@@ -317,3 +317,135 @@ test('spring: no marker + no stereotype → stays at the interface (sound)', fun
     ok(c, 'the call is present')
     eq(nm['IFoo::doIt'].id, c.to) -- unchanged: neither gate fires
 end)
+
+-- ── PARAMETERIZED SUPERTYPES (CART-0672) ────────────────────────────────────
+-- `extends Base` parses `superclass → type_identifier`; `extends Base<T>` parses
+-- `superclass → generic_type → type_identifier`. The two queries named only the
+-- first shape, so a GENERIC class had no parent and a GENERIC interface never
+-- entered data.implements — the input resolve_interface consumes, which is why
+-- this also under-covered the bean redirect above by ~38% on a real repo.
+--
+-- It hid because a lost super chain DEGRADES TO NAME MATCHING, which succeeds
+-- while the method name is unique. Only the conjunction (generic AND ambiguous)
+-- loses an edge, so the arms below pair both.
+local GENERIC = {
+    ['Session.java'] = table.concat({
+        'package com.example.app;',
+        'class Session { void flush() {} }',
+    }, '\n'),
+    ['PlainBase.java'] = table.concat({
+        'package com.example.app;',
+        'class PlainBase { Session getSession() { return null; } }',
+    }, '\n'),
+    ['GenericBase.java'] = table.concat({
+        'package com.example.app;',
+        'class GenericBase<T, C> { Session getSession() { return null; } }',
+    }, '\n'),
+    -- the AMBIGUITY the conjunction needs: two more getSession in the package
+    ['Decoy1.java'] = table.concat({
+        'package com.example.app;',
+        'class Decoy1 { Session getSession() { return null; } }',
+    }, '\n'),
+    ['Decoy2.java'] = table.concat({
+        'package com.example.app;',
+        'class Decoy2 { Session getSession() { return null; } }',
+    }, '\n'),
+    ['PlainChild.java'] = table.concat({
+        'package com.example.app;',
+        'class PlainChild extends PlainBase { void run() { getSession().flush(); } }',
+    }, '\n'),
+    ['GenericChild.java'] = table.concat({
+        'package com.example.app;',
+        'class GenericChild<T> extends GenericBase<T, String> {',
+        '  void run() { getSession().flush(); }',
+        '}',
+    }, '\n'),
+    -- iface half: a GENERIC interface with exactly one @Service implementor
+    ['TypedValidator.java'] = table.concat({
+        'package com.example.app;',
+        'interface TypedValidator<T> { boolean check(T t); }',
+    }, '\n'),
+    ['TypedValidatorImpl.java'] = table.concat({
+        'package com.example.app;',
+        '@Service class TypedValidatorImpl implements TypedValidator<String> {',
+        '  public boolean check(String s) { return true; }',
+        '}',
+    }, '\n'),
+    ['Runner.java'] = table.concat({
+        'package com.example.app;',
+        'class Runner {',
+        '  private TypedValidator<String> typed;',
+        '  boolean go(String s) { return this.typed.check(s); }',
+        '}',
+    }, '\n'),
+    -- ⚠ THE GUARD AGAINST OVER-REACH: the parent name becomes VISIBLE here for
+    -- the first time, so a resolver keying on the simple name gets a fresh
+    -- opportunity to fabricate. `AbstractList` is outside the corpus and must
+    -- resolve to NOTHING, not to a same-named local class.
+    ['ExternalChild.java'] = table.concat({
+        'package com.example.app;',
+        'import java.util.AbstractList;',
+        'abstract class ExternalChild<T> extends AbstractList<T> {',
+        '  void run() { this.size(); }',
+        '}',
+    }, '\n'),
+}
+
+-- data.extends is a LIST of {child, parent, file} rows (build_super folds it
+-- into the one-parent map, marking a collision `false`), so read it as one.
+local function parent_of(data, child)
+    for _, e in ipairs(data.extends or {}) do
+        if e.child == child then return e.parent end
+    end
+end
+
+test('java: a PARAMETERIZED superclass is still a superclass', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(GENERIC)
+    eq('PlainBase', parent_of(data, 'PlainChild'), 'the plain form, unchanged')
+    eq('GenericBase', parent_of(data, 'GenericChild'),
+        'and the parameterized one, ERASED to the same declaration')
+
+    -- the edge the erasure buys: the chain resolves instead of refusing between
+    -- the four same-named getSession definitions in the package
+    local c = callof(data, 'GenericChild::getSession')
+    ok(c and c.to, 'the inherited call resolves')
+    eq('super', c.prov, 'and it got there by walking the chain, not by name')
+    ok((c.to or ''):find('GenericBase'), 'to the generic parent: ' .. tostring(c.to))
+    -- and the CASCADE closes with it: losing the receiver had taken the chained
+    -- call down too, which is what made the real site read as two bugs.
+    local f
+    for _, x in ipairs(data.calls) do
+        if x.callee == 'flush' and x.file == 'GenericChild.java' then f = x end
+    end
+    ok(f and (f.to or ''):find('Session::flush'),
+        'the chained call rides the recovered receiver type: ' .. tostring(f and f.to))
+end)
+
+test('java: a GENERIC interface enters data.implements and redirects', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(GENERIC)
+    local seen = {}
+    for _, e in ipairs(data.implements or {}) do seen[e.child .. '->' .. e.iface] = true end
+    ok(seen['TypedValidatorImpl->TypedValidator'],
+        'implements Foo<T> is the same relation as implements Foo')
+
+    -- the QUIETER failure this closes: before, the call resolved to the abstract
+    -- declaration with no absence class marking it — a resolved edge that stops
+    -- at the interface reads exactly like a correct answer.
+    local nm = byname(data)
+    local c = callof(data, 'TypedValidator::check') or callof(data, 'check')
+    ok(c, 'the call is present')
+    eq(nm['TypedValidatorImpl::check'].id, c.to, 'redirected to the single bean impl')
+end)
+
+test('java: an out-of-corpus generic superclass resolves to NOTHING', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(GENERIC)
+    eq('AbstractList', parent_of(data, 'ExternalChild'),
+        'the name is captured — that is the point of the fix')
+    local size
+    for _, c in ipairs(data.calls) do if c.callee == 'size' then size = c end end
+    ok(size, 'the call is present')
+    eq(nil, size.to, 'and it lands on nothing: a visible name is not a resolvable one')
+end)

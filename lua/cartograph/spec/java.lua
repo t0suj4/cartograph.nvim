@@ -537,10 +537,29 @@ return {
     -- `false`; the implements relation is SET-valued and lives separately in
     -- iface_query → data.implements, consumed by resolve_interface). Feeds
     -- transitive super.m()/inherited this.m() resolution.
+    -- ⚠ THE PARAMETERIZED FORM IS A DIFFERENT NODE, NOT A DECORATED ONE
+    -- (CART-0672). `extends Base` parses `superclass → type_identifier`;
+    -- `extends Base<T, C>` parses `superclass → generic_type → type_identifier`,
+    -- so a query naming only the first shape gives a generic class NO PARENT.
+    -- Measured on an 8k-file Spring monorepo: 1,030 of 3,304 `extends` clauses
+    -- (31%) and 801 of 2,088 `implements` (38%) were invisible, and the second
+    -- number is a ~38% under-coverage of the F1 bean redirect.
+    --
+    -- IT HID BECAUSE A LOST SUPER CHAIN DEGRADES TO NAME MATCHING, which succeeds
+    -- while the method name is unique. It becomes a lost EDGE only where the name
+    -- is ALSO ambiguous — a conjunction, which is why a 1-D bestiary never emitted
+    -- it ([[cartograph-combinatorial-grid]]).
+    --
+    -- ERASURE IS CORRECT HERE and is the reason the alternation is legal rather
+    -- than a shortcut: `Base<T, C>` and `Base` are THE SAME DECLARATION, and the
+    -- chain being walked is the declaration chain. The type arguments are a
+    -- sibling `type_arguments` node, so capturing the direct `type_identifier`
+    -- child cannot pick one of them up by accident.
     super_query = [=[
         (class_declaration
             name: (identifier) @child
-            superclass: (superclass (type_identifier) @parent))
+            superclass: (superclass [ (type_identifier) @parent
+                                      (generic_type (type_identifier) @parent) ]))
     ]=],
     -- interface→impl (F1, [[cartograph-linker]]'s first Java kind): a class's
     -- `implements I, J` and an interface's `extends K` clauses. SET-valued
@@ -548,13 +567,17 @@ return {
     -- shared defs loop's cap_node keeps only one). resolve_interface reads
     -- data.implements + data.beans to redirect an interface-stub call to its
     -- unique @stereotype impl.
+    -- Same two shapes as super_query, in both clauses — `implements Foo` and
+    -- `implements Foo<T>`, `interface J extends K` and `interface J<T> extends K<T>`.
     iface_query = [=[
         (class_declaration
             name: (identifier) @ichild
-            (super_interfaces (type_list (type_identifier) @iface))) @idecl
+            (super_interfaces (type_list [ (type_identifier) @iface
+                                           (generic_type (type_identifier) @iface) ]))) @idecl
         (interface_declaration
             name: (identifier) @ichild
-            (extends_interfaces (type_list (type_identifier) @iface))) @idecl
+            (extends_interfaces (type_list [ (type_identifier) @iface
+                                             (generic_type (type_identifier) @iface) ]))) @idecl
     ]=],
     entry_names = { main = true },
     -- an ANNOTATION WITH ARGUMENTS passes the method into a framework

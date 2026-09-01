@@ -135,7 +135,27 @@ end
 -- signature and nothing on this corpus resolves differently. The pin oracle still
 -- DECLINES here (0 of 907 edges decided) and says so with its substrate line: the
 -- binds exist, no dotted receiver on this corpus is one of them.
-M.VERSION = 164 -- v164: ODIN ATTRIBUTES HID A FIFTH OF THE STANDARD LIBRARY
+M.VERSION = 165 -- v165: A PARAMETERIZED SUPERTYPE IS STILL A SUPERTYPE
+               -- (CART-0672). `extends Base` parses `superclass ->
+               -- type_identifier`, `extends Base<T>` parses `superclass ->
+               -- generic_type -> type_identifier`, and java's super_query /
+               -- iface_query named only the first shape. So a GENERIC class had
+               -- NO PARENT and a GENERIC interface never entered
+               -- data.implements — the input resolve_interface consumes, which
+               -- means the shipped Spring bean redirect silently under-covered.
+               -- MEASURED on an 8k-file Spring monorepo by the session that
+               -- found it: 1,030 of 3,304 `extends` (31%) and 801 of 2,088
+               -- `implements` (38%) invisible. Locally on elasticsearch's
+               -- server/.../index (1033 files): extends rows 697 -> 867,
+               -- implements rows 456 -> 510, and `prov=super` 1153 -> 1325
+               -- (+172 resolved, -172 refused) with `base`, `returns` and the
+               -- outside bucket UNCHANGED — the whole gain is the super chain
+               -- and nothing else moved.
+               -- ⚠ IT HID BECAUSE A LOST CHAIN DEGRADES TO NAME MATCHING, which
+               -- succeeds while the name is unique; only generic AND ambiguous
+               -- together lose an edge, which is a grid cell, not a bestiary
+               -- entry.
+               -- v164: ODIN ATTRIBUTES HID A FIFTH OF THE STANDARD LIBRARY
                -- (CART-0630). Odin attaches `@(require_results)` /
                -- `@(private="file")` to a declaration and the grammar makes
                -- `attributes` the FIRST NAMED CHILD, so the `.` anchor in the
