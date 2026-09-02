@@ -60,6 +60,48 @@ test('cache × callcols: warm load then ingest with the flag on is faithful', fu
     if not ok then error(err) end
 end)
 
+-- CART-0674. data.implements / data.extends were the only extraction outputs a
+-- consumer still needed that the cache did not carry: they were scratch for
+-- resolve_interface, which runs BEFORE the save. Measured on the java-liveness
+-- fixture, implements went 2 cold -> 0 warm WITH THE NODE COUNT IDENTICAL.
+--
+-- ⚠ NOTHING CAUGHT IT, AND THIS TEST IS WHY: every existing oracle compares the
+-- GRAPH, and the graph was already resolved when it was written. A vanished
+-- INPUT is invisible to an output comparison until something re-derives from it.
+-- So this asserts the INPUT survives, not that the output matches.
+test('cache: the inheritance rows survive the round trip, sharded by their own file', function ()
+    local root = vim.fn.tempname()
+    local ok, err = pcall(function ()
+        local g = sample_graph(root)
+        g.implements = {
+            { child = 'A', iface = 'I', cintf = false, file = 'a.lua' },
+            { child = 'B', iface = 'J', cintf = true, file = 'b.lua' },
+        }
+        g.extends = { { child = 'B', parent = 'A', file = 'b.lua' } }
+        cache.save(g, nil)
+        local w = cache.load(root)
+        ok(w ~= nil, 'warm load returned a graph')
+        eq(2, #(w.implements or {}), 'both implements rows came back')
+        eq(1, #(w.extends or {}), 'the extends row came back')
+        local byc = {}
+        for _, r in ipairs(w.implements) do byc[r.child] = r end
+        eq('I', byc.A.iface); eq('a.lua', byc.A.file)
+        eq('J', byc.B.iface); eq(true, byc.B.cintf, 'the interface-extends arm is not flattened')
+        eq('A', w.extends[1].parent)
+
+        -- PER-FILE is the whole design: a partial save of one file must carry that
+        -- file's rows and no others, so a changed file re-extracts its own and
+        -- nothing goes stale. A flat manifest list could not do this.
+        cache.save(g, { 'b.lua' })
+        local w2 = cache.load(root)
+        local files = {}
+        for _, r in ipairs(w2.implements or {}) do files[r.file] = true end
+        ok(files['a.lua'] and files['b.lua'], 'a dirty-subset save left the other file intact')
+    end)
+    cache.wipe(root)
+    if not ok then error(err) end
+end)
+
 test('cache × callcols: build_shards materializes proxy calls (no unserializable __cc)', function ()
     -- a flow-LESS graph (no n._flow accessor) ingested with the flag on has proxy
     -- CALLS but serializable nodes — so build_shards must materialize the proxies

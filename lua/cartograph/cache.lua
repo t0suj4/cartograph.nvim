@@ -135,7 +135,31 @@ end
 -- signature and nothing on this corpus resolves differently. The pin oracle still
 -- DECLINES here (0 of 907 edges decided) and says so with its substrate line: the
 -- binds exist, no dotted receiver on this corpus is one of them.
-M.VERSION = 166 -- v166: IN JAVA THE REGISTERING MARKER IS THE COMMON CASE
+M.VERSION = 167 -- v167: THE INHERITANCE FACTS DID NOT SURVIVE THE CACHE
+               -- (CART-0674). data.implements / data.extends were treated as
+               -- scratch for resolve_interface, which runs BEFORE the save, so
+               -- nothing carried them: measured on the java-liveness fixture,
+               -- implements 2 cold and 0 warm with the node count identical.
+               -- They are now sharded per FILE, keyed by the row's own `file`,
+               -- so a changed file re-extracts its own rows and nothing goes
+               -- stale across a partial refresh.
+               -- ⚠ WHY NO ORACLE CAUGHT IT: the `cache` column diffs the GRAPH,
+               -- and the graph was already resolved when it was written. A
+               -- vanished INPUT is invisible to an output comparison until
+               -- something re-derives from it — which is what lint's new
+               -- contract alibi does, and what a relink on a warm graph was
+               -- already doing with only the dirty files' rows to work from.
+               -- ⚠ SCOPE: these TWO fields survive now. resolve_interface also
+               -- takes data.beans, and the other passes take ctorbinds /
+               -- smtclasses / stdaliases / ruby_anc / ruby_ctor / selft_seed —
+               -- none of which is persisted either, so a warm relink is still
+               -- degraded for bean gating and the rest. CART-0715 owns the
+               -- general case and the missing oracle; this bump fixes only what
+               -- lint's contract alibi reads.
+               -- SHAPE ONLY, NO GRAPH DELTA: nodes, edges and calls are
+               -- untouched; this adds two per-file lists to the shard. The bump
+               -- is for format, so a v166 cache is not read as carrying them.
+               -- v166: IN JAVA THE REGISTERING MARKER IS THE COMMON CASE
                -- (CART-0701). java's cbarg_def rested on one structural
                -- premise — an annotation WITH ARGUMENTS hands the method to a
                -- framework — and tree-sitter parses `@Scheduled(fixedRate =
@@ -2113,6 +2137,32 @@ local function build_shards(data, want)
         local s = shards[c.file]
         if s then s.calls[#s.calls + 1] = c end
     end
+    -- INHERITANCE ROWS (CART-0674). data.implements / data.extends are the only
+    -- extraction outputs a CONSUMER still needs and the cache did not carry: they
+    -- were treated as scratch for resolve_interface, which runs before the save.
+    -- Measured on the java-liveness fixture: implements 2 cold, 0 warm, with the
+    -- node count identical either way. TWO CONSEQUENCES, and the second is why the
+    -- `cache` column never caught it — it diffs the GRAPH, and the graph was
+    -- already resolved when it was written, so a vanished INPUT is invisible until
+    -- something re-derives from it:
+    --   · a relink on a warm graph resolved interfaces from the dirty files' rows
+    --     alone, so a warm session could bind fewer calls than a cold one
+    --   · lint's contract alibi could not exist at all — the premise the ticket
+    --     called "already in hand" was in hand at EXTRACT and gone by lint
+    -- Per-FILE, keyed by the row's own `file`, so a changed file re-extracts its
+    -- own rows and nothing goes stale across a partial refresh. That is why this
+    -- is persisted and re-derived rather than flattened onto the node: an
+    -- interface gaining a member does not dirty its implementors' files, so a
+    -- node flag computed once would rot silently.
+    for _, key in ipairs({ 'implements', 'extends' }) do
+        for _, r in ipairs(data[key] or {}) do
+            local s = r.file and shards[r.file]
+            if s then
+                local l = s[key]; if not l then l = {}; s[key] = l end
+                l[#l + 1] = r
+            end
+        end
+    end
     for _, s in pairs(shards) do pack_calls(s) end -- calls → segment + residual
     return shards
 end
@@ -2435,6 +2485,16 @@ local function absorb(data, f, s)
     for _, e in ipairs(s.edges or {}) do data.edges[#data.edges + 1] = e end
     for _, c in ipairs(s.calls or {}) do data.calls[#data.calls + 1] = c end
     if s.names then data.names[f] = s.names end
+    -- the inheritance rows, back in the flat list shape the producers build and
+    -- both consumers (resolve_interface, lint's contract alibi) read. Order is the
+    -- sorted-file concat M.load already uses, so warm is deterministic; neither
+    -- consumer depends on the order.
+    for _, key in ipairs({ 'implements', 'extends' }) do
+        for _, r in ipairs(s[key] or {}) do
+            local l = data[key]; if not l then l = {}; data[key] = l end
+            l[#l + 1] = r
+        end
+    end
 end
 
 -- frontier bundles: modules synthesized from the manifest roster

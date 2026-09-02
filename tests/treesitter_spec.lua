@@ -2079,6 +2079,76 @@ end)
 -- marker_annotation the way annotation is accepted — turns the @Test row green
 -- AND this row wrong, and a test that only checked the failing row would
 -- certify it. Same trap as the 41-candidate arm in CART-0670.
+-- CART-0674. A method that implements a declared interface member, or overrides
+-- one its superclass declares, is reached THROUGH THE SUPERTYPE: a caller holding
+-- a `Validator` writes `v.check()`, the name graph binds that to
+-- `Validator::check`, and the implementation reads callerless while being the only
+-- thing that can run. 91 of 164 surviving false `absent` verdicts on an 8k-file
+-- Spring monorepo sat here, 68 of them literally @Override.
+--
+-- THE FOUR GUARDS ARE THE FIXTURE, and the arity row is the sharp one: the alibi
+-- must key on THIS CLASS'S OWN clause resolved to a DECLARED MEMBER, never on
+-- "some supertype in the corpus declares this name". Mirrors
+-- cartograph-design/examples/negative/java-liveness.
+test('java: an inheritance-contract member gets an alibi, four look-alikes do not', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(name, lines)
+        local fd = assert(io.open(root .. '/' .. name, 'w'))
+        fd:write(table.concat(lines, '\n')); fd:close()
+    end
+    put('Validator.java', {
+        'package com.example.inv;',
+        'interface Validator { void check(String s); }' })
+    put('Marker.java', {
+        'package com.example.inv;',
+        -- a MARKER interface declares no members, so it can alibi nothing
+        'interface Marker { }' })
+    put('PartialImpl.java', {
+        'package com.example.inv;',
+        'class PartialImpl implements Validator {',
+        '    @Override public void check(String s) { }',       -- THE CONTRACT MEMBER
+        '    void check() { }',                                -- SAME NAME, WRONG ARITY
+        '    private void helper() { }',                       -- in no contract
+        '}' })
+    put('LookAlike.java', {
+        'package com.example.inv;',
+        -- matches Validator::check exactly, but implements NOTHING
+        'class LookAlike { public void check(String s) { } }' })
+    put('MarkerOnly.java', {
+        'package com.example.inv;',
+        'class MarkerOnly implements Marker { void strayValue() { } }' })
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    store.ingest(data)
+    local ali = lint.alibi(store)
+    -- (name, arity) -> the contract alibi's evidence, or nil
+    local function contract(nm, arity)
+        for _, n in ipairs(data.nodes) do
+            if n.name == nm and #(n.params or {}) == arity then
+                for _, a in ipairs(ali(n).alibis) do
+                    if a.kind == 'inheritance-contract' then return a end
+                end
+                return nil
+            end
+        end
+        return 'NO SUCH NODE'
+    end
+    local hit = contract('PartialImpl::check', 1)
+    ok(type(hit) == 'table', 'the contract member is alibied: ' .. vim.inspect(hit))
+    eq('implements', hit.evidence.via)
+    eq('Validator', hit.evidence.supertype)
+    eq('Validator::check', hit.evidence.member)
+    eq('matched', hit.tier, 'name+arity is a MATCH — the types are unchecked')
+    -- THE GUARDS. Each is a different way the premise could over-reach.
+    eq(nil, contract('PartialImpl::check', 0), 'wrong ARITY is not contract membership')
+    eq(nil, contract('PartialImpl::helper', 0), 'a member in no contract stays dead')
+    eq(nil, contract('LookAlike::check', 1), 'a look-alike implementing NOTHING stays dead')
+    eq(nil, contract('MarkerOnly::strayValue', 0), 'a MARKER interface declares no members')
+end)
+
 test('java: a registering marker annotation is cbarg, an inert one is not', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

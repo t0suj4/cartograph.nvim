@@ -1291,11 +1291,91 @@ end
 --- and callerless while being perfectly alive. Confinement cannot see a reference that is not
 --- in the lua at all — the same alibi the suggestive rule already respects, and without it
 --- this rule would be authoritative AND WRONG on exactly the corpus with the most addons.
-local function provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once)
+--- THE INHERITANCE-CONTRACT ALIBI (CART-0674). A method that implements a declared
+--- interface member, or overrides one its superclass declares, is reached through the
+--- SUPERTYPE: a caller holding a `Validator` writes `v.check()`, the name graph binds
+--- that to `Validator::check`, and the implementation gets ZERO callers while being the
+--- only thing that can run. On an 8k-file Spring monorepo 91 of 164 surviving false
+--- `absent` verdicts sat on exactly this — 68 literally `@Override` — which makes it a
+--- SECOND, INDEPENDENT route to a false deletion licence beside the truncated candidate
+--- list (CART-0670), reachable at any candidate count.
+---
+--- The premise is keyed on THIS CLASS'S OWN clause resolved to a DECLARED MEMBER, never
+--- on "some supertype in the corpus declares this name" — the negative fixture pins all
+--- four ways that could go wrong: same name WRONG ARITY stays dead, a private member in
+--- no contract stays dead, a look-alike in a class that implements nothing stays dead,
+--- and a MARKER interface (`Serializable` declares no members) alibis nothing.
+---
+--- ARITY, not signature, is the discriminator, and it is deliberately the weak one: the
+--- graph has no types, and over-inclusion only makes us DECLINE to claim death, which is
+--- the safe direction (same argument the occurs_once premise above makes). The tier is
+--- `matched` for that reason and not `proven`.
+---
+--- ⚠ SIMPLE NAMES. `implements`/`extends` rows carry a bare class name, so two classes
+--- spelled alike in different packages share an entry and can mint an alibi for each
+--- other. Same limitation the rest of the java front-end carries, and it errs toward
+--- declining a deletion.
+---
+--- LANGUAGE-NEUTRAL BY CONSTRUCTION: it reads whatever `super_query`/`iface_query` the
+--- spec declared and is simply inert where none is (measured: 0 hits on 39,748 wow lua
+--- methods, 0 on cartograph's own lua, 13 on grocy php, 1,436 on elasticsearch libs).
+local function contract_alibi(data)
+    local sup, mem = {}, {}
+    local function add(child, kind, name)
+        if not (child and name) then return end
+        local l = sup[child]; if not l then l = {}; sup[child] = l end
+        l[#l + 1] = { kind = kind, name = name }
+    end
+    for _, r in ipairs(data.implements or {}) do add(r.child, 'implements', r.iface) end
+    for _, r in ipairs(data.extends or {}) do add(r.child, 'extends', r.parent) end
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            local c, m = (n.name or ''):match('^(.*)::([^:]+)$')
+            if c then
+                local t = mem[c]; if not t then t = {}; mem[c] = t end
+                local k = t[m]; if not k then k = {}; t[m] = k end
+                k[#(n.params or {})] = n -- arity → the declaring node
+            end
+        end
+    end
+    return function (n)
+        local cls, m = (n.name or ''):match('^(.*)::([^:]+)$')
+        if not cls then return nil end
+        local ar = #(n.params or {})
+        -- breadth-first over the supertype chain (a class may reach its contract
+        -- through an abstract base), visited-guarded because a corpus can spell a
+        -- cycle even when the language cannot, and depth-bounded so a pathological
+        -- one costs nothing.
+        local seen, q, depth = { [cls] = true }, { cls }, 0
+        while #q > 0 and depth < 12 do
+            local nq = {}
+            for _, c in ipairs(q) do
+                for _, sp in ipairs(sup[c] or {}) do
+                    if not seen[sp.name] then
+                        seen[sp.name] = true
+                        local hit = mem[sp.name] and mem[sp.name][m] and mem[sp.name][m][ar]
+                        if hit and hit.id ~= n.id then
+                            return { via = sp.kind, supertype = sp.name,
+                                member = hit.name, file = hit.file, arity = ar }
+                        end
+                        nq[#nq + 1] = sp.name
+                    end
+                end
+            end
+            q = nq; depth = depth + 1
+        end
+        return nil
+    end
+end
+
+local function provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract)
     if n.exported ~= false or n.escapes ~= false then return false end
     if not (n.kind == 'function' or n.kind == 'method') then return false end
     if n.decl or n.cbarg or n.entry or metamethod(n) then return false end
     if xmlh and xmlh[n.name] then return false end
+    -- the inheritance contract: reached through a supertype, so the call graph
+    -- attributes the caller to the DECLARATION and this node reads callerless
+    if contract and contract(n) then return false end
     -- PREMISE 4, and a false positive on wow is what demanded it: the name must occur EXACTLY
     -- ONCE in its file — at its own definition. A CALL GRAPH CANNOT CLOSE THIS HOLE BY
     -- ITSELF, because a construct the extractor does not model produces no call record at all,
@@ -1352,9 +1432,10 @@ local function dead_confined_findings(store)
     local band = store.topo()
     local xmlh = store.toc and store.toc.handlers or {}
     local occurs_once = occurs_once_in_file(store)
+    local contract = contract_alibi(store.data)
     local shadow_id, shadow_name, shadow_trunc = refusal_shadow(store.data)
     for _, n in ipairs(store.data.nodes) do
-        if provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once) then
+        if provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract) then
             out[#out + 1] = { file = store.abspath(n), line = atr.sl(n.range) + 1,
                 -- the message states the PROOF, because that is what makes it actionable:
                 -- a reader can check it without trusting the analyzer
@@ -1451,6 +1532,7 @@ function M.alibi(store)
     local band = store.topo()
     local xmlh = (store.toc and store.toc.handlers) or {}
     local occurs_once = occurs_once_in_file(store)
+    local contract = contract_alibi(store.data)
     local shadow_id, shadow_name, shadow_trunc = refusal_sites(store.data) -- site LISTS, truthy like the boolean sets
     local content = {}
     -- the lines a name occurs on, for the frontier evidence. Same word-bounded text
@@ -1517,6 +1599,16 @@ function M.alibi(store)
         if n.cbarg then
             alibi('callback-arg', 'matched',
                 'registered by an annotation / attribute / dispatch field ON the definition', nil)
+        end
+        local ct = contract(n)
+        if ct then
+            -- the EVIDENCE is the offending pair — the supertype declaration a reader
+            -- can open — not a sentence about inheritance
+            alibi('inheritance-contract', 'matched',
+                ('%s a supertype member: a caller reaching it through %s binds to the declaration, not to this body')
+                    :format(ct.via == 'extends' and 'overrides' or 'implements', ct.supertype),
+                { via = ct.via, supertype = ct.supertype,
+                  member = ct.member, file = ct.file, arity = ct.arity })
         end
         if n.entry then
             alibi('entry-point', 'proven', 'the manifest/spec declares it an entry point', nil)
@@ -1639,7 +1731,7 @@ function M.alibi(store)
         end
 
         return { alibis = A, blockers = B,
-            dead = provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once) }
+            dead = provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract) }
     end
 end
 
@@ -2002,12 +2094,18 @@ M.rules = {
             -- reporting the same function twice under two dispositions is noise
             local shadow_id, shadow_name, shadow_trunc = refusal_shadow(store.data)
             local occurs_once = occurs_once_in_file(store)
+            -- THIS LIST IS THE ONE THAT DECIDES THE POPULATION, not provably_dead's:
+            -- the rule reports what that predicate could NOT prove, so a premise added
+            -- there alone suppresses nothing here. Both, or neither (CART-0674).
+            local contract = contract_alibi(store.data)
             for _, n in ipairs(store.data.nodes) do
-                if not provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once)
+                if not provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract)
                     and (n.kind == 'function' or n.kind == 'method')
                     and not n.decl -- a prototype is a declaration, not dead code
                     and not exported(n) and not metamethod(n) and not n.cbarg
                     and not n.entry and not xmlh[n.name]
+                    -- reached through a supertype: the caller binds to the DECLARATION
+                    and not contract(n)
                     and band:n_callers(n.id) == 0
                     -- a registration is an alibi: a dispatch table keeps it alive
                     and band:n_registrants(n.id) == 0 then
