@@ -55,6 +55,43 @@ same graph as functions.
 truth). Keeping transport out of the identity is what lets the same navigator
 sit over a checkout, a running process, or a remote host.
 
+## Everything the analyzer knows is a place
+
+The neutral schema explains what composes. This explains what gets *put* in it,
+and it is the older half of the same discipline.
+
+**A fact the analyzer computes and discards cannot be navigated, explained,
+corrected, or acted on.** So the rule is to reify: when resolution declines to
+pick, the call keeps the rule that refused and the candidates it refused between,
+and the browser descends into the fork rather than a dead end. An absence is not
+`[]`, it is one of four named answers. A hedge is a door. A declined refactoring
+is a menu of the premises that would discharge it. Each of those is an *event* or
+an *omission* turned into an addressable record, and every one of them was
+originally a transient somebody chose to keep.
+
+The cost of not doing it is measurable and recurs. A declared type is read,
+memoised in a per-scope structure the graph cannot see, used once and dropped —
+so five statically-typed languages have no route to type information their source
+states plainly. A type-variable environment is built inside one function and
+discarded, so the same question answered correctly in one position fabricates an
+edge in another. An anti-unified template is computed with its holes and
+substitution sites, then formatted into prose — so the one artifact a
+produce-modify-apply loop needs has no identity. In each case the analysis was
+already right; only the keeping was missing.
+
+**A reified fact must say how it came to be.** Observed, derived, or supplied —
+read from source, computed by a total function, or chosen by a rule or a human
+from a set the analyzer could not narrow. The third is a premise someone
+asserted, not a fact anyone read, and it is the one that needs the journal. A
+supplied fact re-entering the graph as an observed one is the fabrication failure
+wearing a friendlier hat.
+
+This is the half that makes the editor possible rather than merely safe. *The
+reader verifies the writer* says an edit is checked against the graph; reification
+is what gives the writer something to act on in the first place — the same record
+that reports a gap is what proposes its fix, and re-running the report is what
+proves the fix landed.
+
 ## The sub-goal: superseding per-language language servers
 
 This follows from holding the whole graph honestly; it is not what the project
