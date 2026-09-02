@@ -135,7 +135,37 @@ end
 -- signature and nothing on this corpus resolves differently. The pin oracle still
 -- DECLINES here (0 of 907 edges decided) and says so with its substrate line: the
 -- binds exist, no dotted receiver on this corpus is one of them.
-M.VERSION = 165 -- v165: A PARAMETERIZED SUPERTYPE IS STILL A SUPERTYPE
+M.VERSION = 166 -- v166: IN JAVA THE REGISTERING MARKER IS THE COMMON CASE
+               -- (CART-0701). java's cbarg_def rested on one structural
+               -- premise — an annotation WITH ARGUMENTS hands the method to a
+               -- framework — and tree-sitter parses `@Scheduled(fixedRate =
+               -- 1000)` as `annotation` but bare `@Test` as
+               -- `marker_annotation`, which was never accepted. The premise is
+               -- sound and DRAWS THE WRONG SET: @Test, @Bean, @BeforeEach,
+               -- @PostConstruct, the JPA @Pre*/@Post* callbacks and the JAX-RS
+               -- verbs are all argumentless and all register, so the rule kept
+               -- the exception (@Override wraps without registering) and
+               -- dropped the rule.
+               -- cbarg gates provably_dead (lint.lua:1297) and mints the
+               -- `callback-arg` alibi (:1519), so the miss was a FALSE DELETION
+               -- LICENCE on code only reflection reaches — and no call-graph
+               -- work can ever reach it, because the caller is outside the
+               -- source. MEASURED on an 8k-file Spring/JPA monorepo by the
+               -- session that found it: 416 of 6,276 `dead-function` findings
+               -- (309 @Test, 35 @BeforeEach, 25 @PostConstruct, 15 @BeforeAll,
+               -- 10 @Bean), and the fix measured -423 with ZERO findings added.
+               -- ⚠ NO SYNTACTIC FACT SEPARATES @Test FROM @Deprecated, so the
+               -- premise is a SUPPLIED name list and not a derivation:
+               -- @Retention(SOURCE) proves an annotation cannot dispatch at
+               -- runtime, which cleanly EXCLUDES @Override, but @Deprecated and
+               -- @FunctionalInterface are RUNTIME and register nothing.
+               -- Retention is a sound exclusion and never an inclusion.
+               -- ⚠ cbarg is ALSO resolution input — treesitter.lua:7075 grants
+               -- same-file priority to `not n.cbarg` candidates only — so this
+               -- withdraws it from the newly-marked defs. Known conflation
+               -- (moveapply.lua:214 already moved one consumer off the flag);
+               -- CART-0703 splits it.
+               -- v165: A PARAMETERIZED SUPERTYPE IS STILL A SUPERTYPE
                -- (CART-0672). `extends Base` parses `superclass ->
                -- type_identifier`, `extends Base<T>` parses `superclass ->
                -- generic_type -> type_identifier`, and java's super_query /

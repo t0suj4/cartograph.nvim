@@ -93,6 +93,55 @@ local JAVA_SERVICE_MARKERS = {}
 for _, a in ipairs({ 'ISingletonService', 'IMultitonService', 'IService' }) do
     JAVA_SERVICE_MARKERS[a] = true
 end
+-- REGISTERING MARKER annotations: argumentless annotations that nevertheless
+-- hand the method to a framework, which then invokes it by reflection. The
+-- structural premise cbarg_def used to rest on — an annotation WITH ARGUMENTS
+-- passes the method into something — is sound but draws the wrong set, because
+-- IN JAVA THE REGISTERING MARKER IS THE COMMON CASE: `@Test` parses as
+-- tree-sitter's `marker_annotation`, `@Scheduled(fixedRate = 1000)` as
+-- `annotation`, and only the second was accepted. 416 of 8,108-file cross's
+-- 6,276 `dead-function` findings sat on a member some framework calls through
+-- one of the names below (309 `@Test`, 35 `@BeforeEach`, 25 `@PostConstruct`,
+-- 15 `@BeforeAll`, 10 `@Bean`), and no call-graph work can EVER reach them —
+-- the caller is outside the source. [[cartograph-design-home]] CART-0701.
+--
+-- THE PREMISE IS SUPPLIED, NOT PROVEN, and no syntactic fact could replace it.
+-- `@Retention(SOURCE)` proves an annotation cannot dispatch at runtime, so it
+-- cleanly EXCLUDES `@Override`/`@SuppressWarnings` — but `@Deprecated` and
+-- `@FunctionalInterface` are RUNTIME and register nothing, so retention is a
+-- sound exclusion and never an inclusion. A human asserted this list; that it
+-- says so, and that a project can extend it, are CART-0702.
+--
+-- THE INCLUSION RULE, because both directions of error are unsound (a wrong
+-- name mints a false alibi and hides real dead code; a missing one hands out a
+-- false deletion licence): a name belongs here only if the framework INVOKES
+-- the member. Annotations that merely WRAP an invocation made from the source
+-- — `@Override`, `@Transactional`, `@Deprecated`, `@SafeVarargs` — do not
+-- qualify, which is the distinction the original comment was reaching for.
+-- Nor does `@Disabled`, which de-registers and rides beside a `@Test`.
+local JAVA_REGISTERING_MARKERS = {}
+for _, a in ipairs({
+    -- JUnit 4/5 + TestNG: the engine discovers and runs these
+    'Test', 'ParameterizedTest', 'RepeatedTest', 'TestFactory', 'TestTemplate',
+    'BeforeEach', 'AfterEach', 'BeforeAll', 'AfterAll',
+    'Before', 'After', 'BeforeClass', 'AfterClass',
+    'BeforeMethod', 'AfterMethod', 'BeforeSuite', 'AfterSuite',
+    -- @Parameters names the static factory the parameterized runner calls
+    'Parameters',
+    -- Spring: the container calls the factory method, the injection point,
+    -- the scheduled task, the event handler. NOT @Async or @Transactional —
+    -- those proxy a call the SOURCE makes, so an uncalled one is really dead.
+    'Bean', 'Autowired', 'Scheduled', 'EventListener',
+    -- JSR-250 / CDI lifecycle + injection
+    'PostConstruct', 'PreDestroy', 'Inject', 'Produces',
+    -- JPA entity lifecycle callbacks
+    'PrePersist', 'PostPersist', 'PreUpdate', 'PostUpdate',
+    'PreRemove', 'PostRemove', 'PostLoad',
+    -- Jackson: the serializer invokes these during (de)serialization
+    'JsonCreator', 'JsonValue', 'JsonProperty', 'JsonAnySetter', 'JsonAnyGetter',
+    -- JAX-RS verbs are BARE markers; only @Path carries arguments
+    'GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH',
+}) do JAVA_REGISTERING_MARKERS[a] = true end
 -- the first positional string argument of an annotation (@Service("x") → "x"),
 -- or nil. Positional form only — the `@Service(value="x")` element-pair form is
 -- rare and falls back to the default name (sound: a missed explicit name just
@@ -581,13 +630,27 @@ return {
     ]=],
     entry_names = { main = true },
     -- an ANNOTATION WITH ARGUMENTS passes the method into a framework
-    -- (@RequestMapping("/x"), @Scheduled(...)): registered, not dead —
-    -- marker annotations (@Override) wrap without registering
-    cbarg_def = function (defn, _)
+    -- (@RequestMapping("/x"), @Scheduled(...)): registered, not dead. A bare
+    -- MARKER annotation needs its name checked instead — most of them register
+    -- too (@Test, @Bean, @PostConstruct) and only some wrap without
+    -- registering (@Override, @Deprecated), and nothing in the syntax tells
+    -- the two apart. See JAVA_REGISTERING_MARKERS for why the name is the only
+    -- available premise. The name may be qualified (@org.junit.Test), so match
+    -- the last segment.
+    cbarg_def = function (defn, src)
         local mods = defn:child(0)
         if mods and mods:type() == 'modifiers' then
             for _, c in inext, mods, -1 do
-                if c:type() == 'annotation' then return true end
+                local t = c:type()
+                if t == 'annotation' then return true end
+                if t == 'marker_annotation' then
+                    local nm = c:field('name')[1]
+                    local tail = nm
+                        and node_text(nm, src):match('([%w_]+)%s*$')
+                    if tail and JAVA_REGISTERING_MARKERS[tail] then
+                        return true
+                    end
+                end
             end
         end
         return false

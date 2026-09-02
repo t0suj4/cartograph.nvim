@@ -2067,6 +2067,71 @@ test('ruby: qualified defs, file-scoped bare calls, honest frontiers', function 
         'require_relative resolved')
 end)
 
+-- CART-0701. java's cbarg_def accepted tree-sitter's `annotation` (an
+-- annotation WITH ARGUMENTS) and not `marker_annotation` (a bare one), so
+-- @Scheduled(fixedRate = 1000) registered and @Test did not — a false deletion
+-- licence on code only a reflective framework reaches. The arms live in ONE
+-- FILE deliberately: the whole claim is that methods differing only in the
+-- annotation above them get different verdicts, and split across roots the
+-- discrimination could not be asserted at all.
+--
+-- @Deprecated IS THE LOAD-BEARING GUARD. The obvious fix — accept
+-- marker_annotation the way annotation is accepted — turns the @Test row green
+-- AND this row wrong, and a test that only checked the failing row would
+-- certify it. Same trap as the 41-candidate arm in CART-0670.
+test('java: a registering marker annotation is cbarg, an inert one is not', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- package-private throughout: provably_dead returns early on
+    -- `n.exported ~= false`, so `public` would never reach the annotation
+    -- question at all.
+    local fd = assert(io.open(root .. '/Registry.java', 'w'))
+    fd:write(table.concat({
+        'package com.example.svc;',
+        'public class Registry {',
+        '    void calledFromMain() { System.out.println("x"); }',
+        '    @Test void markerRegistered() { System.out.println("x"); }',
+        '    @org.junit.jupiter.api.Test void qualifiedMarker() { System.out.println("x"); }',
+        '    @Scheduled(fixedRate = 1000) void argsRegistered() { System.out.println("x"); }',
+        '    @Deprecated void markerInert() { System.out.println("x"); }',
+        '    @Override void overrideInert() { System.out.println("x"); }',
+        '    void plainDead() { System.out.println("x"); }',
+        '}',
+    }, '\n'))
+    fd:close()
+    local fm = assert(io.open(root .. '/Main.java', 'w'))
+    fm:write(table.concat({
+        'package com.example.svc;',
+        'public class Main {',
+        '    public static void main(String[] a) { new Registry().calledFromMain(); }',
+        '}',
+    }, '\n'))
+    fm:close()
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    local function cbarg(m)
+        local n = byname['Registry::' .. m]
+        ok(n, 'method extracted: ' .. m)
+        return n and n.cbarg or false
+    end
+    -- the flip: a bare @Test hands the method to the JUnit engine
+    ok(cbarg('markerRegistered'), '@Test marker = registered')
+    -- the name may be QUALIFIED at the use site; match the last segment
+    ok(cbarg('qualifiedMarker'), '@org.junit.jupiter.api.Test = registered')
+    -- unmoved: the structural premise still holds for the args form
+    ok(cbarg('argsRegistered'), '@Scheduled(...) = registered')
+    -- THE GUARDS. @Deprecated and @Override are RUNTIME and SOURCE retained
+    -- respectively and neither registers anything, so no retention rule could
+    -- separate them from @Test — only the name can.
+    ok(not cbarg('markerInert'), '@Deprecated marker = NOT registered')
+    ok(not cbarg('overrideInert'), '@Override marker = NOT registered')
+    ok(not cbarg('plainDead'), 'no annotation = NOT registered')
+end)
+
 test('java: class-qualified, annotation cbarg, public exported', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
