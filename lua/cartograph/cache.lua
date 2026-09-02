@@ -135,7 +135,24 @@ end
 -- signature and nothing on this corpus resolves differently. The pin oracle still
 -- DECLINES here (0 of 907 edges decided) and says so with its substrate line: the
 -- binds exist, no dotted receiver on this corpus is one of them.
-M.VERSION = 167 -- v167: THE INHERITANCE FACTS DID NOT SURVIVE THE CACHE
+M.VERSION = 168 -- v168: A WHOLE RESOLUTION PASS GOES SILENT ON A WARM GRAPH
+               -- (CART-0715). v167 persisted the two fields lint needed; this
+               -- carries the rest. EIGHT of the thirteen fields RESOLVE_PASSES
+               -- reads off `x.data` were never cached, so relink on a warm
+               -- graph ran those passes against nothing.
+               -- MEASURED cold-clear-relink vs warm-clear-relink (same driver
+               -- both sides, so the only variable is the inputs):
+               --   zig/src   65,261 -> 55,230 resolved, -10,031 (-15.4%), with
+               --             prov `stdlib` 9,982 -> 0 and `field_chain` 49 -> 0
+               --   discourse/app/models  11,599 -> 11,403, prov
+               --             `ruby_ancestors` 198 -> 0 (and `stdlib` +2, a later
+               --             pass picking up what the silent one dropped)
+               -- After: BOTH diff to exactly ZERO, per-prov identical.
+               -- See M.RESOLVER_INPUTS for the registry, the shapes, why beans
+               -- rides the implements row, and why selft_seed is not a gap.
+               -- SHAPE ONLY, NO GRAPH DELTA: nodes/edges/calls untouched; this
+               -- adds per-file lists and maps to the shard.
+               -- v167: THE INHERITANCE FACTS DID NOT SURVIVE THE CACHE
                -- (CART-0674). data.implements / data.extends were treated as
                -- scratch for resolve_interface, which runs BEFORE the save, so
                -- nothing carried them: measured on the java-liveness fixture,
@@ -2098,6 +2115,59 @@ local function to_raw(n)
 end
 
 -- bucket a graph into per-file shard tables (nil want = all files)
+--- THE RESOLVER INPUTS, and which shape each one is (CART-0674, CART-0715).
+---
+--- Every field the RESOLVE_PASSES table (providers/treesitter.lua) reads off
+--- `x.data`. They were treated as scratch — each is produced during extraction and
+--- consumed by a pass that runs before the save — so the cache carried NONE of
+--- them, and `relink` on a warm graph ran those passes against nothing.
+---
+--- MEASURED, cold-clear-relink vs warm-clear-relink (same driver both sides, so the
+--- only variable is which inputs survived):
+---   zig/src   65,261 -> 55,230 resolved, -10,031 (-15.4%). prov `stdlib` 9,982 -> 0
+---             and `field_chain` 49 -> 0 — A WHOLE PASS GOES SILENT, not degraded.
+---   discourse/app/models  11,599 -> 11,403. prov `ruby_ancestors` 198 -> 0, with
+---             `stdlib` +2 because a later pass picks up what the silent one dropped.
+---
+--- ⚠ WHY NO ORACLE CAUGHT IT. The matrix `cache` column asserts cold == warm over
+--- the GRAPH, and the graph was already resolved when it was written; a vanished
+--- INPUT is invisible to an output comparison until something re-derives from it.
+--- tools/resolveparity.lua does relink and diff, but always on a COLD graph, so the
+--- round trip is precisely its blind spot.
+---
+--- THIS IS THE THIRD SURFACE OF ONE DEFECT: the PARALLEL MERGE lost the same family
+--- once (see v42's note below — "everything after extends had been DROPPED"), because
+--- parallel.lua relinks its accumulator. Every place a graph is RECONSTITUTED has to
+--- carry these; the merge learned it, the cache had not.
+---
+--- SHAPES. `by_file` = a map already keyed by file (the `names` pattern:
+--- ctorbinds[file], fieldalias[file], …). `rows` = a flat list whose rows carry
+--- `.file`. Both shard per FILE, so a changed file re-extracts its own and nothing
+--- goes stale across a partial refresh — which is also why the manifest is the wrong
+--- home: a dirty save writes the manifest from a `data` whose field holds only the
+--- dirty files' rows, and would drop the rest.
+---
+--- NOT HERE, DELIBERATELY:
+---   edges/root    already persisted
+---   beans         keyed by CLASS NAME with no file, and minted only inside the
+---                 iface_query arm — so its children are a subset of implements'
+---                 children by construction. It rides the implements row.
+---   selft_seed    NOT a gap. store.lua sets it per call and clears it immediately
+---                 ("never persist a resolution input onto the graph"); it is a
+---                 transient over the self-type map, which has its own channel
+---                 (save_selft / load_selft). Persisting it would be a second copy.
+M.RESOLVER_INPUTS = {
+    implements = 'rows',    -- + data.beans, carried on the row
+    extends    = 'rows',
+    fieldtypes = 'rows',
+    ruby_anc   = 'rows',
+    ctorbinds  = 'by_file',
+    fieldalias = 'by_file',
+    ruby_ctor  = 'by_file',
+    smtclasses = 'by_file',
+    stdaliases = 'by_file',
+}
+
 local function build_shards(data, want)
     -- synthetic ids: never persisted (their edges either) — sql entities
     -- and db-linked tables re-derive as post-passes, landings re-search
@@ -2137,30 +2207,31 @@ local function build_shards(data, want)
         local s = shards[c.file]
         if s then s.calls[#s.calls + 1] = c end
     end
-    -- INHERITANCE ROWS (CART-0674). data.implements / data.extends are the only
-    -- extraction outputs a CONSUMER still needs and the cache did not carry: they
-    -- were treated as scratch for resolve_interface, which runs before the save.
-    -- Measured on the java-liveness fixture: implements 2 cold, 0 warm, with the
-    -- node count identical either way. TWO CONSEQUENCES, and the second is why the
-    -- `cache` column never caught it — it diffs the GRAPH, and the graph was
-    -- already resolved when it was written, so a vanished INPUT is invisible until
-    -- something re-derives from it:
-    --   · a relink on a warm graph resolved interfaces from the dirty files' rows
-    --     alone, so a warm session could bind fewer calls than a cold one
-    --   · lint's contract alibi could not exist at all — the premise the ticket
-    --     called "already in hand" was in hand at EXTRACT and gone by lint
-    -- Per-FILE, keyed by the row's own `file`, so a changed file re-extracts its
-    -- own rows and nothing goes stale across a partial refresh. That is why this
-    -- is persisted and re-derived rather than flattened onto the node: an
-    -- interface gaining a member does not dirty its implementors' files, so a
-    -- node flag computed once would rot silently.
-    for _, key in ipairs({ 'implements', 'extends' }) do
-        for _, r in ipairs(data[key] or {}) do
-            local s = r.file and shards[r.file]
-            if s then
-                local l = s[key]; if not l then l = {}; s[key] = l end
-                l[#l + 1] = r
+    -- RESOLVER INPUTS: see RESOLVER_INPUTS above.
+    for f, s in pairs(shards) do
+        for field, shape in pairs(M.RESOLVER_INPUTS) do
+            if shape == 'by_file' then s[field] = data[field] and data[field][f] or nil end
+        end
+    end
+    for field, shape in pairs(M.RESOLVER_INPUTS) do
+        if shape == 'rows' then
+            for _, r in ipairs(data[field] or {}) do
+                local s = r.file and shards[r.file]
+                if s then
+                    local l = s[field]; if not l then l = {}; s[field] = l end
+                    l[#l + 1] = r
+                end
             end
+        end
+    end
+    -- BEANS RIDE THE implements ROW. data.beans is keyed by CLASS NAME with no
+    -- file, so it cannot be sharded directly — but it is minted ONLY inside the
+    -- iface_query arm, so its children are a subset of data.implements' children
+    -- by construction and the join is already there. Carried, not duplicated.
+    if data.beans then
+        for _, r in ipairs(data.implements or {}) do
+            local s = r.file and shards[r.file]
+            if s and data.beans[r.child] ~= nil then r.bean = data.beans[r.child] end
         end
     end
     for _, s in pairs(shards) do pack_calls(s) end -- calls → segment + residual
@@ -2485,14 +2556,25 @@ local function absorb(data, f, s)
     for _, e in ipairs(s.edges or {}) do data.edges[#data.edges + 1] = e end
     for _, c in ipairs(s.calls or {}) do data.calls[#data.calls + 1] = c end
     if s.names then data.names[f] = s.names end
-    -- the inheritance rows, back in the flat list shape the producers build and
-    -- both consumers (resolve_interface, lint's contract alibi) read. Order is the
-    -- sorted-file concat M.load already uses, so warm is deterministic; neither
-    -- consumer depends on the order.
-    for _, key in ipairs({ 'implements', 'extends' }) do
-        for _, r in ipairs(s[key] or {}) do
-            local l = data[key]; if not l then l = {}; data[key] = l end
-            l[#l + 1] = r
+    -- the resolver inputs, back in the shape their producers build and their
+    -- passes read. Order is the sorted-file concat M.load already uses, so warm
+    -- is deterministic; no consumer depends on the order.
+    for field, shape in pairs(M.RESOLVER_INPUTS) do
+        if shape == 'by_file' then
+            if s[field] ~= nil then
+                local t = data[field]; if not t then t = {}; data[field] = t end
+                t[f] = s[field]
+            end
+        else
+            for _, r in ipairs(s[field] or {}) do
+                local l = data[field]; if not l then l = {}; data[field] = l end
+                l[#l + 1] = r
+                -- unwrap the bean that rode the implements row (see build_shards)
+                if field == 'implements' and r.bean ~= nil then
+                    local b = data.beans; if not b then b = {}; data.beans = b end
+                    b[r.child] = r.bean
+                end
+            end
         end
     end
 end

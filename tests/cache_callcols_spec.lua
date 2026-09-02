@@ -69,6 +69,75 @@ end)
 -- GRAPH, and the graph was already resolved when it was written. A vanished
 -- INPUT is invisible to an output comparison until something re-derives from it.
 -- So this asserts the INPUT survives, not that the output matches.
+-- CART-0715. THE ORACLE, not just a fix: derive the field list from the
+-- RESOLVE_PASSES source rather than from a declaration, so a NEW pass reading a
+-- NEW `x.data` field fails here instead of silently losing it warm.
+--
+-- ⚠ AND FAIL LOUDLY WHEN THE FIXTURE STOPS COVERING A FIELD. A test that only
+-- checks the fields the sample graph happens to populate passes vacuously
+-- forever — the fence-that-never-fires shape. So an unhandled derived field is
+-- an ERROR, and adding one to RESOLVE_PASSES forces a decision here.
+test('cache: every resolver input the pass table reads survives the round trip', function ()
+    local src = assert(io.open(vim.fn.getcwd()
+        .. '/lua/cartograph/providers/treesitter.lua')):read('a')
+    local body = assert(src:match('local RESOLVE_PASSES = (.-)\n}\n'),
+        'could not find the RESOLVE_PASSES table — this test reads it, not a copy')
+    local derived, seen = {}, {}
+    for f in body:gmatch('x%.data%.([a-z_]+)') do
+        if not seen[f] then seen[f] = true; derived[#derived + 1] = f end
+    end
+    ok(#derived > 5, 'scraped a plausible field list: ' .. #derived)
+
+    -- fields that need no shard, each for a stated reason
+    local EXEMPT = {
+        edges = 'already persisted',
+        root = 'already persisted (manifest)',
+        beans = 'rides the implements row — no file of its own',
+        -- store.lua sets selft_seed per call and clears it immediately: "never
+        -- persist a resolution input onto the graph". The self-type map has its
+        -- own channel (save_selft/load_selft), so persisting it would duplicate.
+        selft_seed = 'a transient over the self-type map, which persists separately',
+    }
+    for _, f in ipairs(derived) do
+        ok(cache.RESOLVER_INPUTS[f] ~= nil or EXEMPT[f] ~= nil,
+            ('RESOLVE_PASSES reads x.data.%s and nothing persists it — add it to '
+                .. 'cache.RESOLVER_INPUTS or exempt it here WITH A REASON'):format(f))
+    end
+
+    local root = vim.fn.tempname()
+    local okr, err = pcall(function ()
+        local g = sample_graph(root)
+        -- populate EVERY registered field, in its declared shape
+        for field, shape in pairs(cache.RESOLVER_INPUTS) do
+            if shape == 'by_file' then
+                g[field] = { ['a.lua'] = { probe = field }, ['b.lua'] = { probe = field } }
+            else
+                g[field] = { { probe = field, file = 'a.lua' },
+                             { probe = field, file = 'b.lua' } }
+            end
+        end
+        g.implements[1].child = 'A'; g.implements[2].child = 'B'
+        g.beans = { A = 'aBean', B = true }
+        cache.save(g, nil)
+        local w = assert(cache.load(root), 'warm load returned a graph')
+        for field, shape in pairs(cache.RESOLVER_INPUTS) do
+            if shape == 'by_file' then
+                ok(w[field] and w[field]['a.lua'] and w[field]['b.lua'],
+                    field .. ' (by_file) came back for both files')
+                eq(field, w[field]['a.lua'].probe)
+            else
+                eq(2, #(w[field] or {}), field .. ' (rows) came back')
+                eq(field, w[field][1].probe)
+            end
+        end
+        -- beans has no file of its own and must arrive via the implements row
+        eq('aBean', (w.beans or {}).A, 'a named bean rode the implements row')
+        eq(true, (w.beans or {}).B, 'a default-named bean did too')
+    end)
+    cache.wipe(root)
+    if not okr then error(err) end
+end)
+
 test('cache: the inheritance rows survive the round trip, sharded by their own file', function ()
     local root = vim.fn.tempname()
     local ok, err = pcall(function ()
