@@ -5707,8 +5707,38 @@ function M.extract(root, opts)
                         a = a:parent()
                     end
                 end
-                if spec.cbarg_def and not isfield then
-                    isfield = spec.cbarg_def(defn, src) or false
+                -- ── CART-0703: TWO FACTS, ONE FLAG, NOW SPLIT ──────────────
+                -- `cbarg` answers "is this definition REFERENCED AS DATA?" — a
+                -- callback argument, a table-field def, a def inside a
+                -- dispatch-table literal. That is a RESOLUTION fact: a bare
+                -- same-file name may not mean a call to something the file
+                -- passes around as a value, so such a candidate does not take
+                -- same-file priority (:7075, :7909).
+                --
+                -- `spec.cbarg_def` answers a DIFFERENT question — "does a
+                -- framework INVOKE this member?" (a java annotation, a python
+                -- decorator). That is a LIVENESS fact and it is NOT evidence
+                -- either way about a name contest: a @Bean called by an
+                -- unqualified name in its own file is, if anything, MORE likely
+                -- to be the one meant.
+                --
+                -- ★ THE PRECEDENT IS cache.lua's v103, which did this once
+                -- already for a third producer: the id pass used to set cbarg
+                -- when a module-level mention put a fn in a dispatch table, and
+                -- v103 removed it because "being a NODE field it was
+                -- indistinguishable from the two classes that legitimately feed
+                -- that gate (a table-field def; a callback argument)". Those
+                -- two are exactly what `cbarg` keeps below. The annotation
+                -- marker is the same mistake through a different producer.
+                --
+                -- MEASURED COST OF THE CONFLATION, both directions: adding
+                -- cbarg lost 6 resolved edges and gained 1 on a Spring monorepo
+                -- (CART-0701's @Bean-calls-@Bean idiom); removing it moved
+                -- elasticsearch/server 91467 -> 91323 resolved. Neither is a
+                -- decision the flag was introduced to make.
+                local isreg = false
+                if spec.cbarg_def then
+                    isreg = spec.cbarg_def(defn, src) or false
                 end
                 -- multi-equation definitions (haskell) are ONE function:
                 -- fold this equation into the previous node
@@ -5772,6 +5802,13 @@ function M.extract(root, opts)
                     -- @langs-ok js/ts `arrow_function` — the B3 this-typing walk is a JS-family concern
                     arrow = defn:type() == 'arrow_function' or nil,
                     cbarg = isfield or nil,
+                    -- a framework INVOKES this member (annotation/decorator).
+                    -- Liveness reads it beside `cbarg`; resolution must not
+                    -- (CART-0703). ★ This is a node FLAG standing in for a
+                    -- relation that wants to be an EDGE with a named registrar
+                    -- — see CART-0723; splitting it is the step that makes that
+                    -- promotion expressible.
+                    registered = isreg or nil,
                     -- unconditional module-load def (lua): a load-order sibling
                     -- for the reassignment-override resolver (resolve_reassign)
                     top = (lang == 'lua' and toplevel_def(defn)) or nil,

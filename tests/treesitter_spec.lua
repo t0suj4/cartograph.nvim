@@ -1998,9 +1998,13 @@ test('python: class-qualified methods, stdlib gate, decorator cbarg', function (
                 .. tostring(c.to))
         end
     end
-    -- a called decorator registers its function: not dead
-    ok(byname.track_view and byname.track_view.cbarg,
-        '@receiver(...) marks the fn dynamically dispatched')
+    -- a called decorator registers its function: not dead. CART-0703 split the
+    -- flag — a DECLARATION MARKER lands on `registered` (liveness) and must NOT
+    -- land on `cbarg`, which gates same-file resolution priority.
+    ok(byname.track_view and byname.track_view.registered,
+        '@receiver(...) marks the fn framework-invoked')
+    ok(not (byname.track_view and byname.track_view.cbarg),
+        'and does NOT take the resolution flag: a decorator is not evidence in a name contest')
     local dead = require('cartograph.lint').run(store,
         { only = { ['dead-function'] = true } })
     for _, f in ipairs(dead) do
@@ -2183,10 +2187,12 @@ test('java: a registering marker annotation is cbarg, an inert one is not', func
     vim.fn.delete(root, 'rf')
     local byname = {}
     for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    -- CART-0703: the annotation verdict is `registered`, not `cbarg`
     local function cbarg(m)
         local n = byname['Registry::' .. m]
         ok(n, 'method extracted: ' .. m)
-        return n and n.cbarg or false
+        ok(not (n and n.cbarg), 'no annotation may set the RESOLUTION flag: ' .. m)
+        return n and n.registered or false
     end
     -- the flip: a bare @Test hands the method to the JUnit engine
     ok(cbarg('markerRegistered'), '@Test marker = registered')
@@ -2213,8 +2219,11 @@ test('java: class-qualified, annotation cbarg, public exported', function ()
     -- methods qualify with `::` (php-style, also Java's own method-ref syntax)
     ok(byname['PetController::listPets'], 'class-qualified method')
     -- @GetMapping("/pets") registers the handler: cbarg, not dead
-    ok(byname['PetController::listPets'].cbarg, 'annotation with args = registered')
-    ok(not byname['PetController::render'].cbarg, 'plain method not cbarg')
+    ok(byname['PetController::listPets'].registered, 'annotation with args = registered')
+    ok(not byname['PetController::render'].registered, 'plain method not registered')
+    -- CART-0703: neither takes the resolution flag
+    ok(not byname['PetController::listPets'].cbarg,
+        '@GetMapping does not withdraw the handler from same-file priority')
     ok(byname['VisitService::count'].exported, 'public = exported')
     ok(not byname['PetController::render'].exported, 'private not exported')
     local function refs_of(nm)
@@ -2360,8 +2369,9 @@ test('rust: impl-qualified methods, crate scope, trait/test cbarg, pub', functio
     ok(hits['Engine::speed'], 'boot -> Engine::speed (dotted method call)')
     ok(hits.helper, 'boot -> helper (bare call, same crate)')
     -- Display impl is trait-registered; #[test] is harness-invoked
-    ok(byname['Engine::fmt'].cbarg, 'trait impl method marked dispatched')
-    ok(byname.spins.cbarg, '#[test] fn marked harness-invoked')
+    ok(byname['Engine::fmt'].registered, 'trait impl method marked dispatched')
+    ok(byname.spins.registered, '#[test] fn marked harness-invoked')
+    ok(not byname.spins.cbarg, 'CART-0703: #[test] is liveness, not a resolution tie-break')
     -- use crate::helper resolves to the file
     ok(vim.tbl_contains(store.imports_out['src/engine.rs'] or {}, 'src/lib.rs'),
         'crate:: import resolved')
@@ -3071,8 +3081,10 @@ test('php: attributes register, $this->/self:: resolve in-class', function ()
     for _, n in ipairs(data.nodes) do byname[n.name] = n end
     -- #[Route('/products', ...)] has arguments: registered, not dead;
     -- the bare #[\Override] marker registers nothing
-    ok(byname['ProductController::goAction'].cbarg, 'attribute with args = cbarg')
-    ok(not byname['ProductController::buildBody'].cbarg, 'marker attribute is not')
+    ok(byname['ProductController::goAction'].registered, 'attribute with args = registered')
+    ok(not byname['ProductController::buildBody'].registered, 'marker attribute is not')
+    ok(not byname['ProductController::goAction'].cbarg,
+        'CART-0703: an attribute does not gate same-file resolution')
     -- $this->buildBody() and self::statCount() carry the enclosing class:
     -- exact same-class matches, not tail guesses
     local hits = {}

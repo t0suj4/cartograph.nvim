@@ -25,6 +25,11 @@ M.NODE_FIELDS = {
     unparsed = true, df = true, flow = true, data = true, ctype = true, ret = true,
     retclass = true, -- generic Class<T> return: arg index binding the return var
     entry = true, exported = true, effects = true, apertures = true,
+    registered = true, -- (CART-0703) a framework INVOKES this member: the
+                       -- liveness half of what `cbarg` used to conflate with
+                       -- referenced-as-data. Registered HERE and not later,
+                       -- because CART-0717 is what happens when a minted node
+                       -- field never reaches this closed schema.
     escapes = true, -- (v109) CONFINEMENT, only with exported == false: is the name
                     -- mentioned in a value position in its own file? false = the
                     -- value provably never left, so a cross-file name match into it

@@ -135,7 +135,18 @@ end
 -- signature and nothing on this corpus resolves differently. The pin oracle still
 -- DECLINES here (0 of 907 edges decided) and says so with its substrate line: the
 -- binds exist, no dotted receiver on this corpus is one of them.
-M.VERSION = 168 -- v168: A WHOLE RESOLUTION PASS GOES SILENT ON A WARM GRAPH
+-- v169: TWO FACTS, ONE FLAG, SPLIT (CART-0703). `cbarg` meant BOTH "referenced
+-- as data" (a resolution tie-break input: such a candidate does not take
+-- same-file priority, treesitter.lua:7075/:7909) and "a framework invokes this"
+-- (a liveness alibi). The second is not evidence either way about a name
+-- contest, so `spec.cbarg_def`'s verdict now lands on a new node field
+-- `registered`, which LIVENESS reads beside cbarg and RESOLUTION does not read
+-- at all. Exactly the correction v103 made for a third producer, quoted there.
+-- WHY THE BUMP: a v169 cache holds the old flags on disk, and a warm open would
+-- feed annotation marks straight back into resolution and resurrect the
+-- asymmetry — v103's own reason, verbatim.
+M.VERSION = 169 -- v169: TWO FACTS, ONE FLAG, SPLIT (CART-0703), see above.
+               -- v168: A WHOLE RESOLUTION PASS GOES SILENT ON A WARM GRAPH
                -- (CART-0715). v167 persisted the two fields lint needed; this
                -- carries the rest. EIGHT of the thirteen fields RESOLVE_PASSES
                -- reads off `x.data` were never cached, so relink on a warm

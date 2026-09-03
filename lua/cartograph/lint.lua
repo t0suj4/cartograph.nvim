@@ -1368,10 +1368,18 @@ local function contract_alibi(data)
     end
 end
 
+-- CART-0703. `cbarg` (referenced as DATA — a callback arg, a table-field def)
+-- and `registered` (a framework INVOKES this — an annotation/decorator) used to
+-- be one flag. They were split because only the first may gate RESOLUTION.
+-- LIVENESS wants both: either one means a caller exists that the call graph
+-- cannot see. Stated once here so the three premise sites cannot drift apart —
+-- CART-0674 is what it costs when two of them disagree.
+local function reached_from_outside(n) return n.cbarg or n.registered end
+
 local function provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract)
     if n.exported ~= false or n.escapes ~= false then return false end
     if not (n.kind == 'function' or n.kind == 'method') then return false end
-    if n.decl or n.cbarg or n.entry or metamethod(n) then return false end
+    if n.decl or reached_from_outside(n) or n.entry or metamethod(n) then return false end
     if xmlh and xmlh[n.name] then return false end
     -- the inheritance contract: reached through a supertype, so the call graph
     -- attributes the caller to the DECLARATION and this node reads callerless
@@ -1596,9 +1604,12 @@ function M.alibi(store)
             alibi('registrants', 'inferred',
                 ('registered by %d site(s) — a dispatch table keeps it alive'):format(#regs), ev)
         end
-        if n.cbarg then
+        if reached_from_outside(n) then
             alibi('callback-arg', 'matched',
-                'registered by an annotation / attribute / dispatch field ON the definition', nil)
+                n.registered
+                    and 'registered by an annotation / attribute ON the definition: a framework invokes it'
+                    or 'referenced as data (a callback argument, a dispatch-table field), so a caller exists outside the call graph',
+                nil)
         end
         local ct = contract(n)
         if ct then
@@ -2102,7 +2113,7 @@ M.rules = {
                 if not provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract)
                     and (n.kind == 'function' or n.kind == 'method')
                     and not n.decl -- a prototype is a declaration, not dead code
-                    and not exported(n) and not metamethod(n) and not n.cbarg
+                    and not exported(n) and not metamethod(n) and not reached_from_outside(n)
                     and not n.entry and not xmlh[n.name]
                     -- reached through a supertype: the caller binds to the DECLARATION
                     and not contract(n)
