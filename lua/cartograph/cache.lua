@@ -145,7 +145,22 @@ end
 -- WHY THE BUMP: a v169 cache holds the old flags on disk, and a warm open would
 -- feed annotation marks straight back into resolution and resurrect the
 -- asymmetry — v103's own reason, verbatim.
-M.VERSION = 169 -- v169: TWO FACTS, ONE FLAG, SPLIT (CART-0703), see above.
+-- v170: A QUERY THAT SILENTLY DROPPED MATCHES, AND PHP DISPATCH THROUGH A
+-- VARIABLE (CART-0734). Two extraction changes, one ticket.
+-- (a) php's calls query required `name: (name)`, so `$obj->$method()` and
+--     `$obj::$method()` matched NOTHING — no call record, so no callee, no
+--     refusal, and a method reached only that way had no caller and entered the
+--     dead-code population. They now arrive flagged `dynamic` with no target.
+-- (b) nvim's Query:iter_matches caps in-progress matches (default 256) and
+--     DISCARDS the overflow silently. A statement that is one long fluent chain
+--     reaches the cap and its calls never appear. MEASURED on sylius at the
+--     SHIPPED build, before any php change: 173 calls missing purely to the cap.
+--     All four iter_matches sites now pass MATCH_OPTS.
+-- BLAST RADIUS, measured: sylius calls 106423 -> 106604 (+181 = 173 cap + 8 php),
+-- nodes/edges/resolved UNCHANGED. libs, self, zig and ruby unchanged on every
+-- metric — they never reached the cap.
+M.VERSION = 170 -- v170: A QUERY THAT SILENTLY DROPPED MATCHES (CART-0734), above.
+               -- v169: TWO FACTS, ONE FLAG, SPLIT (CART-0703), see above.
                -- v168: A WHOLE RESOLUTION PASS GOES SILENT ON A WARM GRAPH
                -- (CART-0715). v167 persisted the two fields lint needed; this
                -- carries the rest. EIGHT of the thirteen fields RESOLVE_PASSES

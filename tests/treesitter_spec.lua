@@ -5236,3 +5236,76 @@ test('file scope: opening the gate did NOT open the fn-ref half', function ()
     ok(var_id(data, 'g_map'), 'but its vars are still nodes')
     vim.fn.delete(root, 'rf')
 end)
+
+-- CART-0734. php dispatches through a variable four common ways, and the calls
+-- query required `name: (name)`, so `$obj->$method()` and `$obj::$method()`
+-- matched NOTHING — no call record, hence no callee, no refusal, and nothing for
+-- census.disp to classify. A method reached only that way had no incoming call
+-- and entered the dead-code population.
+--
+-- THE GUARD IS THAT THEY ARRIVE *DYNAMIC*, not resolved. The honest answer to
+-- `$obj->$method()` is "a call whose target this graph cannot name" — inventing a
+-- target by tail-matching the variable's name would be the fabrication the
+-- absence vocabulary exists to prevent.
+test('php: a call dispatched through a variable is RECORDED and dynamic', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/d.php', 'w'))
+    fd:write(table.concat({
+        '<?php',
+        'class T { public function handle() { return 1; } }',
+        'class D {',
+        '  public function run($obj, $method) {',
+        '    $obj->$method();',      -- variable method
+        '    $obj->{$method}();',    -- braced: NORMALISES to the same shape
+        '    $obj::$method();',      -- variable static method
+        '    $obj->handle();',       -- the control: a NAMED call still resolves
+        '  }',
+        '}',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local dyn, named = 0, 0
+    for _, c in ipairs(data.calls or {}) do
+        local callee = require('cartograph.callrec').callee(c)
+        if c.dynamic then
+            dyn = dyn + 1
+            eq('$method', callee, 'a dynamic callee keeps its sigil, so the answer says WHAT it is')
+            eq(nil, c.to, 'and names no target: the graph cannot see through a variable')
+        elseif callee == 'handle' then named = named + 1 end
+    end
+    eq(3, dyn, 'all three variable-dispatch forms are recorded (braced included)')
+    eq(1, named, 'the named control is unaffected')
+end)
+
+-- CART-0734, the second half and the one that was NOT php-specific. nvim's
+-- Query:iter_matches caps in-progress matches (default 256) and DISCARDS the
+-- overflow silently. A statement that is one long fluent chain reaches the cap,
+-- and the calls simply never appear — absent, which nothing can hedge.
+-- MEASURED on sylius at the then-shipped build, before any php change: 173 calls
+-- missing purely to the cap, in the files that chain the most, with no counter
+-- moving. This asserts the cap is not back.
+test('treesitter: a long fluent chain does not silently lose calls to the match cap', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('php') then skip 'no php parser' end
+    local N = 400 -- comfortably past the 256 default
+    local chain = {}
+    for _ = 1, N do chain[#chain + 1] = '->step()' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/chain.php', 'w'))
+    fd:write('<?php\nclass B { public function step() { return $this; } }\n'
+        .. 'function build($b) {\n  return $b' .. table.concat(chain) .. ';\n}\n')
+    fd:close()
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local n = 0
+    for _, c in ipairs(data.calls or {}) do
+        if require('cartograph.callrec').callee(c) == 'step' then n = n + 1 end
+    end
+    eq(N, n, 'every link of the chain is a call record — a dropped match is an '
+        .. 'ABSENT call, and absence is the one disposition nothing can hedge')
+end)

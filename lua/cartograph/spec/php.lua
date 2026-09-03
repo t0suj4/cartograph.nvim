@@ -216,7 +216,25 @@ return {
         (member_call_expression name: (name) @name) @call
         (scoped_call_expression name: (name) @name) @call
         (function_call_expression function: (variable_name) @name) @call
+        (member_call_expression name: (variable_name) @name) @call
+        (scoped_call_expression name: (variable_name) @name) @call
     ]=],
+    -- ── CART-0734: VARIABLE DISPATCH WAS INVISIBLE, NOT DYNAMIC ─────────────
+    -- The `member_call_expression` / `scoped_call_expression` patterns above
+    -- used to require `name: (name)`, so `$obj->$method()` and `$obj::$method()`
+    -- matched NOTHING -- no call record at all, hence no callee, no refusal, and
+    -- nothing for census.disp to classify. A method reached only that way had no
+    -- incoming call and entered the dead-code population: a false deletion
+    -- licence, and a QUIETER one than a wrong answer, because AN ABSENT RECORD
+    -- CANNOT BE HEDGED.
+    -- The captured node is a `variable_name`, already in `dynamic_callee_types`,
+    -- so these arrive flagged `dynamic` and resolve to nothing by the same route
+    -- `$fn()` takes. Shapes verified by parsing a snippet, per this file's own
+    -- rule -- and the braced form `$obj->{$method}()` NORMALISES to the same
+    -- `name: (variable_name)`, so it needs no pattern of its own.
+    -- STILL UNMODELLED and deliberately out of scope here: `new $class()`, which
+    -- is a special case of php recording NO constructor call at all (not even
+    -- `new T()`) -- see CART-0735.
     -- call_user_func('name', ...) CALLS name: the literal resolves as
     -- the real callee (the string is the dispatch mechanism, not a ~)
     indirect_calls = { call_user_func = 1, call_user_func_array = 1 },

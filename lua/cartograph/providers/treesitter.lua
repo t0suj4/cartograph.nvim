@@ -5583,6 +5583,20 @@ function M.extract(root, opts)
     -- before resolution, which runs after the whole file loop). nil = no mention
     -- walk is coming (index-only front-ends): fall back to the spec's own walk,
     -- which is then the file's ONLY walk.
+-- ── CART-0734: THE QUERY SILENTLY DROPPED MATCHES ───────────────────────────
+-- nvim's Query:iter_matches caps IN-PROGRESS matches (default 256) and, past the
+-- cap, DISCARDS them without erroring. On a file whose statements are long fluent
+-- chains — Symfony's TreeBuilder DSL is the worst case, hundreds of nested
+-- member_call_expression in one statement — the cap is reached and calls simply
+-- never appear. Not refused, not dynamic: ABSENT, which is the one disposition
+-- nothing can hedge.
+-- MEASURED on sylius at the SHIPPED build, before any php change: 112015 calls at
+-- the default cap vs 112188 with it raised. 173 calls the graph never saw, in the
+-- files that chain the most, and no counter moved. Raising it is a correction,
+-- not a tuning knob — the cap exists to bound pathological queries, and ours are
+-- authored, fixed and few.
+local MATCH_OPTS = { match_limit = 65536 }
+
     local function extract_defs(file, lang, spec, src, tsroot, dfreg, escpend)
         -- df-strangler step 6: production DERIVES df from flow.coarse (no
         -- second AST walk). The legacy dfreg df-build survives ONLY as the
@@ -6115,7 +6129,7 @@ function M.extract(root, opts)
         end
         local q = parse_query(lang, combined)
         if q then
-            for _, match in q:iter_matches(tsroot, src, 0, -1) do
+            for _, match in q:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
                 local defn, namen, vdefn, vnamen, valn, adefn, vdecln
                 local childn, parentn, catn, cat, cvarn, cctorn, smtn
                 for id, ns in pairs(match) do
@@ -6264,7 +6278,7 @@ function M.extract(root, opts)
                 -- bind into it, rather than emitting a second edge that would move
                 -- every JS corpus gate.
                 local at_site = {}
-                for _, match in q:iter_matches(tsroot, src, 0, -1) do
+                for _, match in q:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
                     local pathn, bindn
                     for id, ns in pairs(match) do
                         local cn = q.captures[id]
@@ -6363,7 +6377,7 @@ function M.extract(root, opts)
         if spec.iface_query then
             q = parse_query(lang, spec.iface_query)
             if q then
-                for _, match in q:iter_matches(tsroot, src, 0, -1) do
+                for _, match in q:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
                     local decl, childn, ifaces = nil, nil, {}
                     for id, ns in pairs(match) do
                         local cn = q.captures[id]
@@ -6408,7 +6422,7 @@ function M.extract(root, opts)
         -- calls (inventory + reference sites, resolved after all files)
         local q = parse_query(lang, spec.calls)
         if q then
-            for _, match in q:iter_matches(tsroot, src, 0, -1) do
+            for _, match in q:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
                 local calln, namen
                 for id, ns in pairs(match) do
                     local cap = q.captures[id]
