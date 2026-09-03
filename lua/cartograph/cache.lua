@@ -159,6 +159,22 @@ end
 -- BLAST RADIUS, measured: sylius calls 106423 -> 106604 (+181 = 173 cap + 8 php),
 -- nodes/edges/resolved UNCHANGED. libs, self, zig and ruby unchanged on every
 -- metric — they never reached the cap.
+-- v172: AN ARGUMENT LIST IS NOT EVIDENCE OF REGISTRATION (CART-0720). java's
+-- cbarg_def admitted tree-sitter's `annotation` node by TYPE — the
+-- has-arguments spelling — without ever reading its name, so
+-- `@SuppressWarnings("unchecked")` (569 defs on server) minted the same alibi as
+-- `@Scheduled(...)`, and `@Deprecated(since = "8.0")` INVERTED the guard the
+-- java-marker-annotation fixture rests on: the same annotation, the same
+-- semantics, the opposite verdict, decided by whether the author typed
+-- parentheses. Both spellings now ask JAVA_REGISTERING_ANNOS the same question.
+-- ⚠ THIS NUMBER MOVED ONCE ALREADY. It was 171 while main sat at v170;
+-- CART-0722 — the OBSERVED registration route, and the thing that makes this
+-- change landable at all — took 171 on 27b35a4, so this is 172. Not
+-- bookkeeping: THE TWO ARE ONLY CORRECT TOGETHER. 0722 alone is
+-- byte-identical on both java corpora (it can only add provenance while the
+-- name-blind route below is still right by accident); THIS alone mints 456
+-- false deletion licences on libs. A warm cache from either half must never
+-- be served to a build holding the other, which is what the field is for.
 -- v171: AN ANNOTATION THE CORPUS ITSELF READS (CART-0722). The registering-
 -- annotation list is SUPPLIED, so a private framework's annotation can never be
 -- on it — elasticsearch's own @EntitlementTest registers 456 members and no
@@ -172,7 +188,9 @@ end
 -- PluginIntrospector reads Deprecated.class twice to REPORT deprecation and
 -- never invokes anything, so "read reflectively" alone would revive the false
 -- @Deprecated alibi CART-0720 exists to remove.
-M.VERSION = 171 -- v171: AN ANNOTATION THE CORPUS ITSELF READS (CART-0722), above.
+M.VERSION = 172 -- v172: AN ARGUMENT LIST IS NOT EVIDENCE OF REGISTRATION
+               -- (CART-0720), see above.
+               -- v171: AN ANNOTATION THE CORPUS ITSELF READS (CART-0722).
                -- v170: A QUERY THAT SILENTLY DROPPED MATCHES (CART-0734), above.
                -- v169: TWO FACTS, ONE FLAG, SPLIT (CART-0703), see above.
                -- v168: A WHOLE RESOLUTION PASS GOES SILENT ON A WARM GRAPH

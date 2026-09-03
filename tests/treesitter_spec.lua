@@ -2172,6 +2172,10 @@ test('java: a registering marker annotation is cbarg, an inert one is not', func
         '    @Deprecated void markerInert() { System.out.println("x"); }',
         '    @Override void overrideInert() { System.out.println("x"); }',
         '    void plainDead() { System.out.println("x"); }',
+        -- CART-0720: the ARGUMENT-CARRYING form asked the same name question.
+        '    @Test(expected = RuntimeException.class) void argsTest() { System.out.println("x"); }',
+        '    @Deprecated(since = "8.0") void argsInert() { System.out.println("x"); }',
+        '    @SuppressWarnings("unchecked") void argsSuppress() { System.out.println("x"); }',
         '}',
     }, '\n'))
     fd:close()
@@ -2206,6 +2210,12 @@ test('java: a registering marker annotation is cbarg, an inert one is not', func
     ok(not cbarg('markerInert'), '@Deprecated marker = NOT registered')
     ok(not cbarg('overrideInert'), '@Override marker = NOT registered')
     ok(not cbarg('plainDead'), 'no annotation = NOT registered')
+    -- CART-0720. The two node types must answer the SAME question, because the
+    -- split between them is a grammar fact about parentheses and nothing else.
+    ok(cbarg('argsTest'), '@Test(expected = ...) = registered, like the marker')
+    -- *** THE GUARD THIS TICKET EXISTS FOR ***
+    ok(not cbarg('argsInert'), '@Deprecated(since = "8.0") = STILL not registered')
+    ok(not cbarg('argsSuppress'), '@SuppressWarnings("unchecked") = NOT registered')
 end)
 
 test('java: class-qualified, annotation cbarg, public exported', function ()

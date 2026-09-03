@@ -119,7 +119,18 @@ end
 -- — `@Override`, `@Transactional`, `@Deprecated`, `@SafeVarargs` — do not
 -- qualify, which is the distinction the original comment was reaching for.
 -- Nor does `@Disabled`, which de-registers and rides beside a `@Test`.
-local JAVA_REGISTERING_MARKERS = {}
+--
+-- THE SET GATES BOTH ANNOTATION NODE TYPES, and that is CART-0720. The set used
+-- to gate `marker_annotation` only; `annotation` (the has-ARGUMENTS form) was
+-- accepted by node type alone, which is NAME-BLIND and mints a false alibi for
+-- every inert annotation that happens to take an argument. Two measured arms:
+-- `@SuppressWarnings("unchecked")` (569 defs on elasticsearch/server) registers
+-- nothing, and `@Deprecated(since = "8.0")` inverts the very guard the
+-- java-marker-annotation fixture rests on — the same annotation, the same
+-- semantics, the opposite verdict, decided by whether the author typed
+-- parentheses. Arguments are not evidence of registration; the NAME is the only
+-- premise either form has, so both forms ask the same question of it.
+local JAVA_REGISTERING_ANNOS = {}
 for _, a in ipairs({
     -- JUnit 4/5 + TestNG: the engine discovers and runs these
     'Test', 'ParameterizedTest', 'RepeatedTest', 'TestFactory', 'TestTemplate',
@@ -139,9 +150,37 @@ for _, a in ipairs({
     'PreRemove', 'PostRemove', 'PostLoad',
     -- Jackson: the serializer invokes these during (de)serialization
     'JsonCreator', 'JsonValue', 'JsonProperty', 'JsonAnySetter', 'JsonAnyGetter',
-    -- JAX-RS verbs are BARE markers; only @Path carries arguments
-    'GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH',
-}) do JAVA_REGISTERING_MARKERS[a] = true end
+    -- JAX-RS verbs are BARE markers; @Path carries arguments and, on a METHOD,
+    -- names a sub-resource locator the runtime calls
+    'GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH', 'Path',
+    -- ── the names below CARRY ARGUMENTS. Before CART-0720 they were admitted
+    -- by node type without being named, so listing them changes nothing for
+    -- them; they are written down so the set states its own coverage, and so
+    -- that removing the node-type shortcut does not silently drop a framework.
+    -- Measured at ZERO occurrences on every pinned java corpus (server, libs,
+    -- synjava), so they are regression insurance for repos we do not gate on,
+    -- not a claim about ours.
+    -- Spring MVC / WebFlux: the dispatcher invokes the handler it routed to
+    'RequestMapping', 'GetMapping', 'PostMapping', 'PutMapping',
+    'DeleteMapping', 'PatchMapping',
+    'ExceptionHandler', 'InitBinder', 'ModelAttribute',
+    -- Spring messaging: the listener container invokes on delivery
+    'MessageMapping', 'KafkaListener', 'JmsListener', 'RabbitListener',
+    -- Spring setter injection: @Value("${x}") on a setter is called by the container
+    'Value',
+    -- Guice: the injector calls a @Provides factory method
+    'Provides',
+    -- JUnit 4 rules + carrotsearch randomizedtesting: the runner calls these
+    'Rule', 'ClassRule', 'ParametersFactory',
+    -- JPA PROPERTY access: with accessor-based mapping Hibernate calls the
+    -- getter/setter itself. Only the argument-carrying mapping annotations are
+    -- listed — the marker twins (@Id, @Version, @Lob) would be an EXPANSION of
+    -- the population rather than preservation of it, and belong with F1.
+    -- @Transient is deliberately absent: it marks the accessor the ORM will NOT
+    -- invoke, so listing it would be the inclusion rule inverted.
+    'Column', 'JoinColumn', 'Enumerated', 'Temporal', 'Embedded',
+    'OneToOne', 'OneToMany', 'ManyToOne', 'ManyToMany',
+}) do JAVA_REGISTERING_ANNOS[a] = true end
 -- ── THE OBSERVED HALF (CART-0722) ─────────────────────────────────────────
 -- The list above is SUPPLIED: a human asserted it, and a private framework's
 -- annotation can never be on it. `@EntitlementTest` is elasticsearch's, it is
@@ -678,23 +717,27 @@ return {
                                              (generic_type (type_identifier) @iface) ]))) @idecl
     ]=],
     entry_names = { main = true },
-    -- an ANNOTATION WITH ARGUMENTS passes the method into a framework
-    -- (@RequestMapping("/x"), @Scheduled(...)): registered, not dead. A bare
-    -- MARKER annotation needs its name checked instead — most of them register
-    -- too (@Test, @Bean, @PostConstruct) and only some wrap without
-    -- registering (@Override, @Deprecated), and nothing in the syntax tells
-    -- the two apart. See JAVA_REGISTERING_MARKERS for why the name is the only
-    -- available premise. The name may be qualified (@org.junit.Test), so match
-    -- the last segment.
-    -- SECOND RETURN (CART-0722): the annotation names on this def that the
-    -- SUPPLIED list above does not recognise and the JDK does not erase — the
-    -- only ones an observed registrar could ever speak for. Collected here
-    -- rather than in a hook of its own because the modifiers walk, the
-    -- qualified-name tail and the inclusion set all already live in this
-    -- function; a second walk would be a second place for them to drift.
-    -- The verdict itself is UNCHANGED, deliberately: this commit adds a route,
-    -- it does not re-decide the existing one (that is CART-0720, on its own
-    -- branch, and keeping them separate is what made each measurable).
+    -- An annotation registers the member iff its NAME says so — see
+    -- JAVA_REGISTERING_ANNOS for the inclusion rule and why the name is the
+    -- only available premise. tree-sitter splits the two spellings into
+    -- `marker_annotation` (@Test) and `annotation` (@Scheduled(...)); that
+    -- split is a grammar fact about parentheses and carries no semantics, so
+    -- both forms are asked the same question (CART-0720). The name may be
+    -- qualified (@org.junit.Test), so match the last segment.
+    --
+    -- SECOND RETURN (CART-0722): the annotation names this SUPPLIED list does
+    -- not recognise and the JDK does not erase — the only ones an OBSERVED
+    -- registrar could ever speak for. Collected here rather than in a hook of
+    -- its own because the modifiers walk, the qualified-name tail and the
+    -- inclusion set all already live in this function; a second walk would be
+    -- a second place for them to drift.
+    --
+    -- ★ THE TWO HALVES ARE ONE MECHANISM AND THAT IS THE POINT. Name-gating
+    -- the has-arguments form (this ticket) is what STOPS `@EntitlementTest`
+    -- registering by accident; the observed route (CART-0722) is what puts it
+    -- back, on evidence, for the 456 members it really does invoke. Landing
+    -- either alone is wrong in a measurable direction: 0722 alone changes
+    -- nothing at all, this alone mints 456 false deletion licences on libs.
     cbarg_def = function (defn, src)
         local mods = defn:child(0)
         if not (mods and mods:type() == 'modifiers') then return false end
@@ -704,12 +747,8 @@ return {
             if t == 'annotation' or t == 'marker_annotation' then
                 local nm = c:field('name')[1]
                 local tail = nm and node_text(nm, src):match('([%w_]+)%s*$')
-                -- an annotation WITH ARGUMENTS is accepted by node type, which
-                -- is name-blind and is CART-0720's defect — preserved verbatim
-                -- so this change is liveness-neutral on its own
-                if t == 'annotation' then reg = true end
-                if tail and JAVA_REGISTERING_MARKERS[tail] then reg = true end
-                if tail and not JAVA_REGISTERING_MARKERS[tail]
+                if tail and JAVA_REGISTERING_ANNOS[tail] then reg = true end
+                if tail and not JAVA_REGISTERING_ANNOS[tail]
                     and not JAVA_SOURCE_RETAINED[tail] then
                     seen = seen or {}
                     if not seen[tail] then
