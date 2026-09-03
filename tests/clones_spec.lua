@@ -725,3 +725,76 @@ test('clones: an embedded assignment keys instead of crashing (php/c/js)', funct
     eq(2, found and #found, 'and the unrelated one is NOT in the group')
     vim.fn.delete(root, 'rf')
 end)
+
+-- CART-0732. The divergence census answers "which hole kind should we add
+-- next?" with evidence instead of a guess: it classifies every divergence the
+-- two named kinds (value hole / struct hole) cannot take.
+--
+-- THE GUARD IS THAT IT STAYS SILENT ON WHAT IS ALREADY NAMED. A pair whose only
+-- divergence is a clean VALUE hole must contribute nothing — if it did, the
+-- census would be re-reporting the case the anti-unifier already handles, and
+-- every feature count would be inflated by the population the template language
+-- covers today. That is the same trap as java-marker-annotation's @Deprecated
+-- row: a classifier that fires on everything has stopped discriminating.
+test('clones: the divergence census names the residue and stays silent on value holes', function ()
+    -- two functions differing ONLY in a literal: a clean value hole, six rows so
+    -- the pair clears min_rows, and nothing structural anywhere.
+    proj({ ['v.lua'] = [[
+local function alpha(t)
+  local a = t.one
+  local b = t.two
+  local c = a + b
+  local d = c * 2
+  local e = d - 1
+  return e
+end
+local function beta(t)
+  local a = t.one
+  local b = t.two
+  local c = a + b
+  local d = c * 3
+  local e = d - 1
+  return e
+end
+return { alpha, beta }
+]] })
+    local clean = clones.divergence_census(store, { max_dist = 32, below = 0, min_rows = 2 })
+    eq(0, clean.divergences,
+        'a pure VALUE-hole pair contributes NO unnamed divergence — the census must not '
+        .. 're-report what anti_unify already parameterizes')
+
+    -- now a pair whose divergence is a CALL facing an inlined expression: the
+    -- extract/inline relation, which no named hole kind covers.
+    proj({ ['w.lua'] = [[
+local function helper(x, y) return x and y end
+local function gamma(t)
+  local a = t.one
+  local b = t.two
+  local c = helper(a, b)
+  local d = c
+  local e = d
+  return e
+end
+local function delta(t)
+  local a = t.one
+  local b = t.two
+  local c = a and b and a
+  local d = c
+  local e = d
+  return e
+end
+return { gamma, delta, helper }
+]] })
+    -- min_rows below near's reporting default keeps the fixture small; the
+    -- pair matches 5 rows and diverges in exactly one place.
+    local res = clones.divergence_census(store, { max_dist = 32, below = 0, min_rows = 2 })
+    ok(res.divergences > 0, 'an inlined-vs-called divergence IS reported as unnamed')
+    local named = false
+    for k in pairs(res.features) do
+        if k == 'call-vs-expr' or k == 'containment' or k == 'leaf-vs-tree' then named = true end
+    end
+    ok(named, 'and it carries a FEATURE that names the shape, not just a count')
+    -- rows, not strings: the caller formats (CART-0698 / interactive reports)
+    eq('table', type(res.features), 'the census returns ROWS, not rendered text')
+    eq('table', type(res.kindpairs), 'kind pairs come back as data too')
+end)

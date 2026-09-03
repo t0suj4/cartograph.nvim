@@ -1221,6 +1221,202 @@ end
 --- than a name (`'q'` against `require('cartograph.config').keys.close`) never shares a
 --- one-leaf-blanked key, because one side is a whole call chain. The two tiers are
 --- complementary, not nested — neither subsumes the other.
+-- ── divergence census: WHICH HOLE KINDS ARE WE MISSING? ──────────────────────
+-- analyze_pair names exactly two kinds of divergence — a VALUE hole (a clean
+-- parameter) and a STRUCT hole (give up). Everything the template language
+-- cannot express lands in the second bucket undifferentiated, so the question
+-- "what else should a template be able to say?" has no evidence behind it.
+--
+-- This censuses that bucket. For every divergence the named kinds cannot take,
+-- it records the node-kind pair and a set of derived FEATURES, so a further
+-- hole kind is FOUND rather than guessed. CART-0349 already did this once by
+-- hand — it noticed `lit` facing `name` was a class of its own and named it
+-- DRIFT — and the census re-discovers that class, which is the only validation
+-- available for a method like this.
+--
+-- ★ FEATURES, NOT KIND NAMES, ARE THE ROBUST OUTPUT. The kind-pair table is
+-- contaminated wherever the expression IR falls back to `?<tree-sitter type>`
+-- for a construct it does not model: on a mixed corpus (elasticsearch/libs
+-- carries 28 .cc + 6 .h) that fallback dominates the table and measures IR
+-- COVERAGE rather than a missing hole kind. The feature table keys on shape and
+-- does not have that problem. Read features first.
+--
+-- ★ RETURNS ROWS, NOT STRINGS ([[cartograph-interactive-reports]] / CART-0698):
+-- the caller formats. A census that renders is a census that cannot be diffed.
+local function dc_kids(e)
+    local o, k = {}, e.k
+    if k == 'field' then o[1] = e.b
+    elseif k == 'index' then o[1] = e.b; o[2] = e.i
+    elseif k == 'call' then o[1] = e.f; for _, a in ipairs(e.a or {}) do o[#o + 1] = a end
+    elseif k == 'un' then o[1] = e.e
+    elseif k == 'bin' then o[1] = e.l; o[2] = e.r
+    elseif k == 'assign' then o[1] = e.t; o[2] = e.v
+    elseif k == 'table' then for _, c in ipairs(e.kids or {}) do o[#o + 1] = c end end
+    local r = {}
+    for _, c in ipairs(o) do if c then r[#r + 1] = c end end
+    return r
+end
+
+local function dc_size(e)
+    if type(e) ~= 'table' then return 0 end
+    local n = 1
+    for _, c in ipairs(dc_kids(e)) do n = n + dc_size(c) end
+    return n
+end
+
+-- the argument/element LIST a node carries, if any — where a repetition hole
+-- would sit
+local function dc_list(e)
+    if not e then return nil end
+    if e.k == 'call' then return e.a or {} end
+    if e.k == 'table' then return e.kids or {} end
+    return nil
+end
+
+local function dc_align(x, y, la, lb)
+    if not x or not y then return false end
+    local h = {}
+    return anti_unify(x, y, la, lb, h)
+end
+
+-- a repetition hole is only honest if the list's elements are instances of ONE
+-- template; a heterogeneous list is not a repetition, it is unrelated content
+local function dc_homogeneous(list, la, lb)
+    if #list < 2 then return true end
+    for i = 2, #list do if not dc_align(list[1], list[i], la, lb) then return false end end
+    return true
+end
+
+-- does one side NEST the other (the recursion case)? Bounded depth: this is a
+-- census, not a solver, and an unbounded search would dominate its cost.
+local DC_WRAP_DEPTH = 2
+local function dc_wraps(outer, inner, la, lb, depth)
+    depth = depth or DC_WRAP_DEPTH
+    if depth <= 0 then return false end
+    for _, c in ipairs(dc_kids(outer)) do
+        if dc_align(c, inner, la, lb) then return true end
+        if dc_wraps(c, inner, la, lb, depth - 1) then return true end
+    end
+    return false
+end
+
+--- Census the divergences the current hole taxonomy cannot name.
+--- Scans NEAR-clone pairs beyond `below` (default: the shipped max_dist, so the
+--- population is exactly what the tool declines to report today) and classifies
+--- every divergence that is neither a value hole, nor a homogeneous repetition,
+--- nor a bounded nesting.
+---@param store table
+---@param opts table|nil { max_dist = 32, below = 2, min_rows = nil, witnesses = true }
+---@return table { features, kindpairs, witnesses, pairs_scanned, divergences }
+function M.divergence_census(store, opts)
+    local max_dist = (opts and opts.max_dist) or 32
+    local below = (opts and opts.below) or 2
+    -- forwarded so a caller can widen the population; M.near's default (6) is
+    -- tuned for reporting, and a census may legitimately want a smaller floor
+    local min_rows = opts and opts.min_rows
+    local want_wit = not (opts and opts.witnesses == false)
+    local features, kindpairs, witnesses = {}, {}, {}
+    local ndiv, npairs = 0, 0
+    local function bump(t, k) t[k] = (t[k] or 0) + 1 end
+
+    local function record(x, y, la, lb)
+        ndiv = ndiv + 1
+        local kx = x and x.k or 'NIL'
+        local ky = y and y.k or 'NIL'
+        local a, b = kx, ky
+        if a > b then a, b = b, a end
+        bump(kindpairs, a .. ' | ' .. b)
+        local f = {}
+        if not x or not y then
+            f[#f + 1] = 'one-side-absent'
+        else
+            local sx, sy = dc_size(x), dc_size(y)
+            local cx, cy = rcanon(x, la or {}, {}), rcanon(y, lb or {}, {})
+            if cx == cy then f[#f + 1] = 'canon-equal(alpha)' end
+            -- one side literally contains the other: a guard/conjunct was added,
+            -- or a value was wrapped
+            if cx:find(cy, 1, true) or cy:find(cx, 1, true) then f[#f + 1] = 'containment' end
+            -- a bare local facing the expression it was assigned from: EXTRACT LOCAL
+            if (#dc_kids(x) == 0) ~= (#dc_kids(y) == 0) then f[#f + 1] = 'leaf-vs-tree' end
+            -- CART-0349's class, re-found by the census
+            if (kx == 'lit' and ky == 'name') or (kx == 'name' and ky == 'lit') then
+                f[#f + 1] = 'drift(lit/name)'
+            end
+            -- a call facing something that is not one: EXTRACT/INLINE A CALL
+            if (kx == 'call' or ky == 'call') and kx ~= ky then f[#f + 1] = 'call-vs-expr' end
+            local mx, my, ox, oy = {}, {}, {}, {}
+            for i, c in ipairs(dc_kids(x)) do local k2 = rcanon(c, la or {}, {}); mx[k2] = (mx[k2] or 0) + 1; ox[i] = k2 end
+            for i, c in ipairs(dc_kids(y)) do local k2 = rcanon(c, lb or {}, {}); my[k2] = (my[k2] or 0) + 1; oy[i] = k2 end
+            local same = true
+            for k2, v in pairs(mx) do if my[k2] ~= v then same = false; break end end
+            if same then for k2, v in pairs(my) do if mx[k2] ~= v then same = false; break end end end
+            local ordered = #ox == #oy
+            if ordered then for i = 1, #ox do if ox[i] ~= oy[i] then ordered = false; break end end end
+            if same and #ox > 1 and not ordered then f[#f + 1] = 'reorder' end
+            if math.max(sx, sy) > 0 and math.min(sx, sy) / math.max(sx, sy) < 0.34 then
+                f[#f + 1] = 'size-skew'
+            end
+        end
+        if #f == 0 then f[1] = '(no feature)' end
+        for _, n in ipairs(f) do bump(features, n) end
+        if want_wit then
+            local tag = table.concat(f, '+')
+            if not witnesses[tag] and x and y then
+                witnesses[tag] = { a = rcanon(x, la or {}, {}), b = rcanon(y, lb or {}, {}) }
+            end
+        end
+    end
+
+    local function walk(x, y, la, lb)
+        if x == nil and y == nil then return end
+        if x == nil or y == nil then record(x, y, la, lb); return end
+        local lx, ly = dc_list(x), dc_list(y)
+        if x.k == y.k and lx and ly and #lx ~= #ly then
+            -- a list-length divergence IS a repetition hole when the elements are
+            -- one template; only the heterogeneous case is unnamed
+            if not dc_homogeneous(#lx > #ly and lx or ly, la, lb) then record(x, y, la, lb) end
+            local n = math.min(#lx, #ly)
+            for i = 1, n do walk(lx[i], ly[i], la, lb) end
+            return
+        end
+        if x.k ~= y.k then
+            if not (dc_wraps(x, y, la, lb) or dc_wraps(y, x, lb, la)) then record(x, y, la, lb) end
+            return
+        end
+        local kx, ky = dc_kids(x), dc_kids(y)
+        if #kx ~= #ky then record(x, y, la, lb); return end
+        for i = 1, #kx do walk(kx[i], ky[i], la, lb) end
+    end
+
+    for _, p in ipairs(M.near(store, { max_dist = max_dist, min_rows = min_rows })) do
+        if p.dist > below then
+            npairs = npairs + 1
+            for _, o in ipairs(p.ops) do
+                if o.op == 'sub' then
+                    local r1, r2 = p.a.exprs[o.i], p.b.exprs[o.j]
+                    if r1 and r2 then
+                        for _, side in ipairs({ 'lhs', 'rhs' }) do
+                            local l1, l2 = r1[side] or {}, r2[side] or {}
+                            local n = math.min(#l1, #l2)
+                            -- a ROW's lhs/rhs length mismatch is repetition at
+                            -- STATEMENT level (anti_unify_row records it as a bare
+                            -- struct hole, which is why it was invisible)
+                            if #l1 ~= #l2
+                                and not dc_homogeneous(#l1 > #l2 and l1 or l2, p.a.locals, p.b.locals) then
+                                record(l1[n + 1] or l2[n + 1], nil, p.a.locals, p.b.locals)
+                            end
+                            for i = 1, n do walk(l1[i], l2[i], p.a.locals, p.b.locals) end
+                        end
+                        if r1.cond or r2.cond then walk(r1.cond, r2.cond, p.a.locals, p.b.locals) end
+                    end
+                end
+            end
+        end
+    end
+    return { features = features, kindpairs = kindpairs, witnesses = witnesses,
+        pairs_scanned = npairs, divergences = ndiv }
+end
+
 ---@param store table
 ---@param opts table|nil  { max_bucket = 5, min_other = 2 }
 function M.row_drift(store, opts)
