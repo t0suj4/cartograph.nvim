@@ -1374,7 +1374,12 @@ end
 -- LIVENESS wants both: either one means a caller exists that the call graph
 -- cannot see. Stated once here so the three premise sites cannot drift apart —
 -- CART-0674 is what it costs when two of them disagree.
-local function reached_from_outside(n) return n.cbarg or n.registered end
+-- CART-0722 adds a third: `regfrom` is the OBSERVED half of `registered` — a
+-- file in THIS corpus reads an annotation on this def by reflection and invokes
+-- reflectively. It rides its own field because it is DERIVED at ingest and
+-- recomputed there, while `registered` is minted at extract from a supplied
+-- list; keeping the producers apart is what CART-0703 bought.
+local function reached_from_outside(n) return n.cbarg or n.registered or n.regfrom end
 
 local function provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract)
     if n.exported ~= false or n.escapes ~= false then return false end
@@ -1605,11 +1610,17 @@ function M.alibi(store)
                 ('registered by %d site(s) — a dispatch table keeps it alive'):format(#regs), ev)
         end
         if reached_from_outside(n) then
+            -- the OBSERVED premise is named first and carries its witness: it
+            -- is the one of the three a reader can go and check, and saying
+            -- WHERE a premise came from is the whole of R10 / CART-0702
             alibi('callback-arg', 'matched',
-                n.registered
+                n.regfrom
+                    and ('an annotation on it is read by reflection in %s, which invokes reflectively: that file is the registrar')
+                        :format(n.regfrom)
+                or n.registered
                     and 'registered by an annotation / attribute ON the definition: a framework invokes it'
                     or 'referenced as data (a callback argument, a dispatch-table field), so a caller exists outside the call graph',
-                nil)
+                n.regfrom and { file = n.regfrom } or nil)
         end
         local ct = contract(n)
         if ct then

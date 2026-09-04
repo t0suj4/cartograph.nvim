@@ -1108,6 +1108,11 @@ HAZARDS: disclosed with counts, yours to finish.
            dispatch table / load-time data / annotation — the fn view's
            "◆ registered by" descends into it), an entry point, or a
            visibility promise. No alibi ⇒ possibly dead
+           An annotation registers either because a SUPPLIED list names
+           it, or because this corpus is OBSERVED to read it by
+           reflection in a file that also invokes reflectively — and
+           then the alibi names that file, so the premise is one a
+           reader can go and check rather than one to be trusted
 
 A row FITS, or it says so.                              *cartograph-budget*
 The symbols pane has `symbols_width` columns of text (default 30; the gutter is

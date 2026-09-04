@@ -25,6 +25,15 @@ M.NODE_FIELDS = {
     unparsed = true, df = true, flow = true, data = true, ctype = true, ret = true,
     retclass = true, -- generic Class<T> return: arg index binding the return var
     entry = true, exported = true, effects = true, apertures = true,
+    annos = true,   -- (CART-0722) registration-CANDIDATE marks: annotation names
+                    -- on this def that no supplied list claims. Carried, not
+                    -- decided — the reader that would speak for them is in
+                    -- another file, so store.ingest joins them against
+                    -- data.regobs.
+    regfrom = true, -- (CART-0722) the OBSERVED half of `registered`, DERIVED at
+                    -- ingest: the file that reads one of this def's annotations
+                    -- by reflection AND invokes reflectively. A witness a reader
+                    -- can open, which is what a bare boolean could never be.
     registered = true, -- (CART-0703) a framework INVOKES this member: the
                        -- liveness half of what `cbarg` used to conflate with
                        -- referenced-as-data. Registered HERE and not later,

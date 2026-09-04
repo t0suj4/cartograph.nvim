@@ -263,6 +263,16 @@ local function merge_chunk(s, chunk)
     for _, x in ipairs(chunk.fieldtypes or {}) do
         if not seen[x.file] then acc.fieldtypes[#acc.fieldtypes + 1] = x end
     end
+    -- regobs (CART-0722): file-tagged list, deduped like extends — the
+    -- OBSERVED registrar rows, which store.ingest joins against every node's
+    -- `annos`. Dropping it here would leave a parallel extract with the
+    -- candidate marks and none of the evidence, so every observed registration
+    -- would silently vanish and only the LIVENESS numbers would move — exactly
+    -- the failure the comment above records the last time this list went stale.
+    acc.regobs = acc.regobs or {}
+    for _, x in ipairs(chunk.regobs or {}) do
+        if not seen[x.file] then acc.regobs[#acc.regobs + 1] = x end
+    end
     -- ruby_ctor (R5 ctor bindings): keyed BY FILE, per-file overlay
     acc.ruby_ctor = acc.ruby_ctor or {}
     for f, fb in pairs(chunk.ruby_ctor or {}) do
@@ -701,6 +711,13 @@ function M.extract(root, o)
         reorder(acc.extends or {}, function (x) return x.file end)
         reorder(acc.implements or {}, function (x) return x.file end)
         reorder(acc.fieldtypes or {}, function (x) return x.file end)
+        -- CART-0722. The JOIN is order-independent by construction (it takes
+        -- the lexicographically first registrar), so `regfrom` would agree
+        -- either way — but the ROWS reach the cache and the gate snapshot, and
+        -- a list whose order depends on worker arrival is a diff that means
+        -- nothing. ⚠ THIS LIST IS HAND-KEPT AND ALREADY INCOMPLETE: ruby_anc is
+        -- a 'rows' resolver input and is not here (CART-0736).
+        reorder(acc.regobs or {}, function (x) return x.file end)
     end
 
     local failed = {}

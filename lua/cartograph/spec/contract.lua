@@ -168,6 +168,13 @@ M.SLOTS = {
     scan_bare_calls = 'EMITTERS', ctor_query = 'EMITTERS',
     super_query = 'EMITTERS', iface_query = 'EMITTERS', interface = 'EMITTERS',
     aperture_query = 'EMITTERS',
+    -- OBSERVED REGISTRARS (CART-0722): the reflective annotation READ and the
+    -- reflective INVOKE. Two slots and not one because the read is rare and
+    -- cheap to look for while the invoke pattern matches every call in the
+    -- file — the provider runs the second only where the first hit. A language
+    -- declaring one without the other is inert by construction (the provider
+    -- requires both), which is the honest reading: one conjunct is not evidence.
+    reg_read_query = 'EMITTERS', reg_invoke_query = 'EMITTERS',
 
     -- ANALYSIS: flow / df / effects semantics
     -- ACCESS BY STRING KEY (CART-0504): the table through which a variable is

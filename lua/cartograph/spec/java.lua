@@ -142,6 +142,55 @@ for _, a in ipairs({
     -- JAX-RS verbs are BARE markers; only @Path carries arguments
     'GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH',
 }) do JAVA_REGISTERING_MARKERS[a] = true end
+-- ── THE OBSERVED HALF (CART-0722) ─────────────────────────────────────────
+-- The list above is SUPPLIED: a human asserted it, and a private framework's
+-- annotation can never be on it. `@EntitlementTest` is elasticsearch's, it is
+-- read by reflection inside elasticsearch, and it genuinely invokes 456
+-- members. No amount of curating a shared list reaches it — that is the whole
+-- of CART-0720's fork.
+--
+-- So ask the CORPUS instead. Two facts, both read off the tree:
+--   reg_read_query    a reflective annotation read naming a class literal
+--                     (`method.getAnnotation(EntitlementTest.class)`)
+--   reg_invoke_query  a reflective INVOCATION (`.invoke(`, `.newInstance(`)
+-- A file holding both observes-registers the names it reads. The join lives in
+-- store.ingest, not here: the reader and the annotated member are in different
+-- files, so no per-file hook can see both ends.
+--
+-- ★ THE SECOND CONJUNCT IS NOT DECORATION, IT IS THE WHOLE SOUNDNESS ARGUMENT.
+-- "read reflectively" ALONE is measured-WRONG: server's PluginIntrospector
+-- reads `isAnnotationPresent(Deprecated.class)` twice purely to REPORT
+-- deprecation, and contains no reflective invoke at all. Without the invoke
+-- conjunct this route would mint an alibi for every `@Deprecated` member on
+-- server — re-creating the exact false alibi CART-0720 exists to remove, and
+-- defeating the guard examples/java-marker-annotation/ rests on.
+--
+-- GRANULARITY IS FILE, AND THAT IS MEASURED TOO, not a convenience. Function
+-- level FAILS the positive arm: RestEntitlementsCheckAction reads the
+-- annotation at :100 in `getTestEntries` and invokes at :184/:187 in
+-- `createFunctionForMethod`, which takes the Method as a parameter and returns
+-- a lambda closing over it. Read and invoke are one hop apart through a
+-- closure. File level passes both arms on all 14 reflectively-read annotation
+-- names on elasticsearch server+libs (5 in, 9 out), hand-adjudicated.
+--
+-- ERROR DIRECTION, and it is why a file-level heuristic is admissible here at
+-- all: `registered` SUPPRESSES a dead-code finding. Over-claiming declines to
+-- assert death; under-claiming hands out a false deletion licence. This route
+-- can only ever over-claim, which is the sound-first direction.
+local JAVA_REFLECT_READS = {
+    'getAnnotation', 'isAnnotationPresent',
+    'getAnnotationsByType', 'getDeclaredAnnotation',
+}
+local JAVA_REFLECT_INVOKES = { 'invoke', 'newInstance' }
+-- ANNOTATIONS THE JDK DECLARES @Retention(SOURCE). They are erased before a
+-- class file exists, so NO getAnnotation() can ever see one — a PROOF, not a
+-- preference, and the same lever the ticket's layer 1 names. Their only job
+-- here is to keep `annos` from carrying `@Override` on 37,992 of
+-- elasticsearch's 43,926 annotated members (86.5%) for a join that could not
+-- fire. @Deprecated is deliberately ABSENT: it is RUNTIME, so excluding it
+-- would be a preference wearing a proof's hat, and it is the negative arm the
+-- fixture tests.
+local JAVA_SOURCE_RETAINED = { Override = true, SuppressWarnings = true }
 -- the first positional string argument of an annotation (@Service("x") → "x"),
 -- or nil. Positional form only — the `@Service(value="x")` element-pair form is
 -- rare and falls back to the default name (sound: a missed explicit name just
@@ -637,24 +686,54 @@ return {
     -- the two apart. See JAVA_REGISTERING_MARKERS for why the name is the only
     -- available premise. The name may be qualified (@org.junit.Test), so match
     -- the last segment.
+    -- SECOND RETURN (CART-0722): the annotation names on this def that the
+    -- SUPPLIED list above does not recognise and the JDK does not erase — the
+    -- only ones an observed registrar could ever speak for. Collected here
+    -- rather than in a hook of its own because the modifiers walk, the
+    -- qualified-name tail and the inclusion set all already live in this
+    -- function; a second walk would be a second place for them to drift.
+    -- The verdict itself is UNCHANGED, deliberately: this commit adds a route,
+    -- it does not re-decide the existing one (that is CART-0720, on its own
+    -- branch, and keeping them separate is what made each measurable).
     cbarg_def = function (defn, src)
         local mods = defn:child(0)
-        if mods and mods:type() == 'modifiers' then
-            for _, c in inext, mods, -1 do
-                local t = c:type()
-                if t == 'annotation' then return true end
-                if t == 'marker_annotation' then
-                    local nm = c:field('name')[1]
-                    local tail = nm
-                        and node_text(nm, src):match('([%w_]+)%s*$')
-                    if tail and JAVA_REGISTERING_MARKERS[tail] then
-                        return true
+        if not (mods and mods:type() == 'modifiers') then return false end
+        local reg, annos, seen = false, nil, nil
+        for _, c in inext, mods, -1 do
+            local t = c:type()
+            if t == 'annotation' or t == 'marker_annotation' then
+                local nm = c:field('name')[1]
+                local tail = nm and node_text(nm, src):match('([%w_]+)%s*$')
+                -- an annotation WITH ARGUMENTS is accepted by node type, which
+                -- is name-blind and is CART-0720's defect — preserved verbatim
+                -- so this change is liveness-neutral on its own
+                if t == 'annotation' then reg = true end
+                if tail and JAVA_REGISTERING_MARKERS[tail] then reg = true end
+                if tail and not JAVA_REGISTERING_MARKERS[tail]
+                    and not JAVA_SOURCE_RETAINED[tail] then
+                    seen = seen or {}
+                    if not seen[tail] then
+                        seen[tail] = true
+                        annos = annos or {}
+                        annos[#annos + 1] = tail
                     end
                 end
             end
         end
-        return false
+        return reg, annos
     end,
+    -- the reflective REGISTRAR pair, see JAVA_REFLECT_READS above. Split into
+    -- two queries on purpose: the read is rare and cheap to look for, the
+    -- invoke pattern matches every method call in the file, so the provider
+    -- runs the second ONLY where the first hit.
+    reg_read_query = ([=[
+        (method_invocation
+            name: (identifier) @rmeth (#any-of? @rmeth %s)
+            arguments: (argument_list (class_literal) @rcls))
+    ]=]):format('"' .. table.concat(JAVA_REFLECT_READS, '" "') .. '"'),
+    reg_invoke_query = ([=[
+        (method_invocation name: (identifier) @imeth (#any-of? @imeth %s))
+    ]=]):format('"' .. table.concat(JAVA_REFLECT_INVOKES, '" "') .. '"'),
     exported_def = function (defn, src)
         local mods = defn:child(0)
         if mods and mods:type() == 'modifiers' then

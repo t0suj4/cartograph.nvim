@@ -159,7 +159,21 @@ end
 -- BLAST RADIUS, measured: sylius calls 106423 -> 106604 (+181 = 173 cap + 8 php),
 -- nodes/edges/resolved UNCHANGED. libs, self, zig and ruby unchanged on every
 -- metric — they never reached the cap.
-M.VERSION = 170 -- v170: A QUERY THAT SILENTLY DROPPED MATCHES (CART-0734), above.
+-- v171: AN ANNOTATION THE CORPUS ITSELF READS (CART-0722). The registering-
+-- annotation list is SUPPLIED, so a private framework's annotation can never be
+-- on it — elasticsearch's own @EntitlementTest registers 456 members and no
+-- amount of curating a shared list reaches it. So ask the corpus: a file that
+-- READS an annotation reflectively by class literal AND invokes reflectively
+-- (`method.getAnnotation(X.class)` … `method.invoke(…)`) is a registrar this
+-- graph can point at. Two new node fields (`annos`, `regfrom`) and one new
+-- sharded side table (`regobs`) — a cold extract and a warm load must agree
+-- about all three, so the version moves.
+-- ★ THE SECOND CONJUNCT IS THE SOUNDNESS ARGUMENT, not a refinement: server's
+-- PluginIntrospector reads Deprecated.class twice to REPORT deprecation and
+-- never invokes anything, so "read reflectively" alone would revive the false
+-- @Deprecated alibi CART-0720 exists to remove.
+M.VERSION = 171 -- v171: AN ANNOTATION THE CORPUS ITSELF READS (CART-0722), above.
+               -- v170: A QUERY THAT SILENTLY DROPPED MATCHES (CART-0734), above.
                -- v169: TWO FACTS, ONE FLAG, SPLIT (CART-0703), see above.
                -- v168: A WHOLE RESOLUTION PASS GOES SILENT ON A WARM GRAPH
                -- (CART-0715). v167 persisted the two fields lint needed; this
@@ -2183,6 +2197,14 @@ end
 ---                 transient over the self-type map, which has its own channel
 ---                 (save_selft / load_selft). Persisting it would be a second copy.
 M.RESOLVER_INPUTS = {
+    -- ★ regobs IS AN INGEST/LIVENESS INPUT, NOT A RESOLVER INPUT — it never
+    -- reaches a resolve pass. It lives here because this registry is what
+    -- SHARDS a per-file side table into the cache, and that lifecycle is
+    -- exactly the one it needs; a second registry for one field would be a
+    -- second place to forget something (CART-0717 is what forgetting costs).
+    regobs     = 'rows',    -- (CART-0722) {file, anno}: annotations this corpus
+                            -- is OBSERVED to read reflectively in a file that
+                            -- also invokes reflectively
     implements = 'rows',    -- + data.beans, carried on the row
     extends    = 'rows',
     fieldtypes = 'rows',

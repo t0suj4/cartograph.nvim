@@ -5750,9 +5750,18 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- (CART-0701's @Bean-calls-@Bean idiom); removing it moved
                 -- elasticsearch/server 91467 -> 91323 resolved. Neither is a
                 -- decision the flag was introduced to make.
-                local isreg = false
+                local isreg, annos = false, nil
                 if spec.cbarg_def then
-                    isreg = spec.cbarg_def(defn, src) or false
+                    -- SECOND RETURN (CART-0722): the registration-CANDIDATE
+                    -- marks on this def — annotation names the spec's supplied
+                    -- list does not recognise. They are carried, not decided:
+                    -- the reader that would speak for them lives in another
+                    -- file, so the verdict is joined at store.ingest once the
+                    -- whole corpus is in hand. Specs that do not answer return
+                    -- nil and nothing is minted.
+                    local r, a = spec.cbarg_def(defn, src)
+                    isreg = r or false
+                    annos = a
                 end
                 -- multi-equation definitions (haskell) are ONE function:
                 -- fold this equation into the previous node
@@ -5823,6 +5832,16 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- — see CART-0723; splitting it is the step that makes that
                     -- promotion expressible.
                     registered = isreg or nil,
+                    -- registration-candidate marks (CART-0722): annotation
+                    -- names no supplied list claims. store.ingest joins them
+                    -- against data.regobs — the names this corpus is OBSERVED
+                    -- to read reflectively in a file that also invokes
+                    -- reflectively — and sets `registered` + `regfrom` where
+                    -- they meet. Persisted because the join is recomputed on
+                    -- every ingest (warm load included) rather than baked in:
+                    -- a derived fact whose inputs are persisted cannot go
+                    -- stale, which is the CART-0715 lesson stated as a shape.
+                    annos = annos,
                     -- unconditional module-load def (lua): a load-order sibling
                     -- for the reassignment-override resolver (resolve_reassign)
                     top = (lang == 'lua' and toplevel_def(defn)) or nil,
@@ -6410,6 +6429,60 @@ local MATCH_OPTS = { match_limit = 65536 }
             end
         end
 
+        -- OBSERVED REGISTRARS (CART-0722): a file that READS an annotation
+        -- reflectively by class literal AND invokes reflectively is, for the
+        -- names it reads, a registrar this corpus can point at. Records
+        -- data.regobs rows {file, anno}; store.ingest joins them against every
+        -- node's `annos`.
+        --
+        -- ★ BOTH CONJUNCTS OR NOTHING. A read alone is not evidence: measured
+        -- on elasticsearch, PluginIntrospector reads Deprecated.class twice to
+        -- REPORT deprecation and never invokes anything, so a read-only rule
+        -- would revive the false @Deprecated alibi CART-0720 removes. The
+        -- invoke query matches EVERY method call in the file, so it runs only
+        -- where the (rare, cheap) read query already hit — reads are a handful
+        -- of files per corpus, and the broad pattern never touches the rest.
+        if spec.reg_read_query and spec.reg_invoke_query then
+            local rq = parse_query(lang, spec.reg_read_query)
+            local names
+            if rq then
+                for _, match in rq:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
+                    for id, ns in pairs(match) do
+                        if rq.captures[id] == 'rcls' then
+                            local cn = cap_node(ns)
+                            -- `Foo.Bar.class` → `Bar`: the def side stores the
+                            -- qualified-name TAIL too, so the join key is a tail
+                            -- on both ends or it silently never matches
+                            local t = cn and node_text(cn, src)
+                                :gsub('%s*%.%s*class%s*$', '')
+                                :match('([%w_]+)%s*$')
+                            if t then names = names or {}; names[t] = true end
+                        end
+                    end
+                end
+            end
+            if names then
+                local iq = parse_query(lang, spec.reg_invoke_query)
+                local invokes = false
+                if iq then
+                    for _ in iq:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
+                        invokes = true
+                        break
+                    end
+                end
+                if invokes then
+                    -- sorted: the row order reaches the cache and the gate
+                    -- snapshot, and `pairs` over a set is not stable across runs
+                    local ks = {}
+                    for k in pairs(names) do ks[#ks + 1] = k end
+                    table.sort(ks)
+                    data.regobs = data.regobs or {}
+                    for _, k in ipairs(ks) do
+                        data.regobs[#data.regobs + 1] = { file = file, anno = k }
+                    end
+                end
+            end
+        end
 
     end
 

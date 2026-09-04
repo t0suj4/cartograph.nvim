@@ -5309,3 +5309,93 @@ test('treesitter: a long fluent chain does not silently lose calls to the match 
     eq(N, n, 'every link of the chain is a call record — a dropped match is an '
         .. 'ABSENT call, and absence is the one disposition nothing can hedge')
 end)
+
+-- CART-0722. The registering-annotation list is SUPPLIED, so a private
+-- framework's annotation can never be on it, and no amount of curating a shared
+-- list reaches elasticsearch's own @EntitlementTest (456 registered members).
+-- The OBSERVED route asks the corpus instead: a file that reads an annotation
+-- reflectively by class literal AND invokes reflectively is a registrar this
+-- graph can point at, and `regfrom` names it.
+--
+-- ★ THE NEGATIVE ARM IS THE LOAD-BEARING ONE. "Read reflectively" ALONE is
+-- measured-WRONG on the very corpus this was built for: elasticsearch's
+-- PluginIntrospector reads isAnnotationPresent(Deprecated.class) twice purely
+-- to REPORT deprecation and contains no reflective invoke at all. A read-only
+-- rule would mint an alibi for every @Deprecated member on server — reviving
+-- the exact false alibi CART-0720 removes. Reporter.java is that shape.
+--
+-- ★ AND THE POSITIVE ARM PINS THE GRANULARITY. The read and the invoke sit in
+-- DIFFERENT METHODS of the same file, which is the measured
+-- RestEntitlementsCheckAction shape (read at :100 in getTestEntries, invoke at
+-- :184 in createFunctionForMethod, one hop apart through a closure). A future
+-- "tighten this to function level" now fails here instead of silently losing
+-- the whole population it was built to catch.
+test('java: an annotation the corpus reads AND invokes registers; one it only reads does not', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(name, lines)
+        local fd = assert(io.open(root .. '/' .. name, 'w'))
+        fd:write(table.concat(lines, '\n')); fd:close()
+    end
+    -- THE REGISTRAR: reads in one method, invokes in another
+    put('HookRunner.java', {
+        'package com.example.obs;',
+        'import java.lang.reflect.Method;',
+        'class HookRunner {',
+        '    void collect(Class<?> c) {',
+        '        for (Method m : c.getDeclaredMethods()) {',
+        '            if (m.getAnnotation(ObsHook.class) != null) { keep(m); }',
+        '        }',
+        '    }',
+        '    Object make(Method m) throws Exception { return m.invoke(null); }',
+        '    void keep(Method m) { }',
+        '}' })
+    -- READS AND NEVER INVOKES: the PluginIntrospector shape
+    put('Reporter.java', {
+        'package com.example.obs;',
+        'import java.lang.reflect.Method;',
+        'class Reporter {',
+        '    boolean flagged(Method m) { return m.isAnnotationPresent(ObsInert.class); }',
+        '}' })
+    put('Actions.java', {
+        'package com.example.obs;',
+        'class Actions {',
+        '    @ObsHook static void hooked() { }',
+        '    @ObsInert static void inert() { }',
+        '    static void plain() { }',
+        '}' })
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    local hooked, inert, plain = byname['Actions::hooked'],
+        byname['Actions::inert'], byname['Actions::plain']
+    ok(hooked and inert and plain, 'the three arms extracted')
+    -- the CANDIDATE marks are carried on both annotated defs: neither name is
+    -- on the supplied list, so the def side alone cannot tell them apart
+    eq({ 'ObsHook' }, hooked.annos)
+    eq({ 'ObsInert' }, inert.annos)
+    eq(nil, plain.annos, 'an unannotated def carries no candidate marks')
+    -- ...and the CORPUS tells them apart
+    ok(hooked.regfrom and hooked.regfrom:match('HookRunner%.java$'),
+        'read + invoke in one file registers, and names that file: '
+            .. tostring(hooked.regfrom))
+    eq(nil, inert.regfrom,
+        'a file that READS an annotation and never invokes registers nothing')
+    -- and liveness reads it, with the witness in the alibi
+    local ali = lint.alibi(store)
+    local function cb(n)
+        for _, a in ipairs(ali(n).alibis) do
+            if a.kind == 'callback-arg' then return a end
+        end
+        return nil
+    end
+    local a = cb(hooked)
+    ok(a, 'the observed registration is an alibi')
+    ok(a and a.why and a.why:find('read by reflection', 1, true),
+        'the alibi states the OBSERVED premise, not the supplied one')
+    eq(nil, cb(inert), 'the read-only annotation buys no alibi')
+end)

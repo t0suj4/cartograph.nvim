@@ -171,6 +171,38 @@ end
 --- Build all indexes from a decoded graph (schema #1). Split out from load() so
 --- it can be driven directly from in-memory graphs (tests, non-file providers).
 ---@param data table
+-- The observed-registration join (CART-0722); see the call site in M.ingest.
+-- O(annotated nodes), and only elasticsearch-scale java corpora have many.
+local function apply_observed_registration(data)
+    local obs = data and data.regobs
+    local nodes = data and data.nodes
+    if not nodes then return end
+    -- DETERMINISM: many files can observe the same annotation, and `pairs` over
+    -- a set is not stable across runs — a graph that differs run to run breaks
+    -- the byte-parity gates. One witness is enough (a registration is a WITNESS
+    -- fact: one sighting suffices), so take the lexicographically first.
+    local by_anno
+    for _, r in ipairs(obs or {}) do
+        if r.anno and r.file then
+            by_anno = by_anno or {}
+            local cur = by_anno[r.anno]
+            if not cur or r.file < cur then by_anno[r.anno] = r.file end
+        end
+    end
+    for _, n in ipairs(nodes) do
+        if n.annos then
+            local from
+            if by_anno then
+                for _, name in ipairs(n.annos) do
+                    local f = by_anno[name]
+                    if f and (not from or f < from) then from = f end
+                end
+            end
+            n.regfrom = from -- nil when nothing observes it: a full recompute
+        end
+    end
+end
+
 function M.ingest(data, opts)
     M.data    = data
     -- ★ RE-ADOPT WHAT `.h` MEANT WHEN THIS GRAPH WAS BUILT (CART-0410). A cache load
@@ -254,6 +286,25 @@ function M.ingest(data, opts)
     -- through the dual-mode accessor, so post-passes (xlang/sql/… re-run on
     -- the folded graph, incl. refresh's whole-graph re-attach) read columns
     -- transparently. Idempotent; refresh's fresh per-file argv re-folds.
+    -- OBSERVED REGISTRATION (CART-0722). data.regobs names, per file, the
+    -- annotations THIS CORPUS is seen to read reflectively in a file that also
+    -- invokes reflectively; every node carries `annos`, the annotation names no
+    -- supplied list claims. Where they meet, a framework in the corpus invokes
+    -- the member, and `regfrom` names the file a reader can open to check it.
+    --
+    -- ★ HERE AND NOT AT EXTRACT, because the reader and the annotated member
+    -- are in different files: no per-file hook can see both ends. ingest is the
+    -- one seam a cold extract, a warm cache load and a refresh re-attach all
+    -- cross, which is what keeps this from being CART-0715 again — a pass that
+    -- ran on one path and went silent on the other.
+    --
+    -- ★ IT WRITES ITS OWN FIELD AND NEVER `registered`. `registered` has ONE
+    -- producer (the spec hook) and answers one question; a second writer is how
+    -- CART-0703 got a flag that meant two things. `regfrom` is DERIVED, cleared
+    -- and recomputed on every ingest, so it cannot outlive the evidence — if a
+    -- registrar file stops registering, the next ingest drops the alibi.
+    -- Liveness reads the union (lint.reached_from_outside).
+    apply_observed_registration(M.data)
     require('cartograph.argv').fold(M.data)
     -- DF-STRANGLER STEP 6: df is now a COARSE PROJECTION OF FLOW derived AT
     -- EXTRACT (treesitter extract_defs sets n.df = flow.coarse(fl) for every
