@@ -1251,7 +1251,26 @@ local function dc_kids(e)
     elseif k == 'un' then o[1] = e.e
     elseif k == 'bin' then o[1] = e.l; o[2] = e.r
     elseif k == 'assign' then o[1] = e.t; o[2] = e.v
-    elseif k == 'table' then for _, c in ipairs(e.kids or {}) do o[#o + 1] = c end end
+    elseif k == 'table' then for _, c in ipairs(e.kids or {}) do o[#o + 1] = c end
+    else
+        -- ★ EVERY OTHER KIND, AND THIS WAS THE BUG. The closed schema models
+        -- six shapes; everything else is a GENERIC node carrying `.kids` (see
+        -- rcanon's fallback, which prints them). This branch did not exist, so
+        -- dc_kids returned NOTHING for a generic node and `leaf-vs-tree` — "a
+        -- bare local facing the expression it was assigned from" — fired on
+        -- every generic-vs-modelled divergence instead.
+        --
+        -- IT IS WORST EXACTLY WHERE THE CENSUS WAS RUN. On java a method call
+        -- is `?method_invocation`, not `k == 'call'` (the expression IR is a
+        -- LUA IR — CART-0224), so the single largest class of java expressions
+        -- read as LEAVES. The witnesses were unmistakable once printed:
+        --     A ?method_invocation(L,NgetCentroidDP,?argument_list())
+        --     B B*(?decimal_integer_literal(),L)
+        -- tagged `leaf-vs-tree`, i.e. "extract local", for a pair that is two
+        -- different distance formulas. Three of three hand-read witnesses were
+        -- misclassified. See CART-0737.
+        for _, c in ipairs(e.kids or {}) do o[#o + 1] = c end
+    end
     local r = {}
     for _, c in ipairs(o) do if c then r[#r + 1] = c end end
     return r
@@ -1308,6 +1327,19 @@ end
 ---@param store table
 ---@param opts table|nil { max_dist = 32, below = 2, min_rows = nil, witnesses = true }
 ---@return table { features, kindpairs, witnesses, pairs_scanned, divergences }
+-- THE THREE FEATURES THAT ARE REFACTORING RELATIONS, not structural variants
+-- (CART-0732's headline). Each names a NAMING BOUNDARY THAT MOVED:
+--   leaf-vs-tree   a bare name facing the expression it stands for — EXTRACT LOCAL
+--   call-vs-expr   a call facing what it computes    — EXTRACT / INLINE A CALL
+--   containment    one side literally inside the other — AN ADDED GUARD
+-- ⚠ EACH IS A PROXY AT CENSUS GRADE AND MUST NOT BE READ AS A CONFIRMED
+-- REFACTORING. rcanon ALPHA-RENAMES a local to 'L'; it does not substitute the
+-- name's binding, so `leaf-vs-tree` says "a leaf faces a tree", not "this leaf
+-- IS that tree". Confirming it needs the local's assignment row, which the
+-- rollup below does not look up. Kept honest by name: these are CANDIDATES.
+local DC_RELATION = { ['leaf-vs-tree'] = true, ['call-vs-expr'] = true,
+                      ['containment'] = true }
+
 function M.divergence_census(store, opts)
     local max_dist = (opts and opts.max_dist) or 32
     local below = (opts and opts.below) or 2
@@ -1315,7 +1347,21 @@ function M.divergence_census(store, opts)
     -- tuned for reporting, and a census may legitimately want a smaller floor
     local min_rows = opts and opts.min_rows
     local want_wit = not (opts and opts.witnesses == false)
-    local features, kindpairs, witnesses = {}, {}, {}
+    -- PER-PAIR ROLLUP (opt-in). The feature counts answer "which divergence
+    -- classes exist"; they cannot answer "which PAIRS are fully explained by a
+    -- refactoring relation", which is the actionable question and a different
+    -- accumulator over the same walk. Off by default so the census's own
+    -- numbers are untouched.
+    local want_pairs = opts and opts.by_pair
+    -- SIGNATURE COUNTS (rides the pair rollup). ★ THE PAIR IS THE WRONG UNIT
+    -- FOR "ONE THING DONE TWO WAYS": the same disagreement recurs across many
+    -- pairs — `Float.BYTES` facing a bare literal, `x.size()` facing a constant
+    -- — and counted per pair it reads as a handful of unrelated rows. Counted
+    -- per SIGNATURE it is one finding with N sites, which is the form a reader
+    -- diving into an unfamiliar codebase can act on.
+    local sigs = {}
+    local features, kindpairs, witnesses, bypair = {}, {}, {}, {}
+    local cur -- the pair being walked, when want_pairs
     local ndiv, npairs = 0, 0
     local function bump(t, k) t[k] = (t[k] or 0) + 1 end
 
@@ -1359,6 +1405,54 @@ function M.divergence_census(store, opts)
         end
         if #f == 0 then f[1] = '(no feature)' end
         for _, n in ipairs(f) do bump(features, n) end
+        if cur then
+            cur.div = cur.div + 1
+            local rel = false
+            for _, n in ipairs(f) do
+                if DC_RELATION[n] then
+                    rel = true
+                    bump(cur.tags, n)
+                    -- WHICH SIDE HOLDS THE SHORTER FORM: for a leaf-vs-tree it
+                    -- is the side that is a leaf, for call-vs-expr the side
+                    -- that IS the call, for containment the side CONTAINED.
+                    -- A pair pulling both ways is a murkier story than one
+                    -- refactoring half-applied, and says so.
+                    local side
+                    if n == 'leaf-vs-tree' then
+                        side = #dc_kids(x) == 0 and 'a' or 'b'
+                    elseif n == 'call-vs-expr' then
+                        side = kx == 'call' and 'a' or 'b'
+                    else
+                        local cx2 = rcanon(x, la or {}, {})
+                        local cy2 = rcanon(y, lb or {}, {})
+                        side = #cx2 <= #cy2 and 'a' or 'b'
+                    end
+                    if cur.dir == nil then cur.dir = side
+                    elseif cur.dir ~= side then cur.dir = 'both' end
+                end
+            end
+            if rel then
+                cur.explained = cur.explained + 1
+                -- ONE WITNESS PER PAIR, the canon of both sides. A pair-level
+                -- verdict nobody can hand-read is the census's own mistake one
+                -- level up: the tags are proxies and only the text says whether
+                -- the proxy is right here.
+                local ca = rcanon(x, la or {}, {})
+                local cb = rcanon(y, lb or {}, {})
+                if not cur.wit then cur.wit = { a = ca, b = cb } end
+                -- ORDER-NORMALISED, or the same disagreement splits into two
+                -- rows depending on which function the pair enumerator saw first
+                local s1, s2 = ca, cb
+                if s1 > s2 then s1, s2 = s2, s1 end
+                local key = s1 .. '  ⇄  ' .. s2
+                local e = sigs[key]
+                if not e then e = { n = 0, where = {} }; sigs[key] = e end
+                e.n = e.n + 1
+                if #e.where < 4 then
+                    e.where[#e.where + 1] = (cur.an or '?') .. ' / ' .. (cur.bn or '?')
+                end
+            end
+        end
         if want_wit then
             local tag = table.concat(f, '+')
             if not witnesses[tag] and x and y then
@@ -1391,6 +1485,10 @@ function M.divergence_census(store, opts)
     for _, p in ipairs(M.near(store, { max_dist = max_dist, min_rows = min_rows })) do
         if p.dist > below then
             npairs = npairs + 1
+            if want_pairs then
+                cur = { a = p.a.id, b = p.b.id, an = p.a.name, bn = p.b.name,
+                    dist = p.dist, div = 0, explained = 0, tags = {} }
+            end
             for _, o in ipairs(p.ops) do
                 if o.op == 'sub' then
                     local r1, r2 = p.a.exprs[o.i], p.b.exprs[o.j]
@@ -1411,10 +1509,24 @@ function M.divergence_census(store, opts)
                     end
                 end
             end
+            if cur then
+                -- A ZERO-DIVERGENCE PAIR IS NOT A FINDING, it is an exact
+                -- template clone the clone lint already owns; including it here
+                -- would double-report. Only pairs that DIVERGED and whose every
+                -- divergence carries a relation tag are candidates.
+                if cur.div > 0 then bypair[#bypair + 1] = cur end
+                cur = nil
+            end
         end
     end
+    table.sort(bypair, function (m, n)
+        if m.explained ~= n.explained then return m.explained > n.explained end
+        return (m.a or '') < (n.a or '')
+    end)
     return { features = features, kindpairs = kindpairs, witnesses = witnesses,
-        pairs_scanned = npairs, divergences = ndiv }
+        pairs_scanned = npairs, divergences = ndiv,
+        by_pair = want_pairs and bypair or nil,
+        sigs = want_pairs and sigs or nil }
 end
 
 ---@param store table

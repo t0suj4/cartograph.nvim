@@ -67,10 +67,27 @@ local RECORDED = {
     -- `libs` is a GATED corpus at a pinned revision, so its numbers mean the
     -- same thing next month. A count that MOVED is the review question: a new
     -- divergence class, or an expression-IR change that reclassified an old one.
+    --
+    -- ★ RE-RECORDED 2026-09-04 (CART-0737) AND THE FIRST RUN WAS WRONG. dc_kids
+    -- had no branch for a GENERIC node, so every unmodelled expression returned
+    -- ZERO children: the walk stopped there instead of descending, and
+    -- `leaf-vs-tree` fired on "generic faces modelled" rather than on a leaf.
+    -- On java a method call IS generic (`?method_invocation` — the expression IR
+    -- is a LUA IR, CART-0224), so the largest class of java expressions read as
+    -- leaves. The 2026-09-03 numbers are kept BESIDE the new ones because the
+    -- correction is the interesting part, not the tidy table:
+    --     leaf-vs-tree   3422 -> 2666   was ranked #1, is now #3
+    --     (no feature)    946 -> 8545   *** IS NOW #1, BY A FACTOR OF TWO ***
+    --     divergences    8438 -> 16198  the walk now reaches what it skipped
+    -- ★★ THE HEADLINE INVERTS. CART-0732 concluded "the missing hole kinds are
+    -- REFACTORING RELATIONS" on the strength of leaf-vs-tree ranking first.
+    -- Corrected, the largest class by far is the one with NO NAME AT ALL —
+    -- 52.8% of divergences. What the taxonomy is missing is mostly not a
+    -- refactoring relation; it is unnamed.
     ['libs'] = { pairs = 2432,
-        f = { ['leaf-vs-tree'] = 3422, ['size-skew'] = 3395, ['one-side-absent'] = 2590,
-              ['containment'] = 1451, ['(no feature)'] = 946, ['call-vs-expr'] = 842,
-              ['drift(lit/name)'] = 65 } },
+        f = { ['(no feature)'] = 8545, ['size-skew'] = 3963, ['leaf-vs-tree'] = 2666,
+              ['one-side-absent'] = 2590, ['containment'] = 1035, ['call-vs-expr'] = 795,
+              ['drift(lit/name)'] = 135 } },
     -- ★ `self` DELIBERATELY HAS NO ROW. corpora.lua calls it a LIVING corpus,
     -- "NOT GATED: every commit invalidates a snapshot baseline by construction",
     -- and recording numbers against it here would manufacture exactly the drift
@@ -80,7 +97,7 @@ local RECORDED = {
 local target = arg[1]
 if not target then
     print('usage: nvim --headless -u NONE -l tools/divergecensus.lua <corpus|path> '
-        .. '[--max-dist N] [--below N] [--show kinds|features|witnesses|all]')
+        .. '[--max-dist N] [--below N] [--show kinds|features|witnesses|pairs|sigs|all]')
     os.exit(2)
 end
 local max_dist, below, show = 32, 2, 'all'
@@ -103,7 +120,8 @@ local data = ts.extract(root, c and c.packs and { packs = c.packs } or nil)
 data.root = data.root or root
 store.ingest(data)
 
-local res = clones.divergence_census(store, { max_dist = max_dist, below = below })
+local res = clones.divergence_census(store, { max_dist = max_dist, below = below,
+    by_pair = show == 'all' or show == 'pairs' or show == 'sigs' })
 
 local function ranked(t)
     local rows = {}
@@ -148,6 +166,76 @@ if show == 'all' or show == 'kinds' then
     local rows = ranked(res.kindpairs)
     for i = 1, math.min(#rows, 15) do io.write(('  %8d   %s\n'):format(rows[i][2], rows[i][1])) end
     if #rows > 15 then io.write(('  … %d more\n'):format(#rows - 15)) end
+    io.write('\n')
+end
+
+if (show == 'all' or show == 'pairs') and res.by_pair then
+    -- THE CENSUS'S MISSING HALF. Feature counts answer "which divergence
+    -- classes exist"; they cannot answer "which PAIRS are fully explained by a
+    -- refactoring relation", which is the question a FINDING would need. Same
+    -- walk, different accumulator.
+    --
+    -- ⚠ AND THE ANSWER SO FAR IS "ALMOST NONE, AND NOT THE ONES YOU WANT". On
+    -- libs, 93 of 2205 diverging pairs are fully explained, 50 of them in one
+    -- direction with <=2 divergences — and three of three hand-read witnesses
+    -- were NOT half-applied refactorings but parallel implementations that
+    -- differ in one expression (two distance formulas; two ways to compute a
+    -- vector byte size). The tags are PROXIES: `leaf-vs-tree` cannot know
+    -- whether the leaf IS the tree, because rcanon alpha-renames a local and
+    -- never substitutes its binding. Read the witnesses before believing a row.
+    local full, sharp = 0, {}
+    for _, p in ipairs(res.by_pair) do
+        if p.explained == p.div then
+            full = full + 1
+            if p.dir ~= 'both' and p.div <= 2 then sharp[#sharp + 1] = p end
+        end
+    end
+    io.write('PAIRS — fully explained by a refactoring-relation proxy.\n')
+    io.write(('  %d diverging pairs · %d fully explained · %d SHARP (one direction, <=2 divergences)\n')
+        :format(#res.by_pair, full, #sharp))
+    table.sort(sharp, function (m, n) return (m.dist or 0) < (n.dist or 0) end)
+    for i = 1, math.min(#sharp, 10) do
+        local p = sharp[i]
+        local ks = {}
+        for k, v in pairs(p.tags) do ks[#ks + 1] = k .. 'x' .. v end
+        table.sort(ks)
+        io.write(('  %-30s %-30s dist=%d dir=%s [%s]\n')
+            :format((p.an or '?'):sub(-30), (p.bn or '?'):sub(-30), p.dist,
+                tostring(p.dir), table.concat(ks, ',')))
+        if p.wit then
+            io.write(('     A %s\n     B %s\n'):format(p.wit.a:sub(1, 96), p.wit.b:sub(1, 96)))
+        end
+    end
+    io.write('\n')
+end
+
+if (show == 'all' or show == 'sigs') and res.sigs then
+    -- ★★ THE PAIR IS THE WRONG UNIT FOR "ONE THING DONE TWO WAYS". Counted per
+    -- pair, `Float.BYTES` facing a local reads as a scatter of unrelated rows;
+    -- counted per SIGNATURE it is ONE disagreement with 111 sites, and that is
+    -- a thing a reader new to the codebase can act on. Measured on libs: 493 of
+    -- 1028 signatures RECUR. This is the greenspun steer's other half — the
+    -- finding does not deserve standing attention, and it is exactly what you
+    -- want when you are LOOKING for it.
+    --
+    -- ⚠ THE ROWS ARE CANON STRINGS, not prose, and `L` is an ALPHA-RENAMED
+    -- LOCAL — not a literal (literals print `Lint:`/`?decimal_integer_literal`).
+    -- Misreading that turns "a constant inlined vs held in a local" into "a
+    -- magic number", which is a different finding. Read the canon, not the gist.
+    local rows = {}
+    for k, e in pairs(res.sigs) do rows[#rows + 1] = { k, e } end
+    table.sort(rows, function (a, b)
+        if a[2].n ~= b[2].n then return a[2].n > b[2].n end
+        return a[1] < b[1]              -- total order, or the rank is not a fact
+    end)
+    local recur = 0
+    for _, x in ipairs(rows) do if x[2].n > 1 then recur = recur + 1 end end
+    io.write('SIGNATURES — the same disagreement, counted across pairs.\n')
+    io.write(('  %d distinct · %d RECUR (>1 site)\n'):format(#rows, recur))
+    for i = 1, math.min(#rows, 15) do
+        io.write(('  x%-4d %s\n'):format(rows[i][2].n, rows[i][1]:sub(1, 120)))
+        io.write(('        %s\n'):format(table.concat(rows[i][2].where, ' · '):sub(1, 120)))
+    end
     io.write('\n')
 end
 
