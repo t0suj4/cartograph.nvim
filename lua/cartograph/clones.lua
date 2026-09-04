@@ -1407,6 +1407,35 @@ function M.divergence_census(store, opts)
         for _, n in ipairs(f) do bump(features, n) end
         if cur then
             cur.div = cur.div + 1
+            -- ★ EVERY DIVERGENCE GETS A SIGNATURE, not just the tagged ones.
+            -- The first cut of this recorded only relation-tagged rows — 3623
+            -- of 16198 on libs — which silently excluded `(no feature)`, the
+            -- LARGEST class (52.8%) and the one nothing has ever looked at. A
+            -- census that samples only what the taxonomy can already name
+            -- cannot tell you what the taxonomy is missing.
+            if x and y then
+                local ca = rcanon(x, la or {}, {})
+                local cb = rcanon(y, lb or {}, {})
+                local s1, s2 = ca, cb
+                if s1 > s2 then s1, s2 = s2, s1 end
+                local key = s1 .. '  ⇄  ' .. s2
+                local e = sigs[key]
+                if not e then
+                    e = { n = 0, where = {}, owners = {}, nowners = 0, tag = table.concat(f, '+') }
+                    sigs[key] = e
+                end
+                e.n = e.n + 1
+                -- ★ DISTINCT OWNERS, not sites. A disagreement spanning eight
+                -- classes says something a codebase-wide; eight sites inside one
+                -- function is a local habit. Ranking by count conflates them.
+                for _, nm in ipairs({ cur.an, cur.bn }) do
+                    local ow = tostring(nm):match('^(.*)::[^:]+$') or tostring(nm)
+                    if not e.owners[ow] then e.owners[ow] = true; e.nowners = e.nowners + 1 end
+                end
+                if #e.where < 4 then
+                    e.where[#e.where + 1] = (cur.an or '?') .. ' / ' .. (cur.bn or '?')
+                end
+            end
             local rel = false
             for _, n in ipairs(f) do
                 if DC_RELATION[n] then
@@ -1437,19 +1466,8 @@ function M.divergence_census(store, opts)
                 -- verdict nobody can hand-read is the census's own mistake one
                 -- level up: the tags are proxies and only the text says whether
                 -- the proxy is right here.
-                local ca = rcanon(x, la or {}, {})
-                local cb = rcanon(y, lb or {}, {})
-                if not cur.wit then cur.wit = { a = ca, b = cb } end
-                -- ORDER-NORMALISED, or the same disagreement splits into two
-                -- rows depending on which function the pair enumerator saw first
-                local s1, s2 = ca, cb
-                if s1 > s2 then s1, s2 = s2, s1 end
-                local key = s1 .. '  ⇄  ' .. s2
-                local e = sigs[key]
-                if not e then e = { n = 0, where = {} }; sigs[key] = e end
-                e.n = e.n + 1
-                if #e.where < 4 then
-                    e.where[#e.where + 1] = (cur.an or '?') .. ' / ' .. (cur.bn or '?')
+                if not cur.wit then
+                    cur.wit = { a = rcanon(x, la or {}, {}), b = rcanon(y, lb or {}, {}) }
                 end
             end
         end

@@ -138,7 +138,20 @@ io.write(('divergecensus %s   (max_dist=%d, excluded below dist>%d)\n')
 io.write(('  pairs scanned %d   unnamed divergences %d\n\n')
     :format(res.pairs_scanned, res.divergences))
 
+-- ★ THE COMPARISON IS ONLY MEANINGFUL AT THE RECORDED PARAMETERS. A run with a
+-- different --below or --max-dist scans a DIFFERENT POPULATION, and every row
+-- then prints `-> MOVED` for no reason at all — a drift detector that cries
+-- wolf across an axis hides the drift it was built to catch. Caught in-session:
+-- `--below 0` reported "(no feature) 8545 -> MOVED 8653" when nothing had
+-- changed but the floor.
+local REC_MAXDIST, REC_BELOW = 32, 2
 local rec = RECORDED[target]
+if rec and (max_dist ~= REC_MAXDIST or below ~= REC_BELOW) then
+    io.write(('  (recorded run is max_dist=%d below=%d — NOT COMPARED at %d/%d:'
+        .. ' a different population is not drift)\n'):format(
+        REC_MAXDIST, REC_BELOW, max_dist, below))
+    rec = nil
+end
 if show == 'all' or show == 'features' then
     io.write('FEATURES — a divergence can carry several. READ THIS TABLE FIRST.\n')
     if rec then io.write('     count   recorded 2026-09-03   feature\n')
@@ -224,17 +237,25 @@ if (show == 'all' or show == 'sigs') and res.sigs then
     -- magic number", which is a different finding. Read the canon, not the gist.
     local rows = {}
     for k, e in pairs(res.sigs) do rows[#rows + 1] = { k, e } end
+    -- ★ RANKED BY DISTINCT OWNERS, NOT SITES. Eight sites inside one function is
+    -- a local habit; the same disagreement across eight classes is a fact about
+    -- the codebase. Sorting by count alone buried the second under the first —
+    -- and on the first run with this order the top unnamed row turned out to be
+    -- a literal facing a named value across 38 owners (CART-0739).
     table.sort(rows, function (a, b)
+        if a[2].nowners ~= b[2].nowners then return a[2].nowners > b[2].nowners end
         if a[2].n ~= b[2].n then return a[2].n > b[2].n end
         return a[1] < b[1]              -- total order, or the rank is not a fact
     end)
     local recur = 0
     for _, x in ipairs(rows) do if x[2].n > 1 then recur = recur + 1 end end
     io.write('SIGNATURES — the same disagreement, counted across pairs.\n')
-    io.write(('  %d distinct · %d RECUR (>1 site)\n'):format(#rows, recur))
+    io.write(('  %d distinct · %d RECUR (>1 site)   [owners = distinct declaring types]\n')
+        :format(#rows, recur))
     for i = 1, math.min(#rows, 15) do
-        io.write(('  x%-4d %s\n'):format(rows[i][2].n, rows[i][1]:sub(1, 120)))
-        io.write(('        %s\n'):format(table.concat(rows[i][2].where, ' · '):sub(1, 120)))
+        io.write(('  owners=%-3d x%-4d %s\n'):format(rows[i][2].nowners, rows[i][2].n,
+            rows[i][1]:sub(1, 112)))
+        io.write(('               %s\n'):format(table.concat(rows[i][2].where, ' · '):sub(1, 112)))
     end
     io.write('\n')
 end
