@@ -306,7 +306,18 @@ local INDEX = { bracket_index_expression = true, subscript_expression = true,
 -- spec's declared `call_positions` instead of child order.
 local METHOD = { method_index_expression = true }
 local CALL = { function_call = true, call_expression = true, call = true,
-    function_call_expression = true }
+    function_call_expression = true,
+    -- CART-0224 group 3. ★ THESE THREE CANNOT USE THE CHILD-ORDER CALLEE and
+    -- that is why they were absent rather than forgotten. `call_parts` takes the
+    -- FIRST NAMED CHILD as the callee, which is right for `f(x)` and wrong for
+    -- every receiver-qualified call: java's `o.g(1)` parses as
+    -- [object, name, argument_list], so the callee would be `o` and `g` would
+    -- become an ARGUMENT — the IR would assert a call `o(g, 1)` THAT DOES NOT
+    -- EXIST IN THE SOURCE. A missing entry under-reports; that one fabricates.
+    -- They are admitted together with the spec-declared shape below.
+    method_invocation = true,        -- java  o.g(1) / g(1) / super.g(1)
+    member_call_expression = true,   -- php   $o->m(2)
+    scoped_call_expression = true }  -- php   C::s(3)
 -- BINARY operator nodes. `comparison_operator`/`boolean_operator` are PYTHON's
 -- spellings, and their absence is why every purity-gated analyzer was dead there:
 -- `x > 1` fell to the honest-unknown `?` path, and `is_pure` correctly refuses an
@@ -357,7 +368,20 @@ local TABLE = { table_constructor = true, table = true,
     hash = true,                                      -- ruby (array shared with js)
     array_creation_expression = true,                 -- php
     field_initializer_list = true, array_expression = true,    -- rust
-    record = true }                                   -- haskell record UPDATE
+    record = true,                                    -- haskell record UPDATE
+    -- ★ `new T(...)` — java AND php, VERIFIED BY PARSING in both grammars,
+    -- which spell it the same and mean the same (CART-0224 group 3). It lands
+    -- in the ALLOCATION set rather than in CALL because the safety question is
+    -- allocation, not dispatch: `allocates()` answering FALSE for a fresh
+    -- object is a POSITIVE CLAIM, not an honest unknown, and it opens
+    -- optimize's `not allocates(r)` guard so LICM certifies hoisting an
+    -- allocation out of a loop. That was the state for java until now: every
+    -- `new` read as non-allocating. The constructor's ARGUMENTS ride as kids,
+    -- so the read-set stays faithful, and `is_pure` is false either way.
+    -- (java's `array_creation_expression` — `new int[4]` — is covered by the
+    -- php entry above: same name, different construct, same allocation
+    -- semantics, which is the only thing this set claims.)
+    object_creation_expression = true }
 local ALLOCFN = { function_definition = true, function_declaration = true,
     anonymous_function = true, arrow_function = true, lambda_expression = true }
 -- ★ THE ONE OWNER OF "WHAT IS A REGION / CLAUSE / ATTACHED BLOCK IN THIS LANGUAGE" is
@@ -510,6 +534,59 @@ local function call_parts(node)
     return callee, args
 end
 
+--- The callee/receiver/arguments of a call whose shape the SPEC declares
+--- (`call_positions`: node type -> the child holding the callee NAME). Returns
+--- nil when this language declares nothing for this node type, and the caller
+--- falls back to child order.
+---
+--- ★ THE RECEIVER IS DERIVED, NOT DECLARED, and deliberately: it is the FIRST
+--- named child that is neither the name nor the argument list. Taking the LAST
+--- would pick up java's `type_arguments` in `o.<T>m()`; requiring a second
+--- declaration would be a second thing to forget for the next grammar.
+local callpos_cache = {}
+local function declared_call_parts(node, lang, t)
+    if not lang then return nil end
+    local map = callpos_cache[lang]
+    if map == nil then
+        specs = specs or require('cartograph.providers.treesitter').spec
+        map = (specs[lang] or {}).call_positions or false
+        callpos_cache[lang] = map
+    end
+    local pos = map and map[t]
+    if not pos then return nil end
+    local namen = type(pos) == 'string' and node:field(pos)[1] or nil
+    if not namen then return nil end
+    -- ⚠ POSITION DECIDES, NOT TYPE. Not every grammar HAS an argument-list node:
+    -- zig, odin, haskell, scheme and bash expose each argument as a direct child
+    -- of the call (call_parts' own comment says so), so a rule that only reads a
+    -- wrapper silently drops every argument in those languages. Caught by the
+    -- zig control the moment this landed: `.fromInterned(raw)` lost `raw` from
+    -- the read set — a VANISHED READ, the one thing the closed schema exists to
+    -- prevent. So: a child BEFORE the callee name is the receiver, a child AFTER
+    -- it is an argument, and a wrapper is expanded wherever it appears.
+    local _, _, nb = namen:start()
+    local objn, args = nil, {}
+    for c in node:iter_children() do
+        if c:named() and not tsutil.is_comment(c) and not c:equal(namen) then
+            local ct = c:type()
+            if ct == 'arguments' or ct == 'argument_list' then
+                for a in c:iter_children() do
+                    if a:named() and not tsutil.is_comment(a) then args[#args + 1] = a end
+                end
+            else
+                local _, _, cb = c:start()
+                if cb < nb then
+                    if not objn then objn = c end   -- FIRST one: `o.<T>m()` has
+                                                    -- type_arguments after the receiver
+                else
+                    args[#args + 1] = c
+                end
+            end
+        end
+    end
+    return namen, objn, args
+end
+
 -- build_core produces the schema node; `build` (below) wraps it to stamp `.at`
 -- (the source byte-range) on every node — the enabler for source-precise consumers
 -- (clone-extraction hole substitution, refactoring). `.at` is a plain range table
@@ -602,9 +679,29 @@ function build_core(node, src, lang)
         end
     end
     if CALL[t] then
-        local callee, argnodes = call_parts(node)
+        -- ★ THE CALLEE IS SPEC-DECLARED WHERE THE SPEC DECLARES IT (CART-0224
+        -- group 3). `call_positions` already names the child holding the callee
+        -- NAME, verified against each grammar for CART-0499, and the provider
+        -- has read it since. expr reading the SAME declaration is what stops
+        -- this being a second, drifting copy — the rule binder_nodes follows.
+        -- Where nothing is declared, the child-order extraction below is
+        -- unchanged, so every language that worked before is byte-identical.
+        local namen, objn, argnodes = declared_call_parts(node, lang, t)
+        if namen then
+            local a = {}
+            for _, an in ipairs(argnodes) do a[#a + 1] = build(an, src, lang) end
+            -- a RECEIVER-QUALIFIED call reads as a call THROUGH A FIELD, which
+            -- is exactly lua's `o:m()`, so every downstream predicate composes
+            -- without a per-language branch
+            local f = objn
+                and { k = 'field', b = build(objn, src, lang), n = txt(namen, src),
+                      method = true, selid = sel_is_id(namen, lang) }
+                or build(namen, src, lang)
+            return { k = 'call', f = f, a = a, method = (f.k == 'field' and f.method) or false }
+        end
+        local callee, an2 = call_parts(node)
         local a = {}
-        for _, an in ipairs(argnodes) do a[#a + 1] = build(an, src, lang) end
+        for _, an in ipairs(an2) do a[#a + 1] = build(an, src, lang) end
         local f = build(callee, src, lang)
         return { k = 'call', f = f, a = a, method = (f.k == 'field' and f.method) or false }
     end

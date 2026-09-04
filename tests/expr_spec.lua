@@ -922,3 +922,84 @@ test('java: field and array access reach the IR, on every shape that could break
     eq('index', g12 and g12.b and g12.b.k, '...over an index base — chained subscripts nest')
 end)
 
+-- CART-0224 step 3, group 3 — the call layer. The ticket's survey row for java
+-- read "~53% unknown, ZERO CALL LAYER": `method_invocation` was absent from
+-- CALL, and so were php's `member_call_expression` / `scoped_call_expression`.
+--
+-- ★★ THEY COULD NOT SIMPLY BE ADDED, AND THAT IS THE POINT OF THIS TEST.
+-- `call_parts` takes the FIRST NAMED CHILD as the callee — right for `f(x)`,
+-- wrong for every receiver-qualified call. java's `o.g(1)` parses as
+-- [object, name, argument_list], so a bare entry would have built the call
+-- `o(g, 1)`: A CALL THAT DOES NOT EXIST IN THE SOURCE. An incomplete map
+-- under-reports; that one FABRICATES, and optimize applies rewrites.
+-- The callee now comes from the spec's declared `call_positions` — the same
+-- declaration the provider has read since CART-0499, so there is one owner and
+-- not a drifting copy.
+test('java/php: a receiver-qualified call names the METHOD, not the receiver', function ()
+    if not ready('java') then skip 'no java parser' end
+    local function rows_of(lang, src, fnty)
+        local root = vim.treesitter.get_string_parser(src, lang):parse()[1]:root()
+        local fn
+        local function findfn(n)
+            if fn then return end
+            if n:type() == fnty then fn = n; return end
+            for c in n:iter_children() do if c:named() then findfn(c) end end
+        end
+        findfn(root)
+        return fn and flow.build(fn, src, { pfield = 'parameters',
+            expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, lang) end })
+    end
+    local fl = rows_of('java', table.concat({
+        'class C { int m(C o) {',
+        '    int x = o.g(1);',
+        '    x = g(2);',
+        '    x = o.<Integer>h(3);',
+        '    C t = new C(4);',
+        '    return x;',
+        '  }',
+        '  int g(int a) { return a; } }' }, '\n'), 'method_declaration')
+    local function rhs(ln)
+        for _, r in ipairs(fl and fl.stmts or {}) do
+            if r.l == ln and r.expr and r.expr.rhs then return r.expr.rhs[1] end
+        end
+    end
+    local qualified, bare, generic, ctor = rhs(2), rhs(3), rhs(4), rhs(5)
+    -- *** THE FABRICATION GUARD ***
+    eq('call', qualified and qualified.k, 'o.g(1) is a call')
+    eq('field', qualified and qualified.f and qualified.f.k, '...through a field')
+    eq('g', qualified and qualified.f and qualified.f.n,
+        '...and the callee is the METHOD `g`, not the receiver `o`')
+    eq('o', qualified and qualified.f and qualified.f.b and qualified.f.b.n,
+        '...with `o` as the RECEIVER')
+    eq(1, qualified and #qualified.a, 'one argument — `g` did not become one')
+    -- a bare call keeps the simple shape
+    eq('call', bare and bare.k, 'g(2) is a call')
+    eq('name', bare and bare.f and bare.f.k, '...on a bare name')
+    eq(1, bare and #bare.a, 'one argument')
+    -- ★ type_arguments sit BETWEEN receiver and name: the receiver must still be `o`
+    eq('o', generic and generic.f and generic.f.b and generic.f.b.n,
+        'o.<Integer>h(3): the receiver is `o`, not the type argument list')
+    eq('h', generic and generic.f and generic.f.n, '...and the callee is `h`')
+    -- ★ `new C(4)` MUST ALLOCATE. allocates() answering false for a fresh object
+    -- is a POSITIVE CLAIM that opens optimize's `not allocates(r)` guard, so LICM
+    -- would certify hoisting an allocation out of a loop.
+    ok(ctor, 'the constructor row exists')
+    eq(true, expr.allocates(ctor), 'new C(4) allocates')
+    eq(false, expr.is_pure(ctor), '...and is not pure')
+
+    if not ready('php') then return end
+    local pf = rows_of('php', table.concat({
+        '<?php function m($o) {',
+        '  $x = $o->mm(1);',
+        '  $y = C::ss(2);',
+        '  return $x;',
+        '}' }, '\n'), 'function_definition')
+    local function prhs(ln)
+        for _, r in ipairs(pf and pf.stmts or {}) do
+            if r.l == ln and r.expr and r.expr.rhs then return r.expr.rhs[1] end
+        end
+    end
+    local member, scoped = prhs(2), prhs(3)
+    eq('mm', member and member.f and member.f.n, 'php $o->mm(1) names the method')
+    eq('ss', scoped and scoped.f and scoped.f.n, 'php C::ss(2) names the method')
+end)
