@@ -68,26 +68,49 @@ local RECORDED = {
     -- same thing next month. A count that MOVED is the review question: a new
     -- divergence class, or an expression-IR change that reclassified an old one.
     --
-    -- ★ RE-RECORDED 2026-09-04 (CART-0737) AND THE FIRST RUN WAS WRONG. dc_kids
-    -- had no branch for a GENERIC node, so every unmodelled expression returned
-    -- ZERO children: the walk stopped there instead of descending, and
-    -- `leaf-vs-tree` fired on "generic faces modelled" rather than on a leaf.
-    -- On java a method call IS generic (`?method_invocation` — the expression IR
-    -- is a LUA IR, CART-0224), so the largest class of java expressions read as
-    -- leaves. The 2026-09-03 numbers are kept BESIDE the new ones because the
-    -- correction is the interesting part, not the tidy table:
-    --     leaf-vs-tree   3422 -> 2666   was ranked #1, is now #3
-    --     (no feature)    946 -> 8545   *** IS NOW #1, BY A FACTOR OF TWO ***
-    --     divergences    8438 -> 16198  the walk now reaches what it skipped
-    -- ★★ THE HEADLINE INVERTS. CART-0732 concluded "the missing hole kinds are
-    -- REFACTORING RELATIONS" on the strength of leaf-vs-tree ranking first.
-    -- Corrected, the largest class by far is the one with NO NAME AT ALL —
-    -- 52.8% of divergences. What the taxonomy is missing is mostly not a
-    -- refactoring relation; it is unnamed.
-    ['libs'] = { pairs = 2432,
-        f = { ['(no feature)'] = 8545, ['size-skew'] = 3963, ['leaf-vs-tree'] = 2666,
-              ['one-side-absent'] = 2590, ['containment'] = 1035, ['call-vs-expr'] = 795,
-              ['drift(lit/name)'] = 135 } },
+    -- ★ RE-RECORDED TWICE, AND THE TWO CORRECTIONS ARE THE INTERESTING PART.
+    -- Both times the numbers moved because THE INSTRUMENT COULD NOT SEE THE
+    -- CORPUS, not because the corpus changed — the revision is pinned and has
+    -- not moved since the first run.
+    --
+    -- 2026-09-03  first run.
+    -- 2026-09-04  CART-0737: dc_kids had no branch for a GENERIC node, so every
+    --             unmodelled expression returned ZERO children and
+    --             `leaf-vs-tree` fired on "generic faces modelled". It ranked #1
+    --             on an artifact; `(no feature)` rose to #1 at 52.8%.
+    -- 2026-09-05  CART-0224 + CART-0741: the EXPRESSION IR itself was blind to
+    --             java. Literals, field/index access and — the big one — the
+    --             CALL LAYER were unmodelled, so `?method_invocation` stood
+    --             where a call belonged. `call-vs-expr` was reporting 795 on a
+    --             corpus where its own concept occurs 5681 times: 14% coverage,
+    --             and nothing said so. The 795 were the C++ tail (28 .cc/6 .h),
+    --             whose `call_expression` WAS in the map.
+    --
+    --   feature            09-03    09-04    09-05
+    --   call-vs-expr         842      795     5681   x7.1 — now the largest
+    --                                                named class
+    --   (no feature)         946     8545     4553   #1 -> #2, nearly halved
+    --   size-skew           3395     3963     3163
+    --   leaf-vs-tree        3422     2666     2847   was #1 on an artifact
+    --   one-side-absent     2590     2590     2522
+    --   containment         1451     1035     1358
+    --   drift(lit/name)       65      135     1010   25% -> 98% of its own
+    --                                                class (CART-0739)
+    --   divergences         8438    16198    16293
+    --
+    -- ★★ SO: A COUNT IS NOT A CLASS, AND A RANKING IS NOT A FINDING until the
+    -- instrument can see every language it is run on. Three rankings, three
+    -- honest measurements, and the first two were wrong one layer down. The
+    -- fence that would have caught it on day one is the one that caught it on
+    -- day three: A CONTROL CORPUS IN A LANGUAGE THE INSTRUMENT FULLY MODELS.
+    -- cartograph (lua) was byte-identical through every one of these changes.
+    -- If the java numbers move and lua does not, THE INSTRUMENT MOVED, NOT THE
+    -- WORLD — and that is the only reading of a `-> MOVED` row that is safe to
+    -- take at face value.
+    ['libs'] = { pairs = 2429,
+        f = { ['call-vs-expr'] = 5681, ['(no feature)'] = 4553, ['size-skew'] = 3163,
+              ['leaf-vs-tree'] = 2847, ['one-side-absent'] = 2522,
+              ['containment'] = 1358, ['drift(lit/name)'] = 1010 } },
     -- ★ `self` DELIBERATELY HAS NO ROW. corpora.lua calls it a LIVING corpus,
     -- "NOT GATED: every commit invalidates a snapshot baseline by construction",
     -- and recording numbers against it here would manufacture exactly the drift
@@ -154,7 +177,7 @@ if rec and (max_dist ~= REC_MAXDIST or below ~= REC_BELOW) then
 end
 if show == 'all' or show == 'features' then
     io.write('FEATURES — a divergence can carry several. READ THIS TABLE FIRST.\n')
-    if rec then io.write('     count   recorded 2026-09-03   feature\n')
+    if rec then io.write('     count   recorded 2026-09-05   feature\n')
     else io.write('     count   feature\n') end
     for _, r in ipairs(ranked(res.features)) do
         if rec then
