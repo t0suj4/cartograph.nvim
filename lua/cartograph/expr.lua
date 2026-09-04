@@ -220,7 +220,8 @@ local FIELD = { dot_index_expression = true, field_expression = true,
     member_expression = true,
     member_access_expression = true,  -- php   $a->b
     attribute = true,                 -- python a.b — AND lua 5.4 `<const>`, see COLLIDE
-    selector_expression = true }      -- go    a.b
+    selector_expression = true,       -- go    a.b
+    field_access = true }             -- java  o.f / this.f (CART-0224 group 2)
 
 -- ── WHERE A NODE NAME MEANS TWO THINGS (CART-0234) ────────────────────────────────
 -- These maps are keyed on the tree-sitter node TYPE and shared by every language, which
@@ -283,7 +284,26 @@ local function is_modifier(lang, node)
 end
 local INDEX = { bracket_index_expression = true, subscript_expression = true,
     index_expression = true,
-    subscript = true }                -- python a[1] (a[1:2] keeps `?` for the slice)
+    subscript = true,                 -- python a[1] (a[1:2] keeps `?` for the slice)
+    array_access = true }             -- java  a[0] (CART-0224 group 2)
+-- ── CART-0224 group 2, and why these two are added BARE ───────────────────────
+-- Both arms above assume BASE-FIRST / SELECTOR-SECOND with exactly two named
+-- children, and reading `o[2]` without checking it exists is what turned lua's
+-- `local x <const>` into a read of a variable called `const`. So the assumption
+-- was VERIFIED BY PARSING on every java form that reaches these nodes, not on
+-- the simple one:
+--     this.f · o.f · o.f.g (base is itself a field_access) · Outer.this ·
+--     ((Outer) o).f (a parenthesized base) · a[0] · g[1][2] (chained)
+-- All seven yield exactly two named operands, base first. `Outer.this` puts
+-- `this` in SELECTOR position, where sel_is_id correctly answers false.
+-- Neither name is used by another of the 17 grammars, so no VETO entry is
+-- needed — checked across every spec module rather than assumed.
+--
+-- ★ THE CALLEE IS A DIFFERENT PROBLEM AND IS NOT SOLVED THIS WAY. java's
+-- `method_invocation` is [object?, name, argument_list], so the FIRST NAMED
+-- CHILD is the RECEIVER, not the callee — `call_parts` would read `o.g(1)` as
+-- `o(g, 1)`, a call that does not exist. That is group 3, and it reads the
+-- spec's declared `call_positions` instead of child order.
 local METHOD = { method_index_expression = true }
 local CALL = { function_call = true, call_expression = true, call = true,
     function_call_expression = true }

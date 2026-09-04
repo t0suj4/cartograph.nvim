@@ -863,3 +863,62 @@ test('java: literals reach the IR, and the two bases Lua reads differently do no
     eq(nil, seen['num=10'], 'and neither of them minted the value Lua would have read')
 end)
 
+-- CART-0224 step 3, group 2. The ticket's survey row for a java corpus read
+-- "~53% unknown, ZERO CALL LAYER" — and zero field and zero index nodes with
+-- it. `field_access` and `array_access` were simply absent from the shared maps.
+--
+-- ★ THE FORMS ARE THE TEST, because both map arms assume BASE-FIRST /
+-- SELECTOR-SECOND with exactly two named children, and reading `o[2]` without
+-- checking is what once turned lua's `local x <const>` into a read of a
+-- variable named `const`. Each arm below is a shape that could have broken that
+-- assumption and does not: a `this` base, a base that is ITSELF a field access,
+-- a parenthesized base, a chained subscript, and `Outer.this` — which puts
+-- `this` in SELECTOR position, where `selid` must answer false rather than
+-- claiming a name.
+test('java: field and array access reach the IR, on every shape that could break the pairing', function ()
+    if not ready('java') then skip 'no java parser' end
+    local src = table.concat({
+        'class Outer { int f; int[] a; int[][] g; Outer o;',
+        '  int m() {',
+        '    int x = this.f;',
+        '    x = o.f;',
+        '    x = o.o.f;',
+        '    x = ((Outer) o).f;',
+        '    x = a[0];',
+        '    x = g[1][2];',
+        '    return x;',
+        '  } }' }, '\n')
+    local root = vim.treesitter.get_string_parser(src, 'java'):parse()[1]:root()
+    local fn
+    local function findfn(n)
+        if fn then return end
+        if n:type() == 'method_declaration' then fn = n; return end
+        for c in n:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the method')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'java') end })
+    -- the rhs of the row at source line `ln` (0-based within the snippet)
+    local function rhs(ln)
+        for _, r in ipairs(fl.stmts or {}) do
+            if r.l == ln and r.expr and r.expr.rhs then return r.expr.rhs[1] end
+        end
+    end
+    ok(#(fl.stmts or {}) >= 6, 'the method produced rows at all')
+    -- flow rows carry 1-BASED source lines
+    local this_f, o_f, o_o_f, paren_f, a0, g12 =
+        rhs(3), rhs(4), rhs(5), rhs(6), rhs(7), rhs(8)
+    eq('field', this_f and this_f.k, 'this.f is a field')
+    eq('f', this_f and this_f.n, '...selecting `f`')
+    eq('field', o_f and o_f.k, 'o.f is a field')
+    eq('name', o_f and o_f.b and o_f.b.k, '...over a plain name base')
+    eq('field', o_o_f and o_o_f.k, 'o.o.f is a field')
+    eq('field', o_o_f and o_o_f.b and o_o_f.b.k,
+        '...whose BASE is itself a field — the chain forms, so dotted() can walk it')
+    eq('field', paren_f and paren_f.k, '((Outer) o).f is a field: a parenthesized base pairs')
+    eq('index', a0 and a0.k, 'a[0] is an index')
+    eq('index', g12 and g12.k, 'g[1][2] is an index')
+    eq('index', g12 and g12.b and g12.b.k, '...over an index base — chained subscripts nest')
+end)
+
