@@ -80,10 +80,26 @@ local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or 
 --- ⚠ NEITHER FALLBACK CHANGES THE BASE. A literal whose base Lua reads
 --- differently than the source language (java's octal `010` is 8, Lua reads 10)
 --- must not reach here at all — see the LIT note; it stays `?`.
-local function num_value(raw)
+--- Node types whose `0NNN` form is OCTAL, so reading it base-10 is not a missing
+--- answer but a WRONG one — C's `010` is 8 and Lua's `tonumber` says 10. Keyed on
+--- the node type because it is a property of the SPELLING: lua's `number` node
+--- means 10 by the same text, and refusing it there would break a working answer.
+local OCTAL_ZERO_PREFIX = { number_literal = true }  -- c, c++
+
+--- A numeric literal's VALUE from its source text, or NIL when it cannot be read
+--- FAITHFULLY. `tonumber` first, so every answer that worked before is
+--- byte-identical; the fallbacks only ever turn a nil into a value.
+---   `1_000` / `1'000`  digit separators — java, rust, python, js, c#, c++14
+---   `5L` `1.5f` `10UL` a trailing TYPE SUFFIX — java, c, c++, rust
+--- ⚠ NIL IS LOAD-BEARING: the caller mints NO literal at all when this returns
+--- nil, because `eval` answers `true, e.v` for a lit — so a valueless numeric
+--- literal would claim it EVALUATED TO NIL rather than that it is unknown. A
+--- wrong value is worse than an honest `?`.
+local function num_value(raw, nodetype)
+    local nosep = raw:gsub("[_']", '')
+    if OCTAL_ZERO_PREFIX[nodetype] and nosep:match('^0[0-7]+$') then return nil end
     local v = tonumber(raw)
     if v then return v end
-    local nosep = raw:gsub('_', '')
     v = tonumber(nosep)
     if v then return v end
     return tonumber((nosep:gsub('[a-zA-Z]+$', '')))
@@ -103,6 +119,12 @@ local LIT = { number = 'num', integer = 'num', float = 'num', string = 'str',
     decimal_integer_literal = 'num', hex_integer_literal = 'num',
     decimal_floating_point_literal = 'num', hex_floating_point_literal = 'num',
     character_literal = 'str', null_literal = 'nil',
+    -- ── C / C++ (CART-0742). `nullptr` parses as `null` and `true`/`false` as
+    -- themselves, all three already above. ⚠ AND `number_literal` IS ONE NODE
+    -- TYPE FOR EVERY BASE — decimal, hex, OCTAL, binary, float — so the java
+    -- trick of excluding octal by node type is not available here. The base is
+    -- decided from the TEXT instead; see num_value and OCTAL_ZERO_PREFIX.
+    number_literal = 'num', char_literal = 'str',
     -- ⚠ `octal_integer_literal` AND `binary_integer_literal` ARE DELIBERATELY
     -- ABSENT, and the reason is a measured wrong ANSWER rather than a missing
     -- one. Java's `010` is EIGHT; Lua's `tonumber('010')` is TEN. Mapping them
@@ -154,7 +176,9 @@ end
 
 local STRING_INERT = { string_content = true, string_fragment = true,
     escape_sequence = true, string_start = true, string_end = true,
-    raw_string_content = true }
+    raw_string_content = true,
+    character = true }  -- the sole child of a C/C++ `char_literal`: text, not an
+                        -- expression, so `'c'` is a literal and not an interpolation
 -- LANGUAGE COVERAGE IS PARTIAL, AND JAVA IS ESSENTIALLY UNMODELLED. Measured
 -- 2026-07-26 on 200 java functions from the elasticsearch libs corpus: 766 rows
 -- carrying expressions, 2074 OPAQUE (`?`) nodes, ZERO field nodes, zero dotted
@@ -630,11 +654,19 @@ function build_core(node, src, lang)
     end
     if lty then
         local v
-        if lty == 'num' then v = num_value(txt(node, src))
+        if lty == 'num' then v = num_value(txt(node, src), t)
         elseif lty == 'str' then v = txt(node, src) -- raw text incl. quotes; eval strips
         elseif lty == 'bool' then v = (txt(node, src) == 'true')
         elseif lty == 'nil' then v = NIL end
-        return { k = 'lit', ty = lty, v = v }
+        -- ★ A NUMBER WHOSE VALUE WE CANNOT READ IS NOT A LITERAL, IT IS AN
+        -- UNKNOWN. Minting `{k='lit', ty='num', v=nil}` would make `eval` answer
+        -- `true, nil` — "it evaluated, to nil" — for something that is in fact a
+        -- number we failed to parse. Falling through to `?` keeps the honest
+        -- answer and the node's own text, and it is what makes admitting C's
+        -- all-bases `number_literal` safe at all.
+        if lty ~= 'num' or v ~= nil then
+            return { k = 'lit', ty = lty, v = v }
+        end
     end
     -- ★ A SHORTHAND PROPERTY IN AN OBJECT LITERAL IS A REFERENCE (CART-0418). `{a}` is
     -- `{a: a}`, so it READS `a`. Its pattern-position sibling is one letter longer

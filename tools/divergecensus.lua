@@ -86,17 +86,27 @@ local RECORDED = {
     --             and nothing said so. The 795 were the C++ tail (28 .cc/6 .h),
     --             whose `call_expression` WAS in the map.
     --
-    --   feature            09-03    09-04    09-05
-    --   call-vs-expr         842      795     5681   x7.1 — now the largest
-    --                                                named class
-    --   (no feature)         946     8545     4553   #1 -> #2, nearly halved
-    --   size-skew           3395     3963     3163
-    --   leaf-vs-tree        3422     2666     2847   was #1 on an artifact
-    --   one-side-absent     2590     2590     2522
-    --   containment         1451     1035     1358
-    --   drift(lit/name)       65      135     1010   25% -> 98% of its own
-    --                                                class (CART-0739)
-    --   divergences         8438    16198    16293
+    -- 09-05b  CART-0742: the C/C++ tail's literals (libs holds 28 .cc / 6 .h).
+    --         Small HERE because libs is java-dominant; on the pinned `cpp`
+    --         corpus the same two names move `?` -38.6% and `lit` x17.6.
+    --
+    --   feature            09-03    09-04   09-05a   09-05b
+    --   call-vs-expr         842      795     5681     5665
+    --   (no feature)         946     8545     4553     4527   #1 -> #2
+    --   size-skew           3395     3963     3163     3158
+    --   leaf-vs-tree        3422     2666     2847     2846   was #1 on an artifact
+    --   one-side-absent     2590     2590     2522     2561
+    --   containment         1451     1035     1358     1348
+    --   drift(lit/name)       65      135     1010     1043   25% -> 98% (CART-0739)
+    --   divergences         8438    16198    16293    16319
+    --   pairs scanned       2432     2432     2429     2435
+    --
+    -- ⚠ FOUR RE-RECORDS IN THREE DAYS, AND NONE OF THEM WAS DRIFT. That is what
+    -- a baseline pinned to an instrument under active repair looks like, and it
+    -- is worth saying rather than hiding behind tidy numbers: this table is only
+    -- a drift detector once the IR stops moving. Until then a `-> MOVED` row
+    -- means "check which change did it", and the FIRST thing to check is
+    -- whether the lua control moved with it.
     --
     -- ★★ SO: A COUNT IS NOT A CLASS, AND A RANKING IS NOT A FINDING until the
     -- instrument can see every language it is run on. Three rankings, three
@@ -107,10 +117,10 @@ local RECORDED = {
     -- If the java numbers move and lua does not, THE INSTRUMENT MOVED, NOT THE
     -- WORLD — and that is the only reading of a `-> MOVED` row that is safe to
     -- take at face value.
-    ['libs'] = { pairs = 2429,
-        f = { ['call-vs-expr'] = 5681, ['(no feature)'] = 4553, ['size-skew'] = 3163,
-              ['leaf-vs-tree'] = 2847, ['one-side-absent'] = 2522,
-              ['containment'] = 1358, ['drift(lit/name)'] = 1010 } },
+    ['libs'] = { pairs = 2435,
+        f = { ['call-vs-expr'] = 5665, ['(no feature)'] = 4527, ['size-skew'] = 3158,
+              ['leaf-vs-tree'] = 2846, ['one-side-absent'] = 2561,
+              ['containment'] = 1348, ['drift(lit/name)'] = 1043 } },
     -- ★ `self` DELIBERATELY HAS NO ROW. corpora.lua calls it a LIVING corpus,
     -- "NOT GATED: every commit invalidates a snapshot baseline by construction",
     -- and recording numbers against it here would manufacture exactly the drift

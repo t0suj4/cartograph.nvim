@@ -1003,3 +1003,84 @@ test('java/php: a receiver-qualified call names the METHOD, not the receiver', f
     eq('mm', member and member.f and member.f.n, 'php $o->mm(1) names the method')
     eq('ss', scoped and scoped.f and scoped.f.n, 'php C::ss(2) names the method')
 end)
+
+-- CART-0742. The C/C++ tail was the cheapest measurable gap left after
+-- CART-0224: `number_literal` and `char_literal` were absent from LIT, so every
+-- C and C++ literal fell to `?`. Measured on the pinned cpp corpus, 400
+-- functions: `?` 430 -> 264 (-38.6%), `lit` 10 -> 176.
+--
+-- ★★ AND C CANNOT USE JAVA'S TRICK. Java spells octal with its OWN node type, so
+-- group 1 excluded it by name. C and C++ use ONE `number_literal` for EVERY base
+-- — decimal, hex, octal, binary, float — so the base has to be read from the
+-- TEXT. `010` is EIGHT in C and Lua's tonumber says TEN.
+--
+-- ★★ AND THE REFUSAL CANNOT BE A VALUELESS LITERAL. `eval` answers `true, e.v`
+-- for a lit, so `{k='lit', ty='num', v=nil}` would claim the expression
+-- EVALUATED TO NIL rather than that its value is unknown — a lie in the one
+-- direction const-fold and optimize act on. An unreadable number stays `?`.
+test('c/c++: literals reach the IR, and an octal one stays `?` rather than lying', function ()
+    if not ready('c') then skip 'no c parser' end
+    local src = table.concat({
+        'void m(void) {',
+        '  int a = 1;',
+        '  int b = 0x1f;',
+        '  int e = 5U;',
+        '  double h = 2.5;',
+        '  float i = 1.5f;',
+        '  char k = 0x2;',
+        '  int oct = 010;',
+        '}' }, '\n')
+    local root = vim.treesitter.get_string_parser(src, 'c'):parse()[1]:root()
+    local fn
+    local function findfn(n)
+        if fn then return end
+        if n:type() == 'function_definition' then fn = n; return end
+        for c in n:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the function')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'c') end })
+    local seen = {}
+    for _, r in ipairs(fl.stmts or {}) do
+        for _, side in ipairs({ 'lhs', 'rhs' }) do
+            for _, x in ipairs(r.expr and r.expr[side] or {}) do
+                if x.k == 'lit' then seen[('%s=%s'):format(x.ty, tostring(x.v))] = true
+                elseif x.k == '?' then seen['?' .. tostring(x.t)] = true end
+            end
+        end
+    end
+    eq(true, seen['num=1'] ~= nil, 'a decimal literal reaches the IR')
+    eq(true, seen['num=31'] ~= nil, 'hex is read in its own base (0x1f = 31)')
+    eq(true, seen['num=5'] ~= nil, 'a type suffix is stripped (5U)')
+    eq(true, seen['num=2.5'] ~= nil, 'a float reaches the IR')
+    eq(true, seen['num=1.5'] ~= nil, 'a float suffix is stripped (1.5f)')
+    -- *** THE ARM THAT MAKES ADMITTING number_literal SAFE ***
+    eq(true, seen['?number_literal'] ~= nil,
+        'C octal 010 is EIGHT and Lua reads TEN — it must stay an honest `?`')
+    eq(nil, seen['num=10'],
+        '...and must not mint the value a base-10 read would have produced')
+    eq(nil, seen['num=nil'],
+        '...nor a VALUELESS literal, which eval would report as "evaluated to nil"')
+end)
+
+-- ★ AND THE SAME TEXT IN LUA MEANS TEN, which is why the refusal is keyed on the
+-- node type and not on the digits. A blanket octal rule would silently change a
+-- working answer in every language that reads `010` as decimal.
+test('lua: `010` is still TEN — the octal refusal is per-spelling, not per-digit', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fl = build_expr_flow {
+        'local function f()',
+        '  local x = 010',
+        '  return x',
+        'end' }
+    local lit
+    for _, r in ipairs(fl.stmts or {}) do
+        for _, x in ipairs(r.expr and r.expr.rhs or {}) do
+            if x.k == 'lit' then lit = x end
+        end
+    end
+    ok(lit, 'the literal reached the IR')
+    eq('num', lit and lit.ty)
+    eq(10, lit and lit.v, "lua's `010` is decimal ten and must stay ten")
+end)
