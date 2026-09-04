@@ -72,11 +72,46 @@ local KNOWN_ALLOC = { deepcopy = true, setmetatable = true, tbl_extend = true,
 
 local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or '' end
 
+--- A numeric literal's VALUE from its source text. `tonumber` first, so every
+--- answer that worked before is byte-identical; the two fallbacks only ever turn
+--- a nil into a value and can never change one.
+---   `1_000`  digit separators — java, rust, python, js, c#
+---   `5L` `1.5f` `10UL`  a trailing TYPE SUFFIX — java, c, c++, rust
+--- ⚠ NEITHER FALLBACK CHANGES THE BASE. A literal whose base Lua reads
+--- differently than the source language (java's octal `010` is 8, Lua reads 10)
+--- must not reach here at all — see the LIT note; it stays `?`.
+local function num_value(raw)
+    local v = tonumber(raw)
+    if v then return v end
+    local nosep = raw:gsub('_', '')
+    v = tonumber(nosep)
+    if v then return v end
+    return tonumber((nosep:gsub('[a-zA-Z]+$', '')))
+end
+
 -- literal node types (Lua-first; the shared cross-language names). A per-language
 -- harvest can extend these — anything unlisted falls to the `?` honest-unknown path.
 local LIT = { number = 'num', integer = 'num', float = 'num', string = 'str',
     string_literal = 'str', true_ = 'bool', ['true'] = 'bool', ['false'] = 'bool',
-    boolean = 'bool', ['nil'] = 'nil', null = 'nil' }
+    boolean = 'bool', ['nil'] = 'nil', null = 'nil',
+    -- ── java (CART-0224 step 3, group 1). VERIFIED BY PARSING, one snippet per
+    -- name, before any of them was written down. None of these names is used by
+    -- another of the 17 loaded grammars, so they are added bare rather than
+    -- vetoed (the `attribute` collision above is what that check is for).
+    -- `string_literal`, `true` and `false` were already here and java reuses
+    -- them exactly.
+    decimal_integer_literal = 'num', hex_integer_literal = 'num',
+    decimal_floating_point_literal = 'num', hex_floating_point_literal = 'num',
+    character_literal = 'str', null_literal = 'nil',
+    -- ⚠ `octal_integer_literal` AND `binary_integer_literal` ARE DELIBERATELY
+    -- ABSENT, and the reason is a measured wrong ANSWER rather than a missing
+    -- one. Java's `010` is EIGHT; Lua's `tonumber('010')` is TEN. Mapping them
+    -- here would mint `{k='lit', v=10}` — a confident, wrong constant feeding
+    -- eval, const-fold and optimize, which APPLIES rewrites. They stay `?`,
+    -- which is the honest unknown, until someone adds a radix-correct parse
+    -- with its own test. INCOMPLETE MAPS UNDER-REPORT; COLLIDING MAPS FABRICATE
+    -- — and so does a map that reads a value in the wrong base.
+}
 local NAME = { identifier = true, name = true }
 -- THE PARTS OF A STRING THAT CARRY NO EXPRESSION. Everything else nested in a string node
 -- is one — see the interpolation note in build_core. Named per grammar because these are
@@ -498,7 +533,7 @@ function build_core(node, src, lang)
     end
     if lty then
         local v
-        if lty == 'num' then v = tonumber((txt(node, src)))
+        if lty == 'num' then v = num_value(txt(node, src))
         elseif lty == 'str' then v = txt(node, src) -- raw text incl. quotes; eval strips
         elseif lty == 'bool' then v = (txt(node, src) == 'true')
         elseif lty == 'nil' then v = NIL end

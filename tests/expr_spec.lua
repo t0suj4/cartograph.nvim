@@ -801,3 +801,65 @@ test('expr: a declared binder\'s own names are DEFS, not reads — and only wher
     for _, x in ipairs(lua_binders) do if x.defs then opted = true end end
     eq(false, opted, 'lua must NOT opt in, or its numeric-for regresses by 504 rows')
 end)
+
+-- CART-0224 step 3, group 1. The expression IR's language-agnosticism was
+-- aspirational: its literal map is keyed on the LUA/js spellings, so on java
+-- every literal fell to the honest-unknown `?` path. Measured consequence, and
+-- it is why this is not cosmetic: `drift(lit/name)` — "a literal facing a name"
+-- — tests `k == 'lit'`, so on elasticsearch/libs it tagged 135 of 533
+-- literal-vs-name divergences (25%) while tagging 103 of 103 on a lua corpus.
+-- The rule was right and its INPUT was not there (CART-0739).
+--
+-- ★ THE OCTAL AND BINARY ARMS ARE THE POINT OF THIS TEST. Java's `010` is EIGHT
+-- and Lua's tonumber('010') is TEN, so mapping that node type would mint a
+-- confident WRONG constant into eval / const-fold / optimize — which APPLIES
+-- rewrites. They must stay `?`: an honest unknown, not a wrong answer. A future
+-- edit that "completes the map" fails here.
+test('java: literals reach the IR, and the two bases Lua reads differently do not', function ()
+    if not ready('java') then skip 'no java parser' end
+    local src = table.concat({
+        'class T { void m() {',
+        '  int a = 1; int b = 0x1f; int e = 1_000; long g = 5L;',
+        '  double h = 2.5; float i = 1.5f; char k = 0x2;',
+        '  String s = "x"; Object w = null; boolean u = true;',
+        '  int oct = 010; int bin = 0b1010;',
+        '} }' }, '\n')
+    local root = vim.treesitter.get_string_parser(src, 'java'):parse()[1]:root()
+    -- the IR is reached through flow.build, the same seam expr.of uses
+    local fn
+    local function findfn(n)
+        if fn then return end
+        if n:type() == 'method_declaration' then fn = n; return end
+        for c in n:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the method')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'java') end })
+    local kinds = {}
+    for _, r in ipairs(fl.stmts or {}) do
+        local e = r.expr
+        for _, side in ipairs({ 'lhs', 'rhs' }) do
+            for _, x in ipairs(e and e[side] or {}) do
+                if x.k == 'lit' then kinds[#kinds + 1] = ('%s=%s'):format(x.ty, tostring(x.v))
+                elseif x.k == '?' then kinds[#kinds + 1] = '?' .. tostring(x.t) end
+            end
+        end
+    end
+    local seen = {}
+    for _, k in ipairs(kinds) do seen[k] = true end
+    eq(true, seen['num=1'] ~= nil, 'a decimal int reaches the IR as a lit')
+    eq(true, seen['num=31'] ~= nil, 'a hex int is read in its own base (0x1f = 31)')
+    eq(true, seen['num=1000'] ~= nil, 'a digit-separated literal loses the separators (1_000)')
+    eq(true, seen['num=5'] ~= nil, 'a type suffix is stripped (5L)')
+    eq(true, seen['num=2.5'] ~= nil, 'a decimal float reaches the IR')
+    eq(true, seen['num=1.5'] ~= nil, 'a float suffix is stripped (1.5f)')
+    eq(true, seen['nil=nil'] ~= nil, 'null is the nil literal')
+    -- ...and the two that must NOT be read, because Lua would read them wrong
+    eq(true, seen['?octal_integer_literal'] ~= nil,
+        'java octal 010 is EIGHT and Lua reads TEN — it must stay an honest `?`')
+    eq(true, seen['?binary_integer_literal'] ~= nil,
+        'a binary literal stays an honest `?` for the same reason')
+    eq(nil, seen['num=10'], 'and neither of them minted the value Lua would have read')
+end)
+
