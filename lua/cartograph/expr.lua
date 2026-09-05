@@ -980,8 +980,14 @@ function build_core(node, src, lang)
     for c in node:iter_children() do
         if c:named() and not tsutil.is_comment(c) then
             if bnd and bnd[t] and NAMEISH[c:type()] then
-                kids[#kids + 1] = { k = 'assign', t = build(c, src, lang), v = nil,
-                    kids = { build(c, src, lang) } }
+                -- ⚠ BUILT ONCE AND SHARED, not built twice (CART-0743). This
+                -- used to call `build` for `t` and again for `kids[1]`, so the
+                -- node's two accessors held EQUAL BUT DISTINCT tables — and a
+                -- traversal reading `kids` then saw a different object from one
+                -- reading `t`. Harmless while every walker agreed by accident;
+                -- a trap the moment one of them keys on identity.
+                local bn = build(c, src, lang)
+                kids[#kids + 1] = { k = 'assign', t = bn, v = nil, kids = { bn } }
             else
                 kids[#kids + 1] = build(c, src, lang)
             end
@@ -1523,6 +1529,20 @@ local function walk(e, fn)
     elseif e.k == 'call' then walk(e.f, fn); for _, a in ipairs(e.a) do walk(a, fn) end
     elseif e.k == 'un' then walk(e.e, fn)
     elseif e.k == 'bin' then walk(e.l, fn); walk(e.r, fn)
+    -- ★★ AND `assign` BELONGS HERE TOO — IT WAS THE SOUNDNESS BUG (CART-0743).
+    -- `walk` is what `is_pure` is built on, and `is_pure` is documented as "the
+    -- single safety gate for every key-equality lint (comparing two
+    -- side-effecting operands is unsound)". Without this line an `assign` is a
+    -- LEAF to the walk, so `x = f()` in expression position contains no `call`
+    -- that is_pure can see and it answers PURE. `allocates` and `reads_content`
+    -- are built on the same walk and were blind the same way.
+    --
+    -- ★ IT DESCENDS `t`/`v` AND NOT `kids`, deliberately. Both exist and hold
+    -- the same two halves, but a bare declaration builds its `kids` entry as a
+    -- SECOND node with the same content, so a kids-walk visits a twin of `e.t`
+    -- rather than `e.t` itself. Same counts, different identity — and identity
+    -- is exactly what a `walk` callback is entitled to key on.
+    elseif e.k == 'assign' then walk(e.t, fn); walk(e.v, fn)
     elseif e.k == '?' or e.k == 'table' or e.k == 'pair' or e.k == 'type' then
         -- ★ `type` BELONGS HERE OR ITS CONTENTS VANISH. Caught by measurement,
         -- not by the suite: adding the kind without this line lost 90 reads and
@@ -1639,6 +1659,13 @@ function M.dotted_reads(e, out)
         for _, a in ipairs(e.a or {}) do M.dotted_reads(a, out) end
     elseif e.k == 'un' then M.dotted_reads(e.e, out)
     elseif e.k == 'bin' then M.dotted_reads(e.l, out); M.dotted_reads(e.r, out)
+    -- ★ BOTH HALVES, TARGET INCLUDED (CART-0743). This collects dotted names for
+    -- the EXTERNAL SURFACE, and `externals.lua` already walks a row's `lhs` with
+    -- this function for exactly that reason: writing `global.foo` puts it on the
+    -- surface as surely as reading it. So unlike `expr_reads` below, an assign's
+    -- target is NOT skipped here — the two functions answer different questions
+    -- about the same node, which is why one blanket rule would have been wrong.
+    elseif e.k == 'assign' then M.dotted_reads(e.t, out); M.dotted_reads(e.v, out)
     elseif e.k == '?' or e.k == 'table' or e.k == 'pair' or e.k == 'type' then
         for _, c in ipairs(e.kids or {}) do M.dotted_reads(c, out) end
     end
@@ -1753,6 +1780,13 @@ function M.names(row)
         elseif k == 'call' then vars(e.f); for _, a in ipairs(e.a) do vars(a) end
         elseif k == 'un' then vars(e.e)
         elseif k == 'bin' then vars(e.l); vars(e.r)
+        -- ★ A PLAIN-NAME TARGET IS A DEF, NOT A READ (CART-0743) — the same rule
+        -- this function already applies to a row's `lhs` two lines below, and to
+        -- an assign in EXPRESSION position it was applying nothing at all. A
+        -- field or index target IS read (`t.k = v` reads t), so it descends.
+        elseif k == 'assign' then
+            if e.t and e.t.k ~= 'name' then vars(e.t) end
+            vars(e.v)
         elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' then
             for _, c in ipairs(e.kids or {}) do vars(c) end
         end

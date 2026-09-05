@@ -1304,3 +1304,87 @@ test('python: unwrapping a statement moves no read', function ()
     ok(sawcall, 'the call statement is a `call` row')
     ok(reads['a'] and reads['b'], 'and both arguments are still read')
 end)
+
+-- CART-0743. THE SOUNDNESS BUG: `is_pure` is documented as "the single safety
+-- gate for every key-equality lint (comparing two side-effecting operands is
+-- unsound)", and it is built on `walk`. `walk` had no `assign` arm, so an
+-- assignment in EXPRESSION POSITION was a LEAF to it — and `x = f()` therefore
+-- contained no `call` that is_pure could see. It answered PURE.
+--
+-- ★★ THE KIND CARRIES `kids` PRECISELY SO THIS COULD NOT HAPPEN. Its build site
+-- says so outright: "kids is carried for the same reason `pair` carries it:
+-- kids-walkers keep seeing both halves, so a consumer that has never heard of
+-- this kind loses nothing." Three of the four walkers never learned the kind, so
+-- the promise was never kept. Same shape as CART-0742 item 3's `type`, one kind
+-- over — and that fix did not prompt an audit of the kinds already present.
+--
+-- ★ THE FOUR ARE NOT ONE RULE, WHICH IS WHY A BLANKET FIX WOULD HAVE BEEN WRONG:
+--   walk           both halves — a generic visitor owes its callback every node
+--   dotted_reads   both halves — writing `global.foo` is external surface too
+--   names          skip a plain-NAME target (a def), descend a field/index one
+--   expr_reads     ALREADY CORRECT via target_reads; must NOT become a kids-walk
+test('expr: an assignment in expression position is not pure, and its call is visible', function ()
+    if not ready('c') then skip 'no c parser' end
+    -- C spells `a = b = c` as `a = (b = c)`, so the inner assignment reaches
+    -- `build` as a VALUE — the shape CART-0415 added the kind for.
+    local src = 'int f(int a, int b) { a = (b = g()); return a; }\nint g(void) { return 1; }\n'
+    local root = vim.treesitter.get_string_parser(src, 'c'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_definition' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the fn')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'c') end })
+    local assign, sawcall = nil, false
+    for _, r in ipairs(fl.stmts or {}) do
+        for _, e in ipairs((r.expr and r.expr.rhs) or {}) do
+            expr.walk(e, function (x)
+                if x.k == 'assign' then assign = assign or x end
+                if x.k == 'call' then sawcall = true end
+            end)
+        end
+    end
+    ok(assign, 'the inner `b = g()` reaches the IR as an `assign`')
+    ok(sawcall, 'and `walk` REACHES the call inside it — the arm that was missing')
+    eq(false, expr.is_pure(assign),
+        'an assignment whose value is a CALL is NOT pure — the safety gate every '
+        .. 'key-equality lint is built on')
+end)
+
+-- ★ THE OTHER SIDE OF THE SAME ARM: `names` must NOT start reporting the target
+-- of an assignment as a name that is READ. Descending an assign's `kids`
+-- uniformly — the obvious one-line fix — would have done exactly that, turning
+-- every def into a use and disagreeing with du on every bash function.
+test('expr: an assign TARGET is a def in `names`, and a field target still reads its base', function ()
+    if not ready('c') then skip 'no c parser' end
+    local src = 'int f(int a, int b) { a = (b = a); return a; }\n'
+    local root = vim.treesitter.get_string_parser(src, 'c'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_definition' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the fn')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'c') end })
+    local sawassign = false
+    for _, r in ipairs(fl.stmts or {}) do
+        for _, e in ipairs((r.expr and r.expr.rhs) or {}) do
+            expr.walk(e, function (x) if x.k == 'assign' then sawassign = true end end)
+        end
+        if r.expr and sawassign then
+            local names = {}
+            for _, nm in ipairs(expr.names(r.expr) or {}) do names[nm] = true end
+            ok(names['a'], 'the assigned VALUE `a` is read')
+            eq(nil, names['b'], 'the assignment TARGET `b` is a def, not a name read')
+            break
+        end
+    end
+    ok(sawassign, 'the fixture really did produce an assign in expression position')
+end)
