@@ -1647,6 +1647,71 @@ test('parallel extraction: identical graph to sequential', function ()
     -- the mention index is part of the contract too (sorted packing
     -- makes worker-borne and inline-collected sets byte-identical)
     eq(seq.names, got.names)
+    -- ★ THE FRONTIER LIST IS PART OF THE CONTRACT (CART-0747), and it was not on
+    -- this list — which is how a real divergence survived: `data.unparsed` came
+    -- back 3 on serial and 1 on parallel for ghost. An equivalence test that
+    -- HAND-ENUMERATES what it compares can only catch the fields someone
+    -- remembered (CART-0736, the same shape one module over).
+    local function unset(d)
+        local t = {}
+        for _, f in ipairs(d.unparsed or {}) do t[#t + 1] = f end
+        table.sort(t)
+        return t
+    end
+    eq(unset(seq), unset(got))
+end)
+
+-- ★★ THE ARM THE FIXTURE ROOT CANNOT PROVIDE. Above, every unparsed file in
+-- tests/fixtures is `*.min.js` — detected BY NAME by the parent's `list_files`,
+-- so it never reaches a worker and the parent's own list carries it either way.
+-- The divergence lived in the files a WORKER discovers: a bundle detected by
+-- CONTENT (a line over 5000 chars) or a container whose grammar is missing.
+-- MEASURED on ghost before the fix: serial 3, parallel 1 — and the node FLAGS
+-- were 3 both ways, so the two halves of one fact disagreed only in parallel.
+test('parallel: a worker-discovered frontier file reaches data.unparsed', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local par = require 'cartograph.parallel'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    -- NOT `*.min.js`: the name says nothing, the CONTENT says bundle. This is
+    -- the class the parent's name scan cannot see and only a worker finds.
+    vim.fn.writefile({ 'var a=1;' .. string.rep('/*x*/', 1200) .. 'var b=2;' },
+        root .. '/vendor.js')
+    vim.fn.writefile({ 'export function real(x) { return x + 1; }' },
+        root .. '/real.js')
+    local seq = ts.extract(root)
+    local function unset(d)
+        local t = {}
+        for _, f in ipairs(d.unparsed or {}) do t[#t + 1] = f end
+        table.sort(t)
+        return t
+    end
+    local su = unset(seq)
+    eq(1, #su, 'serial finds the content-detected bundle')
+    -- ⚠ BATCH MUST COME DOWN OR THERE ARE NO WORKERS AT ALL. `nw` is
+    -- min(workers, ceil(#files / BATCH)), and `nw < 2` falls straight back to
+    -- serial `ts.extract` — so a two-file root with the default BATCH of 48
+    -- exercises the parent path and the merge never runs. The first version of
+    -- this test did exactly that: it passed with the merge arm DELETED, which is
+    -- a fence that cannot fire on the bug it was written for.
+    local got, batch = nil, par.BATCH
+    par.BATCH = 1
+    par.extract(root, { workers = 2, on_done = function (d) got = d end })
+    vim.wait(120000, function () return got ~= nil end, 50)
+    par.BATCH = batch
+    ok(got, 'parallel finished')
+    eq(su, unset(got), 'and the PARALLEL merge carries the worker s finding too')
+    -- ...and the two halves of the fact agree, which is the invariant that was
+    -- false in parallel: the list and the node flags must name the same files.
+    local flagged = {}
+    for _, n in ipairs(got.nodes or {}) do
+        if n.unparsed and n.file then flagged[#flagged + 1] = n.file end
+    end
+    table.sort(flagged)
+    eq(unset(got), flagged, 'the frontier LIST and the node FLAGS agree')
+    vim.fn.delete(root, 'rf')
 end)
 
 test('parallel audit: a slice-locally settled return chain re-derives', function ()

@@ -188,8 +188,17 @@ end
 -- PluginIntrospector reads Deprecated.class twice to REPORT deprecation and
 -- never invokes anything, so "read reflectively" alone would revive the false
 -- @Deprecated alibi CART-0720 exists to remove.
-M.VERSION = 172 -- v172: AN ARGUMENT LIST IS NOT EVIDENCE OF REGISTRATION
-               -- (CART-0720), see above.
+-- ★★ v173 CHANGES WHAT `data.unparsed` CONTAINS, and a cached graph is a
+-- snapshot of that list. The PARALLEL merge set it from the parent's own
+-- name-based `minified` scan alone and dropped every file a WORKER found — a
+-- content-detected bundle, a container whose grammar is missing. MEASURED on
+-- ghost: serial 3, parallel 1, while the node FLAGS read 3 both ways, so the two
+-- halves of one fact disagreed only in parallel and only in the list that feeds
+-- the frontier census and the lazy text-search descend. Any snapshot taken in
+-- parallel mode before this is SHORT, so it must not be reused.
+M.VERSION = 173 -- v173: A FRONTIER THE PARALLEL MERGE DROPPED (CART-0747), above.
+               -- v172: AN ARGUMENT LIST IS NOT EVIDENCE OF REGISTRATION
+               -- (CART-0720), see below.
                -- v171: AN ANNOTATION THE CORPUS ITSELF READS (CART-0722).
                -- v170: A QUERY THAT SILENTLY DROPPED MATCHES (CART-0734), above.
                -- v169: TWO FACTS, ONE FLAG, SPLIT (CART-0703), see above.

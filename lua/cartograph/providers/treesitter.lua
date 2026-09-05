@@ -3915,7 +3915,26 @@ local function container_trees(parser, clang)
     -- a failed injection parse degrades to an EMPTY region list (module
     -- skeleton, honest frontier), never to misreading the container tree
     -- as host code
-    if not pcall(parser.parse, parser, true) then return out end
+    --
+    -- ★★ ...AND IT SAYS SO, which it did not (CART-0747). The DEGRADE is right;
+    -- returning a bare `{}` was not, because that is exactly what a container
+    -- with no injected regions returns. "There was nothing to read" and "we
+    -- could not read it" rendered identically, and no consumer could tell —
+    -- while the honest channel for precisely this (`unparsed` + `cunparsed`)
+    -- sits TEN LINES AWAY in the caller, handling the CONTAINER parse failure.
+    -- One failure mode was counted and its sibling was silent.
+    --
+    -- ⚠ AND I COULD NOT REACH THIS BRANCH TO TEST IT. The failure was real and
+    -- observed when containers shipped (8e1741d: "workers have nvim-treesitter
+    -- on rtp but never LOAD it, so svelte's set-lang-from-mimetype! injection
+    -- directive was unregistered"), and the `pcall(require, …)` above is the fix
+    -- for that cause. Trying to reproduce it now — unregistering the module,
+    -- re-registering the directive as a THROWING function, a bogus `lang=`
+    -- attribute — nvim swallows all of them and `parse(true)` returns cleanly.
+    -- So this is a DISTINGUISHABILITY fix with no live repro: if the branch is
+    -- dead in today's nvim the change costs one boolean, and if a parser or nvim
+    -- update reopens it the failure is countable instead of invisible.
+    if not pcall(parser.parse, parser, true) then return out, true end
     parser:for_each_tree(function (tree, ltree)
         local hl = ltree:lang()
         if hl ~= clang and M.spec[hl] then
@@ -6887,11 +6906,21 @@ local MATCH_OPTS = { match_limit = 65536 }
             cunparsed[#cunparsed + 1] = file
             return
         end
-        local regions = container_trees(parser, clang) or {}
+        local regions, injfailed = container_trees(parser, clang)
+        regions = regions or {}
         local croot = parser:trees()[1]:root()
         stamp(file)
+        -- ★ THE CONTAINER PARSED AND ITS EMBEDDED CODE DID NOT, so the module
+        -- node is REAL (it has a true range) and carries the frontier flag: for
+        -- every consumer of `unparsed` the meaning is "do not expect this file's
+        -- code to resolve", which is exactly true here. Slightly over-claiming —
+        -- the template WAS read — and over-claiming in the sound direction, which
+        -- is the charter's rule when the choice is between knowing less than we
+        -- do and appearing to know more.
         nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
-            range = pos_of(croot), order = -1 }
+            range = pos_of(croot), order = -1,
+            unparsed = injfailed or nil }
+        if injfailed then cunparsed[#cunparsed + 1] = file end
         -- which regions are <script>? (the rest are template expressions)
         local scripts = {}
         local cq = parse_query(clang, '(script_element (raw_text) @s)')

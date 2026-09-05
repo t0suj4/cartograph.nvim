@@ -315,6 +315,14 @@ local function merge_chunk(s, chunk)
         new[f] = true
     end
     for _, l in ipairs(chunk.no_parser or {}) do acc._no_parser[l] = true end
+    -- ★★ A WORKER'S UNPARSED FILES (CART-0747). MEASURED on ghost before the
+    -- fix: SERIAL `data.unparsed` = 3, PARALLEL = 1 — the merge set the list
+    -- from its OWN name-based `minified` scan and dropped everything a worker
+    -- discovered by CONTENT (a >5000-char bundle line) or by a missing container
+    -- grammar. The node FLAGS survived, because nodes are merged wholesale, so
+    -- the two halves of one fact DISAGREED in parallel and agreed in serial —
+    -- which is why nothing noticed.
+    for _, f in ipairs(chunk.unparsed or {}) do acc._unparsed[f] = true end
     for f in pairs(new) do seen[f] = true end
 end
 
@@ -531,7 +539,7 @@ function M.extract(root, o)
         h_lang = o.h_lang, -- the merged graph carries it, as the inline build does
         capabilities = { calls = true, litdata = true, df = 'lite' },
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
-        mentions = {}, _no_parser = {} }
+        mentions = {}, _no_parser = {}, _unparsed = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
         packs = o.packs, profile = o.profile, h_lang = o.h_lang,
@@ -623,15 +631,29 @@ function M.extract(root, o)
 
     local function finalize()
         local okc, cfg = pcall(require, 'cartograph.config')
+        -- ONE list, from BOTH producers: the parent's name-based minified scan
+        -- and every worker's own findings. Deduped, because a file the parent
+        -- named `*.min.js` may also trip a worker's content rule.
+        local un, unseen = {}, {}
         if #minified > 0 and not (okc and cfg.unparsed == false) then
-            acc.unparsed = minified
             for _, f in ipairs(minified) do
+                if not unseen[f] then unseen[f] = true; un[#un + 1] = f end
                 acc.nodes[#acc.nodes + 1] = { id = f, name = f, kind = 'module',
                     file = f, unparsed = true, order = -1,
                     range = { start = { line = 0, char = 0 },
                         ['end'] = { line = 0, char = 0 } } }
             end
         end
+        -- ⚠ SORTED, because `pairs` order is not deterministic and this list is
+        -- PERSISTED (cache.lua carries `unparsed` in the snapshot). An unsorted
+        -- merge would make two identical runs produce different bytes — the
+        -- hazard the canonicalize step exists for.
+        local wu = {}
+        for f in pairs(acc._unparsed) do if not unseen[f] then wu[#wu + 1] = f end end
+        table.sort(wu)
+        for _, f in ipairs(wu) do un[#un + 1] = f end
+        acc.unparsed = #un > 0 and un or nil
+        acc._unparsed = nil
         acc.no_parser = next(acc._no_parser) and vim.tbl_keys(acc._no_parser) or nil
         acc._no_parser = nil
         acc.fn_ranges = nil
