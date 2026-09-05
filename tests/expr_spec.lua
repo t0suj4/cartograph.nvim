@@ -1388,3 +1388,156 @@ test('expr: an assign TARGET is a def in `names`, and a field target still reads
     end
     ok(sawassign, 'the fixture really did produce an assign in expression position')
 end)
+
+-- CART-0744. SOLE WRAPPERS: a node the GRAMMAR needs and the LANGUAGE does not
+-- have. After CART-0742 these were the largest unread node types left, and each
+-- is BIGGER on its own corpus than `expression_statement` was: php `argument`
+-- 2741 on grocy / 3903 on php, C++ `subscript_argument_list` 1358 and
+-- `condition_clause` 941 on cppmodern.
+--
+-- ★★ THE REFUSALS ARE THE TEST. Every hazard is handled by the SOLE-CHILD rule
+-- itself rather than by a rule of its own, and these arms are what says so.
+test('php: a call argument IS its expression, but a NAMED argument is not', function ()
+    if not ready('php') then skip 'no php parser' end
+    local src = '<?php function f($a) { g($a); g(x: 1); }\nfunction g($p) {}\n'
+    local root = vim.treesitter.get_string_parser(src, 'php'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_definition' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the function')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'php') end })
+    local plain, named = nil, nil
+    for _, r in ipairs(fl.stmts or {}) do
+        for _, e in ipairs((r.expr and r.expr.rhs) or {}) do
+            if e.k == 'call' then
+                local a = (e.a or {})[1]
+                if a and a.k == '?' and a.t == 'argument' then named = a
+                elseif a then plain = plain or a end
+            end
+        end
+    end
+    ok(plain, 'the plain call has an argument in the IR')
+    ok(plain.k ~= '?' or plain.t ~= 'argument',
+        'a plain argument is UNWRAPPED — the call holds the expression itself')
+    ok(named, 'the NAMED argument `x: 1` is still there')
+    eq(2, #(named.kids or {}),
+        '...and it kept BOTH children: the name is a real part of the argument, '
+        .. 'so the sole-child rule refuses it without needing a rule of its own')
+end)
+
+test('c++: a condition unwraps, but an init-statement condition keeps both halves', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    local src = 'int g();\nint f(int x) { if (x) return 1; if (auto p = g(); p) return 2; return 0; }\n'
+    local root = vim.treesitter.get_string_parser(src, 'cpp'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_definition' and nd:field('declarator')[1]
+            and vim.treesitter.get_node_text(nd:field('declarator')[1], src):find('f%(') then
+            fn = nd; return
+        end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found f')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'cpp') end })
+    local plaincond, initcond = false, nil
+    for _, r in ipairs(fl.stmts or {}) do
+        local c = r.expr and r.expr.cond
+        if c then
+            if c.k == '?' and c.t == 'condition_clause' then initcond = c
+            elseif c.k == 'name' then plaincond = true end
+        end
+    end
+    ok(plaincond, '`if (x)` reaches the IR as the NAME x, not as a condition_clause')
+    ok(initcond, '`if (auto p = g(); p)` still carries its wrapper')
+    eq(2, #(initcond.kids or {}),
+        '...with BOTH the init-statement and the value, so the initialiser — and '
+        .. 'the call inside it — is not silently dropped')
+end)
+
+-- ★★ THE ARM FOR WHAT IS DELIBERATELY *NOT* IN THE TABLE, and it is the one that
+-- makes this a decision rather than a filter. `update_expression` (`i++`) and php's
+-- `unary_op_expression` are ALSO 100% single-kid, measured — and unwrapping `i++`
+-- to `i` would claim the expression's value is the variable's AND SILENTLY DELETE
+-- A WRITE. If someone later reads the one-kid census as a to-do list, this fails.
+test('c++: `i++` is NOT a wrapper — a 100%-single-kid OPERATOR must stay unmodelled', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    local src = 'void h(int); void f(int i) { h(i++); }\n'
+    local root = vim.treesitter.get_string_parser(src, 'cpp'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_definition' and nd:field('body')[1] then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the fn')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'cpp') end })
+    local arg
+    for _, r in ipairs(fl.stmts or {}) do
+        for _, e in ipairs((r.expr and r.expr.rhs) or {}) do
+            expr.walk(e, function (x) if x.k == 'call' then arg = (x.a or {})[1] end end)
+        end
+    end
+    ok(arg, 'found the argument of h(...)')
+    eq('?', arg.k, '`i++` stays the honest unknown: it is an OPERATOR, not a wrapper')
+    eq('update_expression', arg.t, '...and says which one')
+end)
+
+-- ★★ THE COLLISION FENCE (CART-0744). Admitting a node BY NAME is only sound if
+-- no other grammar in the roster uses that name for something else — the hazard
+-- the `attribute` collision was (CART-0611), where one name meant two things and
+-- a colliding map FABRICATES where an incomplete one merely under-reports.
+--
+-- ★ IT ASKS THE GRAMMAR, NOT A CORPUS. `language.inspect(lang).symbols` is the
+-- grammar's own symbol table, so this is a COMPLETE answer where a corpus census
+-- is a sample — and the difference is not academic: CART-0742 counted
+-- `expression_statement` in EIGHT languages from a sample and the symbol tables
+-- say TEN. A sample can only report the languages whose corpora happen to
+-- contain the node.
+--
+-- ⚠ `symbols` IS A MAP name->true, NOT AN ARRAY. My first version of this walked
+-- it with `ipairs` and reported that NO grammar has `expression_statement` —
+-- confidently, for all sixteen, including the ones this file already unwraps.
+-- A falsy answer from a structure is a claim about the ACCESSOR first.
+test('expr: every SOLE_WRAP name belongs to exactly one grammar', function ()
+    local ROSTER = { 'lua', 'java', 'php', 'c', 'cpp', 'javascript', 'typescript',
+        'python', 'go', 'rust', 'ruby', 'bash', 'zig', 'odin', 'haskell', 'scheme' }
+    -- the name -> the ONE language allowed to declare it
+    local OWNED = { argument = 'php', condition_clause = 'cpp',
+        subscript_argument_list = 'cpp' }
+    local seen, any = {}, false
+    for _, l in ipairs(ROSTER) do
+        local okl, info = pcall(vim.treesitter.language.inspect, l)
+        if okl and type(info) == 'table' and type(info.symbols) == 'table' then
+            any = true
+            for name, owner in pairs(OWNED) do
+                if info.symbols[name] then
+                    seen[name] = seen[name] or {}
+                    table.insert(seen[name], l)
+                    eq(owner, l, ('`%s` is declared by %s, which SOLE_WRAP does not '
+                        .. 'expect — a name that means two things must not be unwrapped '
+                        .. 'by name'):format(name, l))
+                end
+            end
+        end
+    end
+    if not any then skip 'no parsers installed' end
+    -- ...and the accessor really did work: the guard above is vacuous if
+    -- `symbols` comes back empty, which is exactly how the first version passed
+    -- while checking nothing.
+    local okj, jinfo = pcall(vim.treesitter.language.inspect, 'java')
+    if okj and type(jinfo) == 'table' and type(jinfo.symbols) == 'table'
+        and next(jinfo.symbols) ~= nil then
+        ok(jinfo.symbols['expression_statement'],
+            'the symbol table is really being read — java declares expression_statement')
+    end
+end)

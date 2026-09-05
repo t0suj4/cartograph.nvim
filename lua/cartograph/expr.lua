@@ -558,8 +558,13 @@ local PAREN = { parenthesized_expression = true }
 local UNWRAP = { expression_list = true, variable_list = true }
 
 -- STATEMENT WRAPPERS: a grammar that makes an assignment an EXPRESSION needs a
--- statement node around it (js, python, c, c++, java, go, php, rust). Every one
--- of those eight spells it `expression_statement`.
+-- statement node around it, and every one of them spells it
+-- `expression_statement`. TEN of the sixteen roster grammars declare it — java,
+-- php, c, c++, js, ts, python, go, rust, zig — which is not a guess: it is
+-- `vim.treesitter.language.inspect(lang).symbols`, the grammar's own symbol
+-- table, asked of all sixteen (CART-0744). CART-0742 said "eight" from a corpus
+-- SAMPLE and undercounted by two; a sample can only report the languages whose
+-- corpora happen to contain the node.
 --
 -- ★★ IT IS A SEPARATE TABLE FROM `UNWRAP` ON PURPOSE. `list_children` reads
 -- UNWRAP to mean "these children ARE the operands of the row" — true of an
@@ -573,6 +578,47 @@ local UNWRAP = { expression_list = true, variable_list = true }
 -- default (CART-0742). Two questions, one grammar fact — a second table would
 -- be one more place to forget a language.
 local STMT_WRAP = { expression_statement = true }
+
+-- SOLE WRAPPERS: a node the GRAMMAR needs and the LANGUAGE does not have — it
+-- exists only to hold one expression, and it means nothing itself (CART-0744).
+-- Measured as the largest unread node types left after CART-0742, and each is
+-- BIGGER on its own corpus than `expression_statement` was: php `argument` 2741,
+-- C++ `subscript_argument_list` 1358, `condition_clause` 941 (+92 on C).
+--
+-- ★★ 100%-SINGLE-KID IS A CANDIDATE FILTER, NOT A VERDICT, and that is why this
+-- table is short. Four other node types are ALSO 100% single-kid and are NOT
+-- here: php `unary_op_expression` and C++ `update_expression` are OPERATORS —
+-- unwrapping `i++` to `i` would claim the expression's value is the variable's
+-- AND SILENTLY DELETE A WRITE — while go's `var_declaration` is a ROW and
+-- belongs to harvest_row. The split is by MEANING; the measurement only says
+-- which nodes are cheap to decide.
+--
+-- ★ EVERY HAZARD IS HANDLED BY THE SOLE-CHILD RULE ITSELF, verified by parsing
+-- one snippet per case before any of these was written down:
+--   php  `f(x: 1)`            -> 2 named kids (name + value)   REFUSED, correctly
+--   php  `f(...$xs)`          -> 1 kid, a `variadic_unpacking` node that SURVIVES
+--   c++  `if (auto p = f(); p)` -> 2 named kids (init + value) REFUSED, correctly
+-- so the named argument keeps its name and the init-statement condition keeps
+-- its initialiser, without either needing a rule of its own.
+--
+-- ⚠ THIS IS A THIRD TABLE AND NOT A MERGE, because each of the three has a
+-- SECOND reader that the others must not reach: UNWRAP is read by
+-- `list_children` (its children ARE the row's operands), STMT_WRAP by
+-- `harvest_row` (to split a wrapped assignment), and this one by `build_core`
+-- alone. Merging them would have `harvest_row` hunting for an assignment inside
+-- a php argument.
+-- ★★ AND NO NAME HERE COLLIDES, WHICH IS CHECKED AND NOT ASSUMED. A node name
+-- means whatever ITS grammar says, so admitting one by name is only safe if no
+-- other grammar in the roster uses it for something else — the hazard the
+-- `attribute` collision (CART-0611) was. Asked of all sixteen symbol tables:
+-- `argument` is php ALONE, `condition_clause` and `subscript_argument_list` are
+-- C++ ALONE (the C grammar has NEITHER — the 92 `condition_clause` measured on
+-- the `cpp` corpus are its .cc files). tests/expr_spec.lua fences it, so a
+-- grammar update that introduces a collision fails the suite instead of
+-- silently unwrapping something that means something else.
+local SOLE_WRAP = { argument = true,                    -- php ONLY
+    subscript_argument_list = true,                     -- c++ ONLY (a[i], a[i,j])
+    condition_clause = true }                           -- c++ ONLY (if/while head)
 
 -- ── the recursive harvest: a TS node → a schema expr ─────────────────────────
 local build, build_core
@@ -744,7 +790,7 @@ function build_core(node, src, lang)
     -- already uses and it is load-bearing here: python's `expression_statement`
     -- also spells a bare tuple (`a, b`), where the children are N operands and no
     -- single one of them is the value. Those keep falling to `?`, correctly.
-    if UNWRAP[t] or STMT_WRAP[t] then -- one expr expected: build the sole child, else `?`
+    if UNWRAP[t] or STMT_WRAP[t] or SOLE_WRAP[t] then -- one expr expected: sole child, else `?`
         local only, n = nil, 0
         for c in node:iter_children() do if c:named() and not tsutil.is_comment(c) then only = c; n = n + 1 end end
         if n == 1 then return build(only, src, lang) end

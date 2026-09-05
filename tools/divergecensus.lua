@@ -168,10 +168,19 @@ local RECORDED = {
     --         266 -> 279, SHARP 154 -> 159. Promoting the WEAK form instead
     --         would have moved it far more and mostly wrongly — see the
     --         DC_RELATION comment in clones.lua.
-    ['libs'] = { pairs = 2356,
-        f = { ['(no feature)'] = 5124, ['call-vs-expr'] = 5027, ['size-skew'] = 3496,
-              ['leaf-vs-tree'] = 3129, ['one-side-absent'] = 2363,
-              ['containment'] = 1487, ['drift(lit/name)'] = 1131,
+    -- ★ 09-05f  CART-0744: the SOLE WRAPPERS — php `argument`, C++
+    --         `subscript_argument_list` and `condition_clause`. On THIS corpus
+    --         it is the C++ TAIL moving (28 .cc / 6 .h): the two C++ names are
+    --         C++-only per the grammars' own symbol tables, and java declares
+    --         neither. pairs 2356 -> 2347, divergences 16653 -> 16486. `arity`
+    --         and `arity(appended)` hold EXACTLY, which is the tell that the
+    --         call layer itself did not move — only what sits inside it.
+    --         Where it really pays is php: `?` falls 72% (5447 -> 1544) and 81%
+    --         on sylius, with READS/NAMES/call/lit identical throughout.
+    ['libs'] = { pairs = 2347,
+        f = { ['(no feature)'] = 5044, ['call-vs-expr'] = 4998, ['size-skew'] = 3469,
+              ['leaf-vs-tree'] = 3158, ['one-side-absent'] = 2312,
+              ['containment'] = 1538, ['drift(lit/name)'] = 1160,
               ['arity'] = 363, ['arity(appended)'] = 145 } },
     -- ★ `self` DELIBERATELY HAS NO ROW. corpora.lua calls it a LIVING corpus,
     -- "NOT GATED: every commit invalidates a snapshot baseline by construction",
