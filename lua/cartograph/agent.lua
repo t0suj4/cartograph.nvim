@@ -157,6 +157,19 @@ local function noderow(store, id, extra)
     if not n then return nil end
     local row = { id = id, ref = NUL, name = nn(n.name), kind = nn(n.kind),
         file = nn(n.file), line = nn(line_of(n)), exported = nn(n.exported) }
+    -- ★★ WHAT HAS BEEN SAID ABOUT THIS NODE — AND WHAT NOBODY ASKED (CART-0762).
+    -- `findings` alone would be a trap: an empty list reads as "clean" whether a
+    -- census cleared this node or no census has ever run. `not_run` beside it is
+    -- what makes the two distinguishable, so BOTH are always present — the same
+    -- rule that makes a call verb REFUSE on an index-only graph rather than
+    -- answering "none".
+    local okf, F = pcall(require, 'cartograph.findings')
+    if okf then
+        local f = F.for_node(store, id)
+        row.findings = f.findings
+        row.not_run = f.not_run
+        if #f.stale > 0 then row.findings_stale = f.stale end
+    end
     for k, v in pairs(extra or {}) do row[k] = v end
     return row
 end
