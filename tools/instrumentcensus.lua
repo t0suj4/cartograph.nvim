@@ -209,6 +209,20 @@ local function mode_entries(file, tname)
     if not entries then
         print(('no table %q found in %s'):format(tname, file)); os.exit(2)
     end
+    -- ⚠⚠ AN EMPTY LITERAL THAT IS POPULATED ELSEWHERE MUST REFUSE, NOT REPORT
+    -- ZERO. `JAVA_SERVICE_MARKERS = {}` followed by a loop that fills it is a
+    -- common idiom here, and the first version of this tool answered "0 of the 0
+    -- declared entries [exhaustive]" for it — a confident EXHAUSTIVE claim over a
+    -- scope it had failed to read, which is precisely the failure this tool
+    -- exists to detect. The reader sees a table CONSTRUCTOR; entries added by a
+    -- later loop or assignment are invisible to it, so say so.
+    if #entries == 0 and src:find(tname .. '%[') then
+        print(('%s is EMPTY as a literal but is indexed elsewhere in the file — '
+            .. 'its entries are added by code this reader cannot see (a loop, a '
+            .. 'later assignment). REFUSING rather than reporting an exhaustive '
+            .. 'zero over a scope that was never read.'):format(tname))
+        os.exit(2)
+    end
     print(('%s %s — %d entries\n'):format(file, tname, #entries))
     -- ★ A COPY OF THE WORKING TREE, never the tree itself. An ablation that dies
     -- mid-run must not leave a mutated source behind; and it copies the WORKING

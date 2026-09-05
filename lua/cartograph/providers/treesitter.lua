@@ -1768,13 +1768,30 @@ local function resolve_interface(cv, implements, beans, extends, exact, addref, 
     end
     -- SERVICE TYPES: interfaces transitively extending a marker (fixpoint over
     -- the interface-extends edges, seeded by the marker set)
+    --
+    -- ★★ THE VALUE IS THE MARKER, NOT `true` (CART-0756). This widens a call's
+    -- candidate set from `beanimpls` to ALL implementers, so "why does this
+    -- interface draw from every implementer?" is a question the answer has to be
+    -- able to carry — and a boolean cannot. sinkflow's taint fixpoint already
+    -- shows the shape: it propagates a WITNESS, with a precedence rule for which
+    -- witness survives, rather than a bit.
+    --
+    -- ★ AND IT RECORDS THE ORIGIN MARKER, NOT THE PARENT THAT PASSED IT ALONG.
+    -- Naming the immediate parent is the attribution bug CART-0755 measured on a
+    -- derivation chain: after two hops the accused step is one that merely
+    -- inherited the property, while the marker that actually justified it goes
+    -- unnamed. `svc[p]` already holds ITS origin, so inheriting the value —
+    -- rather than storing `p` — keeps the root at every depth for free.
     local svc = {}
     for _ = 1, SUPER_STEP_LIMIT do
         local changed = false
         for child, parents in pairs(ifext) do
             if not svc[child] then
                 for _, p in ipairs(parents) do
-                    if markers[p] or svc[p] then svc[child] = true; changed = true; break end
+                    -- a DIRECT marker names itself; an inherited one carries the
+                    -- root through unchanged
+                    local origin = markers[p] and p or svc[p]
+                    if origin then svc[child] = origin; changed = true; break end
                 end
             end
         end
@@ -1807,6 +1824,12 @@ local function resolve_interface(cv, implements, beans, extends, exact, addref, 
             local head, sep, method = cfull:match('^([%w_]+)([:.]+)([%w_]+)$')
             -- a service-marked interface draws from ALL implementers; otherwise
             -- only @stereotype beans are candidates
+            -- ⚠ `svc[head]` IS NOW A MARKER NAME, NOT A BOOLEAN, and this test
+            -- is unchanged BECAUSE it only asks truthiness — which is also the
+            -- honest limit of this fix: the marker is recorded and nothing yet
+            -- reads it. `svc` never leaves this function, so no alibi can cite
+            -- it; carrying it across the seam is a `data` field, with the
+            -- closed-schema and parallel-merge cost that implies (CART-0756).
             local set = head and (svc[head] and allimpls[head] or beanimpls[head])
             if set then
                 local only, cnt = nil, 0

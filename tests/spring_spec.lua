@@ -291,6 +291,49 @@ test('spring: inline Services.get(IFoo.class).m() resolves to the impl', functio
     eq(nm['ProductBL::doInline'].id, c.to) -- locator return-type + marker gate
 end)
 
+-- ★★ THE TRANSITIVE CASE — WHICH IS WHY THE MARKER PROPAGATION IS A FIXPOINT AT
+-- ALL, AND WAS UNTESTED (CART-0756). The tests above cover ONE hop (IProductBL
+-- extends ISingletonService) and zero hops (the negative below); nothing
+-- exercised a chain, so the loop that exists to walk one could have been deleted
+-- and the suite would have stayed green.
+--
+-- ★ IT IS ALSO THE ARM THAT MAKES THE PROVENANCE FIX MEANINGFUL. `svc[child]`
+-- now records the ORIGIN MARKER rather than `true` or the parent that passed it
+-- along — the attribution bug CART-0755 measured on a derivation chain, where
+-- after two hops the named step is one that merely INHERITED the property. Two
+-- hops is the shortest chain on which origin and parent differ.
+local SVCCHAIN = {
+    ['ISingletonService.java'] = 'package svc;\npublic interface ISingletonService {}\n',
+    -- the MIDDLE link: carries no marker of its own, only an inherited one
+    ['IBaseBL.java'] = 'package svc;\npublic interface IBaseBL extends ISingletonService {}\n',
+    ['IOrderBL.java'] =
+        'package svc;\npublic interface IOrderBL extends IBaseBL { void ship(); }\n',
+    ['OrderBL.java'] = table.concat({
+        'package svc;',
+        'public class OrderBL implements IOrderBL { public void ship() {} }',
+    }, '\n'),
+    ['Consumer2.java'] = table.concat({
+        'package svc;',
+        'public class Consumer2 {',
+        '  private final IOrderBL bl = null;',
+        '  public void go() { bl.ship(); }',
+        '}',
+    }, '\n'),
+}
+
+test('spring: a marker inherited through TWO hops still gates the redirect', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(SVCCHAIN)
+    local nm = byname(data)
+    ok(not (data.beans or {})['OrderBL'], 'the impl is NOT a @stereotype bean')
+    local c = callof(data, 'IOrderBL::ship')
+    ok(c, 'the interface-typed call is present')
+    -- IOrderBL -> IBaseBL -> ISingletonService: the middle link has no marker of
+    -- its own, so only the FIXPOINT can certify IOrderBL
+    eq(nm['OrderBL::ship'].id, c.to)
+    ok(c.inferred, 'inferred (~)')
+end)
+
 -- the marker IS the gate: the same shape WITHOUT the service marker (and no
 -- @stereotype) must NOT redirect — counting all impls unconditionally would be
 -- the unsound generalization the gates exist to prevent.
