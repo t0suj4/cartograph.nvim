@@ -999,7 +999,17 @@ function M.element_template(container)
             -- refuses on a non-zero count rather than guessing; the probe above
             -- says the count is zero today, and this is what would tell us it
             -- stopped being.
-            if key then varying[key] = h.kind else unkeyed = unkeyed + 1 end
+            --
+            -- ★ THE SPAN IS KEPT, NOT JUST THE KIND (CART-0766 step C). `M.match`
+            -- only ever asks whether a key is present, but `M.render` has to
+            -- SUBSTITUTE at that position, so it needs the range back — and
+            -- re-deriving it from the key string would be parsing a key we
+            -- formatted, which is the pattern CART-0746 cost a day to.
+            if key then
+                varying[key] = { kind = h.kind, at = h.at_a, encloses = h.at_encloses }
+            else
+                unkeyed = unkeyed + 1
+            end
         end
     end
     return { n = #ms, alignable = alignable, donor = ms[1], holes = holes,
@@ -1822,6 +1832,274 @@ function M.match(tmpl, payload, opts)
             features = flist, mismatches = mismatches, structs = structs,
             premise = premise,
         } }
+end
+
+-- ── render: instantiate a template by SUBSTITUTING INTO THE DONOR'S TEXT ──────
+-- CART-0766 step C, and the cheap half of the whole design. The expression IR is
+-- documented as LOSSY ABOUT SURFACE, so instantiating a template by EMITTING from
+-- it is the transliteration problem — quote style, indentation, trailing comma,
+-- alignment, every one of them guessed. Substituting into a real member's own
+-- source text guesses none of them: the donor IS the surrounding style rather
+-- than an imitation of it, and every hole already carries the exact span to write
+-- at. Nothing new is needed but the slicing.
+--
+-- ⚠ THE SPAN CONVENTION IS DERIVED FROM ITS IMPLEMENTATION, NOT ASSUMED. Measured
+-- against a known snippet: lines and columns are 0-BASED and the end is
+-- EXCLUSIVE, so a span slices as `line:sub(sc + 1, ec)` — which agrees with
+-- `txn.edit_file`'s `l:sub(1, sc) .. to .. l:sub(ec + 1)`. The check took one
+-- throwaway render and would have been a silent off-by-one either way.
+
+-- text is 1-based lines (as `store.content` returns) or one string
+local function as_lines(src)
+    if type(src) == 'table' then return src end
+    if type(src) ~= 'string' then return nil end
+    local out, i = {}, 1
+    while true do
+        local j = src:find('\n', i, true)
+        if not j then out[#out + 1] = src:sub(i); return out end
+        out[#out + 1] = src:sub(i, j - 1); i = j + 1
+    end
+end
+
+-- the source text a span covers, or nil if the lines do not reach it
+local function slice(lines, a)
+    if not a then return nil end
+    local sl, sc, el, ec = at.sl(a), at.sc(a), at.el(a), at.ec(a)
+    if not lines[sl + 1] or not lines[el + 1] then return nil end
+    if sl == el then return lines[sl + 1]:sub(sc + 1, ec) end
+    local out = {}
+    for ln = sl, el do
+        local l = lines[ln + 1]
+        if ln == sl then out[#out + 1] = l:sub(sc + 1)
+        elseif ln == el then out[#out + 1] = l:sub(1, ec)
+        else out[#out + 1] = l end
+    end
+    return table.concat(out, '\n')
+end
+
+-- does span `inner` sit inside span `outer`? (used to drop holes a wider slice
+-- already carries — a `field` hole's span CONTAINS its base's holes by
+-- construction, so nesting here is normal, not a malformed template)
+local function spans_contain(outer, inner)
+    local osl, osc, oel, oec = at.sl(outer), at.sc(outer), at.el(outer), at.ec(outer)
+    local isl, isc, iel, iec = at.sl(inner), at.sc(inner), at.el(inner), at.ec(inner)
+    local after_start = isl > osl or (isl == osl and isc >= osc)
+    local before_end = iel < oel or (iel == oel and iec <= oec)
+    return after_start and before_end and not (isl == osl and isc == osc and iel == oel and iec == oec)
+end
+
+--- The substitution map a SUCCESSFUL match implies — TOTAL over the template's
+--- varying positions, sliced from real source on both sides.
+---
+--- ★★ THE REPLACEMENT TEXT MUST BE SLICED, NOT TAKEN FROM THE BINDING. A hole's
+--- `a`/`b` are `tostring(e.v)` — the stored VALUE, not the source text.
+--- ⚠ AND THE WITNESS IS NUMERIC, WHICH IS NOT WHERE THIS WAS FIRST LOOKED FOR. A
+--- string literal's `v` DOES carry its quotes (`'AA'`, `"BB"`, `[[CC]]`), so a
+--- string-only fixture PASSES with the binding spliced directly and proves
+--- nothing — the break that should have failed did not, which is what sent me to
+--- read the builder instead of trusting the claim. A NUMBER is normalised:
+--- `0x1F` is stored as `31`, so splicing the value renders `31` where the source
+--- wrote `0x1F`. That is a real corruption of intent for flags, masks and
+--- colours, and across languages it is worse than cosmetic — go's `0755` is octal
+--- 493 and rust's is decimal 755. The payload's own SPAN is the only honest
+--- source of the payload's text.
+---
+--- ★★ AND IT MUST BE TOTAL, WHICH IS THE MISTAKE THIS FUNCTION MADE FIRST. A
+--- match's BINDINGS are the positions where THIS payload differs from the donor;
+--- a template's VARYING set is every position where ANY member does. Those are
+--- not the same set, and a "map of what differs" is not a "map of what to write":
+--- where a payload happens to agree with the donor the hole still has to be
+--- filled, with the donor's own text. Rendering without that refused 37 of 1184
+--- otherwise-valid instantiations, and the refusal read as a bug in the caller.
+---@param tmpl table     an `M.element_template` result
+---@param m table        an `M.match` result with `ok == true`
+---@param payload_src string|table the payload's source (string or lines)
+---@param donor_src string|table   the donor's source (string or lines)
+---@return table|nil subs, string|nil why
+function M.subs_of(tmpl, m, payload_src, donor_src)
+    if type(tmpl) ~= 'table' or not tmpl.varying then return nil, 'no template' end
+    if type(m) ~= 'table' or not m.ok then return nil, 'the match did not succeed' end
+    local plines, dlines = as_lines(payload_src), as_lines(donor_src)
+    if not plines then return nil, 'no payload source' end
+    if not dlines then return nil, 'no donor source' end
+    local bykey = {}
+    for _, b in ipairs(m.bindings or {}) do
+        -- ⚠ AN OPERATOR BINDING CANNOT BE RENDERED, and says so by name rather
+        -- than arriving downstream as a mysteriously unfilled hole. Its span is
+        -- the ENCLOSING expression (step B's `at_encloses`), so writing there
+        -- would replace the operands along with the operator.
+        if b.site == false then
+            return nil, 'an operator binding has no substitution site — its span '
+                .. 'is the enclosing expression'
+        end
+        bykey[span_key(b.at)] = b
+    end
+    local subs = {}
+    for key, v in pairs(tmpl.varying) do
+        local b = bykey[key]
+        local text = b and slice(plines, b.at_payload) or slice(dlines, v.at)
+        if text == nil then
+            return nil, 'a source does not reach one of its own spans (' .. key .. ')'
+        end
+        subs[key] = text
+    end
+    return subs
+end
+
+--- Render a NEW member from the template, by substituting into the donor's text.
+---@param tmpl table    an `M.element_template` result
+---@param subs table    span key (from `tmpl.varying`) -> replacement SOURCE TEXT
+---@param donor_src string|table the donor's file source (string or lines)
+---@param opts table|nil {
+---   verify = function(text) -> expr node|nil   -- reparse the rendered member
+---   unverified = true  -- render WITHOUT reparsing; display only, never a write
+--- }
+---@return string|nil rendered, string|nil why, table|nil detail
+function M.render(tmpl, subs, donor_src, opts)
+    opts = opts or {}
+    if type(tmpl) ~= 'table' or not tmpl.donor or not tmpl.donor.at then
+        return nil, 'no template with a located donor'
+    end
+    if not tmpl.alignable then
+        return nil, 'the container\'s members do not share a shape'
+    end
+    if (tmpl.unkeyed or 0) > 0 then
+        return nil, 'the template has holes with no source span'
+    end
+    -- ⚠⚠ AN UNVERIFIED RENDER IS A GUESS ABOUT SURFACE, so this refuses rather
+    -- than relying on a caller to remember. See THE BRACKET BUG below for what
+    -- the guess costs; the opt-out exists for display, where nothing is written.
+    if not opts.verify and not opts.unverified then
+        return nil, 'render needs `opts.verify` (a reparse) or an explicit '
+            .. '`opts.unverified` — substituting into text is not a proof that '
+            .. 'the result parses to the shape it was built from'
+    end
+    local lines = as_lines(donor_src)
+    if not lines then return nil, 'no donor source' end
+    subs = subs or {}
+
+    -- EVERY VARYING HOLE MUST BE SUPPLIED. Carrying the donor's own value through
+    -- an unfilled hole is not a safe default: for a KEYED container the varying
+    -- position IS the key, so the render would emit a member with the donor's key
+    -- and the caller's value — a DUPLICATE KEY, a bug the caller asked for and
+    -- never saw. Refusing names the holes instead. (`M.subs_of` is total over
+    -- exactly this set, so a match-derived render never trips it.)
+    local reps, unfilled = {}, {}
+    for key, v in pairs(tmpl.varying) do
+        local text = subs[key]
+        if text == nil then
+            unfilled[#unfilled + 1] = ('%s at %s'):format(v.kind, key)
+        elseif v.encloses then
+            return nil, 'a hole whose span is its ENCLOSING expression cannot be '
+                .. 'written to (operator holes)', { at = v.at, kind = v.kind }
+        elseif at.sl(v.at) ~= at.el(v.at) then
+            -- ⚠ FIRST-CUT REFUSAL, with its population measured rather than
+            -- assumed small: a multi-line hole span. The splice below rebases a
+            -- span into the donor's own coordinates and rewrites ONE line, which
+            -- is exactly the assumption `txn.edit_file` makes and never states.
+            return nil, 'a hole spanning more than one line is not renderable yet',
+                { at = v.at, kind = v.kind }
+        else
+            reps[#reps + 1] = { at = v.at, to = text, kind = v.kind, key = key }
+        end
+    end
+    if #unfilled > 0 then
+        table.sort(unfilled)
+        return nil, 'unfilled hole(s): ' .. table.concat(unfilled, ', '),
+            { unfilled = unfilled }
+    end
+
+    -- ★ NESTED HOLES: THE WIDER SPAN SUBSUMES THE NARROWER, and that is a rule
+    -- rather than a preference. A `field` hole's span CONTAINS its base's holes
+    -- by construction, so nesting here is normal. `varying` deliberately keeps
+    -- both — dropping the inner one would make `M.match` call a payload that
+    -- differs only at the base a MISMATCH, when the members demonstrably vary
+    -- there — so the pruning belongs at render, where "what do I write" is the
+    -- question. The subsumed keys are reported, never silently dropped.
+    local subsumed = {}
+    local outer = {}
+    for _, r in ipairs(reps) do
+        local covered = false
+        for _, o in ipairs(reps) do
+            if o ~= r and spans_contain(o.at, r.at) then covered = true end
+        end
+        if covered then subsumed[#subsumed + 1] = r.key else outer[#outer + 1] = r end
+    end
+    reps = outer
+
+    -- REBASE INTO THE DONOR'S OWN COORDINATES, then splice. Cutting the donor out
+    -- FIRST and rebasing is what keeps this correct: applying the replacements to
+    -- the file and cutting afterwards would need the donor's end column, which the
+    -- replacements have just moved.
+    local dsl, dsc, del = at.sl(tmpl.donor.at), at.sc(tmpl.donor.at), at.el(tmpl.donor.at)
+    local dtext = slice(lines, tmpl.donor.at)
+    if not dtext then return nil, 'the donor source does not reach the donor span' end
+    local dlines = as_lines(dtext)
+    for _, r in ipairs(reps) do
+        local l = at.sl(r.at) - dsl
+        if l < 0 or l > del - dsl then
+            return nil, 'a hole lies outside its own donor', { key = r.key }
+        end
+        local off = (at.sl(r.at) == dsl) and dsc or 0
+        r.line, r.sc, r.ec = l, at.sc(r.at) - off, at.ec(r.at) - off
+    end
+    -- ★ RIGHTMOST-FIRST, AND THE REASON IS WORTH KEEPING: two replacements on one
+    -- line applied left to right have the first shift the second's columns and
+    -- corrupt it. `txn.edit_file` carries the same rule and the same comment; this
+    -- is a deliberate second, small splicer rather than a reuse, because
+    -- `edit_file` splits with `vim.split` (this module is plain Lua, and the
+    -- headless index flows load it) and assumes single-line reps without saying
+    -- so. The oracle below verifies this one far past that.
+    table.sort(reps, function (a, b)
+        if a.line ~= b.line then return a.line > b.line end
+        return a.sc > b.sc
+    end)
+    for _, r in ipairs(reps) do
+        local l = dlines[r.line + 1]
+        if not l then return nil, 'a hole lies outside its own donor', { key = r.key } end
+        dlines[r.line + 1] = l:sub(1, r.sc) .. r.to .. l:sub(r.ec + 1)
+    end
+    local out = table.concat(dlines, '\n')
+    local detail = { subsumed = subsumed, verified = false }
+
+    -- ★★★ THE BRACKET BUG, AND WHY VERIFICATION IS NOT OPTIONAL POLISH.
+    -- Substituting into the donor's text buys the surface OUTSIDE the holes for
+    -- free — indentation, quote style, trailing comma — because the donor IS the
+    -- surrounding style. It buys NOTHING about surface the IR erased INSIDE a
+    -- hole, and there is at least one such erasure in every language here.
+    -- MEASURED on our own tree: `{ start = {...}, ['end'] = {...} }` — a
+    -- BRACKETED key beside an unbracketed one, because `end` is a lua keyword.
+    -- The IR records both as a `lit` str key, so they anti-unify as ONE shape
+    -- with ONE hole, `match` says ok, and the render substitutes `start` -> 'end'
+    -- to produce
+    --       'end' = { line = 9 }
+    -- which is not valid Lua at all. The brackets belong to neither span. 63 of
+    -- 1184 renders on our own tree (5.3%) were this, and EVERY ONE of them looked
+    -- perfectly well-formed as a string.
+    --
+    -- ★★ THE FIX IS NOT A BRACKET RULE. Special-casing lua keys would leave the
+    -- same class open in every other language and in every other erasure. Emit,
+    -- REPARSE, and require the result to fit the template it was built from —
+    -- which is `M.match` applied to the render's own output, so step C is
+    -- verified by step B. Holes come back keyed by the DONOR's spans (the left
+    -- side of `anti_unify` is always the donor), so a fresh parse in snippet
+    -- coordinates compares correctly. This is the round-trip oracle the
+    -- transliteration arc already relies on, and it needs no calibration: the two
+    -- sides share the walk and nothing else.
+    if opts.verify then
+        local ok, ir = pcall(opts.verify, out)
+        if not ok or not ir then
+            return nil, 'the rendered member did not reparse — the substitution '
+                .. 'produced text the grammar does not accept', { rendered = out }
+        end
+        local back = M.match(tmpl, ir)
+        if not back.ok then
+            return nil, 'the rendered member reparsed to a DIFFERENT shape than '
+                .. 'the template it was built from', { rendered = out, refusal = back.refusal }
+        end
+        detail.verified = true
+    end
+    return out, nil, detail
 end
 
 --- Census the divergences the current hole taxonomy cannot name.

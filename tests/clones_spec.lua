@@ -1166,3 +1166,159 @@ test('clones: an operator BINDS where the members vary, with site = false', func
         'flagged NOT a substitution site — step C must refuse rather than overwrite '
         .. 'the operands along with the operator')
 end)
+
+-- ── render: substitute into the DONOR'S TEXT (CART-0766 step C) ──────────────
+-- The IR is LOSSY ABOUT SURFACE, so instantiating a template by EMITTING from it
+-- is the transliteration problem — quote style, indentation, trailing comma, all
+-- guessed. Substituting into a real member's own source guesses none of them: the
+-- donor IS the surrounding style rather than an imitation of it.
+
+-- reparse a rendered member by wrapping it back into a container
+local function reparse_member(text)
+    local src = 'local T = { ' .. text .. ' }'
+    local okp, p = pcall(vim.treesitter.get_string_parser, src, 'lua')
+    if not okp or not p then return nil end
+    local c = container_of(src)
+    return c and c.kids and c.kids[1]
+end
+local VERIFY = { verify = reparse_member }
+
+test('clones: a rendered member round-trips through a reparse', function ()
+    if not ready() then return skip 'no lua parser' end
+    local src = "local T = { alpha = 'AA', beta = 'BB' }"
+    local t = clones.element_template(container_of(src))
+    local p = container_of("local P = { gamma = 'CC' }").kids[1]
+    local m = clones.match(t, p, { lang = 'lua' })
+    eq(true, m.ok)
+    local subs = assert(clones.subs_of(t, m, "local P = { gamma = 'CC' }", src))
+    local out, why, detail = clones.render(t, subs, src, VERIFY)
+    ok(out, 'rendered: ' .. tostring(why))
+    eq("gamma = 'CC'", out)
+    eq(true, detail.verified)
+end)
+
+-- ★★ THE REPLACEMENT IS SLICED FROM SOURCE, NOT TAKEN FROM THE BINDING — and the
+-- witness is NUMERIC, which is not where this was first looked for. A string
+-- literal's `v` DOES carry its quotes, so a string fixture passes either way and
+-- proves nothing (the break that should have failed did not, which is what sent
+-- me to read the builder rather than trust the claim). A NUMBER is normalised:
+-- `0x1F` is stored as `31`. Splicing the value would render `31` where the source
+-- wrote `0x1F` — a real corruption of intent for a flag or a mask, and across
+-- languages worse than cosmetic: go's `0755` is octal 493, rust's is decimal 755.
+test('clones: a hex literal renders as WRITTEN, not as its normalised value', function ()
+    if not ready() then return skip 'no lua parser' end
+    local src = "local T = { a = 1, b = 2 }"
+    local psrc = 'local P = { c = 0x1F }'
+    local t = clones.element_template(container_of(src))
+    local m = clones.match(t, container_of(psrc).kids[1], { lang = 'lua' })
+    eq(true, m.ok)
+    local subs = assert(clones.subs_of(t, m, psrc, src))
+    eq('c = 0x1F', clones.render(t, subs, src, VERIFY),
+        'the IR stores 31; only the payload SOURCE knows it was written 0x1F')
+end)
+
+-- and the string case still holds, for the style the quotes carry
+test('clones: a string-valued hole keeps the payload\'s own quote style', function ()
+    if not ready() then return skip 'no lua parser' end
+    local src = "local T = { a = 'AA', b = 'BB' }"
+    local psrc = 'local P = { c = "CC" }'
+    local t = clones.element_template(container_of(src))
+    local m = clones.match(t, container_of(psrc).kids[1], { lang = 'lua' })
+    eq(true, m.ok)
+    local subs = assert(clones.subs_of(t, m, psrc, src))
+    eq('c = "CC"', clones.render(t, subs, src, VERIFY))
+end)
+
+-- ★★★ THE BRACKET BUG — the reason verification is not optional polish. Our own
+-- tree is full of `{ start = {...}, ['end'] = {...} }`, because `end` is a lua
+-- keyword. The IR records BOTH as a `lit` str key, so they anti-unify as one
+-- shape with one hole and `match` says ok — and the render then produces
+-- `'end' = {...}`, which is not valid Lua at all: the brackets belong to neither
+-- span. 63 of 1184 renders on our own tree were this, every one of them
+-- well-formed as a STRING. Special-casing lua keys would leave the same class
+-- open in every other language; reparsing closes all of it.
+test('clones: a render that reparses to a DIFFERENT shape is refused', function ()
+    if not ready() then return skip 'no lua parser' end
+    local src = "local T = { start = { line = 0 }, ['end'] = { line = 9 } }"
+    local c = container_of(src)
+    local t = clones.element_template(c)
+    eq(true, t.alignable, 'the IR erases bracketedness, so these DO share a shape')
+    local m = clones.match(t, c.kids[2], { lang = 'lua' })
+    eq(true, m.ok, 'and the match succeeds — nothing before the reparse can tell')
+    local subs = assert(clones.subs_of(t, m, src, src))
+    local raw = clones.render(t, subs, src, { unverified = true })
+    eq("'end' = { line = 9 }", raw, 'the unverified render IS the broken text')
+    local out, why = clones.render(t, subs, src, VERIFY)
+    eq(nil, out, 'and verification refuses it')
+    ok(why:find('reparse') or why:find('DIFFERENT shape'), why)
+end)
+
+test('clones: render refuses without a verifier, rather than trusting the caller', function ()
+    if not ready() then return skip 'no lua parser' end
+    local src = "local T = { a = 1, b = 2 }"
+    local t = clones.element_template(container_of(src))
+    local out, why = clones.render(t, {}, src)
+    eq(nil, out)
+    ok(why:find('verify'), why)
+end)
+
+-- ★★ A "MAP OF WHAT DIFFERS" IS NOT A "MAP OF WHAT TO WRITE". A match's BINDINGS
+-- are where THIS payload differs from the donor; a template's VARYING set is
+-- where ANY member does. Where a payload happens to AGREE with the donor the hole
+-- still has to be filled — with the donor's own text. Getting this wrong refused
+-- 37 of 1184 otherwise-valid instantiations, and the refusal read as a caller bug.
+test('clones: subs_of is TOTAL over the varying set, not just over the bindings', function ()
+    if not ready() then return skip 'no lua parser' end
+    -- three members: the KEY varies across all of them, the VALUE only at `c`
+    local src = "local T = { a = 1, b = 1, c = 9 }"
+    local psrc = "local P = { d = 1 }"
+    local t = clones.element_template(container_of(src))
+    local m = clones.match(t, container_of(psrc).kids[1], { lang = 'lua' })
+    eq(true, m.ok)
+    local subs = assert(clones.subs_of(t, m, psrc, src))
+    local n = 0
+    for _ in pairs(subs) do n = n + 1 end
+    local v = 0
+    for _ in pairs(t.varying) do v = v + 1 end
+    eq(v, n, 'every varying position is filled, including the one the payload agrees at')
+    eq('d = 1', clones.render(t, subs, src, VERIFY))
+end)
+
+test('clones: render refuses an unfilled hole rather than keeping the donor value', function ()
+    if not ready() then return skip 'no lua parser' end
+    -- a KEYED container: the varying position IS the key, so carrying the donor's
+    -- value through would emit a DUPLICATE KEY the caller never asked for
+    local src = "local T = { a = 1, b = 2 }"
+    local t = clones.element_template(container_of(src))
+    local out, why, detail = clones.render(t, {}, src, VERIFY)
+    eq(nil, out)
+    ok(why:find('unfilled'), why)
+    ok(detail.unfilled and #detail.unfilled > 0, 'and names them')
+end)
+
+test('clones: subs_of refuses an operator binding by name', function ()
+    if not ready() then return skip 'no lua parser' end
+    local src = "local T = { a + b, a - b }"
+    local psrc = "local P = { a * b }"
+    local t = clones.element_template(container_of(src))
+    local m = clones.match(t, container_of(psrc).kids[1], { lang = 'lua' })
+    eq(true, m.ok)
+    local subs, why = clones.subs_of(t, m, psrc, src)
+    eq(nil, subs)
+    ok(why:find('operator'), why)
+end)
+
+-- ★ TWO HOLES ON ONE LINE, WITH DIFFERENT LENGTHS. Applied left to right the
+-- first splice shifts the second's columns and corrupts it, which is why the
+-- reps sort rightmost-first — the same rule and the same reason `txn.edit_file`
+-- carries. Equal-length substitutions would pass either way and hide it.
+test('clones: two holes on one line render rightmost-first', function ()
+    if not ready() then return skip 'no lua parser' end
+    local src = "local T = { a = 1, bb = 22 }"
+    local psrc = "local P = { ccc = 333 }"
+    local t = clones.element_template(container_of(src))
+    local m = clones.match(t, container_of(psrc).kids[1], { lang = 'lua' })
+    eq(true, m.ok)
+    local subs = assert(clones.subs_of(t, m, psrc, src))
+    eq('ccc = 333', clones.render(t, subs, src, VERIFY))
+end)
