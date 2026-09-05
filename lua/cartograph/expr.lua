@@ -99,7 +99,14 @@ local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or 
 --- answer but a WRONG one — C's `010` is 8 and Lua's `tonumber` says 10. Keyed on
 --- the node type because it is a property of the SPELLING: lua's `number` node
 --- means 10 by the same text, and refusing it there would break a working answer.
-local OCTAL_ZERO_PREFIX = { number_literal = true }  -- c, c++
+--- ★★ AND MEMBERSHIP HERE IS A PER-LANGUAGE FACT, NOT A FAMILY ONE (CART-0745).
+--- GO's `0755` IS OCTAL 493. RUST's `0755` IS DECIMAL 755 — rust spells octal
+--- `0o` ONLY, and a bare leading zero is just a decimal digit. The two grammars
+--- name the node differently (`int_literal` vs `integer_literal`), so the
+--- distinction is expressible; putting rust's in here would mint 493 where the
+--- source says 755, which is the fabrication this table exists to prevent.
+local OCTAL_ZERO_PREFIX = { number_literal = true,   -- c, c++
+    int_literal = true }                             -- go  (NOT rust's integer_literal)
 --- ...and node types that NAME their base outright, so no text is sniffed at all.
 --- java gives each base its own spelling; C gives them all one.
 local RADIX_BY_NODE = { hex_integer_literal = 16, octal_integer_literal = 8,
@@ -113,6 +120,10 @@ local function num_base(body, nodetype)
     if by_node then return by_node end
     if body:match('^0[xX]') then return 16 end
     if body:match('^0[bB]') then return 2 end
+    -- `0o755` — go, rust, python, js. UNAMBIGUOUS, so it needs no node-type gate:
+    -- the bare `0755` form is the one whose meaning differs by language, and that
+    -- is what OCTAL_ZERO_PREFIX keys. Same standing as `0x`/`0b` above.
+    if body:match('^0[oO]') then return 8 end
     if OCTAL_ZERO_PREFIX[nodetype] and body:match('^0[0-7]+$') then return 8 end
     return nil
 end
@@ -131,9 +142,27 @@ end
 --- where the source says THIRTY-ONE. A confident wrong value that looks
 --- complete is the exact failure this whole arc has been about, so only
 --- `[uUlL]` — which are never hex digits — come off a radix-prefixed body.
+--- rust writes the TYPE into the literal: `1u32`, `2.0f64`, `7usize`.
+--- ⚠ AND `f` IS A HEX DIGIT, so the strip is BASE-AWARE for the same reason the
+--- java/C one is: `0x1f64` is hex 8036, and treating its trailing `f64` as a
+--- suffix would read ONE. On a hex body only `i`/`u` may introduce a suffix —
+--- neither is a hex digit — while `f` may on a decimal one. The width is checked
+--- against rust's real set rather than `%d+`, so nothing else can look like one.
+local RUST_WIDTH = { ['8'] = true, ['16'] = true, ['32'] = true,
+    ['64'] = true, ['128'] = true }
+local RUST_SUFFIXED = { integer_literal = true, float_literal = true }
+local function strip_rust_suffix(body, base)
+    local letters = (base == 16) and '[iu]' or '[iuf]'
+    local head, digits = body:match('^(.-)' .. letters .. '(%d+)$')
+    if head and RUST_WIDTH[digits] then return head end
+    local h = body:match('^(.-)[iu]size$')
+    return h or body
+end
+
 local function num_value(raw, nodetype)
     local nosep = raw:gsub("[_']", '')
     local base = num_base(nosep, nodetype)
+    if RUST_SUFFIXED[nodetype] then nosep = strip_rust_suffix(nosep, base) end
     -- the answer every currently-working literal already gives, unchanged
     if base ~= 8 and base ~= 2 then
         local v = tonumber(raw)
@@ -148,7 +177,12 @@ local function num_value(raw, nodetype)
         return tonumber((nosep:gsub('^0[bB]', ''):gsub('[uUlL]+$', '')), 2), 2
     end
     if base == 8 then
-        return tonumber((nosep:gsub('^0', ''):gsub('[uUlL]+$', '')), 8), 8
+        -- ⚠ BOTH SPELLINGS. This stripped a bare leading `0` only — written for
+        -- C, which has no other form — and go/rust/python's `0o755` then reached
+        -- `tonumber('o755', 8)` = NIL, so the literal silently stayed `?`. Caught
+        -- by parsing one snippet per form rather than by trusting the base
+        -- lookup, which was answering 8 perfectly well the whole time.
+        return tonumber((nosep:gsub('^0[oO]?', ''):gsub('[uUlL]+$', '')), 8), 8
     end
     local v = tonumber(nosep)
     if v then return v, nil end
@@ -178,14 +212,37 @@ local LIT = { number = 'num', integer = 'num', float = 'num', string = 'str',
     -- trick of excluding octal by node type is not available here. The base is
     -- decided from the TEXT instead; see num_value and OCTAL_ZERO_PREFIX.
     number_literal = 'num', char_literal = 'str',
-    -- ⚠ `octal_integer_literal` AND `binary_integer_literal` ARE DELIBERATELY
-    -- ABSENT, and the reason is a measured wrong ANSWER rather than a missing
-    -- one. Java's `010` is EIGHT; Lua's `tonumber('010')` is TEN. Mapping them
-    -- here would mint `{k='lit', v=10}` — a confident, wrong constant feeding
-    -- eval, const-fold and optimize, which APPLIES rewrites. They stay `?`,
-    -- which is the honest unknown, until someone adds a radix-correct parse
-    -- with its own test. INCOMPLETE MAPS UNDER-REPORT; COLLIDING MAPS FABRICATE
-    -- — and so does a map that reads a value in the wrong base.
+    -- ── go (CART-0745). `true`/`false`/`nil` are their own node types and were
+    -- already covered by the shared names above, so only these are new.
+    int_literal = 'num', rune_literal = 'str',
+    interpreted_string_literal = 'str',
+    -- ⚠ `imaginary_literal` IS DELIBERATELY ABSENT. `1i` is a COMPLEX number and
+    -- the IR has no complex value, so the honest reading is `?`. Admitting it
+    -- would reach the decimal fallback, which strips a trailing letter and would
+    -- mint `{v = 1}` for `1i` — a real number where the source says an imaginary
+    -- one, and a value `eval` and const-fold would then propagate.
+    -- ── rust (CART-0745). `string_literal`, `char_literal` and `float_literal`
+    -- are shared with the names above and mean the same thing.
+    integer_literal = 'num', boolean_literal = 'bool',
+    -- ── go + rust, one meaning
+    float_literal = 'num',
+    -- ── go, rust AND c++ all spell an escape-free string this way, and all three
+    -- mean the same: a string whose body is text. Verified against the three
+    -- symbol tables before admitting it (CART-0744's rule).
+    raw_string_literal = 'str',
+    -- ⚠ THE NOTE BELOW IS KEPT AND ITS EXAMPLES ARE NOW STALE — READ IT AS THE
+    -- RULE, NOT AS A LIST. It said java's `octal_integer_literal` and
+    -- `binary_integer_literal` were absent; b7afe5a ADMITTED BOTH once
+    -- `num_base` could preserve the base, and they sit eleven lines above. The
+    -- REASONING is exactly why this file can now carry go's `int_literal` and
+    -- rust's `integer_literal` separately, so it earns its keep:
+    --
+    -- the reason is a measured wrong ANSWER rather than a missing one. Java's
+    -- `010` is EIGHT; Lua's `tonumber('010')` is TEN. Mapping such a name here
+    -- WITHOUT a radix-correct parse would mint `{k='lit', v=10}` — a confident,
+    -- wrong constant feeding eval, const-fold and optimize, which APPLIES
+    -- rewrites. INCOMPLETE MAPS UNDER-REPORT; COLLIDING MAPS FABRICATE — and so
+    -- does a map that reads a value in the wrong base.
 }
 local NAME = { identifier = true, name = true }
 -- THE PARTS OF A STRING THAT CARRY NO EXPRESSION. Everything else nested in a string node
@@ -230,8 +287,15 @@ end
 local STRING_INERT = { string_content = true, string_fragment = true,
     escape_sequence = true, string_start = true, string_end = true,
     raw_string_content = true,
-    character = true }  -- the sole child of a C/C++ `char_literal`: text, not an
+    character = true,   -- the sole child of a C/C++ `char_literal`: text, not an
                         -- expression, so `'c'` is a literal and not an interpolation
+    -- go names its string bodies after the string (CART-0745), and C++'s raw
+    -- string carries its own `R"delim(` marker as a child. Both are TEXT; without
+    -- them the enclosing literal reads as an INTERPOLATION and every one of these
+    -- strings stays `?`.
+    interpreted_string_literal_content = true,   -- go
+    raw_string_literal_content = true,           -- go
+    raw_string_delimiter = true }                -- c++
 -- LANGUAGE COVERAGE IS PARTIAL, AND JAVA IS ESSENTIALLY UNMODELLED. Measured
 -- 2026-07-26 on 200 java functions from the elasticsearch libs corpus: 766 rows
 -- carrying expressions, 2074 OPAQUE (`?`) nodes, ZERO field nodes, zero dotted

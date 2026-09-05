@@ -1541,3 +1541,107 @@ test('expr: every SOLE_WRAP name belongs to exactly one grammar', function ()
             'the symbol table is really being read — java declares expression_statement')
     end
 end)
+
+--- every literal / opaque-literal node in a function body, through flow+expr.
+--- ⚠ IT COLLECTS `cond` TOO, and that is not tidiness: rust's `let_declaration`
+--- carries a `value` FIELD, so harvest_row's control-head branch claims it and
+--- every rust initialiser lands in `cond` rather than `rhs` (CART-0750). A
+--- collector that read only `rhs` would report rust as having NO literals at all
+--- and I would have "fixed" a language that was already working.
+local function litset(src, lang, fnt)
+    local root = vim.treesitter.get_string_parser(src, lang):parse()[1]:root()
+    local fn
+    local function ff(n)
+        if fn then return end
+        if n:type() == fnt then fn = n; return end
+        for c in n:iter_children() do if c:named() then ff(c) end end
+    end
+    ff(root)
+    if not fn then return {} end
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, h) return expr.harvest_row(nd, s, h, lang) end })
+    local out = {}
+    local function take(e)
+        expr.walk(e, function (x)
+            if x.k == 'lit' or (x.k == '?' and (x.t or ''):find('literal')) then
+                out[#out + 1] = x
+            end
+        end)
+    end
+    for _, r in ipairs(fl.stmts or {}) do
+        if r.expr then
+            for _, side in ipairs({ 'lhs', 'rhs' }) do
+                for _, e in ipairs(r.expr[side] or {}) do take(e) end
+            end
+            take(r.expr.cond)
+        end
+    end
+    return out
+end
+
+-- CART-0745. GO AND RUST LITERALS. CART-0224 (java/php) and CART-0742 (C/C++)
+-- one family over, with the base machinery already shipped — but the two
+-- languages DISAGREE about the one form that has no prefix, and that is the
+-- whole reason this needs a test rather than a list of names.
+--
+-- ★★ GO's `0755` IS OCTAL 493. RUST's `0755` IS DECIMAL 755. Rust spells octal
+-- `0o` only, so a bare leading zero is just a digit. The grammars name the node
+-- differently (`int_literal` vs `integer_literal`), so OCTAL_ZERO_PREFIX can
+-- hold one and not the other — and putting rust's in would mint 493 where the
+-- source says 755.
+test('go: every base reads correctly, and a bare 0755 is OCTAL', function ()
+    if not ready('go') then skip 'no go parser' end
+    local src = table.concat({ 'package m', 'func f() int {',
+        '  a := 42; b := 0755; c := 0o755; d := 0x1f; e := 0b1010; g := 1_000',
+        '  h := 3.14; j := "hi"; k := `raw`; l := 1i',
+        '  _ = b; _ = c; _ = d; _ = e; _ = g; _ = h; _ = j; _ = k; _ = l',
+        '  return a', '}' }, '\n')
+    local seen, opaque = {}, {}
+    for _, e in ipairs(litset(src, 'go', 'function_declaration')) do
+        if e.k == 'lit' then
+            seen[('%s=%s@%s'):format(e.ty, tostring(e.v), tostring(e.base))] = true
+        elseif e.k == '?' then opaque[e.t] = true end
+    end
+    ok(seen['num=42@nil'], 'a decimal int has no base recorded')
+    ok(seen['num=493@8'], "go's bare `0755` is OCTAL 493 — the C rule, not rust's")
+    ok(seen['num=493@8'], '`0o755` is the same value by the other spelling')
+    ok(seen['num=31@16'] and seen['num=10@2'], 'hex and binary keep value and base')
+    ok(seen['num=1000@nil'], 'digit separators are stripped')
+    ok(seen['str="hi"@nil'], 'an interpreted string is a literal, not an interpolation')
+    ok(seen['str=`raw`@nil'], '...and so is a raw string')
+    -- ★ THE REFUSAL ARM: `1i` is a COMPLEX number and the IR has no complex
+    -- value. Admitting `imaginary_literal` would reach the decimal fallback,
+    -- which strips a trailing letter, and mint `{v = 1}` — a REAL number where
+    -- the source says an imaginary one, propagated by eval and const-fold.
+    ok(opaque['imaginary_literal'], '`1i` stays the honest unknown')
+end)
+
+test('rust: a bare 0755 is DECIMAL, and a type suffix never eats a hex digit', function ()
+    if not ready('rust') then skip 'no rust parser' end
+    local src = table.concat({ 'fn f() -> i32 {',
+        '  let a = 42; let b = 0755; let c = 0o755; let d = 0x1f;',
+        '  let e = 1u32; let g = 0x1_f64; let h = 0x1fu8; let i = 7usize;',
+        '  let j = "hi"; let k = true; let l = r"raw";', '  a', '}' }, '\n')
+    local vals = {}
+    for _, e in ipairs(litset(src, 'rust', 'function_item')) do
+        if e.k == 'lit' then vals[tostring(e.v)] = true end
+    end
+    ok(vals['755'], "rust's bare `0755` is DECIMAL 755 — NOT the C/go octal 493")
+    ok(vals['493'], '...while `0o755` IS 493, by the only octal spelling rust has')
+    ok(vals['31'], '`0x1f` is 31')
+    ok(vals['1'], '`1u32` drops its type suffix')
+    ok(vals['7'], '`7usize` drops the size-suffix form too')
+    -- ★★ THE ARM THAT PAYS FOR THE BASE-AWARE STRIP, AND IT TOOK TWO TRIES TO
+    -- WRITE ONE THAT BITES. `f` IS A HEX DIGIT, so reading `0x1f64`'s trailing
+    -- `f64` as a type suffix leaves `0x1` and answers ONE where the source says
+    -- 8036. But a PLAIN `0x1f64` never reaches the strip — Lua's `tonumber`
+    -- parses hex natively and returns 8036 first — so a base-blind strip passed
+    -- that arm and the guard proved nothing. The separator is what makes raw
+    -- parsing fail and hands the text to the strip: `0x1_f64`. On a hex body
+    -- only `i`/`u` may introduce a suffix, neither being a hex digit, which is
+    -- why `0x1fu8` below still resolves.
+    ok(vals['8036'], '`0x1_f64` is hex 8036 — its `f64` is DIGITS, not a suffix')
+    ok(vals['31'], '`0x1fu8` is 31 — `u8` on a hex body IS a suffix')
+    ok(vals['true'], 'rust spells its booleans `boolean_literal`')
+    ok(vals['"hi"'] and vals['r"raw"'], 'both string forms are literals')
+end)
