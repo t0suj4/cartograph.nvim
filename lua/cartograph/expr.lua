@@ -557,6 +557,23 @@ local TYPE_PRIM = { integral_type = true, floating_point_type = true,
 local PAREN = { parenthesized_expression = true }
 local UNWRAP = { expression_list = true, variable_list = true }
 
+-- STATEMENT WRAPPERS: a grammar that makes an assignment an EXPRESSION needs a
+-- statement node around it (js, python, c, c++, java, go, php, rust). Every one
+-- of those eight spells it `expression_statement`.
+--
+-- ★★ IT IS A SEPARATE TABLE FROM `UNWRAP` ON PURPOSE. `list_children` reads
+-- UNWRAP to mean "these children ARE the operands of the row" — true of an
+-- `expression_list`, false of a statement, whose sole child is the whole
+-- expression rather than one of several. Two meanings, two tables; putting
+-- `expression_statement` in UNWRAP would silently widen `list_children` too.
+--
+-- ★ AND IT IS ONE TABLE FOR BOTH USES. `harvest_row` reads it to split a
+-- wrapped PLAIN assignment into lhs/rhs (CART-0314); `build_core` reads it to
+-- unwrap the wrapper when the row falls through to the whole-node-is-a-value
+-- default (CART-0742). Two questions, one grammar fact — a second table would
+-- be one more place to forget a language.
+local STMT_WRAP = { expression_statement = true }
+
 -- ── the recursive harvest: a TS node → a schema expr ─────────────────────────
 local build, build_core
 
@@ -712,7 +729,22 @@ function build_core(node, src, lang)
     if not node then return { k = '?', t = '<nil>', kids = {} } end
     local t = node:type()
     if PAREN[t] then return build(node:named_child(0), src) end
-    if UNWRAP[t] then -- a list where one expr is expected: build the sole child, else `?`
+    -- ★ A STATEMENT WRAPPER IS NOT A VALUE (CART-0742). A row that is a bare
+    -- call — `foo();`, the commonest statement in every C-family language — falls
+    -- through `harvest_row` to its whole-node-is-a-value default, so `build` met
+    -- the `expression_statement` and emitted `?expression_statement(<call>)`. The
+    -- reads were always right (a `?` walks its kids) and everything keyed off the
+    -- STRUCTURE was wrong: `M.key` produced `?expression_statement(Cfoo())`, so a
+    -- call as a statement and the same call anywhere else were different
+    -- expressions to CSE, to the clone index and to the divergence census.
+    -- MEASURED as the top unread node type in EIGHT corpora, not the six the
+    -- ticket predicted — go and rust wrap their statements too.
+    --
+    -- ⚠ ONLY WHEN IT REALLY IS A SOLE CHILD, which is the same rule UNWRAP
+    -- already uses and it is load-bearing here: python's `expression_statement`
+    -- also spells a bare tuple (`a, b`), where the children are N operands and no
+    -- single one of them is the value. Those keep falling to `?`, correctly.
+    if UNWRAP[t] or STMT_WRAP[t] then -- one expr expected: build the sole child, else `?`
         local only, n = nil, 0
         for c in node:iter_children() do if c:named() and not tsutil.is_comment(c) then only = c; n = n + 1 end end
         if n == 1 then return build(only, src, lang) end
@@ -1047,9 +1079,6 @@ local function list_children(node) -- the named exprs of a *_list (or the node i
     return { node }
 end
 
--- statement wrappers: grammars that make an assignment an EXPRESSION need a
--- statement node around it (js, python, c, java, go).
-local STMT_WRAP = { expression_statement = true }
 local LOCALDECL = { variable_declaration = true, local_declaration = true,
     local_variable_declaration = true,
     -- js/ts `let`/`const`. Its absence had the same effect as the missing

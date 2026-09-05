@@ -121,10 +121,49 @@ local RECORDED = {
     --         Types now key BY NAME in all three structural keys, so pairs that
     --         differed only in a type stop matching — pairs scanned 2435 -> 2356
     --         and every feature falls slightly. Fewer pairs, not fewer findings.
+    --
+    -- ★★ 09-05d  CART-0742 item 2, AND IT IS THE FIFTH SELF-MEASUREMENT — the
+    --         only one that failed in TWO directions at once. A bare statement
+    --         (`foo();`) built as `?expression_statement(<call>)`, so:
+    --
+    --         (a) IT MINTED `call-vs-expr`. The predicate is `(kx == 'call' or
+    --             ky == 'call') and kx ~= ky`, and a WRAPPER facing a call
+    --             satisfies it exactly — `?` is not `call`. Nothing was
+    --             extracted or inlined; one side was simply a statement.
+    --         (b) IT BLINDED THE WALK. `walk` returns on `x.k ~= y.k`, so every
+    --             comparison under a wrapped statement was never made at all.
+    --
+    --         The kind-pair table is the proof, and it is a near-exact transfer:
+    --           ? | call     2983 -> 1492   (-1491)
+    --           call | call  2641 -> 4116   (+1475)
+    --         The same comparisons, now aligned — and DESCENDED INTO, which is
+    --         why total divergences RISE (15865 -> 16653) while the pair set is
+    --         unchanged. More divergences, each located at the real difference
+    --         instead of at a wrapper. Every rise below is that descent.
+    --
+    --   feature            09-05c   09-05d
+    --   call-vs-expr         5585     5027   #1 -> #2, and ~half of it was the wrapper
+    --   (no feature)         4440     5485   #2 -> #1
+    --   size-skew            3107     3496
+    --   leaf-vs-tree         2780     3129
+    --   one-side-absent      2359     2363
+    --   containment          1326     1487
+    --   drift(lit/name)      1030     1131
+    --   divergences         15865    16653
+    --   pairs scanned         2356     2356   unchanged
+    --
+    -- ⚠ SO CART-0732'S HEADLINE NEEDS A FOOTNOTE. `call-vs-expr` was read as
+    -- "EXTRACT/INLINE A CALL is the most valuable missing hole kind", and on
+    -- this corpus half its population was a statement wrapper. The class is
+    -- REAL — 5027 survive, and the C++ witness that opened it is genuine — but
+    -- its RANK was inflated by the same coverage artifact as `leaf-vs-tree`
+    -- (09-04) before it. THAT IS FIVE, AND THE PATTERN IS ALWAYS THE SAME: the
+    -- number describes the instrument, and it describes it most loudly where
+    -- the instrument is blindest.
     ['libs'] = { pairs = 2356,
-        f = { ['call-vs-expr'] = 5585, ['(no feature)'] = 4440, ['size-skew'] = 3107,
-              ['leaf-vs-tree'] = 2780, ['one-side-absent'] = 2359,
-              ['containment'] = 1326, ['drift(lit/name)'] = 1030 } },
+        f = { ['(no feature)'] = 5485, ['call-vs-expr'] = 5027, ['size-skew'] = 3496,
+              ['leaf-vs-tree'] = 3129, ['one-side-absent'] = 2363,
+              ['containment'] = 1487, ['drift(lit/name)'] = 1131 } },
     -- ★ `self` DELIBERATELY HAS NO ROW. corpora.lua calls it a LIVING corpus,
     -- "NOT GATED: every commit invalidates a snapshot baseline by construction",
     -- and recording numbers against it here would manufacture exactly the drift

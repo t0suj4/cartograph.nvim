@@ -1200,3 +1200,107 @@ test('zig: a name inside an array TYPE is still read — the four traversals agr
     ok(names['Air'] or walked['Air'],
         'the element type of `[N]Air` is reachable through the type node')
 end)
+
+-- CART-0742 item 2. A STATEMENT WRAPPER IS NOT A VALUE. `foo();` — the commonest
+-- statement shape in every C-family language — falls through harvest_row to its
+-- whole-node-is-a-value default, so `build` met the `expression_statement` and
+-- emitted `?expression_statement(<call>)`.
+--
+-- ★★ THE READS WERE NEVER WRONG AND THE STRUCTURE ALWAYS WAS. A `?` walks its
+-- kids, so every read survived — which is exactly why nothing caught this. What
+-- broke is everything keyed off the SHAPE: `M.key` produced
+-- `?expression_statement(Cfoo())`, so a call written as a statement and the same
+-- call written anywhere else were DIFFERENT EXPRESSIONS to CSE, to the clone
+-- index and to the divergence census. Measured as the top unread node type in
+-- EIGHT corpora — java, php, js, c, c++, python, go, rust.
+test('java: a bare call statement IS the call, not a wrapper around one', function ()
+    if not ready('java') then skip 'no java parser' end
+    local src = 'class C { void f(Object o) { g(o); } void g(Object x) {} }'
+    local root = vim.treesitter.get_string_parser(src, 'java'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'method_declaration' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the method')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'java') end })
+    local callrow
+    for _, r in ipairs(fl.stmts or {}) do
+        local e = r.expr and r.expr.rhs and r.expr.rhs[1]
+        if e and expr.key(e):find('g', 1, true) then callrow = e end
+    end
+    ok(callrow, 'found the row for `g(o)`')
+    eq('call', callrow.k, 'the row value is the CALL — not `?expression_statement`')
+    -- ★ AND THE KEY IS THE POINT: it must equal the key of the same call written
+    -- in any other position, or the clone index sees two different expressions.
+    eq('CNg(Nx)', (expr.key(callrow):gsub('No%)', 'Nx)')),
+        'the structural key carries no wrapper')
+end)
+
+-- ★ THE REFUSAL ARM. The unwrap fires only on a SOLE named child, which is the
+-- same rule UNWRAP already uses and it is load-bearing: a bare `;` is an
+-- `expression_statement` with NO children, and it has no value to be. Measured
+-- on the C corpora, the ENTIRE residue after this change is that shape — 11 of
+-- cpp's 76 and 1 of cppmodern's 743, all `kids=0`. python's bare-tuple statement
+-- (`a, b`) is the N-child case the same rule refuses.
+test('c: a bare `;` stays the honest unknown — the unwrap needs a SOLE child', function ()
+    if not ready('c') then skip 'no c parser' end
+    local src = 'void f(int a) { g(a); ; }\nvoid g(int x) {}\n'
+    local root = vim.treesitter.get_string_parser(src, 'c'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_definition' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the fn')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'c') end })
+    local kinds, empty = {}, false
+    for _, r in ipairs(fl.stmts or {}) do
+        for _, e in ipairs((r.expr and r.expr.rhs) or {}) do
+            kinds[e.k] = true
+            if e.k == '?' and e.t == 'expression_statement' then
+                empty = true
+                eq(0, #(e.kids or {}), 'the only surviving wrapper is the childless one')
+            end
+        end
+    end
+    ok(kinds['call'], 'the real statement unwrapped to its call')
+    ok(empty, 'and the empty `;` did NOT — it has no sole child to become')
+end)
+
+-- ★★ THE READ-NEUTRALITY ARM, and it is the one that would have caught the
+-- `type` kind's regression a commit earlier. Peeling a `?` must not move a single
+-- read: measured on ten corpora, `READS` and `NAMES` are IDENTICAL either side of
+-- this change and the node count falls by EXACTLY the number of wrappers removed
+-- (libs 8284 -> 7911, -373 = its 373 wrappers). A change that claims to be
+-- structural and moves a read is not structural.
+test('python: unwrapping a statement moves no read', function ()
+    if not ready('python') then skip 'no python parser' end
+    local src = 'def f(a, b):\n    g(a, b)\n    return a\n'
+    local root = vim.treesitter.get_string_parser(src, 'python'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_definition' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the fn')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'python') end })
+    local reads, sawcall = {}, false
+    for _, r in ipairs(fl.stmts or {}) do
+        if r.expr then
+            for _, nm in ipairs(expr.reads(r.expr) or {}) do reads[nm] = true end
+            for _, e in ipairs(r.expr.rhs or {}) do if e.k == 'call' then sawcall = true end end
+        end
+    end
+    ok(sawcall, 'the call statement is a `call` row')
+    ok(reads['a'] and reads['b'], 'and both arguments are still read')
+end)
