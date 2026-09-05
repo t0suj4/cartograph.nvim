@@ -1367,8 +1367,23 @@ end
 -- name's binding, so `leaf-vs-tree` says "a leaf faces a tree", not "this leaf
 -- IS that tree". Confirming it needs the local's assignment row, which the
 -- rollup below does not look up. Kept honest by name: these are CANDIDATES.
+-- ★★ `arity(appended)` JOINS THEM AND BARE `arity` DOES NOT, WHICH IS THE
+-- OPPOSITE OF HOW THIS WAS FIRST BUILT (CART-0742 item 4). Add-parameter is a
+-- refactoring; "the same function called with a different number of arguments"
+-- is not, and the witnesses settle it. The strong form:
+--     assertScoresEquals(a, b)  ⇄  assertScoresEquals(a, b, delta)     x95
+-- The weak form, on the same corpus:
+--     arena.allocate(n * Integer.BYTES)  ⇄  arena.allocate(ADDRESS.byteSize() * k, …)
+-- — same callee, one more argument, and NOTHING in common. That is an overload
+-- or a varargs call, not a refactoring half-applied, and putting it here would
+-- inflate `explained` with pairs no refactoring relates. THAT IS EXACTLY THE
+-- `call-vs-expr` ERROR ONE ITEM EARLIER: a feature whose population was half
+-- something else, promoted on its name rather than on its witnesses.
+-- MEASURED: the strong form is 36% of the class on java, 4% on C++, 0% on php.
+-- The `side` rule below needs no case for either — its generic branch picks the
+-- SHORTER canon, which for an arity divergence is the side with fewer arguments.
 local DC_RELATION = { ['leaf-vs-tree'] = true, ['call-vs-expr'] = true,
-                      ['containment'] = true }
+                      ['containment'] = true, ['arity(appended)'] = true }
 
 function M.divergence_census(store, opts)
     local max_dist = (opts and opts.max_dist) or 32
@@ -1420,6 +1435,72 @@ function M.divergence_census(store, opts)
             end
             -- a call facing something that is not one: EXTRACT/INLINE A CALL
             if (kx == 'call' or ky == 'call') and kx ~= ky then f[#f + 1] = 'call-vs-expr' end
+            -- ★★ THE SAME CALLEE WITH A DIFFERENT NUMBER OF ARGUMENTS: AN
+            -- OPTIONAL-ARGUMENT HOLE (CART-0742 item 4). Neither CART-0729 nor
+            -- CART-0730 named this — they concluded the missing kinds were
+            -- REPETITION and RECURSION — and it is a third thing: the callee
+            -- agrees, only the argument LIST length differs, which is the
+            -- add-parameter / remove-parameter refactoring seen from outside.
+            --
+            -- ★★ IT READS THE NODES, NOT THE KEY, AND THAT IS THE POINT. The
+            -- prototype for this measured the class by pulling the callee out of
+            -- a canon STRING with `^C([%w_%.]+)%(` — a greedy pattern that knows
+            -- nothing about nesting, so a chained call `CMCMNa.b().c(x,y)` read
+            -- as callee `MCMNa.b` with the arguments `).c(x,y`. A zero-argument
+            -- php getter came back with TWELVE ARGUMENTS, and 88% of grocy's
+            -- class was that artifact. A STRUCTURAL KEY IS A LANGUAGE AND A LUA
+            -- PATTERN IS NOT A PARSER FOR IT — here the nodes are in hand, so
+            -- there is nothing to parse (CART-0746).
+            --
+            -- ⚠ THE CALLEE IS COMPARED ALPHA-RENAMED, like every other test in
+            -- this function, so `a.f(x)` and `b.f(x, y)` with `a`/`b` both local
+            -- DO match. That is deliberate — it is the same receiver role — and
+            -- it is also why this is a CANDIDATE, not a confirmed refactoring.
+            --
+            -- ⚠ AND IT CANNOT FIRE WHERE THE TAXONOMY ALREADY SPEAKS. `walk`
+            -- reaches `record` for an arity difference only when the longer
+            -- argument list is NOT homogeneous; a homogeneous one is a
+            -- REPETITION HOLE and never gets here.
+            if kx == 'call' and ky == 'call'
+                and rcanon(x.f, la or {}, {}) == rcanon(y.f, lb or {}, {})
+                and #(x.a or {}) ~= #(y.a or {}) then
+                f[#f + 1] = 'arity'
+                -- ...and the STRONG form: the shorter argument list is an
+                -- alpha-canon PREFIX of the longer, so the extra arguments were
+                -- APPENDED. `f(a,b)` vs `f(a,b,delta)` is an optional argument;
+                -- `f(a,b)` vs `f(x,y,z)` shares only a name. MEASURED at 36% of
+                -- the class on java, 4% on C++, 0% on php.
+                --
+                -- ⚠⚠ AND THE PREFIX IS ALPHA-RENAMED, SO A PREFIX OF BARE
+                -- LOCALS AGREES BY CONSTRUCTION. `rcanon` maps EVERY local to
+                -- `L` — not to a position — so `f(a)` and `f(x, y)` are an
+                -- "appended" match because `L` == `L`. MEASURED on libs: 108 of
+                -- the 130 strong divergences rest on an all-locals prefix and
+                -- only 22 (9 signatures) have a prefix carrying structure the
+                -- canon can tell apart. The tag does NOT distinguish them, so
+                -- READ 130 AS 130 CANDIDATES, NOT 130 FINDINGS. The class's own
+                -- best witness sits in the weak bucket and is real anyway —
+                -- `assertScoresEquals(L,L)` ⇄ `(L,L,Ndelta)` x95 over 6 owners,
+                -- where `Ndelta` is a NON-local name — which is why this is not
+                -- filtered here: the split is a REFINEMENT to make when someone
+                -- acts on the class, not a reason to hide two thirds of it.
+                -- ⚠ THE LOCALS MAP TRAVELS WITH ITS SIDE. Putting the shorter
+                -- list first means swapping `la`/`lb` WITH it — the first cut
+                -- swapped only the argument lists, so a right-longer pair was
+                -- canonicalised with the other side's locals and a name that is
+                -- local on one side read as a global on the other. It cost ONE
+                -- divergence on libs, which is exactly why it is worth a
+                -- comment: a silent 1-in-130 is the kind of wrong that survives.
+                local sa, sb, ma, mb = x.a or {}, y.a or {}, la or {}, lb or {}
+                if #sa > #sb then sa, sb, ma, mb = sb, sa, mb, ma end
+                local pre = true
+                for i = 1, #sa do
+                    if rcanon(sa[i], ma, {}) ~= rcanon(sb[i], mb, {}) then
+                        pre = false; break
+                    end
+                end
+                if pre then f[#f + 1] = 'arity(appended)' end
+            end
             local mx, my, ox, oy = {}, {}, {}, {}
             for i, c in ipairs(dc_kids(x)) do local k2 = rcanon(c, la or {}, {}); mx[k2] = (mx[k2] or 0) + 1; ox[i] = k2 end
             for i, c in ipairs(dc_kids(y)) do local k2 = rcanon(c, lb or {}, {}); my[k2] = (my[k2] or 0) + 1; oy[i] = k2 end

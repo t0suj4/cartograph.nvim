@@ -798,3 +798,122 @@ return { gamma, delta, helper }
     eq('table', type(res.features), 'the census returns ROWS, not rendered text')
     eq('table', type(res.kindpairs), 'kind pairs come back as data too')
 end)
+
+-- CART-0742 item 4. THE OPTIONAL-ARGUMENT HOLE. CART-0729/0730 concluded the
+-- template language was missing REPETITION and RECURSION holes; this is a third
+-- thing neither named — the callee agrees and only the argument LIST length
+-- differs, which is add-parameter/remove-parameter seen from outside.
+--
+-- ★★ THE TWO TAGS ARE THE WHOLE POINT, AND THE WITNESSES DECIDED WHICH IS THE
+-- RELATION. `arity` alone says "same callee, different count", and on real
+-- corpora most of that is an OVERLOAD:
+--     arena.allocate(n * Integer.BYTES) ⇄ arena.allocate(ADDRESS.byteSize()*k, …)
+-- — one more argument and nothing in common. `arity(appended)` additionally
+-- requires the shorter list to be an alpha-canon PREFIX of the longer, which is
+-- the actual optional argument:
+--     assertScoresEquals(a, b) ⇄ assertScoresEquals(a, b, delta)
+-- Only the strong form is in DC_RELATION. Measured: the strong form is 36% of
+-- the class on java, 4% on C++, 0% on php — so promoting bare `arity` would
+-- have inflated `explained` with pairs no refactoring relates, which is exactly
+-- the `call-vs-expr` error CART-0742 item 2 had just finished correcting.
+test('clones: an optional argument is `arity(appended)`; an overload is only `arity`', function ()
+    -- THE STRONG FORM: same callee, and the two-argument call's arguments are a
+    -- prefix of the three-argument call's.
+    proj({ ['ap.lua'] = [[
+local function sink(p, q, r) return p end
+local function alpha(t)
+  local a = t.one
+  local b = t.two
+  local c = sink(a, b)
+  local d = c
+  local e = d
+  return e
+end
+local function beta(t)
+  local a = t.one
+  local b = t.two
+  local c = sink(a, b, t.three)
+  local d = c
+  local e = d
+  return e
+end
+return { alpha, beta, sink }
+]] })
+    local strong = clones.divergence_census(store, { max_dist = 32, below = 0, min_rows = 2 })
+    ok((strong.features['arity'] or 0) > 0, 'same callee + different arg count is `arity`')
+    ok((strong.features['arity(appended)'] or 0) > 0,
+        '...and an APPENDED argument earns the strong tag too')
+
+    -- THE WEAK FORM: same callee, one more argument, and the arguments SHARE
+    -- NOTHING. This is an overload, not a refactoring, and it must NOT be
+    -- promoted — the tag is the honest weaker statement.
+    --
+    -- ⚠ THE ARGUMENTS HERE ARE `t.one` / `t.two` AND NOT TWO LOCALS, AND THAT IS
+    -- LOAD-BEARING. rcanon ALPHA-RENAMES a local to `L`, so `sink(a)` against
+    -- `sink(b, x)` is an APPENDED prefix — `L` really does equal `L` — and the
+    -- first version of this fixture asserted otherwise and failed, correctly.
+    -- Two distinct field selectors are the cheapest arguments rcanon can tell
+    -- apart. The same caveat qualifies the strong tag on real corpora: a prefix
+    -- of bare locals is a weak match and a prefix holding names, literals or
+    -- calls is a strong one, and the tag does not distinguish them.
+    --
+    -- ⚠ AND THE SECOND ARGUMENT IS A LITERAL, NOT A THIRD FIELD, FOR A SEPARATE
+    -- REASON. `sink(t.two, t.three)` reports NOTHING: its argument list is
+    -- HOMOGENEOUS, so `walk` calls it a repetition hole and never reaches
+    -- `record` at all. That is the taxonomy working — the census only names what
+    -- the existing holes cannot — and it took a second failing fixture to see
+    -- it, which is worth more than the assertion it was written for.
+    proj({ ['ov.lua'] = [[
+local function sink(p, q, r) return p end
+local function gamma(t)
+  local a = t.one
+  local b = t.two
+  local c = sink(t.one)
+  local d = c
+  local e = d
+  return e
+end
+local function delta(t)
+  local a = t.one
+  local b = t.two
+  local c = sink(t.two, 42)
+  local d = c
+  local e = d
+  return e
+end
+return { gamma, delta, sink }
+]] })
+    local weak = clones.divergence_census(store, { max_dist = 32, below = 0, min_rows = 2 })
+    ok((weak.features['arity'] or 0) > 0, 'an overload is still `arity` — the count really does differ')
+    eq(nil, weak.features['arity(appended)'],
+        '...but NOT `arity(appended)`: nothing was appended, the arguments disagree at position 1')
+
+    -- ★ THE DISCRIMINATION ARM. A different callee with a different arity is
+    -- NOT an arity finding — without this the predicate fires on every pair of
+    -- unrelated calls and has stopped discriminating, which is the trap the
+    -- value-hole test above exists to guard.
+    proj({ ['dc.lua'] = [[
+local function sink(p, q, r) return p end
+local function other(p, q, r) return q end
+local function eps(t)
+  local a = t.one
+  local b = t.two
+  local c = sink(a)
+  local d = c
+  local e = d
+  return e
+end
+local function zeta(t)
+  local a = t.one
+  local b = t.two
+  local c = other(a, b)
+  local d = c
+  local e = d
+  return e
+end
+return { eps, zeta, sink, other }
+]] })
+    local diff = clones.divergence_census(store, { max_dist = 32, below = 0, min_rows = 2 })
+    eq(nil, diff.features['arity'],
+        'a DIFFERENT callee with a different arity is not an arity finding')
+end)

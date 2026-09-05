@@ -160,10 +160,19 @@ local RECORDED = {
     -- (09-04) before it. THAT IS FIVE, AND THE PATTERN IS ALWAYS THE SAME: the
     -- number describes the instrument, and it describes it most loudly where
     -- the instrument is blindest.
+    -- ★ 09-05e  CART-0742 item 4: the OPTIONAL-ARGUMENT hole ships as a
+    --         predicate, `arity` + its strong refinement `arity(appended)`. It
+    --         adds no divergences (16653 unchanged) — it NAMES 363 that were
+    --         `(no feature)`, which falls 5485 -> 5124. Only the strong form is
+    --         a DC_RELATION, so the pair rollup moves barely: fully explained
+    --         266 -> 279, SHARP 154 -> 159. Promoting the WEAK form instead
+    --         would have moved it far more and mostly wrongly — see the
+    --         DC_RELATION comment in clones.lua.
     ['libs'] = { pairs = 2356,
-        f = { ['(no feature)'] = 5485, ['call-vs-expr'] = 5027, ['size-skew'] = 3496,
+        f = { ['(no feature)'] = 5124, ['call-vs-expr'] = 5027, ['size-skew'] = 3496,
               ['leaf-vs-tree'] = 3129, ['one-side-absent'] = 2363,
-              ['containment'] = 1487, ['drift(lit/name)'] = 1131 } },
+              ['containment'] = 1487, ['drift(lit/name)'] = 1131,
+              ['arity'] = 363, ['arity(appended)'] = 145 } },
     -- ★ `self` DELIBERATELY HAS NO ROW. corpora.lua calls it a LIVING corpus,
     -- "NOT GATED: every commit invalidates a snapshot baseline by construction",
     -- and recording numbers against it here would manufacture exactly the drift
