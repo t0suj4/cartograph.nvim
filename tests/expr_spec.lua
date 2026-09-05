@@ -822,7 +822,7 @@ test('java: literals reach the IR, and the two bases Lua reads differently do no
         '  int a = 1; int b = 0x1f; int e = 1_000; long g = 5L;',
         '  double h = 2.5; float i = 1.5f; char k = 0x2;',
         '  String s = "x"; Object w = null; boolean u = true;',
-        '  int oct = 010; int bin = 0b1010;',
+        '  int oct = 017; int bin = 0b110; int hexs = 0x1fL;',
         '} }' }, '\n')
     local root = vim.treesitter.get_string_parser(src, 'java'):parse()[1]:root()
     -- the IR is reached through flow.build, the same seam expr.of uses
@@ -841,7 +841,9 @@ test('java: literals reach the IR, and the two bases Lua reads differently do no
         local e = r.expr
         for _, side in ipairs({ 'lhs', 'rhs' }) do
             for _, x in ipairs(e and e[side] or {}) do
-                if x.k == 'lit' then kinds[#kinds + 1] = ('%s=%s'):format(x.ty, tostring(x.v))
+                if x.k == 'lit' then
+                    kinds[#kinds + 1] = ('%s=%s%s'):format(x.ty, tostring(x.v),
+                        x.base and ('@' .. x.base) or '')
                 elseif x.k == '?' then kinds[#kinds + 1] = '?' .. tostring(x.t) end
             end
         end
@@ -849,18 +851,24 @@ test('java: literals reach the IR, and the two bases Lua reads differently do no
     local seen = {}
     for _, k in ipairs(kinds) do seen[k] = true end
     eq(true, seen['num=1'] ~= nil, 'a decimal int reaches the IR as a lit')
-    eq(true, seen['num=31'] ~= nil, 'a hex int is read in its own base (0x1f = 31)')
+    eq(true, seen['num=31@16'] ~= nil, 'a hex int is read in its own base (0x1f = 31) AND records it')
     eq(true, seen['num=1000'] ~= nil, 'a digit-separated literal loses the separators (1_000)')
     eq(true, seen['num=5'] ~= nil, 'a type suffix is stripped (5L)')
     eq(true, seen['num=2.5'] ~= nil, 'a decimal float reaches the IR')
     eq(true, seen['num=1.5'] ~= nil, 'a float suffix is stripped (1.5f)')
     eq(true, seen['nil=nil'] ~= nil, 'null is the nil literal')
-    -- ...and the two that must NOT be read, because Lua would read them wrong
-    eq(true, seen['?octal_integer_literal'] ~= nil,
-        'java octal 010 is EIGHT and Lua reads TEN — it must stay an honest `?`')
-    eq(true, seen['?binary_integer_literal'] ~= nil,
-        'a binary literal stays an honest `?` for the same reason')
-    eq(nil, seen['num=10'], 'and neither of them minted the value Lua would have read')
+    -- ── THESE TWO ARMS USED TO ASSERT `?` ────────────────────────────────────
+    -- They were excluded from LIT precisely because Lua's tonumber reads their
+    -- base wrong (`010` is EIGHT in java, TEN in Lua). Now the base is PARSED
+    -- and RECORDED, so the honest answer is the value, not the refusal. The
+    -- literals are chosen so the right answer differs from every plausible wrong
+    -- one: octal 017 is 15 (a base-10 read says 17), binary 0b110 is 6.
+    eq(true, seen['num=15@8'] ~= nil, 'java octal 017 is FIFTEEN, and the base is kept')
+    eq(nil, seen['num=17'], '...not the seventeen a base-10 read would have produced')
+    eq(true, seen['num=6@2'] ~= nil, 'a binary literal reads in base 2 and keeps it')
+    -- ★ AND THE SUFFIX STRIP MUST NOT EAT A HEX DIGIT: `f` and `d` are digits in
+    -- base 16, so stripping them from `0x1f` would read ONE for THIRTY-ONE.
+    eq(true, seen['num=31@16'] ~= nil, '0x1fL is 31 — the L came off, the f did not')
 end)
 
 -- CART-0224 step 3, group 2. The ticket's survey row for a java corpus read
@@ -1028,7 +1036,8 @@ test('c/c++: literals reach the IR, and an octal one stays `?` rather than lying
         '  double h = 2.5;',
         '  float i = 1.5f;',
         '  char k = 0x2;',
-        '  int oct = 010;',
+        '  int oct = 017;',
+        '  int hexs = 0x1fUL;',
         '}' }, '\n')
     local root = vim.treesitter.get_string_parser(src, 'c'):parse()[1]:root()
     local fn
@@ -1045,23 +1054,29 @@ test('c/c++: literals reach the IR, and an octal one stays `?` rather than lying
     for _, r in ipairs(fl.stmts or {}) do
         for _, side in ipairs({ 'lhs', 'rhs' }) do
             for _, x in ipairs(r.expr and r.expr[side] or {}) do
-                if x.k == 'lit' then seen[('%s=%s'):format(x.ty, tostring(x.v))] = true
+                if x.k == 'lit' then
+                    seen[('%s=%s%s'):format(x.ty, tostring(x.v),
+                        x.base and ('@' .. x.base) or '')] = true
                 elseif x.k == '?' then seen['?' .. tostring(x.t)] = true end
             end
         end
     end
     eq(true, seen['num=1'] ~= nil, 'a decimal literal reaches the IR')
-    eq(true, seen['num=31'] ~= nil, 'hex is read in its own base (0x1f = 31)')
+    eq(true, seen['num=31@16'] ~= nil, 'hex is read in its own base (0x1f = 31) and records it')
     eq(true, seen['num=5'] ~= nil, 'a type suffix is stripped (5U)')
     eq(true, seen['num=2.5'] ~= nil, 'a float reaches the IR')
     eq(true, seen['num=1.5'] ~= nil, 'a float suffix is stripped (1.5f)')
-    -- *** THE ARM THAT MAKES ADMITTING number_literal SAFE ***
-    eq(true, seen['?number_literal'] ~= nil,
-        'C octal 010 is EIGHT and Lua reads TEN — it must stay an honest `?`')
-    eq(nil, seen['num=10'],
-        '...and must not mint the value a base-10 read would have produced')
+    -- ── THIS ARM USED TO ASSERT `?` ──────────────────────────────────────────
+    -- C spells every base with ONE node type, so octal could not be excluded by
+    -- name and was refused instead. Now the base is read from the text and KEPT.
+    -- 017 is 15; a base-10 read says 17, so the value alone proves the base.
+    eq(true, seen['num=15@8'] ~= nil, 'C octal 017 is FIFTEEN, in base 8, and says so')
+    eq(nil, seen['num=17'], '...not the seventeen a base-10 read would give')
+    -- ★ THE SUFFIX STRIP IS BASE-AWARE: `f` is a hex DIGIT, `U`/`L` never are.
+    eq(true, seen['num=31@16'] ~= nil, '0x1fUL is 31 — UL came off, f did not')
     eq(nil, seen['num=nil'],
-        '...nor a VALUELESS literal, which eval would report as "evaluated to nil"')
+        'a number that cannot be read is still no literal at all, since eval '
+            .. 'would report a valueless lit as "evaluated to nil"')
 end)
 
 -- ★ AND THE SAME TEXT IN LUA MEANS TEN, which is why the refusal is keyed on the

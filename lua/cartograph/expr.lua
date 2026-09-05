@@ -8,7 +8,13 @@
 --
 -- CLOSED SCHEMA (the uniform-honesty invariant applied to expressions — any
 -- construct the harvest doesn't model becomes `?`, never a lie):
---   { k='lit',   ty='num'|'str'|'bool'|'nil', v=<value> }
+--   { k='lit',   ty='num'|'str'|'bool'|'nil', v=<value>, base=16|8|2? }
+--       `base` = the RADIX THE SOURCE IS WRITTEN IN, absent for decimal. A fact
+--       about the SPELLING, recorded here for the same reason as `selid` below:
+--       this is the only point where the node's text and type are both in hand.
+--       `0x10` and `16` are the same VALUE and not the same SOURCE, and a
+--       consumer that computes a new value and emits it (characterize's `v+1`)
+--       has no other way to write it back in the base the author chose.
 --   { k='name',  n='x' }
 --   { k='field', b=<expr>, n='sel', method=<bool>, selid=<bool> }  -- a.b / a:b
 --       `selid` = does du count this SELECTOR as an identifier leaf in this language?
@@ -85,24 +91,59 @@ local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or 
 --- the node type because it is a property of the SPELLING: lua's `number` node
 --- means 10 by the same text, and refusing it there would break a working answer.
 local OCTAL_ZERO_PREFIX = { number_literal = true }  -- c, c++
+--- ...and node types that NAME their base outright, so no text is sniffed at all.
+--- java gives each base its own spelling; C gives them all one.
+local RADIX_BY_NODE = { hex_integer_literal = 16, octal_integer_literal = 8,
+    binary_integer_literal = 2 }
 
---- A numeric literal's VALUE from its source text, or NIL when it cannot be read
---- FAITHFULLY. `tonumber` first, so every answer that worked before is
---- byte-identical; the fallbacks only ever turn a nil into a value.
+--- The BASE a numeric literal is WRITTEN in — 16 / 8 / 2, or nil for decimal.
+--- A property of the SPELLING, available only here: by the time a consumer holds
+--- the IR the text is gone. Same argument as `field.selid`, and the same place.
+local function num_base(body, nodetype)
+    local by_node = RADIX_BY_NODE[nodetype]
+    if by_node then return by_node end
+    if body:match('^0[xX]') then return 16 end
+    if body:match('^0[bB]') then return 2 end
+    if OCTAL_ZERO_PREFIX[nodetype] and body:match('^0[0-7]+$') then return 8 end
+    return nil
+end
+
+--- A numeric literal's VALUE and BASE from its source text. Value is NIL when it
+--- cannot be read FAITHFULLY; base is nil for decimal.
 ---   `1_000` / `1'000`  digit separators — java, rust, python, js, c#, c++14
 ---   `5L` `1.5f` `10UL` a trailing TYPE SUFFIX — java, c, c++, rust
---- ⚠ NIL IS LOAD-BEARING: the caller mints NO literal at all when this returns
---- nil, because `eval` answers `true, e.v` for a lit — so a valueless numeric
---- literal would claim it EVALUATED TO NIL rather than that it is unknown. A
---- wrong value is worse than an honest `?`.
+--- ⚠ NIL VALUE IS LOAD-BEARING: the caller mints NO literal at all when this
+--- returns nil, because `eval` answers `true, e.v` for a lit — so a valueless
+--- numeric literal would claim it EVALUATED TO NIL rather than that it is
+--- unknown. A wrong value is worse than an honest `?`.
+---
+--- ★★ RAW `tonumber` FIRST, AND THE SUFFIX STRIP IS BASE-AWARE. `f`, `d`, `a`-`e`
+--- ARE HEX DIGITS: stripping `[fFdD]+$` from `0x1f` leaves `0x1` and reads ONE
+--- where the source says THIRTY-ONE. A confident wrong value that looks
+--- complete is the exact failure this whole arc has been about, so only
+--- `[uUlL]` — which are never hex digits — come off a radix-prefixed body.
 local function num_value(raw, nodetype)
     local nosep = raw:gsub("[_']", '')
-    if OCTAL_ZERO_PREFIX[nodetype] and nosep:match('^0[0-7]+$') then return nil end
-    local v = tonumber(raw)
-    if v then return v end
-    v = tonumber(nosep)
-    if v then return v end
-    return tonumber((nosep:gsub('[a-zA-Z]+$', '')))
+    local base = num_base(nosep, nodetype)
+    -- the answer every currently-working literal already gives, unchanged
+    if base ~= 8 and base ~= 2 then
+        local v = tonumber(raw)
+        if v then return v, base end
+    end
+    if base == 16 then
+        local body = nosep:gsub('^0[xX]', '')
+        if body:match('[pP]') then return tonumber(nosep), 16 end -- hex FLOAT
+        return tonumber((body:gsub('[uUlL]+$', '')), 16), 16
+    end
+    if base == 2 then
+        return tonumber((nosep:gsub('^0[bB]', ''):gsub('[uUlL]+$', '')), 2), 2
+    end
+    if base == 8 then
+        return tonumber((nosep:gsub('^0', ''):gsub('[uUlL]+$', '')), 8), 8
+    end
+    local v = tonumber(nosep)
+    if v then return v, nil end
+    return tonumber((nosep:gsub('[a-zA-Z]+$', ''))), nil
 end
 
 -- literal node types (Lua-first; the shared cross-language names). A per-language
@@ -119,6 +160,9 @@ local LIT = { number = 'num', integer = 'num', float = 'num', string = 'str',
     decimal_integer_literal = 'num', hex_integer_literal = 'num',
     decimal_floating_point_literal = 'num', hex_floating_point_literal = 'num',
     character_literal = 'str', null_literal = 'nil',
+    -- admitted once the base could be PRESERVED rather than guessed: their node
+    -- type names it outright, so no text is sniffed (RADIX_BY_NODE)
+    octal_integer_literal = 'num', binary_integer_literal = 'num',
     -- ── C / C++ (CART-0742). `nullptr` parses as `null` and `true`/`false` as
     -- themselves, all three already above. ⚠ AND `number_literal` IS ONE NODE
     -- TYPE FOR EVERY BASE — decimal, hex, OCTAL, binary, float — so the java
@@ -653,8 +697,8 @@ function build_core(node, src, lang)
         if interp then return { k = '?', t = t, kids = interp } end
     end
     if lty then
-        local v
-        if lty == 'num' then v = num_value(txt(node, src), t)
+        local v, base
+        if lty == 'num' then v, base = num_value(txt(node, src), t)
         elseif lty == 'str' then v = txt(node, src) -- raw text incl. quotes; eval strips
         elseif lty == 'bool' then v = (txt(node, src) == 'true')
         elseif lty == 'nil' then v = NIL end
@@ -665,7 +709,9 @@ function build_core(node, src, lang)
         -- answer and the node's own text, and it is what makes admitting C's
         -- all-bases `number_literal` safe at all.
         if lty ~= 'num' or v ~= nil then
-            return { k = 'lit', ty = lty, v = v }
+            -- `base` only when NOT decimal, so every existing lit node is
+            -- byte-identical and no consumer sees anything unless it asks
+            return { k = 'lit', ty = lty, v = v, base = base }
         end
     end
     -- ★ A SHORTHAND PROPERTY IN AN OBJECT LITERAL IS A REFERENCE (CART-0418). `{a}` is
