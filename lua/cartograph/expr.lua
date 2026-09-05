@@ -27,6 +27,15 @@
 --   { k='call',  f=<expr>, a={<expr>...}, method=<bool> }
 --   { k='un',    op='-'|'not'|'#'|..., e=<expr> }
 --   { k='bin',   op='+'|'..'|'and'|'or'|'=='|..., l=<expr>, r=<expr> }
+--   { k='type',  n='Foo'?, prim=true?, kids={<type>...} }  -- A TYPE WHERE AN
+--       EXPRESSION GOES: `new Foo()`, `(String) o`, `new int[n]`. `n` only when
+--       the node IS a bare named type; a COMPOUND (generic, array, scoped) has
+--       n=nil and carries its parts as kids, so a consumer composes the name
+--       rather than parsing one. `prim=true` = a KEYWORD, which names nothing —
+--       a positive fact, not a gap. ⚠ A TYPE IS NOT A READ HERE: du's leaf set
+--       does not count type nodes either, and keeping both sides silent is what
+--       holds the names≡use∪rmw self-gate. Whether a type SHOULD be a read is a
+--       real question and a much larger one.
 --   { k='table' }                                     -- ALLOCATION (fresh identity)
 --   { k='pair',  key=<expr>, val=<expr>? }            -- a constructor's k=v entry;
 --       `key` is a str lit when the property name is KNOWN, an expression when the
@@ -507,6 +516,44 @@ local VARARG = { vararg_expression = true, vararg = true, spread_element = true 
 --     WRONG one is worse.
 local PAIR = { field = true, pair = true, array_element_initializer = true,
     field_initializer = true, field_update = true }
+-- ── A TYPE IN EXPRESSION POSITION (CART-0742) ────────────────────────────────
+-- Types appear where an expression is expected — `new Foo()`, `(String) o`,
+-- `new int[n]`, `Vec::<i32>` — and every one of them fell to `?`. Measured on
+-- elasticsearch/libs it was the LARGEST remaining unread population: 1196
+-- type_identifier + 833 integral_type + 435 type_descriptor + 415
+-- floating_point_type, ~3500 divergences the census could not name.
+--
+-- ★ THE READ SET IS UNCHANGED BY CONSTRUCTION, and that is the whole safety
+-- argument. `?type_identifier` carries NO kids and contributes NO name today —
+-- java declares no `df_ids`, so du's leaf set is {identifier, name} and a
+-- `type_identifier` is not a read on EITHER side. A `type` node that also
+-- contributes no read keeps both sides agreeing, so the names≡use∪rmw self-gate
+-- cannot move. Promoting types to reads is a different question, and a much
+-- bigger one — [[cartograph-types-as-values]] is where it belongs.
+--
+-- ★ AND `prim` IS A POSITIVE FACT, NOT A GAP. `int` is a KEYWORD: it names
+-- nothing, and saying so is different from failing to read it. `Inst.Ref` in
+-- zig is the opposite case and needs no entry here at all — zig spells its
+-- types as ordinary `identifier`s, which is exactly why "a type is a value"
+-- already works there. NONE of the names below appears in the zig grammar.
+--
+-- COMPOUNDS GET `n=nil` AND KEEP THEIR KIDS. `generic_type` is not named
+-- "List<String>"; its base `type_identifier` becomes a nested type node named
+-- "List" and its arguments become nested type nodes of their own, so a consumer
+-- composes the full name instead of parsing a string. Kids are built from EVERY
+-- named child, exactly as the `?` path did, so no walker sees fewer names.
+local TYPE = { type_identifier = true,        -- c, c++, go, java, rust
+    integral_type = true, floating_point_type = true,   -- java
+    boolean_type = true, void_type = true,              -- java
+    generic_type = true, array_type = true,             -- java, rust
+    type_descriptor = true,                             -- c, c++
+    scoped_type_identifier = true }                     -- java  a.b.C
+--- ...of which these NAME something: the node's own text IS the type's name.
+local TYPE_NAMED = { type_identifier = true }
+--- ...and these are KEYWORDS, which name nothing — a fact, not a failure.
+local TYPE_PRIM = { integral_type = true, floating_point_type = true,
+    boolean_type = true, void_type = true }
+
 local PAREN = { parenthesized_expression = true }
 local UNWRAP = { expression_list = true, variable_list = true }
 
@@ -790,6 +837,18 @@ function build_core(node, src, lang)
     if UN[t] then
         local o = operands(node)
         return { k = 'un', op = op_token(node, src), e = build(o[1], src, lang) }
+    end
+    if TYPE[t] then
+        -- kids from EVERY named child, exactly as the `?` path did, so nothing a
+        -- kids-walker used to see disappears
+        local kids = {}
+        for c in node:iter_children() do
+            if c:named() and not tsutil.is_comment(c) then
+                kids[#kids + 1] = build(c, src, lang)
+            end
+        end
+        return { k = 'type', n = TYPE_NAMED[t] and txt(node, src) or nil,
+            prim = TYPE_PRIM[t] or nil, kids = kids }
     end
     if TABLE[t] then
         -- an ALLOCATION (fresh identity) but its field VALUES/keys READ names — carry
@@ -1435,7 +1494,14 @@ local function walk(e, fn)
     elseif e.k == 'call' then walk(e.f, fn); for _, a in ipairs(e.a) do walk(a, fn) end
     elseif e.k == 'un' then walk(e.e, fn)
     elseif e.k == 'bin' then walk(e.l, fn); walk(e.r, fn)
-    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' then
+    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' or e.k == 'type' then
+        -- ★ `type` BELONGS HERE OR ITS CONTENTS VANISH. Caught by measurement,
+        -- not by the suite: adding the kind without this line lost 90 reads and
+        -- 73 names on the zig corpus, because zig's `[N]Air` array type carries
+        -- a real element-type READ in its kids and nothing descended into them.
+        -- A kind that holds `kids` and is absent from this list is a VANISHED
+        -- READ — the one thing the closed schema exists to prevent — and it is
+        -- silent: the fixture suite stayed green through it.
         for _, c in ipairs(e.kids or {}) do walk(c, fn) end
     end
 end
@@ -1461,6 +1527,16 @@ function M.key(e)
     if k == 'bin' then return 'B' .. e.op .. '(' .. M.key(e.l) .. ',' .. M.key(e.r) .. ')' end
     if k == 'pair' then
         return 'P' .. M.key(e.key) .. ':' .. (e.val and M.key(e.val) or '')
+    end
+    -- ★ A TYPE MUST KEY BY ITS NAME OR EVERY TYPE IS THE SAME TYPE. `type` sets
+    -- no `.t`, so without this it fell to the generic branch below and keyed as
+    -- `?()` — and a bare named type has NO KIDS, so `new Foo()` and `new Bar()`
+    -- would be STRUCTURALLY IDENTICAL to CSE and to the clone index. Exactly the
+    -- hazard the `assign` case above records, one kind later.
+    if k == 'type' then
+        local ps = {}
+        for _, c in ipairs(e.kids or {}) do ps[#ps + 1] = M.key(c) end
+        return 'Y' .. (e.n or (e.prim and '#prim') or '') .. '(' .. table.concat(ps, ',') .. ')'
     end
     if k == 'assign' then
         -- ⚠ `t` IS THE TARGET EXPRESSION HERE, NOT A TYPE STRING. The builder writes
@@ -1534,7 +1610,7 @@ function M.dotted_reads(e, out)
         for _, a in ipairs(e.a or {}) do M.dotted_reads(a, out) end
     elseif e.k == 'un' then M.dotted_reads(e.e, out)
     elseif e.k == 'bin' then M.dotted_reads(e.l, out); M.dotted_reads(e.r, out)
-    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' then
+    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' or e.k == 'type' then
         for _, c in ipairs(e.kids or {}) do M.dotted_reads(c, out) end
     end
     return out
@@ -1608,7 +1684,7 @@ local function expr_reads(e, acc)
     elseif k == 'call' then expr_reads(e.f, acc); for _, a in ipairs(e.a) do expr_reads(a, acc) end
     elseif k == 'un' then expr_reads(e.e, acc)
     elseif k == 'bin' then expr_reads(e.l, acc); expr_reads(e.r, acc)
-    elseif k == '?' or k == 'table' or k == 'pair' then
+    elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' then
         for _, c in ipairs(e.kids or {}) do expr_reads(c, acc) end
     end
     -- lit / fn / vararg: no leaf reads
@@ -1648,7 +1724,7 @@ function M.names(row)
         elseif k == 'call' then vars(e.f); for _, a in ipairs(e.a) do vars(a) end
         elseif k == 'un' then vars(e.e)
         elseif k == 'bin' then vars(e.l); vars(e.r)
-        elseif k == '?' or k == 'table' or k == 'pair' then
+        elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' then
             for _, c in ipairs(e.kids or {}) do vars(c) end
         end
     end

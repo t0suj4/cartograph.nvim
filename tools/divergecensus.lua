@@ -117,10 +117,14 @@ local RECORDED = {
     -- If the java numbers move and lua does not, THE INSTRUMENT MOVED, NOT THE
     -- WORLD — and that is the only reading of a `-> MOVED` row that is safe to
     -- take at face value.
-    ['libs'] = { pairs = 2435,
-        f = { ['call-vs-expr'] = 5665, ['(no feature)'] = 4527, ['size-skew'] = 3158,
-              ['leaf-vs-tree'] = 2846, ['one-side-absent'] = 2561,
-              ['containment'] = 1348, ['drift(lit/name)'] = 1043 } },
+    -- 09-05c  CART-0742 item 3: a TYPE in expression position became a kind.
+    --         Types now key BY NAME in all three structural keys, so pairs that
+    --         differed only in a type stop matching — pairs scanned 2435 -> 2356
+    --         and every feature falls slightly. Fewer pairs, not fewer findings.
+    ['libs'] = { pairs = 2356,
+        f = { ['call-vs-expr'] = 5585, ['(no feature)'] = 4440, ['size-skew'] = 3107,
+              ['leaf-vs-tree'] = 2780, ['one-side-absent'] = 2359,
+              ['containment'] = 1326, ['drift(lit/name)'] = 1030 } },
     -- ★ `self` DELIBERATELY HAS NO ROW. corpora.lua calls it a LIVING corpus,
     -- "NOT GATED: every commit invalidates a snapshot baseline by construction",
     -- and recording numbers against it here would manufacture exactly the drift

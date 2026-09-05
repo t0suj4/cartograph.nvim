@@ -67,6 +67,16 @@ local function canon(e, locals, slots, ctr)
         for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = canon(c, locals, slots, ctr) end
         return 'T(' .. table.concat(kp, ',') .. ')'
     end
+    -- ★ A TYPE KEYS BY ITS NAME OR EVERY TYPE IS THE SAME TYPE (CART-0742). A
+    -- bare named type has NO KIDS, so without this `new Foo()` and `new Bar()`
+    -- canon IDENTICALLY. Present in all THREE structural keys in this file,
+    -- because they are three copies of one function and a kind added to two of
+    -- them is a silent disagreement about what "the same expression" means.
+    if k == 'type' then
+        local kp = {}
+        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = canon(c, locals, slots, ctr) end
+        return 'Y' .. (e.n or (e.prim and '#prim') or '') .. '(' .. table.concat(kp, ',') .. ')'
+    end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
     -- ★ AN EMBEDDED ASSIGNMENT, and the reason it CRASHED here rather than
@@ -603,6 +613,16 @@ local function rcanon(e, locals, acc)
         local kp = {}
         for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = rcanon(c, locals, acc) end
         return 'T(' .. table.concat(kp, ',') .. ')'
+    end
+    -- ★ A TYPE KEYS BY ITS NAME OR EVERY TYPE IS THE SAME TYPE (CART-0742). A
+    -- bare named type has NO KIDS, so without this `new Foo()` and `new Bar()`
+    -- canon IDENTICALLY. Present in all THREE structural keys in this file,
+    -- because they are three copies of one function and a kind added to two of
+    -- them is a silent disagreement about what "the same expression" means.
+    if k == 'type' then
+        local kp = {}
+        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = rcanon(c, locals, acc) end
+        return 'Y' .. (e.n or (e.prim and '#prim') or '') .. '(' .. table.concat(kp, ',') .. ')'
     end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
@@ -1177,6 +1197,16 @@ local function bcanon(e, locals, slots, ctr, st)
             .. ',' .. bcanon(e.r, locals, slots, ctr, st) .. ')'
     end
     if k == 'table' then return 'T' end
+    -- ★ A TYPE KEYS BY ITS NAME OR EVERY TYPE IS THE SAME TYPE (CART-0742). A
+    -- bare named type has NO KIDS, so without this `new Foo()` and `new Bar()`
+    -- canon IDENTICALLY. Present in all THREE structural keys in this file,
+    -- because they are three copies of one function and a kind added to two of
+    -- them is a silent disagreement about what "the same expression" means.
+    if k == 'type' then
+        local kp = {}
+        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = bcanon(c, locals, slots, ctr, st) end
+        return 'Y' .. (e.n or (e.prim and '#prim') or '') .. '(' .. table.concat(kp, ',') .. ')'
+    end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
     if k == 'assign' then -- see canon: `t` is the TARGET here, not a type string

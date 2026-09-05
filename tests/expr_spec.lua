@@ -1099,3 +1099,104 @@ test('lua: `010` is still TEN — the octal refusal is per-spelling, not per-dig
     eq('num', lit and lit.ty)
     eq(10, lit and lit.v, "lua's `010` is decimal ten and must stay ten")
 end)
+
+-- CART-0742 item 3. A TYPE WHERE AN EXPRESSION GOES — `new Foo()`, `(String) o`,
+-- `new int[n]` — was the largest unread population left on a java corpus: ~3500
+-- divergences the census could not name (type_identifier 1196, integral_type
+-- 833, type_descriptor 435, floating_point_type 415).
+--
+-- ★★ THE KIDS ARE THE TEST, NOT THE KIND. `?` keeps every named child, so a
+-- kind that keeps FEWER is a vanished read — and the suite would not notice,
+-- because the self-gate checks reads and this leaks below it. Adding the kind
+-- without teaching the FOUR separate traversals about it lost 90 reads and 73
+-- names on the zig corpus, measured; `expr` carries the kid-descent list in
+-- `walk`, `names`, `dotted_reads` and `expr_reads`, and all four had to learn it.
+--
+-- ★ `prim` IS A POSITIVE FACT: `int` is a keyword and NAMES NOTHING. That is
+-- different from failing to read it, and an edit that "helpfully" gave
+-- primitives their keyword as `n` would leak `int` into every consumer that
+-- treats `n` as a reference.
+test('java: a type in expression position is a `type`, and keeps every name under it', function ()
+    if not ready('java') then skip 'no java parser' end
+    local src = table.concat({
+        'class C { java.util.List<String> f(Object o, int n) {',
+        '    C t = new C();',
+        '    int[] a = new int[n];',
+        '    String s = (String) o;',
+        '    return null;',
+        '  } }' }, '\n')
+    local root = vim.treesitter.get_string_parser(src, 'java'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'method_declaration' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the method')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'java') end })
+    local types, prims = {}, 0
+    for _, r in ipairs(fl.stmts or {}) do
+        if r.expr then
+            expr.walk(r.expr.rhs and r.expr.rhs[1], function (e)
+                if e.k == 'type' then
+                    if e.n then types[e.n] = true end
+                    if e.prim then prims = prims + 1 end
+                end
+            end)
+        end
+    end
+    ok(types['C'], 'the type of `new C()` reaches the IR as a named type')
+    ok(types['String'], 'a cast names its type')
+    ok(prims > 0, '`int` is a type too — and a PRIMITIVE, which names nothing')
+    eq(nil, types['int'], '...so it must not appear as a NAME a consumer could resolve')
+    -- ★★ THE VANISHED-READ ARM: `new int[n]` still reads `n`. The dimension sits
+    -- under a node the type branch is adjacent to, and it is a real read.
+    local reads = {}
+    for _, r in ipairs(fl.stmts or {}) do
+        if r.expr then
+            for _, nm in ipairs(expr.names(r.expr) or {}) do reads[nm] = true end
+        end
+    end
+    ok(reads['n'], '`new int[n]` still reads n — the array dimension is not a type')
+    ok(reads['o'], 'and the cast still reads its operand')
+end)
+
+-- ★★ THE ARM THAT GUARDS THE REGRESSION THAT ACTUALLY HAPPENED. The java test
+-- above does NOT: `new int[n]` reaches `n` through TABLE -> `?` -> name, and `?`
+-- was always in the traversal lists. The read that vanished was ZIG's — `[N]Air`
+-- is an `array_type` whose kids hold a real element-type NAME, reachable ONLY
+-- through the type node. Adding the kind without teaching all four traversals
+-- lost 90 reads and 73 names on the zig corpus, and the whole suite stayed
+-- green. A guard that cannot fail on the bug it was written for is not a guard.
+test('zig: a name inside an array TYPE is still read — the four traversals agree', function ()
+    if not ready('zig') then skip 'no zig parser' end
+    local src = 'fn f() void { const xs: [N]Air = undefined; _ = xs; }'
+    local root = vim.treesitter.get_string_parser(src, 'zig'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_declaration' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the fn')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'zig') end })
+    local names, walked = {}, {}
+    for _, r in ipairs(fl.stmts or {}) do
+        if r.expr then
+            for _, nm in ipairs(expr.names(r.expr) or {}) do names[nm] = true end
+            for _, e in ipairs(r.expr.rhs or {}) do
+                expr.walk(e, function (x) if x.k == 'name' then walked[x.n] = true end end)
+            end
+            expr.walk(r.expr.lhs and r.expr.lhs[1], function (x)
+                if x.k == 'name' then walked[x.n] = true end end)
+        end
+    end
+    -- `names` and `walk` are SEPARATE copies of the kid-descent logic; both must
+    -- reach the element type, or one consumer silently sees less than another
+    ok(names['Air'] or walked['Air'],
+        'the element type of `[N]Air` is reachable through the type node')
+end)
