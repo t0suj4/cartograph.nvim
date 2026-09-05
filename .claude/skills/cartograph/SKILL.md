@@ -161,6 +161,39 @@ do not route around it.
 even when empty, so "nothing was declined" and "the ledger was not filled in" stay
 distinguishable.
 
+### The loop, not the four steps
+
+One plan is one turn of a loop, and the loop matters because **an apply invalidates
+the world you planned against**:
+
+1. **Locate, and take the `ref`.** `node_find` / `node_at`, then carry the durable
+   `ref` from the row — not the `id`. Ids embed line numbers and move under every
+   edit; a ref survives a rename and drift.
+2. **Plan.** `txn_plan_moveset` takes a SET (`seed` ids and `seed_refs` refs,
+   unioned), `txn_plan_optimize` its own subject. Writes nothing.
+   ⚠ A ref that resolves WITH a caveat — drifted witness, apparent rename, ordinal
+   match — is a `ref-caveat` **note** on the read side and a **refusal** here. The
+   write side is stricter than the read side ON PURPOSE: a wrong answer is
+   recoverable, a wrong edit is not.
+3. **Preview.** Not optional — apply refuses `unpreviewed`. Preview re-checks the
+   generation itself; `dryrun` does not, so a stale plan would otherwise diff
+   today's disk against yesterday's offsets and print a confident, wrong patch.
+4. **Apply**, then `txn_undo` if needed.
+5. **Now re-derive.** The apply bumped the graph's generation, and a plan handle
+   **dies with the generation it was planned against** — so every other plan you
+   were holding is now dead, and every `id` you were holding has moved. Go back to
+   step 1 and re-locate by ref. Do not batch plans across an apply.
+
+Two more properties of the handle, both deliberate: it is **session-scoped** (it
+dies with the server, like an `id` and unlike a `ref`), and the registry is
+**capped** — a long-running server drops the oldest, and an evicted id refuses by
+name rather than resolving to something else.
+
+**A refusal is a question, not an obstacle.** Read its `rule` and `remedy`: some
+refuse for want of a PREMISE you can supply, and supplying it is the sanctioned
+path. Routing around a refusal — re-planning to dodge it, editing the file
+directly — discards the only guarantee that separates this from a text editor.
+
 ## Live defects — know these before driving writes
 
 - **CART-0582 (P1)**: journal entry ids are `os.time()`-granular and the entry file is
