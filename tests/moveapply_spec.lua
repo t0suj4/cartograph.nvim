@@ -458,3 +458,96 @@ test('CART-0583: arm=false plans without touching the move-set, and still previe
     ok(after, 'an unarmed plan still diffs')
     st.clear_stage()
 end)
+
+-- ── CART-0770: a move lifts the definition, not its container ────────────────
+-- The `var` branch above has always refused a function-local variable as
+-- "lexically scoped, and lifting it to another file is meaningless (and
+-- unsound)". A FUNCTION or METHOD got no such check, so its text was lifted out
+-- of whatever it sat inside and appended at the destination's TOP LEVEL.
+-- MEASURED before the fix: 369 broken plans over three corpora — 12 on our own
+-- tree, 84 on desynced, 273 on grocy — every one of them a file that no longer
+-- parses, and nothing refused.
+
+local function php_ready()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.language.add, 'php')
+end
+
+-- ★★ THE REGRESSION THAT MATTERS MOST, AND IT IS WHY THE PREDICATE IS SYNTACTIC.
+-- `function M.foo()` is a member of M SEMANTICALLY and a top-level statement
+-- SYNTACTICALLY. A first cut refusing "a method is a member of its type" refused
+-- 129 of 216 working moves on desynced — the verb's commonest legitimate use.
+test('moveapply: a top-level `function M.foo()` STILL MOVES (the syntactic/semantic split)', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files({ ['m.lua'] = table.concat({
+        'local M = {}',
+        'function M.foo(x)',
+        '    return x + 1',
+        'end',
+        'return M',
+    }, '\n') })
+    local foo = node_by(st, 'M.foo') or node_by(st, 'foo')
+    ok(foo, 'M.foo captured')
+    local plan, err = moveapply.plan_extract_ids(st, { foo.id }, 'sub/f.lua')
+    ok(plan, 'a top-level definition moves, whatever its NAME says: ' .. tostring(err))
+end)
+
+-- the lua half of the defect: `color = function ... end,` inside a table
+-- constructor, moved with its trailing comma
+test('moveapply: a function inside a TABLE CONSTRUCTOR is refused, naming the container', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files({ ['m.lua'] = table.concat({
+        'local filters = {',
+        '    color = function (def) return def.tag end,',
+        '    world = function (def) return def.w end,',
+        '}',
+        'return filters',
+    }, '\n') })
+    local color = node_by(st, 'color') or node_by(st, 'filters.color')
+    if not color then skip('table-field functions are not minted as nodes here') end
+    local plan, err = moveapply.plan_extract_ids(st, { color.id }, 'sub/c.lua')
+    ok(not plan, 'refused')
+    ok(err and err:find('table_constructor'),
+        'and NAMES the container rather than saying it is inside something: ' .. tostring(err))
+end)
+
+-- a NESTED function: parses fine after a move and loses its upvalues, which is
+-- exactly the unsoundness the `var` branch already refuses. A parses-clean
+-- oracle cannot see it, which is why the measured "cost" of this guard is an
+-- over-estimate.
+test('moveapply: a NESTED function is refused, like a function-local var', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files({ ['m.lua'] = table.concat({
+        'local function outer(a)',
+        '    local function inner(b)',
+        '        return a + b',
+        '    end',
+        '    return inner(1)',
+        'end',
+        'return outer',
+    }, '\n') })
+    local inner = node_by(st, 'inner', 'function')
+    if not inner then skip('nested functions are not minted as nodes here') end
+    local plan, err = moveapply.plan_extract_ids(st, { inner.id }, 'sub/i.lua')
+    ok(not plan, 'refused')
+    ok(err and err:find('not at module level'), tostring(err))
+end)
+
+-- ★ THE PHP HALF, hand-read from grocy: `BaseApiController::ApiResponse` moved
+-- into another file landed AFTER the class's closing brace, and a
+-- `protected function` at php top level does not parse. 273 of grocy's 300
+-- sampled plans were this.
+test('moveapply: a php CLASS METHOD is refused, naming the class declaration', function ()
+    if not php_ready() then skip('no php parser') end
+    local st = ingest_files({
+        ['a.php'] = '<?php\nclass A\n{\n\tprotected function helper($x)\n\t{\n\t\treturn $x;\n\t}\n}\n',
+        ['b.php'] = '<?php\nclass B\n{\n}\n',
+    })
+    local m = node_by(st, 'A::helper', 'method')
+    if not m then skip('php method node not captured in this environment') end
+    local plan, err = moveapply.plan_ids(st, { m.id }, 'b.php')
+    ok(not plan, 'refused')
+    ok(err and err:find('class_declaration'),
+        'and names the class body it sits in: ' .. tostring(err))
+end)

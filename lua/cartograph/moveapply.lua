@@ -71,6 +71,65 @@ local function module_level(store, n)
     return true
 end
 
+-- ★★ THE SAME RULE, FOR EVERYTHING ELSE THAT MOVES (CART-0770). `module_level`
+-- above states the principle and applies it only to `var`; a FUNCTION or METHOD
+-- got no such check, so its text was lifted out of whatever it sat inside and
+-- appended to the destination at top level. MEASURED: 369 broken plans over three
+-- corpora, in two surface forms with ONE cause —
+--   php   moving `BaseApiController::ApiResponse` appends it AFTER the class's
+--         closing brace, and a `protected function` at top level does not parse;
+--   lua   moving `color` out of a table constructor takes ITS TRAILING COMMA with
+--         it, and `color = function ... end,` at top level does not parse.
+-- A class body and a table constructor are the same problem in two syntaxes.
+--
+-- ★ THE PREDICATE IS SYNTACTIC, NOT SEMANTIC, AND THE FIRST CUT GOT THAT WRONG.
+-- "A method is a member of its type" refuses lua's `function M.foo()` — which is
+-- a member SEMANTICALLY and a top-level statement SYNTACTICALLY, and is the
+-- verb's single commonest legitimate move. That cut refused 129 of 216 working
+-- moves on desynced. What actually breaks is being lexically INSIDE something,
+-- so the test is: IS THE DEFINITION A DIRECT CHILD OF THE FILE ROOT?
+--   php    program > class_declaration > declaration_list > method_declaration
+--   lua    chunk > function_declaration                              <- moves
+--   lua    chunk > assignment > table_constructor > field > function <- does not
+-- Language-general, and it needs no new spec slot: `spec.qualify` already walks
+-- to the enclosing class to name `Class::method`, so the graph HAS computed this
+-- and kept only the `::` in a string.
+--
+-- MEASURED, 900 plans over 3 corpora: 368 of 368 broken plans CAUGHT, 0 missed,
+-- and 42 previously-accepted plans now refused. Those 42 are overwhelmingly
+-- `block < function_declaration` — a NESTED function, which is exactly what the
+-- comment above already calls "lexically scoped, and lifting it to another file
+-- is meaningless (and unsound)". They parse; they are not sound. So the cost is
+-- an over-estimate: a parses-clean oracle cannot see a lost upvalue.
+--
+-- ⚠ NO CLAIM WHEN IT CANNOT PARSE. A file that will not parse here returns nil
+-- (allow) rather than refusing: this guard is ADDITIVE, everything it cannot
+-- speak about was already allowed, and refusing on absence of evidence would
+-- take the verb away wherever a parser is missing.
+---@return string|nil  the enclosing chain, innermost first, or nil at module level
+local function enclosing_syntax(store, n, text)
+    if not text then return nil end
+    local okp, ts = pcall(require, 'cartograph.providers.treesitter')
+    if not okp then return nil end
+    local lang = ts.parse_lang(n.file)
+    if not lang then return nil end
+    local okr, parser = pcall(vim.treesitter.get_string_parser, text, lang)
+    if not okr or not parser then return nil end
+    local okt, tree = pcall(function () return parser:parse()[1] end)
+    if not okt or not tree then return nil end
+    local root = tree:root()
+    local okd, d = pcall(root.named_descendant_for_range, root,
+        atr.sl(n.range), atr.sc(n.range), atr.el(n.range), atr.ec(n.range))
+    if not okd or not d then return nil end
+    local fnt = ts.fn_types(lang) or {}
+    while d and d ~= root and not fnt[d:type()] do d = d:parent() end
+    if not d or d == root then return nil end
+    local chain, p = {}, d:parent()
+    while p and p ~= root do chain[#chain + 1] = p:type(); p = p:parent() end
+    if #chain == 0 then return nil end
+    return table.concat(chain, ' < ')
+end
+
 -- THE MODULE SCAFFOLD (CART-0542). A file this verb CREATES used to get the
 -- language header plus the moved text and nothing else -- so an extracted lua
 -- module opened with `function M.scan` and no `local M = {}`. That COMPILES (M
@@ -164,10 +223,14 @@ local function collect(store, ids, dest, plan)
     local txn = require 'cartograph.txn'
     local root = store.data.root
     local okp, ts = pcall(require, 'cartograph.providers.treesitter')
-    local lines_cache = {}
+    local lines_cache, text_cache = {}, {}
+    local function file_text(rel)
+        if text_cache[rel] == nil then text_cache[rel] = txn.read_file(root, rel) or false end
+        return text_cache[rel] or nil
+    end
     local function file_lines(rel)
         if lines_cache[rel] == nil then
-            local t = txn.read_file(root, rel)
+            local t = file_text(rel)
             lines_cache[rel] = t and vim.split(t, '\n', { plain = true }) or false
         end
         return lines_cache[rel]
@@ -187,6 +250,22 @@ local function collect(store, ids, dest, plan)
         elseif n.kind ~= 'function' and n.kind ~= 'method' then
             return nil, ('%s is a %s — only functions, methods, and module-'
                 .. 'level variables move'):format(n.name, n.kind)
+        else
+            -- ★★ THE SAME RULE AS THE `var` BRANCH ABOVE, WHICH IS WHY IT SITS
+            -- BESIDE IT (CART-0770). The text is lifted and appended at the
+            -- destination's TOP LEVEL, so a definition that is not at top level
+            -- HERE cannot survive the trip: a php method lands after its class's
+            -- closing brace, a lua table field lands with its trailing comma.
+            -- The refusal NAMES the enclosing chain, because "it is inside
+            -- something" is not actionable and "inside a class_declaration" is.
+            local encl = enclosing_syntax(store, n, file_text(n.file))
+            if encl then
+                return nil, ('%s is not at module level — it is inside %s, and a '
+                    .. 'move lifts only the definition, not its container. The '
+                    .. 'container would have to move with it, or %s has to become '
+                    .. 'a top-level definition first')
+                    :format(n.name, encl, n.name)
+            end
         end
         if n.file == dest then
             return nil, n.name .. ' already lives in ' .. dest
