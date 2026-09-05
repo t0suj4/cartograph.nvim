@@ -1462,6 +1462,43 @@ test('c++: a condition unwraps, but an init-statement condition keeps both halve
         .. 'the call inside it — is not silently dropped')
 end)
 
+-- ★ THE THIRD SOLE_WRAP ENTRY, AND IT WAS FOUND MISSING BY THE CENSUS, NOT BY
+-- REVIEW. `tools/instrumentcensus.lua entries lua/cartograph/expr.lua SOLE_WRAP`
+-- ablates each entry and re-runs the suite: `argument` and `condition_clause`
+-- came back guarded by the two tests above, and `subscript_argument_list` came
+-- back UNGUARDED — shipped in CART-0744 with a measured 1358 hits on cppmodern
+-- and no test at all. That is the tool's first real finding, on its first run.
+test('c++: a subscript index IS the expression, not a wrapper around it', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    local src = 'int f(int* a, int i) { return a[i + 1]; }\n'
+    local root = vim.treesitter.get_string_parser(src, 'cpp'):parse()[1]:root()
+    local fn
+    local function findfn(nd)
+        if fn then return end
+        if nd:type() == 'function_definition' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then findfn(c) end end
+    end
+    findfn(root)
+    ok(fn, 'found the fn')
+    local fl = flow.build(fn, src, { pfield = 'parameters',
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'cpp') end })
+    local idx
+    for _, r in ipairs(fl.stmts or {}) do
+        for _, e in ipairs((r.expr and r.expr.rhs) or {}) do
+            expr.walk(e, function (x) if x.k == 'index' then idx = idx or x end end)
+        end
+    end
+    ok(idx, '`a[i + 1]` reaches the IR as an index')
+    ok(idx.i and idx.i.k == 'bin',
+        'the INDEX is the expression itself — not `?subscript_argument_list` wrapping it')
+    -- and the read survives, which is what a wrapper peel must never change
+    local reads = {}
+    for _, r in ipairs(fl.stmts or {}) do
+        if r.expr then for _, n in ipairs(expr.reads(r.expr) or {}) do reads[n] = true end end
+    end
+    ok(reads['a'] and reads['i'], 'both names are still read')
+end)
+
 -- ★★ THE ARM FOR WHAT IS DELIBERATELY *NOT* IN THE TABLE, and it is the one that
 -- makes this a decision rather than a filter. `update_expression` (`i++`) and php's
 -- `unary_op_expression` are ALSO 100% single-kid, measured — and unwrapping `i++`
