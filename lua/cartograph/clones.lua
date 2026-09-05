@@ -22,6 +22,7 @@
 
 local expr = require 'cartograph.expr'
 local at = require 'cartograph.at'
+local shortlist = require 'cartograph.shortlist'
 
 local M = {}
 
@@ -836,10 +837,21 @@ local function anti_unify(e1, e2, la, lb, holes)
         -- is not always a restructure — when one side is a literal and the other reads a
         -- name, the copies may have DRIFTED rather than been parameterized. M.drift
         -- reads these; nothing else depends on the extra fields. (CART-0349)
+        --
+        -- ★ AND THE TWO NODES THEMSELVES — `xn`/`yn`, CART-0766 step B. A hole
+        -- carries STRINGS AND SPANS, which is everything `M.drift` and the reports
+        -- need; classifying a divergence in the CENSUS's vocabulary needs NODES,
+        -- because `dc_size`, `dc_kids` and `rcanon` each take one. Attaching them
+        -- where both are already in hand is the alternative to a second traversal
+        -- of this same shape, and a second traversal is the copied-walker bug
+        -- (CART-0746, wrong in both directions in one day).
+        -- ⚠ LIVE REFERENCES into the expression tree, not copies. Holes are
+        -- ephemeral — nothing persists them and no cache version is involved — but
+        -- a consumer must not mutate through them.
         holes[#holes + 1] = { kind = 'struct', a_k = e1.k, b_k = e2.k,
             a = e1.k == 'lit' and tostring(e1.v) or nil, a_ty = e1.ty,
             b = e2.k == 'lit' and tostring(e2.v) or nil, b_ty = e2.ty,
-            at_a = e1.at, at_b = e2.at }
+            at_a = e1.at, at_b = e2.at, xn = e1, yn = e2 }
         return false
     end
     local k = e1.k
@@ -858,7 +870,7 @@ local function anti_unify(e1, e2, la, lb, holes)
             holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
             return true
         end
-        holes[#holes + 1] = { kind = 'struct' }; return false -- local vs global
+        holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2 }; return false -- local vs global
     elseif k == 'field' then
         local ok = anti_unify(e1.b, e2.b, la, lb, holes)
         -- a field-NAME hole lifts as the whole field ACCESS (a value param): e1/e2 ARE
@@ -871,27 +883,54 @@ local function anti_unify(e1, e2, la, lb, holes)
         local o1 = anti_unify(e1.b, e2.b, la, lb, holes)
         return anti_unify(e1.i, e2.i, la, lb, holes) and o1
     elseif k == 'call' then
-        if #(e1.a or {}) ~= #(e2.a or {}) then holes[#holes + 1] = { kind = 'struct' }; return false end
+        if #(e1.a or {}) ~= #(e2.a or {}) then
+            holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2 }; return false
+        end
         local ok = anti_unify(e1.f, e2.f, la, lb, holes)
         for i = 1, #(e1.a or {}) do ok = anti_unify(e1.a[i], e2.a[i], la, lb, holes) and ok end
         return ok
     elseif k == 'un' then
-        if e1.op ~= e2.op then holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op } end
+        -- ⚠ THE SPAN OF AN OPERATOR HOLE IS THE ENCLOSING EXPRESSION, NOT THE
+        -- TOKEN — the IR gives `un`/`bin` a range and the operator no node of its
+        -- own. That makes it a sound positional KEY (every node's span is unique)
+        -- and NOT a substitution site: writing the payload there would replace the
+        -- operands too. `at_encloses` says so at the point of use, so a renderer
+        -- (CART-0766 step C) refuses rather than silently overwriting. Measured on
+        -- our own lua tree: 56 of 11,614 template holes are this kind, and they
+        -- were the ONLY value holes carrying no span at all.
+        if e1.op ~= e2.op then
+            holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op,
+                at_a = e1.at, at_b = e2.at, at_encloses = true }
+        end
         return anti_unify(e1.e, e2.e, la, lb, holes)
     elseif k == 'bin' then
-        if e1.op ~= e2.op then holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op } end
+        if e1.op ~= e2.op then
+            holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op,
+                at_a = e1.at, at_b = e2.at, at_encloses = true }
+        end
         local o1 = anti_unify(e1.l, e2.l, la, lb, holes)
         return anti_unify(e1.r, e2.r, la, lb, holes) and o1
     else -- table / fn / vararg / ? fallback: compare kid lists
         local k1, k2 = e1.kids or {}, e2.kids or {}
         if #k1 ~= #k2 then
-            if #k1 > 0 or #k2 > 0 then holes[#holes + 1] = { kind = 'struct' }; return false end
+            if #k1 > 0 or #k2 > 0 then
+                holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2 }; return false
+            end
             return true
         end
         local ok = true
         for i = 1, #k1 do ok = anti_unify(k1[i], k2[i], la, lb, holes) and ok end
         return ok
     end
+end
+
+-- A hole's POSITION, as a string. `at` is either a packed integer or the
+-- {start,end} table depending on where the node came from, so it goes through
+-- the `at` accessors rather than being indexed — the seam `guards.lua` fences,
+-- and the one `findings.record_lint` was written past.
+local function span_key(a)
+    if not a then return nil end
+    return ('%d:%d-%d:%d'):format(at.sl(a), at.sc(a), at.el(a), at.ec(a))
 end
 
 --- THE ELEMENT TEMPLATE OF A CONTAINER — what its members have in common, and
@@ -910,8 +949,25 @@ end
 --- means the members do not share a shape at all — measured at 6-31% of
 --- containers depending on language — and a caller must be told that rather than
 --- handed a template built from one arbitrary member.
+--- ★★ AND `varying` IS WHAT MAKES `M.match` DISCRIMINATE (CART-0766 step B). A
+--- template's holes are the positions where the members ALREADY DISAGREE, so a
+--- payload diverging THERE is instantiating the template, while a payload
+--- diverging anywhere ELSE is a different shape wearing the same outline. Without
+--- that split every divergence binds, the template matches everything, and
+--- matching everything disambiguates nothing — `leaf-vs-tree` one layer up: a
+--- predicate that fires on every shape has stopped being a predicate.
+---
+--- ★ THE POSITION KEY IS THE DONOR'S SOURCE SPAN, and it costs no new plumbing.
+--- Every hole records `at_a` in the LEFT side's coordinates, the left side is
+--- always `ms[1]`, and `M.match` walks that same donor — so `at_a` already IS
+--- positional identity. MEASURED BEFORE RELYING ON IT (probe, our own lua tree,
+--- 2405 containers with n>=2): 7760 of 7760 VALUE holes carry a span. The only
+--- spanless ones were 85 `struct` — refusals, which need no key — and 56
+--- `operator`, now given the enclosing node's span. The alternative, threading a
+--- path through `anti_unify`, touches fifteen recursion sites in a walker that
+--- four other flows share, to recompute a key the data already carries.
 ---@param container table  an expr node (`k == 'table'`)
----@return table { n, alignable, donor, holes, why? }
+---@return table { n, alignable, donor, holes, varying, unkeyed, why? }
 function M.element_template(container)
     if type(container) ~= 'table' or container.k ~= 'table' then
         return { n = 0, alignable = false, why = 'not a container' }
@@ -923,6 +979,7 @@ function M.element_template(container)
     -- confirmed: `holes` is empty either way and the two cases are not the same.
     if #ms == 1 then
         return { n = 1, alignable = true, donor = ms[1], holes = {},
+            varying = {}, unkeyed = 0,
             why = 'a single member is a shape, not yet a template' }
     end
     local holes, alignable = {}, true
@@ -932,7 +989,21 @@ function M.element_template(container)
         -- map would silently equate two DIFFERENT names as "both local".
         if not anti_unify(ms[1], ms[i], {}, {}, holes) then alignable = false end
     end
-    return { n = #ms, alignable = alignable, donor = ms[1], holes = holes }
+    local varying, unkeyed = {}, 0
+    for _, h in ipairs(holes) do
+        if h.kind ~= 'struct' then
+            local key = span_key(h.at_a)
+            -- ⚠ COUNTED, NOT SWALLOWED. A value hole with no span is a position
+            -- `M.match` cannot recognise, and a template that quietly forgets one
+            -- would report a legitimate instantiation as a mismatch. `M.match`
+            -- refuses on a non-zero count rather than guessing; the probe above
+            -- says the count is zero today, and this is what would tell us it
+            -- stopped being.
+            if key then varying[key] = h.kind else unkeyed = unkeyed + 1 end
+        end
+    end
+    return { n = #ms, alignable = alignable, donor = ms[1], holes = holes,
+        varying = varying, unkeyed = unkeyed }
 end
 
 -- anti-unify two whole rows ({lhs, rhs, cond}); lists of differing length are structural.
@@ -1390,6 +1461,369 @@ local function dc_wraps(outer, inner, la, lb, depth)
     return false
 end
 
+--- CLASSIFY ONE DIVERGENCE in the census's own vocabulary — extracted VERBATIM
+--- from `divergence_census`'s `record`, which was its only caller until CART-0766
+--- step B gave it a second one.
+---
+--- ★★ THE EXTRACTION IS THE POINT, NOT A TIDY-UP. `M.match` must say WHY a
+--- payload failed to fit a container's members, and the honest vocabulary for
+--- that already exists — it was measured, argued down twice (`call-vs-expr` was
+--- ~half artifact, bare `arity` is not a refactoring) and every caveat lives in
+--- the comments below. A SECOND implementation of these predicates would be the
+--- copied-walker bug at the level of a taxonomy: two vocabularies drifting apart,
+--- with the census's calibration attached to only one of them.
+---
+--- ⚠ IT IS NOT A COMPLETE VOCABULARY FOR EVERY POPULATION, and the difference
+--- matters more here than it did for the census. These features were tuned on
+--- NEAR-CLONE PAIRS OF FUNCTION BODIES; pointed at (container member, payload)
+--- some transfer and some have no population at all — `call_arity` measured 0.0%
+--- on four of five corpora. `M.match` therefore RANKS what this returns by the
+--- target language and leaves the rest unranked; it does not filter it, because a
+--- classification is honest even where a ranking has nothing to say. See
+--- CART-0766's calibration notes for the table.
+---@return string[] feature names, never empty ('(no feature)' is an answer)
+local function dc_features(x, y, la, lb)
+    local kx = x and x.k or 'NIL'
+    local ky = y and y.k or 'NIL'
+    local f = {}
+    if not x or not y then
+        f[#f + 1] = 'one-side-absent'
+    else
+        local sx, sy = dc_size(x), dc_size(y)
+        local cx, cy = rcanon(x, la or {}, {}), rcanon(y, lb or {}, {})
+        if cx == cy then f[#f + 1] = 'canon-equal(alpha)' end
+        -- one side literally contains the other: a guard/conjunct was added,
+        -- or a value was wrapped
+        if cx:find(cy, 1, true) or cy:find(cx, 1, true) then f[#f + 1] = 'containment' end
+        -- a bare local facing the expression it was assigned from: EXTRACT LOCAL
+        if (#dc_kids(x) == 0) ~= (#dc_kids(y) == 0) then f[#f + 1] = 'leaf-vs-tree' end
+        -- CART-0349's class, re-found by the census
+        if (kx == 'lit' and ky == 'name') or (kx == 'name' and ky == 'lit') then
+            f[#f + 1] = 'drift(lit/name)'
+        end
+        -- a call facing something that is not one: EXTRACT/INLINE A CALL
+        if (kx == 'call' or ky == 'call') and kx ~= ky then f[#f + 1] = 'call-vs-expr' end
+        -- ★★ THE SAME CALLEE WITH A DIFFERENT NUMBER OF ARGUMENTS: AN
+        -- OPTIONAL-ARGUMENT HOLE (CART-0742 item 4). Neither CART-0729 nor
+        -- CART-0730 named this — they concluded the missing kinds were
+        -- REPETITION and RECURSION — and it is a third thing: the callee
+        -- agrees, only the argument LIST length differs, which is the
+        -- add-parameter / remove-parameter refactoring seen from outside.
+        --
+        -- ★★ IT READS THE NODES, NOT THE KEY, AND THAT IS THE POINT. The
+        -- prototype for this measured the class by pulling the callee out of
+        -- a canon STRING with `^C([%w_%.]+)%(` — a greedy pattern that knows
+        -- nothing about nesting, so a chained call `CMCMNa.b().c(x,y)` read
+        -- as callee `MCMNa.b` with the arguments `).c(x,y`. A zero-argument
+        -- php getter came back with TWELVE ARGUMENTS, and 88% of grocy's
+        -- class was that artifact. A STRUCTURAL KEY IS A LANGUAGE AND A LUA
+        -- PATTERN IS NOT A PARSER FOR IT — here the nodes are in hand, so
+        -- there is nothing to parse (CART-0746).
+        --
+        -- ⚠ THE CALLEE IS COMPARED ALPHA-RENAMED, like every other test in
+        -- this function, so `a.f(x)` and `b.f(x, y)` with `a`/`b` both local
+        -- DO match. That is deliberate — it is the same receiver role — and
+        -- it is also why this is a CANDIDATE, not a confirmed refactoring.
+        --
+        -- ⚠ AND IT CANNOT FIRE WHERE THE TAXONOMY ALREADY SPEAKS. `walk`
+        -- reaches `record` for an arity difference only when the longer
+        -- argument list is NOT homogeneous; a homogeneous one is a
+        -- REPETITION HOLE and never gets here.
+        if kx == 'call' and ky == 'call'
+            and rcanon(x.f, la or {}, {}) == rcanon(y.f, lb or {}, {})
+            and #(x.a or {}) ~= #(y.a or {}) then
+            f[#f + 1] = 'arity'
+            -- ...and the STRONG form: the shorter argument list is an
+            -- alpha-canon PREFIX of the longer, so the extra arguments were
+            -- APPENDED. `f(a,b)` vs `f(a,b,delta)` is an optional argument;
+            -- `f(a,b)` vs `f(x,y,z)` shares only a name. MEASURED at 36% of
+            -- the class on java, 4% on C++, 0% on php.
+            --
+            -- ⚠⚠ AND THE PREFIX IS ALPHA-RENAMED, SO A PREFIX OF BARE
+            -- LOCALS AGREES BY CONSTRUCTION. `rcanon` maps EVERY local to
+            -- `L` — not to a position — so `f(a)` and `f(x, y)` are an
+            -- "appended" match because `L` == `L`. MEASURED on libs: 108 of
+            -- the 130 strong divergences rest on an all-locals prefix and
+            -- only 22 (9 signatures) have a prefix carrying structure the
+            -- canon can tell apart. The tag does NOT distinguish them, so
+            -- READ 130 AS 130 CANDIDATES, NOT 130 FINDINGS. The class's own
+            -- best witness sits in the weak bucket and is real anyway —
+            -- `assertScoresEquals(L,L)` ⇄ `(L,L,Ndelta)` x95 over 6 owners,
+            -- where `Ndelta` is a NON-local name — which is why this is not
+            -- filtered here: the split is a REFINEMENT to make when someone
+            -- acts on the class, not a reason to hide two thirds of it.
+            -- ⚠ THE LOCALS MAP TRAVELS WITH ITS SIDE. Putting the shorter
+            -- list first means swapping `la`/`lb` WITH it — the first cut
+            -- swapped only the argument lists, so a right-longer pair was
+            -- canonicalised with the other side's locals and a name that is
+            -- local on one side read as a global on the other. It cost ONE
+            -- divergence on libs, which is exactly why it is worth a
+            -- comment: a silent 1-in-130 is the kind of wrong that survives.
+            local sa, sb, ma, mb = x.a or {}, y.a or {}, la or {}, lb or {}
+            if #sa > #sb then sa, sb, ma, mb = sb, sa, mb, ma end
+            local pre = true
+            for i = 1, #sa do
+                if rcanon(sa[i], ma, {}) ~= rcanon(sb[i], mb, {}) then
+                    pre = false; break
+                end
+            end
+            if pre then f[#f + 1] = 'arity(appended)' end
+        end
+        local mx, my, ox, oy = {}, {}, {}, {}
+        for i, c in ipairs(dc_kids(x)) do local k2 = rcanon(c, la or {}, {}); mx[k2] = (mx[k2] or 0) + 1; ox[i] = k2 end
+        for i, c in ipairs(dc_kids(y)) do local k2 = rcanon(c, lb or {}, {}); my[k2] = (my[k2] or 0) + 1; oy[i] = k2 end
+        local same = true
+        for k2, v in pairs(mx) do if my[k2] ~= v then same = false; break end end
+        if same then for k2, v in pairs(my) do if mx[k2] ~= v then same = false; break end end end
+        local ordered = #ox == #oy
+        if ordered then for i = 1, #ox do if ox[i] ~= oy[i] then ordered = false; break end end end
+        if same and #ox > 1 and not ordered then f[#f + 1] = 'reorder' end
+        if math.max(sx, sy) > 0 and math.min(sx, sy) / math.max(sx, sy) < 0.34 then
+            f[#f + 1] = 'size-skew'
+        end
+    end
+    if #f == 0 then f[1] = '(no feature)' end
+    return f
+end
+
+-- ── match: does a payload instantiate a container's element template? ─────────
+-- The DUAL of anti-unification, and CART-0766's step B. `anti_unify` GENERALISES
+-- two instances into a skeleton plus holes; `M.match` SPECIALISES — does this one
+-- expression fit the skeleton, and what does each hole bind to. Same traversal,
+-- opposite direction, and it reuses that traversal rather than writing a second
+-- one: a copied walker is a copied bug (CART-0746), and here the copy would also
+-- fork the hole vocabulary the reports and `M.drift` already read.
+--
+-- ★★ THE REFUSAL IS THE MOST USEFUL ANSWER THIS PRODUCES. A match that succeeds
+-- confirms what the caller already intended; a match that fails is the only thing
+-- that says what the container actually holds. So the failure path is where the
+-- work is: it is LOCATED (which position), CLASSIFIED (in the census's measured
+-- vocabulary), and where the gap is trivially derivable it carries the PREMISE
+-- that would close it — a question with an exact cost, in the shape
+-- [[cartograph-hedge-resolution-writes]] names.
+
+-- ⚠⚠ THE ORDER IS PER-LANGUAGE AND THE FEATURE SET IS SHARED — measured, and it
+-- overturned the ranking this arc first wrote from one corpus. Share of
+-- CONTAINERS in which the feature has at least one instance (CART-0766's
+-- calibration notes hold the full table and the method):
+--
+--   * `containment` was ranked LAST on our own lua tree at 0.6% and is 29.1% on
+--     java, the single highest figure in the table — a java array_initializer is
+--     full of members that structurally contain one another and a lua spec table
+--     is not.
+--   * `size-skew` is 31% on php and js against ~10% on java, c++ and lua:
+--     dynamic-language literals are heterogeneous.
+--   * `leaf-vs-tree` is the only feature EVERY corpus supports (6-25%), which is
+--     why it leads the default.
+--   * C++ is uniformly thin (11/10/3/0/2.5), so a refusal there will often land
+--     in `(no feature)`. That is a fact about how much this verb can say in C++,
+--     and it should say that rather than reach for a feature.
+--
+-- ⚠⚠ TWO FEATURES ARE DELIBERATELY IN NO RANKING, FOR TWO DIFFERENT REASONS, and
+-- collapsing them into one bullet is how this comment read on its first cut:
+--   * `arity` — the census's CALL arity, same callee with a different argument
+--     count — HAS NO POPULATION HERE. 0.0% on four calibration corpora of five,
+--     0.5% on the fifth, and it did not fire ONCE across 14,184 cross-matches on
+--     three languages. Container members are almost never calls. Nothing to rank.
+--   * `call-vs-expr` — a call facing something that is not one — DOES have a
+--     population here (8.8% of lua refusals, 10.6% php, 0.3% js) and is unranked
+--     anyway, because CART-0741 measured this feature ~HALF ARTIFACT: a statement
+--     wrapper made `?` face `call` and minted 1491 divergences that were not one.
+--     It is classified honestly and never promoted, which is the only defensible
+--     place for a feature whose own population has not been re-adjudicated on
+--     THIS one. Ranking it would be the mistake this arc has now made three
+--     times: promoting a feature on its name rather than on its witnesses.
+--
+-- ⚠ THE TABLE IS FIVE CORPORA AND FOUR LANGUAGES. Every ranking below is
+-- `ranked-open` and says so in the shortlist it rides in; a language absent from
+-- the table gets DEFAULT_RANK and is told that the order came from a default
+-- rather than from a measurement of it.
+local REFUSAL_RANK = {
+    -- ★ THE LUA ROW WAS WRONG ON ITS FIRST CUT AND A SECOND CORPUS CAUGHT IT.
+    -- It was built from `synlua`, where `containment` and `table-arity` both
+    -- measure 0.0%, so both were dropped — and on our own lua tree they fire 278
+    -- and 142 times across 11,531 refusals. A synthetic gate corpus is a corpus,
+    -- and one corpus is a property of that corpus (the standing lesson, a fourth
+    -- time). Both are back, ranked last, which is what 0.6% earns.
+    lua        = { 'leaf-vs-tree', 'size-skew', 'drift(lit/name)', 'containment', 'table-arity' },
+    java       = { 'containment', 'leaf-vs-tree', 'drift(lit/name)', 'size-skew' },
+    php        = { 'size-skew', 'leaf-vs-tree', 'containment', 'drift(lit/name)', 'table-arity' },
+    cpp        = { 'leaf-vs-tree', 'size-skew', 'drift(lit/name)', 'containment' },
+    javascript = { 'size-skew', 'leaf-vs-tree', 'containment', 'drift(lit/name)', 'table-arity' },
+}
+local DEFAULT_RANK = { 'leaf-vs-tree', 'size-skew', 'containment', 'drift(lit/name)', 'table-arity' }
+
+-- the literal-string keys a table-shaped node declares, for the PREMISE below
+local function lit_keys(e)
+    local out, order = {}, {}
+    if not e or e.k ~= 'table' then return out, order end
+    for _, m in ipairs(e.kids or {}) do
+        if m.k == 'pair' and m.key and m.key.k == 'lit' and m.key.ty == 'str' then
+            local s = tostring(m.key.v)
+            if not out[s] then order[#order + 1] = s end
+            out[s] = true
+        end
+    end
+    return out, order
+end
+
+--- Does `payload` instantiate `tmpl`, and if not, why not.
+---@param tmpl table    an `M.element_template` result
+---@param payload table an expr node — the member a caller proposes to add
+---@param opts table|nil { lang = 'lua'|'java'|… — ranks the refusal vocabulary }
+---@return table {
+---   ok, bindings, distance, weak?,
+---   refusal = { why, features (a shortlist), mismatches, structs, premise? } }
+function M.match(tmpl, payload, opts)
+    opts = opts or {}
+    -- ⚠ NO `vim.*` HERE. This module is plain Lua — its one `vim` reference was
+    -- this line, and a module that runs outside an editor is worth keeping that
+    -- way (the sharded-index and fold flows load it headless).
+    local function no(why, extra)
+        local r = { why = why }
+        for k, v in pairs(extra or {}) do r[k] = v end
+        return { ok = false, distance = math.huge, refusal = r }
+    end
+    if type(tmpl) ~= 'table' or not tmpl.donor then
+        return no(tmpl and tmpl.why or 'no template')
+    end
+    if type(payload) ~= 'table' or not payload.k then
+        return no('the payload is not an expression node')
+    end
+    -- ⚠ A NON-ALIGNABLE TEMPLATE IS NOT A TEMPLATE, and matching against its
+    -- arbitrary first member would answer a question nobody asked. MEASURED on
+    -- our own lua tree: 1696 of 2405 containers with two or more members (70.5%)
+    -- are non-alignable — a spec table is `{ a = 1, b = {…}, c = function … }`,
+    -- three shapes under one name. For those, "what shape should a new member
+    -- take" HAS NO ANSWER, and saying so is the answer.
+    if not tmpl.alignable then
+        return no('the container\'s members do not share a shape', { n = tmpl.n })
+    end
+    if (tmpl.unkeyed or 0) > 0 then
+        return no('the template has holes with no source span, so a position '
+            .. 'cannot be told from a mismatch', { unkeyed = tmpl.unkeyed })
+    end
+
+    local holes = {}
+    anti_unify(tmpl.donor, payload, {}, {}, holes)
+
+    -- THE SPLIT THIS VERB EXISTS FOR: a divergence at a position the members
+    -- already vary at is a BINDING; the same divergence anywhere else is a
+    -- MISMATCH; a shape divergence is neither and stops the walk.
+    local bindings, mismatches, structs = {}, {}, {}
+    for _, h in ipairs(holes) do
+        if h.kind == 'struct' then
+            structs[#structs + 1] = h
+        elseif tmpl.varying[span_key(h.at_a) or ''] then
+            bindings[#bindings + 1] = { hole = h.kind, from = h.a, to = h.b,
+                at = h.at_a, at_payload = h.at_b,
+                -- an operator hole's span is its ENCLOSING expression, so it
+                -- identifies a position and is NOT a place to write (step C)
+                site = not h.at_encloses }
+        else
+            mismatches[#mismatches + 1] = { hole = h.kind, expected = h.a,
+                got = h.b, at = h.at_a, at_payload = h.at_b }
+        end
+    end
+
+    local distance = #mismatches + #structs
+    if distance == 0 then
+        return { ok = true, bindings = bindings, distance = 0,
+            -- ★ n == 1 MATCHES ON ZERO HOLES BY CONSTRUCTION — `varying` is
+            -- empty, so anything that differs is a mismatch. That is the right
+            -- strictness, but the caller must be able to tell "fits a shape
+            -- confirmed by five members" from "is identical to the only one
+            -- there is", which is weaker evidence for a different reason.
+            weak = tmpl.n == 1 and 'template from a single member' or nil }
+    end
+
+    -- CLASSIFY, in the vocabulary the census measured. Only STRUCT holes get a
+    -- feature: they are the ones carrying both nodes, and the features are all
+    -- defined on nodes. A value mismatch needs no vocabulary — "members agree on
+    -- `foo` here and you supplied `bar`, at this span" IS the explanation, and
+    -- [[cartograph-explaining-a-finding]]'s rule is that an explanation is the
+    -- offending nodes rather than a sentence about them.
+    local seen, names = {}, {}
+    local function add(n) if not seen[n] then seen[n] = true; names[#names + 1] = n end end
+    for _, h in ipairs(structs) do
+        if h.xn and h.yn then
+            for _, f in ipairs(dc_features(h.xn, h.yn, {}, {})) do
+                if f ~= '(no feature)' then add(f) end
+            end
+            -- ★ `table-arity` IS COMPUTED HERE AND NOT IN `dc_features`, on
+            -- purpose. It is not a census feature — adding it there would change
+            -- the census's output and break the byte-identical gate by
+            -- construction — and it is this population's OWN analogue of
+            -- `arity`: two nested tables with different member counts, measured
+            -- at 1.8% of member pairs where the CALL form measured 0.0%. Same
+            -- intuition, different predicate; a REDEFINITION, not a transfer,
+            -- and the calibration is what told the two apart.
+            if h.xn.k == 'table' and h.yn.k == 'table'
+                and #(h.xn.kids or {}) ~= #(h.yn.kids or {}) then
+                add('table-arity')
+            end
+        end
+    end
+
+    local lang = opts.lang
+    local rank = lang and REFUSAL_RANK[lang]
+    local order = rank or DEFAULT_RANK
+    local pos = {}
+    for i, n in ipairs(order) do pos[n] = i end
+    -- ranked features first in the measured order, then everything else in the
+    -- order it was found — unranked is a real state and is labelled as one
+    table.sort(names, function (a, b)
+        local pa, pb = pos[a], pos[b]
+        if pa and pb then return pa < pb end
+        if pa then return true end
+        if pb then return false end
+        return a < b
+    end)
+    local rows = {}
+    for _, n in ipairs(names) do
+        rows[#rows + 1] = { feature = n, ranked = pos[n] ~= nil }
+    end
+
+    local flist = shortlist.new{
+        subject = 'why the payload does not fit this container\'s members',
+        scope = ('%d divergence(s) classified, ranked for %s'):format(
+            distance, rank and lang or (lang and (lang .. ' (unmeasured — default order)')
+                or 'no language given (default order)')),
+        -- ⚠ NEVER EXHAUSTIVE, EVEN FOR A MEASURED LANGUAGE. The ranking rests on
+        -- five corpora and four languages; the feature SET is what the census
+        -- happens to name, and the census's own largest class is `(no feature)`.
+        complete = shortlist.RANKED_OPEN,
+        rows = rows,
+    }
+
+    -- THE PREMISE THAT WOULD MAKE IT MATCH — computed only where it is a lookup
+    -- rather than a synthesis: both sides are keyed tables, so the missing and
+    -- surplus keys are a set difference. Anywhere else this field is absent,
+    -- because a plausible-sounding premise nobody checked is the fabrication
+    -- failure in nicer clothes.
+    local premise
+    if tmpl.donor.k == 'table' and payload.k == 'table' then
+        local dk, dorder = lit_keys(tmpl.donor)
+        local pk = lit_keys(payload)
+        local missing, surplus = {}, {}
+        for _, k in ipairs(dorder) do if not pk[k] then missing[#missing + 1] = k end end
+        for k in pairs(pk) do if not dk[k] then surplus[#surplus + 1] = k end end
+        table.sort(surplus)
+        if #missing > 0 or #surplus > 0 then
+            premise = { missing = missing, surplus = surplus }
+        end
+    end
+
+    return { ok = false, bindings = bindings, distance = distance,
+        weak = tmpl.n == 1 and 'template from a single member' or nil,
+        refusal = {
+            why = #structs > 0 and 'the payload has a different shape'
+                or 'the payload differs where every member agrees',
+            features = flist, mismatches = mismatches, structs = structs,
+            premise = premise,
+        } }
+end
+
 --- Census the divergences the current hole taxonomy cannot name.
 --- Scans NEAR-clone pairs beyond `below` (default: the shipped max_dist, so the
 --- population is exactly what the tool declines to report today) and classifies
@@ -1458,104 +1892,10 @@ function M.divergence_census(store, opts)
         local a, b = kx, ky
         if a > b then a, b = b, a end
         bump(kindpairs, a .. ' | ' .. b)
-        local f = {}
-        if not x or not y then
-            f[#f + 1] = 'one-side-absent'
-        else
-            local sx, sy = dc_size(x), dc_size(y)
-            local cx, cy = rcanon(x, la or {}, {}), rcanon(y, lb or {}, {})
-            if cx == cy then f[#f + 1] = 'canon-equal(alpha)' end
-            -- one side literally contains the other: a guard/conjunct was added,
-            -- or a value was wrapped
-            if cx:find(cy, 1, true) or cy:find(cx, 1, true) then f[#f + 1] = 'containment' end
-            -- a bare local facing the expression it was assigned from: EXTRACT LOCAL
-            if (#dc_kids(x) == 0) ~= (#dc_kids(y) == 0) then f[#f + 1] = 'leaf-vs-tree' end
-            -- CART-0349's class, re-found by the census
-            if (kx == 'lit' and ky == 'name') or (kx == 'name' and ky == 'lit') then
-                f[#f + 1] = 'drift(lit/name)'
-            end
-            -- a call facing something that is not one: EXTRACT/INLINE A CALL
-            if (kx == 'call' or ky == 'call') and kx ~= ky then f[#f + 1] = 'call-vs-expr' end
-            -- ★★ THE SAME CALLEE WITH A DIFFERENT NUMBER OF ARGUMENTS: AN
-            -- OPTIONAL-ARGUMENT HOLE (CART-0742 item 4). Neither CART-0729 nor
-            -- CART-0730 named this — they concluded the missing kinds were
-            -- REPETITION and RECURSION — and it is a third thing: the callee
-            -- agrees, only the argument LIST length differs, which is the
-            -- add-parameter / remove-parameter refactoring seen from outside.
-            --
-            -- ★★ IT READS THE NODES, NOT THE KEY, AND THAT IS THE POINT. The
-            -- prototype for this measured the class by pulling the callee out of
-            -- a canon STRING with `^C([%w_%.]+)%(` — a greedy pattern that knows
-            -- nothing about nesting, so a chained call `CMCMNa.b().c(x,y)` read
-            -- as callee `MCMNa.b` with the arguments `).c(x,y`. A zero-argument
-            -- php getter came back with TWELVE ARGUMENTS, and 88% of grocy's
-            -- class was that artifact. A STRUCTURAL KEY IS A LANGUAGE AND A LUA
-            -- PATTERN IS NOT A PARSER FOR IT — here the nodes are in hand, so
-            -- there is nothing to parse (CART-0746).
-            --
-            -- ⚠ THE CALLEE IS COMPARED ALPHA-RENAMED, like every other test in
-            -- this function, so `a.f(x)` and `b.f(x, y)` with `a`/`b` both local
-            -- DO match. That is deliberate — it is the same receiver role — and
-            -- it is also why this is a CANDIDATE, not a confirmed refactoring.
-            --
-            -- ⚠ AND IT CANNOT FIRE WHERE THE TAXONOMY ALREADY SPEAKS. `walk`
-            -- reaches `record` for an arity difference only when the longer
-            -- argument list is NOT homogeneous; a homogeneous one is a
-            -- REPETITION HOLE and never gets here.
-            if kx == 'call' and ky == 'call'
-                and rcanon(x.f, la or {}, {}) == rcanon(y.f, lb or {}, {})
-                and #(x.a or {}) ~= #(y.a or {}) then
-                f[#f + 1] = 'arity'
-                -- ...and the STRONG form: the shorter argument list is an
-                -- alpha-canon PREFIX of the longer, so the extra arguments were
-                -- APPENDED. `f(a,b)` vs `f(a,b,delta)` is an optional argument;
-                -- `f(a,b)` vs `f(x,y,z)` shares only a name. MEASURED at 36% of
-                -- the class on java, 4% on C++, 0% on php.
-                --
-                -- ⚠⚠ AND THE PREFIX IS ALPHA-RENAMED, SO A PREFIX OF BARE
-                -- LOCALS AGREES BY CONSTRUCTION. `rcanon` maps EVERY local to
-                -- `L` — not to a position — so `f(a)` and `f(x, y)` are an
-                -- "appended" match because `L` == `L`. MEASURED on libs: 108 of
-                -- the 130 strong divergences rest on an all-locals prefix and
-                -- only 22 (9 signatures) have a prefix carrying structure the
-                -- canon can tell apart. The tag does NOT distinguish them, so
-                -- READ 130 AS 130 CANDIDATES, NOT 130 FINDINGS. The class's own
-                -- best witness sits in the weak bucket and is real anyway —
-                -- `assertScoresEquals(L,L)` ⇄ `(L,L,Ndelta)` x95 over 6 owners,
-                -- where `Ndelta` is a NON-local name — which is why this is not
-                -- filtered here: the split is a REFINEMENT to make when someone
-                -- acts on the class, not a reason to hide two thirds of it.
-                -- ⚠ THE LOCALS MAP TRAVELS WITH ITS SIDE. Putting the shorter
-                -- list first means swapping `la`/`lb` WITH it — the first cut
-                -- swapped only the argument lists, so a right-longer pair was
-                -- canonicalised with the other side's locals and a name that is
-                -- local on one side read as a global on the other. It cost ONE
-                -- divergence on libs, which is exactly why it is worth a
-                -- comment: a silent 1-in-130 is the kind of wrong that survives.
-                local sa, sb, ma, mb = x.a or {}, y.a or {}, la or {}, lb or {}
-                if #sa > #sb then sa, sb, ma, mb = sb, sa, mb, ma end
-                local pre = true
-                for i = 1, #sa do
-                    if rcanon(sa[i], ma, {}) ~= rcanon(sb[i], mb, {}) then
-                        pre = false; break
-                    end
-                end
-                if pre then f[#f + 1] = 'arity(appended)' end
-            end
-            local mx, my, ox, oy = {}, {}, {}, {}
-            for i, c in ipairs(dc_kids(x)) do local k2 = rcanon(c, la or {}, {}); mx[k2] = (mx[k2] or 0) + 1; ox[i] = k2 end
-            for i, c in ipairs(dc_kids(y)) do local k2 = rcanon(c, lb or {}, {}); my[k2] = (my[k2] or 0) + 1; oy[i] = k2 end
-            local same = true
-            for k2, v in pairs(mx) do if my[k2] ~= v then same = false; break end end
-            if same then for k2, v in pairs(my) do if mx[k2] ~= v then same = false; break end end end
-            local ordered = #ox == #oy
-            if ordered then for i = 1, #ox do if ox[i] ~= oy[i] then ordered = false; break end end end
-            if same and #ox > 1 and not ordered then f[#f + 1] = 'reorder' end
-            if math.max(sx, sy) > 0 and math.min(sx, sy) / math.max(sx, sy) < 0.34 then
-                f[#f + 1] = 'size-skew'
-            end
-        end
-        if #f == 0 then f[1] = '(no feature)' end
+        -- the feature vocabulary now lives in `dc_features` — CART-0766 step B
+        -- needed the same classification for a refusal, and one definition read
+        -- twice beats two definitions drifting apart
+        local f = dc_features(x, y, la, lb)
         for _, n in ipairs(f) do bump(features, n) end
         if cur then
             cur.div = cur.div + 1

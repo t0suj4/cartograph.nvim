@@ -988,3 +988,181 @@ test('clones: a KEYED container yields holes with spans (the CART-0754 dependenc
     ok(t.holes[1].at_a, 'the key hole carries a source span — without it no insert can render')
     eq('argument', t.holes[1].a, 'and names the donor side')
 end)
+
+-- ── match: the dual of anti-unification (CART-0766 step B) ───────────────────
+-- `anti_unify` GENERALISES two instances into a skeleton plus holes; `match`
+-- SPECIALISES — does this payload fit the skeleton, and what does each hole bind
+-- to. Same traversal, opposite direction, reusing it rather than copying it.
+--
+-- ★★ THE DISCRIMINATING RULE, and everything below is a test of it: a divergence
+-- at a position the members ALREADY VARY AT is a BINDING; the same divergence
+-- anywhere else is a MISMATCH. Without that split every divergence binds, the
+-- template matches everything, and a template that matches everything
+-- disambiguates nothing.
+
+-- one member of a container, which is what a caller proposes to insert
+local function member_of(src, i)
+    local c = container_of(src)
+    return c.kids[i or 1]
+end
+
+test('clones: a payload that varies WHERE THE MEMBERS VARY matches, and binds', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(
+        container_of("local T = { argument = true, condition_clause = true }"))
+    local m = clones.match(t, member_of("local P = { subscript_list = true }"))
+    eq(true, m.ok, 'the key is exactly where these members disagree')
+    eq(0, m.distance)
+    ok(#m.bindings >= 1, 'and the divergence comes back as a BINDING, not a failure')
+    eq('argument', m.bindings[1].from, 'from the donor…')
+    eq('subscript_list', m.bindings[1].to, '…to the payload')
+    ok(m.bindings[1].at, 'with the donor span — the site a render substitutes at')
+    eq(true, m.bindings[1].site, 'and that span IS writable (not an enclosing one)')
+end)
+
+-- ★★ THE CASE THAT WOULD PASS UNDER A LOOSE MATCH AND MUST NOT. Both members
+-- spell the key `name`, so a payload spelling it `nome` diverges at a position
+-- where every member AGREES. Structurally it is the same kind of hole as the one
+-- above — a `lit` — and only the varying-set tells them apart.
+test('clones: a payload differing where the members AGREE is refused', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(
+        container_of("local T = { { name = 'a', v = 1 }, { name = 'b', v = 2 } }"))
+    eq(true, t.alignable)
+    local m = clones.match(t, member_of("local P = { { nome = 'c', v = 3 } }"))
+    eq(false, m.ok, 'a misspelled key is not an instantiation')
+    ok(#m.refusal.mismatches >= 1, 'and it is reported as a MISMATCH, located')
+    local mm
+    for _, x in ipairs(m.refusal.mismatches) do if x.expected == 'name' then mm = x end end
+    ok(mm, 'naming the agreed value the payload failed to supply')
+    eq('nome', mm.got, 'and what came instead')
+    ok(mm.at, 'at the donor span')
+end)
+
+test('clones: a bare payload against structured members refuses with leaf-vs-tree', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(
+        container_of("local T = { { name = 'a', v = 1 }, { name = 'b', v = 2 } }"))
+    local m = clones.match(t, member_of("local P = { 'c' }"))
+    eq(false, m.ok)
+    local names = {}
+    for _, r in ipairs(m.refusal.features.rows) do names[r.feature] = true end
+    ok(names['leaf-vs-tree'], 'the census vocabulary names it — the one feature every corpus supports')
+end)
+
+-- ★ THIS POPULATION'S OWN ANALOGUE OF `arity`. The census's `arity` is defined on
+-- two CALLS and measured 0.0% on four corpora of five; two nested TABLES with
+-- different member counts measured 1.8%. A redefinition, not a transfer.
+test('clones: a payload with a different member count reports table-arity', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(
+        container_of("local T = { { a = 1, b = 2 }, { a = 3, b = 4 } }"))
+    local m = clones.match(t, member_of("local P = { { a = 5, b = 6, c = 7 } }"))
+    eq(false, m.ok)
+    local names = {}
+    for _, r in ipairs(m.refusal.features.rows) do names[r.feature] = true end
+    ok(names['table-arity'], 'three fields where members have two')
+    -- ★ AND THE PREMISE IS A LOOKUP, NOT A SYNTHESIS: the surplus key is a set
+    -- difference over literal keys, so it is exact or it is absent.
+    ok(m.refusal.premise, 'the refusal carries what would close the gap')
+    eq('c', m.refusal.premise.surplus[1], 'the key the members do not have')
+end)
+
+test('clones: a NAME where the members hold literals classifies, it does not bind', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { 'x', 'y' }"))
+    local m = clones.match(t, member_of("local P = { z }"))
+    eq(false, m.ok, 'a name is not a literal, however much the position varies')
+    local names = {}
+    for _, r in ipairs(m.refusal.features.rows) do names[r.feature] = true end
+    ok(names['drift(lit/name)'], 'and CART-0349s class names it')
+end)
+
+-- ⚠⚠ THE ORDER IS PER-LANGUAGE AND THE FEATURE SET IS SHARED. `containment` was
+-- ranked LAST from our own lua tree at 0.6% and is 29.1% on java; `size-skew` is
+-- 31% on php against ~10% on lua. One corpus's ranking is a property of that
+-- corpus, so the SAME refusal must come back ordered differently.
+test('clones: the refusal vocabulary is ranked by the TARGET language', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(
+        container_of("local T = { { name = 'a', v = 1 }, { name = 'b', v = 2 } }"))
+    local payload = "local P = { 'c' }"
+    local as_lua = clones.match(t, member_of(payload), { lang = 'lua' })
+    local as_php = clones.match(t, member_of(payload), { lang = 'php' })
+    eq('leaf-vs-tree', as_lua.refusal.features.rows[1].feature, 'lua leads with leaf-vs-tree')
+    eq('size-skew', as_php.refusal.features.rows[1].feature, 'php leads with size-skew')
+    -- ⚠ AND NEITHER IS EXHAUSTIVE: five corpora, four languages.
+    eq('ranked-open', as_lua.refusal.features.complete)
+end)
+
+test('clones: an unmeasured language is told the order came from a default', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(
+        container_of("local T = { { name = 'a', v = 1 }, { name = 'b', v = 2 } }"))
+    local m = clones.match(t, member_of("local P = { 'c' }"), { lang = 'ruby' })
+    ok(m.refusal.features.scope:find('unmeasured'),
+        'and says so rather than passing a default off as a measurement: '
+        .. m.refusal.features.scope)
+end)
+
+-- ⚠ 70.5% of the containers in our own lua tree (1696 of 2405 with n>=2) are
+-- non-alignable. "What shape should a new member take" HAS NO ANSWER there, and
+-- matching against an arbitrary first member would answer a question nobody
+-- asked.
+test('clones: match refuses a non-alignable template up front', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { a = 1, b = { x = 2 } }"))
+    local m = clones.match(t, member_of("local P = { c = 3 }"))
+    eq(false, m.ok)
+    ok(m.refusal.why:find('do not share a shape'), m.refusal.why)
+end)
+
+-- ★ n == 1 MATCHES ONLY ON ZERO HOLES, because `varying` is empty and everything
+-- that differs is therefore a mismatch. That is the right strictness; the caller
+-- still has to be able to tell it from a shape five members confirmed.
+test('clones: a single-member template matches only an identical payload, and says it is weak', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { only = true }"))
+    local same = clones.match(t, member_of("local P = { only = true }"))
+    eq(true, same.ok)
+    eq('template from a single member', same.weak, 'weak evidence, not a confirmed shape')
+    local other = clones.match(t, member_of("local P = { other = true }"))
+    eq(false, other.ok, 'with no varying position, any divergence is a mismatch')
+end)
+
+-- ★★ AN OPERATOR HOLE IS THE ONE KIND WHOSE SPAN IS NOT A WRITE SITE, and giving
+-- it a span at all is a change with SIBLING SURFACES. It carried none until
+-- CART-0766 step B — the IR gives `un`/`bin` a range and the operator no node of
+-- its own — which made it the only value hole `match` could not key. Located, it
+-- also newly satisfies two `at_a`-predicated readers (`near_report`'s location
+-- line and `M.findings`' hint row), so a previously SILENT divergence becomes a
+-- located one. That is an improvement and it is deliberate; this test is what
+-- keeps it from being silent. Measured at the time: zero value-kind near pairs on
+-- desynced/grocy/jquery, so no shipped report output moved — but "nothing has hit
+-- it" is a statement about today.
+test('clones: an operator hole is LOCATED but marked not-a-write-site', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { a + b, a - b }"))
+    eq(true, t.alignable, 'two binary expressions over the same operands align')
+    local op
+    for _, h in ipairs(t.holes) do if h.kind == 'operator' then op = h end end
+    ok(op, 'the operator divergence is a hole')
+    eq('+', op.a); eq('-', op.b)
+    ok(op.at_a, 'and it is LOCATED — it was not, and could not be keyed')
+    eq(true, op.at_encloses,
+        'but the span is the ENCLOSING expression, so a render must not write there')
+end)
+
+test('clones: an operator BINDS where the members vary, with site = false', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { a + b, a - b }"))
+    local m = clones.match(t, member_of("local P = { a * b }"))
+    eq(true, m.ok, 'a third operator over the same operands instantiates the template')
+    local b
+    for _, x in ipairs(m.bindings) do if x.hole == 'operator' then b = x end end
+    ok(b, 'and comes back as a binding')
+    eq('*', b.to)
+    eq(false, b.site,
+        'flagged NOT a substitution site — step C must refuse rather than overwrite '
+        .. 'the operands along with the operator')
+end)
