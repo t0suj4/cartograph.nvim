@@ -1029,7 +1029,20 @@ function build_core(node, src, lang)
         end
         local key
         if not bracketed and kn:type():match('identifier') then
-            key = { k = 'lit', ty = 'str', v = txt(kn, src) }
+            -- ★ STAMPED WITH ITS RANGE (CART-0754). This is the ONE node the IR
+            -- builds without going through `build`, which is the wrapper that
+            -- stamps `.at` — so `{ x = 1 }` had a key with NO SOURCE SPAN while
+            -- `{ ['x'] = 1 }` had one. It could not go through `build` (that
+            -- would rebuild the identifier as a `name` and lose the string
+            -- value), so it stamps the same way `build` does.
+            -- ⚠ AND THE CONSUMER IS REAL, WHICH IS WHY THIS MOVED FROM P3:
+            -- `clones.element_template` renders an insert by substituting at a
+            -- hole's span, and a KEYED table — SOLE_WRAP, LIT, RADIX_BY_NODE,
+            -- every spec slot — produced holes with no span at all (CART-0766).
+            local ksr, ksc, ker, kec = kn:range()
+            key = { k = 'lit', ty = 'str', v = txt(kn, src),
+                at = { start = { line = ksr, char = ksc },
+                    ['end'] = { line = ker, char = kec } } }
         else
             key = build(kn, src, lang)
         end

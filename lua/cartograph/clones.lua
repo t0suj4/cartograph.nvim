@@ -894,6 +894,47 @@ local function anti_unify(e1, e2, la, lb, holes)
     end
 end
 
+--- THE ELEMENT TEMPLATE OF A CONTAINER — what its members have in common, and
+--- where they differ (CART-0766). The first half of the insert verb's
+--- disambiguation, and useful on its own: "what shape are this table's members"
+--- is the question `instrumentcensus` had to answer by hand when it met a table
+--- built by a loop.
+---
+--- ★★ THERE IS NO NEW REPRESENTATION HERE, WHICH IS THE POINT. A template IS
+--- (a DONOR member, the holes across all members). `anti_unify` already records
+--- every divergence with `at_a`/`at_b` — the SOURCE SPANS — so the donor's text
+--- plus the hole spans is a complete substitution recipe, and rendering never has
+--- to emit source from the IR (which is lossy about surface).
+---
+--- ⚠ `alignable = false` IS A FIRST-CLASS ANSWER, not a failure. A `struct` hole
+--- means the members do not share a shape at all — measured at 6-31% of
+--- containers depending on language — and a caller must be told that rather than
+--- handed a template built from one arbitrary member.
+---@param container table  an expr node (`k == 'table'`)
+---@return table { n, alignable, donor, holes, why? }
+function M.element_template(container)
+    if type(container) ~= 'table' or container.k ~= 'table' then
+        return { n = 0, alignable = false, why = 'not a container' }
+    end
+    local ms = container.kids or {}
+    if #ms == 0 then return { n = 0, alignable = false, why = 'no members' } end
+    -- ★ ONE MEMBER IS ALIGNABLE AND TEACHES NOTHING. A template needs a second
+    -- instance to have any holes at all, so say so rather than imply a shape was
+    -- confirmed: `holes` is empty either way and the two cases are not the same.
+    if #ms == 1 then
+        return { n = 1, alignable = true, donor = ms[1], holes = {},
+            why = 'a single member is a shape, not yet a template' }
+    end
+    local holes, alignable = {}, true
+    for i = 2, #ms do
+        -- ⚠ EMPTY LOCALS MAPS: a container's members are declarations, not a
+        -- function body, so nothing here is alpha-renameable. Passing a locals
+        -- map would silently equate two DIFFERENT names as "both local".
+        if not anti_unify(ms[1], ms[i], {}, {}, holes) then alignable = false end
+    end
+    return { n = #ms, alignable = alignable, donor = ms[1], holes = holes }
+end
+
 -- anti-unify two whole rows ({lhs, rhs, cond}); lists of differing length are structural.
 local function anti_unify_row(r1, r2, la, lb, holes)
     if not r1 or not r2 then holes[#holes + 1] = { kind = 'struct' }; return false end

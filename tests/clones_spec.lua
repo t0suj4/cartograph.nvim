@@ -917,3 +917,74 @@ return { eps, zeta, sink, other }
     eq(nil, diff.features['arity'],
         'a DIFFERENT callee with a different arity is not an arity finding')
 end)
+
+-- CART-0766. THE ELEMENT TEMPLATE — what a container's members have in common
+-- and where they differ. The first half of the insert verb's disambiguation, and
+-- useful before any write verb exists: "what shape are this table's members" is
+-- the question instrumentcensus had to answer by hand.
+--
+-- ★★ THERE IS NO NEW REPRESENTATION. A template IS (a DONOR member, the holes
+-- across all members) — `anti_unify` already records every divergence WITH ITS
+-- SOURCE SPAN, so the donor's text plus the hole spans is a complete
+-- substitution recipe and rendering never emits source from the IR.
+local expr = require 'cartograph.expr'
+local function ready() return pcall(vim.treesitter.language.add, 'lua') end
+
+local function container_of(src)
+    local root = vim.treesitter.get_string_parser(src, 'lua'):parse()[1]:root()
+    local function find(n)
+        if n:type() == 'table_constructor' then return n end
+        for c in n:iter_children() do
+            if c:named() then local r = find(c); if r then return r end end
+        end
+    end
+    return expr.build(find(root), src, 'lua')
+end
+
+test('clones: an element template is a donor plus located holes', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { 'x', 'y', 'z' }"))
+    eq(3, t.n)
+    eq(true, t.alignable, 'three string literals share a shape')
+    ok(#t.holes >= 2, 'and differ at the value')
+    ok(t.donor, 'a donor member is handed back — it is the render source')
+    -- ★ THE SPAN IS THE WHOLE POINT: substituting at the donor's hole span is
+    -- what lets an insert render without emitting source from the IR.
+    ok(t.holes[1].at_a, 'the hole carries its source span')
+end)
+
+-- ⚠ `alignable = false` IS AN ANSWER, not a failure. Measured at 6-31% of
+-- containers depending on language, so a caller must be told the members share
+-- no shape rather than handed a template built from one arbitrary member.
+test('clones: a heterogeneous container reports alignable=false, not a guess', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { a = 1, b = { x = 2 } }"))
+    eq(false, t.alignable, 'a literal and a nested table share no shape')
+    ok(t.donor, 'the donor is still returned, so a caller can SEE what it compared')
+end)
+
+-- ★ ONE MEMBER IS A SHAPE, NOT A TEMPLATE. `holes` is empty either way, so the
+-- two cases would render alike unless the answer says which it is.
+test('clones: a single-member container says it is not yet a template', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { only = true }"))
+    eq(1, t.n)
+    eq(true, t.alignable)
+    eq(0, #t.holes)
+    ok(t.why and t.why:find('not yet a template'), 'and says so: ' .. tostring(t.why))
+end)
+
+-- ★★ THE KEYED CASE IS THE ONE THE INSERT VERB ACTUALLY NEEDS — SOLE_WRAP, LIT,
+-- RADIX_BY_NODE and every spec slot are keyed tables. Its holes had NO SPAN
+-- until CART-0754: an unbracketed key was the one node built without going
+-- through `build`, the wrapper that stamps `.at`. A ticket filed P3 that morning
+-- turned out to be on this feature's critical path.
+test('clones: a KEYED container yields holes with spans (the CART-0754 dependency)', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(
+        container_of("local T = { argument = true, condition_clause = true }"))
+    eq(true, t.alignable, 'two `name = true` pairs share a shape')
+    ok(#t.holes >= 1, 'and differ at the KEY')
+    ok(t.holes[1].at_a, 'the key hole carries a source span — without it no insert can render')
+    eq('argument', t.holes[1].a, 'and names the donor side')
+end)
