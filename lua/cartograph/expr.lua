@@ -1818,6 +1818,18 @@ end
 --- The pure TRAVERSAL, exported (CART-0280) so a consumer walking for a construct does not
 --- have to reimplement it. Every duplicate walker in this codebase has eventually disagreed
 --- with the original about one node kind; there is one walk.
+---
+--- ★★ THAT SENTENCE WAS ALREADY HERE AND IT DID NOT STOP ANYTHING (CART-0758). In one day
+--- SIX throwaway probes hand-rolled the descent, and the copy was wrong in BOTH DIRECTIONS:
+---   UNDER  `ipairs({ e.a, e.kids })` leaves a NIL HOLE at index 1, so ipairs stops before
+---          its first iteration and `kids` is NEVER walked — only `call` nodes descend.
+---          jquery's `?` count read 1133 where the true figure is 13272 (CART-0746).
+---   OVER   the fix for that walked `key`/`val` from a key list AND `e.kids` — but a `pair`
+---          CARRIES `kids = { key, val }`, so `{ a = 1, b = 2 }` reported EIGHT literals
+---          where there are four.
+--- ⚠ THE WARNING WAS NOT THE PROBLEM; REACHABILITY WAS. The copies happened in scratch files
+--- that never open this one. `tools/probe.lua` exists so this walk is available over a whole
+--- corpus WITHOUT writing a file — reach for it before writing a throwaway.
 function M.walk(e, fn) return walk(e, fn) end
 
 function M.reads_content(e)
