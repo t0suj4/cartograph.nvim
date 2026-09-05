@@ -286,18 +286,24 @@ local function mode_entries(file, tname)
     vim.fn.writefile(vim.split(src, '\n'), target) -- restore the copy, for tidiness
     vim.fn.delete(tmp, 'rf')
 
+    -- ★ RETURNED AS A SHORTLIST, not printed as prose. This is EXHAUSTIVE — every
+    -- entry that could be mutated WAS, so an empty result is the finding "all
+    -- guarded" rather than "we did not look". The entries we could not mutate
+    -- ride in `skipped`, which is what keeps that claim true (CART-0755).
+    local shortlist = require 'cartograph.shortlist'
+    local rows = {}
+    for _, n in ipairs(unguarded) do rows[#rows + 1] = { name = n, verdict = 'UNGUARDED' } end
+    for _, n in ipairs(unknown) do rows[#rows + 1] = { name = n, verdict = 'UNKNOWN (skipped guard?)' } end
+    local list, why = shortlist.new{
+        subject = ('entries of %s with no guard'):format(tname),
+        scope = ('the %d declared entries'):format(#entries),
+        complete = shortlist.EXHAUSTIVE,
+        rows = rows, columns = { 'verdict', 'name' }, skipped = skipped,
+    }
+    if not list then print('shortlist refused: ' .. tostring(why)); os.exit(2) end
     print('')
-    print(('UNGUARDED: %d of %d entries in %s can be removed with the suite still green')
-        :format(#unguarded, #entries, tname))
-    for _, n in ipairs(unguarded) do print('    ' .. n) end
-    if #unknown > 0 then
-        print(('UNKNOWN: %d entries whose guard may be a test this environment SKIPS'):format(#unknown))
-        for _, n in ipairs(unknown) do print('    ' .. n) end
-    end
-    if #skipped > 0 then
-        print(('  (%d not mutated — key not locatable: %s)')
-            :format(#skipped, table.concat(skipped, ', ')))
-    end
+    print(table.concat(list:render(), '\n'))
+    return list
 end
 
 if mode == 'lines' then mode_lines()

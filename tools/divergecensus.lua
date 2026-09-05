@@ -343,15 +343,27 @@ if (show == 'all' or show == 'sigs') and res.sigs then
     end)
     local recur = 0
     for _, x in ipairs(rows) do if x[2].n > 1 then recur = recur + 1 end end
-    io.write('SIGNATURES — the same disagreement, counted across pairs.\n')
-    io.write(('  %d distinct · %d RECUR (>1 site)   [owners = distinct declaring types]\n')
-        :format(#rows, recur))
+    -- ★ A SHORTLIST, AND A `ranked-open` ONE (CART-0755). This prints the top 15
+    -- of #rows, so an absence here means "did not rank highly", NEVER "does not
+    -- exist" — the opposite of the entries census, which is exhaustive. Stating
+    -- which it is, in the header, is the whole contract: a narrowing presented as
+    -- complete makes a reader stop looking.
+    local shortlist = require 'cartograph.shortlist'
+    local srows = {}
     for i = 1, math.min(#rows, 15) do
-        io.write(('  owners=%-3d x%-4d %s\n'):format(rows[i][2].nowners, rows[i][2].n,
-            rows[i][1]:sub(1, 112)))
-        io.write(('               %s\n'):format(table.concat(rows[i][2].where, ' · '):sub(1, 112)))
+        srows[#srows + 1] = { key = rows[i][1], n = rows[i][2].n,
+            owners = rows[i][2].nowners, where = rows[i][2].where }
     end
-    io.write('\n')
+    local list = shortlist.new{
+        subject = 'the same disagreement, counted across pairs',
+        scope = ('%d distinct signatures, %d of which RECUR'):format(#rows, recur),
+        complete = shortlist.RANKED_OPEN, rows = srows,
+    }
+    io.write(table.concat(list:render(function (r)
+        return ('owners=%-3d x%-4d %s\n               %s'):format(r.owners, r.n,
+            r.key:sub(1, 112), table.concat(r.where, ' · '):sub(1, 112))
+    end), '\n'))
+    io.write('\n\n')
 end
 
 if show == 'all' or show == 'witnesses' then
