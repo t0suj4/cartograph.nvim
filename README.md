@@ -2992,6 +2992,34 @@ tools/install-hooks.sh      # git config core.hooksPath .githooks
 
 `git commit --no-verify` bypasses it for a WIP checkpoint.
 
+<!-- @claim readme-agent-verbs: The agent surface serves 25 verbs. -->
+<!-- check: #require('cartograph.agent').ORDER == 25 -->
+
+## Agent surface (headless, 25 verbs)
+
+Everything above is the editor. There is a second, equal surface: cartograph
+answers the same questions **headlessly**, over MCP or one-shot JSON, and applies
+edits through the same journal.
+
+```sh
+nvim --headless -u NONE -l tools/mcpserve.lua          # MCP server, stdio
+nvim --headless -u NONE -l tools/agentq.lua <verb> …   # one-shot JSON
+```
+
+The verbs are grouped by how far they may be trusted — read, catalogue, version,
+write — and `graph_info` reports which are available on *this* graph and host,
+and why any are not. The write half is a ladder: **plan** (writes nothing) →
+**preview** (writes nothing) → **apply**, and `txn_apply` refuses a plan that was
+never previewed. Every write plan declares the guards it will be checked against,
+and a guard REFUSES rather than warns.
+
+**An empty answer is a typed claim with a reason attached.** `absent`, `refused`,
+`frontier` and `unavailable` mean different things, and reading one as "nothing
+found" is the mistake the envelope exists to prevent.
+
+Full reference — every verb, its arguments, the absence taxonomy and the write
+ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograph/SKILL.md).
+
 ## Tools (dev bench)
 
 `tools/` is measurement tooling for working ON cartograph — outside the
