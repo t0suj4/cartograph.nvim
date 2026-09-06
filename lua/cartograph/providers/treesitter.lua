@@ -7535,6 +7535,24 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- slashed fn like ble/bash/read must not vocab-die on tail `read`
         if not cands and not (spec and spec.literal_names)
             and snames[name:match('([%w_%-]+)$') or ''] then
+            -- ★★★ AN ORACLE THAT CONFIRMS THE WHOLE PATH OUTRANKS A HAND-WRITTEN
+            -- TAIL WORD (CART-0805). This gate exists to stop promiscuous tail
+            -- matching, and the word list it consults is a curated guess — the JS
+            -- spec's `stdlib_names` lists createElement, appendChild,
+            -- querySelectorAll and forty more by hand. A distilled surface states
+            -- `document.createElement` EXACTLY, and it was being refused before it
+            -- was ever asked: every DOM call in jquery died here as `refused:
+            -- vocab`, with the browser profile loaded and holding the key.
+            -- ⚠ THE TEST IS THE EXACT DOTTED NAME, not the profile's namespace
+            -- set: `prof_ext` would answer for anything rooted at a known
+            -- namespace, which would trade a refusal for an UNMINTED disposition
+            -- and move counts without resolving anything. Only a path the oracle
+            -- spells out earns the bypass, and mint_path asks it again at mint
+            -- time, so the surface answers twice.
+            local prof = spec and spec._profile
+            if prof and prof.sigs and prof.sigs[name] then
+                return nil, nil, nil, EXT.stdlib
+            end
             return nil, nil, { rule = 'vocab' }
         end
         if cands then
@@ -8389,6 +8407,24 @@ function M.relink(data, touched)
         -- slashed fn like ble/bash/read must not vocab-die on tail `read`
         if not cands and not (spec and spec.literal_names)
             and snames[name:match('([%w_%-]+)$') or ''] then
+            -- ★★★ AN ORACLE THAT CONFIRMS THE WHOLE PATH OUTRANKS A HAND-WRITTEN
+            -- TAIL WORD (CART-0805). This gate exists to stop promiscuous tail
+            -- matching, and the word list it consults is a curated guess — the JS
+            -- spec's `stdlib_names` lists createElement, appendChild,
+            -- querySelectorAll and forty more by hand. A distilled surface states
+            -- `document.createElement` EXACTLY, and it was being refused before it
+            -- was ever asked: every DOM call in jquery died here as `refused:
+            -- vocab`, with the browser profile loaded and holding the key.
+            -- ⚠ THE TEST IS THE EXACT DOTTED NAME, not the profile's namespace
+            -- set: `prof_ext` would answer for anything rooted at a known
+            -- namespace, which would trade a refusal for an UNMINTED disposition
+            -- and move counts without resolving anything. Only a path the oracle
+            -- spells out earns the bypass, and mint_path asks it again at mint
+            -- time, so the surface answers twice.
+            local prof = spec and spec._profile
+            if prof and prof.sigs and prof.sigs[name] then
+                return nil, nil, nil, EXT.stdlib
+            end
             return nil, nil, { rule = 'vocab' }
         end
         if cands then

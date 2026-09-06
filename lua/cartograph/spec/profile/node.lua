@@ -19,16 +19,34 @@ local api = require('cartograph.spec.profile').load('node-api')
 -- Absent artifact => the node surface alone, which is the correct default.
 local npm = require('cartograph.spec.profile').load('npm-api')
 
+-- ★★★ THE BROWSER HALF (CART-0805). node's surface is the running ENGINE's, so it
+-- has no `document`, no `window`, no `Element` — and two of the three JS corpora
+-- are browser code. `tools/domdistill.lua` reads TypeScript's own `lib.dom.d.ts`
+-- into `dom-api.mpack`: 27 globals, 18873 keys, the extends chains expanded so
+-- `document.appendChild` (declared seven interfaces up, on Node) is a key.
+-- ⚠ WHY IT UNIONS RATHER THAN BEING ITS OWN PROFILE, and it is not a preference:
+-- `select_env` gives a root exactly ONE profile, NEAREST-wins, and a repo is
+-- routinely both — ghost serves a browser frontend out of a node server, and
+-- converse.js has a `headless/` node half beside its browser one. A second profile
+-- would force a choice the tree does not make. Unioning is safe because MINTING IS
+-- GATED ON THE MEMBER: a server-only project never calls `document.createElement`,
+-- so the extra names cost it nothing, which is the measurement that decided this.
+-- NODE STILL WINS A COLLISION — its answer came from a running engine, the DOM's
+-- from a declaration.
+local dom = require('cartograph.spec.profile').load('dom-api')
+
 -- NODE WINS A COLLISION: a package cannot redefine `fs` for a call that already
 -- reached the nodef gate.
 local nsset, namespaces, sigs, vocab = {}, {}, {}, {}
 for k, v in pairs(api.nsset or {}) do nsset[k] = v end
 for k, v in pairs(api.sigs or {}) do sigs[k] = v end
 for k, v in pairs(api.vocab or {}) do vocab[k] = v end
-if npm then
-    for k, v in pairs(npm.nsset or {}) do if nsset[k] == nil then nsset[k] = v end end
-    for k, v in pairs(npm.sigs or {}) do if sigs[k] == nil then sigs[k] = v end end
-    for k, v in pairs(npm.vocab or {}) do if vocab[k] == nil then vocab[k] = v end end
+for _, extra in ipairs({ dom, npm }) do
+    if extra then
+        for k, v in pairs(extra.nsset or {}) do if nsset[k] == nil then nsset[k] = v end end
+        for k, v in pairs(extra.sigs or {}) do if sigs[k] == nil then sigs[k] = v end end
+        for k, v in pairs(extra.vocab or {}) do if vocab[k] == nil then vocab[k] = v end end
+    end
 end
 for k in pairs(nsset) do namespaces[#namespaces + 1] = k end
 table.sort(namespaces) -- an artifact field: order is output (CART-0790)
@@ -79,6 +97,9 @@ local function mint_path(callee, full, why)
     -- fetch, ...) and nothing wider — not the 3959 member names, which would
     -- claim any unresolved project function sharing a name with some builtin.
     if api.free[callee] then return callee end
+    -- and the browser's own callable globals (fetch, alert, requestAnimationFrame,
+    -- getComputedStyle): the same rule, from the same nodef position.
+    if dom and dom.free and dom.free[callee] then return callee end
     return nil
 end
 
@@ -93,7 +114,12 @@ return {
     types = api.types or {},
     namespaces = namespaces,
     nsset = nsset,
-    free = api.free,
+    free = (function ()
+        local f = {}
+        for k, v in pairs(api.free) do f[k] = v end
+        if dom then for k, v in pairs(dom.free or {}) do if f[k] == nil then f[k] = v end end end
+        return f
+    end)(),
     vocab = vocab,
     sigs = sigs,
     mint = true,

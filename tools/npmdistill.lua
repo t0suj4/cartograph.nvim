@@ -47,8 +47,9 @@
 -- a package count and a member count, and both numbers looked healthy while the
 -- corpus's most-imported package was absent from the artifact.
 --
---   INVOCATION USED FOR THAT MEASUREMENT (the default --limit is still 60):
---     nvim --headless -u NONE -l tools/npmdistill.lua ghost --limit 200
+--   INVOCATION:  nvim --headless -u NONE -l tools/npmdistill.lua ghost
+--   (--limit now defaults to 1000, a runaway bound rather than a selection —
+--    see the comment on it below; ghost, the largest corpus here, imports 177)
 --   ⚠ AND THE ARTIFACT IS PROJECT DATA. Remove it before gating anything: every
 --   pinned count in tools/corpora.lua was calibrated WITHOUT an npm surface.
 --
@@ -63,7 +64,23 @@
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 local bench = dofile(repo .. '/tools/bench.lua')
 
-local target, out, limit = nil, repo .. '/lua/cartograph/spec/profile/npm-api.mpack', 60
+-- ★★★ THE DEFAULT IS A RUNAWAY BOUND, NOT A SELECTION POLICY (CART-0805). It was
+-- 60, and that was the SECOND half of the same defect as the alphabetical sort:
+-- ranking fixed WHICH packages survive a cut and left an arbitrary cut in place.
+-- On ghost the old default dropped 117 packages the corpus demonstrably imports —
+-- 27 packages and 4743 members instead of 104 and 10614 — so two people distilling
+-- the same corpus with different flags built DIFFERENT GRAPHS from the same code.
+--
+-- ⚠ THE DISTINCTION IS THE WHOLE POINT. A cap that DECIDES WHAT YOU GET is a bug:
+-- every surviving name is one the code has already asked for, and refusing to
+-- fetch it refuses a question the corpus posed. A cap that BOUNDS A PATHOLOGICAL
+-- INPUT is a safety rail: the package list comes from a manifest, each name
+-- becomes two network requests, and a manifest with ten thousand dependencies
+-- should not be able to turn one command into twenty thousand of them.
+-- So the default is set far above any real manifest (ghost, the largest corpus
+-- here, imports 177) and SAYS SO LOUDLY if it ever binds. If you see it fire,
+-- the interesting question is what that manifest is, not what to pass.
+local target, out, limit = nil, repo .. '/lua/cartograph/spec/profile/npm-api.mpack', 1000
 local i = 1
 while arg and arg[i] do
     local a = arg[i]
@@ -188,7 +205,16 @@ if #wanted > limit then
     local t = {}
     for k = 1, limit do t[k] = wanted[k] end
     wanted = t
+    print(('npmdistill: ⚠ THE RUNAWAY BOUND FIRED — %d imported packages past'
+        .. ' --limit %d, so this surface describes %d of them and the graph built'
+        .. ' on it will differ from one distilled without the cap. Raise --limit,'
+        .. ' or ask why this manifest declares %d dependencies.')
+        :format(cut, limit, #wanted, #names + unimported))
 end
+-- ⚠ THE CUT IS A PROPERTY OF THE INVOCATION AND THE ARTIFACT MUST SAY SO. A
+-- surface distilled under a cap is a DIFFERENT surface, and a graph built on it
+-- resolves differently — recording the number is what lets a later measurement be
+-- attributed to a corpus rather than to a flag (CART-0811).
 names = wanted
 if #names == 0 then
     print('npmdistill: the corpus imports none of its declared packages — nothing'
@@ -254,278 +280,28 @@ end
 
 -- ── parse the DECLARATIONS on the host, with the typescript grammar ─────────
 -- A .d.ts has no executable body; this reads names, never runs anything.
+--
+-- ★★ THE WALK ITSELF LIVES IN tools/dtsread.lua (CART-0805), because the BROWSER
+-- surface is the same job over TypeScript's own lib.dom.d.ts and a second copy of a
+-- declaration walker is a second copy of every bug in it. What stays here is what
+-- is actually specific to npm: which packages to fetch, how to reach them without
+-- installing anything, and the fact that a PACKAGE NAME is the namespace.
 bench.bootstrap()
 pcall(vim.treesitter.language.add, 'typescript')
-local nsset, namespaces, sigs, vocab = {}, {}, {}, {}
-local npkg, nmem, nret = 0, 0, 0
---- ★★★ THE DECLARED RETURN TYPE, which this tool used to read and throw away
---- (CART-0800). `sinon.stub()` returns `SinonStub` and `supertest(app)` returns
---- `SuperTest<Test>`; the .d.ts states both, and keeping only the member NAME
---- discarded the one fact that lets a chain terminate.
---- WHY IT MATTERS: cartograph's `resolve_returns` is already a fixpoint over
---- calls, following each callee's `ret`. A JS function has none, so nothing
---- propagates — and MEASURED on converse.js, 99 of 179 inferable return chains
---- BOTTOM OUT AT A LIBRARY. This is that bottom.
---- ⚠ THE BASE TYPE ONLY, and `Promise<X>` unwraps to X. A member typed
---- `Promise<SinonStub>` is awaited at the call site far more often than it is
---- held, so X is the type a receiver will actually carry. Anything that is not a
---- plain identifier (a union, a literal, a function type, a generic with more
---- than one argument) yields NIL rather than a guess: a wrong return type
---- propagates through a fixpoint and multiplies.
-local function ret_of(n, src)
-    local rt = n:field('return_type')[1]
-    if not rt then return nil end
-    local txt = vim.treesitter.get_node_text(rt, src):gsub('%s+', ' ')
-    txt = txt:gsub('^:%s*', '')
-    local inner = txt:match('^Promise%s*<%s*([%w_$]+)%s*>$')
-    if inner then return inner end
-    -- ★ A GENERIC APPLICATION'S BASE NAME IS A REAL TYPE (CART-0804).
-    -- `SinonStub<TArgs, TReturnValue>` IS a SinonStub: the type arguments decide
-    -- the types of its members' parameters, never WHICH members it has, and the
-    -- members are the only thing this surface answers about. Refusing the whole
-    -- thing lost `sinon.stub`'s return type — the bottom that a `.returns()`
-    -- chain terminates on — for no soundness gain. A union or a function type
-    -- still yields nil, because there the base name is a guess.
-    local base = txt:match('^([%w_$]+)%s*<.*>$')
-    local plain = base or txt:match('^([%w_$]+)$')
-    if not plain then return nil end
-    -- ⚠ A PRIMITIVE TYPES NOTHING A MEMBER CAN BE RESOLVED ON, and a GENERIC TYPE
-    -- VARIABLE is not a type at all. The first cut kept both and produced
-    -- `bookshelf.at -> T`, `bookshelf.belongsTo -> R`, `knex.before -> any` —
-    -- entries that can only ever match by accident, and a wrong return type
-    -- MULTIPLIES through a fixpoint.
-    local PRIM = { void = 1, any = 1, unknown = 1, never = 1, ['this'] = 1,
-        boolean = 1, string = 1, number = 1, object = 1, symbol = 1, bigint = 1,
-        null = 1, undefined = 1, Object = 1, Function = 1 }
-    if PRIM[plain] then return nil end
-    -- a type VARIABLE by convention: one or two characters, capitalised (T, R,
-    -- K, V, TResult is longer and is a real name). Cheap, and the failure mode of
-    -- being too strict here is a MISSING return type, not a wrong one.
-    if #plain <= 2 and plain:match('^%u') then return nil end
-    return plain
+local dts = dofile(repo .. '/tools/dtsread.lua')
+
+local acc = dts.new()
+local npkg = 0
+for _, f in ipairs(fetched) do
+    if dts.absorb(acc, f.src, { ns = f.ns }) > 0 then npkg = npkg + 1 end
 end
+local rep = dts.finish(acc)
+local nmem, nret, nflat, nrets = acc.nmem, acc.nret, rep.flat, rep.rets
 
---- The declared TYPE of a property signature — `assert: SinonAssert` — which is
---- NOT a return type and must never be stored as one: `sinon.assert` does not
---- RETURN a SinonAssert, it IS one. Kept separate for that reason, and read only
---- to flatten a nested namespace path below.
---- the BASE NAME of a type expression, or nil when the expression is not one
---- named type. `SinonStub<A, B>` -> SinonStub (see ret_of on why the base is a
---- real type); a union, a function type or an intersection -> nil.
-local function base_of(txt)
-    txt = (txt or ''):gsub('%s+', ' '):gsub('^:%s*', '')
-    return txt:match('^([%w_$]+)%s*<.*>$') or txt:match('^([%w_$]+)$')
-end
+local namespaces = {}
+for k in pairs(acc.nsset) do namespaces[#namespaces + 1] = k end
+local nsset, sigs, vocab = acc.nsset, acc.sigs, acc.vocab
 
--- owner -> { arity -> return base name }, from the CALL SIGNATURES of a callable
--- interface; and alias name -> the set of type names its definition mentions
-local call_sigs, alias_names = {}, {}
-
-local function type_of(n, src)
-    if n:type() ~= 'property_signature' and n:type() ~= 'public_field_definition' then
-        return nil
-    end
-    local tn = n:field('type')[1]
-    if not tn then return nil end
-    local txt = vim.treesitter.get_node_text(tn, src):gsub('%s+', ' '):gsub('^:%s*', '')
-    return txt:match('^([%w_$]+)%s*<.*>$') or txt:match('^([%w_$]+)$')
-end
-
--- owner -> { member -> true }, so a declared type can be expanded into the
--- members it carries (the flatten pass after every package is absorbed)
-local owner_members, prop_type = {}, {}
-
-local function absorb(nsname, src)
-    local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'typescript')
-    if not okp then return end
-    local okt, tree = pcall(function () return parser:parse()[1] end)
-    if not okt or not tree then return end
-    local found = 0
-    -- ★★★ MEMBERS ARE KEYED BY THEIR DECLARING INTERFACE TOO, not only by the
-    -- package. Without this a return type cannot chain: `sinon.stub()` returns
-    -- `SinonStub`, and resolving `.returns()` on it needs `SinonStub.returns` to
-    -- exist. MEASURED before this: of 769 members carrying a declared return type,
-    -- ZERO had a type whose own members were in the surface — every chain stopped
-    -- one step after it started.
-    local function walk(n, owner)
-        local t = n:type()
-        -- ★★★ A CALLABLE INTERFACE IS HOW A .d.ts SPELLS AN OVERLOADED FUNCTION
-        -- (CART-0808). sinon declares `stub: SinonStubStatic` and SinonStubStatic
-        -- carries three anonymous call signatures with three DIFFERENT return
-        -- types, one per arity. That is not ambiguity to refuse — it is a fact
-        -- keyed by argument count, and the call site states its argument count.
-        if t == 'call_signature' and owner then
-            local params, rtn
-            for ch in n:iter_children() do
-                local ct = ch:type()
-                if ct == 'formal_parameters' then params = ch
-                elseif ct == 'type_annotation' then rtn = ch end
-            end
-            if rtn then
-                local base = base_of(vim.treesitter.get_node_text(rtn, src))
-                local arity = params and params:named_child_count() or 0
-                if base then
-                    call_sigs[owner] = call_sigs[owner] or {}
-                    -- FIRST signature at an arity wins: the declarations list the
-                    -- specific overloads before the catch-alls
-                    if call_sigs[owner][arity] == nil then
-                        call_sigs[owner][arity] = base
-                    end
-                end
-            end
-        end
-        if t == 'type_alias_declaration' then
-            local anm = n:field('name')[1]
-            local at = anm and vim.treesitter.get_node_text(anm, src)
-            if at and at:match('^[%w_$]+$') then
-                local set = {}
-                local function names(x)
-                    if x:type() == 'type_identifier' then
-                        local nm = vim.treesitter.get_node_text(x, src)
-                        if nm and nm:match('^[%w_$]+$') and nm ~= at then set[nm] = true end
-                    end
-                    for ch in x:iter_children() do if ch:named() then names(ch) end end
-                end
-                names(n)
-                alias_names[at] = set
-            end
-        end
-        if t == 'interface_declaration' or t == 'class_declaration' then
-            local onm = n:field('name')[1]
-            if onm then
-                local ot = vim.treesitter.get_node_text(onm, src)
-                if ot and ot:match('^[%w_$]+$') then owner = ot end
-            end
-        end
-        if t == 'function_signature' or t == 'function_declaration'
-            or t == 'class_declaration' or t == 'interface_declaration'
-            or t == 'variable_declarator' or t == 'method_signature'
-            or t == 'property_signature' then
-            local nm = n:field('name')[1]
-            if nm then
-                local nmt = vim.treesitter.get_node_text(nm, src)
-                if nmt and nmt:match('^[%w_$]+$') then
-                    -- the interface-keyed entry, when this member is declared
-                    -- inside one and is not the interface itself
-                    if owner and owner ~= nmt then
-                        local ok2 = owner .. '.' .. nmt
-                        owner_members[owner] = owner_members[owner] or {}
-                        owner_members[owner][nmt] = true
-                        if not sigs[ok2] then
-                            sigs[ok2] = { arities = {}, ret = ret_of(n, src) }
-                            nmem = nmem + 1
-                            if sigs[ok2].ret then nret = nret + 1 end
-                            local pt2 = type_of(n, src)
-                            if pt2 then prop_type[ok2] = pt2 end
-                        end
-                    end
-                    local key = nsname .. '.' .. nmt
-                    if not sigs[key] then
-                        sigs[key] = { arities = {}, ret = ret_of(n, src) }
-                        vocab[nmt] = true
-                        nmem = nmem + 1
-                        found = found + 1
-                        if sigs[key].ret then nret = nret + 1 end
-                        -- remember what this package-level name IS, so a nested
-                        -- namespace (`sinon.assert.calledOnce`) can be flattened
-                        local pt = type_of(n, src)
-                        if pt then prop_type[key] = pt end
-                    end
-                end
-            end
-        end
-        for ch in n:iter_children() do if ch:named() then walk(ch, owner) end end
-    end
-    walk(tree:root(), nil)
-    if found > 0 and not nsset[nsname] then
-        nsset[nsname] = true
-        namespaces[#namespaces + 1] = nsname
-        npkg = npkg + 1
-    end
-end
-for _, f in ipairs(fetched) do absorb(f.ns, f.src) end
-
--- ── FLATTEN ONE LEVEL OF PROPERTY-TYPE INDIRECTION ──────────────────────────
--- ★★★ A NESTED NAMESPACE IS A PATH THE SURFACE CAN STATE (CART-0804). sinon
--- declares `assert: SinonAssert` on its root interface and `calledOnce(...)` on
--- `SinonAssert`, so the corpus's `sinon.assert.calledOnce(spy)` — 1090 sites on
--- ghost, with notCalled at 731 and calledWith at 571 — is TWO facts the surface
--- already holds and no key that joins them. This joins them at DISTILL time and
--- writes `sinon.assert.calledOnce` as an ordinary key.
---
--- ⚠ WHY HERE AND NOT IN mint_path. The alternative is to let the profile accept
--- `sinon.<anything in vocab>` on a three-segment path, and that mints a claim the
--- .d.ts never made — a minted node is a GUARANTEE that this member exists at this
--- path. Flattening keeps the oracle exact: every emitted key is a path the
--- declarations state, spelled out. ONE level only; deeper nesting is rarer than
--- the ambiguity it would buy.
---- an alias resolves when its definition mentions exactly ONE type that this
---- surface knows as an interface: `type SinonStubbedFunction<T> = T extends (...)
---- ? SinonStub<A,R> : SinonStub` names SinonStub on both branches, so the
---- conditional never has to be evaluated to answer what it yields. Two candidates
---- or none, and it stays unresolved rather than guessed.
-local function resolve_alias(name, depth)
-    if not name or (depth or 0) > 3 then return name end
-    if owner_members[name] then return name end
-    local set = alias_names[name]
-    if not set then return name end
-    local one
-    for n2 in pairs(set) do
-        if owner_members[n2] then
-            if one and one ~= n2 then return name end
-            one = n2
-        end
-    end
-    if one then return resolve_alias(one, (depth or 0) + 1) end
-    return name
-end
-
--- ── THE RETURN TYPE OF A CALLABLE PROPERTY, KEYED BY ARITY ──────────────────
--- ★★★ `sinon.stub` had no return type and that is where the volume is: the
--- .d.ts declares it as `stub: SinonStubStatic`, a PROPERTY type — sinon.stub does
--- not RETURN a SinonStubStatic, it IS one — and SinonStubStatic's three call
--- signatures return three different types, one per arity:
---     ()             -> SinonStub
---     (obj)          -> SinonStubbedInstance
---     (obj, method)  -> SinonStubbedFunction   (an alias, resolving to SinonStub)
--- ⚠ A SINGLE `ret` HERE WOULD BE A GUESS, and picking the majority answer would
--- make `sinon.stub(obj).reset()` claim sinon's own `reset` when it means the
--- stubbed object's. The arity is not ambiguity — IT IS THE KEY, the call site
--- states it, and resolve_returns reads the determining call's argument count. So
--- store the whole map and let the call decide; `ret` is filled only when every
--- overload agrees, which is what a caller without an argument count can honestly
--- use.
-local nrets = 0
-for key, ty in pairs(prop_type) do
-    local cs = call_sigs[resolve_alias(ty)]
-    if cs and not sigs[key].ret then
-        local rets, one, unanimous = {}, nil, true
-        for arity, r in pairs(cs) do
-            local rr = resolve_alias(r)
-            rets[arity] = rr
-            if one and one ~= rr then unanimous = false end
-            one = one or rr
-        end
-        if next(rets) then
-            sigs[key].rets = rets
-            if unanimous then sigs[key].ret = one end
-            nrets = nrets + 1
-        end
-    end
-end
-
-local nflat = 0
-for key, ty in pairs(prop_type) do
-    for member in pairs(owner_members[ty] or {}) do
-        local flat = key .. '.' .. member
-        if not sigs[flat] then
-            sigs[flat] = { arities = {}, ret = sigs[ty .. '.' .. member]
-                and sigs[ty .. '.' .. member].ret or nil }
-            vocab[member] = true
-            nflat = nflat + 1
-        end
-    end
-end
 
 if npkg == 0 then
     print('npmdistill: no package declared a readable surface — refusing to write'
@@ -538,7 +314,10 @@ local fd = assert(io.open(out, 'wb'))
 fd:write(vim.mpack.encode({
     schema = 1, runtime = 'npm-api', lang = 'javascript',
     version = tostring(pkg.name or target) .. '@' .. tostring(pkg.version or '?'),
-    stamp = ('npm-%d-%d'):format(npkg, nmem),
+    stamp = ('npm-%d-%d%s'):format(npkg, nmem, cut > 0 and ('-cut' .. cut) or ''),
+    -- how many imported packages this artifact does NOT describe: 0 unless
+    -- --limit was given, and a reader of the surface can tell
+    cut = cut,
     sig_kind = 'javascript', sig_root = 'unpkg',
     types = {}, namespaces = namespaces, nsset = nsset,
     free = {}, vocab = vocab, sigs = sigs,

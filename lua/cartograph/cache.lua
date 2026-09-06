@@ -297,7 +297,17 @@ end
 -- rt at all. With a surface installed ghost goes 45.6% -> 48.1% and mints
 -- SinonStub.resolves 1084, .returns 1051, .withArgs 410, .callsFake 291. A graph
 -- cached before this has the chains unlinked.
-M.VERSION = 187 -- v187: THE RETURN CHAIN REACHES THE PROFILE (CART-0808), above.
+-- ★★ v188: THE BROWSER SURFACE, AND THE GATE THAT WAS HIDING IT (CART-0805).
+-- `tools/domdistill.lua` distils TypeScript's own lib.dom.d.ts into dom-api.mpack
+-- (27 globals, 18873 keys, extends chains expanded) and the node profile unions it.
+-- ⚠ AND IT WOULD HAVE MEASURED ZERO: the stdlib TAIL word list refused every DOM
+-- call as `refused: vocab` before the surface holding the exact dotted key was
+-- asked, so an ORACLE THAT CONFIRMS THE WHOLE PATH now outranks a hand-written
+-- tail word. jquery 37.3 -> 38.8%, mootools 30.6 -> 33.5%, converse.js 23.9 ->
+-- 25.1%, and ghost 42.3 -> 43.5% because it serves a browser frontend. Six pinned
+-- corpora gained nodes, purely additive; a cached graph lacks them.
+M.VERSION = 188 -- v188: THE BROWSER SURFACE (CART-0805), above.
+               -- v187: THE RETURN CHAIN REACHES THE PROFILE (CART-0808)
                -- v186: THE ORACLE ANSWERS FOR A PATH, NOT A PAIR (CART-0804)
                -- v185: A SHAPE'S TWO CONFIG SOURCES COMPOSE (CART-0802)
                -- v184: A SET-ONCE LOCAL NAMES ITS DETERMINING CALL (CART-0800)
