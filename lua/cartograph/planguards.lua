@@ -167,6 +167,83 @@ M.GUARDS['shape-preserved'] = function (_, plan, _, after)
     return { { verdict = M.FAIL, file = sh.file, why = why or 'the shape did not survive' } }
 end
 
+--- THE CODE OF A FILE, WITH ITS COMMENTS REMOVED — the leaf (type, text)
+--- sequence of the parse tree, skipping comment nodes. Two texts with the same
+--- skeleton differ only in what was skipped.
+---
+--- ★ EXPORTED because `annotate` validates a candidate comment PREFIX with it:
+--- splice a probe line into a real file and require the skeleton to be
+--- unchanged. That is the same question the guard below asks AFTER a write,
+--- asked BEFORE one — so a prefix that would trip the guard is refused at PLAN
+--- time with a reason about the STYLE rather than about a failed guard. The
+--- CART-0773 shape: the decision early and specific, the guard as backstop.
+---@return string|nil skeleton, nil when the language has no parser here
+function M.code_skeleton(text, lang)
+    if type(text) ~= 'string' or not lang then return nil end
+    local okp, parser = pcall(vim.treesitter.get_string_parser, text, lang)
+    if not okp or not parser then return nil end
+    local okt, tree = pcall(function () return parser:parse()[1] end)
+    if not okt or not tree then return nil end
+    local tsutil = require 'cartograph.spec.tsutil'
+    local out = {}
+    local lines = vim.split(text, '\n', { plain = true })
+    local function walk(nd)
+        if tsutil.is_comment(nd) then return end
+        local kids = 0
+        for c in nd:iter_children() do kids = kids + 1; walk(c) end
+        if kids == 0 then
+            local sr, sc, er, ec = nd:range()
+            local t = (sr == er) and (lines[sr + 1] or ''):sub(sc + 1, ec) or nd:type()
+            out[#out + 1] = nd:type() .. '\31' .. t
+        end
+    end
+    walk(tree:root())
+    return table.concat(out, '\30')
+end
+
+--- ★★★ THE EDIT WAS ONLY PROSE — and `parses` CANNOT ANSWER THIS (CART-0780).
+--- An `annotate` plan is authorised by "this text is a comment", so the write
+--- must re-derive that it stayed one. The hazard is specific: prose containing a
+--- comment terminator can close the comment early and turn the rest into CODE,
+--- and the result can parse PERFECTLY — so rung 0 passes and the file means
+--- something else.
+---
+--- ⚠ MEASURED SCOPE, so nobody over-trusts it: through `annotate` this is a
+--- BACKSTOP, not the primary barrier. The prefix is validated before use and
+--- every line is prefixed, which designs the escape out for line comments (in
+--- lua `-- oops --[[` is an ordinary comment, since a long comment needs `--[[`
+--- at the comment's start). It is here for the prefix or grammar that breaks
+--- that assumption, and it is driven directly in the spec because the verb can
+--- no longer produce the failure.
+---
+--- ⚠ NO CLAIM WITHOUT A PARSER, like `parses` — a language whose grammar is
+--- absent gets NO-CLAIM rather than a pass.
+M.GUARDS['comment-inert'] = function (_, plan, before, after)
+    local ts = require 'cartograph.providers.treesitter'
+    local rows = {}
+    for _, rel in ipairs((plan and plan.touched) or {}) do
+        local lang = ts.parse_lang(rel)
+        local b, a = (before or {})[rel], (after or {})[rel]
+        if not lang or type(b) ~= 'string' or type(a) ~= 'string' then
+            rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel,
+                why = 'no parser, or no before/after text, so inertness cannot be checked' }
+        else
+            local sb, sa = M.code_skeleton(b, lang), M.code_skeleton(a, lang)
+            if not sb or not sa then
+                rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel,
+                    why = ('the %s parser is unavailable here'):format(lang) }
+            elseif sb == sa then
+                rows[#rows + 1] = { verdict = M.PASS, file = rel }
+            else
+                rows[#rows + 1] = { verdict = M.FAIL, file = rel,
+                    why = 'the edit was supposed to be prose only, and it changed the CODE '
+                        .. '— a comment opener or terminator in the text has escaped' }
+            end
+        end
+    end
+    return rows
+end
+
 --- Run a plan's declared guards over a (before, after) pair.
 --- ONE function, called by BOTH `txn.dryrun` and `txn.execute`, so the preview
 --- and the write cannot disagree about what was checked.
