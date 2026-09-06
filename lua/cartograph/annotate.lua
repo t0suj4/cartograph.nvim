@@ -44,6 +44,23 @@ end
 --- Every candidate line-comment prefix in a text: the leading punctuation run of
 --- each comment that occupies ONE line. Candidates, not a choice — which one
 --- survives is decided by trying the REAL edit.
+--- ⚠⚠ A SHEBANG IS A COMMENT TO THE GRAMMAR AND A KERNEL DIRECTIVE TO THE
+--- OPERATING SYSTEM, and `is_comment` returns TRUE for it — measured: ruby,
+--- python and bash all parse `#!/usr/bin/env x` as a `comment` node (lua alone
+--- gives it its own `hash_bang_line`). Two things follow, and both bite:
+---   · AS A DONOR it yields the prefix `#!/`, because `^(%p+)` runs across all
+---     three characters. `#!/ note` is STILL A VALID COMMENT, so the inertness
+---     trial ACCEPTS it and the file gets prose in a prefix nobody writes.
+---   · AS A NEIGHBOUR it must stay on LINE 1. Anything inserted above it and the
+---     file stops being executable — a breakage no parser can see, because the
+---     result parses perfectly.
+--- ★ THE RULE IS NOT PER-LANGUAGE KNOWLEDGE CREEPING BACK IN. `#!` is the
+--- kernel's exec convention, identical in every language that has one; it is a
+--- FILE-FORMAT fact, not a grammar fact, so one test covers all of them.
+local function is_shebang(line, row)
+    return row == 0 and type(line) == 'string' and line:sub(1, 2) == '#!'
+end
+
 local function candidate_prefixes(text, lang)
     local root = parse_root(text, lang)
     if not root then return {} end
@@ -52,7 +69,7 @@ local function candidate_prefixes(text, lang)
     local function walk(n)
         if tsutil.is_comment(n) then
             local sr, sc, er, ec = n:range()
-            if sr == er then
+            if sr == er and not is_shebang(lines[sr + 1], sr) then
                 local p = ((lines[sr + 1] or ''):sub(sc + 1, ec)):match('^(%p+)')
                 if p and not seen[p] then seen[p] = true; out[#out + 1] = p end
             end
@@ -139,6 +156,17 @@ function M.plan(store, opts)
     local first = atr.sl(n.range)
     local okp, tsm = pcall(require, 'cartograph.providers.treesitter')
     local s = txn.attach_above(lines, first, okp and tsm.attach_pats(n.file) or {})
+    -- ★ AND NOTHING IS INSERTED ABOVE A SHEBANG — but NOT because this verb checks
+    -- for one. A clamp was written here and MEASURED DEAD: `attach_above` already
+    -- DECLINES any adhered block that reaches the TOP OF THE FILE, a rule written
+    -- for license notices and file docblocks ("a header belongs to the FILE, not
+    -- the def"). A shebang is on line 1 by definition, so a walk that would reach
+    -- it is refused before it gets there, and `s` is never 0.
+    -- ⚠ THE VERB THEREFORE DEPENDS ON A NEIGHBOUR'S INVARIANT, which is exactly
+    -- the kind of thing that breaks silently when the neighbour is refactored for
+    -- an unrelated reason. `annotate_spec` drives it, so the dependency is fenced
+    -- rather than assumed — the test guards `attach_above`'s rule, not this file's
+    -- code, and it says so.
 
     -- indentation from the definition's own line, so the block lines up with the
     -- thing it describes rather than with the file

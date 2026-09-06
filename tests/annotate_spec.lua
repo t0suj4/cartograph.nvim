@@ -174,3 +174,59 @@ test('annotate: a one-line BLOCK comment is not accepted as a line prefix', func
         'the block comment was refused as a prefix, so the style came from elsewhere')
     ok(after_of(st, plan):find('-- note', 1, true), 'and the borrowed prefix is used')
 end)
+
+-- ⚠⚠ A SHEBANG IS A COMMENT TO THE GRAMMAR AND A KERNEL DIRECTIVE TO THE OS.
+-- MEASURED: ruby, python and bash all parse `#!/usr/bin/env x` as a `comment`
+-- node — `is_comment` returns TRUE — while LUA ALONE gives it its own
+-- `hash_bang_line`. So it is offered as a style donor and `^(%p+)` runs across
+-- all three characters to yield `#!/`. The trap is that `#!/ note` is STILL A
+-- VALID COMMENT, so the inertness trial ACCEPTS it: neither guard can see the
+-- problem, because the code is unchanged and every comment is a comment.
+--
+-- ★★ THESE TWO TESTS ARE IN PYTHON ON PURPOSE. A first version wrote them in lua
+-- and BOTH PASSED WITH THE GUARDS REMOVED — lua is the one language where the
+-- hazard does not exist, so the fixtures proved nothing. Testing in the
+-- convenient language instead of the affected one is how a guard ships untested.
+local function py_ready()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.language.add, 'python')
+end
+
+test('annotate: a shebang is never taken as a comment style (python)', function ()
+    if not py_ready() then return skip('no python parser') end
+    local st = ingest({
+        ['m.py'] = '#!/usr/bin/env python\ndef f():\n    return 1\n',
+        ['other.py'] = '# an honest comment\ndef o():\n    return 2\n',
+    })
+    local offered = {}
+    for _, c in ipairs(annotate.prefix_candidates(st, 'm.py', 'python')) do
+        offered[c.prefix] = c.donor
+    end
+    eq(nil, offered['#!/'], 'the shebang is not offered as a donor')
+    eq('other.py', offered['#'], 'so the style is borrowed from a real comment')
+end)
+
+-- ★ THIS ONE GUARDS A NEIGHBOUR'S INVARIANT, NOT THIS VERB'S CODE, and that is
+-- why it survives every break of `annotate`. A clamp WAS written here and
+-- measured DEAD: `attach_above` already declines any adhered block reaching the
+-- TOP OF THE FILE — a rule written for license notices — so a walk that would
+-- reach a line-1 shebang is refused before it gets there. The clamp went; the
+-- test stays, because the day that rule is refactored for an unrelated reason,
+-- this is what notices the shebang consequence.
+test('annotate: prose never lands above a shebang (python)', function ()
+    if not py_ready() then return skip('no python parser') end
+    local st = ingest({
+        ['m.py'] = '#!/usr/bin/env python\n# doc\ndef f():\n    return 1\n',
+        ['other.py'] = '# an honest comment\ndef o():\n    return 2\n',
+    })
+    local id = fn_id(st, 'f')
+    if not id then return skip('no python function node') end
+    local plan, why = annotate.plan(st, { node = id, text = 'note' })
+    ok(plan, 'planned: ' .. tostring(why))
+    local _, after = txn.dryrun(st, plan, annotate.edits_for(plan))
+    local out = after['m.py']
+    eq('#!/usr/bin/env python', vim.split(out, '\n', { plain = true })[1],
+        'the shebang is still line 1: ' .. out)
+    ok(out:find('# note', 1, true), 'and the prose landed somewhere')
+end)
