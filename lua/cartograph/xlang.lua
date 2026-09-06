@@ -35,6 +35,97 @@ M.default_bindings = {
           'apply_filters', 'apply_filters_ref_array' }, name = 1 } },
 }
 
+--- ★★ CALL INDEX FOR `verb_matches`, and it is the SAME DEFECT SHAPE as the one
+--- CART-0785 found in greenspun: `link` scanned EVERY call once (twice, with an
+--- import side) PER BINDING, so the pass was B x calls. Measured on our own tree,
+--- 65674 calls, one arm per binding count:
+---     bindings   0     1     2     4     8    16    24
+---     link ms  14.8  55.7  73.0 147.4 251.9 531.2 830.9
+--- 14.8 ms of setup and ~34 ms per binding, dead straight. The binding count is
+--- not fixed either — discovery proposes one per registry it finds, so a
+--- registry-rich tree pays twice: more bindings AND more calls.
+---
+--- WITH THE INDEX, arms interleaved, median of 5, output byte-identical on all 8:
+---     corpus     calls    B     link OLD -> NEW
+---     bnw          1185  12       1.5 ->    1.8 ms   (0.8x — see below)
+---     ruby         8818   5      11.5 ->   11.4 ms   (1.0x)
+---     grocy       15004   5      20.5 ->   15.6 ms   (1.3x)
+---     factorio    21082   6     101.8 ->   29.8 ms   (3.4x)
+---     desynced    21041  11     250.5 ->   29.8 ms   (8.4x)
+---     self        65695  24     574.9 ->   48.8 ms  (11.8x)
+---     ghost      130645  23     903.9 ->  169.5 ms   (5.3x)
+---     zig        131619   4     189.1 ->  109.3 ms   (1.7x)
+--- ★ bnw is 0.3 ms SLOWER and that is the honest shape of an index: 1185 calls
+--- over 12 bindings is too little scanning to pay for one pass of string work.
+--- It is 0.3 ms, and the tree it is measured on is a toy.
+--- Together with the greenspun memo this takes `refresh.files` after a one-file
+--- edit from 4.24 s to 1.78 s — 2.46 s off every edit an agent makes.
+---
+--- ★ THE INDEX IS EXACT, NOT A PREFILTER, and that is the claim to check.
+--- `verb_matches` is true iff callee == verb, OR full == verb, OR full ENDS WITH
+--- '.' .. verb. So a call is keyed under its callee, its full name, and every
+--- DOT-SUFFIX of its full name — `window.chrome.send` under `chrome.send` and
+--- `send`. Those three cases are the whole of `verb_matches`, so the index can
+--- neither miss nor invent; `verb_matches` is still applied to each candidate,
+--- which makes a bug here cost time rather than answers.
+--- ⚠ ORDER IS PART OF THE OUTPUT. Handlers accumulate into `exports[key]` lists
+--- and sites append to an edge's `at`, both in CALL ORDER, so candidate lists are
+--- built and merged ASCENDING BY CALL INDEX. A set-union that lost the order
+--- would produce a graph that is equal in content and different on disk.
+local function verb_index(data)
+    local by = {}
+    local function put(k, i)
+        if not k or k == '' then return end
+        local l = by[k]
+        if not l then l = {}; by[k] = l end
+        if l[#l] ~= i then l[#l + 1] = i end
+    end
+    for i, c in ipairs(data.calls or {}) do
+        put(c.callee, i)
+        local f = c.full
+        if f then
+            put(f, i)
+            local p = f:find('.', 1, true)
+            while p do put(f:sub(p + 1), i); p = f:find('.', p + 1, true) end
+        end
+    end
+    return by
+end
+
+--- Call indices a verb spec could match, ascending. `verb` is a name or a list.
+--- Returns nil when the spec is unusable (empty/absent), meaning "scan them all"
+--- — a refusal to narrow, never a silent empty result.
+local function verb_candidates(idx, verb)
+    if type(verb) ~= 'table' then
+        if not verb or verb == '' then return nil end
+        return idx[verb] or {}
+    end
+    if #verb == 0 then return nil end
+    if #verb == 1 then return verb[1] ~= '' and (idx[verb[1]] or {}) or nil end
+    local seen, out = {}, {}
+    for _, v in ipairs(verb) do
+        if not v or v == '' then return nil end
+        for _, i in ipairs(idx[v] or {}) do
+            if not seen[i] then seen[i] = true; out[#out + 1] = i end
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+--- Iterate `calls` over a candidate index list, yielding (call index, call) just
+--- as `callrec.each` does. `cand == nil` means the narrowing declined, so this
+--- falls back to the full scan rather than to nothing.
+local function each_candidate(calls, cand)
+    if not cand then return ipairs(calls) end
+    local k = 0
+    return function ()
+        k = k + 1
+        local ci = cand[k]
+        if ci then return ci, calls[ci] end
+    end
+end
+
 local function verb_matches(c, verb)
     if type(verb) == 'table' then
         for _, v in ipairs(verb) do
@@ -323,6 +414,14 @@ function M.link(data, bindings)
                 vim.log.levels.WARN)
         end
     end
+    -- built on first use, not up front: a binding set with no import side does
+    -- no scanning, and paying for an index nobody reads is the mistake the
+    -- greenspun memo's placement already cost a measurement over.
+    local vidx
+    local function idx()
+        if not vidx then vidx = verb_index(data) end
+        return vidx
+    end
     for _, b in ipairs(bindings) do
         coop.tick()
         -- A BINDING WITH NO IMPORT SIDE IS A DECLARATION, NOT A LINK (CART-0226): a
@@ -333,7 +432,8 @@ function M.link(data, bindings)
         -- binding means.
         if b.import and (b.import.verb or b.import.any_call) then
         local exports = {}
-        for ci, c in callrec.each(data) do
+        local allcalls = data.calls or {}
+        for ci, c in each_candidate(allcalls, verb_candidates(idx(), b.export.verb)) do
             if ci % 8192 == 0 then coop.tick() end
             if verb_matches(c, b.export.verb) then
                 local key = logical_arg(c, b.export.name)
@@ -352,7 +452,19 @@ function M.link(data, bindings)
             end
         end
         if next(exports) then
-            for ci, c in callrec.each(data) do
+            -- the import side is either a named verb (index by that) or
+            -- `any_call`, where the EXPORTED KEYS are themselves the callable
+            -- names — so the candidates are the calls whose callee is one of the
+            -- keys, which is the same index read with a different key set.
+            local icand
+            if b.import.verb then
+                icand = verb_candidates(idx(), b.import.verb)
+            else
+                local ks = {}
+                for k in pairs(exports) do ks[#ks + 1] = k end
+                icand = verb_candidates(idx(), ks)
+            end
+            for ci, c in each_candidate(allcalls, icand) do
                 if ci % 8192 == 0 then coop.tick() end
                 local hs, key
                 if b.import.verb and verb_matches(c, b.import.verb) then

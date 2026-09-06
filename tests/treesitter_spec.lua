@@ -970,19 +970,26 @@ test('xlang: string-key dispatch links JS to the C++ handler', function ()
     local stats = xl.link(data)
     eq(1, stats.exports)          -- getThing resolved through BindRepeating
     eq(1, stats.unresolved)       -- ghostMessage's handler doesn't exist
-    eq(2, stats.links)            -- chrome.send + sendWithPromise
+    -- chrome.send + sendWithPromise + window.chrome.send. ★ THE THIRD ONE IS THE
+    -- POINT: its full name is `window.chrome.send`, so the binding verb
+    -- `chrome.send` reaches it only through verb_matches' third clause (full ENDS
+    -- WITH '.' .. verb). Nothing else in the suite exercised that clause, which
+    -- made it the branch a candidate INDEX could silently drop — a lookup keyed
+    -- on callee and full alone answers 2 here and looks entirely healthy.
+    eq(3, stats.links)
     local byname = {}
     for _, n in ipairs(data.nodes) do byname[n.name] = n end
     local hits = 0
     for _, e in ipairs(data.edges) do
         if e.xlang and e.to == byname['ThingHandler::HandleGetThing'].id
             and (e.from == byname.requestThing.id
-                or e.from == byname.requestPromised.id) then
+                or e.from == byname.requestPromised.id
+                or e.from == byname.requestQualified.id) then
             hits = hits + 1
             ok(#e.at > 0 and e.at[1].start.char > 0, 'site range on the key literal')
         end
     end
-    eq(2, hits)
+    eq(3, hits)
     -- the send call's statement row now descends into the handler
     local sent
     for _, c in ipairs(data.calls) do
