@@ -33,9 +33,9 @@ statements) beside real source, and lets you stage multi-file edits — merge
 clones, move functions, extract modules — that preview as diffs, apply
 through a journal, and undo byte-exact.
 
-Sixteen languages ship specs (lua, c, cpp, python, javascript, typescript,
-php, ruby, java, go, rust, haskell, scheme, zig, odin, bash) plus vue/svelte
-single-file components. Everything cross-file is name-matched and marked `~`
+Seventeen languages ship specs (lua, c, cpp, python, javascript, typescript,
+php, ruby, java, go, rust, haskell, scheme, zig, odin, bash, erlang) plus
+vue/svelte single-file components. Everything cross-file is name-matched and marked `~`
 unless an oracle proved it; ambiguity refuses to link rather than guess.
 
 Status: EXPERIMENTAL. Tested and journaled (edits undo byte-exact), but

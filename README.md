@@ -52,8 +52,8 @@ specific adapters — framework entry points, FSM browsing, the live oracle,
 database links — are plain `setup{}` blocks; [`examples/`](examples/) has
 complete wirings to copy from.
 
-Sixteen languages (lua, c, cpp, python, js, ts, php, ruby, java, go, rust,
-haskell, scheme, zig, odin, bash) plus vue/svelte single-file components.
+Seventeen languages (lua, c, cpp, python, js, ts, php, ruby, java, go, rust,
+haskell, scheme, zig, odin, bash, erlang) plus vue/svelte single-file components.
 Everything cross-file is name-matched and marked `~` unless an oracle proved
 it; ambiguity refuses to link rather than guess.
 

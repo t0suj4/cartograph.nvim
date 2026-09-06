@@ -255,6 +255,26 @@ return {
         notes = 'js archaeology tier (29 files, frozen 2017) — prototype-'
             .. 'extension culture, string-keyed dispatch',
     },
+    -- ERLANG (CART-0793): the server half of the brotardcast polyglot pair — an
+    -- XMPP server beside its own JS/TS client, which is the roster's missing
+    -- POLYGLOT tier. Registered as an erlang corpus first because spec-audit
+    -- reported the spec "compile-checked ONLY (no corpus exercised them)": a spec
+    -- nothing extracts is a spec nobody has tested.
+    -- ⚠ NO `expected` PIN YET, DELIBERATELY. CART-0788 pinned a number drawn from
+    -- a randomised hash seed; the rule that came out of it is measure determinism
+    -- BEFORE pinning. tools/determinism.lua says this corpus is stable on every
+    -- layer, so a pin is now safe to add — but it should be added by the commit
+    -- that first has a reason to defend the number, not by the one that invents it.
+    erlang = {
+        root = HOME .. '/work/brotardcast/ejabberd',
+        repo = 'https://github.com/processone/ejabberd',
+        rev = '2f226abdfa1f',
+        notes = 'ejabberd, 353 .erl + 37 .hrl, ~159k lines. 50.3%% resolution at'
+            .. ' the first spec. ARITY IS PART OF THE IDENTITY here and the graph'
+            .. ' keys by name: 8.3%% of functions merge away (802 of 9650) — see'
+            .. ' spec/erlang.lua and CART-0676.',
+    },
+
     bash = {
         root = HOME .. '/git/testssl.sh',
         repo = 'https://github.com/testssl/testssl.sh',

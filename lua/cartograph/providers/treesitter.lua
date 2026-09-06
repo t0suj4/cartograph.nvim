@@ -12,7 +12,7 @@
 -- emitted; consumers already degrade to honest frontiers.
 
 local atr = require 'cartograph.at' -- dual-mode range reads: relink/refresh re-run these paths over the FOLDED store
--- @langs bash c cpp go haskell java javascript lua odin php python ruby rust scheme tsx typescript zig
+-- @langs bash c cpp erlang go haskell java javascript lua odin php python ruby rust scheme tsx typescript zig
 -- THE EXTRACTOR: every shipped language passes through here, which is why its
 -- node-type knowledge is supposed to live in the per-language SPECS rather than in
 -- this file. Declared so the language fence checks that separation holds.
@@ -685,6 +685,7 @@ M.spec.scheme = require 'cartograph.spec.scheme'
 M.spec.javascript = require 'cartograph.spec.javascript'
 M.spec.go = require 'cartograph.spec.go'
 M.spec.haskell = require 'cartograph.spec.haskell'
+M.spec.erlang = require 'cartograph.spec.erlang'
 M.spec.rust = require 'cartograph.spec.rust'
 M.spec.python = require 'cartograph.spec.python'
 M.spec.bash = require 'cartograph.spec.bash'
@@ -3368,6 +3369,7 @@ end
 local ATTACH = {
     lua = { '^%s*%-%-' },
     haskell = { '^%s*%-%-' },
+    erlang = { '^%s*%%' },   -- `%` and the `%%`/`%%%` doc conventions all start `%`
     scheme = { '^%s*;' },
     c = { '^%s*//', '^%s*/%*', '^%s*%*' },
     cpp = { '^%s*//', '^%s*/%*', '^%s*%*' },

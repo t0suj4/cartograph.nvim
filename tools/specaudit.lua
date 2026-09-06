@@ -39,7 +39,7 @@ local ts = require('cartograph.providers.treesitter')
 -- corpora exercise embedded languages too (grocy: php+js)
 local DEFAULT = { 'desynced', 'server', 'grocy', 'cpp', 'ghost', 'scheme',
     'ruby', 'rails', 'rspec', 'go', 'rust', 'zig', 'odin', 'python',
-    'haskell', 'blesh' }
+    'haskell', 'blesh', 'erlang' }
 
 local names, EXTRACT, FILECAP = {}, false, 150
 for _, a in ipairs(arg or {}) do
