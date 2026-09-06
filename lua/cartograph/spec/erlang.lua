@@ -39,6 +39,69 @@ return {
         (call expr: (atom) @name) @call
         (call expr: (remote fun: (atom) @name)) @call
     ]=],
+    -- ⚠⚠ A `-spec` IS NOT CODE, AND THE GRAMMAR CANNOT TELL YOU THAT. `-spec
+    -- f(non_neg_integer()) -> boolean().` parses its type applications as `call`
+    -- nodes, identical in shape to a real call. MEASURED on ejabberd: 12811 of
+    -- 54335 call nodes — 23.6% — sit inside a type context, and the top
+    -- "unresolved callees" in the first cut were `boolean`, `non_neg_integer`,
+    -- `state`, `jid` and `opts`: type names, every one.
+    -- ★ AND THE HARM IS NOT NOISE, IT IS FABRICATION. A `-spec` mentioning `jid()`
+    -- name-matches a real `jid/0` in the corpus and mints an edge that no call
+    -- site justifies. Dropping them removes an inflated denominator AND a class of
+    -- invented reference.
+    -- WHY A PREDICATE AND NOT `call_skip_within`: that hook walks THREE parents,
+    -- and 1621 of the 12811 (12.7%) sit deeper — a type nests arbitrarily
+    -- (`[{atom(), [binary()]}]`). Measured, not assumed. So the rule is stated as
+    -- what it actually is: a call in erlang is code only if a function clause
+    -- encloses it.
+    skip_call = function (calln)
+        local a = calln:parent()
+        while a do
+            local t = a:type()
+            -- reached the code that encloses it: this is a real call
+            if t == 'clause_body' or t == 'function_clause' or t == 'fun_decl' then
+                return false
+            end
+            -- a type/attribute context: not code
+            if t == 'type_sig' or t == 'field_type' or t == 'type_alias'
+                or t == 'ann_type' or t == 'fun_type_sig' or t == 'wild_attribute'
+                or t == 'spec_attribute' or t == 'callback_attribute' then
+                return true
+            end
+            a = a:parent()
+        end
+        -- never found a clause body: a top-level attribute, not a call
+        return true
+    end,
+
+    -- ★★ THE MODULE OF A REMOTE CALL WAS BEING THROWN AWAY. `lists:foldl(F, A, L)`
+    -- recorded `callee = foldl` and nothing else — measured: 111 of 55474 erlang
+    -- calls carried a `full`, and all 111 were the JS files in the corpus. So the
+    -- single most informative token in an erlang call site was absent, and `foldl`
+    -- (342 sites) was matched by bare name against the whole corpus.
+    -- ⚠⚠ AND IT MUST BE A DOT, NOT THE SOURCE'S COLON. The provider computes
+    -- `method = full:find(':')` BEFORE this hook runs — that is php's `Class::m`
+    -- test — and a method shifts the implicit-self argument, so emitting
+    -- `lists:map` would silently renumber every OTP call's arguments. A dot also
+    -- makes the L2 profile's namespace path reachable, which keys on the root
+    -- before a DOT (`prof_ext`). The source text is unchanged; only the
+    -- RESOLUTION KEY is normalised, exactly as php rewrites `$this->m` to
+    -- `Class::m`.
+    qualify_call = function (calln, name, src)
+        if calln:type() ~= 'call' then return nil end
+        local e = calln:field('expr')[1]
+        if not e or e:type() ~= 'remote' then return nil end
+        local m = e:field('module')[1]
+        if not m then return nil end
+        -- `remote_module` wraps the atom; a VARIABLE module (`Mod:f()`) is a
+        -- dynamic dispatch this cannot name, and is left alone rather than guessed
+        local ma = m:named_child(0)
+        if not ma or ma:type() ~= 'atom' then return nil end
+        local mod = vim.treesitter.get_node_text(ma, src)
+        if not mod or mod == '' or mod:find('[^%w_]') then return nil end
+        return mod .. '.' .. name
+    end,
+
     -- an `atom` is erlang's identifier AND its string-ish literal, so mentioning
     -- every one of them would index the language's punctuation. Measured on
     -- ELDAPv3.erl: 2114 atoms against 880 calls. Mentions stay off until there is
@@ -50,6 +113,47 @@ return {
     -- a module, and `init/1` is the callback the behaviour then calls. `main` is
     -- escript's.
     entry_names = { main = true, start = true, start_link = true, init = true },
+
+    -- ★★★ A MODULE NAME IS A FILE NAME, AND THE COMPILER ENFORCES IT. erlang has
+    -- no import statement: `ejabberd_hooks:run(...)` names its module inline, and
+    -- the module `ejabberd_hooks` MUST live in `ejabberd_hooks.erl` or the
+    -- compiler refuses the file. So the binding is not a convention this is
+    -- guessing at — it is a language rule, and it is the same shape zig's
+    -- `@import` binding already feeds: {alias, path} per file, then
+    -- `resolve_import` maps the path to a corpus file.
+    -- SIZED BEFORE BUILDING, on 14849 unresolved remote calls:
+    --     module IS a corpus file    4001   26.9%   <- this
+    --     module is an OTP module   10175   68.5%   <- an L2 profile, not built
+    --     neither (deps, missing)     673    4.5%
+    -- This half yields REAL EDGES to real definitions; the OTP half can only
+    -- yield an honest `external`, which is why this one is worth more per call.
+    -- ⚠ SORTED, and that is not housekeeping: the caller appends one import edge
+    -- per entry, so an unsorted set makes the edge ORDER depend on LuaJIT's
+    -- per-process hash seed — which is precisely the bug CART-0790 found in
+    -- zig_imports, in this exact position, four hours ago.
+    scan_imports = function (tsroot, src)
+        local seen = {}
+        local function walk(n)
+            if n:type() == 'remote' then
+                local m = n:field('module')[1]
+                local ma = m and m:named_child(0)
+                if ma and ma:type() == 'atom' then
+                    local mod = vim.treesitter.get_node_text(ma, src)
+                    -- a quoted atom may hold anything; only a bare module name is
+                    -- a file name
+                    if mod and mod ~= '' and not mod:find('[^%w_]') then
+                        seen[mod] = true
+                    end
+                end
+            end
+            for c in n:iter_children() do if c:named() then walk(c) end end
+        end
+        walk(tsroot)
+        local out = {}
+        for mod in pairs(seen) do out[#out + 1] = { alias = mod, path = mod .. '.erl' } end
+        table.sort(out, function (a, b) return a.alias < b.alias end)
+        return out
+    end,
 
     -- `-include("x.hrl")` and `-include_lib("app/include/x.hrl")` are the file
     -- dependency edge. include_lib resolves through the application path, which
