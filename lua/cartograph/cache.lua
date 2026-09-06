@@ -278,7 +278,17 @@ end
 -- parseInt, eval, isFinite, decodeURIComponent) were each verified callable
 -- against `node` itself — and each is ECMAScript or a timer, so the claim holds
 -- for browser code too. A graph cached before this is UNDERDETERMINED, not wrong.
-M.VERSION = 185 -- v185: A SHAPE'S TWO CONFIG SOURCES COMPOSE (CART-0802), above.
+-- ★★ v186: A NESTED NAMESPACE PATH AND A DESTRUCTURED IMPORT BOTH RESOLVE NOW
+-- (CART-0804). `mint_path` asked for exactly two segments; it now asks the ORACLE
+-- for the whole dotted path, so `sinon.assert.calledOnce` mints while a chain's
+-- text (`fs.remove(p).catch`) still cannot be a key. And a destructured import
+-- binds each name to a package member, so a bare `expect()` after
+-- `const {expect} = require('chai')` carries `chai.expect`. Both are gated on the
+-- surface confirming the member, so a corpus with no npm artifact is UNCHANGED —
+-- every pinned corpus re-gated PASS without one. With ghost's surface installed,
+-- resolution 42.8% -> 45.6%.
+M.VERSION = 186 -- v186: THE ORACLE ANSWERS FOR A PATH, NOT A PAIR (CART-0804), above.
+               -- v185: A SHAPE'S TWO CONFIG SOURCES COMPOSE (CART-0802)
                -- v184: A SET-ONCE LOCAL NAMES ITS DETERMINING CALL (CART-0800)
                -- v183: A BARE SPECIFIER BINDS A PACKAGE (CART-0800)
                -- v182: THE NODE/JS ENVIRONMENT PROFILE (CART-0800)

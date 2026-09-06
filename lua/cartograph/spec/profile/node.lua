@@ -52,15 +52,26 @@ if not api or not api.nsset or not next(api.nsset) then return nil end
 local function mint_path(callee, full, why)
     if why ~= 'stdlib' then return nil end
     if full then
-        -- exactly two segments. A deep chain (`a.b.c()`) names a receiver this
-        -- profile cannot type, and guessing which segment is the namespace would
-        -- be the fabrication the nodef gate exists to prevent.
-        local ns, m = full:match('^([%w_$]+)%.([%w_$]+)$')
-        local sig = ns and m and sigs[ns .. '.' .. m]
-        -- ★ THE SECOND RETURN IS THE DECLARED RETURN TYPE. `sinon.stub` yields
-        -- `SinonStub`, which the distilled surface carries and mint_nodes now puts
-        -- on the node — so a chain has a bottom to terminate on.
-        if sig then return ns .. '.' .. m, sig.ret end
+        -- ★★★ ASK THE ORACLE FOR THE WHOLE PATH (CART-0804). This used to demand
+        -- EXACTLY two segments, on the reasoning that a deeper path names a
+        -- receiver the profile cannot type. That is true of a CHAIN
+        -- (`fs.remove(p).catch`) and false of a nested NAMESPACE
+        -- (`sinon.assert.calledOnce`, `path.posix.normalize`, `Intl.NumberFormat
+        -- .supportedLocalesOf`) — and the two are not told apart by counting dots,
+        -- they are told apart by whether the surface declares the path. So the
+        -- segment count stops being a rule and the lookup decides: a chain's text
+        -- carries parentheses and quotes and can never be a key, while a declared
+        -- nested path is one. `sinon.assert.calledOnce` alone is 1090 sites on
+        -- ghost, `notCalled` 731 and `calledWith` 571.
+        -- The soundness argument is UNCHANGED and is the reason this is safe to
+        -- widen: nothing is minted that the distilled surface does not state.
+        if full:match('^[%w_$]+%.[%w_$][%w_$%.]*$') then
+            local sig = sigs[full]
+            -- ★ THE SECOND RETURN IS THE DECLARED RETURN TYPE. `sinon.stub` yields
+            -- `SinonStub`, which the distilled surface carries and mint_nodes now
+            -- puts on the node — so a chain has a bottom to terminate on.
+            if sig then return full, sig.ret end
+        end
         return nil
     end
     -- a BARE call: only a callable GLOBAL is soundly the platform's. `free` holds

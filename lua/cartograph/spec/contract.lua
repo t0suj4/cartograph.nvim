@@ -100,6 +100,13 @@ M.SLOTS = {
     -- derivable from the PATH (go's package, rust's last segment). The @bind
     -- capture wins where the source states an alias; this fills the rest.
     import_bind_path = 'IMPORTS',
+    -- the DESTRUCTURED bind: a language whose import can bind several names at
+    -- once, none of which the @bind capture (a single identifier) can see.
+    -- `const {expect} = require('chai')` -> { expect = 'expect' }; a renaming
+    -- form (`{expect: e}`, `{stub as s}`) maps the LOCAL to the MEMBER, because
+    -- the member is what a profile can confirm and the local is what the call
+    -- site says.
+    import_members = 'IMPORTS',
     -- 'directory' when an import names a PACKAGE DIR (go) rather than a file.
     -- Absent = file, which is what lua/javascript/rust/haskell mean.
     import_unit = 'IMPORTS',

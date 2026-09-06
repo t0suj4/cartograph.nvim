@@ -563,6 +563,78 @@ return {
                 function: (import)
                 arguments: (arguments . (string) @path .))
         ]=],
+        --- ★★★ A DESTRUCTURED IMPORT BINDS EACH NAME TO A PACKAGE MEMBER
+        --- (CART-0804). `const {expect} = require('chai')` and `import {stub} from
+        --- 'sinon'` bind a name that is called BARE thereafter, so the call carries
+        --- no receiver and nothing connects it to the package — `expect` alone is
+        --- 2242 unresolved calls on ghost, from one line repeated across the test
+        --- tree. v183's pkgbind covers only the whole-namespace form
+        --- (`const sinon = require('sinon')`), because its `@bind` capture is a
+        --- single identifier and a destructuring pattern is not one.
+        ---
+        --- Returns { [local name] = member name } for the enclosing binding, or
+        --- nil. The LOCAL may differ from the MEMBER (`{expect: e}`, `{stub as s}`)
+        --- and both are needed: the member is what the surface can confirm, the
+        --- local is what the call site says.
+        ---
+        --- ⚠ THIS IS A BINDING, NOT A GUESS — which is what makes it the sound half
+        --- of CART-0801's argument. The syntax NAMES the package; the only thing
+        --- inferred is that a destructured name is a member of it, and the caller
+        --- still gates the rewrite on the profile confirming that member exists.
+        import_members = function (pathn, src, text)
+            local n = pathn
+            for _ = 1, 4 do -- arguments -> call_expression -> declarator
+                n = n and n:parent()
+                if not n then return nil end
+                local t = n:type()
+                if t == 'variable_declarator' or t == 'assignment_expression'
+                    or t == 'import_statement' then break end
+            end
+            if not n then return nil end
+            local out, found = {}, false
+            local function shorthand(id)
+                local nm = text(id, src)
+                if nm and nm:match('^[%w_$]+$') then out[nm] = nm; found = true end
+            end
+            local function pair(keyn, valn)
+                local k, v = text(keyn, src), text(valn, src)
+                if k and v and k:match('^[%w_$]+$') and v:match('^[%w_$]+$') then
+                    out[v] = k; found = true
+                end
+            end
+            local function walk(node)
+                for ch in node:iter_children() do
+                    if ch:named() then
+                        local t = ch:type()
+                        if t == 'shorthand_property_identifier_pattern' then
+                            shorthand(ch)
+                        elseif t == 'pair_pattern' then
+                            -- `{ expect: e }` — key is the MEMBER, value the local
+                            local k = ch:field('key')[1]
+                            local v = ch:field('value')[1]
+                            if k and v and v:type() == 'identifier' then pair(k, v) end
+                        elseif t == 'import_specifier' then
+                            -- `{ stub }` or `{ stub as s }` — alias is the local
+                            local nm = ch:field('name')[1]
+                            local al = ch:field('alias')[1]
+                            if nm and al then pair(nm, al)
+                            elseif nm then shorthand(nm) end
+                        elseif t == 'object_pattern' or t == 'named_imports'
+                            or t == 'import_clause' then
+                            walk(ch)
+                        end
+                    end
+                end
+            end
+            local tn = n:type()
+            if tn == 'variable_declarator' or tn == 'assignment_expression' then
+                local target = n:field('name')[1] or n:field('left')[1]
+                if target and target:type() == 'object_pattern' then walk(target) end
+            else
+                walk(n) -- import_statement: descend to its named_imports
+            end
+            return found and out or nil
+        end,
         resolve_import = function (path, files, from)
             path = path:gsub('^["\']', ''):gsub('["\']$', '')
             local function norm(p) -- ./ and ../ segments

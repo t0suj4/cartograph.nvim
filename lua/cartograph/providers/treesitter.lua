@@ -3493,6 +3493,25 @@ function M.parse_lang(file)
     return parse_lang_for(file)
 end
 
+--- The PACKAGE a raw import specifier names, or nil when the specifier is a path.
+--- `'lodash/fp'` -> `lodash`, `"@scope/pkg/sub"` -> `@scope/pkg`; a leading dot, a
+--- leading slash or a protocol is a path and answers nil.
+---
+--- ★ EXPORTED BECAUSE TWO READERS NEED THE SAME RULE (CART-0804). The import loop
+--- asks it to bind a local name to a package; `tools/npmdistill.lua` asks it to
+--- rank which packages a corpus actually imports, so it fetches the surface the
+--- code demands instead of the first N package names alphabetically. A second
+--- copy of this rule in the distiller would be a second copy of every future bug
+--- in it — the copied-walker lesson, applied before the copy exists.
+function M.bare_package(rawpath)
+    if type(rawpath) ~= 'string' then return nil end
+    local s = rawpath:gsub('^["\']', ''):gsub('["\']$', '')
+    if s == '' or s:match('^%.') or s:match('^/') or s:match('^%a+:') then
+        return nil
+    end
+    return s:match('^(@[%w%-%._]+/[%w%-%._]+)') or s:match('^([%w%-%._]+)')
+end
+
 --- Is this file a CONTAINER (one file, several language regions — vue/svelte SFC)?
 ---
 --- ★ EXPORTED BECAUSE `parse_lang` ANSWERS FOR A CONTAINER AND THE ANSWER IS A TRAP
@@ -5675,6 +5694,10 @@ function M.extract(root, opts)
     -- a plain local declared beside the imports is not in scope at the call site
     -- (it was, briefly, and every extract raised "bad argument #1 to 'next'").
     local pkgbinds = {}
+    -- ★ THE DESTRUCTURED HALF of the package bind (CART-0804), file-keyed for the
+    -- same reason pkgbinds is: the map is built in the IMPORT loop and read in the
+    -- CALL loop, two separate passes over the file.
+    local membinds = {}
     -- and its merge DISCRIMINATOR, kept BESIDE the node rather than on it: a node
     -- carries only registered schema fields, and this is extraction bookkeeping
     local lastKey = {}         -- file -> spec.merge_key of the last emitted fn
@@ -6440,6 +6463,8 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- the source says what the name is bound to.
         local pkgbind = {}
         pkgbinds[file] = pkgbind
+        local membind = {}
+        membinds[file] = membind
         -- imports
         if spec.import_query then
             q = parse_query(lang, spec.import_query)
@@ -6473,14 +6498,23 @@ local MATCH_OPTS = { match_limit = 65536 }
                             -- URL. `lodash/fp` and `@scope/pkg` keep their package
                             -- part; anything with a protocol or a leading dot is a
                             -- path, not a package.
-                            local spec_s = rawpath:gsub('^["\']', ''):gsub('["\']$', '')
-                            if spec_s ~= '' and not spec_s:match('^%.')
-                                and not spec_s:match('^/') and not spec_s:match('^%a+:') then
-                                local pkg = spec_s:match('^(@[%w%-%._]+/[%w%-%._]+)')
-                                    or spec_s:match('^([%w%-%._]+)')
-                                local b = node_text(bindn, src)
-                                if pkg and b and b:match('^[%w_$]+$') then
-                                    pkgbind[b] = pkg
+                            local pkg = M.bare_package(rawpath)
+                            local b = node_text(bindn, src)
+                            if pkg and b and b:match('^[%w_$]+$') then
+                                pkgbind[b] = pkg
+                            end
+                        end
+                        -- ★ AND THE DESTRUCTURED FORM, which has no @bind at all:
+                        -- `const {expect} = require('chai')`. The query captures a
+                        -- single identifier, so a pattern never reaches the branch
+                        -- above — a spec that knows its language's destructuring
+                        -- reads the enclosing binder instead (CART-0804).
+                        if not target and spec.import_members then
+                            local pkg = M.bare_package(rawpath)
+                            if pkg then
+                                local ms = spec.import_members(pathn, src, node_text)
+                                for lname, member in pairs(ms or {}) do
+                                    membind[lname] = pkg .. '.' .. member
                                 end
                             end
                         end
@@ -6747,6 +6781,16 @@ local MATCH_OPTS = { match_limit = 65536 }
                         if pkg and active_profile.sigs[pkg .. '.' .. mem] then
                             full = pkg .. '.' .. mem
                         end
+                    end
+                    -- and the BARE form a destructured import leaves behind:
+                    -- `expect(x)` after `const {expect} = require('chai')`. Same
+                    -- gate, and it has to be the same gate — the local name is
+                    -- ordinary and often shadows something, so the profile
+                    -- confirming the member is the whole warrant.
+                    local mb = membinds[file]
+                    if mb and next(mb) and active_profile and active_profile.sigs then
+                        local key = full:match('^[%w_$]+$') and mb[full]
+                        if key and active_profile.sigs[key] then full = key end
                     end
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution. A dynamic
