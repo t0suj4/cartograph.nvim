@@ -3026,6 +3026,19 @@ ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograp
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# DISTIL A PROJECT'S npm DEPENDENCY SURFACE. ★ THE SECURITY CONTROL IS "NEVER
+# INSTALL": `npm install` is what runs postinstall scripts, and this never invokes
+# npm — two text GETs per package (manifest, then its .d.ts), no package code run
+# anywhere. `--ignore-scripts` would NOT be equivalent (bin shims, node-gyp).
+nvim --headless -u NONE -l tools/npmdistill.lua ghost
+#   reads the corpus's OWN package.json, falls back to DefinitelyTyped for the many
+#   packages shipping no declarations, and writes spec/profile/npm-api.mpack, which
+#   spec/profile/node.lua unions in when present. ghost: 200 deps -> 80 with a
+#   readable surface, 5066 members. ⚠ NOT checked in — an npm surface is PROJECT
+#   data, one per corpus (gitignored); node's is machine data.
+#   ⚠ The .d.ts text is attacker-controlled and is parsed here by a C grammar:
+#   that is the residual exposure, and isolating it would mean moving the PARSE.
+
 # DISTIL THE NODE + JS LANGUAGE SURFACE FROM THE INSTALLED ENGINE — the same
 # oracle move, one language over.
 nvim --headless -u NONE -l tools/nodedistill.lua
