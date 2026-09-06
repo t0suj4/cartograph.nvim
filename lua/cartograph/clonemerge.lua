@@ -69,10 +69,14 @@ function M.plan(store, id)
         touched = {},
     }
     local touched = { [survivor.file] = true }
-    local lines_cache = {}
+    local lines_cache, text_cache = {}, {}
+    local function file_text(rel)
+        if text_cache[rel] == nil then text_cache[rel] = read_file(root, rel) or false end
+        return text_cache[rel] or nil
+    end
     local function file_lines(rel)
         if lines_cache[rel] == nil then
-            local t = read_file(root, rel)
+            local t = file_text(rel)
             lines_cache[rel] = t and vim.split(t, '\n', { plain = true }) or false
         end
         return lines_cache[rel]
@@ -87,6 +91,67 @@ function M.plan(store, id)
             local okp, ts = pcall(require, 'cartograph.providers.treesitter')
             s, header = txn.attach_above(tls, s,
                 okp and ts.attach_pats(t.file) or {})
+        end
+
+        -- ★★ CART-0770's HOLE SEEN FROM THE DELETE SIDE (CART-0773): the deletion
+        -- range is a DEFINITION, not necessarily a standalone statement, so taking
+        -- it out can leave its container unclosed. MEASURED, hand-read on
+        -- tools/matrix.lua after a merge:
+        --     500|         local shim = { data = data,
+        --     501|             node = function (id) return index[id] end,
+        --     502|         local findings = require(...).run(shim,
+        -- — a NEW statement, with the table never closed. ~31 plans over two
+        -- corpora, before-text confirmed clean on every one.
+        -- (The module name in the witness is elided on purpose: the lint-caller
+        -- audit greps for call sites and cannot tell a QUOTED witness from a real
+        -- one, so a comment that shows code reads as code trips the fence.)
+        --
+        -- ⚠⚠ AND IT IS *NOT* THE SAME PREDICATE AS THE MOVE, WHICH IS WHAT THE
+        -- MEASUREMENT SAID AFTER THE FIRST CUT SHIPPED `enclosing_syntax` HERE.
+        -- On the LIFT side, sitting inside a container is ALWAYS fatal — the text
+        -- cannot stand alone at the destination. On the DELETE side it is usually
+        -- FINE: removing one whole element of a list leaves a valid list. Measured
+        -- on our own tree, `enclosing_syntax` as the decision refused 50 merge
+        -- plans of which only 16 would actually have broken — precision 32%, where
+        -- the same predicate on the move side caught 368 for a cost of 42. It lost
+        -- more than it saved.
+        --
+        -- ★ SO THE DECISION IS THE REMOVAL, SIMULATED, and `enclosing_syntax` is
+        -- demoted to the EXPLANATION. Cut the lines and ask whether the file still
+        -- parses — precise by construction, and it REUSES THE SHIPPED GUARD rather
+        -- than adding a fourth predicate, so container formats come back NO-CLAIM
+        -- and are not refused (CART-0769's delta form, applied early). Measured
+        -- after the change: 16 refused on our own tree, which is EXACTLY the 16
+        -- that would have broken — precision 32% -> 100%.
+        --
+        -- ⚠ AND ITS LIMIT, STATED RATHER THAN IMPLIED: this simulates ONE removal
+        -- at a time, while the plan removes every twin and rewrites call sites.
+        -- Measured on desynced, 2 of 82 plans still fail at execute and both are
+        -- the same shape — THREE removals from one file, none of which breaks it
+        -- alone. The `parses` guard sees the combined edit and catches them, which
+        -- is what a backstop is for; the cost is a less specific message for 2.4%
+        -- of plans. Grouping the removals per file here would close it and is the
+        -- obvious next increment, not a correctness gap.
+        if tls then
+            local cut = {}
+            for i, line in ipairs(tls) do
+                if i - 1 < s or i - 1 > atr.el(t.range) then cut[#cut + 1] = line end
+            end
+            local pg = require 'cartograph.planguards'
+            local rows = pg.GUARDS.parses(nil, nil,
+                { [t.file] = file_text(t.file) },
+                { [t.file] = table.concat(cut, '\n') })
+            if rows[1] and rows[1].verdict == pg.FAIL then
+                -- the explanation, not the decision: naming the container is what
+                -- makes this actionable, and "does not parse" alone would not be
+                local encl = txn.enclosing_syntax(t.file, t.range, file_text(t.file))
+                return nil, ('removing %s from %s would leave the file unparseable%s'
+                    .. ' — the merge is refused whole rather than skipping this'
+                    .. ' twin, because a partial merge rewrites the callers of a'
+                    .. ' twin that still exists')
+                    :format(t.name, t.file,
+                        encl and (', because it sits inside ' .. encl) or '')
+            end
         end
         if header then
             plan.hazards[#plan.hazards + 1] = ('the comment block above %s'

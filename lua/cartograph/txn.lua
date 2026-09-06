@@ -70,6 +70,76 @@ function M.disk_stamp(root, rel)
     return transport.stamp(root .. '/' .. rel)
 end
 
+
+--- ★★ IS THIS DEFINITION AT MODULE LEVEL? The shared predicate behind two write
+--- verbs' soundness (CART-0770 for the LIFT, CART-0773 for the DELETE), and it
+--- lives here because `txn` is where the plan protocol's shared predicates live
+--- (`contained`, `attach_above`). It was moveapply-local for three days and a
+--- second copy would have been the first thing this project tells itself not to
+--- do.
+---
+--- A definition's TEXT is what a write verb moves or removes; its CONTAINER is
+--- not part of that text. So a definition that is not at module level cannot
+--- survive either operation. MEASURED: 369 broken move plans over three corpora,
+--- in two surface forms with ONE cause —
+--   php   moving `BaseApiController::ApiResponse` appends it AFTER the class's
+--         closing brace, and a `protected function` at top level does not parse;
+--   lua   moving `color` out of a table constructor takes ITS TRAILING COMMA with
+--         it, and `color = function ... end,` at top level does not parse.
+-- A class body and a table constructor are the same problem in two syntaxes.
+--
+-- ★ THE PREDICATE IS SYNTACTIC, NOT SEMANTIC, AND THE FIRST CUT GOT THAT WRONG.
+-- "A method is a member of its type" refuses lua's `function M.foo()` — which is
+-- a member SEMANTICALLY and a top-level statement SYNTACTICALLY, and is the
+-- verb's single commonest legitimate move. That cut refused 129 of 216 working
+-- moves on desynced. What actually breaks is being lexically INSIDE something,
+-- so the test is: IS THE DEFINITION A DIRECT CHILD OF THE FILE ROOT?
+--   php    program > class_declaration > declaration_list > method_declaration
+--   lua    chunk > function_declaration                              <- moves
+--   lua    chunk > assignment > table_constructor > field > function <- does not
+-- Language-general, and it needs no new spec slot: `spec.qualify` already walks
+-- to the enclosing class to name `Class::method`, so the graph HAS computed this
+-- and kept only the `::` in a string.
+--
+-- MEASURED, 900 plans over 3 corpora: 368 of 368 broken plans CAUGHT, 0 missed,
+-- and 42 previously-accepted plans now refused. Those 42 are overwhelmingly
+-- `block < function_declaration` — a NESTED function, which is exactly what the
+-- comment above already calls "lexically scoped, and lifting it to another file
+-- is meaningless (and unsound)". They parse; they are not sound. So the cost is
+-- an over-estimate: a parses-clean oracle cannot see a lost upvalue.
+--
+-- ⚠ NO CLAIM WHEN IT CANNOT PARSE. A file that will not parse here returns nil
+-- (allow) rather than refusing: this is ADDITIVE, everything it cannot speak
+-- about was already allowed, and refusing on absence of evidence would take the
+-- verb away wherever a parser is missing. (The same three-valued honesty the
+-- `parses` guard states explicitly; here the third value is simply `nil`.)
+---@param file string   the path, for its language
+---@param range table    the definition's range
+---@param text string|nil the file's source
+---@return string|nil  the enclosing chain, innermost first, or nil at module level
+function M.enclosing_syntax(file, range, text)
+    if not text then return nil end
+    local okp, ts = pcall(require, 'cartograph.providers.treesitter')
+    if not okp then return nil end
+    local lang = ts.parse_lang(file)
+    if not lang then return nil end
+    local okr, parser = pcall(vim.treesitter.get_string_parser, text, lang)
+    if not okr or not parser then return nil end
+    local okt, tree = pcall(function () return parser:parse()[1] end)
+    if not okt or not tree then return nil end
+    local root = tree:root()
+    local okd, d = pcall(root.named_descendant_for_range, root,
+        atr.sl(range), atr.sc(range), atr.el(range), atr.ec(range))
+    if not okd or not d then return nil end
+    local fnt = ts.fn_types(lang) or {}
+    while d and d ~= root and not fnt[d:type()] do d = d:parent() end
+    if not d or d == root then return nil end
+    local chain, p = {}, d:parent()
+    while p and p ~= root do chain[#chain + 1] = p:type(); p = p:parent() end
+    if #chain == 0 then return nil end
+    return table.concat(chain, ' < ')
+end
+
 --- Comment adhesion: walk UP from a def's first line over lines that
 --- belong to it (comments, decorators, attributes — per-language
 --- patterns from the provider); blank lines and code stop the walk.
