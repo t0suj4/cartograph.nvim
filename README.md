@@ -3034,8 +3034,11 @@ nvim --headless -u NONE -l tools/npmdistill.lua ghost
 #   reads the corpus's OWN package.json, falls back to DefinitelyTyped for the many
 #   packages shipping no declarations, and writes spec/profile/npm-api.mpack, which
 #   spec/profile/node.lua unions in when present. ghost: 200 deps -> 80 with a
-#   readable surface, 5066 members. ⚠ NOT checked in — an npm surface is PROJECT
-#   data, one per corpus (gitignored); node's is machine data.
+#   readable surface, 9654 members, 939 carrying a DECLARED RETURN TYPE (663 of
+#   those return a type whose own members are here, so a chain can terminate).
+#   ⚠ NOT checked in — an npm surface is PROJECT data, one per corpus
+#   (gitignored); node's is machine data. Remove it before measuring another
+#   corpus: a stray one silently moved mootools by 2.5 points.
 #   ⚠ The .d.ts text is attacker-controlled and is parsed here by a C grammar:
 #   that is the residual exposure, and isolating it would mean moving the PARSE.
 
