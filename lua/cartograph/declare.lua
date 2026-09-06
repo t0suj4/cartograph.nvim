@@ -287,7 +287,13 @@ function M.plan(store, opts)
         -- container, addressed by the half of its span an insertion cannot move
         shape = { file = n.file, lang = lang,
             container_sl = atr.sl(ir.at), container_sc = atr.sc(ir.at) },
-        target = { name = n.name, file = n.file, ref = store.ref_of(n.id) },
+        -- ⚠ THE `id` IS NOT OPTIONAL, and leaving it out cost a debugging round.
+        -- `txn.verify` resolves the ref and compares `rid ~= spec.id`, so a
+        -- refspec with no id compares against nil and REFUSES EVERY APPLY —
+        -- reporting "no longer resolves" about a ref that resolves perfectly.
+        -- The claim was false in the most misleading direction: it blamed the
+        -- tree for a malformed question.
+        target = { id = n.id, name = n.name, file = n.file, ref = store.ref_of(n.id) },
         member = member,
         reps = { { at = ins_at, to = gap .. member } },
     }
@@ -305,8 +311,8 @@ end
 function M.preview(store, plan) return txn.dryrun(store, plan) end
 
 function M.apply(store, plan)
-    local bad = txn.verify(store, plan, { { ref = plan.target.ref,
-        name = plan.target.name, what = 'symbol' } })
+    local bad = txn.verify(store, plan, { { id = plan.target.id,
+        ref = plan.target.ref, name = plan.target.name, what = 'symbol' } })
     if bad then return nil, bad end
     return txn.execute(store, plan, 'declare: add a member to ' .. plan.target.name)
 end

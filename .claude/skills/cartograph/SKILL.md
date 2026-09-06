@@ -1,6 +1,6 @@
 ---
 name: cartograph
-description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 24 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the four reasons mean different things.
+description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 25 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the four reasons mean different things.
 ---
 
 # cartograph, for an agent
@@ -77,14 +77,14 @@ instrument and surprising if you forget it.
 
 ## The verbs
 
-24, in the order they may be trusted in. `graph_info` first — it reports which verbs
+25, in the order they may be trusted in. `graph_info` first — it reports which verbs
 are available on *this* graph and host, and why any are not.
 
 ```
 READ      graph_info  node_find  node_at  edges_callers  edges_callees  why  lint_run
 CATALOGUE clones_find  cone  ladder  territory  census  mentions  externals
 VERSION   portability_targets  portability_move  portability_move_calls
-WRITE     txn_plan_moveset  txn_plan_optimize  txn_preview
+WRITE     txn_plan_moveset  txn_plan_optimize  txn_plan_declare  txn_preview
           journal_list  journal_get
           txn_apply  txn_undo
 ```
@@ -143,10 +143,33 @@ ok  verb  graph  subject  result  tier  absence  absence_why  notes  refusal
 
 The order is the order of trust, and it is enforced:
 
-1. `txn_plan_moveset` / `txn_plan_optimize` — propose. Writes nothing.
+1. `txn_plan_moveset` / `txn_plan_optimize` / `txn_plan_declare` — propose.
+   Writes nothing.
 2. `txn_preview` — diff it. Writes nothing.
 3. `journal_list` / `journal_get` — read the history.
 4. `txn_apply`, then `txn_undo` if needed.
+
+### Adding to a declared table — `txn_plan_declare`
+
+The commonest edit there is, and the one the other write verbs did not model: a
+day of real work measured 15 commits, ZERO file moves, diffs `+158/-0` and
+`+130/-1`. Two ways in, and they get identical checking:
+
+- `member` — **you write the text** (`subscript_list = true`). It is parsed and
+  matched against the members already there.
+- `subs` — **cartograph writes it**, filling the container's template holes from a
+  real member, so indentation and quote style come from the file.
+
+**Read the refusal; it is usually the useful answer.** It describes the
+CONTAINER, not your syntax — *"the new member does not fit the ones already there
+(leaf-vs-tree, size-skew)"* means the members have a structure yours does not.
+**70.5% of containers with two or more members share no shape at all**, so
+`do not share a shape` is the ordinary reply, not a bug: there is genuinely no
+template to check against, and editing the file directly is the right move.
+
+The plan declares two guards and both REFUSE rather than warn — `parses` (the
+file still compiles) and `shape-preserved` (the member still fits the container,
+re-derived from the written bytes). Neither claims the change is *correct*.
 
 **`txn_apply` refuses a plan that was never previewed** (rule `unpreviewed`). On a
 machine transport the preview is the only step between proposing an edit and making
@@ -170,7 +193,8 @@ the world you planned against**:
    `ref` from the row — not the `id`. Ids embed line numbers and move under every
    edit; a ref survives a rename and drift.
 2. **Plan.** `txn_plan_moveset` takes a SET (`seed` ids and `seed_refs` refs,
-   unioned), `txn_plan_optimize` its own subject. Writes nothing.
+   unioned), `txn_plan_optimize` its own subject, `txn_plan_declare` a container
+   plus a payload. Writes nothing.
    ⚠ A ref that resolves WITH a caveat — drifted witness, apparent rename, ordinal
    match — is a `ref-caveat` **note** on the read side and a **refusal** here. The
    write side is stricter than the read side ON PURPOSE: a wrong answer is

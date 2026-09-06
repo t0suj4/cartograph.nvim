@@ -108,8 +108,8 @@ local function permit(on) agent.set_writable(on) end
 
 local function call(verb, args) return (agent.answer(store, verb, args or {})) end
 
-local WRITE_VERBS = { 'txn_plan_moveset', 'txn_plan_optimize', 'txn_preview',
-    'journal_list', 'journal_get', 'txn_apply', 'txn_undo' }
+local WRITE_VERBS = { 'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
+    'txn_preview', 'journal_list', 'journal_get', 'txn_apply', 'txn_undo' }
 
 -- ── layer 1: the verb table, in process ─────────────────────────────────────
 
@@ -565,4 +565,88 @@ test('agentwrite: a WRITABLE host still arms, and still says so', function ()
     ok(kinds.staged, 'and the staging side effect is disclosed')
     ok(not kinds.unarmed, 'not the read-only note')
     store.clear_stage()
+end)
+
+-- ── txn_plan_declare: the whole loop, over the agent surface ─────────────────
+-- CART-0763 measured the gap this verb closes: a day of real work was 15
+-- commits, ZERO file moves, diffs `+158/-0` and `+130/-1`. The work is
+-- INSERTION, and no shipped verb modelled it — so none of that day could have
+-- gone through the ladder however reliable the ladder became.
+
+local function declare_root()
+    local root = mkroot({ ['m.lua'] = {
+        'local SOLE_WRAP = { argument = true, condition_clause = true }',
+        'local function use() return SOLE_WRAP end',
+        'return { use = use, SOLE_WRAP = SOLE_WRAP }',
+    } })
+    ingest(root)
+    return root
+end
+
+local function var_id(name)
+    for _, n in ipairs(store.data.nodes) do
+        if n.name == name and n.kind == 'var' then return n.id end
+    end
+end
+
+test('agentwrite: txn_plan_declare plans, previews and applies a table entry', function ()
+    if not ready() then return skip('no lua parser') end
+    local root = declare_root()
+    permit(true)
+    local id = var_id('SOLE_WRAP')
+    if not id then return skip('no var node') end
+
+    local d = call('txn_plan_declare', { node = id, member = 'subscript_list = true' })
+    ok(d.subject and d.subject.plan, 'planned: ' .. vim.inspect(d.refusal or d.error))
+    -- ★ THE PLAN SAYS WHAT IT WILL BE CHECKED AGAINST, as a note rather than a
+    -- promise: both guards REFUSE rather than warn, and neither claims the
+    -- change is correct.
+    local guards
+    for _, n in ipairs(d.notes or {}) do if n.kind == 'guards' then guards = n end end
+    ok(guards, 'the answer declares its guards')
+    eq('parses', guards.evidence.guards[1])
+    eq('shape-preserved', guards.evidence.guards[2])
+
+    -- PLANNING WROTE NOTHING
+    ok(not read(root, 'm.lua'):find('subscript_list', 1, true), 'the file is untouched')
+
+    local p = call('txn_preview', { plan = d.subject.plan })
+    ok(p.result and #p.result > 0, 'previewed: ' .. vim.inspect(p.refusal or p.error))
+    ok(not read(root, 'm.lua'):find('subscript_list', 1, true), 'preview wrote nothing either')
+
+    local a = call('txn_apply', { plan = d.subject.plan })
+    ok(a.subject ~= nil and type(a.subject) == 'table' and a.subject.journal,
+        'applied: ' .. vim.inspect(a.refusal or a.error))
+    local after = read(root, 'm.lua')
+    ok(after:find('condition_clause = true, subscript_list = true', 1, true),
+        'placed after the last member, with the separator taken from the source: ' .. after)
+end)
+
+-- ⚠ THE DOMINANT REPLY, so it is fenced like an answer. 70.5% of containers with
+-- two or more members share NO shape, and the refusal must describe the
+-- CONTAINER rather than the caller's syntax.
+test('agentwrite: txn_plan_declare REFUSES a payload of the wrong shape, naming the divergence', function ()
+    if not ready() then return skip('no lua parser') end
+    declare_root()
+    permit(true)
+    local id = var_id('SOLE_WRAP')
+    if not id then return skip('no var node') end
+    local d, status = agent.answer(store, 'txn_plan_declare',
+        { node = id, member = "'a bare string'" })
+    eq('refusal', status)
+    ok(d.refusal.reason:find('does not fit the ones already there'), d.refusal.reason)
+    ok(d.refusal.reason:find('leaf%-vs%-tree') or d.refusal.reason:find('size%-skew')
+        or d.refusal.reason:find('drift'),
+        'and carries a ranked feature, not just a verdict: ' .. d.refusal.reason)
+end)
+
+test('agentwrite: txn_plan_declare with no payload refuses by name', function ()
+    if not ready() then return skip('no lua parser') end
+    declare_root()
+    permit(true)
+    local id = var_id('SOLE_WRAP')
+    if not id then return skip('no var node') end
+    local d, status = agent.answer(store, 'txn_plan_declare', { node = id })
+    eq('refusal', status)
+    eq('no-payload', d.refusal.rule)
 end)

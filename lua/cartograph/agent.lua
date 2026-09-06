@@ -352,7 +352,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     'portability_targets', 'portability_move', 'portability_move_calls',
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
-    'txn_plan_moveset', 'txn_plan_optimize', 'txn_preview',
+    'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare', 'txn_preview',
     'journal_list', 'journal_get',
     'txn_apply', 'txn_undo' }
 
@@ -1941,6 +1941,57 @@ local function v_txn_plan_optimize(store, args)
     }
 end
 
+--- ★★ THE VERB THE MEASUREMENT ASKED FOR (CART-0763 -> CART-0766 step D). A day
+--- of real work was 15 commits, ZERO file moves, diffs `+158/-0` and `+130/-1`:
+--- the work is INSERTION, and the write surface offered moving symbols and
+--- hoisting loop-invariants. Zero of that day could have gone through the ladder
+--- however reliable the ladder became — the binding constraint is
+--- EDIT-VOCABULARY COVERAGE, not reliability.
+---
+--- ★ TWO INPUTS, ONE VERIFICATION. `member` is the text you wrote; `subs` fills
+--- the container's own template holes. Both converge on "candidate text, spliced,
+--- reparsed, matched against the members already there", so a caller choosing the
+--- textual form gets exactly the checking the structural form gets.
+local function v_txn_plan_declare(store, args)
+    local n, bad = write_subject(store, args)
+    if not n then return bad end
+    local declare = require 'cartograph.declare'
+    local subs
+    if args.subs ~= nil and args.subs ~= NUL then
+        subs = {}
+        for k, v in pairs(args.subs) do subs[tostring(k)] = tostring(v) end
+    end
+    local member = (args.member ~= NUL) and args.member or nil
+    if not member and not subs then
+        return refuse('no-payload',
+            'neither `member` nor `subs` was supplied, so there is nothing to add',
+            'pass `member` with the source text you want inserted, or `subs` mapping the template\'s hole keys to their text — `node_declared` shows a container\'s holes')
+    end
+    local node_row = noderow(store, n.id)
+    local plan, why = declare.plan(store, { node = n.id, member = member, subs = subs })
+    if not plan then
+        -- ⚠ A REFUSAL HERE IS USUALLY THE MOST INFORMATIVE ANSWER THE VERB GIVES,
+        -- and it is not an ABSENCE: the container exists and was read. It says
+        -- what the members actually look like, which is what a caller who guessed
+        -- wrong needs. 70.5% of containers with two or more members share no
+        -- shape at all, so this is the DOMINANT reply, not the exceptional one.
+        return refuse('does-not-fit',
+            ('cannot add to %s: %s'):format(tostring(n.name), tostring(why)),
+            'the reason describes the CONTAINER, not your syntax — read what its members have in common and supply one of that shape, or edit the file directly if it has no shape to match',
+            { node = n.id, name = n.name })
+    end
+    local pid = stash_plan(store, plan, 'declare')
+    return {
+        subject = { plan = pid, verb = plan.verb, node = node_row,
+            touched = plan.touched, generation = plan.generation, previewed = false },
+        result = { { file = plan.shape.file, target = plan.target.name,
+            member = plan.member } },
+        notes = { { kind = 'guards', premise = 'what this plan will be checked against',
+            why = 'the plan declares `parses` (the file still compiles) and `shape-preserved` (the inserted member still fits the container\'s element template, re-derived from the written text). Both run at apply and REFUSE rather than warn; neither claims the change is CORRECT.',
+            evidence = { guards = plan.guards } } },
+    }
+end
+
 -- ── verb: txn_preview ───────────────────────────────────────────────────────
 
 --- ★ WHAT A GREEN PREVIEW DOES AND DOES NOT ASSERT (CART-0153 is the ticket that
@@ -2139,6 +2190,8 @@ local function v_txn_apply(store, args)
     local entry, why
     if e.family == 'move' then
         entry, why = require('cartograph.moveapply').apply(store, e.plan)
+    elseif e.family == 'declare' then
+        entry, why = require('cartograph.declare').apply(store, e.plan)
     else
         local okA, ent_or_why = require('cartograph.optapply').apply(store, e.plan)
         if okA then entry = ent_or_why else why = tostring(ent_or_why) end
@@ -2491,6 +2544,26 @@ M.VERBS = {
             return a
         end)(),
         run = v_txn_plan_optimize,
+    },
+    txn_plan_declare = {
+        summary = 'PROPOSE adding a member to a declared container (a table/array/object literal). Writes nothing: returns a plan handle for txn_preview',
+        tier_basis = 'observation', needs_calls = false,
+        -- never empty: the container is caller-supplied and every way of having
+        -- nothing to add to is a REFUSAL (unknown symbol, no literal in its
+        -- range, members that share no shape), so an absence listed here would
+        -- be one no branch can emit
+        absences = {},
+        args = {
+            { name = 'node', type = 'string',
+                desc = 'the declared symbol whose value is the container (from a node_find / node_at row, this graph generation only)' },
+            { name = 'ref', type = 'ref',
+                desc = 'or the DURABLE ref from the same row; a ref that no longer resolves REFUSES (`stale-ref`), and one resolving only WITH A CAVEAT also refuses (`ref-caveat`) — on the write side a probable handle is not good enough' },
+            { name = 'member', type = 'string',
+                desc = 'TEXTUAL: the member source you want inserted, exactly as it should read (`subscript_list = true`). It is parsed and matched against the members already there, so a payload of the wrong shape REFUSES and names the divergence' },
+            { name = 'subs', type = 'object',
+                desc = 'STRUCTURAL: fill the container\'s template holes instead of writing the member yourself, mapping each hole key to its source TEXT. Cartograph renders from a real member, so indentation and quote style come from the file rather than from a guess' },
+        },
+        run = v_txn_plan_declare,
     },
     txn_preview = {
         summary = 'the exact diff a held plan would write, per file, and nothing written — the same edit callback the apply runs',
