@@ -244,7 +244,17 @@ end
 -- same-name tie inside a bound module by ARITY, so remote refusals fall 7664 ->
 -- 56 and 387 more OTP nodes are minted. A graph cached at v178 has those calls
 -- unresolved and those nodes absent.
-M.VERSION = 179 -- v179: ARITY BREAKS THE MODULE-ALIAS TIE (CART-0797), above.
+-- ★★ v180 GIVES ERLANG CALLS THEIR ARGUMENTS — and repairs the `callee` field
+-- v179 broke. Two hardcoded assumptions fell: the argument container field
+-- (`arguments`, but erlang says `args`) and the argument CLASSIFIER (an erlang
+-- atom is a literal, a var is a local, neither type was tested for). Calls with
+-- arguments 0 -> 38282, literal arguments 2999 -> 11226, greenspun registries
+-- 0 -> 5. AND `callee` was 98.6% BARE ARITY DIGITS at v179, because it is derived
+-- from `full`'s last identifier run and v179 put the arity in `full`; it now
+-- comes from the unqualified name. A v179 graph has no erlang arguments and a
+-- callee column of numbers.
+M.VERSION = 180 -- v180: ERLANG CALLS HAVE ARGUMENTS, AND A VERB AGAIN (CART-0799), above.
+               -- v179: ARITY BREAKS THE MODULE-ALIAS TIE (CART-0797)
                -- v178: ARITY IS IDENTITY IN ERLANG (CART-0796)
                -- v177: THE OTP PROFILE MINTS (CART-0793)
                -- v176: THE OTP PROFILE (CART-0793)

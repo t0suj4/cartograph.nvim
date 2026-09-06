@@ -22,6 +22,16 @@ return {
     call_positions = {
         call = 'expr',
     },
+    -- the grammar calls the argument container `args`, not `arguments`. Without
+    -- this the extractor finds none and every erlang call records ZERO arguments
+    -- (CART-0799) — invisible, because zero is a plausible answer.
+    call_args_field = 'args',
+    -- ★ AN ATOM IS A LITERAL AND A VAR IS A LOCAL. Erlang spells both with node
+    -- types the generic classifier does not test for, so every argument came out
+    -- an opaque `expr`: 2999 literal arguments existed and none were readable as
+    -- keys. `remove_user` in `ejabberd_hooks:add(remove_user, Host, ...)` is a
+    -- constant — that is what makes the hook idiom discoverable at all.
+    arg_kinds = { atom = 'lit', var = 'local' },
     -- .hrl is a HEADER, included textually by `-include`. It holds records,
     -- macros and occasionally functions, and it is a real file in the graph —
     -- ejabberd has 37 of them against 353 .erl.

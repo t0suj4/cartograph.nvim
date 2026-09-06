@@ -6650,6 +6650,18 @@ local MATCH_OPTS = { match_limit = 65536 }
                 if calln and namen
                     and not (spec.call_skip or {})[node_text(namen, src)] then
                     local full = name_text(namen, src)
+                    -- ★★ THE VERB IS THE SOURCE'S NAME, NOT THE RESOLUTION KEY.
+                    -- `callee` is derived below by taking `full`'s last `[%w_]+`
+                    -- run, and `full` is REWRITTEN by qualify_call — so a spec
+                    -- that appends anything non-identifier destroys the verb.
+                    -- MEASURED: erlang keys a call `ejabberd_hooks.add/5` so the
+                    -- arity is identity, and 98.6% of its callees became BARE
+                    -- NUMBERS (`1` x16035, `2` x13453). Resolution never noticed
+                    -- because it reads `full`; the inventory, the lints and
+                    -- greenspun all read `callee`. Captured BEFORE qualification,
+                    -- which is what this file's own comment below already says the
+                    -- two fields are for.
+                    local rawfull = full
                     -- method-ness reads the SOURCE text: a receiver-aware
                     -- rewrite below must not shift the implicit-self arg
                     local method = full:find(':') ~= nil
@@ -6681,7 +6693,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         end
                     end
                     local callee = dynamic and full
-                        or full:match('([%w_]+)$') or full
+                        or rawfull:match('([%w_]+)$') or rawfull
                     local sp = pos_of(calln)
                     local encl = in_function(calln, spec, ifmemo)
                     local is_top = encl == nil
@@ -6691,7 +6703,16 @@ local MATCH_OPTS = { match_limit = 65536 }
                         args[1] = ''
                         argv[1] = { k = 'expr' }
                     end
-                    local argsn = calln:field('arguments')[1]
+                    -- ⚠⚠ THE FIELD NAME IS NOT UNIVERSAL, and assuming it was
+                    -- made an entire language's arguments invisible. erlang's
+                    -- `call` node holds them in `args`, so `field('arguments')`
+                    -- found nothing and EVERY erlang call recorded ZERO
+                    -- arguments — `ejabberd_hooks:add(A,B,C)` included. Nothing
+                    -- errored: argv consumers simply concluded "no literal
+                    -- arguments here", which is why greenspun's registry
+                    -- discovery proposed almost nothing on a corpus built out of
+                    -- registry idioms (CART-0799).
+                    local argsn = calln:field(spec.call_args_field or 'arguments')[1]
                     -- @langs-ok lua's sugar call forms `f"s"` / `f{...}`, which only lua's grammar admits
                     if argsn and (argsn:type() == 'string' or argsn:type() == 'table_constructor') then
                         local v = argsn:type() == 'string'
@@ -6746,7 +6767,27 @@ local MATCH_OPTS = { match_limit = 65536 }
                             end
                             local nargv = #argv
                             local t = a:type()
-                            if t == 'list_splat' or t == 'dictionary_splat'
+                            -- ★★ A LANGUAGE MAY NAME ITS OWN ARGUMENT KINDS. The
+                            -- chain below tests grammar node types by hand
+                            -- (`string`, `identifier`, ...), which silently
+                            -- classifies everything a language spells differently
+                            -- as an opaque `expr`. erlang's ATOM is a literal —
+                            -- `ejabberd_hooks:add(remove_user, ...)` has a
+                            -- constant first argument — and its VAR is a local;
+                            -- neither type appears here, so every erlang key read
+                            -- as an expression and registry discovery found
+                            -- nothing on a corpus made of registries (CART-0799).
+                            local ak = spec.arg_kinds and spec.arg_kinds[t]
+                            if ak == 'lit' then
+                                -- a quoted atom carries its quotes in the source
+                                local v = node_text(a, src):gsub("^'", ""):gsub("'$", "")
+                                args[#args + 1] = v
+                                argv[#argv + 1] = { k = 'lit', v = v }
+                            elseif ak == 'local' then
+                                args[#args + 1] = ''
+                                argv[#argv + 1] = { k = 'local', name = node_text(a, src),
+                                    l = select(1, a:range()) }
+                            elseif t == 'list_splat' or t == 'dictionary_splat'
                                 or t == 'spread_element'
                                 or t == 'splat_argument'
                                 or t == 'variadic_unpacking' then

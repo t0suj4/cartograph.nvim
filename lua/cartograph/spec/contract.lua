@@ -266,6 +266,15 @@ M.SLOTS = {
     torn_by_node = 'QUIRKS',     -- node-local tearing after a parse error
     toplevel_only = 'QUIRKS', toplevel_parent = 'QUIRKS', is_top = 'QUIRKS',
     block_container = 'QUIRKS',  -- grammar shape → coarse-region container
+    -- the FIELD holding a call's argument container, when the grammar does not
+    -- call it `arguments`. erlang's `call` node has `args`; without this the
+    -- extractor finds no arguments at all and every argv consumer silently
+    -- answers about an empty list (CART-0799).
+    call_args_field = 'QUIRKS',
+    -- grammar node type -> argument KIND ('lit' / 'local'), for languages whose
+    -- literals are not spelled the way the generic chain tests for. erlang's
+    -- `atom` is a constant and its `var` is a local (CART-0799).
+    arg_kinds = 'QUIRKS',
     block_skip = 'QUIRKS', call_skip = 'QUIRKS', call_skip_within = 'QUIRKS',
     skip_call = 'QUIRKS',        -- parse-level call filters (grammar noise)
     -- per-def veto: a captured def that must NOT become a name in the graph, when
