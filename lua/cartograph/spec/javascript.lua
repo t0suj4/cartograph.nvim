@@ -68,6 +68,57 @@ local function js_is_write(c, n)
     return false
 end
 
+-- ★★★ THE DETERMINING CALL OF A SET-ONCE LOCAL (CART-0800). `resolve_returns` is
+-- a fixpoint over calls: it follows `c.rt` — the POSITION of the call whose return
+-- value this call is invoked on — to that call's target, reads the target's `ret`,
+-- and resolves `ret.member`. It has shipped unfed on JS because nothing ever set
+-- `rt`, and `rt` comes from `spec.local_ret`, which only zig declared.
+-- So `const stub = sinon.stub(); stub.returns(...)` had no link between the two
+-- statements at all. This builds it, modelled on zig_local_retpos.
+-- ⚠ SET-ONCE ONLY. A name declared twice in the same function is recorded as
+-- `false` — ambiguous — because the second binding may carry a different type and
+-- a wrong `rt` propagates through the fixpoint rather than merely failing.
+-- ⚠ AND PER-FUNCTION, not per-file: two functions may each bind `res` to a
+-- different call, and merging them would cross the streams.
+local js_ret_map, js_ret_src
+local JS_FN = { function_declaration = true, method_definition = true,
+    arrow_function = true, function_expression = true, generator_function = true,
+    generator_function_declaration = true }
+
+local function build_js_ret_map(tsroot, src)
+    local map = {}
+    local function walk(n, curfn)
+        if JS_FN[n:type()] then curfn = n end
+        if n:type() == 'variable_declarator' and curfn then
+            local nm = n:field('name')[1]
+            local val = n:field('value')[1]
+            -- `const x = await f()` is the dominant JS shape; unwrap it
+            if val and val:type() == 'await_expression' then val = val:named_child(0) end
+            if nm and nm:type() == 'identifier' and val
+                and val:type() == 'call_expression' then
+                local fe = val:field('function')[1]
+                local namenode
+                if fe and fe:type() == 'identifier' then namenode = fe
+                elseif fe and fe:type() == 'member_expression' then
+                    namenode = fe:field('property')[1]
+                end
+                if namenode then
+                    local key, fid = node_text(nm, src), curfn:id()
+                    map[fid] = map[fid] or {}
+                    if map[fid][key] == nil then
+                        local r, c = namenode:start()
+                        map[fid][key] = { r = r, c = c }
+                    else map[fid][key] = false end -- rebound → ambiguous
+                end
+            end
+        end
+        for c in n:iter_children() do walk(c, curfn) end
+    end
+    walk(tsroot, nil)
+    return map
+end
+
+
 return {
     is_write = js_is_write,
     -- the PREFILTER: every immediate parent type a write mention can have.
@@ -174,6 +225,32 @@ return {
         -- binds o to class C; resolve_local_ctor types o.member → C.member. The
         -- callee stored is the bare class C (not lua's `C.new` convention) → the
         -- JS cut in resolve_local_ctor keys on is_class[callee] directly.
+        -- the receiver is a set-once local bound to a call: hand
+        -- `resolve_returns` the position of that determining call.
+        local_ret = function (calln, src)
+            if calln:type() ~= 'call_expression' then return nil end
+            local fe = calln:field('function')[1]
+            if not fe or fe:type() ~= 'member_expression' then return nil end
+            local obj = fe:field('object')[1]
+            if not (obj and obj:type() == 'identifier') then return nil end
+            if src ~= js_ret_src then
+                local r = calln
+                while r:parent() do r = r:parent() end
+                js_ret_map = build_js_ret_map(r, src)
+                js_ret_src = src
+            end
+            local name = node_text(obj, src)
+            local p = calln:parent()
+            while p do
+                if JS_FN[p:type()] then
+                    local e = js_ret_map[p:id()]
+                    local hit = e and e[name]
+                    if hit then return hit end
+                end
+                if p:type() == 'program' then return nil end
+                p = p:parent()
+            end
+        end,
         ctor_query = [=[
             (variable_declarator name: (identifier) @cvar
                 value: (new_expression constructor: (identifier) @cctor))

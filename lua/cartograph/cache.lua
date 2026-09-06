@@ -264,7 +264,11 @@ end
 -- ★ v183: a BARE import specifier now binds its local name to the PACKAGE, so
 -- `const _ = require('lodash')` makes `_.map()` key `lodash.map`. Gated on the
 -- profile confirming the member, so it adds resolutions and never trades one.
-M.VERSION = 183 -- v183: A BARE SPECIFIER BINDS A PACKAGE (CART-0800), above.
+-- ★ v184: JS calls now carry `rt`, the determining-call pointer that
+-- `resolve_returns` follows — 0 -> 5128 on ghost. A cached graph has none, so its
+-- return chains are unlinkable even after the profile learns the types.
+M.VERSION = 184 -- v184: A SET-ONCE LOCAL NAMES ITS DETERMINING CALL (CART-0800), above.
+               -- v183: A BARE SPECIFIER BINDS A PACKAGE (CART-0800)
                -- v182: THE NODE/JS ENVIRONMENT PROFILE (CART-0800)
                -- v181: THE `erlang` MODULE WAS MISSING FROM ITS OWN PROFILE (CART-0793)
                -- v180: ERLANG CALLS HAVE ARGUMENTS, AND A VERB AGAIN (CART-0799)

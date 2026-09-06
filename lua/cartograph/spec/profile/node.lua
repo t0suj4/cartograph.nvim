@@ -56,7 +56,11 @@ local function mint_path(callee, full, why)
         -- profile cannot type, and guessing which segment is the namespace would
         -- be the fabrication the nodef gate exists to prevent.
         local ns, m = full:match('^([%w_$]+)%.([%w_$]+)$')
-        if ns and m and sigs[ns .. '.' .. m] then return ns .. '.' .. m end
+        local sig = ns and m and sigs[ns .. '.' .. m]
+        -- ★ THE SECOND RETURN IS THE DECLARED RETURN TYPE. `sinon.stub` yields
+        -- `SinonStub`, which the distilled surface carries and mint_nodes now puts
+        -- on the node — so a chain has a bottom to terminate on.
+        if sig then return ns .. '.' .. m, sig.ret end
         return nil
     end
     -- a BARE call: only a callable GLOBAL is soundly the platform's. `free` holds

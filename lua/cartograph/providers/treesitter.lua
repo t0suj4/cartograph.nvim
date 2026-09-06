@@ -2338,11 +2338,23 @@ local function mint_nodes(data, node_index, scheme, file, pathfor)
     end
     local resolved, minted = 0, 0
     for i = 1, cv.n do
-        local path = (not cget(i, 'to')) and pathfor(cget, i)
+        -- ★ `pathfor` MAY ALSO NAME THE RETURN TYPE. A profile distilled from
+        -- declarations knows that `sinon.stub()` yields a `SinonStub`, and
+        -- `resolve_returns` — a fixpoint that has shipped unfed on JS — follows
+        -- exactly that field. Carrying it costs one value; discarding it left the
+        -- bottom of every JS return chain missing (CART-0800).
+        -- ⚠⚠ NOT `local path, pret = (not cget(i,'to')) and pathfor(...)`. An
+        -- and/or chain ADJUSTS A CALL TO ONE VALUE, so `pret` was silently nil on
+        -- every mint and the return type never arrived. cartograph's own
+        -- `truncation` lint caught it — the rule exists because this cost three
+        -- real bugs in one day — and it caught it in the commit that was about to
+        -- report the missing types as a property of the DATA.
+        local path, pret
+        if not cget(i, 'to') then path, pret = pathfor(cget, i) end
         if path then
             local nd = bypath[path]
             if not nd then
-                nd = { id = scheme .. path, name = path,
+                nd = { id = scheme .. path, name = path, ret = pret,
                     kind = 'external', file = file, external = true, order = -1,
                     range = { start = { line = 0, char = 0 },
                         ['end'] = { line = 0, char = 0 } } }
@@ -2351,6 +2363,7 @@ local function mint_nodes(data, node_index, scheme, file, pathfor)
                 if node_index then node_index[nd.id] = nd end
                 minted = minted + 1
             end
+            if pret and not nd.ret then nd.ret = pret end
             cset(i, 'to', nd.id)
             cset(i, 'ext', nil)
             cset(i, 'refused', nil)
