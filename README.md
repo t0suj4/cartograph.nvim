@@ -3042,6 +3042,25 @@ nvim --headless -u NONE -l tools/npmdistill.lua ghost
 #   ⚠ The .d.ts text is attacker-controlled and is parsed here by a C grammar:
 #   that is the residual exposure, and isolating it would mean moving the PARSE.
 
+# DISTIL THE BROWSER SURFACE FROM TypeScript's OWN lib.dom.d.ts. node's surface is
+# the running ENGINE's, so it has no `document`, no `window`, no `Element` — and
+# most JS in the wild is browser code.
+nvim --headless -u NONE -l tools/domdistill.lua
+#   prefers an installed node_modules/typescript, falls back to unpkg; writes
+#   spec/profile/dom-api.mpack (27 globals, 18873 keys, 41 free functions) with the
+#   EXTENDS CHAINS EXPANDED, which is most of the value — `document.appendChild` is
+#   declared seven interfaces up, on Node. spec/profile/node.lua unions it, because
+#   `select_env` gives a root ONE profile and a repo is routinely both (ghost serves
+#   a browser frontend from a node server, and GAINED 1.2 points from this).
+#   jquery 37.3% -> 38.8%, converse.js 23.9% -> 25.1%.
+#   ⚠ It measured ZERO until the stdlib tail-vocabulary gate was demoted: a
+#   hand-written word list was refusing `document.createElement` before the surface
+#   holding that exact key was asked. An oracle that confirms the whole path
+#   outranks a curated tail word.
+#   tools/dtsread.lua is the shared .d.ts reader behind this and npmdistill — the
+#   walk is written once, and it records whether each member is CALLABLE, without
+#   which a call can resolve to a boolean property.
+
 # DISTIL THE NODE + JS LANGUAGE SURFACE FROM THE INSTALLED ENGINE — the same
 # oracle move, one language over.
 nvim --headless -u NONE -l tools/nodedistill.lua
