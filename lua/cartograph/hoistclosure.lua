@@ -125,6 +125,7 @@ function M.plan(store, closure_id)
     local dst0 = at.sl(anchor.range) -- insert before the outermost enclosing fn
     return txn.protocol({
         verb = 'hoist-closure', generation = store.generation,
+        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
         file = node.file, name = short, anchor = anchor.name,
         src_s0 = s0, src_e0 = e0, src_lines = src_lines, dst0 = dst0,
         ref = store.ref_of(closure_id), fn_id = closure_id,

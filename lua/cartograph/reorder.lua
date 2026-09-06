@@ -311,6 +311,7 @@ function M.plan_move(store, fn_id, from_line, to_line, through_line)
 
     return require('cartograph.txn').protocol({
         verb = 'reorder', generation = store.generation,
+        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
         file = rel_file, fn = m.node.name,
         src_s0 = src_s0, src_e0 = src_e0, dst0 = dst0, src_lines = src_lines,
         from_line = from_line, to_line = to_line, through_line = through_line,

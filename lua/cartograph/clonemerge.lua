@@ -61,6 +61,7 @@ function M.plan(store, id)
     local root = store.data.root
     local plan = {
         verb = 'clone-merge',
+        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
         generation = store.generation,
         survivor = { id = id, name = survivor.name, file = survivor.file,
             ref = store.ref_of(id) },

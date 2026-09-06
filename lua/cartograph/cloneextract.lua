@@ -324,6 +324,7 @@ function M.plan(store, pair, opts)
 
     local plan = {
         verb = 'extract-helper', generation = store.generation,
+        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
         helper = hname, nparams = #hp, xfile = xfile, lang = lang,
         files = {}, hazards = hazards,
         a = { id = a.id, name = a.name, ref = store.ref_of(a.id), file = a.file },

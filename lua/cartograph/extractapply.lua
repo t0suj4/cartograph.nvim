@@ -40,6 +40,7 @@ local function stage(store, node, exp, how)
     local root = store.data.root
     return txn.protocol({
         verb = 'extract-fn', generation = store.generation,
+        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
         file = node.file, fn = node.name or '?', fn_id = node.id,
         ref = store.ref_of(node.id), how = how,
         name = exp.name, params = exp.params, returns = exp.returns,

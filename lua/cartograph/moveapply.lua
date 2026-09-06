@@ -465,6 +465,7 @@ function M.plan_ids(store, ids, dest)
     if not dtext then return nil, 'cannot read ' .. dest end
     local plan = {
         verb = 'move', generation = store.generation, dest = dest,
+        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
         moves = {}, hazards = {}, stamps = {}, touched = {},
         dest_at = insert_point(vim.split(dtext, '\n', { plain = true })),
     }
@@ -626,6 +627,7 @@ function M.plan_extract_ids(store, ids, relpath, opts)
     end
     local plan = {
         verb = 'extract-module', generation = store.generation,
+        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
         dest = relpath, creates = { [relpath] = true }, dest_at = 0,
         header = okp and ts.file_header(relpath) or {},
         moves = {}, hazards = {}, stamps = {}, touched = {},

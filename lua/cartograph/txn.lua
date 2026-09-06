@@ -200,6 +200,13 @@ function M.dryrun(store, plan, edit_of)
     for _, rel in ipairs(plan.touched) do
         after[rel] = edit_of(rel, before[rel], before)
     end
+    -- ★ THE PREVIEW COMPUTES THE GUARDS AND DOES NOT REFUSE ON THEM (CART-0769).
+    -- A preview of a FAILING plan plus its verdict is more useful than no
+    -- preview — seeing the broken text is how you find out why — and `execute`
+    -- is where the write happens and where the refusal belongs. Both call
+    -- `planguards.run`, so what the preview checked and what the write checks
+    -- cannot drift.
+    plan.guard_verdicts = require('cartograph.planguards').run(store, plan, before, after)
     return before, after
 end
 
@@ -332,12 +339,39 @@ function M.execute(store, plan, desc, edit_of)
         end
         before[rel] = t
     end
-    local journal = require 'cartograph.journal'
-    local entry, jerr = journal.begin(root, plan.verb, desc, before)
-    if not entry then return nil, jerr end
+    -- ★★ THE GUARD RUNG, AND IT MUST PRECEDE journal.begin FOR THE SAME REASON
+    -- THE CONTAINMENT BACKSTOP DOES (CART-0769). That is also why the whole
+    -- `after` map is computed here rather than inside the write loop: you cannot
+    -- refuse a plan you have not finished computing, and refusing after the
+    -- journal opens leaves an entry for a write nobody meant to make.
+    --
+    -- ⚠ A PLAN DECLARING NO GUARDS REFUSES BY NAME. That is not strictness for
+    -- its own sake: `resolve_edit` above already refuses a plan carrying no
+    -- `edit_of` with "this verb has not joined the plan protocol", and the guard
+    -- half is the same protocol. The alternative — treating silence as "no
+    -- obligations" — is exactly how moveapply and clonemerge came to write
+    -- unparseable files while five sibling verbs checked (CART-0770/0773): a
+    -- missing guard looked identical to a guard that passed.
+    if not plan.guards then
+        return nil, ('the plan for `%s` declares no guards — a write verb must '
+            .. 'name the obligations it accepts (`plan.guards = { \'parses\' }`), '
+            .. 'or say `{}` to declare that it accepts none')
+            :format(tostring(plan.verb))
+    end
     local after = {}
     for _, rel in ipairs(plan.touched) do
         after[rel] = edit_of(rel, before[rel], before)
+    end
+    local verdicts, failed = require('cartograph.planguards').run(store, plan, before, after)
+    plan.guard_verdicts = verdicts
+    if failed then
+        return nil, require('cartograph.planguards').refusal(failed)
+    end
+
+    local journal = require 'cartograph.journal'
+    local entry, jerr = journal.begin(root, plan.verb, desc, before)
+    if not entry then return nil, jerr end
+    for _, rel in ipairs(plan.touched) do
         local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$')
         if dir then vim.fn.mkdir(dir, 'p') end
         local fd = io.open(root .. '/' .. rel, 'w')

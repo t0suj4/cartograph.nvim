@@ -223,7 +223,7 @@ function M.plan_cse(store, fn_id, opts)
             end
         end
     end
-    return txn.protocol({ verb = 'optimize-cse', touched = { rel }, generation = store.generation,
+    return txn.protocol({ verb = 'optimize-cse', guards = { 'parses' }, touched = { rel }, generation = store.generation,
         stamps = { [rel] = txn.disk_stamp(store.data.root, rel) }, rel = rel,
         reps = reps, moves = moves, declined = declined }, M.edits_for)
 end
@@ -374,7 +374,7 @@ function M.plan_localize(store, fn_id, opts)
             end
         end
     end
-    return txn.protocol({ verb = 'optimize-localize', touched = { node.file }, generation = store.generation,
+    return txn.protocol({ verb = 'optimize-localize', guards = { 'parses' }, touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
         reps = reps, ins = ins, moves = moves, declined = declined }, M.edits_for)
 end
@@ -442,7 +442,7 @@ function M.plan_hoist(store, fn_id, opts)
             end
         end
     end
-    return txn.protocol({ verb = 'optimize-hoist', touched = { node.file }, generation = store.generation,
+    return txn.protocol({ verb = 'optimize-hoist', guards = { 'parses' }, touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
         dels = dels, ins = ins, moves = moves, declined = declined }, M.edits_for)
 end
@@ -502,7 +502,7 @@ function M.plan_pre(store, fn_id, opts)
             end
         end
     end
-    return txn.protocol({ verb = 'optimize-pre', touched = { node.file }, generation = store.generation,
+    return txn.protocol({ verb = 'optimize-pre', guards = { 'parses' }, touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
         reps = reps, ins = ins, moves = moves, declined = declined }, M.edits_for)
 end

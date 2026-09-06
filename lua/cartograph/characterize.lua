@@ -1264,6 +1264,7 @@ function M.plan(store, fn_id, opts)
     end
     local plan = {
         verb = 'characterize', generation = store.generation,
+        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
         file = node.file, fn = node.name or '?', fn_id = node.id,
         ref = store.ref_of(node.id),
         subject = reach,
