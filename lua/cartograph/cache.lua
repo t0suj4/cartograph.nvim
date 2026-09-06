@@ -216,7 +216,18 @@ end
 -- the raw provider extract, so no pinned expectation has ever covered an xlang
 -- edge (CART-0789). The version moves because the CACHE holds post-pass graphs;
 -- the gates were blind to this the whole time.
-M.VERSION = 174 -- v174: A KEY POSITION DRAWN FROM THE HASH SEED (CART-0788), above.
+-- ★ v175 CHANGES ERLANG'S EXTRACTION OUTPUT, in both directions. `-spec` type
+-- applications are no longer recorded as calls (55474 -> 41930 calls, and 3735
+-- REF EDGES that no call site justified are gone), and a remote call now carries
+-- its module (`lists.foldl`), which binds module-to-file and turns 601 import
+-- edges into 2257. Any erlang graph cached before this holds fabricated edges and
+-- a call population that no longer exists.
+-- ⚠ AND THE BUMP IS A CORRECTION: the commit that made those changes (CART-0793)
+-- asserted in its message that "extraction behaviour moved again, so it bumps"
+-- and did not touch this file. The claim came first and the bump second, which is
+-- the wrong order and worth the line.
+M.VERSION = 175 -- v175: A -spec IS NOT CODE (CART-0793), above.
+               -- v174: A KEY POSITION DRAWN FROM THE HASH SEED (CART-0788)
                -- v173: A FRONTIER THE PARALLEL MERGE DROPPED (CART-0747)
                -- v172: AN ARGUMENT LIST IS NOT EVIDENCE OF REGISTRATION
                -- (CART-0720), see below.
