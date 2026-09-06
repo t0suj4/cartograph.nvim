@@ -44,6 +44,13 @@ return {
     -- Without it, `merge_equations` folds the two into one node: 802 of 9650
     -- functions on ejabberd (8.3%), worst case `join` with FOUR arities.
     merge_key = function (defn) return arity_of(defn) end,
+    -- ★ AND THE SAME FACT, DECLARED FOR THE RESOLVER (CART-0797). erlang has no
+    -- varargs and no default arguments, so the argument count at a call site is a
+    -- SOUND discriminator among same-named definitions — which is what lets
+    -- resolve_module_alias break the `ejabberd_hooks:add` tie that unique-or-refuse
+    -- cannot. Java must NOT declare this: `f(String...)` accepts any count above a
+    -- fixed prefix (CART-0676).
+    arity_is_identity = true,
 
     -- ⚠⚠ AND THE ARITY GOES IN AN **ALT KEY**, NEVER IN THE NAME. Putting it in
     -- the name (`store_room/4`) was tried and MEASURED: resolution 81.6% -> 35.6%,
@@ -126,16 +133,14 @@ return {
         -- sibling. The argument count is at the site and needs no type
         -- information — which is why this works spec-locally while the general
         -- overload question (CART-0676) needs the resolver to see the call.
-        -- ⚠⚠ A REMOTE CALL KEEPS `mod.name` WITH NO ARITY, AND THAT IS MEASURED,
-        -- NOT ASSUMED. Adding the arity there is the obvious symmetry and it made
-        -- things WORSE: REMOTE 59.7% -> 55.1%. The module-to-file bind resolves
-        -- `mod:f` by looking the member up BY BARE NAME inside the bound file, and
-        -- it does not consult alt keys — so `f/2` matches nothing and the call is
-        -- refused outright instead of merely being ambiguous.
-        -- ★ SO THE RESIDUAL IS PRECISE: a remote call into a module that defines
-        -- the same name at two arities cannot be disambiguated from the spec side.
-        -- The evidence is at the site and the alias path cannot see it — the same
-        -- shape as CART-0676, one layer down.
+        -- ★★ A REMOTE CALL CARRIES THE ARITY TOO (CART-0797). `mod:f(A,B)` resolves
+        -- through the module-to-file bind, which now reads a `/N` suffix off the
+        -- member key and uses it to break a same-name tie inside the bound file —
+        -- `ejabberd_hooks:add` has add/3, add/4 and add/5 there.
+        -- ⚠ THE SUFFIX WAS TRIED ONCE BEFORE AND MADE THINGS WORSE (REMOTE 59.7%
+        -- -> 55.1%), because back then the alias path matched the member BY BARE
+        -- NAME and `f/2` matched nothing at all. The suffix is only safe now that
+        -- the other half exists; the two changes are one change.
         if not e or e:type() ~= 'remote' then
             return name .. '/' .. arity_of(calln)
         end
@@ -147,7 +152,7 @@ return {
         if not ma or ma:type() ~= 'atom' then return nil end
         local mod = vim.treesitter.get_node_text(ma, src)
         if not mod or mod == '' or mod:find('[^%w_]') then return nil end
-        return mod .. '.' .. name
+        return mod .. '.' .. name .. '/' .. arity_of(calln)
     end,
 
     -- an `atom` is erlang's identifier AND its string-ish literal, so mentioning

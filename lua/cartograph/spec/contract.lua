@@ -217,6 +217,10 @@ M.SLOTS = {
     -- different functions. This returns a discriminator; only clauses that agree
     -- on it merge. Erlang is the only one of the 17 specs that needs it.
     merge_key = 'ANALYSIS',
+    -- declares that #params vs the call's argument count is a SOUND discriminator
+    -- in this language — no varargs, no default arguments. Read by
+    -- resolve_module_alias to break a same-name tie inside a bound module.
+    arity_is_identity = 'ANALYSIS',
     binding_modifiers = 'ANALYSIS', -- declaration decorations that read nothing: lua
                                     -- `<const>`/`<close>`, whose node name collides with
                                     -- python's field access (CART-0234)

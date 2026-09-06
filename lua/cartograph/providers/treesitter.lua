@@ -1913,6 +1913,29 @@ end
 --- is not tail-indexed) skips the exact index too. That hole cost module_alias 845 of its
 --- 1054 fills on zig, and I mis-attributed the loss to a pipeline cascade before finding
 --- it. The lists are named explicitly here for exactly that reason.
+--- Every fn/method with this key defined in `file`, in index order. The sibling
+--- of `fit_in_file`, which collapses the same scan to unique-or-refuse; a caller
+--- that can BREAK a tie needs to see the tie.
+local function cands_in_file(tail, exact, key, file)
+    -- ⚠ NOT `ipairs({ tail[key], exact[key] })` — that stops at index 1 the moment
+    -- `tail[key]` is nil, and a BARE name is never tail-indexed (the tail is only
+    -- recorded when it differs from the name), so it iterated ZERO times and this
+    -- helper silently returned nothing. Same shape as the probe-walker bug in
+    -- [[cartograph-capabilities]]; fit_in_file avoids it by scanning the two
+    -- lists in separate statements.
+    local out, seen = {}, {}
+    for _, list in ipairs({ tail[key] or {}, exact[key] or {} }) do
+        for _, nd in ipairs(list) do
+            if nd.file == file and (nd.kind == 'function' or nd.kind == 'method')
+                and not seen[nd.id] then
+                seen[nd.id] = true
+                out[#out + 1] = nd
+            end
+        end
+    end
+    return out
+end
+
 local function fit_in_file(tail, exact, key, file)
     local function scan(list)
         local fit, dup = nil, false
@@ -2075,7 +2098,16 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
         do
             local cfull, cfile = cget(i, 'full'), cget(i, 'file')
             local recv, member = nil, nil
-            if cfull then recv, member = cfull:match('^([%w_]+)[.:]([%w_]+)$') end
+            -- a key MAY carry the call's arity (`econf.options/1`): a language
+            -- where arity is identity supplies it, because the argument count is
+            -- the only thing that can break a same-name tie inside the bound
+            -- module. Captured separately so the LOOKUP still uses the bare
+            -- member — the def is named `options`, not `options/1`.
+            local mar
+            if cfull then
+                recv, member, mar = cfull:match('^([%w_]+)[.:]([%w_]+)/(%d+)$')
+                if not recv then recv, member = cfull:match('^([%w_]+)[.:]([%w_]+)$') end
+            end
             -- fallback: the receiver preserved separately (zig field calls key
             -- only the member into `full`, but recv_local kept the object) — so
             -- a lowercase alias `bar.run()` is still recognized here.
@@ -2087,6 +2119,45 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
             if mod then
                 -- the UNIQUE fn/method with this tail defined in the alias's module
                 local fit, dup = fit_in_file(tail, exact, member, mod)
+                -- ★★★ ARITY BREAKS THE TIE, where the language says arity is
+                -- IDENTITY (CART-0797). `ejabberd_hooks:add(A,B,C)` finds three
+                -- `add` definitions in ejabberd_hooks.erl — add/3, add/4, add/5 —
+                -- and unique-or-refuse refuses. The call site names the argument
+                -- count; nothing else is needed and no type information is
+                -- involved. MEASURED on ejabberd: 3217 of 7664 refused remote
+                -- calls are exactly this, worth +7.7 resolution points.
+                -- ⚠ GATED ON THE SPEC, and the gate is the soundness argument.
+                -- Comparing #params to the argument count is only valid in a
+                -- language with NO varargs and NO default arguments — erlang.
+                -- Java's `f(String...)` accepts any count above a fixed prefix, so
+                -- the same filter there fabricates a resolution (CART-0676 records
+                -- that trap); it must declare itself before it gets this.
+                if dup then
+                    local _, sp = elang_for(cfile)
+                    if sp and sp.arity_is_identity and mar then
+                        -- ⚠ MATCHED AGAINST THE DEF'S OWN ALT KEY, NOT `#params`.
+                        -- The first cut compared the argument count to
+                        -- `#(nd.params or {})` and broke ZERO ties out of 3159:
+                        -- an erlang clause head is a PATTERN, not a parameter list
+                        -- (`handle({A,B}, _, S)`), so the shared param extractor
+                        -- does not count it as three. The spec ALREADY publishes
+                        -- the arity as an alt key (`add/3`) via `spec.alt_keys`,
+                        -- computed by the language's own counter — so ask that,
+                        -- and the two can never drift.
+                        local want = mar and (member .. '/' .. mar) or nil
+                        local only, many = nil, false
+                        for _, nd in ipairs(cands_in_file(tail, exact, member, mod)) do
+                            for _, k in ipairs(nd.altkeys or {}) do
+                                if k == want then
+                                    if only then many = true else only = nd end
+                                    break
+                                end
+                            end
+                        end
+                        -- still ambiguous at this arity => leave the refusal alone
+                        if only and not many then fit, dup = only, false end
+                    end
+                end
                 local cto = cget(i, 'to')
                 -- NO fit, and the bound module is a file we never read: the
                 -- disposition the main resolver left (`no-def`, i.e. external =

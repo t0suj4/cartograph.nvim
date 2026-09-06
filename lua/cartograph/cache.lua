@@ -240,7 +240,12 @@ end
 -- node and are now two: 8989 functions become 9720 on ejabberd, and every erlang
 -- call key changes shape (a local call now keys `name/arity`). A graph cached
 -- before this has 731 fewer functions and calls pointing at conflated nodes.
-M.VERSION = 178 -- v178: ARITY IS IDENTITY IN ERLANG (CART-0796), above.
+-- ★ v179 RESOLVES 7608 MORE ERLANG CALLS. The module-alias pass breaks a
+-- same-name tie inside a bound module by ARITY, so remote refusals fall 7664 ->
+-- 56 and 387 more OTP nodes are minted. A graph cached at v178 has those calls
+-- unresolved and those nodes absent.
+M.VERSION = 179 -- v179: ARITY BREAKS THE MODULE-ALIAS TIE (CART-0797), above.
+               -- v178: ARITY IS IDENTITY IN ERLANG (CART-0796)
                -- v177: THE OTP PROFILE MINTS (CART-0793)
                -- v176: THE OTP PROFILE (CART-0793)
                -- v175: A -spec IS NOT CODE (CART-0793)
