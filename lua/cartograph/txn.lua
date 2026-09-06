@@ -169,10 +169,35 @@ end
 --- dels = {{s, e}} (0-based inclusive; one trailing blank swallowed),
 --- reps = {{at, to}} (at = token range), ins = {{after, lines}}
 --- (0-based; after = -1 inserts at the very top).
+---
+--- ⚠⚠ A REPLACEMENT MUST BE SINGLE-LINE, AND THIS NOW SAYS SO INSTEAD OF
+--- CORRUPTING (CART-0767). The splice below takes the START line and then takes
+--- its tail from the END COLUMN — on that same line. Given a rep spanning lines,
+--- the intervening lines survive untouched and the end column is applied to the
+--- wrong line. MEASURED on a four-line fixture, replacing (0,5)..(2,4):
+---     want   line REPLACED three          (four lines collapse to two)
+---     got    line REPLACED one            (and lines 2-4 untouched)
+--- ★ NOT EVEN OBVIOUSLY BROKEN — plausible text, silently wrong, no error. The
+--- doc line above says `at = token range`, and a token range IS single-line, so
+--- every shipped caller is safe; nothing enforced it, and the next verb to pass a
+--- NODE range would have inherited this. TWO verbs have already declined a
+--- multi-line case by name rather than risk it (moveapply's last-member check,
+--- `declare`'s), which is a rule held up by two comments instead of by code.
+---
+--- It RAISES rather than returning a refusal because `edit_of` is contracted to
+--- return text: a nil would arrive downstream as an empty file. `dryrun` and
+--- `execute` convert the raise into a named refusal.
 function M.edit_file(text, dels, reps, ins)
     local lines = vim.split(text, '\n', { plain = true })
     local edits = {}
     for _, r in ipairs(reps or {}) do
+        if atr.sl(r.at) ~= atr.el(r.at) then
+            error(('edit_file: a replacement spanning lines %d..%d cannot be '
+                .. 'applied — this splice is single-line by construction, and a '
+                .. 'multi-line range would silently keep the intervening lines '
+                .. '(CART-0767). Pass a token range, or split the edit.')
+                :format(atr.sl(r.at) + 1, atr.el(r.at) + 1), 0)
+        end
         edits[#edits + 1] = { line = atr.sl(r.at), ord = 2, rep = r }
     end
     for _, d in ipairs(dels or {}) do
@@ -266,9 +291,20 @@ function M.dryrun(store, plan, edit_of)
         end
         before[rel] = t
     end
+    -- ★ AN EDIT CALLBACK THAT RAISES IS A REFUSAL, NOT A CRASH (CART-0767, and
+    -- CART-0372 is proof at least one verb's callback raises on real input). The
+    -- scorer already pcall'd for this reason; the two paths that actually build
+    -- the text did not, so a raise escaped `dryrun` and `execute` to whatever
+    -- called them — an ex-command, or an agent verb that would report it as an
+    -- internal error rather than as this plan being unbuildable.
     local after = {}
     for _, rel in ipairs(plan.touched) do
-        after[rel] = edit_of(rel, before[rel], before)
+        local ok, out = pcall(edit_of, rel, before[rel], before)
+        if not ok then
+            return nil, nil, ('the edit for %s could not be built: %s')
+                :format(rel, tostring(out))
+        end
+        after[rel] = out
     end
     -- ★ THE PREVIEW COMPUTES THE GUARDS AND DOES NOT REFUSE ON THEM (CART-0769).
     -- A preview of a FAILING plan plus its verdict is more useful than no
@@ -430,7 +466,14 @@ function M.execute(store, plan, desc, edit_of)
     end
     local after = {}
     for _, rel in ipairs(plan.touched) do
-        after[rel] = edit_of(rel, before[rel], before)
+        -- the same pcall dryrun runs, and for the same reason: a raise here is
+        -- this plan refusing to be built, and it must be named rather than
+        -- thrown past the caller (CART-0767)
+        local ok, out = pcall(edit_of, rel, before[rel], before)
+        if not ok then
+            return nil, ('the edit for %s could not be built: %s'):format(rel, tostring(out))
+        end
+        after[rel] = out
     end
     local verdicts, failed = require('cartograph.planguards').run(store, plan, before, after)
     plan.guard_verdicts = verdicts
