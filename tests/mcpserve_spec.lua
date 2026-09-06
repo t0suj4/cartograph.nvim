@@ -333,6 +333,8 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- touching a byte, and the one this verb gives most often in the wild —
         -- 70.6% of containers with two or more members share no shape at all
         txn_plan_declare = { args = { member = 'x = 1' }, expect = 'refusal' },
+        -- naming no subject: a refusal reachable without touching a byte
+        txn_plan_annotate = { args = { text = 'note' }, expect = 'refusal' },
         txn_preview = { args = { plan = 'plan-never-minted' }, expect = 'refusal' },
         journal_list = {},
         journal_get = { args = { id = 'no-such-entry' }, expect = 'refusal' },

@@ -352,7 +352,8 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     'portability_targets', 'portability_move', 'portability_move_calls',
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
-    'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare', 'txn_preview',
+    'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
+    'txn_plan_annotate', 'txn_preview',
     'journal_list', 'journal_get',
     'txn_apply', 'txn_undo' }
 
@@ -1992,6 +1993,54 @@ local function v_txn_plan_declare(store, args)
     }
 end
 
+--- ★★ THE VERB THE ARC'S OWN METRIC ASKED FOR (CART-0780). CART-0763 measured a
+--- day's work, concluded "the work is INSERTION", and picked adding a table entry
+--- as the commonest case; `txn_plan_declare` shipped for it. Re-running the same
+--- metric over 24 commits: comment prose is 1171 of 2334 added lua/ lines
+--- (50.2%) against the table-member case's 106 (4.5%). ELEVEN TIMES.
+---
+--- ★ THE STYLE IS SLICED FROM A REAL COMMENT AND TRIED, never declared. Candidate
+--- prefixes come from comments in the file (then the project, since style is a
+--- language-and-project property), and each is validated by splicing the ACTUAL
+--- block at the ACTUAL position and requiring the code skeleton to be unchanged.
+--- A shebang is excluded as a donor by a file-format rule.
+local function v_txn_plan_annotate(store, args)
+    local n, bad = write_subject(store, args)
+    if not n then return bad end
+    -- ⚠ NO `no-prose` RULE HERE, and one was written and MEASURED DEAD. `text` is
+    -- declared `required`, so omitting it is a USAGE error the surface decides
+    -- before this runs — more precise than any refusal this verb could give. And
+    -- text that is PRESENT AND BLANK reaches the library, which refuses it by
+    -- name. A rule reachable from neither direction is worse than no rule: it
+    -- documents a disposition callers will never see.
+    local text = (args.text ~= NUL) and args.text or nil
+    local node_row = noderow(store, n.id)
+    local plan, why = require('cartograph.annotate').plan(store, { node = n.id, text = text })
+    if not plan then
+        return refuse('cannot-annotate',
+            ('cannot attach prose to %s: %s'):format(tostring(n.name), tostring(why)),
+            'the reason describes the FILE\'s comment style or the definition\'s position, not your prose — a tree with no line comment anywhere cannot have one sliced from it',
+            { node = n.id, name = n.name })
+    end
+    local pid = stash_plan(store, plan, 'annotate')
+    local notes = ledger_notes(plan)
+    notes[#notes + 1] = { kind = 'guards', premise = 'what this plan will be checked against',
+        why = 'the plan declares `parses` (the file still compiles) and `comment-inert` (the edit changed only comments, re-derived from the written bytes). `parses` alone cannot answer the second: prose carrying a comment terminator can close the comment early and turn the rest into CODE, and the result may parse perfectly.',
+        evidence = { guards = plan.guards } }
+    notes[#notes + 1] = { kind = 'style-donor', premise = 'where the comment style came from',
+        why = plan.donor == plan.target.file
+            and 'the prefix was sliced from a comment in this same file'
+            or ('this file holds no line comment, so the style was taken from %s — comment style is a language-and-project property, and the borrowing is disclosed rather than assumed'):format(tostring(plan.donor)),
+        evidence = { donor = plan.donor, prefix = plan.prefix } }
+    return {
+        subject = { plan = pid, verb = plan.verb, node = node_row,
+            touched = plan.touched, generation = plan.generation, previewed = false },
+        result = { { file = plan.target.file, target = plan.target.name,
+            lines = #plan.prose, prefix = plan.prefix } },
+        notes = notes,
+    }
+end
+
 -- ── verb: txn_preview ───────────────────────────────────────────────────────
 
 --- ★ WHAT A GREEN PREVIEW DOES AND DOES NOT ASSERT (CART-0153 is the ticket that
@@ -2192,6 +2241,8 @@ local function v_txn_apply(store, args)
         entry, why = require('cartograph.moveapply').apply(store, e.plan)
     elseif e.family == 'declare' then
         entry, why = require('cartograph.declare').apply(store, e.plan)
+    elseif e.family == 'annotate' then
+        entry, why = require('cartograph.annotate').apply(store, e.plan)
     else
         local okA, ent_or_why = require('cartograph.optapply').apply(store, e.plan)
         if okA then entry = ent_or_why else why = tostring(ent_or_why) end
@@ -2564,6 +2615,23 @@ M.VERBS = {
                 desc = 'STRUCTURAL: fill the container\'s template holes instead of writing the member yourself, mapping each hole key to its source TEXT. Cartograph renders from a real member, so indentation and quote style come from the file rather than from a guess' },
         },
         run = v_txn_plan_declare,
+    },
+    txn_plan_annotate = {
+        summary = 'PROPOSE attaching prose above a definition, in the file\'s own comment style. Writes nothing: returns a plan handle for txn_preview',
+        tier_basis = 'observation', needs_calls = false,
+        -- never empty: the subject is caller-supplied and every way of having
+        -- nothing to annotate is a REFUSAL (unknown symbol, no prose, no comment
+        -- style anywhere in the tree), so an absence here would be unreachable
+        absences = {},
+        args = {
+            { name = 'node', type = 'string',
+                desc = 'the definition to annotate (from a node_find / node_at row, this graph generation only)' },
+            { name = 'ref', type = 'ref',
+                desc = 'or the DURABLE ref from the same row; a stale or caveated ref REFUSES, as on every write verb' },
+            { name = 'text', type = 'string', required = true,
+                desc = 'the prose. Newlines become separate comment lines; the prefix and indentation are taken from the file, not invented' },
+        },
+        run = v_txn_plan_annotate,
     },
     txn_preview = {
         summary = 'the exact diff a held plan would write, per file, and nothing written — the same edit callback the apply runs',

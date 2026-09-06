@@ -109,7 +109,8 @@ local function permit(on) agent.set_writable(on) end
 local function call(verb, args) return (agent.answer(store, verb, args or {})) end
 
 local WRITE_VERBS = { 'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
-    'txn_preview', 'journal_list', 'journal_get', 'txn_apply', 'txn_undo' }
+    'txn_plan_annotate', 'txn_preview', 'journal_list', 'journal_get',
+    'txn_apply', 'txn_undo' }
 
 -- ── layer 1: the verb table, in process ─────────────────────────────────────
 
@@ -649,4 +650,68 @@ test('agentwrite: txn_plan_declare with no payload refuses by name', function ()
     local d, status = agent.answer(store, 'txn_plan_declare', { node = id })
     eq('refusal', status)
     eq('no-payload', d.refusal.rule)
+end)
+
+-- ── txn_plan_annotate: the whole loop, over the agent surface ────────────────
+-- The arc's own metric asked for this verb: comment prose is 50.2% of added
+-- lines against the table-entry case's 4.5%. A verb that exists only as a
+-- library function is not IN the loop, which is what this surface is for.
+
+test('agentwrite: txn_plan_annotate plans, previews and applies prose', function ()
+    if not ready() then return skip('no lua parser') end
+    local root = mkroot({ ['m.lua'] = {
+        '-- a module',
+        'local function helper(x)',
+        '    return x + 1',
+        'end',
+        'return { helper = helper }',
+    } })
+    ingest(root)
+    permit(true)
+    local id = idof('helper')
+    if not id then return skip('no node') end
+
+    local d = call('txn_plan_annotate', { node = id, text = 'what it does\nand why' })
+    ok(d.subject and d.subject.plan, 'planned: ' .. vim.inspect(d.refusal or d.error))
+    -- ★ THE ANSWER SAYS WHERE THE STYLE CAME FROM, because "we borrowed it from
+    -- another file" is a thing a caller must be able to see.
+    local donor, guards
+    for _, n in ipairs(d.notes or {}) do
+        if n.kind == 'style-donor' then donor = n end
+        if n.kind == 'guards' then guards = n end
+    end
+    ok(donor and donor.evidence.prefix == '--', 'the sliced prefix is disclosed')
+    eq('comment-inert', guards.evidence.guards[2])
+
+    ok(not read(root, 'm.lua'):find('what it does', 1, true), 'planning wrote nothing')
+    local p = call('txn_preview', { plan = d.subject.plan })
+    ok(p.result and #p.result > 0, 'previewed: ' .. vim.inspect(p.refusal or p.error))
+    ok(not read(root, 'm.lua'):find('what it does', 1, true), 'preview wrote nothing')
+
+    local a = call('txn_apply', { plan = d.subject.plan })
+    ok(type(a.subject) == 'table' and a.subject.journal,
+        'applied: ' .. vim.inspect(a.refusal or a.error))
+    local after = read(root, 'm.lua')
+    ok(after:find('-- what it does\n-- and why\nlocal function helper', 1, true),
+        'both lines, prefixed, directly above the definition: ' .. after)
+end)
+
+-- ★ TWO DISPOSITIONS, NOT ONE, and the difference is the surface's own contract.
+-- `text` is declared `required`, so OMITTING it is a USAGE error decided before
+-- the verb runs — more precise than any refusal the verb could give. The verb's
+-- own `no-prose` rule therefore covers the case the surface cannot see:
+-- whitespace that is present and empty. A first version asserted `refusal` for
+-- the missing arg and was testing the wrong layer.
+test('agentwrite: txn_plan_annotate distinguishes a MISSING arg from EMPTY prose', function ()
+    if not ready() then return skip('no lua parser') end
+    local root = mkroot({ ['m.lua'] = { '-- m', 'local function f() return 1 end', 'return f' } })
+    ingest(root); permit(true)
+    local id = idof('f')
+    if not id then return skip('no node') end
+    local _, missing = agent.answer(store, 'txn_plan_annotate', { node = id })
+    eq('usage', missing, 'a required arg left out is the SURFACE\'s answer')
+    local d, status = agent.answer(store, 'txn_plan_annotate', { node = id, text = '   ' })
+    eq('refusal', status, 'prose that is present and blank is the VERB\'s answer')
+    eq('cannot-annotate', d.refusal.rule)
+    ok(d.refusal.reason:find('no prose'), d.refusal.reason)
 end)
