@@ -304,6 +304,65 @@ function M.registries(data, opts)
         end
     end
 
+    -- ★★ MEMO, AND IT IS NOT A MICRO-OPTIMISATION. `key_positions` and `keys_at`
+    -- are pure functions of ONE verb's call list, and the import search below
+    -- re-derived both ONCE PER EXPORT — E passes over every verb in the graph
+    -- for an answer that does not depend on the export at all. So discovery cost
+    -- grew as E x V, and E is exactly what a registry-rich codebase has a lot of.
+    -- MEASURED, and the shape is unmistakable once you look ACROSS corpora:
+    --     corpus     calls    E     registries OLD -> NEW
+    --     zig        131619   0        63.1 ms ->    64.0 ms   (1.0x)   [i]
+    --     factorio    21082   2        50.6 ms ->    29.1 ms   (1.7x)
+    --     desynced    21041   7       114.2 ms ->    34.0 ms   (3.4x)
+    --     self        65674  20      2112.7 ms ->   134.7 ms  (15.7x)   [i]
+    --     ghost      130645  19      2242.1 ms ->   258.4 ms   (8.7x)
+    --     wow        339459  62     40043.7 ms ->  2277.1 ms  (17.6x)
+    -- [i] = arms INTERLEAVED, median of 9; the rest are best-of-6 sequential,
+    -- which is only good enough because those ratios are far outside the noise —
+    -- and zig, the one that is not, is measured the careful way for that reason.
+    -- ★ THE SPEEDUP TRACKS E, NOT THE CALL COUNT, and that is the point: it is
+    -- the mechanism showing itself rather than a number to be trusted on its own.
+    -- zig has 2x self's calls, no exports, and nothing to save.
+    -- ⚠ AND THE COST WAS BEING PAID PER EDIT: `refresh.files` calls
+    -- `xl.effective_bindings` after every one-file change. End to end on our own
+    -- tree, arms interleaved, median of 5: 3.90 s -> 2.43 s, so 1.47 s comes off
+    -- EVERY EDIT an agent makes. (CART-0785 measured 4.3-4.8 s for the same call
+    -- immediately after a cold extract; 3.90 s is the steady state of a process
+    -- that has already refreshed once, which is the state a loop is actually in.)
+    -- ★ WHY IT WENT UNSEEN FOR SO LONG: nearly every corpus discovery was WRITTEN
+    -- for is cheap, because a codebase with two boundary idioms has E=2. The
+    -- pathological cases are Lua trees full of `name -> function` registration —
+    -- ours and wow_addons — so the cost only surfaced pointing the tool at itself.
+    --
+    -- ★ IT LIVES HERE RATHER THAN ACROSS BOTH LOOPS, and the margin is small:
+    -- interleaved medians say hoisting costs ~4 ms at E=0 (zig 63.1 -> 67.5) and
+    -- saves ~15 ms at E=20 (self 134.7 -> 119.0). Both are rounding error against
+    -- the ~1980 ms. This placement wins on the one rule that is not noise: the
+    -- loop it sits in does not run at E=0, so it is never slower than HEAD.
+    -- ⚠⚠ AND THE FIRST VERSION OF THIS COMMENT CLAIMED A 20% REGRESSION THAT DID
+    -- NOT EXIST. Sequential runs put zig's HEAD arm at 74.6 ms and then 141.2 ms
+    -- and DISAGREED ON THE DIRECTION; a single arm's own spread is 70-113 ms. A
+    -- best-of-N that runs the arms in ORDER measures the order. Interleave.
+    local memo = {}
+    local function shape(verb, calls)
+        local m = memo[verb]
+        if not m then
+            local best, all = key_positions(calls)
+            m = { best = best, all = all, keys = {} }
+            memo[verb] = m
+        end
+        return m
+    end
+    --- Keys at one position, cached per (verb, pos). The table is READ-ONLY to
+    --- every caller — a key set is only ever probed and `next()`-ed — so handing
+    --- the same instance to each export's overlap test is safe.
+    local function keys_of(verb, calls, pos)
+        local m = shape(verb, calls)
+        local k = m.keys[pos]
+        if not k then k = keys_at(calls, pos); m.keys[pos] = k end
+        return k
+    end
+
     -- imports: literal key overlapping an export's keys (and not itself
     -- carrying the callables — that would be the registry again)
     local bindings, report = {}, {}
@@ -313,11 +372,11 @@ function M.registries(data, opts)
         for iverb, calls in pairs(by_verb) do
             coop.tick()
             if iverb ~= verb and not exports[iverb] and #calls >= min_sites then
-                local _, positions = key_positions(calls)
+                local positions = shape(iverb, calls).all
                 local bestpos, bestshared, besttotal
                 for _, pos in ipairs(positions) do
                     local shared, totalk = 0, 0
-                    for k in pairs(keys_at(calls, pos)) do
+                    for k in pairs(keys_of(iverb, calls, pos)) do
                         totalk = totalk + 1
                         if ex.keys[k] then shared = shared + 1 end
                     end

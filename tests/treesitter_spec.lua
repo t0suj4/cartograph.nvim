@@ -1161,6 +1161,44 @@ test('greenspun: the wiretap registry is discovered, not configured', function (
     ok(stats.unresolved >= 3, 'inline closures stay unresolved: ' .. stats.unresolved)
 end)
 
+-- ★ TWO REGISTRIES, WHICH EVERY OTHER TEST HERE MISSES. The `listener` fixture
+-- has ONE export, and E=1 is the case where the discovery memo (CART-0785)
+-- cannot cross anything: the per-verb key cache is shared across the import
+-- search, so an entry attributed to the wrong verb makes each registry claim the
+-- OTHER one's importer — and with one registry there is no other one.
+-- ⚠ E=1 IS ALSO WHY THE COST HID FOR SO LONG. Discovery re-derived every verb's
+-- key shape ONCE PER EXPORT, so the work was E x V; at E=1 that is just V.
+-- ★★ AND THE FIXTURE WAS WRONG FIRST, CAUGHT BY MAKING THE MEMO FAIL ON PURPOSE.
+-- Two breaks were tried: (A) one key table shared by every verb, (B) the import
+-- search reading the memo under the EXPORT's verb rather than the importer's.
+-- The first-cut fixture had both registries keyed at argument position 1 — so it
+-- caught (A) and PASSED (B), while the one-registry `listener` fixture caught
+-- BOTH, because there `subscribe`'s key is arg 2 and `register_listener`'s is
+-- arg 1. A cache keyed by shape is not tested by two registries of the SAME
+-- shape. So `fire_hook` takes its key second and `run_cmd` takes it first, and
+-- both breaks now fail both tests.
+test('greenspun: two registries in one tree stay separate', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local g = require 'cartograph.greenspun'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/tworegistries')
+    local bindings, report = g.registries(data)
+    eq(2, #bindings)
+    local by = {}
+    for _, b in ipairs(bindings) do by[b.export.verb] = b end
+    ok(by.add_hook and by.define_cmd, 'both registries discovered')
+    -- the load-bearing assertions: each export finds ITS OWN importer, at that
+    -- importer's OWN key position. The key sets are disjoint and the positions
+    -- differ, so a shared key table or a shared position list shows up here as a
+    -- crossed import verb or a wrong `name`.
+    eq({ 'fire_hook' }, by.add_hook.import.verb)
+    eq(2, by.add_hook.import.name)     -- fire_hook(ctx, key)
+    eq({ 'run_cmd' }, by.define_cmd.import.verb)
+    eq(1, by.define_cmd.import.name)   -- run_cmd(key)
+    eq(1, by.add_hook.export.name)
+    eq(2, by.add_hook.export.fn)
+    eq(2, #report)  -- one report entry per registry, three keys each
+end)
+
 test('greenspun: funcall tables and evals are surfaced', function ()
     local g = require 'cartograph.greenspun'
     local data = { schema = 1, root = '/x', edges = {}, calls = {
