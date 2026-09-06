@@ -121,6 +121,52 @@ M.GUARDS.parses = function (_, _, before, after)
     return rows
 end
 
+--- ★★ THE LAW ITSELF, AS A GUARD (CART-0769 increment 2). `parses` above is rung
+--- 0: the file still compiles. This is rung 2 — THE WRITE RE-DERIVES THE FACT
+--- THAT AUTHORISED IT. A `declare` plan exists because a payload matched a
+--- container's element template, so after the write: reparse, find the container
+--- again, rebuild the template, and match the member that is now there.
+---
+--- ★ IT IS DELIBERATELY NOT `clones.render`'s snippet check, and building it as a
+--- guard rather than a callback is the point. Step C verified that a MEMBER
+--- parses and fits — which says nothing about whether the FILE still holds a
+--- well-shaped container with it inside. A valid member with the wrong separator,
+--- or on the wrong side of a delimiter, passes the snippet check and fails this
+--- one. Two assertions, both needed; and as a DECLARED obligation the caller
+--- cannot drop it by forgetting an argument.
+---
+--- ⚠ THE CONTAINER MOVED. The insertion shifted every span after it, so the plan
+--- carries the container's exact START POSITION and this re-finds it from there
+--- rather than trusting a stale span: an insertion happens AFTER the start, so
+--- the start is the durable half of the span and the end is not.
+--- ⚠ POSITION, NOT LINE. Containers NEST and one line can begin two of them, so
+--- a line-addressed search returns the outermost and judges a container that was
+--- never edited. The corpus oracle caught exactly that, reporting it as three
+--- unrelated-looking failure classes with one cause.
+M.GUARDS['shape-preserved'] = function (_, plan, _, after)
+    local sh = plan and plan.shape
+    if not sh or not sh.file then
+        return { { verdict = M.FAIL, why = 'the plan declares `shape-preserved` '
+            .. 'but carries no `shape` to re-derive' } }
+    end
+    local text = (after or {})[sh.file]
+    if type(text) ~= 'string' then
+        return { { verdict = M.NO_CLAIM, file = sh.file,
+            why = 'the plan does not produce text for this file' } }
+    end
+    local ok, why = require('cartograph.declare')
+        .verify(text, sh.lang, sh.container_sl, sh.container_sc)
+    if ok then return { { verdict = M.PASS, file = sh.file } } end
+    -- ⚠ A PARSER THAT IS NOT INSTALLED IS NOT A FAILING SHAPE. Distinguishing
+    -- them is the same three-valued honesty `parses` states above; collapsing
+    -- them would refuse every write in a language whose grammar is absent.
+    if why and (why:find('cannot parse') or why:find('no parser')
+        or why:find('no container syntax')) then
+        return { { verdict = M.NO_CLAIM, file = sh.file, why = why } }
+    end
+    return { { verdict = M.FAIL, file = sh.file, why = why or 'the shape did not survive' } }
+end
+
 --- Run a plan's declared guards over a (before, after) pair.
 --- ONE function, called by BOTH `txn.dryrun` and `txn.execute`, so the preview
 --- and the write cannot disagree about what was checked.
