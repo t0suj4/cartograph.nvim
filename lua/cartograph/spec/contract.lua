@@ -211,6 +211,12 @@ M.SLOTS = {
     -- in NINE grammars (several as a SUPERTYPE) — so it cannot be a base name (CART-0404).
     localdecl = 'ANALYSIS',
     df_ids = 'ANALYSIS', merge_equations = 'ANALYSIS',
+    -- ARITY-KEYING IS LANGUAGE SPECIFIC (user, 2026-09-06). `merge_equations`
+    -- folds consecutive same-NAME clauses into one node, which is right for
+    -- haskell and wrong for erlang, where `store_room/4` and `store_room/5` are
+    -- different functions. This returns a discriminator; only clauses that agree
+    -- on it merge. Erlang is the only one of the 17 specs that needs it.
+    merge_key = 'ANALYSIS',
     binding_modifiers = 'ANALYSIS', -- declaration decorations that read nothing: lua
                                     -- `<const>`/`<close>`, whose node name collides with
                                     -- python's field access (CART-0234)

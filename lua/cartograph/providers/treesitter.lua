@@ -5586,6 +5586,9 @@ function M.extract(root, opts)
     local constDefs = {}       -- file -> name -> string|false (const-fold index,
                                -- set-once scalar-string bindings; false=poisoned)
     local lastFn = {}          -- file -> last emitted fn node (equation merging)
+    -- and its merge DISCRIMINATOR, kept BESIDE the node rather than on it: a node
+    -- carries only registered schema fields, and this is extraction bookkeeping
+    local lastKey = {}         -- file -> spec.merge_key of the last emitted fn
     local fnRanges = {}        -- file -> { {s=line, e=line, id=id}, ... }
     local varFiles = {}       -- file -> true if it DEFINES a var (a mention target)
     local mentions = {}        -- file -> packed mention buffer (Stage B)
@@ -5808,8 +5811,15 @@ local MATCH_OPTS = { match_limit = 65536 }
                     annos = a
                 end
                 -- multi-equation definitions (haskell) are ONE function:
-                -- fold this equation into the previous node
+                -- fold this equation into the previous node.
+                -- ★ UNLESS THE SPEC SUPPLIES A DISCRIMINATOR. Name alone is right
+                -- for haskell (`step 0 = ...; step x = ...` is one function) and
+                -- wrong for erlang, where arity is identity: `store_room/4` and
+                -- `store_room/5` are two functions a name-only merge folds into
+                -- one. Measured on ejabberd: 802 of 9650 (8.3%) lost that way.
                 local prev = not aname and spec.merge_equations and lastFn[file]
+                local mkey = spec.merge_key and spec.merge_key(defn, src) or nil
+                if prev and spec.merge_key and lastKey[file] ~= mkey then prev = nil end
                 if prev and prev.name == name then
                     prev.range['end'] = sp['end']
                     for _, r in ipairs(fnRanges[file] or {}) do
@@ -5905,6 +5915,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     df = dfrec,
                     flow = fl and { stmts = fl.stmts, params = fl.params } or nil }
                 lastFn[file] = nodes[#nodes]
+                lastKey[file] = mkey
                 if wantesc and escpend then escpend[#escpend + 1] = nodes[#nodes] end
                 -- register this body in dfreg: ALWAYS (cheap — one entry) so
                 -- the mention DFS keeps a fn-node stack for write-axis (pw)

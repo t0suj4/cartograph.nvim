@@ -93,10 +93,19 @@ for line in io.lines(tmp) do
     if rel then
         release = rel
     elseif bif then
-        -- an auto-imported BIF: callable with no module, so it is a `free` name
+        -- an auto-imported BIF: callable with no module, so it is a `free` name.
+        -- ⚠⚠ KEYED BOTH BARE AND ARITY-QUALIFIED. `prof_ext` looks `free` up with
+        -- the RESOLUTION KEY, and spec/erlang.lua keys a local call `is_map/1`
+        -- (arity is part of an erlang function's identity). A bare-only table
+        -- misses every one of them: measured, the disposition silently stopped
+        -- firing and minting fell 560 -> 494 nodes with `is_map/1` (430 sites) at
+        -- the top of the unresolved list. The arity form is the profile's job to
+        -- carry, not the resolver's to strip — which keeps arity-keying language
+        -- specific instead of leaking it into shared code.
         nbif = nbif + 1
         free[bif] = free[bif] or {}
         free[bif][#free[bif] + 1] = tonumber(bifa)
+        free[bif .. '/' .. bifa] = free[bif]
         vocab[bif] = true
     else
         local m, fn, a = line:match('^(%S+)%s+(%S+)%s+(%d+)$')

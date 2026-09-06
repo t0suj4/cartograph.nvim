@@ -6,6 +6,16 @@
 -- @langs erlang — a spec IS one grammar's mapping, so every node type here is
 -- erlang's by construction.
 
+-- one definition of "how many arguments", used by the def name key, the alt key
+-- and both call paths. Three copies of this counter is how they drift apart.
+local function arity_of(n)
+    local args = n and n:field('args')[1]
+    if not args then return 0 end
+    local k = 0
+    for c in args:iter_children() do if c:named() then k = k + 1 end end
+    return k
+end
+
 return {
     -- the callee sits in `expr`, which is either an `atom` (local call) or a
     -- `remote` (module-qualified). tree-sitter-erlang gives BOTH the same parent.
@@ -25,6 +35,27 @@ return {
     functions = [=[ (function_clause name: (atom) @name) @def ]=],
     fn_types = { function_clause = true },
     merge_equations = true,
+    -- ★★★ ARITY-KEYING IS LANGUAGE SPECIFIC, and erlang is the only one of the 17
+    -- specs that needs it (user, 2026-09-06). Java's overloads are selected by
+    -- TYPES, of which arity is a partial and varargs-breakable filter; erlang's
+    -- `store_room/4` and `store_room/5` are simply DIFFERENT FUNCTIONS with no
+    -- relationship. So this is a per-language identity rule, not a resolver-wide
+    -- change — CART-0676 is a different mechanism on a neighbouring question.
+    -- Without it, `merge_equations` folds the two into one node: 802 of 9650
+    -- functions on ejabberd (8.3%), worst case `join` with FOUR arities.
+    merge_key = function (defn) return arity_of(defn) end,
+
+    -- ⚠⚠ AND THE ARITY GOES IN AN **ALT KEY**, NEVER IN THE NAME. Putting it in
+    -- the name (`store_room/4`) was tried and MEASURED: resolution 81.6% -> 35.6%,
+    -- extract 8.5s -> 61.7s, minting 560 -> 0 nodes. EIGHT sites read a name's last
+    -- `[%w_]+` run as its unqualified tail, so `store_room/4` indexed under the
+    -- tail `4` and every erlang function landed in a handful of giant arity
+    -- buckets. `alt_keys` is the mechanism for exactly this and says so in its own
+    -- comment: "exact-only (no tail) — an alias key must not become a promiscuous
+    -- tail target." The NAME stays a source identifier; the KEY carries the arity.
+    alt_keys = function (name, defn)
+        return { name .. '/' .. arity_of(defn) }
+    end,
     params_field = 'args',
     body_field = 'body',
     -- erlang has no nested named functions; a `fun` is anonymous. So every named
@@ -90,7 +121,24 @@ return {
     qualify_call = function (calln, name, src)
         if calln:type() ~= 'call' then return nil end
         local e = calln:field('expr')[1]
-        if not e or e:type() ~= 'remote' then return nil end
+        -- ★ A LOCAL CALL KEYS BY name/arity, meeting the alt key above, so a call
+        -- with four arguments reaches `store_room/4` and not its five-argument
+        -- sibling. The argument count is at the site and needs no type
+        -- information — which is why this works spec-locally while the general
+        -- overload question (CART-0676) needs the resolver to see the call.
+        -- ⚠⚠ A REMOTE CALL KEEPS `mod.name` WITH NO ARITY, AND THAT IS MEASURED,
+        -- NOT ASSUMED. Adding the arity there is the obvious symmetry and it made
+        -- things WORSE: REMOTE 59.7% -> 55.1%. The module-to-file bind resolves
+        -- `mod:f` by looking the member up BY BARE NAME inside the bound file, and
+        -- it does not consult alt keys — so `f/2` matches nothing and the call is
+        -- refused outright instead of merely being ambiguous.
+        -- ★ SO THE RESIDUAL IS PRECISE: a remote call into a module that defines
+        -- the same name at two arities cannot be disambiguated from the spec side.
+        -- The evidence is at the site and the alias path cannot see it — the same
+        -- shape as CART-0676, one layer down.
+        if not e or e:type() ~= 'remote' then
+            return name .. '/' .. arity_of(calln)
+        end
         local m = e:field('module')[1]
         if not m then return nil end
         -- `remote_module` wraps the atom; a VARIABLE module (`Mod:f()`) is a

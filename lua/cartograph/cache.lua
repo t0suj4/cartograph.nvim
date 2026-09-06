@@ -236,7 +236,12 @@ end
 -- into 560 EXTERNAL NODES, so an erlang graph gains nodes and 9990 calls gain a
 -- `to`. A graph cached at v176 has neither — it is not wrong, but every one of
 -- those calls reads as unresolved and no jump target exists.
-M.VERSION = 177 -- v177: THE OTP PROFILE MINTS (CART-0793), above.
+-- ★ v178 SPLITS ERLANG DEFS BY ARITY. `store_room/4` and `store_room/5` were one
+-- node and are now two: 8989 functions become 9720 on ejabberd, and every erlang
+-- call key changes shape (a local call now keys `name/arity`). A graph cached
+-- before this has 731 fewer functions and calls pointing at conflated nodes.
+M.VERSION = 178 -- v178: ARITY IS IDENTITY IN ERLANG (CART-0796), above.
+               -- v177: THE OTP PROFILE MINTS (CART-0793)
                -- v176: THE OTP PROFILE (CART-0793)
                -- v175: A -spec IS NOT CODE (CART-0793)
                -- v174: A KEY POSITION DRAWN FROM THE HASH SEED (CART-0788)

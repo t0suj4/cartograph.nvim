@@ -30,23 +30,50 @@ local function mint_path(callee, full, why)
     if full then
         -- a remote call: spec/erlang.lua's qualify_call normalised `lists:foldl`
         -- to `lists.foldl`, which is the key the distiller used
-        local mod, fn = full:match('^([%w_]+)%.([%w_]+)$')
-        if mod and fn and api.sigs[mod .. '.' .. fn] then
+        -- ★ THE KEY CARRIES THE CALL'S ARGUMENT COUNT, so the oracle can be asked
+        -- the sharper question: does this module export this function AT THIS
+        -- ARITY? `lists:foldl/2` does not exist — foldl is 3 — and minting a node
+        -- for it would assert a platform function that is not there.
+        local mod, fn, ar = full:match('^([%w_]+)%.([%w_]+)/(%d+)$')
+        if not mod then mod, fn = full:match('^([%w_]+)%.([%w_]+)$') end
+        local sig = mod and fn and api.sigs[mod .. '.' .. fn]
+        if sig then
             -- the NODE NAME is erlang's own spelling, because it is what a reader
             -- sees in a hover or a jump target; the dot form is an internal key
-            return mod .. ':' .. fn
+            if not ar then return mod .. ':' .. fn end
+            for _, a in ipairs(sig.arities or {}) do
+                if a == tonumber(ar) then return mod .. ':' .. fn end
+            end
+            return nil -- exported, but NOT at this arity: not a claim to make
         end
         -- a dotted call the oracle does not confirm — a module we do not model, or
         -- a function that module does not export. Refusing here is the point:
         -- minting it would assert a platform function that may not exist.
-        return nil
+        if full:find('%.') then return nil end
+        -- not dotted: fall through to the bare/BIF path below
     end
     -- a BARE call disposed to the platform can only be an AUTO-IMPORTED BIF, and
     -- those all belong to `erlang`. `api.free` holds exactly that set (176 names,
     -- from erl_internal:bif/2) and nothing wider, so this cannot claim a project
     -- function that merely shares a name with some OTP export.
-    if api.free[callee] then return 'erlang:' .. callee end
-    return nil
+    -- ⚠ AND IT HAS TO ACCEPT THE ARITY-KEYED FORM. spec/erlang.lua now keys a
+    -- LOCAL call as `is_map/1`, so `full` is no longer nil for bare calls and an
+    -- earlier cut of this function fell through the dotted branch and minted
+    -- NOTHING — 560 external nodes became 494 and `is_map/1` (430 sites) went to
+    -- the top of the unresolved list. The arity is a gift here, not an obstacle:
+    -- `api.free` carries each BIF's arities, so the claim can be checked rather
+    -- than assumed.
+    local bare, bar = (full or callee):match('^([%w_]+)/(%d+)$')
+    bare = bare or callee
+    local arities = api.free[bare]
+    if not arities then return nil end
+    if bar then
+        for _, a in ipairs(arities) do
+            if a == tonumber(bar) then return 'erlang:' .. bare end
+        end
+        return nil -- the name is a BIF, but not at THIS arity: not a claim to make
+    end
+    return 'erlang:' .. bare
 end
 
 return {
