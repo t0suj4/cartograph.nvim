@@ -118,6 +118,14 @@ local NAMED = { function_signature = true, function_declaration = true,
     variable_declarator = true, method_signature = true,
     property_signature = true }
 
+-- ★★★ IS THIS MEMBER CALLABLE (CART-0806). A surface that does not say so lets a
+-- CALL resolve to a boolean: `AddEventListenerOptions.once` is a property of an
+-- options dictionary, and it was the unique owner of the name `once` — so an
+-- event-emitter's `emitter.once(...)` would have been typed as an options bag,
+-- 68 times on converse.js. A call resolves only to something declared callable.
+local CALLABLE = { method_signature = true, function_signature = true,
+    function_declaration = true, method_definition = true }
+
 --- Absorb one declaration source. `opts.ns` names the PACKAGE mode's namespace;
 --- `opts.ambient` selects AMBIENT mode. Returns the number of namespace-level
 --- members found (package mode) or of globals declared (ambient mode).
@@ -234,7 +242,8 @@ function M.absorb(acc, src, opts)
                     acc.owner_members[owner] = acc.owner_members[owner] or {}
                     acc.owner_members[owner][nmt] = true
                     if not acc.sigs[ok2] then
-                        acc.sigs[ok2] = { arities = {}, ret = ret_of(n, src) }
+                        acc.sigs[ok2] = { arities = {}, ret = ret_of(n, src),
+                            fn = CALLABLE[t] or nil }
                         acc.nmem = acc.nmem + 1
                         if acc.sigs[ok2].ret then acc.nret = acc.nret + 1 end
                         local pt = type_of(n, src)
@@ -245,7 +254,8 @@ function M.absorb(acc, src, opts)
                 if nsname then
                     local key = nsname .. '.' .. nmt
                     if not acc.sigs[key] then
-                        acc.sigs[key] = { arities = {}, ret = ret_of(n, src) }
+                        acc.sigs[key] = { arities = {}, ret = ret_of(n, src),
+                            fn = CALLABLE[t] or nil }
                         acc.vocab[nmt] = true
                         acc.nmem = acc.nmem + 1
                         found = found + 1
@@ -323,6 +333,10 @@ function M.finish(acc)
             if next(rets) then
                 acc.sigs[key].rets = rets
                 if unanimous then acc.sigs[key].ret = one end
+                -- ★ a property whose type is a CALLABLE INTERFACE is callable:
+                -- `sinon.stub` is declared `stub: SinonStubStatic`, and
+                -- SinonStubStatic is nothing but call signatures.
+                acc.sigs[key].fn = true
                 rep.rets = rep.rets + 1
             end
         end
@@ -337,15 +351,16 @@ function M.finish(acc)
         for member, decl in pairs(all_members(acc, resolve_alias(acc, ty))) do
             local k = key .. '.' .. member
             if not acc.sigs[k] then
-                flat[k] = acc.sigs[decl .. '.' .. member]
+                flat[k] = acc.sigs[decl .. '.' .. member] or false
                 acc.vocab[member] = true
                 rep.flat = rep.flat + 1
             end
         end
     end
     for k, from in pairs(flat) do
+        from = from or nil
         acc.sigs[k] = { arities = {}, ret = from and from.ret or nil,
-            rets = from and from.rets or nil }
+            rets = from and from.rets or nil, fn = from and from.fn or nil }
     end
 
     -- the AMBIENT globals: `declare var document: Document` makes `document` a
@@ -361,7 +376,8 @@ function M.finish(acc)
                 if not acc.sigs[k] then
                     local from = acc.sigs[decl .. '.' .. m]
                     acc.sigs[k] = { arities = {}, ret = from and from.ret or nil,
-                        rets = from and from.rets or nil }
+                        rets = from and from.rets or nil,
+                        fn = from and from.fn or nil }
                     acc.vocab[m] = true
                     rep.gmembers = rep.gmembers + 1
                 end

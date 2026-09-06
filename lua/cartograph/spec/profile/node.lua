@@ -55,6 +55,41 @@ table.sort(namespaces) -- an artifact field: order is output (CART-0790)
 -- dispositions zero calls and LOOKS installed, which is worse than absent
 if not api or not api.nsset or not next(api.nsset) then return nil end
 
+-- ★★★ THE UNIQUE-OWNER INDEX (CART-0806): member name -> the ONE callable type
+-- that declares it, or nil when several do. Built once, from the composed
+-- surface, so a name is judged against everything this environment offers.
+--
+-- ⚠ ONLY CAPITALISED OWNERS AND ONLY CALLABLE MEMBERS. A lowercase owner is a
+-- GLOBAL (`document.querySelector`), not a type, and a global's member says
+-- nothing about an arbitrary receiver. And a call must resolve to something
+-- declared callable: `AddEventListenerOptions.once` is a BOOLEAN property of an
+-- options dictionary and was the unique owner of the name `once`, so an event
+-- emitter's `.once(...)` would have been typed as an options bag 68 times on
+-- converse.js. The surfaces now record `fn`; this reads it.
+--
+-- ★ WHAT REFUSES IS THE POINT, and it refuses the names that matter most:
+-- `get` has 14 callable owners, `delete` 13, `has` 11, `add` 10, `set` 9,
+-- `addEventListener` 230. Those are exactly the names a project is most likely to
+-- use for its own API, so the rung declines them without being told to.
+local uniq
+local function uniq_member(name)
+    if not uniq then
+        local owners = {}
+        for k, sig in pairs(sigs) do
+            if sig.fn then
+                local o, m = k:match('^([%w_$]+)%.([%w_$]+)$')
+                if o and m and o:match('^%u') then
+                    if owners[m] == nil then owners[m] = o
+                    elseif owners[m] ~= o then owners[m] = false end
+                end
+            end
+        end
+        uniq = owners
+    end
+    local o = uniq[name]
+    return o or nil -- `false` (several owners) reads as nil, which is the refusal
+end
+
 --- ★★★ MINTING, AND HERE THE VERIFICATION IS LOAD-BEARING IN A WAY IT WAS NOT
 --- FOR ERLANG. `lists:foldl` names its module in the SYNTAX, so OTP's namespace
 --- set is a statement about the language. JavaScript's `assert.equal()` names a
@@ -67,8 +102,21 @@ if not api or not api.nsset or not next(api.nsset) then return nil end
 --- ★ AND `prof_ext` ONLY RUNS IN NODEF POSITION — project resolution has already
 --- failed — so a real local `assert` would have answered before this is reached.
 --- Those two together are the whole soundness argument for a conventional root.
-local function mint_path(callee, full, why)
+local function mint_path(callee, full, why, ext)
     if why ~= 'stdlib' then return nil end
+    -- the UNIQUE-OWNER rung: the engine has already established that this corpus
+    -- never names `callee` itself (a fact only the corpus index holds), so the
+    -- surface supplies the type. `Element.getAttribute` is a path the oracle
+    -- states; what is inferred is that THIS receiver is an Element, and the call
+    -- carries `inferred` to say so.
+    if type(ext) == 'table' and ext.inferred then
+        local owner = uniq_member(callee)
+        if owner then
+            local sig = sigs[owner .. '.' .. callee]
+            if sig then return owner .. '.' .. callee, sig.ret end
+        end
+        return nil
+    end
     if full then
         -- ★★★ ASK THE ORACLE FOR THE WHOLE PATH (CART-0804). This used to demand
         -- EXACTLY two segments, on the reasoning that a deeper path names a
@@ -124,4 +172,7 @@ return {
     sigs = sigs,
     mint = true,
     mint_path = mint_path,
+    -- the engine asks this at its vocabulary gate, where it also holds the corpus
+    -- index that decides whether the project names the member itself
+    uniq_member = uniq_member,
 }

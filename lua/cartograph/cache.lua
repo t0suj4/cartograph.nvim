@@ -306,7 +306,16 @@ end
 -- tail word. jquery 37.3 -> 38.8%, mootools 30.6 -> 33.5%, converse.js 23.9 ->
 -- 25.1%, and ghost 42.3 -> 43.5% because it serves a browser frontend. Six pinned
 -- corpora gained nodes, purely additive; a cached graph lacks them.
-M.VERSION = 188 -- v188: THE BROWSER SURFACE (CART-0805), above.
+-- ★★★ v189: THE UNIQUE-OWNER RUNG (CART-0806). A member name belonging to exactly
+-- ONE callable type in the distilled surface, which the project never names
+-- itself, types its own receiver — `elem.getAttribute()` is Element's. Two gates:
+-- the surface must name one callable owner (`get` has 14, `addEventListener` 230),
+-- and the CORPUS must never name it (jquery blocks 25 calls that way, converse.js
+-- 1371). jquery 38.8 -> 49.5%, mootools 33.5 -> 42.6%, converse.js 25.1 -> 36.6%,
+-- ghost 43.5 -> 45.5%. The resolutions carry `inferred`, the TYPE-INFERRED tier:
+-- the member is certain, the receiver is a hedge. Six pinned corpora gained nodes.
+M.VERSION = 189 -- v189: THE UNIQUE-OWNER RUNG (CART-0806), above.
+               -- v188: THE BROWSER SURFACE (CART-0805)
                -- v187: THE RETURN CHAIN REACHES THE PROFILE (CART-0808)
                -- v186: THE ORACLE ANSWERS FOR A PATH, NOT A PAIR (CART-0804)
                -- v185: A SHAPE'S TWO CONFIG SOURCES COMPOSE (CART-0802)

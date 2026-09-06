@@ -50,6 +50,15 @@ M.EXT = {
     -- graph, and across ghost/grocy/sylius/jquery/mootools/desynced there are ZERO
     -- import edges — zero edges of ANY kind — pointing at one.
     unread  = { disp = 'frontier', why = 'unread-file' },
+    -- ★★★ THE UNIQUE-OWNER RUNG (CART-0806): a member name that belongs to exactly
+    -- ONE callable type in the distilled surface, and that the project never
+    -- names, types its own receiver. `elem.getAttribute()` is Element's, because
+    -- nothing else in the platform declares a callable `getAttribute` and this
+    -- corpus declares none either. It reads as `stdlib` to census and levers —
+    -- the same bucket, because it IS the platform — but it carries `inferred`, so
+    -- the resolution lands at the TYPE-INFERRED tier rather than as a lexical
+    -- fact: the name is certain, the RECEIVER is a hedge.
+    stdlib_uniq = { disp = 'external', why = 'stdlib', inferred = true },
     stdalias = { disp = 'external', why = 'std-alias' },-- a call whose root name is
                                                         -- bound to the stdlib via an explicit
                                                         -- `const X = std....` binding in its file
@@ -2350,6 +2359,9 @@ local function mint_nodes(data, node_index, scheme, file, pathfor)
         -- real bugs in one day — and it caught it in the commit that was about to
         -- report the missing types as a property of the DATA.
         local path, pret
+        -- read the disposition BEFORE the mint clears it: a record may say the
+        -- resolution it authorises is INFERRED rather than lexical (CART-0806)
+        local e0 = cget(i, 'ext')
         if not cget(i, 'to') then path, pret = pathfor(cget, i) end
         if path then
             local nd = bypath[path]
@@ -2368,6 +2380,12 @@ local function mint_nodes(data, node_index, scheme, file, pathfor)
             cset(i, 'ext', nil)
             cset(i, 'refused', nil)
             cset(i, 'prov', 'stdlib') -- the by_prov axis: minted external resolution
+            if type(e0) == 'table' and e0.inferred then
+                -- the TYPE-INFERRED tier: the member is certain, the receiver is
+                -- a hedge, and the honesty ladder should say so
+                cset(i, 'inferred', true)
+                cset(i, 'tinf', true)
+            end
             resolved = resolved + 1
             local cfn = cget(i, 'fn')
             if cfn then
@@ -2414,7 +2432,10 @@ local function mint_profile_nodes(data, node_index, profile)
             if type(e) ~= 'table' then return nil end
             local callee = cget(i, 'callee')
             if not callee then return nil end
-            if mint_path then return mint_path(callee, cget(i, 'full'), e.why) end
+            -- the whole record, not just `why`: a disposition may carry HOW it
+            -- was reached (CART-0806's unique-owner rung), and a profile that
+            -- ignores the extra argument is unaffected
+            if mint_path then return mint_path(callee, cget(i, 'full'), e.why, e) end
             -- prof_ext disposition (no-def framework method the profile covers):
             -- OWNER-PRECISE canonical `Owner#member` path, else the bare name.
             if e.why == 'stdlib' then return canon[callee] or callee end
@@ -7553,6 +7574,24 @@ local MATCH_OPTS = { match_limit = 65536 }
             if prof and prof.sigs and prof.sigs[name] then
                 return nil, nil, nil, EXT.stdlib
             end
+            -- ★★★ AND THE UNIQUE-OWNER RUNG (CART-0806). The path is not one the
+            -- surface states — `elem.getAttribute` names a local — but the MEMBER
+            -- is: `getAttribute` is a callable member of Element and of nothing
+            -- else in the platform. Two gates, and the second is the one that
+            -- makes this sound rather than merely plausible:
+            --   · the surface must name exactly ONE callable owner, so `get`
+            --     (14 owners), `add` (10) and `addEventListener` (230) refuse;
+            --   · ⚠ THE PROJECT MUST NEVER NAME IT. If this corpus defines a
+            --     `find` anywhere, `find` is a word this project uses for its own
+            --     purposes and Array's is a coincidence — measured, jquery blocks
+            --     25 calls that way and converse.js 1371. The evidence is the
+            --     corpus's own index, which is why this decision cannot live in
+            --     the profile.
+            local tn = prof and name:match('([%w_%-]+)$')
+            if tn and prof.uniq_member and not tail[tn] and not exact[tn]
+                and prof.uniq_member(tn) then
+                return nil, nil, nil, EXT.stdlib_uniq
+            end
             return nil, nil, { rule = 'vocab' }
         end
         if cands then
@@ -8424,6 +8463,24 @@ function M.relink(data, touched)
             local prof = spec and spec._profile
             if prof and prof.sigs and prof.sigs[name] then
                 return nil, nil, nil, EXT.stdlib
+            end
+            -- ★★★ AND THE UNIQUE-OWNER RUNG (CART-0806). The path is not one the
+            -- surface states — `elem.getAttribute` names a local — but the MEMBER
+            -- is: `getAttribute` is a callable member of Element and of nothing
+            -- else in the platform. Two gates, and the second is the one that
+            -- makes this sound rather than merely plausible:
+            --   · the surface must name exactly ONE callable owner, so `get`
+            --     (14 owners), `add` (10) and `addEventListener` (230) refuse;
+            --   · ⚠ THE PROJECT MUST NEVER NAME IT. If this corpus defines a
+            --     `find` anywhere, `find` is a word this project uses for its own
+            --     purposes and Array's is a coincidence — measured, jquery blocks
+            --     25 calls that way and converse.js 1371. The evidence is the
+            --     corpus's own index, which is why this decision cannot live in
+            --     the profile.
+            local tn = prof and name:match('([%w_%-]+)$')
+            if tn and prof.uniq_member and not tail[tn] and not exact[tn]
+                and prof.uniq_member(tn) then
+                return nil, nil, nil, EXT.stdlib_uniq
             end
             return nil, nil, { rule = 'vocab' }
         end

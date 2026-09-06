@@ -57,6 +57,18 @@ local tmp = vim.fn.tempname()
 local js = ([[
 const fs = require('fs'), mod = require('module');
 const out = [];
+// ⚠ READ THE DESCRIPTOR, NEVER THE VALUE. `typeof o[k]` INVOKES a getter, and
+// several web-shim globals throw ERR_INVALID_THIS when their accessors are read
+// off anything but a live instance — the first cut of this exited 1 on node 18.
+// A descriptor answers without running any of the object's code, which is also
+// the right posture for a tool whose whole security argument is that it executes
+// nothing. An accessor property is simply not claimed callable.
+const callable = (o, k) => {
+  try {
+    const d = Object.getOwnPropertyDescriptor(o, k);
+    return !!d && typeof d.value === 'function';
+  } catch (e) { return false; }
+};
 out.push('@version ' + process.version);
 const names = Object.getOwnPropertyNames(globalThis).sort();
 for (const n of names) {
@@ -70,11 +82,16 @@ for (const n of names) {
   if (t === 'function' && !isCtor) out.push('@free ' + n + ' ' + (v.length|0));
   if (t === 'function' || t === 'object') {
     const ms = new Set();
+    let proto; try { proto = v.prototype; } catch (e) {}
     try { for (const k of Object.getOwnPropertyNames(v)) ms.add(k); } catch (e) {}
-    try { if (v.prototype) for (const k of Object.getOwnPropertyNames(v.prototype)) ms.add(k); } catch (e) {}
+    try { if (proto) for (const k of Object.getOwnPropertyNames(proto)) ms.add(k); } catch (e) {}
     const keep = [...ms].filter(k => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k)).sort();
     if (keep.length) { out.push('@ns ' + n);
-      for (const k of keep) out.push('@m ' + n + ' ' + k); }
+      // ★ WHETHER THE MEMBER IS CALLABLE (CART-0806): the engine knows, and a
+      // surface that does not say so lets a CALL resolve to a boolean —
+      // `AddEventListenerOptions.once` was the unique owner of the name `once`.
+      for (const k of keep) out.push('@m ' + n + ' ' + k + ' '
+        + ((callable(v, k) || callable(proto, k)) ? 1 : 0)); }
   }
 }
 for (const m of mod.builtinModules.slice().sort()) {
@@ -85,12 +102,13 @@ for (const m of mod.builtinModules.slice().sort()) {
     .filter(k => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k)).sort();
   if (!ms.length) continue;
   out.push('@ns ' + m);
-  for (const k of ms) out.push('@m ' + m + ' ' + k);
+  for (const k of ms) out.push('@m ' + m + ' ' + k + ' ' + (callable(v, k) ? 1 : 0));
 }
 fs.writeFileSync(%s, out.join('\n') + '\n');
 ]]):format(('%q'):format(tmp))
 
-vim.fn.system({ 'node', '-e', js })
+local _out = vim.fn.system({ 'node', '-e', js })
+if vim.v.shell_error ~= 0 then print(_out) end
 if vim.v.shell_error ~= 0 then
     print('nodedistill: node exited ' .. vim.v.shell_error); os.exit(2)
 end
@@ -114,11 +132,13 @@ for line in io.lines(tmp) do
             nns = nns + 1
         end
     elseif kind == 'm' then
-        local ns, m = rest:match('^(%S+)%s+(%S+)$')
+        local ns, m, fnflag = rest:match('^(%S+)%s+(%S+)%s+(%d)$')
+        if not ns then ns, m = rest:match('^(%S+)%s+(%S+)$') end
         if ns and m then
             nmem = nmem + 1
             vocab[m] = true
-            sigs[ns .. '.' .. m] = sigs[ns .. '.' .. m] or { arities = {} }
+            sigs[ns .. '.' .. m] = sigs[ns .. '.' .. m]
+                or { arities = {}, fn = fnflag == '1' or nil }
         end
     end
 end
