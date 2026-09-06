@@ -21,10 +21,16 @@
 local M = {}
 
 -- kind enum (the k column); 0 = absent slot
+-- ★ `macro` (9) is APPENDED, never inserted: the numbers are stored in the
+-- columnar fold, so reordering them would silently reinterpret every persisted
+-- graph. A macro argument is neither a literal nor a local — its VALUE may be
+-- unknowable (erlang's `?NS_MAM_2` expands in a library that is not in the tree)
+-- while its NAME is right there in the syntax, and a named key can be linked,
+-- counted and refused where an opaque `expr` can do none of those (CART-0812).
 M.K = { lit = 1, concat = 2, ['local'] = 3, func = 4, callable = 5,
-    expr = 6, spread = 7, scalar = 8 }
+    expr = 6, spread = 7, scalar = 8, macro = 9 }
 M.KNAME = { [0] = nil, 'lit', 'concat', 'local', 'func', 'callable',
-    'expr', 'spread', 'scalar' }
+    'expr', 'spread', 'scalar', 'macro' }
 
 -- ── dual-mode accessor ───────────────────────────────────────────────────
 -- number of args on call `c`

@@ -6986,7 +6986,30 @@ local MATCH_OPTS = { match_limit = 65536 }
                             -- as an expression and registry discovery found
                             -- nothing on a corpus made of registries (CART-0799).
                             local ak = spec.arg_kinds and spec.arg_kinds[t]
-                            if ak == 'lit' then
+                            -- ★★ AN ARGUMENT KIND MAY BE A DECISION, NOT A LABEL
+                            -- (CART-0812). erlang's `macro_call_expr` covers both
+                            -- `?MODULE` — whose value is the file itself, knowable
+                            -- with no preprocessor at all — and `?NS_MAM_2`, whose
+                            -- value lives in a library the tree does not contain.
+                            -- One node type, two answers, so the spec computes it
+                            -- rather than naming it. A function returns (kind,
+                            -- value); anything else keeps the plain table form.
+                            local akv, akval
+                            if type(ak) == 'function' then
+                                ak, akv, akval = ak(a, src, file)
+                            end
+                            if ak == 'macro' then
+                                -- the NAME is the fact; the VALUE is present only
+                                -- when a distilled vocabulary states it, and it
+                                -- stays on a `macro` slot rather than becoming a
+                                -- `lit` — the source did not say it, a library did
+                                args[#args + 1] = akval or ''
+                                argv[#argv + 1] = { k = 'macro', name = akv,
+                                    v = akval }
+                            elseif ak == 'lit' and akv then
+                                args[#args + 1] = akv
+                                argv[#argv + 1] = { k = 'lit', v = akv }
+                            elseif ak == 'lit' then
                                 -- a quoted atom carries its quotes in the source
                                 local v = node_text(a, src):gsub("^'", ""):gsub("'$", "")
                                 args[#args + 1] = v

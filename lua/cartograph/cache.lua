@@ -314,7 +314,16 @@ end
 -- 1371). jquery 38.8 -> 49.5%, mootools 33.5 -> 42.6%, converse.js 25.1 -> 36.6%,
 -- ghost 43.5 -> 45.5%. The resolutions carry `inferred`, the TYPE-INFERRED tier:
 -- the member is certain, the receiver is a hedge. Six pinned corpora gained nodes.
-M.VERSION = 189 -- v189: THE UNIQUE-OWNER RUNG (CART-0806), above.
+-- ★★ v190: A MACRO ARGUMENT IS A NAMED KEY (CART-0812). erlang's
+-- `macro_call_expr` was one opaque `expr`, and it covers two different things:
+-- `?MODULE`, whose value is the file itself, and `?NS_MAM_2`, whose value lives
+-- in a library the tree does not contain but whose NAME is right there in the
+-- syntax. On ejabberd, 2440 opaque argument slots became known — 1213 as the
+-- literal module they expand to, 1227 as named macro keys (158 distinct) — with
+-- the slot total unchanged: a pure reclassification. `argv.K` gains `macro = 9`,
+-- APPENDED, because the numbers are stored in the columnar fold.
+M.VERSION = 190 -- v190: A MACRO ARGUMENT IS A NAMED KEY (CART-0812), above.
+               -- v189: THE UNIQUE-OWNER RUNG (CART-0806)
                -- v188: THE BROWSER SURFACE (CART-0805)
                -- v187: THE RETURN CHAIN REACHES THE PROFILE (CART-0808)
                -- v186: THE ORACLE ANSWERS FOR A PATH, NOT A PAIR (CART-0804)

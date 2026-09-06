@@ -8,6 +8,20 @@
 
 -- one definition of "how many arguments", used by the def name key, the alt key
 -- and both call paths. Three copies of this counter is how they drift apart.
+-- ★ THE MACRO VOCABULARY (CART-0812/0794), optional by design. `erl-macros.mpack`
+-- is written by tools/hrldistill.lua from a LIBRARY's headers — the values live in
+-- neither endpoint of the boundary they join, which is what a wire protocol looks
+-- like from inside one side of it. Absent artifact = macro names without values,
+-- which is still strictly better than an opaque `expr`.
+local MACROS
+do
+    local ok, prof = pcall(require, 'cartograph.spec.profile')
+    if ok and prof and prof.load then
+        local a = prof.load('erl-macros')
+        MACROS = a and a.values or nil
+    end
+end
+
 local function arity_of(n)
     local args = n and n:field('args')[1]
     if not args then return 0 end
@@ -31,7 +45,57 @@ return {
     -- an opaque `expr`: 2999 literal arguments existed and none were readable as
     -- keys. `remove_user` in `ejabberd_hooks:add(remove_user, Host, ...)` is a
     -- constant — that is what makes the hook idiom discoverable at all.
-    arg_kinds = { atom = 'lit', var = 'local' },
+    arg_kinds = { atom = 'lit', var = 'local',
+        -- ★★★ A MACRO ARGUMENT IS A NAMED KEY, NOT AN OPAQUE EXPRESSION
+        -- (CART-0812). Measured on ejabberd: `add_iq_handler(ejabberd_local,
+        -- Host, ?NS_MAM_TMP, ?MODULE, process_iq_v0_2)` classified as
+        -- `lit | local | expr | expr | lit` — the component and the function name
+        -- came through and BOTH HALVES OF THE KEY did not. 57 direct registration
+        -- sites plus 32 declarative `{iq_handler, ...}` tuples, and the
+        -- namespace->handler table they describe was unreadable.
+        --
+        -- ⚠ TWO DIFFERENT PROBLEMS WEARING ONE NODE TYPE:
+        --   `?MODULE` is knowable HERE — it expands to the current module, which
+        --   is the file's own basename, needing no include and no preprocessor.
+        --   1615 occurrences in ejabberd, second only to `?T`. It is emitted as
+        --   the LITERAL it becomes, because that is what it is.
+        --   `?NS_MAM_2` is NOT knowable here — its value is in
+        --   github.com/processone/xmpp, pinned by rebar.config and not vendored.
+        --   But tree-sitter hands us `macro_call_expr > var` holding the NAME, and
+        --   a named key can be linked, counted and refused. 119 distinct `?NS_*`
+        --   are used, and 30 of them join converse.js's declared namespaces BY URI
+        --   once that table is supplied (CART-0794).
+        macro_call_expr = function (node, src, file)
+            -- (the vocabulary is loaded once, below the spec table)
+            local nm
+            for ch in node:iter_children() do
+                if ch:named() and (ch:type() == 'var' or ch:type() == 'atom') then
+                    nm = vim.treesitter.get_node_text(ch, src); break
+                end
+            end
+            if not nm or not nm:match('^[%w_]+$') then return nil end
+            if nm == 'MODULE' or nm == 'MODULE_STRING' then
+                -- the module IS the file: `src/mod_mam.erl` -> `mod_mam`
+                local base = (file or ''):match('([^/]+)%.[eh]rl$')
+                if base then return 'lit', base end
+                return 'macro', nm
+            end
+            -- ★★★ AND THE VALUE, WHEN A DISTILLED VOCABULARY STATES IT
+            -- (CART-0794). `?NS_MAM_2` is `<<"urn:xmpp:mam:2">>` in
+            -- github.com/processone/xmpp — a library ejabberd pins and does not
+            -- vendor — and converse.js declares that same URI as a literal. THE
+            -- URI IS THE IDENTITY AND THE MACRO NAMES ARE PER-PROJECT ALIASES:
+            -- joining the two projects by macro NAME finds 8 pairs, joining by URI
+            -- finds 30, and the sets disagree (`?NS_MAM_2` <-> `Strophe.NS.MAM`).
+            -- ⚠ IT STAYS `macro`, NEVER `lit`. The source does not say
+            -- "urn:xmpp:mam:2" here; a LIBRARY does, and a local `-define` could
+            -- shadow it (measured on ejabberd: 11 own NS defines, ZERO shadowing —
+            -- but that is a fact about today's tree, not a guarantee). Keeping the
+            -- kind honest lets a consumer join on `v` while knowing where it came
+            -- from, which a bare literal could not express.
+            local v = MACROS and MACROS[nm]
+            return 'macro', nm, v
+        end },
     -- .hrl is a HEADER, included textually by `-include`. It holds records,
     -- macros and occasionally functions, and it is a real file in the graph —
     -- ejabberd has 37 of them against 353 .erl.
