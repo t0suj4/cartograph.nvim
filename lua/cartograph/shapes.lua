@@ -98,6 +98,31 @@ M.registry = {
         },
     },
     {
+        -- ERLANG/OTP (CART-0793). rebar3 and mix are the two build systems an OTP
+        -- project actually uses; `*.app.src` is the application resource file the
+        -- compiler itself reads, so a tree with one IS an OTP application even
+        -- when neither build tool is checked in.
+        -- ★ THE POINT OF DETECTING IT IS THE PROFILE. 68.5% of ejabberd's
+        -- unresolved remote calls name an OTP module, and until a shape activates
+        -- `otp` the profile sits on disk unread.
+        name = 'otp-app',
+        detect = function (root)
+            if has(root, 'rebar.config') then return 'rebar.config' end
+            if has(root, 'mix.exs') then return 'mix.exs' end
+            if has(root, 'erlang.mk') then return 'erlang.mk' end
+            for _, d in ipairs({ 'src', '.' }) do
+                local g = vim.fn.glob(root .. '/' .. d .. '/*.app.src', false, true)
+                if #g > 0 then return (d == '.' and '' or d .. '/') .. '*.app.src' end
+            end
+        end,
+        config = {
+            -- an OTP application's entry points are its supervision roots; they
+            -- are named in the .app.src `mod` tuple, which this does not read yet,
+            -- so nothing is claimed rather than a pattern guessed.
+            profile = 'otp',
+        },
+    },
+    {
         name = 'nvim-plugin',
         detect = function (root)
             if has(root, 'plugin') and has(root, 'lua') then

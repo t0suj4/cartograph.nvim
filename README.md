@@ -3026,6 +3026,14 @@ ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograp
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# DISTIL THE OTP STDLIB SURFACE FROM THE INSTALLED RUNTIME — an ORACLE, not a
+# curated list: `erl` is asked which modules exist and what each exports.
+nvim --headless -u NONE -l tools/erldistill.lua
+#   writes lua/cartograph/spec/profile/otp.mpack (OTP 25: 1047 modules, 21212
+#   exports, 176 auto-imported BIFs). The `otp-app` repo shape activates it, and
+#   it dispositions 9996 of ejabberd's unresolved remote calls as `stdlib` —
+#   68.5% of what was left. Re-run it after an OTP upgrade.
+
 # DOES THIS CORPUS PRODUCE THE SAME GRAPH TWICE? LuaJIT randomises its string hash
 # seed PER PROCESS, so any pairs-order dependence reaching an output differs between
 # runs — and an in-process A/B shares one seed and is blind to all of it.

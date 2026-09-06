@@ -226,7 +226,14 @@ end
 -- asserted in its message that "extraction behaviour moved again, so it bumps"
 -- and did not touch this file. The claim came first and the bump second, which is
 -- the wrong order and worth the line.
-M.VERSION = 175 -- v175: A -spec IS NOT CODE (CART-0793), above.
+-- ★ v176 ACTIVATES THE OTP PROFILE, so an erlang graph now carries dispositions
+-- it did not: 9996 of ejabberd's unresolved remote calls are labelled `stdlib`
+-- instead of an unexplained no-def, and `data.profile` is recorded as `otp`. A
+-- graph cached before this is not wrong, it is UNDERDETERMINED — every one of
+-- those calls reads as an open frontier. The profile is version-keyed data, so a
+-- warm load must not serve a graph extracted without it.
+M.VERSION = 176 -- v176: THE OTP PROFILE (CART-0793), above.
+               -- v175: A -spec IS NOT CODE (CART-0793)
                -- v174: A KEY POSITION DRAWN FROM THE HASH SEED (CART-0788)
                -- v173: A FRONTIER THE PARALLEL MERGE DROPPED (CART-0747)
                -- v172: AN ARGUMENT LIST IS NOT EVIDENCE OF REGISTRATION
