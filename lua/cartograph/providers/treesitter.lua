@@ -3103,8 +3103,29 @@ end
 -- settle in ROUNDS — a().b().c() unlocks one link per pass: the
 -- types⇄call-graph mutual fixpoint in its smallest form. Round count is
 -- returned for the measurement protocol. Shared by extract and relink.
-local function resolve_returns(cv, node_index, exact, addref)
+local function resolve_returns(cv, node_index, exact, addref, data)
     local cget, cset = cv.get, cv.set
+    -- ★★★ THE CHAIN HAD NO WAY TO REACH THE PROFILE (CART-0808). Every rung below
+    -- ends at `exact[ret .. sep .. callee]` — the CORPUS index — so a return type
+    -- naming a LIBRARY interface could never continue. Measured on ghost before
+    -- this: `sinon.createSandbox` mints with `ret = SinonSandbox`, the surface
+    -- declares `SinonSandbox.stub`, and `sandbox.stub(...)` still resolved to
+    -- nothing, because `SinonSandbox` is not a node in the corpus and never will
+    -- be. 13 of 138 minted nodes carried a ret and not one of them was ever read.
+    -- The profile is consulted only AFTER the corpus lookup fails, so a project
+    -- type of the same name still wins — the nodef ordering the profile law asks
+    -- for, applied to the chain.
+    local psigs
+    if data and data.profile then
+        local okp, prof = pcall(_profile_mod.load, data.profile)
+        if okp and prof and prof.mint then psigs = prof.sigs end
+    end
+    -- ci -> the return type of a call this pass STAGED for the profile mint. The
+    -- mint runs after every resolution pass, so a staged call has no `to` yet and
+    -- a longer chain (`sinon.stub().returns(x).withArgs(y)`) would stall on its
+    -- own first link. Carrying the type here lets the rounds continue without
+    -- inventing a node the mint pass owns.
+    local staged = {}
     local callidx = {}
     -- the deferred WORKLIST: rounds iterate only the calls still carrying
     -- unresolved rt provenance, not the whole call array per round (which
@@ -3135,6 +3156,33 @@ local function resolve_returns(cv, node_index, exact, addref)
                 local dto = dci and cget(dci, 'to')
                 local dnode = dto and node_index[dto]
                 local ret = dnode and dnode.ret
+                if not ret and dci then ret = staged[dci] end
+                -- ⚠ AND THE DETERMINING CALL MAY NOT BE RESOLVED YET, because the
+                -- profile MINT runs after every resolution pass — so `sinon
+                -- .createSandbox()` has no `to` while this pass is deciding what
+                -- `sandbox.restore()` is, even though the surface has stated its
+                -- return type all along. Reading the type off the surface by the
+                -- call's own name closes that ordering gap without moving the mint
+                -- (which would reorder every profile-bearing corpus's pipeline).
+                if not ret and dci and psigs then
+                    local dfull = cget(dci, 'full')
+                    local ds = dfull and psigs[dfull]
+                    if ds then
+                        -- ★★★ THE ARITY IS THE KEY, NOT AMBIGUITY (CART-0808).
+                        -- A .d.ts spells an overloaded function as a callable
+                        -- interface with one call signature per shape, and they
+                        -- can return DIFFERENT types: `sinon.stub()` is a
+                        -- SinonStub, `sinon.stub(obj)` a SinonStubbedInstance,
+                        -- `sinon.stub(obj, 'm')` a SinonStub again. A single
+                        -- answer would be a guess and the wrong one FABRICATES —
+                        -- `sinon.stub(obj).reset()` would claim sinon's own reset
+                        -- when it means the stubbed object's. The call site states
+                        -- its argument count, so ask it. `ds.ret` remains the
+                        -- answer only where every overload agreed.
+                        local rets = ds.rets
+                        ret = (rets and rets[cv.argn(dci)]) or ds.ret
+                    end
+                end
                 -- GENERIC Class<T> return: the determining call's target binds
                 -- its return type to a Class<T> parameter, so the concrete
                 -- return is the type its class-literal argument names
@@ -3173,6 +3221,28 @@ local function resolve_returns(cv, node_index, exact, addref)
                     for _, node in ipairs(exact[rkey] or {}) do
                         if elang_for(node.file) == clang then
                             if fit then dup = true else fit = node end
+                        end
+                    end
+                    -- ★ THE PROFILE ANSWERS WHERE THE CORPUS CANNOT. `ret` names
+                    -- a library interface, so `exact` was never going to hold it;
+                    -- the distilled surface does. Staging `full` is all that is
+                    -- needed — mint_profile_nodes runs after every pass and mints
+                    -- exactly the calls carrying an `ext` disposition, and its
+                    -- mint_path asks the same surface again, so nothing is minted
+                    -- here that the oracle does not confirm twice.
+                    if not fit and psigs then
+                        local pk = ret .. '.' .. ccallee
+                        local psig = psigs[pk]
+                        if psig then
+                            cset(ci, 'full', pk)
+                            cset(ci, 'rtfull', true)
+                            cset(ci, 'ext', EXT.stdlib)
+                            cset(ci, 'refused', nil)
+                            cset(ci, 'inferred', true)
+                            cset(ci, 'tinf', true)
+                            staged[ci] = psig.ret
+                            progress = true
+                            settled = true
                         end
                     end
                     if fit and not dup then
@@ -3384,7 +3454,7 @@ local RESOLVE_PASSES = {
     { name = 'reassign', run = function (x) -- REWRITE stage (see header)
         return resolve_reassign(x.cv, x.node_index, x.addref) end },
     { name = 'returns', run = function (x)
-        local retn, rounds = resolve_returns(x.cv, x.node_index, x.exact, x.addref)
+        local retn, rounds = resolve_returns(x.cv, x.node_index, x.exact, x.addref, x.data)
         x.ret_resolved, x.ret_rounds = retn, rounds
         return retn end },
     { name = 'self', run = function (x)

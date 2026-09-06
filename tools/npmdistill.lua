@@ -309,6 +309,18 @@ end
 --- NOT a return type and must never be stored as one: `sinon.assert` does not
 --- RETURN a SinonAssert, it IS one. Kept separate for that reason, and read only
 --- to flatten a nested namespace path below.
+--- the BASE NAME of a type expression, or nil when the expression is not one
+--- named type. `SinonStub<A, B>` -> SinonStub (see ret_of on why the base is a
+--- real type); a union, a function type or an intersection -> nil.
+local function base_of(txt)
+    txt = (txt or ''):gsub('%s+', ' '):gsub('^:%s*', '')
+    return txt:match('^([%w_$]+)%s*<.*>$') or txt:match('^([%w_$]+)$')
+end
+
+-- owner -> { arity -> return base name }, from the CALL SIGNATURES of a callable
+-- interface; and alias name -> the set of type names its definition mentions
+local call_sigs, alias_names = {}, {}
+
 local function type_of(n, src)
     if n:type() ~= 'property_signature' and n:type() ~= 'public_field_definition' then
         return nil
@@ -337,6 +349,47 @@ local function absorb(nsname, src)
     -- one step after it started.
     local function walk(n, owner)
         local t = n:type()
+        -- ★★★ A CALLABLE INTERFACE IS HOW A .d.ts SPELLS AN OVERLOADED FUNCTION
+        -- (CART-0808). sinon declares `stub: SinonStubStatic` and SinonStubStatic
+        -- carries three anonymous call signatures with three DIFFERENT return
+        -- types, one per arity. That is not ambiguity to refuse — it is a fact
+        -- keyed by argument count, and the call site states its argument count.
+        if t == 'call_signature' and owner then
+            local params, rtn
+            for ch in n:iter_children() do
+                local ct = ch:type()
+                if ct == 'formal_parameters' then params = ch
+                elseif ct == 'type_annotation' then rtn = ch end
+            end
+            if rtn then
+                local base = base_of(vim.treesitter.get_node_text(rtn, src))
+                local arity = params and params:named_child_count() or 0
+                if base then
+                    call_sigs[owner] = call_sigs[owner] or {}
+                    -- FIRST signature at an arity wins: the declarations list the
+                    -- specific overloads before the catch-alls
+                    if call_sigs[owner][arity] == nil then
+                        call_sigs[owner][arity] = base
+                    end
+                end
+            end
+        end
+        if t == 'type_alias_declaration' then
+            local anm = n:field('name')[1]
+            local at = anm and vim.treesitter.get_node_text(anm, src)
+            if at and at:match('^[%w_$]+$') then
+                local set = {}
+                local function names(x)
+                    if x:type() == 'type_identifier' then
+                        local nm = vim.treesitter.get_node_text(x, src)
+                        if nm and nm:match('^[%w_$]+$') and nm ~= at then set[nm] = true end
+                    end
+                    for ch in x:iter_children() do if ch:named() then names(ch) end end
+                end
+                names(n)
+                alias_names[at] = set
+            end
+        end
         if t == 'interface_declaration' or t == 'class_declaration' then
             local onm = n:field('name')[1]
             if onm then
@@ -362,6 +415,8 @@ local function absorb(nsname, src)
                             sigs[ok2] = { arities = {}, ret = ret_of(n, src) }
                             nmem = nmem + 1
                             if sigs[ok2].ret then nret = nret + 1 end
+                            local pt2 = type_of(n, src)
+                            if pt2 then prop_type[ok2] = pt2 end
                         end
                     end
                     local key = nsname .. '.' .. nmt
@@ -404,6 +459,61 @@ for _, f in ipairs(fetched) do absorb(f.ns, f.src) end
 -- path. Flattening keeps the oracle exact: every emitted key is a path the
 -- declarations state, spelled out. ONE level only; deeper nesting is rarer than
 -- the ambiguity it would buy.
+--- an alias resolves when its definition mentions exactly ONE type that this
+--- surface knows as an interface: `type SinonStubbedFunction<T> = T extends (...)
+--- ? SinonStub<A,R> : SinonStub` names SinonStub on both branches, so the
+--- conditional never has to be evaluated to answer what it yields. Two candidates
+--- or none, and it stays unresolved rather than guessed.
+local function resolve_alias(name, depth)
+    if not name or (depth or 0) > 3 then return name end
+    if owner_members[name] then return name end
+    local set = alias_names[name]
+    if not set then return name end
+    local one
+    for n2 in pairs(set) do
+        if owner_members[n2] then
+            if one and one ~= n2 then return name end
+            one = n2
+        end
+    end
+    if one then return resolve_alias(one, (depth or 0) + 1) end
+    return name
+end
+
+-- ── THE RETURN TYPE OF A CALLABLE PROPERTY, KEYED BY ARITY ──────────────────
+-- ★★★ `sinon.stub` had no return type and that is where the volume is: the
+-- .d.ts declares it as `stub: SinonStubStatic`, a PROPERTY type — sinon.stub does
+-- not RETURN a SinonStubStatic, it IS one — and SinonStubStatic's three call
+-- signatures return three different types, one per arity:
+--     ()             -> SinonStub
+--     (obj)          -> SinonStubbedInstance
+--     (obj, method)  -> SinonStubbedFunction   (an alias, resolving to SinonStub)
+-- ⚠ A SINGLE `ret` HERE WOULD BE A GUESS, and picking the majority answer would
+-- make `sinon.stub(obj).reset()` claim sinon's own `reset` when it means the
+-- stubbed object's. The arity is not ambiguity — IT IS THE KEY, the call site
+-- states it, and resolve_returns reads the determining call's argument count. So
+-- store the whole map and let the call decide; `ret` is filled only when every
+-- overload agrees, which is what a caller without an argument count can honestly
+-- use.
+local nrets = 0
+for key, ty in pairs(prop_type) do
+    local cs = call_sigs[resolve_alias(ty)]
+    if cs and not sigs[key].ret then
+        local rets, one, unanimous = {}, nil, true
+        for arity, r in pairs(cs) do
+            local rr = resolve_alias(r)
+            rets[arity] = rr
+            if one and one ~= rr then unanimous = false end
+            one = one or rr
+        end
+        if next(rets) then
+            sigs[key].rets = rets
+            if unanimous then sigs[key].ret = one end
+            nrets = nrets + 1
+        end
+    end
+end
+
 local nflat = 0
 for key, ty in pairs(prop_type) do
     for member in pairs(owner_members[ty] or {}) do
@@ -435,5 +545,5 @@ fd:write(vim.mpack.encode({
 }))
 fd:close()
 print(('npmdistill: %d packages, %d members (+%d nested paths flattened),'
-    .. ' %d WITH A DECLARED RETURN TYPE -> %s')
-    :format(npkg, nmem, nflat, nret, out:gsub('^' .. vim.pesc(repo) .. '/', '')))
+    .. ' %d with a declared return type, %d callable properties typed BY ARITY -> %s')
+    :format(npkg, nmem, nflat, nret, nrets, out:gsub('^' .. vim.pesc(repo) .. '/', '')))

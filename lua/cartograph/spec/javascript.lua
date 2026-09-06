@@ -81,6 +81,9 @@ end
 -- ⚠ AND PER-FUNCTION, not per-file: two functions may each bind `res` to a
 -- different call, and merging them would cross the streams.
 local js_ret_map, js_ret_src
+-- the scope key for a binding with no enclosing function: the MODULE BODY. A
+-- sentinel rather than a name, so it can never collide with a node id.
+local FILE_SCOPE = '\0file'
 local JS_FN = { function_declaration = true, method_definition = true,
     arrow_function = true, function_expression = true, generator_function = true,
     generator_function_declaration = true }
@@ -89,6 +92,12 @@ local function build_js_ret_map(tsroot, src)
     local map = {}
     local function walk(n, curfn)
         if JS_FN[n:type()] then curfn = n end
+        -- ★ THE MODULE BODY IS A SCOPE TOO (CART-0808). This required an enclosing
+        -- function, so every TOP-LEVEL binding was invisible — and a top-level
+        -- `const sandbox = sinon.createSandbox()` above a test file's suites is
+        -- exactly where the interesting ones live. The set-once rule is unchanged;
+        -- only the scope key is, and a file cannot collide with a function id.
+        if n:type() == 'variable_declarator' and not curfn then curfn = FILE_SCOPE end
         if n:type() == 'variable_declarator' and curfn then
             local nm = n:field('name')[1]
             local val = n:field('value')[1]
@@ -103,10 +112,23 @@ local function build_js_ret_map(tsroot, src)
                     namenode = fe:field('property')[1]
                 end
                 if namenode then
-                    local key, fid = node_text(nm, src), curfn:id()
+                    local key = node_text(nm, src)
+                    local fid = curfn == FILE_SCOPE and FILE_SCOPE or curfn:id()
                     map[fid] = map[fid] or {}
                     if map[fid][key] == nil then
-                        local r, c = namenode:start()
+                        -- ⚠ THE POSITION OF THE CALL, NOT OF THE CALLEE NAME
+                        -- (CART-0808). `resolve_returns` looks the determining
+                        -- call up in an index keyed by each call's `at` START,
+                        -- and a JS call's `at` starts at the RECEIVER: for
+                        -- `sinon.createSandbox()` that is column 23, while
+                        -- `createSandbox` begins at 29. Six columns, and every
+                        -- lookup missed — `rt` was set on 5128 ghost calls and
+                        -- not one of them ever found its determining call. The
+                        -- zig hook this was modelled on returns the name position
+                        -- because zig's `at` convention starts there; the
+                        -- convention is per-language and was copied without being
+                        -- re-derived.
+                        local r, c = val:start()
                         map[fid][key] = { r = r, c = c }
                     else map[fid][key] = false end -- rebound → ambiguous
                 end
@@ -232,7 +254,29 @@ return {
             local fe = calln:field('function')[1]
             if not fe or fe:type() ~= 'member_expression' then return nil end
             local obj = fe:field('object')[1]
-            if not (obj and obj:type() == 'identifier') then return nil end
+            if not obj then return nil end
+            -- ★★★ THE RECEIVER IS ITSELF A CALL — the DIRECT chain
+            -- (`sinon.stub(obj, 'm').resolves(v)`, 789 `.returns` and 870
+            -- `.resolves` sites on ghost). No binding to look up and no set-once
+            -- question to answer: the determining call is right there, and its
+            -- position is where `resolve_returns` will look. `await f()` first,
+            -- which is the dominant async spelling.
+            -- unwrap the two wrappers that stand between a chained call and its
+            -- receiver: `(await g()).h()` is the async spelling and needs BOTH,
+            -- and a parenthesis is exactly why `binder_paren` exists elsewhere in
+            -- this spec
+            local direct = obj
+            for _ = 1, 3 do
+                local t = direct:type()
+                if t == 'await_expression' or t == 'parenthesized_expression' then
+                    direct = direct:named_child(0) or direct
+                else break end
+            end
+            if direct:type() == 'call_expression' then
+                local r, c = direct:start()
+                return { r = r, c = c }
+            end
+            if obj:type() ~= 'identifier' then return nil end
             if src ~= js_ret_src then
                 local r = calln
                 while r:parent() do r = r:parent() end
@@ -247,7 +291,12 @@ return {
                     local hit = e and e[name]
                     if hit then return hit end
                 end
-                if p:type() == 'program' then return nil end
+                if p:type() == 'program' then
+                    -- no enclosing function bound this name: the module body may
+                    local e = js_ret_map[FILE_SCOPE]
+                    local hit = e and e[name]
+                    return hit or nil
+                end
                 p = p:parent()
             end
         end,

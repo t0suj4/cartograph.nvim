@@ -287,7 +287,18 @@ end
 -- surface confirming the member, so a corpus with no npm artifact is UNCHANGED —
 -- every pinned corpus re-gated PASS without one. With ghost's surface installed,
 -- resolution 42.8% -> 45.6%.
-M.VERSION = 186 -- v186: THE ORACLE ANSWERS FOR A PATH, NOT A PAIR (CART-0804), above.
+-- ★★★ v187: THE RETURN CHAIN REACHES THE PROFILE, AND THE ARITY PICKS THE TYPE
+-- (CART-0808). Four separate links were missing and each one alone measured zero:
+-- resolve_returns ended at the CORPUS index, so a return type naming a library
+-- interface could never continue; `rt` was recorded at the CALLEE NAME's column
+-- while the index is keyed by the call's `at` (six columns apart on
+-- `sinon.createSandbox`, and 5128 ghost calls carried an rt that found nothing);
+-- a top-level binding was not a scope; and a receiver that is ITSELF a call had no
+-- rt at all. With a surface installed ghost goes 45.6% -> 48.1% and mints
+-- SinonStub.resolves 1084, .returns 1051, .withArgs 410, .callsFake 291. A graph
+-- cached before this has the chains unlinked.
+M.VERSION = 187 -- v187: THE RETURN CHAIN REACHES THE PROFILE (CART-0808), above.
+               -- v186: THE ORACLE ANSWERS FOR A PATH, NOT A PAIR (CART-0804)
                -- v185: A SHAPE'S TWO CONFIG SOURCES COMPOSE (CART-0802)
                -- v184: A SET-ONCE LOCAL NAMES ITS DETERMINING CALL (CART-0800)
                -- v183: A BARE SPECIFIER BINDS A PACKAGE (CART-0800)
