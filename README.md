@@ -3026,6 +3026,17 @@ ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograp
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# DOES THIS CORPUS PRODUCE THE SAME GRAPH TWICE? LuaJIT randomises its string hash
+# seed PER PROCESS, so any pairs-order dependence reaching an output differs between
+# runs — and an in-process A/B shares one seed and is blind to all of it.
+nvim --headless -u NONE -l tools/determinism.lua desynced --runs 5
+#   runs the corpus in N SEPARATE processes, digests the SEQUENCE of each layer
+#   (files, nodes, calls, edges_pre, bindings, xlang) and names THE EARLIEST MOVING
+#   LAYER — everything after it is downstream and is not independent evidence.
+#   A sequence digest, never a count: a count is stable under permutation, which is
+#   exactly what a hash-order bug does. Exit 1 on a moving layer, 2 if a layer was
+#   never measured.
+
 # A GRAMMAR IS AN ENVIRONMENT WITH A VERSION, so the portability surface applies
 # to it unchanged — and offline, since `language.inspect` is the provides side.
 nvim --headless -u NONE -l tools/gramdiff.lua                 # the GATE (0.03s, exit 1 on a hit)
