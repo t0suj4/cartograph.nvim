@@ -464,11 +464,25 @@ function M.link(data, bindings)
                 for k in pairs(exports) do ks[#ks + 1] = k end
                 icand = verb_candidates(idx(), ks)
             end
+            -- ★ WHICH importer verb matched, when the key position is per-verb.
+            -- `import.names` (CART-0788) gives each importer its own argument
+            -- position, because they genuinely differ — one shared position read
+            -- the wrong argument for every importer that disagreed, and those
+            -- simply never linked. Falls back to `name` for the declared
+            -- bindings, which are hand-written with one position for the set.
+            local names = b.import.names
+            local function key_pos(c)
+                if not names then return b.import.name or 1 end
+                for _, v in ipairs(b.import.verb) do
+                    if verb_matches(c, v) then return names[v] or b.import.name or 1 end
+                end
+                return b.import.name or 1
+            end
             for ci, c in each_candidate(allcalls, icand) do
                 if ci % 8192 == 0 then coop.tick() end
                 local hs, key
                 if b.import.verb and verb_matches(c, b.import.verb) then
-                    key = logical_arg(c, b.import.name or 1)
+                    key = logical_arg(c, key_pos(c))
                     hs = key and key ~= '' and exports[key]
                 elseif b.import.any_call and not callrec.to(c) and exports[callrec.callee(c)] then
                     key = callrec.callee(c)

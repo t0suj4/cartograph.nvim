@@ -196,7 +196,28 @@ end
 -- halves of one fact disagreed only in parallel and only in the list that feeds
 -- the frontier census and the lazy text-search descend. Any snapshot taken in
 -- parallel mode before this is SHORT, so it must not be reused.
-M.VERSION = 173 -- v173: A FRONTIER THE PARALLEL MERGE DROPPED (CART-0747), above.
+-- ★★ v174 CHANGES THE XLANG EDGES A CACHED GRAPH HOLDS, and it changes them in
+-- BOTH directions, which is why a snapshot from before it is not merely stale.
+-- A discovered binding carried ONE key argument position for a whole SET of
+-- importer verbs, taken from whichever importer `pairs` yielded first. Two
+-- consequences, and only the first was obvious:
+--   · applying one importer's position to the others READ THE WRONG ARGUMENT for
+--     every importer that disagreed, so those importers never linked at all;
+--   · which one was "first" came from LuaJIT's string hash SEED, WHICH IS
+--     RANDOMISED PER PROCESS (measured directly: 40 identical keys inserted in
+--     identical order, four processes, four `pairs` orders).
+-- So the same tree produced a different graph on every run — desynced's xlang
+-- links swung 40-292 and its xlang edges 26-123 — and every cached graph is one
+-- arbitrary draw. Per-importer positions (`import.names`) plus sorted binding and
+-- report lists make it deterministic AND recover the links that were unreachable:
+-- desynced 816 links / 274 edges, self 88 edges, ghost 32, each stable across
+-- separate processes (tools/determinism.lua, new with CART-0788).
+-- ⚠ THE GATES DID NOT MOVE AND THAT IS NOT REASSURANCE: `bench.extract` stops at
+-- the raw provider extract, so no pinned expectation has ever covered an xlang
+-- edge (CART-0789). The version moves because the CACHE holds post-pass graphs;
+-- the gates were blind to this the whole time.
+M.VERSION = 174 -- v174: A KEY POSITION DRAWN FROM THE HASH SEED (CART-0788), above.
+               -- v173: A FRONTIER THE PARALLEL MERGE DROPPED (CART-0747)
                -- v172: AN ARGUMENT LIST IS NOT EVIDENCE OF REGISTRATION
                -- (CART-0720), see below.
                -- v171: AN ANNOTATION THE CORPUS ITSELF READS (CART-0722).

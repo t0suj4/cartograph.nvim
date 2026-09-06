@@ -397,9 +397,37 @@ function M.registries(data, opts)
             local iverbs = {}
             for _, im in ipairs(imports) do iverbs[#iverbs + 1] = im.verb end
             table.sort(iverbs)
+            -- ★★★ ONE KEY POSITION PER IMPORTER, because they genuinely differ and
+            -- the old shape had to pick one. `imports` is accumulated in
+            -- `pairs(by_verb)` order, so `imports[1].name` was WHICHEVER IMPORTER
+            -- THE HASH YIELDED FIRST — and LuaJIT 2.1 randomises its string hash
+            -- SEED PER PROCESS (measured: 40 identical keys inserted in identical
+            -- order give a different `pairs` order in every process). So the same
+            -- tree produced a different key position run to run: desynced's
+            -- exports were observed at @1, @2, @3 and @7 across six runs, and its
+            -- xlang link count swung 40-292 (CART-0788).
+            -- ⚠ AND IT WAS NEVER ONLY A DETERMINISM BUG. Applying one importer's
+            -- position to all the others reads the WRONG ARGUMENT for every
+            -- importer that disagrees, so their keys never match and they never
+            -- link. Which subset linked depended on the draw; that IS the 40-292.
+            -- `names` gives each importer its own position. `name` stays, set to
+            -- the position the most importers chose (ties to the lowest), so a
+            -- reader that only knows the old field gets the majority answer
+            -- rather than a random one.
+            local names, tally = {}, {}
+            for _, im in ipairs(imports) do
+                names[im.verb] = im.name
+                tally[im.name] = (tally[im.name] or 0) + 1
+            end
+            local pick, pickn
+            for pos, n in pairs(tally) do
+                if not pickn or n > pickn or (n == pickn and pos < pick) then
+                    pick, pickn = pos, n
+                end
+            end
             bindings[#bindings + 1] = {
                 export = { verb = verb, name = ex.name, fn = ex.fn },
-                import = { verb = iverbs, name = imports[1].name },
+                import = { verb = iverbs, name = pick, names = names },
                 discovered = true, deep = ex.deep,
             }
             -- micro-registries still LINK, but the report tier needs
@@ -415,6 +443,14 @@ function M.registries(data, opts)
                 example = next(ex.keys) }
         end
     end
+    -- ★ AND THE LISTS THEMSELVES ARE HASH-ORDERED: both loops above append while
+    -- iterating `pairs(exports)`. Order is not cosmetic here — xl.link walks
+    -- bindings in order and appends `at` sites to edges in that order, so an
+    -- unsorted list writes a graph that is equal in content and different on
+    -- disk, every run. Sorted by the export verb, which is unique per entry
+    -- because `exports` is keyed by it.
+    table.sort(bindings, function (a, b) return a.export.verb < b.export.verb end)
+    table.sort(report, function (a, b) return a.verb < b.verb end)
     return bindings, report
 end
 
@@ -710,7 +746,15 @@ function M.audit(data, bindings, opts)
                         reg_dyn = true
                     end
                 elseif ivs[callrec.callee(c)] or (c.full and ivs[c.full]) then
-                    local k = argv.str(c, (b.import.name or 1) + shift)
+                    -- per-importer key position (CART-0788): the audit reads the
+                    -- dispatched key, so a shared position read the wrong
+                    -- argument for every importer that disagreed and reported it
+                    -- as a DEAD KEY. Same field, same fix as xl.link.
+                    local ipos = (b.import.names
+                        and b.import.names[callrec.callee(c)]
+                        or (c.full and b.import.names and b.import.names[c.full]))
+                        or b.import.name or 1
+                    local k = argv.str(c, ipos + shift)
                     if k and k ~= '' then
                         disp[k] = true
                         disp_site[k] = disp_site[k] or c
@@ -721,7 +765,7 @@ function M.audit(data, bindings, opts)
                         -- file scan is only a fallback for graphs without
                         -- argv kinds (lua-ls dumps)
                         local pfx
-                        local a = argv.at(c, (b.import.name or 1) + shift)
+                        local a = argv.at(c, ipos + shift)
                         if a and a.k == 'concat' and a.prefix then
                             pfx = a.prefix
                         elseif cache then
