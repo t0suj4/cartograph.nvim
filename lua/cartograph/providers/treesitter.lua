@@ -5657,6 +5657,11 @@ function M.extract(root, opts)
     local constDefs = {}       -- file -> name -> string|false (const-fold index,
                                -- set-once scalar-string bindings; false=poisoned)
     local lastFn = {}          -- file -> last emitted fn node (equation merging)
+    -- file -> { local binding -> npm/package name }, from BARE import specifiers.
+    -- FILE-KEYED because the import scan and the call scan are different closures;
+    -- a plain local declared beside the imports is not in scope at the call site
+    -- (it was, briefly, and every extract raised "bad argument #1 to 'next'").
+    local pkgbinds = {}
     -- and its merge DISCRIMINATOR, kept BESIDE the node rather than on it: a node
     -- carries only registered schema fields, and this is extraction bookkeeping
     local lastKey = {}         -- file -> spec.merge_key of the last emitted fn
@@ -6408,6 +6413,20 @@ local MATCH_OPTS = { match_limit = 65536 }
             flush()
         end
 
+        -- ★★★ WHAT A BARE SPECIFIER BINDS (CART-0800). `const _ = require('lodash')`
+        -- binds `_` to the PACKAGE `lodash`, and until now that was dropped: the
+        -- bind is computed inside `if target`, and a package resolves to no file,
+        -- so the whole site vanished. MEASURED on ghost's unresolved `recv.method()`
+        -- calls, by where the receiver comes from IN ITS OWN FILE:
+        --     import  [module]      28.6%   <- this, and it is DECLARED not inferred
+        --     other/not-in-file     29.9%
+        --     param   [signature]   18.9%
+        --     call return           18.0%
+        --     new C() [ctor]         4.6%
+        -- The largest tractable rung of receiver typing needs no inference at all —
+        -- the source says what the name is bound to.
+        local pkgbind = {}
+        pkgbinds[file] = pkgbind
         -- imports
         if spec.import_query then
             q = parse_query(lang, spec.import_query)
@@ -6433,8 +6452,25 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if pathn then
                         local sr, sc = pathn:start()
                         local site = sr * 4096 + sc
+                        local rawpath = node_text(pathn, src)
                         local target = spec.resolve_import(
-                            node_text(pathn, src), importable, file, root)
+                            rawpath, importable, file, root)
+                        if not target and bindn then
+                            -- a BARE specifier: not relative, not absolute, not a
+                            -- URL. `lodash/fp` and `@scope/pkg` keep their package
+                            -- part; anything with a protocol or a leading dot is a
+                            -- path, not a package.
+                            local spec_s = rawpath:gsub('^["\']', ''):gsub('["\']$', '')
+                            if spec_s ~= '' and not spec_s:match('^%.')
+                                and not spec_s:match('^/') and not spec_s:match('^%a+:') then
+                                local pkg = spec_s:match('^(@[%w%-%._]+/[%w%-%._]+)')
+                                    or spec_s:match('^([%w%-%._]+)')
+                                local b = node_text(bindn, src)
+                                if pkg and b and b:match('^[%w_$]+$') then
+                                    pkgbind[b] = pkg
+                                end
+                            end
+                        end
                         if target and target ~= file then
                             -- ★ THE IMPLICIT BIND (CART-0624). An ALIAS is a
                             -- capture (`import f "fmt"`, `use a::b as c`), but the
@@ -6674,6 +6710,30 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if spec.qualify_call then
                         local q, h, d, qn = spec.qualify_call(calln, full, src, jvt_sm)
                         full, qhedge, qdefer, qqual = q or full, h, d, qn
+                    end
+                    -- ★ AND A PACKAGE-BOUND RECEIVER BECOMES ITS PACKAGE. `_.map()`
+                    -- keys `lodash.map`, which is what the L2 profile's namespace
+                    -- set and its member check are keyed by — so the npm surface
+                    -- becomes reachable for a binding that is NOT the package name,
+                    -- which was the gap that made `_` (819 calls on ghost) and
+                    -- friends unresolvable however good the surface was.
+                    -- ⚠ AFTER `rawfull`, DELIBERATELY: `callee` is derived from the
+                    -- UNQUALIFIED name, and deriving it from a rewritten `full` is
+                    -- what turned 98.6% of erlang's callees into arity digits an
+                    -- hour ago. The verb is the source's; the key is ours.
+                    -- ⚠ ONLY WHEN THE PROFILE CONFIRMS THE MEMBER. An
+                    -- unconditional rewrite replaces a key that MIGHT have
+                    -- name-matched a project definition with one that certainly
+                    -- will not — measured: jquery fell 37.3% -> 36.1% before this
+                    -- gate, because its bindings name packages the profile does
+                    -- not model. The rewrite must ADD a resolution, never trade one.
+                    local pb = pkgbinds[file]
+                    if pb and next(pb) and active_profile and active_profile.sigs then
+                        local r, mem = full:match('^([%w_$]+)%.([%w_$]+)$')
+                        local pkg = r and pb[r]
+                        if pkg and active_profile.sigs[pkg .. '.' .. mem] then
+                            full = pkg .. '.' .. mem
+                        end
                     end
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution. A dynamic

@@ -261,7 +261,11 @@ end
 -- ghost +8685 refs and +86 nodes (resolution 29.7% -> 42.3%); grocy, sylius, rails
 -- and ruby move by their JS files alone. A graph cached before this is not wrong,
 -- it is UNDERDETERMINED — `assert.equal` reads as an open frontier.
-M.VERSION = 182 -- v182: THE NODE/JS ENVIRONMENT PROFILE (CART-0800), above.
+-- ★ v183: a BARE import specifier now binds its local name to the PACKAGE, so
+-- `const _ = require('lodash')` makes `_.map()` key `lodash.map`. Gated on the
+-- profile confirming the member, so it adds resolutions and never trades one.
+M.VERSION = 183 -- v183: A BARE SPECIFIER BINDS A PACKAGE (CART-0800), above.
+               -- v182: THE NODE/JS ENVIRONMENT PROFILE (CART-0800)
                -- v181: THE `erlang` MODULE WAS MISSING FROM ITS OWN PROFILE (CART-0793)
                -- v180: ERLANG CALLS HAVE ARGUMENTS, AND A VERB AGAIN (CART-0799)
                -- v179: ARITY BREAKS THE MODULE-ALIAS TIE (CART-0797)
