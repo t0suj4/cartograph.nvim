@@ -256,7 +256,13 @@ end
 -- ★ v181 ADDS THE PRELOADED OTP MODULES to the profile — `erlang`, `init`,
 -- `erl_prim_loader` and 18 more, which have no path under /lib/erlang/lib and
 -- were therefore absent. 528 more erlang calls resolve and 38 more nodes mint.
-M.VERSION = 181 -- v181: THE `erlang` MODULE WAS MISSING FROM ITS OWN PROFILE (CART-0793), above.
+-- ★★ v182 ACTIVATES A NODE/JS ENVIRONMENT PROFILE on every package.json root, so
+-- a JS graph gains stdlib dispositions and MINTED external nodes it did not have.
+-- ghost +8685 refs and +86 nodes (resolution 29.7% -> 42.3%); grocy, sylius, rails
+-- and ruby move by their JS files alone. A graph cached before this is not wrong,
+-- it is UNDERDETERMINED — `assert.equal` reads as an open frontier.
+M.VERSION = 182 -- v182: THE NODE/JS ENVIRONMENT PROFILE (CART-0800), above.
+               -- v181: THE `erlang` MODULE WAS MISSING FROM ITS OWN PROFILE (CART-0793)
                -- v180: ERLANG CALLS HAVE ARGUMENTS, AND A VERB AGAIN (CART-0799)
                -- v179: ARITY BREAKS THE MODULE-ALIAS TIE (CART-0797)
                -- v178: ARITY IS IDENTITY IN ERLANG (CART-0796)

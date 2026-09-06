@@ -3026,6 +3026,14 @@ ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograp
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# DISTIL THE NODE + JS LANGUAGE SURFACE FROM THE INSTALLED ENGINE — the same
+# oracle move, one language over.
+nvim --headless -u NONE -l tools/nodedistill.lua
+#   writes spec/profile/node-api.mpack (node v18: 161 namespaces, 3959 members, 26
+#   free globals); spec/profile/node.lua adds the minting closure. The
+#   `node-package` shape activates it on any package.json root. ghost 29.7% ->
+#   42.3% — `assert` alone was 13182 unresolved calls there, 10% of the corpus.
+
 # DISTIL THE OTP STDLIB SURFACE FROM THE INSTALLED RUNTIME — an ORACLE, not a
 # curated list: `erl` is asked which modules exist and what each exports.
 nvim --headless -u NONE -l tools/erldistill.lua

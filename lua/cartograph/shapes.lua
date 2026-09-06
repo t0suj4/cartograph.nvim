@@ -309,6 +309,19 @@ M.registry = {
         detect = function (root)
             if has(root, 'package.json') then return 'package.json' end
         end,
+        -- ★★ THE L2 ENVIRONMENT PROFILE THIS SHAPE IMPLIES (CART-0800): a
+        -- package.json root runs node and the JS language surface, so its
+        -- unresolved `assert.equal` / `Math.floor` / `parseInt` calls classify to
+        -- the `stdlib` disposition and mint against `spec/profile/node.lua`.
+        -- Measured: ghost 29.7% -> 42.3%, and `assert` alone was 13182 unresolved
+        -- calls there — 10% of that corpus's entire call population, one import.
+        -- ⚠ A SEPARATE `node-js` SHAPE WAS WRITTEN FIRST, WITH THIS EXACT DETECTOR,
+        -- AND DELETED. Two shapes probing `package.json` is one question answered
+        -- twice, and the duplicate sat ABOVE the rails shape — which cost the rails
+        -- gate 4848 refs on discourse, a tree carrying both markers, because
+        -- `select_env` takes the NEAREST dir and then the FIRST matching shape.
+        -- THIS shape is already last, which is where a marker this generic belongs.
+        config = { profile = 'node' },
         -- the manifest NAMES its entry points: read main/bin/module
         configure = function (root)
             local fd = io.open(root .. '/package.json', 'r')
