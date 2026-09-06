@@ -267,7 +267,19 @@ end
 -- ★ v184: JS calls now carry `rt`, the determining-call pointer that
 -- `resolve_returns` follows — 0 -> 5128 on ghost. A cached graph has none, so its
 -- return chains are unlinkable even after the profile learns the types.
-M.VERSION = 184 -- v184: A SET-ONCE LOCAL NAMES ITS DETERMINING CALL (CART-0800), above.
+-- ★★ v185: THE JS PROFILE NOW ACTIVATES WHERE IT ALWAYS SHOULD HAVE. `shapes.probe`
+-- composed a shape's static `config` and its `configure(root)` with an `or`, so
+-- node-package's `profile = 'node'` was discarded on every package.json naming a
+-- `main` — which is most of them. v182 therefore reached ONE corpus. jquery,
+-- mootools and python (django-oscar) gain the stdlib dispositions and minted
+-- globals v182 promised them: refs +17/+37/+3, nodes +7/+13/+2, purely additive,
+-- 0 removed. The 13 distinct minted names (parseFloat, isNaN, Date.now,
+-- String.fromCharCode, encodeURIComponent, set/clearTimeout, set/clearInterval,
+-- parseInt, eval, isFinite, decodeURIComponent) were each verified callable
+-- against `node` itself — and each is ECMAScript or a timer, so the claim holds
+-- for browser code too. A graph cached before this is UNDERDETERMINED, not wrong.
+M.VERSION = 185 -- v185: A SHAPE'S TWO CONFIG SOURCES COMPOSE (CART-0802), above.
+               -- v184: A SET-ONCE LOCAL NAMES ITS DETERMINING CALL (CART-0800)
                -- v183: A BARE SPECIFIER BINDS A PACKAGE (CART-0800)
                -- v182: THE NODE/JS ENVIRONMENT PROFILE (CART-0800)
                -- v181: THE `erlang` MODULE WAS MISSING FROM ITS OWN PROFILE (CART-0793)

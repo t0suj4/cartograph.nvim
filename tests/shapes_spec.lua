@@ -42,6 +42,26 @@ test('shapes: the node manifest NAMES its entry points', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★★ THE REGRESSION THE TEST ABOVE COULD NOT SEE (CART-0802). It asserts the
+-- entrypoints `configure` produced and nothing about the static `config` that
+-- `configure` was silently REPLACING, so it passed green through the whole
+-- lifetime of the bug. The two branches are pinned here as a PAIR because only
+-- their disagreement is the defect: a manifest with a `main` took the configure
+-- path and lost `profile`, one without took the config path and kept it — and
+-- `ghost/ghost/core`, the single JS corpus whose package.json names no entry,
+-- was the only place the JS profile was ever observed working.
+test('shapes: a manifest that names an entry point KEEPS the profile', function ()
+    local withmain = mkroot({ ['package.json'] = '{"main": "./lib/index.js"}' })
+    local bare = mkroot({ ['package.json'] = '{"name": "x"}' })
+    -- the configure path and the config path answer the SAME profile
+    eq('node', shapes.profile_for(withmain).profile)
+    eq('node', shapes.profile_for(bare).profile)
+    -- and the dynamic half still arrives, i.e. neither source ate the other
+    shapes.apply(withmain)
+    ok(vim.tbl_contains(cfg.entrypoints, '^lib/index%.js$'), 'main still read')
+    vim.fn.delete(withmain, 'rf'); vim.fn.delete(bare, 'rf')
+end)
+
 test('shapes: one root never leaks into the next', function ()
     local fac = mkroot({ ['info.json'] = '{}', ['control.lua'] = '',
         ['data.lua'] = '' })

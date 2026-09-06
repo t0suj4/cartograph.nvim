@@ -26,8 +26,9 @@ local function has_ext(root, ext)
     end
 end
 
--- Each entry: name, detect(root) -> evidence string | nil, and either
--- a static `config` or `configure(root)` for presets that read files.
+-- Each entry: name, detect(root) -> evidence string | nil, and a preset given as
+-- a static `config`, a `configure(root)` that reads files, or BOTH — the two
+-- COMPOSE, with configure winning a key collision (CART-0802).
 -- THE FACTORIO ENTRY POINTS, in ONE place (CART-0635). The engine loads exactly
 -- these by name; a mod ships any subset and requires everything else.
 --
@@ -357,7 +358,22 @@ function M.probe(root)
         local ev = s.detect(root)
         local cfg
         if ev then
-            cfg = s.configure and s.configure(root) or s.config
+            -- ★★ THE TWO SOURCES COMPOSE, THEY ARE NOT ALTERNATIVES (CART-0802).
+            -- This was `s.configure and s.configure(root) or s.config`, so the one
+            -- shape declaring both lost its static half the moment configure
+            -- returned anything: node-package's `profile = 'node'` vanished on
+            -- every package.json naming a `main`, and the JS environment profile
+            -- activated on exactly the one corpus whose manifest declares none.
+            -- ⚠ THE TELL WAS A NUMBER THAT DID NOT MOVE. jquery and converse.js
+            -- reported their pre-profile resolution to the decimal, and "browser
+            -- code, node's surface does not pay there" is a plausible wrong story
+            -- that fits that evidence exactly and would have survived indefinitely.
+            -- `configure` WINS a collision — it read the tree; `config` is the
+            -- shape's default. A FRESH TABLE, never a mutation: `s.config` is the
+            -- registry's, shared by every root probed in the process.
+            local dyn = s.configure and s.configure(root)
+            cfg = (dyn and s.config) and vim.tbl_extend('force', s.config, dyn)
+                or dyn or s.config
             if not cfg then ev = ev .. ' (no usable preset)' end
         end
         out[#out + 1] = { name = s.name, evidence = ev, config = cfg }
