@@ -260,11 +260,18 @@ return {
     -- POLYGLOT tier. Registered as an erlang corpus first because spec-audit
     -- reported the spec "compile-checked ONLY (no corpus exercised them)": a spec
     -- nothing extracts is a spec nobody has tested.
-    -- ⚠ NO `expected` PIN YET, DELIBERATELY. CART-0788 pinned a number drawn from
-    -- a randomised hash seed; the rule that came out of it is measure determinism
-    -- BEFORE pinning. tools/determinism.lua says this corpus is stable on every
-    -- layer, so a pin is now safe to add — but it should be added by the commit
-    -- that first has a reason to defend the number, not by the one that invents it.
+    -- ⚠⚠ NO `expected` PIN, AND NOT MERELY "NOT YET" (user, 2026-09-06: "expect
+    -- brotardcast to evolve"). This is a LIVING corpus like `self`: the tree moves
+    -- for reasons that have nothing to do with cartograph, so a snapshot baseline
+    -- is invalidated by construction and greenable only by blessing unread change.
+    -- `self` carries the same note for the same reason. A determinism check is
+    -- still meaningful here (and passes on every layer) because it compares runs
+    -- over ONE tree state; an expectation compares across tree states and cannot.
+    -- ★ IT IS ALSO A FEEDBACK SOURCE, NOT ONLY A WITNESS. The user will file
+    -- findings against cartograph FROM this corpus, which makes it an APPLICATION
+    -- in the push-pull sense ([[cartograph-acceleration-map]]): a driver's asks
+    -- are specified, an application's findings are DISCOVERED. Measure it, do not
+    -- fence it.
     erlang = {
         root = HOME .. '/work/brotardcast/ejabberd',
         repo = 'https://github.com/processone/ejabberd',
