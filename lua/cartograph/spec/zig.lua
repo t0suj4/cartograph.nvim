@@ -357,10 +357,22 @@ local function zig_imports(tsroot, src)
         for c in n:iter_children() do walk(c) end
     end
     walk(tsroot)
+    -- ⚠ SORTED, because THIS LIST'S ORDER BECOMES THE GRAPH'S. The caller appends
+    -- one `import` edge per entry (providers/treesitter.lua, the @import module
+    -- binding block), so `pairs(seen)` — hash order over alias names — decided the
+    -- order 374 of zig's 25172 edges were written in. LuaJIT 2.1 randomises its
+    -- string hash seed PER PROCESS, so the same tree produced a differently
+    -- ordered graph on every run (CART-0790; found by tools/determinism.lua, which
+    -- named `edges_pre` as the earliest moving layer on zig and on no other corpus
+    -- of the 19 swept).
+    -- ★ THE MULTISET WAS ALWAYS IDENTICAL — the same 25172 edges, permuted — which
+    -- is why every check passed: `refs` is a COUNT, and a count is stable under
+    -- permutation. The alias is unique in `seen`, so sorting on it is total.
     local out = {}
     for alias, path in pairs(seen) do
         if not dup[alias] then out[#out + 1] = { alias = alias, path = path } end
     end
+    table.sort(out, function (a, b) return a.alias < b.alias end)
     return out
 end
 
