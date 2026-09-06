@@ -112,7 +112,7 @@ test('declare: a member of the wrong shape is REFUSED', function ()
         'the refusal carries a ranked feature, not just a verdict: ' .. why)
 end)
 
--- ⚠ THE DOMINANT ANSWER: 54.9% of container LITERALS with 2+ members on our tree
+-- ⚠ THE DOMINANT ANSWER: 70.6% of containers with 2+ members on our own tree
 -- share NO shape, so this message matters more than the success path's.
 test('declare: a container whose members share no shape is REFUSED, saying so', function ()
     if not ready() then skip('no lua parser') end
