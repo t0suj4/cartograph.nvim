@@ -331,7 +331,7 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         txn_plan_optimize = { args = { kind = 'cse', node = idof('M.caller') } },
         -- naming no container and no payload: a refusal reachable without
         -- touching a byte, and the one this verb gives most often in the wild —
-        -- 70.5% of containers with two or more members share no shape at all
+        -- 54.9% of container literals with two or more members share no shape
         txn_plan_declare = { args = { member = 'x = 1' }, expect = 'refusal' },
         txn_preview = { args = { plan = 'plan-never-minted' }, expect = 'refusal' },
         journal_list = {},

@@ -51,9 +51,18 @@ end
 --- whole LINE — which MEASUREMENT KILLED:
 ---
 ---                      one member per line   two members share a line
----     lua (our tree)      87 of 714  (12%)     627 of 714  (88%)
----     php (grocy)        219 of 252  (87%)      33 of 252  (13%)
----     js  (jquery)        28 of  85  (33%)      57 of  85  (67%)
+---     lua (our tree)      58 of 377 (15.4%)    319 of 377 (84.6%)
+---     php (grocy)         77 of 104 (74.0%)     27 of 104 (26.0%)
+---     js  (jquery)        28 of  85 (32.9%)     57 of  85 (67.1%)
+---
+--- ⚠ THESE NUMBERS ARE THE CORRECTED ONES, and the first cut of this comment
+--- carried figures inflated by ~2x on lua and php. It counted every node the IR
+--- calls `k == 'table'` — and on a real walk of our own tree **35.9% of those are
+--- `expression_list`**, a `return a, b` whose "members" of course share a line
+--- (CART-0774). php was worse: `object_creation_expression` and `argument`
+--- together outnumbered the array literals. The DIRECTION survived the
+--- correction and the MAGNITUDE did not, which is the right way round but not a
+--- reason to have shipped the first figures.
 ---
 --- Whole-line copying is right for php and wrong for 88% of lua. Rather than
 --- CLASSIFY the layout — which would be a rule per language per style, and wrong
@@ -209,8 +218,10 @@ function M.plan(store, opts)
     local ms = ir.kids or {}
     local t = clones.element_template(ir)
 
-    -- ⚠ THE DOMINANT ANSWER, so its message matters most: 70.5% of containers
-    -- with two or more members on our own lua tree share NO shape. "What should a
+    -- ⚠ THE DOMINANT ANSWER, so its message matters most: 54.9% of container
+    -- LITERALS with two or more members on our own lua tree share NO shape
+    -- (459 of 836; the 70.5% first quoted here counted `expression_list` and
+    -- `field` nodes as containers — CART-0774). "What should a
     -- new member look like" genuinely has no answer there, and inventing one from
     -- an arbitrary first member would answer a question nobody asked.
     if not t.alignable then

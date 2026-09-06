@@ -1973,8 +1973,9 @@ local function v_txn_plan_declare(store, args)
         -- ⚠ A REFUSAL HERE IS USUALLY THE MOST INFORMATIVE ANSWER THE VERB GIVES,
         -- and it is not an ABSENCE: the container exists and was read. It says
         -- what the members actually look like, which is what a caller who guessed
-        -- wrong needs. 70.5% of containers with two or more members share no
-        -- shape at all, so this is the DOMINANT reply, not the exceptional one.
+        -- wrong needs. 54.9% of container literals with two or more members
+        -- share no shape at all, so this is the DOMINANT reply, not the
+        -- exceptional one.
         return refuse('does-not-fit',
             ('cannot add to %s: %s'):format(tostring(n.name), tostring(why)),
             'the reason describes the CONTAINER, not your syntax — read what its members have in common and supply one of that shape, or edit the file directly if it has no shape to match',

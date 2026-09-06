@@ -1105,7 +1105,7 @@ test('clones: an unmeasured language is told the order came from a default', fun
         .. m.refusal.features.scope)
 end)
 
--- ⚠ 70.5% of the containers in our own lua tree (1696 of 2405 with n>=2) are
+-- ⚠ 54.9% of the container LITERALS in our own lua tree (459 of 836 with n>=2) are
 -- non-alignable. "What shape should a new member take" HAS NO ANSWER there, and
 -- matching against an arbitrary first member would answer a question nobody
 -- asked.

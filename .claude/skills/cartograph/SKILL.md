@@ -163,7 +163,7 @@ day of real work measured 15 commits, ZERO file moves, diffs `+158/-0` and
 **Read the refusal; it is usually the useful answer.** It describes the
 CONTAINER, not your syntax — *"the new member does not fit the ones already there
 (leaf-vs-tree, size-skew)"* means the members have a structure yours does not.
-**70.5% of containers with two or more members share no shape at all**, so
+**54.9% of container literals with two or more members share no shape at all**, so
 `do not share a shape` is the ordinary reply, not a bug: there is genuinely no
 template to check against, and editing the file directly is the right move.
 

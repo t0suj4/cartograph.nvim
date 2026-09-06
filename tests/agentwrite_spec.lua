@@ -622,7 +622,7 @@ test('agentwrite: txn_plan_declare plans, previews and applies a table entry', f
         'placed after the last member, with the separator taken from the source: ' .. after)
 end)
 
--- ⚠ THE DOMINANT REPLY, so it is fenced like an answer. 70.5% of containers with
+-- ⚠ THE DOMINANT REPLY, so it is fenced like an answer. 54.9% of container literals with
 -- two or more members share NO shape, and the refusal must describe the
 -- CONTAINER rather than the caller's syntax.
 test('agentwrite: txn_plan_declare REFUSES a payload of the wrong shape, naming the divergence', function ()
