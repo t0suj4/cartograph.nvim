@@ -232,7 +232,12 @@ end
 -- graph cached before this is not wrong, it is UNDERDETERMINED — every one of
 -- those calls reads as an open frontier. The profile is version-keyed data, so a
 -- warm load must not serve a graph extracted without it.
-M.VERSION = 176 -- v176: THE OTP PROFILE (CART-0793), above.
+-- ★ v177 MINTS. The OTP profile stopped at a disposition; now it promotes that
+-- into 560 EXTERNAL NODES, so an erlang graph gains nodes and 9990 calls gain a
+-- `to`. A graph cached at v176 has neither — it is not wrong, but every one of
+-- those calls reads as unresolved and no jump target exists.
+M.VERSION = 177 -- v177: THE OTP PROFILE MINTS (CART-0793), above.
+               -- v176: THE OTP PROFILE (CART-0793)
                -- v175: A -spec IS NOT CODE (CART-0793)
                -- v174: A KEY POSITION DRAWN FROM THE HASH SEED (CART-0788)
                -- v173: A FRONTIER THE PARALLEL MERGE DROPPED (CART-0747)

@@ -35,7 +35,10 @@
 --          that genuinely cannot be a project function.
 
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
-local out = repo .. '/lua/cartograph/spec/profile/otp.mpack'
+-- the DATA artifact, composed by spec/profile/otp.lua — which adds the minting
+-- closure, because mpack cannot hold a function. Same split as
+-- lua-factorio.lua + lua-factorio-api.mpack.
+local out = repo .. '/lua/cartograph/spec/profile/otp-api.mpack'
 local i = 1
 while arg and arg[i] do
     if arg[i] == '--out' then out = arg[i + 1]; i = i + 2 else i = i + 1 end
@@ -132,7 +135,7 @@ for _, s in pairs(sigs) do table.sort(s.arities) end
 
 local prof = {
     schema = 1,
-    runtime = 'otp',
+    runtime = 'otp-api',
     lang = 'erlang',
     version = release,
     -- ⚠ NOT A WALL CLOCK. A timestamp makes the artifact differ on every run for
