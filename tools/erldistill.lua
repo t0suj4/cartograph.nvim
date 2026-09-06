@@ -60,8 +60,16 @@ local script = ([[
   Rel = erlang:system_info(otp_release),
   {ok, F} = file:open("%s", [write]),
   io:format(F, "@release ~s~n", [Rel]),
-  Mods = [M || {M, P, _} <- code:all_available(),
-               is_list(P), string:find(P, "/lib/erlang/lib/") =/= nomatch],
+  %% ⚠ THE LIB TREE IS NOT ALL OF OTP. `erlang`, `init`, `erl_prim_loader` and
+  %% the rest are PRELOADED — compiled into the emulator, with no path under
+  %% /lib/erlang/lib — so filtering on that path silently dropped the single most
+  %% important module in the language. Measured: 519 unresolved `erlang:` calls on
+  %% ejabberd, `erlang.error/1` and friends absent from sigs entirely.
+  %% `erlang:pre_loaded()` is the runtime's own answer to "what else is there".
+  Pre = [atom_to_list(M) || M <- erlang:pre_loaded()],
+  Lib = [M || {M, P, _} <- code:all_available(),
+              is_list(P), string:find(P, "/lib/erlang/lib/") =/= nomatch],
+  Mods = lists:usort(Pre ++ Lib),
   lists:foreach(fun(MB) ->
       M = list_to_atom(MB),
       case catch M:module_info(exports) of

@@ -253,7 +253,11 @@ end
 -- from `full`'s last identifier run and v179 put the arity in `full`; it now
 -- comes from the unqualified name. A v179 graph has no erlang arguments and a
 -- callee column of numbers.
-M.VERSION = 180 -- v180: ERLANG CALLS HAVE ARGUMENTS, AND A VERB AGAIN (CART-0799), above.
+-- ★ v181 ADDS THE PRELOADED OTP MODULES to the profile — `erlang`, `init`,
+-- `erl_prim_loader` and 18 more, which have no path under /lib/erlang/lib and
+-- were therefore absent. 528 more erlang calls resolve and 38 more nodes mint.
+M.VERSION = 181 -- v181: THE `erlang` MODULE WAS MISSING FROM ITS OWN PROFILE (CART-0793), above.
+               -- v180: ERLANG CALLS HAVE ARGUMENTS, AND A VERB AGAIN (CART-0799)
                -- v179: ARITY BREAKS THE MODULE-ALIAS TIE (CART-0797)
                -- v178: ARITY IS IDENTITY IN ERLANG (CART-0796)
                -- v177: THE OTP PROFILE MINTS (CART-0793)
