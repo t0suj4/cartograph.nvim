@@ -4597,6 +4597,27 @@ pack/vocabulary, name-match, dispatch), and ranks them by the resolution points
 each would add if realized — the "where's the biggest win" call as data, per
 corpus (on zig it independently reproduces the ~50% std figure).
 
+**The gate is not the only axis, and for the biggest blocs it is the wrong
+one.** On both large JS corpora the single largest group of unresolved calls is
+the test framework, and levers reported no such lever, because the group
+arrives through two gates at once: `it` is two characters so it is refused
+`short` and files under *name-match reach*, while `expect` / `describe` /
+`calledOnce` land in *stdlib-profile*. Every lever now prints its **top
+names** — a bucket that is only a number cannot be checked, so a group of any
+size can hide in it — and a second **BLOC** section reunifies what the gate
+axis splits: names that **co-occur in the same files** (≥80% of the smaller
+name's sites inside the bigger one's file set), where each name spans at most
+half the corpus's unresolved files and the shared files are *dedicated* to the
+group (≥50% of what they leave unresolved). Co-occurrence rather than a
+`tests|spec` path match, because that would be a convention in disguise and
+would lose here: ghost keeps its specs in top-level `test/`, converse.js in
+`src/*/tests/` at four different depths. Measured: ghost **31541 calls /
++24.1 pts** across three levers, converse.js **15847 / +26.8** — and on
+cartograph's own `lua/`, whose unresolved mass is one uniform population, the
+cut correctly reports **nothing**. The per-callee attribution behind it is an
+opt-in `census.take(data, {names = true})`, off by default because census also
+runs inside the corpus gates and inside sweeps.
+
 `tools/assigndef.lua` <corpus> is the same question asked of a *missing def form*:
 a callable bound by assignment (`M.f = memo(g)`, `X.y = function(){}`) sometimes
 gets no def node, so every call to it is unresolved. It classifies each site by

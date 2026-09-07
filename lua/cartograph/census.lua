@@ -35,7 +35,14 @@ function M.disp(call)
 end
 
 --- Structured counts over a neutral-schema data table.
-function M.take(data)
+---
+--- `opts.names` opts INTO per-callee attribution for the outside bucket
+--- (`outside.by_name`), which is OFF by default and deliberately so: this
+--- instrument runs inside the corpus gates and inside sweeps whose memory is a
+--- measured ledger ([[cartograph-sweep-memory]]), and a per-name table is a new
+--- allocation proportional to the unresolved population. A consumer that wants
+--- the breakdown asks for it; the other ten pay nothing.
+function M.take(data, opts)
     local c = {
         nodes = { total = 0, by_kind = {}, unparsed = 0 },
         edges = { total = 0, by_kind = {},
@@ -64,7 +71,24 @@ function M.take(data)
             by_prov = {},
             -- the "outside the corpus" bucket, no longer a silent lump:
             -- by disposition (external/noise/dynamic) and by the gate (why)
-            outside = { by_disp = {}, by_why = {} } },
+            -- ★★ AND BY CALLEE NAME, when asked (CART-0803). The gate is the
+            -- wrong axis for a bloc whose members share a LOCATION rather than
+            -- a refusal: ghost's test framework arrives through `short` (`it`)
+            -- and `no-def` (`expect`, `describe`) at once, so the tool built to
+            -- rank levers could not see its own largest one. Each entry keeps
+            -- the FULL why histogram, not a first-seen `why` — a name that
+            -- gates differently across files is the very thing being measured,
+            -- and collapsing it here would rebuild the bug in miniature.
+            outside = { by_disp = {}, by_why = {},
+                by_name = (opts and opts.names) and {} or nil,
+                -- and per FILE, which is the denominator the name view cannot
+                -- supply: "these names co-occur" is cheap to fake on a corpus
+                -- whose unresolved mass is uniform, and what tells a real bloc
+                -- from a slice of one is whether the shared files hold ANYTHING
+                -- ELSE. `{n, dyn}` keeps the total and its opaque share so a
+                -- consumer can match the ranking's exclusion instead of
+                -- receiving a lossy number.
+                by_file = (opts and opts.names) and {} or nil } },
     }
     for _, n in ipairs(data.nodes or {}) do
         c.nodes.total = c.nodes.total + 1
@@ -88,6 +112,21 @@ function M.take(data)
     local cc, resid = view and view.cc, view and view.residual
     local calls = data.calls or {}
     local ncalls = cc and cc.n or #calls
+    -- ONE site reader for BOTH forms. The refusal samples and the by_name
+    -- attribution below must not be able to disagree about where a call is, and
+    -- the way to guarantee that is not to write the read twice — the same
+    -- argument as the mode-branched prologue above, one level down.
+    local function site_of(i)
+        if cc then
+            return callcols.get(cc, 'file', i), callcols.get(cc, 'line', i),
+                callcols.get(cc, 'callee', i), callcols.get(cc, 'full', i)
+        end
+        local call = calls[i]
+        return callrec.file(call), callrec.line(call),
+            callrec.callee(call), callrec.full(call)
+    end
+    local by_name = c.calls.outside.by_name
+    local by_file = c.calls.outside.by_file
     for i = 1, ncalls do
         local to, prov, hedge, refused, dynamic, ext
         if cc then
@@ -117,15 +156,7 @@ function M.take(data)
                 c.calls.refusals_truncated = c.calls.refusals_truncated + 1
             end
             if #r.sites < SAMPLES then
-                local file, line, callee, full
-                if cc then
-                    file, line = callcols.get(cc, 'file', i), callcols.get(cc, 'line', i)
-                    callee, full = callcols.get(cc, 'callee', i), callcols.get(cc, 'full', i)
-                else
-                    local call = calls[i]
-                    file, line = callrec.file(call), callrec.line(call)
-                    callee, full = callrec.callee(call), callrec.full(call)
-                end
+                local file, line, callee, full = site_of(i)
                 r.sites[#r.sites + 1] = ('%s:%d %s'):format(file or '?',
                     (line or 0) + 1, callee or full or '?')
             end
@@ -138,6 +169,31 @@ function M.take(data)
             local o = c.calls.outside
             o.by_disp[disp] = (o.by_disp[disp] or 0) + 1
             if why then o.by_why[why] = (o.by_why[why] or 0) + 1 end
+            if by_name then
+                local file, _, callee, full = site_of(i)
+                local nm = callee or full or '?'
+                local e = by_name[nm]
+                if not e then e = { n = 0, why = {}, files = {}, nfiles = 0 }
+                    by_name[nm] = e end
+                e.n = e.n + 1
+                -- a dynamic call has no gate; key it by its DISPOSITION so the
+                -- histogram stays total and a consumer can exclude it the same
+                -- way the by_why ranking does, rather than losing it silently
+                local k = why or disp
+                e.why[k] = (e.why[k] or 0) + 1
+                -- the FILE SET, which is what lets a consumer reunify a bloc
+                -- without a path convention: co-occurrence is measured, a
+                -- directory name is a guess (and converse.js keeps its specs in
+                -- `src/*/tests/` at four different depths, so the guess loses)
+                if file then
+                    if e.files[file] == nil then e.nfiles = e.nfiles + 1 end
+                    e.files[file] = (e.files[file] or 0) + 1
+                    local g = by_file[file]
+                    if not g then g = { n = 0, dyn = 0 }; by_file[file] = g end
+                    g.n = g.n + 1
+                    if disp == 'dynamic' then g.dyn = g.dyn + 1 end
+                end
+            end
         end
     end
     return c

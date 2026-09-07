@@ -162,3 +162,83 @@ test('census: truncated and complete are not negations of each other', function 
     ok(not tsutil.truncated(silent) and not tsutil.complete(silent))
     ok(not tsutil.truncated(none) and not tsutil.complete(none))
 end)
+
+-- ── THE PER-NAME ATTRIBUTION, AND WHY IT IS OPT-IN (CART-0803) ────────────
+-- `tools/levers.lua` ranked strategic levers by the census GATE that stopped
+-- each unresolved call, and could not see its own largest lever on either big
+-- JS corpus: ghost's test framework arrives through `short` (`it`, 9219 calls)
+-- and `no-def` (`expect`, `describe`) at once, so one bloc showed up as two
+-- unrelated buckets. The fix needs per-callee attribution, which is a table
+-- proportional to the unresolved population — so it is asked for, not paid for
+-- by the ten other consumers, several of which run inside the corpus gates.
+local function twogate()
+    return {
+        schema = 1, root = '/x',
+        nodes = {}, edges = {},
+        calls = {
+            -- ONE name, TWO gates, two files: the shape the ticket is about
+            { fn = 'f', callee = 'it', file = 'test/a.js', line = 1,
+                ext = { disp = 'external', why = 'short' } },
+            { fn = 'f', callee = 'it', file = 'test/a.js', line = 2,
+                ext = { disp = 'external', why = 'short' } },
+            { fn = 'g', callee = 'it', file = 'test/b.js', line = 1,
+                ext = { disp = 'external', why = 'no-def' } },
+            { fn = 'g', callee = 'expect', file = 'test/b.js', line = 2,
+                ext = { disp = 'external', why = 'no-def' } },
+            -- a dynamic call has no gate at all
+            { fn = 'g', callee = 'dyn', file = 'test/b.js', line = 3,
+                dynamic = true },
+            -- and neither a resolved nor a refused call is in the bucket
+            { fn = 'f', callee = 'h', to = 'h', file = 'src/c.js', line = 1 },
+            { fn = 'f', callee = 'k', file = 'src/c.js', line = 2,
+                refused = { rule = 'ambiguous' } },
+        },
+    }
+end
+
+test('census: the per-name outside breakdown is opt-in', function ()
+    local off = census.take(twogate())
+    eq(nil, off.calls.outside.by_name, 'absent unless asked for')
+    eq(nil, off.calls.outside.by_file)
+    -- and the aggregate it sits beside is unchanged either way
+    local on = census.take(twogate(), { names = true })
+    eq(off.calls.unresolved, on.calls.unresolved)
+    eq(off.calls.outside.by_why['short'], on.calls.outside.by_why['short'])
+    ok(on.calls.outside.by_name, 'present when asked for')
+end)
+
+test('census: a name keeps its FULL gate histogram, not a first-seen gate', function ()
+    local c = census.take(twogate(), { names = true })
+    local it = c.calls.outside.by_name['it']
+    eq(3, it.n)
+    -- THE POINT OF THE TICKET: collapsing this to one `why` would rebuild in
+    -- miniature the bug the ticket is about — a bloc split across two gates
+    eq(2, it.why['short'])
+    eq(1, it.why['no-def'])
+    eq(2, it.nfiles)
+    eq(2, it.files['test/a.js'])
+    eq(1, it.files['test/b.js'])
+    -- a dynamic call has no gate, so it is keyed by its DISPOSITION rather than
+    -- dropped: the histogram stays total and the consumer excludes it the same
+    -- way the lever ranking excludes `by_disp.dynamic`
+    eq(1, c.calls.outside.by_name['dyn'].why['dynamic'])
+    -- resolved and refused calls are not in this bucket at all
+    eq(nil, c.calls.outside.by_name['h'])
+    eq(nil, c.calls.outside.by_name['k'])
+end)
+
+test('census: by_file is the denominator, and it keeps the opaque share apart', function ()
+    local c = census.take(twogate(), { names = true })
+    local f = c.calls.outside.by_file
+    eq(2, f['test/a.js'].n)
+    eq(0, f['test/a.js'].dyn)
+    -- b.js holds `it`, `expect` and one dynamic call
+    eq(3, f['test/b.js'].n)
+    eq(1, f['test/b.js'].dyn)
+    -- ★ THE MEASURE THIS DENOMINATOR EXISTS FOR: co-occurrence alone said our
+    -- own lua/ holds five blocs, because a uniformly-spread population is
+    -- trivially self-contained. What tells a real bloc from a slice of one is
+    -- whether its files are DEDICATED to it, and that needs a per-file total
+    -- the per-name view cannot supply.
+    eq(nil, f['src/c.js'], 'a file whose calls all resolved or were refused')
+end)
