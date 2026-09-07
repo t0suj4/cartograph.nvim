@@ -254,3 +254,51 @@ test('agentq: a REFUSAL is not an empty result and not an error', function ()
 
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE SET WAS A SENTENCE, AND NOTHING CHECKED IT (CART-0831) ─────────────
+-- agent.lua's header has declared `absence ∈ absent | refused | frontier |
+-- unavailable` since CART-0581, and the invariant at the bottom of M.answer
+-- enforced everything EXCEPT membership: a verb returning `absence = 'banana'`
+-- passed straight through, and a fifth spelling renders as nothing at all to a
+-- reader who knows the four. tier.ABSENCE is the table now.
+
+test('agent: an undeclared absence kind is an envelope bug, not a new kind', function ()
+    local agent = require 'cartograph.agent'
+    local tiers = require 'cartograph.tier'
+    -- the taxonomy is reachable from the one place tiers live...
+    ok(tiers.is_absence('frontier'))
+    ok(not tiers.is_absence('banana'))
+    -- ...and the envelope's own classifier is what consumes it. Drive a verb
+    -- that must come back empty on an empty store: whatever it names, the
+    -- envelope may only carry a DECLARED kind.
+    store.ingest({ schema = 1, root = '/x', nodes = {}, edges = {}, calls = {} })
+    -- ★★ AND THE ENFORCEMENT IS EXERCISED, NOT MERELY ITS OUTCOME. A first cut
+    -- of this spec drove a real verb and asserted the envelope named a declared
+    -- kind — which it did whether or not the check existed, because no shipped
+    -- verb returns a bad one. Deleting the check failed ZERO specs: a guard that
+    -- never fires reads exactly like a passing test. So the bad kind is INJECTED
+    -- through the open verb table, which is the only way to reach the branch.
+    local BAD = 'banana'
+    agent.VERBS.__spec_badabsence = {
+        summary = 'test-only: names an undeclared absence kind',
+        tier_basis = 'observation', absences = {}, args = {},
+        run = function () return { result = {}, absence = BAD,
+            absence_why = { premise = 'test', why = 'test', evidence = {} } } end,
+    }
+    local env = agent.answer(store, '__spec_badabsence', {})
+    agent.VERBS.__spec_badabsence = nil
+    ok(env and env.ok, 'an envelope bug must still produce an ENVELOPE, never a throw')
+    ok(tiers.is_absence(env.absence),
+        ('the envelope carried %q, which is not a declared kind'):format(tostring(env.absence)))
+    ok(env.absence ~= BAD, 'the undeclared kind was coerced, not passed through')
+    local bug = false
+    for _, n in ipairs(env.notes or {}) do
+        if n.kind == 'envelope-bug' and tostring(n.why):find(BAD, 1, true) then bug = true end
+    end
+    ok(bug, 'the coercion is DISCLOSED as an envelope bug naming the bad value')
+    -- ★ AND THE OBSERVATION AXIS IS STAMPED. Every verb in agent.lua is static;
+    -- nothing observed anything; `unprobed` was already true and merely unsaid.
+    -- Additive — a caller written before this reads it unchanged.
+    eq('unprobed', env.warrant)
+    eq('nothing', tiers.licenses(env.warrant))
+end)

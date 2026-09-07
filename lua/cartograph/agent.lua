@@ -9,8 +9,8 @@
 -- Every answer is the SAME document, and agentq's field names are kept verbatim
 -- so a caller written against phase 0 reads phase 1 unchanged:
 --
---   { ok, verb, graph, subject, result, tier, absence, absence_why, notes,
---     refusal }
+--   { ok, verb, graph, subject, result, tier, absence, absence_why, warrant,
+--     notes, refusal }
 --
 -- THE RULE THAT CARRIES THE WEIGHT, unchanged and non-negotiable:
 --   AN EMPTY RESULT ALWAYS CARRIES AN ABSENCE. A bare `[]` is unrepresentable.
@@ -20,6 +20,18 @@
 --   7 absent / 229 refused / 12 frontier / 18 unavailable, and only the 7
 --   license a deletion. M.answer ENFORCES this for every verb (see the
 --   invariant check at the bottom) so a future verb cannot ship a bare list.
+--   ⚠ AND THE SET IS NOW A TABLE, NOT THIS SENTENCE (CART-0831). It lived here
+--   as prose and was checked by nothing — `absence = 'banana'` passed the
+--   invariant. `tier.ABSENCE` holds it, beside the ladder, where a tier can
+--   never mean two things in two places.
+--
+--   AND EVERY EMPTY ANSWER ALSO CARRIES A `warrant` — the OBSERVATION axis,
+--   runtime-topology/02's absence taxonomy: proven-forbidden | absent-in-window
+--   | unsampled | unprobed | dark. It is a SECOND question, not a fifth kind:
+--   `absence` asks why the GRAPH is silent, `warrant` asks why nothing SAW it
+--   happen, and a static answer is `absent` + `unprobed` at once. Every verb
+--   here is static, so `unprobed` is stamped by default — already true, and
+--   until now unsaid.
 --
 -- ── THE ONE DEVIATION FROM PHASE 0, AND WHY ─────────────────────────────────
 -- Phase 0 wrote: "a non-empty result carries `tier`". That held because alibi's
@@ -2796,7 +2808,8 @@ function M.answer(store, verb, args)
     local graph = M.graph(store)
     local function envelope(fields)
         local d = { ok = true, verb = verb, graph = graph, subject = NUL, result = NUL,
-            tier = NUL, absence = NUL, absence_why = NUL, notes = {}, refusal = NUL }
+            tier = NUL, absence = NUL, absence_why = NUL, warrant = NUL,
+            notes = {}, refusal = NUL }
         for k, val in pairs(fields) do d[k] = val end
         return d
     end
@@ -2838,6 +2851,7 @@ function M.answer(store, verb, args)
 
     local result = res.result or {}
     local tier, absence, absence_why = res.tier, res.absence, res.absence_why
+    local warrant = res.warrant
     local notes = res.notes or {}
 
     -- EVERY ROW THAT NAMES A NODE GETS ITS DURABLE HANDLE, here and nowhere else
@@ -2880,10 +2894,32 @@ function M.answer(store, verb, args)
                 why = ('verb %s returned an empty result and named no absence — the classifier and the verb disagree; treat this as a bug in agent.lua, not as a fact about the code'):format(verb),
                 evidence = NUL }
         end
+        -- ⚠ THE SET WAS A SENTENCE IN A COMMENT AND NOTHING CHECKED IT
+        -- (CART-0831). The header has said `absence ∈ absent | refused |
+        -- frontier | unavailable` since CART-0581, and a verb returning
+        -- `absence = 'banana'` passed this invariant untouched — the four MUST
+        -- render differently, and a fifth spelling renders as nothing at all.
+        -- tiers.ABSENCE is now the table, beside the ladder, so membership is
+        -- checkable. Coerced with a note, never thrown: an envelope bug must
+        -- still produce an envelope.
+        if not tiers.is_absence(absence) then
+            notes[#notes + 1] = { kind = 'envelope-bug',
+                why = ('verb %s named absence %q, which is not a declared kind in tier.ABSENCE — treat the emptiness as unclassified'):format(verb, tostring(absence)) }
+            absence_why = absence_why or { premise = 'unclassified',
+                why = 'the verb named an absence kind this build does not declare',
+                evidence = NUL }
+            absence = 'unavailable'
+        end
+        -- ★ AND THE OBSERVATION AXIS GETS ITS DEFAULT SAID OUT LOUD. Every
+        -- answer in this file is static; nothing observed anything; that is
+        -- ALREADY TRUE and was merely unstated. Additive — a caller written
+        -- before this reads it unchanged.
+        warrant = warrant or tiers.WARRANT_DEFAULT
     end
 
     return envelope { subject = nn(res.subject), result = result, tier = nn(tier),
-        absence = nn(absence), absence_why = nn(absence_why), notes = notes }, 'ok'
+        absence = nn(absence), absence_why = nn(absence_why),
+        warrant = nn(warrant), notes = notes }, 'ok'
 end
 
 -- ── WHAT IS DELIBERATELY NOT A VERB, AND WHY (CART-0145) ────────────────────
