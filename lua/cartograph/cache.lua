@@ -2401,19 +2401,56 @@ M.RESOLVER_INPUTS = {
 }
 
 local function build_shards(data, want)
-    -- synthetic ids: never persisted (their edges either) — sql entities
-    -- and db-linked tables re-derive as post-passes, landings re-search
+    -- ── SESSION-LIVE STATE IS NEVER PERSISTED, AND BOTH HALVES ARE ENFORCED
+    -- HERE (CART-0832). Two different things are ephemeral and only one of them
+    -- is a node:
+    --
+    -- (a) SYNTHETIC NODES minted by a post-pass adapter, which re-derive on the
+    --     next open. SEVEN families now: sql · db · dj · sf · an · pb · k8.
+    --     ⚠ THIS LIST NAMED FOUR OF THEM AND THE OTHER THREE SURVIVED BY AN
+    --     ACCIDENT — kb `synthetic-var-node-families` recorded it: yaml, twig
+    --     and .proto files carry no STAMP, so `shards[n.file]` is nil and the
+    --     node is dropped for an unrelated reason. That accident holds only
+    --     while those extensions stay unclaimed by a spec; the day a proto or
+    --     yaml SPEC ships (dec/41 records exactly when that becomes right), the
+    --     stamp appears and the promise breaks silently. Named, now.
     local synth = {}
     for _, n in ipairs(data.nodes) do
-        -- ⚠ `pb` (the proto contract adapter, CART-0824) is here from the day
-        -- it shipped, and the four families before it are not — kb
-        -- `synthetic-var-node-families` records that this list misses `sf` and
-        -- `an`, and that what saves them today is save-before-attach ORDERING
-        -- rather than this test. A promise held by an accident is one edit from
-        -- being broken; adding the marker with the family is the cheap half.
-        if n.id:sub(1, 5) == 'sql::' or n.unparsed or n.db or n.dj or n.pb then
+        if n.id:sub(1, 5) == 'sql::' or n.unparsed
+            or n.db or n.dj or n.sf or n.an or n.pb or n.k8 then
             synth[n.id] = true
         end
+    end
+    -- (b) ⚠⚠ A RUNTIME OBSERVATION, which is a FLAG ON AN ORDINARY EDGE and so
+    -- is caught by none of the above. `confirm.lua` states the contract — "a
+    -- session-live OVERLAY on the edges, NEVER FOLDED OR CACHED" — and it was
+    -- not enforced: an observed `ref` edge between two real source nodes is not
+    -- synthetic by any test here, so `conf` rode it into the shard and came back
+    -- in the next session. MEASURED on jquery: an edge went matched ->
+    -- confirmed under confirm.apply, was saved, and reloaded as `confirmed`
+    -- with nothing having observed anything.
+    -- ★ AND IT IS THE WORST RUNG TO LEAK: `confirmed` is the TOP of the ladder,
+    -- above `proven`, so a stale flag does not degrade an answer — it PROMOTES
+    -- one. It also propagates past this file, because `tier.of` reads the flag,
+    -- so a fold built from cached data packs rank `confirmed` — and fold.lua:48
+    -- reserves a bit to keep runtime-confirmed OUT, which the cache was handing
+    -- in through the front door.
+    -- ⚠ COPY-ON-WRITE, NEVER IN PLACE. `s.edges[…] = e` stores the LIVE table by
+    -- reference, so clearing the field here would destroy the session's own
+    -- overlay — the graph the user is looking at. A record carrying no
+    -- ephemeral field is passed through untouched, so the common path allocates
+    -- nothing.
+    local EPHEMERAL = { conf = true }
+    local function no_live(rec)
+        for k in pairs(EPHEMERAL) do
+            if rec[k] ~= nil then
+                local copy = {}
+                for kk, vv in pairs(rec) do copy[kk] = vv end
+                for kk in pairs(EPHEMERAL) do copy[kk] = nil end
+                return copy
+            end
+        end
+        return rec
     end
     local shards = {}
     for f in pairs(want) do
@@ -2434,7 +2471,7 @@ local function build_shards(data, want)
         local e = rawget(e0, '__cc') and callrec.record(e0) or e0
         if not (synth[e.from] or synth[e.to]) then
             local s = shards[file_of(e.from)]
-            if s then s.edges[#s.edges + 1] = e end
+            if s then s.edges[#s.edges + 1] = no_live(e) end
         end
     end
     for _, c0 in ipairs(data.calls or {}) do
@@ -2443,7 +2480,9 @@ local function build_shards(data, want)
         -- Materialize it to a plain record first (no-op for a real record).
         local c = rawget(c0, '__cc') and callrec.record(c0) or c0
         local s = shards[c.file]
-        if s then s.calls[#s.calls + 1] = c end
+        -- confirm.apply stamps `conf` on the CALL as well as the edge
+        -- (confirm.lua:52-56), so the call side needs the same strip
+        if s then s.calls[#s.calls + 1] = no_live(c) end
     end
     -- RESOLVER INPUTS: see RESOLVER_INPUTS above.
     for f, s in pairs(shards) do
