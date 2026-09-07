@@ -4618,6 +4618,23 @@ cut correctly reports **nothing**. The per-callee attribution behind it is an
 opt-in `census.take(data, {names = true})`, off by default because census also
 runs inside the corpus gates and inside sweeps.
 
+`tools/stagefit.lua` <corpus> asks whether a profile's free-list can be scoped
+to a **sub-tree** rather than a whole root — the question a test runner's
+injected globals (`it`, `describe`, `beforeEach`) turn on, since free-listing
+them corpus-wide would claim a bare `it()` in `src/` as mocha's. It declares two
+stages from the *runner's own config* (vitest `include` globs; `package.json`
+for the production entries), runs the shipped `portability.stage_map`
+reachability partition, and classifies every bare unresolved call site as
+test-only / shared / prod-only / other-language / unreached. **Two stages, never
+one** — `shared` means multi-stage membership, so a single declared stage yields
+zero shared files by construction and the measurement would bless exactly the
+false mints it exists to catch. On ghost and converse.js every runner global
+comes out 0 shared / 0 prod-only. Its aggregate prod-only column, by contrast,
+reads 1707 on converse.js — and every one of those sites is a *project* global
+(`__`, `html`, `stx`), so the tool prints a per-name verdict and refuses a
+corpus-level one: a column that aggregates over the wrong population says
+"unsound" with authority.
+
 `tools/assigndef.lua` <corpus> is the same question asked of a *missing def form*:
 a callable bound by assignment (`M.f = memo(g)`, `X.y = function(){}`) sometimes
 gets no def node, so every call to it is unresolved. It classifies each site by
