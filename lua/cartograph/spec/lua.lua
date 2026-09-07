@@ -528,6 +528,14 @@ return {
             (variable_list name: (_) @name)
             (expression_list value: (function_definition) @def))
         (field name: (identifier) @name value: (function_definition) @def)
+        ; ★★★ AN INLINE CALLBACK (CART-0813). `script.on_event(id, function(e) ... end)`
+        ; is how a factorio mod says what it DOES, and the closure was not a node at
+        ; all: bravest-new-world had 3 `#`-named nodes in the whole tree while the JS
+        ; front end has minted `#cb` nodes since v51. With no node there is nothing
+        ; for a registration edge to point at, so every inline handler was invisible
+        ; to the call graph AND absent from the registration roster — it could not
+        ; even be reported as "kept alive by a registration" (CART-0226).
+        (arguments (function_definition) @adef)
     ]],
     -- a function VALUE in a table field is registry-style: invoked
     -- through the table, invisible to a name graph

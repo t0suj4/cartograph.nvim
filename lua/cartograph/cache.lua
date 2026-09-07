@@ -322,7 +322,21 @@ end
 -- literal module they expand to, 1227 as named macro keys (158 distinct) — with
 -- the slot total unchanged: a pure reclassification. `argv.K` gains `macro = 9`,
 -- APPENDED, because the numbers are stored in the columnar fold.
-M.VERSION = 190 -- v190: A MACRO ARGUMENT IS A NAMED KEY (CART-0812), above.
+-- ★★★ v191: A LUA INLINE CLOSURE IS A NODE, AND A CALL IS NO LONGER OWNED BY THE
+-- CALLBACK IT PASSES (CART-0813). Two changes, the second found by the first.
+-- `(arguments (function_definition) @adef)` mints `verb#cb` nodes the way the JS
+-- front end has since v51 — bravest-new-world had 3 `#`-named nodes in the whole
+-- tree — and the argument classifier now carries the minted id in `argv.to`, so a
+-- registration finally has a handler to point at.
+-- ⚠ AND `fn_at` WAS LINE-GRANULAR, so a callback opening on its caller's line
+-- CONTAINED that call: `wiretap:register_listener("x", function(e) ... end)` was
+-- attributed to its own argument. Invisible while lua closures were not nodes;
+-- seven self-loops the moment they were. The owner test is position-aware now,
+-- which moves attribution to the real enclosing function in EVERY language with a
+-- same-line callback — jquery gains `core.js::even -> core.js::grep` and loses the
+-- copy that hung off the callback.
+M.VERSION = 191 -- v191: A LUA INLINE CLOSURE IS A NODE (CART-0813), above.
+               -- v190: A MACRO ARGUMENT IS A NAMED KEY (CART-0812)
                -- v189: THE UNIQUE-OWNER RUNG (CART-0806)
                -- v188: THE BROWSER SURFACE (CART-0805)
                -- v187: THE RETURN CHAIN REACHES THE PROFILE (CART-0808)

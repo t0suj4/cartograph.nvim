@@ -89,3 +89,30 @@ test('retchain: a REBOUND local is ambiguous and names nothing', function ()
     local src = 'function f() {\n  let s = a();\n  let s = b();\n  s.restore();\n}\n'
     eq(nil, rt_of(src, 's.restore('))
 end)
+
+test('retchain: a call is NOT owned by the callback it passes', function ()
+    if not ready() then skip 'no javascript parser' end
+    -- ⚠ THE OWNERSHIP DEFECT CART-0813 EXPOSED. `fn_at` picks the innermost
+    -- function CONTAINING a call, and a LINE-granular test says a callback opening
+    -- on its caller's line contains that call — so `f(function(){...})` was
+    -- attributed to its own argument. It was invisible while lua closures were not
+    -- nodes; it produced seven self-loops on bravest-new-world the moment they
+    -- were, and it had been silently mis-attributing JS callbacks all along.
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.js', 'w'))
+    fd:write('function outer() {\n  wrap(function () { inner(); });\n}\n'
+        .. 'function inner() {}\nfunction wrap(f) { f(); }\n')
+    fd:close()
+    local data = ts.extract(root)
+    local byid, wrapcall = {}, nil
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, c in ipairs(data.calls or {}) do
+        if (c.callee or '') == 'wrap' then wrapcall = c end
+    end
+    ok(wrapcall ~= nil, 'the registration call is in the graph')
+    local owner = wrapcall.fn and byid[wrapcall.fn]
+    ok(owner ~= nil, 'and it has an owner')
+    eq('outer', owner.name, 'the ENCLOSING function, never the callback argument')
+    vim.fn.delete(root, 'rf')
+end)

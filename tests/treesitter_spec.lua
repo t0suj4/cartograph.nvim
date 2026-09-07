@@ -1161,11 +1161,17 @@ test('greenspun: the wiretap registry is discovered, not configured', function (
     eq({ 'subscribe' }, bindings[1].import.verb)
     eq(2, bindings[1].import.name) -- the listener name is subscribe's 2nd arg
     ok(report[1] and report[1].keys == 3, 'three interned keys reported')
-    -- linking with ONLY the discovery: the fixture's handlers are inline
-    -- closures, so they are honest frontiers — counted, not invented
+    -- ★ THE REVIEWED UPGRADE (CART-0813). This asserted `exports == 0` with the
+    -- reason stated as a design fact — "the fixture's handlers are inline
+    -- closures, so they are honest frontiers, counted not invented". The frontier
+    -- was a MISSING NODE, not a limit of the idea: a lua inline closure is a node
+    -- now, so the registration resolves to it and the handler is named rather than
+    -- counted. The honest-frontier discipline is unchanged; what changed is that
+    -- this case is no longer on the frontier.
     local stats = xl.link(data, bindings)
-    eq(0, stats.exports)
-    ok(stats.unresolved >= 3, 'inline closures stay unresolved: ' .. stats.unresolved)
+    eq(3, stats.exports, 'the inline closures ARE the handlers, and now resolve')
+    eq(3, stats.registered)
+    eq(0, stats.unresolved)
 end)
 
 -- ★ TWO REGISTRIES, WHICH EVERY OTHER TEST HERE MISSES. The `listener` fixture

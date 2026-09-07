@@ -159,8 +159,18 @@ test('signatures: packs un-hedge, io orders, higher-order inherits', function ()
     ok(sums[by.guarded.id].w[by.acc.id .. '\31n'],
         'pcall(writer) inherits the write through calls={1}')
     eq('writes', effects.purity(store, by.guarded.id))
+    -- ★ A CORRECTION I OWE THIS TEST (CART-0813). I flipped it to `pure`, on the
+    -- reasoning that a lua inline closure is a node now so its effects are known.
+    -- The flip was real and the REASON was wrong: it passed because the ownership
+    -- defect fixed alongside — `fn_at` was line-granular, so `pcall(function() end)`
+    -- was attributed to the closure it passes — had left `guarded2` with NO CALLS
+    -- AT ALL. Trivially pure, for a reason that has nothing to do with callbacks.
+    -- With ownership correct the hedge is back, and it is still honest: the node
+    -- exists and `argv.to` now points at it, but the effects fixpoint's
+    -- higher-order path resolves a NAMED callee and does not yet read a `func`
+    -- argument's target. That is a real follow-on, not a thing to assert away.
     eq('pure~', effects.purity(store, by.guarded2.id),
-        'pcall(anonymous): callback effects unknown — hedged, never pure')
+        'pcall(anonymous): the callback is a node, but effects do not read argv.to yet')
     -- io-io ordering conflict through commute
     local c1, c2
     for _, c in ipairs(store.data.calls) do

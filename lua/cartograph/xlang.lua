@@ -370,6 +370,21 @@ function M.link(data, bindings)
         e.inferred = nil -- the key match outranks a name hypothesis
         if at then e.at[#e.at + 1] = at end
     end
+    local regEdge = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'reg' then regEdge[e.from .. '\31' .. e.to] = e end
+    end
+    local function addreg(from, to, at)
+        if not from or not to then return end
+        local k = from .. '\31' .. to
+        local e = regEdge[k]
+        if not e then
+            e = { from = from, to = to, kind = 'reg', at = {}, xlang = true }
+            regEdge[k] = e
+            data.edges[#data.edges + 1] = e
+        end
+        if at then e.at[#e.at + 1] = at end
+    end
     -- precise site range: the key literal on the call line, when findable
     local line_cache = {}
     local function key_range(c, key)
@@ -502,8 +517,20 @@ function M.link(data, bindings)
                         end
                         stats.exports = stats.exports + 1
                         -- the registration itself references the handler
-                        if callrec.fn(c) then
-                            addref(callrec.fn(c), h, key and key_range(c, key) or nil)
+                        local from = callrec.fn(c)
+                        if from then
+                            addref(from, h, key and key_range(c, key) or nil)
+                        else
+                            -- ★ A TOP-LEVEL REGISTRATION IS THE MODULE'S. Most of
+                            -- them are: a factorio mod's control.lua registers its
+                            -- handlers at load, an ejabberd module from a `start`
+                            -- that is itself top-level. `reg` is the edge kind
+                            -- store.lua already defines for exactly this — "the fn
+                            -- is kept alive by `from` (a module, dispatch table)",
+                            -- readable both ways — and it is what the callback
+                            -- mirror in the resolver already emits when a call has
+                            -- no enclosing function.
+                            addreg(callrec.file(c), h, key and key_range(c, key) or nil)
                         end
                         stats.registered = (stats.registered or 0) + 1
                     else

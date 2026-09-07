@@ -1345,6 +1345,17 @@ local H_LANG = 'c' -- until a tree says otherwise; `.h` stays in c.exts as the d
 
 -- the two by-EXTENSION memos, declared here because set_h_lang below must clear them
 -- (their own commentary lives at their original definition sites further down)
+-- ★★ THE ANON FN'S NODE ID, BY (FILE, POSITION) — CART-0813. The argument
+-- classifier marks an inline closure `k = 'func'` and had nothing to put in `to`,
+-- so the node minted for it was unreachable from the call carrying it:
+-- `find_handler`'s `a.k == 'func' and a.to` branch could never fire and a
+-- registration had no handler to point at.
+-- ⚠ MODULE-LEVEL AND KEYED BY FILE, not a closure local, because the functions
+-- pass and the calls pass are DIFFERENT FUNCTIONS (`extract_calls`) — a per-file
+-- upvalue is simply not in scope there. Keyed by file so two files' identical
+-- positions cannot collide, and never cleared: a worker is a process, and the
+-- entries are a few per file.
+local ANON_AT = {}
 local EXT_ELANG = {} -- ext -> { lang|false, spec|false }
 local EXT_PLANG = {} -- ext -> lang|false
 
@@ -5810,10 +5821,21 @@ function M.extract(root, opts)
         return id
     end
 
-    local function fn_at(file, line)
+    --- the innermost function containing (line, col). `col` is optional and the
+    --- test degrades to the old line-only rule without it — only the CALL-OWNER
+    --- path has a column to give, and that is the path where a callback opening on
+    --- its caller's line produced a self-loop (CART-0813).
+    --- ⚠ THE START SIDE ONLY. A function ENDING on a later call's line is the
+    --- opposite error and needs the end column to fix; it has never been observed,
+    --- so it is left alone rather than changed without a witness.
+    local function fn_at(file, line, col)
         local best
         for _, r in ipairs(fnRanges[file] or {}) do
-            if r.s <= line and line <= r.e and (not best or r.s >= best.s) then best = r end
+            local starts_before = r.s < line
+                or (r.s == line and (col == nil or (r.sc or 0) <= col))
+            if starts_before and line <= r.e and (not best or r.s >= best.s) then
+                best = r
+            end
         end
         return best and best.id
     end
@@ -6136,7 +6158,15 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- the outermost query pattern may match a nested def too;
                 -- ranges keep the innermost containing fn for attribution
                 fnRanges[file] = fnRanges[file] or {}
-                table.insert(fnRanges[file], { s = sp.start.line, e = sp['end'].line, id = id })
+                -- ⚠ THE START COLUMN TOO (CART-0813). `fn_at` picks the innermost
+                -- function CONTAINING a call, and a line-granular test says a
+                -- callback contains the call that PASSES it:
+                -- `wiretap:register_listener("x", function(e) ... end)` opens the
+                -- closure on the call's own line, so every such registration was
+                -- attributed to its own argument — 7 self-loops on
+                -- bravest-new-world the moment lua closures became nodes.
+                table.insert(fnRanges[file], { s = sp.start.line, sc = sp.start.char,
+                    e = sp['end'].line, id = id })
                 if not torn and not aname then
                     exact[name] = exact[name] or {}
                     table.insert(exact[name], nodes[#nodes])
@@ -6178,7 +6208,15 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- key: it is two entries per language and the FIELD fallback chain below already
         -- covers the difference, so a seam here would be ceremony around four names.
         local ANONCALL = { call_expression = true, new_expression = true,     -- js/ts
-            method_invocation = true, object_creation_expression = true }     -- java
+            method_invocation = true, object_creation_expression = true,      -- java
+            function_call = true }                                            -- lua
+        -- ★★ THE ANON FN'S NODE ID, BY ITS POSITION (CART-0813). The argument
+        -- classifier marks an inline closure `k = 'func'` and had nothing to put in
+        -- `to`, so the node minted here was unreachable from the call that carries
+        -- it — `find_handler`'s `a.k == 'func' and a.to` branch could never fire and
+        -- a registration had no handler to point at. The functions query runs before
+        -- the calls query on the same file, so the id is already known by the time
+        -- the argument is classified; this carries it across.
         local function handle_anon_fn(defn)
             local nm = 'fn'
             local args = defn:parent()
@@ -6191,7 +6229,22 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local seg = f and node_text(f, src):match('([%w_$]+)%s*$')
                 if seg then nm = seg end
             end
+            local n0 = #nodes
             handle_fn(defn, nil, nm .. '#cb')
+            -- handle_fn refuses some defs (spec gates), so the append is the
+            -- witness that a node exists rather than an assumption that one does
+            -- ⚠ THE FIRST *FUNCTION* APPENDED, NOT THE LAST NODE. handle_fn emits
+            -- the fn AND whatever else it derives from it, so `nodes[#nodes]` is
+            -- whichever of those came last — and pointing the argument at that
+            -- produced SELF LOOPS on bravest-new-world, a callback registered as
+            -- its own handler. The kind is the discriminator.
+            for i = n0 + 1, #nodes do
+                if nodes[i].kind == 'function' or nodes[i].kind == 'method' then
+                    local r, c0 = defn:start()
+                    ANON_AT[file .. '\31' .. (r * 4096 + c0)] = nodes[i].id
+                    break
+                end
+            end
         end
         --- @param declonly boolean|nil  a DECLARATION with no initializer, from a
         --- `@vdecl` capture. It is a var (named, typed, in scope) but nothing was
@@ -7087,7 +7140,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                                     l = select(1, a:range()) }
                             elseif t == 'function_definition' or t == 'lambda' then
                                 args[#args + 1] = ''
-                                argv[#argv + 1] = { k = 'func' }
+                                local ar, ac = a:start()
+                                argv[#argv + 1] = { k = 'func',
+                                    to = ANON_AT[file .. '\31' .. (ar * 4096 + ac)] }
                             elseif t == 'variable_name' then -- php $var
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'local',
@@ -8083,14 +8138,14 @@ local MATCH_OPTS = { match_limit = 65536 }
             -- was a shadow-walkout guess, and the edge must say so
             local hedged = inferred or p.call.hedge ~= nil
             p.call.inferred = hedged or nil
-            local from = fn_at(p.file, p.at.start.line)
+            local from = fn_at(p.file, p.at.start.line, p.at.start.char)
             p.call.fn = from
             -- a module-level call (from == nil) is owned by its REGION, attributed
             -- in ONE post-pass after every resolution pass has run — see
             -- own_module_calls below
             if from then addref(from, target.id, p.at, hedged) end
         else
-            p.call.fn = fn_at(p.file, p.at.start.line)
+            p.call.fn = fn_at(p.file, p.at.start.line, p.at.start.char)
             p.call.refused = refused
             -- the resolver knew WHY it stayed silent (external/noise): keep it
             -- ([[cartograph-graph-improvements]] #1). refused and ext are
