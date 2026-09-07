@@ -237,3 +237,65 @@ test('proto: the scan honours the WALK\'s exclusion set, not a private copy', fu
     eq(1, #found)
     eq('keep/a.proto', found[1])
 end)
+
+-- ── THE JOIN: A DECLARED EXPORT SIDE (CART-0825) ───────────────────────────
+-- Every other xlang binding finds its export by scanning for a REGISTERING
+-- VERB, because in those boundaries the registration is a call. A gRPC service
+-- is the other shape: the contract is DECLARED in a .proto file, so the export
+-- exists as a NODE before any code runs and there is no call to find. This is
+-- the third rung of [[cartograph-registration-relation]]'s one relation, and
+-- the XMPP macro join wants the same extension.
+
+test('proto: an rpc node carries the WIRE PATH, which is the join identity', function ()
+    local r = assert(proto.parse(
+        'syntax = "proto3";\npackage hipstershop;\n'
+        .. 'service CartService { rpc AddItem(A) returns (B) {} }\n'))
+    eq('hipstershop', r.package)
+    local root = tmproot({ ['p/demo.proto'] =
+        'syntax = "proto3";\npackage hipstershop;\n'
+        .. 'service CartService { rpc AddItem(A) returns (B) {} }\n' })
+    local data = { root = root, nodes = {}, edges = {} }
+    proto.attach(data)
+    local rpc
+    for _, n in ipairs(data.nodes) do if n.pb == 'rpc' then rpc = n end end
+    -- ★ the leading `/` is part of the gRPC method path per the spec, not a
+    -- formatting choice — and it is exactly what both generated stubs write
+    eq('hipstershop.CartService/AddItem', rpc.qname)
+    eq('/hipstershop.CartService/AddItem', rpc.wire)
+end)
+
+test('xlang: a DECLARED export links a wire-path literal to its contract', function ()
+    local xlang = require 'cartograph.xlang'
+    local root = tmproot({ ['p/demo.proto'] =
+        'syntax = "proto3";\npackage shop;\n'
+        .. 'service Cart { rpc AddItem(A) returns (B) {} rpc Lonely(C) returns (D) {} }\n' })
+    local data = { root = root, nodes = {
+        { id = 'stub.py', name = 'stub.py', kind = 'module', file = 'stub.py' },
+        { id = 'stub.py::Stub.__init__@1', name = 'Stub.__init__', kind = 'method',
+            file = 'stub.py' },
+    }, edges = {}, calls = {
+        { fn = 'stub.py::Stub.__init__@1', callee = 'unary_unary', file = 'stub.py',
+            line = 1, argn = 1,
+            argv = { { k = 'lit', v = '/shop.Cart/AddItem' } },
+            args = { '/shop.Cart/AddItem' } },
+        -- ⚠ A NEAR MISS THAT MUST NOT LINK: the right method NAME under the
+        -- wrong service. Joining on `AddItem` would take it; joining on the
+        -- wire path refuses it, which is the whole reason the key is the path.
+        { fn = 'stub.py::Stub.__init__@1', callee = 'unary_unary', file = 'stub.py',
+            line = 2, argn = 1,
+            argv = { { k = 'lit', v = '/other.Cart/AddItem' } },
+            args = { '/other.Cart/AddItem' } },
+    } }
+    proto.attach(data)
+    xlang.link(data)
+    local wire_of, hits = {}, {}
+    for _, n in ipairs(data.nodes) do if n.pb == 'rpc' then wire_of[n.id] = n.wire end end
+    for _, e in ipairs(data.edges) do
+        if e.xlang and wire_of[e.to] then hits[wire_of[e.to]] = (hits[wire_of[e.to]] or 0) + 1 end
+    end
+    eq(1, hits['/shop.Cart/AddItem'])
+    -- the second rpc is declared and nothing names it: an honest empty, and it
+    -- must stay empty rather than collecting the near-miss above
+    eq(nil, hits['/shop.Cart/Lonely'])
+    eq(nil, hits['/other.Cart/AddItem'])
+end)

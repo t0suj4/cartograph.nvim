@@ -404,12 +404,25 @@ function M.attach(data, opts)
                     local name = svc.name .. '::' .. rp.name
                     local qname = (r.package and (r.package .. '.') or '')
                         .. svc.name .. '/' .. rp.name
+                    -- ★★★ THE WIRE PATH IS THE IDENTITY, and it is a LITERAL in
+                    -- the generated code on both sides: grpc-go emits
+                    -- `CartService_AddItem_FullMethodName = "/hipstershop.
+                    -- CartService/AddItem"` and grpc-python passes the same
+                    -- string to `channel.unary_unary(...)`. So the join key is
+                    -- not a NAME MATCH on `AddItem` — which is ambiguous across
+                    -- nine services — but the exact string the runtime itself
+                    -- dispatches on. Same lesson as the XMPP boundary, where
+                    -- joining by macro NAME found 8 pairs and joining by URI
+                    -- found 30, a different set. Carried as its own field
+                    -- because the leading `/` is part of the gRPC spec's method
+                    -- path, not a formatting choice this code gets to make.
+                    local wire = '/' .. qname
                     data.nodes[#data.nodes + 1] = {
                         id = ('%s::%s@%d'):format(rel, name, rp.line),
                         name = name, kind = 'method', file = rel,
                         range = at(rp.line), order = rp.line,
                         pb = 'rpc', pkg = r.package, service = svc.name,
-                        qname = qname, req = rp.req, resp = rp.resp,
+                        qname = qname, wire = wire, req = rp.req, resp = rp.resp,
                         stream_in = rp.stream_in, stream_out = rp.stream_out,
                     }
                     local q = stats.by_qname[qname]

@@ -1076,6 +1076,32 @@ does not understand is counted and sampled into the attach report, since a
 declarative reader that skips quietly reports a contract that is merely
 smaller.
 
+**And the contract is a join key.** Both generated stubs write the gRPC method
+path as a literal — `/hipstershop.CartService/AddItem` — so `tools/grpcjoin.lua`
+answers *who names each RPC, in which language*, keyed on the string the runtime
+itself dispatches on rather than on the method name (`AddItem` alone is
+ambiguous across nine services; this is the XMPP lesson again, where joining by
+macro name found 8 pairs and by URI found 30 — a different set). On
+microservices-demo's `src/`, **15 of 16 wire paths bind**.
+
+The mechanism is one new shape in `cartograph.xlang`: an **export side that is a
+declaration rather than a call**. Every other binding finds its export by
+scanning for a registering verb, because there the registration *is* a call; a
+gRPC contract is declared in a `.proto` file, so the export exists as a node
+before any code runs.
+
+**The unbound column is the interesting one, and its reasons all render
+identically as absence.** The report measures five: the path must reach the
+graph as a call-argument *literal* (grpc-python passes it directly, grpc-go
+binds it to a `const` and passes the identifier); the stubs may be generated at
+build time and absent from the tree (Java here); the language may have no spec
+(C#); **the stub may ship in an installed dependency** — `Health/Check` is the
+one unbound path on this corpus and it is *implemented*, via a pip package
+outside the root; and **the contract may be loaded at runtime**, as Node's
+`protoLoader.loadSync` does, naming the `.proto` file rather than any method.
+"Nobody calls this" and "we cannot read the code that does" are opposite claims
+and the same empty cell, so the tool states which.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:

@@ -51,6 +51,24 @@ M.default_bindings = {
     -- every qualified spelling misses and the binding silently matched NOTHING.
     -- The bare callee is what the erlang key model leaves comparable.
     { export = { verb = 'add_iq_handler', name = 3, mod = 4, fn = 5 } },
+    -- ★★★ gRPC: the contract is DECLARED, not registered by a call (CART-0825).
+    -- `cartograph.proto` mints one `method` node per rpc carrying `wire` — the
+    -- exact method path the runtime dispatches on, `/hipstershop.CartService/
+    -- AddItem`. Both generated stubs write that same string as a LITERAL, so
+    -- this is a wire-path match and not a name match on `AddItem`, which is
+    -- ambiguous across nine services.
+    -- ⚠ ONLY THE PYTHON SIDE LINKS TODAY, and the reason is precise rather than
+    -- a coverage gap: grpc-python passes the path as a CALL ARGUMENT
+    -- (`channel.unary_unary('/hipstershop.CartService/AddItem', …)`), which argv
+    -- reads, while grpc-go binds it to a `const` and passes the IDENTIFIER
+    -- (`Invoke(ctx, CartService_AddItem_FullMethodName, …)`). argv sees that
+    -- argument as `{k='local', name='CartService_AddItem_FullMethodName'}` — the
+    -- name, not the value — because a Go const's literal never enters the graph.
+    -- That is CART-0826; the identifier is a generator CONVENTION and would be a
+    -- lower rung than this exact key, so it is not silently mixed in here.
+    { export = { nodes = 'pb', mark = 'rpc', key = 'wire' },
+      import = { verb = { 'unary_unary', 'unary_stream', 'stream_unary',
+          'stream_stream' }, name = 1 } },
 }
 
 --- ★★ CALL INDEX FOR `verb_matches`, and it is the SAME DEFECT SHAPE as the one
@@ -500,6 +518,34 @@ function M.link(data, bindings)
         -- handler off every dead-code list.
         local exports = {}
         local allcalls = data.calls or {}
+        -- ★★★ AN EXPORT SIDE THAT IS A DECLARATION, NOT A CALL (CART-0825). Every
+        -- binding above finds its export by scanning for a registering VERB,
+        -- because in those boundaries the registration IS a call. A gRPC service
+        -- is the other shape: the contract is DECLARED, in a .proto file, and
+        -- `cartograph.proto` has already minted one `method` node per rpc
+        -- carrying the exact wire path the runtime dispatches on. There is no
+        -- call to find — the export exists as a node before any code runs.
+        -- ⚠ THIS IS THE THIRD RUNG OF THE REGISTRATION RELATION and it was
+        -- predicted: [[cartograph-registration-relation]] records one relation
+        -- implemented three times with the RUNG decided by the syntactic
+        -- carrier, and CART-0226 established that registering needs one side
+        -- where linking needs two. A declared export is that idea's mirror —
+        -- the side that exists without a call site — and the XMPP macro join
+        -- wants exactly the same extension, which is why it lives here rather
+        -- than in a parallel joiner.
+        if b.export.nodes then
+            for _, n in ipairs(data.nodes) do
+                local mark = n[b.export.nodes]
+                if mark and (not b.export.mark or mark == b.export.mark) then
+                    local k = n[b.export.key or 'name']
+                    if k then
+                        exports[k] = exports[k] or {}
+                        table.insert(exports[k], n.id)
+                        stats.exports = stats.exports + 1
+                    end
+                end
+            end
+        else
         for ci, c in each_candidate(allcalls, verb_candidates(idx(), b.export.verb)) do
             if ci % 8192 == 0 then coop.tick() end
             if verb_matches(c, b.export.verb) then
@@ -539,6 +585,7 @@ function M.link(data, bindings)
                 end
             end
         end
+        end -- the declared-export branch
         if b.import and (b.import.verb or b.import.any_call) then
         if next(exports) then
             -- the import side is either a named verb (index by that) or
