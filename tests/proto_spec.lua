@@ -299,3 +299,135 @@ test('xlang: a DECLARED export links a wire-path literal to its contract', funct
     eq(nil, hits['/shop.Cart/Lonely'])
     eq(nil, hits['/other.Cart/AddItem'])
 end)
+
+-- ── THE DEPLOYMENT LAYER (CART-0830) ───────────────────────────────────────
+-- A kubernetes manifest is a THIRD declared artefact beside the source and the
+-- contract, and it carries the one thing a runtime observation cannot get
+-- anywhere else: the map from a running service's name back to its code.
+
+local k8s = require 'cartograph.k8s'
+
+local MANIFEST = [[
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels:
+    app: frontend
+spec:
+  template:
+    spec:
+      serviceAccountName: frontend
+      containers:
+      - name: server
+        image: gcr.io/example/frontend:v1.2
+        ports:
+        - containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: CART_SERVICE_ADDR
+          value: "cartservice:7070"
+        - name: GHOST_SERVICE_ADDR
+          value: "ghostservice:9999"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  ports:
+  - port: 80
+]]
+
+local CART = [[
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cartservice
+spec:
+  template:
+    spec:
+      containers:
+      - name: server
+        image: cartservice
+]]
+
+test('k8s: a manifest yields services, ports and the declared peer topology', function ()
+    local root = tmproot({
+        ['k/frontend.yaml'] = MANIFEST,
+        ['k/cartservice.yaml'] = CART,
+        ['skaffold.yaml'] = 'apiVersion: skaffold/v4beta1\nbuild:\n  artifacts:\n'
+            .. '  - image: frontend\n    context: src/frontend\n'
+            .. '  - image: cartservice\n    context: src/cartservice/src\n',
+    })
+    local data = { root = root, nodes = {}, edges = {} }
+    local s = k8s.attach(data)
+    eq(2, s.files)
+    eq(3, s.docs) -- two Deployments and a Service
+    -- ★ THE IMAGE -> SOURCE JOIN IS SKAFFOLD'S DECLARED CONTEXT, and the fixture
+    -- carries the case a name match gets wrong: cartservice lives in
+    -- `src/cartservice/src`, not `src/cartservice`.
+    eq('src/frontend', k8s.dir_of(data, 'frontend'))
+    eq('src/cartservice/src', k8s.dir_of(data, 'cartservice'))
+    -- ⚠ AND THE REGISTRY PREFIX MUST NOT DEFEAT IT. `gcr.io/example/frontend:v1.2`
+    -- and skaffold's bare `frontend` are the same artifact; keying on the full
+    -- string mapped one service of fifteen on the real corpus.
+    local declared = 0
+    for _, e in ipairs(data.edges) do if e.k8 == 'declares' then declared = declared + 1 end end
+    eq(1, declared) -- frontend -> cartservice, and NOT frontend -> ghostservice
+    -- ★★ THE ONE-SIDED EDGE IS THE POINT, not an omission: `GHOST_SERVICE_ADDR`
+    -- names a service this deployment does not contain. That is the k8s design's
+    -- A4 bipartite shape, and it is REPORTED rather than resolved into a
+    -- fabricated target — an overlay or an operator may still supply it.
+    eq(1, #s.dangling)
+    ok(s.dangling[1]:find('ghostservice'), s.dangling[1])
+end)
+
+test('k8s: a TEMPLATED document is refused and counted, never half-read', function ()
+    local root = tmproot({
+        ['helm/templates/x.yaml'] = 'apiVersion: apps/v1\nkind: Deployment\n'
+            .. 'metadata:\n  name: {{ .Values.name }}\nspec:\n  replicas: {{ .Values.n }}\n',
+        ['k/ok.yaml'] = CART,
+    })
+    local data = { root = root, nodes = {}, edges = {} }
+    local s = k8s.attach(data)
+    -- the plain manifest is read...
+    eq(1, s.files)
+    eq(1, s.services)
+    -- ...and the helm template is REFUSED, with a reason. A reader that took its
+    -- literal `{{ .Values.name }}` as a service name would invent a workload.
+    ok(s.refused >= 1, 'the templated document is refused')
+    ok(table.concat(s.refusals, ' '):find('templated'), table.concat(s.refusals, ' '))
+end)
+
+test('k8s: the same service in two variants is two declarations, not one', function ()
+    -- ⚠ A repo routinely declares one system several times (raw manifests, a
+    -- release bundle, kustomize overlays). Keying services by NAME alone merged
+    -- them on the real corpus and currencyservice came back with three copies of
+    -- its port, as though it listened three times.
+    local root = tmproot({ ['base/c.yaml'] = CART, ['release/c.yaml'] = CART })
+    local data = { root = root, nodes = {}, edges = {} }
+    local s = k8s.attach(data)
+    eq(2, s.services)
+    local variants = {}
+    for _, sv in pairs(s.services_map) do variants[sv.variant] = true end
+    ok(variants['base'] and variants['release'], 'one declaration per variant')
+end)
+
+test('k8s: attach is idempotent and mints no node kind the schema lacks', function ()
+    local validate = require 'cartograph.validate'
+    local root = tmproot({ ['k/c.yaml'] = CART })
+    local data = { root = root, nodes = {}, edges = {} }
+    local s1 = k8s.attach(data)
+    local n1, e1 = #data.nodes, #data.edges
+    local s2 = k8s.attach(data)
+    eq(s1.services, s2.services)
+    eq(n1, #data.nodes); eq(e1, #data.edges)
+    -- ★ THE PRE-`instance`-KIND CUT: the design proposes instance/workload/
+    -- listener/principal and none is in NODE_KINDS. Minting one here would
+    -- pre-empt CART-0140's schema decision.
+    for _, n in ipairs(data.nodes) do
+        ok(validate.NODE_KINDS[n.kind], n.kind .. ' is not a declared node kind')
+    end
+end)

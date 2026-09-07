@@ -259,6 +259,17 @@ function M.open(dump_path, opts)
                         an.includes, an.vars, an.var_links, #an.unused_vars,
                         #an.dead, #an.broken), vim.log.levels.INFO)
             end
+            -- the DEPLOYMENT layer: kubernetes manifests are claimed by no spec
+            -- either, and they carry the identity that maps a running service
+            -- back to its code plus the declared service topology (CART-0830).
+            -- Runs BEFORE proto/xlang so the `deploys` edges exist while the
+            -- contract is being bound.
+            local kb = require('cartograph.k8s').attach(data)
+            local kbline = require('cartograph.k8s').summary(kb)
+            if kbline then
+                vim.notify('cartograph: ' .. kbline,
+                    kb.refused > 0 and vim.log.levels.WARN or vim.log.levels.INFO)
+            end
             -- the gRPC/protobuf CONTRACT: .proto files are claimed by no spec,
             -- so their services and rpcs enter the graph here (CART-0824). One
             -- rpc = one `method` node, SITE-ANCHORED — a vendored copy of a

@@ -1102,6 +1102,51 @@ outside the root; and **the contract may be loaded at runtime**, as Node's
 "Nobody calls this" and "we cannot read the code that does" are opposite claims
 and the same empty cell, so the tool states which.
 
+**The deployment is a third declared layer.** `cartograph.k8s` reads Kubernetes
+manifests as a session post-pass — the family django/symfony/ansible routes
+already use — and takes two things from them that nothing else in the tree has.
+The **declared topology**: a workload's `*_SERVICE_ADDR` env names a peer, which
+is 14 service→service edges per deployment on microservices-demo. And the
+**identity**: the map from a running service's name back to its code, joined
+through `skaffold.yaml`'s declared build *context* rather than by name —
+skaffold says `cartservice → src/cartservice/src`, the one service of twelve
+whose directory is not its image name, so a name match is right eleven times and
+silently wrong once.
+
+The roster is keyed by **deployment variant**, because a repo routinely declares
+one system several times (raw manifests, a release bundle, kustomize overlays):
+keying by name alone merged them, and `currencyservice` came back holding three
+copies of its port as though it listened three times. Templated documents
+(`{{ .Values.x }}`) are **refused and counted**, never half-read. And the first
+run surfaced a **one-sided declared edge** — `frontend` names
+`shoppingassistantservice` in all three deployment variants and none of them
+ships it, which is an optional component rather than automatically a bug, so it
+is reported with its variant and never resolved into a fabricated target.
+
+This mints no new node kind. The design corpus proposes `instance` / `workload`
+/ `listener` / `principal` for this domain and none is in the schema; adding one
+is a schema decision that belongs to the ticket which owns that design, so the
+manifest file becomes a `module` node and the identity map rides beside the
+graph.
+
+**And a running stack can confirm it.** `tools/otelobserve.lua` reads
+OpenTelemetry spans from a live deployment and diffs them against that static
+contract graph. The address translation is already there: `confirm.apply` keys
+on node ids, a span names a wire path, and the proto adapter mints a node
+carrying exactly that — so a runtime event is addressable in the static graph
+without any new mechanism. This is the runtime tier's second producer, and the
+first that observes a process cartograph is *not inside*: the existing one hooks
+Lua calls in the running editor, which is self-shaped by construction.
+
+Two disciplines make it honest. **Absence never refutes** — an RPC no span named
+is *not observed*, not unused, and the report says so in those words. And **an
+observation is service-granular on the calling side**: a span carries
+`service.name` and never the calling function, so only an observation that lands
+on an edge the graph already has is materialised; the rest are reported as facts
+about a service, since the graph has no node at that granularity. Materialising
+them would smear one span across every file of the caller, so that is opt-in
+(`--coarse`) and its cost is printed either way.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:
