@@ -33,6 +33,24 @@ M.default_bindings = {
     { export = { verb = { 'add_action', 'add_filter' }, name = 1, fn = 2 },
       import = { verb = { 'do_action', 'do_action_ref_array',
           'apply_filters', 'apply_filters_ref_array' }, name = 1 } },
+    -- ★★★ ERLANG / ejabberd: an IQ handler registers under an XMPP NAMESPACE, and
+    -- the handler is a MODULE + FUNCTION pair of atoms (CART-0794/0812).
+    --   gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_MAM_2,
+    --                                 ?MODULE, process_iq_v0_3)
+    -- ONE-SIDED BY CONSTRUCTION: the importer is a remote XMPP client, not code in
+    -- this tree, so there is nothing to link to and inventing one would fabricate.
+    -- The registration edge is the whole point — it is the alibi for every handler
+    -- the erlang call graph cannot otherwise reach.
+    -- ⚠ The KEY is a `macro` slot carrying the namespace URI when a distilled
+    -- vocabulary supplies it (tools/hrldistill.lua); with no vocabulary the key is
+    -- absent and the handler edge is made anyway, which is the right split — the
+    -- edge is a fact about THIS tree, the URI is a fact about a library.
+    -- ⚠ THE BARE NAME, NOT `gen_iq_handler.add_iq_handler`. `verb_matches` tests
+    -- the callee, the full, and the full's dotted tail — and an erlang remote
+    -- call's `full` is ARITY-QUALIFIED (`gen_iq_handler.add_iq_handler/5`), so
+    -- every qualified spelling misses and the binding silently matched NOTHING.
+    -- The bare callee is what the erlang key model leaves comparable.
+    { export = { verb = 'add_iq_handler', name = 3, mod = 4, fn = 5 } },
 }
 
 --- ★★ CALL INDEX FOR `verb_matches`, and it is the SAME DEFECT SHAPE as the one
@@ -175,13 +193,38 @@ end
 --- name (the &Class::Method inside base::BindRepeating spans lines).
 local function find_handler(c, root, exact, export)
     if export.fn then
-        local a = argv.at(c, export.fn + (callrec.method(c) and 1 or 0))
+        local off = callrec.method(c) and 1 or 0
+        local a = argv.at(c, export.fn + off)
         if a then
             if a.k == 'func' and a.to then return a.to end
             local name = a.k == 'lit' and a.v or a.k == 'local' and a.name
                 or a.k == 'callable' and a.name
-            if name and exact[name] and #exact[name] == 1 then
-                return exact[name][1].id
+            -- ★★ A SEPARATE ARGUMENT MAY NAME THE HANDLER'S MODULE (CART-0226).
+            -- erlang registers `add_iq_handler(Component, Host, NS, mod_mam,
+            -- process_iq_v0_3)` — the handler is a pair, and the function atom
+            -- alone is hopeless: `process_iq` is defined by a dozen modules, so
+            -- the uniqueness test below refuses every one of them. With the module
+            -- in hand the candidate set is one file, and a name that is ambiguous
+            -- corpus-wide is unique inside it.
+            -- ⚠ IT DISAMBIGUATES, IT NEVER WIDENS: a module that names no file we
+            -- have leaves the candidates untouched, so an unknown module cannot
+            -- turn a refusal into a guess.
+            local cands = name and exact[name] or nil
+            if cands and export.mod then
+                local m = argv.at(c, export.mod + off)
+                local mn = m and (m.k == 'lit' and m.v or m.k == 'local' and m.name)
+                if mn and mn ~= '' then
+                    local fit
+                    for _, nd in ipairs(cands) do
+                        if (nd.file or ''):match('([^/]+)%.[%w]+$') == mn then
+                            fit = fit == nil and nd or false
+                        end
+                    end
+                    if fit then cands = { fit } end
+                end
+            end
+            if name and cands and #cands == 1 then
+                return cands[1].id
             end
             -- an inline closure or unresolvable callable: don't fall through
             -- to the textual scan, it would grab neighbouring names
@@ -430,27 +473,46 @@ function M.link(data, bindings)
         -- `b.import.verb` below from indexing nil — greenspun.audit already guards the
         -- same way (`if b.import and …`), so the two agree about what a one-sided
         -- binding means.
-        if b.import and (b.import.verb or b.import.any_call) then
+        -- ★★★ THE EXPORT SCAN RUNS FOR EVERY BINDING, ONE-SIDED OR NOT
+        -- (CART-0226). It used to sit inside the import gate below, so a
+        -- profile's registry idiom — `script.on_event(id, handler)`, which is
+        -- engine-dispatched and has no importer in the corpus — was skipped
+        -- entirely and its handler edge was never made. The comment on
+        -- `M.profile_bindings` called that out as "a REAL edge we do not yet
+        -- have"; this is it. LINKING still needs two sides. REGISTERING does not:
+        -- "something outside the call graph invokes this function" is true the
+        -- moment the registration is seen, and it is the alibi that keeps a
+        -- handler off every dead-code list.
         local exports = {}
         local allcalls = data.calls or {}
         for ci, c in each_candidate(allcalls, verb_candidates(idx(), b.export.verb)) do
             if ci % 8192 == 0 then coop.tick() end
             if verb_matches(c, b.export.verb) then
-                local key = logical_arg(c, b.export.name)
-                if key and key ~= '' then
+                -- ⚠ A KEY IS REQUIRED TO LINK AND NOT TO REGISTER. A hook idiom
+                -- (`script.on_init(handler)`) names no key at all, and demanding
+                -- one dropped the whole class before it reached find_handler.
+                local key = b.export.name and logical_arg(c, b.export.name) or nil
+                if key == '' then key = nil end
+                if key or not b.export.name then
                     local h = find_handler(c, data.root, exact, b.export)
                     if h then
-                        exports[key] = exports[key] or {}
-                        table.insert(exports[key], h)
+                        if key then
+                            exports[key] = exports[key] or {}
+                            table.insert(exports[key], h)
+                        end
                         stats.exports = stats.exports + 1
                         -- the registration itself references the handler
-                        if callrec.fn(c) then addref(callrec.fn(c), h, key_range(c, key)) end
+                        if callrec.fn(c) then
+                            addref(callrec.fn(c), h, key and key_range(c, key) or nil)
+                        end
+                        stats.registered = (stats.registered or 0) + 1
                     else
                         stats.unresolved = stats.unresolved + 1
                     end
                 end
             end
         end
+        if b.import and (b.import.verb or b.import.any_call) then
         if next(exports) then
             -- the import side is either a named verb (index by that) or
             -- `any_call`, where the EXPORTED KEYS are themselves the callable

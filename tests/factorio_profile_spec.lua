@@ -197,10 +197,18 @@ test('xlang: profile templates COMPOSE with the built-in bindings', function ()
     cfg.bindings, cfg.bindings_only = saved, saved_only
 end)
 
-test('xlang: a binding with NO import side is a DECLARATION, not a link', function ()
-    -- A platform idiom is usually ENGINE-dispatched: nothing in mod code imports
-    -- script.on_event, the game does. link() must skip such a binding rather than
-    -- index a nil import (it would crash) or invent an edge.
+test('xlang: a one-sided binding REGISTERS its handler but does not LINK', function ()
+    -- ★★ THE DISTINCTION THIS TEST USED TO MISS (CART-0226). A platform idiom is
+    -- ENGINE-dispatched: nothing in mod code imports script.on_event, the game
+    -- does, so there is no importer to pair an export with and inventing one would
+    -- fabricate. LINKING needs two sides. REGISTERING does not — "something
+    -- outside the call graph invokes this function" is true the moment the
+    -- registration is seen, and it is the alibi that keeps a handler off every
+    -- dead-code list.
+    -- Its previous form asserted "adds no edge", and passed for the wrong reason:
+    -- the fixture handed link() a plain string array where argv entries were
+    -- expected, so find_handler saw no kinds and could not have resolved anything
+    -- either way.
     local xl = require 'cartograph.xlang'
     local R = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
     local data = {
@@ -211,11 +219,80 @@ test('xlang: a binding with NO import side is a DECLARATION, not a link', functi
         },
         edges = {},
         calls = { { fn = 'm.lua', callee = 'script.on_event', full = 'script.on_event',
-            file = 'm.lua', line = 0, at = R, argv = { 'defines.events.on_tick', 'h' } } },
+            file = 'm.lua', line = 0, at = R,
+            -- ⚠ `args` IS THE STRING VIEW argv.str READS, and argv the typed one.
+            -- A fixture carrying only argv makes every key read as '' — which is
+            -- how the first cut of these tests failed, in the harness rather than
+            -- in the code.
+            args = { 'on_tick', '' },
+            argv = { { k = 'lit', v = 'on_tick' }, { k = 'local', name = 'h' } } } },
     }
-    local before = #data.edges
-    local stats = xl.link(data, { { export = { verb = 'script.on_event', name = 1 },
+    local stats = xl.link(data, { { export = { verb = 'script.on_event', name = 1, fn = 2 },
         template = { verb = 'script.on_event', kind = 'enum-key' } } })
     ok(stats ~= nil, 'link survives an import-less binding instead of crashing')
-    eq(before, #data.edges, 'and adds no edge: a declaration is not a link')
+    eq(0, stats.links, 'no LINK: there is no importer to pair with')
+    eq(1, stats.registered, 'but the registration IS recorded')
+    eq(1, #data.edges)
+    eq('m.lua::h', data.edges[1].to, 'and it points at the handler')
+end)
+
+test('xlang: a MODULE argument disambiguates an ambiguous handler name', function ()
+    -- erlang registers `add_iq_handler(Component, Host, NS, mod_mam, process_iq)`
+    -- and `process_iq` is defined by a dozen modules, so the uniqueness test
+    -- refuses every one of them. The module names the FILE, and a name ambiguous
+    -- corpus-wide is unique inside it.
+    local xl = require 'cartograph.xlang'
+    local R = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+    local function mk(mod)
+        return { id = mod .. '.erl::process_iq', name = 'process_iq', kind = 'function',
+            file = 'src/' .. mod .. '.erl', range = R, order = 0 }
+    end
+    local data = {
+        root = '/x',
+        nodes = { { id = 'src/mod_mam.erl', name = 'mod_mam.erl', kind = 'module',
+                    file = 'src/mod_mam.erl', range = R, order = 0 },
+                  mk('mod_mam'), mk('mod_ping'), mk('mod_time') },
+        edges = {},
+        calls = { { fn = 'src/mod_mam.erl', callee = 'add_iq_handler',
+            full = 'gen_iq_handler.add_iq_handler/5', file = 'src/mod_mam.erl',
+            line = 0, at = R,
+            args = { 'ejabberd_local', '', 'urn:xmpp:mam:2', 'mod_mam', 'process_iq' },
+            argv = {
+                { k = 'lit', v = 'ejabberd_local' }, { k = 'local', name = 'Host' },
+                { k = 'macro', name = 'NS_MAM_2', v = 'urn:xmpp:mam:2' },
+                { k = 'lit', v = 'mod_mam' }, { k = 'lit', v = 'process_iq' } } } },
+    }
+    local B = { { export = { verb = 'add_iq_handler', name = 3, mod = 4, fn = 5 } } }
+    local stats = xl.link(data, B)
+    eq(1, stats.registered)
+    eq('mod_mam.erl::process_iq', data.edges[1].to,
+        'the module picked the right one of three same-named handlers')
+
+    -- ⚠ AND IT DISAMBIGUATES WITHOUT WIDENING: a module naming no file we have
+    -- must leave the ambiguity intact, never turn a refusal into a guess.
+    data.edges = {}
+    data.calls[1].argv[4] = { k = 'lit', v = 'mod_not_in_this_tree' }
+    local s2 = xl.link(data, B)
+    eq(0, s2.registered or 0, 'an unknown module leaves three candidates, so it refuses')
+end)
+
+test('xlang: a HOOK idiom names no key and still registers', function ()
+    -- `script.on_init(handler)` has no key argument at all, and requiring one
+    -- dropped the whole class before find_handler was ever reached
+    local xl = require 'cartograph.xlang'
+    local R = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+    local data = {
+        root = '/x',
+        nodes = {
+            { id = 'm.lua', name = 'm.lua', kind = 'module', file = 'm.lua', range = R, order = 0 },
+            { id = 'm.lua::boot', name = 'boot', kind = 'function', file = 'm.lua', range = R, order = 0 },
+        },
+        edges = {},
+        calls = { { fn = 'm.lua', callee = 'script.on_init', full = 'script.on_init',
+            file = 'm.lua', line = 0, at = R,
+            args = { '' }, argv = { { k = 'local', name = 'boot' } } } },
+    }
+    local stats = xl.link(data, { { export = { verb = 'script.on_init', fn = 1 } } })
+    eq(1, stats.registered)
+    eq('m.lua::boot', data.edges[1].to)
 end)
