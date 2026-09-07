@@ -3042,6 +3042,20 @@ nvim --headless -u NONE -l tools/npmdistill.lua ghost
 #   ⚠ The .d.ts text is attacker-controlled and is parsed here by a C grammar:
 #   that is the residual exposure, and isolating it would mean moving the PARSE.
 
+# DISTIL AN ERLANG MACRO VOCABULARY FROM A LIBRARY'S HEADERS. ejabberd registers
+# its IQ handlers by XMPP namespace — `?NS_MAM_2` — and the URIs live in neither
+# endpoint of that boundary: they are in the `xmpp` library ejabberd pins and does
+# not vendor. A protocol boundary's key table lives in a library BOTH sides depend
+# on, which is what a wire protocol looks like from inside one side of it.
+nvim --headless -u NONE -l tools/hrldistill.lua --from ~/git/xmpp/include
+#   writes spec/profile/erl-macros.mpack; 163 of 168 defines resolve, including
+#   the composed ones (`<<(?NS_ADMIN)/binary, "#x">>`) via a fixpoint, and the
+#   refused count is recorded in the artifact rather than dropped.
+#   The erlang spec reads it so a `macro` argument carries its VALUE beside its
+#   NAME — never as a `lit`: the source does not say that URI at that site, a
+#   LIBRARY does, and a local `-define` could shadow it.
+#   Joining ejabberd to converse.js by macro NAME finds 8 pairs; by URI, 30.
+
 # DISTIL THE BROWSER SURFACE FROM TypeScript's OWN lib.dom.d.ts. node's surface is
 # the running ENGINE's, so it has no `document`, no `window`, no `Element` — and
 # most JS in the wild is browser code.
