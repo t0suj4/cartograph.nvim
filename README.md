@@ -1046,6 +1046,36 @@ work corpus is `<C-o>`-navigable as a single session. (Following a call across a
 language or engine boundary *into* another band is the next step, once bands are
 linked.)
 
+### The gRPC contract
+
+A polyglot service repo agrees on a **declared contract** rather than a shared
+call: microservices-demo's twelve services — Go, Python, Java, Node, C# — all
+key on `protos/demo.proto`, nine services and fifteen RPCs. `.proto` is claimed
+by no spec, so that contract used to be invisible; `cartograph.proto` reads it
+as a **session post-pass**, the way django and symfony routes and ansible
+handlers join the graph. Each `.proto` file becomes a module node and each
+`rpc` a `method` node named `Service::Rpc`, carrying its package-qualified
+`hipstershop.CartService/AddItem` name and its request and response types.
+
+A `service` is deliberately *not* a node and neither is a `message` — a Java
+class is not a node either, it is the qualifier on its methods' names, and this
+follows that rather than inventing a shape. Nothing here mints a `var`, so none
+of it lands on the write axis.
+
+**RPC nodes are site-anchored, and vendored copies are not deduplicated.**
+microservices-demo carries `demo.proto` four times plus a fifth `CartService`
+in `Cart.proto`; on the whole repo that is 40 service declarations and 66 RPCs
+reunifying to **16 distinct qualified names**. Each copy is a real declaration
+at a real site, so each gets its own node — aggregating by qualified name is
+the cross-service join's job, and doing it in the reader would destroy the
+evidence that the copies exist. The reader is a token scanner rather than a
+line matcher, because the shapes that break a line matcher are ordinary here (a
+`//` inside a `go_package` string, an `option (x) = { … }` brace body, an RPC
+wrapping across five lines), and **it refuses loudly**: every declaration it
+does not understand is counted and sampled into the attach report, since a
+declarative reader that skips quietly reports a contract that is merely
+smaller.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:

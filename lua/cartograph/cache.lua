@@ -2405,7 +2405,13 @@ local function build_shards(data, want)
     -- and db-linked tables re-derive as post-passes, landings re-search
     local synth = {}
     for _, n in ipairs(data.nodes) do
-        if n.id:sub(1, 5) == 'sql::' or n.unparsed or n.db or n.dj then
+        -- ⚠ `pb` (the proto contract adapter, CART-0824) is here from the day
+        -- it shipped, and the four families before it are not — kb
+        -- `synthetic-var-node-families` records that this list misses `sf` and
+        -- `an`, and that what saves them today is save-before-attach ORDERING
+        -- rather than this test. A promise held by an accident is one edit from
+        -- being broken; adding the marker with the family is the cheap half.
+        if n.id:sub(1, 5) == 'sql::' or n.unparsed or n.db or n.dj or n.pb then
             synth[n.id] = true
         end
     end

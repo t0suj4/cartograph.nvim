@@ -4186,6 +4186,15 @@ local EXCLUDE_DIRS = { node_modules = true, vendor = true, dist = true,
     build = true, cache = true, minified = true,
     -- vendored-source conventions (hugo's deps/, azerothcore's deps/)
     deps = true, third_party = true, thirdparty = true, external = true }
+-- ★ EXPORTED SO THE RULE HAS ONE HOME (CART-0824). A post-pass adapter reads
+-- files no spec claims — ansible's yaml, symfony's twig, proto's .proto — so it
+-- cannot use this walk's output and must scan for itself. Three such scans exist
+-- and each hardcodes its OWN exclusion list: ansible.lua:176 skips `molecule /
+-- node_modules / .git / collections`, which is neither this set nor anyone
+-- else's. Sharing the SET is the half that actually drifts; unifying the four
+-- WALKS is CART-0817's, and is deliberately not done here — this table is read
+-- by nothing in extraction, so exporting it changes no behaviour.
+M.EXCLUDE_DIRS = EXCLUDE_DIRS
 
 local function list_files(root, subdirs, tp)
     tp = tp or transport

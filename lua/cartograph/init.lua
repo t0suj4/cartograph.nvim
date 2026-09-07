@@ -259,6 +259,17 @@ function M.open(dump_path, opts)
                         an.includes, an.vars, an.var_links, #an.unused_vars,
                         #an.dead, #an.broken), vim.log.levels.INFO)
             end
+            -- the gRPC/protobuf CONTRACT: .proto files are claimed by no spec,
+            -- so their services and rpcs enter the graph here (CART-0824). One
+            -- rpc = one `method` node, SITE-ANCHORED — a vendored copy of a
+            -- .proto is a second real declaration, and reunifying the copies by
+            -- qualified name belongs to the cross-service join, not here.
+            local pb = require('cartograph.proto').attach(data)
+            local pbline = require('cartograph.proto').summary(pb)
+            if pbline then
+                vim.notify('cartograph: ' .. pbline,
+                    pb.refused > 0 and vim.log.levels.WARN or vim.log.levels.INFO)
+            end
             -- a configured database: its tables join the graph and the
             -- code's SQL entities link to them (session post-pass)
             local dbl, dberr = require('cartograph.dblink').attach(data)
