@@ -28,6 +28,26 @@ local M = {}
 -- them, a generation bump (a real edit — content changed, worth retrying)
 -- resets the set. Pure escalation over a bare `data` (no generation) skips the
 -- cache entirely and relies on the live c.escalated field alone.
+--
+-- ⚠ THE EIGHTH GENERATION-KEYED CACHE OF CART-0822, AND THE ONE LEFT ALONE —
+-- deliberately, with the reason recorded rather than the fix guessed at. The
+-- other seven took a `store` and keyed on `store.generation`, so they moved onto
+-- the store where session.capture/restore can see them. This one takes a bare
+-- `data` and a CALLER-SUPPLIED `opts.generation`: there is no store here to
+-- attach to, and inventing a store dependency to satisfy a symmetry would add a
+-- require to a module that currently needs none. The collision is the CALLER's
+-- to avoid — it chooses the key.
+-- ★ AND IT CANNOT FIRE TODAY: `M.run`/`M.run_async` have NO caller anywhere in
+-- the tree (only tests/escalate_spec.lua), so this module is unwired in
+-- production. That is a fact worth stating next to the cache, because a reader
+-- comparing this file against the other seven will otherwise read the asymmetry
+-- as an oversight. When it IS wired, the caller must pass a generation that
+-- cannot collide across bands, or pass none (the pure path above, which is
+-- sound by construction).
+-- ⚠ The fence in tests/session_spec.lua does not cover this file, and correctly
+-- so: it forbids keying a FILE-SCOPE local on `store.generation`, and this keys
+-- on an argument. A fence widened to catch it would flag every legitimate
+-- memo in the tree.
 local cache = { gen = nil, keys = {} }
 
 -- a stable identity for a call across re-ingests: site + name.

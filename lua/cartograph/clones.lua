@@ -150,12 +150,20 @@ end
 -- ingest) → sound eviction. Floored at 2 rows (a 0-1 stmt body can't be any tier's clone);
 -- each tier applies its own min_rows over the cached fns. Each fn record carries keys +
 -- lines + the row exprs (near anti-unifier) + locals + nparams + def line.
-local index_cache
+-- ⚠ ON THE STORE, NOT A MODULE UPVALUE (CART-0822). A module-level cache is
+-- INVISIBLE to session.capture()/restore(), which iterate the store's own
+-- fields, so two bands whose per-band generations collided read each other's
+-- answer. A store field listed in store.BAND_TRANSIENT is dropped on every band
+-- swap, with no registration beyond that one line.
+-- ★ ON THE AGENT PATH TOO (agent.lua requires cartograph.clones), and this is
+-- the ticket's named instance: build_index returning the PREVIOUS root's
+-- function set, which every clone tier then reports pairs over.
 local INDEX_FLOOR = 2
 
 local function build_index(store)
-    if index_cache and index_cache.gen == store.generation then
-        return index_cache.fns, index_cache.post
+    local c = store._clone_idx
+    if c and c.gen == store.generation then
+        return c.fns, c.post
     end
     local fns = {}
     for _, n in ipairs(store.data.nodes) do
@@ -178,7 +186,7 @@ local function build_index(store)
             if not seen[k] then seen[k] = true; post[k] = post[k] or {}; post[k][#post[k] + 1] = i end
         end
     end
-    index_cache = { gen = store.generation, fns = fns, post = post }
+    store._clone_idx = { gen = store.generation, fns = fns, post = post }
     return fns, post
 end
 
@@ -726,9 +734,14 @@ end
 -- inverted index over RELATIVE row-keys (locals abstracted) — the candidate index for
 -- near-clone pairing, so an insertion-drifted pair still shares distinctive keys. Memoized
 -- alongside the generation-cached fn index (rebuilds when build_index does).
-local rel_post_cache
+-- ⚠ ON THE STORE, NOT A MODULE UPVALUE (CART-0822). A module-level cache is
+-- INVISIBLE to session.capture()/restore(), which iterate the store's own
+-- fields, so two bands whose per-band generations collided read each other's
+-- answer. A store field listed in store.BAND_TRANSIENT is dropped on every band
+-- swap, with no registration beyond that one line.
 local function rel_post(store, fns)
-    if rel_post_cache and rel_post_cache.gen == store.generation then return rel_post_cache.post end
+    local c = store._clone_relpost
+    if c and c.gen == store.generation then return c.post end
     local post = {}
     for i, f in ipairs(fns) do
         local ks = rel_keys(f)
@@ -737,7 +750,7 @@ local function rel_post(store, fns)
             if not seen[k] then seen[k] = true; post[k] = post[k] or {}; post[k][#post[k] + 1] = i end
         end
     end
-    rel_post_cache = { gen = store.generation, post = post }
+    store._clone_relpost = { gen = store.generation, post = post }
     return post
 end
 

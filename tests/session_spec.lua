@@ -107,3 +107,187 @@ test('session: close drops a band and re-activates a survivor', function ()
     ok(store.node('/a::aaa'), 'the survivor is live in the lens')
     eq(nil, session.bands.b, 'closed band is gone')
 end)
+
+-- ── ★★★ THE MODULE-LEVEL CACHES THAT SERVED THE WRONG BAND (CART-0822) ───────
+-- store.BAND_TRANSIENT enumerated store.lua's OWN five caches and read as a
+-- closed list for as long as bands have existed. Seven more generation-keyed
+-- caches lived as module upvalues in six other modules, where capture()/restore()
+-- — which iterate `pairs(store)` — cannot see them. `store.generation` is a
+-- PER-BAND counter, so two fresh bands both reach generation 1 and each reads
+-- the other's answer. THE COLLISION IS THE DEFAULT, not a forced state: no
+-- fixture needs to arrange it, two ordinary opens produce it.
+local CART_0822 = { '_diag', '_clone_idx', '_clone_relpost', '_field_reach',
+    '_portflow', '_short_idx', '_var_idx' }
+
+test('bands: every re-homed cache is DECLARED band-transient', function ()
+    for _, k in ipairs(CART_0822) do
+        ok(store.BAND_TRANSIENT[k], k .. ' must be declared in BAND_TRANSIENT')
+    end
+end)
+
+test('bands: a re-homed cache is dropped by the SWITCH, which is the swap that matters', function ()
+    -- ⚠ AND `begin` IS NOT THE PATH — I asserted it first and it was wrong.
+    -- `session.begin` captures the OUTGOING band and then lets the caller
+    -- ingest; it never clears the live store, so a warmed field is still there
+    -- immediately afterwards. That is harmless: the ingest bumps the generation,
+    -- so every generation-keyed reader recomputes. `restore` (the switch path)
+    -- is what clears, and it is where a stale answer could otherwise be served.
+    session.reset()
+    session.begin('/a'); store.ingest(graph('/a', 'aaa'))
+    for _, k in ipairs(CART_0822) do store[k] = { gen = store.generation, mark = 'A' } end
+    session.begin('/b'); store.ingest(graph('/b', 'bbb'))
+    for _, k in ipairs(CART_0822) do
+        ok(store[k] == nil or store[k].gen ~= store.generation,
+            k .. ' must not be readable at B\'s generation')
+    end
+    -- THE SWITCH: restore() clears every non-session field, so a BAND_TRANSIENT
+    -- cache is gone and a snapshotted one would come back. Both are checked —
+    -- the field must be absent, not merely stale.
+    for _, k in ipairs(CART_0822) do store[k] = { gen = store.generation, mark = 'B' } end
+    session.switch('a')
+    for _, k in ipairs(CART_0822) do
+        eq(nil, store[k], k .. ' survived a switch (declare it BAND_TRANSIENT)')
+    end
+end)
+
+-- ★★★ THE PREMISE, MEASURED — AND IT CORRECTS THE TICKET THAT ASKED FOR IT.
+-- CART-0822 says two bands' counters "COLLIDE", which reads as "immediately".
+-- They do NOT: `begin` captures the outgoing band but never resets the counter,
+-- so it keeps CLIMBING across opens — band A lands on 1 and band B on 2, and a
+-- module cache from A is correctly invalidated in B. That is why nobody ever hit
+-- this, and it is worth knowing before believing any report of it.
+-- ⚠ THE COLLISION IS REACHABLE IN FIVE STEPS AND THE FIFTH IS ORDINARY: switch
+-- BACK to A, re-ingest (any edit does it), and A's counter climbs to B's value.
+-- Now the two bands are at the same generation and a module-level cache warmed
+-- in one answers for the other.
+test('bands: generations collide after a SWITCH-BACK, not on a fresh open', function ()
+    session.reset()
+    session.begin('/a'); store.ingest(graph('/a', 'aaa'))
+    local a1 = store.generation
+    session.begin('/b'); store.ingest(graph('/b', 'bbb'))
+    local b1 = store.generation
+    ok(a1 ~= b1, 'two FRESH bands do not collide: ' .. a1 .. ' vs ' .. b1)
+
+    session.switch('a')
+    eq(a1, store.generation, 'switching back restores A\'s own counter')
+    store.ingest(graph('/a', 'aaa'))          -- any re-ingest in A
+    local a2 = store.generation
+    eq(b1, a2, 'ONE re-ingest in A puts it on B\'s generation')
+    session.switch('b')
+    eq(a2, store.generation,
+        'and now the two bands are indistinguishable by generation alone')
+    -- so keying on the generation is only sound where the CACHE ITSELF is
+    -- per-band. That is the placement, not the key.
+    ok(not store.SESSION_GLOBAL.generation,
+        'generation is per-band, so capture/restore swaps it')
+end)
+
+test('bands: a PUBLIC reader answers about the active band after a swap', function ()
+    -- ★★★ END TO END THROUGH A REAL ACCESSOR, ON THE EXACT INTERLEAVING THAT
+    -- COLLIDES. `shortpath` is the one of the seven with a public entry point;
+    -- the ticket's named instance `var_by_name` is reachable only from
+    -- M.attach's keymap callback (a window + line state + the 'lit' view), so
+    -- it rides on the placement test rather than on a test-only export
+    -- invented to reach it.
+    --
+    -- ⚠⚠ AND THE SEQUENCE IS THE WHOLE TEST. My first version opened two bands
+    -- with `begin` and PASSED against the old module-upvalue code — because a
+    -- fresh open bumps the generation, so the stale cache self-invalidates and
+    -- there was never a wrong answer to catch. It asserted the right outcome on
+    -- a state that cannot exhibit the bug. The five steps below are what
+    -- actually put two bands on one generation.
+    local symbols = require 'cartograph.panes.symbols'
+    local function tree(root, files)
+        local g = { root = root, nodes = {}, edges = {}, calls = {} }
+        for _, f in ipairs(files) do
+            g.nodes[#g.nodes + 1] = { id = root .. '::' .. f, name = f,
+                kind = 'module', file = f, range = R, order = 0 }
+        end
+        return g
+    end
+    local A = { 'x/init.lua' }                    -- unique basename  -> 'init.lua'
+    local B = { 'x/init.lua', 'y/init.lua' }      -- colliding        -> 'x/init.lua'
+
+    session.reset()
+    session.begin('/a'); store.ingest(tree('/a', A))          -- (1) A at gen 1
+    session.begin('/b'); store.ingest(tree('/b', B))          -- (2) B at gen 2
+    session.switch('a')                                        -- (3) back to A, gen 1
+    store.ingest(tree('/a', A))                                -- (4) A climbs to gen 2
+    eq('init.lua', symbols.shortpath('x/init.lua'),            -- (5) WARM A's cache
+        'band A: a unique basename is its own shortest label')
+    session.switch('b')                                        -- (6) B, also gen 2
+    -- (7) THE READ THAT WAS WRONG. Same file path, same generation number,
+    -- different band: B has two init.lua so the honest label needs a parent
+    -- segment. A cache carried over from A answers 'init.lua'.
+    eq('x/init.lua', symbols.shortpath('x/init.lua'),
+        'band B must not inherit band A\'s label at the same generation')
+    -- and A is still A's, recomputed rather than resurrected
+    session.switch('a')
+    eq('init.lua', symbols.shortpath('x/init.lua'))
+end)
+
+-- ★★★ THE FENCE FOR THE NINTH CACHE, and it is the point of the whole exercise:
+-- placement is now the DEFAULT-CORRECT choice, so the thing to forbid is the
+-- default-wrong one. The anti-pattern is precise — a FILE-SCOPE local assigned
+-- a value derived from `store.generation` — and it is what all seven sites had.
+-- A function-scope local holding a record READ from the store is fine, and a
+-- plan/envelope carrying a `generation` FIELD is not a cache at all.
+-- ⚠ MY FIRST TRY FLAGGED SIXTEEN SITES AND WAS WRONG ABOUT FOURTEEN: it treated
+-- any dotless assignment target as a module local, which catches every
+-- `generation = store.generation` field inside a plan literal (agent, moveapply,
+-- reorder, declare …) and every ordinary local. A fence with a 14/16 false
+-- positive rate gets deleted by the next person, so it reads the DECLARATIONS.
+test('bands: no module outside store.lua keys a FILE-SCOPE local on store.generation', function ()
+    local root = vim.fn.getcwd() .. '/lua/cartograph'
+    local bad, scanned, declared = {}, 0, 0
+    local function walk(dir)
+        for name, t in vim.fs.dir(dir) do
+            local path = dir .. '/' .. name
+            if t == 'directory' then walk(path)
+            elseif name:sub(-4) == '.lua' then
+                scanned = scanned + 1
+                local fd = io.open(path, 'r')
+                local src = fd and fd:read('a') or ''
+                if fd then fd:close() end
+                local rel = path:sub(#root + 2)
+                if rel ~= 'store.lua' and src ~= '' then
+                    local lines = vim.split(src, '\n')
+                    -- pass 1: FILE-SCOPE locals only — column 0, this repo's
+                    -- top-level form. `local a, b` declares both.
+                    local top = {}
+                    for _, line in ipairs(lines) do
+                        local names = line:match('^local ([%w_][%w_%s,]*)=')
+                            or line:match('^local ([%w_][%w_%s,]*)$')
+                        if names then
+                            for nm in names:gmatch('[%w_]+') do
+                                top[nm] = true; declared = declared + 1
+                            end
+                        end
+                    end
+                    -- pass 2: an assignment to one of them that reads the generation
+                    for lno, line in ipairs(lines) do
+                        if line:find('store%.generation') and not line:match('^%s*%-%-') then
+                            local lhs = line:match('^%s*([%w_][%w_%s,%.]-)%s*=[^=]')
+                            if lhs and not lhs:find('%.') then
+                                for nm in lhs:gmatch('[%w_]+') do
+                                    if top[nm] then
+                                        bad[#bad + 1] = ('%s:%d %s'):format(rel, lno,
+                                            (line:gsub('^%s+', '')))
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    walk(root)
+    -- guard the scan itself, twice: a walk that found no files, or a
+    -- declaration pass that matched nothing, would pass vacuously — the
+    -- fence-that-never-fires shape this repo keeps rediscovering
+    ok(scanned > 50, 'scanned a plausible number of modules: ' .. scanned)
+    ok(declared > 200, 'found file-scope locals to check against: ' .. declared)
+    eq({}, bad, 'file-scope generation caches (put them on the store instead)')
+end)

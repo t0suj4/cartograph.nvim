@@ -319,15 +319,21 @@ end
 -- 12 identical `init.lua` rows are worse than a clipped path. The full path stays
 -- on the row via `line_file` (hover/gf/staging read it, never the label).
 
+-- ⚠ ON THE STORE, NOT A MODULE UPVALUE (CART-0822). A module-level cache is
+-- INVISIBLE to session.capture()/restore(), which iterate the store's own
+-- fields, so two bands whose per-band generations collided read each other's
+-- answer. A store field listed in store.BAND_TRANSIENT is dropped on every band
+-- swap, with no registration beyond that one line.
 --- The shortest unique path suffix per file, rebuilt when the graph generation
 --- moves (same cache discipline as var_idx).
-local short_idx, short_gen
 local function suffix(segs, n)
     return table.concat(segs, '/', math.max(1, #segs - n + 1))
 end
 function M.shortpath(file)
-    if short_gen ~= store.generation or not short_idx then
-        short_idx, short_gen = {}, store.generation
+    local si = store._short_idx
+    if not si or si.gen ~= store.generation then
+        si = { gen = store.generation, idx = {} }
+        store._short_idx = si
         local by_base = {}
         for _, f in ipairs(store.files or {}) do
             local base = f:match('([^/]+)$') or f
@@ -336,7 +342,7 @@ function M.shortpath(file)
         end
         for _, fs in pairs(by_base) do
             if #fs == 1 then
-                short_idx[fs[1]] = fs[1]:match('([^/]+)$') or fs[1]
+                si.idx[fs[1]] = fs[1]:match('([^/]+)$') or fs[1]
             else
                 -- a shared basename grows parent segments until it separates
                 for _, f in ipairs(fs) do
@@ -353,12 +359,12 @@ function M.shortpath(file)
                         end
                         take = take + 1
                     until not clash or take > #segs
-                    short_idx[f] = label
+                    si.idx[f] = label
                 end
             end
         end
     end
-    return short_idx[file] or file
+    return si.idx[file] or file
 end
 
 --- Fit an identity into what the budget leaves after `indent` and `tail`. Elides
@@ -464,18 +470,29 @@ end
 -- var nodes by name, preferring the data-carrying one when names collide —
 -- rebuilt when the graph's generation moves (ingest/splice/hotswap). The
 -- lit-view ref follow used to scan ALL of by_id per keypress.
-local var_idx, var_gen
+-- ⚠ ON THE STORE, NOT A MODULE UPVALUE (CART-0822). A module-level cache is
+-- INVISIBLE to session.capture()/restore(), which iterate the store's own
+-- fields, so two bands whose per-band generations collided read each other's
+-- answer. A store field listed in store.BAND_TRANSIENT is dropped on every band
+-- swap, with no registration beyond that one line.
+-- ★★ THIS IS THE TICKET'S NAMED INSTANCE, and it is why the class is a WRONG
+-- ANSWER rather than an empty one: `var_by_name('cfg')` returned band A's var
+-- NODE for band B's row, and the lit-view ref follow DESCENDS it — so the
+-- navigation landed in the other corpus, with a real node and a real file, and
+-- nothing in the answer said which band it came from.
 local function var_by_name(name)
-    if var_gen ~= store.generation then
-        var_idx, var_gen = {}, store.generation
+    local vi = store._var_idx
+    if not vi or vi.gen ~= store.generation then
+        vi = { gen = store.generation, idx = {} }
+        store._var_idx = vi
         for _, n in pairs(store.by_id or {}) do
             if n.kind == 'var' then
-                local cur = var_idx[n.name]
-                if not cur or (n.data and not cur.data) then var_idx[n.name] = n end
+                local cur = vi.idx[n.name]
+                if not cur or (n.data and not cur.data) then vi.idx[n.name] = n end
             end
         end
     end
-    return var_idx[name]
+    return vi.idx[name]
 end
 
 local function file_row(ctx, file, depth, dim)

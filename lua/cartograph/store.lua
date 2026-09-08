@@ -2116,14 +2116,56 @@ end
 -- and per-band generations can COLLIDE, so a swapped cache would be silently
 -- stale. Single-band sessions never call these, so the common path is
 -- byte-identical (the gating invariant).
+--
+-- ⚠⚠⚠ AND THE LIST BELOW READ AS CLOSED FOR AS LONG AS BANDS HAVE EXISTED, WHICH
+-- IS WHY IT WAS WRONG (CART-0822). It enumerates THIS FILE'S caches. Seven more
+-- generation-keyed caches lived as MODULE-LEVEL UPVALUES in six other modules —
+-- lsp, clones (x2), characterize, portflow, panes/symbols (x2) — and
+-- capture()/restore() iterate `pairs(M)`, so an upvalue in another module is
+-- UNREACHABLE from here. Nothing was stale-but-empty: `var_by_name('cfg')`
+-- returned band A's var NODE for band B's row, and descending it navigated into
+-- the other corpus. Three of the seven sat on the AGENT path (mcpserve →
+-- agent → lsp/clones), which is what made this the prerequisite for giving any
+-- agent surface more than one root (CART-0823).
+--
+-- ★★★ SO THE FIX IS PLACEMENT, NOT A BETTER KEY, AND PLACEMENT IS WHAT FLIPS THE
+-- DEFAULT. A module upvalue is invisible to the band mechanism and every new one
+-- has to remember; a STORE FIELD is band-correct with no registration at all,
+-- because capture() copies every field it is not told to skip. The rejected
+-- alternative was keying each module cache on (root, generation) — the
+-- capture_selft idiom — and it has a hole placement does not: close a band on
+-- root R, reopen R later, and the generation RESTARTS, so (R, gen=1) matches a
+-- cache built from the earlier tree. capture_selft gets away with root-keying
+-- because it captures immediately after resolution; a long-lived memo does not.
+-- A band-identity TOKEN was also rejected: capture/restore already IS the band
+-- identity, and a second mechanism would need threading through the single-band
+-- path, cache loads and self:// bands — new surface for this exact bug class.
 M.SESSION_GLOBAL = { _subs = true, _redraw_subs = true, _hl_subs = true,
     _ctx_subs = true, _plan_subs = true, _fact_producers = true, loc_provider = true,
     -- _label_subs belongs here for the same reason as its siblings: a pane's
     -- subscription is SESSION wiring, not graph content, and leaving it out meant a
     -- re-ingest silently unwired the name pick (found by its own spec).
     _label_subs = true }
+-- ⚠ EVERY GENERATION-KEYED DERIVED CACHE BELONGS HERE, wherever it is COMPUTED.
+-- DROPPED on swap rather than snapshotted, deliberately and uniformly: all of
+-- these are derived and rebuildable, and RAM is the admission control on a
+-- multi-band session ([[cartograph-sweep-memory]]) — carrying N bands' clone
+-- indexes (per-fn row exprs, seconds to build repo-wide) is the wrong trade.
+-- Dropping costs a recompute; keeping a stale one costs a wrong answer.
+-- ★ Uniform ON PURPOSE: a per-site keep-or-drop judgement is how the last eight
+-- got decided one at a time. `effects.lua` uses the other correct placement
+-- (`store._fx/_fxgen`, snapshotted per band) and is left alone — it is sound,
+-- it is small, and re-deciding it is not this ticket.
 M.BAND_TRANSIENT = { _topo = true, _fold = true, _topo_gen = true, _ws_bfs = true,
-    _post = true, _post_gen = true, _scopes = true, _scopes_gen = true }
+    _post = true, _post_gen = true, _scopes = true, _scopes_gen = true,
+    -- CART-0822: re-homed from module-level upvalues in six other modules
+    _diag = true,           -- lsp.lua        the lint run behind diagnostics
+    _clone_idx = true,      -- clones.lua     the per-fn key index (the costly one)
+    _clone_relpost = true,  -- clones.lua     the related-post index
+    _field_reach = true,    -- characterize.lua
+    _portflow = true,       -- portflow.lua   the whole port-flow analysis
+    _short_idx = true,      -- panes/symbols.lua  shortest unambiguous file label
+    _var_idx = true }       -- panes/symbols.lua  var node by name
 
 --- Snapshot the active band's per-band state (shallow — each band owns distinct
 --- data/index tables, so sharing refs is correct; the caches are omitted and

@@ -328,13 +328,21 @@ end
 --- every test fixture is written to `m.lua`, so the first proj() cached an empty table for
 --- that path and every later fixture inherited it — a stale-cache miss that looks exactly
 --- like a derivation that does not fire.
-local field_reach_cache = nil
+-- ⚠ ON THE STORE, NOT A MODULE UPVALUE (CART-0822). A module-level cache is
+-- INVISIBLE to session.capture()/restore(), which iterate the store's own
+-- fields, so two bands whose per-band generations collided read each other's
+-- answer. A store field listed in store.BAND_TRANSIENT is dropped on every band
+-- swap, with no registration beyond that one line.
+-- ⚠ AND THE COMMENT ABOVE IS EXACTLY HOW THE CLASS SPREAD: it calls
+-- generation-keying "THE EXISTING IDIOM (clones.lua build_index)" and copies the
+-- PLACEMENT along with the key. The key was never the problem.
 local function field_reach(store, node)
     -- LAZY, like every other cross-module require in this file: holes -> synth -> runoracle
     -- -> characterize -> holes is a load cycle, and a top-level require re-enters mid-load
     -- (the CART-0326 lesson, recorded in holes.lua).
     local expr = require 'cartograph.expr'
-    if not field_reach_cache or field_reach_cache.gen ~= store.generation then
+    local fr = store._field_reach
+    if not fr or fr.gen ~= store.generation then
         -- ★ THE MODULE NODE IS NOT IN store.by_file — that index holds functions and regions
         -- only, which is why the first cut of this silently answered nil for every file. The
         -- file -> module map is built ONCE per generation here rather than rescanned per file.
@@ -342,14 +350,15 @@ local function field_reach(store, node)
         for _, n in ipairs(store.data.nodes or {}) do
             if n.kind == 'module' and n.file then mods[n.file] = n.id end
         end
-        field_reach_cache = { gen = store.generation, byfile = {}, mods = mods }
+        fr = { gen = store.generation, byfile = {}, mods = mods }
+        store._field_reach = fr
     end
-    local byfile = field_reach_cache.byfile
+    local byfile = fr.byfile
     local t = byfile[node.file]
     if t == nil then
         t = {}
         byfile[node.file] = t
-        local mid = field_reach_cache.mods[node.file]
+        local mid = fr.mods[node.file]
         local okm, mo = false, nil
         if mid then okm, mo = pcall(expr.of_module, store, mid) end
         local stmts = okm and mo and mo.fl and mo.fl.stmts or {}

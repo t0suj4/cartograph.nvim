@@ -587,15 +587,25 @@ end
 -- handler would double-publish). A PURE helper the stdio host calls on
 -- didOpen/didSave; memoized per graph generation so per-file filtering is cheap.
 local LSP_SEV = { error = 1, warn = 2, info = 3, hint = 4 }
-local _diag = { gen = nil, findings = nil }
+-- ⚠ ON THE STORE, NOT A MODULE UPVALUE (CART-0822). A module-level cache is
+-- INVISIBLE to session.capture()/restore(), which iterate the store's own
+-- fields, so two bands whose per-band generations collided read each other's
+-- answer. A store field listed in store.BAND_TRANSIENT is dropped on every band
+-- swap, with no registration beyond that one line.
+-- ★ AND THIS ONE IS ON THE AGENT PATH: mcpserve requires cartograph.agent, and
+-- agent.lua requires cartograph.lsp. A stale `_diag` here returns the OTHER
+-- band's findings for this file — every one of them naming a real line in a
+-- file of a different corpus.
 --- LSP Diagnostic[] for one file (by uri), from the graph-aware lint.
 function M.diagnostics(store, uri)
-    if _diag.gen ~= store.generation then
-        _diag = { gen = store.generation, findings = require('cartograph.lint').run(store) }
+    local d = store._diag
+    if not d or d.gen ~= store.generation then
+        d = { gen = store.generation, findings = require('cartograph.lint').run(store) }
+        store._diag = d
     end
     local abs = store.abs(file_key(store, uri))
     local out = {}
-    for _, f in ipairs(_diag.findings) do
+    for _, f in ipairs(d.findings) do
         if f.file == abs then
             local L = math.max((f.line or 1) - 1, 0)
             out[#out + 1] = {

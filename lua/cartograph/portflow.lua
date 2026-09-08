@@ -307,12 +307,17 @@ function M.decl_of(byname, decl, p)
 end
 
 -- ── the cached whole analysis ───────────────────────────────────────────────
-local cache
+-- ⚠ ON THE STORE, NOT A MODULE UPVALUE (CART-0822). A module-level cache is
+-- INVISIBLE to session.capture()/restore(), which iterate the store's own
+-- fields, so two bands whose per-band generations collided read each other's
+-- answer. A store field listed in store.BAND_TRANSIENT is dropped on every band
+-- swap, with no registration beyond that one line.
 function M.analyze(store, opts)
     opts = opts or { bare = true, degree = M.DEGREE }
     local key = ('%s|%s|%s'):format(tostring(opts.bare), tostring(opts.degree),
         tostring(opts.minw))
-    if cache and cache.gen == store.generation and cache.key == key then return cache.a end
+    local c = store._portflow
+    if c and c.gen == store.generation and c.key == key then return c.a end
     local col = M.collect(store)
     local part = M.partition(col, opts)
     local byname, decl = M.declarations(store)
@@ -346,7 +351,7 @@ function M.analyze(store, opts)
             linked = linked, unlinked = total - linked, edges = #col.edges,
             nfn = col.nfn, nsink = part.nsink, classes = #part.classes },
         opts = opts }
-    cache = { gen = store.generation, key = key, a = a }
+    store._portflow = { gen = store.generation, key = key, a = a }
     return a
 end
 
