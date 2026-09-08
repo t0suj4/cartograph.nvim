@@ -225,5 +225,22 @@ test('rootjoin: the tool runs on the fixture and reports its populations', funct
     -- rungs of evidence even when they join identically
     ok(out:find('carrier=tuple', 1, true) or out:find('carrier: %d+%-tuple'),
         'the tuple carrier is attributed in the rows')
+
+    -- ★★★ THE ROW'S RUNG IS COMPUTED, NOT ASSERTED (CART-0843). Both carriers
+    -- shipped claiming a flat `xlang`; the key comes from a distilled PROFILE
+    -- artifact, which the ladder grades `stdlib` — rank 5 against xlang's 3.
+    -- `tier.floor` takes the weakest hop, so the rung DROPS, and that drop is
+    -- the correction rather than a regression.
+    local rcall = out:match('rung%(call%) = (%S+)')
+    local rtup = out:match('rung%(tuple%) = (%S+)')
+    eq('stdlib', rcall, 'the call carrier floors at stdlib, not xlang')
+    eq('stdlib', rtup, 'and so does the tuple carrier')
+    ok(not out:find('rung%(call%) = xlang'), 'the flat overclaim must be gone')
+    -- ⚠ AND THE UNGRADED HOP IS VISIBLE. The tuple's meaning comes from an
+    -- INTERPRETATION — a `convention`, which the ladder has no slot for because
+    -- it is full. Reporting it is the `unbuilt` lesson one axis over: do not
+    -- approximate a missing rung with its nearest neighbour.
+    ok(out:find('UNGRADED', 1, true),
+        'the interpretation hop is reported as ungraded: ' .. tostring(rtup))
     vim.fn.delete(a, 'rf'); vim.fn.delete(b, 'rf')
 end)

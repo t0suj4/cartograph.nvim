@@ -74,6 +74,45 @@ M.LADDER = {
                                                -- See the ★ note above.
 }
 
+-- ══ THE FLOOR OVER A PATH ══════════════════════════════════════════════════
+-- ★★★ THE LADDER WAS ALWAYS A MAX OVER MECHANISMS, and that is why a composed
+-- relation needs a different aggregation rather than a different vocabulary.
+-- `M.of` grades an edge by the HIGHEST flag SET ON IT — correct for one edge
+-- resolved by one mechanism, and silently FLATTERING for a path that passed
+-- through several. Each hop of a composition is exactly the mechanism that
+-- would have set one of those flags: a profile-supplied value is what sets
+-- `stdlib`, a string-key match is what sets `xlang`. So this does not borrow the
+-- edge vocabulary for a new subject — it decomposes ONE edge's trust into the
+-- mechanisms that each would have flagged it, and takes the WEAKEST instead of
+-- letting one flag win.
+--
+-- ★★ A COMPOSED RELATION IS ONLY AS GOOD AS ITS WEAKEST HOP — min over hops,
+-- never max, never an average. A 3-hop path with two proven hops and one guess
+-- IS a guess.
+--
+-- ⚠⚠ AND AN UNGRADED HOP IS RETURNED, NOT SWALLOWED. A hop whose mechanism has
+-- no rung on this ladder (the banked `convention`, or anything a caller invents)
+-- cannot be approximated by its nearest neighbour — that is exactly the mistake
+-- `unbuilt` exists to prevent on the absence axis. The count comes back so a
+-- caller must render it; an empty or wholly-ungraded list returns `nil` and the
+-- caller must say UNGRADED rather than "no downgrade", which is the
+-- guard-that-reads-like-a-pass shape.
+---@param rungs table  a list of rung NAMES, one per hop that makes a claim
+---@return string|nil weakest  the least-trusted declared rung, nil if none was
+---@return integer ungraded    hops whose name is not a declared rung
+function M.floor(rungs)
+    local worst, ungraded = nil, 0
+    for _, t in ipairs(rungs or {}) do
+        local r = M.RANK[t]
+        if not r then ungraded = ungraded + 1
+        else
+            local wr = worst and M.RANK[worst]
+            if not wr or r > wr then worst = t end
+        end
+    end
+    return worst, ungraded
+end
+
 -- ══ THE TWO ABSENCE AXES ═══════════════════════════════════════════════════
 -- The ladder above grades a POSITIVE answer. Neither axis below is a rung on
 -- it, and neither is comparable with it: `M.LADDER` is FULL (fold.lua packs a

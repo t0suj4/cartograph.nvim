@@ -267,13 +267,15 @@ end
 --- emits `tier_headline = 'peak'` — a SUMMARY OVER ROWS IS A QUANTIFIER CHOICE,
 --- and publishing the summary without its quantifier is the same defect class as
 --- an empty list without its absence: the value is legible, its meaning is not.
+-- ★ DELEGATES TO tier.floor (CART-0843): the same arithmetic serves a SUMMARY
+-- OVER ROWS here and a FLOOR OVER HOPS in a composed relation, and two copies
+-- of "which of these is weakest" would drift the way the tier if-chain drifted
+-- across four files before tier.lua existed. ⚠ The `ungraded` count is dropped
+-- HERE deliberately and only here: every name in this list came from a verb's
+-- own row, so an undeclared one is a bug in that verb rather than a hop we
+-- cannot grade — and the envelope invariant already catches it.
 local function floor_tier(list)
-    local worst
-    for _, t in ipairs(list) do
-        local r, wr = tiers.rank(t), worst and tiers.rank(worst)
-        if r and (not wr or r > wr) then worst = t end
-    end
-    return worst
+    return (tiers.floor(list))
 end
 
 --- the CART-0545 disclosure, in agentq's own words: tier.lua and ladder.lua

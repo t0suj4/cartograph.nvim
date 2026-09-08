@@ -46,6 +46,7 @@ package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.pa
 local ts = require 'cartograph.providers.treesitter'
 local argv = require 'cartograph.argv'
 local prof = require 'cartograph.spec.profile'
+local tiers = require 'cartograph.tier'
 
 -- ── THE RELATION, DECLARED ──────────────────────────────────────────────────
 -- ★ ONE relation, as DATA rather than as control flow, so a second one is a
@@ -76,6 +77,37 @@ local RELATIONS = {
         right = {
             root = '~/work/brotardcast/converse.js/src',
             verb = 'addNamespace', alias_slot = 1, key_slot = 2,
+        },
+        -- ★★★ THE HOPS EACH CARRIER PASSES THROUGH, DECLARED (CART-0843). A join
+        -- row is a COMPOSED relation, and `tier.floor` takes the weakest hop
+        -- rather than letting the strongest mechanism speak for the path.
+        -- ⚠ THIS CORRECTS A SHIPPED OVERCLAIM: both carriers asserted a flat
+        -- `rung = 'xlang'`, and every URI-keyed row's key comes from
+        -- `erl-macros` — a distilled PROFILE ARTIFACT, which the ladder itself
+        -- grades `stdlib` ("an active env profile names it"), rank 5 against
+        -- xlang's 3. Two rungs of flattery, asserted as a constant where a
+        -- computation belonged.
+        -- ⚠ A HOP IS LISTED ONLY IF IT MAKES A CLAIM. Parsing the tuple out of
+        -- the tree is not a claim — it is the substrate (bytes and sightings),
+        -- and grading it would invent a rung for reading a file.
+        hops = {
+            call = {
+                'stdlib',   -- the URI comes from erl-macros, not from the source
+                'xlang',    -- and the client's literal is matched as a wire key
+            },
+            tuple = {
+                'stdlib',   -- same vocabulary, same artifact, same stamp
+                'xlang',    -- same string-key match on the client side
+                -- ⚠⚠ AND ONE HOP THIS LADDER CANNOT GRADE. The tuple's MEANING
+                -- comes from an INTERPRETATION derived from a consumer's clause
+                -- heads (gen_mod.erl:424-429) — a declared convention, which is
+                -- `convention`: a rung tier.lua lists as a BANKED insertion
+                -- point that DOES NOT EXIST, because the ladder is full (7
+                -- rungs, fold packs 3 bits, an 8th decodes as none). It is
+                -- reported as UNGRADED rather than approximated by its nearest
+                -- neighbour — the `unbuilt` lesson, one axis over. CART-0848.
+                'convention',
+            },
         },
         -- ⚠ THE NAME RULE, PRINTED WITH ITS RESULT. An unstated matching rule
         -- makes its own number uncheckable — the arc's earlier "8 by name" can
@@ -194,6 +226,12 @@ for _, c in ipairs(dl.calls or {}) do
     end
 end
 
+--- the honest rung for a row of `carrier`, plus how many hops are ungraded
+local function rung_of(carrier)
+    local floor, ungraded = tiers.floor(R.hops[carrier] or {})
+    return floor, ungraded
+end
+
 -- ── THE JOIN, both keys ─────────────────────────────────────────────────────
 -- ⚠ BOTH CARRIERS, AND THE CARRIER IS RECORDED PER ROW. They are the same
 -- relation (CART-0846) so they join identically, but a reader must be able to
@@ -205,13 +243,13 @@ for _, s in ipairs(reg) do
     if s.uri and decl_by_uri[s.uri] then
         local d = decl_by_uri[s.uri]
         by_uri[s.uri] = true
-        rows[#rows + 1] = { key = s.uri, kind = 'uri',
+        local fl, ung = rung_of('call')
+        rows[#rows + 1] = { key = s.uri, kind = 'uri', carrier = 'call',
             left = { root = left_root, file = s.file, line = s.line, via = s.name },
             right = { root = right_root, file = d.file, line = d.line, alias = d.alias },
-            -- xlang's own confidence rule: a string-key match is the mechanism
-            -- the protocol itself dispatches by, so it is not hedged
-            rung = 'xlang',
-            provenance = ('key from %s (%s)'):format(R.left.vocab, tostring(vstamp)) }
+            rung = fl, ungraded = ung,
+            provenance = ('key from %s (%s) · floor over %d hop(s)')
+                :format(R.left.vocab, tostring(vstamp), #R.hops.call) }
     end
     if s.name then
         local short = s.name:gsub(R.name_rule.strip, '')
@@ -225,10 +263,11 @@ for _, t in ipairs(tuple_regs) do
     if d then
         by_uri[t.uri] = true
         joined_by_carrier.tuple = joined_by_carrier.tuple + 1
+        local fl, ung = rung_of('tuple')
         rows[#rows + 1] = { key = t.uri, kind = 'uri', carrier = 'tuple',
             left = { root = left_root, file = t.file, line = t.line, via = t.name },
             right = { root = right_root, file = d.file, line = d.line, alias = d.alias },
-            rung = 'xlang',
+            rung = fl, ungraded = ung,
             provenance = ('key from %s (%s) · carrier: %d-tuple, interpretation from gen_mod')
                 :format(R.left.vocab, tostring(vstamp), t.arity) }
     end
@@ -255,6 +294,16 @@ print('')
 print(('  ★ JOINED, by URI:  %d namespace(s)  (%d row(s))'):format(cnt(by_uri), #rows))
 print(('    JOINED, by NAME: %d namespace(s)  — rule: strip %s, %s')
     :format(cnt(by_name), R.name_rule.strip, R.name_rule.match))
+for _, carrier in ipairs({ 'call', 'tuple' }) do
+    local fl, ung = rung_of(carrier)
+    print(('    rung(%s) = %s  — the FLOOR over %d declared hop(s) [%s]%s')
+        :format(carrier, tostring(fl), #R.hops[carrier],
+            table.concat(R.hops[carrier], ' -> '),
+            ung > 0 and (', ⚠ %d UNGRADED (no rung on this ladder)'):format(ung) or ''))
+end
+print('    ⚠ A COMPOSED ROW IS ONLY AS GOOD AS ITS WEAKEST HOP. Both carriers')
+print('      were shipped asserting a flat `xlang`; the key rides on a distilled')
+print('      profile artifact, which the ladder grades `stdlib` — two rungs down.')
 print('    ⚠ THE TWO KEYS FIND DIFFERENT SETS, which is the point: a namespace')
 print('      URI is the identity the protocol dispatches on, and each project')
 print('      names it whatever it likes (?NS_CLIENT_STATE is CSI).')
@@ -410,6 +459,8 @@ if want_rows then
         print(('    %s'):format(r.key))
         print(('      L %s:%s via ?%s'):format(r.left.file, tostring(r.left.line), tostring(r.left.via)))
         print(('      R %s:%s as %s'):format(r.right.file, tostring(r.right.line), tostring(r.right.alias)))
-        print(('      rung=%s · %s'):format(r.rung, r.provenance))
+        print(('      rung=%s%s · %s'):format(tostring(r.rung),
+            (r.ungraded or 0) > 0 and (' (+%d UNGRADED hop)'):format(r.ungraded) or '',
+            r.provenance))
     end
 end

@@ -70,6 +70,57 @@ test('tier: census bins ref edges by the ladder', function ()
     eq(1, c.edges.ref.matched)
 end)
 
+-- ── THE FLOOR OVER A PATH (CART-0843) ──────────────────────────────────────
+-- ★★★ THE LADDER WAS ALWAYS A MAX OVER MECHANISMS. `M.of` grades an edge by the
+-- HIGHEST flag set on it — right for one edge resolved one way, and silently
+-- FLATTERING for a path through several. Each hop of a composed relation is the
+-- mechanism that would have set one of those flags, so the floor is the
+-- composition-honest aggregation of the same vocabulary.
+
+test('tier: floor takes the WEAKEST hop, never the strongest', function ()
+    -- rank is the index: confirmed=1 … matched=7, so a HIGHER rank is weaker
+    eq('stdlib', (tier.floor({ 'xlang', 'stdlib' })), 'stdlib(5) is weaker than xlang(3)')
+    eq('stdlib', (tier.floor({ 'stdlib', 'xlang' })), 'and order does not matter')
+    eq('matched', (tier.floor({ 'confirmed', 'proven', 'matched' })), 'the tail rung wins')
+    eq('confirmed', (tier.floor({ 'confirmed' })), 'one hop is its own floor')
+    -- ⚠ THE SHIPPED OVERCLAIM THIS EXISTS TO PREVENT: rootjoin asserted a flat
+    -- `xlang` on rows whose key comes from a distilled PROFILE artifact, which
+    -- the ladder itself grades `stdlib`. Two rungs of flattery, from stamping a
+    -- constant where a computation belonged.
+    ok(tier.RANK.stdlib > tier.RANK.xlang, 'and the direction is the ladder\'s own')
+end)
+
+test('tier: an UNGRADED hop is COUNTED, never approximated', function ()
+    -- ⚠ THE VACUOUS CASES, BOTH DECIDED. An empty or wholly-ungraded list must
+    -- return nil so a caller says UNGRADED — returning a rung, or silently "no
+    -- downgrade", is the guard-that-reads-like-a-pass shape.
+    local f0, u0 = tier.floor({})
+    eq(nil, f0, 'no hops grades nothing')
+    eq(0, u0)
+    local f1, u1 = tier.floor({ 'banana' })
+    eq(nil, f1, 'an undeclared rung is NOT approximated by a neighbour')
+    eq(1, u1, 'it is counted so the caller must render it')
+    -- ★ AND THE REAL INSTANCE: the tuple carrier's interpretation hop is
+    -- `convention`, which tier.lua lists as a BANKED insertion point that does
+    -- not exist — the ladder is full (7 rungs, fold packs 3 bits). So a real
+    -- composed relation has an ungraded hop TODAY (CART-0848).
+    local f2, u2 = tier.floor({ 'stdlib', 'xlang', 'convention' })
+    eq('stdlib', f2, 'the declared hops still produce a floor')
+    eq(1, u2, 'and the undeclared one is reported beside it')
+    eq(nil, tier.RANK.convention, 'convention is banked, not declared')
+end)
+
+test('tier: floor is the ONE implementation — agent delegates to it', function ()
+    -- "a probe and a verb that compute the same thing SEPARATELY will disagree,
+    -- and the disagreement will be discovered by a reader who trusts the wrong
+    -- one". agent.lua's floor_tier was a second copy of this arithmetic.
+    local src = assert(io.open(vim.fn.getcwd() .. '/lua/cartograph/agent.lua')):read('a')
+    local body = assert(src:match('local function floor_tier%(list%)(.-)\nend'),
+        'could not find floor_tier — this test reads it, not a copy')
+    ok(body:find('tiers%.floor'), 'floor_tier must delegate, not reimplement')
+    ok(not body:find('for _, t in ipairs'), 'and the loop must be gone')
+end)
+
 -- ── THE TWO ABSENCE AXES (CART-0831) ───────────────────────────────────────
 -- runtime-topology/05-build-order.md's Phase 0: "settle the absence warrant,
 -- with no collector at all ... the only phase whose cost rises the longer it
