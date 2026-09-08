@@ -1,6 +1,6 @@
 ---
 name: cartograph
-description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 26 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the four reasons mean different things.
+description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 26 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
 ---
 
 # cartograph, for an agent
@@ -14,7 +14,7 @@ lenses) is for humans and you cannot use it.
 ## The one rule
 
 **An empty answer is never a bare empty list.** Every verb that finds nothing says
-*why*, and the reason is one of four values that do not mean the same thing:
+*why*, and the reason is one of five values that do not mean the same thing:
 
 | `absence` | means | your next move |
 |---|---|---|
@@ -22,6 +22,18 @@ lenses) is for humans and you cannot use it.
 | `refused` | something might qualify and a rule declined to pick | **do not** treat as nothing — read `absence_why.evidence` |
 | `frontier` | the analysis cannot see this far | a different tool, or accept the limit |
 | `unavailable` | the capability is missing on this graph or host | change the invocation |
+| `unbuilt` | the artifact is produced by a step nobody ran (codegen, a build) | run the build, then re-open |
+
+`absent` is the **only** one that licenses acting. `unbuilt` exists because it
+used to be reported as `absent`: a reading can be complete over the files that
+exist and still be incomplete over the system, when something outside them
+produces more of it.
+
+Every empty answer also carries a **`warrant`** — a second, independent question:
+`absence` asks why the GRAPH is silent, `warrant` asks why nothing OBSERVED it
+happen. Every verb here is static, so the warrant is `unprobed` and that is
+already true rather than new. Do not read `unsampled` (nothing watched long
+enough) as evidence of anything: only `proven-forbidden` licenses acting.
 
 This is the whole reason to use cartograph instead of grep. Measured on cartograph's
 own tree: of 266 dead-code findings, **7 were `absent` and 229 were `refused`** — only
@@ -37,11 +49,21 @@ Two hosts, same envelope.
 
 ```bash
 # a session — MCP, newline-delimited JSON-RPC 2.0, one JSON object per line
-nvim --headless -u NONE -l tools/mcpserve.lua <root> [--index-only] [--write]
+nvim --headless -u NONE -l tools/mcpserve.lua <root>... [--index-only] [--write]
 
 # one shot — one JSON document on stdout, nothing else
 nvim --headless -u NONE -l tools/agentq.lua <root> alibi <file> <line>
 ```
+
+**Several roots in one host.** Pass more than one and each opens as a *band*; every
+verb then takes an optional `band` (its `enum` in `tools/list` is the roster, and
+`graph_info` carries a `bands` note giving each band its root). Naming a band is
+**sticky** — it switches the session, so a later call that omits `band` answers
+about that one; `graph.band` and `graph.root` on every answer say which band
+answered. ⚠ This **selects** a root and does **not join** two: only one band is
+readable at a time, so no verb spans roots. A duplicate root is refused at
+startup. `lspserve` takes several roots too and needs no extra argument — it
+routes each request by its `textDocument.uri`.
 
 `agentq` exit codes, so a shell can tell an answer from a refusal without parsing:
 

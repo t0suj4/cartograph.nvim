@@ -226,6 +226,40 @@ test('bands: a PUBLIC reader answers about the active band after a swap', functi
     eq('init.lua', symbols.shortpath('x/init.lua'))
 end)
 
+-- ── ONE BAND IS NOT MULTI-BAND (CART-0823) ──────────────────────────────────
+-- ⚠⚠ AND THIS CASE IS UNREACHABLE FROM tools/mcpserve.lua, WHICH IS WHY IT
+-- NEEDED ITS OWN SPEC. A single-root host never calls `session.begin` at all, so
+-- it has ZERO bands — and a mutation loosening the gate from `< 2` to `< 1`
+-- passed every wire spec, because zero is below both. The state the gate
+-- actually protects is the COCKPIT'S NORMAL ONE: `init.lua` always registers a
+-- band, so an interactive session sits at exactly ONE, and its in-process agent
+-- calls must not start advertising a `band` argument that can only ever name the
+-- band you are already in.
+test('bands: ONE registered band advertises no band argument', function ()
+    local agent = require 'cartograph.agent'
+    session.reset()
+    session.begin('/a'); store.ingest(graph('/a', 'aaa'))
+    eq(1, #session.list(), 'the cockpit\'s normal state: exactly one band')
+    for _, verb in ipairs(agent.ORDER) do
+        eq(nil, (agent.schema(verb).properties or {}).band,
+            verb .. ' must not offer `band` when there is only one')
+    end
+    -- and the envelope still NAMES that band, because a session with a band has
+    -- an answer to "which one" even when there is no choice to make
+    local d = agent.answer(store, 'graph_info', {})
+    eq('a', d.graph.band)
+
+    -- TWO bands: now the question is real and the argument appears
+    session.begin('/b'); store.ingest(graph('/b', 'bbb'))
+    eq(2, #session.list())
+    for _, verb in ipairs(agent.ORDER) do
+        local band = (agent.schema(verb).properties or {}).band
+        ok(band ~= nil, verb .. ' must offer `band` when there are two')
+        eq(2, #(band.enum or {}), verb .. '.band enumerates the roster')
+    end
+    session.reset()
+end)
+
 -- ★★★ THE FENCE FOR THE NINTH CACHE, and it is the point of the whole exercise:
 -- placement is now the DEFAULT-CORRECT choice, so the thing to forbid is the
 -- default-wrong one. The anti-pattern is precise — a FILE-SCOPE local assigned
@@ -237,9 +271,15 @@ end)
 -- `generation = store.generation` field inside a plan literal (agent, moveapply,
 -- reorder, declare …) and every ordinary local. A fence with a 14/16 false
 -- positive rate gets deleted by the next person, so it reads the DECLARATIONS.
-test('bands: no module outside store.lua keys a FILE-SCOPE local on store.generation', function ()
+-- ⚠⚠ AND THEN IT MISSED TWO, WHICH IS THE MORE USEFUL FAILURE (CART-0823). It
+-- was written from seven instances that were all FILE-SCOPE LOCALS, so that is
+-- the only shape it checked — and `agent.lua`'s `M._graph_cache` /
+-- `M._refs_cache` are MODULE-TABLE FIELDS. ★ A FENCE DESCRIBES THE INSTANCES
+-- THAT PROMPTED IT, not the class; the way to find the gap was to ask what
+-- OTHER placement has the same property, not to re-read the same seven.
+test('bands: no module outside store.lua keys a MODULE-LEVEL cache on store.generation', function ()
     local root = vim.fn.getcwd() .. '/lua/cartograph'
-    local bad, scanned, declared = {}, 0, 0
+    local bad, scanned, declared, keyed = {}, 0, 0, 0
     local function walk(dir)
         for name, t in vim.fs.dir(dir) do
             local path = dir .. '/' .. name
@@ -252,28 +292,58 @@ test('bands: no module outside store.lua keys a FILE-SCOPE local on store.genera
                 local rel = path:sub(#root + 2)
                 if rel ~= 'store.lua' and src ~= '' then
                     local lines = vim.split(src, '\n')
-                    -- pass 1: FILE-SCOPE locals only — column 0, this repo's
-                    -- top-level form. `local a, b` declares both.
-                    local top = {}
+                    local function code(l) return not l:match('^%s*%-%-') end
+                    -- ── PASS 0: does this file read store.generation IN CODE?
+                    -- ⚠ THE GATE MUST READ CODE, NOT PROSE. Gating on any mention
+                    -- put escalate.lua back in scope purely because its header
+                    -- COMMENT explains why it is exempt — a fence tripped by its
+                    -- own documentation.
+                    local uses = false
                     for _, line in ipairs(lines) do
-                        local names = line:match('^local ([%w_][%w_%s,]*)=')
-                            or line:match('^local ([%w_][%w_%s,]*)$')
-                        if names then
-                            for nm in names:gmatch('[%w_]+') do
-                                top[nm] = true; declared = declared + 1
+                        if code(line) and line:find('store%.generation') then uses = true; break end
+                    end
+                    if uses then
+                        keyed = keyed + 1
+                        -- ── PASS 1: FILE-SCOPE locals (column 0, this repo's form)
+                        local top = {}
+                        for _, line in ipairs(lines) do
+                            local names = line:match('^local ([%w_][%w_%s,]*)=')
+                                or line:match('^local ([%w_][%w_%s,]*)$')
+                            if names then
+                                for nm in names:gmatch('[%w_]+') do
+                                    top[nm] = true; declared = declared + 1
+                                end
                             end
                         end
-                    end
-                    -- pass 2: an assignment to one of them that reads the generation
-                    for lno, line in ipairs(lines) do
-                        if line:find('store%.generation') and not line:match('^%s*%-%-') then
-                            local lhs = line:match('^%s*([%w_][%w_%s,%.]-)%s*=[^=]')
-                            if lhs and not lhs:find('%.') then
-                                for nm in lhs:gmatch('[%w_]+') do
-                                    if top[nm] then
+                        -- ── PASS 2: an assignment in either default-wrong placement
+                        for lno, line in ipairs(lines) do
+                            -- ⚠⚠ TWO SIGNALS, AND THE SECOND IS WHY CART-0823'S PAIR
+                            -- ESCAPED THE FIRST VERSION. agent.lua reads
+                            -- `local gen = store.generation` on ONE line and assigns
+                            -- `M._graph_cache = { gen = gen, … }` on ANOTHER, so a
+                            -- fence that demanded `store.generation` on the
+                            -- assignment line could not see it. A record whose first
+                            -- field is `gen` is the same cache by another spelling.
+                            local sig = line:find('store%.generation')
+                                or line:find('=%s*{%s*gen%s*=')
+                            if sig and code(line) then
+                                local lhs = line:match('^%s*([%w_][%w_%s,%.]-)%s*=[^=]')
+                                if lhs and not lhs:find('%.') then
+                                    for nm in lhs:gmatch('[%w_]+') do
+                                        if top[nm] then
+                                            bad[#bad + 1] = ('%s:%d %s'):format(rel, lno,
+                                                (line:gsub('^%s+', '')))
+                                            break
+                                        end
+                                    end
+                                elseif lhs then
+                                    -- `store.<field>` is the CORRECT placement, so the
+                                    -- RECEIVER decides — `M.`/a module alias is a cache
+                                    -- the band mechanism cannot reach.
+                                    local recv = lhs:match('^([%w_]+)%.')
+                                    if recv and recv ~= 'store' then
                                         bad[#bad + 1] = ('%s:%d %s'):format(rel, lno,
                                             (line:gsub('^%s+', '')))
-                                        break
                                     end
                                 end
                             end
@@ -284,10 +354,12 @@ test('bands: no module outside store.lua keys a FILE-SCOPE local on store.genera
         end
     end
     walk(root)
-    -- guard the scan itself, twice: a walk that found no files, or a
-    -- declaration pass that matched nothing, would pass vacuously — the
-    -- fence-that-never-fires shape this repo keeps rediscovering
+    -- guard the scan itself, three ways: a walk that found no files, a gate that
+    -- admitted no files, or a declaration pass that matched nothing would all
+    -- pass vacuously — the fence-that-never-fires shape this repo keeps
+    -- rediscovering, and this fence has now failed that way TWICE
     ok(scanned > 50, 'scanned a plausible number of modules: ' .. scanned)
-    ok(declared > 200, 'found file-scope locals to check against: ' .. declared)
-    eq({}, bad, 'file-scope generation caches (put them on the store instead)')
+    ok(keyed > 5, 'modules that actually read store.generation in code: ' .. keyed)
+    ok(declared > 20, 'file-scope locals to check against: ' .. declared)
+    eq({}, bad, 'module-level generation caches (put them on the store instead)')
 end)

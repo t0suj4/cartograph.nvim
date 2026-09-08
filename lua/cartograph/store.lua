@@ -2165,7 +2165,15 @@ M.BAND_TRANSIENT = { _topo = true, _fold = true, _topo_gen = true, _ws_bfs = tru
     _field_reach = true,    -- characterize.lua
     _portflow = true,       -- portflow.lua   the whole port-flow analysis
     _short_idx = true,      -- panes/symbols.lua  shortest unambiguous file label
-    _var_idx = true }       -- panes/symbols.lua  var node by name
+    _var_idx = true,        -- panes/symbols.lua  var node by name
+    -- ⚠ CART-0823 found TWO MORE in agent.lua, and the CART-0822 fence could not
+    -- see them: they were MODULE-TABLE fields (`M._graph_cache = …`), not
+    -- file-scope locals, and each carried a VACUOUS second key — `c.store ==
+    -- store` on a singleton module table is true forever. `_graph_doc` is the
+    -- worse of the two: M.graph runs on every agent answer and stamps which BAND
+    -- answered, so a stale one makes the envelope lie about its own provenance.
+    _graph_doc = true,      -- agent.lua      the graph_info doc
+    _refs_doc = true }      -- agent.lua      externals.references (whole-corpus reparse)
 
 --- Snapshot the active band's per-band state (shallow — each band owns distinct
 --- data/index tables, so sharing refs is correct; the caches are omitted and

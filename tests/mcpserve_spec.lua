@@ -883,6 +883,220 @@ test('mcpserve: mentions REFUSES on a thin index rather than reporting zero file
     eq(vim.NIL, d.absence, 'a missing INSTRUMENT is not an absence in the code')
 end)
 
+-- ── ★★★ N ROOTS ON THE AGENT SURFACE (CART-0823) ────────────────────────────
+-- The cockpit has been multi-band since bands shipped; this host took exactly
+-- ONE root. ~/work/brotardcast registers TWO cartograph servers in its
+-- .mcp.json for that reason — two extractions, two processes, and no way to ask
+-- either about the other.
+-- ⚠ WHAT IS FENCED IS "SWITCHABLE", NOT "JOINED". Only one band is readable at a
+-- time (a stashed band is a store.capture() snapshot), so these specs assert
+-- that a verb can be POINTED at a root and says which one answered — never that
+-- a verb spans two. That join is CART-0821 / CART-0026.
+
+-- a second root whose function name exists NOWHERE in the first, so "which band
+-- answered" is decidable from the ANSWER and not just from the envelope's label
+local B_LUA = [[
+local M = {}
+function M.only_in_band_b(x) return x end
+return M
+]]
+
+local function mkfixture_b()
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/b.lua', 'w'))
+    fd:write(B_LUA); fd:close()
+    return root
+end
+
+local TWO
+local function client_two()
+    if TWO then return TWO.c, TWO.a, TWO.b end
+    local a, b = mkfixture(), mkfixture_b()
+    local c, err = mcp.connect { cmd = { vim.v.progpath, '--headless', '-u', 'NONE',
+        '-l', repo('tools/mcpserve.lua'), a, b }, timeout = 60000 }
+    ok(c ~= nil, 'two-root mcpserve did not come up: ' .. tostring(err))
+    TWO = { c = c, a = a, b = b }
+    return c, a, b
+end
+
+test('mcpserve: a SINGLE root advertises no band argument at all', function ()
+    if not ready() then skip('no treesitter') end
+    -- ★ THE BYTE-IDENTICAL PATH. `agent.multiband()` returns nil below two
+    -- bands, so a one-root host is exactly what it was — no injected argument,
+    -- no routing branch, and a client written against it sees no change. This is
+    -- asserted FIRST because it is the property most easily lost.
+    local c = client(false)
+    local res = c:request('tools/list', vim.empty_dict())
+    for _, t in ipairs(res.tools) do
+        eq(nil, (t.inputSchema.properties or {}).band,
+            t.name .. ' must not offer `band` on a single-root host')
+    end
+end)
+
+test('mcpserve: two roots advertise a DISCOVERABLE band argument, with the roster', function ()
+    if not ready() then skip('no treesitter') end
+    local c = client_two()
+    local res, why = c:request('tools/list', vim.empty_dict())
+    ok(res ~= nil, 'tools/list: ' .. tostring(why))
+    local n = 0
+    for _, t in ipairs(res.tools) do
+        local band = (t.inputSchema.properties or {}).band
+        ok(band ~= nil, t.name .. ' must offer `band`')
+        if band then
+            n = n + 1
+            -- ★ AN ENUM, NOT FREE TEXT: a client can offer the real band names
+            -- instead of guessing them, which is the difference between a router
+            -- an agent can use and one it cannot.
+            eq(2, #(band.enum or {}), t.name .. '.band lists both open bands')
+            ok(band.description:find('does NOT join', 1, true)
+                or band.description:find('not available', 1, true),
+                'the description says this selects a root rather than joining two')
+        end
+    end
+    ok(n >= 10, 'the band argument is injected in ONE place, so every verb has it: ' .. n)
+end)
+
+test('mcpserve: the FIRST root is the default band even when argv is RELATIVE', function ()
+    if not ready() then skip('no treesitter') end
+    -- ⚠⚠ THE RELATIVE FORM IS THE ONE THAT BROKE SILENTLY, and it took reverting
+    -- to see: `vim.fn.expand('./ra')` returns `./ra` unchanged while the provider
+    -- absolutizes `data.root`, so comparing the two matched NOTHING and the
+    -- LAST band stayed active — the exact opposite of the documented "first root
+    -- is the default", with no error anywhere. Measured on the revert:
+    --     active rb   (wrong, last root)   vs   active ra   (fixed)
+    -- ★ Driven through a shell so the roots really are relative to a cwd; the
+    -- MCP client harness has no cwd option, and a spec that SKIPS here would
+    -- have fenced nothing. The banner on stderr is the assertion surface.
+    local parent = vim.fn.tempname()
+    vim.fn.mkdir(parent .. '/ra', 'p'); vim.fn.mkdir(parent .. '/rb', 'p')
+    local fa = assert(io.open(parent .. '/ra/a.lua', 'w')); fa:write(M_LUA); fa:close()
+    local fb = assert(io.open(parent .. '/rb/b.lua', 'w')); fb:write(B_LUA); fb:close()
+    local cmd = ('cd %s && %s --headless -u NONE -l %s ./ra ./rb </dev/null 2>&1')
+        :format(vim.fn.shellescape(parent), vim.fn.shellescape(vim.v.progpath),
+            vim.fn.shellescape(repo('tools/mcpserve.lua')))
+    local out = vim.fn.system({ 'sh', '-c', cmd })
+    local active = out:match('bands %[[^%]]*%], active (%S+)')
+    ok(active ~= nil, 'the host reported its roster: ' .. out:sub(1, 300))
+    eq('ra', active, 'the FIRST relative root is the default band')
+    vim.fn.delete(parent, 'rf')
+end)
+
+test('mcpserve: graph_info publishes the roster, each band with its root', function ()
+    if not ready() then skip('no treesitter') end
+    local c, a = client_two()
+    local d, why = c:call('graph_info', vim.empty_dict())
+    ok(d ~= nil, 'graph_info: ' .. tostring(why))
+    eq(a, d.graph.root, 'argv order is the only preference the operator expressed')
+    ok(d.graph.band ~= vim.NIL and d.graph.band ~= nil, 'and the envelope NAMES the band')
+    -- the roster rides on the negotiation surface: the enum gives names, this
+    -- gives each name its ROOT, which is what makes the choice meaningful
+    local bands
+    for _, note in ipairs(d.notes or {}) do if note.kind == 'bands' then bands = note end end
+    ok(bands ~= nil, 'graph_info carries a bands note')
+    ok(bands.why:find('2 roots', 1, true), 'and says how many are open')
+    ok(bands.why:find(a, 1, true), 'naming each root, not just each band name')
+end)
+
+test('mcpserve: `band` points a verb at the other root, and the ANSWER proves which', function ()
+    if not ready() then skip('no treesitter') end
+    local c, a, b = client_two()
+    -- band A cannot see B's function, and that is the control: without it, a
+    -- passing find in band B would not distinguish "switched" from "both
+    -- resident in one graph".
+    local d0 = c:call('node_find', { query = 'only_in_band_b' })
+    eq(0, #d0.result, 'band A does not contain band B\'s function')
+    ok(d0.absence ~= vim.NIL, 'and says so as an ABSENCE, not a bare empty list')
+    eq(a, d0.graph.root, 'answered from the default (first) root')
+    -- ⚠ AND A BAND NAME IS ONLY ACCEPTED WHERE IT IS ADVERTISED: on a
+    -- single-root host `band` stays an unknown argument rather than being
+    -- silently ignored, which would let a caller believe it took effect.
+    local d1, why1 = client(false):call('node_find', { query = 'M', band = 'anything' })
+    eq(nil, d1, 'a single-root host does not accept `band`')
+    ok(tostring(why1):find('no argument', 1, true),
+        'it is a USAGE fault, not a silently ignored argument: ' .. tostring(why1))
+end)
+
+test('mcpserve: the SWITCH happens, is STICKY, and every answer says where it is', function ()
+    if not ready() then skip('no treesitter') end
+    local c, a, b = client_two()
+    local bandnames = {}
+    local res = c:request('tools/list', vim.empty_dict())
+    for _, t in ipairs(res.tools) do
+        if t.name == 'node_find' then bandnames = t.inputSchema.properties.band.enum end
+    end
+    table.sort(bandnames)
+    -- find the band whose root is B, from the roster rather than by guessing
+    local bname
+    local gi = c:call('graph_info', vim.empty_dict())
+    for _, note in ipairs(gi.notes or {}) do
+        if note.kind == 'bands' then
+            for name, root in note.why:gmatch('([%w_%-%.:]+)%*? %-> (%S+)') do
+                if root == b then bname = name:gsub('%*$', '') end
+            end
+        end
+    end
+    ok(bname ~= nil, 'the roster names the band owning root B')
+
+    local d = c:call('node_find', { query = 'only_in_band_b', band = bname })
+    eq(b, d.graph.root, 'the answer came from root B')
+    ok(#d.result >= 1, 'and it FOUND B\'s function — a label alone would not prove the switch')
+
+    -- ★★ STICKY, ASSERTED RATHER THAN ASSUMED. Naming a band switches the
+    -- session; a following call that omits `band` answers about THAT band. The
+    -- alternative (scoped, switch-and-restore) would drop every BAND_TRANSIENT
+    -- cache twice per call — the clone index alone is seconds repo-wide — so
+    -- sticky is the deliberate choice and this is what makes it discoverable
+    -- rather than surprising.
+    local d2 = c:call('graph_info', vim.empty_dict())
+    eq(b, d2.graph.root, 'the band is STICKY: a later call without `band` stays in B')
+    eq(d.graph.band, d2.graph.band, 'and the envelope keeps naming it')
+
+    -- back, so later specs in this file are not surprised by the cursor
+    local names = {}
+    for _, note in ipairs(d2.notes or {}) do
+        if note.kind == 'bands' then
+            for name, root in note.why:gmatch('([%w_%-%.:]+)%*? %-> (%S+)') do
+                if root == a then names[#names + 1] = name:gsub('%*$', '') end
+            end
+        end
+    end
+    local back = c:call('graph_info', { band = names[1] })
+    eq(a, back.graph.root, 'and it switches back the same way')
+end)
+
+test('mcpserve: an unknown band REFUSES with the roster, and does not answer from the active one', function ()
+    if not ready() then skip('no treesitter') end
+    local c, a = client_two()
+    local d, why, raw = c:call('node_find', { query = 'M', band = 'no-such-band' })
+    ok(d ~= nil, 'the refusal arrives as content: ' .. tostring(why))
+    eq(false, raw.isError)
+    eq(false, d.ok)
+    eq('unknown-band', d.refusal.rule)
+    -- ★ THE POINT OF REFUSING RATHER THAN DEFAULTING: answering from the active
+    -- band would attribute a real result to the wrong root, silently. An agent
+    -- that mistyped a band name must not receive a plausible answer.
+    eq(vim.NIL, d.result, 'nothing was run')
+    ok(d.refusal.remedy:find('|', 1, true) or d.refusal.remedy:find('graph_info', 1, true),
+        'and the remedy names the open bands')
+    eq(a, d.graph.root, 'the envelope reports the band the caller was ALREADY in')
+end)
+
+test('mcpserve: a duplicate root is REFUSED at startup, not silently deduped', function ()
+    if not ready() then skip('no treesitter') end
+    -- ⚠ CART-0837 ARRIVES AT THIS ENTRY POINT. `session.begin` accepts a
+    -- duplicate root, `name_for` uniquifies the NAME, and `by_root` then returns
+    -- whichever `pairs()` yields first — nondeterministically. The cockpit is
+    -- safe only because init.lua's caller checks `by_root` first; argv has no
+    -- such guard, which is exactly what that finding predicted.
+    local a = mkfixture()
+    local out = vim.fn.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l',
+        repo('tools/mcpserve.lua'), a, a })
+    ok(vim.v.shell_error ~= 0, 'the server refuses to start')
+    ok(out:find('given twice', 1, true), 'and says why: ' .. out:sub(1, 200))
+    vim.fn.delete(a, 'rf')
+end)
+
 test('mcpserve: the servers shut down cleanly', function ()
     if not ready() then skip('no treesitter') end
     for _, s in pairs(SERVERS) do
@@ -890,5 +1104,10 @@ test('mcpserve: the servers shut down cleanly', function ()
         vim.fn.delete(s.root, 'rf')
     end
     SERVERS = {}
+    if TWO then
+        TWO.c:close()
+        vim.fn.delete(TWO.a, 'rf'); vim.fn.delete(TWO.b, 'rf')
+        TWO = nil
+    end
     ok(true)
 end)

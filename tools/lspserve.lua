@@ -15,19 +15,78 @@ local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
-local root = arg[1]
-if not root then io.stderr:write('usage: lspserve <root>\n'); os.exit(2) end
+-- ── N ROOTS, ROUTED BY THE URI (CART-0823) ──────────────────────────────────
+-- ★★★ AND THE LSP SIDE NEEDS NO PROTOCOL EXTENSION, WHICH IS THE WHOLE POINT.
+-- The MCP host routes by an explicit `band` argument because a tool call names
+-- no file. Every LSP request DOES name one — `textDocument.uri` — and
+-- `session.owning(path)` already answers "which band owns this file?" by root
+-- containment, innermost root winning. It was written for the cockpit's rule
+-- (a command acts on the buffer's band) and it is the same rule here.
+-- ⚠ SWITCHABLE ROOTS, NOT A CROSS-ROOT QUERY: one band is readable at a time, so
+-- a definition in root A is never found from a file in root B. That join is
+-- CART-0821 / CART-0026, not this.
+local roots = {}
+for i = 1, #arg do roots[#roots + 1] = arg[i] end
+if #roots == 0 then io.stderr:write('usage: lspserve <root>...\n'); os.exit(2) end
 
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local lsp = require 'cartograph.lsp'
+-- one band per root only when there IS more than one: the single-root path never
+-- touches `session`, so it stays byte-identical
+local session = #roots > 1 and require 'cartograph.session' or nil
 
--- cold-load the corpus once (a server pays extraction at startup, then serves)
-local ok, data = pcall(ts.extract, root)
-if not ok then io.stderr:write('extract failed: ' .. tostring(data) .. '\n'); os.exit(1) end
-data.root = data.root or root
-store.ingest(data)
-io.stderr:write(('cartograph lspserve: %s (%d nodes)\n'):format(root, #data.nodes))
+do
+    local seen = {}
+    for _, r in ipairs(roots) do
+        -- ⚠ ONE BAND PER ROOT (CART-0837): `session.begin` accepts duplicates and
+        -- `by_root`/`owning` then depend on `pairs()` order. argv has no guard in
+        -- front of it, so a repeat is refused rather than deduped.
+        local key = vim.fn.fnamemodify(vim.fn.expand(r), ':p'):gsub('/+$', '')
+        if seen[key] then
+            io.stderr:write(('lspserve: root %q given twice — one band per root (CART-0837)\n'):format(key))
+            os.exit(2)
+        end
+        seen[key] = true
+        -- extract BEFORE begin, so the band's `root` is `data.root` verbatim —
+        -- `owning` matches by string containment against it
+        local ok, data = pcall(ts.extract, r)
+        if not ok then io.stderr:write('extract failed (' .. r .. '): ' .. tostring(data) .. '\n'); os.exit(1) end
+        data.root = data.root or r
+        if session then session.begin(data.root) end
+        store.ingest(data)
+        io.stderr:write(('cartograph lspserve: %s (%d nodes)\n'):format(data.root, #data.nodes))
+    end
+end
+if session then
+    -- ⚠ NORMALISE BOTH SIDES. `expand` does not absolutize a bare relative path,
+    -- so `lspserve ./a ./b` would compare `./a` against an absolutized `data.root`,
+    -- match nothing, and silently leave the LAST band active — the opposite of
+    -- the documented "first root is the default". The duplicate check above
+    -- already normalises this way; both sides must agree.
+    local function norm(x) return vim.fn.fnamemodify(vim.fn.expand(x), ':p'):gsub('/+$', '') end
+    local want = norm(roots[1])
+    for _, b in ipairs(session.list()) do
+        if norm(b.root) == want then session.switch(b.name); break end
+    end
+    io.stderr:write(('cartograph lspserve: %d bands, active %s — requests route by textDocument.uri\n')
+        :format(#session.list(), tostring(session.active)))
+end
+
+--- Point the lens at the band OWNING this request's file, if the request names
+--- one. ⚠ A request with no uri (`shutdown`, `initialize`) leaves the band
+--- alone: the alternative — resetting to the first band — would make the active
+--- band depend on how a client interleaves its housekeeping.
+local function route(params)
+    if not session then return end
+    local uri = params and ((params.textDocument or {}).uri or params.uri)
+    if type(uri) ~= 'string' then return end
+    local path = uri:gsub('^file://', ''):gsub('%%(%x%x)', function (h)
+        return string.char(tonumber(h, 16))
+    end)
+    local owner = session.owning(path)
+    if owner and owner ~= session.active then session.switch(owner) end
+end
 
 -- ── Content-Length framed JSON-RPC over stdio ───────────────────────────
 local function read_message()
@@ -73,6 +132,7 @@ while true do
         if method == 'textDocument/didOpen' or method == 'textDocument/didSave' then
             local td = msg.params and msg.params.textDocument
             if td and td.uri then
+                route(msg.params)
                 write_message {
                     jsonrpc = '2.0', method = 'textDocument/publishDiagnostics',
                     params = { uri = td.uri, diagnostics = lsp.diagnostics(store, td.uri) },
@@ -85,6 +145,7 @@ while true do
         if not h then
             fail(id, -32601, 'method not found: ' .. method)
         else
+            route(msg.params)
             local hok, res = pcall(h, store, msg.params or {})
             if hok then reply(id, res == nil and vim.NIL or res)
             else fail(id, -32603, tostring(res)) end

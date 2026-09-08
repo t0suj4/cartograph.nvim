@@ -130,6 +130,35 @@ local NUL = vim.NIL
 M.WRITABLE = false
 function M.set_writable(on) M.WRITABLE = on and true or false end
 
+-- ── MULTI-BAND ROUTING (CART-0823) ──────────────────────────────────────────
+-- ★★ THE COCKPIT HAS BEEN MULTI-BAND SINCE BANDS SHIPPED AND THE AGENT SURFACE
+-- TOOK EXACTLY ONE ROOT — a rung apart on the axis the application needs.
+-- ~/work/brotardcast registers TWO MCP SERVERS in its .mcp.json because one
+-- process could not hold both roots: two extractions, two resident graphs, two
+-- processes.
+--
+-- ⚠⚠ WHAT THIS BUYS AND WHAT IT DOES NOT. A stashed band is a `store.capture()`
+-- SNAPSHOT, not a live graph, and only one band is readable at a time. So this
+-- buys SWITCHABLE roots — a verb can be asked "in which band?" — and NOT a
+-- cross-root QUERY. A question spanning two graphs at once is CART-0821 (which
+-- sidesteps bands entirely) and later CART-0026's federated accessor. Anyone who
+-- reads the first as the second will be wrong.
+--
+-- ★ NO SECOND HOME FOR THE ROSTER. `session` IS the registry; this reads it live
+-- rather than taking a copy the way `set_writable` takes the permission. A
+-- permission is a fact about the host and has nowhere else to live; a band
+-- roster already has an owner, and two copies is the bug this repo keeps filing.
+local session = require 'cartograph.session'
+
+--- The band roster, ONLY when the question arises: nil for zero or one band, so
+--- a single-root host takes the byte-identical path it always did — no `band`
+--- argument in any schema, no routing branch, no behaviour to re-verify.
+local function multiband()
+    local rows = session.list()
+    if #rows < 2 then return nil end
+    return rows
+end
+
 -- ── small helpers ───────────────────────────────────────────────────────────
 
 local function nn(v) if v == nil then return NUL end return v end
@@ -300,20 +329,40 @@ local function build_graph(store)
     }
 end
 
+-- ⚠⚠⚠ THE NINTH BAND-UNSAFE CACHE, AND IT WAS IN THIS FILE (CART-0823, the
+-- class of CART-0822). It read `c.gen == gen and c.store == store`, which LOOKS
+-- like an identity check and is VACUOUS: `store` is a singleton MODULE TABLE, so
+-- `c.store == store` is true forever and the memo was keyed on the generation
+-- ALONE. ★ A guard that never fires reads exactly like a passing test.
+-- ⚠ AND THE CART-0822 FENCE STRUCTURALLY COULD NOT SEE IT: that fence forbids a
+-- FILE-SCOPE LOCAL keyed on store.generation, and this is a MODULE-TABLE FIELD
+-- (`M._graph_cache = …`, a dotted target). The fence is widened in
+-- tests/session_spec.lua to cover dotted targets on anything but `store`.
+-- ★★ IT MATTERS MOST HERE, WHICH IS WHY IT IS FIXED IN THIS TICKET RATHER THAN
+-- FILED: M.graph runs on EVERY answer, and multi-band discoverability rests on
+-- the envelope's `graph` naming the band that answered. This cache is the one
+-- thing that could make it LIE. Reachable over the wire on a write host — a
+-- txn_apply in band A bumps A's generation to B's (fresh opens land on 1 and 2,
+-- one write equalizes), and every envelope from band B then carries A's doc.
 function M.graph(store)
     local gen = store.generation or 0
-    local c = M._graph_cache
+    local c = store._graph_doc
     local doc
-    if c and c.gen == gen and c.store == store then
+    if c and c.gen == gen then
         doc = c.doc
     else
         doc = build_graph(store)
-        M._graph_cache = { gen = gen, store = store, doc = doc }
+        store._graph_doc = { gen = gen, doc = doc }
     end
     -- `writable` is stamped on EVERY call, never inside build_graph: it is a fact
     -- about the HOST, and the memo is keyed on the graph's generation, so freezing
     -- it there would publish whatever the flag happened to be at the first answer.
     doc.writable = M.WRITABLE
+    -- ★ AND `band` FOR THE SAME REASON, ONE RUNG OUT: which band answered is a
+    -- fact about the SESSION, not about this graph's content. Stamped per call so
+    -- a memo can never publish a stale band name — the whole point of naming it.
+    -- nil on a single-band host, where the question does not arise.
+    doc.band = next(session.bands or {}) and session.active or nil
     return doc
 end
 
@@ -398,8 +447,26 @@ local function v_graph_info(store)
             available = available, unavailable_why = nn(why),
             absences = v.absences }
     end
+    -- ★★ THE ROSTER RIDES ON THE NEGOTIATION SURFACE (CART-0823). graph_info's
+    -- job is to say what may be asked at all, and on a multi-root host "of
+    -- which root?" is part of that. Without it an agent can read `band` in a
+    -- tool schema and still not know what the other bands ARE — the enum gives
+    -- names, this gives each name its ROOT, which is what makes the choice
+    -- meaningful. A NOTE rather than a row: the rows describe verbs, and mixing
+    -- two kinds of row into one list is how a result stops being one thing.
+    local notes
+    local rows2 = multiband()
+    if rows2 then
+        local parts = {}
+        for _, b in ipairs(rows2) do
+            parts[#parts + 1] = ('%s%s -> %s'):format(b.name, b.active and '*' or '', b.root)
+        end
+        notes = { { kind = 'bands',
+            why = ('%d roots are open in this session (* = active, answers default to it); pass `band` to any verb to switch. ⚠ This SELECTS a root, it does not JOIN two — no verb here spans bands: %s')
+                :format(#rows2, table.concat(parts, ' · ')) } }
+    end
     -- graph_info's own rows are a description of the instrument, never empty.
-    return { result = rows }
+    return { result = rows, notes = notes }
 end
 
 -- ── verb: node_find ─────────────────────────────────────────────────────────
@@ -1413,14 +1480,17 @@ end
 --- The READ SURFACE, memoized on this graph's generation. references() re-parses
 --- every function in the corpus (expr.of), so the move verb — which needs both
 --- the diff and the coverage counts the diff does not return — would otherwise
---- pay for it twice per call and again on every repeat. Keyed the way M.graph's
---- memo is, on (store, generation), so an edit invalidates it.
+--- pay for it twice per call and again on every repeat.
+--- ⚠ THE TENTH, AND ITS COMMENT NAMED THE BUG: it said "keyed the way M.graph's
+--- memo is, on (store, generation)" — inheriting the vacuous half along with the
+--- pattern. `store` is a singleton module table; the tuple was always a single.
+--- Now a store field, dropped on a band swap. See M.graph above.
 local function refs_of(store)
     local gen = store.generation or 0
-    local c = M._refs_cache
-    if c and c.gen == gen and c.store == store then return c.refs end
+    local c = store._refs_doc
+    if c and c.gen == gen then return c.refs end
     local refs = require('cartograph.externals').references(store)
-    M._refs_cache = { gen = gen, store = store, refs = refs }
+    store._refs_doc = { gen = gen, refs = refs }
     return refs
 end
 
@@ -2741,6 +2811,29 @@ function M.schema(verb)
         props[a.name] = p
         if a.required then req[#req + 1] = a.name end
     end
+    -- ★★ THE BAND ARGUMENT IS DECLARED, NOT DOCUMENTED (CART-0823). A router an
+    -- agent cannot DISCOVER is a router it will not use: tools/list publishes
+    -- this schema, so the argument has to be in it, with the roster as an `enum`
+    -- so a client can offer the actual band names rather than guess them.
+    -- Injected here, in the one place every surface's schema comes from, instead
+    -- of appended to thirty `args` tables.
+    local rows = multiband()
+    if rows then
+        local names = {}
+        for _, r in ipairs(rows) do names[#names + 1] = r.name end
+        table.sort(names)
+        -- ⚠⚠ AND THE DESCRIPTION MUST NOT NAME THE CURRENT BAND. A client fetches
+        -- tools/list ONCE at startup and caches it; sticky switching then moves
+        -- the active band, and a baked-in name would be wrong for the rest of the
+        -- session. This is exactly what M.graph's `doc.writable` comment warns
+        -- about one screen up — "the memo is keyed on the graph's generation, so
+        -- freezing it there would publish whatever the flag happened to be at the
+        -- first answer" — and the rule was followed for the envelope stamp and
+        -- broken here. The band that answered belongs in the ANSWER, which is
+        -- what `graph.band` is for; a schema can only describe the RULE.
+        props.band = { type = 'string', enum = names,
+            description = 'which open root to answer about. Default: whichever band is active — every answer\'s `graph.band` and `graph.root` name the one that answered, and graph_info lists the roster with each band\'s root. ⚠ STICKY: naming a band switches this session to it, so a later call that omits `band` answers about THAT band. On a --write host a write verb writes to whichever band it is routed to. This SELECTS a root; it does NOT join two — a cross-root question is not available on this surface.' }
+    end
     return { type = 'object', required = req,
         properties = next(props) and props or vim.empty_dict() }
 end
@@ -2782,10 +2875,23 @@ local function validate(verb, args)
             end
         end
     end
+    -- ★ `band` IS DECLARED BY M.schema, NOT BY v.args, so the unknown-argument
+    -- check has to know about it too (CART-0823). It is injected in one place
+    -- rather than appended to thirty arg tables — and this loop is the second
+    -- surface of that same decision, which is exactly the kind of pair that
+    -- goes unnoticed: the schema would advertise `band` while the validator
+    -- rejected it, and the wire spec is where that showed up.
+    -- ⚠ ACCEPTED ONLY WHEN IT IS REAL. On a single-band host `band` is not
+    -- advertised, so passing it stays a usage error rather than being quietly
+    -- swallowed — an argument that is silently ignored is worse than one that
+    -- is refused, because the caller believes it took effect.
+    local band_ok = multiband() ~= nil
     for k in pairs(args) do
-        if not decl[k] then
+        if not decl[k] and not (k == 'band' and band_ok) then
+            local names = vim.tbl_map(function (a) return a.name end, v.args)
+            if band_ok then names[#names + 1] = 'band' end
             return ('%s has no argument `%s` (accepts: %s)'):format(verb, k,
-                #v.args > 0 and table.concat(vim.tbl_map(function (a) return a.name end, v.args), ', ') or 'none')
+                #names > 0 and table.concat(names, ', ') or 'none')
         end
     end
     return nil
@@ -2807,6 +2913,33 @@ function M.answer(store, verb, args)
         return { ok = false, verb = verb,
             error = { kind = 'usage', reason = bad } }, 'usage'
     end
+
+    -- ── BAND ROUTING, RESOLVED BEFORE THE SWITCH (CART-0823) ────────────────
+    -- ⚠⚠ AND THE SWITCH IS DEFERRED PAST THE PERMISSION CHECK ON PURPOSE. A
+    -- refused call must not leave the session pointing at a different root: that
+    -- is CART-0583's defect exactly — a read-only host that still mutated
+    -- session state — and switching is a real state change (it drops every
+    -- BAND_TRANSIENT cache). So the band is DECIDED here, APPLIED below only
+    -- once the call is going to run, and an unknown name becomes a refusal that
+    -- answers about the band the caller was already in.
+    local rows = multiband()
+    local btarget, berr
+    if rows and args.band ~= nil and args.band ~= '' then
+        if not session.bands[args.band] then
+            local names = {}
+            for _, r in ipairs(rows) do names[#names + 1] = r.name end
+            table.sort(names)
+            berr = { rule = 'unknown-band',
+                reason = ('no open band named %q, so %s was not run — answering about an unnamed band would silently attribute the result to the wrong root'):format(tostring(args.band), verb),
+                remedy = ('name one of the open bands: %s (or omit `band` for the active one, %q). graph_info lists the roster with each band\'s root'):format(table.concat(names, ' | '), tostring(session.active)) }
+        elseif args.band ~= session.active then
+            btarget = args.band
+        end
+    end
+    -- PERMISSION IS A FACT ABOUT THE HOST, NOT THE BAND, so it is settled while
+    -- still in the caller's current band.
+    local perm_refused = v.mutates and not M.WRITABLE
+    if btarget and not perm_refused and not berr then session.switch(btarget) end
 
     local graph = M.graph(store)
     local function envelope(fields)
@@ -2832,6 +2965,11 @@ function M.answer(store, verb, args)
             reason = ('%s writes to the tree, and this host was started without write permission — nothing was planned, diffed or written'):format(verb),
             remedy = 'start the host with --write (nvim --headless -u NONE -l tools/mcpserve.lua <root> --write). Planning and previewing need no permission: txn_plan_* and txn_preview answer on a read-only host, so a proposal and its diff can be produced and reviewed before anyone grants the power to apply it' }
     end
+
+    -- ADDRESSING, after permission and before capability: a capability question
+    -- is per-BAND (one root may be thin and another full), so it cannot be asked
+    -- until the band is settled.
+    if berr then return refusal(berr) end
 
     -- CAPABILITY, in ONE place. A verb that needs the call graph must never be
     -- allowed to answer "none" off a graph that has none.

@@ -39,15 +39,47 @@ local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
-local root, index_only, writable
+-- ── N ROOTS, ONE BAND EACH (CART-0823) ──────────────────────────────────────
+-- The cockpit has been multi-band since bands shipped and this host took exactly
+-- ONE root, on the axis the application needs: ~/work/brotardcast registers TWO
+-- cartograph servers in its .mcp.json because one process could not hold both.
+-- Now `mcpserve <rootA> <rootB> …` opens a band per root, and every verb takes
+-- an optional `band` (declared in tools/list, so an agent can discover it).
+--
+-- ⚠⚠ THIS BUYS SWITCHABLE ROOTS, NOT A CROSS-ROOT QUERY. Only one band is
+-- readable at a time — a stashed band is a store.capture() snapshot, not a live
+-- graph — so no verb here spans two roots. The question that needs both graphs
+-- at once is CART-0821, and later CART-0026's federated accessor. Read this as
+-- the second and you will be wrong.
+local roots, index_only, writable = {}, nil, nil
 for i = 1, #arg do
     if arg[i] == '--index-only' then index_only = true
     elseif arg[i] == '--write' then writable = true
-    elseif not root then root = arg[i] end
+    else roots[#roots + 1] = arg[i] end
 end
-if not root then
-    io.stderr:write('usage: mcpserve <root> [--index-only] [--write]\n')
+if #roots == 0 then
+    io.stderr:write('usage: mcpserve <root>... [--index-only] [--write]\n')
     os.exit(2)
+end
+-- ⚠ ONE BAND PER ROOT, ENFORCED HERE BECAUSE NOTHING ELSE ENFORCES IT
+-- (CART-0837). `session.begin` accepts a duplicate root happily — `name_for`
+-- uniquifies the NAME, so a second band on one root registers and `by_root` then
+-- returns whichever `pairs()` yields first, nondeterministically. The cockpit is
+-- safe only because init.lua's caller checks `by_root` before opening. THIS is
+-- the entry point that finding predicted: roots arrive from argv with no such
+-- guard, so the duplicate is REFUSED rather than deduped — a repeated root in a
+-- command line is a caller error, and silently collapsing it would hide it.
+do
+    local seen = {}
+    for _, r in ipairs(roots) do
+        local key = vim.fn.fnamemodify(vim.fn.expand(r), ':p'):gsub('/+$', '')
+        if seen[key] then
+            io.stderr:write(('mcpserve: root %q given twice (as %q and %q). One band per root: two bands on one root make `by_root` nondeterministic — see CART-0837.\n')
+                :format(key, seen[key], r))
+            os.exit(2)
+        end
+        seen[key] = r
+    end
 end
 
 local agent = require 'cartograph.agent'
@@ -80,17 +112,54 @@ local function kinds_of(list)
     return table.concat(out, '|')
 end
 
--- cold-load the corpus once (a server pays extraction at startup, then serves)
-local ok, data = pcall(index_only and ts.index_only or ts.extract, root)
-if not ok then
-    io.stderr:write('extract failed: ' .. tostring(data) .. '\n')
-    os.exit(1)
+-- cold-load each corpus once (a server pays extraction at startup, then serves)
+-- ★ ONE BAND PER ROOT, IN ARGV ORDER, so the FIRST root is the one answers
+-- default to. `session.begin` freezes the outgoing band before the next ingest,
+-- which is what keeps N graphs resident rather than clobbering one.
+-- ⚠ A SINGLE ROOT NEVER TOUCHES session AT ALL: `begin` is called only when
+-- there is more than one, so the one-root path — every existing caller, every
+-- existing spec — is byte-identical, and `agent.multiband()` returns nil, so no
+-- `band` argument appears in any schema.
+local session = #roots > 1 and require 'cartograph.session' or nil
+local band_of_root = {}
+for _, r in ipairs(roots) do
+    -- EXTRACT FIRST, THEN REGISTER. `session.begin` freezes the outgoing band
+    -- and makes the new one active, so the ingest that follows lands in the new
+    -- band — but doing the extract first lets the band's `root` be `data.root`
+    -- VERBATIM. That matters: `session.by_root` and `session.owning` compare
+    -- against it by string containment, so a band registered under the argv
+    -- spelling and a graph carrying the provider's spelling would never match.
+    local ok, data = pcall(index_only and ts.index_only or ts.extract, r)
+    if not ok then
+        io.stderr:write(('extract failed (%s): %s\n'):format(r, tostring(data)))
+        os.exit(1)
+    end
+    data.root = data.root or r
+    if session then band_of_root[data.root] = session.begin(data.root) end
+    store.ingest(data)
+    io.stderr:write(('cartograph mcpserve: %s (%d nodes%s%s)\n')
+        :format(data.root, #(data.nodes or {}), index_only and ', index-only' or '',
+            writable and ', WRITABLE' or ', read-only'))
 end
-data.root = data.root or root
-store.ingest(data)
-io.stderr:write(('cartograph mcpserve: %s (%d nodes%s%s)\n')
-    :format(root, #(data.nodes or {}), index_only and ', index-only' or '',
-        writable and ', WRITABLE' or ', read-only'))
+if session then
+    -- ★ THE FIRST ROOT IS THE DEFAULT BAND, because argv order is the only
+    -- preference the operator expressed. The loop above left the LAST one
+    -- active, so switch back explicitly rather than relying on iteration order.
+    -- ⚠ NORMALISE BOTH SIDES. `expand` does not absolutize a bare relative path,
+    -- so `mcpserve ./a ./b` would compare `./a` against an absolutized `data.root`,
+    -- match nothing, and silently leave the LAST band active — the opposite of
+    -- the documented "first root is the default". The duplicate check above
+    -- already normalises this way; both sides must agree.
+    local function norm(x) return vim.fn.fnamemodify(vim.fn.expand(x), ':p'):gsub('/+$', '') end
+    local want = norm(roots[1])
+    for root, name in pairs(band_of_root) do
+        if norm(root) == want then session.switch(name); break end
+    end
+    local names = {}
+    for _, b in ipairs(session.list()) do names[#names + 1] = b.name end
+    io.stderr:write(('cartograph mcpserve: %d bands [%s], active %s — pass `band` to any verb; it SELECTS a root and does not join two\n')
+        :format(#names, table.concat(names, ' '), tostring(session.active)))
+end
 
 -- ── newline-delimited JSON-RPC 2.0 over stdio ───────────────────────────
 local function write_message(obj)
