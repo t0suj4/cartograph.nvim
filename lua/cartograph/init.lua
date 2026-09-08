@@ -281,6 +281,19 @@ function M.open(dump_path, opts)
                 vim.notify('cartograph: ' .. pbline,
                     pb.refused > 0 and vim.log.levels.WARN or vim.log.levels.INFO)
             end
+            -- ★ THE SECOND REGISTRATION CARRIER (CART-0846): erlang registers
+            -- IQ handlers by CALL and by a TUPLE RETURNED FROM A CALLBACK, and
+            -- argv reads only the call. This reads the tuple against the
+            -- interpretation gen_mod.erl states in executable code, and mints
+            -- the SAME handler edge the call path mints — using xlang's own
+            -- exported resolver, never a synthetic call (dec/36).
+            -- Runs BEFORE xlang so the handler edges exist when the linker runs.
+            local er = require('cartograph.erlreg').attach(data)
+            local erline = require('cartograph.erlreg').summary(er)
+            if erline then
+                vim.notify('cartograph: ' .. erline,
+                    #er.refused > 0 and vim.log.levels.WARN or vim.log.levels.INFO)
+            end
             -- a configured database: its tables join the graph and the
             -- code's SQL entities link to them (session post-pass)
             local dbl, dberr = require('cartograph.dblink').attach(data)

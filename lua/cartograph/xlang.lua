@@ -206,6 +206,66 @@ function M.call_text(root, c, lines)
     return text
 end
 
+--- ★ THE DEF INDEX, EXPORTED FOR THE SAME REASON AS handler_by_module: a
+--- second carrier must resolve against the IDENTICAL index, tail rule included,
+--- or the two carriers disagree about which names are ambiguous.
+---@return table  name -> { node, … }
+function M.def_index(data)
+    local exact, tails = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            exact[n.name] = exact[n.name] or {}
+            table.insert(exact[n.name], n)
+            local tail = n.name:match('([%w_]+)$')
+            if tail and tail ~= n.name then
+                tails[tail] = tails[tail] or {}
+                table.insert(tails[tail], n)
+            end
+        end
+    end
+    -- a unique tail resolves too (Worker::work findable as 'work')
+    for tail, list in pairs(tails) do
+        if #list == 1 and not exact[tail] then exact[tail] = list end
+    end
+    return exact
+end
+
+--- ★★ THE HANDLER RESOLUTION, EXPORTED BECAUSE A SECOND CARRIER NEEDS IT
+--- (CART-0846). Given the def index, a function NAME and optionally the MODULE
+--- that owns it, return the one node id or nil.
+--- ⚠ A SEPARATE ARGUMENT MAY NAME THE HANDLER'S MODULE (CART-0226). erlang
+--- registers `add_iq_handler(Component, Host, NS, mod_mam, process_iq_v0_3)` —
+--- the handler is a PAIR, and the function atom alone is hopeless: `process_iq`
+--- is defined by a dozen modules, so the uniqueness test refuses every one of
+--- them. With the module in hand the candidate set is one file, and a name that
+--- is ambiguous corpus-wide is unique inside it.
+--- ⚠ IT DISAMBIGUATES, IT NEVER WIDENS: a module naming no file we have leaves
+--- the candidates untouched, so an unknown module cannot turn a refusal into a
+--- guess.
+--- ★ EXPORTED RATHER THAN COPIED. erlang's SECOND registration carrier — a
+--- `{iq_handler, …}` tuple returned from a callback — resolves its handler by
+--- the same (name, module) pair, and "a probe and a verb that compute the same
+--- thing SEPARATELY will disagree, and the disagreement will be discovered by a
+--- reader who trusts the wrong one" (holes.lua's own reason for existing).
+---@param exact table  name -> { node, … }, from M.def_index
+---@param name string|nil
+---@param mod string|nil  the module's basename, when a carrier names one
+---@return string|nil  the resolved node id
+function M.handler_by_module(exact, name, mod)
+    local cands = name and exact[name] or nil
+    if cands and mod and mod ~= '' then
+        local fit
+        for _, nd in ipairs(cands) do
+            if (nd.file or ''):match('([^/]+)%.[%w]+$') == mod then
+                fit = fit == nil and nd or false
+            end
+        end
+        if fit then cands = { fit } end
+    end
+    if name and cands and #cands == 1 then return cands[1].id end
+    return nil
+end
+
 --- Resolve the handler of an export call: a resolved function argv first,
 --- then a textual scan of the call's source for a qualified/plain function
 --- name (the &Class::Method inside base::BindRepeating spans lines).
@@ -227,23 +287,13 @@ local function find_handler(c, root, exact, export)
             -- ⚠ IT DISAMBIGUATES, IT NEVER WIDENS: a module that names no file we
             -- have leaves the candidates untouched, so an unknown module cannot
             -- turn a refusal into a guess.
-            local cands = name and exact[name] or nil
-            if cands and export.mod then
+            local mn
+            if export.mod then
                 local m = argv.at(c, export.mod + off)
-                local mn = m and (m.k == 'lit' and m.v or m.k == 'local' and m.name)
-                if mn and mn ~= '' then
-                    local fit
-                    for _, nd in ipairs(cands) do
-                        if (nd.file or ''):match('([^/]+)%.[%w]+$') == mn then
-                            fit = fit == nil and nd or false
-                        end
-                    end
-                    if fit then cands = { fit } end
-                end
+                mn = m and (m.k == 'lit' and m.v or m.k == 'local' and m.name)
             end
-            if name and cands and #cands == 1 then
-                return cands[1].id
-            end
+            local hit = M.handler_by_module(exact, name, mn)
+            if hit then return hit end
             -- an inline closure or unresolvable callable: don't fall through
             -- to the textual scan, it would grab neighbouring names
             if a.k ~= 'expr' then return nil end
@@ -357,23 +407,7 @@ function M.link(data, bindings)
     bindings = bindings or require('cartograph.config').bindings
         or M.default_bindings
     local coop = require 'cartograph.coop' -- tick() yields under coop.run; else no-op
-    local exact, tails = {}, {}
-    for _, n in ipairs(data.nodes) do
-        if n.kind == 'function' or n.kind == 'method' then
-            exact[n.name] = exact[n.name] or {}
-            table.insert(exact[n.name], n)
-            local tail = n.name:match('([%w_]+)$')
-            if tail and tail ~= n.name then
-                tails[tail] = tails[tail] or {}
-                table.insert(tails[tail], n)
-            end
-        end
-    end
-    -- a unique tail resolves too (Worker::work findable as 'work')
-    for tail, list in pairs(tails) do
-        if #list == 1 and not exact[tail] then exact[tail] = list end
-    end
-    local refEdge = {}
+    local exact = M.def_index(data)    local refEdge = {}
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
     end

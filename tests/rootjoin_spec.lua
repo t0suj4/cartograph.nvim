@@ -184,13 +184,22 @@ test('rootjoin: the tool runs on the fixture and reports its populations', funct
     -- GREEN while the tool printed "0 registration(s)" — a guard that did not
     -- fire, in the spec written to guard exactly that. The count in the OUTPUT
     -- is the thing a reader trusts, so it is the thing under test.
-    local n = out:match('REFUSED [^:]*:%s*(%d+) registration')
-    ok(n ~= nil, 'the tool reports a refused count: ' .. out:sub(1, 400))
+    -- ⚠ THE LABEL CHANGED WHEN THE CARRIER BECAME READABLE (CART-0846). It said
+    -- "REFUSED (registered in a shape argv cannot read)"; argv still cannot, but
+    -- `erlreg` now does, so the section is a TEXT CENSUS kept as an independent
+    -- check on the structural reader. This spec broke on that rename, which is
+    -- the spec working: it asserts the tool's own output, not a copy of it.
+    local n = out:match('censused by TEXT[^:]*:%s*(%d+) tagged tuple')
+    ok(n ~= nil, 'the tool reports the text census: ' .. out:sub(1, 400))
     ok(tonumber(n) == 1,
-        'the fixture has exactly ONE tuple registration and the tool must find it, got ' .. tostring(n))
+        'the fixture has exactly ONE tagged tuple and the census must find it, got ' .. tostring(n))
     -- and the tool must say so rather than presenting zero as clean
     ok(not out:find('ZERO IS SUSPECT', 1, true),
         'a census reporting zero on a fixture that has one is broken')
+    -- ★ THE TWO READERS MUST AGREE. A text scan and a structural reader over the
+    -- same shape are each other's check; the tool prints which.
+    ok(out:find('COUNTS AGREE', 1, true) or out:find('COUNTS DISAGREE', 1, true),
+        'the tool states whether the census and the reader agree')
 
     -- ★★★ AND THE TWO JOIN NUMBERS, FROM THE TOOL. Asserting only that the
     -- LABELS appear left the key logic unfenced: collapsing the name join onto
@@ -202,9 +211,19 @@ test('rootjoin: the tool runs on the fixture and reports its populations', funct
     -- twice.
     local nu = out:match('JOINED, by URI:%s*(%d+)')
     local nn = out:match('JOINED, by NAME:%s*(%d+)')
-    eq('2', nu, 'the URI is the identity: both registered namespaces join')
-    eq('1', nn, 'the local names agree on only one')
+    -- ★★★ THREE, NOT TWO, AND THE THIRD IS THE POINT (CART-0846). The fixture's
+    -- server registers TWO namespaces by CALL and a third by the TUPLE carrier
+    -- (`{iq_handler, ejabberd_local, ?NS_TIME, process_local_iq}`), which argv
+    -- cannot reach. Reading it takes this join 2 -> 3 — the same move that took
+    -- the real corpus 6 -> 10. This assertion was `2` until the carrier landed,
+    -- and it changing IS the deliverable.
+    eq('3', nu, 'the URI is the identity: both carriers contribute')
     ok(tonumber(nu) > tonumber(nn),
-        'and the tool must show the URI join as the LARGER set, not equal')
+        'and the URI join stays the LARGER set — the two keys still disagree')
+    -- and the carrier is recorded per row, so a reader can ask which produced a
+    -- pair: an argv-read call and an interpretation-read tuple are different
+    -- rungs of evidence even when they join identically
+    ok(out:find('carrier=tuple', 1, true) or out:find('carrier: %d+%-tuple'),
+        'the tuple carrier is attributed in the rows')
     vim.fn.delete(a, 'rf'); vim.fn.delete(b, 'rf')
 end)

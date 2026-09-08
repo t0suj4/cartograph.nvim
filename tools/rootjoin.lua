@@ -159,6 +159,22 @@ for _, c in ipairs(dr.calls or {}) do
 end
 local function cnt(t) local k = 0 for _ in pairs(t) do k = k + 1 end return k end
 
+-- ── ★★★ THE SECOND CARRIER (CART-0846), NOW READ. The tuple registry that was
+-- counted-but-never-joined below is joinable: `erlreg` reads it against the
+-- interpretation gen_mod.erl states in executable code, and the URI it yields
+-- is the SAME key this relation already joins on. So the REFUSED population
+-- shrinks and the JOINED one grows — and the four namespaces the call form
+-- never reaches (urn:xmpp:blocking · carbons:2 · push:0 · time) arrive here.
+local erlreg = require 'cartograph.erlreg'
+local ers = erlreg.attach(dl)
+local tuple_regs = {}
+for _, r in ipairs(ers.rows or {}) do
+    if r.uri then
+        tuple_regs[#tuple_regs + 1] = { k = 'tuple', name = r.key, uri = r.uri,
+            file = r.file, line = r.line, arity = r.arity }
+    end
+end
+
 -- ── the LEFT side: registrations by CALL, and the key's kind per site ───────
 local reg, kinds, unvalued = {}, {}, 0
 for _, c in ipairs(dl.calls or {}) do
@@ -179,7 +195,12 @@ for _, c in ipairs(dl.calls or {}) do
 end
 
 -- ── THE JOIN, both keys ─────────────────────────────────────────────────────
+-- ⚠ BOTH CARRIERS, AND THE CARRIER IS RECORDED PER ROW. They are the same
+-- relation (CART-0846) so they join identically, but a reader must be able to
+-- ask which carrier produced a pair — the call form is argv-read, the tuple form
+-- is interpretation-read, and those are different rungs of evidence.
 local rows, by_uri, by_name = {}, {}, {}
+local joined_by_carrier = { call = 0, tuple = 0 }
 for _, s in ipairs(reg) do
     if s.uri and decl_by_uri[s.uri] then
         local d = decl_by_uri[s.uri]
@@ -198,6 +219,25 @@ for _, s in ipairs(reg) do
     end
 end
 
+-- the SAME join, over the second carrier
+for _, t in ipairs(tuple_regs) do
+    local d = decl_by_uri[t.uri]
+    if d then
+        by_uri[t.uri] = true
+        joined_by_carrier.tuple = joined_by_carrier.tuple + 1
+        rows[#rows + 1] = { key = t.uri, kind = 'uri', carrier = 'tuple',
+            left = { root = left_root, file = t.file, line = t.line, via = t.name },
+            right = { root = right_root, file = d.file, line = d.line, alias = d.alias },
+            rung = 'xlang',
+            provenance = ('key from %s (%s) · carrier: %d-tuple, interpretation from gen_mod')
+                :format(R.left.vocab, tostring(vstamp), t.arity) }
+    end
+    if t.name then
+        local short = t.name:gsub(R.name_rule.strip, '')
+        if decl_by_alias[short] then by_name[short] = true end
+    end
+end
+
 print('')
 print('  POPULATIONS, and they answer four different questions')
 print(('    client DECLARED          %4d site(s)  %d distinct URI, %d distinct alias%s')
@@ -209,6 +249,8 @@ table.sort(kparts)
 print(('    server REGISTERED (call) %4d site(s)  key slot kinds: %s%s')
     :format(#reg, table.concat(kparts, ' '),
         unvalued > 0 and (', %d unvalued'):format(unvalued) or ''))
+print(('    server REGISTERED (tuple) %3d site(s)  %s')
+    :format(#tuple_regs, erlreg.summary(ers) or 'no tuple carrier here'))
 print('')
 print(('  ★ JOINED, by URI:  %d namespace(s)  (%d row(s))'):format(cnt(by_uri), #rows))
 print(('    JOINED, by NAME: %d namespace(s)  — rule: strip %s, %s')
@@ -258,8 +300,19 @@ end
 -- guard the census: a pattern that silently matches nothing would report a
 -- clean residual, which is the strongest possible wrong answer here
 print('')
-print(('  REFUSED (registered in a shape argv cannot read): %d registration(s) in %d file(s), %d distinct namespace(s)')
+-- ⚠ THIS CENSUS NOW MEASURES A POPULATION THAT IS READ, and saying "argv
+-- cannot read it" without saying who DOES would be stale prose describing a
+-- solved gap. argv still cannot; `erlreg` reads it by interpretation
+-- (CART-0846). The census is KEPT rather than deleted because it is the
+-- independent check on the reader: a TEXT SCAN counted 32 and the structural
+-- reader claims 26 of 32 with 6 refused by kind, and those two numbers agreeing
+-- is what says the reader is not silently dropping a shape.
+print(('  THE SECOND CARRIER, censused by TEXT as a check on the reader: %d tagged tuple(s) in %d file(s), %d distinct namespace(s)')
     :format(refused_regs, cnt(refused_files), cnt(refused_ns)))
+print(('    structural reader: %d read · %d refused by element kind (%d total) %s')
+    :format(#tuple_regs, (ers.notvalue or 0), ers.tuples,
+        ers.tuples == refused_regs and '★ COUNTS AGREE'
+            or '⚠ COUNTS DISAGREE — the reader or the scan is missing a shape'))
 if refused_regs == 0 then
     print('    ⚠ ZERO IS SUSPECT, NOT CLEAN: this is a text scan for a shape known')
     print('      to exist in ejabberd. Zero means the pattern or the walk is')
@@ -279,17 +332,18 @@ else
             if not by_uri[v] then also_new[v] = true end
         end
     end
-    print(('    ★ %d of them WOULD join by URI, and %d of those are namespaces the')
-        :format(cnt(joinable), cnt(also_new)))
-    print(('      call form does NOT reach — so reading this shape would take the'))
-    print(('      join from %d to %d namespaces, not %d to %d.')
-        :format(cnt(by_uri), cnt(by_uri) + cnt(also_new), cnt(by_uri), cnt(joinable)))
-    if cnt(also_new) > 0 then
-        local names = {}
-        for v in pairs(also_new) do names[#names + 1] = v end
-        table.sort(names)
-        print(('      only there: %s'):format(table.concat(names, ' · ')))
-    end
+    print(('    ★ %d of them join by URI, and %d of the joined namespaces come')
+        :format(cnt(joinable), joined_by_carrier.tuple > 0 and cnt(joinable) or 0))
+    print(('      from this carrier — %d join rows out of %d carry carrier=tuple.')
+        :format(joined_by_carrier.tuple, #rows))
+    -- ★ THE MARGINAL VALUE IS NOW ZERO BY CONSTRUCTION, AND THAT IS THE POINT.
+    -- Before erlreg this section reported "reading this shape would take the
+    -- join 6 -> 10". It is read, the join IS 10, and the residual's remaining
+    -- gain is nil — which is what a closed gap looks like. Keep the line: a
+    -- residual that silently stops being reported cannot be seen to have closed.
+    print('    ⚠ AND THE REMAINING GAIN IS NOW NIL, BY CONSTRUCTION: before this')
+    print('      carrier was read the same census said "6 -> 10". It is read, the')
+    print('      join IS 10, and a closed gap should still report itself.')
 end
 
 -- ── THE CEILINGS, for reading the join against ──────────────────────────────
