@@ -65,6 +65,20 @@ local agent = require 'cartograph.agent'
 agent.set_writable(writable or false)
 local store = require 'cartograph.store'
 local ts = require 'cartograph.providers.treesitter'
+local tiers = require 'cartograph.tier'
+
+-- ⚠⚠ DERIVED FROM tier.ABSENCE, NEVER RETYPED (CART-0831). This description is
+-- an AGENT-FACING SURFACE of the absence axis, and it had the four kinds
+-- hardcoded — so adding a fifth (`unbuilt`) left the MCP host telling every
+-- agent that a kind it can now receive does not exist. Exactly the failure
+-- [[cartograph-shipping-checklist]] warns about: a DATA FIELD HAS ITS OWN
+-- SURFACES and nothing enumerates them. Reading the table means the next rung
+-- needs no edit here at all.
+local function kinds_of(list)
+    local out = {}
+    for _, r in ipairs(list) do out[#out + 1] = r.name end
+    return table.concat(out, '|')
+end
 
 -- cold-load the corpus once (a server pays extraction at startup, then serves)
 local ok, data = pcall(index_only and ts.index_only or ts.extract, root)
@@ -119,8 +133,9 @@ local function tools_list()
                 and 'WEAKEST rung in the list — the answer is only as good as its shakiest row'
                 or 'STRONGEST rung in the list — one witness decides') .. ')') or ''
         out[#out + 1] = { name = name, inputSchema = agent.schema(name),
-            description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (absent|refused|frontier|unavailable) — never a bare list. tier_basis=%s%s.%s')
-                :format(v.summary, v.tier_basis, q, w) }
+            description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (%s) — never a bare list — plus a `warrant` (%s) saying why nothing OBSERVED it; every verb here is static, so that is `%s`. tier_basis=%s%s.%s')
+                :format(v.summary, kinds_of(tiers.ABSENCE), kinds_of(tiers.WARRANT),
+                    tiers.WARRANT_DEFAULT, v.tier_basis, q, w) }
     end
     return { tools = out }
 end

@@ -694,7 +694,14 @@ test('mcpserve: a successful call returns the envelope, decoded, over the wire',
         'and it is the shipped shape, got ' .. tostring(w.result[1].kind))
 end)
 
-test('mcpserve: the four absences survive the wire and stay distinguishable', function ()
+-- ⚠ THREE OF THEM, AND THE NAME USED TO SAY FOUR while the loop below ran over
+-- three cases — a count in a test name that nothing checked. The other reading
+-- kinds have their own homes and cannot be produced by `edges_callers`:
+-- `unavailable` is the thin-index spec above ("an unshipped profile is
+-- unavailable"), and `unbuilt` (CART-0831) is minted by a contract front end,
+-- not by a graph query. tier_spec owns the full-set membership assertion; this
+-- one owns the WIRE, which is why it names what it actually sends.
+test('mcpserve: three absences survive the wire and stay distinguishable', function ()
     if not ready() then skip('no treesitter') end
     local c = client(false)
     local seen = {}

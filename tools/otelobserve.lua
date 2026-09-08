@@ -44,6 +44,7 @@ local ts = require 'cartograph.providers.treesitter'
 local proto = require 'cartograph.proto'
 local xlang = require 'cartograph.xlang'
 local confirm = require 'cartograph.confirm'
+local tiers = require 'cartograph.tier'
 
 local target, spanfile, coarse
 local i = 1
@@ -85,7 +86,22 @@ end
 local KIND = { [2] = 'server', [3] = 'client',
     SPAN_KIND_SERVER = 'server', SPAN_KIND_CLIENT = 'client' }
 
+-- ★★ THE WINDOW IS DATA, NOT A SENTENCE. The whole point of the observation
+-- axis is that "not seen" means nothing without how long anything watched, and
+-- this tool used to print "not called during THIS workload" with the workload
+-- unquantified. ⚠ NANOSECONDS DO NOT FIT A DOUBLE — an OTLP timestamp is ~1.7e18
+-- and 2^53 is ~9.0e15, so tonumber() on the raw field silently rounds. OTLP-JSON
+-- carries it as a STRING for exactly that reason; drop the last 9 digits as text
+-- and the seconds are exact.
+local function unix_sec(v)
+    if v == nil then return nil end
+    local d = tostring(v):match('^(%d+)$')
+    if not d or #d < 10 then return nil end
+    return tonumber(d:sub(1, -10))
+end
+
 local obs, nspans, nlines, bad = {}, 0, 0, 0
+local wmin, wmax = nil, nil
 local fd = io.open(vim.fn.expand(spanfile), 'r')
 if not fd then print('cannot read ' .. spanfile); os.exit(2) end
 for line in fd:lines() do
@@ -98,6 +114,11 @@ for line in fd:lines() do
                 for _, ss in ipairs(rs.scopeSpans or {}) do
                     for _, sp in ipairs(ss.spans or {}) do
                         nspans = nspans + 1
+                        local t = unix_sec(sp.startTimeUnixNano)
+                        if t then
+                            wmin = (wmin and math.min(wmin, t)) or t
+                            wmax = (wmax and math.max(wmax, t)) or t
+                        end
                         -- otelgrpc names the span after the full method and ALSO
                         -- sets rpc.service/rpc.method. Prefer the attributes —
                         -- the span NAME is a display convention and has changed
@@ -128,6 +149,10 @@ fd:close()
 print(('otelobserve %s'):format(root:gsub('.*/', '')))
 print(('  spans: %d envelope line(s), %d span(s), %d undecodable')
     :format(nlines, nspans, bad))
+local window = (wmin and wmax) and (wmax - wmin) or nil
+print(('  observation window: %s')
+    :format(window and ('%ds (first to last span start)'):format(window)
+        or 'UNKNOWN — no parseable startTimeUnixNano'))
 -- ★ A PROBE THAT RETURNS ZERO POINTS AT ITS OWN DETECTOR FIRST. No spans is a
 -- FAULT in the harness (nothing ran, the collector never received, the file is
 -- the wrong one) and reads exactly like "the system made no calls".
@@ -227,8 +252,37 @@ for _, w in ipairs(order) do
 end
 print(('  %d confirmed · %d recovered (observed, not in the contract) · %d not observed')
     :format(confirmed_w, recovered_w, unobserved))
-print('  ⚠ `not observed` IS NOT `unused`. A run exercises some paths; absence')
-print('    never refutes. These rpcs were not called during THIS workload.')
+
+-- ── ★★★ WHAT `not observed` IS WORTH, AND IT IS A NAMED KIND NOW (CART-0831).
+-- This tool is half of why tier.WARRANT exists: it printed a paragraph, grpcjoin
+-- printed five, and neither shared a word with the other.
+--
+-- ⚠⚠ AND THE KIND IS ALWAYS `unsampled`, NEVER `absent-in-window`. The
+-- temptation is real — a 60s capture against a live k8s deployment FEELS like a
+-- window, and `absent-in-window` licenses 'flag' where `unsampled` licenses
+-- nothing. Two reasons it would be wrong, and the first is the law:
+--   · A LICENSE IS AN UPPER BOUND A CONSUMER MAY ONLY WEAKEN, never raise
+--     (tier.lua). Minting the stronger kind from a run IS raising it.
+--   · `absent-in-window` means observed CONTINUOUSLY for a window and never
+--     seen, which requires knowing the edge's PERIOD. Nothing here knows that.
+--     A cron-driven rpc firing hourly is unobserved in any capture we take, and
+--     Health/Check proves the sensitivity in the other direction: `not observed`
+--     on a 3-request compose workload, THE MOST-CALLED RPC IN THE SYSTEM on
+--     kubernetes (44/min) — same static graph, same tool, opposite emptiness,
+--     and the only thing that differed was who was watching and for how long.
+-- So the window is reported as DATA above and the kind stays at the bottom.
+-- `absent-in-window` remains unminted until something declares a
+-- continuous-window premise it can actually stand behind.
+local WARRANT = 'unsampled'
+if not tiers.is_warrant(WARRANT) then
+    print(('  ⚠ FAULT: %q is not a declared tier.WARRANT kind'):format(WARRANT))
+    os.exit(2)
+end
+print(('  ⚠ `not observed` IS NOT `unused` — it is [%s, licenses %s].')
+    :format(WARRANT, tiers.licenses(WARRANT)))
+print(('    A run exercises some paths; absence never refutes. These rpcs were'))
+print(('    not called during %s, which is a fact about the WATCHING.')
+    :format(window and (('a %ds window'):format(window)) or 'an unmeasured window'))
 
 -- ── FEED confirm.apply, AND PREFER THE EDGE THE STATIC JOIN ALREADY MADE.
 -- ★★ This is what separates a CONFIRMATION from a fabrication. An observation

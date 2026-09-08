@@ -89,22 +89,47 @@ test('tier: the ladder is untouched and still exactly seven rungs', function ()
 end)
 
 test('tier: the READING axis is a table, not a sentence in a comment', function ()
-    for _, name in ipairs({ 'absent', 'refused', 'frontier', 'unavailable' }) do
+    for _, name in ipairs({ 'absent', 'refused', 'frontier', 'unavailable',
+        'unbuilt' }) do
         ok(tier.is_absence(name), name .. ' must be a declared reading kind')
     end
     ok(not tier.is_absence('banana'))
     ok(not tier.is_absence('unprobed'), 'an observation warrant is NOT a reading kind')
-    -- ★ ONLY ONE OF THE FOUR LICENSES ACTING, and it is the whole point of the
+    -- ★ ONLY ONE OF THEM LICENSES ACTING, and it is the whole point of the
     -- split: on this repo's own fold the 266 dead-code findings are 7 absent /
     -- 229 refused / 12 frontier / 18 unavailable, and only the 7 permit a
     -- deletion.
     eq('act', tier.licenses('absent'))
-    for _, name in ipairs({ 'refused', 'frontier', 'unavailable' }) do
+    for _, name in ipairs({ 'refused', 'frontier', 'unavailable', 'unbuilt' }) do
         eq('nothing', tier.licenses(name))
     end
 end)
 
-test('tier: the OBSERVATION axis is a second question, not a fifth kind', function ()
+-- ── ★★★ `unbuilt` IS THE ONE KIND THE FALSIFIER PRODUCED, and this spec is the
+-- reason it is not `absent`. CART-0831 declared its own falsifier — "if some
+-- existing analysis cannot honestly say which absence warrant its negatives
+-- carry, the taxonomy is wrong and should be fixed here, not papered over with
+-- a default" — and grpcjoin's five hand-written warrants were run against the
+-- four original kinds: four fitted, and the java one did not fit anything.
+test('tier: unbuilt exists because a COMPLETE reading can still be incomplete', function ()
+    -- THE MEASURED INSTANCE: microservices-demo declares gRPC rpcs, java is
+    -- present, and no `*Grpc.java` exists in the tree because protoc runs at
+    -- BUILD time. A reading complete over the artifacts read is NOT complete
+    -- over the system when something outside them PRODUCES more.
+    ok(tier.is_absence('unbuilt'))
+    -- ⚠ THE LOAD-BEARING ASSERTION. Before this kind, that case classified as
+    -- `absent` — which licenses ACTING, and acting on it is exactly wrong. If a
+    -- later hand collapses the two, this fails.
+    ok(tier.licenses('unbuilt') ~= tier.licenses('absent'),
+        'unbuilt must never inherit the one license that permits acting')
+    eq('nothing', tier.licenses('unbuilt'))
+    -- and it is not `frontier` either: the region was never SKIPPED, it does
+    -- not exist yet. Same license, different cause, so the distinction lives in
+    -- the kind rather than in prose a reader has to find.
+    ok(tier.is_absence('frontier'))
+end)
+
+test('tier: the OBSERVATION axis is a second question, never one more reading kind', function ()
     for _, name in ipairs({ 'proven-forbidden', 'absent-in-window', 'unsampled',
         'unprobed', 'dark' }) do
         ok(tier.is_warrant(name), name .. ' must be a declared warrant')
@@ -123,6 +148,61 @@ test('tier: the OBSERVATION axis is a second question, not a fifth kind', functi
     -- and the two axes never share a rank space with the presence ladder
     eq(nil, tier.rank('unprobed'))
     eq(nil, tier.rank('absent'))
+end)
+
+-- ── ★★ THE MIGRATION IS THE OTHER HALF OF CART-0831, and a taxonomy nothing
+-- consumes is not checked by anything. These two tools are WHY the tables
+-- exist: each had written its own warrants as prose. So the fence reads their
+-- SOURCE rather than a copy of it — a sixth reason added there with an
+-- undeclared kind fails here, which is the shape a fence needs to have.
+test('tier: grpcjoin names only DECLARED reading kinds', function ()
+    local src = assert(io.open(vim.fn.getcwd() .. '/tools/grpcjoin.lua')):read('a')
+    local body = assert(src:match('local WARRANTS = (.-)\n}\n'),
+        'could not find the WARRANTS table — this test reads it, not a copy')
+    local kinds = {}
+    for k in body:gmatch("kind = '([%w%-]+)'") do kinds[#kinds + 1] = k end
+    -- guard the scrape itself: a pattern that matches nothing would make every
+    -- assertion below vacuously true, which is the fence-that-never-fires shape
+    eq(5, #kinds, 'the five measured warrants, each carrying its kind')
+    for _, k in ipairs(kinds) do
+        ok(tier.is_absence(k), k .. ' is named by grpcjoin but not declared')
+    end
+    -- ⚠ AND THE WORD COLLISION IS GONE. This tool used to call an unreadable
+    -- extension "dark", which on the OBSERVATION axis means a probe was
+    -- attempted and REFUSED — one word, two axes, the `torn` failure the tier
+    -- header warns about.
+    ok(not body:find('dark'), 'a WARRANT word must not be reused for a reading')
+end)
+
+test('tier: otelobserve never mints the warrant that would RAISE its license', function ()
+    local src = assert(io.open(vim.fn.getcwd() .. '/tools/otelobserve.lua')):read('a')
+    local w = assert(src:match("local WARRANT = '([%w%-]+)'"),
+        'could not find the declared WARRANT — this test reads it, not a copy')
+    eq('unsampled', w)
+    ok(tier.is_warrant(w))
+    -- ★★★ THE POINT: a capture is not a window. `absent-in-window` licenses
+    -- 'flag' and `unsampled` licenses nothing, so minting the former from a run
+    -- RAISES a license the consumer may only weaken. Health/Check measured the
+    -- sensitivity — unobserved on a 3-request compose workload, the most-called
+    -- rpc in the system on kubernetes. Same graph, opposite emptiness.
+    eq('nothing', tier.licenses(w))
+    eq('flag', tier.licenses('absent-in-window'))
+    ok(not src:find('absent%-in%-window\'', 1),
+        'the stronger warrant must not be minted from a capture')
+end)
+
+-- ★★ THE AGENT-FACING SURFACE, which is the one that nearly went stale. The MCP
+-- tool description tells every agent what an empty answer can say, and it had
+-- the four kinds HARDCODED — so a fifth would have left the host denying a kind
+-- it now emits. A DATA FIELD HAS ITS OWN SURFACES and nothing enumerates them.
+test('tier: mcpserve DERIVES the absence enum instead of retyping it', function ()
+    local src = assert(io.open(vim.fn.getcwd() .. '/tools/mcpserve.lua')):read('a')
+    ok(src:find('kinds_of%(tiers%.ABSENCE%)'),
+        'the tool description must read tier.ABSENCE, not a copy of its names')
+    ok(src:find('kinds_of%(tiers%.WARRANT%)'), 'and the warrant axis too')
+    -- the retyped list must be GONE, not merely joined by a new one
+    ok(not src:find('absent|refused|frontier|unavailable'),
+        'a hardcoded enum is what went stale; it must not survive')
 end)
 
 test('tier: a license is an UPPER BOUND a consumer may only weaken', function ()

@@ -25,6 +25,7 @@ package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.pa
 local ts = require 'cartograph.providers.treesitter'
 local proto = require 'cartograph.proto'
 local xlang = require 'cartograph.xlang'
+local tiers = require 'cartograph.tier'
 
 local arg1 = arg and arg[1]
 local root = repo .. '/lua'
@@ -115,11 +116,28 @@ for _, wp in ipairs(order) do
 end
 print(('  %d of %d wire path(s) bound'):format(bound, #order))
 
--- ── ★★ THE UNBOUND COLUMN, AND ITS THREE REASONS RENDER IDENTICALLY AS ABSENCE.
+-- ── ★★ THE UNBOUND COLUMN, AND ITS REASONS RENDER IDENTICALLY AS ABSENCE.
 -- "Nobody calls this rpc" and "we cannot read the code that does" are opposite
 -- statements and the same empty cell, which is the absence-rendered-as-silence
 -- class this repo keeps rediscovering. So the reasons are MEASURED here, per
 -- language, rather than left to the reader.
+--
+-- ★★★ AND EACH ONE NOW CARRIES ITS KIND FROM `tier.ABSENCE` (CART-0831). This
+-- tool is why that table exists: it had FIVE warrants written as five
+-- paragraphs of prose, no shared vocabulary with otelobserve's window and no
+-- way for a reader to ask "which kind of absence is this" of either. Naming
+-- the kind is not a relabelling — `is_absence` is asserted below, so a typo
+-- fails loudly the way agent.lua's envelope check does, and the five reasons
+-- became the taxonomy's own falsifier: FOUR fit, and the java one did not fit
+-- anything, which is where `unbuilt` came from.
+--
+-- ⚠ AND ONE WORD HAD TO GO. The no-parser row below used to read "a language
+-- with no spec is dark" — but on the OBSERVATION axis `dark` is a declared
+-- warrant meaning a probe was ATTEMPTED AND REFUSED. One word, two axes, which
+-- is precisely the collision tier.lua's header warns about for `torn`. The
+-- reading-axis name for it is `frontier`. tests/tier_spec.lua reads the table
+-- below and fails if a WARRANT word reappears in it, so this cannot silently
+-- come back.
 local files_by_lang, unread = {}, {}
 do
     local seen = {}
@@ -161,29 +179,67 @@ if #ue > 0 then
     print(('    unread extensions in this tree: %s'):format(table.concat(ue, ' ')))
 end
 
+-- THE FIVE WARRANTS, each with the `tier.ABSENCE` kind it carries. ⚠ THE KIND
+-- IS THE CLAIM'S SCOPE, so read `licenses` before acting on any of them: only
+-- `absent` licenses acting at all, and the runtime-loaded row below is `absent`
+-- ONLY ABOUT THE KEY — the reference exists, at another granularity.
+local WARRANTS = {
+    { kind = 'unavailable', why = {
+        'the wire path must reach the graph as a CALL-ARGUMENT LITERAL.',
+        'grpc-python passes it directly (`channel.unary_unary(\'/pkg.Svc/M\', …)`)',
+        'and argv reads it. grpc-go binds it to a `const` and passes the',
+        'IDENTIFIER (`Invoke(ctx, Svc_M_FullMethodName, …)`), which argv reports',
+        'as {k=\'local\', name=\'Svc_M_FullMethodName\'} — the name, not the value,',
+        'because a Go const literal never enters the graph. That is CART-0826,',
+        'and the identifier is a GENERATOR CONVENTION, a lower rung than this',
+        'exact key, so it is not silently mixed in.',
+        '→ `unavailable`: the file was read, the call was extracted, the DATA',
+        '  CLASS (a const\'s literal value) was not.' } },
+    { kind = 'unbuilt', why = {
+        'a language whose stubs are GENERATED AT BUILD TIME contributes no file',
+        'to read at all (java here: no *Grpc.java in the tree).',
+        '→ `unbuilt`, AND THIS IS THE ROW THAT MINTED THAT KIND (CART-0831).',
+        '  The reading was COMPLETE over the tree, so the taxonomy said `absent`',
+        '  — which licenses ACTING, and acting is exactly wrong: protoc writes',
+        '  the file at build time. Not `frontier` either; the region was not',
+        '  skipped, it does not exist yet. A reading complete over the artifacts',
+        '  read is not complete over the system when something PRODUCES more.' } },
+    { kind = 'frontier', why = {
+        'a language with no spec cannot be read at all (`unread extensions`',
+        'above).',
+        '→ `frontier`, the no-parser case — see the note above on the word this',
+        '  row used to use instead.' } },
+    { kind = 'frontier', why = {
+        'THE STUB MAY BE AN INSTALLED DEPENDENCY, OUTSIDE THE ROOT. That is why',
+        'Health/Check is unbound on microservices-demo and it is NOT',
+        'unreferenced: recommendation_server.py:31 does `from grpc_health.v1',
+        'import health_pb2_grpc` and implements the servicer, but the file',
+        'carrying the literal ships in a pip package.',
+        '→ `frontier`, outside-the-root. An honest frontier.' } },
+    { kind = 'absent', why = {
+        'THE CONTRACT MAY BE LOADED AT RUNTIME, so no wire path is ever',
+        'written. Node does exactly this — paymentservice/server.js:71',
+        '`protoLoader.loadSync(path.join(protoRoot, \'demo.proto\'))` — and names',
+        'the .proto FILE instead.',
+        '→ `absent` ABOUT THE KEY ONLY: no call-argument literal names this wire',
+        '  path anywhere, and that reading IS complete. It is NOT absent as a',
+        '  reference — the join exists at SERVICE rather than METHOD',
+        '  granularity, which is CART-0827 rather than a gap here.' } },
+}
+
 print('')
-print('  ⚠ WHY A PRESENT LANGUAGE MAY STILL BIND NOTHING — measured, not assumed:')
-print('    · the wire path must reach the graph as a CALL-ARGUMENT LITERAL.')
-print('      grpc-python passes it directly (`channel.unary_unary(\'/pkg.Svc/M\'')
-print('      , …)`) and argv reads it. grpc-go binds it to a `const` and passes')
-print('      the IDENTIFIER (`Invoke(ctx, Svc_M_FullMethodName, …)`), which argv')
-print('      reports as {k=\'local\', name=\'Svc_M_FullMethodName\'} — the name,')
-print('      not the value, because a Go const literal never enters the graph.')
-print('      That is CART-0826, and the identifier is a GENERATOR CONVENTION, a')
-print('      lower rung than this exact key, so it is not silently mixed in.')
-print('    · a language whose stubs are GENERATED AT BUILD TIME contributes no')
-print('      file to read at all (java here: no *Grpc.java in the tree).')
-print('    · a language with no spec is dark (`unread extensions` above).')
-print('    · THE STUB MAY BE AN INSTALLED DEPENDENCY, OUTSIDE THE ROOT. That is')
-print('      why Health/Check is unbound on microservices-demo and it is NOT')
-print('      unreferenced: recommendation_server.py:31 does `from grpc_health.v1')
-print('      import health_pb2_grpc` and implements the servicer, but the file')
-print('      carrying the literal ships in a pip package. An honest frontier.')
-print('    · THE CONTRACT MAY BE LOADED AT RUNTIME, so no wire path is ever')
-print('      written. Node does exactly this — paymentservice/server.js:71')
-print('      `protoLoader.loadSync(path.join(protoRoot, \'demo.proto\'))` — and')
-print('      names the .proto FILE instead. That IS joinable, at SERVICE rather')
-print('      than METHOD granularity, and is CART-0827 rather than a gap here.')
+print('  ⚠ WHY A PRESENT LANGUAGE MAY STILL BIND NOTHING — measured, not assumed.')
+print('    Each reason carries its tier.ABSENCE kind and that kind\'s LICENSE:')
+for _, w in ipairs(WARRANTS) do
+    -- the mirror of agent.lua's envelope check: a kind this table invents but
+    -- the taxonomy does not declare is a FAULT in this tool, not a finding
+    if not tiers.is_absence(w.kind) then
+        print(('  ⚠ FAULT: %q is not a declared tier.ABSENCE kind'):format(w.kind))
+        os.exit(2)
+    end
+    print(('    · [%s, licenses %s]'):format(w.kind, tiers.licenses(w.kind)))
+    for _, line in ipairs(w.why) do print('      ' .. line) end
+end
 if #unbound > 0 then
     print('')
     print(('  UNBOUND WIRE PATHS (%d) — open the named instance before believing'):format(#unbound))

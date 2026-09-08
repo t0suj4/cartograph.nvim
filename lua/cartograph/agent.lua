@@ -14,11 +14,13 @@
 --
 -- THE RULE THAT CARRIES THE WEIGHT, unchanged and non-negotiable:
 --   AN EMPTY RESULT ALWAYS CARRIES AN ABSENCE. A bare `[]` is unrepresentable.
---   `absence` ∈ absent | refused | frontier | unavailable, and `absence_why`
---   NAMES THE PREMISE that failed, with its evidence. The four MUST render
---   differently: on this repo's own fold the 266 dead-code findings split
---   7 absent / 229 refused / 12 frontier / 18 unavailable, and only the 7
---   license a deletion. M.answer ENFORCES this for every verb (see the
+--   `absence` ∈ absent | refused | frontier | unavailable | unbuilt, and
+--   `absence_why` NAMES THE PREMISE that failed, with its evidence. They MUST
+--   render differently: on this repo's own fold the 266 dead-code findings
+--   split 7 absent / 229 refused / 12 frontier / 18 unavailable, and only the 7
+--   license a deletion. (`unbuilt` is 0 there and that is not a hole — this
+--   repo has no code generation step. It was minted from a java gRPC stub that
+--   protoc writes at build time; see tier.lua.) M.answer ENFORCES this for every verb (see the
 --   invariant check at the bottom) so a future verb cannot ship a bare list.
 --   ⚠ AND THE SET IS NOW A TABLE, NOT THIS SENTENCE (CART-0831). It lived here
 --   as prose and was checked by nothing — `absence = 'banana'` passed the
@@ -27,7 +29,8 @@
 --
 --   AND EVERY EMPTY ANSWER ALSO CARRIES A `warrant` — the OBSERVATION axis,
 --   runtime-topology/02's absence taxonomy: proven-forbidden | absent-in-window
---   | unsampled | unprobed | dark. It is a SECOND question, not a fifth kind:
+--   | unsampled | unprobed | dark. It is a SECOND question, never one more
+--   reading kind:
 --   `absence` asks why the GRAPH is silent, `warrant` asks why nothing SAW it
 --   happen, and a static answer is `absent` + `unprobed` at once. Every verb
 --   here is static, so `unprobed` is stamped by default — already true, and
