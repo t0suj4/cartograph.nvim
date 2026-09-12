@@ -1192,6 +1192,33 @@ function M.analyze_pair(pair)
     -- and attributed the 4 exceptions to the row-pairing artefact, which is the bug
     -- fixed in CART-0875 — so those four were never wrappers failing the rule, they
     -- were pairings that should not have existed.
+    --
+    -- ★★★ SCORED PAIR-BY-PAIR AGAINST THEIR CLASSIFICATION, on a WORKTREE PINNED to
+    -- the commit they measured (so the corpus is identical, not merely similar —
+    -- 59 pairs both sides, 31 structural both sides, ZERO disagreements about which
+    -- pairs those are). Their per-pair context-variable count is the oracle:
+    --      struct > 0 OR field/op   agree 29   disagree 2   <- this rule
+    --      field/op alone           agree 21   disagree 10
+    --      struct alone             agree 23   disagree 8
+    -- NEITHER SIGNAL SUFFICES; the disjunction is not a hedge, it is the measured
+    -- best of the three. (I shipped it before scoring the alternatives — the scoring
+    -- is what makes it a choice rather than a guess.)
+    --
+    -- ⚠ THE TWO IT STILL GETS WRONG ARE BOTH OVER-REPORTS, AND BOTH HAND-READ:
+    --   #34 `tp = tp or require 'cartograph.transport'` vs `tp = tp or transport`
+    --       — a CALL against a NAME sharing no subterm. A whole-term replacement,
+    --         so a plain node hole; nothing encloses anything.
+    --   #47 `rec(node)` vs `rec(node, true)`
+    --       — an ARITY difference in the argument list, which is a hedge INSIDE the
+    --         list, not a wrapper around it.
+    -- So `struct` conflates three things and only the third is a wrapper: differing
+    -- list arity (hedge), a kind change with no shared subterm (plain hole), and one
+    -- side ENCLOSING the other (context variable).
+    -- ⇒ AND NO COUNTING RULE SEPARATES THEM: #33 has struct=1, insdel=0 and no
+    --   field/op exactly like those two, and IS a wrapper. The discriminator is
+    --   whether one side CONTAINS what the other has bare, which is the context
+    --   variable itself — rung 3+, not a threshold that can be tuned here. 29/31 is
+    --   the ceiling for a signal-counting rule and this sits on it.
     local wrapping = nstruct > 0
     for _, h in ipairs(params) do
         if h.kind == 'field' or h.kind == 'operator' then wrapping = true end
