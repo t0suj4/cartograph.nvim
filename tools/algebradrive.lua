@@ -360,6 +360,21 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                         or ('★ SHAPE DISAGREES: mine=' .. tostring(ours.shape)
                             .. ' rigid ctx=' .. h.ctx))
                         )
+                    -- ★ WHICH SIGNAL FIRED? The rule is `struct > 0 OR field/op`.
+                    -- Knowing which half over-claims is the difference between
+                    -- "the rule is 93%" and a mechanism that can be fixed.
+                    if mine ~= (h.ctx > 0) then
+                        local fo = false
+                        for _, x in ipairs(ours.holes) do
+                            if x.kind == 'field' or x.kind == 'operator' then fo = true end
+                        end
+                        bump('   ⤷ over-report by: ' ..
+                            ((ours.struct > 0 and fo) and 'BOTH signals'
+                             or (ours.struct > 0) and 'STRUCT hole only'
+                             or 'FIELD/OP hole only'))
+                        bump(('   ⤷ witness: %s:%s / %s:%s'):format(
+                            p.a.file, tostring(p.a.line), p.b.file, tostring(p.b.line)))
+                    end
                     if mine ~= (h.ctx > 0) and shown < show then
                         shown = shown + 1
                         print(('\n★ SHAPE/RIGID DISAGREEMENT %d — %s:%s / %s:%s\n'

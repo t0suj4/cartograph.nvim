@@ -1247,6 +1247,30 @@ function M.analyze_pair(pair)
     --   bound a consumer may only weaken. A caller that needs certainty a wrapper
     --   EXISTS has to run the context variable; a caller that needs to know one
     --   does NOT exist can trust `rows` today.
+    --
+    -- ★★★ AND THE TWO SIGNALS ARE NOT EQUALLY GOOD — ALL 21 ERRORS ARE THE STRUCT
+    -- ONE. Broken down by which half of `struct > 0 OR field/op` fired:
+    --        lua  2 of 2  STRUCT hole only
+    --        wow 19 of 19 STRUCT hole only
+    --   ⇒ THE FIELD/OP SIGNAL HAS PRODUCED ZERO FALSE POSITIVES IN 319 STRUCTURAL
+    --     PAIRS. It is exact and incomplete (field/op alone scored 21 of 31 on lua,
+    --     i.e. 10 wrappers it cannot see). `struct` is the RECALL half and carries
+    --     100% of the error. Precision and recall live in different signals here.
+    --
+    -- ⚠ AND THE OVER-REPORTS HAVE A POPULATION, not just a mechanism. On wow they
+    -- are overwhelmingly VENDORED LIBRARY COPIES AT DIFFERENT VERSIONS — the same
+    -- AceDB-3.0 / AceGUI-3.0 file carried into many addons. Hand-read witness:
+    --     LootPlan  DBObjectLib:ResetProfile(noChildren)
+    --     MySales   DBObjectLib:ResetProfile(noChildren, noCallbacks)
+    -- One library version added a parameter. Version drift adds parameters and
+    -- statements, which is ARITY AND INSERTION — hedge territory — and never
+    -- enclosure. So the struct signal over-fires exactly where a corpus vendors its
+    -- dependencies, which is most Lua addon corpora.
+    --
+    -- ⇒ THE AVAILABLE IMPROVEMENT, not taken here: `wrapper` could be split by
+    --   which signal fired — field/op is a CONFIRMED wrapper, struct alone is a
+    --   POSSIBLE one. Rendering an exact signal and a heuristic one identically is
+    --   the same fault this shape field was introduced to fix, one level down.
     local wrapping = nstruct > 0
     for _, h in ipairs(params) do
         if h.kind == 'field' or h.kind == 'operator' then wrapping = true end
