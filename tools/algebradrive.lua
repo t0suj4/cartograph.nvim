@@ -61,7 +61,8 @@ local store = require 'cartograph.store'
 local expr = require 'cartograph.expr'
 local clones = require 'cartograph.clones'
 
-local target, want_pairs, show, dist, rigid = arg[1], 60, 3, nil, false
+local target, want_pairs, show, dist, rigid, sizes, maxsize, stride =
+    arg[1], 60, 3, nil, false, false, nil, 1
 local i = 2
 while arg[i] do
     if arg[i] == '--pairs' then want_pairs = tonumber(arg[i + 1]); i = i + 2
@@ -75,6 +76,24 @@ while arg[i] do
     -- measured it and called it "fine for a probe, NOT for the interactive path"), so
     -- it is opt-in and carries a size guard.
     elseif arg[i] == '--rigid' then rigid = true; i = i + 1
+    -- ★ SIZE ONLY: how many pairs could the rigid path even attempt? The alignment
+    -- DP is memoized over string keys and the prototype guards at nS*nQ > 400000;
+    -- this runs the guard and nothing else, so a corpus can be sized in one pass
+    -- instead of discovered by a run that never finishes.
+    elseif arg[i] == '--sizes' then sizes = true; rigid = true; i = i + 1
+    -- ⚠⚠ `clones.near` RETURNS ITS PAIRS RANKED BY (shared, dist), SO THE LIST IS
+    -- ORDERED MOST-EXPENSIVE-FIRST. Taking `--pairs N` off the front is therefore
+    -- NOT A SAMPLE OF THE POPULATION — it is the worst N, and on wow it walks
+    -- straight into the band that costs minutes per pair. (Measured: 54 of 4000
+    -- wow pairs exceed the guard, but the first two do.) `--maxsize` filters by
+    -- the alignment's actual cost driver so a run can cover the population it
+    -- claims to. Same family as the max_dist gate: a measurement inherits the
+    -- ORDER its population arrives in, not just the filter that selected it.
+    elseif arg[i] == '--maxsize' then maxsize = tonumber(arg[i + 1]); i = i + 2
+    -- ★ AND A CAP ALONE DOES NOT FIX THE ORDER. Taking the first N pairs UNDER the
+    -- cap is still the most expensive N OF THAT BAND. `--stride` walks the ranked
+    -- list so a sample spans it instead of sitting on one end.
+    elseif arg[i] == '--stride' then stride = tonumber(arg[i + 1]); i = i + 2
     else print('unknown argument: ' .. arg[i]); os.exit(2) end
 end
 if not target then
@@ -282,7 +301,7 @@ local function pair_terms(p)
 end
 
 local shown, examined = 0, 0
-for pi = 1, math.min(#pairs_, want_pairs) do
+for pi = 1, math.min(#pairs_, want_pairs), stride do
     local p = pairs_[pi]
     local ours = clones.analyze_pair(p)
     if rigid then
@@ -295,6 +314,21 @@ for pi = 1, math.min(#pairs_, want_pairs) do
         -- snapshot the prototype measured.
         local S, Q = fn_term(p.a), fn_term(p.b)
         local nS, nQ = A.size(S), A.size(Q)
+        if sizes then
+            local prod = nS * nQ
+            local band = prod > 400000 and 'D: OVER THE GUARD (unattemptable)'
+                or prod > 100000 and 'C: 100k-400k (minutes)'
+                or prod > 20000 and 'B: 20k-100k'
+                or 'A: under 20k (the prototype measured here)'
+            bump('size ' .. band)
+            bump('cartograph kind: ' .. tostring(ours.kind))
+            goto next_pair
+        end
+        if maxsize and nS * nQ > maxsize then
+            bump('rigid: filtered out by --maxsize')
+            bump('cartograph kind: ' .. tostring(ours.kind))
+            goto next_pair
+        end
         if nS * nQ > 400000 then
             bump('rigid: SKIPPED, too big (the prototype\'s own guard)')
         else
