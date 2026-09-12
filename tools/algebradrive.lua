@@ -61,7 +61,7 @@ local store = require 'cartograph.store'
 local expr = require 'cartograph.expr'
 local clones = require 'cartograph.clones'
 
-local target, want_pairs, show, dist = arg[1], 60, 3, nil
+local target, want_pairs, show, dist, rigid = arg[1], 60, 3, nil, false
 local i = 2
 while arg[i] do
     if arg[i] == '--pairs' then want_pairs = tonumber(arg[i + 1]); i = i + 2
@@ -71,6 +71,10 @@ while arg[i] do
     -- CANNOT carry many divergences and can barely mix shapes. Any claim about
     -- what shapes co-occur is a claim about THIS GATE until the gate is moved.
     elseif arg[i] == '--dist' then dist = tonumber(arg[i + 1]); i = i + 2
+    -- the rigid path costs 0.2-12 s per pair on sides of 40-220 nodes (the prototype
+    -- measured it and called it "fine for a probe, NOT for the interactive path"), so
+    -- it is opt-in and carries a size guard.
+    elseif arg[i] == '--rigid' then rigid = true; i = i + 1
     else print('unknown argument: ' .. arg[i]); os.exit(2) end
 end
 if not target then
@@ -98,7 +102,14 @@ local function kind_of(e)
 end
 
 local unsupported = {}
-local function to_term(e)
+--- ⚠ `locals` COLLAPSES EVERY LOCAL TO ONE SYMBOL, and that is not a simplification I
+--- chose — it mirrors `clones.anti_unify`'s own alpha rule ("both locals: alpha-
+--- equivalent, no hole") and the prototype's bridge does the same. WITHOUT IT two
+--- functions that differ only in local NAMES do not align at all, which is most real
+--- near-clones. The prototype records the cost: `nm` and `out` wear one symbol, so a
+--- template can say less than it means (NEARCLONES.md's caveat; HOPAU.md's binders are
+--- the principled fix and are not in this path).
+local function to_term(e, locals)
     if e == nil then return nil end
     if type(e) ~= 'table' or e.k == nil then return nil end
     local k = e.k
@@ -106,7 +117,7 @@ local function to_term(e)
     if k == 'lit' then
         t = A.lit(tostring(e.ty) .. ':' .. tostring(e.v))
     elseif k == 'name' then
-        t = A.name(tostring(e.n))
+        t = (locals and locals[e.n]) and A.name('\1local') or A.name(tostring(e.n))
     else
         -- ★ THE CHILD LIST COMES FROM `expr.children`, THE SOURCE `walk` ITSELF
         -- CONSUMES (CART-0882). Not a per-kind descent written here -- that
@@ -114,7 +125,7 @@ local function to_term(e)
         -- third chance to omit a kind silently.
         local kids = {}
         for _, c in ipairs(expr.children(e)) do
-            local ct = to_term(c)
+            local ct = to_term(c, locals)
             if ct then kids[#kids + 1] = ct end
         end
         if #kids == 0 and not (k == 'table' or k == '?' or k == 'type') then
@@ -130,20 +141,20 @@ end
 
 --- a clone ROW ({lhs, rhs, cond}) as one term, so a pair of rows is a pair of
 --- instances the lgg can take. Shape mirrors `clones.anti_unify_row`.
-local function row_term(r)
+local function row_term(r, locals)
     if type(r) ~= 'table' then return nil end
-    if r.k ~= nil then return to_term(r) end
+    if r.k ~= nil then return to_term(r, locals) end
     local kids = {}
-    local function push(list)
+    local function push(list, tag)
         local seq = {}
         for _, x in ipairs(list or {}) do
-            local t = to_term(x); if t then seq[#seq + 1] = t end
+            local t = to_term(x, locals); if t then seq[#seq + 1] = t end
         end
-        kids[#kids + 1] = A.seq(seq)
+        kids[#kids + 1] = A.node(tag, tunpack(seq))
     end
-    push(r.lhs); push(r.rhs)
-    local c = r.cond and to_term(r.cond) or nil
-    if c then kids[#kids + 1] = c end
+    push(r.lhs, 'lhs'); push(r.rhs, 'rhs')
+    local c = r.cond and to_term(r.cond, locals) or nil
+    if c then kids[#kids + 1] = A.node('cond', c) end
     return A.node('row', tunpack(kids))
 end
 
@@ -204,6 +215,35 @@ local function arity_split(x, y)
     return nil
 end
 
+--- ★★★ THE RIGID PATH: THE ARROW THE POSITIONAL ONE COULD NOT EXPRESS.
+--- Everything above drives `A.generalize`, the POSITIONAL lgg, which has no context
+--- variable and therefore cannot represent a WRAPPER — one side enclosing what the
+--- other has bare. That is the largest class in cartograph's "structural" bucket
+--- (20 of 31 on the lua corpus), so every aggregate the positional path produced was
+--- measuring an arrow that was blind to the majority case.
+---
+--- ⚠ THE UNIT IS THE WHOLE FUNCTION, NOT THE DIVERGING ROWS. My positional run fed
+--- `generalize` only the `sub` rows, which is wrong for vertical generalization: an
+--- alignment is over the entire row sequence, and inserted/deleted rows are part of
+--- what it aligns AROUND. The prototype's own bridge encodes a function as a seq of
+--- rows and hands the whole thing to `vertical`; this follows it.
+local function fn_term(f)
+    local rows = {}
+    for i = 1, #(f.exprs or {}) do
+        rows[i] = row_term(f.exprs[i], f.locals) or A.node('row~')
+    end
+    return A.seq(rows)
+end
+
+local function count_holes(t, acc)
+    acc = acc or { hedge = 0, ctx = 0 }
+    if t.k == 'hole' then
+        if t.ctx then acc.ctx = acc.ctx + 1 else acc.hedge = acc.hedge + 1 end
+    end
+    for _, c in ipairs(t.kids or {}) do count_holes(c, acc) end
+    return acc
+end
+
 -- ── run ─────────────────────────────────────────────────────────────────────
 local reg = dofile(here .. 'corpora.lua')
 local c = reg[target]
@@ -232,7 +272,7 @@ local function pair_terms(p)
     local as, bs = {}, {}
     for _, o in ipairs(p.ops) do
         if o.op == 'sub' then
-            local ta, tb = row_term(p.a.exprs[o.i]), row_term(p.b.exprs[o.j])
+            local ta, tb = row_term(p.a.exprs[o.i], p.a.locals), row_term(p.b.exprs[o.j], p.b.locals)
             if not ta or not tb then return nil end
             as[#as + 1] = ta; bs[#bs + 1] = tb
         end
@@ -245,11 +285,66 @@ local shown, examined = 0, 0
 for pi = 1, math.min(#pairs_, want_pairs) do
     local p = pairs_[pi]
     local ours = clones.analyze_pair(p)
+    if rigid then
+        -- ★★★ THE MEASUREMENT THAT SUPERSEDES THE POSITIONAL ONE. `vertical` under the
+        -- JWZ skeleton returns a template with HEDGE holes (a slice of a row list) and
+        -- CONTEXT holes (a wrapper around a base). `ctx > 0` is the algebra's own answer
+        -- to "is this a wrapper", derived rather than inferred from hole KINDS — which
+        -- is exactly what `clones.analyze_pair.shape` has to approximate by counting.
+        -- So this is a FRESH ORACLE for that rule, on any corpus, not just the one
+        -- snapshot the prototype measured.
+        local S, Q = fn_term(p.a), fn_term(p.b)
+        local nS, nQ = A.size(S), A.size(Q)
+        if nS * nQ > 400000 then
+            bump('rigid: SKIPPED, too big (the prototype\'s own guard)')
+        else
+            local t0 = os.clock()
+            local okv, v = pcall(A.vertical, S, Q, { skeleton = 'jwz' })
+            local dt = os.clock() - t0
+            if not okv or not v or not v.templates or not v.templates[1] then
+                bump('rigid: REFUSED — ' .. tostring(v):sub(1, 50))
+            else
+                local T = v.templates[1]
+                local h = count_holes(T.body)
+                -- the law on real IR: instantiating either valuation reproduces its side
+                local r1 = A.instantiate(T, T.values[1])
+                local r2 = A.instantiate(T, T.values[2])
+                local rebuilt = r1 and r2 and A.eq(r1.term, S) and A.eq(r2.term, Q)
+                bump(rebuilt and 'rigid: REBUILDS BOTH' or '★ rigid: does NOT rebuild')
+                -- per-pair line, so the adapter can be validated against the
+                -- prototype's own experiments/nearclones_detail-*.txt rather than
+                -- only in aggregate (an aggregate with no names cannot be checked)
+                print(('PAIR\t%d\t%s\t%d\t%d\t%s\t%s'):format(pi, ours.kind,
+                    h.hedge, h.ctx, tostring(ours.shape), tostring(rebuilt)))
+                bump(h.ctx > 0 and 'rigid: has a CONTEXT variable (a wrapper)'
+                    or 'rigid: hedge variables only')
+                if dt > 5 then bump('rigid: slow pair (>5s)') end
+                -- ★ SCORE clones.analyze_pair.shape AGAINST IT, which is the point
+                if ours.kind == 'structural' then
+                    local mine = ours.shape == 'wrapper' or ours.shape == 'mixed'
+                    bump(((mine == (h.ctx > 0)) and 'SHAPE AGREES with rigid'
+                        or ('★ SHAPE DISAGREES: mine=' .. tostring(ours.shape)
+                            .. ' rigid ctx=' .. h.ctx))
+                        )
+                    if mine ~= (h.ctx > 0) and shown < show then
+                        shown = shown + 1
+                        print(('\n★ SHAPE/RIGID DISAGREEMENT %d — %s:%s / %s:%s\n'
+                            .. '   mine=%s (struct=%d insdel=%d)  rigid: ctx=%d hedge=%d')
+                            :format(shown, p.a.file, tostring(p.a.line), p.b.file,
+                                tostring(p.b.line), tostring(ours.shape), ours.struct,
+                                ours.insdel, h.ctx, h.hedge))
+                    end
+                end
+            end
+        end
+        bump('cartograph kind: ' .. tostring(ours.kind))
+        goto next_pair
+    end
     -- align the SAME rows the analyzer used, so the two sides see one input
     for _, o in ipairs(p.ops) do
         if o.op == 'sub' then
             local ra, rb = p.a.exprs[o.i], p.b.exprs[o.j]
-            local ta, tb = row_term(ra), row_term(rb)
+            local ta, tb = row_term(ra, p.a.locals), row_term(rb, p.b.locals)
             if ta and tb then
                 examined = examined + 1
                 local ok, g = pcall(A.generalize, { ta, tb })
@@ -404,6 +499,7 @@ for pi = 1, math.min(#pairs_, want_pairs) do
         end
     end
     bump('cartograph kind: ' .. tostring(ours.kind))
+    ::next_pair::
 end
 
 print(('\nexamined %d diverging rows across %d pairs\n'):format(examined, math.min(#pairs_, want_pairs)))
