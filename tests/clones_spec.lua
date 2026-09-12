@@ -190,6 +190,42 @@ test('clones: an inserted row and a wrapped expression are DIFFERENT structural 
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0881. The wrapper verdict NAMES ITS EVIDENCE, because the two signals that
+-- produce it are not the same claim. Measured over 319 structural pairs on two
+-- corpora against the algebra's own context variable: a SELECTOR hole (field or
+-- operator) had ZERO false positives, while a STRUCT hole alone carried ALL 21
+-- over-reports. Rendering them identically is the fault `shape` was introduced to
+-- fix, one level down.
+test('clones: a wrapper verdict says whether a SELECTOR or only a SHAPE divergence found it', function ()
+    local base = '  local a = load(src)\n  local b = trim(a)\n  local c = wrap(b)\n'
+    -- SELECTOR: same base `c`, different field off it — X(base) with field:a(◦) / field:b(◦)
+    local sel_a = base .. '  local d = c.alpha\n  audit(d)\n  persist(d)\n  return d'
+    local sel_b = base .. '  local d = c.beta\n  persist(d)\n  return d'
+    -- SHAPE ONLY: an arity difference, which is a hedge inside the list and encloses
+    -- nothing — the exact shape of the measured over-reports (rec(n) vs rec(n, true))
+    local shp_a = base .. '  local d = pick(c)\n  audit(d)\n  persist(d)\n  return d'
+    local shp_b = base .. '  local d = pick(c, true)\n  persist(d)\n  return d'
+    local root = proj {
+        ['s1.lua'] = fn('sel_one', 'src', sel_a),
+        ['s2.lua'] = fn('sel_two', 'src', sel_b),
+        ['p1.lua'] = fn('shp_one', 'src', shp_a),
+        ['p2.lua'] = fn('shp_two', 'src', shp_b),
+    }
+    local ps = clones.near(store, { max_dist = 3, min_rows = 4, min_shared = 2 })
+    local sp = near_pair(ps, 'sel_one', 'sel_two')
+    local pp = near_pair(ps, 'shp_one', 'shp_two')
+    ok(sp and pp, 'both pairs are near-clones')
+    local sa = sp and clones.analyze_pair(sp)
+    local pa = pp and clones.analyze_pair(pp)
+    ok(sa and sa.evidence == 'selector',
+        'a field hole is SELECTOR evidence (got ' .. tostring(sa and sa.evidence) .. ')')
+    ok(pa and pa.evidence == 'shape',
+        'an arity difference alone is SHAPE evidence (got ' .. tostring(pa and pa.evidence) .. ')')
+    -- and the point: the two do not render the same, so a reader can tell them apart
+    ok(sa and pa and sa.evidence ~= pa.evidence, 'the two kinds of evidence are distinguished')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ⚠ THE CASE THAT SEPARATES THE RIGHT RULE FROM THE PLAUSIBLE ONE. My first cut made a
 -- STRUCT hole the only wrapper signal, and it classified 12 wrappers where the prototype
 -- found 20. The rest are FIELD and OPERATOR holes, which are context variables too --

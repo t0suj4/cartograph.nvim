@@ -1271,18 +1271,50 @@ function M.analyze_pair(pair)
     --   which signal fired — field/op is a CONFIRMED wrapper, struct alone is a
     --   POSSIBLE one. Rendering an exact signal and a heuristic one identically is
     --   the same fault this shape field was introduced to fix, one level down.
-    local wrapping = nstruct > 0
+    -- ★★ THE TWO SIGNALS ARE KEPT APART BECAUSE THEY ARE NOT THE SAME CLAIM.
+    -- A SELECTOR hole (field/operator) IS the wrapper: `X(base)` with `field:a(◦)`
+    -- against `field:b(◦)`, the base kept on both sides. A STRUCT hole only says
+    -- the two rows differ in SHAPE, which is necessary but not sufficient — the
+    -- same evidence is produced by a differing list arity and by a kind change
+    -- with no shared subterm, neither of which encloses anything.
+    -- Merging them into one verdict renders an exact signal and a heuristic
+    -- identically, which is the fault `shape` itself was introduced to fix.
+    local selector = false
     for _, h in ipairs(params) do
-        if h.kind == 'field' or h.kind == 'operator' then wrapping = true end
+        if h.kind == 'field' or h.kind == 'operator' then selector = true end
     end
-    local shape
+    local wrapping = nstruct > 0 or selector
+    local shape, evidence
     if kind == 'structural' then
         if not wrapping then shape = 'rows'
         elseif insdel == 0 then shape = 'wrapper'
         else shape = 'mixed' end
+        -- ⚠ `evidence` IS THE FIELD A CONSUMER SHOULD GATE ON, not `shape`.
+        -- MEASURED over 319 structural pairs on two corpora, against the algebra's
+        -- own context variable (tools/algebradrive.lua --rigid):
+        --   'selector'  a field/operator hole fired — ZERO false positives. When
+        --               both signals fire this still reads `selector`, and that is
+        --               measured too: no disagreement ever involved field/op.
+        --   'shape'     a struct hole and nothing else — carries ALL 21 over-reports
+        --               (lua 2 of 2, wow 19 of 19). On a corpus that VENDORS its
+        --               dependencies this fires often and means little: two copies
+        --               of one library at different versions differ by an added
+        --               parameter or statement, which is arity and insertion.
+        --
+        -- ★★★ SCORED, and this is why the split is worth a field:
+        --        rows       196 / 196   100%
+        --        selector    30 /  30   100%     (0 errors — a modest sample, stated)
+        --        shape       72 /  93    77.4%   (every measured error lives here)
+        --        ---------------------------------------------------------------
+        --        merged     298 / 319    93.4%   <- what ONE verdict reported
+        -- THE MERGED FIGURE IS A BLEND OF A PERFECT SIGNAL AND A 77% ONE, and it
+        -- misleads in BOTH directions: a consumer acting on "93%" is too cautious
+        -- about `selector` and far too trusting of `shape`. An average over two
+        -- populations with different reliability is not a property of either.
+        if shape ~= 'rows' then evidence = selector and 'selector' or 'shape' end
     end
     return { kind = kind, holes = params, insdel = insdel, drift = drift,
-        struct = nstruct, shape = shape }
+        struct = nstruct, shape = shape, evidence = evidence }
 end
 
 --- Human-readable report for M.near pairs. `store` is used to show the differing
@@ -1331,17 +1363,24 @@ function M.near_report(pairs_, store)
     -- different owners and different costs (CART-0881 rung 2). "needs a human" was never
     -- true of all of them: every structural pair HAS a template, and what differs is what
     -- the template needs — a hedge hole, or a context variable.
+    -- ★ THE VERDICT NAMES ITS EVIDENCE, because the two are not equally good and a
+    -- reader deciding where to spend attention needs to know which one they have.
+    -- `selector` has zero measured false positives; `shape` carries every one.
     local SHAPE = {
         rows = 'structural: ROWS ONLY (inserted/deleted statements — a repetition hole)',
-        wrapper = 'structural: A WRAPPER (one side encloses the other — a context hole)',
-        mixed = 'structural: WRAPPER + ROWS (both, so neither reading is complete)',
+        ['wrapper/selector'] = 'structural: A WRAPPER (one side encloses the other — a context hole)',
+        ['wrapper/shape'] = 'structural: MAYBE A WRAPPER (shape divergence only — may be an arity difference)',
+        ['mixed/selector'] = 'structural: WRAPPER + ROWS (one side encloses the other, and rows differ)',
+        ['mixed/shape'] = 'structural: ROWS, and MAYBE a wrapper (shape divergence only)',
     }
     for i, p in ipairs(pairs_) do
         local a = M.analyze_pair(p)
         local pos = band_lo[i] == band_hi[i] and ('#%d'):format(band_lo[i])
             or ('#%d-%d'):format(band_lo[i], band_hi[i])
         L[#L + 1] = ('■ %s of %d · %d edit(s), %d shared statement(s) — %s:')
-            :format(pos, #pairs_, p.dist, p.shared, (a.shape and SHAPE[a.shape]) or TAG[a.kind])
+            :format(pos, #pairs_, p.dist, p.shared,
+                (a.shape and (SHAPE[a.shape .. '/' .. tostring(a.evidence)] or SHAPE[a.shape]))
+                or TAG[a.kind])
         L[#L + 1] = ('    %s  %s:%d'):format(p.a.name, p.a.file, p.a.lines[1] or 0)
         L[#L + 1] = ('    %s  %s:%d'):format(p.b.name, p.b.file, p.b.lines[1] or 0)
         -- ★ the divergence that may not be a parameter at all — see M.analyze_pair's

@@ -363,6 +363,12 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                     -- ★ WHICH SIGNAL FIRED? The rule is `struct > 0 OR field/op`.
                     -- Knowing which half over-claims is the difference between
                     -- "the rule is 93%" and a mechanism that can be fixed.
+                    -- ★ SCORE BY EVIDENCE, which is the claim the field makes:
+                    -- `selector` is documented as having zero false positives, so
+                    -- a single disagreement in that bucket falsifies the field's
+                    -- own docstring. `shape` is documented as carrying them all.
+                    bump(('   EVIDENCE %s: %s'):format(tostring(ours.evidence),
+                        (mine == (h.ctx > 0)) and 'agrees' or '★ DISAGREES'))
                     if mine ~= (h.ctx > 0) then
                         local fo = false
                         for _, x in ipairs(ours.holes) do
