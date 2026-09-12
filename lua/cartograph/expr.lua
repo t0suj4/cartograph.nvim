@@ -1644,14 +1644,41 @@ end
 
 -- ── traversal + predicates ─────────────────────────────────────────────────
 -- visit every expr node in a tree (pre-order)
-local function walk(e, fn)
-    if not e then return end
-    fn(e)
-    if e.k == 'field' then walk(e.b, fn)
-    elseif e.k == 'index' then walk(e.b, fn); walk(e.i, fn)
-    elseif e.k == 'call' then walk(e.f, fn); for _, a in ipairs(e.a) do walk(a, fn) end
-    elseif e.k == 'un' then walk(e.e, fn)
-    elseif e.k == 'bin' then walk(e.l, fn); walk(e.r, fn)
+--- THE ONE PLACE THAT SAYS WHICH FIELDS OF A NODE ARE ITS CHILDREN (CART-0882).
+--- Extracted verbatim out of `walk`, which now CONSUMES it -- so this is not a
+--- new authority, it is the old one with a name. Every existing test of `walk`,
+--- `is_pure`, `allocates` and `reads_content` is therefore a test of this table.
+---
+--- ★★ WHY IT WAS EXTRACTED. The enumeration below has been WRONG BY OMISSION
+--- TWICE, both times SILENTLY: `assign` (CART-0743 -- `is_pure`, "the single
+--- safety gate for every key-equality lint", answered PURE for `x = f()`), and
+--- zig's `type` (90 reads and 73 names vanished; THE FIXTURE SUITE STAYED
+--- GREEN). A second consumer that needed one-level children would have copied
+--- it -- and A COPIED WALKER IS A COPIED BUG (CART-0746, tools/probe.lua's
+--- reason for existing). The algebra driver needs exactly that, so the fix is
+--- one source, not a careful copy.
+---
+--- ⚠ IT DESCENDS `t`/`v` AND NOT `kids` FOR `assign`, deliberately -- see the
+--- note in that branch below; changing it would silently re-point every
+--- identity-keyed consumer at a twin node.
+---
+--- ⚠⚠ NIL CHILDREN ARE SKIPPED, NOT HELD AS EMPTY SLOTS. For a WALK that is
+--- correct and was always the behaviour. For a POSITION LENS it is not: with
+--- `e.b` nil on an `index`, `e.i` becomes child 1 rather than child 2, so a path
+--- recorded against one node does not address the same place on another. Any
+--- lens built over this must decide that question explicitly rather than inherit
+--- it -- recorded here because it is invisible at the call site.
+local function children(e, out)
+    out = out or {}
+    if not e then return out end
+    local k = e.k
+    if k == 'field' then out[#out + 1] = e.b
+    elseif k == 'index' then out[#out + 1] = e.b; out[#out + 1] = e.i
+    elseif k == 'call' then
+        out[#out + 1] = e.f
+        for _, a in ipairs(e.a) do out[#out + 1] = a end
+    elseif k == 'un' then out[#out + 1] = e.e
+    elseif k == 'bin' then out[#out + 1] = e.l; out[#out + 1] = e.r
     -- ★★ AND `assign` BELONGS HERE TOO — IT WAS THE SOUNDNESS BUG (CART-0743).
     -- `walk` is what `is_pure` is built on, and `is_pure` is documented as "the
     -- single safety gate for every key-equality lint (comparing two
@@ -1665,8 +1692,8 @@ local function walk(e, fn)
     -- SECOND node with the same content, so a kids-walk visits a twin of `e.t`
     -- rather than `e.t` itself. Same counts, different identity — and identity
     -- is exactly what a `walk` callback is entitled to key on.
-    elseif e.k == 'assign' then walk(e.t, fn); walk(e.v, fn)
-    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' or e.k == 'type' then
+    elseif k == 'assign' then out[#out + 1] = e.t; out[#out + 1] = e.v
+    elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' then
         -- ★ `type` BELONGS HERE OR ITS CONTENTS VANISH. Caught by measurement,
         -- not by the suite: adding the kind without this line lost 90 reads and
         -- 73 names on the zig corpus, because zig's `[N]Air` array type carries
@@ -1674,10 +1701,21 @@ local function walk(e, fn)
         -- A kind that holds `kids` and is absent from this list is a VANISHED
         -- READ — the one thing the closed schema exists to prevent — and it is
         -- silent: the fixture suite stayed green through it.
-        for _, c in ipairs(e.kids or {}) do walk(c, fn) end
+        for _, c in ipairs(e.kids or {}) do out[#out + 1] = c end
     end
+    return out
+end
+
+local function walk(e, fn)
+    if not e then return end
+    fn(e)
+    for _, c in ipairs(children(e)) do walk(c, fn) end
 end
 M.walk = walk
+
+--- One level of children, in walk order. The algebra driver (tools/algebradrive.lua)
+--- reads it to build positional terms; see the nil-slot warning above.
+function M.children(e) return children(e) end
 
 --- canonical STRUCTURAL key — equal keys ⟺ structurally-identical expressions.
 --- Order-sensitive (commutativity is a later refinement). ALLOCATIONS (table/fn)
