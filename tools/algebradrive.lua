@@ -374,6 +374,9 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                         for _, x in ipairs(ours.holes) do
                             if x.kind == 'field' or x.kind == 'operator' then fo = true end
                         end
+                        local w = ours.struct_why or {}
+                        bump(('   ⤷ struct cause: arity=%d kind=%d localglobal=%d')
+                            :format(w.arity or 0, w.kind or 0, w.localglobal or 0))
                         bump('   ⤷ over-report by: ' ..
                             ((ours.struct > 0 and fo) and 'BOTH signals'
                              or (ours.struct > 0) and 'STRUCT hole only'

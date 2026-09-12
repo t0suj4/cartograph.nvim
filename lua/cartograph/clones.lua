@@ -903,7 +903,7 @@ local function anti_unify(e1, e2, la, lb, holes)
         holes[#holes + 1] = { kind = 'struct', a_k = e1.k, b_k = e2.k,
             a = e1.k == 'lit' and tostring(e1.v) or nil, a_ty = e1.ty,
             b = e2.k == 'lit' and tostring(e2.v) or nil, b_ty = e2.ty,
-            at_a = e1.at, at_b = e2.at, xn = e1, yn = e2 }
+            at_a = e1.at, at_b = e2.at, xn = e1, yn = e2, why = 'kind' }
         return false
     end
     local k = e1.k
@@ -922,7 +922,8 @@ local function anti_unify(e1, e2, la, lb, holes)
             holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
             return true
         end
-        holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2 }; return false -- local vs global
+        holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'localglobal' }
+        return false -- local vs global
     elseif k == 'field' then
         local ok = anti_unify(e1.b, e2.b, la, lb, holes)
         -- a field-NAME hole lifts as the whole field ACCESS (a value param): e1/e2 ARE
@@ -936,7 +937,7 @@ local function anti_unify(e1, e2, la, lb, holes)
         return anti_unify(e1.i, e2.i, la, lb, holes) and o1
     elseif k == 'call' then
         if #(e1.a or {}) ~= #(e2.a or {}) then
-            holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2 }; return false
+            holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'arity' }; return false
         end
         local ok = anti_unify(e1.f, e2.f, la, lb, holes)
         for i = 1, #(e1.a or {}) do ok = anti_unify(e1.a[i], e2.a[i], la, lb, holes) and ok end
@@ -966,7 +967,7 @@ local function anti_unify(e1, e2, la, lb, holes)
         local k1, k2 = e1.kids or {}, e2.kids or {}
         if #k1 ~= #k2 then
             if #k1 > 0 or #k2 > 0 then
-                holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2 }; return false
+                holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'arity' }; return false
             end
             return true
         end
@@ -1121,8 +1122,36 @@ function M.analyze_pair(pair)
     -- WHAT EACH SIGNAL MEANS, and they are independent:
     --   insdel  a WHOLE ROW exists on one side only            -> a hedge/repetition hole
     --   nstruct a row diverges in SHAPE, not in a leaf value   -> a wrapper candidate
-    local nstruct = 0
-    for _, h in ipairs(holes) do if h.kind == 'struct' then nstruct = nstruct + 1 end end
+    -- ★★★ A STRUCT HOLE ALREADY KNOWS WHY IT FIRED — the BRANCH that emitted it is
+    -- the cause — and it used to throw that away, which is the third time in this
+    -- arc a computed fact reached no caller (the struct COUNT, the row-pairing
+    -- tie-break, this). The four sites are not one population:
+    --     'arity'        a call or kid list of differing LENGTH. A hedge inside the
+    --                    list; it encloses nothing, so NEVER a wrapper.
+    --     'localglobal'  a local facing a global. The binder pass measured all 13
+    --                    such holes as function PARAMETERS, not wrappers.
+    --     'kind'         the two nodes have different kinds. GENUINELY AMBIGUOUS —
+    --                    a call wrapping a field IS enclosure, a call facing a bare
+    --                    name is a whole-term replacement.
+    --
+    -- ⚠ MEASURED AGAINST THE ALGEBRA over the 21 over-reports, and it corrected a
+    -- prediction I had just made from a single witness ("most will be arity",
+    -- reasoning from a vendored library that added a parameter):
+    --     kind         13     <- the MAJORITY, and the ambiguous one
+    --     arity         7
+    --     localglobal   1
+    -- So tagging the cause fences 8 of 21 soundly and leaves 13 needing the real
+    -- question: does one side CONTAIN what the other has bare? One witness is not a
+    -- population, even when it is the right witness.
+    local nstruct, why_arity, why_kind, why_lg = 0, 0, 0, 0
+    for _, h in ipairs(holes) do
+        if h.kind == 'struct' then
+            nstruct = nstruct + 1
+            if h.why == 'arity' then why_arity = why_arity + 1
+            elseif h.why == 'localglobal' then why_lg = why_lg + 1
+            else why_kind = why_kind + 1 end
+        end
+    end
     local structural = insdel > 0 or nstruct > 0
     -- group value holes by (kind, a, b) — one PARAMETER per distinct varying leaf, but
     -- collect EVERY occurrence's range (sites_a/sites_b) so a leaf that appears more than
@@ -1314,7 +1343,8 @@ function M.analyze_pair(pair)
         if shape ~= 'rows' then evidence = selector and 'selector' or 'shape' end
     end
     return { kind = kind, holes = params, insdel = insdel, drift = drift,
-        struct = nstruct, shape = shape, evidence = evidence }
+        struct = nstruct, shape = shape, evidence = evidence,
+        struct_why = { arity = why_arity, kind = why_kind, localglobal = why_lg } }
 end
 
 --- Human-readable report for M.near pairs. `store` is used to show the differing
