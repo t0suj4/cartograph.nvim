@@ -153,6 +153,48 @@ test('clones: two bodies differing by ONE statement are a near-clone (1 hole)', 
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0875. THE ALIGNER'S TIE-BREAK. When one side INSERTS a row next to a row that
+-- also differs, two alignments cost exactly the same, and the backtrace used to take
+-- `sub` unconditionally -- pairing two rows that have nothing to do with each other.
+-- Measured on cartograph's own tree: `param (field): n.file <=> vim.log.levels.WARN`
+-- on 7 of the 59 near pairs, which is a parameter an extract verb would have believed.
+-- ⚠ NOTHING PINNED THIS, and the whole suite stayed green through it: the defect is in
+-- WHICH rows get paired, not in how many, so every count was right.
+test('clones: an inserted row next to a differing row does not pair unrelated rows', function ()
+    -- a[3] and b[3] are the same notify with a different message; a[4] is A's insertion.
+    -- The tie is sub(a3,b3)+del(a4) against del(a3)+sub(a4,b3) -- same cost, and only the
+    -- first pairs the two notifies.
+    local body_a = '  local n = focus(store)\n  if not n then return end\n'
+        .. '  notify(\'focus a function first\', levels.WARN)\n'
+        .. '  mat_df(store, n.file)\n  scratch(narrow(store, n))\n  return n'
+    local body_b = '  local n = focus(store)\n  if not n then return end\n'
+        .. '  notify(\'focus a method first\', levels.WARN)\n'
+        .. '  scratch(fieldlink(store, n))\n  return n'
+    local root = proj {
+        ['a.lua'] = fn('cmd_a', 'store', body_a),
+        ['b.lua'] = fn('cmd_b', 'store', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 3, min_rows = 4, min_shared = 2 }),
+        'cmd_a', 'cmd_b')
+    ok(p, 'cmd_a and cmd_b are a near-clone')
+    local holes = p and clones.analyze_pair(p).holes or {}
+    local paired_message, nonsense = false, nil
+    for _, h in ipairs(holes) do
+        local a, b = tostring(h.a), tostring(h.b)
+        if a:find('function first', 1, true) and b:find('method first', 1, true) then
+            paired_message = true
+        end
+        -- the defect's signature: the INSERTED row's field against the notify's field
+        if (a == 'file' and b == 'WARN') or (a == 'WARN' and b == 'file') then
+            nonsense = a .. ' <=> ' .. b
+        end
+    end
+    ok(not nonsense, 'no hole pairs the inserted row with the notify (' ..
+        tostring(nonsense) .. ')')
+    ok(paired_message, 'the two notify messages are the parameter')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- CART-0353. The ROW tier: a literal duplicating a module constant, in a statement written
 -- elsewhere using the name. Neither half is sufficient alone, so both are pinned.
 test('clones: a literal that IS a module constant, where a twin statement reads it, is row-drift', function ()

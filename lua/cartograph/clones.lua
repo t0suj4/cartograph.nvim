@@ -565,6 +565,25 @@ local POST_CAP = 30
 -- Levenshtein distance + backtrace over two arrays of atomic row-keys.
 -- Returns (dist, ops) where ops is the alignment [{op, i, j}] in forward order
 -- (op ∈ match|sub|del|ins; i indexes a, j indexes b).
+-- ★★★ HOW MUCH DO TWO ROW KEYS AGREE? The COMMON PREFIX LENGTH, and that is READ
+-- OFF `rcanon`'s FORMAT rather than invented: rcanon writes a key HEAD-FIRST — the
+-- kind letter, then the callee/operator, then the children — so a shared prefix IS
+-- shared top-level structure, and two rows that are different statements diverge
+-- within a couple of characters. Measured on the pair that motivated this
+-- (CART-0875):
+--     a[7] =CFNvim.notify(Lstr:'cartograph: focus a function first',…WARN)
+--     b[7] =CFNvim.notify(Lstr:'cartograph: focus a method first',…WARN)   -> ~40
+--     a[8] =CNmat_df(L,FL.file)          against b[7] above                ->   2
+-- ⚠ It is a TIE-BREAK ONLY. It never enters the DP, so the edit DISTANCE is
+-- untouched and every `max_dist` threshold, tier count and baseline is unchanged.
+local function keysim(x, y)
+    if not x or not y then return -1 end
+    local n = math.min(#x, #y)
+    local i = 1
+    while i <= n and x:byte(i) == y:byte(i) do i = i + 1 end
+    return i - 1
+end
+
 local function align(a, b)
     local la, lb = #a, #b
     local d = {}
@@ -581,7 +600,27 @@ local function align(a, b)
     while i > 0 or j > 0 do
         if i > 0 and j > 0 and a[i] == b[j] and d[i][j] == d[i - 1][j - 1] then
             ops[#ops + 1] = { op = 'match', i = i, j = j }; i = i - 1; j = j - 1
-        elseif i > 0 and j > 0 and d[i][j] == d[i - 1][j - 1] + 1 then
+        elseif i > 0 and j > 0 and d[i][j] == d[i - 1][j - 1] + 1
+            -- ★★★ A TIE MUST NOT DEFAULT TO `sub` (CART-0875). Several branches can
+            -- satisfy the same DP cell, and the FIRST LISTED WINS, so an unconditional
+            -- `sub` here meant the aligner would always rather PAIR TWO UNRELATED ROWS
+            -- than leave an insertion. Measured cost of that: for every near pair where
+            -- one side inserts a row NEXT TO a row that also differs, analyze_pair
+            -- reported a parameter between two rows that have nothing to do with each
+            -- other — `n.file ⇄ vim.log.levels.WARN` on 7 of the 22 structural pairs
+            -- carrying dependent holes, and any extract built on those params would
+            -- have taken a `store` where a message belongs.
+            -- ⚠ THE TWO ALIGNMENTS COST THE SAME. It was never a cheaper path winning;
+            -- it was an arbitrary order deciding. So the fix belongs HERE and not in
+            -- the cost function: giving `sub` a cost of 2 (the Levenshtein→LCS variant)
+            -- would also fix it and would move `dist` for EVERY pair, changing what
+            -- `max_dist` means and every near-tier count with it.
+            -- ONE STEP OF LOOKAHEAD IS ENOUGH: if the row this `sub` would consume on
+            -- one side agrees BETTER with the other side's NEXT row, take the deletion
+            -- (or insertion) and let the better pairing happen.
+            and not (d[i][j] == d[i - 1][j] + 1 and keysim(a[i - 1], b[j]) > keysim(a[i], b[j]))
+            and not (d[i][j] == d[i][j - 1] + 1 and keysim(a[i], b[j - 1]) > keysim(a[i], b[j]))
+        then
             ops[#ops + 1] = { op = 'sub', i = i, j = j }; i = i - 1; j = j - 1
         elseif i > 0 and d[i][j] == d[i - 1][j] + 1 then
             ops[#ops + 1] = { op = 'del', i = i }; i = i - 1
