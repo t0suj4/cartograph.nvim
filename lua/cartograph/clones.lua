@@ -1192,6 +1192,14 @@ function M.analyze_pair(pair)
     -- and attributed the 4 exceptions to the row-pairing artefact, which is the bug
     -- fixed in CART-0875 — so those four were never wrappers failing the rule, they
     -- were pairings that should not have existed.
+    -- ⇒ AND THAT IS NOW MEASURED, NOT ASSERTED. Scoring this rule against their
+    --   oracle with the tie-break REVERTED and then restored, same pinned corpus:
+    --        pre-fix aligner   agree 25 / 31
+    --        post-fix aligner  agree 29 / 31
+    --   The four that moved are #54 #55 #57 #58 — one family, all ctx=0 — which are
+    --   EXACTLY the "other four" their write-up names. Their tree alignment had
+    --   already seen through cartograph's bad row pairing, so THE ORACLE AGREED WITH
+    --   THE FIX BEFORE THE FIX EXISTED: two independent routes to the same pairing.
     --
     -- ★★★ SCORED PAIR-BY-PAIR AGAINST THEIR CLASSIFICATION, on a WORKTREE PINNED to
     -- the commit they measured (so the corpus is identical, not merely similar —
