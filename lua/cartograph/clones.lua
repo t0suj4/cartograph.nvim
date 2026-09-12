@@ -1227,6 +1227,26 @@ function M.analyze_pair(pair)
     --   whether one side CONTAINS what the other has bare, which is the context
     --   variable itself — rung 3+, not a threshold that can be tuned here. 29/31 is
     --   the ceiling for a signal-counting rule and this sits on it.
+    --
+    -- ★★★ CONFIRMED ON A SECOND CORPUS the prototype never touched (wow addons,
+    -- 2.27M lines, functions far larger than cartograph's own), by driving
+    -- `A.vertical` over a strided sample so the ranked list was not read off its
+    -- expensive end (tools/algebradrive.lua --rigid --stride):
+    --        lua   structural  31   agree  29   93.5%
+    --        wow   structural 288   agree 269   93.4%
+    --        both  structural 319   agree 298   93.4%
+    -- The accuracy is the same to a tenth of a point on two corpora three orders of
+    -- magnitude apart in size, which is a stronger statement than either alone.
+    --
+    -- ★★★ AND EVERY ONE OF THE 21 ERRORS IS IN THE SAME DIRECTION: this rule said
+    -- wrapper/mixed where the algebra found ctx = 0. ZERO UNDER-REPORTS — across 319
+    -- structural pairs it never once MISSED a wrapper.
+    -- ⇒ SO `shape` IS AN UPPER BOUND, NOT AN ESTIMATE, and that is how a consumer
+    --   must read it: `wrapper`/`mixed` is a SUPERSET of the true wrappers, `rows`
+    --   is trustworthy negatively. Same discipline as `tier.licenses` — an upper
+    --   bound a consumer may only weaken. A caller that needs certainty a wrapper
+    --   EXISTS has to run the context variable; a caller that needs to know one
+    --   does NOT exist can trust `rows` today.
     local wrapping = nstruct > 0
     for _, h in ipairs(params) do
         if h.kind == 'field' or h.kind == 'operator' then wrapping = true end
