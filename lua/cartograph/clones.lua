@@ -1104,8 +1104,26 @@ function M.analyze_pair(pair)
             insdel = insdel + 1
         end
     end
-    local structural = insdel > 0
-    for _, h in ipairs(holes) do if h.kind == 'struct' then structural = true end end
+    -- ★★★ "structural (needs a human)" IS TWO DIFFERENT ANSWERS WEARING ONE LABEL
+    -- (CART-0881 rung 2). Measured by the prototype algebra against these very pairs
+    -- (~/tools/templates NEARCLONES.md, 2026-09-10): ALL 31 structural pairs have a
+    -- template. Eleven are pure row insertion/deletion — a HEDGE variable and nothing
+    -- else. Twenty contain a WRAPPER: one side encloses what the other has bare, which
+    -- is a CONTEXT variable, and it is typically SHARED ACROSS SITES (`c.line` against
+    -- `callrec.line(c)` at eight sites = ONE accessor migration, stated once).
+    -- Their sentence for it: "The verdict does not distinguish them; the template does."
+    --
+    -- ⚠ AND THE SIGNAL WAS ALREADY COMPUTED HERE AND THROWN AWAY. `holes` carries the
+    -- struct entries; `params` below drops them (`if h.kind ~= 'struct'`), so the count
+    -- reached no caller and the two classes rendered identically. Counting it is the
+    -- whole change — nothing new is derived.
+    --
+    -- WHAT EACH SIGNAL MEANS, and they are independent:
+    --   insdel  a WHOLE ROW exists on one side only            -> a hedge/repetition hole
+    --   nstruct a row diverges in SHAPE, not in a leaf value   -> a wrapper candidate
+    local nstruct = 0
+    for _, h in ipairs(holes) do if h.kind == 'struct' then nstruct = nstruct + 1 end end
+    local structural = insdel > 0 or nstruct > 0
     -- group value holes by (kind, a, b) — one PARAMETER per distinct varying leaf, but
     -- collect EVERY occurrence's range (sites_a/sites_b) so a leaf that appears more than
     -- once in the body is substituted at all its sites (the extract transaction needs this;
@@ -1156,7 +1174,36 @@ function M.analyze_pair(pair)
             end
         end
     end
-    return { kind = kind, holes = params, insdel = insdel, drift = drift }
+    -- ★ `shape` REFINES `kind`, IT DOES NOT REPLACE IT. Every existing consumer reads
+    -- `kind` and keeps reading the same three values; a new field cannot break one.
+    -- Only meaningful when kind == 'structural'.
+    --   'rows'    pure insert/delete, no shape divergence — the cheapest class: a hedge
+    --             hole is the whole story, and nothing is wrapped.
+    --   'wrapper' a row diverges in shape — one side encloses the other. The class the
+    --             extract/hoist verbs want, and the one worth a human's attention.
+    --   'mixed'   both, so neither reading is complete on its own.
+    -- ⚠ A STRUCT HOLE IS NOT THE ONLY WRAPPER SIGNAL, and my first cut said it was.
+    -- Measured against the prototype's independent classification: struct-only gave
+    -- 12 wrappers where it found 20. The rest are in plain sight — their finding is
+    -- that "cartograph's field and operator holes ARE context variables": a field
+    -- hole is `X(base)` with `field:a(◦)` against `field:b(◦)`, an operator hole is
+    -- `X(l, r)`. Both are a wrapper around a base this code keeps, not a leaf value.
+    -- ★ AND THEIR RULE IS NOW CLEANER THAN WHEN THEY MEASURED IT: they had 26 of 30
+    -- and attributed the 4 exceptions to the row-pairing artefact, which is the bug
+    -- fixed in CART-0875 — so those four were never wrappers failing the rule, they
+    -- were pairings that should not have existed.
+    local wrapping = nstruct > 0
+    for _, h in ipairs(params) do
+        if h.kind == 'field' or h.kind == 'operator' then wrapping = true end
+    end
+    local shape
+    if kind == 'structural' then
+        if not wrapping then shape = 'rows'
+        elseif insdel == 0 then shape = 'wrapper'
+        else shape = 'mixed' end
+    end
+    return { kind = kind, holes = params, insdel = insdel, drift = drift,
+        struct = nstruct, shape = shape }
 end
 
 --- Human-readable report for M.near pairs. `store` is used to show the differing
@@ -1201,12 +1248,21 @@ function M.near_report(pairs_, store)
     end
     local TAG = { value = 'value-parameterizable', exact = 'EXACT (mergeable directly)',
         structural = 'structural (needs a human)' }
+    -- ★★★ SAY WHICH KIND OF STRUCTURAL, because the one label covered two answers with
+    -- different owners and different costs (CART-0881 rung 2). "needs a human" was never
+    -- true of all of them: every structural pair HAS a template, and what differs is what
+    -- the template needs — a hedge hole, or a context variable.
+    local SHAPE = {
+        rows = 'structural: ROWS ONLY (inserted/deleted statements — a repetition hole)',
+        wrapper = 'structural: A WRAPPER (one side encloses the other — a context hole)',
+        mixed = 'structural: WRAPPER + ROWS (both, so neither reading is complete)',
+    }
     for i, p in ipairs(pairs_) do
         local a = M.analyze_pair(p)
         local pos = band_lo[i] == band_hi[i] and ('#%d'):format(band_lo[i])
             or ('#%d-%d'):format(band_lo[i], band_hi[i])
         L[#L + 1] = ('■ %s of %d · %d edit(s), %d shared statement(s) — %s:')
-            :format(pos, #pairs_, p.dist, p.shared, TAG[a.kind])
+            :format(pos, #pairs_, p.dist, p.shared, (a.shape and SHAPE[a.shape]) or TAG[a.kind])
         L[#L + 1] = ('    %s  %s:%d'):format(p.a.name, p.a.file, p.a.lines[1] or 0)
         L[#L + 1] = ('    %s  %s:%d'):format(p.b.name, p.b.file, p.b.lines[1] or 0)
         -- ★ the divergence that may not be a parameter at all — see M.analyze_pair's

@@ -153,6 +153,68 @@ test('clones: two bodies differing by ONE statement are a near-clone (1 hole)', 
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0881 rung 2. "structural (needs a human)" covered TWO answers with different
+-- owners: a pair whose only difference is inserted/deleted ROWS (a repetition hole and
+-- nothing else) and a pair where one side WRAPS what the other has bare (a context
+-- hole, typically shared across sites). Measured by the prototype algebra on
+-- cartograph's own 59 near pairs: all 31 structural pairs HAVE a template; the split
+-- was 11 rows-only against 20 carrying a wrapper. The signal was already computed in
+-- `analyze_pair` and dropped on the floor -- struct holes never reached a caller.
+test('clones: an inserted row and a wrapped expression are DIFFERENT structural shapes', function ()
+    local base = '  local a = load(src)\n  local b = trim(a)\n  local c = wrap(b)\n'
+    -- ROWS ONLY: identical but for one extra statement on side A
+    local rows_a = base .. '  audit(c)\n  persist(c)\n  return c'
+    local rows_b = base .. '  persist(c)\n  return c'
+    -- A WRAPPER: same row count, but one side reads `c.line` where the other CALLS
+    -- `line(c)` -- the accessor migration shape, a context hole around the same base
+    local wrap_a = base .. '  local d = c.line\n  persist(d)\n  return d'
+    local wrap_b = base .. '  local d = line(c)\n  persist(d)\n  return d'
+    local root = proj {
+        ['r1.lua'] = fn('rows_one', 'src', rows_a),
+        ['r2.lua'] = fn('rows_two', 'src', rows_b),
+        ['w1.lua'] = fn('wrap_one', 'src', wrap_a),
+        ['w2.lua'] = fn('wrap_two', 'src', wrap_b),
+    }
+    local ps = clones.near(store, { max_dist = 3, min_rows = 4, min_shared = 2 })
+    local rp = near_pair(ps, 'rows_one', 'rows_two')
+    local wp = near_pair(ps, 'wrap_one', 'wrap_two')
+    ok(rp and wp, 'both pairs are near-clones')
+    local ra = rp and clones.analyze_pair(rp)
+    local wa = wp and clones.analyze_pair(wp)
+    ok(ra and ra.kind == 'structural' and ra.shape == 'rows',
+        'an inserted row is shape=rows (got ' .. tostring(ra and ra.shape) .. ')')
+    ok(wa and wa.kind == 'structural' and wa.shape ~= 'rows',
+        'a wrapped expression is NOT shape=rows (got ' .. tostring(wa and wa.shape) .. ')')
+    -- and the point of the split: the two do not render the same
+    ok(ra and wa and ra.shape ~= wa.shape, 'the two structural shapes are distinguished')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠ THE CASE THAT SEPARATES THE RIGHT RULE FROM THE PLAUSIBLE ONE. My first cut made a
+-- STRUCT hole the only wrapper signal, and it classified 12 wrappers where the prototype
+-- found 20. The rest are FIELD and OPERATOR holes, which are context variables too --
+-- `X(base)` with `field:a(◦)` against `field:b(◦)`. A pair whose only wrapper evidence is
+-- a field hole, alongside an inserted row, is exactly where the two rules disagree: the
+-- struct-only rule calls it `rows` and loses the wrapper.
+test('clones: a field hole beside an inserted row is a wrapper, not rows-only', function ()
+    local base = '  local a = load(src)\n  local b = trim(a)\n  local c = wrap(b)\n'
+    local a = base .. '  local d = c.alpha\n  audit(d)\n  persist(d)\n  return d'
+    local b = base .. '  local d = c.beta\n  persist(d)\n  return d'
+    local root = proj {
+        ['m1.lua'] = fn('mix_one', 'src', a),
+        ['m2.lua'] = fn('mix_two', 'src', b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 3, min_rows = 4, min_shared = 2 }),
+        'mix_one', 'mix_two')
+    ok(p, 'mix_one and mix_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok(an and an.insdel > 0, 'it really does carry an inserted row')
+    ok(an and an.struct == 0, 'and NO struct hole — the field hole is the only wrapper evidence')
+    ok(an and an.shape ~= 'rows',
+        'so it is not rows-only (got ' .. tostring(an and an.shape) .. ')')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- CART-0875. THE ALIGNER'S TIE-BREAK. When one side INSERTS a row next to a row that
 -- also differs, two alignments cost exactly the same, and the backtrace used to take
 -- `sub` unconditionally -- pairing two rows that have nothing to do with each other.
