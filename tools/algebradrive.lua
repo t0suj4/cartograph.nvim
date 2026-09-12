@@ -328,7 +328,16 @@ for pi = 1, math.min(#pairs_, want_pairs) do
     -- the differential
     local TA, TB = pair_terms(p)
     if not TA then
-        bump('DIFF: no pair term')
+        -- ⚠ I FIRST REPORTED THIS AS "an adapter gap, honest" AND IT IS NOT A GAP.
+        -- Diagnosed on wow: all 57 such pairs have NO `sub` ops at all — their whole
+        -- divergence is rows present on one side only. There are no diverging rows to
+        -- anti-unify, so `pair_terms` correctly builds nothing. That is not a hole in
+        -- the adapter; it is the ROWS-ONLY class (clones.analyze_pair's `shape`), and
+        -- calling it a gap hid a whole class behind a word that sounded like candour.
+        local nsub = 0
+        for _, o in ipairs(p.ops) do if o.op == 'sub' then nsub = nsub + 1 end end
+        bump(nsub == 0 and 'rows-only pair (no diverging rows — not a gap)'
+            or 'DIFF: no pair term (a real adapter gap)')
     else
         local ok, g = pcall(A.generalize, { TA, TB })
         if not ok then
