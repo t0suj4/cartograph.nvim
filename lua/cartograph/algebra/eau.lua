@@ -5,8 +5,8 @@
 -- came from the plan's own capture hazards; the free-identifier scan that
 -- confirmed them reports ZERO for the two parts already adapted, which is what
 -- makes a count of two believable rather than a coincidence.
-return function (M, S)
-local cat, is_hole = S.cat, S.is_hole
+return function (M, SHARED)
+local cat, is_hole = SHARED.cat, SHARED.is_hole
 
 local function ax(theory, t) return (theory and t and t.kids and theory[t.k]) or nil end
 

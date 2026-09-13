@@ -128,3 +128,104 @@ local x = A.generalize(1, 2)
     ok((t2.lua.generalize or 0) > 0, 'a consumer outside the algebra IS counted')
     vim.fn.delete(root, 'rf')
 end)
+
+--- ★★★ THE PARTS PROTOCOL IS A HAND-WRITTEN DEPENDENCY, AND THIS IS WHAT MAKES IT
+--- VISIBLE (CART-0912). `core.lua` ends with
+---     local PARTS = { vsym = vsym, slice = slice, … }
+---     require('cartograph.algebra.hopau')(M, PARTS)
+--- and each part opens `return function (M, SHARED)` and binds what it needs.
+--- ⚠ THE PARAMETER IS CALLED `SHARED` BECAUSE THIS FENCE READS IT BY NAME. It
+--- was `S` first, and `termgraph` has its own `local S` — the term-graph store —
+--- so the fence reported `termgraph reads S.eqs` twice. A text predicate over a
+--- one-letter name is the same mistake this session filed three times in the
+--- tool; here the collision was mine, and the fix is a name nothing else uses.
+--- NO ANALYSIS KNOWS THAT SHAPE: the linker sees a call, not a protocol, so a
+--- local leaving `core` takes the other parts down with it and nothing says so
+--- until something runs. Both halves have already bitten —
+---   `key` read by a part and NOT in PARTS  -> "attempt to call global 'key'"
+---   a local that travels out of core        -> PARTS hands round a nil
+--- so the fence checks the THREE sets against each other.
+---
+--- ⚠ IT IS A TEXT CHECK ON PURPOSE, and says so: the shape is four lines of Lua
+--- in one file, and a parser for it would be a second authority on a convention
+--- this spec IS the authority for. What it must not do is pass by finding
+--- nothing — hence the floor assertions on each set.
+test('algebra parts: what a part reads, core supplies, and core still defines', function ()
+    local dir = vim.fn.getcwd() .. '/lua/cartograph/algebra'
+    local core = table.concat(vim.fn.readfile(dir .. '/core.lua'), '\n')
+
+    -- the PARTS table: `name = local_name`, from `local PARTS = {` to its `}`
+    local decl = core:match('\nlocal PARTS = (%b{})')
+    ok(decl, 'core declares a PARTS table')
+    local supplied = {}
+    for k, v in decl:gmatch('([%w_]+)%s*=%s*([%w_]+)') do supplied[k] = v end
+    local nsup = 0; for _ in pairs(supplied) do nsup = nsup + 1 end
+    ok(nsup >= 8, 'and it supplies a plausible number of locals: ' .. nsup)
+
+    -- core's own module-level locals
+    local defined = {}
+    for n in core:gmatch('\nlocal function ([%w_]+)') do defined[n] = true end
+    for n in core:gmatch('\nlocal ([%w_]+)%s*=') do defined[n] = true end
+
+    -- ★ EVERY VALUE PARTS HANDS ROUND MUST STILL EXIST IN CORE. This is the half
+    -- that catches a local LEAVING with a section.
+    local dead = {}
+    for k, v in pairs(supplied) do
+        if not defined[v] then dead[#dead + 1] = ('%s = %s'):format(k, v) end
+    end
+    table.sort(dead)
+    eq(0, #dead, 'PARTS hands round a local core no longer defines: ' ..
+        table.concat(dead, ', '))
+
+    -- ★ AND EVERY `S.<name>` A PART READS MUST BE SUPPLIED. This is the half that
+    -- catches the `key` bug — a part reading something nobody passes it.
+    local parts, missing, total = 0, {}, 0
+    for _, path in ipairs(vim.fn.glob(dir .. '/*.lua', false, true)) do
+        local name = path:match('([^/]+)%.lua$')
+        if name ~= 'core' and name ~= 'origin' then
+            local src = table.concat(vim.fn.readfile(path), '\n')
+            ok(src:find('return function (M, SHARED)', 1, true),
+                name .. ' opens with the part signature')
+            parts = parts + 1
+            for n in src:gmatch('SHARED%.([%w_]+)') do
+                total = total + 1
+                if not supplied[n] then
+                    missing[#missing + 1] = ('%s reads S.%s'):format(name, n)
+                end
+            end
+        end
+    end
+    ok(parts >= 4, 'the fence actually looked at parts: ' .. parts)
+    ok(total >= 8, 'and at a plausible number of reads: ' .. total)
+    table.sort(missing)
+    eq(0, #missing, 'a part reads something PARTS does not supply: ' ..
+        table.concat(missing, ', '))
+end)
+
+--- ⚠ AND THE STRUCTURAL CHECK IS NOT ENOUGH ON ITS OWN: it proves the wiring is
+--- consistent, not that the code behind it works. One arrow per part, RUN.
+test('algebra parts: one arrow from each part actually runs', function ()
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    if not A then skip('algebra unavailable') end
+    local t1 = A.node('f', A.name('x'), A.lit('number:1'))
+    local t2 = A.node('f', A.name('y'), A.lit('number:1'))
+    local cases = {
+        { 'hopau',       function () return A.lam('x', A.name('x')) end },
+        { 'termgraph',   function () return A.tg_of_term(t1) end },
+        { 'eau',         function () return A.flatten(t1, { f = 'A' }) end },
+        { 'materialize', function () return A.is_absence('absent') end },
+        { 'tai',         function () return A.jwz(t1, t2) end },
+        { 'vertical',    function () return A.vertical(t1, t2) end },
+        -- ⚠ `generalize(instances, opts)` takes a LIST. Calling it with two terms
+        -- raised "attempt to index a nil value", which is this test being
+        -- wrong rather than the part being broken — exactly what a smoke
+        -- test must not confuse.
+        { 'core',        function () return A.generalize({ t1, t2 }) end },
+    }
+    for _, c in ipairs(cases) do
+        local okc, r = pcall(c[2])
+        ok(okc and r ~= nil, ('%s: %s'):format(c[1],
+            okc and 'ran' or tostring(r):gsub('.*:%d+: ', '')))
+    end
+end)

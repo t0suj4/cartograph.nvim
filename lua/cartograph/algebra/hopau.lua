@@ -1,8 +1,8 @@
 -- A PART OF `cartograph.algebra.core`, which requires this file at its end and
 -- passes its own module table in. ⚠ IT DOES NOT `require` CORE BACK: that is a
 -- load cycle — Lua says "loop or previous error loading module".
-return function (M, S)
-local _ = S
+return function (M, SHARED)
+local _ = SHARED
 
 -- ── HIGHER-ORDER PATTERN ANTI-UNIFICATION (Baumgartner, Kutsia, Levy, Villaret, JAR 2017) ──
 -- Read in full (open access). Terms are simply typed λ-terms in η-long β-normal form:

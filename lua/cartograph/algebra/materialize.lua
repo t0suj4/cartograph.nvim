@@ -4,8 +4,8 @@
 -- ★ `child`, `is_hole` and `key` are the file-locals this section reaches back
 -- for; the plan's capture hazards named two of them and the free-identifier
 -- scan (zero on every part already adapted) found the third.
-return function (M, S)
-local child, is_hole, key = S.child, S.is_hole, S.key
+return function (M, SHARED)
+local child, is_hole, key = SHARED.child, SHARED.is_hole, SHARED.key
 
 function M.is_absence(name) return M.ABSENCE[name] ~= nil end
 

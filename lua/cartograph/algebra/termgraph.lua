@@ -1,8 +1,8 @@
 -- A PART OF `cartograph.algebra.core`, which requires this file at its end and
 -- passes its own module table in. ⚠ IT DOES NOT `require` CORE BACK: that is a
 -- load cycle — Lua says "loop or previous error loading module".
-return function (M, S)
-local vsym, lcs_alignments, slice = S.vsym, S.lcs_alignments, S.slice
+return function (M, SHARED)
+local vsym, lcs_alignments, slice = SHARED.vsym, SHARED.lcs_alignments, SHARED.slice
 
 -- ── TERM-GRAPH ANTI-UNIFICATION (Baumgartner, Kutsia, Levy, Villaret, FSCD 2018) ──────
 -- Read in full (LIPIcs 108, article 9). A term-graph is a system of recursion equations
