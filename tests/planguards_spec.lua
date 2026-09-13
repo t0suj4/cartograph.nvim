@@ -155,3 +155,96 @@ test('planguards: dryrun ATTACHES verdicts without refusing', function ()
     local m = verdicts_by_file(plan.guard_verdicts)
     ok(m['sub/h.lua'] or m['m.lua'], 'per FILE, not one verdict for the plan')
 end)
+
+-- ── the intermediary effect: previewing a state that is not on disk ─────────
+--
+-- ★★★ A COMPOSITION APPLIES STEP 1 TO NOTHING, STEP 2 TO THE RESULT OF STEP 1.
+-- None of those middle states exists as a file, and `dryrun` read the filesystem
+-- unconditionally, so a preview could only ever show what a plan does to the
+-- CURRENT tree (CART-0920). The rendering side was already virtual — every
+-- verb's `edits_for` takes its content as an ARGUMENT — so the read loop was the
+-- whole of the binding.
+
+local function one_plan(st, name, dest)
+    local n
+    for _, x in ipairs(st.data.nodes) do
+        if x.name == name and (x.kind == 'function' or x.kind == 'method') then n = x end
+    end
+    return n and moveapply.plan_extract_ids(st, { n.id }, dest)
+end
+
+test('dryrun: opts.before previews against SUPPLIED content, not the disk', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] =
+        'local M = {}\nfunction M.f(x) return x + 1 end\nreturn M\n' }
+    local plan = one_plan(st, 'M.f', 'sub/u.lua')
+    ok(plan ~= nil, 'a plan was built')
+
+    -- the disk preview: the source file loses the function
+    local b1, a1 = txn.dryrun(st, plan)
+    ok(b1['m.lua']:find('M.f', 1, true), 'the disk before holds the function')
+    ok(not a1['m.lua']:find('return x + 1', 1, true), 'and the after drops it')
+
+    -- ⚠ NOW THE SAME PLAN AGAINST A STATE THAT IS NOT ON DISK. A composition's
+    -- earlier step would have produced this text; nothing wrote it anywhere.
+    local mid = 'local M = {}\nfunction M.f(x) return x + 99 end\n-- step 1 was here\nreturn M\n'
+    local b2, a2, why2, virtual = txn.dryrun(st, plan, nil, { before = { ['m.lua'] = mid } })
+    ok(b2 ~= nil, 'the virtual preview ran: ' .. tostring(why2))
+    eq(mid, b2['m.lua'], 'the before is the SUPPLIED content')
+    ok(a2['m.lua']:find('step 1 was here', 1, true),
+        'and the after is built on it — the earlier step survives')
+
+    -- ★ AND IT SAYS WHICH RELS WERE VIRTUAL, because a caller that gates on
+    -- "has been diffed" must not accept a diff taken against content nobody can
+    -- see on disk.
+    eq({ 'm.lua' }, virtual)
+    eq(nil, select(4, txn.dryrun(st, plan)), 'a disk preview reports no virtual rels')
+end)
+
+--- ⚠ AND THE `false` THAT MATTERS IS FOR A FILE THAT EXISTS. Where the plan
+--- CREATES the file, the disk fallback also yields `false`, so both a nil-test
+--- and a truthiness-test agree and the distinction is invisible — mutating
+--- `~= nil` to a truthiness test passed the suite until this case existed. A
+--- composition whose earlier step DELETED a file is where they diverge: nil-ness
+--- honours the supplied absence and the edit refuses to build; truthiness falls
+--- through and previews against the DISK CONTENT, which is a confident preview of
+--- something the composition never asked for.
+test('dryrun: a supplied `false` for an EXISTING file is honoured, not re-read', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] =
+        'local M = {}\nfunction M.f(x) return x + 1 end\nreturn M\n' }
+    local plan = one_plan(st, 'M.f', 'sub/u.lua')
+    -- `m.lua` is on disk and is NOT in plan.creates
+    local b, a, why = txn.dryrun(st, plan, nil, { before = { ['m.lua'] = false } })
+    eq(nil, b, 'the plan cannot be built against an absent source')
+    eq(nil, a)
+    ok(tostring(why):find('m.lua', 1, true),
+        'and the refusal names the file rather than previewing the disk: ' .. tostring(why))
+end)
+
+test('dryrun: a supplied `false` is a CREATE, not a missing file', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] =
+        'local M = {}\nfunction M.f(x) return x + 1 end\nreturn M\n' }
+    local plan = one_plan(st, 'M.f', 'sub/u.lua')
+    -- `sub/u.lua` does not exist on disk either, but supplying `false` must go
+    -- through the SAME path rather than falling back to the read and its refusal.
+    -- ⚠ Testing truthiness instead of nil-ness here sends a legitimate create
+    -- back to the disk read, which refuses it.
+    local b, a, why = txn.dryrun(st, plan, nil, { before = { ['sub/u.lua'] = false } })
+    ok(b ~= nil, 'the create previews: ' .. tostring(why))
+    eq(false, b['sub/u.lua'], 'and its before is FALSE, not nil')
+    ok(a['sub/u.lua'] and a['sub/u.lua']:find('M.f', 1, true), 'the new file holds the move')
+end)
+
+test('dryrun: unmentioned files still come from the disk', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] =
+        'local M = {}\nfunction M.f(x) return x + 1 end\nreturn M\n' }
+    local plan = one_plan(st, 'M.f', 'sub/u.lua')
+    -- a composition supplies only what its earlier steps touched; everything
+    -- else must read normally, or a partial map would blank the rest
+    local b = txn.dryrun(st, plan, nil, { before = { ['sub/u.lua'] = false } })
+    ok(b['m.lua'] and b['m.lua']:find('M.f', 1, true),
+        'the unmentioned source is still read from disk')
+end)

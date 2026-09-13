@@ -273,24 +273,63 @@ end
 --- Dry-run a plan: the same before-content read and edit callback the
 --- apply uses, but nothing written. Returns (before_map, after_map).
 --- `edit_of` is optional — the plan's own is used when it is omitted.
-function M.dryrun(store, plan, edit_of)
+---
+--- ★★★ `opts.before` IS WHAT MAKES AN INTERMEDIARY EFFECT PREVIEWABLE (CART-0920).
+--- A composition applies step 1 to nothing, step 2 to the result of step 1, and
+--- so on; none of those middle states exists on disk, and until now this read the
+--- file system unconditionally, so the preview could only ever show what a plan
+--- does to the CURRENT tree. The RENDERING side was already virtual — every
+--- verb's `edits_for` is called as `f(rel, before, all)` and takes its content as
+--- an ARGUMENT — so this loop was the whole of what bound preview to the disk.
+---
+--- `opts.before` is a partial map `rel -> string | false`; `false` means the file
+--- did not exist at that step (a create). Anything it does not mention is read
+--- from disk, so a composition supplies only the files its earlier steps touched.
+---
+--- ⚠⚠ A VIRTUAL PREVIEW IS NOT A DISK PREVIEW, AND MUST NEVER SATISFY AN APPLY
+--- GATE. `txn_apply` refuses a plan that "has never been diffed"; that gate exists
+--- so nobody writes bytes no caller has seen. A diff taken against content that is
+--- not on disk has not shown anyone what the write would do. The rels whose
+--- content was SUPPLIED come back as the fourth return value for exactly that
+--- reason — a caller that gates on having previewed must check it, and the agent's
+--- `txn_preview` passes no opts at all.
+---
+--- ⚠ THE STAMP GUARANTEE DOES NOT MOVE WITH IT. `plan.stamps` pins each touched
+--- file's disk stamp so `execute` can refuse on drift; a supplied before-image has
+--- no stamp and cannot acquire one. Composed work must verify the ORIGINAL inputs'
+--- stamps once, at the end — which `execute` still does, because it reads the disk
+--- itself and never sees these opts.
+--- @return table|nil before, table|nil after, string|nil why, table|nil virtual
+function M.dryrun(store, plan, edit_of, opts)
     local nope
     edit_of, nope = resolve_edit(plan, edit_of)
     if not edit_of then return nil, nil, nope end
     local root = store.data.root
     local cok, cwhy = M.contain_plan(plan)
     if not cok then return nil, cwhy end
-    local before = {}
+    local supplied = opts and opts.before or nil
+    local before, virtual = {}, nil
     for _, rel in ipairs(plan.touched) do
-        local t = M.read_file(root, rel)
-        if not t then
-            if not (plan.creates and plan.creates[rel]) then
-                return nil, nil, 'cannot read ' .. rel
+        local t
+        if supplied ~= nil and supplied[rel] ~= nil then
+            -- ★ `false` IS A VALUE HERE, NOT AN ABSENCE: it says the file did not
+            -- exist at this step. Testing truthiness instead of nil-ness would
+            -- send a legitimate create back to the disk read below and refuse it.
+            t = supplied[rel]
+            virtual = virtual or {}
+            virtual[#virtual + 1] = rel
+        else
+            t = M.read_file(root, rel)
+            if not t then
+                if not (plan.creates and plan.creates[rel]) then
+                    return nil, nil, 'cannot read ' .. rel
+                end
+                t = false
             end
-            t = false
         end
         before[rel] = t
     end
+    if virtual then table.sort(virtual) end
     -- ★ AN EDIT CALLBACK THAT RAISES IS A REFUSAL, NOT A CRASH (CART-0767, and
     -- CART-0372 is proof at least one verb's callback raises on real input). The
     -- scorer already pcall'd for this reason; the two paths that actually build
@@ -312,8 +351,11 @@ function M.dryrun(store, plan, edit_of)
     -- is where the write happens and where the refusal belongs. Both call
     -- `planguards.run`, so what the preview checked and what the write checks
     -- cannot drift.
+    -- ★ THE GUARDS SEE THE HYPOTHETICAL, WHICH IS RIGHT. `planguards.run` works
+    -- from the (before, after) TEXT and reads no files, so a virtual step's
+    -- guards judge the state that step would produce rather than the one on disk.
     plan.guard_verdicts = require('cartograph.planguards').run(store, plan, before, after)
-    return before, after
+    return before, after, nil, virtual
 end
 
 --- ★ THE PLAN PROTOCOL'S SCORING HALF (CART-0375): what this plan would do to the line count,
