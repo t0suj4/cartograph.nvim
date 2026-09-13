@@ -14,11 +14,19 @@
 -- mean GUESSING which arrows survive; driving first MEASURES it. This tool
 -- touches no shipped analysis path and writes nothing.
 --
--- ★★ IT NEVER COPIES THE PROTOTYPE. `dofile` of the real module, or nothing.
--- A copied algebra would be a second authority that drifts, which is the failure
--- this whole arc exists to avoid (CART-0746: A COPIED WALKER IS A COPIED BUG).
--- If the prototype moves, this tool breaks loudly rather than answering from a
--- stale snapshot.
+-- ★★ SUPERSEDED 2026-09-13 BY THE VENDORING (CART-0912), AND THE ORIGINAL RULE
+-- IS LEFT HERE BECAUSE IT WAS RIGHT ABOUT THE HAZARD. It read:
+--
+--     "IT NEVER COPIES THE PROTOTYPE. `dofile` of the real module, or nothing.
+--      A copied algebra would be a second authority that drifts" (CART-0746: A
+--      COPIED WALKER IS A COPIED BUG).
+--
+-- The algebra is now cartograph's own code at `cartograph.algebra.core`, and
+-- this tool loads it through the seam like everything else — so it no longer
+-- `dofile`s anything either. ★ WHAT ANSWERS THE OLD OBJECTION IS NOT THAT THE
+-- COPY CANNOT DRIFT, IT IS THAT IT CANNOT DRIFT *SILENTLY*: the copy carries a
+-- stamp (`cartograph.algebra.origin`) and `tools/vendordrift.lua` reports which
+-- of the two moved. A second artifact, yes; a second AUTHORITY, no.
 --
 -- ★★ AND SPANS RIDE THROUGH THE ALGEBRA FOR FREE -- checked in the source, not
 -- assumed. `M.rebuild(t, kids)` carries "every field that is not the child

@@ -84,11 +84,15 @@ function M.check()
     end
     local alg_ok, alg_why = require('cartograph.algebra').available()
     if alg_ok then
-        h.ok('template algebra found (clone structure can be SETTLED, not just'
+        -- ★ VENDORED (CART-0912): this is cartograph's own module now, so the
+        -- line reports PROVENANCE rather than discovery — there is nothing left
+        -- to find, and saying "found" would imply an install step that no
+        -- longer exists.
+        h.ok('template algebra built in (clone structure can be SETTLED, not just'
             .. ' bounded) — ' .. alg_why)
     else
-        h.info('template algebra unavailable — clone structure stays a bounded'
-            .. ' heuristic and says so; optional (' .. tostring(alg_why) .. ')')
+        h.info('template algebra disabled — clone structure stays a bounded'
+            .. ' heuristic and says so (' .. tostring(alg_why) .. ')')
     end
 
     if vim.fn.executable('git') == 1 then

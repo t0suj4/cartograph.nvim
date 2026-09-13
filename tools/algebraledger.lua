@@ -123,6 +123,19 @@ function M.uses(root, arrows)
             -- measurement that includes the measuring instrument reports the
             -- instrument.
             if f:find('algebraledger%.lua$') then text = nil end
+            -- ⚠ NOR THE ALGEBRA ITSELF. Since the vendoring (CART-0912) the
+            -- algebra lives at `lua/cartograph/algebra/core.lua`, INSIDE the
+            -- tier this counts. Its 6001 lines call its own arrows constantly,
+            -- so counting them would report every export as shipped and the
+            -- ledger would read 164 of 164 the day it stopped meaning anything.
+            -- ★ ABSORBED STILL MEANS "SOMETHING ELSE CALLS IT". Owning the code
+            -- did not change the question; it changed which files are allowed
+            -- to answer it.
+            -- ⚠ AND THE EXCLUSION IS DELIBERATE, NOT INHERITED. `core.lua` is
+            -- skipped today only because it does not contain the string
+            -- `cartograph.algebra` — an accident of the guard below that would
+            -- evaporate the moment the vendored file gained one self-reference.
+            if f:find('/cartograph/algebra/') then text = nil end
             if text and text:find('cartograph.algebra', 1, true) then
                 local vars = bindings(text)
                 -- ⚠ ABSENCE RENDERED AS SILENCE IS THE FAILURE MODE HERE. A file
@@ -157,15 +170,23 @@ end
 
 function M.run(opts)
     opts = opts or {}
-    local alg = require 'cartograph.algebra'
-    local path, declared = alg.path()
-    local src = path and read(path)
+    local root = opts.root or REPO
+    -- ★★★ THE LEFT SIDE IS OUR OWN FILE NOW (CART-0912). Before the vendoring
+    -- this read the donor at `algebra.path()`; that made the ledger a statement
+    -- about SOMEONE ELSE'S module. The code is cartograph's own, so the export
+    -- surface being measured is `lua/cartograph/algebra/core.lua` — and the day
+    -- we adapt it (split it by its 38 sections) the ledger follows the edit
+    -- instead of quietly measuring a file we no longer run.
+    -- ⚠ COMPARING THE TWO IS A DIFFERENT TOOL. `tools/vendordrift.lua` answers
+    -- "has the copy or the donor moved"; a ledger that silently read whichever
+    -- it found would answer neither question reliably.
+    local path = root .. '/lua/cartograph/algebra/core.lua'
+    local declared = 'vendored'
+    local src = read(path)
     if not src then
-        print(('algebraledger: cannot read the prototype at %s (declared by %s)')
-            :format(tostring(path), tostring(declared)))
+        print(('algebraledger: cannot read the vendored algebra at %s'):format(path))
         return 1
     end
-    local root = opts.root or REPO
     local sect, order, of = M.exports(src)
     local arrows = {}
     for a in pairs(of) do arrows[a] = true end

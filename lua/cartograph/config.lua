@@ -24,13 +24,18 @@ M.clangd_compile_commands = nil
 M.luals = true
 M.luals_bin = nil
 
--- the proven template algebra (~/tools/templates) as an optional oracle for
--- clone analysis: it settles structural questions the counting heuristic can
--- only bound. `false` disables; algebra_path overrides discovery, and
--- $CARTOGRAPH_ALGEBRA is honoured after it.
--- ⚠ THIS PATH IS LOADED WITH `dofile`, SO IT EXECUTES. It may only ever come
--- from here, from that env var, or from the fixed default — NEVER from the tree
--- being analysed. See lua/cartograph/algebra.lua.
+-- the proven template algebra, which settles structural questions the counting
+-- heuristic can only bound. `false` disables it — the consumers then render
+-- their `unavailable` rung, which is the only way that path is still reachable.
+-- ★ VENDORED 2026-09-13 (CART-0912): the algebra is cartograph's own code at
+-- `cartograph.algebra.core` and is no longer loaded from anywhere. `false` is
+-- therefore the only setting that changes behaviour.
+-- ⚠ `algebra_path` / $CARTOGRAPH_ALGEBRA NO LONGER SELECT WHAT IS LOADED. They
+-- name the DONOR the copy came from, and their only readers are the drift fence
+-- (`tools/vendordrift.lua`) and the absorption ledger — both of which read that
+-- file as TEXT. Nothing `dofile`s it any more, so the execution hazard the old
+-- note warned about is gone rather than merely managed; the declared-source
+-- rule still governs the path because a reader is still a reader.
 M.algebra = true
 M.algebra_path = nil
 

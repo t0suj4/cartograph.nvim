@@ -58,7 +58,12 @@
 
 local M = {}
 
---- where we would load from, and which declared source said so.
+--- ⚠ NO LONGER THE LOAD PATH. Since the vendoring (CART-0912) this answers
+--- "where did the copy COME FROM", and its only consumers are the drift fence
+--- and the absorption ledger, both of which read the donor AS TEXT and neither
+--- of which executes it. The declared-source rule in the header still governs
+--- it — a path out of the analysed tree must never reach a reader either — but
+--- nothing here `dofile`s any more.
 --- @return string path, string source
 function M.path()
     local cfg = require('cartograph.config').algebra_path
@@ -70,8 +75,22 @@ end
 
 local loaded, load_err
 
---- load the real module, memoized. NEVER a copy: if it is not there, this
---- returns nil and the reason, and the caller says so out loud.
+--- ★★★ VENDORED 2026-09-13 (CART-0912): the algebra is CARTOGRAPH'S OWN CODE
+--- now, at `cartograph.algebra.core`, and this no longer `dofile`s anything.
+--- USER: "The end goal is to make the code cartograph's own. But dofile-ing it
+--- is an acceptable intermediate step." The intermediate step is over.
+---
+--- ★★ AND THIS REMOVES A TRUST BOUNDARY RATHER THAN WEAKENING ONE. The header
+--- above argues at length that the load path must be a DECLARED source because
+--- `dofile` EXECUTES what it loads. Requiring an in-tree module executes code
+--- that is in the repository, reviewed, and covered by the suite — there is no
+--- longer an external file to declare, and `M.path()` survives only to say
+--- where the copy CAME FROM (see `tools/vendordrift.lua`).
+---
+--- ⚠ THE REFUSAL PATH IS STILL REAL AND STILL EXERCISED. `config.algebra =
+--- false` disables the seam, so every consumer's `unavailable` rung keeps its
+--- test. A rung whose only trigger was a missing file would have gone dead the
+--- moment the file stopped being able to be missing.
 --- @return table|nil algebra, string|nil err
 function M.load()
     -- ⚠ THE DISABLE CHECK IS NOT MEMOIZED, and neither is it merely cheap to
@@ -85,26 +104,29 @@ function M.load()
     end
     if loaded then return loaded end
     if load_err then return nil, load_err end
-    local path, source = M.path()
-    if vim.fn.filereadable(path) ~= 1 then
-        load_err = ('not readable at %s (from %s)'):format(path, source)
-        return nil, load_err
-    end
-    local ok, A = pcall(dofile, path)
+    local ok, A = pcall(require, 'cartograph.algebra.core')
     if not ok or type(A) ~= 'table' then
-        load_err = ('failed to load %s: %s'):format(path, tostring(A))
+        load_err = ('failed to load cartograph.algebra.core: %s'):format(tostring(A))
         return nil, load_err
     end
     loaded = A
     return A
 end
 
+--- the vendoring record: donor repo, revision and sha at the time the copy was
+--- taken. Read by `tools/vendordrift.lua` and by anything reporting provenance.
+--- @return table origin
+function M.origin()
+    return require 'cartograph.algebra.origin'
+end
+
 --- @return boolean ok, string reason
 function M.available()
     local A, err = M.load()
     if not A then return false, err end
-    local path, source = M.path()
-    return true, ('%s (from %s)'):format(path, source)
+    local o = M.origin()
+    return true, ('vendored %s (from %s/%s)'):format(
+        o.donor_rev:sub(1, 8), o.donor_repo, o.donor_file)
 end
 
 -- ── the adapter: cartograph expr IR → prototype term ────────────────────────

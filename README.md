@@ -501,7 +501,11 @@ a chain `a~b, b~c` with no `a~c` edge usually means the index refused the third
 pair at its distance cutoff, not that there are two families. Because the cheap
 answer yields *more* families, it reads as a finer result rather than a wrong
 one, so the command refuses when the template algebra is unavailable instead of
-falling back to it — `:checkhealth cartograph` says whether it is present.
+falling back to it. The algebra is **vendored** — cartograph's own code at
+`cartograph.algebra.core`, with its origin recorded in `cartograph.algebra.origin`
+and `tools/vendordrift.lua` reporting whether the copy or its donor has moved — so
+"unavailable" now means only that `algebra = false` was set.
+`:checkhealth cartograph` reports it either way.
 
 The proposal also shows **the helper body itself**, and it is worth saying how,
 because the obvious way is wrong. It is not the template printed back out: the
