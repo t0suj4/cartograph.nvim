@@ -97,3 +97,78 @@ test('hoist-closure: the write is journaled and the result parses', function ()
     end
     vim.fn.delete(root, 'rf')
 end)
+
+--- ★★★ THE WRITE CAPTURE (CART-0905). `reads` is every use NOT in `params` and
+--- NOT in `defs`, so a name this body ASSIGNS lands in `defs` and never reaches
+--- the read gate. MEASURED before the fix: a closure doing `count = count + n`
+--- on an enclosing local was ALLOWED to hoist while one that merely READ it was
+--- refused — the verb refused the safe case and allowed the unsafe one.
+--- Hoisting the first turns the assignment into a write to a GLOBAL; `parses`
+--- cannot catch it, because it parses.
+local WRITES = 'local M = {}\nlocal function outer()\n  local count = 0\n'
+    .. '  local function bump(n)\n    count = count + n\n    return count\n  end\n'
+    .. '  local function readonly(n)\n    return count + n\n  end\n'
+    .. '  return bump, readonly\nend\nM.outer = outer\nreturn M\n'
+
+test('hoist-closure: a closure that ASSIGNS an enclosing local is refused', function ()
+    local root = proj(WRITES)
+    local plan, why, detail = hc.plan(store, id_of('bump'))
+    eq(nil, plan)
+    ok(tostring(why):find('assigns enclosing local `count`'),
+        'named as an assignment, not a read: ' .. tostring(why))
+    ok(detail and detail.writes == 'count', 'and the name rides as structure')
+
+    -- BOTH SIDES: the read-only sibling is still refused, by the OTHER gate —
+    -- otherwise a blanket refusal would pass this test too
+    local p2, w2, d2 = hc.plan(store, id_of('readonly'))
+    eq(nil, p2)
+    ok(tostring(w2):find('captures enclosing local'), 'the reader is refused as a READ: ' .. tostring(w2))
+    ok(d2 and d2.captures == 'count', 'and names what it captures')
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ⚠ A SIBLING'S LOCALS ARE NOT THE PARENT'S. `expr.of` on an enclosing
+--- function returns its CHILDREN'S statements too, so a name declared only
+--- inside a sibling closure looked like an enclosing local. Measured: `outer`
+--- holding two callbacks reported `defs = {acc, seen, s, pad, acc, seen, s,
+--- pad}` — every local of both, attributed to the parent.
+local SIBS = 'local M = {}\nlocal function outer(live)\n'
+    .. '  local function cb1(t)\n    local pad = 1\n    return pad + t + live\n  end\n'
+    .. '  local function cb2(t)\n    local pad = 2\n    return pad + t\n  end\n'
+    .. '  return cb1, cb2\nend\nM.outer = outer\nreturn M\n'
+
+test('hoist-closure: a name declared in a SIBLING closure is not an enclosing local', function ()
+    local root = proj(SIBS)
+    local plan, why, detail = hc.plan(store, id_of('cb1'))
+    -- cb1 captures `live` (a real enclosing param) and declares its own `pad`,
+    -- which cb2 also declares. Only `live` may be reported.
+    eq(nil, plan)
+    ok(tostring(why):find('`live`'), 'the REAL capture is named: ' .. tostring(why))
+    ok(not tostring(why):find('`pad`'),
+        'the sibling\'s local is not reported as a capture: ' .. tostring(why))
+    ok(detail and detail.captures == 'live', 'and it is the one that rides as structure')
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ⚠⚠ AND THE COORDINATE TRAP THAT FIX INTRODUCED. `s.l` is 1-BASED and
+--- `at.sl`/`at.el` are 0-BASED; comparing them raw shifts every test by one
+--- line. The failure is SILENT AND WIDENING — a declaration on the line where a
+--- sibling closure starts reads as being INSIDE it, drops out of the enclosing
+--- facts, and the capture it should block is ALLOWED. This fixture puts the
+--- declaration exactly there.
+local ADJACENT = 'local M = {}\nlocal function outer(x)\n  local cap = x + 1\n'
+    .. '  local function pure(y)\n    return y + 1\n  end\n'
+    .. '  local function grabs(z)\n    return z + cap\n  end\n'
+    .. '  return pure(x) + grabs(x)\nend\nreturn M\n'
+
+test('hoist-closure: a declaration abutting a sibling\'s first line still counts', function ()
+    local root = proj(ADJACENT)
+    local plan, why = hc.plan(store, id_of('grabs'))
+    eq(nil, plan)
+    ok(tostring(why):find('captures enclosing local `cap`'),
+        'the abutting declaration is still an enclosing local: ' .. tostring(why))
+    -- and the genuinely capture-free sibling still hoists, so this is not a
+    -- blanket refusal
+    ok(hc.plan(store, id_of('pure')), 'the capture-free closure still lifts')
+    vim.fn.delete(root, 'rf')
+end)

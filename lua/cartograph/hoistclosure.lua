@@ -25,13 +25,41 @@ local function contains(outer, inner)
 end
 
 -- params ∪ df-defs of a function body, and its free reads + vararg use
-local function body_facts(store, id)
+--- ⚠ `skip` EXCLUDES A NESTED RANGE, and without it an enclosing function's
+--- facts include ITS CHILDREN'S. MEASURED: for `outer` holding two callbacks,
+--- `defs` came back `{acc, seen, s, pad, acc, seen, s, pad}` -- every local of
+--- both callbacks, attributed to the parent. The read gate survived that
+--- (a child's own defs are excluded from its own `reads`), but any gate that
+--- compares a child's DEFS against the parent's sees every inner local as a
+--- shadow of an enclosing one. Statements carry their line, so the child's
+--- range is enough to leave it out.
+local function body_facts(store, id, skip)
     local eo = require('cartograph.expr').of(store, id)
     if not eo then return nil end
     local pset, dset = {}, {}
     for _, p in ipairs(eo.fl.params or {}) do pset[p] = true end
+    -- ⚠ EVERY nested range, not just the target's. A SIBLING closure's locals
+    -- are attributed to the parent too, so skipping only the closure under test
+    -- still left `pad` (declared in cb2) looking like an enclosing local of cb1.
+    -- ⚠⚠ TWO COORDINATE SYSTEMS. `s.l` is 1-BASED (the flow layer's statement
+    -- line) and `at.sl`/`at.el` are 0-BASED (node ranges). Comparing them raw
+    -- shifts every test by one line, and the failure is SILENT AND WIDENING: a
+    -- declaration on the first line of a sibling closure reads as being INSIDE
+    -- it, drops out of the enclosing facts, and the capture it should have
+    -- blocked is allowed through. Measured exactly that — `local cap = x + 1`
+    -- at 1-based line 4 fell inside a closure spanning 0-based 4..6.
+    local function outside(s)
+        if not skip or not s.l then return true end
+        local l0 = s.l - 1
+        for _, rng in ipairs(skip) do
+            if l0 >= at.sl(rng) and l0 <= at.el(rng) then return false end
+        end
+        return true
+    end
     for _, s in ipairs(eo.fl.stmts or {}) do
-        for _, d in ipairs(s.def or {}) do dset[d] = true end
+        if outside(s) then
+            for _, d in ipairs(s.def or {}) do dset[d] = true end
+        end
     end
     local reads, vararg = {}, false
     local expr = require 'cartograph.expr'
@@ -76,11 +104,43 @@ function M.plan(store, closure_id)
 
     -- CAPTURE gate: no free read may be a local/param of ANY enclosing function
     local encl_locals = {}
+    -- the ranges of EVERY function nested inside this enclosing one: their
+    -- declarations are theirs, not the parent's
     for _, e in ipairs(encl) do
-        local f = body_facts(store, e.id)
+        local inner = {}
+        for _, n2 in ipairs(store.data.nodes) do
+            if (n2.kind == 'function' or n2.kind == 'method') and n2.id ~= e.id
+                and n2.file == e.file and contains(e.range, n2.range) then
+                inner[#inner + 1] = n2.range
+            end
+        end
+        local f = body_facts(store, e.id, inner)
         if f then
             for k in pairs(f.params) do encl_locals[k] = true end
             for k in pairs(f.defs) do encl_locals[k] = true end
+        end
+    end
+    -- ★★★ THE WRITE CAPTURE, WHICH THIS GATE COULD NOT SEE (CART-0905). `reads`
+    -- is every use NOT in `params` and NOT in `defs`, so a name this body
+    -- ASSIGNS lands in `defs` and is excluded from `reads` — invisible here.
+    -- MEASURED: a closure doing `count = count + n` on an enclosing local was
+    -- ALLOWED to hoist while one that merely READ it was refused. Hoisting the
+    -- first turns the assignment into a write to a GLOBAL and silently destroys
+    -- the closure; `parses` cannot catch it, because it parses.
+    --
+    -- ⚠ CONSERVATIVE BY CONSTRUCTION, AND DELIBERATELY SO. A name in both this
+    -- body's `defs` and an enclosing local is EITHER a write to that local OR a
+    -- local of the same name SHADOWING it. Telling the two apart needs the
+    -- declaration-vs-assignment distinction — the spec declares it
+    -- (`write_gate` + `is_write`, 11 specs) and computes it at ingest as
+    -- `MF_WRITE`, but no accessor reaches it from here. Refusing BOTH
+    -- over-refuses a shadow and never under-refuses a write, which is the only
+    -- safe direction for a verb that edits code.
+    for d in pairs(self.defs) do
+        if d ~= short and encl_locals[d] then
+            return nil, ('assigns enclosing local `%s` (or shadows it) — hoisting'
+                .. ' would write a different variable'):format(d),
+                { writes = d }
         end
     end
     for r in pairs(self.reads) do
