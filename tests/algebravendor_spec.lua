@@ -37,11 +37,24 @@ test('algebra vendoring: the seam loads the in-tree module, not the donor', func
 end)
 
 --- the stamp is not decoration: `vendordrift` compares BOTH sides to it, so a
---- stamp that does not describe the file it sits beside makes every state wrong
+--- stamp that does not describe the file it sits beside makes every state wrong.
+--- ⚠ BUT IT IS A RECORD OF THE PAST, NOT A CLAIM ABOUT THE PRESENT (CART-0916).
+--- The first cut asserted `o.lines` against the CURRENT file and so became a
+--- freeze on ever editing the copy — which contradicts the design it guards,
+--- where DIVERGED is the plan. The line count is checked only while the fence
+--- itself says nothing has moved.
 test('algebra vendoring: the origin stamp describes the file beside it', function ()
     local o = require 'cartograph.algebra.origin'
     eq(64, #o.sha256)
     eq(40, #o.donor_rev)
+    ok(o.vendored_at:match('^%d%d%d%d%-%d%d%-%d%d$'), 'a dated stamp: ' .. tostring(o.vendored_at))
+
+    local state = drift.check(drift.units[1]).state
+    if state ~= 'IDENTICAL' then
+        -- an adapted copy is the goal, not a failure; `vendordrift` owns the
+        -- comparison and reports it as DIVERGED
+        return
+    end
     local n = 0
     for _ in io.lines(vim.fn.getcwd() .. '/lua/cartograph/algebra/core.lua') do n = n + 1 end
     eq(o.lines, n)

@@ -1920,7 +1920,8 @@ local function v_txn_plan_moveset(store, args)
     -- user their staged set — a verb the operator started read-only should not be
     -- reaching into session state at all. Unarmed plans still preview, because
     -- txn.dryrun reads the plan and never the staged set.
-    local plan, why = moveapply.plan_moveset(store, ids, args.dest, { arm = M.WRITABLE })
+    local plan, why = moveapply.plan_moveset(store, ids, args.dest,
+        { arm = M.WRITABLE, reexport = args.reexport and true or nil })
     if not plan then
         return refuse('cannot-plan',
             ('no move-set plan could be built for %s: %s'):format(tostring(args.dest), tostring(why)),
@@ -2743,6 +2744,8 @@ M.VERBS = {
                 desc = 'or the DURABLE refs from the same rows; unioned with `seed`. A ref that no longer resolves REFUSES (`stale-ref`), and one that resolves only WITH A CAVEAT also refuses (`ref-caveat`) — on the write side a probable handle is not good enough' },
             { name = 'dest', type = 'string', required = true,
                 desc = 'destination path, relative to the graph root. An existing file = MOVE; a new path = EXTRACT-MODULE. A path escaping the root is refused' },
+            { name = 'reexport', type = 'boolean',
+                desc = 'when the source is a single-table module (`return M`) and a moved name has NO call site to rewrite, the plan REFUSES: the move would change what require() returns with nothing able to detect it. Pass true to wire the old names to the new home instead, preserving the surface' },
         },
         run = v_txn_plan_moveset,
     },

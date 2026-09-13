@@ -156,11 +156,124 @@ local function module_scaffold(plan, dest, ts, file_lines)
     end
 end
 
+-- ★★★ THE RESIDUAL HAS TWO DIRECTIONS AND ONLY ONE WAS COMPUTED (CART-0915).
+-- `module_scaffold` above enumerates what the MOVED code still reaches that the
+-- new table does not hold. The mirror of that is what the SOURCE module stops
+-- holding: move `M.hoau` out of a file whose contract is `return M`, and every
+-- reader of that module's table loses the member.
+--
+-- ⚠ AND THE MOVE-SET CANNOT CATCH IT THE WAY IT CATCHES EVERYTHING ELSE. This
+-- verb is sound because it REWRITES THE CALLERS; a symbol with NO callers has
+-- nothing to rewrite, so the plan is vacuously correct and the result is wrong.
+-- Measured on the vendored algebra: 16 arrows moved, `A.hoau` and `A.lam` nil
+-- afterwards, 2440 tests green — because no test can exercise what no caller
+-- calls. THE VERB IS BLIND EXACTLY ON THE SYMBOLS NOBODY USES YET, which is the
+-- population an absorption arc moves by definition.
+--
+-- ★ SO THE TELL IS NOT "IT BROKE", IT IS "NOTHING COULD HAVE TOLD US". A moved
+-- member with zero call sites is an UNVERIFIABLE move, and that is a fact about
+-- the evidence, not about the code. It is disclosed as a hazard either way, and
+-- refused unless the caller says what to do -- `reexport` wires the old name to
+-- the new home so the surface is preserved by construction.
+local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts)
+    local per, order = {}, {}
+    for _, m in ipairs(plan.moves) do
+        if m.mode ~= 'copy' then
+            local ls = file_lines(m.file)
+            local tbl = ls and ts.module_table(m.file, ls) or nil
+            local member = tbl and m.name:match('^' .. tbl .. '%.([%a_][%w_]*)$')
+            if member then
+                local e = per[m.file]
+                if not e then
+                    e = { table = tbl, names = {}, blind = {} }
+                    per[m.file] = e; order[#order + 1] = m.file
+                end
+                e.names[#e.names + 1] = member
+                -- a call site inside the move-set travels with it and proves
+                -- nothing about the module's surface
+                local outside = 0
+                for _, c in ipairs(store.calls_to[m.id] or {}) do
+                    local fn = callrec.fn(c)
+                    if not (fn and in_move[fn]) then outside = outside + 1 end
+                end
+                if outside == 0 then e.blind[#e.blind + 1] = member end
+            end
+        end
+    end
+    if #order == 0 then return true end
+
+    local blind_total = 0
+    for _, rel in ipairs(order) do blind_total = blind_total + #per[rel].blind end
+
+    -- ⚠ DISCLOSED, NOT REFUSED — and the first cut had it the other way round.
+    -- A blanket refusal contradicted `moveapply: a top-level function M.foo()
+    -- STILL MOVES`, a deliberate test whose fixture is EXACTLY this shape: one
+    -- `M.foo` in a `return M` module with no callers, extracted to a new file.
+    -- That is a legitimate plan, and the fact that a fence fired on existing
+    -- green behaviour is the tell that the fence was describing one instance
+    -- rather than the class. This verb already reports the MIRROR residual (the
+    -- scaffold's "the moved code still reaches M.x") as a hazard; the same
+    -- residual seen from the other side gets the same treatment.
+    local _ = blind_total
+
+    for _, rel in ipairs(order) do
+        local e = per[rel]
+        table.sort(e.names)
+        table.sort(e.blind)
+        -- ★ THE BLIND COUNT IS THE ACTIONABLE HALF. "the surface shrinks" is a
+        -- fact about the edit; "and N of them have no call site, so no rewrite
+        -- and no test can detect it" is a fact about the EVIDENCE, and it is the
+        -- one that decides whether a reader should look.
+        plan.hazards[#plan.hazards + 1] = ('%s.{%s} leave %s — its module table no'
+            .. ' longer holds them%s%s'):format(e.table,
+            table.concat(e.names, ', '), rel,
+            #e.blind > 0 and ((', and %d have NO call site outside the move-set'
+                .. ' (%s), so nothing was rewritten and no test can fail on it')
+                :format(#e.blind, table.concat(e.blind, ', '))) or '',
+            (opts and opts.reexport) and ('; ' .. rel .. ' re-exports them from ' .. dest)
+            or ' — pass reexport=true to keep the surface')
+        if opts and opts.reexport then
+            local ls = file_lines(rel) or {}
+            local line, alias = ts.import_line(rel, dest)
+            if not (line and alias) then
+                return nil, ('cannot wire a re-export in %s: no import idiom for'
+                    .. ' %s in this language'):format(rel, dest)
+            end
+            -- ★ ONE BLOCK, IMMEDIATELY BEFORE `return M`, AND THE REQUIRE GOES
+            -- IN IT. A require at the top would read more idiomatically, but the
+            -- assignments must follow the definition of every name they read and
+            -- the file's own `local M` -- keeping the pair adjacent is what makes
+            -- the edit mechanical rather than a judgement about where imports go.
+            -- ⚠ `ins.after` IS 0-BASED and edit_file splices at `after + 2`, so
+            -- the anchor for "immediately BEFORE 1-based line i" is `i - 2`, not
+            -- `i - 1`. The first cut used `i - 1` and put the whole block AFTER
+            -- `return M` — code after a chunk's return is a syntax error, and the
+            -- `parses` guard refused the apply rather than writing it. That guard
+            -- is the only reason this was a failed test and not a broken file.
+            local at
+            for i = #ls, 1, -1 do
+                if (ls[i] or ''):match('^return%s+' .. e.table .. '%s*$') then at = i - 2; break end
+            end
+            if not at then
+                return nil, ('cannot wire a re-export in %s: no `return %s` line'
+                    .. ' to insert before'):format(rel, e.table)
+            end
+            local block = { '', ('-- re-exported from %s so %s keeps its surface'):format(dest, e.table), line }
+            for _, n in ipairs(e.names) do
+                block[#block + 1] = ('%s.%s = %s.%s'):format(e.table, n, alias, n)
+            end
+            plan.reexports = plan.reexports or {}
+            plan.reexports[#plan.reexports + 1] = { file = rel, after = at, lines = block }
+        end
+    end
+    return true
+end
+
 -- the shared plan core: collect the staged symbols (kind gate, comment
 -- adhesion, cbarg disclosure), fold in the ImpactEngine's findings as
 -- disclosure hazards, stamp the touched set. Both verbs (move,
 -- extract-module) build on it.
-local function collect(store, ids, dest, plan)
+local function collect(store, ids, dest, plan, opts)
     local txn = require 'cartograph.txn'
     local root = store.data.root
     local okp, ts = pcall(require, 'cartograph.providers.treesitter')
@@ -366,6 +479,10 @@ local function collect(store, ids, dest, plan)
     if okp and plan.creates and plan.creates[dest] then
         module_scaffold(plan, dest, ts, file_lines)
     end
+    if okp then
+        local okl, whyl = surface_loss(store, plan, dest, ts, file_lines, in_move, opts)
+        if not okl then return nil, whyl end
+    end
     for f in pairs(touched) do
         plan.touched[#plan.touched + 1] = f
         plan.stamps[f] = txn.disk_stamp(root, f)
@@ -413,7 +530,7 @@ function M.plan_ids(store, ids, dest)
         moves = {}, hazards = {}, stamps = {}, touched = {},
         dest_at = insert_point(vim.split(dtext, '\n', { plain = true })),
     }
-    return collect(store, ids, dest, plan)
+    return collect(store, ids, dest, plan, opts)
 end
 
 --- Build the EXTRACT-MODULE plan: the staged move-set leaves for a
@@ -581,7 +698,7 @@ function M.plan_extract_ids(store, ids, relpath, opts)
         plan.hazards[#plan.hazards + 1] = relpath
             .. ' will need its package clause — cartograph wrote none'
     end
-    return collect(store, ids, relpath, plan)
+    return collect(store, ids, relpath, plan, opts)
 end
 
 -- at most three names, then a count — a refusal that lists forty symbols is a
@@ -733,6 +850,11 @@ function M.edits_for(plan)
             for _, i in ipairs(plan.imports_add or {}) do
                 if i.file == rel then
                     ins[#ins + 1] = { after = i.after, lines = { i.text } }
+                end
+            end
+            for _, r in ipairs(plan.reexports or {}) do
+                if r.file == rel then
+                    ins[#ins + 1] = { after = r.after, lines = r.lines }
                 end
             end
             return require('cartograph.txn').edit_file(before, dels, reps, ins)

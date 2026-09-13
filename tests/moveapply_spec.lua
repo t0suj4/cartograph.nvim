@@ -551,3 +551,62 @@ test('moveapply: a php CLASS METHOD is refused, naming the class declaration', f
     ok(err and err:find('class_declaration'),
         'and names the class body it sits in: ' .. tostring(err))
 end)
+
+--- ★★★ THE RESIDUAL SEEN FROM THE SOURCE SIDE (CART-0915). `module_scaffold`
+--- has always reported what the MOVED code still reaches; the mirror — what the
+--- SOURCE module stops holding — was computed nowhere, and a move-set is sound
+--- BECAUSE IT REWRITES CALLERS, so a symbol with no callers is moved with
+--- nothing rewritten and nothing able to fail. Measured on the vendored algebra:
+--- 16 arrows moved, `A.hoau` nil afterwards, 2440 tests green.
+test('moveapply: a moved M.x is DISCLOSED as leaving the source module\'s table', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'function M.foo(x) return x + 1 end',
+        'function M.bar(x) return x - 1 end',
+        'return M',
+    }, '\n') }
+    local foo = node_by(st, 'M.foo') or node_by(st, 'foo')
+    local plan = assert(moveapply.plan_extract_ids(st, { foo.id }, 'sub/f.lua'))
+    local said
+    for _, h in ipairs(plan.hazards or {}) do
+        if h:find('no longer holds them', 1, true) then said = h end
+    end
+    ok(said, 'the surface loss is disclosed: ' .. tostring(said))
+    ok(said:find('foo', 1, true), 'naming the member')
+    -- ★ the BLIND count is the actionable half — not that the surface shrank,
+    -- but that nothing could have detected it
+    ok(said:find('NO call site', 1, true), 'and that nothing was rewritten: ' .. said)
+    ok(said:find('reexport', 1, true), 'and how to keep the surface')
+end)
+
+--- and the remedy is MECHANICAL, so it is applied and then LOADED — a re-export
+--- that renders but does not run would be the same class of defect it fixes
+test('moveapply: reexport=true keeps the moved name on the source module', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'function M.foo(x) return x + 1 end',
+        'return M',
+    }, '\n') }
+    local root = st.data.root
+    local foo = node_by(st, 'M.foo') or node_by(st, 'foo')
+    local plan = assert(moveapply.plan_extract_ids(st, { foo.id }, 'sub/f.lua',
+        { reexport = true }))
+    st.clear_stage(); st.stage(foo.id); st.set_dest('sub/f.lua')
+    local okay, why = moveapply.apply(st, plan)
+    ok(okay, 'applied: ' .. tostring(why))
+
+    local src = table.concat(vim.fn.readfile(root .. '/m.lua'), '\n')
+    ok(src:find('require', 1, true), 'the source requires the new home: ' .. src)
+    ok(src:find('M.foo = ', 1, true), 'and rebinds the moved name')
+    ok(src:find('return M'), 'and still returns its table')
+
+    -- ⚠ RUN IT. The whole defect was code that loads clean and answers nil.
+    package.path = root .. '/?.lua;' .. package.path
+    package.loaded['m'], package.loaded['sub.f'] = nil, nil
+    local okl, A = pcall(require, 'm')
+    ok(okl, 'the rewritten module loads: ' .. tostring(A))
+    eq('function', type(okl and A.foo), 'and M.foo is STILL REACHABLE through it')
+    eq(6, okl and A.foo(5))
+end)
