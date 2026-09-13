@@ -191,6 +191,61 @@ function M.compute(store, moveset, dest)
         for _, dep in ipairs(band:callees(tid)) do consider(dep) end
         for _, to in ipairs(band:var_uses(tid)) do consider(to) end
     end
+    -- ★★★ A SECOND, CHEAPER RUNG, BECAUSE THE FIRST IS BOUNDED BY RESOLUTION
+    -- (CART-0919). Everything above is built from `band:callees` / `band:var_uses`
+    -- — RESOLVED edges — so a file-local whose call sites the linker could not
+    -- resolve produces NO hazard at all. MEASURED on the vendored algebra:
+    -- `slice` had 26 call sites in the moved text and all 26 were unresolved,
+    -- while `vsym` (12) and `lcs_alignments` (4) resolved and were disclosed. The
+    -- extracted module loaded clean and died on first use.
+    --
+    -- ⚠ THE ERROR DIRECTION IS WHAT MAKES THIS WORTH A SECOND MECHANISM: the list
+    -- gets SHORTER where the graph knows LESS, so the plan reads as SAFER exactly
+    -- where it is least understood.
+    --
+    -- The rung: the moved TEXT NAMES an identifier that is a module-level
+    -- file-local of the source and is not travelling. NODES exist even when CALLS
+    -- do not resolve, so the candidate set costs nothing extra, and a text match
+    -- can only OVER-report — which for a disclosure is the safe direction, and is
+    -- already how `module_scaffold`'s `M.x` residual works.
+    local textual = {}
+    do
+        local txn = require 'cartograph.txn'
+        local root = store.data.root
+        local moved_text = {}          -- file -> the moved lines, concatenated
+        for _, r in ipairs(ranges) do
+            if moved_text[r.file] == nil then
+                local t = root and txn.read_file(root, r.file)
+                moved_text[r.file] = t and vim.split(t, '\n', { plain = true }) or false
+            end
+        end
+        local chunk = {}
+        for _, r in ipairs(ranges) do
+            local ls = moved_text[r.file]
+            if ls then
+                local acc = chunk[r.file] or {}
+                for i = r.s + 1, r.e + 1 do acc[#acc + 1] = ls[i] end
+                chunk[r.file] = acc
+            end
+        end
+        for file, acc in pairs(chunk) do
+            local body = table.concat(acc, '\n')
+            for _, n in ipairs(store.data.nodes or {}) do
+                -- a module-level, same-file, non-travelling, UNQUALIFIED name:
+                -- `M.foo` is the other half of the residual and is reported by
+                -- `module_scaffold`, so only bare locals are this rung's business
+                if n.file == file and not travels[n.id] and not captured[n.id]
+                    and n.name and not n.name:find('%.')
+                    and (n.kind == 'function' or n.kind == 'var')
+                    and module_level(n)
+                    and body:find('%f[%w_]' .. n.name:gsub('%p', '%%%0') .. '%f[^%w_]') then
+                    captured[n.id] = { name = n.name, file = n.file }
+                    textual[n.id] = true
+                end
+            end
+        end
+    end
+
     local capkeys, caps = {}, {}
     for depid in pairs(captured) do capkeys[#capkeys + 1] = depid end
     table.sort(capkeys, function (a, b) return captured[a].name < captured[b].name end)
@@ -200,17 +255,40 @@ function M.compute(store, moveset, dest)
         -- is cluster-private, safe to pull in. SHARED = referenced by staying
         -- code too → moving it would break the stayer; require or copy instead.
         -- (Referrers may be nested nodes, hence the `travels` test, not the set.)
-        local private = true
-        for _, r in ipairs(band:callers(depid)) do
-            if not travels[r] then private = false; break end
+        -- ⚠⚠ `private` IS NOT A MESSAGE, IT IS THE CLOSURE'S ELIGIBILITY TEST:
+        -- `moveapply.close_moveset` PULLS every private capture INTO the move-set.
+        -- So a TEXTUAL capture can never be private. Its whole premise is that the
+        -- call sites did not resolve, and `band:callers` on an unresolved symbol
+        -- returns an EMPTY list — which the loop below reads as "nobody else uses
+        -- it" and would answer `private = true`.
+        -- ★ MEASURED, AND IT WOULD HAVE BEEN WORSE THAN THE SILENCE IT FIXES: on
+        -- the vendored algebra `slice` is a module-level local that the STAYING
+        -- `VERTICAL DIFFERENCES` section calls ~20 times, and the first cut of this
+        -- rung had the closure move it into the extracted file. I wrote the caveat
+        -- into the MESSAGE and left the FLAG alone.
+        local private = not textual[depid]
+        if private then
+            for _, r in ipairs(band:callers(depid)) do
+                if not travels[r] then private = false; break end
+            end
         end
         if private then
             for _, from in ipairs(band:var_used_by(depid)) do
                 if not travels[from] then private = false; break end
             end
         end
-        caps[#caps + 1] = { id = depid, name = c.name, file = c.file, private = private }
-        warn('capture', private
+        caps[#caps + 1] = { id = depid, name = c.name, file = c.file,
+            private = private, textual = textual[depid] or nil }
+        -- ⚠ A TEXTUAL HIT MUST NOT CLAIM `private`. That verdict is computed from
+        -- `band:callers`, and this rung exists precisely because those edges are
+        -- missing — an empty caller list would read as "nobody else uses it" when
+        -- the truth is "nothing could be resolved". Say which it is.
+        warn('capture', textual[depid]
+            and ('%s (file-local in %s) is NAMED IN THE MOVED TEXT but its call'
+                .. ' sites did not resolve, so whether staying code also uses it'
+                .. ' is UNKNOWN — require it, copy it, or add it to the move-set')
+                :format(c.name, c.file)
+            or private
             and ('%s (file-local in %s, private to the move) is referenced but'
                 .. ' stays behind — add it to the move-set'):format(c.name, c.file)
             or ('%s (file-local in %s, shared with staying code) is referenced'

@@ -642,3 +642,69 @@ test('moveapply: an emitted require drops the package root — and keeps it when
     local nline = tsp.import_line('lua/a/b.lua', 'lua/a/c.lua')
     ok(nline:find("require 'lua.a.c'", 1, true), 'no ctx = no stripping: ' .. tostring(nline))
 end)
+
+--- ★★★ THE CAPTURE DISCLOSURE HAD ONE MECHANISM AND IT WAS RESOLUTION-BOUND
+--- (CART-0919). Captures were read off `band:callees` / `band:var_uses`, so a
+--- file-local whose call sites the linker could not resolve produced NO hazard —
+--- the list got SHORTER exactly where the graph knew LESS, and the extracted
+--- module loaded clean and died on first use.
+---
+--- ★ THE UNRESOLVED CASE, MEASURED AND THEN REPRODUCED: a name DEFINED MORE THAN
+--- ONCE at module level in one file. The vendored algebra has THREE `local
+--- function slice`, and all 26 of its call sites carry `to = nil`. Two earlier
+--- hypotheses (nesting, a parameter of the same name) were tried and refuted by
+--- the graph before this one held.
+test('moveapply: a file-local whose calls do not resolve is still disclosed', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'local function helper(x) return x + 1 end',
+        'function M.early(y) return helper(y) end',
+        'local function helper(x) return x + 2 end',   -- the SECOND definition
+        'local function untouched(x) return x - 1 end',
+        'function M.uses_it(x)',
+        '    return helper(x)',
+        'end',
+        'return M',
+    }, '\n') }
+    local n = node_by(st, 'M.uses_it') or node_by(st, 'uses_it')
+    local plan = assert(moveapply.plan_extract_ids(st, { n.id }, 'sub/u.lua'))
+
+    local said, noise = nil, false
+    for _, h in ipairs(plan.hazards or {}) do
+        if h:find('capture', 1, true) and h:find('helper', 1, true) then said = h end
+        if h:find('untouched', 1, true) then noise = true end
+    end
+    ok(said, 'the unresolved file-local is disclosed: ' .. tostring(said))
+    ok(said:find('UNKNOWN', 1, true),
+        'and says the sharing is UNKNOWN rather than asserting private: ' .. said)
+    ok(not noise, 'a file-local the moved text does not name is NOT reported')
+end)
+
+--- ★★★ AND `private` IS NOT A MESSAGE — IT IS THE CLOSURE'S ELIGIBILITY TEST.
+--- `close_moveset` PULLS every private capture INTO the move-set, and `private`
+--- is computed from `band:callers`, which on an UNRESOLVED symbol returns an
+--- empty list — read as "nobody else uses it". The first cut of the text rung
+--- therefore made the closure MOVE a shared local: on the vendored algebra
+--- `slice` is called ~20 times by the STAYING `VERTICAL DIFFERENCES` section, and
+--- moving it would have broken the file that kept it. ⇒ WORSE THAN THE SILENCE
+--- IT FIXES, from writing the caveat into the message and leaving the flag alone.
+test('moveapply: an unresolved capture is NEVER pulled into the move-set', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'local function helper(x) return x + 1 end',
+        'function M.stays(y) return helper(y) end',    -- STAYING code uses it
+        'local function helper(x) return x + 2 end',
+        'function M.uses_it(x) return helper(x) end',
+        'return M',
+    }, '\n') }
+    local n = node_by(st, 'M.uses_it') or node_by(st, 'uses_it')
+    local closed = moveapply.close_moveset(st, { n.id }, 'sub/u.lua')
+    for _, id in ipairs(closed) do
+        local cn = st.node(id)
+        ok(not (cn and cn.name == 'helper'),
+            'the unresolved capture did NOT travel: ' .. tostring(cn and cn.name))
+    end
+    eq(1, #closed, 'the move-set is the seed alone')
+end)
