@@ -2542,3 +2542,104 @@ test('template_of: an unkeyed hole refuses rather than placing it somewhere', fu
     eq(nil, t)
     ok(tostring(why):find('no source span'), 'names it: ' .. tostring(why))
 end)
+
+--- ★★★ THE OTHER HALF OF THE LATTICE. `template_meet` is the greatest template
+--- BELOW two; this is the least ABOVE. The consumer is a refusal that becomes an
+--- answer: `M.match` says a payload does not instantiate a template and stops,
+--- and `join(T, payload)` says what T would have to BECOME to admit it.
+test('template_join: a match refusal becomes a named widening', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local et = clones.element_template(container_of_src("local X = { f(1, z), f(2, z) }"))
+    local T = clones.template_of(et)
+    ok(T ~= nil, 'the container adapts')
+
+    -- the payload `f(7, q)` differs in a FIXED position, so match refuses
+    local payload = container_of_src("local Y = { f(7, q) }").kids[1]
+    local m = clones.match(et, payload)
+    eq(false, m.ok)
+
+    -- ...and the join says exactly what would have to give
+    local j, why = clones.template_join(T, payload)
+    ok(j ~= nil, 'the join exists: ' .. tostring(why))
+    eq(1, #(j.new or {}))
+    local shown = A.show(j.template.body)
+    ok(select(2, shown:gsub('%?', '')) == 2,
+        'the fixed argument became a second hole: ' .. shown)
+    ok(A.instance_of(T, j.template), 'and the widening is ABOVE the original')
+end)
+
+--- ⚠ ADOPTION: a payload the template ALREADY admits must leave it UNCHANGED.
+--- A join that widened on every newcomer would erode a claim one payload at a
+--- time, which is the failure `adjoin` is named for.
+test('template_join: a payload that already fits changes nothing', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local T = clones.template_of(
+        clones.element_template(container_of_src("local X = { f(1, z), f(2, z) }")))
+    local payload = container_of_src("local Y = { f(7, z) }").kids[1]
+
+    local j, why = clones.template_join(T, payload)
+    ok(j ~= nil, 'it joins: ' .. tostring(why))
+    eq(0, #(j.new or {}))
+    eq(0, #(j.split or {}))
+    eq(A.show(T.body), A.show(j.template.body))
+
+    -- ★ AND THE HOLE NAMES SURVIVE, which is the whole reason this is `join` and
+    -- not `generalize`: a re-derivation renames, and every stored value keyed by
+    -- the old name is orphaned.
+    ok(#(j.kept or {}) > 0, 'holes are KEPT by name, so stored values follow')
+    local names = {}
+    for _, h in ipairs(A.hole_names(j.template)) do names[h] = true end
+    for _, h in ipairs(A.hole_names(T)) do
+        ok(names[h], ('hole %s kept its name through the join'):format(h))
+    end
+end)
+
+--- The law, dual to the meet's and asserted the same way: ABOVE both inputs.
+test('template_join: the join is above both templates', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local T1 = clones.template_of(
+        clones.element_template(container_of_src("local X = { f(1, z), f(2, z) }")))
+    local T2 = clones.template_of(
+        clones.element_template(container_of_src("local Y = { g(1, z), g(2, z) }")))
+
+    local j, why = clones.template_join(T1, T2)
+    ok(j ~= nil, 'two templates join: ' .. tostring(why))
+    ok(A.instance_of(T1, j.template), 'above the LEFT template')
+    ok(A.instance_of(T2, j.template), 'above the RIGHT template')
+    -- and strictly above at least one, or "join" would be satisfied by handing
+    -- back an input
+    ok(not A.instance_of(j.template, T1) or not A.instance_of(j.template, T2),
+        'strictly above at least one: ' .. A.show(j.template.body))
+    -- the clashing head is what gave way, and the AGREEING argument did not
+    ok(A.show(j.template.body):find('z', 1, true),
+        'the part both agreed on is still fixed: ' .. A.show(j.template.body))
+end)
+
+--- THREE INPUT SHAPES reach these verbs and the normaliser is SHARED with
+--- `template_meet` — two copies of a shape test is how the two verbs start
+--- disagreeing about what they accept.
+test('template_join/meet: template, element_template and payload all normalise', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local et = clones.element_template(container_of_src("local X = { f(1, z), f(2, z) }"))
+    local T = clones.template_of(et)
+    local payload = container_of_src("local Y = { f(7, z) }").kids[1]
+
+    ok(clones.template_join(T, payload), 'prototype template + expr payload')
+    ok(clones.template_join(et, payload), 'element_template + expr payload')
+    ok(clones.template_join(et, T), 'element_template + prototype template')
+    ok(clones.template_meet(et, T), 'and the meet takes the same shapes')
+
+    local bad, why = clones.template_join(T, { nope = true })
+    eq(nil, bad)
+    ok(tostring(why):find('neither a template'), 'a fourth shape refuses by name: ' .. tostring(why))
+end)

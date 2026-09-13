@@ -3801,6 +3801,34 @@ function M.template_of(et)
     return A.abstract(body, H)
 end
 
+--- Normalise whatever a caller has into a prototype template. THREE SHAPES
+--- reach these verbs and they are distinguishable by construction:
+---   * a PROTOTYPE TEMPLATE     — carries `.body`
+---   * an `element_template`    — carries `.donor` and span-keyed `.varying`
+---   * an EXPR NODE (a payload) — carries `.k`, and becomes a GROUND template,
+---     which is what makes "what would this template have to become to admit
+---     this payload" expressible at all.
+--- Shared by `template_meet` and `template_join` deliberately: two copies of a
+--- shape test is how the two verbs start disagreeing about what they accept.
+local function as_template(x, side)
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    if not A then return nil, 'algebra unavailable' end
+    if type(x) ~= 'table' then return nil, side .. ' is not a template or a payload' end
+    if x.body then return x end
+    if x.donor ~= nil or x.varying ~= nil then
+        local t, w = M.template_of(x)
+        if not t then return nil, side .. ': ' .. tostring(w) end
+        return t
+    end
+    if x.k ~= nil then
+        local t = alg.term(x)
+        if not t then return nil, side .. ': the payload does not adapt to a term' end
+        return A.template(t)
+    end
+    return nil, side .. ' is neither a template, an element template, nor an expr node'
+end
+
 --- The MEET of two container templates: the most general template that is an
 --- instance of BOTH, or a named reason there is none.
 ---@param a table an `M.element_template` result, or a prototype template
@@ -3811,18 +3839,45 @@ function M.template_meet(a, b, opts)
     local alg = require 'cartograph.algebra'
     local A, why = alg.load()
     if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
-    local function as_template(x, side)
-        if type(x) ~= 'table' then return nil, side .. ' is not a template' end
-        if x.body then return x end             -- already a prototype template
-        local t, w = M.template_of(x)
-        if not t then return nil, side .. ': ' .. tostring(w) end
-        return t
-    end
     local T1, w1 = as_template(a, 'left');  if not T1 then return nil, w1 end
     local T2, w2 = as_template(b, 'right'); if not T2 then return nil, w2 end
     local ok, r, uwhy = pcall(A.unify, T1, T2, opts)
     if not ok then return nil, 'unify failed: ' .. tostring(r) end
     if not r then return nil, tostring(uwhy) end
+    return r
+end
+
+--- The JOIN: the least template ABOVE both — the dual of `template_meet`, and
+--- the other half of the lattice CART-0879 said cartograph lacked.
+---
+--- ★★★ THE CONSUMER IS A REFUSAL THAT BECOMES AN ANSWER. `M.match` says a
+--- payload does not instantiate a template and stops there. `join(T, payload)`
+--- says what the template would have to BECOME to admit it, and the deltas say
+--- exactly what moved:
+---     kept      holes that survived unchanged, by NAME, so stored values follow
+---     split     one hole that faced different partners and became several
+---     widened   a hole whose domain had to grow
+---     new       fixed structure that stopped being fixed
+--- A widening you can read is a correctable claim; a refusal is not.
+---
+--- ⚠ NOT `generalize`. `generalize({instances})` rebuilds a family from scratch
+--- and would not keep hole names, domains, or the operator edits a user made —
+--- so every stored value would be orphaned. `join` moves a STORED template up by
+--- exactly what the newcomer forces. That distinction is the whole reason this
+--- is a separate arrow rather than a re-derivation.
+---@param a table template | element_template | expr node
+---@param b table likewise
+---@return table|nil join { template, left, right, kept, split, widened, new, ... }
+---@return string|nil why
+function M.template_join(a, b, opts)
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+    local T1, w1 = as_template(a, 'left');  if not T1 then return nil, w1 end
+    local T2, w2 = as_template(b, 'right'); if not T2 then return nil, w2 end
+    local ok, r, jwhy = pcall(A.join, T1, T2, opts)
+    if not ok then return nil, 'join failed: ' .. tostring(r) end
+    if not r then return nil, tostring(jwhy) end
     return r
 end
 
