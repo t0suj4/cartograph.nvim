@@ -4004,4 +4004,78 @@ function M.family_edit(fam, op, opts)
     }
 end
 
+--- ADOPTION: a newcomer joins a family, and the family's values follow.
+---
+--- ★★★ THIS IS THE ARROW `family_edit` HAD NO RECOVERY PATH WITHOUT (CART-0896).
+--- `migrate` carries the family it is GIVEN and never adopts, so a member
+--- dropped by a narrowing edit cannot migrate back in — "adoption is a match,
+--- not a migration". This is that match.
+---
+--- ★★ AND IT ENFORCES THE OBSERVED/SUPPLIED DISTINCTION THE CHARTER ALREADY
+--- CARRIES. A newcomer is an OBSERVATION: it may widen a DERIVED domain (the
+--- family simply turns out to be broader than the members seen so far) and it
+--- may NOT override a SUPPLIED one — a pin is a premise, and an observation
+--- does not get to overrule a premise by arriving. The refusal names the hole
+--- and offers the two honest routes: open the pin, or adopt with `force`.
+---
+--- ⚠ WHEN THE NEWCOMER ALREADY FITS, THE TEMPLATE IS UNCHANGED. That is what
+--- makes this ADOPTION rather than a re-derivation: `generalize` over the old
+--- members plus the newcomer would rename every hole and orphan every stored
+--- value, and a family that re-derived on every arrival would never be stable
+--- enough to correct.
+---@param fam table a family from `M.families` / `M.family_of`
+---@param payload table a member record (`.exprs`) or an expr node
+---@param opts table|nil { force = true to override a supplied domain }
+---@return table|nil result { template, values, adopted, widened, join }
+---@return string|nil why
+function M.family_adopt(fam, payload, opts)
+    opts = opts or {}
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+    if type(fam) ~= 'table' or type(fam.template) ~= 'table' or not fam.template.body then
+        return nil, 'not a family with a template'
+    end
+
+    -- ⚠ TWO PAYLOAD SHAPES, AND THEY ARE NOT INTERCHANGEABLE. A member record
+    -- carries `.exprs` (a function's rows) and becomes a FUNCTION term; an expr
+    -- node carries `.k` and becomes a single expression. Adapting one as the
+    -- other yields a term of the wrong ARITY, which then fails as a mismatch
+    -- against the family rather than as a bad argument.
+    -- ⚠ THE ORDER IS DEFENSIVE, NOT LOAD-BEARING, and mutation says so: swapping
+    -- the two branches breaks no test, because a member record has no `.k` and
+    -- the shapes are disjoint TODAY. It is written `.exprs` first anyway — that
+    -- is the field only one of them can have — so a record that later grows a
+    -- `.k` is still read as what it is.
+    local I
+    if type(payload) ~= 'table' then
+        return nil, 'the newcomer is not a member record or an expr node'
+    elseif payload.exprs ~= nil then
+        I = alg.fn_term(payload)
+    elseif payload.k ~= nil then
+        I = alg.term(payload)
+    else
+        return nil, 'the newcomer is neither a member record (.exprs) nor an expr node (.k)'
+    end
+    if not I then return nil, 'the newcomer does not adapt to a term' end
+
+    local Vs, n = {}, #(fam.members or {})
+    for i = 1, n do Vs[i] = (fam.values or {})[i] or {} end
+
+    local okj, r, awhy = pcall(A.adjoin, fam.template, Vs, I, opts)
+    if not okj then return nil, 'adjoin failed: ' .. tostring(r) end
+    if not r then return nil, tostring(awhy) end
+
+    -- ★ ADOPTED vs WIDENED is the answer, not a detail. "It already fitted" and
+    -- "the family had to grow to take it" are different facts about the claim,
+    -- and only the second one changed what the template says.
+    local j = r.join or {}
+    local widened = #(j.new or {}) + #(j.split or {}) + #(j.widened or {})
+    return {
+        template = r.template, values = r.values, join = j,
+        adopted = widened == 0, widened = widened,
+        new = j.new, split = j.split, grew = j.widened,
+    }
+end
+
 return M

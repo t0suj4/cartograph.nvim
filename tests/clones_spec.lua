@@ -2814,3 +2814,101 @@ test('family_edit: a pin closes holes it never touched, and `open` cannot undo t
         ('refused on the hole no edit touched (%s): %s'):format(other,
             tostring(m.refusal and m.refusal.why)))
 end)
+
+--- ★★★ ADOPTION CLOSES CART-0896's LOOP. `migrate` carries the family it is
+--- given and never adopts, so a member dropped by a narrowing edit could not get
+--- back in — "adoption is a match, not a migration". This is that match.
+test('family_adopt: a newcomer that already fits leaves the template UNCHANGED', function ()
+    need_alg()
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+
+    local before = A.show(f.template.body)
+    local r, why = clones.family_adopt(f, f.members[2])
+    ok(r ~= nil, 'a member of the family is adoptable: ' .. tostring(why))
+    eq(true, r.adopted)
+    eq(0, r.widened)
+    eq(before, A.show(r.template.body))
+    -- ⚠ and it is ADOPTION, not re-derivation: `generalize` over the members
+    -- plus the newcomer would rename every hole and orphan every stored value
+    for _, h in ipairs(A.hole_names(f.template)) do
+        ok(r.template.holes[h], ('hole %s kept its name through the adoption'):format(h))
+    end
+end)
+
+--- ★★ A NEWCOMER IS AN OBSERVATION AND MAY NOT OVERRULE A PREMISE. It may widen
+--- a DERIVED domain — the family simply turns out broader than the members seen
+--- so far — and it may not override a SUPPLIED one, because a pin is a premise
+--- and an observation does not get to overturn it by arriving.
+test('family_adopt: it refuses to override a SUPPLIED domain, and names both routes', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local hs = {}
+    for h in pairs(f.template.holes) do hs[#hs + 1] = h end
+    table.sort(hs)
+    local h = hs[1]
+
+    local pinned = clones.family_edit(f, { edit = 'pin', h = h, value = f.values[1][h] })
+    ok(pinned and #pinned.dropped > 0, 'the pin drops someone to re-adopt')
+    local d = pinned.dropped[1]
+    local narrowed = { members = { f.members[1] }, template = pinned.template,
+        values = { pinned.values[1] } }
+
+    local r, why = clones.family_adopt(narrowed, f.members[d.i])
+    eq(nil, r)
+    ok(tostring(why):find('supplied domain'), 'names the premise: ' .. tostring(why))
+    ok(tostring(why):find(h, 1, true), 'and which hole: ' .. tostring(why))
+    ok(tostring(why):find('force'), 'and offers the override: ' .. tostring(why))
+
+    -- FORCE is the other route, and it works
+    local forced = clones.family_adopt(narrowed, f.members[d.i], { force = true })
+    ok(forced ~= nil, 'force overrides the premise explicitly')
+    eq(2, #forced.values)
+end)
+
+--- THE RECOVERY LOOP END TO END: pin drops a member, opening the pin restores
+--- the premise, and adoption brings it back. This is what `family_edit` had no
+--- answer for before (CART-0896).
+test('family_adopt: pin, open, adopt brings a dropped member back', function ()
+    need_alg()
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local hs = {}
+    for h in pairs(f.template.holes) do hs[#hs + 1] = h end
+    table.sort(hs)
+    local h = hs[1]
+
+    local pinned = clones.family_edit(f, { edit = 'pin', h = h, value = f.values[1][h] })
+    local d = pinned.dropped[1]
+    ok(d ~= nil, 'a member was dropped')
+
+    local opened = A.open_hole(pinned.template, h)
+    ok(opened ~= nil, 'the pin re-opens')
+    local fam = { members = { f.members[1] }, template = opened, values = { pinned.values[1] } }
+
+    local r, why = clones.family_adopt(fam, f.members[d.i])
+    ok(r ~= nil, 'the dropped member is adopted back: ' .. tostring(why))
+    eq(2, #r.values)
+    eq(false, r.adopted)        -- it had to WIDEN to take it back
+    ok(r.widened > 0, 'and the widening is reported, not silent')
+end)
+
+test('family_adopt: payload shapes, and a refusal for anything else', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+
+    ok(clones.family_adopt(f, f.members[1]), 'a member record (.exprs) adopts')
+    local a, w1 = clones.family_adopt(f, { nope = true })
+    eq(nil, a); ok(tostring(w1):find('neither a member record'), tostring(w1))
+    local b, w2 = clones.family_adopt(f, 'not a table')
+    eq(nil, b); ok(tostring(w2):find('not a member record'), tostring(w2))
+    local c, w3 = clones.family_adopt({ template = false }, f.members[1])
+    eq(nil, c); ok(tostring(w3):find('not a family'), tostring(w3))
+end)
