@@ -46,11 +46,53 @@ local function ls(dir, out)
     return out
 end
 
---- every `function M.x` in the prototype, attributed to its enclosing section
+--- ★★★ EVERY NAME ON THE MODULE TABLE, NOT EVERY `function M.x` (CART-0911).
+--- The first predicate was `^function M%.` and nothing else, which is the
+--- hand-rolled-parser failure this repo has a rule about: it described the
+--- instances its author had in mind rather than the CLASS. MEASURED on the
+--- vendored algebra, four shapes were invisible to it:
+---
+---     function M.x(...)          159   counted
+---     M.x = <identifier>           5   an ALIAS of a local function — an ARROW
+---     M.x.y = function(...)        4   a NAMESPACED arrow (M.rigidity.lcs)
+---     M.x = {...} / setmetatable   ~8   a VALUE: data that is part of the contract
+---
+--- ⚠ AND A VALUE IS NOT AN ARROW, SO THEY ARE COUNTED SEPARATELY RATHER THAN
+--- TOGETHER OR NOT AT ALL. `M.KV_ABSENT` is a sentinel a consumer must handle to
+--- use the KV section at all — dropping it says the contract is smaller than it
+--- is, and folding it into the arrow count says more arrows exist than do. The
+--- report carries both numbers because they answer different questions.
+---
+--- ⚠ `M.grammar('sh', {...})` IS A CALL, NOT AN EXPORT — it INVOKES an exported
+--- function to register a grammar. The `=` is what makes an assignment, and the
+--- patterns below require it.
+--- ★★ AND A DEFINITION OUTRANKS AN ASSIGNMENT, which is not a nicety: once a
+--- section is extracted, `core.lua` carries `M.alpha_eq = hopau.alpha_eq` while
+--- `hopau.lua` carries `function M.alpha_eq`. Taking the first sighting read our
+--- OWN re-export as data and put the name in the wrong section — MEASURED, the
+--- split moved the breakdown 168 arrow/9 value to 156/21 while the total held.
+--- A `function M.x` is a stronger claim about a name than any assignment to it,
+--- so it wins both the KIND and the SECTION.
+--- @return table sect, table order, table of, table kind, table rank
 function M.exports(src)
-    local sect, order, of = {}, {}, {}
+    local sect, order, of, kind, rank = {}, {}, {}, {}, {}
     local cur = '(preamble)'
     sect[cur] = {}; order[#order + 1] = cur
+    local function add(name, k, r)
+        if not name then return end
+        if not of[name] then
+            of[name], kind[name], rank[name] = cur, k, r
+            sect[cur][#sect[cur] + 1] = name
+        elseif r > rank[name] then
+            -- drop it from the weaker section and re-file it under this one
+            local old = sect[of[name]]
+            for i, n in ipairs(old) do
+                if n == name then table.remove(old, i); break end
+            end
+            of[name], kind[name], rank[name] = cur, k, r
+            sect[cur][#sect[cur] + 1] = name
+        end
+    end
     for line in src:gmatch('[^\n]*') do
         local title = line:match('^%-%- \226\148\128\226\148\128 (.-) [\226\148\128 ]*$')
             or line:match('^%-%- \226\148\128\226\148\128 (.+)$')
@@ -58,14 +100,22 @@ function M.exports(src)
             cur = title:gsub('[\226\148\128%s]+$', '')
             if not sect[cur] then sect[cur] = {}; order[#order + 1] = cur end
         else
-            local fn = line:match('^function M%.([%w_]+)')
-            if fn and not of[fn] then
-                of[fn] = cur
-                sect[cur][#sect[cur] + 1] = fn
+            local fn = line:match('^function M%.([%w_%.]+)')
+            if fn then
+                add(fn, 'arrow', 2)
+            else
+                local name, rhs = line:match('^M%.([%w_%.]+)%s*=%s*(.+)$')
+                if name then
+                    -- an ALIAS is a bare identifier; a `function` literal is an
+                    -- arrow written the other way round; anything else (a table,
+                    -- a setmetatable, a literal) is DATA
+                    add(name, (rhs:match('^[%a_][%w_]*%s*$') or rhs:match('^function%f[%W]'))
+                        and 'arrow' or 'value', 1)
+                end
             end
         end
     end
-    return sect, order, of
+    return sect, order, of, kind, rank
 end
 
 --- ★★★ THE EXPORT SURFACE IS A DIRECTORY, NOT A FILE (CART-0918). While the
@@ -83,9 +133,9 @@ end
 --- ★ THE SECTION GROUPING SURVIVES THE SPLIT FOR FREE, because the `-- ── title ──`
 --- headers travel WITH the moved text — the move-set carries the comment block
 --- verbatim. So the merge is by section TITLE and needs no new authority.
---- @return table sect, table order, table of, table files
+--- @return table sect, table order, table of, table files, table kind
 function M.exports_dir(dir)
-    local sect, order, of, files = {}, {}, {}, {}
+    local sect, order, of, files, kind, rank = {}, {}, {}, {}, {}, {}
     local paths = ls(dir)
     table.sort(paths, function (a, b)
         -- core first, then stable: the preamble and the bulk of the sections
@@ -101,7 +151,7 @@ function M.exports_dir(dir)
             local src = read(path)
             if src then
                 files[#files + 1] = path
-                local s2, o2, of2 = M.exports(src)
+                local s2, o2, of2, k2, r2 = M.exports(src)
                 for _, title in ipairs(o2) do
                     if not sect[title] then sect[title] = {}; order[#order + 1] = title end
                     for _, fn in ipairs(s2[title]) do
@@ -111,7 +161,16 @@ function M.exports_dir(dir)
                         -- twice would inflate the denominator — the very thing
                         -- this function exists to stop.
                         if not of[fn] then
-                            of[fn] = of2[fn]
+                            of[fn], kind[fn], rank[fn] = of2[fn], k2[fn], r2[fn]
+                            sect[title][#sect[title] + 1] = fn
+                        elseif (r2[fn] or 0) > (rank[fn] or 0) then
+                            -- the DEFINITION found in a later file outranks the
+                            -- re-export the first file carries (see M.exports)
+                            local old = sect[of[fn]]
+                            for i, n in ipairs(old or {}) do
+                                if n == fn then table.remove(old, i); break end
+                            end
+                            of[fn], kind[fn], rank[fn] = of2[fn], k2[fn], r2[fn]
                             sect[title][#sect[title] + 1] = fn
                         end
                     end
@@ -119,7 +178,7 @@ function M.exports_dir(dir)
             end
         end
     end
-    return sect, order, of, files
+    return sect, order, of, files, kind
 end
 
 --- the local each consumer binds the loaded algebra to — DERIVED, not assumed.
@@ -204,7 +263,10 @@ function M.uses(root, arrows)
                     -- than none.
                     local reaches = false
                     for a in pairs(arrows) do
-                        if text:find('%.' .. a .. '%f[^%w_]') then reaches = true; break end
+                        -- ⚠ a NAMESPACED name carries a dot (`rigidity.lcs`) and
+                        -- an unescaped one is a WILDCARD here — it would match
+                        -- `rigidityXlcs` and, worse, report a reach that is not one
+                        if text:find('%.' .. a:gsub('%.', '%%.') .. '%f[^%w_]') then reaches = true; break end
                     end
                     if reaches then
                         M.unbound[#M.unbound + 1] = f:gsub('^' .. (root or ''), '')
@@ -212,7 +274,7 @@ function M.uses(root, arrows)
                 end
                 for v in pairs(vars) do
                     for a in pairs(arrows) do
-                        local n = select(2, text:gsub(v .. '%.' .. a .. '%f[^%w_]', ''))
+                        local n = select(2, text:gsub(v .. '%.' .. a:gsub('%.', '%%.') .. '%f[^%w_]', ''))
                         if n > 0 then tiers[tier][a] = (tiers[tier][a] or 0) + n end
                     end
                 end
@@ -235,7 +297,7 @@ function M.run(opts)
     -- "has the copy or the donor moved"; a ledger that silently read whichever
     -- it found would answer neither question reliably.
     local dir = root .. '/lua/cartograph/algebra'
-    local sect, order, of, files = M.exports_dir(dir)
+    local sect, order, of, files, kind = M.exports_dir(dir)
     if #files == 0 then
         print(('algebraledger: no vendored algebra under %s'):format(dir))
         return 1
@@ -264,7 +326,14 @@ function M.run(opts)
         for _, f in ipairs(files) do names[#names + 1] = f:match('([^/]+)$') end
         print(('    %s'):format(table.concat(names, ' ')))
     end
-    print(('  exports: %d'):format(nexp))
+    local narrow, nvalue = 0, 0
+    for a in pairs(arrows) do
+        if kind[a] == 'value' then nvalue = nvalue + 1 else narrow = narrow + 1 end
+    end
+    -- ★ TWO NUMBERS, BECAUSE THEY ANSWER DIFFERENT QUESTIONS: how much of the
+    -- CAPABILITY is reachable, and how much of the CONTRACT is. A sentinel a
+    -- consumer must handle is part of the second and not of the first.
+    print(('  exports: %d   (%d arrow · %d value)'):format(nexp, narrow, nvalue))
     print(('    SHIPPED  (a consumer in lua/):  %3d'):format(count(shipped)))
     print(('    HARNESS  (tools/ only):         %3d'):format(count(harness)))
     print(('    TEST     (tests/ only):         %3d'):format(count(testonly)))
