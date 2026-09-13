@@ -419,7 +419,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
-    'txn_plan_annotate', 'txn_preview',
+    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_preview',
     'journal_list', 'journal_get',
     'txn_apply', 'txn_undo' }
 
@@ -1975,6 +1975,91 @@ local OPT_KIND = { cse = 'plan_cse', localize = 'plan_localize',
 --- not look here" (a REFUSAL, a fact about the tooling). They were previously
 --- distinguishable only by reading the prose, so optapply's builders now return a
 --- machine-readable `code` beside it and this branches on that, not on the words.
+-- ── extract-family: one helper for N copies (CART-0888 / CART-0891) ─────────
+--
+-- ★★★ THE PAIR VERB IS A DIFFERENT ANSWER, NOT A CHEAPER ONE. Asking pairwise
+-- over a component of N near-clones gives up to C(N,2) proposals which DISAGREE
+-- — 84% of wow's components — and the clique proxy agrees with the MDL
+-- partition on only 38%. An agent handed a family finding and left with only
+-- `:CartographExtractHelper` would act on a different answer than it read.
+--
+-- ⚠ THE FOCUSED QUERY, NOT THE BATCH. `clones.families` partitions every
+-- component (9 s on factorio, minutes on wow); `family_of` answers about ONE
+-- function in 0.003 s with the same answer. A verb that paid the batch cost per
+-- call would be unusable interactively.
+local function v_txn_plan_extract_family(store, args)
+    local n, bad = write_subject(store, args)
+    if not n then return bad end
+    local clones = require 'cartograph.clones'
+    local alg = require 'cartograph.algebra'
+    local okA, whyA = alg.available()
+    if not okA then
+        -- the seam's own rule: an absent algebra is a NAMED answer. Reporting
+        -- "no family" here would read as a fact about the code.
+        return { subject = { plan = NUL, node = noderow(store, n.id), verb = 'extract-family' },
+            result = {}, absence = 'unavailable',
+            absence_why = { premise = 'algebra-unavailable',
+                why = ('the template algebra is not loadable (%s) — family structure cannot be computed, and the pairwise verb answers a DIFFERENT question'):format(tostring(whyA)),
+                evidence = { checkhealth = 'cartograph' } } }
+    end
+
+    local fam, fwhy = clones.family_of(store, n.id, {})
+    if not fam then
+        return { subject = { plan = NUL, node = noderow(store, n.id), verb = 'extract-family' },
+            result = {}, absence = 'absent',
+            absence_why = { premise = 'no-family',
+                why = ('%s joined no near-clone family: %s'):format(tostring(n.name), tostring(fwhy)),
+                evidence = { node = n.id } } }
+    end
+
+    local v = clones.family_admissibility(fam, store)
+    local cx = require 'cartograph.cloneextract'
+    local plan, why = cx.plan_family(store, fam, { partial = args.partial and true or nil })
+    if not plan then
+        -- ★ THE VERDICT RIDES WITH THE REFUSAL. "Cannot plan" plus a per-member
+        -- list of who is extractable and why the rest are not is actionable;
+        -- the sentence alone is not.
+        local members = {}
+        for _, rec in ipairs((v or {}).members or {}) do
+            members[#members + 1] = { name = nn(rec.name), file = nn(rec.file),
+                line = nn(rec.line), extractable = rec.ok,
+                why = nn(rec.reason), captures = rec.captured and #rec.captured > 0
+                    and table.concat(rec.captured, ', ') or NUL }
+        end
+        return refuse('cannot-plan',
+            ('the family of %s (%d members) cannot be extracted: %s')
+                :format(tostring(n.name), #fam.members, tostring(why)),
+            'the per-member verdict says which copies are extractable and why the others are not; `partial = true` extracts the admissible subset when at least two are',
+            { node = n.id, members = members,
+              liftable = (v and v.n_liftable or 0),
+              lifts = (v and v.lifts and table.concat(v.lifts, ', ')) or NUL })
+    end
+
+    local rows = {}
+    for _, m in ipairs(plan.members) do
+        rows[#rows + 1] = { name = nn(m.name), file = nn(m.file), ref = m.ref,
+            role = 'rewritten to call the helper' }
+    end
+    local notes = {}
+    if plan.partial then
+        local left = {}
+        for _, l in ipairs(plan.left or {}) do
+            left[#left + 1] = { name = nn(l.name), file = nn(l.file), line = nn(l.line), why = nn(l.reason) }
+        end
+        notes[#notes + 1] = { kind = 'partial', premise = 'caller opted in',
+            why = ('%d member(s) were LEFT BEHIND and keep their own bodies — the extraction is incomplete, which is sound (nothing dangles) but not total'):format(#left),
+            evidence = { left = left } }
+    end
+    local pid = stash_plan(store, plan, 'extract-family')
+    return {
+        subject = { plan = pid, verb = plan.verb, node = noderow(store, n.id),
+            helper = plan.helper, parameters = plan.nparams,
+            members = #plan.members, touched = plan.touched,
+            generation = plan.generation, previewed = false },
+        result = rows, notes = notes,
+    }
+end
+
 local function v_txn_plan_optimize(store, args)
     local n, bad = write_subject(store, args)
     if not n then return bad end
@@ -2660,6 +2745,29 @@ M.VERBS = {
                 desc = 'destination path, relative to the graph root. An existing file = MOVE; a new path = EXTRACT-MODULE. A path escaping the root is refused' },
         },
         run = v_txn_plan_moveset,
+    },
+    txn_plan_extract_family = {
+        summary = 'PROPOSE ONE shared helper for a function\'s whole near-clone FAMILY (not just its nearest partner). Writes nothing: returns a plan handle for txn_preview, plus the per-member verdict when it cannot',
+        -- ⚠ `observation`, like the other planners: the answer carries a PLAN and
+        -- a per-member verdict, never a RUNG. Declaring `derived` would oblige a
+        -- `tier_headline` quantifying a summary this verb does not produce
+        -- (CART-0581) — the catalogue fence says so by name.
+        tier_basis = 'observation', needs_calls = true,
+        -- `absent`      the function joined no family
+        -- `refused`     a family exists and a gate declined the extraction
+        -- `unavailable` the template algebra is not loadable — family structure
+        --               cannot be computed, and the PAIRWISE verb answers a
+        --               DIFFERENT question, so this must not silently degrade
+        absences = { 'absent', 'refused', 'unavailable' },
+        args = (function ()
+            local a = {
+                { name = 'partial', type = 'boolean',
+                    desc = 'extract the ADMISSIBLE subset when some members cannot be (default false: refuse and name them). Sound — a skipped member keeps its own body and nothing dangles — but incomplete' },
+            }
+            for _, x in ipairs(ADDRESS) do a[#a + 1] = x end
+            return a
+        end)(),
+        run = v_txn_plan_extract_family,
     },
     txn_plan_optimize = {
         summary = 'PROPOSE an optimizer rewrite inside one function (cse | localize | hoist | pre). Writes nothing: returns a plan handle for txn_preview, plus the per-site `declined` ledger',

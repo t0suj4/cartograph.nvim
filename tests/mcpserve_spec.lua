@@ -329,6 +329,11 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- was never minted: refusals reachable without touching a byte
         txn_plan_moveset = { args = { dest = 'lib/new.lua' }, expect = 'refusal' },
         txn_plan_optimize = { args = { kind = 'cse', node = idof('M.caller') } },
+        -- ⚠ ABSENCE, NOT REFUSAL: this fixture's function joins no near-clone
+        -- family, and "no family here" is a fact about the CODE. A refusal would
+        -- be a fact about the instrument, and the two are what this envelope
+        -- exists to keep apart.
+        txn_plan_extract_family = { args = { node = idof('M.caller') } },
         -- naming no container and no payload: a refusal reachable without
         -- touching a byte, and the one this verb gives most often in the wild —
         -- 70.6% of containers with two or more members share no shape at all

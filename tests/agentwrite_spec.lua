@@ -109,8 +109,8 @@ local function permit(on) agent.set_writable(on) end
 local function call(verb, args) return (agent.answer(store, verb, args or {})) end
 
 local WRITE_VERBS = { 'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
-    'txn_plan_annotate', 'txn_preview', 'journal_list', 'journal_get',
-    'txn_apply', 'txn_undo' }
+    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_preview', 'journal_list',
+    'journal_get', 'txn_apply', 'txn_undo' }
 
 -- ── layer 1: the verb table, in process ─────────────────────────────────────
 
