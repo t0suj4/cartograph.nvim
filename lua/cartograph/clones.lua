@@ -3521,10 +3521,39 @@ function M.family_helper_text(fam, store, opts)
     local src = nd and store.content and store.content(nd)
     if not src then return nil, 'the donor source is not available' end
 
+    -- ★★★ THE IDENTITY RENDER, a -> a. Substitute every hole with the DONOR'S
+    -- OWN text and the result must be the donor's source, byte for byte. There
+    -- is no expected value to calibrate: the answer IS the input, which is the
+    -- same property the transliteration round-trip oracle relies on (emit,
+    -- reparse, identical IR) and the reason it needs no tuning.
+    -- ⚠ WHAT IT DOES AND DOES NOT TEST. Replacing a span with the text OF that
+    -- span is identity for ANY span inside the donor, so this cannot see a hole
+    -- pointing at the wrong place. It exercises the parts that have offsets in
+    -- them and therefore can be off by one: the rebase into donor coordinates,
+    -- the rightmost-first ordering when two holes share a line, and the donor
+    -- slice itself. Mutating either of those two is caught. SPAN CORRECTNESS
+    -- needs the reparse oracle (CART-0893), which does not exist here.
+    -- ⚠ `render`'s NESTED-SPAN SUBSUMPTION is inherited but UNREACHABLE from
+    -- this caller, measured 0 of 9 renders on our own tree — and structurally
+    -- so: `hole_sites` stops descending AT a hole, so two recorded spans come
+    -- from disjoint template subtrees and cannot nest. It earns its keep one
+    -- altitude down, where a `field` hole's span contains its base's.
+    -- MEASURED: 9/9 on our own tree and 15/15 on factorio-mods reproduce their
+    -- donor byte for byte.
+    local ident = opts.identity and as_lines(src) or nil
     local subs = {}
     for h, keys in pairs(tmpl.by_hole) do
         for _, key in ipairs(keys) do
-            subs[key] = (opts.subs and opts.subs[h]) or tmpl.params[h]
+            if ident then
+                local own = slice(ident, tmpl.varying[key].at)
+                if own == nil then
+                    return nil, ('the donor does not reach its own span for %s')
+                        :format(tmpl.params[h])
+                end
+                subs[key] = own
+            else
+                subs[key] = (opts.subs and opts.subs[h]) or tmpl.params[h]
+            end
         end
     end
     return M.render(tmpl, subs, src, { unverified = true })

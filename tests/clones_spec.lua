@@ -2143,3 +2143,86 @@ return M
     ok(tostring(why):find('share one span'),
         'names the collision rather than letting one win: ' .. tostring(why))
 end)
+
+--- ★★★ THE IDENTITY RENDER, a -> a. Substitute every hole with the DONOR'S OWN
+--- text and the result must be the donor's source, byte for byte. There is no
+--- expected value to calibrate — the answer IS the input, the same property the
+--- transliteration round-trip oracle rests on.
+---
+--- MEASURED as a sweep when it landed: 9 of 9 renderable families on this repo
+--- and 15 of 15 on factorio-mods reproduce their donor exactly. Mutating the
+--- splice order or dropping the donor's column offset from the rebase are both
+--- caught by it.
+---
+--- ⚠ AND THE LIMIT, because this test would otherwise be read as proving more
+--- than it does: replacing a span with the text OF that span is identity for ANY
+--- span inside the donor, so it CANNOT see a hole pointing at the wrong place.
+--- What it does exercise is everything with an offset in it — the rebase into
+--- donor coordinates, the rightmost-first ordering when two holes share a line,
+--- the nested-span subsumption, and the donor slice. Span correctness needs the
+--- reparse oracle that does not exist yet (CART-0893).
+test('family_helper_text: the identity render reproduces the donor byte for byte', function ()
+    need_alg()
+    local at = require 'cartograph.at'
+    local function donor_text(tmpl)
+        local nd = store.node(tmpl.donor.id)
+        local lines = store.content(nd)
+        local sl, el, sc, ec = at.sl(tmpl.donor.at), at.el(tmpl.donor.at),
+            at.sc(tmpl.donor.at), at.ec(tmpl.donor.at)
+        local out = {}
+        for i = sl, el do out[#out + 1] = lines[i + 1] end
+        out[1] = out[1]:sub(sc + 1)
+        out[#out] = out[#out]:sub(1, ec - (el == sl and sc or 0))
+        return table.concat(out, '\n')
+    end
+
+    fam3()
+    local r = clones.families(store, {})
+    local f = r.families[1]
+    local t1 = clones.family_template(f, store)
+    ok(t1 ~= nil, 'the template is available')
+    local id1, why1 = clones.family_helper_text(f, store, { identity = true })
+    ok(id1 ~= nil, 'the identity render succeeds: ' .. tostring(why1))
+    eq(donor_text(t1), id1)
+    -- and it is NOT the parameterized render, or the oracle compares a render
+    -- to itself and holds vacuously
+    local p1 = clones.family_helper_text(f, store)
+    ok(p1 ~= id1, 'the parameterized render really does differ from the donor')
+
+    -- ⚠ AND ONE WITH A HOLE MENTIONED TWICE, where two replacements land on one
+    -- line and the rightmost-first rule is what keeps the columns valid.
+    proj { ['g.lua'] = [[
+local M = {}
+function M.pa(node)
+    if not node then return nil end
+    local acc = 0
+    local seen = {}
+    if node.t == 'AAA' or node.t == 'BBB' then return node end
+    for _, c in ipairs(node.kids) do
+        if c.t == 'AAA' or c.t == 'BBB' then return c end
+    end
+    seen[acc] = true
+    return nil
+end
+function M.pc(node)
+    if not node then return nil end
+    local acc = 0
+    local seen = {}
+    if node.t == 'CCC' or node.t == 'DDD' then return node end
+    for _, c in ipairs(node.kids) do
+        if c.t == 'CCC' or c.t == 'DDD' then return c end
+    end
+    seen[acc] = true
+    return nil
+end
+return M
+]] }
+    local r2 = clones.families(store, {})
+    ok(r2 and #r2.families > 0, 'the repeated-hole fixture yields a family')
+    local f2 = r2.families[1]
+    local t2 = clones.family_template(f2, store)
+    ok(t2 ~= nil, 'and it adapts')
+    local id2, why2 = clones.family_helper_text(f2, store, { identity = true })
+    ok(id2 ~= nil, 'the identity render succeeds with repeated holes: ' .. tostring(why2))
+    eq(donor_text(t2), id2)
+end)
