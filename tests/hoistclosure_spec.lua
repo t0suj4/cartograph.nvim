@@ -252,3 +252,30 @@ test('hoist-closure: a capture that appears ONLY in a condition is caught', func
     ok(detail and detail.captures == 'flag', 'and named')
     vim.fn.delete(root, 'rf')
 end)
+
+--- ★★★ THE WHOLE CAPTURE SET, DETERMINISTICALLY. `reads` is a SET, so returning
+--- on the first match reported one name chosen by HASH ORDER — the same closure
+--- named `live` on one run and `scratch` on the next. A caller deciding whether
+--- a FAMILY captures uniformly (CART-0904) would be comparing coin flips, and a
+--- lift built on one name would miss every other capture the body still makes.
+--- MEASURED on our own tree: 11 of 16 capturing members capture MORE THAN ONE.
+local MULTI = 'local M = {}\nlocal function outer()\n  local aa = 1\n  local bb = 2\n  local cc = 3\n'
+    .. '  local function inner(n)\n    return aa + bb + cc + n\n  end\n'
+    .. '  return inner, aa, bb, cc\nend\nreturn M\n'
+
+test('hoist-closure: the refusal carries EVERY captured name, sorted', function ()
+    local root = proj(MULTI)
+    local plan, why, detail = hc.plan(store, id_of('inner'))
+    eq(nil, plan)
+    ok(detail and detail.captured, 'the whole set rides with the refusal')
+    eq(3, #detail.captured)
+    eq('aa', detail.captured[1]); eq('bb', detail.captured[2]); eq('cc', detail.captured[3])
+    -- ⚠ DETERMINISTIC: the same input must give the same answer twice, or a
+    -- caller comparing two members compares hash order
+    local _, _, d2 = hc.plan(store, id_of('inner'))
+    eq(table.concat(detail.captured, '+'), table.concat(d2.captured, '+'))
+    -- and the single-name field still agrees with the set's first element,
+    -- because the message names one
+    eq(detail.captured[1], detail.captures)
+    vim.fn.delete(root, 'rf')
+end)

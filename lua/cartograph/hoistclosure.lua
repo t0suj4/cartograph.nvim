@@ -168,8 +168,20 @@ function M.plan(store, closure_id)
                 { writes = d }
         end
     end
+    -- ★★★ THE WHOLE SET, NOT AN ARBITRARY ELEMENT. `reads` is a SET, so
+    -- returning on the first match reports one captured name chosen by hash
+    -- order — the same closure named `live` on one run and `scratch` on the
+    -- next. A caller deciding whether a FAMILY captures uniformly (CART-0904)
+    -- would be comparing coin flips, and a lift built on one name would miss
+    -- every other capture the body still makes.
+    local captured = {}
     for r in pairs(self.reads) do
-        if r ~= short and encl_locals[r] then
+        if r ~= short and encl_locals[r] then captured[#captured + 1] = r end
+    end
+    table.sort(captured)
+
+    for _, r in ipairs(captured) do
+        if true then
             -- ⚠ THE NAME RIDES AS STRUCTURE, NOT ONLY IN THE MESSAGE. A caller
             -- that needs to know WHICH local is captured — `clones`, deciding
             -- whether a family's members all capture the same one — would
@@ -177,7 +189,7 @@ function M.plan(store, closure_id)
             -- pattern CART-0746 cost a day to. Extra returns are ignored by
             -- every existing caller.
             return nil, ('captures enclosing local `%s` — parameterize it first (extract-helper)'):format(r),
-                { captures = r }
+                { captures = r, captured = captured }
         end
     end
 
