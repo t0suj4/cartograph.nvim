@@ -223,9 +223,80 @@ end
 -- exposed for the spec: the binding shapes are where this tool's bugs live
 M._bindings = bindings
 
+--- ★★★ CODE-AS-DATA IS NOT CODE (CART-0910). A text scan cannot tell a call from
+--- a STRING that spells one, and this tool's own spec holds fixtures like
+---     ['direct'] = 'local A = alg.load()\nA.partition(x)\n'
+--- which read as a file that loads the algebra and binds it invisibly. Comments
+--- do the same: every header here names arrows in prose.
+--- ⚠ NOT A PARSER, AND NOT PRETENDING TO BE. It blanks the CONTENTS of quoted
+--- strings and comments while preserving line structure, which is exactly enough
+--- for the line-oriented predicates below, and it is deliberately blind to long
+--- brackets with levels — a `[==[` would survive. The real fix is to ask the
+--- GRAPH (CART-0912's "hand-rolled enumerators on both sides of a relation");
+--- this is the honest interim, and it fails toward the text as written.
+--- @return string
+local function decommented(text)
+    local out = {}
+    for line in text:gmatch('[^\n]*') do
+        local l = line:gsub('%-%-%[%[.-%]%]', ''):gsub('%-%-.*$', '')
+        -- blank a string's CONTENTS, keep its quotes: the line still parses as
+        -- an assignment, it just stops spelling anything
+        l = l:gsub('(["\'])(.-)%1', '%1%1')
+        out[#out + 1] = l
+    end
+    return table.concat(out, '\n')
+end
+
+--- the SEAM's own API, derived from the seam file rather than listed here — a
+--- hardcoded list is the second authority this whole tool exists to avoid.
+--- @return table set
+local function seam_api(root)
+    local src = read(root .. '/lua/cartograph/algebra.lua') or ''
+    local set = {}
+    for fn in src:gmatch('\nfunction M%.([%w_]+)') do set[fn] = true end
+    return set
+end
+
+--- ★★★ WHICH FILES REACH FOR THE ALGEBRA IN A SHAPE WE CANNOT SEE — structurally,
+--- not by spotting arrow names (CART-0910). The previous test asked whether the
+--- text contained `.<arrow>` for ANY of the 168 arrows, and the arrow names
+--- include `name`, `at`, `apply`, `copy`, `size`, `ref` and `match`. MEASURED, it
+--- fired on all three files that touch the algebra and on nothing else — 15
+--- "hits" in `agent.lua`, which is a verb catalogue full of `.name` fields, and 0
+--- of them a use of the algebra. A warning that has been wrong on every run since
+--- it shipped is the inverse of a fence that never fires, and it costs the same:
+--- nobody reads the line.
+---
+--- THE STRUCTURAL QUESTION INSTEAD: this file binds the SEAM, and calls `load()`
+--- on it — so it holds the algebra — yet no binding shape was recognised. That is
+--- precisely "it loaded the arrows and we cannot see what it called them", and a
+--- file that only asks `available()` or converts a term is not it.
+--- ⚠ TWO TEXTS, AND MIXING THEM UP COST A ROUND. The seam VAR is found in the
+--- RAW text, because `require 'cartograph.algebra'` IS a string and
+--- `decommented` blanks it — stripping the evidence the detector runs on. The
+--- REACHES are found in the stripped text, because that is where fixtures and
+--- prose lie. Same file, two readings, and each predicate takes the one it needs.
+--- @return string|nil member  the seam var whose load we saw
+local function loads_unseen(raw, code, api)
+    local seams = {}
+    for line in raw:gmatch('[^\n]*') do
+        local v = line:match('^%s*local%s+([%w_]+)%s*=%s*require%s*%(?%s*[\'"]cartograph%.algebra[\'"]')
+        if v then seams[v] = true end
+    end
+    for v in pairs(seams) do
+        if code:find('%f[%w_]' .. v .. '%.load%s*%(') then return v end
+        -- a member that is NOT part of the seam's API is a reach we do not model
+        for m in code:gmatch('%f[%w_]' .. v .. '%.([%w_]+)') do
+            if not api[m] then return v end
+        end
+    end
+    return nil
+end
+
 --- count uses of each arrow, per tier
 function M.uses(root, arrows)
     M.unbound = {}
+    local api = seam_api(root)
     local tiers = { lua = {}, tools = {}, tests = {} }
     local _ = root
     for tier, dir in pairs { lua = root .. '/lua', tools = root .. '/tools', tests = root .. '/tests' } do
@@ -250,26 +321,23 @@ function M.uses(root, arrows)
             -- evaporate the moment the vendored file gained one self-reference.
             if f:find('/cartograph/algebra/') then text = nil end
             if text and text:find('cartograph.algebra', 1, true) then
-                local vars = bindings(text)
+                local code = decommented(text)
+                local vars = bindings(code)
                 -- ⚠ ABSENCE RENDERED AS SILENCE IS THE FAILURE MODE HERE. A file
                 -- that requires the algebra but binds it in a shape this does
                 -- not recognise contributes ZERO, which is indistinguishable
                 -- from "uses nothing". Say so instead.
                 if not next(vars) then
-                    -- ⚠ ONLY WARN IF THE FILE ACTUALLY REACHES FOR AN ARROW.
+                    -- ⚠ ONLY WARN IF THE FILE ACTUALLY HOLDS THE ARROWS.
                     -- `health.lua` requires the algebra to ask `available()` and
                     -- touches no operator at all; flagging it would be a fence
                     -- that cries wolf, and a warning nobody believes is worse
-                    -- than none.
-                    local reaches = false
-                    for a in pairs(arrows) do
-                        -- ⚠ a NAMESPACED name carries a dot (`rigidity.lcs`) and
-                        -- an unescaped one is a WILDCARD here — it would match
-                        -- `rigidityXlcs` and, worse, report a reach that is not one
-                        if text:find('%.' .. a:gsub('%.', '%%.') .. '%f[^%w_]') then reaches = true; break end
-                    end
-                    if reaches then
-                        M.unbound[#M.unbound + 1] = f:gsub('^' .. (root or ''), '')
+                    -- than none. See `loads_unseen` for why this is structural
+                    -- and no longer a search for arrow NAMES.
+                    local v = loads_unseen(text, code, api)
+                    if v then
+                        M.unbound[#M.unbound + 1] = ('%s (binds `%s`)')
+                            :format(f:gsub('^' .. (root or ''), ''), v)
                     end
                 end
                 for v in pairs(vars) do

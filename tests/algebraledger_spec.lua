@@ -163,3 +163,66 @@ test('algebraledger: a definition beats a re-export, for both kind and section',
     eq(0, #(sect['leftovers'] or {}), 'the re-export leaves no ghost behind')
     vim.fn.delete(dir, 'rf')
 end)
+
+--- ★★★ THE WARNING MUST STILL FIRE (CART-0910). It was a search for arrow NAMES
+--- anywhere in the text, and the 168 arrow names include `name`, `at`, `apply`,
+--- `copy`, `size`, `ref` and `match` — so it fired on all three files that touch
+--- the algebra and on none of them was it right. MEASURED: 15 "hits" in
+--- `agent.lua`, which is a verb catalogue full of `.name` fields. A warning
+--- wrong on every run since it shipped is the inverse of a fence that never
+--- fires and costs the same — nobody reads the line.
+--- ⚠ SO THE POSITIVE CASE IS THE ASSERTION THAT MATTERS. Silencing a false alarm
+--- by deleting the check would pass every negative test ever written.
+test('algebraledger: the unbound warning is structural — it fires on a hidden binding', function ()
+    local root = vim.fn.tempname()
+    for _, d in ipairs({ '/lua/cartograph', '/tools', '/tests' }) do
+        vim.fn.mkdir(root .. d, 'p')
+    end
+    local function put(rel, body)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(body); fd:close()
+    end
+    -- the seam, so `seam_api` has something to derive from
+    put('lua/cartograph/algebra.lua',
+        '\nfunction M.load() end\nfunction M.available() end\nfunction M.term(e) end\n')
+
+    -- ⚠ THE POSITIVE: it loads the algebra and binds it in a shape `bindings`
+    -- does not model, so its arrow uses are invisible and MUST be announced
+    put('lua/cartograph/hidden.lua', table.concat({
+        "local alg = require 'cartograph.algebra'",
+        'local holder = {}',
+        'holder.A = alg.load()',          -- not a `local X = ...load()`
+        'holder.A.partition(x)',
+    }, '\n'))
+    local t1 = led.uses(root, { partition = true })
+    eq(0, t1.lua.partition or 0, 'the use really is invisible to the counter')
+    eq(1, #led.unbound, 'and the file is announced: ' .. vim.inspect(led.unbound))
+    ok(tostring(led.unbound[1]):find('hidden.lua', 1, true))
+
+    -- ⚠ THE NEGATIVES, one per false-alarm source measured on the real tree:
+    --   a seam-only consumer (agent.lua asks `available()` and nothing else)
+    --   a file whose fixtures SPELL a load in a STRING (this spec does)
+    --   prose in a comment naming an arrow
+    put('lua/cartograph/hidden.lua', '-- removed\n')
+    put('lua/cartograph/seamonly.lua', table.concat({
+        "local alg = require 'cartograph.algebra'",
+        'local ok = alg.available()',
+        'local t = alg.term({ k = "name" })',
+        'local row = { name = 1, at = 2, size = 3, apply = 4 }',  -- arrow NAMES as fields
+    }, '\n'))
+    -- ⚠ THE FIXTURE'S SHAPE IS THE TEST. Written as `local F = { direct = "..." }`
+    -- this passes for the WRONG REASON: the line starts with `local` and ends in
+    -- `load(`, so `bindings` claims it as a binding and the warning is skipped
+    -- without the stripping ever being consulted. The real spec spells its
+    -- fixtures as INDENTED TABLE KEYS, which `bindings` cannot see — that is the
+    -- shape that reached the old arrow-name search, so it is the shape to pin.
+    put('tests/fixtures_spec.lua', table.concat({
+        "local alg = require 'cartograph.algebra'",
+        'local F = {',
+        "    ['direct'] = 'local A = alg.load()\\nA.partition(x)\\n',",
+        '}',
+        '-- prose: alg.load() gives you A.partition',
+    }, '\n'))
+    led.uses(root, { partition = true })
+    eq(0, #led.unbound, 'no false alarm: ' .. vim.inspect(led.unbound))
+    vim.fn.delete(root, 'rf')
+end)
