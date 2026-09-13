@@ -3698,4 +3698,132 @@ function M.family_verify(fam, store, opts)
     return true, nil, { rendered = text, rows = #keys, holes = #tmpl.order }
 end
 
+-- ── the MEET: two templates, not a template and a payload (CART-0879 item 1) ──
+--
+-- ★★★ WHAT CARTOGRAPH COULD NOT ASK. `M.match` is ONE-SIDED — a template against
+-- a payload — so "does this snippet instantiate that claim" had an answer and
+-- "do these two claims OVERLAP" had none. Templates under instantiation form a
+-- generality order: `generalize`/`join` compute the least template ABOVE two
+-- (the lgg, absorbed already), and nothing computed the most general template
+-- BELOW them, or said that none exists. That is unification (Martelli &
+-- Montanari 1982), and the prototype exports it as `A.unify`.
+--
+-- ★★ THE ADAPTER IS THE REAL WORK, AND IT LIGHTS UP MORE THAN UNIFY.
+-- `element_template` produces cartograph's OTHER template shape —
+-- `{donor, varying, holes}`, keyed by the donor's source spans — which no
+-- algebra arrow can take. `template_of` turns it into a prototype template, and
+-- once a stored claim is a template record, `join`, `migrate`, `classify` and
+-- `instance_of` all become askable of it, not only `unify`.
+--
+-- ★ IT USES `A.abstract`, NOT A HAND-BUILT RECORD. The prototype builds a
+-- template from an instance plus hole SITES (paths), and going through its own
+-- constructor is what keeps the domains, origins and edit log in the shape every
+-- other arrow expects. Hand-assembling `{body, holes, edits}` here would be a
+-- second authority for what a template IS.
+--
+-- ⚠ THE PATHS COME FROM THE TERM, NOT THE EXPR. `algebra.term` already carries
+-- `e.at` onto the term node (the span licence), so the varying positions can be
+-- located by walking the finished term — no parallel descent, and no second copy
+-- of the adapter to keep in step.
+
+--- A container's `element_template` as a PROTOTYPE template.
+---@param et table an `M.element_template` result
+---@return table|nil template, string|nil why
+function M.template_of(et)
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+    if type(et) ~= 'table' or not et.donor then return nil, 'not an element template' end
+    if not et.alignable then
+        return nil, 'the container\'s members do not share a shape'
+    end
+    if (et.n or 0) < 2 then
+        return nil, 'a single member is a shape, not yet a template'
+    end
+    if (et.unkeyed or 0) > 0 then
+        return nil, ('%d hole(s) carry no source span, so their position in the'
+            .. ' term cannot be located'):format(et.unkeyed)
+    end
+
+    -- ⚠ NO LOCALS MAP, and `element_template` states why: a container's members
+    -- are DECLARATIONS, not a function body, so nothing here is alpha-renameable
+    -- and a locals map would silently equate two different names as "both local".
+    local body = alg.term(et.donor)
+    if not body then return nil, 'the donor does not adapt to a term' end
+
+    -- ★ ONLY THE OUTERMOST VARYING SPANS BECOME HOLES, which is `M.render`'s own
+    -- subsumption rule rather than a new one. `varying` deliberately keeps BOTH
+    -- a field hole and its base's holes — dropping the inner one would make
+    -- `M.match` call a payload that differs only at the base a mismatch — so the
+    -- pruning belongs here, where "what is a hole" is the question.
+    local outer = {}
+    for key, v in pairs(et.varying) do
+        local covered = false
+        for k2, v2 in pairs(et.varying) do
+            if k2 ~= key and spans_contain(v2.at, v.at) then covered = true end
+        end
+        if not covered then outer[key] = v end
+    end
+
+    local H, n, found = {}, 0, 0
+    local function walk(t, path)
+        local key = t.at and span_key(t.at)
+        if key and outer[key] then
+            n = n + 1
+            H[('h%d'):format(n)] = { sites = { { path = path } },
+                domain = A.open(), origin = 'derived' }
+            found = found + 1
+            return                      -- a hole's insides are not the template's
+        end
+        for i, c in ipairs(t.kids or {}) do
+            local p = {}
+            for _, x in ipairs(path) do p[#p + 1] = x end
+            p[#p + 1] = i
+            walk(c, p)
+        end
+    end
+    walk(body, {})
+
+    -- ⚠ A VARYING POSITION WITH NO NODE IN THE TERM IS A REFUSAL, NOT A SMALLER
+    -- TEMPLATE. The adapter drops expression kinds it does not model, and a
+    -- template missing one of the positions its members demonstrably vary at
+    -- claims agreement where none was checked — the same failure `unkeyed`
+    -- exists to prevent, one layer along.
+    local want = 0
+    for _ in pairs(outer) do want = want + 1 end
+    if found < want then
+        return nil, ('%d of %d varying position(s) have no node in the term — the'
+            .. ' adapter does not model that expression kind'):format(want - found, want)
+    end
+    if want == 0 then
+        return nil, 'the members vary nowhere the term can express'
+    end
+    return A.abstract(body, H)
+end
+
+--- The MEET of two container templates: the most general template that is an
+--- instance of BOTH, or a named reason there is none.
+---@param a table an `M.element_template` result, or a prototype template
+---@param b table likewise
+---@return table|nil meet { template, left, right, renamed, fresh, free }
+---@return string|nil why
+function M.template_meet(a, b, opts)
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+    local function as_template(x, side)
+        if type(x) ~= 'table' then return nil, side .. ' is not a template' end
+        if x.body then return x end             -- already a prototype template
+        local t, w = M.template_of(x)
+        if not t then return nil, side .. ': ' .. tostring(w) end
+        return t
+    end
+    local T1, w1 = as_template(a, 'left');  if not T1 then return nil, w1 end
+    local T2, w2 = as_template(b, 'right'); if not T2 then return nil, w2 end
+    local ok, r, uwhy = pcall(A.unify, T1, T2, opts)
+    if not ok then return nil, 'unify failed: ' .. tostring(r) end
+    if not r then return nil, tostring(uwhy) end
+    return r
+end
+
 return M

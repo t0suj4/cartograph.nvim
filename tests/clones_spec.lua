@@ -2392,3 +2392,153 @@ return M
     local good, why = clones.family_verify(f, store)
     ok(good, 'a method donor round-trips: ' .. tostring(why))
 end)
+
+-- ── the MEET: unify two templates (CART-0879 item 1) ────────────────────────
+--
+-- `M.match` is ONE-SIDED — a template against a payload — so "do these two
+-- claims OVERLAP" had no operation. These pin the adapter that gets
+-- cartograph's OTHER template shape into the algebra, and the defining law of
+-- the meet itself.
+
+local function container_of_src(src)
+    local root = vim.treesitter.get_string_parser(src, 'lua'):parse()[1]:root()
+    local function find(n)
+        if n:type() == 'table_constructor' then return n end
+        for c in n:iter_children() do
+            if c:named() then local r = find(c); if r then return r end end
+        end
+    end
+    return expr.build(find(root), src, 'lua')
+end
+local function tmpl_of(src)
+    return clones.template_of(clones.element_template(container_of_src(src)))
+end
+
+test('template_of: the varying position becomes a hole, the rest stays fixed', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local t, why = tmpl_of("local X = { f(1, z), f(2, z) }")
+    ok(t ~= nil, 'the container adapts: ' .. tostring(why))
+    local shown = A.show(t.body)
+    ok(shown:find('?'), 'it has a hole where the members differ: ' .. shown)
+    ok(shown:find('f', 1, true) and shown:find('z', 1, true),
+        'and the AGREEING parts are still fixed, not holes: ' .. shown)
+    -- BOTH SIDES: the hole is at the varying arg, so the literal must be gone
+    ok(not shown:find('num:1'), 'the donor\'s own varying value is not baked in: ' .. shown)
+end)
+
+test('template_of: refuses by name where a template is not warranted', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local a, w1 = tmpl_of("local X = { 'a' }")
+    eq(nil, a); ok(tostring(w1):find('single member'), tostring(w1))
+    local b, w2 = tmpl_of("local X = { 'a', f(1,2,3) }")
+    eq(nil, b); ok(tostring(w2):find('do not share a shape'), tostring(w2))
+    local c, w3 = clones.template_of({ donor = false })
+    eq(nil, c); ok(tostring(w3):find('not an element template'), tostring(w3))
+end)
+
+--- ★★★ THE DEFINING LAW, asserted with the prototype's own subsumption check
+--- rather than a hand-computed expectation: the meet is an INSTANCE OF BOTH.
+--- A wrong meet that happens to look plausible passes an eyeball and fails this.
+test('template_meet: the meet is an instance of both templates', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local T1 = tmpl_of("local X = { f(1, z), f(2, z) }")      -- (call f ?h z)
+    local T2 = tmpl_of("local Y = { f(3, 3), f(3, 4) }")      -- (call f 3 ?h)
+    ok(T1 and T2, 'both containers adapt')
+
+    local m, why = clones.template_meet(T1, T2)
+    ok(m ~= nil, 'they overlap: ' .. tostring(why))
+    ok(A.instance_of(m.template, T1), 'the meet is below the LEFT template')
+    ok(A.instance_of(m.template, T2), 'the meet is below the RIGHT template')
+    -- and it is genuinely lower than at least one of them — otherwise "meet"
+    -- would be satisfied by handing back an input
+    ok(not A.instance_of(T1, m.template) or not A.instance_of(T2, m.template),
+        'the meet is strictly below at least one side: ' .. A.show(m.template.body))
+end)
+
+--- AND THE OTHER SIDE: templates whose FIXED parts disagree have NO meet, and
+--- the refusal names the clash rather than returning an empty template.
+test('template_meet: a clash in the fixed part is a named refusal', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local head, w1 = clones.template_meet(
+        tmpl_of("local X = { f(1, z), f(2, z) }"),
+        tmpl_of("local Y = { g(1, z), g(2, z) }"))
+    eq(nil, head); ok(tostring(w1):find('f') and tostring(w1):find('g'),
+        'names the clashing symbols: ' .. tostring(w1))
+
+    local fixed, w2 = clones.template_meet(
+        tmpl_of("local X = { f(1, z), f(2, z) }"),
+        tmpl_of("local Y = { f(9, w), f(8, w) }"))
+    eq(nil, fixed); ok(tostring(w2):find('z') and tostring(w2):find('w'),
+        'a disagreeing FIXED argument is a clash, not a hole: ' .. tostring(w2))
+end)
+
+--- ★★ SUBSUMPTION, which is `M.render`'s rule and not a new one. `varying` keeps
+--- BOTH a field hole and its base's holes deliberately; only the OUTERMOST may
+--- become a hole here. Without the pruning the walk stops at the outer span and
+--- never reaches the inner one, so the position count comes up short and the
+--- whole container is refused — a nested divergence would silently stop having
+--- a template.
+test('template_of: nested varying spans yield ONE hole, not a refusal', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    -- ⚠ THE FIXTURE MUST ACTUALLY NEST. `{ a.b.c, a.b.d }` yields ONE varying
+    -- span (the whole member) and exercises nothing — the first cut used it and
+    -- the mutation "drop subsumption" survived. Varying the BASE as well as the
+    -- field gives two spans, one inside the other.
+    local et = clones.element_template(container_of_src("local X = { a.b.c, x.b.d }"))
+    local nv = 0; for _ in pairs(et.varying) do nv = nv + 1 end
+    ok(nv >= 2, 'the fixture yields nested spans to prune, got ' .. nv)
+
+    local t, why = clones.template_of(et)
+    ok(t ~= nil, 'a nested field divergence still adapts: ' .. tostring(why))
+    local n = 0
+    local function count(x)
+        if x.k == 'hole' then n = n + 1; return end
+        for _, c in ipairs(x.kids or {}) do count(c) end
+    end
+    count(t.body)
+    eq(1, n)
+    ok(A.show(t.body):find('?'), 'and it is a hole: ' .. A.show(t.body))
+end)
+
+--- ⚠ A VARYING POSITION WITH NO NODE IN THE TERM IS A REFUSAL, NOT A SMALLER
+--- TEMPLATE. The adapter drops expression kinds it does not model (CART-0882),
+--- and a template missing a position its members demonstrably vary at claims
+--- agreement where none was checked. Fabricated, because the reachable corpus
+--- shapes all locate: the guard is for the kind the adapter stops modelling
+--- NEXT, which is exactly when nobody is looking.
+test('template_of: a varying span the term cannot locate refuses', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local et = clones.element_template(container_of_src("local X = { f(1, z), f(2, z) }"))
+    ok(clones.template_of(et) ~= nil, 'it adapts before the injection')
+
+    et.varying['999:0-999:9'] = { kind = 'value', at = {
+        start = { line = 999, char = 0 }, ['end'] = { line = 999, char = 9 } } }
+    local t, why = clones.template_of(et)
+    eq(nil, t)
+    ok(tostring(why):find('no node in the term'), 'names it: ' .. tostring(why))
+end)
+
+--- And an UNKEYED hole — one `element_template` itself could not give a span —
+--- cannot be placed in a term at all. `M.match` refuses on a non-zero count for
+--- the same reason; this is that refusal one layer along.
+test('template_of: an unkeyed hole refuses rather than placing it somewhere', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local et = clones.element_template(container_of_src("local X = { f(1, z), f(2, z) }"))
+    et.unkeyed = 1
+    local t, why = clones.template_of(et)
+    eq(nil, t)
+    ok(tostring(why):find('no source span'), 'names it: ' .. tostring(why))
+end)
