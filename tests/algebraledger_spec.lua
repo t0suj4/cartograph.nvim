@@ -226,3 +226,34 @@ test('algebraledger: the unbound warning is structural — it fires on a hidden 
     eq(0, #led.unbound, 'no false alarm: ' .. vim.inspect(led.unbound))
     vim.fn.delete(root, 'rf')
 end)
+
+--- ★★★ PROSE NAMES ARROWS, AND PROSE IS NOT A CONSUMER (CART-0921). The uses
+--- scan read the RAW text, so `-- replayable by `A.replay_edit`` in a comment
+--- counted as a shipped consumer. MEASURED when the real consumer finally landed
+--- and the number did NOT move: SHIPPED 26 counting comments, 23 counting code;
+--- HARNESS 4 -> 6 and TEST 3 -> 4, their only lua/ "use" being prose.
+--- ⚠ THE FLATTERING DIRECTION, for the second time in this tool — absorption
+--- reads FURTHER ALONG than it is, which is the error nobody questions.
+test('algebraledger: an arrow named only in a COMMENT is not a consumer', function ()
+    local root = vim.fn.tempname()
+    for _, d in ipairs({ '/lua/cartograph', '/tools', '/tests' }) do
+        vim.fn.mkdir(root .. d, 'p')
+    end
+    local function put(rel, body)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(body); fd:close()
+    end
+    put('lua/cartograph/algebra.lua', '\nfunction M.load() end\n')
+
+    -- prose and a string mention it; nothing calls it
+    put('lua/cartograph/talker.lua', table.concat({
+        "local alg = require 'cartograph.algebra'",
+        'local A = alg.load()',
+        '-- see A.partition for the MDL split',
+        'local doc = "A.partition groups the members"',
+        'local x = A.generalize(1, 2)',      -- the ONE real use
+    }, '\n'))
+
+    local t = led.uses(root, { partition = true, generalize = true })
+    eq(nil, t.lua.partition, 'a comment and a string are not consumers')
+    ok((t.lua.generalize or 0) > 0, 'and a real call still counts')
+end)

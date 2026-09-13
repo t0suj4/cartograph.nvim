@@ -340,9 +340,21 @@ function M.uses(root, arrows)
                             :format(f:gsub('^' .. (root or ''), ''), v)
                     end
                 end
+                -- ⚠⚠ COUNT USES FROM `code`, NOT `text` (CART-0921). Prose in
+                -- this tree NAMES ARROWS constantly — `-- replayable by
+                -- A.replay_edit` in clones.lua made `replay_edit` read as
+                -- SHIPPED while its only mention was a comment. MEASURED when
+                -- the real consumer landed and the number did not move:
+                --     SHIPPED 26 counting comments · 23 counting code
+                --     HARNESS 4 -> 6 · TEST 3 -> 4 (their only lua/ "use" was prose)
+                -- ★ AND IT IS THE FLATTERING DIRECTION, for the second time in
+                -- this tool: absorption looks FURTHER ALONG than it is, so the
+                -- error is the one nobody questions. The stripper was written
+                -- for the unbound WARNING and I noted at the time that the
+                -- counts should be measured too, then did not.
                 for v in pairs(vars) do
                     for a in pairs(arrows) do
-                        local n = select(2, text:gsub(v .. '%.' .. a:gsub('%.', '%%.') .. '%f[^%w_]', ''))
+                        local n = select(2, code:gsub(v .. '%.' .. a:gsub('%.', '%%.') .. '%f[^%w_]', ''))
                         if n > 0 then tiers[tier][a] = (tiers[tier][a] or 0) + n end
                     end
                 end

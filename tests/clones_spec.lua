@@ -3360,3 +3360,80 @@ end
     ok(tostring(res.why):find('store law', 1, true),
         'and names the law that broke: ' .. tostring(res.why))
 end)
+
+-- ── the virtual-step ladder ────────────────────────────────────────────────
+--
+-- ★★★ `family_edit` APPLIES ONE EDIT; `family_steps` FOLDS A LOG, and the state
+-- AFTER EACH STEP is the thing a composition needs and nothing else produces.
+-- These assert the LADDER: that rung k is computed against rung k-1, that the
+-- surviving set only shrinks, and that a refusal stops the fold instead of
+-- skipping a step.
+
+test('family_steps: a two-edit log yields the state after EACH step', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local tmpl = clones.family_template(f, store)
+    local h = tmpl and tmpl.order[1]
+    ok(h ~= nil, 'the family has a hole')
+
+    -- pin, then open: down then back up, which the edit order allows
+    local steps, why = clones.family_steps(f,
+        { { op = 'pin', h = h, value = f.values[1][h] }, { op = 'open', h = h } })
+    ok(steps ~= nil, 'the fold ran: ' .. tostring(why))
+    eq(2, #steps)
+    eq(1, steps[1].i)
+    eq(2, steps[2].i)
+    ok(steps[1].template ~= nil and steps[2].template ~= nil, 'each rung carries a template')
+
+    -- ★ RUNG 2 IS COMPUTED AGAINST RUNG 1, not against the family. A pin drops
+    -- every member holding another value; re-opening cannot bring them back
+    -- ("adoption is a match, not a migration"), so the survivors only shrink.
+    ok(#steps[2].kept <= #steps[1].kept, 'the surviving set never grows')
+    ok(#steps[1].kept < #f.members, 'and the pin really did drop somebody')
+end)
+
+test('family_steps: a REFUSED step is a rung, and it stops the fold', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local h = (clones.family_template(f, store) or {}).order[1]
+    local steps = assert(clones.family_steps(f, {
+        { op = 'pin', h = h, value = f.values[1][h] },
+        { op = 'nonsuch', h = h },                      -- replay_edit refuses
+        { op = 'open', h = h },                         -- must NOT be reached
+    }))
+    eq(2, #steps, 'the ladder stops at the refusal')
+    eq(true, steps[2].refused)
+    ok(tostring(steps[2].why):find('nonsuch', 1, true), 'naming the op: ' .. tostring(steps[2].why))
+    eq(nil, steps[2].template, 'a refused rung carries no state')
+    -- ⚠ AND THE RUNGS BEFORE IT STAND. Discarding them would lose a real result
+    -- because a later step failed.
+    ok(steps[1].template ~= nil, 'the rungs before the refusal are kept')
+end)
+
+test('family_steps: the inputs are NOT mutated — nothing is written', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local h = (clones.family_template(f, store) or {}).order[1]
+    local before_holes, before_members = f.holes, #f.members
+    local before_edits = #(f.template.edits or {})
+    assert(clones.family_steps(f, { { op = 'pin', h = h, value = f.values[1][h] } }))
+    eq(before_holes, f.holes)
+    eq(before_members, #f.members)
+    -- ★ THE LOG IS THE TELL: every edit APPENDS to `T.edits`, so a fold that
+    -- mutated the family's own template would show up here and nowhere else.
+    eq(before_edits, #(f.template.edits or {}))
+end)
+
+test('family_steps: a malformed log is a named refusal, not a partial ladder', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f then skip 'no family' end
+    local s1, w1 = clones.family_steps(f, {})
+    eq(nil, s1); ok(tostring(w1):find('no edits', 1, true), tostring(w1))
+    local s2, w2 = clones.family_steps(f, { { h = 'h1' } })   -- no `op` field
+    eq(nil, s2)
+    ok(tostring(w2):find('not a recorded edit', 1, true), tostring(w2))
+end)

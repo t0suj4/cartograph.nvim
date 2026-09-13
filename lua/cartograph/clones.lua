@@ -4393,4 +4393,84 @@ function M.family_propagate(fam, i, text, store, opts)
     return out
 end
 
+-- ── the VIRTUAL-STEP LADDER: a SEQUENCE of edits, none of them written ──────
+--
+-- ★★★ `family_edit` APPLIES ONE EDIT; THIS FOLDS A LOG. The difference is not
+-- convenience — it is the thing CART-0920 is missing. A composition needs to ask
+-- "what is the state after steps 1..k", and until something folds an edit log
+-- there is no such state to ask about: there is a template before, a template
+-- after, and nothing in between.
+--
+-- ★★ THE ARROW IS `replay_edit`, AND IT READS THE ALGEBRA'S OWN LOG FORMAT. Each
+-- of the five edits records its op into `T.edits` (`edited(T, op)` copies the
+-- template and appends), so an op is a VALUE that can be carried, stored and
+-- replayed against a different template. `replay_edit` dispatches SEVEN ops —
+-- the five moves plus `rewrite` and `join` — which is two more than
+-- `family_edit` can spell, so a log may legitimately contain steps this tree
+-- cannot yet author.
+--
+-- ⚠ THE VALUES MIGRATE AT EVERY STEP, AND THE RESULT IS SPARSE. `migrate` keys
+-- kept members by their ORIGINAL index, so the surviving set only ever shrinks
+-- and index k means the same member at every rung. Carrying a DENSE list forward
+-- would silently renumber the family halfway down the ladder.
+--
+-- ⚠ AND A REFUSAL STOPS THE FOLD RATHER THAN SKIPPING THE STEP. Step k+1 is
+-- defined against the state step k produced; continuing past a refusal would
+-- compute a rung that no sequence of edits reaches.
+
+--- Fold a sequence of recorded edits onto a family, returning the state after
+--- EACH step. Writes nothing and mutates neither the family nor its template.
+---
+--- @param fam table   a family record
+--- @param ops table   a list of recorded ops (`T.edits` entries: {op=..., ...})
+--- @param opts table|nil  { env }
+--- @return table|nil steps, string|nil why
+--- steps = { { i, op, template, values, kept, dropped, refused, why } }
+function M.family_steps(fam, ops, opts)
+    opts = opts or {}
+    if type(fam) ~= 'table' or type(fam.template) ~= 'table' then
+        return nil, 'not a family record'
+    end
+    if type(ops) ~= 'table' or #ops == 0 then return nil, 'no edits to replay' end
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+    if not A.replay_edit then return nil, 'this algebra has no replay_edit' end
+
+    local T, Vs = fam.template, fam.values
+    local steps = {}
+    for k, op in ipairs(ops) do
+        if type(op) ~= 'table' or op.op == nil then
+            return nil, ('step %d is not a recorded edit (no `op` field)'):format(k)
+        end
+        local T2, rwhy = A.replay_edit(T, op)
+        if not T2 then
+            -- ★ THE REFUSAL IS A RUNG, NOT AN ERROR. The ladder up to here is
+            -- real and the caller may well want it; what it may not do is
+            -- pretend step k happened.
+            steps[#steps + 1] = { i = k, op = op, refused = true,
+                why = ('%s: %s'):format(tostring(op.op), tostring(rwhy)) }
+            return steps
+        end
+        local okm, mig = pcall(A.migrate, T, T2, Vs, opts.env)
+        if not okm or not mig then
+            steps[#steps + 1] = { i = k, op = op, refused = true,
+                why = ('%s: migrate failed: %s'):format(tostring(op.op), tostring(mig)) }
+            return steps
+        end
+        -- name who fell out, on the same terms `family_edit` does: indices are
+        -- correct and unusable
+        local dropped = {}
+        for _, d in ipairs(mig.dropped or {}) do
+            local m = (fam.members or {})[d.i]
+            dropped[#dropped + 1] = { i = d.i, why = d.why, op = d.op,
+                name = m and m.name, file = m and m.file }
+        end
+        steps[#steps + 1] = { i = k, op = op, template = mig.template,
+            values = mig.values, kept = mig.kept, dropped = dropped }
+        T, Vs = mig.template, mig.values
+    end
+    return steps
+end
+
 return M
