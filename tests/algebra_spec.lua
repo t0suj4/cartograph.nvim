@@ -95,3 +95,41 @@ test('algebra seam: disabled reports a reason and mints nothing', function ()
     eq(nil, row)
     ok(alg.available(), 're-enabling restores it without a reload')
 end)
+
+--- ★★★ THE ACCESSOR THAT WENT DEAD, PINNED FROM BOTH SIDES.
+--- A TEMPLATE is a record `{ body, holes, edits }`; the TERM is `template.body`.
+--- A guard written as `template.k == 'hole'` reads nil for EVERY template and so
+--- never fires -- which is exactly what happened in tools/familydiff.lua and let
+--- a bare-hole "family" be counted as a success (CART-0888).
+---
+--- ⚠ ASSERTING ONLY THE FALSE SIDE IS HOW THE BUG SURVIVES. A predicate that can
+--- never return true passes every "is not collapsed" assertion in the suite, so
+--- the TRUE case is the one that has to be pinned.
+test('algebra seam: is_collapsed fires on a bare hole, and .k on the template does not', function ()
+    local A = need()
+    local g = A.generalize({ A.node('alpha', A.name('p')), A.node('beta', A.lit('number:7')) })
+    eq(nil, g.template.k)                      -- the trap: nil, silently
+    eq('hole', g.template.body.k)              -- the term really is a bare hole
+    ok(alg.is_collapsed(g.template), 'is_collapsed sees it')
+    eq(0, alg.fixed_nodes(g.template.body))    -- and it shares no fixed structure
+
+    -- the negative side, so the predicate is not simply always true
+    local h = A.generalize({ A.node('f', A.name('x')), A.node('f', A.name('y')) })
+    ok(not alg.is_collapsed(h.template), 'a shared root is not collapsed')
+    ok(alg.fixed_nodes(h.template.body) > 0, 'and it shares fixed structure')
+end)
+
+--- ★★ A BARE-HOLE TEMPLATE RETRACTS TO EVERY INSTANCE TRIVIALLY, which is why
+--- "the lgg retracts" is NOT evidence that the members are one family. This is
+--- the law that made the dead guard's damage invisible.
+test('algebra seam: retraction alone does not witness a family', function ()
+    local A = need()
+    local xs = { A.node('alpha', A.name('p')), A.node('beta', A.lit('number:7')) }
+    local g = A.generalize(xs)
+    for i = 1, #xs do
+        local r = A.instantiate(g.template, g.values[i])
+        ok(r and A.eq(r.term, xs[i]), 'a COLLAPSED template still retracts to instance ' .. i)
+    end
+    ok(alg.is_collapsed(g.template),
+        'so retraction and collapse are true at once — only fixed_nodes separates them')
+end)
