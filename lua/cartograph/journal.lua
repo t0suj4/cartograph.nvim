@@ -100,7 +100,17 @@ function M.begin(root, verb, plan, files)
     local id, why = alloc_id(root, verb)
     if not id then return nil, why end
     local e = {
+        -- the ENTRY format. ⚠ NOT bumped for a plan change: an entry's shape and
+        -- the plan it describes version independently, and conflating them would
+        -- invalidate every recoverable entry for a change to something the
+        -- recovery path does not read.
         version = 1,
+        -- ★ WHICH PLAN SCHEMA THE DESCRIPTION BELOW WAS WRITTEN AGAINST
+        -- (CART-0922). Undo and redo restore BYTES and never consult this — they
+        -- must keep working for every entry ever written. It is here for anything
+        -- that would REPLAY `e.plan`, which is exactly the thing that needs to
+        -- know it is reading an old recording.
+        plan_version = require('cartograph.schema').PLAN,
         id = id,
         verb = verb, root = root, ts = os.time(),
         status = 'pending',

@@ -4431,6 +4431,17 @@ function M.family_steps(fam, ops, opts)
     if type(fam) ~= 'table' or type(fam.template) ~= 'table' then
         return nil, 'not a family record'
     end
+    -- ★★ A LADDER THAT CLAIMS TO BE SERIALIZED IS GATED; A BARE LIST IS NOT
+    -- (CART-0922). An in-process list of ops has no provenance question — it was
+    -- built by the caller a moment ago. A table carrying `ops` is an ARTIFACT,
+    -- and `replay_edit` EXECUTES what it holds, so it must say which meanings it
+    -- was recorded under. ⚠ `ops` present and `version` absent is the dangerous
+    -- shape and is refused by name: it LOOKS serialized and cannot prove it.
+    if type(ops) == 'table' and ops.ops ~= nil then
+        local okv, vwhy = require('cartograph.schema').replayable('ladder', ops.version)
+        if not okv then return nil, vwhy end
+        ops = ops.ops
+    end
     if type(ops) ~= 'table' or #ops == 0 then return nil, 'no edits to replay' end
     local alg = require 'cartograph.algebra'
     local A, why = alg.load()
@@ -4471,6 +4482,15 @@ function M.family_steps(fam, ops, opts)
         T, Vs = mig.template, mig.values
     end
     return steps
+end
+
+--- Stamp a list of recorded edits as a LADDER, the serializable form
+--- `family_steps` will accept back. One place writes the version, so a new
+--- writer cannot forget the field (CART-0922).
+--- @param ops table a list of recorded ops
+--- @return table ladder { version, ops }
+function M.ladder(ops)
+    return require('cartograph.schema').stamp('ladder', { ops = ops })
 end
 
 return M

@@ -708,3 +708,59 @@ test('moveapply: an unresolved capture is NEVER pulled into the move-set', funct
     end
     eq(1, #closed, 'the move-set is the seed alone')
 end)
+
+--- ★★★ THE PLAN'S FIELD SET IS PINNED, BECAUSE A DOCUMENTED RULE IS WHAT FAILED
+--- (CART-0922). `schema.PLAN` says a bump is owed when a field a replayer reads
+--- is added, removed, or changes meaning — and that rule already failed TWICE in
+--- one day: `plan.reexports` (CART-0915) and `captures[].textual` (CART-0919)
+--- both landed with no bump, because nothing could have checked one. A rule in a
+--- header is advice; this is the fence.
+---
+--- ⚠ FAILING THIS TEST IS NOT A BUG TO SILENCE. It means a plan field changed,
+--- and there are exactly two honest answers: BUMP `schema.PLAN` (the field is
+--- read when a plan is replayed) or add the name here with a note saying why it
+--- is not (it is local to one apply and never serialized). Editing the list
+--- without deciding is the failure this exists to prevent.
+test('moveapply: the PLAN field set is pinned to its schema version', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'local function h(x) return x end',
+        'function M.f(x) return h(x) end',
+        'return M',
+    }, '\n') }
+    local n = node_by(st, 'M.f') or node_by(st, 'f')
+    local plan = assert(moveapply.plan_extract_ids(st, { n.id }, 'sub/u.lua'))
+
+    -- the v2 surface, in sorted order
+    local want = { 'copy', 'creates', 'dest', 'dest_at', 'edit_of', 'generation',
+        'guards', 'hazards', 'header', 'imports_add', 'moves', 'rewrites',
+        'scaffold', 'stamps', 'touched', 'verb' }
+    -- `reexports` is v2's addition and appears only when the caller asks for it,
+    -- so it is listed as OPTIONAL rather than required: a field that comes and
+    -- goes with an option is still part of the schema a replayer reads.
+    local optional = { reexports = true }
+
+    local got = {}
+    for k in pairs(plan) do got[#got + 1] = k end
+    table.sort(got)
+    local missing, extra = {}, {}
+    local wset = {}
+    for _, k in ipairs(want) do wset[k] = true end
+    for _, k in ipairs(got) do
+        if not wset[k] and not optional[k] then extra[#extra + 1] = k end
+    end
+    local gset = {}
+    for _, k in ipairs(got) do gset[k] = true end
+    for _, k in ipairs(want) do if not gset[k] then missing[#missing + 1] = k end end
+
+    eq(0, #extra, 'a NEW plan field: bump schema.PLAN or list it here — ' ..
+        table.concat(extra, ', '))
+    eq(0, #missing, 'a plan field VANISHED: bump schema.PLAN — ' ..
+        table.concat(missing, ', '))
+
+    -- and the reexport option really does add the v2 field, so `optional` is not
+    -- a hole someone can hide a field in
+    local rx = assert(moveapply.plan_extract_ids(st, { n.id }, 'sub/u.lua', { reexport = true }))
+    ok(rx.reexports ~= nil, 'reexport=true produces the v2 field it names')
+end)

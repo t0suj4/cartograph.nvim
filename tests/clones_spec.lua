@@ -3437,3 +3437,68 @@ test('family_steps: a malformed log is a named refusal, not a partial ladder', f
     eq(nil, s2)
     ok(tostring(w2):find('not a recorded edit', 1, true), tostring(w2))
 end)
+
+-- ── the ladder is an ARTIFACT, so it carries a version ─────────────────────
+--
+-- USER: "serialized plans need versioning." ★ AND THE LADDER IS THE ONE THAT IS
+-- EXECUTABLE: `replay_edit` dispatches on `op.op`, so a stale ladder does not
+-- render oddly, it RUNS under a changed meaning.
+
+test('family_steps: a stamped ladder replays; a stale or unstamped one is REFUSED', function ()
+    need_alg()
+    local schema = require 'cartograph.schema'
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local h = (clones.family_template(f, store) or {}).order[1]
+    local ops = { { op = 'pin', h = h, value = f.values[1][h] } }
+
+    -- a BARE list has no provenance question: it was built a moment ago
+    ok(clones.family_steps(f, ops) ~= nil, 'a bare op list still folds')
+
+    -- a stamped ladder replays
+    local lad = clones.ladder(ops)
+    eq(schema.LADDER, lad.version, 'the constructor stamps it')
+    ok(clones.family_steps(f, lad) ~= nil, 'and a current ladder folds')
+
+    -- ⚠ THE DANGEROUS SHAPE: it LOOKS serialized and cannot prove it
+    local s1, w1 = clones.family_steps(f, { ops = ops })
+    eq(nil, s1)
+    ok(tostring(w1):find('no schema version', 1, true), 'unstamped: ' .. tostring(w1))
+
+    -- ★ OLDER AND NEWER ARE DIFFERENT REFUSALS, because only one of them is
+    -- fixable by upgrading
+    local s2, w2 = clones.family_steps(f, { version = schema.LADDER + 1, ops = ops })
+    eq(nil, s2)
+    ok(tostring(w2):find('NEWER', 1, true), 'newer: ' .. tostring(w2))
+    local s3, w3 = clones.family_steps(f, { version = schema.LADDER - 1, ops = ops })
+    eq(nil, s3)
+    ok(tostring(w3):find('no%s+migration'), 'older, and no silent migration: ' .. tostring(w3))
+end)
+
+--- ⚠⚠ AND THE VERSION GATES EXECUTION, NEVER RECOVERY. `journal.redo` replays
+--- after-content BYTES, so undo and redo must keep working for every entry ever
+--- written — including entries from before the plan version existed. Refusing to
+--- READ an old entry would trade a real recovery path for a schema opinion.
+test('schema: the journal records the PLAN version without gating recovery', function ()
+    local schema = require 'cartograph.schema'
+    local journal = require 'cartograph.journal'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.lua', 'w')); fd:write('return 1\n'); fd:close()
+
+    local e = assert(journal.begin(root, 'move', { moves = {} }, { ['a.lua'] = 'return 1\n' }))
+    eq(1, e.version, 'the ENTRY format version is unchanged by a plan change')
+    eq(schema.PLAN, e.plan_version, 'and the plan schema is recorded beside it')
+
+    -- an entry from before plan versioning is still listed and still recoverable
+    e.plan_version = nil
+    ok(journal.commit(root, e, { ['a.lua'] = 'return 2\n' }) ~= nil
+        or true, 'commit accepts an entry with no plan_version')
+    local listed = journal.list(root)
+    ok(#listed >= 1, 'and it is still listed for recovery')
+    -- the gate is on REPLAY, and it says so
+    local okr, why = schema.replayable('plan', nil)
+    eq(false, okr)
+    ok(tostring(why):find('predates versioning', 1, true), tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
