@@ -82,6 +82,15 @@ function M.check()
     else
         h.info('lua-language-server not found — lua stays name-matched (~); optional')
     end
+    local alg_ok, alg_why = require('cartograph.algebra').available()
+    if alg_ok then
+        h.ok('template algebra found (clone structure can be SETTLED, not just'
+            .. ' bounded) — ' .. alg_why)
+    else
+        h.info('template algebra unavailable — clone structure stays a bounded'
+            .. ' heuristic and says so; optional (' .. tostring(alg_why) .. ')')
+    end
+
     if vim.fn.executable('git') == 1 then
         h.ok('git found (cartograph.history available)')
     else

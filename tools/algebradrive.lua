@@ -45,24 +45,27 @@ dofile(here .. 'bench.lua').bootstrap()
 -- a result that confirms you without having checked anything
 -- ([[test-the-premise-not-the-consequence]]). The zero-child case crashed on
 -- LuaJIT, and that crash is the only reason the truncation was ever seen.
-local tunpack = table.unpack or unpack
 
-local ALG = os.getenv('CARTOGRAPH_ALGEBRA')
-    or (os.getenv('HOME') .. '/tools/templates/algebra.lua')
-if vim.fn.filereadable(ALG) ~= 1 then
-    print('the prototype algebra is not readable at: ' .. ALG)
-    print('set CARTOGRAPH_ALGEBRA to its path. THIS TOOL DOES NOT CARRY A COPY.')
+-- ★★★ THE LOADER AND THE ADAPTER BOTH LIVE IN THE SHIPPED TREE NOW
+-- (`cartograph.algebra`, CART-0889). They were BORN here, and leaving a second
+-- copy behind after promoting them would be precisely the bug this file's own
+-- header warns about -- two adapters drifting apart, and TWO `dofile`s of a
+-- 6001-line module with internal memo state live in one process.
+local alg = require 'cartograph.algebra'
+local A = alg.load()
+if not A then
+    local _, why = alg.available()
+    print('the prototype algebra is not available: ' .. tostring(why))
+    print('set config.algebra_path or $CARTOGRAPH_ALGEBRA. NO COPY IS CARRIED.')
     os.exit(2)
 end
-local A = dofile(ALG)
 
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
-local expr = require 'cartograph.expr'
 local clones = require 'cartograph.clones'
 
-local target, want_pairs, show, dist, rigid, sizes, maxsize, stride =
-    arg[1], 60, 3, nil, false, false, nil, 1
+local target, want_pairs, show, dist, rigid, sizes, maxsize, stride, timing =
+    arg[1], 60, 3, nil, false, false, nil, 1, false
 local i = 2
 while arg[i] do
     if arg[i] == '--pairs' then want_pairs = tonumber(arg[i + 1]); i = i + 2
@@ -76,6 +79,9 @@ while arg[i] do
     -- measured it and called it "fine for a probe, NOT for the interactive path"), so
     -- it is opt-in and carries a size guard.
     elseif arg[i] == '--rigid' then rigid = true; i = i + 1
+    -- ⚠ WALL-CLOCK BUCKETS ARE OPT-IN because they are NONDETERMINISTIC and this
+    -- tool's oracle is that two runs over one tree agree BYTE FOR BYTE.
+    elseif arg[i] == '--time' then timing = true; i = i + 1
     -- ★ SIZE ONLY: how many pairs could the rigid path even attempt? The alignment
     -- DP is memoized over string keys and the prototype guards at nS*nQ > 400000;
     -- this runs the guard and nothing else, so a corpus can be sized in one pass
@@ -113,69 +119,13 @@ end
 -- ⚠ A LITERAL CARRIES ITS TYPE for the same reason: `expr.key` writes
 -- `L<ty>:<v>`, so number 1 and string "1" are distinct there. Dropping the type
 -- here would make them equal and silently under-report divergence.
-local function kind_of(e)
-    local k = e.k
-    if k == 'bin' or k == 'un' then return k .. ':' .. tostring(e.op) end
-    if k == 'field' then return (e.method and 'method.' or 'field.') .. tostring(e.n) end
-    return k
-end
-
 local unsupported = {}
---- ⚠ `locals` COLLAPSES EVERY LOCAL TO ONE SYMBOL, and that is not a simplification I
---- chose — it mirrors `clones.anti_unify`'s own alpha rule ("both locals: alpha-
---- equivalent, no hole") and the prototype's bridge does the same. WITHOUT IT two
---- functions that differ only in local NAMES do not align at all, which is most real
---- near-clones. The prototype records the cost: `nm` and `out` wear one symbol, so a
---- template can say less than it means (NEARCLONES.md's caveat; HOPAU.md's binders are
---- the principled fix and are not in this path).
-local function to_term(e, locals)
-    if e == nil then return nil end
-    if type(e) ~= 'table' or e.k == nil then return nil end
-    local k = e.k
-    local t
-    if k == 'lit' then
-        t = A.lit(tostring(e.ty) .. ':' .. tostring(e.v))
-    elseif k == 'name' then
-        t = (locals and locals[e.n]) and A.name('\1local') or A.name(tostring(e.n))
-    else
-        -- ★ THE CHILD LIST COMES FROM `expr.children`, THE SOURCE `walk` ITSELF
-        -- CONSUMES (CART-0882). Not a per-kind descent written here -- that
-        -- would be the fourth hand-written traversal in this codebase and the
-        -- third chance to omit a kind silently.
-        local kids = {}
-        for _, c in ipairs(expr.children(e)) do
-            local ct = to_term(c, locals)
-            if ct then kids[#kids + 1] = ct end
-        end
-        if #kids == 0 and not (k == 'table' or k == '?' or k == 'type') then
-            -- a leaf kind the adapter does not model: counted, never guessed at
-            unsupported[k] = (unsupported[k] or 0) + 1
-        end
-        t = A.node(kind_of(e), tunpack(kids))
-    end
-    -- the span, carried as a non-child field: rebuild keeps it, eq ignores it
-    if e.at then t.at = e.at end
-    return t
-end
 
---- a clone ROW ({lhs, rhs, cond}) as one term, so a pair of rows is a pair of
---- instances the lgg can take. Shape mirrors `clones.anti_unify_row`.
-local function row_term(r, locals)
-    if type(r) ~= 'table' then return nil end
-    if r.k ~= nil then return to_term(r, locals) end
-    local kids = {}
-    local function push(list, tag)
-        local seq = {}
-        for _, x in ipairs(list or {}) do
-            local t = to_term(x, locals); if t then seq[#seq + 1] = t end
-        end
-        kids[#kids + 1] = A.node(tag, tunpack(seq))
-    end
-    push(r.lhs, 'lhs'); push(r.rhs, 'rhs')
-    local c = r.cond and to_term(r.cond, locals) or nil
-    if c then kids[#kids + 1] = A.node('cond', c) end
-    return A.node('row', tunpack(kids))
-end
+-- The adapter itself is `cartograph.algebra`; these wrappers exist only to feed
+-- this tool's own unsupported-kind tally, which the shipped seam takes as an
+-- optional out-parameter rather than owning.
+local function to_term(e, locals) return alg.term(e, locals, unsupported) end
+local function row_term(r, locals) return alg.row_term(r, locals, unsupported) end
 
 --- ★★★ IS A DIFFERING-ARITY `table` REPETITION, OR IS IT KEYED DATA?
 --- The two have DIFFERENT RIGHT ANSWERS and the positional lgg cannot tell them
@@ -391,7 +341,19 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                             local tx = to_term(sh.xn, p.a.locals)
                             local ty = to_term(sh.yn, p.b.locals)
                             if tx and ty then
+                                local t0n = timing and os.clock() or 0
                                 local okg, gv = pcall(A.vertical, tx, ty, { skeleton = 'jwz' })
+                                -- ⚠ OFF BY DEFAULT: a wall-clock bucket is
+                                -- NONDETERMINISTIC, and this tool's whole value is
+                                -- that two runs of the same tree are BYTE-IDENTICAL.
+                                -- An always-on timer silently destroys that oracle.
+                                if timing then
+                                    local dtn = os.clock() - t0n
+                                    bump(dtn < 0.01 and 'node-vertical: <10ms'
+                                        or dtn < 0.1 and 'node-vertical: 10-100ms'
+                                        or dtn < 1 and 'node-vertical: 0.1-1s'
+                                        or 'node-vertical: >1s')
+                                end
                                 if okg and gv and gv.templates and gv.templates[1] then
                                     local hh = count_holes(gv.templates[1].body)
                                     if hh.ctx > 0 then retained = retained + 1 end

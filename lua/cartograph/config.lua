@@ -24,6 +24,16 @@ M.clangd_compile_commands = nil
 M.luals = true
 M.luals_bin = nil
 
+-- the proven template algebra (~/tools/templates) as an optional oracle for
+-- clone analysis: it settles structural questions the counting heuristic can
+-- only bound. `false` disables; algebra_path overrides discovery, and
+-- $CARTOGRAPH_ALGEBRA is honoured after it.
+-- ⚠ THIS PATH IS LOADED WITH `dofile`, SO IT EXECUTES. It may only ever come
+-- from here, from that env var, or from the fixed default — NEVER from the tree
+-- being analysed. See lua/cartograph/algebra.lua.
+M.algebra = true
+M.algebra_path = nil
+
 -- go-to-def into an environment profile's source (RBS/stdlib): overrides the
 -- root the profile's distilled symbol locations are relative to. nil = use the
 -- artifact's baked root hint; when neither resolves to a readable file, go-to-def
