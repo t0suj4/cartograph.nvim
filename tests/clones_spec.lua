@@ -2761,3 +2761,56 @@ test('family_edit: refuses an unknown edit and a missing hole by name', function
     local d, w4 = clones.family_edit({ template = false }, { edit = 'pin' })
     eq(nil, d); ok(tostring(w4):find('not a family'), tostring(w4))
 end)
+
+--- ★★★ THE JOURNAL IS COMPLETE FOR THE WRONG HALF (CART-0896). The template
+--- journals its edits and `A.replay_edit` replays them, so `open` restores what
+--- `pin` SUPPLIED. But `migrate` ends by RE-DERIVING domains over the SURVIVING
+--- members, and a re-derivation is not a move in the order — so it is not in the
+--- log and nothing undoes it.
+---
+--- This is a characterization test of a BOUNDARY, not of a defect: it is here
+--- because the behaviour is surprising, the refusal it produces says "pinned"
+--- about a hole nobody pinned, and a future change to the summary policy would
+--- otherwise move it silently.
+test('family_edit: a pin closes holes it never touched, and `open` cannot undo that', function ()
+    need_alg()
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local f = fam_edit_fixture()
+    if not f or f.holes < 2 then skip 'fixture needs two holes' end
+
+    local hs = {}
+    for h in pairs(f.template.holes) do hs[#hs + 1] = h end
+    table.sort(hs)
+    local pinned_hole, other = hs[1], hs[2]
+
+    -- BEFORE: neither hole is closed
+    ok(not f.template.holes[other].was, 'the other hole was never pinned')
+
+    local res = clones.family_edit(f,
+        { edit = 'pin', h = pinned_hole, value = f.values[1][pinned_hole] })
+    ok(res ~= nil and #res.dropped > 0, 'the pin drops members')
+
+    -- ★ the UNEDITED hole is now closed too, because one survivor means one
+    -- value per column
+    local d1 = A.show_domain(res.template.holes[pinned_hole].domain)
+    local d2 = A.show_domain(res.template.holes[other].domain)
+    ok(d1:find('"'), ('the pinned hole is closed: %s'):format(d1))
+    ok(d2:find('"'), ('and so is the UNEDITED one: %s'):format(d2))
+    ok(not res.template.holes[other].was,
+        'yet it carries no `was` marker — no edit narrowed it, a re-derivation did')
+
+    -- ★★ so re-opening the pin does NOT re-admit a dropped member, and the
+    -- refusal names the OTHER hole
+    local reopened = A.open_hole(res.template, pinned_hole)
+    ok(reopened ~= nil, 'the pin re-opens')
+    local dropped = res.dropped[1]
+    local inst = A.instantiate(f.template, f.values[dropped.i])
+    ok(A.match(f.template, inst.term).ok,
+        'CONTROL: the ORIGINAL template matches its own member')
+    local m = A.match(reopened, inst.term)
+    eq(false, m.ok)
+    ok(tostring(m.refusal and m.refusal.why):find(other),
+        ('refused on the hole no edit touched (%s): %s'):format(other,
+            tostring(m.refusal and m.refusal.why)))
+end)

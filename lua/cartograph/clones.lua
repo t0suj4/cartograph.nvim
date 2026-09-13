@@ -3952,12 +3952,30 @@ function M.family_edit(fam, op, opts)
 
     -- the members' value maps, in member order
     --
-    -- ⚠ THE RESULT IS SPARSE, AND CHAINING EDITS COMPOUNDS IT. `migrate` returns
-    -- `values` for the KEPT members only, still keyed by the ORIGINAL index. So
-    -- feeding a result back in as a family drops the already-dropped again —
-    -- correct, because their values are genuinely gone, but it means a chain of
-    -- edits is not a chain of families: to undo an edit you re-edit the
-    -- ORIGINAL, you do not `open` your way back up.
+    -- ⚠⚠ THE RESULT IS SPARSE, AND `open` DOES NOT WALK IT BACK. `migrate`
+    -- returns `values` for the KEPT members only, still keyed by the ORIGINAL
+    -- index, so feeding a result back in drops the already-dropped again.
+    --
+    -- ★★★ AND THE EDIT LOG CANNOT UNDO IT, WHICH IS NOT OBVIOUS. The template
+    -- journals its edits (`T.edits`, replayable by `A.replay_edit`), so `open`
+    -- restores exactly what `pin` SUPPLIED. But `migrate` ends by RE-DERIVING
+    -- DOMAINS over the surviving members, and with one survivor every column
+    -- holds one value — so holes nobody edited close too. MEASURED on a 3-member
+    -- family, pinning h1:
+    --
+    --     ORIGINAL            h1={lit}    h2={lit}
+    --     after A.pin(h1)     h1=="num:1" h2={lit}        <- the edit alone
+    --     after migrate       h1=="num:1" h2=="str:1"     <- h2 was never edited
+    --
+    -- Re-opening h1 then leaves h2 closed, and a dropped member is refused on
+    -- H2 — a hole no edit ever touched. The journal is complete for SUPPLIED
+    -- narrowing and silent about DERIVED narrowing, because a re-derivation is
+    -- not a move in the order.
+    --
+    -- ⇒ The values are NOT gone: the original family still holds them. To undo,
+    --   re-edit the ORIGINAL. To bring a dropped member back into an edited
+    --   family is an ADOPTION (a match), which the prototype names `adjoin` —
+    --   "migration carries the family it is given and never adopts".
     local Vs, n = {}, #(fam.members or {})
     for i = 1, n do Vs[i] = (fam.values or {})[i] or {} end
 
