@@ -3881,4 +3881,109 @@ function M.template_join(a, b, opts)
     return r
 end
 
+-- ── EDITING A FAMILY'S TEMPLATE, AND CARRYING ITS VALUES (CART-0879) ─────────
+--
+-- ★★★ WHAT `templates.lua` EXISTS FOR AND COULD NOT DO. Its own header: "a
+-- template you cannot point at cannot be CORRECTED. If the mining
+-- over-generalises — a hole wider than it should be, two holes that are really
+-- one — there is nothing to narrow." Storing the template made it a CLAIM; what
+-- was missing is the operation that narrows it AND says who falls out.
+--
+-- ⚠ THE EDIT IS THE EASY HALF. Every edit moves the template in the generality
+-- order, and the direction decides what can go wrong:
+--     pin    narrow a hole to one value     DOWN — members CAN drop out
+--     merge  two holes become one           DOWN — non-linear; members can drop
+--     dig    a fixed subtree becomes a hole  UP  — nobody should drop
+--     split  one site of a hole splits off   UP  — nobody should drop
+--     open   undo a pin                      UP  — bounded to pinned holes
+-- `A.migrate` is what makes an edit safe: it follows every member's values from
+-- T0 to T1 along the edits T1 recorded beyond T0's, and returns `dropped` with a
+-- REASON PER MEMBER. An edit verb without it silently keeps a family whose
+-- members no longer instantiate their own template.
+--
+-- ★ THE DROPPED LIST IS THE ANSWER, not an error path. "Narrow this hole to
+-- `nil` and three of nineteen members stop matching, here they are" is the
+-- finding; the edited template alone is not.
+
+--- Apply ONE edit to a family's template and migrate every member's values.
+---@param fam table a family from `M.families` / `M.family_of`
+---@param op table { edit = 'pin'|'open'|'dig'|'merge'|'split', h=, h2=, value=, path=, site= }
+---@param opts table|nil { env = }
+---@return table|nil result { template, values, kept, dropped, direction }
+---@return string|nil why
+function M.family_edit(fam, op, opts)
+    opts = opts or {}
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+    if type(fam) ~= 'table' or type(fam.template) ~= 'table' or not fam.template.body then
+        return nil, 'not a family with a template'
+    end
+    if type(op) ~= 'table' or type(op.edit) ~= 'string' then
+        return nil, 'no edit named'
+    end
+
+    -- ⚠ THE DIRECTION IS DECLARED HERE, NOT INFERRED. A caller that does not
+    -- know whether an edit can lose members cannot read the result honestly,
+    -- and the prototype states the direction per operator in its own headers.
+    local DOWN = { pin = true, merge = true }
+    local UP = { open = true, dig = true, split = true }
+    if not (DOWN[op.edit] or UP[op.edit]) then
+        return nil, ('unknown edit `%s` (pin, open, dig, merge, split)'):format(op.edit)
+    end
+
+    local T0 = fam.template
+    local T1, ewhy
+    if op.edit == 'pin' then
+        if op.value == nil then return nil, 'pin needs a value' end
+        T1, ewhy = A.pin(T0, op.h, op.value)
+    elseif op.edit == 'open' then
+        T1, ewhy = A.open_hole(T0, op.h)
+    elseif op.edit == 'dig' then
+        if type(op.path) ~= 'table' then return nil, 'dig needs a path' end
+        T1, ewhy = A.dig(T0, op.path, op.h, op.domain)
+    elseif op.edit == 'merge' then
+        T1, ewhy = A.merge(T0, op.h, op.h2)
+    else
+        if type(op.site) ~= 'number' then return nil, 'split needs a site index' end
+        T1, ewhy = A.split(T0, op.h, op.site, op.h2)
+    end
+    if not T1 then return nil, ('%s: %s'):format(op.edit, tostring(ewhy)) end
+
+    -- the members' value maps, in member order
+    --
+    -- ⚠ THE RESULT IS SPARSE, AND CHAINING EDITS COMPOUNDS IT. `migrate` returns
+    -- `values` for the KEPT members only, still keyed by the ORIGINAL index. So
+    -- feeding a result back in as a family drops the already-dropped again —
+    -- correct, because their values are genuinely gone, but it means a chain of
+    -- edits is not a chain of families: to undo an edit you re-edit the
+    -- ORIGINAL, you do not `open` your way back up.
+    local Vs, n = {}, #(fam.members or {})
+    for i = 1, n do Vs[i] = (fam.values or {})[i] or {} end
+
+    local okm, mig = pcall(A.migrate, T0, T1, Vs, opts.env)
+    if not okm or not mig then
+        return nil, 'migrate failed: ' .. tostring(mig)
+    end
+
+    -- ★ NAME THE MEMBERS THAT FELL OUT. `migrate` reports indices; a caller
+    -- reading a report needs the function and the file, and resolving it here
+    -- is what makes the dropped list usable rather than merely correct.
+    local dropped = {}
+    for _, d in ipairs(mig.dropped or {}) do
+        local m = (fam.members or {})[d.i]
+        dropped[#dropped + 1] = {
+            i = d.i, why = d.why, op = d.op,
+            name = m and m.name, file = m and m.file,
+            line = m and (m.lines or {})[1],
+        }
+    end
+    return {
+        template = mig.template, values = mig.values,
+        kept = mig.kept, dropped = dropped,
+        direction = DOWN[op.edit] and 'down' or 'up',
+        edit = op.edit,
+    }
+end
+
 return M

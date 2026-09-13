@@ -2643,3 +2643,121 @@ test('template_join/meet: template, element_template and payload all normalise',
     eq(nil, bad)
     ok(tostring(why):find('neither a template'), 'a fourth shape refuses by name: ' .. tostring(why))
 end)
+
+-- ── editing a family's template, and carrying its values ────────────────────
+--
+-- `templates.lua` exists because "a template you cannot point at cannot be
+-- CORRECTED". What was missing is the operation that corrects one AND says who
+-- falls out. The dropped list is the answer, not an error path.
+
+--- a 3-member family whose members differ at two literal positions
+local function fam_edit_fixture()
+    local function body(n)
+        return ([[
+function M.g%s(t)
+    local acc = 0
+    local seen = {}
+    for i = 1, #t do acc = acc + t[i] * %s end
+    local s = tostring(acc)
+    local u = string.upper(s)
+    seen[u] = true
+    local pad = string.rep("-", #u)
+    local out = pad .. u
+    return out .. "%s"
+end
+]]):format(n, n, n)
+    end
+    proj { ['fe.lua'] = 'local M = {}\n' .. body(1) .. body(2) .. body(3) .. 'return M\n' }
+    local r = clones.families(store, {})
+    return r and r.families[1]
+end
+
+test('family_edit: a PIN narrows the template and NAMES who falls out', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    eq(3, #f.members)
+
+    local h = (clones.family_template(f, store) or {}).order[1]
+    ok(h ~= nil, 'the family has a hole to pin')
+    local res, why = clones.family_edit(f, { edit = 'pin', h = h, value = f.values[1][h] })
+    ok(res ~= nil, 'the pin applies: ' .. tostring(why))
+
+    eq('down', res.direction)
+    eq(1, #res.kept)
+    eq(2, #res.dropped)
+    -- ★ the dropped entries are USABLE: a name, a file and a reason, not indices
+    for _, d in ipairs(res.dropped) do
+        ok(d.name and d.file, 'a dropped member carries where it is')
+        ok(tostring(d.why):find('differs'), 'and why it fell out: ' .. tostring(d.why))
+    end
+end)
+
+--- ★★★ THE LAW `migrate` EXISTS FOR: a kept member's MIGRATED values must
+--- instantiate the EDITED template to the SAME instance the original values
+--- instantiated the original template to. An edit that quietly changed what a
+--- member means would keep it in `kept` and pass every count-based assertion.
+test('family_edit: a kept member still means the same thing', function ()
+    need_alg()
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local h = (clones.family_template(f, store) or {}).order[1]
+
+    local before = A.instantiate(f.template, f.values[1])
+    ok(before and before.ok, 'the original values instantiate the original template')
+
+    local res = clones.family_edit(f, { edit = 'pin', h = h, value = f.values[1][h] })
+    ok(res ~= nil, 'the pin applies')
+    for _, i in ipairs(res.kept) do
+        local after = A.instantiate(res.template, res.values[i])
+        ok(after and after.ok, ('member %d still instantiates the edited template'):format(i))
+        ok(A.eq(after.term, A.instantiate(f.template, f.values[i]).term),
+            ('member %d means the same after the edit as before'):format(i))
+    end
+end)
+
+--- AND THE OTHER DIRECTION. `dig` moves UP — a fixed subtree becomes a hole —
+--- so the template admits MORE and nobody may fall out. A verb that reported
+--- the same shape for both directions would be describing its own control flow,
+--- not the edit.
+test('family_edit: an UP edit drops nobody', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+
+    -- a path to some FIXED node in the body
+    local path
+    local function find(t, p)
+        if path then return end
+        if t.k ~= 'hole' and #p > 0 and #(t.kids or {}) == 0 then path = p; return end
+        for i, c in ipairs(t.kids or {}) do
+            local q = {}; for _, x in ipairs(p) do q[#q + 1] = x end; q[#q + 1] = i
+            find(c, q)
+        end
+    end
+    find(f.template.body, {})
+    ok(path ~= nil, 'the template has a fixed subtree to dig')
+
+    local res, why = clones.family_edit(f, { edit = 'dig', path = path, h = 'dug1' })
+    ok(res ~= nil, 'the dig applies: ' .. tostring(why))
+    eq('up', res.direction)
+    eq(0, #res.dropped)
+    eq(3, #res.kept)
+end)
+
+test('family_edit: refuses an unknown edit and a missing hole by name', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f then skip 'fixture yielded no family' end
+
+    local a, w1 = clones.family_edit(f, { edit = 'wat' })
+    eq(nil, a); ok(tostring(w1):find('unknown edit'), tostring(w1))
+    local b, w2 = clones.family_edit(f, { edit = 'open', h = 'nope' })
+    eq(nil, b); ok(tostring(w2):find('no hole'), tostring(w2))
+    local c, w3 = clones.family_edit(f, { edit = 'pin', h = 'h1' })
+    eq(nil, c); ok(tostring(w3):find('needs a value'), tostring(w3))
+    local d, w4 = clones.family_edit({ template = false }, { edit = 'pin' })
+    eq(nil, d); ok(tostring(w4):find('not a family'), tostring(w4))
+end)
