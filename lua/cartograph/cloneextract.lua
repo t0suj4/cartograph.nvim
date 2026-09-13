@@ -383,6 +383,203 @@ function M.plan(store, pair, opts)
 end
 
 --- The edit callback (pure splice) — shared by preview and apply.
+-- ── THE FAMILY PLAN: one helper for N copies, not C(N,2) proposals ───────────
+--
+-- ★★★ WHY NOT JUST RUN THE PAIR VERB N TIMES. Asking pairwise over a component
+-- of N near-clones gives up to C(N,2) proposals which DISAGREE — measured, 84%
+-- of wow's components — and the clique proxy agrees with the MDL partition on
+-- only 38%. The family is the unit a human would extract; the pair is a sample
+-- of it. So the template comes from `clones.families` (MDL) and the body from
+-- `family_helper_text`, VERIFIED by the reparse oracle before a plan exists.
+--
+-- ⚠ SAME-FILE ONLY IN v1, REFUSED BY NAME OTHERWISE. Cross-file needs a new
+-- module, N require lines, the free-read gate over N files, and a phase gate
+-- whose union GROWS with N — on Factorio that refuses more often the larger the
+-- family. The pair verb already treats cross-file as its own branch; this keeps
+-- the split rather than half-doing it. MEASURED: 4 of 7 same-file on our own
+-- tree, ~50 of 105 on wow.
+--
+-- ⚠ ADMISSIBLE MEMBERS ONLY. `liftable` members are nested and need their
+-- captures turned into parameters (CART-0904); that changes the signature AND
+-- the helper's placement, so v1 refuses them by name rather than guessing.
+--
+-- ★ PARTIAL IS SOUND HERE, and that is not inherited from the merge verb.
+-- `clonemerge` refuses whole because "a partial merge rewrites the callers of a
+-- twin that still exists" — dangling references. Extraction has no such
+-- failure: the helper exists, the admissible bodies delegate, and a skipped
+-- member keeps its own body. Nothing dangles and it parses. INCOMPLETE IS NOT
+-- UNSOUND, so `opts.partial` extracts the admissible subset and the plan says
+-- exactly who was left behind.
+
+--- Build a plan to extract a FAMILY into one shared helper, or (nil, reason).
+---@param store table
+---@param fam table a family from `clones.families` / `clones.family_of`
+---@param opts table|nil { partial = true to extract the admissible subset }
+---@return table|nil plan, string|nil why
+function M.plan_family(store, fam, opts)
+    opts = opts or {}
+    local clones = require 'cartograph.clones'
+    if type(fam) ~= 'table' or type(fam.members) ~= 'table' or #fam.members < 2 then
+        return nil, 'not a family of two or more'
+    end
+
+    local v, vwhy = clones.family_admissibility(fam, store)
+    if not v then return nil, vwhy end
+    if not v.body then
+        return nil, 'no helper body: ' .. tostring(v.body_why)
+    end
+
+    -- ★ THE REPARSE ORACLE GATES THE PLAN, not just the display. A rendered
+    -- helper that does not read back as its own template is not something to
+    -- build a transaction on (CART-0893), and a hole at STATEMENT position
+    -- renders text the grammar rejects (CART-0894) — caught here by name.
+    local vok, verr, vdet = clones.family_verify(fam, store)
+    if not vok then
+        -- ⚠ TWO DIFFERENT FACTS, and for a WRITE both refuse. "The oracle cannot
+        -- speak" (an anonymous-function donor is an EXPRESSION, so its own text
+        -- is not a standalone chunk) is not the same as "the text is wrong" —
+        -- but writing text nobody could check is the thing this plan must not
+        -- do, so the distinction lands in the MESSAGE, not in the outcome.
+        if vdet and vdet.verifiable == false then
+            return nil, ('the helper body cannot be VERIFIED (%s) — refusing rather'
+                .. ' than writing text nothing checked'):format(tostring(verr)
+                :gsub('^not verifiable: ', ''))
+        end
+        return nil, 'the helper body does not verify: ' .. tostring(verr)
+    end
+
+    -- which members are we actually rewriting?
+    local take = {}
+    for _, i in ipairs(v.admissible) do take[#take + 1] = i end
+    if #take < 2 then
+        if v.n_liftable > 0 then
+            return nil, ('%d member(s) need their captures lifted first (%s) — not'
+                .. ' supported yet'):format(v.n_liftable,
+                v.lifts and table.concat(v.lifts, ', ') or 'unknown')
+        end
+        return nil, ('only %d member(s) are extractable; a helper needs two')
+            :format(#take)
+    end
+    if #take < v.n and not opts.partial then
+        local names = {}
+        for _, rec in ipairs(v.refused) do
+            names[#names + 1] = ('%s (%s)'):format(rec.name or '?', rec.reason or '?')
+        end
+        return nil, ('%d of %d members are not extractable: %s — pass opts.partial'
+            .. ' to extract the rest'):format(v.n - #take, v.n,
+            table.concat(names, '; '):sub(1, 200))
+    end
+
+    -- same-file only, and the language must be one we can synthesize
+    local file, lang
+    for _, i in ipairs(take) do
+        local m = fam.members[i]
+        if file == nil then file = m.file elseif m.file ~= file then
+            return nil, 'the family spans more than one file — cross-file family'
+                .. ' extraction is not supported yet'
+        end
+    end
+    lang = lang_of(file)
+    if not (lang and EXTRACT[lang]) then
+        return nil, ('no synthesis syntax for %s'):format(tostring(lang))
+    end
+    local syn = EXTRACT[lang]
+
+    -- the donor is the FIRST ADMISSIBLE member, because the body text is its own
+    local donor_i = take[1]
+    local tmpl, twhy = clones.family_template(fam, store, { donor = donor_i })
+    if not tmpl then return nil, twhy end
+
+    local root = store.data.root
+    local lines = vim.split(txn.read_file(root, file) or '', '\n', { plain = true })
+
+    -- every member's body span, and the earliest signature line (the helper goes
+    -- above it so it is in scope at every call)
+    local spans, earliest = {}, nil
+    for _, i in ipairs(take) do
+        local m = fam.members[i]
+        local sig, open, close = body_span(store, m.id, m.lines or {})
+        if not sig then
+            return nil, ('%s is not a clean multi-line block'):format(m.name or '?')
+        end
+        spans[i] = { sig = sig, open = open, close = close }
+        if earliest == nil or sig < earliest then earliest = sig end
+    end
+    -- ⚠ OVERLAP IS FATAL, and with N members it is O(N^2) rather than one check.
+    -- A nested pair would have both ops rewriting the same lines.
+    for _, i in ipairs(take) do
+        for _, j in ipairs(take) do
+            if i ~= j and not (spans[i].close < spans[j].sig or spans[j].close < spans[i].sig) then
+                return nil, ('%s and %s overlap (nested?) — cannot extract')
+                    :format(fam.members[i].name or '?', fam.members[j].name or '?')
+            end
+        end
+    end
+
+    local hname = fresh_name(store, { file }, fam.members[donor_i].name)
+    local hparams = {}
+    for _, p in ipairs((v.members[donor_i] or {}).nparams and {} or {}) do hparams[#hparams + 1] = p end
+    do  -- the donor's own parameters, then one per hole
+        local un = require 'cartograph.untangle'
+        local dv = un.body_extractable(store, fam.members[donor_i].id)
+        for _, p in ipairs(dv.params or {}) do hparams[#hparams + 1] = p end
+        for _, h in ipairs(tmpl.order) do hparams[#hparams + 1] = tmpl.params[h] end
+    end
+
+    -- the helper body: the donor's own text with each hole occurrence replaced
+    local body = {}
+    for _, l in ipairs(vim.split(v.body, '\n', { plain = true })) do body[#body + 1] = l end
+    -- `family_helper_text` renders from the donor's FULL range (signature
+    -- included); the helper needs the BODY only, so drop the wrapper lines.
+    table.remove(body, 1)
+    table.remove(body)
+
+    local plan = {
+        verb = 'extract-family', generation = store.generation,
+        guards = { 'parses' },
+        helper = hname, nparams = #tmpl.order, xfile = false, lang = lang,
+        files = {}, hazards = {}, partial = #take < v.n or nil,
+        members = {}, left = {},
+    }
+    for _, rec in ipairs(v.refused) do
+        plan.left[#plan.left + 1] = { name = rec.name, file = rec.file,
+            line = rec.line, reason = rec.reason }
+    end
+
+    local ops = {}
+    local sig_indent = indent_of(lines[spans[donor_i].sig + 1])
+    ops[#ops + 1] = { from0b = earliest, to0b = earliest - 1,
+        new = syn.local_helper(hname, table.concat(hparams, ', '), body, sig_indent) }
+    for _, i in ipairs(take) do
+        local m = fam.members[i]
+        local un = require 'cartograph.untangle'
+        local mv = un.body_extractable(store, m.id)
+        local args = {}
+        for _, p in ipairs(mv.params or {}) do args[#args + 1] = p end
+        -- ★ EACH MEMBER PASSES ITS OWN FILLING, read from ITS OWN source at the
+        -- span the template recorded for it — never the donor's.
+        for _, h in ipairs(tmpl.order) do
+            local val = (fam.values[i] or {})[h]
+            local ext = clones.term_extent(val)
+            if not ext then
+                return nil, ('%s has no located value for %s'):format(m.name or '?', tmpl.params[h])
+            end
+            args[#args + 1] = span_text(lines, ext)
+        end
+        ops[#ops + 1] = { from0b = spans[i].open, to0b = spans[i].close,
+            new = { indent_of(lines[spans[i].open + 1])
+                .. syn.ret(hname, table.concat(args, ', ')) } }
+        plan.members[#plan.members + 1] = { id = m.id, name = m.name,
+            ref = store.ref_of(m.id), file = m.file }
+    end
+    plan.files[file] = { ops = ops }
+    plan.touched = { file }
+    -- ★ JOIN THE PLAN PROTOCOL — the one line every builder ends with. Without
+    -- it `dryrun` refuses with "this verb has not joined the plan protocol",
+    -- which is a correct refusal and an easy one to mistake for a bad plan.
+    return txn.protocol(plan, M.edits_for)
+end
+
 function M.edits_for(plan)
     return function (rel, before)
         if plan.create and rel == plan.create.file then

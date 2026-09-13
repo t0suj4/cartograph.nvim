@@ -382,3 +382,217 @@ test('extract-helper: a hole with no site on one side REFUSES, it does not raise
         'and names the reason: ' .. tostring(why))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── the FAMILY plan: one helper for N copies (CART-0888 / CART-0904) ─────────
+--
+-- Asking PAIRWISE over a component of N near-clones gives up to C(N,2)
+-- proposals which DISAGREE — 84% of wow's components — and the clique proxy
+-- agrees with the MDL partition on only 38%. The family is the unit a human
+-- would extract; the pair is a sample of it.
+
+local algx = require 'cartograph.algebra'
+local function need_algebra()
+    local okA, whyA = algx.available()
+    if not okA then skip('algebra unavailable: ' .. tostring(whyA)) end
+end
+
+--- three same-file copies differing at one literal each
+local function fam3_src()
+    local function body(n)
+        return ([[
+local function pick%s(node)
+  if not node then return nil end
+  local acc = 0
+  local seen = {}
+  if node.t == 'K%s' then return node end
+  for _, c in ipairs(node.kids) do
+    if c.t == 'K%s' then return c end
+  end
+  seen[acc] = true
+  return nil
+end
+]]):format(n, n, n)
+    end
+    return 'local M = {}\n\n' .. body(1) .. '\n' .. body(2) .. '\n' .. body(3) .. '\nreturn M\n'
+end
+
+local function family_of_fixture()
+    local clones = require 'cartograph.clones'
+    local r = clones.families(store, {})
+    if not r then return nil end
+    for _, f in ipairs(r.families) do
+        if #f.members >= 2 and f.holes > 0 then return f end
+    end
+end
+
+test('extract-family: one helper for N copies, each passing its own filling', function ()
+    if not ready('lua') then return skip 'no lua parser' end
+    need_algebra()
+    local root = proj { ['m.lua'] = fam3_src() }
+    local fam = family_of_fixture()
+    if not fam then skip 'fixture yielded no family' end
+
+    local plan, why = cx.plan_family(store, fam)
+    ok(plan, 'the family plans: ' .. tostring(why))
+    if plan then
+        ok(#plan.members >= 2, 'it rewrites every member: ' .. #plan.members)
+        eq(false, plan.xfile)
+        local _, after = cx.preview(store, plan)
+        local text = after[plan.touched[1]]
+
+        -- ★ ONE helper, defined once, with a parameter per hole
+        eq(1, select(2, text:gsub('function ' .. plan.helper .. '%(', '')))
+        -- ★ EVERY member delegates, each with ITS OWN literal
+        for _, k in ipairs { 'K1', 'K2', 'K3' } do
+            ok(text:find(("'%s'"):format(k), 1, true),
+                ('%s survives as an ARGUMENT at its own call site'):format(k))
+        end
+        -- ⚠ and the literals are GONE from the helper body — otherwise the
+        -- helper is one member's code wearing a parameter list
+        local hstart = text:find('function ' .. plan.helper, 1, true)
+        local hend = text:find('\nend', hstart, true)
+        local hbody = text:sub(hstart, hend)
+        for _, k in ipairs { 'K1', 'K2', 'K3' } do
+            ok(not hbody:find(k, 1, true),
+                ('%s is parameterized inside the helper, not baked in'):format(k))
+        end
+        -- and it parses
+        local pr = vim.treesitter.get_string_parser(text, 'lua'):parse()[1]:root()
+        ok(not pr:has_error(), 'the extracted result parses clean')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ⚠ CROSS-FILE IS REFUSED BY NAME IN v1. It needs a new module, N require
+--- lines, the free-read gate over N files, and a phase gate whose union GROWS
+--- with N. The pair verb already treats it as its own branch; half-doing it
+--- here would be worse than saying so.
+test('extract-family: a family spanning two files is refused by name', function ()
+    if not ready('lua') then return skip 'no lua parser' end
+    need_algebra()
+    local src = fam3_src()
+    local half = src:find('local function pick2')
+    local root = proj {
+        ['a.lua'] = src:sub(1, half - 1) .. 'return M\n',
+        ['b.lua'] = 'local M = {}\n\n' .. src:sub(half) }
+    local fam = family_of_fixture()
+    if not fam then skip 'fixture yielded no family' end
+    local files = {}
+    for _, m in ipairs(fam.members) do files[m.file] = true end
+    local n = 0; for _ in pairs(files) do n = n + 1 end
+    if n < 2 then skip 'fixture family did not span files' end
+
+    local plan, why = cx.plan_family(store, fam)
+    eq(nil, plan)
+    ok(tostring(why):find('more than one file'), 'named: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-family: refuses a family with nothing to share', function ()
+    if not ready('lua') then return skip 'no lua parser' end
+    need_algebra()
+    local a, w1 = cx.plan_family(store, { members = {} })
+    eq(nil, a); ok(tostring(w1):find('two or more'), tostring(w1))
+end)
+
+--- ⚠ PARTIAL IS A CALLER'S CHOICE, NOT A DEFAULT. Extraction is sound when
+--- incomplete — the helper exists, the admissible bodies delegate, a skipped
+--- member keeps its own body, nothing dangles — but silently rewriting a subset
+--- would hide that a member was left behind. Refuse and NAME them; extract only
+--- when asked. (`clonemerge` refuses whole for a different reason: a partial
+--- merge leaves dangling references. That argument does not transfer.)
+test('extract-family: an inadmissible member refuses, and opts.partial takes the rest', function ()
+    if not ready('lua') then return skip 'no lua parser' end
+    need_algebra()
+    local function body(n, indent)
+        local i = indent and '  ' or ''
+        return ([[
+%slocal function pick%s(node)
+%s  if not node then return nil end
+%s  local acc = 0
+%s  local seen = {}
+%s  if node.t == 'K%s' then return node end
+%s  for _, c in ipairs(node.kids) do
+%s    if c.t == 'K%s' then return c end
+%s  end
+%s  seen[acc] = true
+%s  return nil
+%send
+]]):format(i, n, i, i, i, i, n, i, i, n, i, i, i, i)
+    end
+    -- pick3 is NESTED inside `wrap`, so it is inadmissible; 1 and 2 are not
+    local root = proj { ['m.lua'] = 'local M = {}\n\n' .. body(1) .. '\n' .. body(2)
+        .. '\nlocal function wrap()\n' .. body(3, true) .. '  return pick3\nend\n\nreturn M\n' }
+    local fam = family_of_fixture()
+    if not fam then skip 'fixture yielded no family' end
+    local clones = require 'cartograph.clones'
+    local v = clones.family_admissibility(fam, store)
+    if not v or v.n_admissible == v.n or v.n_admissible < 2 then
+        skip 'fixture did not produce a mixed family'
+    end
+
+    -- without opts.partial: refuse, and NAME who is left out
+    local plan, why = cx.plan_family(store, fam)
+    eq(nil, plan)
+    ok(tostring(why):find('not extractable'), 'names the shortfall: ' .. tostring(why))
+    ok(tostring(why):find('partial'), 'and offers the opt-in: ' .. tostring(why))
+
+    -- with it: extract the admissible subset, and SAY who was left
+    local p2, w2 = cx.plan_family(store, fam, { partial = true })
+    ok(p2, 'partial extracts the rest: ' .. tostring(w2))
+    if p2 then
+        eq(true, p2.partial)
+        eq(v.n_admissible, #p2.members)
+        ok(#p2.left > 0, 'and the plan records who was left behind')
+        ok(p2.left[1].name and p2.left[1].reason, 'with a name and a reason')
+        local _, after = cx.preview(store, p2)
+        local pr = vim.treesitter.get_string_parser(after[p2.touched[1]], 'lua'):parse()[1]:root()
+        ok(not pr:has_error(), 'a PARTIAL extraction still parses clean')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ★★★ THE REPARSE ORACLE GATES THE PLAN, NOT JUST THE DISPLAY. A hole at
+--- STATEMENT position renders `if not f then p1 end` — which reads perfectly
+--- reasonable and is not valid Lua, because a bare expression is not a statement
+--- (CART-0894). The text renders fine and fails to READ BACK, so the oracle is
+--- the only thing between it and a write.
+---
+--- ⚠ STUBBED, and honestly so. Three synthetic fixtures failed to reproduce the
+--- shape: literals differing INSIDE a call are leaf holes; whole statements of
+--- different arity are refused earlier by the co-walk; and a hole on the CALLEE
+--- renders `p1(name)`, which is valid Lua and verifies. The real witness
+--- (bravest-new-world) has the hole covering a whole call WITH its arguments.
+--- Rather than contort a fixture until it happens to break, the gate is tested
+--- directly — with a CONTROL, so it cannot pass by the family being unplannable
+--- for some other reason.
+test('extract-family: a body that does not read back is refused, not written', function ()
+    if not ready('lua') then return skip 'no lua parser' end
+    need_algebra()
+    local root = proj { ['m.lua'] = fam3_src() }
+    local fam = family_of_fixture()
+    if not fam then skip 'fixture yielded no family' end
+
+    local clones = require 'cartograph.clones'
+    ok(cx.plan_family(store, fam), 'CONTROL: the family plans while it verifies')
+
+    local saved = clones.family_verify
+    clones.family_verify = function () return nil, 'the rendered helper did not reparse' end
+    local plan, why = cx.plan_family(store, fam)
+    clones.family_verify = saved
+
+    eq(nil, plan)
+    ok(tostring(why):find('does not verify'), 'the oracle refuses the plan: ' .. tostring(why))
+
+    -- and the OTHER outcome: "cannot be verified" is a different fact, and for a
+    -- WRITE it also refuses — the distinction lands in the message
+    clones.family_verify = function ()
+        return nil, 'not verifiable: the donor\'s own text does not reparse standalone',
+            { verifiable = false }
+    end
+    local p2, w2 = cx.plan_family(store, fam)
+    clones.family_verify = saved
+    eq(nil, p2)
+    ok(tostring(w2):find('cannot be VERIFIED'), 'named distinctly: ' .. tostring(w2))
+    vim.fn.delete(root, 'rf')
+end)
