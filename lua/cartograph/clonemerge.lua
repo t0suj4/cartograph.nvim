@@ -25,6 +25,56 @@ local read_file, disk_stamp = txn.read_file, txn.disk_stamp
 
 --- Witness twins of `id`: same kind, equal behavior witness, elsewhere
 --- in the graph. The clone detector's identity, reused as the merge's.
+--- ★★★ THE STATEMENT-KIND SEQUENCE — the distinction every identity here drops.
+---
+--- `row_key` is `lhs=rhs;C:cond` and `refs.witness` is df shape + params +
+--- callees. NEITHER encodes what KIND of statement a row is, so an `if` block
+--- and a `while` loop over the same body are twins on both, and this verb plans
+--- to DELETE one of them (CART-0892). Two independent derivations agreeing is
+--- not corroboration when both sit downstream of a row model that never carried
+--- the kind.
+---
+--- ⇒ The kind is not missing from the tree — it is on `fl.stmts[i].kind`, which
+---   ~10 modules already read. It is dropped where the clone ladder flattens
+---   statements into rows. So the fix is an INTERPRETATION at the consumer that
+---   acts, not a wider key: keying it would move every clone count and force a
+---   cache VERSION bump, and the census is a DISCOVERY mechanism that is
+---   supposed to over-approximate (CART-0740).
+---
+--- ⚠ AND THIS IS THE CONSUMER THAT ACTS. The standing law says a write
+--- authorised by a derived fact must RE-DERIVE it; re-deriving a blind witness
+--- re-derives the blindness, so the re-derivation has to see something the
+--- witness cannot.
+--- ★★★ THE MINIMUM-BODY FLOOR (CART-0895), and `clones.lua` already states the
+--- rule this verb was missing:
+---
+---     INDEX_FLOOR = 2   -- "a 0-1 stmt body can't be any tier's clone"
+---
+--- Every clone TIER floors trivial bodies. This verb did not, because it uses a
+--- DIFFERENT IDENTITY (`refs.witness` = df shape + params + callees) and never
+--- passes through the clone index. MEASURED on our own tree before the floor:
+--- 318 merge plans SUCCEEDED and 216 of them (68%) had a ONE-ROW survivor; the
+--- largest deleted 50 FUNCTIONS, among them `M.argv_of`, `M.argn` and `get` from
+--- three unrelated files. One-line functions collide on the witness because
+--- there is almost nothing in them to tell apart.
+---
+--- ⚠ THE KIND GATE BELOW DOES NOT CATCH THIS: a 1-row body has a 1-element kind
+--- sequence, so every one of those 216 passes it. Two different blind spots in
+--- one verb, and fixing either alone leaves the other.
+local BODY_FLOOR = 2
+
+--- the statement-KIND sequence of a function body — the distinction every
+--- identity in this file drops.
+local function kind_seq(store, id)
+    local eo = require('cartograph.expr').of(store, id)
+    if not eo or not eo.fl then return nil end
+    local out = {}
+    for _, s in ipairs(eo.fl.stmts or {}) do out[#out + 1] = tostring(s.kind or '?') end
+    -- the row COUNT rides with the sequence: it is its length, so the floor
+    -- costs no second parse
+    return table.concat(out, ','), #out
+end
+
 function M.twins(store, id)
     local refs = require 'cartograph.refs'
     local n = store.node(id)
@@ -38,14 +88,43 @@ function M.twins(store, id)
     end
     local w = refs.witness(n, callees(n))
     if not w then return {}, 'no data-flow witness (blocks/vars cannot merge)' end
+    -- ⚠ THE KIND CHECK RUNS *AFTER* THE WITNESS, and the order is the whole
+    -- cost story: `expr.of` is one whole-file reparse per call, while the
+    -- witness is a cheap comparison. Filtering first means the expensive call
+    -- runs only on the handful that already matched.
+    local ks, rejected, rows = nil, 0, nil
     local out = {}
     for _, x in ipairs(store.data.nodes) do
         if x.id ~= id and x.kind == n.kind and not x.db and not x.sql
             and refs.witness(x, callees(x)) == w then
-            out[#out + 1] = x
+            if ks == nil then
+                -- checked HERE rather than up front so a function with no
+                -- witness match never pays the parse
+                local k, r = kind_seq(store, id)
+                -- ⚠ UNREADABLE IS NOT "ZERO ROWS". Ordering the floor first
+                -- reported "a 0-row body is below the floor", which is a claim
+                -- about a body nobody read. Absence gets its own refusal.
+                if not k then
+                    return {}, 'the survivor body cannot be read, so its shape'
+                        .. ' cannot be compared — refused rather than merged on'
+                        .. ' the data-flow witness alone'
+                end
+                if r < BODY_FLOOR then
+                    return {}, ('a %d-row body is below the merge floor of %d rows'
+                        .. ' — too little structure for the data-flow witness to'
+                        .. ' tell it from an unrelated function'):format(r, BODY_FLOOR)
+                end
+                ks, rows = k, r
+            end
+            local xs = kind_seq(store, x.id)
+            -- ABSENCE IS NOT PERMISSION. A kind sequence we cannot compute is
+            -- not evidence the two agree, and this authorises a DELETION, so an
+            -- unreadable side refuses the twin rather than passing it through.
+            if ks and xs and xs == ks then out[#out + 1] = x
+            else rejected = rejected + 1 end
         end
     end
-    return out
+    return out, nil, rejected
 end
 
 --- Build the plan: survivor = the focused function, removed = its
@@ -53,8 +132,19 @@ end
 function M.plan(store, id)
     local survivor = store.node(id)
     if not survivor then return nil, 'no function under focus' end
-    local twins, why = M.twins(store, id)
+    local twins, why, rejected = M.twins(store, id)
     if #twins == 0 then
+        -- ⚠ NAME WHICH GATE REFUSED. "no twin" and "a twin the kind check threw
+        -- out" are different facts, and the second one is the interesting one:
+        -- it means the data-flow witness MATCHED and the statement kinds did
+        -- not, which is exactly the `if`-vs-`while` case (CART-0892). Reporting
+        -- both as "no twin" hides the only evidence that the witness is coarse.
+        if (rejected or 0) > 0 then
+            return nil, ('%d candidate(s) matched the data-flow witness of %s but'
+                .. ' differ in STATEMENT KINDS (an `if` and a `while` over the same'
+                .. ' body have the same witness) — refused rather than merged')
+                :format(rejected, survivor.name)
+        end
         return nil, why or ('no clones of %s found (witness has no twin)')
             :format(survivor.name)
     end
