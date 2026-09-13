@@ -844,3 +844,81 @@ test('hazards: running the fix VERBATIM discharges the hazard', function ()
     -- the surface is actually preserved, not merely un-warned
     ok(fixed.reexports and #fixed.reexports > 0, 'the re-export wiring is in the plan')
 end)
+
+-- ── holding TWO plans at once ──────────────────────────────────────────────
+--
+-- ★★★ STAGING IS ARMING, AND IT IS ONE SLOT BY DESIGN: `apply` confirms the plan
+-- against the LIVE move-set, which in the cockpit is the user's own selection.
+-- That guard is not weakened here. What was missing is that `arm = false` gave a
+-- plan that could be previewed and NEVER applied — so a composition could hold
+-- two plans only by giving up on applying either.
+
+test('arm: two UNARMED plans are held at once, and either can be armed', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'function M.f(x) return x + 1 end',
+        'function M.g(x) return x - 1 end',
+        'return M',
+    }, '\n') }
+    local f = node_by(st, 'M.f') or node_by(st, 'f')
+    local g = node_by(st, 'M.g') or node_by(st, 'g')
+
+    -- BOTH plans exist as values before either is applied
+    local pf = assert(moveapply.plan_moveset(st, { f.id }, 'sub/f.lua', { arm = false }))
+    local pg = assert(moveapply.plan_moveset(st, { g.id }, 'sub/g.lua', { arm = false }))
+    eq(0, #st.staged_ids(), 'planning unarmed touched no session state')
+
+    -- ⚠ AND AN UNARMED PLAN IS STILL REFUSED BY APPLY, which is the property that
+    -- made holding two useless before: the refusal names the staging, not the plan
+    local no, why = moveapply.apply(st, pf)
+    eq(nil, no)
+    ok(tostring(why):find('nothing is staged', 1, true), tostring(why))
+
+    ok(moveapply.arm(st, pf), 'arming the FIRST works')
+    eq(1, #st.staged_ids())
+    ok(moveapply.arm(st, pg), 'and so does arming the SECOND instead')
+    eq(1, #st.staged_ids(), 'arming replaces rather than accumulates')
+    -- the slot still holds exactly one plan's worth, which is the guard intact
+    eq(pg.moves[1].id, st.staged_ids()[1])
+end)
+
+test('arm: applying one plan makes the other stale, and arming SAYS SO', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'function M.f(x) return x + 1 end',
+        'function M.g(x) return x - 1 end',
+        'return M',
+    }, '\n') }
+    local f = node_by(st, 'M.f') or node_by(st, 'f')
+    local g = node_by(st, 'M.g') or node_by(st, 'g')
+    local pf = assert(moveapply.plan_moveset(st, { f.id }, 'sub/f.lua', { arm = false }))
+    local pg = assert(moveapply.plan_moveset(st, { g.id }, 'sub/g.lua', { arm = false }))
+    eq(st.generation, pg.generation, 'both plans were built on this generation')
+
+    assert(moveapply.arm(st, pf))
+    ok(moveapply.apply(st, pf), 'the first plan applies')
+
+    -- ★★★ AND THE SECOND IS NOW STALE, WHICH IS A FACT ABOUT THE WORLD, NOT A
+    -- LIMITATION OF HOLDING TWO. Applying BUMPS THE GRAPH GENERATION, so every id
+    -- in the held plan may name a different symbol — measured here, `M.g`'s node
+    -- no longer resolves at all.
+    -- ⚠ I EXPECTED THE STAMP TO CATCH THIS AT THE WRITE AND IT DOES NOT GET THAT
+    -- FAR: arming refuses first, by generation, which is the better place — a
+    -- refusal that names "re-plan" beats one that names a drifted file.
+    ok(st.generation ~= pg.generation, 'applying moved the generation')
+    eq(nil, st.node(pg.moves[1].id), 'and the held plan\'s node is gone')
+    local no, why = moveapply.arm(st, pg)
+    eq(nil, no)
+    ok(tostring(why):find('generation', 1, true),
+        'arming names the generation rather than arming a dead plan: ' .. tostring(why))
+
+    -- ⇒ SO "HOLD TWO PLANS" MEANS: hold them, apply one, RE-DERIVE the other.
+    -- The re-plan is cheap and the refusal above is what tells you to do it.
+    local g2 = node_by(st, 'M.g') or node_by(st, 'g')
+    ok(g2 ~= nil, 'the symbol is still in the tree, under a new id')
+    local pg2 = assert(moveapply.plan_moveset(st, { g2.id }, 'sub/g.lua', { arm = false }))
+    ok(moveapply.arm(st, pg2), 'and the re-derived plan arms')
+    ok(moveapply.apply(st, pg2), 'and applies')
+end)

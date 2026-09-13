@@ -773,6 +773,53 @@ local function stage_mismatch(store, ids, plan)
         :format(#ids, #plan.moves, detail)
 end
 
+--- ARM a plan that was planned UNARMED, so a caller can HOLD SEVERAL and choose
+--- which to apply (CART-0920).
+---
+--- ★★★ STAGING IS ARMING, AND IT IS A SINGLE SLOT BY DESIGN. `plan_moveset`
+--- stages as it plans, so planning a SECOND move-set makes the first unapplyable
+--- — correctly: `apply`'s last rung confirms the plan against the LIVE move-set,
+--- which in the cockpit is the user's own selection, and a plan that no longer
+--- matches it is a plan the user did not ask for. That guard is not weakened
+--- here. What was missing is that `arm = false` produced a plan which could be
+--- previewed and NEVER applied, so a composition could hold two plans only by
+--- giving up on applying either.
+---
+--- ⚠ ARMING IS NOT A PROMISE THAT THE PLAN IS STILL GOOD, and it must not be read
+--- as one. It re-stages exactly this plan's moves and checks the two things it
+--- can check cheaply — the graph generation, and that every moved node still
+--- resolves. The guarantee that the FILES have not moved underneath lives where
+--- it always did, in `plan.stamps`, and `execute` refuses on drift. So holding a
+--- second plan across an apply is allowed and its staleness is CAUGHT AT THE
+--- WRITE, by the stamp, not hidden by arming succeeding.
+--- @return boolean|nil ok, string|nil why
+function M.arm(store, plan)
+    if type(plan) ~= 'table' or type(plan.moves) ~= 'table' then
+        return nil, 'not a move-set plan'
+    end
+    local gen = store.generation or 0
+    if plan.generation and plan.generation ~= gen then
+        return nil, ('this plan was built against graph generation %s and the'
+            .. ' store is on %s — every id in it may name a different symbol;'
+            .. ' re-plan'):format(tostring(plan.generation), tostring(gen))
+    end
+    -- ★ A VANISHED NODE IS A DIFFERENT REFUSAL FROM A BUMPED GENERATION, because
+    -- only one of them says WHICH symbol went. A generation can hold while an
+    -- individual id dies (a partial re-ingest), so both are checked.
+    local gone = {}
+    for _, m in ipairs(plan.moves) do
+        if not store.node(m.id) then gone[#gone + 1] = m.name or tostring(m.id) end
+    end
+    if #gone > 0 then
+        return nil, ('%d symbol(s) in this plan are no longer in the graph (%s)'
+            .. ' — re-plan'):format(#gone, some(gone))
+    end
+    store.clear_stage()
+    for _, m in ipairs(plan.moves) do store.stage(m.id) end
+    store.set_dest(plan.dest)
+    return true
+end
+
 --- Apply: the shared ladder plus one verb-specific rung — the LIVE
 --- move-set must still be exactly the plan's moves. On success the
 --- move-set is consumed (cleared before the splice, which a staged
