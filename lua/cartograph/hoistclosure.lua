@@ -85,7 +85,14 @@ function M.plan(store, closure_id)
     end
     for r in pairs(self.reads) do
         if r ~= short and encl_locals[r] then
-            return nil, ('captures enclosing local `%s` — parameterize it first (extract-helper)'):format(r)
+            -- ⚠ THE NAME RIDES AS STRUCTURE, NOT ONLY IN THE MESSAGE. A caller
+            -- that needs to know WHICH local is captured — `clones`, deciding
+            -- whether a family's members all capture the same one — would
+            -- otherwise have to parse a string we formatted, which is the
+            -- pattern CART-0746 cost a day to. Extra returns are ignored by
+            -- every existing caller.
+            return nil, ('captures enclosing local `%s` — parameterize it first (extract-helper)'):format(r),
+                { captures = r }
         end
     end
 

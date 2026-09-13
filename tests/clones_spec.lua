@@ -2912,3 +2912,148 @@ test('family_adopt: payload shapes, and a refusal for anything else', function (
     local c, w3 = clones.family_adopt({ template = false }, f.members[1])
     eq(nil, c); ok(tostring(w3):find('not a family'), tostring(w3))
 end)
+
+-- ── the per-member verdict ──────────────────────────────────────────────────
+--
+-- USER: "refuse-whole is too coarse when interactive." The N-way prereqs are
+-- the pair verb's applied to every member, and one failure sank the family.
+-- MEASURED before building this: of the 22 families a refuse-whole plan rejects
+-- on wow, 7 are "all but 1" — the biggest losing 25 of 26 extractions to one
+-- member. This verb does not decide; it reports and lets the caller choose.
+
+test('family_admissibility: a clean family is fully admissible, with a param count', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local v, why = clones.family_admissibility(f, store)
+    ok(v ~= nil, 'the verdict computes: ' .. tostring(why))
+    eq(3, v.n)
+    eq(3, v.n_admissible)
+    eq(0, #v.refused)
+    ok(v.params ~= nil, 'and the family has an agreed parameter count')
+    ok(v.body ~= nil, 'the helper body renders')
+    eq(false, v.xfile)
+end)
+
+--- ★★★ THE REFUSAL IS PER MEMBER, WITH ITS REASON AND — when it is a capture —
+--- THE NAME. A name every member captures is a PARAMETER, not a blocker
+--- (CART-0904), and reporting only `nested` hides exactly that.
+test('family_admissibility: a nested member is refused BY NAME and names what it captures', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    proj { ['cb.lua'] = [[
+local M = {}
+local function outer(live)
+    local function cb1(t)
+        local acc = 0
+        local seen = {}
+        for i = 1, #t do acc = acc + t[i] * 1 end
+        local s = tostring(acc)
+        seen[s] = live
+        local pad = string.rep("-", #s)
+        return pad .. s
+    end
+    local function cb2(t)
+        local acc = 0
+        local seen = {}
+        for i = 1, #t do acc = acc + t[i] * 2 end
+        local s = tostring(acc)
+        seen[s] = live
+        local pad = string.rep("-", #s)
+        return pad .. s
+    end
+    return cb1, cb2
+end
+M.outer = outer
+return M
+]] }
+    local r = clones.families(store, {})
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f
+    for _, x in ipairs(r.families) do if #x.members >= 2 and x.holes > 0 then f = x end end
+    if not f then skip 'no multi-member family with holes' end
+
+    local v = clones.family_admissibility(f, store)
+    ok(v ~= nil, 'the verdict computes')
+    ok(#v.refused > 0, 'the nested members are refused')
+    for _, m in ipairs(v.refused) do
+        ok(m.name and m.file, 'a refusal carries where it is')
+        -- ⚠ A SPECIFIC reason. `ok(m.reason)` passes for the string "refused",
+        -- and the mutation that replaced every reason with it survived.
+        ok(tostring(m.reason):find('nested') or tostring(m.reason):find('parameter')
+            or tostring(m.reason):find('vararg') or tostring(m.reason):find('recurs'),
+            'and a reason that says WHICH gate: ' .. tostring(m.reason))
+        if m.nested then
+            ok(m.captures, 'a nested member names WHAT it captures: ' .. tostring(m.captures))
+        end
+    end
+    -- ⚠ THE BODY GATE IS REPORTED SEPARATELY, and asserting "body or body_why"
+    -- passes for a hardcoded body — that mutation survived. Inject a `row~` so
+    -- the body genuinely cannot render, and require the REASON to come back.
+    ok(v.body ~= nil, 'the body renders for this family')
+    local kids = f.template.body.kids
+    kids[#kids + 1] = { k = 'row~' }
+    local v2 = clones.family_admissibility(f, store)
+    kids[#kids] = nil
+    ok(v2 ~= nil, 'the verdict still computes when the body cannot render')
+    eq(nil, v2.body)
+    ok(tostring(v2.body_why):find('row~'),
+        'and the family-level gate says why: ' .. tostring(v2.body_why))
+end)
+
+--- ⚠ THE PARAMETER COUNT IS A MAJORITY, NOT MEMBER 1's. The pair verb compares
+--- two and refuses on disagreement; with N there is a MODE, and taking the first
+--- member's count makes the verdict depend on an ordering nobody chose.
+--- ⚠ THE FIXTURE MUST PUT THE ODD MEMBER FIRST, or the test cannot tell a
+--- majority from member 1's count. The first cut re-derived the majority from
+--- the same data and asserted they matched — circular, and the mutation "take
+--- member 1's count" survived it.
+test('family_admissibility: the odd-arity member is refused, not the majority', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local function body(n, extra)
+        return ([[
+function M.a%s(t%s)
+    local acc = 0
+    local seen = {}
+    for i = 1, #t do acc = acc + t[i] * %s end
+    local s = tostring(acc)
+    local u = string.upper(s)
+    seen[u] = true
+    local pad = string.rep("-", #u)
+    return pad .. u
+end
+]]):format(n, extra, n)
+    end
+    -- member 1 takes TWO parameters; members 2 and 3 take one. The majority is 1.
+    proj { ['arity.lua'] = 'local M = {}\n'
+        .. body(1, ', extra') .. body(2, '') .. body(3, '') .. 'return M\n' }
+    local r = clones.families(store, {})
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f
+    for _, x in ipairs(r.families) do if #x.members >= 3 and x.holes > 0 then f = x end end
+    if not f then skip 'no 3-member family with holes' end
+
+    local v = clones.family_admissibility(f, store)
+    ok(v ~= nil, 'the verdict computes')
+    eq(1, v.params)
+    ok(#v.refused >= 1, 'the odd-arity member is refused')
+    local found
+    for _, m in ipairs(v.refused) do
+        if tostring(m.reason):find('parameter') then found = m end
+    end
+    ok(found ~= nil, 'and refused FOR its arity, naming both counts: '
+        .. tostring(found and found.reason))
+    ok(tostring(found.reason):find('2') and tostring(found.reason):find('1'),
+        'the message carries the member count and the family count: ' .. tostring(found.reason))
+end)
+
+test('family_admissibility: family-level refusals come back as a reason, not a verdict', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f then skip 'no family' end
+    local a, w1 = clones.family_admissibility({ members = { f.members[1] } }, store)
+    eq(nil, a); ok(tostring(w1):find('one%-member'), tostring(w1))
+    local b, w2 = clones.family_admissibility({ nope = true }, store)
+    eq(nil, b); ok(tostring(w2):find('not a family'), tostring(w2))
+end)

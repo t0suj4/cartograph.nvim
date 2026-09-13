@@ -4078,4 +4078,107 @@ function M.family_adopt(fam, payload, opts)
     }
 end
 
+-- ── THE PER-MEMBER VERDICT: who in this family can be extracted, and why not ──
+--
+-- ★★★ REFUSE-WHOLE IS TOO COARSE WHEN A HUMAN IS CHOOSING (user, 2026-09-13).
+-- The N-way prereqs are the pair verb's, applied to every member, and one
+-- failure currently sinks the family. MEASURED before building this — families
+-- that a refuse-whole plan would reject:
+--
+--     self  3   factorio  2   wow  22
+--     of wow's 22:  7 are "all but 1"   15 are systematic (<2 admissible)
+--     biggest single loss: 0 of 25 members (AceConfigDialog:SelectGroup)
+--
+-- So a third of rejections lose almost a whole family to one member.
+--
+-- ⚠ AND THE MERGE PRECEDENT DOES NOT TRANSFER, which is why partial is even on
+-- the table. `clonemerge` refuses whole because "a partial merge rewrites the
+-- callers of a twin that still exists" — skipping a member there leaves
+-- DANGLING REFERENCES. Extraction has no such failure: the helper exists, the
+-- admissible bodies delegate to it, and a skipped member keeps its own body.
+-- Nothing dangles, it parses, behaviour is identical. INCOMPLETE IS NOT UNSOUND.
+--
+-- ⇒ So this verb does not decide. It reports the verdict PER MEMBER and lets
+--   the caller choose whole or partial — an interactive surface can say "25 of
+--   26; member 14 is nested and captures `opts`" where a plan could only say no.
+--
+-- ⚠ COST: one `expr.of` per member (a whole-file reparse each). This is a
+-- FOCUSED query about ONE family, not a corpus sweep; `families` over wow is
+-- 298 families and this would reparse thousands of files.
+
+--- Per-member extraction admissibility for one family.
+---@param fam table a family from `M.families` / `M.family_of`
+---@param store table
+---@return table|nil verdict {members, admissible, refused, params, files, xfile, body}
+---@return string|nil why  a FAMILY-level refusal (nothing per-member to report)
+function M.family_admissibility(fam, store, opts)
+    opts = opts or {}
+    if type(fam) ~= 'table' or type(fam.members) ~= 'table' then
+        return nil, 'not a family'
+    end
+    if #fam.members < 2 then
+        return nil, 'a one-member family has nothing to share'
+    end
+
+    local un = require 'cartograph.untangle'
+    local hc = require 'cartograph.hoistclosure'
+
+    -- ★ THE FAMILY-LEVEL GATE FIRST, because it is not a member's fault. If the
+    -- template cannot render a helper body at all there is no extraction to be
+    -- partial ABOUT, and reporting per-member verdicts would imply otherwise.
+    local body, bwhy = M.family_helper_text(fam, store)
+
+    local out, files, nfiles = {}, {}, 0
+    local counts = {}
+    for i, m in ipairs(fam.members) do
+        local v = un.body_extractable(store, m.id)
+        local rec = {
+            i = i, id = m.id, name = m.name, file = m.file,
+            line = (m.lines or {})[1],
+            ok = v.ok and true or false,
+            reason = v.ok and nil or v.reason,
+            nested = v.nested and true or false,
+            nparams = v.ok and #(v.params or {}) or nil,
+        }
+        -- ★ WHAT IS CAPTURED, not merely THAT it captures (CART-0904). A name
+        -- every member captures is a PARAMETER, indistinguishable in kind from a
+        -- hole — the family already agrees on it. Reporting the name is what
+        -- lets a caller see that; reporting only `nested` hides it.
+        if v.nested then
+            local _, _, detail = hc.plan(store, m.id)
+            rec.captures = detail and detail.captures or nil
+        end
+        if rec.ok then counts[rec.nparams] = (counts[rec.nparams] or 0) + 1 end
+        if not files[m.file] then files[m.file] = true; nfiles = nfiles + 1 end
+        out[i] = rec
+    end
+
+    -- ⚠ THE PARAMETER COUNT IS A MAJORITY, NOT THE FIRST MEMBER'S. The pair verb
+    -- compares two and either agrees or refuses; with N there is a MODE, and
+    -- picking member 1's count would make the verdict depend on an ordering
+    -- nobody chose.
+    local majority, best = nil, -1
+    for k, n in pairs(counts) do
+        if n > best or (n == best and majority and k < majority) then majority, best = k, n end
+    end
+    local admissible, refused = {}, {}
+    for _, rec in ipairs(out) do
+        if rec.ok and majority and rec.nparams ~= majority then
+            rec.ok = false
+            rec.reason = ('takes %d parameter(s) where the family takes %d')
+                :format(rec.nparams, majority)
+        end
+        if rec.ok then admissible[#admissible + 1] = rec.i
+        else refused[#refused + 1] = rec end
+    end
+
+    return {
+        members = out, admissible = admissible, refused = refused,
+        params = majority, files = nfiles, xfile = nfiles > 1,
+        body = body, body_why = body and nil or bwhy,
+        -- the two numbers a caller decides on
+        n = #fam.members, n_admissible = #admissible,
+    }
+end
+
 return M
