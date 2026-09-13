@@ -482,6 +482,50 @@ inserted statement, a local where the other has a field access — the pair is
 flagged *structural* and left to a human, because a value parameter can't
 capture it.
 
+Both of those answer a question about a **pair**, and a pair is an artifact of
+how the index finds clones rather than the unit anyone refactors. Vendored code
+arrives in families — one `BuildSubGroups` from AceConfigDialog-3.0 sits in 21
+different addons — and asking pairwise produces up to one proposal per pair,
+which on 84% of the components measured disagree with each other about how many
+parameters the helper needs. `:CartographExtractFamily` answers for the whole
+family instead: it grows the focused function's component, partitions it by
+**description length**, and proposes one helper whose parameters come from the
+family's shared template, each carrying a call site per member on that member's
+own source span.
+
+The split is decided by description length rather than by the shape of the
+clone graph, and that distinction is not academic. The cheap test — is this
+component a clique — agrees with the principled answer on only 38% of the
+components measured, and it errs by *splitting* families that are genuinely one:
+a chain `a~b, b~c` with no `a~c` edge usually means the index refused the third
+pair at its distance cutoff, not that there are two families. Because the cheap
+answer yields *more* families, it reads as a finer result rather than a wrong
+one, so the command refuses when the template algebra is unavailable instead of
+falling back to it — `:checkhealth cartograph` says whether it is present.
+
+The proposal also shows **the helper body itself**, and it is worth saying how,
+because the obvious way is wrong. It is not the template printed back out: the
+analysis erases which local a name refers to and carries no statement kind, so a
+term cannot say which variable to write or whether to write `if` or `while`.
+Printing one would have to invent both. Instead the text is **the donor's own
+source**, with every occurrence of every hole replaced by its parameter — the
+term says only *where to cut*. Surface outside the holes therefore comes along
+for free, because the donor is the surrounding style.
+
+*Every* occurrence: a hole is not a position, and a template may mention one
+hole several times. On this repo 32% of holes occur more than once, up to four
+times — so substituting only the recorded one leaves the donor's literal
+standing everywhere else and yields a helper that is correct for the donor and
+wrong for every other caller. The rendered text is **display only**: it is not
+reparsed, and the signature shown is still the donor's.
+
+A parameter shown as a local names what stands at that site in each copy; it is
+not a claim that the copies read the same variable, because the analysis erases
+which local is which on the way in. A family with no varying part is reported as
+having nothing to parameterize under this analysis, and is routed to
+`:CartographMerge` — which does its own equivalence check — rather than being
+certified equal here.
+
 One shape of *structural* is not a restructure at all, and the report calls it
 out: when an otherwise identical statement has a **literal on one side and a
 read on the other**, the copies may not have been parameterized — one of them
