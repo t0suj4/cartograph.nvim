@@ -3530,7 +3530,7 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
     for _, h in ipairs(plan.hazards) do
         if h:match('call site') and h:match('a.lua') then disclosed = true end
     end
-    ok(disclosed, table.concat(plan.hazards, ' | '))
+    ok(disclosed, require('cartograph.hazard').text(plan.hazards))
 
     -- verb rung: the move-set changed after planning -> refuse
     store.set_txn(plan)
@@ -3747,7 +3747,7 @@ test('adhesion declines file headers: the license stays', function ()
     for _, h in ipairs(plan.hazards) do
         if h:match('file header') then hz = true end
     end
-    ok(hz, table.concat(plan.hazards, ' | '))
+    ok(hz, require('cartograph.hazard').text(plan.hazards))
     store.clear_stage()
     vim.fn.delete(root, 'rf')
 end)

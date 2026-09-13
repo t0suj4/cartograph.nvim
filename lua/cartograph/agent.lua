@@ -1836,11 +1836,22 @@ local function ledger_notes(plan)
                 or ('%d site(s) were considered and DECLINED, each carrying the premise that stopped it'):format(#dec)),
         evidence = { declined = dec or {} } }
     if plan.hazards then
+        -- ★★★ THE FIXES RIDE WITH THE HAZARDS (CART-0920). A hazard used to be a
+        -- sentence addressed to a human, so a caller could not ask WHICH
+        -- INVOCATION DISCHARGES IT. Those that know their remedy now carry a
+        -- {verb, args}, and this is where an agent finds them — a hazard list
+        -- without them is a list of problems, with them it is a list of moves.
+        -- ⚠ A PROPOSAL, NEVER AN ACTION: nothing runs a fix, because the operator
+        -- may legitimately decide the hazard is the outcome they wanted.
+        local hz = require 'cartograph.hazard'
+        local fixes = hz.fixes(plan)
         out[#out + 1] = { kind = 'hazards', premise = 'disclosed-not-rewritten',
             why = #plan.hazards == 0
                 and 'no hazard: the plan rewrites everything it found'
-                or ('%d hazard(s) — what this plan does NOT rewrite and a human must handle'):format(#plan.hazards),
-            evidence = { hazards = plan.hazards } }
+                or ('%d hazard(s) — what this plan does NOT rewrite and a human must handle%s'):format(
+                    #plan.hazards,
+                    #fixes > 0 and ('; %d of them name a verb that would discharge them'):format(#fixes) or ''),
+            evidence = { hazards = plan.hazards, fixes = #fixes > 0 and fixes or nil } }
     end
     return out
 end

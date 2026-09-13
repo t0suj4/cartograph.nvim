@@ -199,7 +199,7 @@ test('moveapply: a member left BEHIND stays disclosed (the scaffold is not a lie
     local text = dest_text(st, plan)
     ok(select(1, pcall(load(text, 'd'))), 'and it does load')
     local h = haz(plan, 'M%.stays')
-    ok(h, 'the residual member is named: ' .. table.concat(plan.hazards, ' | '))
+    ok(h, 'the residual member is named: ' .. require('cartograph.hazard').text(plan.hazards))
     ok(h and h:find('created FRESH'), 'and it says WHY the reference is now dead')
 end)
 
@@ -679,6 +679,16 @@ test('moveapply: a file-local whose calls do not resolve is still disclosed', fu
     ok(said:find('UNKNOWN', 1, true),
         'and says the sharing is UNKNOWN rather than asserting private: ' .. said)
     ok(not noise, 'a file-local the moved text does not name is NOT reported')
+
+    -- ★★★ AND IT ARRIVES AS A ROW, NOT AS PROSE (CART-0920). `impact` has always
+    -- emitted `{ level, kind, msg }`; `moveapply` used to concatenate that into
+    -- `kind .. ': ' .. msg` at the boundary, so downstream had to RE-PARSE what
+    -- was already known. Asserting the string alone let a mutation that flattens
+    -- it back pass the whole suite.
+    local hz = require 'cartograph.hazard'
+    local kinds = {}
+    for _, h in ipairs(plan.hazards or {}) do kinds[hz.row(h).kind] = true end
+    ok(kinds['capture'], 'the capture hazard keeps its KIND across the boundary')
 end)
 
 --- ★★★ AND `private` IS NOT A MESSAGE — IT IS THE CLOSURE'S ELIGIBILITY TEST.
@@ -763,4 +773,74 @@ test('moveapply: the PLAN field set is pinned to its schema version', function (
     -- a hole someone can hide a field in
     local rx = assert(moveapply.plan_extract_ids(st, { n.id }, 'sub/u.lua', { reexport = true }))
     ok(rx.reexports ~= nil, 'reexport=true produces the v2 field it names')
+end)
+
+-- ── a hazard says how to discharge itself ──────────────────────────────────
+--
+-- ★★★ THE ROW WAS ALREADY THERE AND `moveapply` DESTROYED IT. `impact` emits
+-- `{ level, kind, msg }`; the boundary did `h.kind .. ': ' .. h.msg` and handed
+-- on prose, so downstream had to RE-PARSE what was already known —
+-- `module_scaffold` greps its own hazards for `^capture: <name>` — and nothing
+-- could ask a hazard how to discharge it. Measured over three sections of the
+-- algebra split: 13, 22 and 15 hazards, every one resolved by reading prose.
+
+test('hazards: the surface hazard carries the VERB that discharges it', function ()
+    if not ready() then skip('no lua parser') end
+    local hz = require 'cartograph.hazard'
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'function M.f(x) return x + 1 end',
+        'function M.g(x) return x - 1 end',
+        'return M',
+    }, '\n') }
+    local n = node_by(st, 'M.f') or node_by(st, 'f')
+    local plan = assert(moveapply.plan_extract_ids(st, { n.id }, 'sub/u.lua'))
+
+    local row
+    for _, h in ipairs(plan.hazards) do
+        if hz.row(h).kind == 'surface' then row = hz.row(h) end
+    end
+    ok(row, 'the surface hazard is a row with a kind: ' .. hz.text(plan.hazards))
+    -- it still reads as its own sentence, which is what every existing consumer does
+    ok(row:find('no longer holds them', 1, true), 'and quacks like its string')
+    ok(('%s'):format(row):find('M.{f}', 1, true), 'through __tostring too')
+    -- and it carries the machine-readable specifics that were buried in prose
+    eq('m.lua', row.evidence.file)
+    eq({ 'f' }, row.evidence.names)
+
+    -- ★ THE HANDLE
+    local fixes = hz.fixes(plan)
+    eq(1, #fixes)
+    eq('txn_plan_moveset', fixes[1].verb)
+    eq(true, fixes[1].args.reexport)
+    eq('sub/u.lua', fixes[1].args.dest)
+end)
+
+test('hazards: running the fix VERBATIM discharges the hazard', function ()
+    if not ready() then skip('no lua parser') end
+    local hz = require 'cartograph.hazard'
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'function M.f(x) return x + 1 end',
+        'function M.g(x) return x - 1 end',
+        'return M',
+    }, '\n') }
+    local n = node_by(st, 'M.f') or node_by(st, 'f')
+    local plan = assert(moveapply.plan_extract_ids(st, { n.id }, 'sub/u.lua'))
+    local fix = hz.fixes(plan)[1]
+    ok(fix, 'a fix was proposed')
+
+    -- ⚠ THE ARGS ARE USED AS GIVEN. A handle whose arguments have to be adjusted
+    -- by the caller is prose with extra steps.
+    local fixed = assert(moveapply.plan_extract_ids(st, { n.id }, fix.args.dest,
+        { reexport = fix.args.reexport }))
+    local still
+    for _, h in ipairs(fixed.hazards) do
+        local r = hz.row(h)
+        if r.kind == 'surface' and r.fix then still = r end
+    end
+    eq(nil, still, 'the hazard no longer proposes a fix — it is discharged')
+    eq(0, #hz.fixes(fixed), 'and the plan has no outstanding fixes')
+    -- the surface is actually preserved, not merely un-warned
+    ok(fixed.reexports and #fixed.reexports > 0, 'the re-export wiring is in the plan')
 end)

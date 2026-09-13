@@ -224,7 +224,7 @@ local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts)
         -- fact about the edit; "and N of them have no call site, so no rewrite
         -- and no test can detect it" is a fact about the EVIDENCE, and it is the
         -- one that decides whether a reader should look.
-        plan.hazards[#plan.hazards + 1] = ('%s.{%s} leave %s — its module table no'
+        local reason = ('%s.{%s} leave %s — its module table no'
             .. ' longer holds them%s%s'):format(e.table,
             table.concat(e.names, ', '), rel,
             #e.blind > 0 and ((', and %d have NO call site outside the move-set'
@@ -232,6 +232,21 @@ local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts)
                 :format(#e.blind, table.concat(e.blind, ', '))) or '',
             (opts and opts.reexport) and ('; ' .. rel .. ' re-exports them from ' .. dest)
             or ' — pass reexport=true to keep the surface')
+        -- ★★★ THE FLAGSHIP HANDLE: this hazard's remedy IS a verb invocation, and
+        -- until now it was spelled out in English at the end of a sentence. A
+        -- caller can run the `fix` verbatim; nothing here runs it, because the
+        -- operator may legitimately decide the surface change is what they want.
+        local fix
+        if not (opts and opts.reexport) then
+            fix = { verb = 'txn_plan_moveset',
+                args = { dest = dest, reexport = true },
+                why = ('re-plan with reexport=true: %s keeps %s.{%s} by wiring'
+                    .. ' them to %s'):format(rel, e.table,
+                    table.concat(e.names, ', '), dest) }
+        end
+        plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new(
+            'surface', reason, fix,
+            { file = rel, table = e.table, names = e.names, blind = e.blind })
         if opts and opts.reexport then
             local ls = file_lines(rel) or {}
             local line, alias = ts.import_line(rel, dest,
@@ -381,10 +396,21 @@ local function collect(store, ids, dest, plan, opts)
     -- written together or not at all. Bare names, exotic forms and
     -- shadowed aliases stay hazards; the moved code's own body is never
     -- rewritten (dest_requires stays spoken).
+    local hz = require 'cartograph.hazard'
     local imp = require('cartograph.impact').compute(store, ids, dest)
+    -- ★★★ THE ROW WAS ALREADY THERE AND THIS LINE DESTROYED IT (CART-0920).
+    -- `impact` emits `{ level, kind, msg }` — a kind a caller could filter on and
+    -- a level a caller could rank by — and the old spelling was
+    --     plan.hazards[#plan.hazards + 1] = h.kind .. ': ' .. h.msg
+    -- which concatenated the structure into prose at the module boundary. The
+    -- string had to be RE-PARSED downstream to recover what was already known
+    -- (`module_scaffold` greps its own hazards for `^capture: <name>`), and
+    -- nothing could ask a hazard how to discharge it.
     for _, h in ipairs(imp.hazards) do
         if h.kind ~= 'noop' then
-            plan.hazards[#plan.hazards + 1] = h.kind .. ': ' .. h.msg
+            plan.hazards[#plan.hazards + 1] = hz.new(h.kind,
+                h.kind .. ': ' .. h.msg, nil,
+                { level = h.level, capture = h.capture })
         end
     end
     plan.rewrites, plan.imports_add = {}, {}
