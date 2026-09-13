@@ -1394,6 +1394,27 @@ function M.analyze_pair(pair)
                 -- must not be quoted as "32% reliable" as though that were one
                 -- number. What IS stable: the rung is where the over-reports
                 -- concentrate, and `selector` is exact on both.
+                --
+                -- ★★★ AND THE CHEAP TEST LEAVES NOTHING ON THE TABLE, which is why
+                -- this rung uses it. The algebra's OWN instrument was run on the two
+                -- diverging nodes -- `vertical` at NODE scale rather than function
+                -- scale -- and scored beside this subterm test:
+                --      node-scale vertical vs the function-scale oracle  85/90  94.4%
+                --      as a narrowing, on wow:  both  280 agree / 7 over / 1 under
+                -- IDENTICAL AT SCALE. On 288 pairs a canonical-key subterm test is
+                -- indistinguishable from running the alignment algebra locally; the
+                -- single lua pair that separated them was noise.
+                --
+                -- ★★ THE FINDING WORTH CARRYING: the node-scale answer reproduces the
+                -- function-scale one 94% of the time. DECIDING whether a wrapper
+                -- exists is affordable; only DESCRIBING it needs the function-wide
+                -- alignment (0.2-12 s/pair, half of wow outside the guard).
+                --
+                -- ⇒ NEITHER CANDIDATE SHIPS AS A NARROWING: both still cost an
+                --   under-report, so the residual is not a missing instrument. It is a
+                --   boundary where node-scale evidence and function-scale alignment
+                --   legitimately disagree -- which is what an evidence rung is for and
+                --   a verdict change is not.
             else evidence = 'shape' end
         end
     end
