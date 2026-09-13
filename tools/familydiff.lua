@@ -49,13 +49,7 @@ store.ingest(ts.extract(root, c and c.packs and { packs = c.packs } or nil))
 local MAX_DIST, MIN_ROWS, MIN_SHARED = 2, 6, 2   -- clones.near's own defaults
 local pairs_ = clones.near(store, {})
 
-local function fn_term(f)
-    local rows = {}
-    for i = 1, #(f.exprs or {}) do
-        rows[i] = alg.row_term(f.exprs[i], f.locals) or A.node('row~')
-    end
-    return A.seq(rows)
-end
+local fn_term = alg.fn_term
 -- ⚠ `A.generalize` RETURNS A RESULT RECORD, NOT A TEMPLATE. Its own internal
 -- recursive call reads `base.template`, and the driver reads `g.template.holes`.
 -- Counting holes on the record itself yields 0 for EVERY input, because the
@@ -140,11 +134,24 @@ for _, ids in pairs(members) do
                 bump('family generalize FAILED: ' .. tostring(fam):sub(1, 50))
             else
                 local famholes = nholes(fam.template)
+                -- ★ RETRACTION IS NOT EVIDENCE OF A FAMILY ON ITS OWN. Report it
+                -- beside the FIXED-NODE count, which is the prototype's own
+                -- admissibility test (`partition`'s min_fixed).
+                local fixed = alg.fixed_nodes(fam.template.body)
                 bump(retracts(fam, terms)
                     and '  family RETRACTION HOLDS over all N'
                     or '★ family RETRACTION FAILS (not one family)')
-                -- a bare hole at the root = the members share no structure at all
-                if fam.template.k == 'hole' then
+                bump(fixed == 0 and '★ family template shares NO fixed structure'
+                    or fixed < 5 and '  family shares 1-4 fixed nodes'
+                    or '  family shares 5+ fixed nodes')
+                -- ⚠⚠ THIS CHECK WAS DEAD IN THE FIRST CUT AND NEVER ONCE FIRED.
+                -- It read `fam.template.k`, but a TEMPLATE is a record
+                -- `{ body, holes, edits }` -- the TERM is `template.body`, so
+                -- `.k` was nil for every family. A bare-hole template RETRACTS
+                -- TO EVERY INSTANCE TRIVIALLY, so the "retraction holds" tally it
+                -- fell through to was counting exactly the not-a-family case it
+                -- was supposed to exclude.
+                if alg.is_collapsed(fam.template) then
                     bump('family lgg COLLAPSED to a bare hole (not one family)')
                 else
                     -- ★★★ THE DEFECT IS NOT "the family beats the BEST pair".

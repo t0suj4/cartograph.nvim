@@ -2872,4 +2872,137 @@ function M.findings(store, opts)
     return out
 end
 
+--- ★★★ NEAR-CLONE FAMILIES: partition each connected component of the near-graph
+--- into families by DESCRIPTION LENGTH, through the proven algebra (CART-0888).
+---
+--- WHY THIS EXISTS. `near` returns PAIRS and `extract_proposal` derives ONE
+--- helper per pair, so a component of N near-clones yields up to C(N,2) helper
+--- proposals for what is often ONE family -- and they disagree with each other,
+--- measured at 84% of wow's examined components. A family is the unit a human
+--- would actually extract; a pair is an artifact of how the index finds them.
+---
+--- ★★ A COMPONENT IS NOT AUTOMATICALLY A FAMILY, AND THE CHEAP TEST FOR THAT IS
+--- WRONG. The obvious proxy -- "is the component a clique in the near-graph" --
+--- calls 87% of wow's components CHAINS and would split them. MEASURED, that
+--- proxy OVER-SPLITS: on factorio all 8 components partition into ONE family
+--- with 57-94 shared fixed nodes and 1-3 holes, chains included. The chain-ness
+--- is an artifact of `near`'s OWN admission filter (two members 3 row-edits
+--- apart are refused at max_dist=2) and says nothing about whether they are one
+--- family. So the split is decided by MDL, never by graph shape.
+---
+--- ★★ AND MDL NEEDS AN ADMISSIBILITY FLOOR, which the algebra supplies as
+--- `min_fixed`: without it, unrelated instances are "one family" under a bare
+--- hole because that pays one family cost instead of N. ⚠ THE RETRACTION LAW
+--- CANNOT SUBSTITUTE -- a bare-hole template retracts to every instance
+--- trivially, which is how a guard meant to catch exactly this sat DEAD and
+--- never fired (CART-0888).
+---
+--- ★★★ THE PROXY IS MEASURED, NOT ARGUED (wow, 152 components):
+---       cliques 20, chains 132
+---       CHAIN and ONE family      93   <- the proxy would split all of these
+---       CHAIN and split           39   <- it agrees, but cannot say INTO WHAT
+---       clique and ONE family     19
+---       clique and split           1
+---   ⇒ the clique proxy agrees with MDL on 58 of 152 = 38.2%. It is not a cheap
+---   approximation of this answer; it is a different answer. And MDL is not a
+---   no-op either: it SPLITS 40 of 152 (26%), so the component is neither
+---   automatically one family nor reliably several.
+---
+--- COST, measured, and it is the reason this can be a verb at all: `generalize`
+--- is ~0.001 s typical / 0.112 s worst (a simultaneous descent), and greedy
+--- `partition` 0.032 s at n=8, agreeing with the brute-force optimum on 8 of 8.
+--- ⚠ NOT to be confused with `vertical`'s 0.2-12 s alignment DP; they are
+--- different complexity classes, and citing one for the other is what made this
+--- look unaffordable before it was timed.
+---
+--- ⚠ BUT THE GREEDY IS O(n^3) IN THE COMPONENT, AND THAT IS THE REAL BOUND:
+--- on wow the worst single component cost 15.8 s and all 152 cost 111 s total.
+--- THIS IS A BATCH VERB, NOT AN INTERACTIVE ONE. `max_family` (default 40) is
+--- what keeps it bounded, and components skipped by it are COUNTED in the
+--- result rather than silently dropped -- wow's largest is 28, so the default
+--- skips nothing there and the figure above is the whole population.
+---
+--- @return table|nil result, string|nil why
+--- result = { families = { { members, template, values, dl, fixed, holes,
+---            origin, via } }, components, examined, skipped, population }
+function M.families(store, opts)
+    opts = opts or {}
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    -- ⚠ REFUSE BY NAME, NEVER FALL BACK TO THE CLIQUE PROXY. It over-splits, so
+    -- a silent degrade would hand back MORE families that look like a finer
+    -- answer. Absence renders as a plausible positive unless it is said aloud.
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+
+    local maxn = opts.max_family or 40
+    local pairs_ = M.near(store, opts)
+
+    local up, rec = {}, {}
+    local function find(x) while up[x] and up[x] ~= x do x = up[x] end return x end
+    for _, p in ipairs(pairs_) do
+        rec[p.a.id], rec[p.b.id] = p.a, p.b
+        up[p.a.id] = up[p.a.id] or p.a.id
+        up[p.b.id] = up[p.b.id] or p.b.id
+        local ra, rb = find(p.a.id), find(p.b.id)
+        if ra ~= rb then up[ra] = rb end
+    end
+    local comp = {}
+    for id in pairs(up) do
+        local r = find(id)
+        comp[r] = comp[r] or {}
+        comp[r][#comp[r] + 1] = id
+    end
+
+    local out, ncomp, examined, skipped = {}, 0, 0, 0
+    local roots = {}
+    for r in pairs(comp) do roots[#roots + 1] = r end
+    table.sort(roots)                       -- ★ determinism: `pairs` order is not stable
+    for _, r in ipairs(roots) do
+        local ids = comp[r]
+        ncomp = ncomp + 1
+        if #ids < 2 then                    -- nothing to partition
+        elseif #ids > maxn then
+            skipped = skipped + 1           -- counted, never silently dropped
+        else
+            table.sort(ids)
+            local terms = {}
+            for i, id in ipairs(ids) do terms[i] = alg.fn_term(rec[id]) end
+            local okp, part = pcall(A.partition, terms, opts.partition)
+            if okp and part then
+                examined = examined + 1
+                for _, f in ipairs(part.families) do
+                    local members = {}
+                    for _, k in ipairs(f.members) do members[#members + 1] = rec[ids[k]] end
+                    local nh = 0
+                    for _ in pairs(f.template.holes or {}) do nh = nh + 1 end
+                    out[#out + 1] = {
+                        members = members, template = f.template, values = f.values,
+                        dl = f.dl, holes = nh,
+                        fixed = alg.fixed_nodes(f.template.body),
+                        collapsed = alg.is_collapsed(f.template),
+                        -- ⚠ THESE ARE NOT GRAPH RECORDS, so `validate.check` never
+                        -- sees them and these two fields are DESCRIPTIVE here, not
+                        -- enforced. They use the registered vocabulary on purpose:
+                        -- if a family ever becomes a node, the contract already
+                        -- matches instead of being retrofitted.
+                        origin = 'derived', via = 'algebra.partition',
+                    }
+                end
+            end
+        end
+    end
+    return {
+        families = out, components = ncomp, examined = examined, skipped = skipped,
+        -- ★ THE POPULATION RIDES WITH THE ANSWER. Every count here inherits
+        -- `near`'s admission filter AND the MDL constants; a family count without
+        -- them is not a property of the corpus.
+        population = {
+            max_dist = opts.max_dist or 2, min_rows = opts.min_rows or 6,
+            min_shared = opts.min_shared or 2, max_family = maxn,
+            min_fixed = (opts.partition and opts.partition.min_fixed) or 1,
+            family_cost = (opts.partition and opts.partition.family_cost) or 1,
+        },
+    }
+end
+
 return M

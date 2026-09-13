@@ -1497,3 +1497,107 @@ test('clones: two holes on one line render rightmost-first', function ()
     local subs = assert(clones.subs_of(t, m, psrc, src))
     eq('ccc = 333', clones.render(t, subs, src, VERIFY))
 end)
+
+-- ── near-clone FAMILIES (clones.families, CART-0888) ────────────────────────
+--
+-- `near` returns PAIRS; a family is the unit a human would actually extract.
+-- These guard the two decisions that make `families` more than a grouping:
+-- the split is decided by MDL and NOT by graph shape, and an absent algebra is
+-- a NAMED refusal rather than a fall-back to the cheap proxy that over-splits.
+
+local alg = require 'cartograph.algebra'
+
+local function need_alg()
+    local ok, why = alg.available()
+    if not ok then skip('algebra unavailable: ' .. tostring(why)) end
+end
+
+--- three bodies that differ only in one literal each: one family, not three pairs
+local function fam3()
+    -- ⚠ SIZED FOR THE DEFAULT POPULATION ON PURPOSE. A shorter body is refused
+    -- by `near`'s own min_rows and the test would then be measuring the fixture,
+    -- not the verb -- and would pass vacuously with zero families if the
+    -- assertions were relaxed to match.
+    local function body(n)
+        return ([[
+function M.f%s(t)
+    local acc = 0
+    local seen = {}
+    for i = 1, #t do acc = acc + t[i] * %s end
+    local s = tostring(acc)
+    local u = string.upper(s)
+    seen[u] = true
+    local pad = string.rep("-", #u)
+    local out = pad .. u
+    return out .. "%s"
+end
+]]):format(n, n, n)
+    end
+    return proj { ['a.lua'] = 'local M = {}\n' .. body(1) .. body(2) .. body(3) .. 'return M\n' }
+end
+
+test('families: one component of near-clones is ONE family, not N pairs', function ()
+    need_alg()
+    fam3()
+    local r, why = clones.families(store, {})
+    ok(r ~= nil, 'families computed: ' .. tostring(why))
+    eq(1, #r.families)
+    local f = r.families[1]
+    eq(3, #f.members)
+    ok(not f.collapsed, 'the family template is not a bare hole')
+    ok(f.fixed > 0, 'it shares fixed structure: ' .. tostring(f.fixed))
+    ok(f.holes > 0, 'and it has holes where the members differ')
+end)
+
+--- ★ THE POPULATION RIDES WITH THE ANSWER. A family count that does not carry
+--- `near`'s admission filter and the MDL constants is not a property of the
+--- corpus — it is a property of a gate nobody can see.
+test('families: the answer carries the constants it was measured under', function ()
+    need_alg()
+    fam3()
+    local r = clones.families(store, {})
+    eq(2, r.population.max_dist)
+    eq(6, r.population.min_rows)
+    eq(1, r.population.min_fixed)
+    ok(r.components >= 1, 'components counted')
+    eq(0, r.skipped)
+end)
+
+--- ★★ ABSENCE IS A NAMED ANSWER. Falling back to the clique proxy would hand
+--- back MORE families, which reads as a FINER answer rather than as a missing
+--- instrument — the exact shape this codebase treats as unsound.
+test('families: an absent algebra REFUSES, it does not fall back', function ()
+    need_alg()
+    fam3()
+    local cfg = require 'cartograph.config'
+    local saved = cfg.algebra
+    cfg.algebra = false
+    local r, why = clones.families(store, {})
+    cfg.algebra = saved
+    eq(nil, r)
+    ok(tostring(why):find('algebra unavailable'), 'and names the reason: ' .. tostring(why))
+end)
+
+--- ★★★ THE ADMISSIBILITY FLOOR IS WHAT STOPS MDL SAYING "ANYTHING IS ONE
+--- FAMILY". Without `min_fixed`, unrelated instances merge under a BARE HOLE
+--- because that pays one family cost instead of N — and the retraction law
+--- cannot catch it, because a bare hole retracts to every instance trivially.
+--- That is why this asserts on the TEMPLATE, not on the partition succeeding.
+test('families: unrelated instances do NOT merge under a bare hole', function ()
+    need_alg()
+    local A = alg.load()
+    local unrelated = {
+        A.node('alpha', A.name('p'), A.name('q')),
+        A.node('beta', A.lit('number:7')),
+        A.node('gamma', A.name('z'), A.name('w'), A.name('v')),
+    }
+    local part = A.partition(unrelated)
+    for _, f in ipairs(part.families) do
+        if #f.members > 1 then
+            ok(alg.fixed_nodes(f.template.body) >= 1,
+                'a multi-member family shares at least one fixed node')
+            ok(not alg.is_collapsed(f.template),
+                'and is never a bare hole holding unrelated members together')
+        end
+    end
+end)

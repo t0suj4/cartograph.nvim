@@ -198,4 +198,43 @@ function M.row_term(r, locals, unsupported)
     return A.node('row', tunpack(kids))
 end
 
+--- a whole FUNCTION as one term: a seq of its rows, so two functions are two
+--- instances the lgg can take. Third consumer of this shape, hence it lives here
+--- and not in each tool -- the same rule the rewire enforced for `term`.
+---
+--- ⚠ A ROW THE ADAPTER CANNOT BUILD BECOMES `row~`, NOT NOTHING. Dropping it
+--- would silently shorten one side and make a positional alignment compare rows
+--- that are not counterparts; a distinct marker keeps the arity honest.
+function M.fn_term(f)
+    local A = M.load()
+    if not A then return nil end
+    local rows = {}
+    for i = 1, #(f.exprs or {}) do
+        rows[i] = M.row_term(f.exprs[i], f.locals) or A.node('row~')
+    end
+    return A.seq(rows)
+end
+
+--- ⚠ `A.generalize` RETURNS A RESULT RECORD and so does `A.template`: the
+--- TEMPLATE is `{ body, holes, edits }`, and the TERM is `template.body`. Asking
+--- a template for `.k` yields nil, silently -- which is how a "is this a bare
+--- hole" guard can be DEAD and never once fire (CART-0888). These two accessors
+--- exist so no consumer has to remember which record it is holding.
+function M.is_collapsed(tmpl)
+    local b = tmpl and tmpl.body
+    return b ~= nil and b.k == 'hole'
+end
+
+--- how much FIXED structure a template shares — the prototype's own admissibility
+--- test (`partition`'s `min_fixed`). ★ THE RETRACTION LAW CANNOT REPLACE THIS: a
+--- bare-hole template retracts to EVERY instance trivially, so "it retracts" is
+--- not evidence the members are one family. Verified, not assumed.
+function M.fixed_nodes(t)
+    if t == nil then return 0 end
+    if t.k == 'hole' then return 0 end
+    local n = 1
+    for _, c in ipairs(t.kids or {}) do n = n + M.fixed_nodes(c) end
+    return n
+end
+
 return M

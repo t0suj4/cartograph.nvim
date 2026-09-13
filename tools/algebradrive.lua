@@ -196,13 +196,7 @@ end
 --- alignment is over the entire row sequence, and inserted/deleted rows are part of
 --- what it aligns AROUND. The prototype's own bridge encodes a function as a seq of
 --- rows and hands the whole thing to `vertical`; this follows it.
-local function fn_term(f)
-    local rows = {}
-    for i = 1, #(f.exprs or {}) do
-        rows[i] = row_term(f.exprs[i], f.locals) or A.node('row~')
-    end
-    return A.seq(rows)
-end
+local fn_term = alg.fn_term
 
 local function count_holes(t, acc)
     acc = acc or { hedge = 0, ctx = 0 }
