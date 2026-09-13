@@ -516,8 +516,21 @@ for free, because the donor is the surrounding style.
 hole several times. On this repo 32% of holes occur more than once, up to four
 times — so substituting only the recorded one leaves the donor's literal
 standing everywhere else and yields a helper that is correct for the donor and
-wrong for every other caller. The rendered text is **display only**: it is not
-reparsed, and the signature shown is still the donor's.
+wrong for every other caller.
+
+The text is then **read back**. Substituting into real source buys the surface
+outside the holes for free and nothing about surface the IR erased *inside* one,
+so the rendered helper is reparsed and required to be the same template with
+each parameter at its own hole — emitted, read back, compared, which needs no
+calibration because the two sides share the walk and nothing else. The proposal
+says which of three happened. *Verified.* *Not verified* — and on
+`~/work/factorio-mods` that fires on a real one: a hole spanning a whole call
+statement renders as `if not f then p1 end`, which looks reasonable and is not
+valid Lua. Or *not verifiable*, when the donor's own span is an anonymous
+function: that is an expression, so a chunk containing only it is a syntax error
+and the check cannot speak either way. Reporting those as failures would have
+been a 44% false alarm on this repo, so the donor's own text is parsed first as
+a control. The signature shown is still the donor's.
 
 A parameter shown as a local names what stands at that site in each copy; it is
 not a claim that the copies read the same variable, because the analysis erases

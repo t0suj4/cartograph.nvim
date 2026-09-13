@@ -468,9 +468,15 @@ verb refuses is as load-bearing as what it writes — see
                               call site per member on its own span. The
                               HELPER BODY is shown too: the donor's own
                               source with every hole occurrence replaced by
-                              its parameter. That text is DISPLAY ONLY --
-                              it is not reparsed, and the signature shown
-                              is the donor's. Needs the template algebra
+                              its parameter. The text is then REPARSED
+                              and required to be the same template with
+                              each parameter at its own hole; the proposal
+                              says VERIFIED, NOT VERIFIED, or NOT
+                              VERIFIABLE (a donor whose span is an
+                              anonymous function is an expression, so its
+                              own text does not parse standalone and the
+                              check cannot speak). The signature shown is
+                              still the donor's. Needs the template algebra
                               (:checkhealth); refuses by name without it
                               rather than falling back to the pairwise
                               answer

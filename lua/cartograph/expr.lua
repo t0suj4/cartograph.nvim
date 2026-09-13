@@ -2189,6 +2189,22 @@ local function file_src(store, node)
     return table.concat(lines, '\n'), lines
 end
 
+--- the flow config for one language. FACTORED so `M.of` and `M.of_text` cannot
+--- drift: a snippet reparsed under a different config is not a reparse of the
+--- same thing, and the difference would show up as a mismatch attributed to the
+--- text rather than to the harness.
+local function flow_cfg(lang, s, method)
+    return { pfield = s.params_field, df_ids = s.df_ids, regime = s.regime,
+        ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
+        blocks = s.blocks,                          -- attached blocks (part B)
+        mods = s.binding_modifiers, -- CART-0234
+        binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
+        body_of = s.body_of, params_of = s.params_of, -- CART-0305
+        fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
+        method = method or false,
+        expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
+end
+
 local function fn_node(node, root, lang)
     if not root then return nil end
     local d = root:named_descendant_for_range(at.sl(node.range), at.sc(node.range),
@@ -2215,19 +2231,73 @@ function M.of(store, fn_id)
     src = src or ''
     local fn = fn_node(node, parse_root(src, lang, lines), lang)
     if not fn then return nil end
-    local cfg = { pfield = s.params_field, df_ids = s.df_ids, regime = s.regime,
-        ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
-        blocks = s.blocks,                          -- attached blocks (part B)
-        mods = s.binding_modifiers, -- CART-0234
-        binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
-        body_of = s.body_of, params_of = s.params_of, -- CART-0305
-        fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
-        method = (node.kind == 'method') and lang == 'lua',
-        expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
+    local cfg = flow_cfg(lang, s, (node.kind == 'method') and lang == 'lua')
     local flow = require 'cartograph.flow'
     local fl = flow.build(fn, src, cfg)
     return { fl = fl, lang = lang, node = node,
         bound = M.bound_names(fn, src, s.binders) }
+end
+
+--- The language `M.of` would use for a file, or nil when this layer does not
+--- support it. Exported because a caller that has a FILE and needs `of_text`
+--- must resolve the language the SAME way, or it verifies under a spec the
+--- original was never harvested with.
+---@param file string
+---@return string|nil lang
+function M.lang_of(file) return lang_of_file(file) end
+
+--- The statement sequence of the FIRST function in a source STRING — the same
+--- shape `M.of` returns, so `.fl.stmts[i].expr` and `clones.fn_row_keys` read it
+--- identically.
+---
+--- ★★★ THIS IS THE ARROW A REPARSE ORACLE NEEDS (CART-0893). Everything else in
+--- this layer starts from a STORE NODE, which means a round-trip check —
+--- render text, read it back, compare to what it was built from — had nowhere to
+--- put the text. `flow.build` never wanted a store: it takes a node, a source
+--- string and a config, and `M.of` only used the store to find the file, its
+--- text and its language. So the snippet path is the same machinery with those
+--- three supplied directly.
+---
+--- ⚠ IT PARSES DIRECTLY, NOT THROUGH `parse_root`. That cache holds ONE entry
+--- and releases the previous tree on a miss, so verifying a snippet would evict
+--- the live file's parse and the next real query would pay for it. A snippet is
+--- a one-shot: it should not disturb a cache sized for the file being read.
+---
+--- ⚠ A TREE WITH AN ERROR NODE IS A REFUSAL, not a parse. That is the whole
+--- point at the oracle's altitude: substituting into text buys nothing about
+--- surface the IR erased inside a hole, and the failure mode is text that looks
+--- well-formed and is not (THE BRACKET BUG in clones.render, 5.3% of renders on
+--- our own tree).
+---@param src string   source text containing one function
+---@param lang string  the language name, as `ts.parse_lang` reports it
+---@param opts table|nil { method = true for a lua method body }
+---@return table|nil eo { fl, lang }, string|nil why
+function M.of_text(src, lang, opts)
+    if type(src) ~= 'string' or src == '' then return nil, 'no text' end
+    if not lang or not spec[lang] then
+        return nil, 'no expression spec for ' .. tostring(lang)
+    end
+    local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    if not okp or not parser then return nil, 'no parser for ' .. tostring(lang) end
+    local okt, trees = pcall(parser.parse, parser)
+    if not okt or not trees or not trees[1] then return nil, 'the text did not parse' end
+    local root = trees[1]:root()
+    if root:has_error() then
+        return nil, 'the text does not parse cleanly — the grammar rejects it'
+    end
+    local fnt = ts.fn_types(lang)
+    local function find(n)
+        if fnt[n:type()] then return n end
+        for c in n:iter_children() do
+            if c:named() then local r = find(c); if r then return r end end
+        end
+    end
+    local fn = find(root)
+    if not fn then return nil, 'no function node in the text' end
+    local flow = require 'cartograph.flow'
+    local ok, fl = pcall(flow.build, fn, src, flow_cfg(lang, spec[lang], opts and opts.method))
+    if not ok or not fl then return nil, 'the flow layer refused the text' end
+    return { fl = fl, lang = lang }
 end
 
 --- A MODULE's TOP-LEVEL statement sequence, harvested with the same machinery.

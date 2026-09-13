@@ -2226,3 +2226,169 @@ return M
     ok(id2 ~= nil, 'the identity render succeeds with repeated holes: ' .. tostring(why2))
     eq(donor_text(t2), id2)
 end)
+
+-- ── the reparse oracle (CART-0893) ──────────────────────────────────────────
+--
+-- Render the helper, READ IT BACK, and require it to be the template it was
+-- built from with each parameter at its own hole. Step C checked by step B —
+-- `M.render`'s own discipline, lifted to function altitude.
+
+test('expr.of_text: a function in a STRING harvests like one in the tree', function ()
+    if not ready() then return skip 'no lua parser' end
+    local eo, why = expr.of_text([[
+local function f(t)
+    local acc = 0
+    acc = acc + #t
+    return acc
+end
+]], 'lua')
+    ok(eo ~= nil, 'a standalone function parses: ' .. tostring(why))
+    ok(eo.fl and #(eo.fl.stmts or {}) >= 3, 'and yields its statement rows')
+
+    -- the refusals, each by name
+    local a, w1 = expr.of_text('local function f( +++ ', 'lua')
+    eq(nil, a); ok(tostring(w1):find('parse'), 'a broken text says so: ' .. tostring(w1))
+    local b, w2 = expr.of_text('local x = 1', 'lua')
+    eq(nil, b); ok(tostring(w2):find('no function'), 'text with no function: ' .. tostring(w2))
+    local c, w3 = expr.of_text('whatever', 'not-a-language')
+    eq(nil, c); ok(tostring(w3):find('spec'), 'an unsupported language: ' .. tostring(w3))
+end)
+
+test('family_verify: a rendered helper reparses to its own template', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    fam3()
+    local r = clones.families(store, {})
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    local good, why, d = clones.family_verify(f, store)
+    ok(good, 'the render verifies: ' .. tostring(why))
+    ok(d and d.rows and d.rows > 0, 'and reports what it read back')
+end)
+
+--- ★★★ THE CONTROL IS WHAT KEEPS THIS HONEST. A donor whose span is an
+--- ANONYMOUS function is an EXPRESSION, and a chunk containing only one is a
+--- syntax error — so its own text does not reparse and the oracle cannot speak
+--- either way. MEASURED before the control existed: 4 of 9 rendered helpers on
+--- our own tree "did not reparse", every one of them for that reason and NONE
+--- because the render was wrong. Reported as defects that is a 44% false alarm.
+test('family_verify: an anonymous-function donor is NOT VERIFIABLE, not a defect', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    proj { ['h.lua'] = [[
+local M = {}
+M.wrap1 = function (name, ps, body, ind)
+    local out = { ind .. "A" }
+    local seen = {}
+    for _, l in ipairs(body) do out[#out + 1] = l end
+    seen[name] = ps
+    out[#out + 1] = ind .. "B"
+    out[#out + 1] = ''
+    return out
+end
+M.wrap2 = function (name, ps, body, ind)
+    local out = { ind .. "C" }
+    local seen = {}
+    for _, l in ipairs(body) do out[#out + 1] = l end
+    seen[name] = ps
+    out[#out + 1] = ind .. "D"
+    out[#out + 1] = ''
+    return out
+end
+return M
+]] }
+    local r = clones.families(store, {})
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    local good, why, d = clones.family_verify(f, store)
+    eq(nil, good)
+    ok(tostring(why):find('not verifiable'), 'it says NOT VERIFIABLE: ' .. tostring(why))
+    ok(d and d.verifiable == false,
+        'and flags it as a frame problem, so a caller can tell it from a failure')
+    -- ⚠ BOTH SIDES: the render itself still succeeded. "Cannot be checked" must
+    -- not be reported as "is wrong".
+    ok(clones.family_helper_text(f, store) ~= nil, 'the render itself is fine')
+end)
+
+--- AND THE DEFECT SIDE: a substitution that breaks the grammar must be caught,
+--- which is the whole reason the oracle exists. `M.render`'s BRACKET BUG was
+--- 5.3% of renders at container altitude and every one looked well-formed.
+test('family_verify: a substitution that breaks the grammar is caught', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    fam3()
+    local r = clones.families(store, {})
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    local h = (clones.family_template(f, store) or {}).order[1]
+    ok(h ~= nil, 'the family has a hole to substitute at')
+
+    local good, why = clones.family_verify(f, store, { subs = { [h] = ')' } })
+    eq(nil, good)
+    ok(tostring(why):find('did not reparse'),
+        'the oracle refuses text the grammar rejects: ' .. tostring(why))
+    -- and it is NOT reported as a frame problem — the donor parses fine
+    ok(not tostring(why):find('not verifiable'),
+        'a real defect is distinguished from an unverifiable frame')
+end)
+
+--- ★★★ THE COMPARISON ITSELF, which the grammar test above does NOT reach: a
+--- substitution that PARSES CLEANLY but is a different TERM. Found by mutation
+--- — removing the `A.eq` entirely broke no test, because every negative until
+--- now failed at the parse gate instead.
+test('family_verify: a render that parses but is a DIFFERENT term is caught', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    fam3()
+    local r = clones.families(store, {})
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    local h = (clones.family_template(f, store) or {}).order[1]
+    ok(h ~= nil, 'the family has a hole to substitute at')
+
+    -- `a + b` is valid Lua and reparses to a BINARY NODE where the template says
+    -- one position: the text is well-formed and the shape is not what was asked.
+    local good, why = clones.family_verify(f, store, { subs = { [h] = 'a + b' } })
+    eq(nil, good)
+    ok(tostring(why):find('DIFFERENT term'), 'the term comparison fires: ' .. tostring(why))
+    ok(not tostring(why):find('did not reparse'),
+        'and it is NOT the parse gate — the text was perfectly valid')
+end)
+
+--- A METHOD donor is harvested with `method = true` (the implicit receiver), and
+--- the reparse must use the SAME config or it compares one text under two specs.
+test('family_verify: a method donor verifies under the method config', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    proj { ['m.lua'] = [[
+local M = {}
+function M:m1(t)
+    local acc = self.base
+    local seen = {}
+    for i = 1, #t do acc = acc + t[i] * 3 end
+    local s = tostring(acc)
+    local u = string.upper(s) .. self.tag
+    seen[u] = true
+    local pad = string.rep("-", #u)
+    return pad .. u
+end
+function M:m2(t)
+    local acc = self.base
+    local seen = {}
+    for i = 1, #t do acc = acc + t[i] * 7 end
+    local s = tostring(acc)
+    local u = string.upper(s) .. self.tag
+    seen[u] = true
+    local pad = string.rep("-", #u)
+    return pad .. u
+end
+return M
+]] }
+    local r = clones.families(store, {})
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    local good, why = clones.family_verify(f, store)
+    ok(good, 'a method donor round-trips: ' .. tostring(why))
+end)

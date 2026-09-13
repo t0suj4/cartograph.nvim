@@ -3297,9 +3297,23 @@ function M.family_proposal(fam, store)
         L[#L + 1] = ('  the helper body, from the donor %s (%s):')
             :format(fam.members[1].name, fam.members[1].file)
         for _, line in ipairs(as_lines(body) or {}) do L[#L + 1] = '    ' .. line end
-        L[#L + 1] = '  ⚠ DISPLAY ONLY. The text is not reparsed, so it is a proposal about'
-        L[#L + 1] = '    surface, not a verified edit — and the signature shown is the'
-        L[#L + 1] = '    DONOR\'s, which the extraction would have to rename.'
+        -- ★ THE VERDICT RIDES WITH THE TEXT (CART-0893). Three answers, and the
+        -- middle one is the reason this is not a boolean: a donor whose span is
+        -- an anonymous function is an EXPRESSION, so its own text does not parse
+        -- standalone and the oracle cannot speak either way. Printing that as a
+        -- failure would be a false alarm; printing nothing would let an
+        -- unverified render read exactly like a verified one.
+        local vok, vwhy, vd = M.family_verify(fam, store)
+        if vok then
+            L[#L + 1] = '  ✓ VERIFIED: the text above reparses to exactly this template with'
+            L[#L + 1] = '    each parameter at its own hole — emitted, read back, compared.'
+        elseif vd and vd.verifiable == false then
+            L[#L + 1] = '  ⚠ NOT VERIFIABLE: ' .. tostring(vwhy):gsub('^not verifiable: ', '')
+        else
+            L[#L + 1] = '  ⚠ NOT VERIFIED: ' .. tostring(vwhy)
+        end
+        L[#L + 1] = '  ⚠ The signature shown is the DONOR\'s, which the extraction would'
+        L[#L + 1] = '    have to rename; nothing here rewrites a call site.'
     else
         -- a named refusal, because a proposal that silently omits the body reads
         -- as one where the body was not worth showing
@@ -3346,14 +3360,17 @@ end
 -- ingest and states that post-fold arrivals stay raw and read through the same
 -- accessors. There is no range constructor to call.
 --
--- ⚠⚠ DISPLAY ONLY, AND IT REFUSES RATHER THAN TRUSTING THE CALLER. `M.render`
--- verifies by reparsing and calling `M.match(tmpl, ir)` — which takes the
--- `element_template` shape, not this one. The function-altitude oracle is
--- reparse → `algebra.fn_term` → `A.match`, and it needs a snippet parser this
--- module does not have. THE BRACKET BUG above (5.3% of renders on our own tree)
--- is why that gap is named instead of papered over: a wrong render looks
--- perfectly well-formed as a string. Until the oracle exists this path passes
--- `unverified` and must never authorise a write.
+-- ⚠⚠ IT REFUSES RATHER THAN TRUSTING THE CALLER. `M.render` verifies by
+-- reparsing and calling `M.match(tmpl, ir)`, which takes the `element_template`
+-- shape and not this one. THE FUNCTION-ALTITUDE ORACLE IS NOW `M.family_verify`
+-- (CART-0893): reparse through `expr.of_text` -> `algebra.fn_term`, then compare
+-- STRUCTURALLY against the template with each hole plugged by its own parameter.
+-- It caught a real one on factorio-mods the first time it ran: a hole spanning a
+-- whole call statement renders as `if not f then p1 end`, which reads fine and
+-- is not valid Lua -- THE BRACKET BUG's class, one altitude up. So this path
+-- still passes `unverified` to `render` (that verifier cannot take this shape)
+-- and the verification happens in `family_verify` instead; a caller on a WRITE
+-- path must go through it, never through the raw text.
 
 --- The source extent of a term: its own span, or the HULL of its kids'.
 --- Returns nil when ANY kid is spanless — a partial hull would name a region
@@ -3557,6 +3574,128 @@ function M.family_helper_text(fam, store, opts)
         end
     end
     return M.render(tmpl, subs, src, { unverified = true })
+end
+
+--- ★★★ THE REPARSE ORACLE AT FUNCTION ALTITUDE (CART-0893). Render the helper,
+--- READ IT BACK, and require it to match the template it was built from — step C
+--- checked by step B, which is `M.render`'s own discipline one altitude down and
+--- the same round-trip the transliteration arc rests on. It needs no
+--- calibration: the two sides share the walk and nothing else.
+---
+--- ⚠ WHY IT IS NOT OPTIONAL POLISH. Substituting into the donor's text buys the
+--- surface OUTSIDE the holes for free and NOTHING about surface the IR erased
+--- INSIDE one. THE BRACKET BUG (see `M.render`) was 63 of 1184 renders on our own
+--- tree — 5.3% — and every one of them looked perfectly well-formed as a string.
+--- The identity render (`opts.identity`) cannot see this class at all: replacing
+--- a span with the text OF that span is identity for any span, so it checks the
+--- splicer and says nothing about whether the cut was in the right place.
+---
+--- ★ TWO CHECKS, AND THE SECOND IS THE ONE ABOUT SPANS. `match.ok` says the
+--- rendered text still has the template's SHAPE. It does NOT say each parameter
+--- landed where the template says its hole is — a render that wrote `p2` at
+--- `p1`'s position still matches, with the values swapped. So every hole must
+--- come back holding ITS OWN parameter name. That is the check the span
+--- correctness of `hole_sites` actually rides on.
+---@param fam table
+---@param store table
+---@param opts table|nil { donor = index }
+---@return boolean|nil ok, string|nil why, table|nil detail
+function M.family_verify(fam, store, opts)
+    local tmpl, why = M.family_template(fam, store, opts)
+    if not tmpl then return nil, why end
+    local text, twhy = M.family_helper_text(fam, store, opts)
+    if not text then return nil, twhy end
+
+    local lang = expr.lang_of(tmpl.donor.file)
+    if not lang then
+        return nil, ('no expression spec for %s — the helper cannot be read back')
+            :format(tostring(tmpl.donor.file))
+    end
+    -- ★★★ THE CONTROL, AND WITHOUT IT THIS ORACLE LIES. The donor's span is not
+    -- always a standalone chunk: an ANONYMOUS function (`function (a, b) … end`)
+    -- is an EXPRESSION, and a file containing only one is a syntax error in Lua.
+    -- MEASURED before this existed: 4 of 9 rendered helpers "did not reparse",
+    -- every one of them for that reason and none because the render was wrong.
+    -- Reporting those as defects would have been a false alarm at 44%.
+    --
+    -- ⇒ Parse the DONOR'S OWN TEXT through the identical path first — which is
+    --   exactly the identity render. If the control cannot parse, the frame is
+    --   at fault and this family is NOT VERIFIABLE, which is a different answer
+    --   from "the render is broken". If the control parses and the rendered text
+    --   does not, the parameters broke the grammar and that IS the defect this
+    --   oracle exists to catch.
+    -- ⚠ THE METHOD FLAG MUST CROSS TOO. `expr.of` sets `method` from the node's
+    -- kind, and the flow layer harvests a lua method differently (the implicit
+    -- receiver). Reparsing without it harvests the SAME TEXT under a DIFFERENT
+    -- config, and the mismatch would be reported against the render. Found by
+    -- mutation: forcing the flag broke no test, because nothing verified a
+    -- method donor.
+    local dn = store and store.node and store.node(tmpl.donor.id)
+    local topts = { method = (dn and dn.kind == 'method') and lang == 'lua' }
+
+    local control = M.family_helper_text(fam, store,
+        { donor = opts and opts.donor, identity = true })
+    -- ⚠ NOT `control and expr.of_text(...)`: an `and` expression yields ONE
+    -- value, so the second return is discarded and every refusal below reported
+    -- the fallback reason instead of the real one.
+    local ceo, cwhy
+    if control then ceo, cwhy = expr.of_text(control, lang, topts)
+    else cwhy = 'the donor produced no identity render' end
+    if not ceo then
+        return nil, ('not verifiable: the donor\'s own text does not reparse'
+            .. ' standalone (%s) — an anonymous function body is an expression,'
+            .. ' not a chunk'):format(tostring(cwhy or 'no identity render')),
+            { rendered = text, control = control, verifiable = false }
+    end
+
+    local eo, ewhy = expr.of_text(text, lang, topts)
+    if not eo then
+        return nil, ('the rendered helper did not reparse though the donor\'s own'
+            .. ' text does: %s'):format(tostring(ewhy)), { rendered = text }
+    end
+    local keys, _, _, exprs, locals = fn_row_keys(eo)
+    if not keys then
+        return nil, 'the reparsed helper has no harvestable rows', { rendered = text }
+    end
+
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    if not A then return nil, 'algebra unavailable' end
+    local term = alg.fn_term { exprs = exprs, locals = locals }
+
+    -- ⚠ NOT `A.match`, AND THE REASON IS A DOMAIN. The template's holes carry
+    -- DERIVED domains — where every member held a literal, the hole is
+    -- `kinds{lit}` — and a helper's parameter is a NAME. So `match` refuses the
+    -- render with "kind name not in {lit}", which is a true statement about the
+    -- domain and says nothing about whether the text is right. MEASURED: 3 of 14
+    -- families failed this way before the comparison moved.
+    --
+    -- ⇒ Compare STRUCTURALLY against the template with each hole plugged by its
+    --   own parameter. That is exactly what the render claims to have produced,
+    --   it needs no domain to hold, and it subsumes BOTH checks: a parameter
+    --   written at the wrong hole makes the terms differ, where `match.ok` would
+    --   have passed with the values merely swapped.
+    -- the SAME resolution the render used, or the oracle compares the text
+    -- against something the caller never asked for. ⚠ Only meaningful for
+    -- identifier-like substitutions: a sub of `x + 1` reparses to a tree, not a
+    -- name, and would be reported as a mismatch it is not.
+    local function sub_of(h)
+        return (opts and opts.subs and opts.subs[h]) or tmpl.params[h]
+    end
+    local function plug(t)
+        if t == nil then return nil end
+        if t.k == 'hole' then return A.name(sub_of(t.h) or ('?' .. tostring(t.h))) end
+        local kids = {}
+        for i, c in ipairs(t.kids or {}) do kids[i] = plug(c) end
+        return A.rebuild(t, kids)
+    end
+    local want = plug(fam.template.body)
+    if not A.eq(term, want) then
+        return nil, 'the rendered helper reparsed to a DIFFERENT term than the'
+            .. ' template it was built from',
+            { rendered = text, got = A.show(term), want = A.show(want) }
+    end
+    return true, nil, { rendered = text, rows = #keys, holes = #tmpl.order }
 end
 
 return M
