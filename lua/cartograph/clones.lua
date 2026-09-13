@@ -4151,8 +4151,16 @@ function M.family_admissibility(fam, store, opts)
         -- hole — the family already agrees on it. Reporting the name is what
         -- lets a caller see that; reporting only `nested` hides it.
         if v.nested then
-            local _, _, detail = hc.plan(store, m.id)
+            local plan, _, detail = hc.plan(store, m.id)
             rec.captures = detail and detail.captures or nil
+            -- ★ THE WHOLE SET, because a member capturing two names needs two
+            -- parameters and `captures` is only the first. MEASURED: 24 of 60
+            -- capturing members on wow capture more than one.
+            rec.captured = detail and detail.captured or (rec.captures and { rec.captures }) or {}
+            rec.writes = detail and detail.writes or nil
+            -- capture-FREE but nested: `body_extractable` refuses on nesting
+            -- alone, yet there is nothing to lift — it hoists as it stands.
+            rec.capture_free = (plan ~= nil) or nil
         end
         if rec.ok then counts[rec.nparams] = (counts[rec.nparams] or 0) + 1 end
         if not files[m.file] then files[m.file] = true; nfiles = nfiles + 1 end
@@ -4178,12 +4186,72 @@ function M.family_admissibility(fam, store, opts)
         else refused[#refused + 1] = rec end
     end
 
+    -- ── THE CAPTURE LIFT (CART-0904) ────────────────────────────────────────
+    --
+    -- ★★★ A NAME EVERY MEMBER CAPTURES IS A PARAMETER, not a blocker. The family
+    -- already agrees on it, which is the same evidence a hole rests on, and
+    -- `hoistclosure`'s own refusal says so: "parameterize it first
+    -- (extract-helper)". The two verbs are inverses; this is the side that can
+    -- act.
+    --
+    -- ⚠ IT IS A SEPARATE VERDICT, NOT A PROMOTION. These members are extractable
+    -- ONLY IF the captures are lifted, which changes the helper's signature —
+    -- so they ride in `liftable`, not in `admissible`, and the caller decides.
+    -- Silently folding them in would be this verb deciding, which is exactly
+    -- what the per-member verdict exists not to do.
+    --
+    -- THE THREE WAYS A LIFT IS REFUSED, each measured on wow (25 families with a
+    -- nested member):
+    --   a WRITE capture      2   Lua parameters are by VALUE, so a lifted write
+    --                            updates a copy — unsound, never lifted.
+    --   DIFFERENT sets       5   a helper has ONE signature; a member cannot
+    --                            pass a name it does not have in scope.
+    --   the same set        14   LIFTABLE.
+    --   capture-free         4   nothing to lift; these hoist as they stand.
+    local liftable, lifts, lift_why = {}, nil, nil
+    do
+        local nested, sets, writes, freeonly = {}, {}, nil, true
+        for _, rec in ipairs(out) do
+            if rec.nested then
+                nested[#nested + 1] = rec
+                if rec.writes then writes = writes or rec.writes end
+                if #rec.captured > 0 then
+                    freeonly = false
+                    sets[table.concat(rec.captured, '\1')] = rec.captured
+                end
+            end
+        end
+        if #nested == 0 then lift_why = nil
+        elseif writes then
+            lift_why = ('a member WRITES enclosing local `%s` — a lifted write would'
+                .. ' update a copy'):format(writes)
+        elseif freeonly then
+            lifts, lift_why = {}, nil          -- nothing to lift; nesting alone
+            for _, rec in ipairs(nested) do liftable[#liftable + 1] = rec.i end
+        else
+            local n, only = 0, nil
+            for _, set in pairs(sets) do n = n + 1; only = set end
+            if n > 1 then
+                lift_why = ('members capture %d different sets — a helper has one'
+                    .. ' signature'):format(n)
+            else
+                -- every capturing member agrees; a capture-free sibling needs
+                -- nothing and rides along
+                lifts = only
+                for _, rec in ipairs(nested) do liftable[#liftable + 1] = rec.i end
+            end
+        end
+    end
+
     return {
         members = out, admissible = admissible, refused = refused,
         params = majority, files = nfiles, xfile = nfiles > 1,
         body = body, body_why = body and nil or bwhy,
-        -- the two numbers a caller decides on
-        n = #fam.members, n_admissible = #admissible,
+        -- ★ liftable is NOT admissible: these need the captures lifted first,
+        -- and `lifts` names the parameters that would add.
+        liftable = liftable, lifts = lifts, lift_why = lift_why,
+        -- the numbers a caller decides on
+        n = #fam.members, n_admissible = #admissible, n_liftable = #liftable,
     }
 end
 

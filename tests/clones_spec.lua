@@ -3057,3 +3057,153 @@ test('family_admissibility: family-level refusals come back as a reason, not a v
     local b, w2 = clones.family_admissibility({ nope = true }, store)
     eq(nil, b); ok(tostring(w2):find('not a family'), tostring(w2))
 end)
+
+-- ── the capture lift (CART-0904) ────────────────────────────────────────────
+--
+-- A name every member captures is a PARAMETER, not a blocker: the family already
+-- agrees on it, which is the same evidence a hole rests on. `hoistclosure`'s own
+-- refusal says so — "parameterize it first (extract-helper)" — and the two verbs
+-- are inverses. This is the side that can act.
+--
+-- ⚠ IT IS A SEPARATE VERDICT, NOT A PROMOTION: a lifted member is extractable
+-- only if the captures become parameters, which changes the helper's signature.
+
+local function nested_family(src)
+    proj { ['nf.lua'] = src }
+    local r = clones.families(store, {})
+    if not r then return nil end
+    for _, f in ipairs(r.families) do
+        if #f.members >= 2 and f.holes > 0 then return f end
+    end
+end
+
+test('family_admissibility: a uniformly captured set is LIFTABLE, and named', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local f = nested_family([[
+local M = {}
+local function outer(live, tag)
+    local function cb1(t)
+        local acc = 0
+        local seen = {}
+        for i = 1, #t do acc = acc + t[i] * 1 end
+        local s = tostring(acc) .. tag
+        seen[s] = live
+        local pad = string.rep("-", #s)
+        return pad .. s
+    end
+    local function cb2(t)
+        local acc = 0
+        local seen = {}
+        for i = 1, #t do acc = acc + t[i] * 2 end
+        local s = tostring(acc) .. tag
+        seen[s] = live
+        local pad = string.rep("-", #s)
+        return pad .. s
+    end
+    return cb1, cb2
+end
+M.outer = outer
+return M
+]])
+    if not f then skip 'fixture yielded no family' end
+    local v = clones.family_admissibility(f, store)
+    ok(v ~= nil, 'the verdict computes')
+
+    -- ★ liftable, NOT admissible — the distinction is the point
+    eq(0, v.n_admissible)
+    ok(v.n_liftable >= 2, 'the nested members are liftable: ' .. tostring(v.n_liftable))
+    ok(v.lifts ~= nil, 'and the lift names its parameters')
+    local names = table.concat(v.lifts, ',')
+    ok(names:find('live') and names:find('tag'),
+        'BOTH captured names, not just the first: ' .. names)
+    eq(nil, v.lift_why)
+end)
+
+--- ⚠ A WRITE CAPTURE IS NEVER LIFTED. Lua parameters are by VALUE, so a lifted
+--- write updates a copy and the closure stops working. Measured on wow: 2 of 25
+--- families with a nested member contain one.
+test('family_admissibility: a WRITE capture refuses the lift by name', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local f = nested_family([[
+local M = {}
+local function outer()
+    local count = 0
+    local function cb1(t)
+        local seen = {}
+        local keep = {}
+        count = count + 1
+        local s = tostring(count) .. "1"
+        seen[s] = true
+        keep[#keep + 1] = s
+        local u = string.upper(s)
+        local pad = string.rep("-", #u)
+        local low = string.lower(u)
+        return pad .. u .. low
+    end
+    local function cb2(t)
+        local seen = {}
+        local keep = {}
+        count = count + 2
+        local s = tostring(count) .. "2"
+        seen[s] = true
+        keep[#keep + 1] = s
+        local u = string.upper(s)
+        local pad = string.rep("-", #u)
+        local low = string.lower(u)
+        return pad .. u .. low
+    end
+    return cb1, cb2
+end
+M.outer = outer
+return M
+]])
+    if not f then skip 'fixture yielded no family' end
+    local v = clones.family_admissibility(f, store)
+    ok(v ~= nil, 'the verdict computes')
+    eq(0, v.n_liftable)
+    eq(nil, v.lifts)
+    ok(tostring(v.lift_why):find('WRITES'), 'names the write: ' .. tostring(v.lift_why))
+    ok(tostring(v.lift_why):find('count'), 'and which local: ' .. tostring(v.lift_why))
+end)
+
+--- ⚠ AND DIFFERENT SETS CANNOT SHARE ONE SIGNATURE. A member cannot pass a name
+--- it does not have in scope. 5 of 25 on wow.
+test('family_admissibility: members capturing DIFFERENT sets refuse the lift', function ()
+    need_alg()
+    if not ready() then return skip 'no lua parser' end
+    local f = nested_family([[
+local M = {}
+local function outer(alpha, beta)
+    local function cb1(t)
+        local acc = 0
+        local seen = {}
+        for i = 1, #t do acc = acc + t[i] * 1 end
+        local s = tostring(acc) .. alpha
+        seen[s] = true
+        local pad = string.rep("-", #s)
+        return pad .. s
+    end
+    local function cb2(t)
+        local acc = 0
+        local seen = {}
+        for i = 1, #t do acc = acc + t[i] * 2 end
+        local s = tostring(acc) .. beta
+        seen[s] = true
+        local pad = string.rep("-", #s)
+        return pad .. s
+    end
+    return cb1, cb2
+end
+M.outer = outer
+return M
+]])
+    if not f then skip 'fixture yielded no family' end
+    local v = clones.family_admissibility(f, store)
+    ok(v ~= nil, 'the verdict computes')
+    eq(0, v.n_liftable)
+    eq(nil, v.lifts)
+    ok(tostring(v.lift_why):find('different sets'),
+        'names the disagreement: ' .. tostring(v.lift_why))
+end)
