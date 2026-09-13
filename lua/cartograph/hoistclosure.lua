@@ -61,16 +61,41 @@ local function body_facts(store, id, skip)
             for _, d in ipairs(s.def or {}) do dset[d] = true end
         end
     end
+    -- ★★★ READS COME FROM `k == 'name'` NODES, NOT FROM `s.use` (CART-0259).
+    -- `s.use` is FLATTENED: it lists the field selector of `rec.file` and the
+    -- KEY of `{ ref = x }` alongside genuine variable reads, so a closure that
+    -- merely touched a field named like an enclosing local was refused as
+    -- capturing it. MEASURED on our own tree: of 135,885 uses, 44,397 (33%) are
+    -- NOT name nodes — 32,812 fields and 11,585 table-constructor keys.
+    --
+    -- ⚠ NARROWING `reads` WIDENS THIS VERB, which is the unsafe direction, so
+    -- the residue was checked before the change rather than after: every one of
+    -- the 44,397 is a selector or a key, and neither is a variable read. The
+    -- expression tree already carries the distinction — a field is `k='field'`
+    -- with its name in `n`, not a `name` node — and this loop was ALREADY
+    -- walking it for vararg.
     local reads, vararg = {}, false
     local expr = require 'cartograph.expr'
     for _, s in ipairs(eo.fl.stmts or {}) do
-        for _, u in ipairs(s.use or {}) do
-            if not pset[u] and not dset[u] then reads[u] = true end
-        end
         if s.expr then
-            local function scan(e) expr.walk(e, function (x) if x.k == 'vararg' then vararg = true end end) end
+            local function scan(e)
+                if not e then return end
+                expr.walk(e, function (x)
+                    if x.k == 'vararg' then vararg = true end
+                    if x.k == 'name' then
+                        local u = tostring(x.n)
+                        if not pset[u] and not dset[u] then reads[u] = true end
+                    end
+                end)
+            end
             for _, x in ipairs(s.expr.lhs or {}) do scan(x) end
             for _, x in ipairs(s.expr.rhs or {}) do scan(x) end
+            -- ⚠ REDUNDANT TODAY, KEPT DELIBERATELY. A conditional row encodes
+            -- its guard TWICE — once as the row's `rhs` and once as `cond` — so
+            -- dropping this scan currently breaks no test (mutation-checked).
+            -- That is a property of the row model, not a guarantee: a language
+            -- whose rows do not duplicate the guard would lose every
+            -- condition-only capture, silently and in the widening direction.
             scan(s.expr.cond)
         end
     end

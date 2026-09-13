@@ -3972,6 +3972,12 @@ function M.family_edit(fam, op, opts)
     -- narrowing and silent about DERIVED narrowing, because a re-derivation is
     -- not a move in the order.
     --
+    -- ★ THIS IS THE PROTOTYPE'S STATED DESIGN, NOT A DEFECT (DOMAINS.md, which
+    -- uses pin-then-open as its own illustration): "a derived closed domain
+    -- never refuses an OBSERVATION; it widens on the next one". `match` is a
+    -- strict test and refuses; `adjoin` is an observation and widens — which is
+    -- why `family_adopt` takes the dropped member back.
+    --
     -- ⇒ The values are NOT gone: the original family still holds them. To undo,
     --   re-edit the ORIGINAL. To bring a dropped member back into an edited
     --   family is an ADOPTION (a match), which the prototype names `adjoin` —

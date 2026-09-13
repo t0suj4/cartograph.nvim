@@ -172,3 +172,83 @@ test('hoist-closure: a declaration abutting a sibling\'s first line still counts
     ok(hc.plan(store, id_of('pure')), 'the capture-free closure still lifts')
     vim.fn.delete(root, 'rf')
 end)
+
+--- ★★★ A FIELD SELECTOR IS NOT A VARIABLE READ (CART-0259). `s.use` is
+--- FLATTENED: it lists the selector of `rec.file` and the KEY of `{ ref = x }`
+--- beside genuine reads, so a closure that merely touched a field named like an
+--- enclosing local was refused as capturing it. `inner` below captures NOTHING.
+---
+--- MEASURED on our own tree before the fix: of 135,885 uses, 44,397 (33%) are
+--- not name nodes — 32,812 field selectors and 11,585 table-constructor keys.
+--- Not a corner case; a third of the signal.
+local FIELD = 'local M = {}\nlocal function outer(recs)\n  local file = "out.txt"\n'
+    .. '  local function inner(rec)\n    return rec.file\n  end\n'
+    .. '  M.f = file\n  return inner(recs[1])\nend\nreturn M\n'
+
+test('hoist-closure: a FIELD named like an enclosing local is not a capture', function ()
+    local root = proj(FIELD)
+    local plan, why = hc.plan(store, id_of('inner'))
+    ok(plan, 'inner captures nothing and lifts: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
+--- AND A TABLE KEY IS NOT ONE EITHER — the other 11,585.
+local KEY = 'local M = {}\nlocal function outer()\n  local ref = 1\n'
+    .. '  local function mk(id)\n    return { ref = id, n = 2 }\n  end\n'
+    .. '  return mk, ref\nend\nreturn M\n'
+
+test('hoist-closure: a table-constructor KEY named like an enclosing local is not a capture', function ()
+    local root = proj(KEY)
+    local plan, why = hc.plan(store, id_of('mk'))
+    ok(plan, 'mk captures nothing and lifts: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ⚠ BOTH SIDES, and this is the one that matters: narrowing `reads` WIDENS a
+--- write verb. A genuine read of an enclosing local must STILL be refused, or
+--- the fix traded a false refusal for a false permission.
+local REAL = 'local M = {}\nlocal function outer(recs)\n  local file = "out.txt"\n'
+    .. '  local function inner(rec)\n    return rec.n .. file\n  end\n'
+    .. '  return inner(recs[1])\nend\nreturn M\n'
+
+test('hoist-closure: a genuine read of the same name is STILL refused', function ()
+    local root = proj(REAL)
+    local plan, why, detail = hc.plan(store, id_of('inner'))
+    eq(nil, plan)
+    ok(tostring(why):find('captures enclosing local `file`'),
+        'the real capture is still caught: ' .. tostring(why))
+    ok(detail and detail.captures == 'file', 'and named')
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ⚠ A CLOSURE'S OWN PARAM SHADOWING AN ENCLOSING NAME IS NOT A CAPTURE. The
+--- read set excludes this body's params and defs for exactly this reason;
+--- dropping that filter turns every local into a capture of any enclosing name
+--- that happens to match. Found by mutation — no fixture shadowed anything.
+local SHADOW = 'local M = {}\nlocal function outer()\n  local x = 1\n'
+    .. '  local function inner(x)\n    local y = x + 1\n    return y\n  end\n'
+    .. '  return inner, x\nend\nreturn M\n'
+
+test('hoist-closure: a param shadowing an enclosing local is not a capture', function ()
+    local root = proj(SHADOW)
+    local plan, why = hc.plan(store, id_of('inner'))
+    ok(plan, 'inner uses only its own `x` and lifts: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ⚠ AND THE CONDITION IS PART OF THE ROW. A row is `lhs = rhs ; C: cond`, and
+--- a capture appearing ONLY in the guard is still a capture. Found by mutation:
+--- dropping the `cond` scan broke no test, because every fixture captured in an
+--- lhs or rhs.
+local INCOND = 'local M = {}\nlocal function outer()\n  local flag = true\n'
+    .. '  local function inner(n)\n    if flag then return n end\n    return 0\n  end\n'
+    .. '  return inner, flag\nend\nreturn M\n'
+
+test('hoist-closure: a capture that appears ONLY in a condition is caught', function ()
+    local root = proj(INCOND)
+    local plan, why, detail = hc.plan(store, id_of('inner'))
+    eq(nil, plan)
+    ok(tostring(why):find('`flag`'), 'the guard-only capture is caught: ' .. tostring(why))
+    ok(detail and detail.captures == 'flag', 'and named')
+    vim.fn.delete(root, 'rf')
+end)
