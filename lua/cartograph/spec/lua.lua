@@ -915,8 +915,17 @@ return {
     end,
     -- what a NEW import of `dest` looks like here, and the alias it
     -- introduces — the write side of the wiring the verbs disclose
-    import_line = function (dest)
-        local mod = dest:gsub('%.lua$', ''):gsub('/init$', ''):gsub('/', '.')
+    import_line = function (dest, ctx)
+        -- ★ THE PACKAGE ROOT IS NOT PART OF THE MODULE PATH (CART-0917). Strip it
+        -- through the SAME declaration and the SAME marker gate the resolver uses
+        -- above — a literal 'lua/' here would be the second copy of the
+        -- declaration that this file's line 829 comment says not to write.
+        local rel = dest
+        if ctx and type(ctx.root) == 'string' and ctx.files and PKGROOT
+            and nvim_lua_root(ctx.root, ctx.files) then
+            rel = rel:gsub('^' .. PKGROOT:gsub('%p', '%%%0') .. '/', '')
+        end
+        local mod = rel:gsub('%.lua$', ''):gsub('/init$', ''):gsub('/', '.')
         local alias = dest:match('([%w_]+)%.lua$')
         if alias == 'init' then alias = dest:match('([%w_]+)/init%.lua$') end
         if not alias then return nil end

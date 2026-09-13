@@ -256,7 +256,9 @@ function M.plan(store, pair, opts)
                 end
             end
         end
-        require_line, alias = require('cartograph.providers.treesitter').import_line(a.file, dest)
+        local tsp0 = require 'cartograph.providers.treesitter'
+        require_line, alias = tsp0.import_line(a.file, dest,
+            tsp0.import_ctx(store.data.root, store.files))
         if not require_line then return nil, 'cannot form a require line for this language' end
         hazards[#hazards + 1] = ('verify the require path in `%s` resolves to %s'):format(require_line, dest)
     end
@@ -562,8 +564,9 @@ function M.plan_family(store, fam, opts)
             end
         end
 
-        require_line, alias = require('cartograph.providers.treesitter')
-            .import_line(files[1], dest)
+        local tsp1 = require 'cartograph.providers.treesitter'
+        require_line, alias = tsp1.import_line(files[1], dest,
+            tsp1.import_ctx(store.data.root, store.files))
         if not require_line then
             return nil, 'cannot form a require line for this language'
         end
@@ -667,8 +670,9 @@ function M.plan_family(store, fam, opts)
         -- members needs the import once, and inserting it three times would
         -- produce three identical requires.
         local tsp = require 'cartograph.providers.treesitter'
+        local ictx = tsp.import_ctx(store.data.root, store.files)
         for _, f in ipairs(files) do
-            local rl = tsp.import_line(f, dest)
+            local rl = tsp.import_line(f, dest, ictx)
             if not rl then
                 return nil, ('cannot form a require line for %s'):format(f)
             end

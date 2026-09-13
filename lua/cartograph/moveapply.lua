@@ -234,7 +234,8 @@ local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts)
             or ' — pass reexport=true to keep the surface')
         if opts and opts.reexport then
             local ls = file_lines(rel) or {}
-            local line, alias = ts.import_line(rel, dest)
+            local line, alias = ts.import_line(rel, dest,
+                ts.import_ctx(store.data.root, store.files))
             if not (line and alias) then
                 return nil, ('cannot wire a re-export in %s: no import idiom for'
                     .. ' %s in this language'):format(rel, dest)
@@ -425,7 +426,8 @@ local function collect(store, ids, dest, plan, opts)
                 if ok_site and not destAlias then
                     local imp2 = imports[F]
                     if imp2 == nil and okp and ls then
-                        local line, alias = ts.import_line(F, dest)
+                        local line, alias = ts.import_line(F, dest,
+                            ts.import_ctx(store.data.root, store.files))
                         -- decline an alias the file already uses
                         if line and alias and not table.concat(ls, '\n')
                             :find('%f[%w_]' .. alias .. '%f[^%w_]') then

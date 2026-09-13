@@ -3652,11 +3652,33 @@ function M.module_scaffold(file, name)
 end
 
 -- the import line a file would use to reach `dest`, and its alias —
--- nil when this language's wiring is not mechanically writable
-function M.import_line(from_file, dest)
+-- nil when this language's wiring is not mechanically writable.
+--
+-- ★★★ `ctx` IS WHAT MAKES THE MODULE PATH RIGHT, AND IT WAS MISSING (CART-0917).
+-- A language may resolve dotted module names from a PACKAGE ROOT (nvim: `lua/`),
+-- and that root is DECLARED in the ecosystem, marker-gated on the layout actually
+-- being present. The read side has consulted it since the declaration existed;
+-- this hook took only `dest`, so it could not, and emitted
+-- `require 'lua.cartograph.x'` for `lua/cartograph/x.lua` — a path that resolves
+-- to nothing from runtimepath. Passing the context lets the SAME declaration
+-- answer in both directions instead of the write side guessing.
+-- ⚠ `ctx` IS OPTIONAL AND ITS ABSENCE IS NOT A ROOT-LESS ANSWER: without it the
+-- spec cannot run the marker gate, so it must fall back to the path-as-written.
+-- Every in-tree caller passes one; the fallback exists for a caller with no store.
+function M.import_line(from_file, dest, ctx)
     local _, spec = elang_for(from_file)
     if not (spec and spec.import_line) then return nil end
-    return spec.import_line(dest)
+    return spec.import_line(dest, ctx)
+end
+
+--- build the context `import_line` needs from a store's own two facts. The file
+--- SET is what the marker gate iterates; the store keeps an array, and handing
+--- the array straight in would iterate integer keys and raise on the first match.
+--- @return table ctx
+function M.import_ctx(root, files)
+    local set = {}
+    for _, f in ipairs(files or {}) do set[f] = true end
+    return { root = root, files = set }
 end
 
 -- patterns matching this file's import lines (new-import placement)

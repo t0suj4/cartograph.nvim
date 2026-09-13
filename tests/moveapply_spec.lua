@@ -610,3 +610,35 @@ test('moveapply: reexport=true keeps the moved name on the source module', funct
     eq('function', type(okl and A.foo), 'and M.foo is STILL REACHABLE through it')
     eq(6, okl and A.foo(5))
 end)
+
+--- ★★★ THE PACKAGE ROOT IS NOT PART OF THE MODULE PATH (CART-0917), and this is
+--- pinned BOTH WAYS because a one-sided assertion would pass on a dead predicate.
+--- The resolver has consulted the declared `package_root` since it existed; the
+--- WRITE side took only `dest` and so emitted `require 'lua.cartograph.x'` for
+--- `lua/cartograph/x.lua` — text that renders fine and resolves to nothing from
+--- runtimepath. Found by LOADING an extracted module, never by reading a diff.
+test('moveapply: an emitted require drops the package root — and keeps it when there is none', function ()
+    if not ready() then skip('no lua parser') end
+    local tsp = require 'cartograph.providers.treesitter'
+
+    -- an nvim-plugin layout: the marker gate fires on `lua/**.lua` being present
+    local plug = { 'lua/cartograph/algebra/core.lua', 'lua/cartograph/algebra/hopau.lua' }
+    local pctx = tsp.import_ctx('/tmp/plug', plug)
+    local line, alias = tsp.import_line('lua/cartograph/algebra/core.lua',
+        'lua/cartograph/algebra/hopau.lua', pctx)
+    eq('hopau', alias)
+    ok(line:find("require 'cartograph.algebra.hopau'", 1, true),
+        'the package root is stripped: ' .. tostring(line))
+    ok(not line:find('lua.cartograph', 1, true), 'and not merely dotted: ' .. tostring(line))
+
+    -- ⚠ THE OTHER SIDE. A tree with no `lua/` layout must be UNCHANGED, or the
+    -- fix is a literal 'lua/' rule wearing a declaration's clothes.
+    local flat = { 'sub/f.lua', 'm.lua' }
+    local fline = tsp.import_line('m.lua', 'sub/f.lua', tsp.import_ctx('/tmp/flat', flat))
+    ok(fline:find("require 'sub.f'", 1, true), 'a root-less layout is untouched: ' .. tostring(fline))
+
+    -- and a caller with NO context cannot run the marker gate, so it must fall
+    -- back to the path as written rather than inventing a root
+    local nline = tsp.import_line('lua/a/b.lua', 'lua/a/c.lua')
+    ok(nline:find("require 'lua.a.c'", 1, true), 'no ctx = no stripping: ' .. tostring(nline))
+end)
