@@ -172,7 +172,7 @@ function M.attach(data)
         local first = e.sites[1].call
         local id = 'sql::table:' .. t:lower()
         data.nodes[#data.nodes + 1] = { id = id, name = 'table ' .. t,
-            kind = 'var', sql = true, file = first.file,
+            kind = 'var', sql = true, origin = 'derived', via = 'sql', file = first.file,
             order = first.line,
             range = key_range(first, t) }
         stats.tables = stats.tables + 1

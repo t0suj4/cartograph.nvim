@@ -100,7 +100,7 @@ function M.attach(data)
         if #regs == 1 or samefile then
             local r = regs[1]
             local node = { id = 'route::' .. full, name = 'route ' .. full,
-                kind = 'var', dj = true, file = r.file, order = r.line,
+                kind = 'var', dj = true, origin = 'derived', via = 'django', file = r.file, order = r.line,
                 range = { start = { line = r.line, char = 0 },
                     ['end'] = { line = r.line, char = 0 } } }
             data.nodes[#data.nodes + 1] = node
@@ -129,7 +129,7 @@ function M.attach(data)
         end
         if hit then
             data.edges[#data.edges + 1] = { from = from_id, to = hit.id,
-                kind = 'use', dj = true,
+                kind = 'use', dj = true, origin = 'derived', via = 'django',
                 at = { { start = { line = line, char = 0 },
                     ['end'] = { line = line, char = 0 } } } }
             used[hit.id] = true

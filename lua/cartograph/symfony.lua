@@ -143,7 +143,7 @@ function M.attach(data)
             end
             seen[rt.name] = rt
             local node = { id = 'sfroute::' .. rt.name, name = 'route ' .. rt.name,
-                kind = 'var', sf = true, file = rt.file, order = rt.line,
+                kind = 'var', sf = true, origin = 'derived', via = 'symfony', file = rt.file, order = rt.line,
                 range = { start = { line = rt.line, char = 0 },
                     ['end'] = { line = rt.line, char = 0 } } }
             data.nodes[#data.nodes + 1] = node

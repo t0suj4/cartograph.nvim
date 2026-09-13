@@ -40,3 +40,39 @@ test('validate: each violation class is caught', function ()
         ok(r.violations[rule], rule .. ' caught')
     end
 end)
+
+-- CART-0887. The charter demands "a reified fact must say how it came to be"; until
+-- now the schema could not carry it, and the manual said of accessor reads that they
+-- are "shown, never minted as edges — the graph has nowhere to record where an edge
+-- came from yet, and an edge that cannot say would launder one kind of claim as the
+-- other". `origin` is the strength, `via` the channel — two fields because
+-- characterize.lua learned from a shipped bug that "THE CHANNEL RECORDS HOW, THE TIER
+-- RECORDS HOW STRONG".
+test('validate: a derived fact with no `via` is the laundering the field exists to stop', function ()
+    local base = { id = 'a.lua::f@1', name = 'f', kind = 'function',
+        file = 'a.lua', range = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 1 } } }
+    local function check(extra)
+        local n = vim.tbl_extend('force', {}, base, extra or {})
+        return validate.check({ nodes = { n }, edges = {}, calls = {}, root = '/x' })
+    end
+    -- ⚠ `check` returns { checked, ok, violations } and the rules live under
+    -- `violations`, keyed by rule name. Two wrong guesses before reading it: a list
+    -- of flags, then a top-level map. Both read as "the validation never fires" when
+    -- it was firing correctly one level down — an accessor error, not a code one.
+    local function flagged(res, tag)
+        for rule in pairs((res or {}).violations or {}) do
+            if tostring(rule):find(tag, 1, true) then return true end
+        end
+        return false
+    end
+    -- observed needs no via: the parse said so and the file is the witness
+    ok(not flagged(check { origin = 'observed' }, 'origin'), 'observed alone is fine')
+    -- derived without via is the laundering
+    ok(flagged(check { origin = 'derived' }, 'origin-via'),
+        'derived with no via is flagged')
+    ok(not flagged(check { origin = 'derived', via = 'symfony' }, 'origin'),
+        'derived WITH via is fine')
+    -- and a value outside the three reads as "some other kind of fact" to consumers
+    ok(flagged(check { origin = 'guessed', via = 'x' }, 'origin'),
+        'an origin outside the three is flagged')
+end)

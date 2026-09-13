@@ -62,6 +62,24 @@ M.NODE_FIELDS = {
                     -- alt_keys hook produced at extraction
     -- token provider (stack languages)
     effect = true, derived = true, echeck = true,
+    -- ★★★ WHERE THIS FACT CAME FROM (CART-0887). The charter demands it in prose —
+    -- "A reified fact must say how it came to be. Observed, derived, or supplied" —
+    -- and until now the schema could not carry it, so the manual had to say of
+    -- accessor reads that they are "shown, never minted as edges — the graph has
+    -- nowhere to record where an edge came from yet, and an edge that cannot say
+    -- would launder one kind of claim as the other".
+    -- ⚠ NOT `prov` (CALL_FIELDS.prov is the resolution STAGE that landed c.to) and
+    -- NOT `derived` (taken above by the token provider). `origin` is the word
+    -- templates.lua already uses for the same concept.
+    -- ★★ AND `via` IS NOT DECORATION — IT IS THE SECOND AXIS. characterize.lua
+    -- learned this from a shipped bug and states it at its TIER_RANK: "THE CHANNEL
+    -- RECORDS HOW, THE TIER RECORDS HOW STRONG, and they are separate fields for
+    -- exactly this reason". A value observed by running against a declared fake
+    -- shipped as `measured` when it was a `claim`. `origin` is the strength; `via`
+    -- names the channel and the producer, and is REQUIRED whenever origin is not
+    -- `observed` — a derived fact that cannot say what derived it is the laundering
+    -- the manual warned about, wearing the new field.
+    origin = true, via = true,
     external = true, -- a MINTED external symbol (stdlib): no local def, file is
                      -- the synthetic profile scheme (`zig-std`) — the target of a
                      -- stdlib-tier resolution ([[cartograph-stdlib-profile]])
@@ -74,9 +92,41 @@ M.NODE_FIELDS = {
     -- row slice, _flowp0/_flowpn = params slice.
     _flow = true, _flow0 = true, _flown = true, _flowp0 = true, _flowpn = true,
 }
+--- The three strengths the charter names. A fact carrying none of these is
+--- `observed` by default — the parse said so, and the file is re-readable.
+--- ★ Anything else MUST carry `via`: see the note on NODE_FIELDS.origin.
+M.ORIGINS = { observed = true, derived = true, supplied = true }
+
+--- ★★ THE FIELD IS ONLY WORTH HAVING IF IT CAN BE WRONG. Two checks, and the
+--- second is the one that carries the charter's meaning:
+---   · an `origin` outside the three is a typo that would silently read as "some
+---     other kind of fact" to every consumer;
+---   · a NON-OBSERVED fact with NO `via` is exactly the laundering this field was
+---     added to prevent — "derived" with nothing saying by what is indistinguishable
+---     from "the parse said so" the moment anyone reads it.
+--- ⚠ `observed` MAY omit `via`: the channel is the parse and the file is the
+--- witness, which is the one case where the source needs no naming.
+local function origin_ok(rec, what, flag)
+    local o = rec.origin
+    if o == nil then return end
+    if not M.ORIGINS[o] then
+        flag(what .. '-origin', ('%s on %s'):format(tostring(o), tostring(rec.id or '?')))
+    elseif o ~= 'observed' and (rec.via == nil or rec.via == '') then
+        flag(what .. '-origin-via', ('%s is %s with no via'):format(
+            tostring(rec.id or '?'), tostring(o)))
+    end
+end
+
 M.EDGE_FIELDS = {
     from = true, to = true, kind = true, at = true, atn = true,
     inferred = true, self = true,
+    -- see NODE_FIELDS.origin: the strength, and `via` the channel that produced it.
+    -- ⚠ THESE ARE A DIFFERENT AXIS FROM THE TRUST TIERS BELOW, and the tiers already
+    -- mix two things: `tinf` is a METHOD, `proven`/`xlang` an ORACLE, and `conf`
+    -- ("runtime-confirmed, session-live overlay") is a CHANNEL filed among strengths.
+    -- `origin`/`via` are registered here saying which axis they are on, so they do
+    -- not become the fifth thing under one comment.
+    origin = true, via = true,
     -- trust tiers: type-inferred (graph-VM), oracle proven/xlang,
     -- runtime-confirmed (session-live overlay, self://loaded / MCP)
     tinf = true, proven = true, xlang = true, conf = true,
@@ -185,6 +235,7 @@ function M.check(data)
                 flag('node-field', ('%s on %s'):format(k, tostring(n.id)))
             end
         end
+        origin_ok(n, 'node', flag)
     end
 
     local function endpoint(id)

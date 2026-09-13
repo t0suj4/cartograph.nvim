@@ -60,7 +60,7 @@ function M.link(data, db, opts)
     for _, n in ipairs(db.nodes) do
         local copy = {}
         for k, v in pairs(n) do copy[k] = v end
-        copy.db = true
+        copy.db = true; copy.origin = 'derived'; copy.via = 'dblink'
         data.nodes[#data.nodes + 1] = copy
         if n.kind == 'var' then
             tablenames[#tablenames + 1] = n.name
@@ -72,7 +72,7 @@ function M.link(data, db, opts)
     for _, e in ipairs(db.edges) do
         local copy = {}
         for k, v in pairs(e) do copy[k] = v end
-        copy.db = true
+        copy.db = true; copy.origin = 'derived'; copy.via = 'dblink'
         data.edges[#data.edges + 1] = copy
     end
 

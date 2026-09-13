@@ -268,7 +268,7 @@ function M.attach(data)
                         if not node then
                             node = { id = 'handler::' .. hname,
                                 name = 'handler ' .. hname, kind = 'var',
-                                an = true, file = rel, order = line or 0,
+                                an = true, origin = 'derived', via = 'ansible', file = rel, order = line or 0,
                                 range = { start = { line = line or 0, char = 0 },
                                     ['end'] = { line = line or 0, char = 0 } } }
                             data.nodes[#data.nodes + 1] = node
@@ -314,7 +314,7 @@ function M.attach(data)
     local file_node = {}
     local function ensure_file(rel)
         if file_node[rel] then return file_node[rel] end
-        local node = { id = rel, name = rel, kind = 'module', an = true,
+        local node = { id = rel, name = rel, kind = 'module', an = true, origin = 'derived', via = 'ansible',
             file = rel, order = -1, range = R0 }
         data.nodes[#data.nodes + 1] = node
         file_node[rel] = node
