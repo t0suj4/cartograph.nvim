@@ -190,6 +190,41 @@ test('clones: an inserted row and a wrapped expression are DIFFERENT structural 
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0876. A hole reading locals is a FUNCTION of them, and that dependency list IS
+-- the helper's argument list. `extract_proposal` used to answer every structural pair
+-- with "extract by hand", discarding a signature it could derive: the struct holes
+-- carry both diverging subterms, and the locals each reads are the arguments.
+-- Measured on cartograph's own tree, 14 of 31 structural pairs carry such a hole —
+-- the prototype's independent binder pass put it at fifteen once the row-misalignment
+-- artefact (CART-0875) was discounted.
+test('clones: a divergence reading a local is reported as a FUNCTION of the local', function ()
+    -- the accessor-migration shape: one side reads `c.line`, the other CALLS `line(c)`.
+    -- Different node kinds, so a struct hole — and both sides read the local `c`.
+    local base = '  local a = load(src)\n  local c = trim(a)\n'
+    local body_a = base .. '  local d = c.line\n  persist(d)\n  return d'
+    local body_b = base .. '  local d = line(c)\n  persist(d)\n  return d'
+    local root = proj {
+        ['x1.lua'] = fn('acc_one', 'src', body_a),
+        ['x2.lua'] = fn('acc_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 3, min_rows = 4, min_shared = 2 }),
+        'acc_one', 'acc_two')
+    ok(p, 'acc_one and acc_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok(an and #(an.structs or {}) > 0, 'the divergence is a struct hole')
+    local dep
+    for _, h in ipairs(an and an.structs or {}) do
+        for _, d in ipairs(h.deps_a or {}) do if d == 'c' then dep = d end end
+        for _, d in ipairs(h.deps_b or {}) do if d == 'c' then dep = d end end
+    end
+    ok(dep == 'c', 'the hole reports the local `c` as its dependency (got '
+        .. tostring(dep) .. ')')
+    -- and the proposal says so instead of only refusing
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('FUNCTION of (c)', 1, true), 'the proposal names it a FUNCTION of (c)')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- CART-0881. The wrapper verdict NAMES ITS EVIDENCE, because the two signals that
 -- produce it are not the same claim. Measured over 319 structural pairs on two
 -- corpora against the algebra's own context variable: a SELECTOR hole (field or

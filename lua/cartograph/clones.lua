@@ -873,6 +873,30 @@ end
 
 local function is_local(n, locals) return locals and locals[n] or false end
 
+--- ★★★ WHICH LOCALS DOES THIS SUBTERM ACTUALLY READ? That list IS the signature of
+--- the helper parameter the hole would become (CART-0876; NEARBINDERS.md ran exactly
+--- this over these pairs). A hole reading NO local is a VALUE parameter — hand it a
+--- value. A hole reading locals is a FUNCTION parameter applied to them: the
+--- prototype writes it `Y(c) : c.line = callrec.line(c)`, ONE parameter with EIGHT
+--- sites, and that dependency list is what the extract verb must put in the helper's
+--- argument list.
+--- ⚠ IT NARROWS TO WHAT IS USED, not what is in scope (the prototype's `Sol` does the
+--- same). A subterm sitting under ten locals but reading one takes one argument.
+--- ★ `is_local` is the SAME predicate `anti_unify` uses, so a name counted here is a
+--- name that function alpha-collapsed — not a second notion of localness.
+local function local_deps(node, locals)
+    local out = {}
+    if not node or not locals then return out end
+    local seen = {}
+    expr.walk(node, function (n)
+        if n.k == 'name' and is_local(n.n, locals) and not seen[n.n] then
+            seen[n.n] = true; out[#out + 1] = n.n
+        end
+    end)
+    table.sort(out)
+    return out
+end
+
 -- "nameA / nameB" for a pair, for report headers
 local function p_name(pair) return ('%s / %s'):format(pair.a.name, pair.b.name) end
 
@@ -1169,6 +1193,9 @@ function M.analyze_pair(pair)
         if h.kind == 'struct' then
             nstruct = nstruct + 1
             structs[#structs + 1] = h
+            -- the helper signature this hole would carry, per side
+            h.deps_a = local_deps(h.xn, pair.a.locals)
+            h.deps_b = local_deps(h.yn, pair.b.locals)
             if h.why == 'arity' then why_arity = why_arity + 1
             elseif h.why == 'localglobal' then why_lg = why_lg + 1
             else
@@ -1538,9 +1565,41 @@ function M.extract_proposal(pair, store)
         return { ('%s are an EXACT clone after anti-unification (the near-distance was'
             .. ' alpha-renaming) — :CartographMerge applies directly.'):format(p_name(pair)) }
     elseif a.kind == 'structural' then
-        return { ('%s differ structurally (%d inserted/deleted statement(s) and/or a shape'
-            .. ' change) — not a clean value-parameterization; extract by hand.')
-            :format(p_name(pair), a.insdel) }
+        -- ★★★ "EXTRACT BY HAND" THREW AWAY A SIGNATURE IT COULD HAVE DERIVED
+        -- (CART-0876). A structural pair is not one thing: its struct holes carry the
+        -- two diverging subterms, and the LOCALS each subterm reads ARE the helper's
+        -- argument list. Measured on cartograph's own tree, 14 of the 31 structural
+        -- pairs carry such a hole — the prototype's binder pass, run on these same
+        -- pairs, put the figure at fifteen once its row-misalignment artefact (the
+        -- bug fixed in CART-0875) was discounted.
+        -- ⚠ THIS STILL DOES NOT CLAIM EXTRACTABILITY. Rows present on one side only
+        -- mean the bodies genuinely differ in statements, and no single helper covers
+        -- that. What changes is that the reader is told WHAT THE HELPER WOULD TAKE and
+        -- WHAT STILL BLOCKS IT, instead of one sentence that ends the conversation.
+        local L = { ('%s differ structurally (%d inserted/deleted statement(s), %d shape'
+            .. ' divergence(s)) — not a clean value-parameterization.')
+            :format(p_name(pair), a.insdel, a.struct or 0) }
+        local fn_params = {}
+        for _, h in ipairs(a.structs or {}) do
+            local d = (#(h.deps_a or {}) >= #(h.deps_b or {})) and h.deps_a or h.deps_b
+            if d and #d > 0 then fn_params[#fn_params + 1] = { h = h, deps = d } end
+        end
+        if #a.holes > 0 or #fn_params > 0 then
+            L[#L + 1] = '  the helper this WOULD take, derived:'
+            for i, h in ipairs(a.holes) do
+                L[#L + 1] = ('    p%d  a VALUE (%s):  %s  /  %s')
+                    :format(i, h.kind, tostring(h.a), tostring(h.b))
+            end
+            for i, f in ipairs(fn_params) do
+                -- a hole reading locals is a FUNCTION of them, not a value
+                L[#L + 1] = ('    f%d  a FUNCTION of (%s)   [%s divergence]')
+                    :format(i, table.concat(f.deps, ', '), tostring(f.h.why or 'kind'))
+            end
+        end
+        L[#L + 1] = ('  what blocks a single helper: %s'):format(
+            a.insdel > 0 and ('%d row(s) on one side only'):format(a.insdel)
+            or 'a shape divergence the value-parameterization cannot cross')
+        return L
     end
     local L = {
         ('helper extraction proposal — %s'):format(p_name(pair)),
