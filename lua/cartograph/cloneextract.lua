@@ -278,6 +278,20 @@ function M.plan(store, pair, opts)
         hp[i] = name
     end
     for i, p in ipairs(analysis.holes) do
+        -- ★★★ THE LOOP BELOW IS VACUOUS FOR AN EMPTY SITE LIST (CART-0372), and
+        -- `call_line` then indexes `p[sites_key][1]` and hands nil to `at.sl`,
+        -- which RAISES. `plan` has a refusal channel used for 4080 of 4294 pairs
+        -- on wow with precise reasons; raising on the 4295th loses a whole survey
+        -- to one input, which is exactly what happened to the fold queue.
+        --
+        -- ⚠ A HOLE WITH NO SITE ON ONE SIDE HAS NO ARGUMENT TO PASS at that call,
+        -- so there is nothing to guess at — the refusal is the answer, not a
+        -- fallback. Checking `[1]` rather than `#` because that is the index
+        -- `call_line` actually uses, and a sparse list makes the two disagree.
+        if not (p.sites_a and p.sites_a[1] and p.sites_b and p.sites_b[1]) then
+            return nil, ('hole %d has no located site on one side — there is no'
+                .. ' argument to pass at that call'):format(i)
+        end
         for _, side in ipairs({ { s = p.sites_a, open = a_open, close = a_close },
             { s = p.sites_b, open = b_open, close = b_close } }) do
             for _, r in ipairs(side.s) do

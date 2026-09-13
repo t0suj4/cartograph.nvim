@@ -339,3 +339,46 @@ test('extract-helper: a SAME-PHASE cross-file move may read that phase global', 
     end
     vim.fn.delete(root, 'rf')
 end)
+
+--- ★★★ A VERB WITH A REFUSAL CHANNEL MUST NOT RAISE (CART-0372). `plan` refuses
+--- 4080 of 4294 pairs on wow with precise reasons; raising on the 4295th loses
+--- the whole survey to one input, which is what happened to the fold queue —
+--- the first run printed a stack trace and none of the other 58 rows.
+---
+--- THE MECHANISM: the hole-validation loop iterates `side.s`, so it is VACUOUS
+--- for an empty site list. `call_line` then indexes `p[sites_key][1]` and hands
+--- nil to `at.sl`.
+---
+--- ⚠ FORCED, and honestly so: swept 5,055 pairs across three corpora (self 543
+--- at max_dist 24, factorio 218, wow 4,294) and the precondition occurs ZERO
+--- times today — the tree that produced the original witness has moved. But no
+--- commit ever touched that indexing, so the path is unchanged and the defect
+--- is LATENT, not fixed. Stubbing the analysis is the only way to reach it.
+test('extract-helper: a hole with no site on one side REFUSES, it does not raise', function ()
+    if not ready('lua') then return skip 'no lua parser' end
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\nlocal function fmt_a(x)\n  local y = prep(x)\n  local z = norm(y)\n'
+        .. '  local w = encode(z, \'json\')\n  local o = wrap(w)\n  return o\nend\n\n'
+        .. 'local function fmt_b(a)\n  local b = prep(a)\n  local c = norm(b)\n'
+        .. '  local d = encode(c, \'yaml\')\n  local e = wrap(d)\n  return e\nend\n\nreturn M\n' }
+    local pair = pair_of('fmt_a')
+    ok(pair ~= nil, 'the fixture yields a pair')
+    -- CONTROL: it plans cleanly before the injection, or this passes for the
+    -- wrong reason
+    ok(cx.plan(store, pair), 'the pair plans before the analysis is stubbed')
+
+    local saved = clones.analyze_pair
+    clones.analyze_pair = function (p)
+        local an = saved(p)
+        if an and an.holes and an.holes[1] then an.holes[1].sites_b = {} end
+        return an
+    end
+    local okc, plan, why = pcall(cx.plan, store, pair)
+    clones.analyze_pair = saved
+
+    ok(okc, 'plan RETURNS rather than raising: ' .. tostring(plan))
+    eq(nil, plan)
+    ok(tostring(why):find('no located site on one side'),
+        'and names the reason: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
