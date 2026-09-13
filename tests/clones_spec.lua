@@ -3207,3 +3207,156 @@ return M
     ok(tostring(v.lift_why):find('different sets'),
         'names the disagreement: ' .. tostring(v.lift_why))
 end)
+
+-- ── classify / propagate: an edit on ONE member, clustered ──────────────────
+--
+-- ★★★ THE DESIGN SENTENCE IS THE USER'S (PROPAGATE.md): an edit lands on one
+-- instance; whether the abstraction applies elsewhere is an OPERATOR DECISION;
+-- the machinery clusters the impact and shows previews so the decisions are per
+-- CLUSTER, not per member. So these tests assert the CLUSTERING and the KIND,
+-- never that anything was written -- `propagate` writes nothing by construction
+-- and hands back a commit closure instead.
+
+local function fam_prop_text(n, mul, tail, upper)
+    return ([[
+function M.g%s(t)
+    local acc = 0
+    local seen = {}
+    for i = 1, #t do acc = acc + t[i] * %s end
+    local s = tostring(acc)
+    local u = string.%s(s)
+    seen[u] = true
+    local pad = string.rep("-", #u)
+    local out = pad .. u
+    return out .. "%s"
+end
+]]):format(n, mul, upper or 'upper', tail)
+end
+
+test('family_propagate: an UNCHANGED member classifies as `none`', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    local r, why = clones.family_propagate(f, 1, fam_prop_text(1, 1, 1), store)
+    ok(r ~= nil, 'classified: ' .. tostring(why))
+    eq('none', r.kind)
+    -- ⚠ AND `none` MUST NOT CARRY CLUSTERS. Reporting an empty cluster set reads
+    -- as "nothing to propagate to", which is a different claim from "there is
+    -- nothing to propagate".
+    eq(nil, r.template)
+    eq(nil, r.holes)
+end)
+
+test('family_propagate: a VALUE edit clusters the family by what each member holds', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    -- every site of the varying literal moves to the SAME new value: the store
+    -- law holds, so this is a value edit and not a straddle
+    local r, why = clones.family_propagate(f, 1, fam_prop_text(1, 9, 9), store)
+    ok(r ~= nil, 'classified: ' .. tostring(why))
+    ok(r.kind == 'value' or r.kind == 'mixed',
+        'a value-only edit is `value` (or `mixed` if the name moved too): ' .. tostring(r.kind))
+    ok(r.holes and #r.holes > 0, 'it names the changed hole(s)')
+    local h = r.holes[1]
+    ok(h.class ~= nil, 'and the VALUE CLASS -- who already held the old value')
+    ok(h.others ~= nil, 'and the others, grouped by what they hold')
+    -- the commit closure is carried OUT, not called: nothing is written here
+    -- ⚠ A HOLE CARRIES A PREVIEW; THE COMMIT IS ONE AND SCOPED (member / class /
+    -- all / a list). Asserting a per-hole commit is what showed that committing
+    -- one hole for one member is not a decision the design offers.
+    ok(type(h.preview) == 'function', 'each hole carries a preview')
+    ok(type(r.commit.values) == 'function', 'and ONE scoped commit for the value part')
+
+    -- ⚠ EACH EDIT'S HOLE COUNT IS THE CLAIM, not merely that holes exist: a
+    -- one-hole edit must report ONE. The first cut read `P.holes` instead of
+    -- `P.values.holes` and answered nil for all three -- "a value edit changed no
+    -- holes", which is coherent-looking and impossible.
+    local one = clones.family_propagate(f, 1, fam_prop_text(1, 9, 1), store)
+    eq(1, #one.holes, 'an edit to ONE hole reports one')
+    eq(2, #r.holes, 'and an edit to both reports two')
+end)
+
+test('family_propagate: a FIXED-part edit propagates by migrate, grouping refusals', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+    -- `string.upper` -> `string.lower` is in the FIXED part: every hole is kept
+    local r, why = clones.family_propagate(f, 1, fam_prop_text(1, 1, 1, 'lower'), store)
+    ok(r ~= nil, 'classified: ' .. tostring(why))
+    ok(r.kind == 'template' or r.kind == 'mixed', 'a fixed-part change: ' .. tostring(r.kind))
+    ok(r.template ~= nil, 'the template part is present')
+    ok(#r.template.clean > 0, 'members survive the migration')
+    -- ★ REFUSALS ARE GROUPED BY REASON, which is the clustering the design is
+    -- for: a list of N refusals is a list; three reasons over N members is a
+    -- decision.
+    for _, g in ipairs(r.template.refused or {}) do
+        ok(g.why and g.members, 'each refusal group carries a reason and its members')
+    end
+    ok(type(r.commit.template) == 'function', 'and a commit closure, uncalled')
+end)
+
+test('family_propagate: unparseable text is a NAMED refusal, not a classification', function ()
+    need_alg()
+    local f = fam_edit_fixture()
+    if not f then skip 'no family' end
+    local r, why = clones.family_propagate(f, 1, 'function M.g1(t) return', store)
+    eq(nil, r)
+    ok(tostring(why):find('does not parse', 1, true), 'names the parse failure: ' .. tostring(why))
+    local r2, why2 = clones.family_propagate(f, 99, fam_prop_text(1, 1, 1), store)
+    eq(nil, r2)
+    ok(tostring(why2):find('not in this family', 1, true), 'and a bad member index: ' .. tostring(why2))
+end)
+
+--- ★★★ THE STRADDLE, AND IT NEEDS A NON-LINEAR HOLE. An edit that crosses a hole
+--- boundary cannot propagate: the abstraction has to move first. The only kind
+--- that carries a PROPOSAL rather than a hint is the STORE-LAW straddle — one
+--- site of a shared hole changed while its other sites did not — because only
+--- that one converges (split the changed sites, migrate, classify again).
+--- ⚠ A fixture with one site per hole cannot produce it, which is why the three
+--- tests above never reached this branch: removing the early return left the
+--- suite green because `propagate` guards the same case itself.
+test('family_propagate: one site of a SHARED hole is a straddle with a proposal', function ()
+    need_alg()
+    -- the literal appears TWICE per member, so anti-unification gives ONE hole
+    -- with TWO sites (Plotkin's rule: equal values in equal positions unify)
+    -- ⚠ AND IT MUST BE LONG ENOUGH TO BE A FAMILY. The first cut had six rows
+    -- and `families` returned nothing, so the test SKIPPED — a straddle test
+    -- that never runs is the same as no test, and it announced itself only as a
+    -- skip line nobody reads.
+    local function two(n, s1, s2)
+        return ([[
+function M.h%s(t)
+    local a = t[1] * %s
+    local b = t[2] * %s
+    local c = a + b
+    local d = c * 2
+    local e = d + 1
+    local g = e * 3
+    local h = g - 4
+    local k = h + 5
+    return k
+end
+]]):format(n, s1 or n, s2 or n)
+    end
+    proj { ['st.lua'] = 'local M = {}\n' .. two(1) .. two(2) .. two(3) .. 'return M\n' }
+    local r = clones.families(store, {})
+    local f = r and r.families[1]
+    if not f or f.holes == 0 then skip 'fixture yielded no family with holes' end
+
+    -- change ONE of the two sites: the store law breaks
+    local res, why = clones.family_propagate(f, 1, two(1, 9, 1), store)
+    ok(res ~= nil, 'classified: ' .. tostring(why))
+    eq('straddle', res.kind)
+    -- ★ AND A STRADDLE CARRIES NO CLUSTERS, because there is nothing to propagate
+    -- until the abstraction moves. Reporting an empty cluster set would read as
+    -- "propagates to nobody", a different and wrong claim.
+    eq(nil, res.template)
+    eq(nil, res.holes)
+    -- ★ THE STORE-LAW STRADDLE IS THE ONE THAT CARRIES A PROPOSAL, because it is
+    -- the only one that converges. The others carry a HINT, which is weaker, and
+    -- the prototype distinguishes them by name.
+    ok(res.proposal ~= nil, 'it carries a PROPOSAL, not merely a hint')
+    ok(tostring(res.why):find('store law', 1, true),
+        'and names the law that broke: ' .. tostring(res.why))
+end)

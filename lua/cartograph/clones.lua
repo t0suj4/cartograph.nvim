@@ -4255,4 +4255,142 @@ function M.family_admissibility(fam, store, opts)
     }
 end
 
+-- ── an edit on ONE member, propagated by COMMITMENT ─────────────────────────
+--
+-- ★★★ THE ARROWS ARE `classify` AND `propagate` (PROPAGATE.md). Their design
+-- sentence is the user's: an edit lands on one instance; whether the abstraction
+-- applies elsewhere is an OPERATOR DECISION; the machinery's job is to cluster
+-- the impact and show previews so the decisions are PER CLUSTER, NOT PER MEMBER.
+-- Nearest prior art is linked editing of clones (Toomim, Begel, Graham 2004).
+--
+-- ⚠ THIS VERB REPORTS AND DOES NOT DECIDE, and here that is the arrow's own
+-- contract rather than our house style: `propagate` hands back a `commit`
+-- CLOSURE and applies nothing until it is called. We carry that closure out
+-- instead of calling it, so the decision stays where the design put it.
+--
+-- ★★ FIVE KINDS, AND ONLY ONE OF THEM PROPAGATES CLEANLY:
+--      none       the edited text equals the member's instance
+--      value      only values changed; T intact; scopes member / class / all
+--      template   the fixed part changed, holes kept; propagates by `migrate`
+--      mixed      both; the TEMPLATE part propagates, the value part stays local
+--      straddle   the edit crossed a hole boundary; the abstraction must move
+--                 first. Only the STORE-LAW straddle carries a PROPOSAL, because
+--                 only it converges (split the changed sites, migrate, classify
+--                 again); the others carry a HINT, which is a weaker thing and
+--                 the prototype says so by name.
+--
+-- ⚠ AND `unsupported` IS NOT A STRADDLE. A repetition or context hole is outside
+-- what classify models at all; rendering the two alike would turn "we do not
+-- handle this shape" into "your edit was bad".
+
+--- Classify an edit made to ONE member's text and cluster its impact over the
+--- family, without writing anything.
+---
+--- @param fam table   a family record (`families` / `family_of`)
+--- @param i number    the 1-based member index whose text was edited
+--- @param text string the member's NEW source text
+--- @param store table
+--- @param opts table|nil
+--- @return table|nil result, string|nil why
+--- result = { kind, hint, proposal, holes = { {h, from, to, class, others} },
+---            template = { clean, refused = { {why, members} }, drifted },
+---            commit = { value = fn(h, scope), template = fn(members) } }
+function M.family_propagate(fam, i, text, store, opts)
+    opts = opts or {}
+    if type(fam) ~= 'table' or type(fam.template) ~= 'table' then
+        return nil, 'not a family record'
+    end
+    local Vs = fam.values
+    if type(Vs) ~= 'table' then return nil, 'the family carries no values' end
+    if type(i) ~= 'number' or not Vs[i] then
+        return nil, ('member %s is not in this family'):format(tostring(i))
+    end
+    if type(text) ~= 'string' or text == '' then return nil, 'no edited text' end
+
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+    if not (A.classify and A.propagate) then
+        return nil, 'this algebra has no classify/propagate'
+    end
+
+    -- ⚠ THE EDITED TEXT IS PARSED THROUGH THE SAME PATH `family_verify` READS A
+    -- RENDER BACK THROUGH, and for the same reason: a term is a SELECTOR, not a
+    -- source, so the only way to turn text into one is to parse it. The member's
+    -- own file decides the language -- an edit does not change it.
+    local m = fam.members and fam.members[i]
+    local file = m and (m.file or (m.ref and m.ref.file))
+    local lang = file and expr.lang_of(file)
+    if not lang then
+        return nil, ('no expression spec for %s -- the edit cannot be read')
+            :format(tostring(file))
+    end
+    local topts = { method = m and m.kind == 'method' or nil }
+    local eo, ewhy = expr.of_text(text, lang, topts)
+    if not eo then
+        return nil, ('the edited text does not parse as %s: %s')
+            :format(lang, tostring(ewhy))
+    end
+    local keys, _, _, exprs, locals = fn_row_keys(eo)
+    if not keys then return nil, 'the edited text has no harvestable rows' end
+    local I2 = alg.fn_term { exprs = exprs, locals = locals }
+    if not I2 then return nil, 'the edited text did not convert to a term' end
+
+    local C = A.classify(fam.template, Vs[i], I2)
+    if not C then return nil, 'classify returned nothing' end
+    local out = { kind = C.kind, why = C.why, hint = C.hint,
+        proposal = C.proposal, region = C.region, hole = C.hole }
+    -- ★ THE THREE NON-PROPAGATING KINDS ARE ANSWERS, NOT FAILURES. `none` means
+    -- the edit was a no-op against the abstraction; a straddle means the
+    -- ABSTRACTION must move first and carries the reason; `unsupported` means
+    -- the shape is outside the model. Each is reported with its own word, above.
+    --
+    -- ⚠ AND THERE IS DELIBERATELY NO EARLY RETURN FOR THEM HERE. The first cut
+    -- had one; MUTATION SHOWED IT WAS DEAD — `propagate` guards exactly those
+    -- three kinds as its own first statement, so deleting our copy changed
+    -- nothing the suite could see, in either direction. A second guard that
+    -- cannot fail is a dead predicate, and this repo's rule is that a dead
+    -- predicate passes every negative test ever written. The clusters below stay
+    -- nil for those kinds because `propagate` returns them nil, which is the
+    -- answer we want and the one it is contracted to give.
+    local P = A.propagate(fam.template, C, Vs, i)
+    if not P then return nil, 'propagate returned nothing' end
+
+    -- the VALUE part: per changed hole, who already holds the old value (the
+    -- class) and who holds something else, grouped by what they hold.
+    -- ⚠ IT IS `P.values.holes`, NOT `P.holes`. The first cut read the wrong
+    -- field and got nil -- which rendered as "a value edit changed no holes", a
+    -- coherent-looking answer that is not a possible one. A falsy answer is a
+    -- claim about MY ACCESSOR first; the test that asserted the clusters exist
+    -- is the only reason it did not ship.
+    -- ★ AND THE VALUE PART CARRIES ITS OWN COMMIT, scoped: `member`, `class`,
+    -- `all`, or an explicit list. A per-hole commit alone would lose the scope
+    -- vocabulary the design is built on.
+    local V = P.values
+    if V and V.holes then
+        -- ⚠ A HOLE CARRIES A `preview`, NOT A COMMIT. There is ONE commit for the
+        -- value part and it is SCOPED (member / class / all / a list) -- reading
+        -- a per-hole commit off these entries got nil, because committing one
+        -- hole for one member is not a decision the design offers.
+        out.holes = {}
+        out.commit = { values = V.commit }
+        for _, h in ipairs(V.holes) do
+            out.holes[#out.holes + 1] = { h = h.h, from = h.from, to = h.to,
+                class = h.class, others = h.others, preview = h.preview }
+        end
+        -- the widened template the family would adopt along with the values
+        out.widened = V.widened
+    end
+    -- the TEMPLATE part: migrate over the recorded rewrites. `refused` is
+    -- GROUPED BY REASON, which is the whole point of the clustering -- a list of
+    -- N refusals is a list; three reasons over N members is a decision.
+    if P.template then
+        out.template = { clean = P.template.clean, refused = P.template.refused,
+            drifted = P.template.drifted, preview = P.template.preview }
+        out.commit = out.commit or {}
+        out.commit.template = P.template.commit
+    end
+    return out
+end
+
 return M
