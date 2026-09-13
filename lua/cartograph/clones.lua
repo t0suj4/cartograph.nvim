@@ -878,6 +878,26 @@ local function p_name(pair) return ('%s / %s'):format(pair.a.name, pair.b.name) 
 
 -- descend e1,e2 in lockstep; append {kind,a,b} per divergence to `holes`.
 -- returns true iff structurally alignable (no struct hole below here).
+--- ★★★ DOES ONE SIDE KEEP SOMETHING THE OTHER ALSO HAS? That is the question a
+--- `kind` struct hole cannot answer from its own tag, and it is the difference
+--- between ENCLOSURE and REPLACEMENT:
+---     c.line   against   callrec.line(c)   share `c`   -> the wrapper's argument
+---     require 'x'  against  transport      share nothing -> a whole-term swap
+--- Exactly computable from the two nodes the hole already carries, using the
+--- canonical walker and the canonical key — no new traversal, no new authority.
+--- ⚠ IT USES `expr.key`, WHICH KEEPS REAL NAMES, not `rcanon`'s alpha-collapsed
+--- form. That is deliberate and it is the conservative direction: two DIFFERENT
+--- locals will not be mistaken for a shared base. The cost is that a genuinely
+--- shared base which was RENAMED between the copies reads as unshared.
+local function shares_subterm(x, y)
+    if not x or not y then return false end
+    local seen = {}
+    expr.walk(x, function (n) seen[expr.key(n)] = true end)
+    local hit = false
+    expr.walk(y, function (n) if seen[expr.key(n)] then hit = true end end)
+    return hit
+end
+
 local function anti_unify(e1, e2, la, lb, holes)
     if e1 == nil and e2 == nil then return true end
     if e1 == nil or e2 == nil then
@@ -1143,13 +1163,17 @@ function M.analyze_pair(pair)
     -- So tagging the cause fences 8 of 21 soundly and leaves 13 needing the real
     -- question: does one side CONTAIN what the other has bare? One witness is not a
     -- population, even when it is the right witness.
-    local nstruct, why_arity, why_kind, why_lg = 0, 0, 0, 0
+    local nstruct, why_arity, why_kind, why_lg, kind_shared = 0, 0, 0, 0, 0
     for _, h in ipairs(holes) do
         if h.kind == 'struct' then
             nstruct = nstruct + 1
             if h.why == 'arity' then why_arity = why_arity + 1
             elseif h.why == 'localglobal' then why_lg = why_lg + 1
-            else why_kind = why_kind + 1 end
+            else
+                why_kind = why_kind + 1
+                -- measured only, so far: the verdict below still reads `struct > 0`
+                if shares_subterm(h.xn, h.yn) then kind_shared = kind_shared + 1 end
+            end
         end
     end
     local structural = insdel > 0 or nstruct > 0
@@ -1340,11 +1364,41 @@ function M.analyze_pair(pair)
         -- misleads in BOTH directions: a consumer acting on "93%" is too cautious
         -- about `selector` and far too trusting of `shape`. An average over two
         -- populations with different reliability is not a property of either.
-        if shape ~= 'rows' then evidence = selector and 'selector' or 'shape' end
+        -- ★★★ THREE RUNGS, NOT TWO, AND THE VERDICT IS NOT NARROWED.
+        -- Containment on the `kind` bucket was built and scored against the algebra
+        -- (tools/algebradrive.lua): as a NARROWING it takes 93.4% -> 96.9% and
+        -- fixes 13 of the 21 over-reports — but it costs 2 UNDER-reports where
+        -- there were none, and an under-report means a `rows` verdict HIDING a
+        -- wrapper. That trades a sound bound for an accuracy gain, which is the one
+        -- trade this codebase consistently refuses (`tier.licenses`, "a profile can
+        -- only subtract, a false guarantee is unsound").
+        -- ⇒ SO THE SIGNAL IS REPORTED, NOT ACTED ON: nothing is demoted to `rows`,
+        --   the upper bound survives, and the reader gets the precision as a RUNG.
+        if shape ~= 'rows' then
+            if selector then evidence = 'selector'          -- 30/30 measured
+            elseif why_kind > 0 and kind_shared == 0 then
+                evidence = 'shape-unshared'                 -- the weakest: the two
+                -- sides of every `kind` hole share NO subterm, so nothing is kept
+                -- across the divergence and enclosure is unlikely. 13 of the 21
+                -- measured over-reports are here.
+                -- SCORED against the algebra's context variable:
+                --      evidence          lua          wow           both
+                --      selector        10/10  100%   20/20  100%   30/30  100%
+                --      shape            5/6    83%   61/68   90%   66/74   89%
+                --      shape-unshared   5/6    83%    1/13    8%    6/19   32%
+                -- ⚠⚠ AND THE BOTTOM RUNG DISAGREES WITH ITSELF ACROSS CORPORA —
+                -- 83% right on lua, 92% WRONG on wow. n=6 on lua is small enough
+                -- that this may be noise, but it is NOT yet a stable property and
+                -- must not be quoted as "32% reliable" as though that were one
+                -- number. What IS stable: the rung is where the over-reports
+                -- concentrate, and `selector` is exact on both.
+            else evidence = 'shape' end
+        end
     end
     return { kind = kind, holes = params, insdel = insdel, drift = drift,
         struct = nstruct, shape = shape, evidence = evidence,
-        struct_why = { arity = why_arity, kind = why_kind, localglobal = why_lg } }
+        struct_why = { arity = why_arity, kind = why_kind, localglobal = why_lg,
+            kind_shared = kind_shared } }
 end
 
 --- Human-readable report for M.near pairs. `store` is used to show the differing
@@ -1400,6 +1454,8 @@ function M.near_report(pairs_, store)
         rows = 'structural: ROWS ONLY (inserted/deleted statements — a repetition hole)',
         ['wrapper/selector'] = 'structural: A WRAPPER (one side encloses the other — a context hole)',
         ['wrapper/shape'] = 'structural: MAYBE A WRAPPER (shape divergence only — may be an arity difference)',
+        ['wrapper/shape-unshared'] = 'structural: PROBABLY NOT A WRAPPER (the diverging sides share nothing)',
+        ['mixed/shape-unshared'] = 'structural: ROWS, and probably not a wrapper (the diverging sides share nothing)',
         ['mixed/selector'] = 'structural: WRAPPER + ROWS (one side encloses the other, and rows differ)',
         ['mixed/shape'] = 'structural: ROWS, and MAYBE a wrapper (shape divergence only)',
     }

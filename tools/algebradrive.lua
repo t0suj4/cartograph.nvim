@@ -363,6 +363,33 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                     -- ★ WHICH SIGNAL FIRED? The rule is `struct > 0 OR field/op`.
                     -- Knowing which half over-claims is the difference between
                     -- "the rule is 93%" and a mechanism that can be fixed.
+                    -- ★★★ SCORE THE CANDIDATE NARROWING TOO: a `kind` struct hole
+                    -- counts as wrapper evidence ONLY IF the two sides share a
+                    -- subterm (enclosure keeps something; replacement does not).
+                    -- arity and localglobal holes stop counting entirely.
+                    -- ⚠ BOTH DIRECTIONS ARE SCORED. The shipped rule's value is that
+                    -- it has ZERO under-reports, so `shape` reads as an UPPER BOUND;
+                    -- a narrowing that buys precision by losing that is not an
+                    -- improvement, it is a different and weaker claim.
+                    local w = ours.struct_why or {}
+                    -- ⚠ A PAIR HAS MANY HOLES WITH DIFFERENT CAUSES, so a narrowing
+                    -- must be per-HOLE while the verdict is per-PAIR. My first cut
+                    -- dropped arity and localglobal evidence entirely and under-
+                    -- reported 7 true wrappers on lua alone — pairs that carry an
+                    -- inserted argument AND a wrapper elsewhere. Narrow only the
+                    -- bucket the argument was about: a `kind` hole must share a
+                    -- subterm; arity and localglobal keep whatever they were worth.
+                    local cand = (ours.evidence == 'selector')
+                        or (w.kind or 0) > 0 and (w.kind_shared or 0) > 0
+                        or (w.arity or 0) > 0 or (w.localglobal or 0) > 0
+                    local truth = h.ctx > 0
+                    bump(cand == truth and 'CANDIDATE agrees'
+                        or (cand and '★ CANDIDATE over-reports' or '★★ CANDIDATE UNDER-REPORTS'))
+                    if mine ~= cand then
+                        bump('   ⤷ candidate differs from shipped: ' ..
+                            (cand and 'candidate says wrapper' or 'candidate says rows')
+                            .. (truth == cand and ' (and is RIGHT)' or ' (and is WRONG)'))
+                    end
                     -- ★ SCORE BY EVIDENCE, which is the claim the field makes:
                     -- `selector` is documented as having zero false positives, so
                     -- a single disagreement in that bucket falsifies the field's
