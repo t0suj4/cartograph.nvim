@@ -1164,9 +1164,11 @@ function M.analyze_pair(pair)
     -- question: does one side CONTAIN what the other has bare? One witness is not a
     -- population, even when it is the right witness.
     local nstruct, why_arity, why_kind, why_lg, kind_shared = 0, 0, 0, 0, 0
+    local structs = {}
     for _, h in ipairs(holes) do
         if h.kind == 'struct' then
             nstruct = nstruct + 1
+            structs[#structs + 1] = h
             if h.why == 'arity' then why_arity = why_arity + 1
             elseif h.why == 'localglobal' then why_lg = why_lg + 1
             else
@@ -1398,7 +1400,14 @@ function M.analyze_pair(pair)
     return { kind = kind, holes = params, insdel = insdel, drift = drift,
         struct = nstruct, shape = shape, evidence = evidence,
         struct_why = { arity = why_arity, kind = why_kind, localglobal = why_lg,
-            kind_shared = kind_shared } }
+            kind_shared = kind_shared },
+        -- ★ THE STRUCT HOLES THEMSELVES, which this function has always computed and
+        -- always dropped (`params` excludes them). Exposed so a consumer can ask the
+        -- question the counts cannot answer — what do the two diverging sides
+        -- actually have in common. FOURTH computed-and-discarded fact in this arc.
+        -- ⚠ `xn`/`yn` are LIVE REFERENCES into the expression tree, not copies, and
+        -- carry the same contract as the holes list: read, never mutate through them.
+        structs = structs }
 end
 
 --- Human-readable report for M.near pairs. `store` is used to show the differing

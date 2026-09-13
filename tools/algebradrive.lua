@@ -363,6 +363,48 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                     -- ★ WHICH SIGNAL FIRED? The rule is `struct > 0 OR field/op`.
                     -- Knowing which half over-claims is the difference between
                     -- "the rule is 93%" and a mechanism that can be fixed.
+                    -- ★★★ LET THE ALGEBRA CHARACTERISE THE DIVERGENCE ITSELF.
+                    -- Instead of reading witnesses one at a time, anti-unify the two
+                    -- diverging nodes of every `kind` struct hole and ask what the
+                    -- lgg RETAINED. If it is a bare hole, the two sides have nothing
+                    -- in common at all — a whole-term replacement, which encloses
+                    -- nothing. If structure survives, something is genuinely shared
+                    -- and a wrapper is possible. This is the machinery answering the
+                    -- question the counts could not, on its own terms.
+                    -- ⚠⚠ MY FIRST CUT ASKED `A.generalize` WHETHER THE LGG RETAINED
+                    -- STRUCTURE, AND THAT TEST IS VACUOUS BY DEFINITION. A `kind`
+                    -- struct hole means the two nodes have DIFFERENT ROOT SYMBOLS —
+                    -- that is why the hole exists — and the anti-unification of two
+                    -- terms with different roots IS a variable. It answered "bare
+                    -- hole" on 11 of 11 and could never have answered anything else:
+                    -- a constant standing where a computation belonged, which is the
+                    -- exact shape of the payload-accessor error.
+                    -- ⇒ THE RIGHT INSTRUMENT IS THE SAME ONE, APPLIED LOCALLY.
+                    -- `vertical` finds context variables; run it on the two small
+                    -- diverging NODES instead of the whole function and it answers
+                    -- "is one of these a context applied to the other" directly, and
+                    -- cheaply, because subterms are small.
+                    local retained, kindholes = 0, 0
+                    for _, sh in ipairs(ours.structs or {}) do
+                        if sh.why ~= 'arity' and sh.why ~= 'localglobal' and sh.xn and sh.yn then
+                            kindholes = kindholes + 1
+                            local tx = to_term(sh.xn, p.a.locals)
+                            local ty = to_term(sh.yn, p.b.locals)
+                            if tx and ty then
+                                local okg, gv = pcall(A.vertical, tx, ty, { skeleton = 'jwz' })
+                                if okg and gv and gv.templates and gv.templates[1] then
+                                    local hh = count_holes(gv.templates[1].body)
+                                    if hh.ctx > 0 then retained = retained + 1 end
+                                end
+                            end
+                        end
+                    end
+                    if kindholes > 0 then
+                        bump(('LOCAL vertical on kind holes: %s'):format(
+                            retained > 0 and 'a CONTEXT variable' or 'no context'))
+                        bump(('   ⤷ vs rigid: %s'):format(
+                            ((retained > 0) == (h.ctx > 0)) and 'agrees' or '★ differs'))
+                    end
                     -- ★★★ SCORE THE CANDIDATE NARROWING TOO: a `kind` struct hole
                     -- counts as wrapper evidence ONLY IF the two sides share a
                     -- subterm (enclosure keeps something; replacement does not).
@@ -382,7 +424,14 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                     local cand = (ours.evidence == 'selector')
                         or (w.kind or 0) > 0 and (w.kind_shared or 0) > 0
                         or (w.arity or 0) > 0 or (w.localglobal or 0) > 0
+                    -- the same rule with LOCAL VERTICAL replacing the containment
+                    -- test on the kind bucket — the algebra's own answer, node-scale
+                    local cand2 = (ours.evidence == 'selector')
+                        or (kindholes > 0 and retained > 0)
+                        or (w.arity or 0) > 0 or (w.localglobal or 0) > 0
                     local truth = h.ctx > 0
+                    bump(cand2 == truth and 'CAND2 (local vertical) agrees'
+                        or (cand2 and '★ CAND2 over-reports' or '★★ CAND2 UNDER-REPORTS'))
                     bump(cand == truth and 'CANDIDATE agrees'
                         or (cand and '★ CANDIDATE over-reports' or '★★ CANDIDATE UNDER-REPORTS'))
                     if mine ~= cand then
