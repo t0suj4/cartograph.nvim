@@ -44,7 +44,16 @@ M.LADDER = 1 -- v1: { version, ops = { {op='pin'|'open'|'dig'|'merge'|'split'|
            --     'rewrite'|'join', ...} } }, the vendored algebra's own log
            --     format at donor rev c07bdd40
 
-local CURRENT = { plan = 'PLAN', ladder = 'LADDER' }
+--- THE RECIPE: a list of VERB INVOCATIONS a composition runs in order. ★ IT IS
+--- NOT A LIST OF PLANS, and that distinction is the whole design: applying a plan
+--- BUMPS THE GRAPH GENERATION, after which every id in a held plan may name a
+--- different symbol — measured, the node stops resolving entirely. AN INVOCATION
+--- SURVIVES A GENERATION BUMP; A PLAN DOES NOT. So a recipe records what to ask
+--- for, and each step is re-derived against the graph as it then stands.
+M.RECIPE = 1 -- v1: { version, steps = { { verb, args } } }, args addressing
+           --     symbols by DURABLE REF and never by node id
+
+local CURRENT = { plan = 'PLAN', ladder = 'LADDER', recipe = 'RECIPE' }
 
 --- Is a recorded artifact safe to REPLAY here?
 ---
