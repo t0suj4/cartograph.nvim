@@ -470,20 +470,106 @@ function M.plan_family(store, fam, opts)
             table.concat(names, '; '):sub(1, 200))
     end
 
-    -- same-file only, and the language must be one we can synthesize
-    local file, lang
+    -- ⚠ ONE FILE OR MANY, and with N members a file may hold SEVERAL of them —
+    -- the ops have to be grouped per file, not per member.
+    local file, lang, byfile, files = nil, nil, {}, {}
     for _, i in ipairs(take) do
         local m = fam.members[i]
-        if file == nil then file = m.file elseif m.file ~= file then
-            return nil, 'the family spans more than one file — cross-file family'
-                .. ' extraction is not supported yet'
-        end
+        if file == nil then file = m.file end
+        if not byfile[m.file] then byfile[m.file] = {}; files[#files + 1] = m.file end
+        table.insert(byfile[m.file], i)
     end
+    table.sort(files)
+    local xfile = #files > 1
     lang = lang_of(file)
     if not (lang and EXTRACT[lang]) then
         return nil, ('no synthesis syntax for %s'):format(tostring(lang))
     end
+    for _, f in ipairs(files) do
+        if lang_of(f) ~= lang then
+            return nil, ('the family spans two languages (%s and %s)')
+                :format(lang, tostring(lang_of(f)))
+        end
+    end
     local syn = EXTRACT[lang]
+    if xfile and not syn.module then
+        return nil, ('cross-file extraction is not supported for %s yet (no module'
+            .. ' wiring)'):format(lang)
+    end
+
+    -- ── THE CROSS-FILE GATES, N-WAY ────────────────────────────────────────
+    local dest, alias, require_line
+    local hazards = {}
+    if xfile then
+        dest = opts.dest
+        if not dest then
+            return nil, ('the family spans %d files — pass a destination module'
+                .. ' path for the shared helper'):format(#files)
+        end
+        if dest:sub(1, 1) == '/' or dest:find('%.%.') then
+            return nil, 'the destination must be a plain path inside the project'
+        end
+        if txn.read_file(store.data.root, dest) then
+            return nil, dest .. ' already exists — pick a new module path'
+        end
+
+        -- ★ THE FREE-READ GATE, ONCE PER MEMBER. A moved body may read only
+        -- globals: a source-file LOCAL does not exist at the new home. With N
+        -- members this is N chances to fail, and one failure is the whole
+        -- family's — the helper is shared, so it must be movable for everyone.
+        local un = require 'cartograph.untangle'
+        for _, i in ipairs(take) do
+            local m = fam.members[i]
+            local mv = un.body_extractable(store, m.id)
+            local loc = file_locals(store, m.file)
+            for r in pairs(mv.reads or {}) do
+                if loc[r] then
+                    return nil, ('%s reads file-local `%s` — it cannot move to a'
+                        .. ' shared module'):format(m.name or '?', r)
+                end
+            end
+        end
+
+        -- ★★ THE PHASE GATE GETS STRICTER AS N GROWS, and that is the honest
+        -- shape rather than a limitation to apologise for. The shared home loads
+        -- in the UNION of every member's file's phases; a phase-bound global is
+        -- safe only if every destination phase is that global's own. Two files
+        -- may share a phase where five do not, so a family that a PAIR could
+        -- extract may be refused — the refusal names the union so the reader can
+        -- see why.
+        local found, phaseset = phases_of(store)
+        if found then
+            local dest_ph, phlist = {}, {}
+            for _, f in ipairs(files) do
+                for p in pairs(phaseset[f] or {}) do
+                    if not dest_ph[p] then dest_ph[p] = true; phlist[#phlist + 1] = p end
+                end
+            end
+            table.sort(phlist)
+            local nph = #phlist
+            for _, i in ipairs(take) do
+                local m = fam.members[i]
+                local mv = un.body_extractable(store, m.id)
+                for r in pairs(mv.reads or {}) do
+                    local pg = PHASE_GLOBAL[r]
+                    if pg and not (nph == 1 and dest_ph[pg]) then
+                        return nil, ('%s reads phase-bound global `%s` (%s phase), but'
+                            .. ' the shared module would load across phases {%s} —'
+                            .. ' not phase-safe'):format(m.name or '?', r, pg,
+                            table.concat(phlist, ', '))
+                    end
+                end
+            end
+        end
+
+        require_line, alias = require('cartograph.providers.treesitter')
+            .import_line(files[1], dest)
+        if not require_line then
+            return nil, 'cannot form a require line for this language'
+        end
+        hazards[#hazards + 1] = ('verify the require path in `%s` resolves to %s')
+            :format(require_line, dest)
+    end
 
     -- the donor is the FIRST ADMISSIBLE member, because the body text is its own
     local donor_i = take[1]
@@ -491,32 +577,42 @@ function M.plan_family(store, fam, opts)
     if not tmpl then return nil, twhy end
 
     local root = store.data.root
-    local lines = vim.split(txn.read_file(root, file) or '', '\n', { plain = true })
+    -- ⚠ ONE LINE ARRAY PER FILE. A member's filling is read from ITS OWN source,
+    -- and cross-file the files differ; a single `lines` would silently slice the
+    -- donor's text at another file's coordinates.
+    local linesof = {}
+    for _, f in ipairs(files) do
+        linesof[f] = vim.split(txn.read_file(root, f) or '', '\n', { plain = true })
+    end
 
-    -- every member's body span, and the earliest signature line (the helper goes
-    -- above it so it is in scope at every call)
-    local spans, earliest = {}, nil
+    -- every member's body span, and the earliest signature line PER FILE (the
+    -- same-file helper goes above the first member in that file)
+    local spans, earliest = {}, {}
     for _, i in ipairs(take) do
         local m = fam.members[i]
         local sig, open, close = body_span(store, m.id, m.lines or {})
         if not sig then
             return nil, ('%s is not a clean multi-line block'):format(m.name or '?')
         end
-        spans[i] = { sig = sig, open = open, close = close }
-        if earliest == nil or sig < earliest then earliest = sig end
+        spans[i] = { sig = sig, open = open, close = close, file = m.file }
+        if earliest[m.file] == nil or sig < earliest[m.file] then earliest[m.file] = sig end
     end
     -- ⚠ OVERLAP IS FATAL, and with N members it is O(N^2) rather than one check.
-    -- A nested pair would have both ops rewriting the same lines.
+    -- Only WITHIN a file: two members in different files cannot overlap, and
+    -- comparing their line numbers across files would invent a collision.
     for _, i in ipairs(take) do
         for _, j in ipairs(take) do
-            if i ~= j and not (spans[i].close < spans[j].sig or spans[j].close < spans[i].sig) then
+            if i ~= j and spans[i].file == spans[j].file
+                and not (spans[i].close < spans[j].sig or spans[j].close < spans[i].sig) then
                 return nil, ('%s and %s overlap (nested?) — cannot extract')
                     :format(fam.members[i].name or '?', fam.members[j].name or '?')
             end
         end
     end
 
-    local hname = fresh_name(store, { file }, fam.members[donor_i].name)
+    -- cross-file the helper lives in a NEW module, so no existing file's names
+    -- constrain it; same-file it must not collide in the one file it lands in
+    local hname = fresh_name(store, xfile and {} or { file }, fam.members[donor_i].name)
     local hparams = {}
     for _, p in ipairs((v.members[donor_i] or {}).nparams and {} or {}) do hparams[#hparams + 1] = p end
     do  -- the donor's own parameters, then one per hole
@@ -537,8 +633,8 @@ function M.plan_family(store, fam, opts)
     local plan = {
         verb = 'extract-family', generation = store.generation,
         guards = { 'parses' },
-        helper = hname, nparams = #tmpl.order, xfile = false, lang = lang,
-        files = {}, hazards = {}, partial = #take < v.n or nil,
+        helper = hname, nparams = #tmpl.order, xfile = xfile, lang = lang,
+        files = {}, hazards = hazards, partial = #take < v.n or nil,
         members = {}, left = {},
     }
     for _, rec in ipairs(v.refused) do
@@ -546,34 +642,70 @@ function M.plan_family(store, fam, opts)
             line = rec.line, reason = rec.reason }
     end
 
+    -- the CALLEE as each site writes it: a bare local same-file, `alias.helper`
+    -- through the require cross-file
+    local callee = xfile and (alias .. '.' .. hname) or hname
+    if xfile then
+        plan.create = { file = dest,
+            lines = syn.module(hname, table.concat(hparams, ', '), body) }
+        plan.creates = { [dest] = true }
+        plan.helper_call = callee
+    end
+
     local ops = {}
-    local sig_indent = indent_of(lines[spans[donor_i].sig + 1])
-    ops[#ops + 1] = { from0b = earliest, to0b = earliest - 1,
-        new = syn.local_helper(hname, table.concat(hparams, ', '), body, sig_indent) }
+    for _, f in ipairs(files) do ops[f] = nil end
+    local perfile = {}
+    for _, f in ipairs(files) do perfile[f] = {} end
+
+    if not xfile then
+        -- the helper as a local above the first member in this file
+        local sig_indent = indent_of(linesof[file][spans[donor_i].sig + 1])
+        table.insert(perfile[file], { from0b = earliest[file], to0b = earliest[file] - 1,
+            new = syn.local_helper(hname, table.concat(hparams, ', '), body, sig_indent) })
+    else
+        -- ⚠ ONE REQUIRE PER FILE, not one per member. A file holding three
+        -- members needs the import once, and inserting it three times would
+        -- produce three identical requires.
+        local tsp = require 'cartograph.providers.treesitter'
+        for _, f in ipairs(files) do
+            local rl = tsp.import_line(f, dest)
+            if not rl then
+                return nil, ('cannot form a require line for %s'):format(f)
+            end
+            local ip = import_point(linesof[f], tsp.import_pats(f))
+            table.insert(perfile[f], { from0b = ip, to0b = ip - 1, new = { rl } })
+        end
+    end
+
+    local un = require 'cartograph.untangle'
     for _, i in ipairs(take) do
         local m = fam.members[i]
-        local un = require 'cartograph.untangle'
         local mv = un.body_extractable(store, m.id)
         local args = {}
         for _, p in ipairs(mv.params or {}) do args[#args + 1] = p end
         -- ★ EACH MEMBER PASSES ITS OWN FILLING, read from ITS OWN source at the
-        -- span the template recorded for it — never the donor's.
+        -- span the template recorded for it — never the donor's, and never
+        -- another file's line array.
         for _, h in ipairs(tmpl.order) do
             local val = (fam.values[i] or {})[h]
             local ext = clones.term_extent(val)
             if not ext then
                 return nil, ('%s has no located value for %s'):format(m.name or '?', tmpl.params[h])
             end
-            args[#args + 1] = span_text(lines, ext)
+            args[#args + 1] = span_text(linesof[m.file], ext)
         end
-        ops[#ops + 1] = { from0b = spans[i].open, to0b = spans[i].close,
-            new = { indent_of(lines[spans[i].open + 1])
-                .. syn.ret(hname, table.concat(args, ', ')) } }
+        table.insert(perfile[m.file], { from0b = spans[i].open, to0b = spans[i].close,
+            new = { indent_of(linesof[m.file][spans[i].open + 1])
+                .. syn.ret(callee, table.concat(args, ', ')) } })
         plan.members[#plan.members + 1] = { id = m.id, name = m.name,
             ref = store.ref_of(m.id), file = m.file }
     end
-    plan.files[file] = { ops = ops }
-    plan.touched = { file }
+
+    for _, f in ipairs(files) do plan.files[f] = { ops = perfile[f] } end
+    plan.touched = {}
+    for _, f in ipairs(files) do plan.touched[#plan.touched + 1] = f end
+    if xfile then plan.touched[#plan.touched + 1] = dest end
+    table.sort(plan.touched)
     -- ★ JOIN THE PLAN PROTOCOL — the one line every builder ends with. Without
     -- it `dryrun` refuses with "this verb has not joined the plan protocol",
     -- which is a correct refusal and an easy one to mistake for a bad plan.

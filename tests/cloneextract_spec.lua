@@ -463,11 +463,13 @@ test('extract-family: one helper for N copies, each passing its own filling', fu
     vim.fn.delete(root, 'rf')
 end)
 
---- ⚠ CROSS-FILE IS REFUSED BY NAME IN v1. It needs a new module, N require
---- lines, the free-read gate over N files, and a phase gate whose union GROWS
---- with N. The pair verb already treats it as its own branch; half-doing it
---- here would be worse than saying so.
-test('extract-family: a family spanning two files is refused by name', function ()
+--- ★★★ CROSS-FILE: the helper becomes a NEW SHARED MODULE, each file gains ONE
+--- require, and every member delegates through the alias. The gates that make it
+--- sound are N-way: a moved body may read only globals (a source-file local does
+--- not exist at the new home), and on Factorio the module loads in the UNION of
+--- every member's phases — which GROWS with N, so a family a pair could extract
+--- may be refused.
+test('extract-family: cross-file creates a shared module and one require per file', function ()
     if not ready('lua') then return skip 'no lua parser' end
     need_algebra()
     local src = fam3_src()
@@ -479,12 +481,75 @@ test('extract-family: a family spanning two files is refused by name', function 
     if not fam then skip 'fixture yielded no family' end
     local files = {}
     for _, m in ipairs(fam.members) do files[m.file] = true end
-    local n = 0; for _ in pairs(files) do n = n + 1 end
-    if n < 2 then skip 'fixture family did not span files' end
+    local nf = 0; for _ in pairs(files) do nf = nf + 1 end
+    if nf < 2 then skip 'fixture family did not span files' end
 
-    local plan, why = cx.plan_family(store, fam)
+    -- ⚠ WITHOUT A DESTINATION IT REFUSES, naming the count rather than picking a
+    -- path: where a new module goes is the caller's decision, not the verb's
+    local none, why = cx.plan_family(store, fam)
+    eq(nil, none)
+    ok(tostring(why):find('destination module path'), 'asks for a home: ' .. tostring(why))
+
+    local plan, w2 = cx.plan_family(store, fam, { dest = 'lib/shared.lua' })
+    ok(plan, 'with a destination it plans: ' .. tostring(w2))
+    if plan then
+        eq(true, plan.xfile)
+        ok(plan.create and plan.create.file == 'lib/shared.lua', 'it creates the module')
+        ok(plan.helper_call and plan.helper_call:find('%.'),
+            'and members call it through an alias: ' .. tostring(plan.helper_call))
+        ok(#plan.hazards > 0, 'the require path rides as a HAZARD to verify, not a claim')
+
+        local _, after = cx.preview(store, plan)
+        -- the module holds the helper exactly once
+        local mod = after['lib/shared.lua']
+        ok(mod and mod:find('function M%.' .. plan.helper), 'the module defines the helper')
+
+        -- ⚠ ONE REQUIRE PER FILE, not one per member: a file holding two members
+        -- must not gain the import twice
+        for f in pairs(files) do
+            local text = after[f]
+            ok(text, 'the file was rewritten: ' .. f)
+            eq(1, select(2, text:gsub("require%s*%(?%s*'lib%.shared'", '')),
+                ('%s gains exactly one require'):format(f))
+            local pr = vim.treesitter.get_string_parser(text, 'lua'):parse()[1]:root()
+            ok(not pr:has_error(), f .. ' parses clean after the rewrite')
+        end
+        local pm = vim.treesitter.get_string_parser(mod, 'lua'):parse()[1]:root()
+        ok(not pm:has_error(), 'and so does the new module')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ⚠ THE FREE-READ GATE IS N-WAY, AND ONE FAILURE IS THE WHOLE FAMILY'S. A
+--- moved body may read only globals: a source-file LOCAL does not exist at the
+--- new home. The helper is SHARED, so it has to be movable for every member —
+--- with N members that is N chances to fail, not two.
+test('extract-family: cross-file refuses when ANY member reads a file-local', function ()
+    if not ready('lua') then return skip 'no lua parser' end
+    need_algebra()
+    local src = fam3_src()
+    local half = src:find('local function pick2')
+    -- ⚠ BOTH files declare `SENTINEL` and every body reads it, so the members
+    -- stay CLONES (an extra differing row would push them past the distance gate
+    -- and the fixture would yield no family at all — the first cut did exactly
+    -- that and SKIPPED).
+    local withlocal = src:gsub('seen%[acc%] = true', 'seen[acc] = SENTINEL')
+    local h2 = withlocal:find('local function pick2')
+    local root = proj {
+        ['a.lua'] = 'local M = {}\nlocal SENTINEL = 7\n\n'
+            .. withlocal:sub(#'local M = {}\n\n' + 1, h2 - 1) .. 'return M\n',
+        ['b.lua'] = 'local M = {}\nlocal SENTINEL = 7\n\n' .. withlocal:sub(h2) }
+    local fam = family_of_fixture()
+    if not fam then skip 'fixture yielded no family' end
+    local files = {}
+    for _, m in ipairs(fam.members) do files[m.file] = true end
+    local nf = 0; for _ in pairs(files) do nf = nf + 1 end
+    if nf < 2 then skip 'fixture family did not span files' end
+
+    local plan, why = cx.plan_family(store, fam, { dest = 'lib/shared.lua' })
     eq(nil, plan)
-    ok(tostring(why):find('more than one file'), 'named: ' .. tostring(why))
+    ok(tostring(why):find('file%-local'), 'names the gate: ' .. tostring(why))
+    ok(tostring(why):find('SENTINEL'), 'and WHICH local: ' .. tostring(why))
     vim.fn.delete(root, 'rf')
 end)
 
@@ -594,5 +659,51 @@ test('extract-family: a body that does not read back is refused, not written', f
     clones.family_verify = saved
     eq(nil, p2)
     ok(tostring(w2):find('cannot be VERIFIED'), 'named distinctly: ' .. tostring(w2))
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ★★★ THE PHASE GATE GETS STRICTER AS N GROWS, and that is the honest shape
+--- rather than a limitation to apologise for. The shared home loads in the UNION
+--- of every member's file's phases; a phase-bound global (`game` is runtime-only)
+--- is safe only if every destination phase is that global's own. TWO files may
+--- share a phase where THREE do not, so a family a PAIR could extract can be
+--- refused — and the refusal names the union so the reader sees why.
+test('extract-family: a cross-PHASE family reading a phase-bound global is refused', function ()
+    if not ready('lua') then return skip 'no lua parser' end
+    need_algebra()
+    local function fam_handle(lit)
+        return ('local function handle(x)\n  local n = prep(x)\n  local z = norm(n)\n'
+            .. '  local q = tag(z)\n  game.print(\'%s\')\n  return wrap(q)\nend\n'
+            .. 'return handle\n'):format(lit)
+    end
+    local root = proj {
+        ['control.lua'] = "require('rt')\nrequire('rt2')\n",
+        ['data.lua'] = "require('dt')\n",
+        ['rt.lua'] = fam_handle('a'),
+        ['rt2.lua'] = fam_handle('b'),
+        ['dt.lua'] = fam_handle('c'),
+    }
+    local clones = require 'cartograph.clones'
+    local id
+    for _, n in ipairs(store.data.nodes) do
+        if n.name == 'handle' and n.file == 'rt.lua' then id = n.id end
+    end
+    if not id then skip 'fixture yielded no handle' end
+    local fam = clones.family_of(store, id, { max_dist = 2, min_rows = 3, min_shared = 2 })
+    if not fam or #fam.members < 2 then skip 'fixture yielded no family' end
+
+    local plan, why = cx.plan_family(store, fam, { dest = 'lib/shared.lua' })
+    eq(nil, plan)
+    ok(tostring(why):find('phase%-bound'), 'the phase gate fires: ' .. tostring(why))
+    ok(tostring(why):find('game'), 'naming the global: ' .. tostring(why))
+    -- ⚠ ASSERT ON THE UNION ITSELF, not on the words appearing anywhere. The
+    -- message says "...global `game` (runtime phase) ... phases {data, runtime}",
+    -- so searching the whole string for "runtime" passes even when the union was
+    -- computed from ONE file — `game` put the word there. Mutation found that:
+    -- taking the union from files[1] alone survived until this read the braces.
+    local union = tostring(why):match('phases {([^}]*)}')
+    ok(union, 'the refusal states the destination phase union: ' .. tostring(why))
+    ok(union:find('data') and union:find('runtime'),
+        'and it spans BOTH phases, computed over every member file: {' .. tostring(union) .. '}')
     vim.fn.delete(root, 'rf')
 end)
