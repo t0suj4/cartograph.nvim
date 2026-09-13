@@ -3071,6 +3071,77 @@ function M.family_of(store, fn_id, opts)
     return nil, 'the focused function landed in no family'
 end
 
+--- EVERY occurrence of every hole, as the DONOR's own subterm at that position.
+---
+--- ★★★ A HOLE IS NOT A POSITION, AND READING `values[i][h]` AS ONE SHIPS A
+--- SILENTLY WRONG HELPER. `values` holds ONE value per hole per member -- the
+--- thing the members disagree on -- but the template body may mention that hole
+--- SEVERAL TIMES. MEASURED on our own lua tree before this existed: 8 of 25
+--- holes (32%) occur more than once, up to 4 times, across 5 of 14 families
+--- (36%). The witness was `ansible.lua`'s `map_of`/`seq_of`: two functions
+--- differing in FOUR positions, a template with TWO holes, and a render that
+--- parameterized the first `if` and left `'block_mapping'` HARD-CODED inside the
+--- loop -- a helper that returns the wrong node for half its callers and looks
+--- perfectly reasonable.
+---
+--- So the spans come from walking the template ALONGSIDE the donor's own term,
+--- which is what `values_at` does in the prototype: wherever the template has a
+--- hole, the donor's subterm at that position is what occupies it, and it
+--- carries the span. Arity or kind disagreeing means the donor is not an
+--- instance of this template, which is a refusal and never a partial answer.
+---
+--- ★ AND THAT IS WHERE THE HEDGE FAMILIES GO. MEASURED on our own tree after the
+--- co-walk landed: 9 families render and 5 refuse -- 3 on arity, 1 on shape, 1
+--- on a repetition hole. A REPETITION hole stands for a VARIABLE number of kids,
+--- so a template carrying one does not align positionally with any single
+--- instance, and its SIBLINGS then read as an arity disagreement. This is the
+--- same boundary the prototype states for `transplant` ("transplant over a hedge
+--- family waits on classify over repetition holes"), reached from the other
+--- side: positional substitution and hedge structure are what does not compose.
+--- It is a refusal here rather than a mis-cut.
+---@return table|nil sites  { [hole] = { term, ... } }
+---@return string|nil why
+local function hole_sites(tmpl, inst)
+    local sites = {}
+    local function walk(t, i)
+        if t == nil or i == nil then return 'the donor does not reach the template' end
+        if t.k == 'hole' then
+            -- a repetition/context hole does not stand for ONE subterm, so there
+            -- is no single span to write to -- `render` refuses these one
+            -- altitude down for the same reason.
+            if t.rep or t.ctx then return 'a repetition or context hole has no single site' end
+            sites[t.h] = sites[t.h] or {}
+            sites[t.h][#sites[t.h] + 1] = inst and i or i
+            return nil
+        end
+        if t.k ~= i.k then return 'the donor diverges from the template shape' end
+        local tk, ik = t.kids or {}, i.kids or {}
+        if #tk ~= #ik then return 'the donor and the template disagree on arity' end
+        for n = 1, #tk do
+            local why = walk(tk[n], ik[n])
+            if why then return why end
+        end
+        return nil
+    end
+    local why = walk(tmpl, inst)
+    if why then return nil, why end
+    return sites
+end
+
+--- a family's hole names in the order its PARAMETERS are numbered. Shared with
+--- `family_proposal` so `p3` means the same hole in the listing and the text --
+--- `pairs` over the hole map really did come out `h5 h4 h2 h1 h3`.
+local function sorted_holes(tmpl)
+    local hk = {}
+    for h in pairs((tmpl and tmpl.holes) or {}) do hk[#hk + 1] = h end
+    table.sort(hk, function (x, y)
+        local nx, ny = tonumber(x:match('%d+')), tonumber(y:match('%d+'))
+        if nx and ny and nx ~= ny then return nx < ny end
+        return x < y
+    end)
+    return hk
+end
+
 --- ★★★ ONE HELPER PROPOSAL PER FAMILY, not one per pair (CART-0888, the
 --- `generalize` half). `extract_proposal` takes a PAIR and derives a signature
 --- from it; over a component of N that yields up to C(N,2) proposals which
@@ -3110,13 +3181,7 @@ function M.family_proposal(fam, store)
     -- h1 h3` -- and a proposal whose parameters are numbered differently on
     -- every run cannot be diffed or reviewed. Sorted by the NUMERIC suffix, so
     -- h10 follows h9 rather than h1.
-    local hk = {}
-    for h in pairs(fam.template.holes or {}) do hk[#hk + 1] = h end
-    table.sort(hk, function(x, y)
-        local nx, ny = tonumber(x:match('%d+')), tonumber(y:match('%d+'))
-        if nx and ny and nx ~= ny then return nx < ny end
-        return x < y
-    end)
+    local hk = sorted_holes(fam.template)
 
     local rt = 0
     local function count_rt(t)
@@ -3221,10 +3286,248 @@ function M.family_proposal(fam, store)
         L[#L + 1] = ('  ⚠ %d statement(s) the extractor cannot rebuild (row~) sit in the'
             .. ' shared body — the helper is NOT complete as shown'):format(rt)
     end
+    -- ★ THE HELPER AS TEXT. Everything above says WHAT varies; this says what you
+    -- would actually write. It is the DONOR'S OWN SOURCE with each hole replaced
+    -- by its parameter -- never a term printed back out, which the term model
+    -- cannot do (see the term -> text header).
+    -- ⚠ `as_lines`, not `vim.split`: this module is plain Lua and the headless
+    -- index flows load it, the same reason `render` carries its own splicer.
+    local body, rwhy = M.family_helper_text(fam, store)
+    if body then
+        L[#L + 1] = ('  the helper body, from the donor %s (%s):')
+            :format(fam.members[1].name, fam.members[1].file)
+        for _, line in ipairs(as_lines(body) or {}) do L[#L + 1] = '    ' .. line end
+        L[#L + 1] = '  ⚠ DISPLAY ONLY. The text is not reparsed, so it is a proposal about'
+        L[#L + 1] = '    surface, not a verified edit — and the signature shown is the'
+        L[#L + 1] = '    DONOR\'s, which the extraction would have to rename.'
+    else
+        -- a named refusal, because a proposal that silently omits the body reads
+        -- as one where the body was not worth showing
+        L[#L + 1] = ('  no helper body rendered: %s'):format(tostring(rwhy))
+    end
+
     -- the boundary, carried with the answer rather than left to the reader
     L[#L + 1] = '  note: a parameter shown as [a local] is SOME local at that site;'
     L[#L + 1] = '        the analysis does not claim the copies read the SAME variable.'
     return L
+end
+
+-- ── TERM → TEXT AT FUNCTION ALTITUDE ────────────────────────────────────────
+--
+-- ★★★ A TERM IS A SELECTOR, NOT A SOURCE, so nothing here EMITS from a term.
+-- The term model is lossy by construction and it was measured from both ends on
+-- 2026-09-13: `algebra.term` collapses every local to one sentinel, so a term
+-- cannot say WHICH variable to write (CART-0890); `row_term`, exactly like
+-- `row_key`, carries no statement kind, so a term cannot say whether to write
+-- `if` or `while` (CART-0892). Printing a term would have to invent both.
+--
+-- ⇒ THE TEXT COMES FROM THE DONOR; THE TERM ONLY SAYS WHERE TO CUT. That is
+-- `M.render`'s contract one altitude down: it renders a CONTAINER member by
+-- substituting at the members' varying spans, and this renders a FUNCTION by
+-- substituting at a family's hole spans. The splicer, the rightmost-first rule,
+-- the subsumption rule and every refusal are REUSED WHOLE — what follows is a
+-- SHAPE ADAPTER, not a second renderer. `element_template` produces
+-- `{donor, varying, unkeyed, alignable}` and so does this.
+--
+-- ★★ THE SPAN IS THERE BECAUSE `A.rebuild` CARRIES EVERY NON-CHILD FIELD and
+-- `A.eq` compares only `k`/`v`/`n`/`kids`. So `at` rides through anti-unification
+-- untouched: `template.body` has no spans (it is the SHARED shape, belonging to
+-- no one member) but `values[i][hole]` carries member i's own span. The donor is
+-- therefore a MEMBER, never the template.
+--
+-- ★ SYNTHETIC `seq` NODES HAVE NO SPAN, AND THE HULL RECOVERS MOST OF THEM.
+-- MEASURED (our own lua tree: 14 families with holes, 25 holes) — 16 values
+-- carried `at`, 9 did not, and 7 of those 9 were `seq`, the wrapper `term` and
+-- `row_term` build for an lhs/rhs list. A seq is not a source node, but its
+-- extent IS its kids' extent. The hull is taken ONLY when every kid yields a
+-- span: a partial hull would cut a region narrower than the construct and leave
+-- fragments of it behind, which reads as a successful render.
+-- ⚠ The hull is a RAW range table on purpose — `at.lua` interns ranges at
+-- ingest and states that post-fold arrivals stay raw and read through the same
+-- accessors. There is no range constructor to call.
+--
+-- ⚠⚠ DISPLAY ONLY, AND IT REFUSES RATHER THAN TRUSTING THE CALLER. `M.render`
+-- verifies by reparsing and calling `M.match(tmpl, ir)` — which takes the
+-- `element_template` shape, not this one. The function-altitude oracle is
+-- reparse → `algebra.fn_term` → `A.match`, and it needs a snippet parser this
+-- module does not have. THE BRACKET BUG above (5.3% of renders on our own tree)
+-- is why that gap is named instead of papered over: a wrong render looks
+-- perfectly well-formed as a string. Until the oracle exists this path passes
+-- `unverified` and must never authorise a write.
+
+--- The source extent of a term: its own span, or the HULL of its kids'.
+--- Returns nil when ANY kid is spanless — a partial hull would name a region
+--- narrower than the construct, and cutting there leaves fragments behind while
+--- reporting success.
+--- A `row~` (the sentinel for a row the adapter could not build) has neither a
+--- span nor kids, so it yields nil -- which is the right answer, and the reason
+--- callers that RENDER refuse it earlier rather than discovering it here.
+---@param t table|nil a prototype term
+---@return table|nil range  a RAW range (post-fold arrivals stay raw, see at.lua)
+function M.term_extent(t)
+    if t == nil then return nil end
+    if t.at then return t.at end
+    local kids = t.kids or {}
+    if #kids == 0 then return nil end
+    local sl, sc, el, ec
+    for _, c in ipairs(kids) do
+        local a = M.term_extent(c)
+        if not a then return nil end
+        local csl, csc, cel, cec = at.sl(a), at.sc(a), at.el(a), at.ec(a)
+        if sl == nil or csl < sl or (csl == sl and csc < sc) then sl, sc = csl, csc end
+        if el == nil or cel > el or (cel == el and cec > ec) then el, ec = cel, cec end
+    end
+    if sl == nil or el == nil then return nil end
+    return { start = { line = sl, char = sc }, ['end'] = { line = el, char = ec } }
+end
+
+--- Adapt one `M.families` family into the shape `M.render` accepts, with one
+--- member chosen as the DONOR whose text will be spliced.
+---@param fam table   a family from `M.families` / `M.family_of`
+---@param store table
+---@param opts table|nil { donor = index into fam.members (default 1) }
+---@return table|nil tmpl, string|nil why
+function M.family_template(fam, store, opts)
+    opts = opts or {}
+    if type(fam) ~= 'table' or type(fam.members) ~= 'table' then
+        return nil, 'not a family'
+    end
+    if #fam.members < 2 then
+        return nil, 'a one-member family has no holes to parameterize'
+    end
+    local body = fam.template and fam.template.body
+    if body == nil then return nil, 'the family carries no template body' end
+
+    -- ⚠ A `row~` IS A STATEMENT THE ADAPTER COULD NOT BUILD, and rendering the
+    -- donor's text would silently HARD-CODE the donor's version of it. Whether
+    -- that statement varies across the members is precisely what the term model
+    -- failed to say, so the output would assert something nothing checked. The
+    -- proposal WARNS about this (it is prose beside a list); a text artifact
+    -- reads as finished, so here it refuses.
+    local rt = 0
+    local function count_rt(t)
+        if t == nil then return end
+        if t.k == 'row~' then rt = rt + 1 end
+        for _, k in ipairs(t.kids or {}) do count_rt(k) end
+    end
+    count_rt(body)
+    if rt > 0 then
+        return nil, ('%d statement(s) in the shared body are `row~` — the adapter'
+            .. ' could not build them, so rendering the donor would hard-code its'
+            .. ' version of a statement nothing compared'):format(rt)
+    end
+
+    local di = opts.donor or 1
+    local donor = fam.members[di]
+    if not donor then return nil, 'no such donor member' end
+    local nd = store and store.node and store.node(donor.id)
+    local drng = nd and nd.range
+    if not drng then return nil, 'the donor function has no source range' end
+
+    local hk = sorted_holes(fam.template)
+    if #hk == 0 then
+        return nil, 'the family has no holes — nothing varies, so there is'
+            .. ' nothing to parameterize (the verb is merge, not extract)'
+    end
+
+    -- ★ the donor's OWN term, walked against the template, so a hole mentioned
+    -- N times yields N spans. Rebuilt rather than taken from `fam.values`,
+    -- which holds one value per hole and cannot express an occurrence.
+    --
+    -- ⚠ THE SAME NAMED REFUSAL `families`/`family_of` OWE. A family record only
+    -- exists if the algebra loaded, so this is unreachable through the shipped
+    -- verbs -- but a FABRICATED family reaches it (the spec builds several), and
+    -- an absent algebra must never surface as a traceback from `fn_term`.
+    local alg = require 'cartograph.algebra'
+    local aok, awhy = alg.available()
+    if not aok then return nil, 'algebra unavailable: ' .. tostring(awhy) end
+    local sites, swhy = hole_sites(body, alg.fn_term(donor))
+    if not sites then return nil, swhy end
+
+    local varying, by_hole, params = {}, {}, {}
+    local unkeyed, spanless = 0, {}
+    for i, h in ipairs(hk) do
+        params[h] = ('p%d'):format(i)
+        by_hole[h] = {}
+        local occs = sites[h] or {}
+        if #occs == 0 then
+            unkeyed = unkeyed + 1
+            spanless[#spanless + 1] = ('%s (no occurrence in the body)'):format(params[h])
+        end
+        for _, v in ipairs(occs) do
+        local ext = M.term_extent(v)
+        if not ext then
+            unkeyed = unkeyed + 1
+            spanless[#spanless + 1] = ('%s (%s)'):format(params[h], v and tostring(v.k) or 'no value')
+        else
+            -- A span outside the donor would splice text from another function
+            -- entirely. `render` rebases and catches it too; catching it here
+            -- names the PARAMETER rather than a rebased line offset.
+            if at.sl(ext) < at.sl(drng) or at.el(ext) > at.el(drng) then
+                return nil, ('%s lies outside the donor %s — its span is another'
+                    .. ' member\'s'):format(params[h], donor.name or '?')
+            end
+            local key = span_key(ext)
+            -- ⚠ THE SAME PARAMETER AT THE SAME SPAN IS NOT A COLLISION, and the
+            -- first cut refused it. `row_term` mirrors `row_key`, which writes a
+            -- conditional row as `lhs=rhs;C:cond` -- the CONDITION APPEARS TWICE,
+            -- once as the row's value and once as its guard. So an `if` whose
+            -- condition varies yields two occurrences of one hole at ONE span,
+            -- and refusing there killed the render for every conditional in the
+            -- corpus. Writing the same text twice into one region is what would
+            -- corrupt it, so the occurrence is DROPPED, not refused.
+            if varying[key] then
+                if varying[key].param ~= params[h] then
+                    return nil, ('%s and %s share one span in the donor, so one'
+                        .. ' substitution would silently win')
+                        :format(varying[key].param, params[h])
+                end
+            else
+                varying[key] = { at = ext, kind = (v and v.k) or 'value',
+                    hole = h, param = params[h] }
+                by_hole[h][#by_hole[h] + 1] = key
+            end
+        end
+        end
+    end
+
+    return {
+        n = #fam.members,
+        alignable = true,
+        donor = { at = drng, id = donor.id, file = donor.file, name = donor.name },
+        varying = varying, by_hole = by_hole, params = params, order = hk,
+        unkeyed = unkeyed, spanless = spanless,
+    }
+end
+
+--- The helper body as TEXT: the donor's own source, with every hole replaced by
+--- its parameter name. DISPLAY ONLY — see the `unverified` note above.
+---@param fam table
+---@param store table
+---@param opts table|nil { donor = index, subs = { [hole] = text } }
+---@return string|nil text, string|nil why, table|nil detail
+function M.family_helper_text(fam, store, opts)
+    opts = opts or {}
+    local tmpl, why = M.family_template(fam, store, opts)
+    if not tmpl then return nil, why end
+    if tmpl.unkeyed > 0 then
+        -- `render` refuses this too, by count; naming the parameters and the term
+        -- kind that lost the span is what tells a reader whether it is a `seq`
+        -- the hull could not close or a hole with no value at all.
+        return nil, ('%d parameter(s) have no source span in the donor: %s')
+            :format(tmpl.unkeyed, table.concat(tmpl.spanless, ', '))
+    end
+    local nd = store and store.node and store.node(tmpl.donor.id)
+    local src = nd and store.content and store.content(nd)
+    if not src then return nil, 'the donor source is not available' end
+
+    local subs = {}
+    for h, keys in pairs(tmpl.by_hole) do
+        for _, key in ipairs(keys) do
+            subs[key] = (opts.subs and opts.subs[h]) or tmpl.params[h]
+        end
+    end
+    return M.render(tmpl, subs, src, { unverified = true })
 end
 
 return M

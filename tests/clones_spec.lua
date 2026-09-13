@@ -1760,3 +1760,386 @@ test('family_of: an absent algebra refuses by name', function ()
     eq(nil, got)
     ok(tostring(why):find('algebra unavailable'), 'names the reason: ' .. tostring(why))
 end)
+
+-- ── TERM → TEXT: rendering a family's helper body (CART-0893) ───────────────
+--
+-- The algebra's missing side. A term cannot be printed — it collapses locals and
+-- carries no statement kind — so the text comes from the DONOR and the term only
+-- says where to cut. These pin the three things that makes true or false:
+-- the span survives anti-unification, the hull closes a synthetic `seq`, and
+-- every case where the cut is not known REFUSES rather than rendering.
+
+test('family_helper_text: the donor\'s surface survives, the holes become parameters', function ()
+    need_alg()
+    fam3()
+    local r = clones.families(store, {})
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    local text, why = clones.family_helper_text(f, store)
+    ok(text ~= nil, 'rendered: ' .. tostring(why))
+
+    -- surface OUTSIDE the holes comes from the donor for free — that is the
+    -- whole reason this substitutes instead of emitting
+    ok(text:find('local acc = 0', 1, true), 'shared body text survived:\n' .. text)
+    ok(text:find('p1', 1, true), 'and a hole was replaced by its parameter:\n' .. text)
+    -- ⚠ BOTH SIDES. A renderer that never substituted would also keep the shared
+    -- text, so assert the donor's OWN varying literal is gone from at least one
+    -- of the positions the family said varies.
+    local donor_lit = '* 1'
+    ok(not text:find(donor_lit, 1, true),
+        'the donor\'s varying literal was replaced, not carried:\n' .. text)
+end)
+
+--- ★ THE P-NUMBERS ARE ONE NUMBERING, and `sorted_holes` is why. The proposal
+--- lists `p1..pN` and the rendered text writes `p1..pN`; if the two sorted the
+--- hole map differently (and `pairs` really did come out `h5 h4 h2 h1 h3`) then
+--- every parameter in the listing would name a different position than the text.
+test('family_helper_text: parameter names agree with the proposal listing', function ()
+    need_alg()
+    -- ⚠ FIVE varying literals, and `max_dist` raised to admit them. `fam3` was
+    -- the first fixture here and it yields TWO holes — with two keys `pairs`
+    -- order and sorted order COINCIDE, so numbering the parameters in `pairs`
+    -- order passed this test unchanged. A guard that cannot distinguish the two
+    -- orders is not testing the sort. `family_proposal`'s own comment records
+    -- the map coming out `h5 h4 h2 h1 h3`, which is the case that must be caught.
+    -- ⚠ SIZED FOR `min_rows`, WHICH COUNTS *MATCHED* ROWS. A first cut put the
+    -- five varying rows in a nine-row body, leaving four matching rows — under
+    -- the floor of 6, so `near` admitted NOTHING and the test SKIPPED, proving
+    -- nothing at all. The shared rows have to outnumber the floor on their own.
+    local function body(n, a, b, c, d, e)
+        return ([[
+function M.r%s(t)
+    local acc = %s
+    local seen = {}
+    local keep = {}
+    for i = 1, #t do acc = acc + t[i] * %s end
+    local s = tostring(acc) .. "%s"
+    local u = string.upper(s) .. "%s"
+    seen[u] = true
+    keep[#keep + 1] = u
+    local pad = string.rep("-", #u)
+    local low = string.lower(u)
+    local n2 = #low + #pad
+    local tag = low .. tostring(n2)
+    return pad .. u .. tag .. "%s"
+end
+]]):format(n, a, b, c, d, e)
+    end
+    proj { ['e.lua'] = 'local M = {}\n' .. body(1, 11, 12, 13, 14, 15)
+        .. body(2, 21, 22, 23, 24, 25) .. 'return M\n' }
+    local r = clones.families(store, { max_dist = 8 })
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f = r.families[1]
+    -- the fixture must actually produce the ordering problem, or the guard below
+    -- is measuring nothing -- so this is an assertion, not a skip
+    ok(f.holes >= 4, ('the fixture yields enough holes to order, got %d'):format(f.holes))
+    local text = clones.family_helper_text(f, store)
+    if not text then skip 'family did not render' end
+    local at = require 'cartograph.at'
+    local tmpl = clones.family_template(f, store)
+    ok(tmpl ~= nil, 'the render-shaped template is available')
+
+    -- ⚠ PRESENCE IS NOT CORRESPONDENCE, and the first cut of this test only
+    -- checked that `p1..pN` appeared on both sides. Numbering the parameters in
+    -- `pairs` order instead of `sorted_holes` order STILL PASSED THAT: both
+    -- lists contain the same names, just against different positions. What has
+    -- to agree is the POSITION each name stands for, so the donor's span for
+    -- `pN` in the listing must be the span `pN` was written at in the body.
+    local at_of = {}
+    do
+        local cur
+        for _, line in ipairs(clones.family_proposal(f, store)) do
+            local p = line:match('^%s*(p%d+):%s*$')
+            if p then cur = p
+            elseif cur then
+                local l, c = line:match('at [^%s]+:(%d+):(%d+)%s*$')
+                if l then at_of[cur] = l .. ':' .. c; cur = nil end   -- donor is member 1
+            end
+        end
+    end
+    -- the numbering itself, asserted directly: `pN` is assigned along
+    -- `sorted_holes`, so the order is strictly ascending by numeric suffix
+    for i = 2, #tmpl.order do
+        local a = tonumber(tmpl.order[i - 1]:match('%d+'))
+        local b = tonumber(tmpl.order[i]:match('%d+'))
+        ok(a and b and a < b, ('parameters are numbered in hole order, got %s then %s')
+            :format(tmpl.order[i - 1], tmpl.order[i]))
+    end
+
+    local checked = 0
+    for _, v in pairs(tmpl.varying) do
+        local want = ('%d:%d'):format(at.sl(v.at) + 1, at.sc(v.at) + 1)
+        ok(at_of[v.param] ~= nil, v.param .. ' appears in the listing')
+        eq(want, at_of[v.param])
+        ok(text:find(v.param, 1, true), v.param .. ' appears in the rendered body:\n' .. text)
+        checked = checked + 1
+    end
+    ok(checked > 0, 'at least one parameter was compared')
+end)
+
+--- ★★ THE HULL, PINNED BOTH SIDES. `term`/`row_term` wrap lhs/rhs lists in a
+--- synthetic `seq` that is not a source node and carries no span of its own; its
+--- extent is its kids' extent. MEASURED before it was built — 7 of 9 spanless
+--- hole values on our own lua tree, and 18 of 18 on factorio-mods, were `seq`,
+--- of which 6 were EMPTY (no kids, so nothing to hull from).
+---
+--- ⚠ Tested on the primitive directly. An earlier attempt drove it through a
+--- fabricated family and mutated `fam.values` — which the renderer stopped
+--- reading when the spans moved to a co-walk of the donor's own term, so the
+--- test passed while exercising nothing.
+test('term_extent: a spanless seq takes its kids\' hull; a partial one refuses', function ()
+    local at = require 'cartograph.at'
+    local rng = function (sl, sc, el, ec)
+        return { start = { line = sl, char = sc }, ['end'] = { line = el, char = ec } }
+    end
+    local a = { k = 'lit', v = 1, at = rng(3, 10, 3, 14) }
+    local b = { k = 'lit', v = 2, at = rng(3, 20, 4, 6) }
+
+    -- its own span wins, untouched
+    eq(3, at.sl(clones.term_extent(a)))
+    eq(14, at.ec(clones.term_extent(a)))
+
+    -- POSITIVE: the hull spans from the first kid's start to the last kid's end
+    local hull = clones.term_extent { k = 'seq', kids = { a, b } }
+    ok(hull ~= nil, 'a seq over spanned kids is hulled')
+    eq(3, at.sl(hull)); eq(10, at.sc(hull))
+    eq(4, at.el(hull)); eq(6, at.ec(hull))
+
+    -- and it does not depend on the kids being in source order
+    local rev = clones.term_extent { k = 'seq', kids = { b, a } }
+    eq(3, at.sl(rev)); eq(10, at.sc(rev)); eq(4, at.el(rev)); eq(6, at.ec(rev))
+
+    -- NEGATIVE: one spanless kid and the extent is NOT guessed
+    eq(nil, clones.term_extent { k = 'seq', kids = { a, { k = 'name', n = 'x' } } })
+    -- NEGATIVE: nothing to hull from at all
+    eq(nil, clones.term_extent { k = 'seq', kids = {} })
+    eq(nil, clones.term_extent(nil))
+end)
+
+--- ⚠ A `row~` IS A STATEMENT THE ADAPTER COULD NOT BUILD. Rendering the donor's
+--- text would hard-code the donor's version of a statement nothing compared —
+--- and unlike the proposal, which prints a warning beside a list, a block of
+--- text reads as finished.
+test('family_helper_text: an unbuildable statement refuses the whole render', function ()
+    need_alg()
+    fam3()
+    local r = clones.families(store, {})
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    ok(clones.family_helper_text(f, store) ~= nil, 'it renders before the injection')
+    local kids = f.template.body.kids
+    kids[#kids + 1] = { k = 'row~' }
+    local got, why = clones.family_helper_text(f, store)
+    eq(nil, got)
+    ok(tostring(why):find('row~'), 'names the unbuildable statement: ' .. tostring(why))
+    kids[#kids] = nil
+end)
+
+--- A hole-free family is a MERGE; a family of one joined nothing. Neither has a
+--- parameter to write, and both must say which they are.
+test('family_template: nothing to parameterize refuses by its own reason', function ()
+    need_alg()
+    fam3()
+    local r = clones.families(store, {})
+    local f = r.families[1]
+
+    local one = { members = { f.members[1] }, template = f.template, values = f.values }
+    local got, why = clones.family_template(one, store)
+    eq(nil, got)
+    ok(tostring(why):find('one%-member'), 'a singleton says so: ' .. tostring(why))
+
+    local none = { members = f.members, template = { body = f.template.body, holes = {} },
+        values = f.values }
+    local got2, why2 = clones.family_template(none, store)
+    eq(nil, got2)
+    ok(tostring(why2):find('merge'), 'a hole-free family points at merge: ' .. tostring(why2))
+end)
+
+--- ★★★ A HOLE IS NOT A POSITION. `values[i][h]` holds ONE value per hole, but the
+--- template body may mention that hole several times; substituting only the
+--- recorded one leaves the donor's literal standing everywhere else, and the
+--- result is a helper that is wrong for every caller but the donor.
+---
+--- MEASURED when this was found: 8 of 25 holes (32%) on our own tree occur more
+--- than once, up to 4 times. The real witness was `ansible.lua` — `map_of` and
+--- `seq_of` differ in FOUR places, the template has TWO holes, and the first
+--- render parameterized the outer `if` while leaving `'block_mapping'`
+--- hard-coded inside the loop.
+test('family_helper_text: EVERY occurrence of a hole is substituted, not the first', function ()
+    need_alg()
+    proj { ['c.lua'] = [[
+local M = {}
+function M.pick_a(node)
+    if not node then return nil end
+    local acc = 0
+    local seen = {}
+    if node.t == 'AAA' or node.t == 'BBB' then return node end
+    for _, c in ipairs(node.kids) do
+        if c.t == 'AAA' or c.t == 'BBB' then return c end
+    end
+    seen[acc] = true
+    return nil
+end
+function M.pick_c(node)
+    if not node then return nil end
+    local acc = 0
+    local seen = {}
+    if node.t == 'CCC' or node.t == 'DDD' then return node end
+    for _, c in ipairs(node.kids) do
+        if c.t == 'CCC' or c.t == 'DDD' then return c end
+    end
+    seen[acc] = true
+    return nil
+end
+return M
+]] }
+    local r = clones.families(store, {})
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    local text, why = clones.family_helper_text(f, store)
+    ok(text ~= nil, 'rendered: ' .. tostring(why))
+
+    -- the donor's literals appear TWICE each in its source; not one may survive
+    local donor = f.members[1]
+    local lits = donor.name:find('pick_a') and { 'AAA', 'BBB' } or { 'CCC', 'DDD' }
+    for _, lit in ipairs(lits) do
+        ok(not text:find(lit, 1, true),
+            ('%s still stands in the rendered body — an occurrence was missed:\n%s')
+            :format(lit, text))
+    end
+    ok(text:find('p1', 1, true), 'and the parameter took its place:\n' .. text)
+end)
+
+--- ⚠ THE FALSE COLLISION. `row_term` mirrors `row_key`, which writes a
+--- conditional row as `lhs=rhs;C:cond` — the CONDITION IS ENCODED TWICE. So one
+--- hole legitimately reports two occurrences at ONE span, and treating that as a
+--- conflict refuses every conditional in the corpus. Only two DIFFERENT
+--- parameters sharing a span is a real collision.
+test('family_template: one parameter twice at one span is dropped, not refused', function ()
+    need_alg()
+    proj { ['d.lua'] = [[
+local M = {}
+function M.q1(node)
+    local acc = 0
+    local seen = {}
+    if node.t == 'XX' then return node end
+    local s = tostring(acc)
+    local u = string.upper(s)
+    seen[u] = true
+    return u
+end
+function M.q2(node)
+    local acc = 0
+    local seen = {}
+    if node.t == 'YY' then return node end
+    local s = tostring(acc)
+    local u = string.upper(s)
+    seen[u] = true
+    return u
+end
+return M
+]] }
+    local r = clones.families(store, {})
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    local tmpl, why = clones.family_template(f, store)
+    ok(tmpl ~= nil, 'a varying condition does not read as a span collision: ' .. tostring(why))
+    -- and the span really is claimed once, by one parameter
+    local nkeys = 0
+    for _ in pairs(tmpl.varying) do nkeys = nkeys + 1 end
+    ok(nkeys > 0, 'the condition span is claimed')
+end)
+
+--- ⚠ A FABRICATED FAMILY REACHES `family_template` DIRECTLY, and the shipped
+--- verbs' "absent algebra refuses by name" contract has to hold there too. The
+--- renderer rebuilds the donor's term itself (`alg.fn_term`), so without the
+--- check an absent algebra surfaces as a traceback out of `family_proposal`
+--- rather than as an answer. Unreachable through the commands today — a family
+--- record only exists if the algebra loaded — and reachable from a spec, which
+--- is exactly how a future caller will reach it.
+test('family_template: an absent algebra refuses by name, like every other verb', function ()
+    need_alg()
+    fam3()
+    local r = clones.families(store, {})
+    local f = r.families[1]
+    ok(clones.family_template(f, store) ~= nil, 'it answers while the algebra is present')
+
+    local cfg = require 'cartograph.config'
+    local saved = cfg.algebra
+    cfg.algebra = false
+    local got, why = clones.family_template(f, store)
+    local got2, why2 = clones.family_helper_text(f, store)
+    cfg.algebra = saved
+
+    eq(nil, got)
+    ok(tostring(why):find('algebra unavailable'), 'names the reason: ' .. tostring(why))
+    eq(nil, got2)
+    ok(tostring(why2):find('algebra unavailable'), 'and so does the text verb: ' .. tostring(why2))
+end)
+
+--- ★ THE REAL COLLISION, as opposed to the false one above. Two DIFFERENT
+--- parameters landing on ONE donor span means one substitution overwrites the
+--- other and the loser vanishes silently. Dropping a duplicate of the SAME
+--- parameter is safe; this is not, and the two share a branch.
+---
+--- ⚠ CONSTRUCTED, because the corpus does not offer it: a conditional row
+--- encodes its condition TWICE at one span (`lhs=rhs;C:cond`), so renaming the
+--- second occurrence to a fresh hole puts two distinct parameters on that one
+--- span — exactly the shape that must refuse. Found by mutation: removing the
+--- collision check broke no test until this existed.
+test('family_template: two DIFFERENT parameters on one span is refused', function ()
+    need_alg()
+    proj { ['f.lua'] = [[
+local M = {}
+function M.s1(node)
+    local acc = 0
+    local seen = {}
+    if node.t == 'XX' then return node end
+    local s = tostring(acc)
+    local u = string.upper(s)
+    seen[u] = true
+    return u
+end
+function M.s2(node)
+    local acc = 0
+    local seen = {}
+    if node.t == 'YY' then return node end
+    local s = tostring(acc)
+    local u = string.upper(s)
+    seen[u] = true
+    return u
+end
+return M
+]] }
+    local r = clones.families(store, {})
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f = r.families[1]
+    if f.holes == 0 then skip 'fixture family has no holes' end
+    ok(clones.family_template(f, store) ~= nil, 'it answers before the rename')
+
+    -- find a hole mentioned twice, and rename its SECOND occurrence
+    local counts, target = {}, nil
+    local function scan(t)
+        if t == nil then return end
+        if t.k == 'hole' then
+            counts[t.h] = (counts[t.h] or 0) + 1
+            if counts[t.h] == 2 and not target then target = t end
+        end
+        for _, k in ipairs(t.kids or {}) do scan(k) end
+    end
+    scan(f.template.body)
+    if not target then skip 'no hole occurs twice in this template' end
+
+    local was = target.h
+    target.h = 'h99'
+    f.template.holes['h99'] = f.template.holes[was]
+    local got, why = clones.family_template(f, store)
+    target.h = was
+    f.template.holes['h99'] = nil
+
+    eq(nil, got)
+    ok(tostring(why):find('share one span'),
+        'names the collision rather than letting one win: ' .. tostring(why))
+end)

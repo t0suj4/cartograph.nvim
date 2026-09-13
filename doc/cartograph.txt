@@ -465,10 +465,15 @@ verb refuses is as load-bearing as what it writes — see
                               partner. The component is partitioned by
                               description length and the family template's
                               holes become the parameters, each carrying a
-                              call site per member on its own span. Needs
-                              the template algebra (:checkhealth); refuses
-                              by name without it rather than falling back
-                              to the pairwise answer
+                              call site per member on its own span. The
+                              HELPER BODY is shown too: the donor's own
+                              source with every hole occurrence replaced by
+                              its parameter. That text is DISPLAY ONLY --
+                              it is not reparsed, and the signature shown
+                              is the donor's. Needs the template algebra
+                              (:checkhealth); refuses by name without it
+                              rather than falling back to the pairwise
+                              answer
   :CartographExtractHelperApply [path]
                               stage that helper for real. A same-file
                               pair needs no argument; a CROSS-FILE pair
