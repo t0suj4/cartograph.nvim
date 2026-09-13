@@ -1601,3 +1601,162 @@ test('families: unrelated instances do NOT merge under a bare hole', function ()
         end
     end
 end)
+
+--- ★★★ ONE PROPOSAL PER FAMILY (the `generalize` half, CART-0888). The pair-wise
+--- `extract_proposal` yields up to C(N,2) proposals over one component and they
+--- disagree; a family carries ONE template and one valuation per member.
+test('family_proposal: one helper for N copies, with a call site per member', function ()
+    need_alg()
+    fam3()
+    local r = clones.families(store, {})
+    eq(1, #r.families)
+    local L = clones.family_proposal(r.families[1], store)
+    local txt = table.concat(L, '\n')
+    ok(txt:find('ONE helper for 3 copies'), 'proposes one helper:\n' .. txt)
+    -- one call-site line per member per parameter, not one proposal per pair
+    local sites = select(2, txt:gsub('      M%.f%d  =', ''))
+    ok(sites >= 3, 'at least one call site per member, got ' .. sites)
+    ok(txt:find('at '), 'and each carries a span')
+end)
+
+--- ★★ DETERMINISM: the hole map is iterated with `pairs`, which really did come
+--- out `h5 h4 h2 h1 h3`. A proposal whose parameters are numbered differently on
+--- each run cannot be diffed or reviewed, so the order is pinned.
+test('family_proposal: parameter numbering is stable across runs', function ()
+    need_alg()
+    fam3()
+    local r = clones.families(store, {})
+    local a = table.concat(clones.family_proposal(r.families[1], store), '\n')
+    local b = table.concat(clones.family_proposal(r.families[1], store), '\n')
+    eq(a, b)
+    ok(a:find('p1:'), 'parameters are numbered from p1')
+end)
+
+--- ★★★ THE ALPHA-COLLAPSE BOUNDARY. The adapter maps EVERY local to one symbol,
+--- so the term cannot say WHICH local a hole holds. Reading the source at the
+--- hole's span recovers the NAME AT THAT USE — but two members showing a local
+--- at one hole MAY BE READING UNRELATED VARIABLES, and the proposal must not
+--- imply otherwise.
+---
+--- ⚠ THE FIXTURE HAS TO PUT A LOCAL OPPOSITE A NON-LOCAL. Two bodies differing
+--- only in a local NAME are alpha-equivalent — `near` returns them at distance 0
+--- and never admits them — so a hole containing a local only arises where one
+--- member reads a local and another reads a field or global. That is exactly the
+--- shape seen in the real corpus, and building the fixture the obvious way
+--- instead yields no family and a test that SKIPS, proving nothing.
+test('family_proposal: a collapsed local is NAMED per site, and claimed of nothing', function ()
+    need_alg()
+    proj { ['b.lua'] = [[
+local M = {}
+CFG = { limit = 0 }
+function M.g1(t)
+    local acc = 0
+    local seen = {}
+    for i = 1, #t do acc = acc + t[i] end
+    local s = tostring(acc)
+    local u = string.upper(s)
+    seen[u] = true
+    local pad = string.rep("-", #u)
+    return pad .. u
+end
+function M.g2(t)
+    local acc = 0
+    local seen = {}
+    for i = 1, #t do CFG.limit = CFG.limit + t[i] end
+    local s = tostring(CFG.limit)
+    local u = string.upper(s)
+    seen[u] = true
+    local pad = string.rep("-", #u)
+    return pad .. u
+end
+return M
+]] }
+    local r = clones.families(store, {})
+    if not r or #r.families == 0 then skip 'fixture yielded no family' end
+    local f = r.families[1]
+    local txt = table.concat(clones.family_proposal(f, store), '\n')
+
+    -- the sentinel NEVER reaches the reader, whatever the family turned out to be
+    ok(not txt:find('\1local'), 'the collapse sentinel is never printed raw:\n' .. txt)
+    if f.holes > 0 then
+        -- every parameter line names a real token read from the member's source
+        ok(txt:find('at [^\n]*b%.lua:%d+:%d+'), 'each call site carries a span:\n' .. txt)
+        ok(txt:find('does not claim the copies read the SAME variable'),
+            'and the alpha-collapse boundary rides with the answer:\n' .. txt)
+    end
+end)
+
+--- ★ A ZERO-HOLE FAMILY OF TWO IS A MERGE, NOT AN EXTRACTION — sending the
+--- reader to "extract a helper" there is the wrong command.
+--- ⚠ AND A SINGLETON IS NEITHER. `partition` gives a one-member family a
+--- hole-free template BY CONSTRUCTION, so it lands in the same branch; calling
+--- that "1 copies are IDENTICAL after alpha-renaming" is nonsense a reader would
+--- believe. Both are asserted here because the first cut conflated them.
+test('family_proposal: a singleton is not "identical copies", and two of them are', function ()
+    need_alg()
+    fam3()
+    local r = clones.families(store, {})
+    local m = r.families[1].members[1]
+
+    local lone = { members = { m }, template = { body = { k = 'seq' }, holes = {} },
+        values = { {} }, dl = 0, holes = 0, fixed = 0 }
+    local txt1 = table.concat(clones.family_proposal(lone, store), '\n')
+    ok(txt1:find('joined NO family'), 'a singleton reports as unmerged: ' .. txt1)
+    ok(not txt1:find('IDENTICAL'), 'and never as identical copies')
+
+    local two = { members = { m, m }, template = { body = { k = 'seq' }, holes = {} },
+        values = { {}, {} }, dl = 0, holes = 0, fixed = 0 }
+    local txt2 = table.concat(clones.family_proposal(two, store), '\n')
+    ok(txt2:find('CartographMerge'), 'two hole-free members route to merge: ' .. txt2)
+    -- ⚠ AND IT MUST NOT CERTIFY THE EQUIVALENCE IT DID NOT CHECK. `near` admitted
+    -- these at row-distance 1-2, so the ROW KEYS differ while the TERMS do not --
+    -- the term model is coarser (expr.children drops nil slots, CART-0882). The
+    -- line points at merge; merge does its own check.
+    ok(txt2:find('re%-checks') or txt2:find('coarser'),
+        'the proposal defers the equivalence check rather than claiming it: ' .. txt2)
+    ok(not txt2:find('IDENTICAL after alpha'), 'and does not overclaim identity')
+end)
+
+--- ★ THE FOCUSED QUERY MUST AGREE WITH THE BATCH ONE, or the interactive command
+--- and the report answer different questions. `families` partitions every
+--- component (9 s on factorio); `family_of` grows only the focus's component
+--- over the cached index (0.003 s). Measured equal on the real corpus; pinned
+--- here on a fixture so a divergence fails rather than being noticed later.
+test('family_of: the focused query returns the same family as the batch verb', function ()
+    need_alg()
+    fam3()
+    local batch = clones.families(store, {})
+    eq(1, #batch.families)
+    local want = batch.families[1]
+    local got, why = clones.family_of(store, want.members[1].id, {})
+    ok(got ~= nil, 'focused query found a family: ' .. tostring(why))
+    eq(#want.members, #got.members)
+    eq(want.holes, got.holes)
+    eq(want.dl, got.dl)
+end)
+
+--- ⚠ A BOUNDED BFS MUST REFUSE, NOT TRUNCATE. A component cut off at an
+--- arbitrary prefix would partition into confident, WRONG families — the answer
+--- would look fine and describe a set the user never asked about.
+test('family_of: an over-large component refuses instead of truncating', function ()
+    need_alg()
+    fam3()
+    local id = clones.families(store, {}).families[1].members[1].id
+    local got, why = clones.family_of(store, id, { max_family = 2 })
+    eq(nil, got)
+    ok(tostring(why):find('larger than max_family'), 'and names the bound: ' .. tostring(why))
+end)
+
+--- absence stays a named answer on the focused path too
+test('family_of: an absent algebra refuses by name', function ()
+    need_alg()
+    fam3()
+    local id = clones.families(store, {}).families[1].members[1].id
+    local cfg = require 'cartograph.config'
+    local saved = cfg.algebra
+    cfg.algebra = false
+    local got, why = clones.family_of(store, id, {})
+    cfg.algebra = saved
+    eq(nil, got)
+    ok(tostring(why):find('algebra unavailable'), 'names the reason: ' .. tostring(why))
+end)

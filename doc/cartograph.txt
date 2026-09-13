@@ -460,6 +460,15 @@ verb refuses is as load-bearing as what it writes — see
                               factor into — the anti-unified template
                               plus a body-safety verdict. A scaffold to
                               read; nothing is staged
+  :CartographExtractFamily    propose ONE helper for this function's whole
+                              near-clone FAMILY, not just its nearest
+                              partner. The component is partitioned by
+                              description length and the family template's
+                              holes become the parameters, each carrying a
+                              call site per member on its own span. Needs
+                              the template algebra (:checkhealth); refuses
+                              by name without it rather than falling back
+                              to the pairwise answer
   :CartographExtractHelperApply [path]
                               stage that helper for real. A same-file
                               pair needs no argument; a CROSS-FILE pair

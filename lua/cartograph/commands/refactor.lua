@@ -294,6 +294,31 @@ function M.register(H)
         scratch(clones.extract_proposal(best, store))
     end, { desc = 'cartograph: propose the parameterized helper the focused function and its nearest near-clone could factor into — the anti-unified template with the differing leaves as parameters, plus a body-safety verdict (is the whole body cleanly liftable?). A reviewable scaffold (the write is not auto-applied). Companion to :CartographMerge for the near-clone case' })
 
+    -- ── extract-FAMILY proposal: the focus's whole family → ONE helper ──
+    cmd('CartographExtractFamily', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
+        end
+        local clones = require 'cartograph.clones'
+        -- ★ THE FOCUSED QUERY, NOT THE BATCH ONE. `families` partitions every
+        -- component in the store (9 s on factorio); `family_of` grows just this
+        -- function's component over the cached index -- measured 0.003 s, and it
+        -- returns the same family the batch verb does.
+        local fam, why = clones.family_of(store, id, { max_dist = 2 })
+        if not fam then
+            -- ⚠ NAMED, NEVER A QUIET FALL-BACK TO THE PAIRWISE PROPOSAL. That
+            -- one answers a DIFFERENT question (one partner, not the family), so
+            -- offering it silently would read as the family answer.
+            return vim.notify(('cartograph: no family for %s — %s (:CartographExtractHelper'
+                .. ' proposes the pairwise helper instead)'):format(n.name, tostring(why)),
+                vim.log.levels.INFO)
+        end
+        scratch(clones.family_proposal(fam, store))
+    end, { desc = 'cartograph: propose ONE helper for the focused function\'s whole near-clone FAMILY, not just its nearest partner — the component is partitioned by description length (the proven template algebra) and the family template\'s holes become the parameters, each with a call site per member carried on its own source span. Companion to :CartographExtractHelper, which answers the pairwise question' })
+
     -- ── extract-helper APPLY: stage the transaction (verified auto-write) ──
     cmd('CartographExtractHelperApply', function (o)
         local store = live() if not store then return end

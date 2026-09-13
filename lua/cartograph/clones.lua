@@ -3005,4 +3005,226 @@ function M.families(store, opts)
     }
 end
 
+--- ★ THE FOCUSED QUERY: the family containing ONE function, without partitioning
+--- the whole store. `families` is a BATCH verb (9 s on factorio, minutes on wow
+--- -- it partitions every component); an interactive command cannot pay that to
+--- answer a question about one function. `near_of` enumerates just one
+--- function's candidate partners over the generation-cached index, so growing
+--- the focus's component by BFS over it costs a handful of those instead.
+---
+--- ⚠ THE BFS IS BOUNDED AND SAYS SO. `max_family` stops the growth; a component
+--- larger than that returns `nil` with a reason rather than a family built from
+--- an arbitrary prefix of it -- a truncated component would partition into
+--- confident, wrong families.
+---
+--- @return table|nil family, string|nil why
+function M.family_of(store, fn_id, opts)
+    opts = opts or {}
+    local alg = require 'cartograph.algebra'
+    local A, why = alg.load()
+    if not A then return nil, 'algebra unavailable: ' .. tostring(why) end
+
+    local maxn = opts.max_family or 40
+    local seen, order, queue = { [fn_id] = true }, {}, { fn_id }
+    local rec = {}
+    while #queue > 0 do
+        local id = table.remove(queue, 1)
+        order[#order + 1] = id
+        for _, p in ipairs(M.near_of(store, id, opts)) do
+            for _, side in ipairs({ p.a, p.b }) do
+                rec[side.id] = rec[side.id] or side
+                if not seen[side.id] then
+                    seen[side.id] = true
+                    queue[#queue + 1] = side.id
+                    if #order + #queue > maxn then
+                        return nil, ('component larger than max_family=%d'):format(maxn)
+                    end
+                end
+            end
+        end
+    end
+    if #order < 2 then return nil, 'no near-clone within the admission filter' end
+
+    table.sort(order)                    -- ★ determinism, as in `families`
+    local terms = {}
+    for i, id in ipairs(order) do terms[i] = alg.fn_term(rec[id]) end
+    local okp, part = pcall(A.partition, terms, opts.partition)
+    if not okp or not part then return nil, 'partition failed: ' .. tostring(part) end
+
+    for _, f in ipairs(part.families) do
+        for _, k in ipairs(f.members) do
+            if order[k] == fn_id then
+                local members, values = {}, {}
+                for j, mk in ipairs(f.members) do
+                    members[j] = rec[order[mk]]; values[j] = f.values[mk]
+                end
+                local nh = 0
+                for _ in pairs(f.template.holes or {}) do nh = nh + 1 end
+                return { members = members, template = f.template, values = values,
+                    dl = f.dl, holes = nh,
+                    fixed = alg.fixed_nodes(f.template.body),
+                    collapsed = alg.is_collapsed(f.template),
+                    origin = 'derived', via = 'algebra.partition' }
+            end
+        end
+    end
+    return nil, 'the focused function landed in no family'
+end
+
+--- ★★★ ONE HELPER PROPOSAL PER FAMILY, not one per pair (CART-0888, the
+--- `generalize` half). `extract_proposal` takes a PAIR and derives a signature
+--- from it; over a component of N that yields up to C(N,2) proposals which
+--- DISAGREE WITH EACH OTHER (84% of wow's components). A family already carries
+--- ONE template and one valuation per member -- `partition` computed both -- so
+--- this reads that result rather than generalizing again.
+---
+--- ★★ THE PER-MEMBER SPANS ARE WHAT MAKE IT ACTIONABLE, and they exist only
+--- because a span rides through every arrow untouched (`rebuild` carries
+--- non-child fields, `eq` ignores them -- see cartograph.algebra). The TEMPLATE
+--- body has no `at` (a generalized root is in no single file); each
+--- `values[i][hole]` has the span IN MEMBER i. That is N call sites for one
+--- helper, and it is the whole reason the adapter carries `at` at all.
+---
+--- ⚠⚠ THE ALPHA-COLLAPSE BOUNDARY, AND IT MUST BE SAID OUT LOUD. The adapter
+--- maps EVERY local to one symbol (mirroring `anti_unify`'s alpha rule), so a
+--- hole whose value is that sentinel says "a local" and NOTHING about WHICH.
+--- Reading the source at the hole's span recovers the NAME AT THAT USE -- which
+--- is honest and useful -- but two members both showing a local at the same hole
+--- MAY BE READING UNRELATED VARIABLES. Binding identity was erased on the way
+--- in and no amount of span-reading restores it. So this reports the names it
+--- found and claims no relation between them; a caller that wants "the same
+--- variable in both" needs a binder pass this path does not have.
+---
+--- ⚠ `row~` IS THE OTHER SENTINEL: `fn_term` substitutes it for a row the
+--- adapter could not build, and `fixed_nodes` counts it like any other node --
+--- so a family's `fixed` is inflated by exactly the number of them. Reported,
+--- never quietly folded in. (Measured 0 of 30 on factorio; not zero by
+--- construction.)
+---
+--- @return table lines   same string-list contract as `extract_proposal`
+function M.family_proposal(fam, store)
+    local alg = require 'cartograph.algebra'
+    local n = #fam.members
+
+    -- ★ `pairs` over the hole map is UNORDERED -- it really came out `h5 h4 h2
+    -- h1 h3` -- and a proposal whose parameters are numbered differently on
+    -- every run cannot be diffed or reviewed. Sorted by the NUMERIC suffix, so
+    -- h10 follows h9 rather than h1.
+    local hk = {}
+    for h in pairs(fam.template.holes or {}) do hk[#hk + 1] = h end
+    table.sort(hk, function(x, y)
+        local nx, ny = tonumber(x:match('%d+')), tonumber(y:match('%d+'))
+        if nx and ny and nx ~= ny then return nx < ny end
+        return x < y
+    end)
+
+    local rt = 0
+    local function count_rt(t)
+        if t == nil then return end
+        if t.k == 'row~' then rt = rt + 1 end
+        for _, k in ipairs(t.kids or {}) do count_rt(k) end
+    end
+    count_rt(fam.template.body)
+
+    local srccache = {}
+    --- the SOURCE TEXT at a hole's span in one member — this is what turns the
+    --- alpha-collapse sentinel back into a readable name
+    local function text_at(m, rng)
+        if not rng then return nil end
+        local lines = srccache[m.id]
+        if lines == nil then
+            local nd = store and store.node and store.node(m.id)
+            lines = (nd and store.content and store.content(nd)) or false
+            srccache[m.id] = lines
+        end
+        if not lines then return nil end
+        local sl, el = at.sl(rng), at.el(rng)
+        if sl ~= el then return nil end            -- multi-line: not a token
+        local line = lines[sl + 1]
+        if not line then return nil end
+        return line:sub(at.sc(rng) + 1, at.ec(rng))
+    end
+
+    --- a hole's value as the reader should see it: the recovered name where the
+    --- term only says "a local", the term's own symbol otherwise
+    local function shown(v, m)
+        if v == nil then return '(absent)' end
+        local txt = text_at(m, v.at)
+        local sym = v.n or v.v or v.k
+        if type(sym) == 'string' and sym:find('\1local') then
+            return txt and (txt .. '  [a local]') or 'a local'
+        end
+        return txt or tostring(sym)
+    end
+
+    -- ⚠ A SINGLETON IS NOT "IDENTICAL COPIES", AND THE FIRST CUT SAID IT WAS.
+    -- `partition`'s `family_of` gives a ONE-MEMBER family a template with NO
+    -- HOLES by construction (`M.template(M.copy(instance))`), which lands in the
+    -- same `#hk == 0` branch as a genuine hole-free family. Reporting "1 copies
+    -- are IDENTICAL after alpha-renaming" would be nonsense, and it is exactly
+    -- the kind of sentence a reader believes. A singleton means MDL refused to
+    -- merge this member with anything -- a finding about the component, not an
+    -- extraction.
+    if n == 1 then
+        local m = fam.members[1]
+        return { ('%s (%s:%d) joined NO family — the partition found no'
+            .. ' description-length gain in merging it with its near-clones.')
+            :format(m.name, m.file, (m.lines or {})[1] or 0) }
+    end
+
+    if #hk == 0 then
+        -- ★ ZERO HOLES ACROSS TWO OR MORE MEMBERS: nothing varies, so there is no
+        -- parameter to lift and the verb is MERGE, not extract-helper.
+        --
+        -- ⚠⚠ "IDENTICAL" HERE MEANS IDENTICAL AS THE ADAPTER SEES THEM, WHICH IS
+        -- WEAKER THAN IDENTICAL. `near` admitted these members at row-distance
+        -- 1-2, so their canonical ROW KEYS differ while their TERMS do not --
+        -- the term is lossy relative to `rcanon` somewhere. The known mechanism
+        -- is `expr.children` SKIPPING NIL CHILDREN instead of holding them as
+        -- slots (CART-0882): kids (x, nil, z) and (x, z, nil) flatten to the
+        -- same (x, z). That is right for a walk and wrong for a position lens.
+        -- ⇒ SO THIS POINTS AT MERGE, IT DOES NOT CERTIFY IT. :CartographMerge
+        -- does its own equivalence check; this must not be read as having done
+        -- one. Measured 46 of 298 families on wow, 0 on factorio.
+        local L = { ('%d copies have NO varying part under this analysis — nothing'
+            .. ' to parameterize. :CartographMerge is the verb, and it re-checks'
+            .. ' equivalence itself; the term model here is coarser than the row'
+            .. ' keys that admitted them.'):format(n) }
+        for _, m in ipairs(fam.members) do
+            L[#L + 1] = ('    %s  %s:%d'):format(m.name, m.file, (m.lines or {})[1] or 0)
+        end
+        return L
+    end
+
+    local L = {
+        ('helper extraction proposal — ONE helper for %d copies'):format(n),
+        ('  %d shared fixed node(s), %d parameter(s), description length %s')
+            :format(alg.fixed_nodes(fam.template.body) - rt, #hk, tostring(fam.dl)),
+        '  the copies:',
+    }
+    for _, m in ipairs(fam.members) do
+        L[#L + 1] = ('    %s  %s:%d'):format(m.name, m.file, (m.lines or {})[1] or 0)
+    end
+    L[#L + 1] = '  parameters (one per hole; each line is one call site):'
+    for i, h in ipairs(hk) do
+        L[#L + 1] = ('    p%d:'):format(i)
+        for k, m in ipairs(fam.members) do
+            local v = fam.values[k] and fam.values[k][h]
+            local where = ''
+            if v and v.at then
+                where = ('   at %s:%d:%d'):format(m.file, at.sl(v.at) + 1, at.sc(v.at) + 1)
+            end
+            L[#L + 1] = ('      %s  =  %s%s'):format(m.name, shown(v, m), where)
+        end
+    end
+    if rt > 0 then
+        L[#L + 1] = ('  ⚠ %d statement(s) the extractor cannot rebuild (row~) sit in the'
+            .. ' shared body — the helper is NOT complete as shown'):format(rt)
+    end
+    -- the boundary, carried with the answer rather than left to the reader
+    L[#L + 1] = '  note: a parameter shown as [a local] is SOME local at that site;'
+    L[#L + 1] = '        the analysis does not claim the copies read the SAME variable.'
+    return L
+end
+
 return M
