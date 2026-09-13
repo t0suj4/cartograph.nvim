@@ -68,6 +68,60 @@ function M.exports(src)
     return sect, order, of
 end
 
+--- ★★★ THE EXPORT SURFACE IS A DIRECTORY, NOT A FILE (CART-0918). While the
+--- algebra was one vendored file, reading `core.lua` was the whole surface. The
+--- moment cartograph's own move-set extracted a section (rung 3 of CART-0912),
+--- 12 exports left that file and the ledger read 159 -> 147 — with the NUMERATOR
+--- untouched, so absorption "improved" from 15.1% to 16.3% for moving code.
+---
+--- ⚠ AND THAT IS THE FLATTERING DIRECTION, WHICH IS THE ONE NOBODY QUESTIONS.
+--- This file's own header says so about UNDERCOUNTING the numerator; a shrinking
+--- DENOMINATOR is the same failure with a bigger lever — split the module enough
+--- times and absorption reaches 100% with no arrow gaining a consumer. A ratio
+--- whose denominator is a side effect of file layout is not a measurement.
+---
+--- ★ THE SECTION GROUPING SURVIVES THE SPLIT FOR FREE, because the `-- ── title ──`
+--- headers travel WITH the moved text — the move-set carries the comment block
+--- verbatim. So the merge is by section TITLE and needs no new authority.
+--- @return table sect, table order, table of, table files
+function M.exports_dir(dir)
+    local sect, order, of, files = {}, {}, {}, {}
+    local paths = ls(dir)
+    table.sort(paths, function (a, b)
+        -- core first, then stable: the preamble and the bulk of the sections
+        -- come from it, so the section ORDER reads like the original file
+        local ac, bc = a:find('core%.lua$') and 0 or 1, b:find('core%.lua$') and 0 or 1
+        if ac ~= bc then return ac < bc end
+        return a < b
+    end)
+    for _, path in ipairs(paths) do
+        -- the stamp is a record, not code: it exports nothing and its fields
+        -- would read as a section-less preamble
+        if not path:find('origin%.lua$') then
+            local src = read(path)
+            if src then
+                files[#files + 1] = path
+                local s2, o2, of2 = M.exports(src)
+                for _, title in ipairs(o2) do
+                    if not sect[title] then sect[title] = {}; order[#order + 1] = title end
+                    for _, fn in ipairs(s2[title]) do
+                        -- ⚠ FIRST FILE WINS on a duplicate name. Two files
+                        -- exporting one name is a real defect (the module table
+                        -- would take whichever loaded last), and counting it
+                        -- twice would inflate the denominator — the very thing
+                        -- this function exists to stop.
+                        if not of[fn] then
+                            of[fn] = of2[fn]
+                            sect[title][#sect[title] + 1] = fn
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return sect, order, of, files
+end
+
 --- the local each consumer binds the loaded algebra to — DERIVED, not assumed.
 --- `clones.lua` writes `local A, why = alg.load()` and the seam writes
 --- `local A = M.load()`; a tool that hardcoded `A` would silently miss any file
@@ -180,14 +234,12 @@ function M.run(opts)
     -- ⚠ COMPARING THE TWO IS A DIFFERENT TOOL. `tools/vendordrift.lua` answers
     -- "has the copy or the donor moved"; a ledger that silently read whichever
     -- it found would answer neither question reliably.
-    local path = root .. '/lua/cartograph/algebra/core.lua'
-    local declared = 'vendored'
-    local src = read(path)
-    if not src then
-        print(('algebraledger: cannot read the vendored algebra at %s'):format(path))
+    local dir = root .. '/lua/cartograph/algebra'
+    local sect, order, of, files = M.exports_dir(dir)
+    if #files == 0 then
+        print(('algebraledger: no vendored algebra under %s'):format(dir))
         return 1
     end
-    local sect, order, of = M.exports(src)
     local arrows = {}
     for a in pairs(of) do arrows[a] = true end
     local nexp = 0; for _ in pairs(arrows) do nexp = nexp + 1 end
@@ -203,7 +255,15 @@ function M.run(opts)
     local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
 
     print(('ALGEBRA ABSORPTION LEDGER'))
-    print(('  prototype: %s  (declared by %s)'):format(path, declared))
+    print(('  vendored: %s  (%d file%s)'):format(
+        dir:gsub('^' .. (root or ''), ''), #files, #files == 1 and '' or 's'))
+    if #files > 1 then
+        -- name them: once the split starts, WHICH files carry the surface is
+        -- the thing a reader cannot infer from a count
+        local names = {}
+        for _, f in ipairs(files) do names[#names + 1] = f:match('([^/]+)$') end
+        print(('    %s'):format(table.concat(names, ' ')))
+    end
     print(('  exports: %d'):format(nexp))
     print(('    SHIPPED  (a consumer in lua/):  %3d'):format(count(shipped)))
     print(('    HARNESS  (tools/ only):         %3d'):format(count(harness)))

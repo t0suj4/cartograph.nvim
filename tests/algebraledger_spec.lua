@@ -49,3 +49,49 @@ test('algebraledger: exports are attributed to the prototype\'s own sections', f
     ok(of.lit ~= of.transplant, 'constructors and operators are grouped apart')
     ok(#sect[of.lit] > 1, 'the terms section holds several constructors')
 end)
+
+--- ★★★ THE DENOMINATOR MUST SURVIVE THE SPLIT IT IS MEASURING (CART-0918).
+--- Reading the surface from `core.lua` alone was right while the algebra was one
+--- file and wrong the moment adaptation began: 12 exports moved out and the
+--- ledger read 159 -> 147 with the numerator untouched, so absorption "improved"
+--- for moving code. That is the flattering direction, and this file's own header
+--- says the flattering direction is the one nobody questions.
+test('algebraledger: the export surface is the DIRECTORY, so a split does not shrink it', function ()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local function put(name, body)
+        local fd = assert(io.open(dir .. '/' .. name, 'w')); fd:write(body); fd:close()
+    end
+    local HDR = '-- \226\148\128\226\148\128 %s \226\148\128\226\148\128\n'
+
+    -- before the split: one file, two sections, three exports
+    put('core.lua', HDR:format('terms')
+        .. 'function M.lit(v) end\nfunction M.name(n) end\n'
+        .. HDR:format('hopau')
+        .. 'function M.hoau(a, b) end\n')
+    local _, _, of1, files1 = led.exports_dir(dir)
+    local n1 = 0; for _ in pairs(of1) do n1 = n1 + 1 end
+    eq(1, #files1)
+    eq(3, n1)
+
+    -- after: the second section has MOVED, exactly as the move-set carries it
+    -- (the `-- ── title ──` header travels with the text, which is why the
+    -- grouping needs no second authority)
+    put('core.lua', HDR:format('terms')
+        .. 'function M.lit(v) end\nfunction M.name(n) end\n')
+    put('hopau.lua', HDR:format('hopau') .. 'function M.hoau(a, b) end\n')
+    put('origin.lua', 'return { sha256 = "x" }\n')   -- the stamp exports nothing
+    local sect2, order2, of2, files2 = led.exports_dir(dir)
+    local n2 = 0; for _ in pairs(of2) do n2 = n2 + 1 end
+    eq(2, #files2, 'the stamp is not counted as a source')
+    eq(n1, n2, 'the export surface is UNCHANGED by the split')
+    eq('hopau', of2.hoau, 'and the moved arrow keeps its section')
+    ok(#sect2['terms'] == 2 and #sect2['hopau'] == 1, 'both sections survive')
+    -- core sorts first, so the section order still reads like the original file.
+    -- ⚠ order[1] is the `(preamble)` pseudo-section every file opens with — the
+    -- ORDER of the real sections is the claim, not the first slot.
+    local at = {}
+    for i, t in ipairs(order2) do at[t] = i end
+    ok(at['terms'] < at['hopau'], 'core.lua\'s sections come first')
+    vim.fn.delete(dir, 'rf')
+end)
