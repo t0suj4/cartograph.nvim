@@ -163,9 +163,20 @@ test('algebra parts: what a part reads, core supplies, and core still defines', 
     ok(nsup >= 8, 'and it supplies a plausible number of locals: ' .. nsup)
 
     -- core's own module-level locals
+    -- ⚠ FOUR DECLARATION FORMS, AND MISSING ONE IS A FALSE ALARM. The first cut
+    -- read `local function X` and `local X =` only, and reported that PARTS hands
+    -- round `subst`, which core no longer defines — core declares it at :397 as a
+    -- bare FORWARD DECLARATION, `local subst`, assigned further down. A fence that
+    -- over-reports on a declaration form it does not know teaches its reader to
+    -- ignore it, which is the same cost as one that never fires.
     local defined = {}
     for n in core:gmatch('\nlocal function ([%w_]+)') do defined[n] = true end
-    for n in core:gmatch('\nlocal ([%w_]+)%s*=') do defined[n] = true end
+    for names in core:gmatch('\nlocal ([%w_,%s]+)=') do          -- incl. `local a, b =`
+        for n in names:gmatch('[%w_]+') do defined[n] = true end
+    end
+    for names in core:gmatch('\nlocal ([%w_,%s]+)\n') do        -- forward declarations
+        for n in names:gmatch('[%w_]+') do defined[n] = true end
+    end
 
     -- ★ EVERY VALUE PARTS HANDS ROUND MUST STILL EXIST IN CORE. This is the half
     -- that catches a local LEAVING with a section.
