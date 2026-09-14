@@ -187,10 +187,16 @@ test('algebra parts: what a part reads, core supplies, and core still defines', 
             ok(src:find('return function (M, SHARED)', 1, true),
                 name .. ' opens with the part signature')
             parts = parts + 1
-            for n in src:gmatch('SHARED%.([%w_]+)') do
+            -- ★ THE SAME TOOL THE HARNESS-SHIM FENCE USES (`tools/surface.lua`):
+            -- `reads ⊆ supplied`, one interface apart. Its receiver FRONTIER is
+            -- what stopped this reporting `termgraph reads S.eqs` — that part's
+            -- own term-graph store — back when the parameter was called `S`.
+            local surface = dofile(vim.fn.getcwd() .. '/tools/surface.lua')
+            for full in pairs(surface.uses(src, { receivers = { 'SHARED' } })) do
                 total = total + 1
+                local n = full:sub(#'SHARED.' + 1)
                 if not supplied[n] then
-                    missing[#missing + 1] = ('%s reads S.%s'):format(name, n)
+                    missing[#missing + 1] = ('%s reads SHARED.%s'):format(name, n)
                 end
             end
         end

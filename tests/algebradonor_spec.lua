@@ -171,25 +171,15 @@ test('algebra(donor): the shim is TOTAL over the surface the donor uses', functi
     if not schema_ok then skip('the donor spec did not load') end
     local src = table.concat(vim.fn.readfile(vim.fn.getcwd()
         .. '/tests/vendor/algebra_spec.lua'), '\n')
-    local supplied = {}
-    for _, s in ipairs(SUPPLIES) do supplied[s] = true end
+    -- ★ THROUGH `tools/surface.lua`, which is this check promoted out of the two
+    -- places I hand-rolled it. It carries the floor itself: a scan that matches
+    -- nothing reports zero missing, which is the same answer as a complete shim.
+    local surface = dofile(vim.fn.getcwd() .. '/tools/surface.lua')
+    local used = surface.uses(src, { receivers = { 'assert' }, bares = { 'describe', 'it' } })
+    local missing, why = surface.gap(used, SUPPLIES)
+    ok(missing, tostring(why))
+    eq(0, #missing, surface.report(missing, 'the donor\'s harness surface'))
 
-    local used, missing = {}, {}
-    for name in src:gmatch('%f[%w_]assert%.([%w_.]+)') do
-        used['assert.' .. name] = true
-    end
-    for _, bare in ipairs({ 'describe', 'it' }) do
-        if src:find('%f[%w_]' .. bare .. '%s*%(') then used[bare] = true end
-    end
-    for name in pairs(used) do
-        if not supplied[name] then missing[#missing + 1] = name end
-    end
-    table.sort(missing)
-    eq(0, #missing, 'the donor uses harness names the shim does not supply: '
-        .. table.concat(missing, ', '))
-
-    -- ⚠ AND THE FENCE MUST NOT PASS BY FINDING NOTHING: the donor really does
-    -- reach for a surface, and a scan that matched none would report the same 0.
     local nused = 0; for _ in pairs(used) do nused = nused + 1 end
     ok(nused >= 8, 'the scan found the donor\'s surface: ' .. nused)
     ok(n >= 200, 'and the donor registered its tests: ' .. tostring(n))
