@@ -197,6 +197,16 @@ function M.compute(store, moveset, dest)
     local travelling = {}
     for id in pairs(travels) do travelling[#travelling + 1] = id end
     local freeset, partial = require('cartograph.expr').free_set(store, travelling)
+    -- ★ THE RECEIPT: what each rung LOOKED AT, so a run with no captures is
+    -- reviewable (CART-0912). `slice` produced no hazard because its call sites
+    -- did not resolve, and "could not look" rendered as "nothing to do".
+    local rc = require('cartograph.receipt').new()
+    if partial then
+        rc:partial('free names of the moved set', 0,
+            ('`expr.free` could not answer for every one of the %d travelling'
+            .. ' nodes, so the free set is a LOWER BOUND and no candidate was'
+            .. ' filtered by it'):format(#travelling))
+    end
 
     local captured = {} -- dep id -> { name, file } (deduped)
     local function consider(depid)
@@ -310,7 +320,20 @@ function M.compute(store, moveset, dest)
                 :format(c.name, c.file))
     end
 
+    -- what the capture rungs found, WITH what looked
+    if #caps == 0 then
+        rc:none('captures', ('the resolved-edge rung over %d travelling node(s),'
+            .. ' and the free-name rung over %d name(s) the set reads but does'
+            .. ' not bind'):format(#travelling,
+            (function () local c = 0; for _ in pairs(freeset) do c = c + 1 end; return c end)()))
+    else
+        local textual_n = 0
+        for _, c in ipairs(caps) do if c.textual then textual_n = textual_n + 1 end end
+        rc:did('captures', #caps, { by_free_name_rung = textual_n })
+    end
+
     return {
+        receipt = rc,  -- the BUILDER; moveapply takes its rows
         moves = moves,
         rewrites = rewrites,
         requires_add = sorted_keys(add),

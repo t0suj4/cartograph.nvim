@@ -110,9 +110,18 @@ function M.run(store, recipe, opts)
                         ('the plan could not be previewed: %s'):format(tostring(dwhy)))
                     derailed = true
                 else
+                    -- ★ THE RECEIPT RIDES WITH EVERY STEP, INCLUDING THE SMOOTH
+                    -- ONES (CART-0912). A step with no hazards used to report
+                    -- nothing at all, which is the same rendering as a step
+                    -- nobody could analyse. `unwarranted` is the review question
+                    -- in one field: a clean step is not "no rows", it is every
+                    -- row `did` or `none`.
+                    local rcm = require 'cartograph.receipt'
                     local row = { i = i, verb = verb, ok = true, plan = plan,
                         before = before, after = after,
-                        hazards = plan.hazards, fixes = hz.fixes(plan) }
+                        hazards = plan.hazards, fixes = hz.fixes(plan),
+                        receipt = plan.receipt,
+                        unwarranted = plan.receipt and rcm.unwarranted(plan.receipt) or nil }
                     if opts.apply then
                         local aok, awhy = spec.arm(store, plan)
                         local entry

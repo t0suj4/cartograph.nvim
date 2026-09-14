@@ -398,6 +398,8 @@ local function collect(store, ids, dest, plan, opts)
     -- rewritten (dest_requires stays spoken).
     local hz = require 'cartograph.hazard'
     local imp = require('cartograph.impact').compute(store, ids, dest)
+    -- impact's rungs know what THEY looked at; the plan's receipt starts as theirs
+    plan._receipt = imp.receipt
     -- ★★★ THE ROW WAS ALREADY THERE AND THIS LINE DESTROYED IT (CART-0920).
     -- `impact` emits `{ level, kind, msg }` — a kind a caller could filter on and
     -- a level a caller could rank by — and the old spelling was
@@ -516,6 +518,43 @@ local function collect(store, ids, dest, plan, opts)
         plan.stamps[f] = txn.disk_stamp(root, f)
     end
     table.sort(plan.touched)
+
+    -- ★★★ THE RECEIPT (CART-0912): what this plan DID, not only what it refused.
+    -- A hazard carries its reason; a success carried nothing, so a smooth run was
+    -- indistinguishable from an unexamined one — and this project has three
+    -- measured cases of exactly that in one day.
+    -- ⚠ `rewrites = 0` IS THE FIELD THAT MOTIVATED IT: it could mean no callers
+    -- exist or none were resolvable, and nothing said which. Here the two are
+    -- different rows with different warrants.
+    local rc = plan._receipt or require('cartograph.receipt').new()
+    rc:did('symbols moved', #plan.moves)
+    local declined = 0
+    for _, v in pairs(rw_left) do declined = declined + v end
+    if #plan.rewrites > 0 then
+        rc:did('call sites requalified', #plan.rewrites)
+    elseif declined == 0 then
+        rc:none('call sites requalified',
+            'the ImpactEngine over this move-set: no site outside it reaches a'
+            .. ' moved symbol through a binding this verb can rewrite')
+    end
+    if declined > 0 then
+        rc:partial('call sites requalified', #plan.rewrites,
+            ('%d more site(s) reference the old home and were NOT rewritten —'
+            .. ' they ride in the hazards'):format(declined))
+    end
+    if #plan.imports_add > 0 then rc:did('imports added', #plan.imports_add)
+    else rc:none('imports added', 'the rewritten sites: none needed a new binding') end
+    if plan.scaffold then rc:did('module scaffold written', 1, plan.scaffold.name)
+    elseif plan.creates and next(plan.creates) then
+        rc:blind('module scaffold written',
+            'the destination is created but no scaffold was written — either this'
+            .. ' language declares none, or the module table could not be read'
+            .. ' from the source (the idiom must be MECHANICAL or nothing is written)')
+    end
+    if plan.reexports then rc:did('re-exports wired', #plan.reexports) end
+    -- ⚠ ROWS, NOT THE BUILDER: `journal.begin` serializes the plan, and a
+    -- table carrying a metatable and methods does not survive that.
+    plan.receipt, plan._receipt = rc.rows, nil
     return txn.protocol(plan, M.edits_for)
 end
 

@@ -1845,6 +1845,23 @@ local function ledger_notes(plan)
         -- may legitimately decide the hazard is the outcome they wanted.
         local hz = require 'cartograph.hazard'
         local fixes = hz.fixes(plan)
+        -- ★★★ AND WHAT THE PLAN DID, WITH ITS WARRANTS (CART-0912). A hazard
+        -- carries its reason; a success carried nothing, so a plan that found no
+        -- captures rendered exactly like one whose rungs could not look. The
+        -- receipt says which — and `unwarranted` is the review question in one
+        -- number: a clean plan is not "no rows", it is every row `did` or `none`.
+        if plan.receipt then
+            local rcm = require 'cartograph.receipt'
+            local unw = rcm.unwarranted(plan.receipt)
+            out[#out + 1] = { kind = 'receipt', premise = 'what-this-plan-did',
+                why = (#unw == 0
+                    and ('%d decision(s), every one warranted — each row is either'
+                        .. ' something done or something LOOKED FOR and not found,'
+                        .. ' with what looked'):format(#plan.receipt)
+                    or ('%d decision(s), %d of them UNWARRANTED — a lower bound or'
+                        .. ' something that could not be looked at'):format(#plan.receipt, #unw)),
+                evidence = { rows = plan.receipt, unwarranted = #unw > 0 and unw or nil } }
+        end
         out[#out + 1] = { kind = 'hazards', premise = 'disclosed-not-rewritten',
             why = #plan.hazards == 0
                 and 'no hazard: the plan rewrites everything it found'

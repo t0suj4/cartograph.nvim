@@ -749,7 +749,11 @@ test('moveapply: the PLAN field set is pinned to its schema version', function (
     -- `reexports` is v2's addition and appears only when the caller asks for it,
     -- so it is listed as OPTIONAL rather than required: a field that comes and
     -- goes with an option is still part of the schema a replayer reads.
-    local optional = { reexports = true }
+    -- ⚠ `receipt` IS A PLAN FIELD A REPLAYER DOES NOT READ — it is what the plan
+    -- DID and with what warrant (CART-0912), for review rather than for apply. So
+    -- it is listed here rather than bumping `schema.PLAN`, which is the choice
+    -- this fence exists to force someone to make out loud.
+    local optional = { reexports = true, receipt = true }
 
     local got = {}
     for k in pairs(plan) do got[#got + 1] = k end
