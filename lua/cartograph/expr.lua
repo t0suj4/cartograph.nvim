@@ -2448,4 +2448,141 @@ function M.gate(fl, lang)
     return bad
 end
 
+--- ★★★ WHICH NAMES DOES THIS FUNCTION READ THAT IT DOES NOT DEFINE (CART-0912).
+--- Promoted out of `hoistclosure`, where it was correct and private, because THREE
+--- other instruments were each answering the same question badly over TEXT:
+---
+---     impact's capture rung   `body:find(name)` — matches prose and strings too
+---     a free-identifier scan  CALL targets only — blind to values and indexes
+---     the parts fence         what a part ASKS for, not what it NEEDS
+---
+--- ⇒ TEXT HAS SYNTACTIC ROLES AND THE IR DOES NOT. Measured on a fixture naming
+---   one local per role: the IR reports a CALL, a VALUE and an INDEX alike, and
+---   reports neither the comment nor the string that spell the same names. Each of
+---   those three roles had already cost a real defect — `slice` (call), `key`
+---   (value), `RUNG_RANK` (index) — one per instrument.
+---
+--- ⚠ `s.def`, NOT `s.defs`. A throwaway that guessed the plural reported every
+--- local of the function as free, which is the failure mode a shared query exists
+--- to stop being re-invented.
+---
+--- @param store table
+--- @param id string  a function/method node id
+--- @param opts table|nil { skip = { ranges } } — nested function ranges whose
+---   statements belong to the nested function, not to this one. ⚠ EVERY nested
+---   range, not just one: a SIBLING closure's locals are attributed to the parent
+---   too (CART-0908), and the ranges are 0-BASED while `s.l` is 1-BASED.
+--- @return table|nil facts { params, defs, reads, vararg, locals }
+function M.free(store, id, opts)
+    local skip = (opts or {}).skip
+    local eo = M.of(store, id)
+    if not eo then return nil end
+    local pset, dset = {}, {}
+    for _, p in ipairs(eo.fl.params or {}) do pset[p] = true end
+    -- ⚠ EVERY nested range, not just the target's. A SIBLING closure's locals
+    -- are attributed to the parent too, so skipping only the closure under test
+    -- still left `pad` (declared in cb2) looking like an enclosing local of cb1.
+    -- ⚠⚠ TWO COORDINATE SYSTEMS. `s.l` is 1-BASED (the flow layer's statement
+    -- line) and `at.sl`/`at.el` are 0-BASED (node ranges). Comparing them raw
+    -- shifts every test by one line, and the failure is SILENT AND WIDENING: a
+    -- declaration on the first line of a sibling closure reads as being INSIDE
+    -- it, drops out of the enclosing facts, and the capture it should have
+    -- blocked is allowed through. Measured exactly that — `local cap = x + 1`
+    -- at 1-based line 4 fell inside a closure spanning 0-based 4..6.
+    local function outside(s)
+        if not skip or not s.l then return true end
+        local l0 = s.l - 1
+        for _, rng in ipairs(skip) do
+            if l0 >= at.sl(rng) and l0 <= at.el(rng) then return false end
+        end
+        return true
+    end
+    for _, s in ipairs(eo.fl.stmts or {}) do
+        if outside(s) then
+            for _, d in ipairs(s.def or {}) do dset[d] = true end
+        end
+    end
+    -- ★★★ READS COME FROM `k == 'name'` NODES, NOT FROM `s.use` (CART-0259).
+    -- `s.use` is FLATTENED: it lists the field selector of `rec.file` and the
+    -- KEY of `{ ref = x }` alongside genuine variable reads, so a closure that
+    -- merely touched a field named like an enclosing local was refused as
+    -- capturing it. MEASURED on our own tree: of 135,885 uses, 44,397 (33%) are
+    -- NOT name nodes — 32,812 fields and 11,585 table-constructor keys.
+    --
+    -- ⚠ NARROWING `reads` WIDENS THIS VERB, which is the unsafe direction, so
+    -- the residue was checked before the change rather than after: every one of
+    -- the 44,397 is a selector or a key, and neither is a variable read. The
+    -- expression tree already carries the distinction — a field is `k='field'`
+    -- with its name in `n`, not a `name` node — and this loop was ALREADY
+    -- walking it for vararg.
+    local reads, vararg = {}, false
+    for _, s in ipairs(eo.fl.stmts or {}) do
+        if s.expr then
+            local function scan(e)
+                if not e then return end
+                M.walk(e, function (x)
+                    if x.k == 'vararg' then vararg = true end
+                    if x.k == 'name' then
+                        local u = tostring(x.n)
+                        if not pset[u] and not dset[u] then reads[u] = true end
+                    end
+                end)
+            end
+            for _, x in ipairs(s.expr.lhs or {}) do scan(x) end
+            for _, x in ipairs(s.expr.rhs or {}) do scan(x) end
+            -- ⚠ REDUNDANT TODAY, KEPT DELIBERATELY. A conditional row encodes
+            -- its guard TWICE — once as the row's `rhs` and once as `cond` — so
+            -- dropping this scan currently breaks no test (mutation-checked).
+            -- That is a property of the row model, not a guarantee: a language
+            -- whose rows do not duplicate the guard would lose every
+            -- condition-only capture, silently and in the widening direction.
+            scan(s.expr.cond)
+        end
+    end
+    return { params = pset, defs = dset, reads = reads, vararg = vararg, locals = pset }
+end
+
+--- ★★★ THE FREE NAMES OF A NODE SET — `(∪ reads) \ (∪ defs ∪ params)`.
+---
+--- `M.free` answers for ONE function and subtracts only THAT function's own
+--- bindings, which is right for one function and wrong for a SET. Unioning the
+--- reads without subtracting the set's bindings fails in both directions, and I
+--- shipped neither failure only because a test caught each:
+---
+---   over the SEED alone      a private helper that travels reads a name nobody
+---                            else reads -> the name is missed, and a filter
+---                            built on it SUPPRESSES A REAL CAPTURE
+---   over the CLOSURE, no     a nested closure's own reads include its PARENT's
+---   subtraction              locals — free for the child, BOUND in the set —
+---                            so the set looks to read names nothing outside
+---                            supplies
+---
+--- ⇒ IT IS NOT A HEURISTIC, IT IS SET ALGEBRA, and subtracting is what makes it
+---   an answer rather than a guess. MEASURED on one section of the vendored
+---   algebra: 14 nodes, 39 names read, 21 free after subtraction — the five real
+---   captures free, the two long-standing phantoms not read at all.
+---
+--- ⚠ `partial` IS PART OF THE ANSWER. If `expr.free` cannot answer for even ONE
+--- node in the set, the free set is a LOWER BOUND: names the unreadable node
+--- reads are missing from it, so anything deciding on this must not treat an
+--- absence as evidence. Callers get the flag, not a silent short set.
+--- @param store table
+--- @param ids table   node ids (the whole travelling set, contained nodes too)
+--- @return table free (set), boolean partial
+function M.free_set(store, ids)
+    local reads, bound, partial = {}, {}, false
+    for _, id in ipairs(ids) do
+        local ok, f = pcall(M.free, store, id)
+        if not ok or not f then partial = true
+        else
+            for n in pairs(f.reads or {}) do reads[n] = true end
+            for n in pairs(f.defs or {}) do bound[n] = true end
+            for n in pairs(f.params or {}) do bound[n] = true end
+        end
+    end
+    local free = {}
+    for n in pairs(reads) do if not bound[n] then free[n] = true end end
+    return free, partial
+end
+
 return M

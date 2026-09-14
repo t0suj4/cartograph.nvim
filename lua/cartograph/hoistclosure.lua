@@ -24,82 +24,16 @@ local function contains(outer, inner)
     return true
 end
 
--- params ∪ df-defs of a function body, and its free reads + vararg use
---- ⚠ `skip` EXCLUDES A NESTED RANGE, and without it an enclosing function's
---- facts include ITS CHILDREN'S. MEASURED: for `outer` holding two callbacks,
---- `defs` came back `{acc, seen, s, pad, acc, seen, s, pad}` -- every local of
---- both callbacks, attributed to the parent. The read gate survived that
---- (a child's own defs are excluded from its own `reads`), but any gate that
---- compares a child's DEFS against the parent's sees every inner local as a
---- shadow of an enclosing one. Statements carry their line, so the child's
---- range is enough to leave it out.
+-- ⚠ `body_facts` MOVED TO `expr.free` (CART-0912). The question it answers —
+-- which names does this function READ that it does not DEFINE — turned out to be
+-- the one three other instruments were each answering badly over TEXT: the
+-- move-set's capture rung (`body:find`), a free-identifier scan (CALL targets
+-- only) and the parts fence. Text has syntactic roles and the IR does not, which
+-- is why `key` (a value), `slice` (a call) and `RUNG_RANK` (an index) each hid
+-- from a different one of them. This was the correct implementation, private to
+-- one module; promoting it is the fix.
 local function body_facts(store, id, skip)
-    local eo = require('cartograph.expr').of(store, id)
-    if not eo then return nil end
-    local pset, dset = {}, {}
-    for _, p in ipairs(eo.fl.params or {}) do pset[p] = true end
-    -- ⚠ EVERY nested range, not just the target's. A SIBLING closure's locals
-    -- are attributed to the parent too, so skipping only the closure under test
-    -- still left `pad` (declared in cb2) looking like an enclosing local of cb1.
-    -- ⚠⚠ TWO COORDINATE SYSTEMS. `s.l` is 1-BASED (the flow layer's statement
-    -- line) and `at.sl`/`at.el` are 0-BASED (node ranges). Comparing them raw
-    -- shifts every test by one line, and the failure is SILENT AND WIDENING: a
-    -- declaration on the first line of a sibling closure reads as being INSIDE
-    -- it, drops out of the enclosing facts, and the capture it should have
-    -- blocked is allowed through. Measured exactly that — `local cap = x + 1`
-    -- at 1-based line 4 fell inside a closure spanning 0-based 4..6.
-    local function outside(s)
-        if not skip or not s.l then return true end
-        local l0 = s.l - 1
-        for _, rng in ipairs(skip) do
-            if l0 >= at.sl(rng) and l0 <= at.el(rng) then return false end
-        end
-        return true
-    end
-    for _, s in ipairs(eo.fl.stmts or {}) do
-        if outside(s) then
-            for _, d in ipairs(s.def or {}) do dset[d] = true end
-        end
-    end
-    -- ★★★ READS COME FROM `k == 'name'` NODES, NOT FROM `s.use` (CART-0259).
-    -- `s.use` is FLATTENED: it lists the field selector of `rec.file` and the
-    -- KEY of `{ ref = x }` alongside genuine variable reads, so a closure that
-    -- merely touched a field named like an enclosing local was refused as
-    -- capturing it. MEASURED on our own tree: of 135,885 uses, 44,397 (33%) are
-    -- NOT name nodes — 32,812 fields and 11,585 table-constructor keys.
-    --
-    -- ⚠ NARROWING `reads` WIDENS THIS VERB, which is the unsafe direction, so
-    -- the residue was checked before the change rather than after: every one of
-    -- the 44,397 is a selector or a key, and neither is a variable read. The
-    -- expression tree already carries the distinction — a field is `k='field'`
-    -- with its name in `n`, not a `name` node — and this loop was ALREADY
-    -- walking it for vararg.
-    local reads, vararg = {}, false
-    local expr = require 'cartograph.expr'
-    for _, s in ipairs(eo.fl.stmts or {}) do
-        if s.expr then
-            local function scan(e)
-                if not e then return end
-                expr.walk(e, function (x)
-                    if x.k == 'vararg' then vararg = true end
-                    if x.k == 'name' then
-                        local u = tostring(x.n)
-                        if not pset[u] and not dset[u] then reads[u] = true end
-                    end
-                end)
-            end
-            for _, x in ipairs(s.expr.lhs or {}) do scan(x) end
-            for _, x in ipairs(s.expr.rhs or {}) do scan(x) end
-            -- ⚠ REDUNDANT TODAY, KEPT DELIBERATELY. A conditional row encodes
-            -- its guard TWICE — once as the row's `rhs` and once as `cond` — so
-            -- dropping this scan currently breaks no test (mutation-checked).
-            -- That is a property of the row model, not a guarantee: a language
-            -- whose rows do not duplicate the guard would lose every
-            -- condition-only capture, silently and in the widening direction.
-            scan(s.expr.cond)
-        end
-    end
-    return { params = pset, defs = dset, reads = reads, vararg = vararg, locals = pset }
+    return require('cartograph.expr').free(store, id, { skip = skip })
 end
 
 --- Plan to hoist the nested closure `closure_id` to module scope, or (nil, reason).

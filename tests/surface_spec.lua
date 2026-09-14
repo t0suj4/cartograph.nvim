@@ -63,3 +63,60 @@ test('surface: supplied may be a list or a set, and the gap is sorted', function
     ok(surface.report(as_list, 'shim'):find('2 unsupplied', 1, true))
     eq('shim: total', surface.report({}, 'shim'))
 end)
+
+-- ── the free names of a SET, which is what a capture is ────────────────────
+
+local expr = require 'cartograph.expr'
+local ts2 = require 'cartograph.providers.treesitter'
+local store2 = require 'cartograph.store'
+
+local function ready2()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.language.add, 'lua')
+end
+
+--- ★★★ THE SUBTRACTION IS THE WHOLE POINT. `expr.free` subtracts ONE function's
+--- own bindings, which is right for one function and wrong for a SET: a nested
+--- closure reads its parent's locals, and those are free for the child and BOUND
+--- in the set.
+test('expr.free_set: the set\'s own bindings are subtracted', function ()
+    if not ready2() then skip('no lua parser') end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local OUTSIDE = 1',
+        'function M.a(x)',
+        '    local mine = x',
+        '    local function inner(y) return mine + y + OUTSIDE end',
+        '    return inner(x)',
+        'end',
+        'return M',
+    }, '\n')); fd:close()
+    store2.ingest(ts2.extract(root))
+    local ids = {}
+    for _, n in ipairs(store2.data.nodes) do
+        if n.file == 'm.lua' and (n.kind == 'function' or n.kind == 'method') then
+            ids[#ids + 1] = n.id
+        end
+    end
+    ok(#ids >= 2, 'the fixture has a parent and a child: ' .. #ids)
+
+    local free, partial = expr.free_set(store2, ids)
+    eq(false, partial)
+    eq(true, free['OUTSIDE'], 'a name from outside the set is free')
+    eq(nil, free['mine'], 'a name the SET binds is not free, though the child reads it')
+    eq(nil, free['x'], 'nor is a parameter')
+    eq(nil, free['y'], 'nor a nested parameter')
+end)
+
+--- ⚠ A PARTIAL ANSWER IS A LOWER BOUND, and a caller deciding on it must not
+--- read an absence as evidence — which is why the flag exists rather than a
+--- silently short set.
+test('expr.free_set: an unanswerable node makes the result PARTIAL', function ()
+    if not ready2() then skip('no lua parser') end
+    local free, partial = expr.free_set(store2, { 'no-such-node-id' })
+    eq(true, partial)
+    eq(0, (function () local c = 0; for _ in pairs(free) do c = c + 1 end; return c end)())
+end)

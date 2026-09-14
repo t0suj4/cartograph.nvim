@@ -922,3 +922,74 @@ test('arm: applying one plan makes the other stale, and arming SAYS SO', functio
     ok(moveapply.arm(st, pg2), 'and the re-derived plan arms')
     ok(moveapply.apply(st, pg2), 'and applies')
 end)
+
+--- ★★★ THE CAPTURE CANDIDATES ARE FILTERED BY WHAT THE MOVED CODE ACTUALLY READS
+--- (CART-0912), and the read set must be taken over the CLOSURE, not the seed.
+--- The resolved rung captures by NAME, and a name can collide: `core.lua` has
+--- `M.derive = { values = function…, template = function… }` — functions inside a
+--- TABLE CONSTRUCTOR — which mint module-level nodes called `values` and
+--- `template`, captured on three separate sections of the algebra split and
+--- pruned by hand each time.
+--- ⚠⚠ BUT A FILTER IS ONLY AS SOUND AS THE SET IT FILTERS AGAINST. Reading only
+--- the SEED dropped `child` and `is_hole` from a section whose PRIVATE HELPERS use
+--- them, and the filter then suppressed two REAL captures — failing in the unsafe
+--- direction. The read set is taken over `travels`: the seed plus everything the
+--- move pulls in.
+test('moveapply: a capture read only by a PRIVATE HELPER is still disclosed', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'local function shared(x) return x + 1 end',   -- stays: also used below
+        'local function helper(x) return shared(x) end',  -- PRIVATE, travels
+        'function M.entry(x) return helper(x) end',
+        'function M.stays(x) return shared(x) end',    -- keeps `shared` shared
+        'return M',
+    }, '\n') }
+    local n = node_by(st, 'M.entry') or node_by(st, 'entry')
+    -- ⚠ `plan_moveset`, NOT `plan_extract_ids`: only the former CLOSES the set
+    -- over its private captures, and the whole point here is that `helper`
+    -- travels. My first cut used the explicit-id entry point, `helper` stayed,
+    -- and the test failed at baseline — the fixture did not build the shape it
+    -- was asserting about.
+    local plan = assert(moveapply.plan_moveset(st, { n.id }, 'sub/e.lua', { arm = false }))
+
+    -- `helper` travels with the move (private); `shared` stays and is read ONLY
+    -- from inside `helper`, never from the seeded function
+    local said
+    for _, h in ipairs(plan.hazards or {}) do
+        if h:find('capture', 1, true) and h:find('shared', 1, true) then said = h end
+    end
+    ok(said, 'the helper\'s capture is disclosed: ' ..
+        require('cartograph.hazard').text(plan.hazards))
+end)
+
+--- ★★★ A CAPTURE IS A FREE NAME OF THE TRAVELLING SET — `(∪reads) \ (∪binds)` —
+--- and the SUBTRACTION is what makes it an answer rather than a guess
+--- (CART-0912). Built two ways wrong first, each failing in a different
+--- direction: over the SEED it suppressed real captures read only by a private
+--- helper; over the CLOSURE without subtracting it reported names the set binds
+--- itself, because a NESTED closure's own reads include its PARENT's locals.
+test('moveapply: a local the moved set BINDS is not a capture, even read by a child', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files { ['m.lua'] = table.concat({
+        'local M = {}',
+        'local outside = 7',                     -- a genuine capture
+        'function M.entry(x)',
+        '    local mine = x + 1',                -- BOUND by the moved set
+        '    local function inner(y) return mine + y + outside end',  -- child reads both
+        '    return inner(x)',
+        'end',
+        'function M.stays() return outside end', -- keeps `outside` shared
+        'return M',
+    }, '\n') }
+    local n = node_by(st, 'M.entry') or node_by(st, 'entry')
+    local plan = assert(moveapply.plan_moveset(st, { n.id }, 'sub/e.lua', { arm = false }))
+    local txt = require('cartograph.hazard').text(plan.hazards)
+
+    -- the child reads `mine`, which the PARENT declares: free for the child,
+    -- BOUND in the set, so not a capture
+    ok(not txt:find('capture: mine', 1, true),
+        'a name the set binds itself is not disclosed: ' .. txt)
+    -- and the genuine one still is
+    ok(txt:find('outside', 1, true), 'a name from outside the set IS: ' .. txt)
+end)

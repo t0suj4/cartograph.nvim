@@ -178,11 +178,32 @@ function M.compute(store, moveset, dest)
         end
         return true
     end
+    -- ★★★ THE FREE NAMES OF THE TRAVELLING SET, which is what a capture IS: a
+    -- name the moved code reads and the moved code does not bind (CART-0912).
+    --
+    -- ⚠ I BUILT THIS TWICE WRONG FIRST, and each way failed in a different
+    -- direction — over the SEED it suppressed real captures (`child`, `is_hole`
+    -- read only by a private helper), over the CLOSURE without subtracting it
+    -- reported names the set binds itself (a nested closure sees its PARENT's
+    -- locals as free). Subtracting the set's own bindings is what makes it an
+    -- answer. MEASURED on one section: the five real captures free, the two
+    -- long-standing phantoms not read at all.
+    --
+    -- ⚠⚠ AND A PARTIAL ANSWER MAY NOT FILTER. If `expr.free` could not answer for
+    -- some node, the free set is a LOWER BOUND and an absence is not evidence —
+    -- so the filter is skipped entirely rather than applied to a short set. This
+    -- verb has already suppressed a real capture once (CART-0919) and the cost
+    -- was a module that loaded clean and died on first use.
+    local travelling = {}
+    for id in pairs(travels) do travelling[#travelling + 1] = id end
+    local freeset, partial = require('cartograph.expr').free_set(store, travelling)
+
     local captured = {} -- dep id -> { name, file } (deduped)
     local function consider(depid)
         if depid and not travels[depid] and not captured[depid] then
             local dn = store.node(depid)
-            if dn and sources[dn.file] and module_level(dn) then -- true capture
+            if dn and sources[dn.file] and module_level(dn)
+                and (partial or freeset[dn.name]) then -- true capture
                 captured[depid] = { name = dn.name, file = dn.file }
             end
         end
@@ -210,38 +231,31 @@ function M.compute(store, moveset, dest)
     -- already how `module_scaffold`'s `M.x` residual works.
     local textual = {}
     do
-        local txn = require 'cartograph.txn'
-        local root = store.data.root
-        local moved_text = {}          -- file -> the moved lines, concatenated
-        for _, r in ipairs(ranges) do
-            if moved_text[r.file] == nil then
-                local t = root and txn.read_file(root, r.file)
-                moved_text[r.file] = t and vim.split(t, '\n', { plain = true }) or false
-            end
-        end
-        local chunk = {}
-        for _, r in ipairs(ranges) do
-            local ls = moved_text[r.file]
-            if ls then
-                local acc = chunk[r.file] or {}
-                for i = r.s + 1, r.e + 1 do acc[#acc + 1] = ls[i] end
-                chunk[r.file] = acc
-            end
-        end
-        for file, acc in pairs(chunk) do
-            local body = table.concat(acc, '\n')
-            for _, n in ipairs(store.data.nodes or {}) do
-                -- a module-level, same-file, non-travelling, UNQUALIFIED name:
-                -- `M.foo` is the other half of the residual and is reported by
-                -- `module_scaffold`, so only bare locals are this rung's business
-                if n.file == file and not travels[n.id] and not captured[n.id]
-                    and n.name and not n.name:find('%.')
-                    and (n.kind == 'function' or n.kind == 'var')
-                    and module_level(n)
-                    and body:find('%f[%w_]' .. n.name:gsub('%p', '%%%0') .. '%f[^%w_]') then
-                    captured[n.id] = { name = n.name, file = n.file }
-                    textual[n.id] = true
-                end
+        -- ★★★ THE SECOND RUNG READS THE IR, NOT THE TEXT (CART-0912). It began as
+        -- `body:find(name)` over the moved lines, which works and over-reports:
+        -- prose and string literals spell the same names, so three sections of the
+        -- algebra split disclosed `template`, `values`, `instance` and `parse` as
+        -- captures when the moved code reaches them as `M.template` or never at
+        -- all. `expr.free` answers the same question over NAME NODES, where a
+        -- comment is not a name and a string is not a name.
+        -- ⚠ AND IT SEES EVERY SYNTACTIC ROLE. The resolved-edge rung above is
+        -- blind where resolution fails; a CALL-shaped text scan is blind to values
+        -- and indexes. Measured, one real defect each: `slice` (call), `key`
+        -- (value), `RUNG_RANK` (index).
+        -- ★ NO `skip`: a nested closure's statements are attributed to its parent,
+        -- and a nested closure reading an enclosing file-local IS a capture of the
+        -- function being moved.
+        -- the files the move is leaving: a capture is a local of a SOURCE file,
+        -- never of some unrelated file that happens to share a name
+        local sourcefiles = {}
+        for _, r in ipairs(ranges) do sourcefiles[r.file] = true end
+        for _, n in ipairs(store.data.nodes or {}) do
+            if not travels[n.id] and not captured[n.id]
+                and n.name and not n.name:find('%.') and freeset[n.name]
+                and (n.kind == 'function' or n.kind == 'var')
+                and module_level(n) and sourcefiles[n.file] then
+                captured[n.id] = { name = n.name, file = n.file }
+                textual[n.id] = true
             end
         end
     end
