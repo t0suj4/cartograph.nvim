@@ -4354,7 +4354,8 @@ if os.getenv('DERIVE') then require('derive').apply_to(M, os.getenv('DERIVE')) e
 -- ★ EVERY NAME HERE CAME FROM THE PLAN'S OWN CAPTURE HAZARDS, not from a crash.
 local PARTS = { vsym = vsym, lcs_alignments = lcs_alignments, slice = slice,
     cat = cat, is_hole = is_hole, child = child, key = key,
-    lcp = lcp, lexlt = lexlt, prefix_eq = prefix_eq, is_prefix = is_prefix }
+    lcp = lcp, lexlt = lexlt, prefix_eq = prefix_eq, is_prefix = is_prefix,
+    RUNG_RANK = RUNG_RANK }
 require('cartograph.algebra.hopau')(M, PARTS)
 require('cartograph.algebra.termgraph')(M, PARTS)
 require('cartograph.algebra.eau')(M, PARTS)

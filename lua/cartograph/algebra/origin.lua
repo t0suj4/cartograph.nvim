@@ -51,4 +51,17 @@ return {
     -- the copy stays byte-comparable; if we ever want that check it belongs in
     -- `tools/`, not here.
     unported     = { 'core.lua:5999 — optional `require("derive")`, env-gated on DERIVE' },
+
+    -- ★★★ THE DONOR'S OWN TESTS CAME TOO (CART-0912). 243 of them over 5240
+    -- lines, vendored BYTE-IDENTICAL to `tests/vendor/algebra_spec.lua` and run
+    -- through a harness shim. ⇒ THIS IS WHAT MAKES THE PROOF OURS RATHER THAN
+    -- BORROWED: the code was already ours, and a capability whose evidence lives
+    -- in someone else's repository is a capability we cannot re-check after we
+    -- change it — and we have changed it, six sections' worth.
+    -- ⚠ AND IT IS THE ACCEPTANCE ORACLE FOR THE SPLIT: the donor's tests know
+    -- nothing about parts, so they pass only if the adaptation preserved
+    -- behaviour exactly.
+    spec_file    = 'spec/algebra_spec.lua',
+    spec_sha256  = '437287231debd88d47c0613ce9f91e03b77145c07cad1c6ef027840f20172dc1',
+    spec_lines   = 5240,
 }

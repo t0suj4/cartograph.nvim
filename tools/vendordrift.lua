@@ -68,6 +68,20 @@ M.units = {
         --- than hardcoding a path.
         donor  = function () return (require 'cartograph.algebra').path() end,
     },
+    {
+        -- ★ THE SECOND UNIT, WHICH THIS FILE'S HEADER PROMISED WOULD BE A ROW
+        -- RATHER THAN A SECOND TOOL. The donor's 243 tests, vendored verbatim.
+        name   = 'tests/vendor/algebra_spec.lua',
+        copy   = REPO .. '/tests/vendor/algebra_spec.lua',
+        origin = 'cartograph.algebra.origin',
+        stamp_field = 'spec_sha256',
+        -- the spec sits beside the module in the donor, so its path is derived
+        -- from the DECLARED one rather than written again
+        donor  = function ()
+            local path = (require 'cartograph.algebra').path()
+            return (path:gsub('algebra%.lua$', 'spec/algebra_spec.lua'))
+        end,
+    },
 }
 
 --- @return table report  { name, state, copy_sha, donor_sha, stamp_sha, note }
@@ -76,6 +90,12 @@ function M.check(u)
     -- states are the whole of this tool, and a test that can only run against
     -- the real pair can only ever exercise ONE of them
     local stamp = u.stamp or require(u.origin)
+    -- a unit may point at a different sha field of the same stamp record: one
+    -- origin, several vendored artifacts
+    if u.stamp_field then
+        stamp = { sha256 = stamp[u.stamp_field], vendored_at = stamp.vendored_at,
+            donor_repo = stamp.donor_repo, donor_rev = stamp.donor_rev }
+    end
     local copy_sha = sha256(u.copy)
     if not copy_sha then
         return { name = u.name, state = 'UNAVAILABLE',

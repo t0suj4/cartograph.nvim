@@ -1,11 +1,17 @@
 -- A PART OF `cartograph.algebra.core`, which requires this file at its end and
 -- passes its own module table in. ⚠ IT DOES NOT `require` CORE BACK: that is a
 -- load cycle — Lua says "loop or previous error loading module".
--- ★ `child`, `is_hole` and `key` are the file-locals this section reaches back
+-- ★ `child`, `is_hole`, `key` and `RUNG_RANK` are what this section reaches back
 -- for; the plan's capture hazards named two of them and the free-identifier
 -- scan (zero on every part already adapted) found the third.
 return function (M, SHARED)
 local child, is_hole, key = SHARED.child, SHARED.is_hole, SHARED.key
+-- ⚠ `RUNG_RANK` IS INDEXED, NEVER CALLED — `RUNG_RANK[t]`, three times — so the
+-- free-identifier scan (which reads CALL TARGETS) could not see it and the
+-- capture hazards did not name it either. THE DONOR'S OWN TESTS FOUND IT, on
+-- their first run, with "attempt to index global 'RUNG_RANK'". A third blind
+-- spot in the same family: value, call, INDEX.
+local RUNG_RANK = SHARED.RUNG_RANK
 
 function M.is_absence(name) return M.ABSENCE[name] ~= nil end
 
