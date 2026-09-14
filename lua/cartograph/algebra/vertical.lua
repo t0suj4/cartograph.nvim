@@ -18,9 +18,17 @@
 -- DELIBERATELY: `slice` and `lcs_alignments` are read by `termgraph` and by
 -- `M.rigidity.lcs`, and core's PARTS table is what hands them round. A local
 -- that left with this section would take those with it.
+-- ⚠ THIS PART BINDS `cat_flat` AND `is_strict_prefix`, NOT `cat`/`is_prefix`
+-- (CART-0924). Core declared each of those names TWICE, and the SECOND
+-- definition of both lived INSIDE this section — so this is the code that
+-- meant them. `local PARTS = {...}` is built at the BOTTOM of core, where a
+-- duplicated name resolves to the LAST definition, so every OTHER part was
+-- silently handed these instead of the ones it was written against. Lua
+-- scoping is positional; the PARTS protocol is not, so the names are unique
+-- now and the ambiguity cannot come back (the parts fence checks it).
 return function (M, SHARED)
 local cat, is_prefix, key, lcp, lcs_alignments, lexlt, prefix_eq, slice, vsym =
-    SHARED.cat, SHARED.is_prefix, SHARED.key, SHARED.lcp, SHARED.lcs_alignments, SHARED.lexlt, SHARED.prefix_eq, SHARED.slice, SHARED.vsym
+    SHARED.cat_flat, SHARED.is_strict_prefix, SHARED.key, SHARED.lcp, SHARED.lcs_alignments, SHARED.lexlt, SHARED.prefix_eq, SHARED.slice, SHARED.vsym
 
 -- I1 ⋈_{I3} I2: I1 and I2 share a proper ancestor that is not an ancestor of I3,
 -- and none of the three is an ancestor of another

@@ -178,6 +178,28 @@ test('algebra parts: what a part reads, core supplies, and core still defines', 
         for n in names:gmatch('[%w_]+') do defined[n] = true end
     end
 
+    --- ★★★ AND EACH MUST BE DEFINED EXACTLY ONCE (CART-0924). `local PARTS = {…}`
+    --- is built at the BOTTOM of core, so a name declared TWICE resolves there to
+    --- the LAST definition — and a section from higher up in the file was written
+    --- against the earlier one. MEASURED: `cat`@1448 and `is_prefix`@1438 with
+    --- `M.classify` at 1450, and second definitions at 4609/4614 inside the
+    --- VERTICAL DIFFERENCES section. Splitting `classify` silently turned a
+    --- `value` edit into a `straddle`, and 17 donor tests caught it.
+    --- ⇒ LUA SCOPING IS POSITIONAL AND THIS TABLE IS NOT. The fix is unique names;
+    ---   this is the fence that keeps them unique.
+    local counts = {}
+    for n in core:gmatch('\nlocal function ([%w_]+)') do counts[n] = (counts[n] or 0) + 1 end
+    local ambiguous = {}
+    for k, v in pairs(supplied) do
+        if (counts[v] or 0) > 1 then
+            ambiguous[#ambiguous + 1] = ('%s = %s (%d definitions)'):format(k, v, counts[v])
+        end
+    end
+    table.sort(ambiguous)
+    eq(0, #ambiguous, 'PARTS hands round a name core defines MORE THAN ONCE, so'
+        .. ' every part gets whichever one is in scope at the BOTTOM of the file: '
+        .. table.concat(ambiguous, ', '))
+
     -- ★ EVERY VALUE PARTS HANDS ROUND MUST STILL EXIST IN CORE. This is the half
     -- that catches a local LEAVING with a section.
     local dead = {}

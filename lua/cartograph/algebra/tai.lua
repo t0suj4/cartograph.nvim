@@ -6,8 +6,14 @@
 -- free-identifier scan (zero on every part already adapted) found the same
 -- seven. `is_prefix` is there only because of the TEXT rung — its call sites do
 -- not resolve, so the resolved-edge rung could not see it (CART-0919).
+-- ⚠ `is_strict_prefix`, NOT `is_prefix` (CART-0924). This section sits at 5006
+-- in the original file and the second definition of that name is at 4614, so
+-- THIS is the one it was written against — a fact about POSITION, which is how
+-- Lua scoping works and how the PARTS table does not. The six donor tests that
+-- failed when it was bound to the first definition are the whole argument for
+-- taking the donor's tests along.
 return function (M, SHARED)
-local child, is_prefix, key = SHARED.child, SHARED.is_prefix, SHARED.key
+local child, is_prefix, key = SHARED.child, SHARED.is_strict_prefix, SHARED.key
 local lcp, lexlt, prefix_eq, vsym = SHARED.lcp, SHARED.lexlt, SHARED.prefix_eq, SHARED.vsym
 
 -- ── THE TAI MAPPING HIERARCHY (Lu, Su, Tang 2001, as corrected by Kuboyama 2007) ──────
