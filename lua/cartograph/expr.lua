@@ -523,6 +523,13 @@ local TABLE = { table_constructor = true, table = true,
     -- php entry above: same name, different construct, same allocation
     -- semantics, which is the only thing this set claims.)
     object_creation_expression = true }
+-- ★★ AN ALLOCATION CLAIM, NOT A WALK CLAIM (CART-0928). These five name node types
+-- whose evaluation CREATES A FRESH IDENTITY — which is why `is_pure` refuses them and
+-- `allocates` answers yes. It is NOT the walk boundary: that is `FNSTOP_OF` below, which
+-- the language owns and can withdraw from. Until CART-0928 this table was ORed in FRONT
+-- of that one, so it silently answered both questions and the withdrawal could not take.
+-- ⚠ THE TWO SETS COINCIDE ON ALL 18 SHIPPED SPECS, so every closure today is both, and
+-- the branch that handles "allocation, not boundary" is exercised only by the tests.
 local ALLOCFN = { function_definition = true, function_declaration = true,
     anonymous_function = true, arrow_function = true, lambda_expression = true }
 -- ★ THE ONE OWNER OF "WHAT IS A REGION / CLAUSE / ATTACHED BLOCK IN THIS LANGUAGE" is
@@ -537,7 +544,11 @@ local CLS_OF = setmetatable({}, { __index = function (t, lang)
     return c
 end })
 -- ★ THE NESTED-FUNCTION STOP, THE SAME ONE du USES, for the same reason (CART-0395).
--- ALLOCFN below is a five-name base list, so a nested body spelled anything else was walked
+-- ★★ AND SINCE CART-0928 IT IS THE *SOLE* OWNER OF THE BOUNDARY QUESTION whenever the
+-- language is known — the relationship below inverted. ALLOCFN no longer supplements this
+-- set; it answers a different question (is the VALUE an allocation) and is consulted for
+-- the boundary only when there is no language to ask.
+-- ALLOCFN above is a five-name base list, so a nested body spelled anything else was walked
 -- straight into by the `?` honest-unknown path — and its names counted as reads of the
 -- enclosing row. MEASURED on elasticsearch/libs: a `return new Runnable() { @Override public
 -- void run() {…} }` made its `return` row read `Override, closeInternal, onClose, run,
@@ -1056,9 +1067,67 @@ function build_core(node, src, lang)
     -- which is also what du now says, since the block's names live on the block's OWN rows.
     -- Without this the call row's expr read the whole block while its `use` did not, and the
     -- self-gate is the thing that would have caught it (had it ever been run on ruby).
-    if ALLOCFN[t] or (lang and (FNSTOP_OF[lang][t]
-        or (CLS_OF[lang].blocks and CLS_OF[lang].blocks[t]))) then
+    -- ★★★ TWO QUESTIONS, AND ONE TABLE USED TO ANSWER BOTH (CART-0928).
+    --   IS IT A WALK BOUNDARY?  where THIS row's business ends. Language-owned, and
+    --                           withdrawable through `fn_unminted`.
+    --   IS IT AN ALLOCATION?    a claim about the VALUE. `function () end` creates a
+    --                           fresh identity whatever the walk does with its body.
+    -- `ALLOCFN` used to be ORed in FRONT of the language-owned set, so it answered the
+    -- FIRST question too and no language could withdraw any of its five names. That was
+    -- unreachable until CART-0929 (the same five sit in LEGACY_FN_STOP, which refused
+    -- first), and it is why arm A moved du and left the IR still rendering an opaque
+    -- `{k='fn'}` — the CART-0308 drift signature, produced by the guard built to
+    -- prevent it.
+    -- ★ WITH NO LANGUAGE, ALLOCFN IS STILL THE BOUNDARY: it is the cross-language base
+    -- and there is nothing better to ask. ⚠ AND THAT ARM IS LIVE, not ceremonial — I
+    -- wrote it up as unreachable (every public entry refuses a nil lang) and then
+    -- CHECKED, which is the only reason this says the opposite: `build` at the PAREN
+    -- branch above recurses as `build(child, src)` and DROPS `lang`, so everything
+    -- inside a parenthesised expression is classified with no language. MEASURED on
+    -- java — `Runnable r = (new Runnable(){ public void run(){ FOO(); } });` reads
+    -- {FOO, run} where the unparenthesised form reads {} — i.e. the exact
+    -- `method_declaration` leak FNSTOP_OF exists to stop, coming back through the
+    -- parentheses. PRE-EXISTING and unchanged here (the old `or` behaved identically
+    -- with a nil lang); filed as CART-0931 rather than fixed inside this one.
+    local boundary
+    if lang then
+        boundary = FNSTOP_OF[lang][t]
+            or (CLS_OF[lang].blocks and CLS_OF[lang].blocks[t]) or false
+    else
+        boundary = ALLOCFN[t] or false
+    end
+    if boundary then
         return { k = 'fn' } -- NEVER descend a closure body (du doesn't either)
+    end
+    -- ★★ AN ALLOCATION THE LANGUAGE SAYS IS *NOT* A BOUNDARY. Unreachable on every
+    -- shipped spec (ALLOCFN is a SUBSET of the boundary set on all 18, verified by
+    -- running the intersection, and pinned by a tripwire in tests/exprfn_spec.lua), and
+    -- it still has to be RIGHT: falling through to the generic `?` path would drop
+    -- `k='fn'` and with it the ALLOCATION FACT, so `is_pure` would call
+    -- `function () end` pure and every key-equality lint would be free to fold two
+    -- distinct closures together. That is the trap the ticket's "just delete ALLOCFN"
+    -- option walks into.
+    -- ⚠ THE CONSTANT KEY IS SAFE ONLY THROUGH THE `is_pure` GATE. `M.key` answers a
+    -- bare 'Fn' for a descended closure too, so two closures with DIFFERENT BODIES key
+    -- equal; a consumer that compares keys without gating on `is_pure` would fold them.
+    -- That is already `M.key`'s documented contract ("equality-based consumers MUST gate
+    -- on is_pure"), and a descended `fn` makes it load-bearing rather than theoretical.
+    -- ★ IT DESCENDS THE WHOLE NODE, PARAMETER LIST INCLUDED — MEASURED, NOT ASSUMED.
+    -- Under arm A (`fn_unminted = { function_definition = true }` for lua) du reads
+    -- {DEEP, a, p} from `local cb = function (p) return DEEP + p + a end`: `p` is the
+    -- closure's OWN PARAMETER and du counts it as a read of the ENCLOSING row, because
+    -- the mention pass is a textual sweep attributing to the innermost MINTED function
+    -- (CART-0926). A body-only descent reads {DEEP, a} and leaves `p` a fresh `missing`.
+    -- The gate's contract is agreement with du, so the IR follows it; whether du is
+    -- RIGHT to count a binder as a read is a different question, filed apart.
+    if ALLOCFN[t] then
+        local kids = {}
+        for c in node:iter_children() do
+            if c:named() and not tsutil.is_comment(c) then
+                kids[#kids + 1] = build(c, src, lang)
+            end
+        end
+        return { k = 'fn', kids = kids }
     end
     -- ★ AN ASSIGNMENT IN AN EXPRESSION POSITION (CART-0415). C spells `a = b = c` as
     -- `a = (b = c)` and a for-init comma list as a chain of assignment_expressions, so the
@@ -1693,7 +1762,12 @@ local function children(e, out)
     -- rather than `e.t` itself. Same counts, different identity — and identity
     -- is exactly what a `walk` callback is entitled to key on.
     elseif k == 'assign' then out[#out + 1] = e.t; out[#out + 1] = e.v
-    elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' then
+    -- ★ `fn` DESCENDS ITS KIDS, AND ONLY A NON-BOUNDARY CLOSURE HAS ANY
+    -- (CART-0928). The opaque `{k='fn'}` — every closure on every shipped spec
+    -- today — carries no kids and stays a LEAF here, which is the alignment the
+    -- self-gate depends on. Omitting it would make the new branch a SILENT NO-OP:
+    -- a kind holding `kids` that nothing descends is a VANISHED READ.
+    elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' or k == 'fn' then
         -- ★ `type` BELONGS HERE OR ITS CONTENTS VANISH. Caught by measurement,
         -- not by the suite: adding the kind without this line lost 90 reads and
         -- 73 names on the zig corpus, because zig's `[N]Air` array type carries
@@ -1827,7 +1901,10 @@ function M.dotted_reads(e, out)
     -- target is NOT skipped here — the two functions answer different questions
     -- about the same node, which is why one blanket rule would have been wrong.
     elseif e.k == 'assign' then M.dotted_reads(e.t, out); M.dotted_reads(e.v, out)
-    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' or e.k == 'type' then
+    -- `fn` for the reason given in `children` (CART-0928), and a dotted name inside a
+    -- DESCENDED closure is on the external surface as surely as one written beside it.
+    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' or e.k == 'type'
+        or e.k == 'fn' then
         for _, c in ipairs(e.kids or {}) do M.dotted_reads(c, out) end
     end
     return out
@@ -1913,10 +1990,16 @@ local function expr_reads(e, acc)
     elseif k == 'call' then expr_reads(e.f, acc); for _, a in ipairs(e.a) do expr_reads(a, acc) end
     elseif k == 'un' then expr_reads(e.e, acc)
     elseif k == 'bin' then expr_reads(e.l, acc); expr_reads(e.r, acc)
-    elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' then
+    -- ★ `fn` DESCENDS ITS KIDS, AND ONLY A NON-BOUNDARY CLOSURE HAS ANY
+    -- (CART-0928). The opaque `{k='fn'}` — every closure on every shipped spec
+    -- today — carries no kids and stays a LEAF here, which is the alignment the
+    -- self-gate depends on. Omitting it would make the new branch a SILENT NO-OP:
+    -- a kind holding `kids` that nothing descends is a VANISHED READ.
+    elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' or k == 'fn' then
         for _, c in ipairs(e.kids or {}) do expr_reads(c, acc) end
     end
-    -- lit / fn / vararg: no leaf reads
+    -- lit / vararg: no leaf reads. An OPAQUE `fn` has none either — but a descended
+    -- one does, which is why it moved up into the branch above (CART-0928).
 end
 
 -- the READS of an lhs TARGET: a plain name is a DEF (not read); a field/index target
@@ -1960,7 +2043,8 @@ function M.names(row)
         elseif k == 'assign' then
             if e.t and e.t.k ~= 'name' then vars(e.t) end
             vars(e.v)
-        elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' then
+        -- `fn` for the reason given in `children` (CART-0928): opaque = leaf.
+        elseif k == '?' or k == 'table' or k == 'pair' or k == 'type' or k == 'fn' then
             for _, c in ipairs(e.kids or {}) do vars(c) end
         end
     end
