@@ -1034,12 +1034,42 @@ end
 -- is PRE-EXISTING and pinned into every dfparity census. Removing those is a real
 -- fix and a separate one — folding it in here would double the blast radius and
 -- confound the recalibration. This change only stops making it worse.
+-- ★ IT IS NO LONGER KEPT WHOLE *UNCONDITIONALLY* (CART-0929). It is still the
+-- DEFAULT — nothing shrinks unless a spec asks — but `fn_unminted` can now withdraw
+-- from it, because an override the seven names were immune to was not an override.
+-- ⚠ AND THE PARAGRAPH ABOVE HAS SINCE EXPIRED, which is recorded rather than
+-- rewritten because the deferral was the right call at the time. Every type it names
+-- is now DECLARED in its language's `fn_types` (php:274 `anonymous_function` +
+-- `arrow_function`, java:539 + cpp:256 `lambda_expression`), so each has a minting
+-- owner and the stop is sound. MEASURED by walking parse trees for LEGACY-typed
+-- nodes the language does not declare — the population that gets its rows DELETED:
+-- grocy/mantisbt php, elasticsearch java, jquery js, cartograph lua, luanti cpp,
+-- ripgrep rust, guile scheme — 1794 files, ZERO occurrences. Dropping LEGACY
+-- outright is therefore inert today and is CART-0930, still separate, because that
+-- is a corpus claim that can rot and this one is a set intersection that cannot.
 local LEGACY_FN_STOP = { function_definition = true, function_declaration = true,
     method_declaration = true, anonymous_function = true, arrow_function = true,
     lambda_expression = true, constructor_declaration = true }
 
---- Where flow's walk stops descending: every LEGACY stop, plus the language's own
---- scope types MINUS the ones it declares it does not mint (`fn_unminted`).
+--- Where flow's walk stops descending: every LEGACY stop UNION the language's own
+--- scope types, MINUS the ones it declares it does not mint (`fn_unminted`).
+---
+--- ★★★ THE SUBTRACTION IS OUTERMOST, AND THAT IS THE WHOLE POINT (CART-0929).
+--- It used to read `LEGACY u (fn_types \ fn_unminted)` — the withdrawal reached only the
+--- fn_types arm, so the seven LEGACY names were beyond any language's reach. That is not
+--- a partial override, it is an UNREACHABLE one: `ALLOCFN` (expr.lua:526), the other
+--- hard-coded stop list, is a PROPER SUBSET of LEGACY, so every type it blocks is a type
+--- LEGACY re-added first. No spec could produce the half-application CART-0928 describes
+--- no matter what it declared — it took a patched copy of THIS function to expose it. A
+--- mechanism whose stated purpose (expr.lua:545) is that du and the IR agree BY
+--- CONSTRUCTION cannot have an unreachable override standing in front of it.
+--- ⚠ ZERO-DELTA WHEN IT LANDED, AND PROVABLY SO — no corpus needed, the proof is a set
+--- intersection. LEGACY n fn_unminted was EMPTY for all five declarers: ruby `lambda`,
+--- python `lambda`, rust `closure_expression`, go `func_literal`, js `generator_function`
+--- / `generator_function_declaration` / `function_expression` / `method_definition`.
+--- js MISSES BY ONE NAME — `arrow_function` is in LEGACY, and js declares it in
+--- `fn_types` rather than `fn_unminted`. One spec edit away from live, which is the
+--- reason to repair the mechanism before someone needs it rather than after.
 ---
 --- ★ `fn_unminted` MEANS "NOT *ALWAYS* MINTED", and the distinction is not pedantic.
 --- A type minted in only SOME syntactic positions is unsound as a stop, because the
@@ -1056,9 +1086,9 @@ function M.flow_stop(lang)
     local unminted = (s and s.fn_unminted) or {}
     local out = {}
     for t in pairs(LEGACY_FN_STOP) do out[t] = true end
-    for t in pairs(M.fn_types(lang)) do
-        if not unminted[t] then out[t] = true end
-    end
+    for t in pairs(M.fn_types(lang)) do out[t] = true end
+    -- ★ AFTER BOTH ARMS, NOT INSIDE ONE OF THEM. See the ★★★ note above.
+    for t in pairs(unminted) do out[t] = nil end
     return out
 end
 

@@ -1236,6 +1236,15 @@ M.VERSION = 193 -- v193: A NESTED RETURNED CLOSURE IS A NODE (CART-0926), above.
                -- ghost 6986 -> 28406 (js `function_expression`), python 3 -> 66
                -- (`lambda`). Each spec now declares `fn_unminted` and the stop is
                -- LEGACY ∪ (fn_types \ fn_unminted).
+               -- ★ THAT PARENTHESISATION WAS ITSELF THE BUG, repaired later by
+               -- CART-0929: the stop is now (LEGACY ∪ fn_types) \ fn_unminted, so a
+               -- spec can withdraw a LEGACY name instead of being silently refused.
+               -- NO VERSION OF ITS OWN, deliberately — the two formulas were proven
+               -- to return identical sets on all 18 shipped specs (the difference is
+               -- exactly LEGACY ∩ fn_unminted, which was empty), so extraction
+               -- behaviour did not move and a bump would force a needless re-extract.
+               -- The line above is left as v120 wrote it: it is the record of what
+               -- v120 did, not a description of the code today.
                -- ★★ "MINTED" MEANS *ALWAYS* MINTED. js mints `function_expression` only
                -- as a declarator/pair value, an argument, or an assignment right — never
                -- as an IIFE head, the shape jquery and ghost are built from; and
