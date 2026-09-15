@@ -335,7 +335,52 @@ end
 -- which moves attribution to the real enclosing function in EVERY language with a
 -- same-line callback — jquery gains `core.js::even -> core.js::grep` and loses the
 -- copy that hung off the callback.
-M.VERSION = 191 -- v191: A LUA INLINE CLOSURE IS A NODE (CART-0813), above.
+-- ★★★ v192: A BRACKETED KEY IS STILL A KEY (CART-0927). lua's `functions` query
+-- asked for `name: (identifier)`, so `{ k = fn }` and `{ [K] = fn }` minted and
+-- `{ ["OnAcquire"] = fn }` / `{ [1] = fn }` did not — 2911 of wow's 45445
+-- functions, 6.5% of the corpus, concentrated in the Ace3 widget tables every
+-- addon embeds. Found by walking the parse tree and SUBTRACTING the minted set
+-- (tools/mintcensus.lua): every census we own iterates the minted nodes, so a
+-- minting gap is by construction absent from all of them.
+-- ⚠ THE COUNT ALONE WAS A CONFLATION. One parent chain — table_constructor <
+-- field < function_definition — held FOUR causes, separated only by matching the
+-- clause as a TEMPLATE and reading the refusal: 2904 `name:string`, 7
+-- `name:number`, 26 POSITIONAL (no key at all) and 24 a COMPUTED CALL key. Only
+-- the first two are minted here. A positional field needs a synthetic `#` name
+-- (the @adef treatment) and a computed key HAS NO STATIC NAME — minting it means
+-- inventing one, which is a decision and not a missing clause.
+-- ★ THE RETURN POSITION AND THE IIFE STAY UNMINTED, DELIBERATELY. Both were
+-- measured and both move `fn_at` attribution off the enclosing function, which
+-- breaks a DECLARED ownership rule: a call inside a top-level anonymous function
+-- is owned by the REGION (tests/toplevel_spec.lua:70, "the reported shape").
+-- That is CART-0926's territory and needs a containment closure first.
+-- ★★★ v193: A NESTED RETURNED CLOSURE IS A NODE, A TOP-LEVEL ONE IS NOT
+-- (CART-0926). One parent chain — `return_statement < expression_list <
+-- function_definition` — and two shapes that need opposite answers:
+--   TOP-LEVEL  `return function (M, SHARED) … end` closing a chunk. The REGION
+--              owns it and owns the calls inside it. USER DECISION 2026-09-15:
+--              "return function () … end should stay a part of its region"; the
+--              rule was already asserted by tests/toplevel_spec.lua:70 from a
+--              user report. 25 in this tree, 0 in wow. STILL NOT MINTED.
+--   NESTED     `local function reader(V) return function (spec) … end end`. No
+--              region owns it, so its body had NO OWNER AT ALL — the flow walk
+--              stops at `function_definition` and, finding nothing minted to
+--              relocate the rows to, DELETES them. 57 here, 57 in wow (all of
+--              wow's). MINTED as `<enclosing>#ret`, mirroring `#cb`.
+-- ⚠ THE COST OF THE OMISSION WAS A MODULE THAT LOADED CLEAN AND DIED ON FIRST
+-- USE. Splitting the algebra's `demand over a family` section reported ZERO
+-- captures while the section read `at`, `is_hole`, `key` and `subst` inside a
+-- returned closure. Measured on a fixture before and after:
+--   before  impact captures for {reader} = DEEP0, helper
+--   after   impact captures for {reader} = DEEP0, DEEP1, ONLY_DEPTH1, helper
+-- ★ AND THE CONTAINMENT CLOSURE THAT MAKES IT TRAVEL ALREADY EXISTED —
+-- impact.lua:139's `travels` is the move-set PLUS every contained node. It could
+-- not see this one because there was no node to contain. Minting is the whole fix.
+-- ⚠ ATTRIBUTION MOVES, as it did at v191: an edge from inside the closure body
+-- belonged to the enclosing function and now belongs to `<encl>#ret`.
+M.VERSION = 193 -- v193: A NESTED RETURNED CLOSURE IS A NODE (CART-0926), above.
+               -- v192: A BRACKETED KEY IS STILL A KEY (CART-0927)
+               -- v191: A LUA INLINE CLOSURE IS A NODE (CART-0813)
                -- v190: A MACRO ARGUMENT IS A NAMED KEY (CART-0812)
                -- v189: THE UNIQUE-OWNER RUNG (CART-0806)
                -- v188: THE BROWSER SURFACE (CART-0805)

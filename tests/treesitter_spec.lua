@@ -5525,3 +5525,94 @@ test('java: an annotation the corpus reads AND invokes registers; one it only re
         'the alibi states the OBSERVED premise, not the supplied one')
     eq(nil, cb(inert), 'the read-only annotation buys no alibi')
 end)
+
+--- ★★★ A BRACKETED KEY IS STILL A KEY (CART-0927). lua's `functions` query asked
+--- for `name: (identifier)`, so `{ k = fn }` minted and `{ ["k"] = fn }` did not —
+--- 2911 of wow's 45445 functions, 6.5% of the corpus, concentrated in the Ace3
+--- widget tables every addon embeds. With no node there is nothing for a
+--- registration edge to point at and the body's flow rows have no owner.
+--- ⚠ BOTH DIRECTIONS ARE PINNED. A clause that over-matches would mint the
+--- POSITIONAL field too — which is a different bug needing a synthetic name, not
+--- this fix — so the negative half asserts exactly what stays unminted.
+test('treesitter: a bracketed STRING or NUMBER key mints its function', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local methods = {',
+        '\t["OnAcquire"] = function (self) return self end,',
+        '\t[1] = function (self) return self end,',
+        '\tplain = function (self) return self end,',
+        '\t[ [==[long]==] ] = function (self) return self end,',
+        '}',
+        'return methods',
+    }, '\n'))
+    fd:close()
+    local byname = {}
+    for _, n in ipairs(ts.extract(root).nodes) do
+        if n.kind == 'function' then byname[n.name] = true end
+    end
+    -- ★ THE NAME IS THE STRING'S CONTENT, NEVER ITS DELIMITERS. Measured before
+    -- the strip: `"\"OnAcquire\""`. A quoted name matches no call site and reads
+    -- as a distinct symbol to every consumer keying on `.name`.
+    ok(byname['OnAcquire'], 'a bracketed string key mints, unquoted')
+    ok(not byname['"OnAcquire"'], 'and the delimiters are NOT part of the name')
+    ok(byname['1'], 'a bracketed number key mints')
+    ok(byname['plain'], 'and the bare-key case is unchanged')
+    ok(byname['long'], 'a long-bracket string key mints, unbracketed')
+end)
+
+--- ★ THE NEGATIVE HALF: the shapes this clause must NOT reach. Each is a separate
+--- decision with its own cost, measured in the CART-0927 A/B — the return position
+--- and the IIFE move `fn_at` attribution off the enclosing function and break the
+--- declared rule that a call in a top-level anonymous function is owned by the
+--- REGION (see `toplevel:` above); a POSITIONAL field has no key to name it with.
+test('treesitter: the other unminted positions stay unminted, deliberately', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local t = { function (a) return a end }', -- POSITIONAL: no key at all
+        'local u = (function () return 1 end)()',  -- the IIFE
+        'local v = t or function (b) return b end', -- under a binary expression
+        'return function (c) return c end',        -- the return position
+    }, '\n'))
+    fd:close()
+    local n_fn = 0
+    for _, n in ipairs(ts.extract(root).nodes) do
+        if n.kind == 'function' then n_fn = n_fn + 1 end
+    end
+    eq(0, n_fn, 'none of the four shapes mints — each is its own decision')
+end)
+
+--- ★★★ A NESTED RETURNED CLOSURE IS A NODE, A TOP-LEVEL ONE IS NOT (CART-0926).
+--- The two shapes share one parent chain and need opposite answers, so the test
+--- that matters is the PAIR — either alone passes for a rule that does the wrong
+--- thing to the other. The top-level half is also asserted from the other side by
+--- `toplevel: a call inside a top-level anonymous function is owned too`.
+test('treesitter: a NESTED returned closure mints, a TOP-LEVEL one does not', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function reader(v)',
+        '\treturn function (spec) return spec + v end',  -- NESTED: minted
+        'end',
+        'return function (M) return reader(M) end',      -- TOP-LEVEL: region's
+    }, '\n'))
+    fd:close()
+    local byname = {}
+    for _, n in ipairs(ts.extract(root).nodes) do
+        if n.kind == 'function' then byname[n.name] = true end
+    end
+    ok(byname['reader'], 'the enclosing function is unchanged')
+    ok(byname['reader#ret'], 'the NESTED returned closure is a node, named for its owner')
+    -- ★ the top-level one would be `fn#ret` or `m#ret`; assert the ABSENCE by
+    -- counting, because any name it took would be wrong
+    local n_fn = 0
+    for _ in pairs(byname) do n_fn = n_fn + 1 end
+    eq(2, n_fn, 'exactly two: the top-level factory stays part of its region')
+end)

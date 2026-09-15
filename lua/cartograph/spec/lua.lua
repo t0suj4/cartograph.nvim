@@ -536,6 +536,27 @@ return {
         ; to the call graph AND absent from the registration roster — it could not
         ; even be reported as "kept alive by a registration" (CART-0226).
         (arguments (function_definition) @adef)
+        ; ★★★ A BRACKETED KEY IS STILL A KEY (CART-0927). The clause above requires
+        ; `name: (identifier)`, which `{ k = fn }` and `{ [K] = fn }` both satisfy —
+        ; a bracketed IDENTIFIER key lands in the same field. A bracketed STRING or
+        ; NUMBER does not, and nothing minted it: 2904 + 7 of wow's 45445 functions,
+        ; 6.5% of our largest lua witness, led by the Ace3 widget idiom
+        ;     local methods = { ["OnAcquire"] = function(self) … end }
+        ; and by migration tables keyed `[1] = function(self)`. Same argument as the
+        ; inline callback above: with no node there is nothing for a registration
+        ; edge to point at, and the body's flow rows have no owner to be relocated
+        ; to, so they are DELETED rather than over-collected (providers/treesitter
+        ; .lua:988-1035). ⚠ THE SHAPES WERE READ FROM THE GRAMMAR, not guessed —
+        ; `field`'s `name:` holds a `string`/`number` node for these two forms.
+        (field name: (string) @name value: (function_definition) @def)
+        (field name: (number) @name value: (function_definition) @def)
+        ; ★★★ A NESTED RETURNED CLOSURE (CART-0926). `@rdef` and not `@def`
+        ; because the query cannot ask the question that decides it: a TOP-LEVEL
+        ; `return function () … end` stays part of its REGION (user's decision,
+        ; 2026-09-15; tests/toplevel_spec.lua:70) and a NESTED one must be a node
+        ; or its body has no owner and the flow walk DELETES its rows. The
+        ; ancestor test lives in `handle_ret_fn`.
+        (return_statement (expression_list (function_definition) @rdef))
     ]],
     -- a function VALUE in a table field is registry-style: invoked
     -- through the table, invisible to a name graph

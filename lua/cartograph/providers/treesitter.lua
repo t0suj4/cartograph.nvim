@@ -291,6 +291,35 @@ local function name_text(namen, src)
         local fixed = qname(namen, src)
         if fixed then return fixed end
     end
+    -- ★★ A NAME SPELLED AS A STRING IS THE STRING'S CONTENT, NEVER ITS DELIMITERS
+    -- (CART-0927). `{ ["OnAcquire"] = function … }` must mint `OnAcquire`, not
+    -- `"OnAcquire"` — a quoted name matches no call site, indexes wrong under the
+    -- `tail` map, and reads as a distinct symbol to every consumer keying on
+    -- `.name`. Measured before the strip: name="\"OnAcquire\"".
+    -- ⚠ CONFINED BY THE FACT THAT NOTHING ELSE REACHES IT: lua's new `field name:
+    -- (string)` clause is the ONLY `@name` capture of a string type in the whole
+    -- spec directory (checked across all 65 query blocks), so this branch is
+    -- unreachable for every other language and cannot move their names. It is
+    -- written as a general rule rather than a lua special case because the rule IS
+    -- general — the same one `litval` applies to a string leaf.
+    -- @langs-ok `string_content` is a PREFERENCE WITH A TOTAL FALLBACK, not a
+    -- branch this depends on: a grammar that has no such child (erlang, go,
+    -- haskell, java, javascript, scheme, tsx, typescript) falls through to the
+    -- delimiter strip below and loses nothing. Preferred where it exists because
+    -- a long bracket (`[==[k]==]`) has no fixed-width delimiter to strip, and
+    -- because the grammar knows where its own string starts better than a regex.
+    local nt = namen:type()
+    if nt == 'string' or nt == 'string_literal' then
+        for c in namen:iter_children() do
+            -- @langs-ok a PREFERENCE with a total fallback; see the note above
+            if c:named() and c:type() == 'string_content' then
+                return (node_text(c, src):gsub('%s+', ''))
+            end
+        end
+        local txt = node_text(namen, src):gsub('%s+', '')
+        return (txt:gsub('^%[=*%[', ''):gsub('%]=*%]$', '')
+                   :gsub('^["\']', ''):gsub('["\']$', ''))
+    end
     return (node_text(namen, src):gsub('%s+', ''))
 end
 local inext = tsutil.inext
@@ -6248,6 +6277,34 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- a registration had no handler to point at. The functions query runs before
         -- the calls query on the same file, so the id is already known by the time
         -- the argument is classified; this carries it across.
+        -- ★★★ A NESTED RETURNED CLOSURE IS A NODE; A TOP-LEVEL ONE IS NOT
+        -- (CART-0926, and the USER'S DECISION 2026-09-15: "return function () …
+        -- end should stay a part of its region"). ONE PARENT CHAIN, TWO SHAPES:
+        --   TOP-LEVEL  `return function (M, SHARED) … end` closing a chunk — the
+        --              module-factory idiom. The REGION owns it and owns the calls
+        --              inside it (tests/toplevel_spec.lua:70, "the reported
+        --              shape"). 25 in this tree, 0 in wow. REFUSED HERE.
+        --   NESTED     `local function reader(V) return function (spec) … end end`
+        --              — no region owns it, so its body had NO OWNER AT ALL: the
+        --              flow walk stops at `function_definition` and, finding
+        --              nothing minted to relocate the rows to, DELETES them
+        --              (treesitter.lua:988-1035). Measured on a fixture: `reader`
+        --              had 2 statement rows for a 3-statement function, and a name
+        --              read only at depth 1 was invisible to every capture rung.
+        --              57 in this tree, 57 in wow — all of wow's. MINTED HERE.
+        -- ⚠ THE TEST CANNOT BE WRITTEN IN THE QUERY: tree-sitter cannot ask "has a
+        -- function ancestor". `in_function` already answers it, memoised, against
+        -- the language's own `fn_types` — reused rather than re-walked, because a
+        -- copied walker is a copied bug (CART-0746).
+        local function handle_ret_fn(defn)
+            local encl = in_function(defn, spec)
+            if not encl then return end -- TOP-LEVEL: the region keeps it. Decided.
+            local nm = 'fn'
+            local f = encl:field('name')[1]
+            local seg = f and node_text(f, src):match('([%w_$%.:]+)%s*$')
+            if seg then nm = seg end
+            handle_fn(defn, nil, nm .. '#ret')
+        end
         local function handle_anon_fn(defn)
             local nm = 'fn'
             local args = defn:parent()
@@ -6491,13 +6548,14 @@ local MATCH_OPTS = { match_limit = 65536 }
         local q = parse_query(lang, combined)
         if q then
             for _, match in q:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
-                local defn, namen, vdefn, vnamen, valn, adefn, vdecln
+                local defn, namen, vdefn, vnamen, valn, adefn, vdecln, rdefn
                 local childn, parentn, catn, cat, cvarn, cctorn, smtn
                 for id, ns in pairs(match) do
                     local capn = q.captures[id]
                     local n = cap_node(ns)
                     if capn == 'def' then defn = n
                     elseif capn == 'adef' then adefn = n
+                    elseif capn == 'rdef' then rdefn = n
                     elseif capn == 'name' then namen = n
                     elseif capn == 'vdef' then vdefn = n
                     elseif capn == 'vdecl' then vdecln = n
@@ -6530,6 +6588,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     handle_fn(defn, namen)
                 elseif adefn then
                     handle_anon_fn(adefn)
+                elseif rdefn then
+                    handle_ret_fn(rdefn)
                 end
             end
         end
