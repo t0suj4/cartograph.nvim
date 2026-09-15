@@ -140,10 +140,35 @@ end
 -- ⚠ A LITERAL CARRIES ITS TYPE for the same reason: `expr.key` writes
 -- `L<ty>:<v>`, so number 1 and string "1" are distinct there. Dropping the type
 -- would make them equal and silently under-report divergence.
+--- the term KIND for an expr node, plus the DISCRIMINANT that rides as its first
+--- KID when it has one (`+` for a `bin`, the selector for a `field`).
+---
+--- ★★★ A DISCRIMINANT IS A KID, NOT PART OF THE KIND (CART-0934). It used to be
+--- welded on — `bin:+`, `field.foo` — and a KIND CAN NEVER BE A HOLE, so two terms
+--- differing only in an operator or a selector had different kinds at that node, the
+--- lgg collapsed the whole subterm to a bare hole, and the family was inadmissible.
+--- MEASURED: `(field.foo a)`/`(field.bar a)` gave 2 families and
+--- `one_family_admissible = false`; as `(field ?h1 a)` it is ONE family with the base
+--- kept as fixed structure. `clones.anti_unify_row` has always called a differing
+--- field or operator a CLEAN EXTRACTABLE PARAMETER, so the welded form is also what
+--- stopped the algebra from replacing it.
+---
+--- ⚠ IT MUST BE A KID AND NOT A FIELD, and that distinction is the whole reason the
+--- weld existed. `A.eq` compares `k`, `v`, `n` and THE KID LIST only — an operator in
+--- a plain field would be invisible to it, so `a + b` and `a - b` would compare EQUAL
+--- and anti-unify to nothing. In the kid list it is compared, so they stay distinct
+--- AND can be abstracted. Verified both ways in tests/algebra_spec.lua.
+---
+--- ⚠ IF AN EAU THEORY EVER LANDS, IT KEYS ON THE WRONG THING. `eau` reads
+--- `theory[t.k]`, and algebradrive's note cites EAU.md's "operator theories would be a
+--- profile table over `bin:*`" — which this change dissolves into a single `bin`.
+--- A theory would need `t.kids[1].n`. Nothing declares one today (verified by grep),
+--- so this is a note for whoever writes the first, not a regression.
+--- @return string kind, string|nil discriminant
 function M.kind_of(e)
     local k = e.k
-    if k == 'bin' or k == 'un' then return k .. ':' .. tostring(e.op) end
-    if k == 'field' then return (e.method and 'method.' or 'field.') .. tostring(e.n) end
+    if k == 'bin' or k == 'un' then return k, tostring(e.op) end
+    if k == 'field' then return (e.method and 'method' or 'field'), tostring(e.n) end
     return k
 end
 
@@ -191,7 +216,17 @@ function M.term(e, locals, unsupported)
             -- a leaf kind the adapter does not model: counted, never guessed at
             unsupported[k] = (unsupported[k] or 0) + 1
         end
-        t = A.node(M.kind_of(e), tunpack(kids))
+        -- ONE SOURCE FOR BOTH HALVES: `kind_of` returns the kind and, where the
+        -- grammar has one, the discriminant that leads the kid list. Deriving them
+        -- in two places is the second-list defect this change exists to remove.
+        local kk, disc = M.kind_of(e)
+        if disc then
+            local all = { A.name(disc) }
+            for _, c in ipairs(kids) do all[#all + 1] = c end
+            t = A.node(kk, tunpack(all))
+        else
+            t = A.node(kk, tunpack(kids))
+        end
     end
     -- the span, carried as a non-child field: rebuild keeps it, eq ignores it
     if e.at then t.at = e.at end
@@ -257,6 +292,105 @@ function M.fixed_nodes(t)
     local n = 1
     for _, c in ipairs(t.kids or {}) do n = n + M.fixed_nodes(c) end
     return n
+end
+
+--- how much material a template PRESERVES — `fixed_nodes` plus whatever a hole
+--- carries in its ARGUMENT LIST. The admissibility measure for a template produced
+--- by a CONTEXT-VARIABLE generalizer (`A.vertical`, BK rigid lgg over hedges),
+--- where `fixed_nodes` is not one and silently admits everything.
+---
+--- ★★★ IT DIFFERS FROM `fixed_nodes` IN EXACTLY ONE WAY: it DESCENDS INTO A HOLE'S
+--- KIDS. `vertical` returns a context hole carrying the arguments both sides shared
+--- — measured, `{k='hole', h='X1', ctx=true, kids={{k='name', n='a'}}}` — and
+--- `fixed_nodes` returns 0 at the hole without looking inside. That is not a small
+--- difference: it is the whole signal. HOPAU.md calls the same thing `Y(ȳ)`, "the
+--- list of locals in scope that its differing subterm actually uses".
+---
+--- ⚠ WHY A SECOND MEASURE RATHER THAN A LOWER `min_fixed`. MEASURED over a graded
+--- corpus, `A.vertical` on each pair, seq-wrapped:
+---
+---     CASE                          template                 fixed  PRESERVED
+---     identical                     (seq (bin:+ a b))            4      4
+---     literal differs               (seq (bin:+ a ?x1...))       3      3
+---     global name differs           (seq (call ?x1...))          2      2
+---     FIELD selector differs        (seq ?X1(a))                 1      2
+---     OPERATOR differs              (seq ?X1(a b))               1      3
+---     operator differs, big arms    (seq ?X1((call f x) b))      1      5
+---     unrelated                     (seq ?x1...)                 1      1
+---     bare names                    (seq ?x1...)                 1      1
+---     deep unrelated                (seq ?x1...)                 1      1
+---
+--- `fixed_nodes` scores the last SIX identically at 1 — three families we want and
+--- three we must refuse — because the 1 is the `seq` WRAPPER, not shared structure.
+--- So no threshold on it separates them, and lowering `min_fixed` admits everything.
+--- `preserved_nodes` separates cleanly at >= 2 and is MONOTONE in shared material
+--- (2 / 3 / 5), so it ranks candidates as well as admitting them.
+---
+--- ⚠ THE THRESHOLD IS NOT 1 AND DEPENDS ON THE WRAPPER. A seq-wrapped template
+--- scores 1 for the wrapper alone, so "admissible" is >= 2 here. Pass the floor
+--- explicitly; do not reuse `min_fixed`'s default.
+--- @param t table a template BODY
+--- @return number
+function M.preserved_nodes(t)
+    if t == nil then return 0 end
+    local n = (t.k == 'hole') and 0 or 1
+    for _, c in ipairs(t.kids or {}) do n = n + M.preserved_nodes(c) end
+    return n
+end
+
+--- ARE THESE TWO TERMS ONE CONCEPT-FAMILY? Returns `ok, info`, where info carries
+--- `template`, `preserved`, and on a refusal a `why`.
+---
+--- ★★★ WHY THIS IS NOT `A.partition` (CART-0934). partition is the right answer and
+--- cannot be used yet, for two reasons that are its CALLERS' problem, not its own:
+---   • `mdl.family_of` hard-codes the FIRST-ORDER lgg, which cannot abstract a
+---     discriminant position; `A.vertical` (BK rigid lgg over hedges) can, and there
+---     is no hook to swap the generalizer.
+---   • `family_of` also hard-codes `fixed_nodes(T.body) >= min_fixed`, which is NOT an
+---     admissibility test for a context-variable template — MEASURED: it scores a real
+---     family and a vacuous one identically at 1, because that 1 is the seq WRAPPER.
+--- Both sit in the VENDORED core, whose local edits are the in-progress split
+--- (CART-0912) watched by tools/vendordrift.lua. Bending it here would put a semantic
+--- change underneath a structural divergence.
+---
+--- ⚠ SO THIS IS A SECOND FAMILY SELECTOR BESIDE `partition` — EXACTLY THE SHAPE OF
+--- THE DEFECT THIS SESSION KEEPS FINDING (CART-0932, two set-builders; CART-0928, two
+--- stop lists). It is defensible only because it is TEMPORARY and strictly NARROWER
+--- (pairwise, never n-ary), and migrating to the algebra is the stated destination.
+--- ★ THE EXIT CONDITION, so it does not become permanent by neglect: when `family_of`
+--- accepts a generalizer AND an admissibility measure, DELETE THIS and call partition.
+--- It is not a fallback to keep beside it.
+---
+--- ⚠ PAIRWISE ON PURPOSE. `vertical(s, q)` is binary and minimises across ALIGNMENTS,
+--- so folding it over n members is unlikely to be associative — families would depend
+--- on member order. Donor enumeration needs pairs, so the fold is not needed and is
+--- not guessed at here.
+--- @param a table term
+--- @param b table term
+--- @param opts table|nil { floor = number }
+--- @return boolean ok, table info
+function M.pair_family(a, b, opts)
+    opts = opts or {}
+    local A = M.load()
+    if not A then return false, { why = 'algebra unavailable' } end
+    local okv, r = pcall(A.vertical, A.seq({ a }), A.seq({ b }), {})
+    if not okv or not r or not r.templates or not r.templates[1] then
+        return false, { why = 'vertical produced no template' }
+    end
+    local T = r.templates[1]
+    local body = T.body or T
+    local p = M.preserved_nodes(body)
+    -- ⚠ THE FLOOR IS WRAPPER-DEPENDENT AND IS PASSED, NEVER INHERITED. A seq-wrapped
+    -- template scores 1 for the WRAPPER ALONE, so the floor is 2 here; reusing
+    -- `min_fixed`'s default of 1 would admit every pair in the tree. That is the trap a
+    -- NEGATIVE example caught — three positives alone looked like a clean win — so it
+    -- is written as a number with its reason rather than a default to be inherited.
+    local floor = opts.floor or 2
+    if p < floor then
+        return false, { template = body, preserved = p,
+            why = ('preserves %d, floor %d — the seq wrapper alone'):format(p, floor) }
+    end
+    return true, { template = body, preserved = p, values = T.values }
 end
 
 return M

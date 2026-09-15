@@ -5,7 +5,8 @@
 -- SOMEONE ELSE'S SOURCE and so can rot without anything here changing:
 --
 --   1. spans ride through `rebuild` and are ignored by `eq`
---   2. the adapter puts discriminants in the KIND, where `eq` looks
+--   2. the adapter puts discriminants in the KID LIST, where `eq` also looks
+--      (they were in the KIND until CART-0934; a kind can never be a hole)
 --   3. an absent algebra is a NAMED answer, never a silent fallback
 --
 -- (1) is the one that matters most: the header licences carrying source ranges
@@ -46,13 +47,30 @@ test('algebra seam: a span survives rebuild and disturbs no comparison', functio
     ok(A.eq(t, u), 'eq ignores the span entirely')
 end)
 
-test('algebra seam: a DIFFERING OPERATOR is not equal (kind, not field)', function ()
-    local A = need()
-    local plus = A.node(alg.kind_of({ k = 'bin', op = '+' }))
-    local minus = A.node(alg.kind_of({ k = 'bin', op = '-' }))
-    eq('bin:+', plus.k)
-    ok(not A.eq(plus, minus), 'bin:+ and bin:- are distinct to eq')
-end)
+--- ★★★ THE CLAIM, NOT THE ENCODING (CART-0934). This used to assert `plus.k ==
+--- 'bin:+'` — the discriminant welded into the kind. It now rides as the first KID,
+--- and the claim that MATTERS is unchanged and asserted directly: `eq` compares the
+--- kid list, so differing operators stay distinct. ⚠ A field would NOT work: `eq`
+--- reads `k`, `v`, `n` and kids only, so an operator in a plain field would make
+--- `a + b` and `a - b` compare EQUAL. Both halves are pinned below.
+test('algebra seam: a DIFFERING OPERATOR is not equal, and CAN be abstracted',
+    function ()
+        local A = need()
+        local plus = alg.term({ k = 'bin', op = '+',
+            l = { k = 'name', n = 'a' }, r = { k = 'name', n = 'b' } })
+        local minus = alg.term({ k = 'bin', op = '-',
+            l = { k = 'name', n = 'a' }, r = { k = 'name', n = 'b' } })
+        ok(not A.eq(plus, minus), 'a differing operator is still distinct to eq')
+        eq('bin', plus.k, 'the kind is the bare node kind')
+        eq('+', plus.kids[1].n, 'and the operator leads the kid list')
+        -- ⚠ THE HALF THE OLD SHAPE COULD NOT DO: they now share a family instead of
+        -- collapsing to a bare hole. This is the entire point of the change.
+        local p = A.partition({ plus, minus }, { min_fixed = 1 })
+        eq(1, #p.families, 'differing operators anti-unify to ONE family')
+        ok(p.one_family_admissible, 'and it is admissible on its fixed structure')
+        ok(alg.fixed_nodes(p.families[1].template.body) >= 2,
+            'the operands survive as fixed structure, not just the hole')
+    end)
 
 --- a literal's TYPE is part of its identity, as it is in `expr.key`
 test('algebra seam: number 1 and string "1" are distinct literals', function ()
@@ -132,4 +150,168 @@ test('algebra seam: retraction alone does not witness a family', function ()
     end
     ok(alg.is_collapsed(g.template),
         'so retraction and collapse are true at once — only fixed_nodes separates them')
+end)
+
+--- ★★★ `preserved_nodes` EXISTS BECAUSE `fixed_nodes` IS NOT AN ADMISSIBILITY TEST
+--- FOR A CONTEXT-VARIABLE TEMPLATE (CART-0934). `A.vertical` returns a hole that
+--- CARRIES the arguments both sides shared; `fixed_nodes` returns 0 at a hole
+--- without descending, so it scores a real generalization and a vacuous one alike.
+---
+--- ⚠ THE NEGATIVE HALF IS THE POINT. Three positives alone looked like a clean win
+--- and were not: the measure that "worked" on them admitted every unrelated pair
+--- too. Both directions are pinned below, and the third test pins the FAILURE of
+--- the old measure — if `fixed_nodes` ever starts separating these, this measure
+--- is redundant and should be deleted rather than kept out of habit.
+local function vert_body(a, b)
+    local A = need()
+    local r = A.vertical(A.seq({ a }), A.seq({ b }), {})
+    local T = r.templates and r.templates[1]
+    return T and (T.body or T)
+end
+
+test('algebra seam: preserved_nodes counts what a context hole carries', function ()
+    local A = need()
+    -- the measured shape: {k='hole', ctx=true, kids={{k='name', n='a'}}}
+    local body = vert_body(A.node('field.foo', A.name('a')),
+                           A.node('field.bar', A.name('a')))
+    ok(body, 'vertical produced a template')
+    eq(1, alg.fixed_nodes(body), 'fixed_nodes sees only the seq wrapper')
+    eq(2, alg.preserved_nodes(body), 'preserved_nodes also sees the carried argument')
+end)
+
+test('algebra seam: preserved_nodes separates real families from vacuous ones',
+    function ()
+        local A = need()
+        local N, L, D = A.name, A.lit, A.node
+        -- POSITIVE: shares structure the lgg cannot express (kind-welded discriminants)
+        local pos = {
+            { 'field selector', D('field.foo', N 'a'), D('field.bar', N 'a') },
+            { 'operator', D('bin:+', N 'a', N 'b'), D('bin:-', N 'a', N 'b') },
+            { 'operator, big arms', D('bin:+', D('call', N 'f', N 'x'), N 'b'),
+                D('bin:-', D('call', N 'f', N 'x'), N 'b') },
+        }
+        -- NEGATIVE: shares NOTHING. Each must land on the wrapper alone.
+        local neg = {
+            { 'unrelated', D('call', N 'FOO'), D('bin:*', N 'zzz', L 'num:9') },
+            { 'bare names', N 'alpha', N 'omega' },
+            { 'deep unrelated', D('while', D('cmp:<', N 'i', N 'n'), N 'body'),
+                D('return', D('call', N 'QQQ', L 'str:x')) },
+        }
+        for _, c in ipairs(pos) do
+            local p = alg.preserved_nodes(vert_body(c[2], c[3]))
+            ok(p >= 2, ('%s must be admissible, preserved=%d'):format(c[1], p))
+        end
+        for _, c in ipairs(neg) do
+            local p = alg.preserved_nodes(vert_body(c[2], c[3]))
+            eq(1, p, ('%s must score the wrapper ALONE'):format(c[1]))
+        end
+    end)
+
+--- ★ AND THE MEASURE IS MONOTONE IN SHARED MATERIAL, so it ranks as well as admits.
+--- A threshold-only measure would pass the two tests above and still be useless for
+--- choosing BETWEEN candidate families, which is what donor enumeration needs.
+test('algebra seam: preserved_nodes rises with the material actually shared',
+    function ()
+        local A = need()
+        local N, D = A.name, A.node
+        local small = alg.preserved_nodes(vert_body(
+            D('bin:+', N 'a', N 'b'), D('bin:-', N 'a', N 'b')))
+        local big = alg.preserved_nodes(vert_body(
+            D('bin:+', D('call', N 'f', N 'x'), N 'b'),
+            D('bin:-', D('call', N 'f', N 'x'), N 'b')))
+        ok(big > small,
+            ('bigger shared arms must score higher: %d vs %d'):format(big, small))
+        -- ⚠ AND fixed_nodes MUST STILL BE FLAT ACROSS THEM — the reason this exists.
+        eq(alg.fixed_nodes(vert_body(D('bin:+', N 'a', N 'b'), D('bin:-', N 'a', N 'b'))),
+            alg.fixed_nodes(vert_body(D('bin:+', D('call', N 'f', N 'x'), N 'b'),
+                D('bin:-', D('call', N 'f', N 'x'), N 'b'))),
+            'fixed_nodes cannot tell them apart, which is why preserved_nodes exists')
+    end)
+
+--- ★★★ `pair_family` IS THE PAIRWISE FAMILY SELECTOR (CART-0934) — `A.vertical` for
+--- the generalizer, `preserved_nodes` for admissibility. It exists because
+--- `mdl.family_of` hard-codes BOTH the first-order lgg and `fixed_nodes`, and neither
+--- can be swapped. ⚠ It is a SECOND selector beside `partition` and must not outlive
+--- that; the exit condition is written beside the function.
+local function fld(sel, base) return { k = 'field', n = sel, b = { k = 'name', n = base } } end
+local function bin(op, l, r)
+    return { k = 'bin', op = op, l = { k = 'name', n = l }, r = { k = 'name', n = r } }
+end
+
+test('algebra seam: pair_family admits shared structure and refuses the wrapper',
+    function ()
+        need()
+        -- POSITIVE: exactly the shapes the welded kind could not abstract at all
+        local ok1, i1 = alg.pair_family(alg.term(fld('foo', 'a')), alg.term(fld('bar', 'a')))
+        ok(ok1, 'a differing selector over a shared base is a family')
+        ok(i1.preserved >= 3, 'the field kind AND the base survive: ' .. i1.preserved)
+        local ok2, i2 = alg.pair_family(alg.term(bin('+', 'a', 'b')),
+            alg.term(bin('-', 'a', 'b')))
+        ok(ok2, 'a differing operator over shared arms is a family')
+        ok(i2.preserved >= 4, 'the bin kind AND both arms survive: ' .. i2.preserved)
+
+        -- NEGATIVE: nothing shared. Each must land on the wrapper ALONE and REFUSE.
+        local ok3, i3 = alg.pair_family(
+            alg.term({ k = 'call', f = { k = 'name', n = 'FOO' }, a = {} }),
+            alg.term(bin('*', 'zzz', 'q')))
+        ok(not ok3, 'unrelated terms are refused')
+        eq(1, i3.preserved, 'and score the wrapper alone')
+        ok(i3.why and i3.why:find('wrapper'), 'the refusal says why: ' .. tostring(i3.why))
+        local ok4 = alg.pair_family(alg.term({ k = 'name', n = 'alpha' }),
+            alg.term({ k = 'name', n = 'omega' }))
+        ok(not ok4, 'two bare names are refused')
+    end)
+
+--- ★★ THE MIXED PAIR IS THE CALIBRATION, and it is why the floor is a PARAMETER.
+--- `a.foo` vs `b.bar` shares only the node KIND — both are field accesses, nothing
+--- else survives. At the default floor of 2 that is ADMITTED, which is the weakest
+--- admission the measure can make. A caller who wants a shared OPERAND too must say
+--- so; the default is not a judgement that kind-alone is enough for every use.
+test('algebra seam: pair_family floor decides the weakest admission', function ()
+    need()
+    local a, b = alg.term(fld('foo', 'a')), alg.term(fld('bar', 'b'))
+    local ok2, i2 = alg.pair_family(a, b)                 -- default floor = 2
+    ok(ok2, 'kind-alone is admitted at the default floor')
+    eq(2, i2.preserved, 'and it preserves exactly the wrapper + the kind')
+    local ok3 = alg.pair_family(a, b, { floor = 3 })      -- demand an operand too
+    ok(not ok3, 'a caller demanding more than the kind can refuse it')
+    -- ⚠ AND THE FLOOR MUST NEVER BE 1: that is the wrapper, so it admits everything.
+    local okall = alg.pair_family(alg.term({ k = 'name', n = 'alpha' }),
+        alg.term({ k = 'name', n = 'omega' }), { floor = 1 })
+    ok(okall, 'floor 1 admits even two bare names — the trap, pinned so it stays visible')
+end)
+
+--- ★★★ THE CASE THAT DISTINGUISHES THE TWO MEASURES, and the reason `pair_family`
+--- uses `preserved_nodes` rather than `fixed_nodes`. ⚠ WITHOUT THIS TEST THE CHOICE
+--- IS UNGUARDED: swapping in `fixed_nodes` passed every other test in this file,
+--- because reification made most templates align STRUCTURALLY — the shared material
+--- becomes genuinely fixed and the two measures agree. They part company only where
+--- `vertical` still emits a CONTEXT hole, i.e. where one side nests what the other
+--- leaves bare.
+test('algebra seam: a context hole is where the two measures part', function ()
+    local A = need()
+    local nm = function (n) return { k = 'name', n = n } end
+    -- `f(x) + b` vs `x + b` — same operator, same second operand, first operand
+    -- WRAPPED. vertical keeps the bin and `b`, and holes the wrapper as a context
+    -- variable APPLIED TO `x`: (seq (bin + ?X1(x) b)).
+    local wrapped = alg.term({ k = 'bin', op = '+',
+        l = { k = 'call', f = nm 'f', a = { nm 'x' } }, r = nm 'b' })
+    local bare = alg.term({ k = 'bin', op = '+', l = nm 'x', r = nm 'b' })
+    local r = A.vertical(A.seq({ wrapped }), A.seq({ bare }), {})
+    local body = r.templates[1].body
+    ok(alg.preserved_nodes(body) > alg.fixed_nodes(body),
+        ('the carried argument is invisible to fixed_nodes: %d vs %d')
+            :format(alg.preserved_nodes(body), alg.fixed_nodes(body)))
+
+    -- ★ AND HERE THE MEASURE CHANGES THE VERDICT, not just the score. `f(a)` and
+    -- `a.foo` share only `a`; vertical says "some unary context applied to a", which
+    -- is exactly what a helper taking `a` would be. fixed_nodes scores 1 — the
+    -- wrapper — and would REFUSE it; preserved_nodes scores 2 and admits.
+    local okp, info = alg.pair_family(
+        alg.term({ k = 'call', f = nm 'f', a = { nm 'a' } }),
+        alg.term({ k = 'field', n = 'foo', b = nm 'a' }))
+    ok(okp, 'a shared operand under differing contexts is a family')
+    eq(2, info.preserved, 'preserved counts the carried argument')
+    eq(1, alg.fixed_nodes(info.template),
+        'fixed_nodes sees only the wrapper — swapping it in would refuse this pair')
 end)
