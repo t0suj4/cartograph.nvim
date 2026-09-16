@@ -849,7 +849,30 @@ end
 function build_core(node, src, lang)
     if not node then return { k = '?', t = '<nil>', kids = {} } end
     local t = node:type()
-    if PAREN[t] then return build(node:named_child(0), src) end
+    -- ★★★ `lang` IS PASSED THROUGH (CART-0931). This was the only `build` call in
+    -- the module that omitted it, and the whole subtree under a parenthesised
+    -- expression was therefore classified with NO LANGUAGE. Two symptoms, both
+    -- measured:
+    --   1. the boundary test fell back to ALLOCFN (five names) instead of the
+    --      language's stop set, so `method_declaration` and ruby's attached
+    --      `block` were not boundaries inside brackets -- the elasticsearch
+    --      closure-leak class coming back through the parentheses, which is what
+    --      CART-0931 was filed on.
+    --   2. ⚠⚠ AND THE WORSE ONE: `declared_call_parts` needs the lang to find the
+    --      spec's receiver-qualified call shape. Without it a parenthesised
+    --      method call fell through to the generic "first named child is the
+    --      callee" rule and the IR ASSERTED A CALL THAT DOES NOT EXIST IN THE
+    --      SOURCE -- exactly the failure the CALL table's own comment says
+    --      method_invocation / member_call_expression / scoped_call_expression
+    --      were admitted to prevent. Measured, same code both ways:
+    --        java   o.g(1)    -> CMNo.g(Lnum:1)      (o . g applied to 1)
+    --             ( o.g(1) )  -> CNo(Ng,Lnum:1)      (o applied to g and 1)
+    --        php    $o->m(2)  -> CMNo.m(Lnum:2)
+    --             ($o->m(2))  -> CNo(Nm,Lnum:2)
+    --      That is not imprecision: `expr.key` is the clone index's key and CSE's
+    --      key, so the same call read as two different expressions depending on
+    --      whether someone wrapped it in brackets.
+    if PAREN[t] then return build(node:named_child(0), src, lang) end
     -- ★ A STATEMENT WRAPPER IS NOT A VALUE (CART-0742). A row that is a bare
     -- call — `foo();`, the commonest statement in every C-family language — falls
     -- through `harvest_row` to its whole-node-is-a-value default, so `build` met

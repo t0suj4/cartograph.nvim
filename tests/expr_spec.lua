@@ -1749,3 +1749,66 @@ for _, L in ipairs({
             vim.fn.delete(root, 'rf')
         end)
 end
+
+-- ── parentheses do not change what an expression IS (CART-0931) ─────────────
+--
+-- `build`'s PAREN arm was the ONE call in the module that dropped `lang`, so the
+-- whole subtree under a bracket was classified with no language. The filed
+-- symptom was the closure-boundary leak (ALLOCFN's five names standing in for
+-- the language's stop set). This pins the WORSE one, found later:
+-- `declared_call_parts` needs the lang to find the spec's receiver-qualified
+-- call shape, and without it a parenthesised method call fell through to the
+-- generic "first named child is the callee" rule.
+--
+-- ⚠⚠ THAT IS NOT IMPRECISION, IT IS A FABRICATION — the exact failure the CALL
+-- table's own comment says method_invocation / member_call_expression /
+-- scoped_call_expression were admitted to prevent:
+--     java   o.g(1)  -> CMNo.g(Lnum:1)   ( o . g  applied to 1 )
+--          ( o.g(1) )-> CNo(Ng,Lnum:1)   ( o applied to g AND 1 )
+-- MEASURED on corpora: libs 1991 such calls, mantisbt 76, and the three
+-- counters moved in lockstep (+N method, -N plain, -N total args), so every one
+-- of them carried the method name as a spurious extra argument. `expr.key` is
+-- the clone index's key and CSE's key, so the same call read as two different
+-- expressions depending on whether anyone wrapped it in brackets.
+
+local function first_call_key(src, lang)
+    local eo = expr.of_text(src, lang)
+    if not eo then return nil end
+    local found
+    for _, r in ipairs(eo.fl.stmts or {}) do
+        if r.expr then
+            for _, side in ipairs({ 'lhs', 'rhs' }) do
+                for _, e in ipairs(r.expr[side] or {}) do
+                    expr.walk(e, function (x)
+                        if not found and x.k == 'call' then found = x end
+                    end)
+                end
+            end
+        end
+    end
+    return found and expr.key(found)
+end
+
+for _, L in ipairs({
+    { lang = 'java',
+      bare  = 'class A { int f(B o) { return o.g(1); } }',
+      paren = 'class A { int f(B o) { return (o.g(1)); } }' },
+    { lang = 'php',
+      bare  = '<?php function f($o) { return $o->m(2); }',
+      paren = '<?php function f($o) { return ($o->m(2)); }' },
+}) do
+    test(('expr: a parenthesised %s method call is the SAME expression'):format(L.lang),
+        function ()
+            if not ready(L.lang) then skip('no ' .. L.lang .. ' parser') end
+            local kb = first_call_key(L.bare, L.lang)
+            local kp = first_call_key(L.paren, L.lang)
+            ok(kb ~= nil, 'the bare form has a call')
+            ok(kp ~= nil, 'the parenthesised form has a call')
+            -- ⚠ EQUALITY IS THE WEAK HALF unless the bare key is also RIGHT: two
+            -- identically-wrong keys would pass. The receiver-qualified marker
+            -- pins which of the two shapes they agreed on.
+            ok(tostring(kb):find('CM', 1, true),
+                'the bare form is a METHOD call, not a bare-name call: ' .. tostring(kb))
+            eq(kb, kp, 'brackets do not change the expression')
+        end)
+end
