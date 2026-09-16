@@ -4367,6 +4367,92 @@ local STR_PARTS = { string_content = true, string_value = true,
     string_fragment = true, string_start = true, string_end = true,
     escape_sequence = true, heredoc_start = true, heredoc_end = true }
 
+--- Fold an expression to a KNOWN string against the same-file const index.
+---
+--- CART-0944. `require(path .. "power")` with `local path = "prototypes/.../"`
+--- at the top of the file is 93 of se's 661 requires -- 14.1% of the FACTORIO
+--- REFERENCE CORPUS -- and produced NO IMPORT EDGE AT ALL, because the argument
+--- reader's concat arm is guarded on the LEFT being a string (php's
+--- `'prefix_' . x` prefix family) and everything else falls through to
+--- `{ k = 'expr' }` with an EMPTY `args` slot, which the import branch reads as
+--- "nothing to resolve".
+---
+--- ★ THE ANALYSIS ALREADY EXISTS; ONLY THE ORDER WAS WRONG. `constfold` indexes
+--- exactly this population -- a same-file SET-ONCE STRING local, poisoned by any
+--- rebind or non-string binding -- and `constfold.fold` is a POST-PASS over
+--- `argv` (the end of M.extract). Import edges are minted DURING the call walk,
+--- so the fold ran one pass too late to be seen. `extract_defs` runs before
+--- `extract_calls` for the same file, so at the import branch the index is
+--- already complete for this file and the lookup is just a table read.
+---
+--- ⚠ SOUNDNESS IS INHERITED, NOT RE-ARGUED. Every leaf must be a plain string
+--- literal or a name the const index calls a string; a poisoned name, an
+--- interpolated string, a call, a field read or a number returns nil and the
+--- site stays honestly unresolved. That is constfold's gate, unchanged.
+---
+--- ⚠⚠ THE OPERATOR IS READ, NOT ASSUMED. `x - "3"` is a `binary_expression`
+--- too. `spec.concat_op` is already declared (lua `..`, php `.`) and already
+--- read by keyaccess, so this needs no new spec field. A language that does not
+--- declare one never folds a concat -- which is the honest default, not a gap:
+--- `+` is overloaded in every language that spells concatenation with it.
+---@param n userdata    the expression node
+---@param src string
+---@param spec table
+---@param consts table|nil  the const index FOR THIS FILE ({ name = string|false })
+---@param depth integer|nil
+---@return string|nil
+local function fold_str(n, src, spec, consts, depth)
+    depth = (depth or 0) + 1
+    if not n or depth > 6 then return nil end
+    local t = n:type()
+    if t == 'parenthesized_expression' then
+        for _, c in inext, n, -1 do
+            if c:named() and not tsutil.is_comment(c) then
+                return fold_str(c, src, spec, consts, depth)
+            end
+        end
+        return nil
+    end
+    if t == 'string' or t == 'string_literal' or t == 'encapsed_string' then
+        -- an INTERPOLATED string is not a literal: "$dir/x" names a variable,
+        -- and the typed-strings rule above says k='lit' must mean KNOWN
+        for _, c in inext, n, -1 do
+            if c:named() and not STR_PARTS[c:type()] then return nil end
+        end
+        local txt = node_text(n, src)
+        return (txt:gsub('^["\'%[=]+', ''):gsub('["\'%]=]+$', ''))
+    end
+    if t == 'identifier' or t == 'variable_name' then
+        if not consts then return nil end
+        local v = consts[(node_text(n, src):gsub('^%$', ''))]
+        return type(v) == 'string' and v or nil
+    end
+    if t == 'binary_expression' and spec.concat_op then
+        local opn = n:field('operator')[1]
+        local op = opn and node_text(opn, src)
+        if not op then -- lua exposes no `operator` field; the token IS the type
+            for c in n:iter_children() do
+                if not c:named() then op = c:type(); break end
+            end
+        end
+        if op ~= spec.concat_op then return nil end
+        local l = fold_str(n:field('left')[1], src, spec, consts, depth)
+        local r = l and fold_str(n:field('right')[1], src, spec, consts, depth)
+        if l and r then return l .. r end
+    end
+    return nil
+end
+
+--- the module string an import site names: the argument reader's slot when it
+--- filled one, else the const fold over the argument's TREE.
+--- ⚠ FILE-SCOPE, NOT A CLOSURE IN THE CALL WALK. It is reached once per call
+--- site in every file of every corpus, and a closure built there would allocate
+--- per site for a function that captures nothing it cannot be handed.
+local function import_path(args, arg1n, src, spec, consts)
+    if args[1] and args[1] ~= '' then return args[1] end
+    return arg1n and fold_str(arg1n, src, spec, consts) or nil
+end
+
 -- LEB128, little-endian base-128
 local function vput(parts, v)
     while v >= 0x80 do
@@ -7110,6 +7196,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         local fa = calln:field('argument')
                         if fa and #fa > 0 then argnodes = fa end
                     end
+                    local arg1n
                     for _, a in (argsn and argsn.child and inext)
                         or (argnodes and ipairs(argnodes)) or NOOP,
                         argnodes or argsn, argnodes and 0 or -1 do
@@ -7148,6 +7235,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 end
                             end
                             local nargv = #argv
+                            -- the FIRST positional argument's NODE, kept for the
+                            -- import fold below (CART-0944): the `args` slot it
+                            -- produces is empty for a computed path, and the fold
+                            -- needs the tree, not the empty string
+                            if #args == 0 and not kw then arg1n = a end
                             local t = a:type()
                             -- ★★ A LANGUAGE MAY NAME ITS OWN ARGUMENT KINDS. The
                             -- chain below tests grammar node types by hand
@@ -7293,9 +7385,23 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- the LOCAL it binds, when the spec can read it
                     -- (requalification needs to know which name means
                     -- which module)
+                    -- ★ A COMPUTED PATH BUILT FROM SET-ONCE STRINGS IS STILL A
+                    -- PATH (CART-0944). `args[1]` is empty for anything the
+                    -- argument reader classified as an expression, which is where
+                    -- `require(path .. "power")` landed -- 93 sites in se, 14.1%
+                    -- of the factorio reference corpus, all of them a file-scope
+                    -- `local path = "<literal>"` plus a literal tail. The fold is
+                    -- constfold's own gate applied one pass EARLIER, so the
+                    -- resulting edge is exactly the one the literal spelling would
+                    -- have produced -- and is NOT hedged, for the same reason a
+                    -- folded `k='lit'` argument is not: the set-once gate is the
+                    -- soundness claim, and marking these `inferred` would put a ~
+                    -- on a path the file states outright in two pieces.
                     if spec.import_call and full == spec.import_call then
-                        local target = args[1] and args[1] ~= ''
-                            and spec.resolve_import(args[1], importable, file, root)
+                        local p1 = import_path(args, arg1n, src, spec,
+                            constDefs[file])
+                        local target = p1
+                            and spec.resolve_import(p1, importable, file, root)
                         if target and target ~= file then
                             local pt = calln:parent()
                             local ptt = pt and pt:type() or ''
@@ -7309,9 +7415,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- custom loader verbs (mantis require_api): the spec
                     -- recognizes loader-SHAPED names with a source-file
                     -- literal; the edge is name-matched, so it carries ~
-                    if spec.import_call_like and args[1] and args[1] ~= ''
-                        and spec.import_call_like(full, args[1]) then
-                        local target = spec.resolve_import(args[1], importable, file, root)
+                    local pl = spec.import_call_like
+                        and import_path(args, arg1n, src, spec, constDefs[file])
+                    if pl and spec.import_call_like(full, pl) then
+                        local target = spec.resolve_import(pl, importable, file, root)
                         if target and target ~= file then
                             edges[#edges + 1] = { from = file, to = target,
                                 kind = 'import', inferred = true }

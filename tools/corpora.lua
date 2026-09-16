@@ -472,8 +472,18 @@ return {
         lang = 'lua', -- version-pinned mod dir, not a git repo
         notes = 'Space Exploration 0.7.57 — the FACTORIO reference corpus:'
             .. ' 5 phase entries (control/data/updates/final-fixes/settings),'
-            .. ' phase cones separate via imports (2 shared files), unreached'
-            .. ' = conditional compat requires + menu-simulations engine'
-            .. ' entries; the factorio sharing-model cut lands here',
+            .. ' phase cones separate via imports (2 shared files);'
+            .. ' the factorio sharing-model cut lands here.'
+            -- ⚠ THE OLD NOTE HERE READ "unreached = conditional compat requires
+            -- + menu-simulations engine entries" AND THAT WAS A TOOL GAP
+            -- DESCRIBED AS A CORPUS PROPERTY (CART-0944). 93 of this corpus's
+            -- 661 requires are `local path = "<literal>"` + `require(path ..
+            -- "name")`, which minted no import edge at all, so the files they
+            -- reach looked like orphans. Folding them (cache v194) moves
+            -- UNREACHED 106 files (27.0%) -> 14 (3.6%): data 160 -> 207,
+            -- data-updates 18 -> 45, data-final-fixes 34 -> 52, control and
+            -- settings unchanged. ★ ANY REACHABILITY-KEYED READING OF A FACTORIO
+            -- CORPUS TAKEN BEFORE v194 WAS OVER A QUARTER SHORT.
+            .. ' unreached 14/392 (3.6%) as of cache v194.',
     },
 }

@@ -378,7 +378,31 @@ end
 -- not see this one because there was no node to contain. Minting is the whole fix.
 -- ⚠ ATTRIBUTION MOVES, as it did at v191: an edge from inside the closure body
 -- belonged to the enclosing function and now belongs to `<encl>#ret`.
-M.VERSION = 193 -- v193: A NESTED RETURNED CLOSURE IS A NODE (CART-0926), above.
+-- v194: A COMPUTED IMPORT PATH BUILT FROM SET-ONCE STRINGS IS STILL A PATH
+-- (CART-0944). `local path = "prototypes/.../entity/"` at the top of a file plus
+-- `require(path .. "power")` further down is 93 of se's 661 requires -- 14.1% of
+-- the FACTORIO REFERENCE CORPUS -- and produced NO IMPORT EDGE AT ALL. The
+-- argument reader's concat arm is guarded on the LEFT being a string (php's
+-- `'prefix_' . x` prefix family), so an identifier-left concat fell through to
+-- `{ k = 'expr' }` with an EMPTY `args` slot, and the import branch reads an empty
+-- slot as "nothing to resolve".
+-- ★ THE ANALYSIS EXISTED AND ONLY THE ORDER WAS WRONG: `constfold` indexes exactly
+-- this population (same-file SET-ONCE STRING locals, poisoned by any rebind or
+-- non-string binding) but `constfold.fold` is a POST-PASS over `argv`, and import
+-- edges are minted DURING the call walk. `extract_defs` runs before `extract_calls`
+-- for the same file, so the index is already complete at the import branch.
+-- MEASURED (tools import-edge count, before -> after):
+--   se     import 544 -> 636  (+92), all in prototypes/**/compatibility/krastorio2
+--   bnw    9 -> 9,  php 894 -> 894 (unchanged: php inclusions ride import_query)
+-- The 93rd folds and does NOT resolve, honestly: `require(path .. "categories.lua")`
+-- already carries the extension, and resolve_import never tries the module string
+-- as a bare path. Filed separately -- it is factorio-only semantics (stock lua's
+-- `require "x.lua"` looks for x/lua.lua), so it belongs inside the factorio gate.
+-- ⚠ NOT HEDGED, deliberately, and for the same reason a folded `k='lit'` argument
+-- is not: the set-once gate IS the soundness claim. Marking these `inferred` would
+-- put a ~ on a path the file states outright in two pieces.
+M.VERSION = 194 -- v194: A COMPUTED IMPORT PATH IS STILL A PATH (CART-0944), above.
+               -- v193: A NESTED RETURNED CLOSURE IS A NODE (CART-0926)
                -- v192: A BRACKETED KEY IS STILL A KEY (CART-0927)
                -- v191: A LUA INLINE CLOSURE IS A NODE (CART-0813)
                -- v190: A MACRO ARGUMENT IS A NAMED KEY (CART-0812)
