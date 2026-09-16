@@ -315,3 +315,48 @@ test('algebra seam: a context hole is where the two measures part', function ()
     eq(1, alg.fixed_nodes(info.template),
         'fixed_nodes sees only the wrapper — swapping it in would refuse this pair')
 end)
+
+--- ★★★ THE REGRESSION THIS FILE COULD NOT HAVE CAUGHT (CART-0937). Every other
+--- `pair_family` test above builds SMALL hand-made terms, and `vertical`'s DEFAULT
+--- alignment handles those fine — so the suite was green while the function refused
+--- essentially every real function body.
+---
+--- The terms below are the REAL dataflow terms of `ts.flow_stop` (13 rows) and
+--- `expr.lua`'s `LOCALDECL_OF.__index` (10 rows), frozen as literals so the test
+--- does not depend on the tree's current content. ⚠ SIZE ALONE DOES NOT REPRODUCE
+--- IT: a synthetic 11-row pair differing by one clean insertion is handled by the
+--- default, because LCS still finds an ADMISSIBLE alignment. It takes real scattered
+--- divergence, which is why the fixture is measured rather than invented.
+local function dfrow(A, dc, ...) return A.node('row', A.name(dc), A.seq({ ... })) end
+
+test('algebra seam: pair_family handles REAL-SIZED terms, which the default cannot',
+    function ()
+        local A = need()
+        local F, I = A.name 'free', A.name 'inner'
+        local R = function (dc, ...) return dfrow(A, dc, ...) end
+        local q = A.seq({
+            R('fresh', F, F, F), R('fresh', I, F), R('fresh'),
+            R('none', F, F, F), R('none', F, F, F), R('none', I, F),
+            R('none', F, F, F, F, F), R('none', F, F, F, F, F), R('none', I, F),
+            R('none', F, F, I), R('none', F, F, I), R('none', I, F), R('none', I) })
+        local t = A.seq({
+            R('fresh', F, F, F), R('fresh'),
+            R('none', F, F, F), R('none', F, F, F), R('none', I, F),
+            R('none', F, F, I, F), R('none', F, F, I, F), R('none', I, F),
+            R('none', F, F, F, I), R('none', I) })
+
+        -- ⚠ THE DEFAULT STRATEGY RETURNS A SILENT EMPTY HERE: candidates = 0 with
+        -- truncated = false and budget_refusals = 0. Pinned so that the reason
+        -- `skeleton = 'zhang'` is passed cannot be quietly removed as redundant.
+        -- ★ If this half ever FAILS, the vendored default improved — check before
+        -- deleting anything; that is good news, not a broken test.
+        local d = A.vertical(A.seq({ q }), A.seq({ t }), {})
+        eq(0, d.candidates or 0,
+            'the DEFAULT alignment still finds no admissible alignment at this size')
+
+        -- ⚠ NOT `local ok` — that shadows the `ok` assertion in this harness.
+        local admitted, info = alg.pair_family(q, t, { floor = 2 })
+        ok(admitted, 'pair_family admits the pair: ' .. tostring(info.why))
+        ok(info.preserved >= 40,
+            'and preserves most of it (measured 55 of 57): ' .. tostring(info.preserved))
+    end)

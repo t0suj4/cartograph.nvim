@@ -367,13 +367,36 @@ end
 --- not guessed at here.
 --- @param a table term
 --- @param b table term
---- @param opts table|nil { floor = number }
+--- ⚠ A REFUSAL CARRIES NO `preserved`, AND A CALLER MUST NOT READ THAT AS ZERO.
+--- `ok == false` with `why = 'vertical produced no template'` means the generalizer
+--- declined; `info.preserved` is nil, NOT a low score. Ranking callers that collapse
+--- it to 0 will rank a refusal alongside a genuine mismatch — I did exactly that an
+--- hour after writing this and published two rankings that were measuring the
+--- declines (CART-0937). Destructure `ok` first.
+--- @param a table term
+--- @param b table term
+--- @param opts table|nil { floor = number, skeleton = 'zhang'|'jwz'|nil }
 --- @return boolean ok, table info
 function M.pair_family(a, b, opts)
     opts = opts or {}
     local A = M.load()
     if not A then return false, { why = 'algebra unavailable' } end
-    local okv, r = pcall(A.vertical, A.seq({ a }), A.seq({ b }), {})
+    -- ★★★ `skeleton = 'zhang'` IS NOT A TUNING CHOICE, IT IS THE DIFFERENCE BETWEEN
+    -- WORKING AND SILENTLY REFUSING (CART-0937). `vertical`'s DEFAULT strategy
+    -- enumerates LCS alignments and keeps the ADMISSIBLE ones; above ~6 rows / ~40
+    -- nodes it finds NONE and returns `candidates = 0` — with `truncated = false`
+    -- and `budget_refusals = 0`, i.e. a SILENT EMPTY, not a refusal. MEASURED on a
+    -- real pair, truncating row by row:
+    --     rows 6  sizes 32/34  preserved 28   template
+    --     rows 7  sizes 40/41  NO TEMPLATE, candidates = 0, truncated = FALSE
+    -- ⚠ RAISING `cap` DOES NOT HELP (512 gives the same zero): the enumerated
+    -- alignments are not admissible, so more of them changes nothing. `zhang` picks
+    -- ONE alignment by TREE EDIT DISTANCE instead (Zhang's constrained distance,
+    -- vertical.lua:240 dispatches it) and the same full-size pair then preserves 55
+    -- of 57 nodes. ⇒ THE DEFAULT IS USABLE ONLY ON TOY TERMS, which is exactly what
+    -- the first tests for this function were built from.
+    local okv, r = pcall(A.vertical, A.seq({ a }), A.seq({ b }),
+        { skeleton = opts.skeleton or 'zhang' })
     if not okv or not r or not r.templates or not r.templates[1] then
         return false, { why = 'vertical produced no template' }
     end
