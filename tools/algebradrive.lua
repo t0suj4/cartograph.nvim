@@ -140,7 +140,7 @@ local unsupported = {}
 -- this tool's own unsupported-kind tally, which the shipped seam takes as an
 -- optional out-parameter rather than owning.
 local function to_term(e, locals) return alg.term(e, locals, unsupported) end
-local function row_term(r, locals) return alg.row_term(r, locals, unsupported) end
+local function row_term(r, locals, srcmap) return alg.row_term(r, locals, unsupported, srcmap) end
 
 --- ★★★ IS A DIFFERING-ARITY `table` REPETITION, OR IS IT KEYED DATA?
 --- The two have DIFFERENT RIGHT ANSWERS and the positional lgg cannot tell them
@@ -246,11 +246,18 @@ end
 --- between equal divergent tuples only WITHIN the term it is given. So the terms
 --- handed to `generalize` are the WHOLE diverging body on each side -- then both
 --- sides dedup over the same extent and the counts mean the same thing.
-local function pair_terms(p)
+--- ★★ THE THIRD RETURN IS THE WAY BACK TO THE EXPRESSION TREE (CART-0939
+--- blocker 1). A struct hole on our side carries `xn`/`yn`, LIVE expr nodes that
+--- `M.drift`, `dc_size`, `dc_kids`, `rcanon` and `local_deps` each take; a term has
+--- no such field and must not grow one (`A.copy` is a deep copy and would clone the
+--- subtree, losing the identity that is the whole point). `alg.term`'s `srcmap`
+--- out-param answers it without touching the term.
+local function pair_terms(p, srcmap)
     local as, bs = {}, {}
     for _, o in ipairs(p.ops) do
         if o.op == 'sub' then
-            local ta, tb = row_term(p.a.exprs[o.i], p.a.locals), row_term(p.b.exprs[o.j], p.b.locals)
+            local ta = row_term(p.a.exprs[o.i], p.a.locals, srcmap)
+            local tb = row_term(p.b.exprs[o.j], p.b.locals, srcmap)
             if not ta or not tb then return nil end
             as[#as + 1] = ta; bs[#bs + 1] = tb
         end
@@ -264,7 +271,7 @@ end
 -- spent the whole `--show` allowance first and the run came back reporting
 -- `★ differs 2` with nothing printed to look at. A shared budget silently starves
 -- whichever consumer is last, and the starved one is invisible.
-local shown, hshown, examined = 0, 0, 0
+local shown, hshown, bshown, examined = 0, 0, 0, 0
 for pi = 1, math.min(#pairs_, want_pairs), stride do
     local p = pairs_[pi]
     local ours = clones.analyze_pair(p)
@@ -531,7 +538,150 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
     end
 
     -- the differential
-    local TA, TB = pair_terms(p)
+    -- ── THE WRITE DESTINATION OF A HOLE (CART-0941) ────────────────────────
+    -- ★★★ A HOLE'S KIND SAYS WHAT VARIES; IT DOES NOT SAY WHERE. `anti_unify_row`
+    -- walks `r.lhs` exactly as it walks `r.rhs` and throws the side away, so a
+    -- divergent field SELECTOR on an assignment TARGET arrives at `cloneextract`
+    -- as an ordinary value hole -- and gets substituted, turning
+    -- `self.alpha = alpha` into `hp1 = alpha`. Reproduced end to end.
+    --
+    -- ⇒ THE DESTINATION KIND IS ALREADY IN THE IR AND NOTHING READS IT. A row's
+    --   `lhs` is a list of expression nodes and their `k` IS the destination kind.
+    --   MEASURED over our own tree, 3000 functions: 14406 `name`, 4822 `index`,
+    --   1214 `field` -- 29.5% of writes are not plain names, which is the class
+    --   where a hole on the left is not a value at all.
+    --
+    -- ★ IT IS A DISPATCH, NOT JUST A GUARD. What the destination is decides which
+    --   rewrite exists: a differing selector on a `field` destination factors as
+    --   `self[hp] = v` -- an INDEX write with the SELECTOR as the argument -- while
+    --   on an `index` destination the key is already an expression and today's
+    --   substitution is correct. Refusing all of them would forbid a refactoring
+    --   that is merely unimplemented.
+    local wdest = {}
+    do
+        local exprm = require 'cartograph.expr'
+        for _, o in ipairs(p.ops) do
+            if o.op == 'sub' then
+                local ra = p.a.exprs[o.i]
+                for _, d in ipairs((ra and ra.lhs) or {}) do
+                    -- every node UNDER a destination is on the write side, and the
+                    -- destination's own `k` is the kind the whole subtree reports
+                    local dk = d.at and ('%d:%d-%d:%d'):format(
+                        atm.sl(d.at), atm.sc(d.at), atm.el(d.at), atm.ec(d.at))
+                    exprm.walk(d, function (x)
+                        local k = x.at and ('%d:%d-%d:%d'):format(
+                            atm.sl(x.at), atm.sc(x.at), atm.el(x.at), atm.ec(x.at))
+                        -- ★★★ WHOLE VS INSIDE, AND THE SUM OF THE TWO IS NOT A POPULATION.
+                        -- A hole whose span EQUALS the destination's is the destination
+                        -- -- substituting it replaces the assignment target and the
+                        -- write is lost. A hole strictly INSIDE one is a key or a base
+                        -- (`t[k] = v` with a differing `k`), and substituting THAT is
+                        -- correct today. Counting them together would report a bug and
+                        -- a non-bug as one number.
+                        if k then wdest[k] = { kind = d.k, whole = (k == dk), node = d } end
+                    end)
+                end
+            end
+        end
+    end
+    for _, h in ipairs(ours.holes or {}) do
+        local on = nil
+        for _, r in ipairs(h.sites_a or {}) do
+            local k = ('%d:%d-%d:%d'):format(atm.sl(r), atm.sc(r), atm.el(r), atm.ec(r))
+            if wdest[k] then on = wdest[k]; break end
+        end
+        if on then
+            bump(('WRITE-DEST HOLE: a %s hole %s a %s destination'):format(
+                h.kind, on.whole and 'IS' or 'is inside', on.kind))
+            -- ⚠ ONLY A `value` PAIR REACHES THE VERB: `cloneextract.plan` refuses
+            -- anything else outright, so a write-destination hole on a structural
+            -- pair is recorded but harms nothing. The reachable population is the
+            -- `whole` line and only that one.
+            if ours.kind == 'value' then
+                bump(on.whole
+                    and ('  ↳ ★ BREAKS THE WRITE: a %s hole IS a %s destination, kind=value')
+                        :format(h.kind, on.kind)
+                    or ('  ↳ inside a %s destination, substitution is correct'):format(on.kind))
+            end
+            -- ★★★ TWO ROUTES TO THE SAME ANSWER, AND THEY MUST AGREE. This driver
+            -- decides `whole` by SPAN CONTAINMENT over the destination subtree; the
+            -- shipped tag (CART-0941) decides `target` from the two DESTINATION
+            -- NODES, because a span test is exactly what CART-0940 breaks -- a
+            -- method-call field carries no span, so in ruby and php both sides
+            -- would be nil and every hole would compare equal to the destination.
+            -- Independent derivations of one fact: if they diverge, one of them is
+            -- describing its own mechanism rather than the code.
+            bump(((h.target or false) == on.whole)
+                and 'TARGET TAG vs SPAN: agree'
+                or ('TARGET TAG vs ★ SPAN DISAGREE: tag=%s span=%s')
+                    :format(tostring(h.target), tostring(on.whole)))
+            -- ★★★ DOES THE WRITE ESCAPE THE FUNCTION? USER: "there is more to field
+            -- writes depending on escape." A field write is not an implementation
+            -- detail when its base outlives the call -- it is an OUTPUT, part of the
+            -- contract, and two copies writing DIFFERENT fields of an escaping base
+            -- do not have the same effects. That is a statement about
+            -- `analyze_pair`'s VERDICT (`kind = 'value'` means "they differ only in
+            -- leaf values"), not only about whether one hole may be substituted.
+            --
+            -- ⚠ NOT AN ESCAPE ANALYSIS, AND DELIBERATELY NOT. `consumers.lua` has
+            -- one and says what it costs: Lua-only, name-matched, no interprocedural
+            -- flow, "an escape is reported, never followed". This asks a strictly
+            -- smaller question the IR answers directly -- WHERE THE BASE IS BOUND --
+            -- and reports the three answers apart rather than collapsing them.
+            if on.whole and on.node then
+                local base = on.node
+                while base and base.b do base = base.b end
+                local bn = (base and base.k == 'name') and base.n or nil
+                local cls = 'base is not a plain name'
+                if bn then
+                    local eo = p.a.id and require('cartograph.expr').of(store, p.a.id)
+                    local isparam, isdef, returned = false, false, false
+                    for _, pn in ipairs((eo and eo.fl and eo.fl.params) or {}) do
+                        if pn == bn then isparam = true end
+                    end
+                    for _, st in ipairs((eo and eo.fl and eo.fl.stmts) or {}) do
+                        for _, dd in ipairs(st.def or {}) do if dd == bn then isdef = true end end
+                    end
+                    -- ★ REACHES A RETURN, asked through the canonical walker over the
+                    -- RETURN rows only -- a hand-rolled descent here would be the
+                    -- copied walker this repo has a rule about (CART-0746).
+                    for _, st in ipairs((eo and eo.fl and eo.fl.stmts) or {}) do
+                        if st.kind == 'return' or (st.ret ~= nil) then
+                            for _, side in ipairs({ 'lhs', 'rhs' }) do
+                                for _, e in ipairs((st.expr and st.expr[side]) or {}) do
+                                    require('cartograph.expr').walk(e, function (x)
+                                        if x.k == 'name' and x.n == bn then returned = true end
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                    if isparam then cls = 'a PARAM — the write escapes through the argument'
+                    elseif isdef and returned then cls = 'a body-local that REACHES a return'
+                    elseif isdef then cls = '★ a body-local, NOT returned'
+                    else cls = 'neither param nor body-local — a global/upvalue' end
+                end
+                bump('WRITE ESCAPE: ' .. cls)
+                -- ⚠ "NOT RETURNED" IS NOT "DOES NOT ESCAPE" -- see the note at the
+                -- classifier. Print the witnesses so the claim is adjudicated by
+                -- opening the code rather than by the label.
+                -- ⚠⚠ ITS OWN BUDGET, FOR THE SECOND TIME IN ONE FILE. The hole-set
+                -- dump was starved by sharing `shown` with dumps that fire earlier;
+                -- I gave that one `hshown` and then wrote this one against `shown`
+                -- again, and it printed NOTHING while the counter said 4. A shared
+                -- print budget is not a knob, it is a silent priority order.
+                if cls:find('NOT returned', 1, true) and bshown < 6 then
+                    bshown = bshown + 1
+                    print(('\n★ BODY-LOCAL BASE: %s  base=%s   %s / %s  (%s:%s)')
+                        :format(tostring(h.kind), tostring(bn), p.a.name, p.b.name,
+                            tostring(p.a.file), tostring(p.a.line)))
+                end
+            end
+        end
+    end
+
+    local srcmap = {}
+    local TA, TB = pair_terms(p, srcmap)
     if not TA then
         -- ⚠ I FIRST REPORTED THIS AS "an adapter gap, honest" AND IT IS NOT A GAP.
         -- Diagnosed on wow: all 57 such pairs have NO `sub` ops at all — their whole
@@ -640,55 +790,13 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
             -- tells them apart. It is also where the span comes from: a reified
             -- discriminant has no node of its own, which is the same fact our side
             -- records as `at_encloses`.
-            local LOCAL = '\1local'
-            local function classify_hole(v1, v2, pk, idx)
-                if v1 == nil or v2 == nil then return 'struct' end
-                if v1.k ~= v2.k then return 'struct' end
-                if v1.k == 'lit' then return 'literal' end
-                if v1.k == 'name' then
-                    if (v1.n == LOCAL) ~= (v2.n == LOCAL) then return 'struct' end
-                    -- ⚠⚠ THE DISCRIMINANT IS POSITIONAL, AND THE PARENT'S KIND ALONE
-                    -- CANNOT SEE IT. A `field` term is `field(name:sel, base)` -- TWO
-                    -- name-ish children, and only the FIRST is the selector. Keying on
-                    -- the parent kind called every field BASE a field hole: measured on
-                    -- `slice / slice`, `at.sl(a)` against `atr.sl(a)` came back as four
-                    -- `field` holes where our walker rightly reports a `name` one. Same
-                    -- trap for `bin`/`un`, whose operand 1 sits beside the reified op.
-                    if idx == 1 then
-                        if pk == 'bin' or pk == 'un' then return 'operator' end
-                        if pk == 'field' or pk == 'method' then return 'field' end
-                    end
-                    return 'name'
-                end
-                return 'struct'
-            end
-            -- every hole SITE in the body, with the enclosing kind and the span the
-            -- site occupies IN EACH INSTANCE.
-            --
-            -- ⚠⚠ SITES, NOT NAMES, AND THE SPAN COMES FROM THE INSTANCE, NOT FROM
-            -- THE VALUE MAP. The lgg is NON-LINEAR: one hole name stands at every
-            -- position whose value tuple is equal, so `g.values[1][h]` is ONE term
-            -- and reading its `at` gives every site of that hole THE SAME SPAN.
-            -- Measured: it reported `literal@139:34-139:44 x2` and
-            -- `field@2267:27-2267:29 x4` -- one span with a multiplicity, which is
-            -- an artifact of the key and not a disagreement between the walkers.
-            -- The template is ZIPPED against the instance instead, so each site
-            -- reads the span of the subterm actually standing there.
-            local function zip_sites(t, ia, ib, pk, idx, pat, out)
-                if type(t) ~= 'table' then return out end
-                if t.k == 'hole' then
-                    out[#out + 1] = { h = t.h, pk = pk, idx = idx, a = ia, b = ib,
-                        at = (type(ia) == 'table' and ia.at) or pat }
-                    return out
-                end
-                local ka = (type(ia) == 'table' and ia.kids) or {}
-                local kb = (type(ib) == 'table' and ib.kids) or {}
-                for i, c in ipairs(t.kids or {}) do
-                    zip_sites(c, ka[i], kb[i], t.k, i, t.at or pat, out)
-                end
-                return out
-            end
-            local sites = zip_sites(g.template.body, TA, TB, nil, nil, nil, {})
+            -- ★★ THE CLASSIFIER AND THE ZIP NOW LIVE IN THE ADAPTER
+            -- (`cartograph.algebra`, CART-0939). They were born here, and leaving a
+            -- copy behind after promoting them is precisely this file's own header
+            -- warning -- and THREE callers need them identically, because
+            -- `analyze_pair`, `element_template` and `clones.match` all call the
+            -- walker. `tools/elemdrive.lua` is the second consumer.
+            local sites = alg.hole_sites(g.template.body, TA, TB)
             -- ★★★ THE COMPARISON IS PER PARAMETER, NOT PER SITE, BECAUSE OURS IS TOO.
             -- `analyze_pair` returns `params`, not the raw hole list: value holes are
             -- grouped by (kind, a, b) -- Plotkin's rule -- with every occurrence kept
@@ -699,7 +807,11 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
             -- `literal@139:34-139:44 x2` against our x1, one hole seen twice.
             local seen, derived, refuse = {}, {}, false
             for _, st in ipairs(sites) do
-                local kd = classify_hole(st.a, st.b, st.pk, st.idx)
+                -- ⚠ A HEDGE HOLE IS OUR `struct why='arity'` -- `generalize` absorbs a
+                -- differing-arity child list into one repetition hole and cartograph
+                -- has none, so it maps back to the refusal `anti_unify` produces.
+                -- See tools/elemdrive.lua, where the class is measured.
+                local kd = (st.rep and 'struct') or alg.hole_kind(st.a, st.b, st.pk, st.idx)
                 if kd == 'struct' then refuse = true end
                 if not seen[st.h] then
                     seen[st.h] = true
@@ -726,6 +838,93 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                 bump(('  ↳ REFUSE DIFFERS, %s'):format(
                     (ours.insdel or 0) > 0 and 'insdel > 0 (outside the term)'
                         or '★ no insdel — a real walker divergence'))
+            end
+            -- ★★★ BLOCKER 1, MEASURED: DOES THE DERIVED STRUCT HOLE NAME THE SAME
+            -- EXPRESSION NODE? Every other arm here compares spans or kinds, which
+            -- are derived facts. This one compares IDENTITY -- the exact table the
+            -- walker handed `M.drift` against the one recovered through the term --
+            -- so it either matches or names the node, with nothing in between.
+            --
+            -- ⚠ OUR SIDE DOES NOT ALWAYS HAVE ONE. `anti_unify_row` emits a bare
+            -- `{ kind = 'struct' }` for a nil row or a differing lhs/rhs COUNT, with
+            -- no `xn`/`yn` at all -- so those are counted separately rather than
+            -- scored as a miss. A consumer reading `xn` on one of those already gets
+            -- nil today; the migration does not make that worse or better.
+            if ours.kind == 'structural' then
+                local mine_nodes, n_bare = {}, 0
+                for _, h in ipairs(ours.structs or {}) do
+                    if h.xn then mine_nodes[h.xn] = true else n_bare = n_bare + 1 end
+                end
+                -- ★★★ A MISS IS USUALLY A GRANULARITY DIFFERENCE, NOT AN ABSENCE, and
+                -- scoring it flat says the wrong thing. Our walker RECORDS THE
+                -- SHALLOWEST divergence and stops descending; the lgg keeps going and
+                -- names a leaf inside the same region. Both are correct and they are
+                -- not the same node -- so the three outcomes are counted apart:
+                --   hit        the same node
+                --   inside     a DESCENDANT of a node ours named (ours is the ancestor)
+                --   elsewhere  neither -- the only one that is a real gap
+                local expr_m = require 'cartograph.expr'
+                local function contains(root, needle)
+                    local found = false
+                    expr_m.walk(root, function (x) if x == needle then found = true end end)
+                    return found
+                end
+                local hit, inside, elsewhere, nosrc = 0, 0, 0, 0
+                for _, st in ipairs(sites) do
+                    local kd = (st.rep and 'struct') or alg.hole_kind(st.a, st.b, st.pk, st.idx)
+                    if kd == 'struct' and not st.rep then
+                        local e = srcmap[st.a]
+                        if not e then nosrc = nosrc + 1
+                        elseif mine_nodes[e] then hit = hit + 1
+                        else
+                            local within = false
+                            for xn in pairs(mine_nodes) do
+                                if contains(xn, e) then within = true; break end
+                            end
+                            if within then inside = inside + 1 else elsewhere = elsewhere + 1 end
+                        end
+                    end
+                end
+                local miss = elsewhere
+                if inside > 0 then bump(('  ↳ %d derived struct(s) sit INSIDE a region ours named'):format(inside)) end
+                if nosrc > 0 then bump(('  ↳ ★ %d derived struct(s) had NO source node at all'):format(nosrc)) end
+                if hit + miss > 0 then
+                    -- ⚠ NO `%d` IN A BRANCH THAT RECEIVES NO ARGUMENT. The first cut
+                    -- put one in the failure string and passed only the `%s`, so the
+                    -- count printed literally as `%d` -- a report that looks like a
+                    -- number and is a format string.
+                    -- ★★★ AND AN `elsewhere` IS ONLY A GAP IF OURS HAD A NODE TO MISS.
+                    -- `anti_unify_row` emits a BARE `{ kind = 'struct' }` -- no `xn`,
+                    -- no `yn` -- for a nil row or a differing lhs/rhs COUNT, so on
+                    -- those pairs `mine_nodes` is EMPTY and every derived struct
+                    -- scores as elsewhere by construction. That is the migration
+                    -- SUPPLYING a node where the walker supplies nil, which is the
+                    -- opposite of a gap, and reporting it as a miss would have made
+                    -- blocker 1 look unresolved.
+                    bump(miss == 0
+                        and 'STRUCT NODE IDENTITY: every derived struct names a node the walker named'
+                        or (n_bare > 0
+                            and ('STRUCT NODE IDENTITY: %d elsewhere, ALL under a BARE hole (ours had no node)'):format(miss)
+                            or ('STRUCT NODE IDENTITY: ★ %d of %d name a node the walker did not'):format(miss, hit + inside + miss)))
+                    if miss > 0 and shown < show then
+                        shown = shown + 1
+                        print(('\n★ STRUCT IDENTITY MISS: %s / %s'):format(p.a.name, p.b.name))
+                        for _, h in ipairs(ours.structs or {}) do
+                            print(('    ours  why=%-12s xn=%s'):format(tostring(h.why),
+                                h.xn and (h.xn.k .. ' @' .. tostring(h.xn.at and atm.sl(h.xn.at))) or 'nil'))
+                        end
+                        for _, st in ipairs(sites) do
+                            local k2 = (st.rep and 'struct') or alg.hole_kind(st.a, st.b, st.pk, st.idx)
+                            if k2 == 'struct' and not st.rep then
+                                local e = srcmap[st.a]
+                                print(('    lgg   %-17s src=%s  %s'):format(
+                                    'struct', e and (e.k .. ' @' .. tostring(e.at and atm.sl(e.at))) or 'NO SRC',
+                                    A.show(st.a)))
+                            end
+                        end
+                    end
+                end
+                if n_bare > 0 then bump(('  ↳ ours had %d bare struct hole(s) (no xn at all)'):format(n_bare)) end
             end
             -- ⚠ THE SET COMPARE RUNS ON VALUE PAIRS ONLY, AND THAT IS NOT A DODGE.
             -- Our struct holes from `arity` and `localglobal` carry NO span at all

@@ -58,6 +58,13 @@
 
 local M = {}
 
+-- ⚠ ONE NAME FOR THE COLLAPSED-LOCAL SENTINEL. `M.term` writes it and
+-- `M.hole_kind` reads it back to tell a `localglobal` refusal from a name hole;
+-- spelling it twice is the two-lists defect this file has been on the wrong end
+-- of three times (CART-0928, CART-0929, CART-0932). The `\1` prefix is chosen so
+-- no source identifier can collide with it.
+local LOCAL_SENTINEL = '\1local'
+
 --- ⚠ NO LONGER THE LOAD PATH. Since the vendoring (CART-0912) this answers
 --- "where did the copy COME FROM", and its only consumers are the drift fence
 --- and the absorption ledger, both of which read the donor AS TEXT and neither
@@ -197,7 +204,19 @@ local tunpack = table.unpack or unpack
 --- @param e table expr node
 --- @param locals table|nil set of local names
 --- @param unsupported table|nil optional counter for unmodelled leaf kinds
-function M.term(e, locals, unsupported)
+--- ★★★ `srcmap` IS A SIDE TABLE, NOT A FIELD ON THE TERM (CART-0939 blocker 1).
+--- The struct-hole consumers (`M.drift`, `dc_size`, `dc_kids`, `rcanon`,
+--- `local_deps`) each take an EXPR NODE, and a term has none -- so migrating
+--- `anti_unify` needs a way back. The obvious move is `t.src = e`, riding free the
+--- way `at` does because `rebuild` carries every non-child field and `eq` ignores
+--- it. ⚠ AND IT IS WRONG: `A.copy` is a DEEP copy over `pairs(t)` (core.lua:63,
+--- used by abstract, classify and composition), so it would recursively clone the
+--- whole expression subtree hanging off every term -- and the clone's `src` would
+--- no longer BE the node, which is the one property the consumers need.
+--- ⇒ A map keyed by the term's identity gives the same answer, costs the term
+---   nothing, and cannot be deep-copied by accident. It is opt-in for the same
+---   reason `unsupported` is: a caller that does not need it pays nothing.
+function M.term(e, locals, unsupported, srcmap)
     local A = M.load()
     if not A then return nil end
     if e == nil then return nil end
@@ -207,7 +226,7 @@ function M.term(e, locals, unsupported)
     if k == 'lit' then
         t = A.lit(tostring(e.ty) .. ':' .. tostring(e.v))
     elseif k == 'name' then
-        t = (locals and locals[e.n]) and A.name('\1local') or A.name(tostring(e.n))
+        t = (locals and locals[e.n]) and A.name(LOCAL_SENTINEL) or A.name(tostring(e.n))
     else
         -- ★ THE CHILD LIST COMES FROM `expr.children`, THE SOURCE `walk` ITSELF
         -- CONSUMES (CART-0882). Not a per-kind descent written here -- that
@@ -215,7 +234,7 @@ function M.term(e, locals, unsupported)
         -- kind silently.
         local kids = {}
         for _, c in ipairs(require('cartograph.expr').children(e)) do
-            local ct = M.term(c, locals, unsupported)
+            local ct = M.term(c, locals, unsupported, srcmap)
             if ct then kids[#kids + 1] = ct end
         end
         if unsupported and #kids == 0
@@ -237,27 +256,28 @@ function M.term(e, locals, unsupported)
     end
     -- the span, carried as a non-child field: rebuild keeps it, eq ignores it
     if e.at then t.at = e.at end
+    if srcmap then srcmap[t] = e end
     return t
 end
 
 --- a clone ROW ({lhs, rhs, cond}) as one term, so a pair of rows is a pair of
 --- instances the lgg can take. Shape mirrors `clones.anti_unify_row`.
-function M.row_term(r, locals, unsupported)
+function M.row_term(r, locals, unsupported, srcmap)
     local A = M.load()
     if not A then return nil end
     if type(r) ~= 'table' then return nil end
-    if r.k ~= nil then return M.term(r, locals, unsupported) end
+    if r.k ~= nil then return M.term(r, locals, unsupported, srcmap) end
     local kids = {}
     local function push(list, tag)
         local seq = {}
         for _, x in ipairs(list or {}) do
-            local t = M.term(x, locals, unsupported)
+            local t = M.term(x, locals, unsupported, srcmap)
             if t then seq[#seq + 1] = t end
         end
         kids[#kids + 1] = A.node(tag, tunpack(seq))
     end
     push(r.lhs, 'lhs'); push(r.rhs, 'rhs')
-    local c = r.cond and M.term(r.cond, locals, unsupported) or nil
+    local c = r.cond and M.term(r.cond, locals, unsupported, srcmap) or nil
     if c then kids[#kids + 1] = A.node('cond', c) end
     return A.node('row', tunpack(kids))
 end
@@ -421,6 +441,116 @@ function M.pair_family(a, b, opts)
             why = ('preserves %d, floor %d — the seq wrapper alone'):format(p, floor) }
     end
     return true, { template = body, preserved = p, values = T.values }
+end
+
+-- ── reading the lgg's holes back in cartograph's vocabulary ─────────────────
+--
+-- ★★★ THIS IS THE MIGRATION'S HALF OF THE SEAM (CART-0939). `A.generalize` gives
+-- UNIFORM holes: a name and a value per instance, with no notion of literal /
+-- name / field / operator / struct. Every consumer of `clones.anti_unify` reads
+-- exactly that vocabulary, so replacing the walker needs something that recovers
+-- it -- and that something must NOT be a second descent, or the walker has been
+-- rebuilt under a new name and the migration bought nothing (CART-0746).
+--
+-- It lives here rather than in a driver because THREE callers need it identically
+-- (`analyze_pair`, `element_template` and `clones.match` all call the walker), and
+-- a copy per driver is the defect this file exists to avoid.
+
+--- the cartograph hole KIND for a divergence, from the two values at one site.
+---
+--- ★★ A FLAT DISPATCH, DELIBERATELY. It reads the two values, the enclosing term's
+--- kind and the child INDEX -- nothing else, and it never recurses.
+---
+--- ⚠⚠ THE DISCRIMINANT IS POSITIONAL AND THE PARENT'S KIND ALONE CANNOT SEE IT.
+--- Since CART-0934 the operator and the field selector are reified as the FIRST
+--- KID, an ordinary `name` leaf -- so `+` vs `-`, `.foo` vs `.bar` and `x` vs `y`
+--- are THE SAME SHAPE in the term encoding. A `field` term is
+--- `field(name:selector, base)`: TWO name-ish children, only the first of which is
+--- the selector. MEASURED on `slice / slice` in our own tree: keying on the parent
+--- kind alone called `at.sl(a)` against `atr.sl(a)` four FIELD holes where the
+--- walker rightly reports one NAME hole.
+---
+--- ⚠ A LOCAL FACING A GLOBAL IS A REFUSAL, not a name hole. `M.term` collapses
+--- every local to one sentinel, so two locals are already equal and never reach
+--- here; one local against one global is the `localglobal` struct hole.
+--- @param v1 table|nil the value at this site in instance A (a TERM)
+--- @param v2 table|nil the value at this site in instance B
+--- @param pk string|nil the enclosing term's kind
+--- @param idx number|nil this site's index in the enclosing kid list
+--- @return string 'literal' | 'name' | 'field' | 'operator' | 'struct'
+function M.hole_kind(v1, v2, pk, idx)
+    if v1 == nil or v2 == nil then return 'struct' end
+    if type(v1) ~= 'table' or type(v2) ~= 'table' then return 'struct' end
+    if v1.k ~= v2.k then return 'struct' end
+    if v1.k == 'lit' then return 'literal' end
+    if v1.k == 'name' then
+        if (v1.n == LOCAL_SENTINEL) ~= (v2.n == LOCAL_SENTINEL) then return 'struct' end
+        if idx == 1 then
+            if pk == 'bin' or pk == 'un' then return 'operator' end
+            if pk == 'field' or pk == 'method' then return 'field' end
+        end
+        return 'name'
+    end
+    return 'struct'
+end
+
+--- every hole SITE in a template body, zipped against two instances.
+---
+--- ⚠⚠ SITES, NOT NAMES, AND THE SPAN COMES FROM THE INSTANCE. The lgg is
+--- NON-LINEAR by default: one hole name stands at every position whose value tuple
+--- is equal, so reading `values[1][h].at` gives every site of that hole THE SAME
+--- span. MEASURED: it reported `literal@139:34-139:44 x2` and
+--- `field@2267:27-2267:29 x4` -- one span with a multiplicity, an artifact of the
+--- key rather than a disagreement. Zipping the body against the instance gives
+--- each site the span of the subterm actually standing there.
+---
+--- ★ AND THE FALLBACK IS THE ENCLOSING TERM'S SPAN, which is the same rule our
+--- side records as `at_encloses`: a reified discriminant has no node of its own,
+--- so an operator or selector hole takes the span of the node that contains it.
+--- ⇒ IT ALSO RECOVERS A SPAN WHERE THE WALKER HAS NONE. A method-call `field` node
+--- is built without one (CART-0940), so `anti_unify` emits a field hole with
+--- `at_a = nil` while this returns the enclosing call's range.
+--- @param body table the template BODY (holes are `k == 'hole'`)
+--- @param ia table|nil instance A as a term
+--- @param ib table|nil instance B as a term
+--- @return table list of { h, pk, idx, a, b, at }, in pre-order
+function M.hole_sites(body, ia, ib)
+    local out = {}
+    local function walk(t, xa, xb, pk, idx, pat)
+        if type(t) ~= 'table' then return end
+        if t.k == 'hole' then
+            -- ★★★ `rep` IS REPORTED, NOT INTERPRETED. `A.generalize` places a HEDGE
+            -- hole -- a slice of a child list -- whenever the instances' arities
+            -- differ, unconditionally: there is no flag to turn it off (`align` is
+            -- `join`'s option, not this one). cartograph HAS NO HEDGE: `anti_unify`
+            -- emits `struct why='arity'` and refuses. So every consumer migrating off
+            -- the walker has to decide what a hedge means to it, and that decision is
+            -- NOT the same for all three -- `element_template` must refuse to keep
+            -- `M.match` discriminating, while a future consumer may want the
+            -- repetition claim. Reporting the fact and leaving the policy to the
+            -- caller is what keeps this from becoming a fourth place that decides.
+            out[#out + 1] = { h = t.h, pk = pk, idx = idx, a = xa, b = xb,
+                rep = t.rep or nil,
+                at = (type(xa) == 'table' and xa.at) or pat }
+            return
+        end
+        local ka = (type(xa) == 'table' and xa.kids) or {}
+        local kb = (type(xb) == 'table' and xb.kids) or {}
+        for i, c in ipairs(t.kids or {}) do
+            -- ⚠⚠ THE ENCLOSING SPAN COMES FROM THE INSTANCE, NOT FROM THE TEMPLATE.
+            -- It read `t.at or pat` and passed every real run, because a template
+            -- node the lgg REBUILDS from instance A inherits A's `at` (rebuild
+            -- carries every field that is not the child list). That is a guarantee
+            -- about SOMEONE ELSE'S SOURCE, and it is void the moment a template is
+            -- built any other way -- a hand-made body, or a node the lgg constructs
+            -- rather than rebuilds. Reading the instance makes it hold by
+            -- construction; the template is kept only as a second fallback.
+            local pa = (type(xa) == 'table' and xa.at) or t.at or pat
+            walk(c, ka[i], kb[i], t.k, i, pa)
+        end
+    end
+    walk(body, ia, ib, nil, nil, nil)
+    return out
 end
 
 return M

@@ -360,3 +360,87 @@ test('algebra seam: pair_family handles REAL-SIZED terms, which the default cann
         ok(info.preserved >= 40,
             'and preserves most of it (measured 55 of 57): ' .. tostring(info.preserved))
     end)
+
+--- ── the classifier that reads the lgg's holes back (CART-0939) ──────────────
+---
+--- ★★★ THESE GUARD A MIGRATION, NOT A FEATURE. `M.hole_kind` and `M.hole_sites`
+--- exist so `clones.anti_unify` can be replaced by `A.generalize` without its three
+--- callers noticing; they are the half that turns uniform holes back into
+--- cartograph's vocabulary. Each test below is a case the first cut got WRONG on
+--- real code, so none of them is a restatement of the implementation.
+
+test('algebra seam: a discriminant hole is told from an ordinary child BY POSITION',
+    function ()
+        local A = need()
+        -- ⚠ THE CASE THAT BROKE THE FIRST CUT, from `slice / slice` in our own tree:
+        -- `at.sl(a)` against `atr.sl(a)`. A field term is `field(name:selector, base)`
+        -- and BOTH children are names, so keying on the parent kind alone called the
+        -- differing BASE a `field` hole. It is a `name` hole; only kid 1 is the
+        -- selector.
+        eq('field', alg.hole_kind(A.name 'sl', A.name 'sc', 'field', 1),
+            'kid 1 under a field IS the selector')
+        eq('name', alg.hole_kind(A.name 'at', A.name 'atr', 'field', 2),
+            'kid 2 under a field is the BASE, an ordinary name')
+        eq('operator', alg.hole_kind(A.name '+', A.name '-', 'bin', 1),
+            'kid 1 under a bin is the reified operator')
+        eq('name', alg.hole_kind(A.name 'x', A.name 'y', 'bin', 2),
+            'kid 2 under a bin is an operand')
+    end)
+
+test('algebra seam: a local facing a global is a REFUSAL, not a name hole', function ()
+    local A = need()
+    -- `M.term` collapses every local to one sentinel, so two locals are equal and
+    -- never reach the classifier at all; one local against one global is the
+    -- `localglobal` struct hole that makes `anti_unify` return false.
+    eq('struct', alg.hole_kind(A.name '\1local', A.name 'GLOBAL', nil, 2))
+    eq('struct', alg.hole_kind(A.name 'GLOBAL', A.name '\1local', nil, 2))
+    eq('name', alg.hole_kind(A.name 'A', A.name 'B', nil, 2),
+        'two globals are a plain name hole')
+    eq('literal', alg.hole_kind(A.lit 'str:a', A.lit 'str:b', nil, 2))
+    eq('struct', alg.hole_kind(A.lit 'str:a', A.name 'b', nil, 2),
+        'differing kinds are structural')
+    eq('struct', alg.hole_kind(A.node('call', A.name 'f'), A.node('call', A.name 'g'), nil, 2),
+        'two differing subtrees are structural, not a value')
+end)
+
+test('algebra seam: a hole SITE takes its span from the instance, not the value map',
+    function ()
+        local A = need()
+        -- ⚠ THE LGG IS NON-LINEAR: one hole name stands at every position whose value
+        -- tuple is equal. Reading `values[1][h].at` therefore gives every site of
+        -- that hole THE SAME span -- measured as `field@2267:27-2267:29 x4`, one span
+        -- with a multiplicity. Zipping against the instance gives each site the span
+        -- of the subterm actually standing there.
+        local function at(l) return { start = { line = l, char = 0 },
+            ['end'] = { line = l, char = 3 } } end
+        local a1, a2 = A.name 'x', A.name 'y'
+        a1.at, a2.at = at(1), at(2)
+        local b1, b2 = A.name 'p', A.name 'q'
+        b1.at, b2.at = at(11), at(12)
+        local body = A.node('seq', A.hole 'h1', A.hole 'h1')
+        local sites = alg.hole_sites(body, A.node('seq', a1, a2), A.node('seq', b1, b2))
+        eq(2, #sites, 'ONE hole name, TWO sites')
+        eq('h1', sites[1].h); eq('h1', sites[2].h)
+        eq(1, sites[1].at.start.line, 'site 1 takes instance A position 1')
+        eq(2, sites[2].at.start.line, 'site 2 takes instance A position 2 — NOT the same span')
+    end)
+
+test('algebra seam: a site with no value of its own falls back to the enclosing span',
+    function ()
+        local A = need()
+        -- ★ A REIFIED DISCRIMINANT HAS NO NODE, so it has no span -- which is the same
+        -- fact our side records as `at_encloses`. It must not come back nil, or an
+        -- operator hole would be unkeyable.
+        -- ⇒ AND THIS IS WHY THE MIGRATION RECOVERS A SPAN THE WALKER LOSES: a
+        -- method-call `field` node is built without one (CART-0940), so `anti_unify`
+        -- emits `at_a = nil` where this returns the enclosing call's range.
+        local sel = A.name 'foo'                     -- no `.at`, like `M.term` builds
+        local outer = A.node('field', sel, A.name 'base')
+        outer.at = { start = { line = 7, char = 0 }, ['end'] = { line = 7, char = 9 } }
+        local body = A.node('field', A.hole 'h1', A.name 'base')
+        local sites = alg.hole_sites(body, outer, outer)
+        eq(1, #sites)
+        ok(sites[1].at ~= nil, 'the site is keyable')
+        eq(7, sites[1].at.start.line, 'and it takes the ENCLOSING field span')
+        eq('field', sites[1].pk); eq(1, sites[1].idx)
+    end)
