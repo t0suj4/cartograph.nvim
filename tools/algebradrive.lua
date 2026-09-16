@@ -71,6 +71,7 @@ end
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local clones = require 'cartograph.clones'
+local atm = require 'cartograph.at'
 
 local target, want_pairs, show, dist, rigid, sizes, maxsize, stride, timing =
     arg[1], 60, 3, nil, false, false, nil, 1, false
@@ -117,12 +118,18 @@ end
 
 -- ── the adapter: cartograph expr IR → prototype term ────────────────────────
 --
--- ⚠ DISCRIMINANTS GO IN THE KIND, NOT IN A FIELD. `A.eq` compares `k`, `v`, `n`
--- and the kid list ONLY, so a `bin` carrying `op = '+'` and one carrying
--- `op = '-'` would compare EQUAL if the operator lived in a field -- and would
--- then anti-unify to nothing instead of to a hole. Encoding it as `bin:+`
--- mirrors `expr.key`'s own discriminants, and the prototype expects exactly
--- this shape (EAU.md: "operator theories would be a profile table over `bin:*`").
+-- ⚠ A DISCRIMINANT MUST NOT BE A FIELD -- `A.eq` compares `k`, `v`, `n` and the
+-- kid list ONLY, so a `bin` carrying `op = '+'` and one carrying `op = '-'` would
+-- compare EQUAL if the operator lived in a field, and would then anti-unify to
+-- nothing instead of to a hole.
+--
+-- ★★★ AND IT IS A KID, NOT PART OF THE KIND (CART-0934). This paragraph read
+-- "discriminants go IN THE KIND" and prescribed `bin:+`, which fixed `eq` and broke
+-- the lgg: A KIND CAN NEVER BE A HOLE, so two terms differing only in an operator
+-- or a selector had DIFFERENT KINDS there and the whole subterm collapsed to a bare
+-- hole. The adapter is `cartograph.algebra` now and owns the encoding; this file
+-- only consumes it. EAU.md's "a profile table over `bin:*`" still names the same
+-- operator theory -- the theory keys on the operator, not on where it is stored.
 --
 -- ⚠ A LITERAL CARRIES ITS TYPE for the same reason: `expr.key` writes
 -- `L<ty>:<v>`, so number 1 and string "1" are distinct there. Dropping the type
@@ -252,7 +259,12 @@ local function pair_terms(p)
     return A.seq(as), A.seq(bs)
 end
 
-local shown, examined = 0, 0
+-- ⚠ THE HOLE-SET DUMP GETS A BUDGET OF ITS OWN. It shared `shown` with the
+-- retraction and arity dumps, which fire earlier in the pair loop -- so on wow those
+-- spent the whole `--show` allowance first and the run came back reporting
+-- `★ differs 2` with nothing printed to look at. A shared budget silently starves
+-- whichever consumer is last, and the starved one is invisible.
+local shown, hshown, examined = 0, 0, 0
 for pi = 1, math.min(#pairs_, want_pairs), stride do
     local p = pairs_[pi]
     local ours = clones.analyze_pair(p)
@@ -538,7 +550,14 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
         else
             local lgg = 0
             for _ in pairs(g.template.holes or {}) do lgg = lgg + 1 end
-            local mine = #(ours.holes or {})
+            -- ⚠⚠ `ours.holes` IS NOT OUR HOLE LIST. `analyze_pair` returns `params`
+            -- under that name -- the VALUE holes, grouped by (kind, a, b), with the
+            -- struct ones dropped into a separate `structs` field. Comparing it
+            -- against the lgg's total counted two different populations and produced
+            -- a standing "ours FEWER holes than the lgg" on exactly the 9 structural
+            -- pairs that HAVE struct holes (the other 7 are structural through
+            -- `insdel` and have none, and they read AGREE). A denominator, again.
+            local mine = #(ours.holes or {}) + #(ours.structs or {})
             -- ★★★ "THE LGG FOUND HOLES" IS NOT "THE LGG FOUND A VALID TEMPLATE".
             -- The differential counts holes; it never asked whether the template
             -- REPRODUCES the two bodies it was derived from. For the 214 pairs we
@@ -590,10 +609,183 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                 bump(valid and '   ↳ value pair: lgg template valid'
                     or '   ↳ ⚠ value pair: lgg template INVALID')
             end
-            if false then
-            elseif mine == lgg then bump('DIFF: AGREE on hole count')
-            elseif mine < lgg then bump('DIFF: ours FEWER holes than the lgg')
-            else bump('DIFF: ours MORE holes than the lgg') end
+            -- ── THE MIGRATION ORACLE: does the lgg REPRODUCE anti_unify's holes? ──
+            -- ★★★ A HOLE COUNT IS NOT A HOLE SET. Two walkers agree on "two holes"
+            -- and still put them in different places, or in the same places with
+            -- different KINDS -- and the kind is what a caller reads (a `field` hole
+            -- lifts the whole access; an `operator` hole has no substitution site at
+            -- all). So the count comparison below licenses nothing by itself, and
+            -- the count was the only thing this differential ever checked.
+            --
+            -- ★★ `classify_hole` IS THE MIGRATION'S OWN CODE, WRITTEN HERE FIRST.
+            -- Replacing `anti_unify` with `A.generalize` needs something that turns
+            -- the lgg's uniform holes back into cartograph's hole vocabulary; this
+            -- is it. It is a FLAT DISPATCH on the two values plus the enclosing
+            -- kind AND KID INDEX -- if it ever recurses, the walker has been rebuilt
+            -- under a new name and the migration bought nothing (CART-0746).
+            --
+            -- ★★★ WHAT IT MEASURED, THREE CORPORA (CART-0939). Not one case where
+            -- the lgg misses a divergence ours finds or finds one ours misses; every
+            -- difference is OURS LOSING INFORMATION:
+            --     lua/   32/32  hole sets identical
+            --     rails   3/3   identical values, ours carries NO SPAN (CART-0940)
+            --     wow     2/2   identical values, ours SPLITS ONE PARAMETER IN TWO
+            --                   (its grouping key includes the hole KIND, so the same
+            --                   token used as a selector and as a read buckets twice)
+            --
+            -- ⚠ THE PARENT IS REQUIRED, NOT A CONVENIENCE. Since CART-0934 the
+            -- operator and the field selector are reified as the FIRST KID, an
+            -- ordinary `name` leaf -- so `+` vs `-`, `.foo` vs `.bar` and `x` vs `y`
+            -- are THE SAME SHAPE in the term encoding, and only the enclosing node
+            -- tells them apart. It is also where the span comes from: a reified
+            -- discriminant has no node of its own, which is the same fact our side
+            -- records as `at_encloses`.
+            local LOCAL = '\1local'
+            local function classify_hole(v1, v2, pk, idx)
+                if v1 == nil or v2 == nil then return 'struct' end
+                if v1.k ~= v2.k then return 'struct' end
+                if v1.k == 'lit' then return 'literal' end
+                if v1.k == 'name' then
+                    if (v1.n == LOCAL) ~= (v2.n == LOCAL) then return 'struct' end
+                    -- ⚠⚠ THE DISCRIMINANT IS POSITIONAL, AND THE PARENT'S KIND ALONE
+                    -- CANNOT SEE IT. A `field` term is `field(name:sel, base)` -- TWO
+                    -- name-ish children, and only the FIRST is the selector. Keying on
+                    -- the parent kind called every field BASE a field hole: measured on
+                    -- `slice / slice`, `at.sl(a)` against `atr.sl(a)` came back as four
+                    -- `field` holes where our walker rightly reports a `name` one. Same
+                    -- trap for `bin`/`un`, whose operand 1 sits beside the reified op.
+                    if idx == 1 then
+                        if pk == 'bin' or pk == 'un' then return 'operator' end
+                        if pk == 'field' or pk == 'method' then return 'field' end
+                    end
+                    return 'name'
+                end
+                return 'struct'
+            end
+            -- every hole SITE in the body, with the enclosing kind and the span the
+            -- site occupies IN EACH INSTANCE.
+            --
+            -- ⚠⚠ SITES, NOT NAMES, AND THE SPAN COMES FROM THE INSTANCE, NOT FROM
+            -- THE VALUE MAP. The lgg is NON-LINEAR: one hole name stands at every
+            -- position whose value tuple is equal, so `g.values[1][h]` is ONE term
+            -- and reading its `at` gives every site of that hole THE SAME SPAN.
+            -- Measured: it reported `literal@139:34-139:44 x2` and
+            -- `field@2267:27-2267:29 x4` -- one span with a multiplicity, which is
+            -- an artifact of the key and not a disagreement between the walkers.
+            -- The template is ZIPPED against the instance instead, so each site
+            -- reads the span of the subterm actually standing there.
+            local function zip_sites(t, ia, ib, pk, idx, pat, out)
+                if type(t) ~= 'table' then return out end
+                if t.k == 'hole' then
+                    out[#out + 1] = { h = t.h, pk = pk, idx = idx, a = ia, b = ib,
+                        at = (type(ia) == 'table' and ia.at) or pat }
+                    return out
+                end
+                local ka = (type(ia) == 'table' and ia.kids) or {}
+                local kb = (type(ib) == 'table' and ib.kids) or {}
+                for i, c in ipairs(t.kids or {}) do
+                    zip_sites(c, ka[i], kb[i], t.k, i, t.at or pat, out)
+                end
+                return out
+            end
+            local sites = zip_sites(g.template.body, TA, TB, nil, nil, nil, {})
+            -- ★★★ THE COMPARISON IS PER PARAMETER, NOT PER SITE, BECAUSE OURS IS TOO.
+            -- `analyze_pair` returns `params`, not the raw hole list: value holes are
+            -- grouped by (kind, a, b) -- Plotkin's rule -- with every occurrence kept
+            -- in `sites_a`/`sites_b` and `at_a` left as the FIRST site. That is the
+            -- SAME non-linearity as the lgg's value-tuple memo, which `summaries.lua`
+            -- says in as many words. Comparing our params against the lgg's SITES
+            -- therefore measures the grouping, not the walkers -- it reported
+            -- `literal@139:34-139:44 x2` against our x1, one hole seen twice.
+            local seen, derived, refuse = {}, {}, false
+            for _, st in ipairs(sites) do
+                local kd = classify_hole(st.a, st.b, st.pk, st.idx)
+                if kd == 'struct' then refuse = true end
+                if not seen[st.h] then
+                    seen[st.h] = true
+                    derived[#derived + 1] = { kind = kd, at = st.at,
+                        sa = type(st.a) == 'table' and A.show(st.a) or nil,
+                        sb = type(st.b) == 'table' and A.show(st.b) or nil }
+                end
+            end
+            -- ★★★ THE ONE THAT DECIDES THE SWAP. `ours.kind` is the verdict callers
+            -- act on; every other number here is detail. If the derived
+            -- classification refuses exactly where we refuse, a swap changes no
+            -- consumer's answer -- and holes are ephemeral (clones.lua:945), so
+            -- there is no cached artifact to version either.
+            local agree = (refuse == (ours.kind == 'structural'))
+            bump(('REFUSE PARITY: %s'):format(agree and 'agrees' or '★ DIFFERS'))
+            -- ⚠ A DISAGREEMENT HERE IS NOT AUTOMATICALLY A WALKER DISAGREEMENT, and
+            -- reporting it flat would say it was. `ours.kind` is structural when
+            -- `insdel > 0` -- a whole ROW present on one side only -- and the term
+            -- this differential builds contains the SUBSTITUTED rows and nothing
+            -- else, so the lgg is never shown the insertion it is being blamed for
+            -- missing. Split the two before reading anything into the number: only
+            -- the `no insdel` arm is about the walkers.
+            if not agree then
+                bump(('  ↳ REFUSE DIFFERS, %s'):format(
+                    (ours.insdel or 0) > 0 and 'insdel > 0 (outside the term)'
+                        or '★ no insdel — a real walker divergence'))
+            end
+            -- ⚠ THE SET COMPARE RUNS ON VALUE PAIRS ONLY, AND THAT IS NOT A DODGE.
+            -- Our struct holes from `arity` and `localglobal` carry NO span at all
+            -- (they were never substitution sites), so on a refused pair the two
+            -- sides cannot be keyed alike and a mismatch would measure the KEY, not
+            -- the walkers. On a value pair every hole carries `at_a`.
+            if ours.kind == 'value' then
+                local function tally(list, kf, af)
+                    local m = {}
+                    for _, h in ipairs(list) do
+                        local a = af(h)
+                        local key = kf(h) .. '@' .. (a and
+                            ('%d:%d-%d:%d'):format(atm.sl(a), atm.sc(a), atm.el(a), atm.ec(a))
+                            or '?')
+                        m[key] = (m[key] or 0) + 1
+                    end
+                    return m
+                end
+                local mineset = tally(ours.holes, function (h) return h.kind end,
+                    function (h) return h.at_a end)
+                local lggset = tally(derived, function (h) return h.kind end,
+                    function (h) return h.at end)
+                local same = true
+                for k, n in pairs(mineset) do if lggset[k] ~= n then same = false end end
+                for k, n in pairs(lggset) do if mineset[k] ~= n then same = false end end
+                bump('HOLE SET (value pairs): ' .. (same and 'identical' or '★ differs'))
+                if not same and hshown < 6 then
+                    hshown = hshown + 1
+                    local function dump(m, label)
+                        local ks = {}
+                        for k in pairs(m) do ks[#ks + 1] = k end
+                        table.sort(ks)
+                        for _, k in ipairs(ks) do
+                            print(('    %s %s x%d'):format(label, k, m[k]))
+                        end
+                    end
+                    print(('\n★ HOLE SET DIFFERS: %s / %s'):format(p.a.name, p.b.name))
+                    dump(mineset, 'ours')
+                    dump(lggset, 'lgg ')
+                    for _, h in ipairs(ours.holes) do
+                        print(('      ours %-9s a=%s  b=%s'):format(
+                            h.kind, tostring(h.a), tostring(h.b)))
+                    end
+                    for _, h in ipairs(derived) do
+                        print(('      lgg  %-9s a=%s  b=%s'):format(
+                            h.kind, tostring(h.sa), tostring(h.sb)))
+                    end
+                end
+            end
+            -- ★★★ A HOLE-COUNT DIFFERENCE ONLY MATTERS WHERE WE CLAIM A CLEAN PAIR.
+            -- On a pair we already REFUSED (kind='structural') the lgg finding more
+            -- is expected and harmless -- nothing downstream acts on it. On a pair we
+            -- call `value` -- clean, extractable, the helper's parameter list comes
+            -- straight off these holes -- the lgg finding MORE holes means a real
+            -- divergence we did not parameterize, and the extract verb would weld it
+            -- shut. Same number, opposite consequence, so it is crossed with the kind
+            -- rather than reported flat.
+            local dir = (mine == lgg) and 'AGREE' or (mine < lgg) and 'ours FEWER' or 'ours MORE'
+            bump('DIFF: ' .. dir .. ' on hole count')
+            bump(('DIFF x KIND: %-10s %s'):format(tostring(ours.kind), dir))
         end
     end
     bump('cartograph kind: ' .. tostring(ours.kind))

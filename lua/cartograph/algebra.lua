@@ -131,11 +131,18 @@ end
 
 -- ── the adapter: cartograph expr IR → prototype term ────────────────────────
 --
--- ⚠ DISCRIMINANTS GO IN THE KIND, NOT IN A FIELD. `A.eq` compares `k`, `v`, `n`
--- and the kid list ONLY, so a `bin` carrying `op = '+'` and one carrying
--- `op = '-'` would compare EQUAL if the operator lived in a field -- and would
--- anti-unify to nothing instead of to a hole. `bin:+` mirrors `expr.key`'s own
--- discriminants, and the prototype expects exactly this shape.
+-- ⚠ A DISCRIMINANT MUST NOT BE A FIELD -- `A.eq` compares `k`, `v`, `n` and the
+-- kid list ONLY, so a `bin` carrying `op = '+'` and one carrying `op = '-'` would
+-- compare EQUAL if the operator lived in a field, and would anti-unify to nothing
+-- instead of to a hole.
+--
+-- ★★★ AND IT IS A KID, NOT PART OF THE KIND (CART-0934). This paragraph read
+-- "discriminants go IN THE KIND" and prescribed `bin:+`, which fixed `eq` and broke
+-- the lgg: A KIND CAN NEVER BE A HOLE, so two terms differing only in an operator
+-- or a selector had DIFFERENT KINDS at that node and the whole subterm collapsed to
+-- a bare hole. The kid list is the one place that is both compared by `eq` and
+-- open to a hole. `kind_of` returns the pair and `M.term` leads the kid list with
+-- it; see its doc comment below for the measurement.
 --
 -- ⚠ A LITERAL CARRIES ITS TYPE for the same reason: `expr.key` writes
 -- `L<ty>:<v>`, so number 1 and string "1" are distinct there. Dropping the type
