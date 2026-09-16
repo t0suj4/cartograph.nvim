@@ -459,6 +459,41 @@ local CALL = { function_call = true, call_expression = true, call = true,
     method_invocation = true,        -- java  o.g(1) / g(1) / super.g(1)
     member_call_expression = true,   -- php   $o->m(2)
     scoped_call_expression = true }  -- php   C::s(3)
+-- FILE INCLUSION SPELLED AS A KEYWORD, NOT A CALL (CART-0947). php's four
+-- inclusion forms are dedicated grammar nodes, so they matched nothing above and
+-- harvested as the opaque `k = '?'` -- no IR analysis could see a php file
+-- inclusion at all, and a wrapper search over the IR found 0 wrappers in the
+-- corpus that has two (core.php:278, plugin_api.php:989).
+--
+-- ★★★ THE DISCRIMINATOR IS THE ARGUMENT, NOT THE SPELLING, and it is why this
+-- table is php-only rather than a general "inclusion" arm. Measured across
+-- corpora (probe, both populations), inclusion is opaque in EVERY keyword-form
+-- language, and by a much larger margin than php:
+--     go    import_spec 5703 · import_declaration 829 · import_spec_list 795
+--     cpp   preproc_include 3464
+--     py    import_from_statement 1417 · import_statement 161 · aliased_import 158
+--     rust  use_declaration 298 · use_list 297 · use_wildcard 26
+--     php   require_once_expression 35 · include_once_expression 1
+--     ruby  NONE -- `require 'x'` is a method call and was always modelled
+-- ⚠ AND THEY SHOULD STAY OPAQUE. go's `import_spec`, cpp's `#include`, python's
+-- `import a.b` and rust's `use` take a STATIC PATH by grammar: there is no
+-- expression to model, the import_query already captures them as import EDGES,
+-- and minting IR nodes for them would add structure carrying no information.
+-- php's `require_once( $dir . $f )` takes an ARBITRARY EXPRESSION -- that is the
+-- whole difference, and it is the only keyword-form inclusion measured that has
+-- one. A language that grows a dynamic-import EXPRESSION belongs here; one whose
+-- inclusion names a literal path does not. (Dynamic forms that are already CALLS
+-- -- js `import()`, python `__import__`/`importlib.import_module` -- need no
+-- entry: they were modelled the day CALL was.)
+--
+-- ⚠⚠ THE CALLEE IS SYNTHETIC AND ITS SPAN IS THE KEYWORD'S, NOT THE NODE'S. A
+-- span is a SUBSTITUTION SITE (CART-0940): clones.render and cloneextract
+-- rewrite the range a hole reports, so giving the synthetic callee the whole
+-- statement's range would let a rewrite replace the statement. The keyword is an
+-- anonymous child whose own `:type()` IS its text, so it supplies both.
+local INCLUDE = { require_expression = true, require_once_expression = true,
+    include_expression = true, include_once_expression = true }
+
 -- BINARY operator nodes. `comparison_operator`/`boolean_operator` are PYTHON's
 -- spellings, and their absence is why every purity-gated analyzer was dead there:
 -- `x > 1` fell to the honest-unknown `?` path, and `is_pure` correctly refuses an
@@ -978,6 +1013,24 @@ function build_core(node, src, lang)
         if o[1] and o[2] then
             return { k = 'index', b = build(o[1], src, lang), i = build(o[2], src, lang) }
         end
+    end
+    if INCLUDE[t] then
+        -- one anonymous keyword token + exactly one named child (the path
+        -- expression, which PAREN unwraps transparently on the way down)
+        local kwn, argn
+        for c in node:iter_children() do
+            if not c:named() then
+                if not kwn then kwn = c end
+            elseif not tsutil.is_comment(c) and not argn then
+                argn = c
+            end
+        end
+        local f = { k = 'name', n = kwn and kwn:type() or t }
+        if kwn then
+            local sr, sc, er, ec = kwn:range()
+            f.at = { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } }
+        end
+        return { k = 'call', f = f, a = { build(argn, src, lang) }, method = false }
     end
     if CALL[t] then
         -- ★ THE CALLEE IS SPEC-DECLARED WHERE THE SPEC DECLARES IT (CART-0224

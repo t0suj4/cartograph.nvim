@@ -1812,3 +1812,73 @@ for _, L in ipairs({
             eq(kb, kp, 'brackets do not change the expression')
         end)
 end
+
+-- ── php's inclusion keywords are calls in the IR (CART-0947) ────────────────
+--
+-- php spells file inclusion with four dedicated grammar nodes rather than a
+-- call, so they matched nothing in the harvest and became the opaque `k = '?'`:
+-- NO IR ANALYSIS COULD SEE A PHP FILE INCLUSION AT ALL. A wrapper search over
+-- the IR (a function one of whose PARAMETERS reaches an inclusion) found 0 in
+-- mantisbt, which has four — `require_api`, the verb behind 2823 call sites,
+-- among them. With the arm it finds all four.
+--
+-- ⚠ THE DISCRIMINATOR IS THE ARGUMENT. Inclusion is opaque in every keyword-form
+-- language (go 7300+ nodes, cpp 3464, python 1800+, rust 640) and SHOULD STAY
+-- so: those forms take a static path by grammar, the import_query already
+-- captures them as edges, and IR nodes for them would carry no expression.
+-- php's `require_once( $dir . $f )` takes an arbitrary one. That is the whole
+-- difference, and the negative test below pins it.
+
+test('expr: php inclusion is a call whose argument is the path EXPRESSION', function ()
+    if not ready('php') then skip 'no php parser' end
+    local eo = expr.of_text(
+        '<?php function w($p) { require_once( $dir . $p ); }', 'php')
+    ok(eo ~= nil, 'the text parses')
+    local call
+    for _, r in ipairs((eo and eo.fl.stmts) or {}) do
+        if r.expr then
+            for _, side in ipairs({ 'lhs', 'rhs' }) do
+                for _, e in ipairs(r.expr[side] or {}) do
+                    expr.walk(e, function (x)
+                        if not call and x.k == 'call' then call = x end
+                    end)
+                end
+            end
+        end
+    end
+    ok(call ~= nil, 'the inclusion is a call, not an opaque `?`')
+    eq('require_once', call and call.f and call.f.n, 'the keyword is the callee')
+    -- the point of the whole arm: the ARGUMENT is reachable as structure, which
+    -- is what a param-reaches-the-include search needs
+    eq(1, call and #(call.a or {}), 'exactly one argument')
+    eq('bin', call and call.a[1] and call.a[1].k,
+        'and it is the concat EXPRESSION, parentheses unwrapped')
+    -- ⚠ THE SPAN IS THE KEYWORD'S, NOT THE STATEMENT'S. A span is a substitution
+    -- site; a synthetic callee spanning the whole statement would let a rewrite
+    -- replace the statement.
+    local at = call and call.f and call.f.at
+    ok(at ~= nil, 'the synthetic callee carries a span')
+    ok(at and at.start.char == 23 and at['end'].char == 35,
+        'and it covers exactly `require_once`: ' .. vim.inspect(at))
+end)
+
+test('expr: a STATIC-path inclusion keyword stays opaque', function ()
+    if not ready('python') then skip 'no python parser' end
+    -- python's `import a.b` names a literal path: there is nothing to model, the
+    -- import_query already draws the edge, and minting a call here would assert
+    -- structure carrying no information. Pinning the NEGATIVE is what stops the
+    -- php arm from being quietly generalised to every inclusion spelling.
+    local eo = expr.of_text('def w():\n    import a.b\n', 'python')
+    ok(eo ~= nil, 'the text parses')
+    local calls = 0
+    for _, r in ipairs((eo and eo.fl.stmts) or {}) do
+        if r.expr then
+            for _, side in ipairs({ 'lhs', 'rhs' }) do
+                for _, e in ipairs(r.expr[side] or {}) do
+                    expr.walk(e, function (x) if x.k == 'call' then calls = calls + 1 end end)
+                end
+            end
+        end
+    end
+    eq(0, calls, 'python `import a.b` is not modelled as a call')
+end)
