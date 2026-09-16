@@ -1682,3 +1682,70 @@ test('rust: a bare 0755 is DECIMAL, and a type suffix never eats a hex digit', f
     ok(vals['true'], 'rust spells its booleans `boolean_literal`')
     ok(vals['"hi"'] and vals['r"raw"'], 'both string forms are literals')
 end)
+
+-- ── a method-call field node carries its span (CART-0940) ───────────────────
+--
+-- ★★★ THE ONE FIELD CONSTRUCTOR THAT DOES NOT RETURN THROUGH `build`, so it
+-- never got the range `build` stamps on everything else. MEASURED before the
+-- fix: 0 of 16694 ruby field nodes had an `at`, and php lost exactly its method
+-- calls (2064 spanned property accesses, 631 spanless method ones) while lua,
+-- go, rust, python and javascript were clean — they hand `declared_call_parts`
+-- a callee node that already spans `o.m`, so `objn` stays nil.
+--
+-- ⚠ NON-NIL IS THE WEAK HALF OF THE CLAIM. The span is a SUBSTITUTION SITE:
+-- `anti_unify` records it as a field hole's `at_a` and the extract/render verbs
+-- rewrite THAT RANGE. A wrong extent passes "has a span" and silently rewrites
+-- the wrong text, so the extent is asserted against the source characters.
+
+local function span_text(lines, a)
+    if not a then return nil end
+    local sl, sc = a.start.line, a.start.char
+    local el, ec = a['end'].line, a['end'].char
+    if sl ~= el then return '<multiline>' end
+    return (lines[sl + 1] or ''):sub(sc + 1, ec)
+end
+
+for _, L in ipairs({
+    { lang = 'ruby', ext = 'rb',
+      src = { 'def wrap(o)', '  o.foo(1)', 'end' }, want = 'o.foo' },
+    { lang = 'php', ext = 'php',
+      src = { '<?php', 'function wrap($o) {', '  $o->foo(1);', '}' }, want = '$o->foo' },
+}) do
+    test(('expr: a %s method-call field node spans exactly the access'):format(L.lang),
+        function ()
+            if not ready(L.lang) then skip('no ' .. L.lang .. ' parser') end
+            local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+            local fd = assert(io.open(root .. '/t.' .. L.ext, 'w'))
+            fd:write(table.concat(L.src, '\n') .. '\n'); fd:close()
+            store.ingest(ts.extract(root))
+            local id
+            for _, n in ipairs(store.data.nodes) do
+                if (n.name or ''):find('wrap') and (n.kind == 'function' or n.kind == 'method') then
+                    id = n.id
+                end
+            end
+            ok(id ~= nil, 'the function was extracted')
+            local eo = id and expr.of(store, id)
+            ok(eo ~= nil, 'and has an analyzable body')
+            local found
+            for _, s in ipairs((eo and eo.fl.stmts) or {}) do
+                if s.expr then
+                    for _, side in ipairs({ 'lhs', 'rhs' }) do
+                        for _, e in ipairs(s.expr[side] or {}) do
+                            expr.walk(e, function (x)
+                                if x.k == 'field' and x.method then found = found or x end
+                            end)
+                        end
+                    end
+                end
+            end
+            ok(found ~= nil, 'the receiver-qualified call built a method field node')
+            if found then
+                -- the predicate the census checks, stated as a law
+                ok(found.at ~= nil, 'which CARRIES A SPAN (was nil for every one)')
+                eq(L.want, span_text(L.src, found.at),
+                    'and the span covers exactly the access, not the whole call')
+            end
+            vim.fn.delete(root, 'rf')
+        end)
+end

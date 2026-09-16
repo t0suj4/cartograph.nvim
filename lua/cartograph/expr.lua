@@ -971,10 +971,41 @@ function build_core(node, src, lang)
             -- a RECEIVER-QUALIFIED call reads as a call THROUGH A FIELD, which
             -- is exactly lua's `o:m()`, so every downstream predicate composes
             -- without a per-language branch
-            local f = objn
-                and { k = 'field', b = build(objn, src, lang), n = txt(namen, src),
+            --
+            -- ★★★ AND IT CARRIES A SPAN, WHICH IT DID NOT (CART-0940). This is the
+            -- ONE field constructor that does not return through `build`, so it
+            -- never got the range `build` stamps on everything else. MEASURED: 0 of
+            -- 16694 ruby field nodes had an `at` (rails, 2880 of 4527 fns), and php
+            -- lost exactly its method calls (2064 spanned property accesses, 631
+            -- spanless method ones) while lua, go, rust, python and javascript were
+            -- clean — they hand `declared_call_parts` a callee node that already
+            -- spans `o.m`, so `objn` stays nil and this branch is never reached.
+            --
+            -- ⚠ THE RANGE IS COMPOSED BECAUSE NO NODE HAS IT. A grammar that splits
+            -- the receiver and the method into SIBLING FIELDS has no node spanning
+            -- `o.m` — that absence is why this branch exists at all. `objn` precedes
+            -- `namen` by construction (`declared_call_parts` takes a child BEFORE
+            -- the callee name as the receiver), so the field runs from one start to
+            -- the other end, which is exactly the extent `FIELD[t]`'s own node gives
+            -- in the grammars that have one.
+            --
+            -- ⚠⚠ THE SPAN IS A SUBSTITUTION SITE, not decoration: `anti_unify`
+            -- records it as a field hole's `at_a`, and `clones.render` /
+            -- `cloneextract` rewrite THAT RANGE. A missing one made the hole
+            -- unkeyable (`element_template.unkeyed`, on which `M.match` refuses
+            -- outright); a WRONG one would silently rewrite the wrong text, so the
+            -- extent is asserted by test rather than assumed from the node types.
+            local f
+            if objn then
+                f = { k = 'field', b = build(objn, src, lang), n = txt(namen, src),
                       method = true, selid = sel_is_id(namen, lang) }
-                or build(namen, src, lang)
+                local osr, osc = objn:range()
+                local _, _, ner, nec = namen:range()
+                f.at = { start = { line = osr, char = osc },
+                    ['end'] = { line = ner, char = nec } }
+            else
+                f = build(namen, src, lang)
+            end
             return { k = 'call', f = f, a = a, method = (f.k == 'field' and f.method) or false }
         end
         local callee, an2 = call_parts(node)
