@@ -1120,7 +1120,73 @@ local function anti_unify_row(r1, r2, la, lb, holes)
         holes[#holes + 1] = { kind = 'struct' }; return false
     end
     local ok = true
-    for i = 1, #(r1.lhs or {}) do ok = anti_unify(r1.lhs[i], r2.lhs[i], la, lb, holes) and ok end
+    -- ★★★ WHICH SIDE A HOLE CAME FROM, RECORDED WHERE IT IS FREE (CART-0941).
+    -- This function already separates the two loops; until now it threw the
+    -- distinction away, and a divergent field SELECTOR on an assignment TARGET
+    -- reached `cloneextract` as an ordinary value hole. It substitutes them, so
+    -- `self.alpha = alpha` became `hp1 = alpha` and THE FIELD WRITE WAS LOST —
+    -- reproduced end to end, valid Lua, past the `parses` gate.
+    --
+    -- ⚠ TAGGED BY RANGE, NOT BY THREADING A PARAMETER. `anti_unify` appends to
+    -- `holes` from fifteen recursion sites; passing a side through all of them to
+    -- set one field is the change this codebase keeps paying for (CART-0928's two
+    -- stop lists, CART-0932's two set-builders). The loop knows the answer for
+    -- every hole it produced, so it marks the range it just appended.
+    --
+    -- ★ AND THE DESTINATION KIND COMES FROM THE ROW, NOT FROM THE HOLE. `r1.lhs[i]`
+    -- IS the destination expression and its `k` is the kind — `name`, `field` or
+    -- `index`. MEASURED on our own tree (3000 functions): 14406 name, 4822 index,
+    -- 1214 field, so 29.5% of writes are not plain names. `dest` carries it so a
+    -- consumer can DISPATCH rather than only refuse: a differing selector on a
+    -- `field` destination factors as `self[hp] = v`, while a differing key on an
+    -- `index` destination is already a value and substitutes correctly today.
+    --
+    -- ★★★ AND `side` ALONE OVER-REFUSES, WHICH IS WHY `target` EXISTS. Every hole
+    -- BELOW a destination is on the write side, but only the one that IS the
+    -- destination is dangerous: substituting `t[k] = v`'s differing KEY is correct
+    -- today (the key is already an expression), while substituting `self.alpha`
+    -- replaces the target and the write is gone. A refusal keyed on `side` would
+    -- forbid the first along with the second.
+    --
+    -- ⚠ IT IS DERIVED FROM THE TWO DESTINATION NODES, NOT BY MATCHING SPANS. The
+    -- obvious test -- "the hole's `at_a` IS the destination's `at`" -- fails exactly
+    -- where it is needed most: a method-call `field` node carries NO span at all
+    -- (CART-0940), so in ruby and php both sides would be nil and every hole would
+    -- compare equal to the destination. The divergence that produces the
+    -- destination's own hole is computable from `d1`/`d2` directly, and that is
+    -- the same condition `anti_unify` itself uses one level down.
+    for i = 1, #(r1.lhs or {}) do
+        local before = #holes
+        local d1, d2 = r1.lhs[i], r2.lhs[i]
+        ok = anti_unify(d1, d2, la, lb, holes) and ok
+        -- does the TARGET ITSELF diverge, and in what
+        local tk, tn1, tn2
+        if d1 and d2 and d1.k == d2.k and (d1.k == 'field' or d1.k == 'name')
+            and d1.n ~= d2.n then
+            tk, tn1, tn2 = d1.k, d1.n, d2.n
+        end
+        for j = before + 1, #holes do
+            holes[j].side = 'lhs'
+            holes[j].dest = d1 and d1.k or nil
+            -- ★ MATCHED BY VALUE, AND THE NESTED CASES WERE MEASURED RATHER THAN
+            -- REASONED ABOUT -- the first cut of this comment claimed a nested
+            -- repeat would tag both holes, and it does not. Three two-level
+            -- destinations, run end to end:
+            --   self.c.c / self.x.c   INNER differs  -> target=nil, PLANS, and the
+            --                         result is `hp1.c = v`: the BASE is the
+            --                         parameter and the write survives. Correct.
+            --   self.b.c / self.b.d   OUTER differs  -> target=true, refused
+            --   self.c.c / self.c.d   outer differs, inner name REPEATS the outer's
+            --                         old value -> target=true, refused, and the
+            --                         inner position is not tagged (it has no hole:
+            --                         `c` faces `c` there)
+            -- ⇒ The tuple matched is (kind, d1.n, d2.n), and a hole only carries
+            --   BOTH of those when it is the destination's own divergence.
+            if tk and holes[j].kind == tk and holes[j].a == tn1 and holes[j].b == tn2 then
+                holes[j].target = true
+            end
+        end
+    end
     for i = 1, #(r1.rhs or {}) do ok = anti_unify(r1.rhs[i], r2.rhs[i], la, lb, holes) and ok end
     if r1.cond or r2.cond then ok = anti_unify(r1.cond, r2.cond, la, lb, holes) and ok end
     return ok
@@ -1221,6 +1287,13 @@ function M.analyze_pair(pair)
                     sites_a = {}, sites_b = {} }
                 bykey[key] = p; params[#params + 1] = p
             end
+            -- ⚠ A PARAMETER IS ON THE WRITE SIDE IF **ANY** OF ITS SITES IS, and the
+            -- grouping is by (kind, a, b) — so one parameter can hold a read site and
+            -- a write site at once (`self.X = X` is exactly that shape when the two
+            -- tokens group together). Taking the FIRST site's side, the way `at_a`
+            -- does, would report the pair as read-only whenever the read came first.
+            if h.side == 'lhs' then p.side = 'lhs'; p.dest = p.dest or h.dest end
+            if h.target then p.target = true end
             if h.at_a then p.sites_a[#p.sites_a + 1] = h.at_a end
             if h.at_b then p.sites_b[#p.sites_b + 1] = h.at_b end
         end
@@ -1458,6 +1531,13 @@ function M.analyze_pair(pair)
         structs = structs }
 end
 
+--- does any hole of this analysis stand where the assignment TARGET is? One place,
+--- because two readers want it and a second copy of the loop is the two-lists defect.
+local function target_hole(a)
+    for _, h in ipairs((a and a.holes) or {}) do if h.target then return h end end
+    return nil
+end
+
 --- Human-readable report for M.near pairs. `store` is used to show the differing
 --- (hole) source lines — the parameters the two copies would factor into.
 function M.near_report(pairs_, store)
@@ -1523,6 +1603,13 @@ function M.near_report(pairs_, store)
         L[#L + 1] = ('■ %s of %d · %d edit(s), %d shared statement(s) — %s:')
             :format(pos, #pairs_, p.dist, p.shared,
                 (a.shape and (SHAPE[a.shape .. '/' .. tostring(a.evidence)] or SHAPE[a.shape]))
+                -- ★★★ `value-parameterizable` IS A CLAIM AND IT CAN BE FALSE. A hole that
+                -- IS an assignment target cannot become a parameter -- substituting it
+                -- deletes the write (CART-0941) -- so the verb refuses and this line
+                -- must not promise otherwise. It read `TAG[a.kind]` alone, which is
+                -- exactly the surface a new data field does not reach on its own.
+                or (target_hole(a) and 'value-shaped, but the divergence is an'
+                    .. ' assignment TARGET — not parameterizable')
                 or TAG[a.kind])
         L[#L + 1] = ('    %s  %s:%d'):format(p.a.name, p.a.file, p.a.lines[1] or 0)
         L[#L + 1] = ('    %s  %s:%d'):format(p.b.name, p.b.file, p.b.lines[1] or 0)

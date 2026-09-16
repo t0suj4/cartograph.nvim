@@ -199,6 +199,32 @@ function M.plan(store, pair, opts)
     if analysis.kind ~= 'value' then
         return nil, ('not value-parameterizable (%s) — nothing to lift cleanly'):format(analysis.kind)
     end
+    -- ★★★ A WRITE TARGET IS NOT A VALUE (CART-0941). Every hole below becomes an
+    -- `hp<i>` parameter, is substituted at each of its sites, and is passed the
+    -- text of its first site as the argument. That is right for a READ and wrong
+    -- for an assignment TARGET: `self.alpha = alpha` became `hp1 = alpha`, which
+    -- assigns to the parameter, DELETES THE FIELD WRITE in both copies, and passes
+    -- `self.alpha` read before the write. It parses, so the `parses` guard passed
+    -- it; both callers were silently broken.
+    --
+    -- ⚠ THE TEST IS `target`, NOT `side`. A hole merely UNDER a destination is
+    -- fine -- `t[k] = v` with a differing key substitutes correctly, because the
+    -- key is already an expression -- and refusing on `side` would forbid that too.
+    -- `target` marks only the hole that IS the destination.
+    --
+    -- ⇒ THIS IS A REFUSAL AND NOT YET A DISPATCH. A differing selector on a
+    --   `field` destination has a real factoring, `self[hp] = v` with the SELECTOR
+    --   as the argument -- an INDEX write cartograph has no verb for. Until it
+    --   does, declining is the honest answer; the reason names the destination
+    --   kind so the reader can see which rewrite is missing rather than only that
+    --   one is.
+    for i, h in ipairs(analysis.holes) do
+        if h.target then
+            return nil, ('hole %d is the assignment TARGET (a %s hole on a %s'
+                .. ' destination) — substituting it would delete the write')
+                :format(i, tostring(h.kind), tostring(h.dest))
+        end
+    end
     local va = un.body_extractable(store, a.id)
     if not va.ok then return nil, ('%s body not liftable: %s'):format(a.name, va.reason) end
     local vb = un.body_extractable(store, b.id)

@@ -977,9 +977,16 @@ local function v_clones_find(store, args)
     if want ~= 'exact' then
         for _, p in ipairs(clones.near(store)) do
             local a = clones.analyze_pair(p)
-            local holes = {}
+            -- ⚠ THIS REBUILDS A HOLE FIELD BY FIELD, so every field the analysis
+            -- gains is invisible here until it is named -- the surface a DATA FIELD
+            -- has and nothing enumerates. `side`/`dest`/`target` (CART-0941) are the
+            -- current instance: without them an agent reads "a field hole, alpha vs
+            -- beta" and cannot tell a substitutable value from an assignment target.
+            local holes, blocked = {}, nil
             for _, h in ipairs(a.holes or {}) do
-                holes[#holes + 1] = { kind = nn(h.kind), a = tostring(h.a), b = tostring(h.b) }
+                holes[#holes + 1] = { kind = nn(h.kind), a = tostring(h.a), b = tostring(h.b),
+                    side = h.side, dest = h.dest and nn(h.dest) or nil, target = h.target }
+                if h.target then blocked = h end
             end
             -- DRIFT is a QUESTION, not a finding: one copy hardcodes what the
             -- other reads. clones.analyze_pair already states what it checked
@@ -993,8 +1000,18 @@ local function v_clones_find(store, args)
                 distance = p.dist, rows_compared = NUL,
                 members = { noderow(store, p.a.id), noderow(store, p.b.id) },
                 holes = holes, drift = drift,
+                -- ★★★ DO NOT RECOMMEND A VERB THAT WILL REFUSE. `cloneextract.plan`
+                -- declines a pair whose hole IS an assignment target (CART-0941 --
+                -- substituting it deletes the write), and this line recommended it
+                -- anyway because it only ever looked at `kind`. Advice that
+                -- dead-ends is worse than no advice: the reader spends the round
+                -- trip and learns nothing the analysis already knew.
                 action = a.kind == 'structural'
                     and 'extract by hand — the two shapes diverged, so no parameter list recovers the difference'
+                    or blocked
+                    and (('extract by hand — the divergence is the assignment TARGET (a %s'
+                        .. ' on a %s destination), so parameterizing it would delete the write')
+                        :format(nn(blocked.kind), nn(blocked.dest or '?')))
                     or ':CartographExtractHelper factors the holes into parameters' }
         end
     end

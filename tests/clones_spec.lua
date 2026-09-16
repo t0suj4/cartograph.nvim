@@ -3502,3 +3502,77 @@ test('schema: the journal records the PLAN version without gating recovery', fun
     ok(tostring(why):find('predates versioning', 1, true), tostring(why))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── which SIDE a hole came from, and what kind of destination (CART-0941) ────
+--
+-- ★★★ THIS PINS A CORRECTNESS BUG, NOT A FIELD. `anti_unify_row` walks `r.lhs`
+-- exactly as it walks `r.rhs` and used to throw the distinction away, so a
+-- divergent field SELECTOR on an assignment TARGET arrived at `cloneextract` as
+-- an ordinary value hole. It substitutes those, so `self.alpha = alpha` became
+-- `hp1 = alpha` in the generated helper and THE FIELD WRITE WAS SILENTLY LOST —
+-- valid Lua, past the `parses` gate, both callers broken. Measured on factorio:
+-- 6 of 17 sampled value-parameterizable pairs carry a hole of this shape.
+--
+-- ⚠ THE FIELD IS NOT YET READ BY ANYTHING. The refusal (and the dispatch that
+-- should replace it) is the next step on CART-0941; this test exists so the fact
+-- cannot be removed as unused before the consumer lands.
+
+test('clones: a hole on an assignment TARGET is tagged with its side and destination kind',
+    function ()
+        local clones = require 'cartograph.clones'
+        local body = [[
+    local n = 0
+    local seen = {}
+    self.tag = 'shared'
+    self.%s = %s
+    n = n + 1
+    seen[n] = true
+    if n > 0 then n = n - 1 end
+    return n, seen]]
+        local root = proj { ['t.lua'] = ('local M = {}\n\nfunction M.mk_alpha(self, v)\n%s\nend\n\n'
+            .. 'function M.mk_beta(self, v)\n%s\nend\n\nreturn M\n')
+            :format(body:format('alpha', 'v'), body:format('beta', 'v')) }
+        local p = clones.near_of(store, fn_id('M.mk_alpha'),
+            { max_dist = 3, min_rows = 4, min_shared = 2 })[1]
+        ok(p ~= nil, 'the two copies are a near pair')
+        local a = clones.analyze_pair(p)
+        eq('value', a.kind, 'and cartograph calls the pair value-parameterizable')
+        eq(1, #a.holes, 'with one hole — the differing field selector')
+        local h = a.holes[1]
+        eq('field', h.kind)
+        -- ⚠ THE TWO HALVES ANSWER DIFFERENT QUESTIONS and a consumer needs both:
+        -- `side` says the substitution would replace a WRITE TARGET; `dest` says
+        -- WHICH rewrite could replace it (`self[hp] = v` for a field destination,
+        -- nothing needed for an index one, whose key is already an expression).
+        eq('lhs', h.side, 'the hole is on the WRITE side')
+        eq('field', h.dest, 'and the destination is a field access')
+        vim.fn.delete(root, 'rf')
+    end)
+
+test('clones: a hole on the READ side carries no write tag', function ()
+    local clones = require 'cartograph.clones'
+    -- ★ THE ASYMMETRY IS THE POINT. A field hole on a READ substitutes the whole
+    -- access as a value, which is correct — so the read side needs no kind and
+    -- gets none. Tagging both sides would have looked tidier and said nothing.
+    local body = [[
+    local n = 0
+    local seen = {}
+    local tag = 'shared'
+    local got = self.%s
+    n = n + 1
+    seen[n] = true
+    if n > 0 then n = n - 1 end
+    return n, seen, got, tag]]
+    local root = proj { ['r.lua'] = ('local M = {}\n\nfunction M.rd_alpha(self)\n%s\nend\n\n'
+        .. 'function M.rd_beta(self)\n%s\nend\n\nreturn M\n')
+        :format(body:format('alpha'), body:format('beta')) }
+    local p = clones.near_of(store, fn_id('M.rd_alpha'),
+        { max_dist = 3, min_rows = 4, min_shared = 2 })[1]
+    ok(p ~= nil, 'the two copies are a near pair')
+    local a = clones.analyze_pair(p)
+    eq(1, #a.holes)
+    eq('field', a.holes[1].kind)
+    eq(nil, a.holes[1].side, 'a read-side hole carries no side')
+    eq(nil, a.holes[1].dest, 'and no destination kind')
+    vim.fn.delete(root, 'rf')
+end)

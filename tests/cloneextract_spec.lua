@@ -707,3 +707,119 @@ test('extract-family: a cross-PHASE family reading a phase-bound global is refus
         'and it spans BOTH phases, computed over every member file: {' .. tostring(union) .. '}')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── a write TARGET is not a value (CART-0941) ───────────────────────────────
+--
+-- ★★★ THIS IS A CORRECTNESS REGRESSION TEST, NOT A REFUSAL TEST. Before it,
+-- `plan` accepted the pair below and emitted `hp1 = alpha` where the source read
+-- `self.alpha = alpha`: the helper assigned to its own parameter, NEITHER copy
+-- set its field any more, and the argument passed was the field read BEFORE the
+-- write. It parses, so the `parses` guard let it through. Measured on factorio:
+-- 6 of 17 sampled value-parameterizable pairs carried a hole of this shape.
+
+test('extract-helper: REFUSES a hole that IS the assignment target', function ()
+    local body = [[
+  local n = 0
+  local seen = {}
+  self.tag = 'shared'
+  self.%s = v
+  n = n + 1
+  seen[n] = true
+  if n > 0 then n = n - 1 end
+  return n, seen]]
+    local root = proj { ['w.lua'] = ('local M = {}\n\nlocal function wr_a(self, v)\n%s\nend\n\n'
+        .. 'local function wr_b(self, v)\n%s\nend\n\nreturn M\n')
+        :format(body:format('alpha'), body:format('beta')) }
+    local p = pair_of('wr_a')
+    ok(p ~= nil, 'the two copies are still a near pair')
+    local plan, why = cx.plan(store, p)
+    eq(nil, plan, 'and the extraction is refused')
+    ok(tostring(why):find('assignment TARGET', 1, true),
+        'the reason names the target: ' .. tostring(why))
+    -- ⚠ AND IT NAMES THE DESTINATION KIND, because that is what says which rewrite
+    -- is missing (`self[hp] = v`, an index write) rather than only that one is.
+    ok(tostring(why):find('field destination', 1, true),
+        'and the destination kind: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: a hole INSIDE a destination still plans — `target` is not `side`',
+    function ()
+        -- ★★★ THE NON-VACUITY GUARD FOR THE REFUSAL ABOVE. Every hole below a
+        -- destination carries `side = 'lhs'`, so a refusal keyed on the SIDE would
+        -- swallow this pair too — and it is perfectly extractable: the index KEY is
+        -- already an expression, substituting it rewrites `self[hp1] = v`, and the
+        -- write survives. If this test ever fails, the gate has become a blanket
+        -- one and a whole class of correct extractions went with it.
+        local body = [[
+  local n = 0
+  local seen = {}
+  self.tag = 'shared'
+  self[%s] = v
+  n = n + 1
+  seen[n] = true
+  if n > 0 then n = n - 1 end
+  return n, seen]]
+        local root = proj { ['k.lua'] = ('local M = {}\n\nlocal function kw_a(self, v)\n%s\nend\n\n'
+            .. 'local function kw_b(self, v)\n%s\nend\n\nreturn M\n')
+            :format(body:format("'alpha'"), body:format("'beta'")) }
+        local p = pair_of('kw_a')
+        ok(p ~= nil, 'the two copies are a near pair')
+        local a = clones.analyze_pair(p)
+        eq('value', a.kind)
+        eq(1, #a.holes, 'one hole — the differing key')
+        eq('lhs', a.holes[1].side, 'it IS on the write side')
+        eq('index', a.holes[1].dest, 'under an index destination')
+        eq(nil, a.holes[1].target, 'but it is NOT the target itself')
+        local plan, why = cx.plan(store, p)
+        ok(plan, 'so the extraction still plans: ' .. tostring(why))
+        if plan then
+            local _, after = cx.preview(store, plan)
+            local text = after[plan.a.file]
+            ok(text:find('self[hp1] = v', 1, true),
+                'and the write survives, with the KEY parameterized')
+        end
+        vim.fn.delete(root, 'rf')
+    end)
+
+test('extract-helper: on a two-level destination only the OUTER selector is the target',
+    function ()
+        -- ★★★ THE CASE I GOT WRONG IN PROSE FIRST. A nested destination has two
+        -- selectors and the refusal must fire on exactly one of them: replacing the
+        -- BASE (`self.c` -> `hp1`) leaves `hp1.c = v`, which still writes; replacing
+        -- the OUTER selector leaves `hp1 = v`, which does not. The tuple matched is
+        -- (kind, d1.n, d2.n) and only the destination's own divergence carries both.
+        local body = [[
+  local n = 0
+  local seen = {}
+  self.tag = 'shared'
+  %s = v
+  n = n + 1
+  seen[n] = true
+  if n > 0 then n = n - 1 end
+  return n, seen]]
+        local function build(la, lb)
+            return proj { ['n.lua'] = ('local M = {}\n\nlocal function q_a(self, v)\n%s\nend\n\n'
+                .. 'local function q_b(self, v)\n%s\nend\n\nreturn M\n')
+                :format(body:format(la), body:format(lb)) }
+        end
+
+        local root = build('self.c.c', 'self.x.c')     -- the BASE varies
+        local a = clones.analyze_pair(pair_of('q_a'))
+        eq(nil, a.holes[1].target, 'a base divergence is NOT the target')
+        local plan = cx.plan(store, pair_of('q_a'))
+        ok(plan, 'so it plans')
+        if plan then
+            local _, after = cx.preview(store, plan)
+            ok(after[plan.a.file]:find('hp1.c = v', 1, true),
+                'and the write survives with the BASE parameterized')
+        end
+        vim.fn.delete(root, 'rf')
+
+        root = build('self.b.c', 'self.b.d')           -- the SELECTOR varies
+        a = clones.analyze_pair(pair_of('q_a'))
+        eq(true, a.holes[1].target, 'an outer-selector divergence IS the target')
+        local p2, why = cx.plan(store, pair_of('q_a'))
+        eq(nil, p2, 'so it is refused: ' .. tostring(why))
+        vim.fn.delete(root, 'rf')
+    end)
