@@ -2890,7 +2890,7 @@ M.VERBS = {
         args = {
             { name = 'node', type = 'string',
                 desc = 'the declared symbol whose value is the container (from a node_find / node_at row, this graph generation only)' },
-            { name = 'ref', type = 'ref',
+            { name = 'ref', type = 'object', shape = 'ref',
                 desc = 'or the DURABLE ref from the same row; a ref that no longer resolves REFUSES (`stale-ref`), and one resolving only WITH A CAVEAT also refuses (`ref-caveat`) — on the write side a probable handle is not good enough' },
             { name = 'member', type = 'string',
                 desc = 'TEXTUAL: the member source you want inserted, exactly as it should read (`subscript_list = true`). It is parsed and matched against the members already there, so a payload of the wrong shape REFUSES and names the divergence' },
@@ -2909,7 +2909,7 @@ M.VERBS = {
         args = {
             { name = 'node', type = 'string',
                 desc = 'the definition to annotate (from a node_find / node_at row, this graph generation only)' },
-            { name = 'ref', type = 'ref',
+            { name = 'ref', type = 'object', shape = 'ref',
                 desc = 'or the DURABLE ref from the same row; a stale or caveated ref REFUSES, as on every write verb' },
             { name = 'text', type = 'string', required = true,
                 desc = 'the prose. Newlines become separate comment lines; the prefix and indentation are taken from the file, not invented' },
