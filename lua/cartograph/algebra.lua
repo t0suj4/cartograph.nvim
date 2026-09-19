@@ -117,6 +117,19 @@ function M.load()
         return nil, load_err
     end
     loaded = A
+    -- ★★★ THE LAST STEP OF LOADING IS WIRING OUR TREE-SITTER IN (CART-0961).
+    -- `origin.unported` records `M.parsers.lua` as one of the three things that
+    -- did not come with the vendoring: the donor's `lua` grammar reads
+    -- `A.parsers.lua` and answers nil without it, which makes every operator
+    -- that consumes a term READ FROM SOURCE unavailable. The hook is ours, is
+    -- not vendored, and lives in `cartograph.algebraread`.
+    -- ⚠ INSTALLED AFTER `loaded` IS SET, and the hook closes over `A` rather
+    -- than calling back here, so a parse can never re-enter this function.
+    -- ⚠ AND IT IS NOT FATAL. A tree-sitter parser that is missing makes the
+    -- READER unavailable, not the algebra — the same absent/unavailable split
+    -- the rest of the seam draws, and the grammar already answers nil.
+    local okr, reader = pcall(require, 'cartograph.algebraread')
+    if okr and type(A.parsers) == 'table' then A.parsers.lua = reader.parser(A) end
     return A
 end
 

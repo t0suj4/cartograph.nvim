@@ -83,14 +83,17 @@ return {
     --   tests/algebradonor_spec.lua honours it. ⇒ THE CODE IS OURS BUT PART OF
     --   ITS EVIDENCE IS NOT RE-CHECKABLE HERE — the lossless lua reader, the
     --   scope-graph census and the keyed oracle are the operators affected.
-    --   `M.parsers.lua` — the donor installs a tree-sitter parse hook from
-    --   experiments/lua_reader.lua. Without it `M.grammar('lua').parse` returns
-    --   nil, so the reader-shaped operators are UNAVAILABLE here, not wrong.
-    --   We have tree-sitter; wiring ours in is adaptation, not vendoring.
+    --   `M.parsers.lua` — ✅ PORTED 2026-09-19 (CART-0961), and deliberately NOT
+    --   as a vendored file: `cartograph.algebraread` is ours, the seam installs
+    --   it as the last step of `algebra.load()`, and the donor's acceptance test
+    --   is ours too (cst_print(read(src)) == src over all 231 files in lua/).
+    --   ⇒ IT DID NOT CLOSE THE EVIDENCE GAP: the 43 pending tests want the
+    --   FIXTURE FILES, not a parser, and still pend.
     unported     = {
         'core.lua:3912 — optional `require("derive")`, env-gated on DERIVE',
         'experiments/* — the donor fixtures 43 vendored tests pend on',
-        'M.parsers.lua — the lua parse hook; the reader operators are unavailable',
+        -- 'M.parsers.lua' — PORTED, see CART-0961; kept in the comment above so
+        -- the record says what was once missing and what closed it
     },
 
     -- ★★★ THE DONOR'S OWN TESTS CAME TOO (CART-0912). 372 of them over 8270
