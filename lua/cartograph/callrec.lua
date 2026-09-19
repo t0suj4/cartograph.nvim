@@ -13,10 +13,37 @@
 -- ingest by resolve/confirm, so they can't fold into an immutable column and
 -- are deliberately NOT seamed here.) The string fields (fn/callee/file/full)
 -- are the fold-worthy weight — node-id / path strings repeated per call; line
--- is the one scalar. THE SEAM MUST BE COMPLETE PER FIELD: step 3 can only fold
--- a field once EVERY reader goes through its accessor (a raw reader left behind
--- would see the index instead of the value). So migration proceeds field-by-
--- field to completion, not file-by-file.
+-- is the one scalar.
+--
+-- ⚠⚠ THE COMPLETENESS OBLIGATION THIS HEADER USED TO STATE IS FALSE FOR THE
+-- REPRESENTATION THAT WAS ACTUALLY BUILT, and it sent a reader on a migration
+-- that buys nothing (CART-0878 follow-up, 2026-09-19). It read: "THE SEAM MUST
+-- BE COMPLETE PER FIELD: step 3 can only fold a field once EVERY reader goes
+-- through its accessor (a raw reader left behind would see the index instead of
+-- the value)."
+--
+-- That is true of an INDEX-BASED fold, and it is exactly right for the analogy
+-- one paragraph above: `at.lua` hands back a PACKED SCALAR (`if type(r) ==
+-- 'number' then return C.sl(r) end`), and a raw `r.start.line` on a packed range
+-- reads nil — there the accessor is the only way through. Brick 3 did NOT choose
+-- that model for calls. `callcols` rows are TRANSPARENT PROXIES: `proxy_index`
+-- routes a covered field to its column and everything else to a per-row residual,
+-- and its own header says so — "a consumer that reads `c.file` (seamed) OR
+-- `c.strarg` (not yet columnar) OR writes `c.to = …` works UNCHANGED ... it is
+-- the safe default because it needs no consumer edit."
+--
+-- ⇒ SO A RAW READER LEFT BEHIND IS AN OPTIMIZATION MISS, NOT A CORRECTNESS BUG,
+-- and the seam does NOT have to be complete per field before a field folds.
+-- `tools/callmigrate.lua` is the authority and already draws the line: it fences
+-- HAZARDS (pairs/next over a proxy, post-ingest writes to an immutable column)
+-- and exits non-zero on those, while listing raw reads as an INVENTORY. MEASURED
+-- 2026-09-19: 0 hazards, 26 raw reads — the flag may flip today, and the 26 are
+-- a resident-store optimization nobody is blocked on. `config.callcols_store` is
+-- off by default (CARTOGRAPH_CALLCOLS=1).
+--
+-- ★ THE ACCESSORS STILL EARN THEIR KEEP — one place a reader touches a core
+-- field is what let brick 3 be written at all, and what lets the column be read
+-- DIRECTLY for the resident win. What they no longer carry is a deadline.
 
 local M = {}
 
