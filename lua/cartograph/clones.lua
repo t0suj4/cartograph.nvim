@@ -1997,6 +1997,88 @@ function M.near_report(pairs_, store)
     return L
 end
 
+--- ★★★ THE ONE VERDICT EVERY SURFACE MUST READ (CART-0964). `extract_proposal`
+--- computed this inline and `agent.lua` reconstructed it from `a.kind` alone, so the
+--- prose told a human "NOT blocked: 2 function parameter(s) cover all 2 shape
+--- divergence(s)" while the agent verb told a machine "no parameter list recovers the
+--- difference" — about the same pair, in the same second. Two renderings of one
+--- analysis may differ in WORDING; they may not differ in WHAT THEY CLAIM. The fix is
+--- not to copy the predicate, it is to have one.
+---
+--- ⚠ THE FILTER AND THE COUNT ARE DELIBERATELY ASYMMETRIC, and this is the shipped
+--- behaviour rather than a tidy-up: `fn_params` keeps only the merged parameters that
+--- READ A LOCAL (a dependency-less struct pair is not a helper argument you can write
+--- down), while `covered` sums the sites of EVERY merged parameter. So a pair whose
+--- divergences all merge into dependency-less parameters reports `uncrossed`, not
+--- `covered`. Changing either half moves a verdict; do it on purpose if at all.
+---
+--- Returns { state, fn_params, covered, struct, insdel } where state is one of
+---   'exact'      the near-distance was alpha-renaming; :CartographMerge applies
+---   'value'      a clean value parameterization
+---   'insdel'     rows on one side only — no single helper covers that
+---   'covered'    structural, and N function parameters cover every divergence
+---   'uncrossed'  structural, and a shape divergence nothing derived crosses
+function M.extract_verdict(a)
+    if a.kind == 'exact' then return { state = 'exact' } end
+    if a.kind ~= 'structural' then
+        return { state = 'value', fn_params = {}, covered = 0,
+            struct = a.struct or 0, insdel = a.insdel or 0 }
+    end
+    local fn_params, covered = {}, 0
+    for _, f in ipairs(a.fparams or {}) do
+        local d = (#(f.deps_a or {}) >= #(f.deps_b or {})) and f.deps_a or f.deps_b
+        if d and #d > 0 then fn_params[#fn_params + 1] = { f = f, deps = d } end
+        covered = covered + #(f.sites or {})
+    end
+    local state = 'uncrossed'
+    if (a.insdel or 0) > 0 then state = 'insdel'
+    elseif #fn_params > 0 and covered == (a.struct or 0) then state = 'covered' end
+    return { state = state, fn_params = fn_params, covered = covered,
+        struct = a.struct or 0, insdel = a.insdel or 0 }
+end
+
+--- The TRANSPORTABLE projection of one `analyze_pair` result — what a consumer that
+--- is not this module may read. Plain values only: no IR nodes, no source spans.
+---
+--- ★★★ IT EXISTS BECAUSE THE REBUILD WAS THE DEFECT (CART-0964). `agent.lua` copied a
+--- hole field by field and said so in a warning above the loop — "every field the
+--- analysis gains is invisible here until it is named — the surface a DATA FIELD has
+--- and nothing enumerates". Three fields were then gained and none was named:
+--- `literal_dep` (the fact price), `fparams` (Mer-S), and the struct `why` taxonomy.
+--- A projection that lives HERE goes stale in one place, next to the analysis that
+--- moved, instead of silently in each consumer.
+---
+--- ⚠ `xn`/`yn` MUST NOT CROSS. They are expression-IR nodes with parent links and
+--- spans; an agent receiving them would be reading our internals as though they were
+--- an interface. A struct hole exports the two sides' KINDS, their NAMES where a side
+--- is a name, and the dependency lists — which is what a reader needs to know what the
+--- helper would take.
+function M.export_pair(a)
+    local holes = {}
+    for _, h in ipairs(a.holes or {}) do
+        holes[#holes + 1] = { kind = h.kind, a = h.a, b = h.b,
+            side = h.side, dest = h.dest, target = h.target,
+            literal_dep = h.literal_dep }
+    end
+    local function sidename(n)
+        if type(n) ~= 'table' then return nil end
+        return n.k == 'name' and n.n or nil
+    end
+    local structs = {}
+    for _, h in ipairs(a.structs or {}) do
+        structs[#structs + 1] = { why = h.why, a = sidename(h.xn), b = sidename(h.yn),
+            a_kind = h.xn and h.xn.k or nil, b_kind = h.yn and h.yn.k or nil,
+            deps_a = h.deps_a, deps_b = h.deps_b }
+    end
+    local fparams = {}
+    for _, f in ipairs(a.fparams or {}) do
+        fparams[#fparams + 1] = { why = f.why, deps_a = f.deps_a, deps_b = f.deps_b,
+            sites = #(f.sites or {}) }
+    end
+    return { holes = holes, structs = structs, fparams = fparams,
+        verdict = M.extract_verdict(a) }
+end
+
 --- An extraction PROPOSAL for a value-parameterizable near-clone pair: the reviewable
 --- scaffold for the helper the two copies factor into. Returns report lines, or a single
 --- line explaining why the pair isn't a clean value-parameterization. This is the
@@ -2025,11 +2107,8 @@ function M.extract_proposal(pair, store)
             :format(p_name(pair), a.insdel, a.struct or 0) }
         -- ★ ONE ENTRY PER STORED PAIR, NOT PER SITE (Mer-S). `a.fparams` is the merged
         -- list; `a.structs` is still every occurrence, for the consumers that count them.
-        local fn_params = {}
-        for _, f in ipairs(a.fparams or {}) do
-            local d = (#(f.deps_a or {}) >= #(f.deps_b or {})) and f.deps_a or f.deps_b
-            if d and #d > 0 then fn_params[#fn_params + 1] = { f = f, deps = d } end
-        end
+        local verdict = M.extract_verdict(a)
+        local fn_params = verdict.fn_params
         if #a.holes > 0 or #fn_params > 0 then
             L[#L + 1] = '  the helper this WOULD take, derived:'
             for i, h in ipairs(a.holes) do
@@ -2050,12 +2129,10 @@ function M.extract_proposal(pair, store)
         -- cross it and a FUNCTION parameter is not a value parameterization. With the
         -- pairs merged, the eight `c.line` / `callrec.line(c)` sites of key_range are
         -- ONE parameter covering every divergence, and nothing blocks the helper.
-        local covered = 0
-        for _, f in ipairs(a.fparams or {}) do covered = covered + #(f.sites or {}) end
-        if a.insdel > 0 then
+        if verdict.state == 'insdel' then
             L[#L + 1] = ('  what blocks a single helper: %d row(s) on one side only')
                 :format(a.insdel)
-        elseif #fn_params > 0 and covered == (a.struct or 0) then
+        elseif verdict.state == 'covered' then
             L[#L + 1] = ('  NOT blocked: %d function parameter(s) cover all %d shape'
                 .. ' divergence(s).'):format(#fn_params, a.struct or 0)
             L[#L + 1] = '    The value parameterization cannot cross them; a FUNCTION parameter is not one.'
@@ -3344,17 +3421,25 @@ function M.findings(store, opts)
         end
         if a.kind == 'value' then
             for _, h in ipairs(a.holes) do
+                -- ★ THE PRICE RIDES ALONG (CART-0964, the third surface). A hole that
+                -- is an import path or a member of one costs the resolver a fact when
+                -- it is passed as a VALUE, and this message is read exactly where the
+                -- reader is deciding how to pass it. The analysis has carried
+                -- `literal_dep` since CART-0876; two of the three surfaces dropped it.
+                local price = h.literal_dep
+                    and (' ★ PRICED: %s — pass it as a FUNCTION and it costs nothing')
+                        :format(h.literal_dep) or ''
                 if h.at_a then
                     out[#out + 1] = { file = p.a.file, line = at.sl(h.at_a) + 1,
                         col = at.sc(h.at_a) + 1, severity = 'hint',
-                        message = ('clone hole (%s): %s ⇄ %s — a parameter of the shared helper')
-                            :format(h.kind, tostring(h.a), tostring(h.b)) }
+                        message = ('clone hole (%s): %s ⇄ %s — a parameter of the shared helper%s')
+                            :format(h.kind, tostring(h.a), tostring(h.b), price) }
                 end
                 if h.at_b then
                     out[#out + 1] = { file = p.b.file, line = at.sl(h.at_b) + 1,
                         col = at.sc(h.at_b) + 1, severity = 'hint',
-                        message = ('clone hole (%s): %s ⇄ %s — a parameter of the shared helper')
-                            :format(h.kind, tostring(h.b), tostring(h.a)) }
+                        message = ('clone hole (%s): %s ⇄ %s — a parameter of the shared helper%s')
+                            :format(h.kind, tostring(h.b), tostring(h.a), price) }
                 end
             end
         end

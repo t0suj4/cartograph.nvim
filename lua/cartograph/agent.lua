@@ -977,16 +977,37 @@ local function v_clones_find(store, args)
     if want ~= 'exact' then
         for _, p in ipairs(clones.near(store)) do
             local a = clones.analyze_pair(p)
-            -- ⚠ THIS REBUILDS A HOLE FIELD BY FIELD, so every field the analysis
-            -- gains is invisible here until it is named -- the surface a DATA FIELD
-            -- has and nothing enumerates. `side`/`dest`/`target` (CART-0941) are the
-            -- current instance: without them an agent reads "a field hole, alpha vs
-            -- beta" and cannot tell a substitutable value from an assignment target.
+            -- ★★★ THE PROJECTION IS THE ANALYSIS MODULE'S, NOT THIS LOOP'S
+            -- (CART-0964). This used to rebuild a hole FIELD BY FIELD under a warning
+            -- that said exactly what would go wrong -- "every field the analysis gains
+            -- is invisible here until it is named" -- and then three did: the fact
+            -- price (`literal_dep`), the Mer-S function parameters, and the struct
+            -- `why` taxonomy. A rebuild here goes stale silently; `clones.export_pair`
+            -- goes stale next to the analysis that moved.
+            local ex = clones.export_pair(a)
             local holes, blocked = {}, nil
-            for _, h in ipairs(a.holes or {}) do
+            for i, h in ipairs(ex.holes) do
                 holes[#holes + 1] = { kind = nn(h.kind), a = tostring(h.a), b = tostring(h.b),
-                    side = h.side, dest = h.dest and nn(h.dest) or nil, target = h.target }
-                if h.target then blocked = h end
+                    side = h.side, dest = h.dest and nn(h.dest) or nil, target = h.target,
+                    -- the FACT PRICE: this leaf is an import path, or a member of one.
+                    -- Passed as a value the resolver stops seeing it; passed as a
+                    -- function the call site keeps its literal and it costs nothing.
+                    literal_dep = h.literal_dep and nn(h.literal_dep) or nil }
+                if h.target then blocked = a.holes[i] end
+            end
+            -- the SHAPE divergences and the merged parameters that cover them. A
+            -- struct hole never became a value parameter, so an agent that sees only
+            -- `holes` reads a structural pair as though it had fewer differences than
+            -- it has, and cannot see the helper the analysis already derived.
+            local structs, fparams = {}, {}
+            for _, h in ipairs(ex.structs) do
+                structs[#structs + 1] = { why = nn(h.why), a = nn(h.a), b = nn(h.b),
+                    a_kind = nn(h.a_kind), b_kind = nn(h.b_kind),
+                    deps_a = h.deps_a, deps_b = h.deps_b }
+            end
+            for _, f in ipairs(ex.fparams) do
+                fparams[#fparams + 1] = { why = nn(f.why), deps_a = f.deps_a,
+                    deps_b = f.deps_b, sites = f.sites }
             end
             -- DRIFT is a QUESTION, not a finding: one copy hardcodes what the
             -- other reads. clones.analyze_pair already states what it checked
@@ -999,15 +1020,34 @@ local function v_clones_find(store, args)
             rows[#rows + 1] = { kind = 'near', shape = a.kind, copies = 2,
                 distance = p.dist, rows_compared = NUL,
                 members = { noderow(store, p.a.id), noderow(store, p.b.id) },
-                holes = holes, drift = drift,
+                holes = holes, drift = drift, structs = structs, fparams = fparams,
                 -- ★★★ DO NOT RECOMMEND A VERB THAT WILL REFUSE. `cloneextract.plan`
                 -- declines a pair whose hole IS an assignment target (CART-0941 --
                 -- substituting it deletes the write), and this line recommended it
                 -- anyway because it only ever looked at `kind`. Advice that
                 -- dead-ends is worse than no advice: the reader spends the round
                 -- trip and learns nothing the analysis already knew.
-                action = a.kind == 'structural'
-                    and 'extract by hand — the two shapes diverged, so no parameter list recovers the difference'
+                -- ★★★ READ OFF THE SHARED VERDICT, NOT RECONSTRUCTED (CART-0964).
+                -- This line used to branch on `a.kind` alone and so told an agent
+                -- "no parameter list recovers the difference" about a pair whose
+                -- prose proposal said "NOT blocked: 2 function parameter(s) cover
+                -- all 2 shape divergence(s)". The sentence was true when it was
+                -- written -- before Mer-S derived those parameters -- and a stale
+                -- CANNOT is the expensive kind: it stops the reader trying at all
+                -- (claims.lua states the asymmetry). `clones.extract_verdict` is
+                -- now the single predicate both surfaces read.
+                action = (ex.verdict.state == 'insdel'
+                        and ('extract by hand — %d row(s) exist on one side only,'
+                            .. ' so no single helper covers both bodies')
+                            :format(ex.verdict.insdel))
+                    or (ex.verdict.state == 'covered'
+                        and ('%d function parameter(s) cover all %d shape divergence(s)'
+                            .. ' — :CartographExtractHelper derives the signature.'
+                            .. ' A FUNCTION parameter is not a value parameterization')
+                            :format(#ex.verdict.fn_params, ex.verdict.struct))
+                    or (ex.verdict.state == 'uncrossed'
+                        and 'extract by hand — a shape divergence no derived'
+                            .. ' parameter crosses')
                     or blocked
                     and (('extract by hand — the divergence is the assignment TARGET (a %s'
                         .. ' on a %s destination), so parameterizing it would delete the write')
@@ -3276,8 +3316,24 @@ end
 --                   copy of undo's.
 --   clone-merge     clonemerge/cloneextract are a third apply family and ride the
 --                   same txn substrate, so the plan handle and txn_preview /
---                   txn_apply already fit them unchanged. Only their PLAN verb is
---                   missing; adding it is one entry plus its absence taxonomy.
+--                   txn_apply already fit them unchanged.
+--                   ⚠ THIS PARAGRAPH WENT STALE AND WAS CAUGHT BY A READER, NOT BY
+--                   A TEST (CART-0964). It said "Only their PLAN verb is missing"
+--                   long after `txn_plan_extract_family` landed over
+--                   cloneextract.plan_family — the exact defect the portability
+--                   paragraph above records: a stale caveat costs more than a
+--                   missing feature, because it stops the next reader running a
+--                   mechanism that is already here. WHAT IS ACTUALLY MISSING:
+--                     · clonemerge's PLAN verb (the exact-group merge). One entry
+--                       plus its absence taxonomy, as this used to say of both.
+--                     · a PAIRWISE extract plan, the analogue of
+--                       :CartographExtractHelper. `family_of` is a BFS over
+--                       `near_of` and admits a two-member family, so the pairwise
+--                       case is already reachable through the family verb — whether
+--                       a separate one is warranted (does a 2-family answer differ
+--                       from the pair? does the family verb's ALGEBRA dependency
+--                       matter when the pairwise path has none?) is a design
+--                       question and is filed, not guessed.
 --   the `copy` set  moveapply's extract-module takes an opts.copy set (duplicate
 --                   rather than move). Not exposed: it is an extract-only option
 --                   that the MOVE branch refuses, so publishing it needs the

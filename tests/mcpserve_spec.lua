@@ -1116,3 +1116,92 @@ test('mcpserve: the servers shut down cleanly', function ()
     end
     ok(true)
 end)
+
+-- ── the agent row and the prose proposal must CLAIM the same thing ───────────
+-- CART-0964. `clones_find` branched on `a.kind` alone and so told an agent "no
+-- parameter list recovers the difference" about a pair whose prose proposal said
+-- "NOT blocked: 2 function parameter(s) cover all 2 shape divergence(s)" — two
+-- renderings of one analysis, contradicting each other in the same second. They now
+-- read ONE predicate, `clones.extract_verdict`.
+
+local function clonefix(files)
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for name, src in pairs(files) do
+        local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(src); fd:close()
+    end
+    ingest(root)
+    return root
+end
+
+local function nearrow(res, n1, n2)
+    for _, r in ipairs(res.result or {}) do
+        local nm = {}
+        for _, m in ipairs(r.members or {}) do nm[tostring(m.name)] = true end
+        if nm[n1] and nm[n2] then return r end
+    end
+end
+
+test('agent: a covered structural pair says so — the row and the proposal AGREE', function ()
+    if not ready() then return end
+    -- the swapped-argument shape: `occ(caller, id)` against `occ(id, callee)`, which
+    -- is a rename divergence the analysis merges into ONE function parameter
+    -- ⚠ THE BINDER IS THE SAME ON BOTH SIDES ON PURPOSE. A differing loop-variable
+    -- name costs TWO edits (the `for` clause harvests as two rows), which puts the
+    -- pair past the SHIPPED max_dist of 2 that this verb uses — and a fixture the
+    -- shipped default cannot see would test a distance nobody runs.
+    local base = '  local out = {}\n  local id = item_id(src)\n  local seen = {}\n'
+    local a = base .. '  for _, caller in ipairs(edges(id)) do\n'
+        .. '    local hits = occ(caller, id)\n    out[#out + 1] = hits\n'
+        .. '    seen[caller] = true\n  end\n  return out'
+    local b = base .. '  for _, caller in ipairs(edges(id)) do\n'
+        .. '    local hits = occ(id, caller)\n    out[#out + 1] = hits\n'
+        .. '    seen[caller] = true\n  end\n  return out'
+    local function fn(name, body)
+        return ('local function %s(src)\n%s\nend\nreturn %s\n'):format(name, body, name)
+    end
+    local root = clonefix { ['ag1.lua'] = fn('incoming_calls', a),
+        ['ag2.lua'] = fn('outgoing_calls', b) }
+
+    local res = agent.answer(store, 'clones_find', { kind = 'near' })
+    local row = nearrow(res, 'incoming_calls', 'outgoing_calls')
+    ok(row, 'the near pair reaches the agent surface')
+    eq('structural', row and row.shape)
+
+    -- ★ THE AGREEMENT FIRST, because it is the defect: everything below is the
+    -- mechanism that makes it hold, and a mechanism assertion failing first would
+    -- hide which claim actually moved.
+    local clones = require 'cartograph.clones'
+    local p = clones.near_of(store, row.members[1].id, {})[1]
+    local prose = table.concat(clones.extract_proposal(p, store), '\n')
+    local prose_covered = prose:find('NOT blocked', 1, true) ~= nil
+    local row_covered = tostring(row.action):find('cover all', 1, true) ~= nil
+    eq(prose_covered, row_covered,
+        'the prose and the agent row agree on whether a helper is blocked:\n' .. prose
+            .. '\n  action: ' .. tostring(row.action))
+    ok(row_covered, 'and on this pair both say it is covered')
+
+    ok(row and #(row.structs or {}) > 0, 'the SHAPE divergences are exported, not only the value holes')
+    ok(row and #(row.fparams or {}) > 0, 'and the merged function parameters the analysis derived')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('agent: the FACT PRICE reaches the agent row', function ()
+    if not ready() then return end
+    local function fn(name, mod)
+        return ('local function %s(src)\n  local m = require(%q)\n  local out = {}\n'
+            .. '  local seed = load(src)\n  local n = count(seed)\n'
+            .. '  out[#out + 1] = m.run(seed)\n  out[#out + 1] = n\n'
+            .. '  persist(out)\n  return out\nend\nreturn %s\n'):format(name, mod, name)
+    end
+    local root = clonefix { ['ap1.lua'] = fn('via_alpha', 'pkg.alpha'),
+        ['ap2.lua'] = fn('via_beta', 'pkg.beta') }
+    local res = agent.answer(store, 'clones_find', { kind = 'near' })
+    local row = nearrow(res, 'via_alpha', 'via_beta')
+    ok(row, 'the pair reaches the agent surface')
+    local priced
+    for _, h in ipairs(row and row.holes or {}) do
+        if h.literal_dep and tostring(h.literal_dep) ~= 'NUL' then priced = h end
+    end
+    ok(priced, 'the import-path hole carries its price, not just its value')
+    vim.fn.delete(root, 'rf')
+end)
