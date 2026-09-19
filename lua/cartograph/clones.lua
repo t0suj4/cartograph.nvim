@@ -123,10 +123,24 @@ end
 local function fn_row_keys(eo)
     local stmts = eo and eo.fl and eo.fl.stmts
     if not stmts or #stmts == 0 then return nil end
-    local locals = {}
-    for _, p in ipairs(eo.fl.params or {}) do locals[p] = true end
+    local locals, params = {}, {}
+    -- ⚠ THE PARAMS ARE KEPT APART AS WELL AS MERGED. `locals` answers "is this name
+    -- bound in the body"; `params` answers "does the CALL SITE hold this value" — a
+    -- different question, and the one an extraction has to ask, because a helper
+    -- carrying the shared statements takes a body local WITH it (CART-0876 item 2).
+    --
+    -- ⚠⚠ AND IT IS "ASSIGNED ONCE", NOT "IS A PARAMETER". `opts = opts or {}` on the
+    -- first line is the commonest idiom in this language — 230 of our own 4138
+    -- functions (5.6%) redefine a parameter. If that row is inside the lifted region
+    -- the helper carries the reassignment, while the call site would pass the INCOMING
+    -- value: the hole would read one thing and the original another. A parameter the
+    -- body ever redefines therefore drops out of the call-site-safe set. This is
+    -- conservative — a redefinition AFTER the hole's row is harmless and still drops
+    -- it — and conservative here means falling back to the struct hole and the
+    -- function parameter Mer-S derives, which is the safe direction.
+    for _, p in ipairs(eo.fl.params or {}) do locals[p] = true; params[p] = true end
     for _, s in ipairs(stmts) do
-        for _, d in ipairs(s.def or {}) do locals[d] = true end
+        for _, d in ipairs(s.def or {}) do locals[d] = true; params[d] = nil end
     end
     local slots, ctr = {}, { n = 0 }
     local keys, lines, exprs = {}, {}, {}
@@ -135,7 +149,7 @@ local function fn_row_keys(eo)
         lines[#lines + 1] = s.l
         exprs[#exprs + 1] = s.expr
     end
-    return keys, lines, #(eo.fl.params or {}), exprs, locals
+    return keys, lines, #(eo.fl.params or {}), exprs, locals, params
 end
 
 --- The alpha-invariant structural signature of a function's body: (nparams, {row_key…}).
@@ -175,10 +189,11 @@ local function build_index(store)
         if (n.kind == 'function' or n.kind == 'method') and n.file then
             local ok, eo = pcall(expr.of, store, n.id)
             if ok and eo then
-                local keys, lines, nparams, exprs, locals = fn_row_keys(eo)
+                local keys, lines, nparams, exprs, locals, params = fn_row_keys(eo)
                 if keys and #keys >= INDEX_FLOOR then
                     fns[#fns + 1] = { id = n.id, name = n.name, file = n.file,
                         keys = keys, lines = lines, exprs = exprs, locals = locals,
+                        params = params,
                         nparams = nparams, line = n.range and (at.sl(n.range) + 1) or 0 }
                 end
             end
@@ -1048,7 +1063,7 @@ local function shares_subterm(x, y)
     return hit
 end
 
-local function anti_unify(e1, e2, la, lb, holes, ren)
+local function anti_unify(e1, e2, la, lb, holes, ctx)
     if e1 == nil and e2 == nil then return true end
     if e1 == nil or e2 == nil then
         holes[#holes + 1] = { kind = 'struct' }; return false
@@ -1088,7 +1103,7 @@ local function anti_unify(e1, e2, la, lb, holes, ren)
         local l1, l2 = is_local(e1.n, la), is_local(e2.n, lb)
         if l1 and l2 then
             -- ★★★ TWO LOCALS ARE ALPHA-EQUIVALENT ONLY UNDER A BIJECTION, and until
-            -- `ren` there was no map to check it against: the rule was "any local
+            -- `ctx` there was no map to check it against: the rule was "any local
             -- equals any local", which is sound for a consistent rename and WRONG for
             -- a swap. The witness is lsp.lua's two call-hierarchy handlers —
             -- `occurrences(caller, id)` against `occurrences(id, callee)`, the SAME
@@ -1105,16 +1120,16 @@ local function anti_unify(e1, e2, la, lb, holes, ren)
             --
             -- ⚠ A map, not a set: BOTH directions are checked, so `a ⇄ x` and
             -- `b ⇄ x` collide as surely as `a ⇄ x` and `a ⇄ y`. Equal names register
-            -- too (`n ⇄ n`), or a later `n ⇄ m` would slip past. `ren` is per PAIR and
-            -- filled greedily in op order; a caller passing none (the template matcher,
-            -- the repetition aligner) gets exactly the old behaviour.
-            if ren then
-                local ra, rb = ren.a[e1.n], ren.b[e2.n]
+            -- too (`n ⇄ n`), or a later `n ⇄ m` would slip past. `ctx.ra`/`ctx.rb` are
+            -- per PAIR and filled greedily in op order; a caller passing no `ctx` (the
+            -- template matcher, the repetition aligner) gets exactly the old behaviour.
+            if ctx then
+                local ra, rb = ctx.ra[e1.n], ctx.rb[e2.n]
                 if (ra and ra ~= e2.n) or (rb and rb ~= e1.n) then
                     holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'rename' }
                     return false
                 end
-                ren.a[e1.n], ren.b[e2.n] = e2.n, e1.n
+                ctx.ra[e1.n], ctx.rb[e2.n] = e2.n, e1.n
             end
             return true
         end
@@ -1123,10 +1138,36 @@ local function anti_unify(e1, e2, la, lb, holes, ren)
             holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
             return true
         end
+        -- ★★★ A LOCAL FACING A GLOBAL IS A LEAF DIFFERENCE, SO IT IS A TERM HOLE —
+        -- a value parameter, not a refusal (CART-0876 item 2). The algebra says so
+        -- twice over: NEARBINDERS.md found every such hole to be "a parameter whose
+        -- argument is the local here and the expression there", and the BK pass
+        -- corrected an earlier reading of its own — "that mismatch is a LEAF
+        -- difference and stays a term hole"; the CONTEXT variable names the other
+        -- struct hole (kind/arity differing with a shared subtree), not this one.
+        --
+        -- ⚠⚠ AND IT IS A VALUE ONLY IF THE LOCAL IS IN SCOPE AT THE CALL SITE, which
+        -- is NOT the same as being in `locals`. The proposal's own sentence is
+        -- "introduce a helper carrying the N shared statement(s) ... then replace each
+        -- body with a call": a body local defined in the shared region MOVES INTO THE
+        -- HELPER, so passing it at the call site names something that does not exist
+        -- yet. A PARAMETER of the enclosing function is in scope there by
+        -- construction; nothing else is guaranteed to be. Of the five holes over
+        -- `lua/`, `mod` (spec/haskell.lua `resolve_import(mod, files)`) and `extra`
+        -- (flow.lua `extend_set(base, extra)`) are parameters and lift; `so`
+        -- (`local so = require 'cartograph.self_oracle'`, confirm.lua:148, the FIRST
+        -- row of the shared region) is not, and stays a struct hole for the function
+        -- parameter Mer-S already derives for it.
+        local lnm = l1 and e1.n or e2.n
+        local ps = ctx and (l1 and ctx.pa or ctx.pb)
+        if ps and ps[lnm] then
+            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
+            return true
+        end
         holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'localglobal' }
-        return false -- local vs global
+        return false -- a local the call site cannot name
     elseif k == 'field' then
-        local ok = anti_unify(e1.b, e2.b, la, lb, holes, ren)
+        local ok = anti_unify(e1.b, e2.b, la, lb, holes, ctx)
         -- a field-NAME hole lifts as the whole field ACCESS (a value param): e1/e2 ARE
         -- the field nodes, so e1.at/e2.at span `base.name` — the value to pass.
         if e1.n ~= e2.n then
@@ -1134,14 +1175,14 @@ local function anti_unify(e1, e2, la, lb, holes, ren)
         end
         return ok
     elseif k == 'index' then
-        local o1 = anti_unify(e1.b, e2.b, la, lb, holes, ren)
-        return anti_unify(e1.i, e2.i, la, lb, holes, ren) and o1
+        local o1 = anti_unify(e1.b, e2.b, la, lb, holes, ctx)
+        return anti_unify(e1.i, e2.i, la, lb, holes, ctx) and o1
     elseif k == 'call' then
         if #(e1.a or {}) ~= #(e2.a or {}) then
             holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'arity' }; return false
         end
-        local ok = anti_unify(e1.f, e2.f, la, lb, holes, ren)
-        for i = 1, #(e1.a or {}) do ok = anti_unify(e1.a[i], e2.a[i], la, lb, holes, ren) and ok end
+        local ok = anti_unify(e1.f, e2.f, la, lb, holes, ctx)
+        for i = 1, #(e1.a or {}) do ok = anti_unify(e1.a[i], e2.a[i], la, lb, holes, ctx) and ok end
         return ok
     elseif k == 'un' then
         -- ⚠ THE SPAN OF AN OPERATOR HOLE IS THE ENCLOSING EXPRESSION, NOT THE
@@ -1156,14 +1197,14 @@ local function anti_unify(e1, e2, la, lb, holes, ren)
             holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op,
                 at_a = e1.at, at_b = e2.at, at_encloses = true }
         end
-        return anti_unify(e1.e, e2.e, la, lb, holes, ren)
+        return anti_unify(e1.e, e2.e, la, lb, holes, ctx)
     elseif k == 'bin' then
         if e1.op ~= e2.op then
             holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op,
                 at_a = e1.at, at_b = e2.at, at_encloses = true }
         end
-        local o1 = anti_unify(e1.l, e2.l, la, lb, holes, ren)
-        return anti_unify(e1.r, e2.r, la, lb, holes, ren) and o1
+        local o1 = anti_unify(e1.l, e2.l, la, lb, holes, ctx)
+        return anti_unify(e1.r, e2.r, la, lb, holes, ctx) and o1
     else -- table / fn / vararg / ? fallback: compare kid lists
         local k1, k2 = e1.kids or {}, e2.kids or {}
         if #k1 ~= #k2 then
@@ -1173,7 +1214,7 @@ local function anti_unify(e1, e2, la, lb, holes, ren)
             return true
         end
         local ok = true
-        for i = 1, #k1 do ok = anti_unify(k1[i], k2[i], la, lb, holes, ren) and ok end
+        for i = 1, #k1 do ok = anti_unify(k1[i], k2[i], la, lb, holes, ctx) and ok end
         return ok
     end
 end
@@ -1328,7 +1369,7 @@ local function same_at(x, y)
         and at.el(x) == at.el(y) and at.ec(x) == at.ec(y)
 end
 
-local function anti_unify_row(r1, r2, la, lb, holes, imp, ren)
+local function anti_unify_row(r1, r2, la, lb, holes, imp, ctx)
     local row_start = #holes
     if not r1 or not r2 then holes[#holes + 1] = { kind = 'struct' }; return false end
     if #(r1.lhs or {}) ~= #(r2.lhs or {}) or #(r1.rhs or {}) ~= #(r2.rhs or {}) then
@@ -1373,7 +1414,7 @@ local function anti_unify_row(r1, r2, la, lb, holes, imp, ren)
     for i = 1, #(r1.lhs or {}) do
         local before = #holes
         local d1, d2 = r1.lhs[i], r2.lhs[i]
-        ok = anti_unify(d1, d2, la, lb, holes, ren) and ok
+        ok = anti_unify(d1, d2, la, lb, holes, ctx) and ok
         -- does the TARGET ITSELF diverge, and in what
         local tk, tn1, tn2
         if d1 and d2 and d1.k == d2.k and (d1.k == 'field' or d1.k == 'name')
@@ -1402,8 +1443,8 @@ local function anti_unify_row(r1, r2, la, lb, holes, imp, ren)
             end
         end
     end
-    for i = 1, #(r1.rhs or {}) do ok = anti_unify(r1.rhs[i], r2.rhs[i], la, lb, holes, ren) and ok end
-    if r1.cond or r2.cond then ok = anti_unify(r1.cond, r2.cond, la, lb, holes, ren) and ok end
+    for i = 1, #(r1.rhs or {}) do ok = anti_unify(r1.rhs[i], r2.rhs[i], la, lb, holes, ctx) and ok end
+    if r1.cond or r2.cond then ok = anti_unify(r1.cond, r2.cond, la, lb, holes, ctx) and ok end
     -- ★ TAGGED BY RANGE, the same way `side` is, and for the same reason: the cost is
     -- a property of WHERE the hole sits, the row knows every hole it just produced,
     -- and threading a sixth parameter through `anti_unify`'s fifteen recursion sites
@@ -1446,9 +1487,10 @@ function M.analyze_pair(pair)
     -- key — never by a row key, so no tier count moves.
     local locals_a = with_binders(pair.a.exprs, lang, pair.a.locals)
     local locals_b = with_binders(pair.b.exprs, lang, pair.b.locals)
-    -- the alpha-rename map, ONE per pair and shared across every row (see the `name`
-    -- arm): a rename is only a rename if it is the same everywhere in the body.
-    local ren = { a = {}, b = {} }
+    -- ONE per-pair context rather than four more positional arguments: the rename maps
+    -- (see the `name` arm) and each side's PARAMETER set, which decides whether a local
+    -- facing a global can be lifted as a value.
+    local ctx = { ra = {}, rb = {}, pa = pair.a.params, pb = pair.b.params }
     -- ★★★ SEEDED FROM THE MATCHED ROWS FIRST, and the order is the point. A `match` row
     -- pairs two locals just as firmly as a `sub` row does; seeing only the subs, the map
     -- learns `caller ⇄ src` from the one differing row and never learns the `src ⇄ src`
@@ -1460,7 +1502,7 @@ function M.analyze_pair(pair)
     -- matched row only when the two names are literally the same.
     for _, o in ipairs(pair.ops) do
         if o.op == 'match' then
-            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], locals_a, locals_b, {}, imp, ren)
+            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], locals_a, locals_b, {}, imp, ctx)
         end
     end
     for _, o in ipairs(pair.ops) do
@@ -1468,7 +1510,7 @@ function M.analyze_pair(pair)
             -- per-ROW hole lists, then merged. The drift test below needs to know that a
             -- row diverges in exactly ONE place, which a single shared list cannot say.
             local rh = {}
-            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], locals_a, locals_b, rh, imp, ren)
+            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], locals_a, locals_b, rh, imp, ctx)
             rows[#rows + 1] = rh
             for _, h in ipairs(rh) do holes[#holes + 1] = h end
         elseif o.op == 'ins' or o.op == 'del' then
@@ -1498,10 +1540,12 @@ function M.analyze_pair(pair)
     -- tie-break, this). The four sites are not one population:
     --     'arity'        a call or kid list of differing LENGTH. A hedge inside the
     --                    list; it encloses nothing, so NEVER a wrapper.
-    --     'localglobal'  a local facing a global — a module upvalue or a stdlib name
-    --                    against a body local. FIVE over `lua/` at max_dist 20 once
-    --                    loop binders are visible (`with_binders`); it fires ZERO
-    --                    times at the shipped max_dist of 2. CART-0876.
+    --     'localglobal'  a local facing a global where the local is NOT a parameter,
+    --                    so the call site cannot name it (see the `name` arm). When it
+    --                    IS a parameter the hole is a value parameter and never
+    --                    reaches this list. TWO over `lua/` at max_dist 20 of the five
+    --                    such divergences; it fires ZERO times at the shipped
+    --                    max_dist of 2, and on wow 5 holes over 5291 pairs. CART-0876.
     --     'rename'       two locals that do NOT rename consistently across the body —
     --                    a SWAP, not a rename. See the `name` arm.
     --

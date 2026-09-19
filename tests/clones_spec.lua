@@ -3796,9 +3796,64 @@ test('clones: a numeric-for binds its VARIABLE, never its bounds', function ()
     vim.fn.delete(root, 'rf')
 end)
 
-test('clones: a real local against a real global is STILL a localglobal hole', function ()
-    -- the arm's true population, the five the measurement left standing over `lua/`:
-    -- a module upvalue or a stdlib global facing a body local.
+test('clones: a PARAMETER facing a global is a value parameter, not a struct hole', function ()
+    -- CART-0876 item 2. A leaf difference is a TERM hole (the BK pass: "that mismatch
+    -- is a LEAF difference and stays a term hole"), so a local facing a global is a
+    -- parameter whose argument is the local here and the global there — provided the
+    -- call site can NAME the local, which for a body replaced wholesale means a
+    -- parameter of the enclosing function.
+    local base = '  local out = {}\n  local seed = load(src)\n'
+    local tail = '  local n = count(out)\n  persist(out)\n  return n'
+    local body_a = base .. '  out[#out + 1] = tag(mode)\n' .. tail
+    local body_b = base .. '  out[#out + 1] = tag(DEFAULTS)\n' .. tail
+    local root = proj {
+        ['pg1.lua'] = fn('from_param', 'src, mode', body_a),
+        ['pg2.lua'] = fn('from_global', 'src, mode', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'from_param', 'from_global')
+    ok(p, 'from_param and from_global are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    eq(0, lg_holes(an), 'the parameter facing a global mints NO struct hole')
+    local saw = false
+    for _, h in ipairs(an and an.holes or {}) do
+        if h.kind == 'name' and h.a == 'mode' and h.b == 'DEFAULTS' then saw = true end
+    end
+    ok(saw, 'it is a value parameter: mode / DEFAULTS')
+    eq('value', an and an.kind, 'and the pair is offered as a clean extraction')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a REDEFINED parameter is not call-site-safe either', function ()
+    -- ⚠ THE TRIPWIRE FOR "ASSIGNED ONCE" vs "IS A PARAMETER". `mode = mode or 'x'` is
+    -- the commonest idiom in the language (5.6% of our own functions redefine a
+    -- parameter). That row sits INSIDE the lifted region, so the helper carries the
+    -- reassignment while the call site would pass the INCOMING value — the hole would
+    -- read one thing and the original another.
+    local base = '  local out = {}\n  local seed = load(src)\n'
+    local tail = '  local n = count(out)\n  persist(out)\n  return n'
+    local pre = "  mode = mode or 'fast'\n"
+    local body_a = pre .. base .. '  out[#out + 1] = tag(mode)\n' .. tail
+    local body_b = pre .. base .. '  out[#out + 1] = tag(DEFAULTS)\n' .. tail
+    local root = proj {
+        ['rp1.lua'] = fn('reassigned_param', 'src, mode', body_a),
+        ['rp2.lua'] = fn('reassigned_global', 'src, mode', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'reassigned_param', 'reassigned_global')
+    ok(p, 'reassigned_param and reassigned_global are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok(lg_holes(an) >= 1, 'the redefined parameter is NOT lifted as a value')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a BODY local against a global is STILL a localglobal hole', function ()
+    -- ⚠ THE TRIPWIRE FOR ITEM 2's SCOPE. The proposal's own sentence is "introduce a
+    -- helper carrying the N shared statement(s) ... then replace each body with a
+    -- call": a local DEFINED in the shared region moves into the helper, so passing it
+    -- at the call site names something that does not exist there. The shipped instance
+    -- is confirm.lua:148 — `local so = require 'cartograph.self_oracle'`, the first row
+    -- of the shared region — which is why two of the five holes over `lua/` stayed.
     local base = '  local out = {}\n  local seed = load(src)\n'
     local tail = '  persist(out)\n  return out'
     local body_a = base .. '  local mode = pick(seed)\n  out[#out + 1] = mode\n' .. tail
