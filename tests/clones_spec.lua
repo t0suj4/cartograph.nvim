@@ -3721,3 +3721,129 @@ test('clones: Mer-S does NOT merge two different wrapper divergences', function 
     eq(2, an and #(an.fparams or {}), 'two distinct pairs stay two parameters')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── loop binders: the locals df never records ────────────────────────────────
+-- `for _, g in pairs(t)` puts `g` in `use` and never in `def`, so the locals set
+-- (params ∪ df-defs) misses every loop variable and the anti-unifier reads one as a
+-- GLOBAL. Measured over `lua/` at max_dist 20 before this: 22 `localglobal` struct
+-- holes, of which SEVENTEEN were two loop variables facing each other. The prototype
+-- ran the same experiment and reached the same harvest (~/tools/templates
+-- NEARBINDERS.md: "read off the `for` clause nodes ... a copy; cartograph's set is
+-- not touched").
+local function lg_holes(an)
+    local n = 0
+    for _, h in ipairs(an and an.structs or {}) do
+        if h.why == 'localglobal' then n = n + 1 end
+    end
+    return n
+end
+
+test('clones: a loop variable facing a real local is NOT local-vs-global', function ()
+    -- ⚠ THE DEFECT NEEDS AN ASYMMETRY, which is why the shipped instance is
+    -- lsp.lua:408 against lsp.lua:422: `caller` is a loop binder the locals set misses
+    -- and `id` on the other side is a parameter it has, so the arm sees local-vs-global
+    -- where two locals face each other. Two MISSED binders facing each other mint a
+    -- plain `name` hole instead and would not have caught this.
+    local base = '  local out = {}\n  local seed = load(src)\n'
+    local tail = '  local n = count(out)\n  persist(out)\n  return n'
+    local body_a = base .. '  for _, caller in ipairs(seed) do out[#out + 1] = tag(caller) end\n' .. tail
+    local body_b = base .. '  local item = pick(seed)\n'
+        .. '  for _, caller in ipairs(seed) do out[#out + 1] = tag(item) end\n' .. tail
+    local root = proj {
+        ['lb1.lua'] = fn('incoming', 'src', body_a),
+        ['lb2.lua'] = fn('outgoing', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'incoming', 'outgoing')
+    ok(p, 'incoming and outgoing are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    eq(0, lg_holes(an), 'the loop binder ⇄ the parameter mints NO local-vs-global hole')
+    -- ⚠ THE CONTAINMENT, ASSERTED DIRECTLY. `pair.a.locals` feeds `rcanon` and every
+    -- row key; widening it there would move every tier count and every clone baseline.
+    -- The binder is visible to the anti-unifier and absent from the key set, which is
+    -- the whole design in one assertion.
+    ok(p and not (p.a.locals or {})['caller'],
+        'and the ROW-KEY locals set is untouched — the widening is a view')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a numeric-for binds its VARIABLE, never its bounds', function ()
+    -- ⚠ THE TRIPWIRE FOR THE `break`. `for i = 1, limit` has two name children and only
+    -- the FIRST binds; calling `limit` a local too would make `limit` ⇄ `cap` read as
+    -- two alpha-equivalent locals and SWALLOW a real divergence — a false MERGE, the one
+    -- direction this must never take.
+    local base = '  local out = {}\n  local seed = load(src)\n'
+    local tail = '  local n = count(out)\n  persist(out)\n  return n'
+    local body_a = base .. '  for i = 1, limit do out[#out + 1] = seed[i] end\n' .. tail
+    local body_b = base .. '  for j = 1, cap do out[#out + 1] = seed[j] end\n' .. tail
+    local root = proj {
+        ['nb1.lua'] = fn('upto_limit', 'src', body_a),
+        ['nb2.lua'] = fn('upto_cap', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'upto_limit', 'upto_cap')
+    ok(p, 'upto_limit and upto_cap are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local saw = false
+    for _, h in ipairs(an and an.holes or {}) do
+        if (h.a == 'limit' and h.b == 'cap') or (h.a == 'cap' and h.b == 'limit') then saw = true end
+    end
+    ok(saw, 'the BOUND limit ⇄ cap is still reported as a parameter')
+    eq(1, #(an and an.holes or {}),
+        'and it is the ONLY one — i ⇄ j, the binders, mint nothing')
+    eq('value', an and an.kind,
+        'so the pair reads as a clean extraction: one value parameter, no structure')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a real local against a real global is STILL a localglobal hole', function ()
+    -- the arm's true population, the five the measurement left standing over `lua/`:
+    -- a module upvalue or a stdlib global facing a body local.
+    local base = '  local out = {}\n  local seed = load(src)\n'
+    local tail = '  persist(out)\n  return out'
+    local body_a = base .. '  local mode = pick(seed)\n  out[#out + 1] = mode\n' .. tail
+    local body_b = base .. '  local mode = pick(seed)\n  out[#out + 1] = DEFAULTS\n' .. tail
+    local root = proj {
+        ['gg1.lua'] = fn('with_local', 'src', body_a),
+        ['gg2.lua'] = fn('with_global', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'with_local', 'with_global')
+    ok(p, 'with_local and with_global are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok(lg_holes(an) >= 1, 'mode ⇄ DEFAULTS still reads as local-vs-global: '
+        .. tostring(an and #(an.structs or {})))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: two locals that SWAP are a rename divergence, not a clean extraction', function ()
+    -- ⚠ THE SHIPPED WITNESS is lsp.lua's two call-hierarchy handlers:
+    -- `occurrences(caller, id)` against `occurrences(id, callee)` — the same two
+    -- arguments in the OPPOSITE order. "Any local equals any local" makes that read as
+    -- a clean two-parameter extraction, and no single helper can implement it. While
+    -- `caller` was missing from the locals set the arm refused the pair for the WRONG
+    -- reason (local-vs-global); teaching it about binders removed that accident, so
+    -- the bijection has to be checked rather than inherited.
+    local base = '  local out = {}\n  local id = item_id(src)\n'
+    local body_a = base .. '  for _, caller in ipairs(edges(id)) do\n'
+        .. '    local hits = occ(caller, id)\n    out[#out + 1] = hits\n  end\n  return out'
+    local body_b = base .. '  for _, callee in ipairs(edges(id)) do\n'
+        .. '    local hits = occ(id, callee)\n    out[#out + 1] = hits\n  end\n  return out'
+    local root = proj {
+        ['sw1.lua'] = fn('incoming_calls', 'src', body_a),
+        ['sw2.lua'] = fn('outgoing_calls', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'incoming_calls', 'outgoing_calls')
+    ok(p, 'incoming_calls and outgoing_calls are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local nren = 0
+    for _, h in ipairs(an and an.structs or {}) do
+        if h.why == 'rename' then nren = nren + 1 end
+    end
+    ok(nren >= 1, 'the swapped argument pair is reported as a rename divergence')
+    eq('structural', an and an.kind, 'so the pair is NOT offered as a clean extraction')
+    eq(nren, an and an.struct_why and an.struct_why.rename,
+        'and `rename` is counted in its OWN bucket, not folded into `kind`')
+    vim.fn.delete(root, 'rf')
+end)
