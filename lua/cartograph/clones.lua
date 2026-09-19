@@ -1114,7 +1114,55 @@ function M.element_template(container)
 end
 
 -- anti-unify two whole rows ({lhs, rhs, cond}); lists of differing length are structural.
-local function anti_unify_row(r1, r2, la, lb, holes)
+--- ★★★ THE POSITIONS A RESOLVER READS AS A LITERAL — and lifting one to a VALUE
+--- parameter destroys the fact it carries. Two shapes today, both the import seam:
+---     require('cartograph.narrow')            the path argument
+---     require('cartograph.narrow').report     the selector on the result
+--- Turn either into a parameter and `require(mod)[fn]` resolves to NOTHING: the
+--- import edge and the reference to the report function both stop existing.
+---
+--- ★★ MEASURED, ON OUR OWN TREE, BEFORE THIS EXISTED (CART-0878). Extracting six
+--- command callbacks with the module and report as STRING parameters took
+--- commands/analysis.lua from 17 import edges to 11, and three report functions
+--- (`report_blocks`, `param_report`, `devirt_report`) became unreferenced. The same
+--- six extracted with the call passed as a FUNCTION cost nothing and removed exactly
+--- the same duplication — 32 near-clone pairs to 7 either way. Cross-checked by the
+--- algebra's scope graph, whose `module` resolution class went 31 -> 25 -> 31 over
+--- the same three variants: two analysers, different IRs, the same six facts.
+---
+--- ⚠ SO THIS IS NOT A REFUSAL. A hole here is still extractable; what it costs is
+--- known, and the cost is zero if it is lifted as a function rather than a value.
+--- The proposal says so and leaves the choice — a rule source may only refuse, and
+--- this is not a rule, it is a price.
+---
+--- ⚠ AND IT IS THE SPEC'S `import_call`, NOT THE STRING `require`. lua says
+--- `require`, ruby says `require_relative`, php declares none and gets nothing —
+--- which is honest: php's import edges come from `import_query`, a shape this test
+--- does not model, so it reports no cost rather than a wrong one.
+local function literal_dep_sites(r, imp, out)
+    local function scan(e)
+        if type(e) ~= 'table' then return end
+        if e.k == 'call' and e.f and e.f.k == 'name' and e.f.n == imp then
+            local a1 = e.a and e.a[1]
+            if a1 and a1.k == 'lit' and a1.at then out[#out + 1] = { at = a1.at, why = 'an import path' } end
+        elseif e.k == 'field' and e.at and e.b and e.b.k == 'call'
+            and e.b.f and e.b.f.k == 'name' and e.b.f.n == imp then
+            out[#out + 1] = { at = e.at, why = 'a member of an import' }
+        end
+    end
+    for _, e in ipairs(r.lhs or {}) do expr.walk(e, scan) end
+    for _, e in ipairs(r.rhs or {}) do expr.walk(e, scan) end
+    if r.cond then expr.walk(r.cond, scan) end
+end
+
+local function same_at(x, y)
+    if not x or not y then return false end
+    return at.sl(x) == at.sl(y) and at.sc(x) == at.sc(y)
+        and at.el(x) == at.el(y) and at.ec(x) == at.ec(y)
+end
+
+local function anti_unify_row(r1, r2, la, lb, holes, imp)
+    local row_start = #holes
     if not r1 or not r2 then holes[#holes + 1] = { kind = 'struct' }; return false end
     if #(r1.lhs or {}) ~= #(r2.lhs or {}) or #(r1.rhs or {}) ~= #(r2.rhs or {}) then
         holes[#holes + 1] = { kind = 'struct' }; return false
@@ -1189,6 +1237,21 @@ local function anti_unify_row(r1, r2, la, lb, holes)
     end
     for i = 1, #(r1.rhs or {}) do ok = anti_unify(r1.rhs[i], r2.rhs[i], la, lb, holes) and ok end
     if r1.cond or r2.cond then ok = anti_unify(r1.cond, r2.cond, la, lb, holes) and ok end
+    -- ★ TAGGED BY RANGE, the same way `side` is, and for the same reason: the cost is
+    -- a property of WHERE the hole sits, the row knows every hole it just produced,
+    -- and threading a sixth parameter through `anti_unify`'s fifteen recursion sites
+    -- is the change this file keeps paying for.
+    if imp then
+        local sites = {}
+        literal_dep_sites(r1, imp, sites)
+        if #sites > 0 then
+            for j = row_start + 1, #holes do
+                for _, sd in ipairs(sites) do
+                    if same_at(holes[j].at_a, sd.at) then holes[j].literal_dep = sd.why; break end
+                end
+            end
+        end
+    end
     return ok
 end
 
@@ -1203,12 +1266,22 @@ end
 ---                value-parameterization (a callback/restructure, left to the human).
 function M.analyze_pair(pair)
     local holes, insdel, rows = {}, 0, {}
+    -- the language's import verb, for the literal-dependency price (see
+    -- `literal_dep_sites`). A language that declares none simply gets no price.
+    local imp
+    do
+        local lang = pair.a.file and expr.lang_of(pair.a.file)
+        if lang then
+            local oks, sp = pcall(require, 'cartograph.spec.' .. lang)
+            imp = oks and type(sp) == 'table' and sp.import_call or nil
+        end
+    end
     for _, o in ipairs(pair.ops) do
         if o.op == 'sub' then
             -- per-ROW hole lists, then merged. The drift test below needs to know that a
             -- row diverges in exactly ONE place, which a single shared list cannot say.
             local rh = {}
-            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], pair.a.locals, pair.b.locals, rh)
+            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], pair.a.locals, pair.b.locals, rh, imp)
             rows[#rows + 1] = rh
             for _, h in ipairs(rh) do holes[#holes + 1] = h end
         elseif o.op == 'ins' or o.op == 'del' then
@@ -1294,6 +1367,10 @@ function M.analyze_pair(pair)
             -- does, would report the pair as read-only whenever the read came first.
             if h.side == 'lhs' then p.side = 'lhs'; p.dest = p.dest or h.dest end
             if h.target then p.target = true end
+            -- ★ A PARAMETER IS PRICED IF **ANY** OF ITS SITES IS, the same rule `side`
+            -- uses: the grouping is by (kind, a, b), so one parameter can hold a priced
+            -- site and a free one, and lifting it pays for the priced one regardless.
+            if h.literal_dep then p.literal_dep = p.literal_dep or h.literal_dep end
             if h.at_a then p.sites_a[#p.sites_a + 1] = h.at_a end
             if h.at_b then p.sites_b[#p.sites_b + 1] = h.at_b end
         end
@@ -1623,7 +1700,10 @@ function M.near_report(pairs_, store)
         end
         -- the refined holes (the helper's parameters), anti-unified to the leaf
         for _, h in ipairs(a.holes) do
-            L[#L + 1] = ('      param (%s): %s  ⇄  %s'):format(h.kind, tostring(h.a), tostring(h.b))
+            L[#L + 1] = ('      param (%s): %s  ⇄  %s%s'):format(h.kind,
+                tostring(h.a), tostring(h.b),
+                h.literal_dep and ('   ★ PRICED: this is ' .. h.literal_dep
+                    .. ' — as a VALUE it costs the resolution') or '')
         end
         -- the raw differing rows (source), for the ins/del and structural cases
         for _, o in ipairs(p.ops) do
@@ -1696,9 +1776,16 @@ function M.extract_proposal(pair, store)
             pair.b.file, pair.b.lines[1] or 0),
         '  parameters (the varying leaves — one per hole):',
     }
+    local priced = 0
+    for _, h in ipairs(a.holes) do if h.literal_dep then priced = priced + 1 end end
     for i, h in ipairs(a.holes) do
         L[#L + 1] = ('    p%d (%s):  %s  in %s   /   %s  in %s')
             :format(i, h.kind, tostring(h.a), pair.a.name, tostring(h.b), pair.b.name)
+        if h.literal_dep then
+            L[#L + 1] = ('         ★ PRICED — this leaf is %s. Passed as a VALUE the'
+                .. ' resolver stops seeing it;'):format(h.literal_dep)
+            L[#L + 1] = '           passed as a FUNCTION the call site keeps its literal and it costs nothing.'
+        end
         -- the substitution SITE, from the expr-IR leaf range — where the rewrite lands
         if h.at_a and h.at_b then
             L[#L + 1] = ('         at %s:%d:%d  /  %s:%d:%d'):format(
@@ -1709,6 +1796,19 @@ function M.extract_proposal(pair, store)
     L[#L + 1] = ('  → introduce a helper carrying the %d shared statement(s) with the above')
         :format(pair.shared)
     L[#L + 1] = '    leaves as parameters, then replace each body with a call passing its filling.'
+    -- ★★★ THE PRICE THE CLONE TIER CANNOT SEE (CART-0876/0878). Both shapes of this
+    -- extraction remove exactly the same duplication; only one of them keeps the graph
+    -- we analyse ourselves with. Measured on our own commands/analysis.lua: six
+    -- callbacks lifted with STRING parameters took it from 17 import edges to 11 and
+    -- left three report functions unreferenced; the same six lifted with the call as a
+    -- FUNCTION cost nothing, and the near tier moved 32 -> 7 pairs either way.
+    if priced > 0 then
+        L[#L + 1] = ('  ★ FACT PRICE: %d of the %d parameter(s) above carry a resolution.')
+            :format(priced, #a.holes)
+        L[#L + 1] = '    Lifting them as VALUES makes the resolver lose what they name; lifting the'
+        L[#L + 1] = '    whole call as a FUNCTION keeps every literal at its call site and costs nothing.'
+        L[#L + 1] = '    Same duplication removed either way — this is a price, not a refusal.'
+    end
     -- body-safety gate (prereq #3): can each whole body be lifted into a same-scope
     -- helper? (top-level, no vararg/recursion, free reads visible to the helper)
     if store then

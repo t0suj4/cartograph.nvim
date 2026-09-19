@@ -3576,3 +3576,68 @@ test('clones: a hole on the READ side carries no write tag', function ()
     eq(nil, a.holes[1].dest, 'and no destination kind')
     vim.fn.delete(root, 'rf')
 end)
+
+-- CART-0876/0878. THE PRICE THE CLONE TIER CANNOT SEE. Two extractions can remove
+-- exactly the same duplication and only one of them keeps the graph we analyse
+-- ourselves with: lifting `require('m')`'s path — or the selector on its result — to a
+-- VALUE parameter makes `require(mod)[fn]` resolve to nothing, and the import edge and
+-- the reference to the function both stop existing. Measured on our own
+-- commands/analysis.lua: 17 import edges to 11, three report functions unreferenced,
+-- and the algebra's scope graph agreeing at module class 31 -> 25. Lifting the whole
+-- call as a FUNCTION costs nothing and removes the same clone.
+-- ⇒ SO THE PROPOSAL CARRIES A PRICE, NOT A REFUSAL — the choice stays the reader's.
+test('clones: a hole that is an IMPORT PATH is priced, and a plain string is not', function ()
+    local base = '  local s = ready(src)\n  if not s then return end\n'
+    local body_a = base .. "  log('starting up')\n  return require('proj.alpha').report(s)"
+    local body_b = base .. "  log('starting up')\n  return require('proj.beta').report(s)"
+    local root = proj {
+        ['p1.lua'] = fn('imp_one', 'src', body_a),
+        ['p2.lua'] = fn('imp_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 3, min_rows = 4, min_shared = 2 }),
+        'imp_one', 'imp_two')
+    ok(p, 'imp_one and imp_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local path_hole, other
+    for _, h in ipairs(an and an.holes or {}) do
+        if tostring(h.a):find('proj.alpha', 1, true) then path_hole = h
+        elseif tostring(h.a):find('starting up', 1, true) then other = h end
+    end
+    ok(path_hole, 'the import path is a hole')
+    eq('an import path', path_hole and path_hole.literal_dep,
+        'and it is PRICED as an import path')
+    -- ★ THE TRIPWIRE. A string literal that is NOT an import path must stay free, or
+    -- the price degenerates into "every literal costs something" and says nothing.
+    ok(other == nil or other.literal_dep == nil,
+        'a plain string literal in the same body is NOT priced')
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('FACT PRICE', 1, true), 'the proposal states the price')
+    ok(txt:find('as a FUNCTION', 1, true), 'and names the lift that costs nothing')
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ★ THE SELECTOR IS THE OTHER HALF, and it is the one that makes a function look
+--- DEAD rather than merely unimported: `require('m').report` against
+--- `require('m').summary` lifts to `require('m')[fn]`, and both `report` and
+--- `summary` lose their only reference.
+test('clones: a MEMBER of an import is priced too', function ()
+    local base = '  local s = ready(src)\n  if not s then return end\n'
+    local body_a = base .. "  return require('proj.alpha').report(s)"
+    local body_b = base .. "  return require('proj.alpha').summary(s)"
+    local root = proj {
+        ['q1.lua'] = fn('mem_one', 'src', body_a),
+        ['q2.lua'] = fn('mem_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 3, min_rows = 3, min_shared = 2 }),
+        'mem_one', 'mem_two')
+    ok(p, 'mem_one and mem_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local sel
+    for _, h in ipairs(an and an.holes or {}) do
+        if h.kind == 'field' and tostring(h.a) == 'report' then sel = h end
+    end
+    ok(sel, 'the selector is a field hole')
+    eq('a member of an import', sel and sel.literal_dep,
+        'and it is PRICED as a member of an import')
+    vim.fn.delete(root, 'rf')
+end)
