@@ -1,19 +1,30 @@
--- THE DONOR'S OWN 243 TESTS, RUN AGAINST OUR VENDORED COPY (CART-0912).
+-- THE DONOR'S OWN 372 TESTS, RUN AGAINST OUR VENDORED COPY (CART-0912).
+-- (243 at the 2026-09-13 cut; 372 since the 2026-09-19 re-vendor.)
 --
 -- ★★★ THIS IS WHAT MAKES THE PROOF OURS RATHER THAN BORROWED. The code has been
--- ours since the vendoring, and we have since SPLIT IT SIX WAYS — a capability
+-- ours since the vendoring, and we have since SPLIT IT 23 WAYS — a capability
 -- whose evidence lives in someone else's repository is one we cannot re-check
 -- after we change it. The donor's tests know nothing about parts, so they pass
 -- only if the adaptation preserved behaviour exactly. ⇒ THEY ARE THE ACCEPTANCE
 -- ORACLE FOR THE SPLIT, not a nicety.
 --
 -- ★★ THE THREE BANDS, EXACTLY AS THE USER DESCRIBED THEM:
---      VERBATIM  tests/vendor/algebra_spec.lua — 5240 lines, byte-identical,
+--      VERBATIM  tests/vendor/algebra_spec.lua — 8270 lines, byte-identical,
 --                stamped in `cartograph.algebra.origin` and watched by
 --                `tools/vendordrift.lua` as its SECOND unit
 --      ADAPT     this file: a harness shim, ~60 lines
 --      NEW       nothing
 --    The whole adaptation is the harness, which is the smallest possible cut.
+--
+-- ⚠ THE RE-VENDOR ADDED A THIRD ABSENCE KIND TO THE SHIM, NOT A FOURTH BAND.
+-- 43 of the 372 pend on the donor's `experiments/` fixtures, which are its
+-- measurement corpus and did not come with the code. The donor declares that
+-- contract itself beside its first use — "a re-vendored spec without
+-- experiments/ pends by name" — so `pending` is mapped onto `skip` and the two
+-- tests that `dofile` a fixture UNGUARDED are classified the same way, by a
+-- pattern that must name a missing file under `experiments/`. ⇒ WE HOLD THE
+-- CODE BUT NOT ALL OF ITS EVIDENCE: the lossless lua reader, the scope-graph
+-- census and the keyed oracle cannot be re-checked here.
 --
 -- ⚠ THE SHIM IS LOADED INTO A PRIVATE ENVIRONMENT, NOT INSTALLED GLOBALLY.
 -- `assert` is a Lua builtin every other spec uses; overriding `_G.assert` to
@@ -98,7 +109,7 @@ local SUPPLIES = { 'describe', 'it', 'assert', 'assert.equals', 'assert.equal',
     'assert.falsy', 'assert.is_falsy', 'assert.matches',
     'assert.are_not.same', 'assert.are_not.equal', 'assert.are_not.equals',
     'assert.is_not.equals', 'assert.is_not.equal', 'assert.is_not.same',
-    'assert.is_not_nil', 'assert.has_error' }
+    'assert.is_not_nil', 'assert.has_error', 'pending' }
 
 local function load_donor()
     local path = vim.fn.getcwd() .. '/tests/vendor/algebra_spec.lua'
@@ -125,6 +136,14 @@ local function load_donor()
         derive = 'a prototype-development affordance, deliberately not vendored'
             .. ' — see cartograph.algebra.origin.unported',
     }
+    --- ★★★ `pending` IS THE DONOR'S OWN WORD FOR "NOT ANSWERABLE HERE", AND THE
+    --- DONOR WROTE IT FOR US. Its spec says so in as many words beside the first
+    --- use: "the reader module lives beside the prototype; a re-vendored spec
+    --- without experiments/ pends by name". busted has `pending`; this harness
+    --- has `skip`; without the mapping all 40 of those became FAILURES, which is
+    --- the flattering direction's opposite — it blames the copy for a fixture
+    --- the donor deliberately kept.
+    env.pending = function (why) skip('donor pending: ' .. tostring(why)) end
     env.it = function (name, fn)
         local full = table.concat(stack, ' / ') .. ' / ' .. name
         registered = registered + 1
@@ -135,6 +154,18 @@ local function load_donor()
             local mod = type(err) == 'string' and err:match("module '([%w_.]+)' not found")
             if mod and UNPORTED[mod] then
                 skip(('requires `%s`: %s'):format(mod, UNPORTED[mod]))
+            end
+            -- ⚠ THE SAME DOCTRINE, ONE DEPENDENCY KIND OVER: the donor's
+            -- `experiments/` fixtures are its measurement material, not the
+            -- algebra, and they did not come with the vendoring. Most donor
+            -- tests guard them with `pending`; TWO `dofile` them unguarded, and
+            -- the intent is plainly the same. The pattern is deliberately
+            -- narrow — it must name a missing file under `experiments/`, so a
+            -- genuine error from inside a fixture that IS present still fails.
+            local fx = type(err) == 'string'
+                and err:match("cannot open (experiments/[%w_%-%.]+)")
+            if fx then
+                skip(('requires `%s`: a donor fixture, not vendored'):format(fx))
             end
             error(err, 0)
         end

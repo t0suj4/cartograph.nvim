@@ -10,10 +10,9 @@ return function (M, SHARED)
 -- private to this section and took it. PARTS then handed `vertical` a nil.
 -- ⇒ EACH SPLIT MAKES THE NEXT ONE LESS SAFE while a part's dependencies are
 --   invisible to the analysis that decides what travels.
-local is_strict_prefix = SHARED.is_strict_prefix
-local child, key, lcp, lexlt, prefix_eq, vsym =
-    SHARED.child, SHARED.key, SHARED.lcp, SHARED.lexlt, SHARED.prefix_eq, SHARED.vsym
-
+local child, is_strict_prefix, key, lcp, lexlt, prefix_eq, vsym =
+    SHARED.child, SHARED.is_strict_prefix, SHARED.key, SHARED.lcp, SHARED.lexlt,
+    SHARED.prefix_eq, SHARED.vsym
 
 -- ── CONSTRAINED MAPPINGS (Zhang 1995, as presented in Bille 2005 §3.4) ─────────
 -- ⚠ Zhang's paper was not read (paywalled). The definition below is Bille's statement

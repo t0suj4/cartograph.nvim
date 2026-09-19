@@ -13,8 +13,9 @@
 -- failed when it was bound to the first definition are the whole argument for
 -- taking the donor's tests along.
 return function (M, SHARED)
-local child, is_prefix, key = SHARED.child, SHARED.is_strict_prefix, SHARED.key
-local lcp, lexlt, prefix_eq, vsym = SHARED.lcp, SHARED.lexlt, SHARED.prefix_eq, SHARED.vsym
+local below, child, is_strict_prefix, key, lcp, lexlt, no_ancestors, prefix_eq, same, vsym =
+    SHARED.below, SHARED.child, SHARED.is_strict_prefix, SHARED.key, SHARED.lcp,
+    SHARED.lexlt, SHARED.no_ancestors, SHARED.prefix_eq, SHARED.same, SHARED.vsym
 
 -- ── THE TAI MAPPING HIERARCHY (Lu, Su, Tang 2001, as corrected by Kuboyama 2007) ──────
 -- Source: Kuboyama, "Matching and Learning in Trees", PhD thesis, U. Tokyo 2007, §2.8.6
@@ -25,16 +26,6 @@ local lcp, lexlt, prefix_eq, vsym = SHARED.lcp, SHARED.lexlt, SHARED.prefix_eq, 
 -- maximum) and x‘y for the lca. On position paths, lca = longest common prefix and
 -- "x below y" = y is a strict prefix of x. The empty path is the hedge's virtual root.
 local function lca(p, q) return lcp(p, q) end
-
-local function below(x, y) return is_prefix(y, x) end -- x proper descendant of y
-
-local function same(p, q) return key(p) == key(q) end
-
-local function no_ancestors(a, b, c)
-    return not (prefix_eq(a, b) or prefix_eq(b, a) or prefix_eq(a, c) or prefix_eq(c, a)
-        or prefix_eq(b, c) or prefix_eq(c, b))
-end
-
 local function triples(pairs, f)
     local n = #pairs
     for i = 1, n do
@@ -96,7 +87,7 @@ function M.mapping_leaves(pairs)
     local out = {}
     for _, p in ipairs(pairs) do
         local leaf = true
-        for _, q in ipairs(pairs) do if q ~= p and is_prefix(p.I, q.I) then leaf = false; break end end
+        for _, q in ipairs(pairs) do if q ~= p and is_strict_prefix(p.I, q.I) then leaf = false; break end end
         if leaf then out[#out + 1] = p end
     end
     return out

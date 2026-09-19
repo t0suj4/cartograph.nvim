@@ -52,7 +52,6 @@ local function abstract_by_value(t, Vs) -- every occurrence of a hole's value be
     end
     return go(t)
 end
-
 function M.transplant(a, b, c, opts)
     opts = opts or {}
     local env = opts.env

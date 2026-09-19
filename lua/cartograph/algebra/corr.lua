@@ -7,7 +7,8 @@
 -- this one did not, because a capture is now the FREE NAMES OF THE TRAVELLING
 -- SET, `(∪reads) \ (∪binds)`, rather than a text match (CART-0912).
 return function (M, SHARED)
-local at, cat, child, is_hole, key = SHARED.at, SHARED.cat, SHARED.child, SHARED.is_hole, SHARED.key
+local at, cat, child, is_hole, key =
+    SHARED.at, SHARED.cat, SHARED.child, SHARED.is_hole, SHARED.key
 
 local function all_paths(t, path, f) -- every position under t, with its subterm
     f(path, t)
@@ -20,15 +21,18 @@ function M.trace(T, V, env, stage)
     local r = M.instantiate(T, V, env)
     if not r.ok then return r end
     for h, e in pairs(M.sites(T)) do if e.ctx then return { ok = false, why = 'context hole ' .. h .. ' unsupported' } end end
+    if M.has_keyed(T.body) then return { ok = false, why = 'keyed nodes unsupported by trace (positional paths)' } end
     local origins = {}
-    local function attribute_value(out_path, h, v, base)
+    local seen = {} -- occurrences per hole in preorder: the site index (CLASSIFY.md reads it)
+    local function attribute_value(out_path, h, v, base, site, tpath)
         all_paths(v, {}, function(q, _)
-            origins[key(cat(out_path, q))] = { src = 'hole', stage = stage, hole = h, at = cat(base, q) }
+            origins[key(cat(out_path, q))] = { src = 'hole', stage = stage, hole = h, at = cat(base, q), site = site, tpath = tpath }
         end)
     end
     local function build(t, tpath, out_path)
         if is_hole(t) then -- a point hole: the whole value lands here
-            attribute_value(out_path, t.h, V[t.h], {})
+            seen[t.h] = (seen[t.h] or 0) + 1
+            attribute_value(out_path, t.h, V[t.h], {}, seen[t.h], tpath)
             return M.copy(V[t.h])
         end
         if t.k == 'embed' then -- the string is one output position; its inside is a nested correspondence
@@ -45,9 +49,10 @@ function M.trace(T, V, env, stage)
         local kids, n = {}, 0
         for i, c in ipairs(t.kids) do
             if is_hole(c) and c.rep then -- a repetition hole splices its sequence in
+                seen[c.h] = (seen[c.h] or 0) + 1
                 for j, e in ipairs(V[c.h].kids or {}) do
                     n = n + 1
-                    attribute_value(child(out_path, n), c.h, e, { j })
+                    attribute_value(child(out_path, n), c.h, e, { j }, seen[c.h], child(tpath, i))
                     kids[n] = M.copy(e)
                 end
             else

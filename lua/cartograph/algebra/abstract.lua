@@ -29,10 +29,18 @@ end
 --- read each hole's value off I at its sites (first site; the others must agree)
 function M.values_at(I, H)
     local V, conflicts = {}, {}
+    -- a site under an optional pair the instance lacks owes no value
+    local function dropped(s)
+        for _, u in ipairs(s.under or {}) do if at(I, u.path) == nil then return true end end
+        return false
+    end
     for h, e in pairs(H) do
         for _, s in ipairs(e.sites) do
             local v
-            if e.ctx then
+            if dropped(s) then v = nil
+            elseif e.presence then
+                v = at(I, s.path) ~= nil and M.present() or M.absent()
+            elseif e.ctx then
                 -- cut the context out: the slice with the sub-slice at the cursor replaced by ◦ (CTXCUT.md)
                 if not s.cursor then error('values_at: a context site (hole ' .. h .. ') needs a cursor record; H from sites(T) has none, H from match does') end
                 local parent = at(I, { unpack(s.path, 1, #s.path - 1) })
@@ -50,7 +58,8 @@ function M.values_at(I, H)
             else
                 v = M.copy(at_through(I, s.path, s.through))
             end
-            if V[h] == nil then V[h] = v
+            if v == nil then -- dropped
+            elseif V[h] == nil then V[h] = v
             elseif not M.eq(V[h], v) then conflicts[#conflicts + 1] = h end
         end
     end
@@ -63,19 +72,18 @@ local function later_first(a, b)
     -- the later-bound site first (ids from match), else the positive-width one
     if #a.path ~= #b.path then return #a.path > #b.path end
     for i = 1, #a.path do
-        if a.path[i] ~= b.path[i] then return a.path[i] > b.path[i] end
+        if a.path[i] ~= b.path[i] then return M.step_lt(b.path[i], a.path[i]) end
     end
     if a.id and b.id then return a.id > b.id end
     return (a.n or 1) > (b.n or 1)
 end
-
 function M.abstract(I, H)
     local entries = {}
     for h, e in pairs(H) do
         for _, s in ipairs(e.sites) do
             if e.ctx and not s.cursor then error('abstract: a context site (hole ' .. h .. ') needs a cursor record; H from sites(T) has none, H from match does') end
             entries[#entries + 1] = { h = h, path = s.path, n = s.n, rep = e.rep, ctx = e.ctx or nil, cursor = s.cursor,
-                through = s.through, id = s.id, within = s.within }
+                through = s.through, id = s.id, within = s.within, presence = e.presence or nil, under = s.under }
         end
     end
     -- the sites matched inside a context site's applied hedge, transitively (nested contexts)
@@ -128,7 +136,20 @@ function M.abstract(I, H)
         for _, x in ipairs(pool) do if x.within == enc then plan[#plan + 1] = x end end
         table.sort(plan, later_first)
         for _, p in ipairs(plan) do
-            if p.ctx then
+            -- a site under an optional pair this instance lacks: the pair's body cannot be read
+            -- off this instance, so the template cannot be recovered from it (KEYED.md)
+            for _, u in ipairs(p.under or {}) do
+                if at(body, u.path) == nil then
+                    error(('abstract: optional pair %s (hole %s) is absent in this instance; abstract from a member carrying it'):format(u.path[#u.path], u.h))
+                end
+            end
+            if p.presence then
+                local pair = at(body, p.path)
+                if pair == nil then
+                    error(('abstract: optional pair %s (hole %s) is absent in this instance; abstract from a member carrying it'):format(p.path[#p.path], p.h))
+                end
+                pair.opt = p.h
+            elseif p.ctx then
                 local node = cut(orig, p, pool)
                 local parent = at(body, { unpack(p.path, 1, #p.path - 1) })
                 local start, n = p.path[#p.path], p.n or 0

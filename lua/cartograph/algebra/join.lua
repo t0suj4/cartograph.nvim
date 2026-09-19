@@ -10,17 +10,16 @@
 -- `table.unpack or unpack` idiom once as a file-local, so a part that lost it
 -- would get 5.1's global on LuaJIT and nil elsewhere.
 return function (M, SHARED)
-local derived, family, is_hole, key, subst, unpack =
-    SHARED.derived, SHARED.family, SHARED.is_hole, SHARED.key, SHARED.subst, SHARED.unpack
+local anchor_fit, derived, fits, hedged_run, is_hole, same_key, subst, unpack =
+    SHARED.anchor_fit, SHARED.derived, SHARED.fits, SHARED.hedged_run, SHARED.is_hole,
+    SHARED.same_key, SHARED.subst, SHARED.unpack
 
 local function policy_of(opts)
     if type(opts) == 'number' then return { cap = opts, summary = M.SUMMARY } end
     opts = opts or {}
     return { cap = opts.cap or 3, summary = opts.summary or M.SUMMARY }
 end
-
 local function summarizable(v) return type(v) == 'table' and not is_hole(v) and v.k ~= 'seq' and v.k ~= 'cursor' end
-
 --- a derived domain from a value column: the fold of `widen`; empty or unsummarizable → open
 function M.summarize(values, opts)
     local D
@@ -30,13 +29,11 @@ function M.summarize(values, opts)
     end
     return D or M.open()
 end
-
 --- the incremental step: a derived domain meets one more observed value
 function M.widen(D, v, opts)
     if not summarizable(v) then return M.open() end
     return M.join_domain(D, M.closed(v), opts)
 end
-
 --- is this domain a value summary (as against a structural claim: rep, ref, context)?
 function M.summary_shaped(D)
     if D.kind == 'open' or D.kind == 'closed' or D.kind == 'kinds' then return true end
@@ -46,7 +43,6 @@ function M.summary_shaped(D)
     end
     return false
 end
-
 --- derived domains are summaries: recompute them from the family's value column.
 --- Three arms: value summaries (always); the repetition claim of a hedge hole and the
 --- recursion claim of a term hole (only when `opts.env` is passed: the element and base
@@ -197,7 +193,10 @@ function M.join(T1, T2, opts)
             if e.ctx then return nil, 'unsupported: hole ' .. h .. ' is a context hole (joining with context variables is not implemented)' end
         end
     end
-    local used, leftcount, memo, frags, order, counter, absorbed = {}, {}, {}, {}, {}, 0, {}
+    local used, leftcount, memo, frags, order, counter, absorbed, relaxed = {}, {}, {}, {}, {}, 0, {}, {}
+    -- a fragment side with NO value: the hole sits under an optional pair the other side
+    -- lacks, so that side's mapper owes nothing for it (KEYED.md)
+    local NOVAL = { k = 'noval' }
     -- the domain joins read `opts.env` for @refs; `@self` is the family's template, T1
     local dopts = setmetatable({ env = { defs = (opts.env or {}).defs, self = (opts.env or {}).self or T1 } }, { __index = opts })
     local boundary = nil -- inside a boundary crossed by THIS join, new holes are named <boundary>.<n>
@@ -237,58 +236,106 @@ function M.join(T1, T2, opts)
     end
     local lgg
     local function slice(kids, i, j) local out = {}; for x = i, j do out[#out + 1] = kids[x] end; return M.seq(out) end
-    local function rep_at(kids) -- the index of the one hedge hole; false when none; 'many' when several
-        local at
-        for i, c in ipairs(kids) do if is_hole(c) and c.rep then if at then return 'many' end; at = i end end
-        return at or false
-    end
-    -- ── hedge alignment (HEDGEJOIN.md). Two cases, both unitary:
-    -- FORCED: a list holding exactly one hedge hole fixes p positions before it and s after;
-    --   they align positionally, the hole absorbs the other side's middle (what match does).
-    -- ENDS: no hedge hole and unequal lengths: the identical prefix and suffix (generalize's
-    --   rule, M.eq per position), the middle becomes one hedge hole.
-    -- Several hedge holes in one list are not aligned by guessing: the node becomes a hole.
+    -- ── hedge alignment (HEDGEJOIN.md, LCSJOIN.md). Unitary, in this order:
+    -- BOTH HEDGED, same shape: hedge against hedge, the rest positional.
+    -- FORCED by k hedges on one side: the p kids before the first and the s after the last
+    --   align positionally; each interior fixed segment is placed at its leftmost fit in what
+    --   remains and the hedge before it takes what precedes (Kutsia's order as the hand-built
+    --   matcher takes it: leftmost hedge, shortest first). No fit: fall through.
+    -- EQUAL LENGTHS: positional.
+    -- LCS (Myers 1986): the kids common to both lists anchor; between two anchors a run of
+    --   equal length aligns kid by kid and an unequal run is one fresh hedge. The identical
+    --   prefix and suffix are the anchors' first and last stretch, so the old ends rule is the
+    --   case with no anchor inside.
+    local function hedges_at(kids) local out = {}; for i, c in ipairs(kids) do if is_hole(c) and c.rep then out[#out + 1] = i end end; return out end
     local function lgg_hedge(ak, bk, parent)
-        local ra, rb = rep_at(ak), rep_at(bk)
-        if ra == 'many' or rb == 'many' then return nil end
+        local ha, hb = hedges_at(ak), hedges_at(bk)
         if opts.align == 'none' and #ak ~= #bk then return nil end -- the fixed-arity lgg: no hedge holes
-        local function elementwise(pa, pb, n, out)
-            for i = 1, n do out[#out + 1] = lgg(ak[pa + i], bk[pb + i], parent) end
-        end
-        local p, sa, sb
-        if ra and rb then
-            if ra ~= rb or #ak - ra ~= #bk - rb then ra, rb = false, false end -- shapes disagree: ENDS
-        end
-        if ra or rb then
-            p = (ra or rb) - 1
-            local s = ra and (#ak - ra) or (#bk - rb)
-            local other = ra and #bk or #ak
-            if other < p + s then ra, rb = false, false -- no room for the fixed parts: ENDS
-            else
-                local out = {}
-                elementwise(0, 0, p, out)
-                local la = ra and ak[ra] or slice(ak, p + 1, #ak - s)
-                local lb = rb and bk[rb] or slice(bk, p + 1, #bk - s)
-                out[#out + 1] = fresh(la, lb, true)
-                elementwise(#ak - s, #bk - s, s, out)
+        local out = {}
+        local function elementwise(pa, pb, n) for i = 1, n do out[#out + 1] = lgg(ak[pa + i], bk[pb + i], parent) end end
+        if #ha > 0 and #hb > 0 and #ha == #hb and #ak == #bk then
+            local same = true
+            for i = 1, #ha do if ha[i] ~= hb[i] then same = false end end
+            if same then
+                local at = {}
+                for _, i in ipairs(ha) do at[i] = true end
+                for i = 1, #ak do out[#out + 1] = at[i] and fresh(ak[i], bk[i], true) or lgg(ak[i], bk[i], parent) end
                 return out
             end
         end
-        if #ak == #bk then local out = {}; elementwise(0, 0, #ak, out); return out end
+        local function forced(tk, ik, tside) -- tk holds the hedges, ik does not
+            local hs = hedges_at(tk)
+            local p, s = hs[1] - 1, #tk - hs[#hs]
+            if #ik < p + s then return nil end
+            local plan = {}
+            for i = 1, p do plan[#plan + 1] = { 'pair', i, i } end
+            local pos, limit = p + 1, #ik - s
+            for x = 1, #hs do
+                if x < #hs then
+                    local seg_from, seg_to = hs[x] + 1, hs[x + 1] - 1
+                    local len = seg_to - seg_from + 1
+                    local q
+                    for cand = pos, limit - len + 1 do
+                        local okf = true
+                        for d = 0, len - 1 do if not fits(tk[seg_from + d], ik[cand + d]) then okf = false; break end end
+                        if okf then q = cand; break end
+                    end
+                    if not q then return nil end
+                    plan[#plan + 1] = { 'hedge', hs[x], pos, q - 1 }
+                    for d = 0, len - 1 do plan[#plan + 1] = { 'pair', seg_from + d, q + d } end
+                    pos = q + len
+                else
+                    plan[#plan + 1] = { 'hedge', hs[x], pos, limit }
+                    pos = limit + 1
+                end
+            end
+            for i = 1, s do plan[#plan + 1] = { 'pair', #tk - s + i, #ik - s + i } end
+            local res = {}
+            for _, st in ipairs(plan) do
+                if st[1] == 'pair' then
+                    local t, i = tk[st[2]], ik[st[3]]
+                    res[#res + 1] = tside == 'a' and lgg(t, i, parent) or lgg(i, t, parent)
+                else
+                    local sl = slice(ik, st[3], st[4])
+                    res[#res + 1] = tside == 'a' and fresh(tk[st[2]], sl, true) or fresh(sl, tk[st[2]], true)
+                end
+            end
+            return res
+        end
+        if #ha > 0 and #hb == 0 then local r = forced(ak, bk, 'a'); if r then return r end end
+        if #hb > 0 and #ha == 0 then local r = forced(bk, ak, 'b'); if r then return r end end
+        if #ak == #bk and #ha == 0 and #hb == 0 then elementwise(0, 0, #ak); return out end
+        -- a hedge that found no placement above is swallowed by the run it lies in (`absorbed`)
+        -- the identical prefix and suffix first (M.eq per position, the old ends rule), then the
+        -- LCS inside the middle. An anchor there: equal kids, or a kid with holes inside that fits
+        -- the other (the same test the forced rule places segments by), so a statement the family
+        -- already abstracted still anchors.
         local minlen = math.min(#ak, #bk)
         local pre = 0
         while pre < minlen and M.eq(ak[pre + 1], bk[pre + 1]) do pre = pre + 1 end
         local suf = 0
         while suf < minlen - pre and M.eq(ak[#ak - suf], bk[#bk - suf]) do suf = suf + 1 end
-        local out = {}
-        elementwise(0, 0, pre, out)
-        out[#out + 1] = fresh(slice(ak, pre + 1, #ak - suf), slice(bk, pre + 1, #bk - suf), true)
-        elementwise(#ak - suf, #bk - suf, suf, out)
+        elementwise(0, 0, pre)
+        local ma, mb = {}, {}
+        for x = pre + 1, #ak - suf do ma[#ma + 1] = ak[x] end
+        for x = pre + 1, #bk - suf do mb[#mb + 1] = bk[x] end
+        local anchors = M.lcs(ma, mb, anchor_fit)
+        anchors[#anchors + 1] = { #ma + 1, #mb + 1 }
+        local i, j = 1, 1
+        for _, an in ipairs(anchors) do
+            local ra, rb = an[1] - i, an[2] - j
+            local ai, bj = pre + i, pre + j -- the run's first positions in the full lists
+            if ra == rb and not hedged_run(ak, ai, ai + ra - 1) and not hedged_run(bk, bj, bj + rb - 1) then elementwise(ai - 1, bj - 1, ra)
+            elseif ra > 0 or rb > 0 then out[#out + 1] = fresh(slice(ak, ai, ai + ra - 1), slice(bk, bj, bj + rb - 1), true) end
+            if an[1] <= #ma then out[#out + 1] = lgg(ak[pre + an[1]], bk[pre + an[2]], parent) end
+            i, j = an[1] + 1, an[2] + 1
+        end
+        elementwise(#ak - suf, #bk - suf, suf)
         return out
     end
     -- the keyed-table fragment (survey §3.2): fields align by key, the rest is one hedge hole
     local function table_join(a, b, keyed)
-        local kids, common, extra = {}, {}, false
+        local kids, common = {}, {}
         for _, kk in ipairs(keyed[1].order) do
             local pb = keyed[2].map[kk]
             if pb then
@@ -302,8 +349,110 @@ function M.join(T1, T2, opts)
         if #ra > 0 or #rb > 0 then kids[#kids + 1] = fresh(M.seq(ra), M.seq(rb), true) end
         return { k = 'table', kids = kids }
     end
+    -- ── KEYED nodes (KEYED.md): kids meet by key. A key on both sides joins its kids; a
+    -- key on one side is CARRIED from that side, made optional under a presence hole whose
+    -- fragments are present/absent (or the side's own presence hole), and the holes inside
+    -- the carried kid get fragments with NOVAL on the other side. The kid order is T1's,
+    -- then T2's new keys.
+    local function carry(kid, side)
+        local c = M.copy(kid)
+        local T = side == 'left' and T1 or T2
+        local function register(h, node_setter)
+            local name = h
+            if side == 'right' and used[name] then
+                repeat counter = counter + 1; name = (opts.prefix or 'j') .. counter until not used[name]
+            end
+            if not frags[name] then
+                used[name] = true
+                local src = T.holes[h] or { domain = M.open(), origin = 'derived' }
+                frags[name] = { left = side == 'left' and M.hole(h) or NOVAL, right = side == 'right' and M.hole(h) or NOVAL,
+                    domain = M.copy(src.domain), carried = side }
+                order[#order + 1] = name
+            end
+            if node_setter then node_setter(name) end
+        end
+        local function walk(t, top)
+            if type(t) ~= 'table' then return end
+            -- the carried kid's OWN presence is decided by the caller (`presence`); a nested
+            -- optional pair keeps the presence hole it had, registered here
+            if t.opt and not top then register(t.opt, function(name) t.opt = name end) end
+            if is_hole(t) then
+                register(t.h, function(name) t.h = name end)
+                for _, x in ipairs(t.kids or {}) do walk(x) end
+                return
+            end
+            for _, x in ipairs(t.kids or {}) do walk(x) end
+        end
+        walk(c, true)
+        return c
+    end
+    local function keyed_join(a, b)
+        local oka, ka = pcall(M.keys, a)
+        local okb, kb = pcall(M.keys, b)
+        if not (oka and okb) then return fresh(a, b) end
+        local amap, bmap = {}, {}
+        for _, e in ipairs(ka) do amap[e.key] = e end
+        for _, e in ipairs(kb) do bmap[e.key] = e end
+        local function presence(pa, pb)
+            local l = pa and (pa.opt and M.hole(pa.opt) or M.present()) or M.absent()
+            local r = pb and (pb.opt and M.hole(pb.opt) or M.present()) or M.absent()
+            return fresh(l, r).h
+        end
+        -- two keyed-ordered nodes whose shared keys come in different orders: no keyed-ordered
+        -- template admits both, so the least one above them RELAXES the discipline to keyed
+        -- (order is no longer identity). Recorded: a relaxation is a widening of the node.
+        local align = a.align
+        if a.align == 'keyed-ordered' then
+            local pos = {}
+            for i, kid in ipairs(b.kids) do pos[M.key_of(b, kid)] = i end
+            local last = 0
+            for _, kid in ipairs(a.kids) do
+                local k = M.key_of(a, kid)
+                if pos[k] then
+                    if pos[k] < last then align = 'keyed'; relaxed[#relaxed + 1] = { k = a.k, from = 'keyed-ordered', to = 'keyed' }; break end
+                    last = pos[k]
+                end
+            end
+        end
+        -- a merge-keyed element diverging in kind or discipline on the two sides: the whole
+        -- list is the hole, decided before any fragment is registered for its elements
+        if a.key then
+            for _, e in ipairs(ka) do
+                local other = bmap[e.key]
+                if other and (e.kid.k ~= other.kid.k or e.kid.align ~= other.kid.align or not same_key(e.kid.key, other.kid.key)) then return fresh(a, b) end
+            end
+        end
+        local kids = {}
+        for _, e in ipairs(ka) do
+            local other = bmap[e.key]
+            local kid
+            if other then
+                kid = lgg(e.kid, other.kid, a.k)
+                assert(not is_hole(kid), 'keyed join: a bare hole as a kid of a keyed node (the pre-check should have escalated)')
+                if e.kid.opt or other.kid.opt then kid = M.copy(kid); kid.opt = presence(e.kid, other.kid) end
+            else
+                kid = carry(e.kid, 'left')
+                kid.opt = presence(e.kid, nil)
+            end
+            kids[#kids + 1] = kid
+        end
+        for _, e in ipairs(kb) do
+            if not amap[e.key] then
+                local kid = carry(e.kid, 'right')
+                kid.opt = presence(nil, e.kid)
+                kids[#kids + 1] = kid
+            end
+        end
+        return { k = a.k, align = align, key = a.key, kids = kids }
+    end
     lgg = function(a, b, parent)
         if is_hole(a) or is_hole(b) then return fresh(a, b) end
+        if a.align or b.align then
+            if a.k ~= b.k or a.align ~= b.align or not same_key(a.key, b.key) then return fresh(a, b) end
+            local kid = keyed_join(a, b)
+            -- a joined pair keeps a presence mark it had on either side (both carried it: no new one)
+            return kid
+        end
         if a.k == 'embed' or b.k == 'embed' then -- a boundary: parse the other side, or match grammars
             local ga, gb = a.k == 'embed' and a, b.k == 'embed' and b
             if ga and gb then
@@ -338,6 +487,12 @@ function M.join(T1, T2, opts)
                     return { k = 'embed', g = g, kids = { inner } }
                 end
             end
+            return fresh(a, b)
+        end
+        -- two leaves (a literal or a name on both sides) join by value; a stray `kids` table on a
+        -- leaf (a rebuilt name) used to send them to the hedge alignment, which crashed on nil kids
+        if type(a) == 'table' and type(b) == 'table' and (a.k == 'lit' or a.k == 'name') and (b.k == 'lit' or b.k == 'name') then
+            if M.eq(a, b) then return M.copy(a) end
             return fresh(a, b)
         end
         if a.k == 'table' and not opts.positional then
@@ -378,7 +533,15 @@ function M.join(T1, T2, opts)
     local function mapper(side)
         return function(V, P)
             local W, unfilled = {}, {}
-            for _, n in ipairs(order) do W[n] = subst(frags[n][side], V, unfilled) end
+            for _, n in ipairs(order) do
+                local f = frags[n][side]
+                -- a bare hole with no value on this side sits under an optional pair this
+                -- member lacks (KEYED.md): nothing is owed, and instantiate is where a hole
+                -- that IS owed and missing is refused. A fragment WITH holes inside still
+                -- needs every value to be built.
+                if f == NOVAL or (is_hole(f) and V[f.h] == nil) then W[n] = nil
+                else W[n] = subst(f, V, unfilled) end
+            end
             if next(unfilled) then
                 local miss = {}
                 for h in pairs(unfilled) do miss[#miss + 1] = h end
@@ -390,7 +553,7 @@ function M.join(T1, T2, opts)
         end
     end
     return { template = J, left = mapper('left'), right = mapper('right'),
-        kept = kept, split = split, widened = widened, overrode = overrode, new = new, absorbed = absorbed, frags = frags }
+        kept = kept, split = split, widened = widened, overrode = overrode, new = new, absorbed = absorbed, frags = frags, relaxed = relaxed }
 end
 
 --- a new instance joins a stored family; the family's values follow, the newcomer's are read

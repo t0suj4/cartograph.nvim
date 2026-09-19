@@ -27,8 +27,9 @@
 -- scoping is positional; the PARTS protocol is not, so the names are unique
 -- now and the ambiguity cannot come back (the parts fence checks it).
 return function (M, SHARED)
-local cat, is_prefix, key, lcp, lcs_alignments, lexlt, prefix_eq, slice, vsym =
-    SHARED.cat_flat, SHARED.is_strict_prefix, SHARED.key, SHARED.lcp, SHARED.lcs_alignments, SHARED.lexlt, SHARED.prefix_eq, SHARED.slice, SHARED.vsym
+local cat_lists, is_strict_prefix, key, lcp, lcs_alignments, lexlt, prefix_eq, slice, vsym =
+    SHARED.cat_lists, SHARED.is_strict_prefix, SHARED.key, SHARED.lcp,
+    SHARED.lcs_alignments, SHARED.lexlt, SHARED.prefix_eq, SHARED.slice, SHARED.vsym
 
 -- I1 ⋈_{I3} I2: I1 and I2 share a proper ancestor that is not an ancestor of I3,
 -- and none of the three is an ancestor of another
@@ -45,7 +46,7 @@ function M.word(H)
     local out = {}
     local function walk(hedge, prefix)
         for i, t in ipairs(hedge) do
-            local pos = cat(prefix, { i })
+            local pos = cat_lists(prefix, { i })
             out[#out + 1] = { sym = vsym(t), pos = pos }
             if t.kids then walk(t.kids, pos) end
         end
@@ -71,7 +72,7 @@ function M.admissible(a)
         for l = 1, #a do
             if k ~= l then
                 local Ik, Il, Jk, Jl = a[k].I, a[l].I, a[k].J, a[l].J
-                if is_prefix(Ik, Il) ~= is_prefix(Jk, Jl) then
+                if is_strict_prefix(Ik, Il) ~= is_strict_prefix(Jk, Jl) then
                     return false, { kind = 'two', k, l }
                 end
             end
@@ -121,9 +122,9 @@ local function rigid_lgg(S, Q, a)
         local f = fr[1]
         local innerk = build(slice(fr, 2, #fr)).kids
         if f.node then
-            return M.seq(cat(M.copy(f.left), { M.rebuild(f.node, innerk) }, M.copy(f.right)))
+            return M.seq(cat_lists(M.copy(f.left), { M.rebuild(f.node, innerk) }, M.copy(f.right)))
         end
-        return M.seq(cat(M.copy(f.left), innerk, M.copy(f.right)))
+        return M.seq(cat_lists(M.copy(f.left), innerk, M.copy(f.right)))
     end
     -- the store: one variable per distinct pair (Mer-S); empties vanish (Clr-S)
     local function hedgevar(S1, Q1)
@@ -158,12 +159,12 @@ local function rigid_lgg(S, Q, a)
         local function top(fr)
             if #fr == 0 then return {}, {}, {} end
             local f, rest = fr[1], slice(fr, 2, #fr)
-            if f.node then return f.left, cat({ { node = f.node, left = {}, right = {} } }, rest), f.right end
+            if f.node then return f.left, cat_lists({ { node = f.node, left = {}, right = {} } }, rest), f.right end
             return f.left, rest, f.right
         end
         local cl, cs, cr = top(c)
         local dl, ds, dr = top(d)
-        return cat(hedgevar(cl, dl), ctxvar(cs, ds, inner), hedgevar(cr, dr))
+        return cat_lists(hedgevar(cl, dl), ctxvar(cs, ds, inner), hedgevar(cr, dr))
     end
     local function rebase(e, di, dj, drop_i, drop_j)
         local I, J = {}, {}
@@ -185,24 +186,24 @@ local function rigid_lgg(S, Q, a)
             local a1, a2 = {}, {}
             for e = 1, k do a1[#a1 + 1] = rebase(al[e], i1 - 1, j1 - 1) end
             for e = k + 1, #al do a2[#a2 + 1] = rebase(al[e], ik, jk) end
-            local inner = cat(process(slice(S1, i1, ik), slice(Q1, j1, jk), a1, {}, {}),
+            local inner = cat_lists(process(slice(S1, i1, ik), slice(Q1, j1, jk), a1, {}, {}),
                 process(slice(S1, ik + 1, im), slice(Q1, jk + 1, jm), a2, {}, {}))
-            return wrap(cat(c, { { left = slice(S1, 1, i1 - 1), right = slice(S1, im + 1, #S1) } }),
-                cat(d, { { left = slice(Q1, 1, j1 - 1), right = slice(Q1, jm + 1, #Q1) } }), inner)
+            return wrap(cat_lists(c, { { left = slice(S1, 1, i1 - 1), right = slice(S1, im + 1, #S1) } }),
+                cat_lists(d, { { left = slice(Q1, 1, j1 - 1), right = slice(Q1, jm + 1, #Q1) } }), inner)
         end
         if i1 == im and #al[1].I > 1 then -- Abs-L: all inside S1[i1], whose root is not aligned
             local t = S1[i1]
             local a2 = {}
             for e = 1, #al do a2[e] = rebase(al[e], nil, nil, true, false) end
             return process(t.kids or {}, Q1, a2,
-                cat(c, { { left = slice(S1, 1, i1 - 1), node = t, right = slice(S1, i1 + 1, #S1) } }), d)
+                cat_lists(c, { { left = slice(S1, 1, i1 - 1), node = t, right = slice(S1, i1 + 1, #S1) } }), d)
         end
         if j1 == jm and #al[1].J > 1 then -- Abs-R
             local t = Q1[j1]
             local a2 = {}
             for e = 1, #al do a2[e] = rebase(al[e], nil, nil, false, true) end
             return process(S1, t.kids or {}, a2, c,
-                cat(d, { { left = slice(Q1, 1, j1 - 1), node = t, right = slice(Q1, j1 + 1, #Q1) } }))
+                cat_lists(d, { { left = slice(Q1, 1, j1 - 1), node = t, right = slice(Q1, j1 + 1, #Q1) } }))
         end
         -- App-A: the first element is the root of S1[i1] and of Q1[j1]
         local s, q = S1[i1], Q1[j1]
@@ -211,8 +212,8 @@ local function rigid_lgg(S, Q, a)
         for e = 2, #al do rest[#rest + 1] = rebase(al[e], nil, nil, true, true) end
         local kids = process(s.kids or {}, q.kids or {}, rest, {}, {})
         local nd = s.kids and M.rebuild(s, kids) or M.copy(s)
-        return wrap(cat(c, { { left = slice(S1, 1, i1 - 1), right = slice(S1, i1 + 1, #S1) } }),
-            cat(d, { { left = slice(Q1, 1, j1 - 1), right = slice(Q1, j1 + 1, #Q1) } }), { nd })
+        return wrap(cat_lists(c, { { left = slice(S1, 1, i1 - 1), right = slice(S1, i1 + 1, #S1) } }),
+            cat_lists(d, { { left = slice(Q1, 1, j1 - 1), right = slice(Q1, j1 + 1, #Q1) } }), { nd })
     end
     local body = M.seq(process(S, Q, a, {}, {}))
     local T = M.template(body, {})

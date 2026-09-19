@@ -2,7 +2,8 @@
 -- passes its own module table in. ⚠ IT DOES NOT `require` CORE BACK: that is a
 -- load cycle — Lua says "loop or previous error loading module".
 return function (M, SHARED)
-local vsym, lcs_alignments, slice = SHARED.vsym, SHARED.lcs_alignments, SHARED.slice
+local lcs_alignments, slice, vsym =
+    SHARED.lcs_alignments, SHARED.slice, SHARED.vsym
 
 -- ── TERM-GRAPH ANTI-UNIFICATION (Baumgartner, Kutsia, Levy, Villaret, FSCD 2018) ──────
 -- Read in full (LIPIcs 108, article 9). A term-graph is a system of recursion equations

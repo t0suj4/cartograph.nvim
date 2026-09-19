@@ -4,8 +4,8 @@
 -- ★ 4 shared file-local(s), each (a) a core module-level local, (b) used
 -- here and (c) not defined here — the three conditions, not a guess.
 return function (M, SHARED)
-local child, is_hole, key, subst =
-    SHARED.child, SHARED.is_hole, SHARED.key, SHARED.subst
+local child, is_hole, key, occurs, subst =
+    SHARED.child, SHARED.is_hole, SHARED.key, SHARED.occurs, SHARED.subst
 
 --- the kinds envelope of a summary domain: what a family's derived domain says about SHAPE
 function M.relax(D)
@@ -19,15 +19,10 @@ function M.relax(D)
         if ok then local l = {}; for k in pairs(set) do l[#l + 1] = k end; table.sort(l); return M.kinds(l) end
         return M.copy(D)
     end
-    if D.kind == 'rep' then return M.rep(M.relax(D.of), D.min, D.max) end
+    if D.kind == 'rep' then return M.rep(M.relax(D.of), D.min, D.max, D.period) end
     return M.copy(D) -- open, kinds, and the structural claims (ref, both) stay
 end
 
-local function occurs(h, t)
-    if is_hole(t) then return t.h == h end
-    for _, c in ipairs(t.kids or {}) do if occurs(h, c) then return true end end
-    return false
-end
 
 --- the meet of two hole domains, closed domains excluded (they are equations). nil, why when disjoint.
 local function meet_domains(A, B)
@@ -51,11 +46,15 @@ local function meet_domains(A, B)
         return M.kinds(out)
     end
     if A.kind == 'rep' and B.kind == 'rep' then
+        -- an open hedge takes the other side's claim, period included (an open side widens nothing)
+        if A.of.kind == 'open' and not A.period then return M.rep(B.of, math.max(A.min, B.min), (A.max and B.max) and math.min(A.max, B.max) or A.max or B.max, B.period) end
+        if B.of.kind == 'open' and not B.period then return M.rep(A.of, math.max(A.min, B.min), (A.max and B.max) and math.min(A.max, B.max) or A.max or B.max, A.period) end
+        if (A.period or 1) ~= (B.period or 1) then return nil, ('periods differ: %d and %d'):format(A.period or 1, B.period or 1) end
         local of, why = meet_domains(A.of, B.of)
         if not of then return nil, why end
         local min, max = math.max(A.min, B.min), (A.max and B.max) and math.min(A.max, B.max) or A.max or B.max
         if max and min > max then return nil, ('repetition counts disjoint: {%d,%s} and {%d,%s}'):format(A.min, tostring(A.max or ''), B.min, tostring(B.max or '')) end
-        return M.rep(of, min, max)
+        return M.rep(of, min, max, A.period)
     end
     -- structural claims: a CONJUNCTION, kept canonical (flattened, deduplicated, kind sets merged,
     -- sorted) so the meet is symmetric and idempotent: (a & b) ∧ a = a & b
@@ -188,6 +187,20 @@ function M.solve(eqs, H, opts)
                 return false, ('count %d below {%d,%s}'):format(n, D.min, tostring(D.max or ''))
             end
             if D.max and n > D.max then return false, ('count %d above {%d,%d}'):format(n, D.min, D.max) end
+            if D.period then -- a unit of several kids: chunk the template's kids when no hedge hole cuts across them
+                local hedged = false
+                for _, e in ipairs(t.kids) do if is_hole(e) and e.rep then hedged = true end end
+                if not hedged then
+                    if #t.kids % D.period ~= 0 then return false, ('length %d is not a multiple of the period %d'):format(#t.kids, D.period) end
+                    for c = 1, #t.kids / D.period do
+                        local kids = {}
+                        for j = 1, D.period do kids[j] = t.kids[(c - 1) * D.period + j] end
+                        local ok, why = constrain(x, D.of, M.seq(kids), at)
+                        if not ok then return false, ('chunk %d: %s'):format(c, why) end
+                    end
+                    return true
+                end
+            end
             for _, e in ipairs(t.kids) do
                 if is_hole(e) and e.rep then
                     local de = dom[e.h]
@@ -272,6 +285,7 @@ function M.solve(eqs, H, opts)
                     return fail('several hedge holes in one list: sequence unification is not unitary there, refused', at)
                 end
                 if not ra and not rb then
+                    if l.align or r.align then return fail('unification over keyed nodes is not implemented (KEYED.md)', at) end
                     if #ak ~= #bk then return fail(('arity: %d vs %d children'):format(#ak, #bk), at) end
                     for i = #ak, 1, -1 do push(ak[i], bk[i], child(at, i)) end
                 elseif ra and rb then

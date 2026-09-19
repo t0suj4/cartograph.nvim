@@ -2,7 +2,8 @@
 -- passes its own module table in. ⚠ IT DOES NOT `require` CORE BACK: that is a
 -- load cycle — Lua says "loop or previous error loading module".
 return function (M, SHARED)
-local _ = SHARED
+local unpack =
+    SHARED.unpack
 
 -- ── HIGHER-ORDER PATTERN ANTI-UNIFICATION (Baumgartner, Kutsia, Levy, Villaret, JAR 2017) ──
 -- Read in full (open access). Terms are simply typed λ-terms in η-long β-normal form:
@@ -17,24 +18,13 @@ local _ = SHARED
 -- Binder names are made globally distinct on entry (Remark 1). Locals of a program are
 -- exactly λ-bound variables here, and a hole Y(ȳ) carries the locals it depends on.
 function M.lam(x, body) return { k = 'lam', x = x, body = body } end
-
 function M.app(h, ...) return { k = 'app', h = h, args = { ... } } end
-
 function M.bv(x, ...) return { k = 'app', bv = x, args = { ... } } end
-
 function M.fv(name, ...) return { k = 'fv', name = name, args = { ... } } end
-
-local function lams(t) -- peel leading abstractions
-    local xs = {}
-    while t.k == 'lam' do xs[#xs + 1] = t.x; t = t.body end
-    return xs, t
-end
-
 function M.lams(xs, body)
     for i = #xs, 1, -1 do body = M.lam(xs[i], body) end
     return body
 end
-
 local function ho_map_names(t, ren) -- rename bound variables by table (binders and uses)
     if t.k == 'lam' then return { k = 'lam', x = ren[t.x] or t.x, body = ho_map_names(t.body, ren) } end
     local args = {}
@@ -43,10 +33,8 @@ local function ho_map_names(t, ren) -- rename bound variables by table (binders 
     if t.bv then return { k = 'app', bv = ren[t.bv] or t.bv, args = args } end
     return { k = 'app', h = t.h, args = args }
 end
-
 --- every λ in the term binds a fresh, globally distinct name (Remark 1)
 local ho_fresh_n = 0
-
 function M.ho_distinct(t)
     local function go(u, env)
         if u.k == 'lam' then
@@ -63,7 +51,6 @@ function M.ho_distinct(t)
     end
     return go(t, {})
 end
-
 --- canonical string: de Bruijn indices for bound variables (a free-standing bound name
 --- that is not under its binder is printed as '!name'), free variables numbered by first
 --- occurrence unless opts.keep_free. Two α-equivalent terms print the same.
@@ -88,9 +75,7 @@ function M.ho_show(t, opts)
     end
     return go(t, {}, 0)
 end
-
 function M.alpha_eq(t, s) return M.ho_show(t) == M.ho_show(s) end
-
 --- Theorem 2(a): is t a higher-order pattern? Every free variable is applied to pairwise
 --- distinct bound variables that are in scope. Returns ok, offending variable name.
 function M.ho_is_pattern(t)
@@ -112,7 +97,6 @@ function M.ho_is_pattern(t)
     end
     return go(t, {})
 end
-
 --- canonical string MODULO ≃ (Theorem 4): free variables numbered by first occurrence, and
 --- each free variable's parameters permuted so that its first occurrence lists its
 --- bound-variable arguments in increasing de Bruijn order. Two results equivalent up to
@@ -148,7 +132,6 @@ function M.ho_canon(t)
     end
     return go(t, {}, 0)
 end
-
 local function ho_free_bound(t, acc, order) -- bound-variable names occurring free in t, first-occurrence order
     acc, order = acc or {}, order or {}
     if t.k == 'lam' then ho_free_bound(t.body, acc, order); return acc, order end
@@ -156,7 +139,6 @@ local function ho_free_bound(t, acc, order) -- bound-variable names occurring fr
     for _, a in ipairs(t.args) do ho_free_bound(a, acc, order) end
     return acc, order
 end
-
 --- β-reduce a pattern application: Y(ā) with Y ↦ λȳ.t is t{ȳ ↦ ā}; since ā are variables
 --- (or, when rebuilding, arbitrary terms in place of variables) this is a substitution
 local function ho_subst_vars(t, map) -- replace bound-variable heads per map (var -> term)
@@ -174,7 +156,6 @@ local function ho_subst_vars(t, map) -- replace bound-variable heads per map (va
     if t.bv then return { k = 'app', bv = t.bv, args = args } end
     return { k = 'app', h = t.h, args = args }
 end
-
 --- apply a substitution {Y = {xs = {...}, body = t}} to a term, β-reducing Y(ā)
 function M.ho_apply(t, sigma)
     if t.k == 'lam' then return { k = 'lam', x = t.x, body = M.ho_apply(t.body, sigma) } end

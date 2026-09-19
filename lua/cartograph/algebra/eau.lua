@@ -6,11 +6,8 @@
 -- confirmed them reports ZERO for the two parts already adapted, which is what
 -- makes a count of two believable rather than a coincidence.
 return function (M, SHARED)
-local cat, is_hole = SHARED.cat, SHARED.is_hole
-
-local function ax(theory, t) return (theory and t and t.kids and theory[t.k]) or nil end
-
-local function isA(theory, t) local a = ax(theory, t); return a and a.A end
+local ax, cat, isA, is_hole =
+    SHARED.ax, SHARED.cat, SHARED.isA, SHARED.is_hole
 
 local function isC(theory, t) local a = ax(theory, t); return a and a.C end
 
@@ -53,7 +50,6 @@ local function group(f, list, theory)
     if #list == 1 then return list[1] end
     return M.rebuild(f, list)
 end
-
 local function slice_l(list, i, j) local out = {}; for k = i, j do out[#out + 1] = list[k] end; return out end
 
 --- matching modulo B: does pattern p (with holes) have an instance equal modulo B to t?
@@ -292,7 +288,6 @@ function M.eau(t, s, theory, opts)
         local body = M.flatten(resolve(M.hole(x0)), theory)
         local domains, V1, V2 = {}, {}, {}
         for _, e in ipairs(st.S) do
-            local kind = (e.l.k == e.r.k and e.l.k ~= 'hole') and e.l.k or nil
             domains[e.y] = { domain = M.summarize({ e.l, e.r }, opts), origin = 'derived' }
             V1[e.y], V2[e.y] = M.copy(e.l), M.copy(e.r)
         end

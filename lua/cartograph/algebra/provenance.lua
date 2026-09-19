@@ -19,13 +19,11 @@ function M.observed(V, sites)
     for h in pairs(V) do P[h] = { src = 'observed', via = { sites and sites[h] and sites[h].sites and sites[h].sites[1] and key(sites[h].sites[1].path) or 'match' } } end
     return P
 end
-
 function M.supplied(h, journal, P)
     P = P or {}
     P[h] = { src = 'supplied', via = { 'operator' }, journal = journal }
     return P
 end
-
 function M.carry(p, via)
     if not p then return nil end
     local q = { src = p.src, via = {}, journal = p.journal }
@@ -33,7 +31,6 @@ function M.carry(p, via)
     q.via[#q.via + 1] = via
     return q
 end
-
 --- provenance for migrated values: a value equal to what the member had under the same
 --- hole is carried; split's copy carries the source hole's; anything else was computed.
 function M.migrate_provenance(op, V, W, P)
@@ -45,7 +42,6 @@ function M.migrate_provenance(op, V, W, P)
     end
     return Q
 end
-
 --- Emission is the line between verified span surgery and authoring: every value must
 --- carry a provenance, a supplied value must carry its journal entry, and the reader
 --- verifies the writer (match reads the emitted instance back).

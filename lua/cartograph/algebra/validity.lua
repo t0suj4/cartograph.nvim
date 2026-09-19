@@ -28,15 +28,12 @@ function M.edit_key(T)
     end
     return #parts .. ':' .. table.concat(parts, ';')
 end
-
 function M.stamp(T, V) return { values = V, at = #(T.edits or {}), key = M.edit_key(T) } end
-
 function M.valid(T, S)
     if type(S) ~= 'table' or S.key == nil then return false, 'unstamped values are a guess wearing a cache\'s clothes' end
     if S.key ~= M.edit_key(T) then return false, ('stale: stamped at edit %d, template is at edit %d'):format(S.at or -1, #(T.edits or {})) end
     return true
 end
-
 --- instantiate from stamped values: a stale stamp is `unavailable` (the value class for
 --- this generation was never extracted), never a silent fill.
 function M.instantiate_stamped(T, S, env)

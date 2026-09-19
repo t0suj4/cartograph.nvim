@@ -476,8 +476,9 @@ describe('survey §3.2: the keyed-table fragment of commutative generalization',
     local t1 = tb(pr('a', lit(1)), pr('b', lit(2)), pr('c', lit(3)))
     local t2 = tb(pr('c', lit(3)), pr('a', lit(9)))
 
-    it('positional generalization loses every field; key alignment keeps the shared ones', function()
-        assert.equals('(table ?h1...)', A.show(A.generalize({ t1, t2 }, { positional = true }).template.body))
+    it('positional generalization keeps only the field common to both, as an anchor; key alignment keeps the shared ones by key', function()
+        -- ~~'(table ?h1...)'~~ since LCSJOIN.md the shared pair anchors the positional alignment; the pairs around it are two hedges
+        assert.equals('(table ?h1... (pair "c" 3) ?h2...)', A.show(A.generalize({ t1, t2 }, { positional = true }).template.body))
         local g = A.generalize { t1, t2 }
         assert.equals('(table (pair "a" ?h1) (pair "c" 3) ?h2...)', A.show(g.template.body))
         assert.equals('{lit}', A.show_domain(g.template.holes.h1.domain))
@@ -2656,6 +2657,7 @@ describe('cross-grammar nesting: a hole whose value is text under another gramma
         -- boundary; the new hole ranges over commands, the members' values render to their strings
         local j2 = A.adjoin(g.template, g.values, doc('x:5', 'ls'))
         -- joined INSIDE the boundary; since HEDGEJOIN.md the unequal arity is a hedge hole, not a node hole
+        -- (a bare hole never anchors, LCSJOIN.md, so the word hole is absorbed as before)
         assert.equals('(doc (image ?h1) (command (embed (cmd ?j1...))))', A.show(j2.template.body))
         assert.is_true(A.eq(A.instantiate(j2.template, j2.values[4]).term, doc('x:5', 'ls')))
         assert.is_true(A.eq(A.instantiate(j2.template, j2.values[1]).term, docs[1]))
@@ -2705,9 +2707,14 @@ describe('cross-grammar nesting: a hole whose value is text under another gramma
         -- wrapping the root is the same move
         local C3 = A.classify(g.template, g.values[1], node('when', lit 'x', doc('x:1', 'run fast')))
         assert.equals('template', C3.kind)
-        -- but a rewritten region that breaks the old region apart cannot thread a hole through a string
+        -- a kid appended beside the boundary is a template edit that leaves the string whole
+        -- (~~a straddle~~ under the positional diff, which took the whole command node as the region; CLASSIFY.md)
         local C4 = A.classify(g.template, g.values[1], node('doc', node('image', lit 'x:1'), node('command', lit 'run fast', lit 'extra')))
-        assert.equals('straddle', C4.kind); assert.truthy(C4.why:find('behind a grammar boundary'))
+        assert.equals('template', C4.kind)
+        assert.equals('(doc (image ?h1) (command (embed (cmd run ?h2.1)) "extra"))', A.show(C4.template.body))
+        -- but a rewritten region that breaks the old region apart cannot thread a hole through a string
+        local C5 = A.classify(g.template, g.values[1], node('doc', node('image', lit 'x:1'), node('command', lit 'run', lit 'fast')))
+        assert.equals('straddle', C5.kind); assert.truthy(C5.why:find('behind a grammar boundary'))
     end)
 
     it('LAW over random shell strings: generalize across the boundary rebuilds, match inverts, adjoin and classify hold', function()
@@ -3390,8 +3397,10 @@ describe('the tensions: materialization onto the closed schema, provenance, abse
         assert.equals('refused', A.absence_of(A.match(T, node('f', lit 'a', lit 'a', node('g', name 'n')))).absence) -- domain
         assert.equals('frontier', A.absence_of(A.instantiate(T, { x = lit 'a' })).absence)                            -- unfilled hole
         assert.equals('refused', A.absence_of(A.instantiate(T, { x = lit 'a', y = name 'n' })).absence)
+        -- ~~a repetition hole made classify unavailable~~ since CLASSIFY.md it classifies; a context hole still does not
         local R = A.template(node('f', hole('r', true)))
-        assert.equals('unavailable', A.absence_of(A.classify(R, { r = A.seq { lit 'a' } }, node('f', lit 'b'))).absence)
+        assert.equals('value', A.classify(R, { r = A.seq { lit 'a' } }, node('f', lit 'b')).kind)
+        assert.equals('unavailable', A.absence_of(A.classify(A.template(node('f', A.ctx 'c')), {}, node('f', lit 'b'))).absence)
         assert.has_error(function() A.absence_of({ why = 'banana' }) end)
         -- every dropped member of random migrations classifies (no negative falls through)
         local n = 0
@@ -3872,20 +3881,26 @@ describe('hedge-aware join: alignment is forced by one hedge hole, else by ident
         assert.equals('(seq 7 8 g)', A.show(W.j1)) -- X spliced into the wider slice
     end)
 
-    it('several hedge holes in one list are not aligned by guessing: the node becomes a hole, and a derived match refuses', function()
+    it('several hedge holes in one list: join places the fixed segment between them at its leftmost fit (LCSJOIN.md), as the matchers do; the derived match searches the split (DMATCH.md)', function()
         local T = A.template(node('f', hole_rep 'X', name 'a', hole_rep 'Y'))
         local r = A.join(T, node('f', name 'b', name 'a', name 'c'))
-        assert.equals('?j1', A.show(r.template.body))
-        assert.same({ 'j1' }, r.new)
-        -- the original matcher backtracks and finds the split; the derived one refuses by name, never binds wrongly
+        -- ~~'?j1' (the node became a hole)~~ since LCSJOIN.md the k-hedge forced rule keeps the template
+        assert.equals('(f ?X... a ?Y...)', A.show(r.template.body))
+        assert.same({}, r.new)
+        local W = A.match(r.template, node('f', name 'b', name 'a', name 'c')).values
+        assert.equals('(seq b)', A.show(W.X)); assert.equals('(seq c)', A.show(W.Y))
+        -- the original matcher backtracks and finds the split; ~~the derived one refuses by name~~
+        -- since DMATCH.md the derived one enumerates the widths (Kutsia's Projection and Widening)
+        -- and closes each candidate with this join, so it finds the same split
         assert.is_true(A.match(T, node('f', name 'b', name 'a', name 'c')).ok)
         local D = require 'derive'
         local M2 = dofile('algebra.lua')
         D.apply_to(M2, 'match')
         local m = M2.match(T, node('f', name 'b', name 'a', name 'c'))
         D.apply_to(A, os.getenv('DERIVE') or '') -- rebind the basis to the suite's module
-        assert.is_false(m.ok)
-        assert.matches('fixed parts differ', m.refusal.why)
+        assert.is_true(m.ok, m.refusal and m.refusal.why)
+        assert.equals('(seq b)', A.show(m.values.X)); assert.equals('(seq c)', A.show(m.values.Y))
+        assert.equals(1, m.sites.X.sites[1].n); assert.equals(1, m.sites.Y.sites[1].n)
     end)
 
     it("the 'none' rigidity is the fixed-arity lgg: unequal lists make a node hole (what the classify diff reads)", function()
@@ -3898,8 +3913,9 @@ describe('hedge-aware join: alignment is forced by one hedge hole, else by ident
     it("adjoin under the 'none' rigidity keeps the old shape (a node hole), so classify still works on an arity-divergent family", function()
         local T, Vs = A.template(node('f', hole 'a', lit(2))), { { a = lit(1) } }
         local j = A.adjoin(T, Vs, node('f', lit(1), lit(2), lit(3)))
-        assert.equals('(f ?j1...)', A.show(j.template.body)) -- default: a hedge hole (?a is not eq to 1, so no identical prefix), which classify refuses
-        assert.equals('unsupported', A.classify(j.template, j.values[1], node('f', lit(5), lit(2))).kind)
+        assert.equals('(f ?a 2 ?j1...)', A.show(j.template.body)) -- default: ~~'(f ?j1...)'~~ since LCSJOIN.md the 2 anchors and ?a aligns with 1
+        -- ~~the hedge is what classify refuses~~ since CLASSIFY.md the hedge family classifies too: a value edit of ?a
+        assert.equals('value', A.classify(j.template, j.values[1], node('f', lit(5), lit(2), lit(3))).kind)
         local jn = A.adjoin(T, Vs, node('f', lit(1), lit(2), lit(3)), { align = 'none' })
         assert.equals('?j1', A.show(jn.template.body))
         assert.equals('value', A.classify(jn.template, jn.values[1], node('f', lit(5), lit(2))).kind)
@@ -5236,5 +5252,3019 @@ describe('matching with context variables (CTXMATCH.md; Kutsia WWV\'05 slides, B
             end
         end
         assert.is_true(checked >= 100 and withctx >= 30, ('checked %d with context holes %d over %d pairs'):format(checked, withctx, pairs_))
+    end)
+end)
+
+describe('a database is a family read live (SQLITE.md; SQLite datatype3 §3, fileformat2 §1.3, pragma; Codd Figures 5 and 6 as tables)', function()
+    local function emb(g, inner) return { k = 'embed', g = g, kids = { inner } } end
+    -- the reader module lives beside the prototype; a re-vendored spec without experiments/ pends by name
+    local okR, R = pcall(require, 'experiments.sqlite_reader')
+    local have, ver
+    if okR then have, ver = R.available() else have, ver = false, 'experiments/sqlite_reader.lua not found: ' .. tostring(R) end
+    local tmp = (os.getenv('SQLITE_READER_TMP') or os.getenv('TMPDIR') or '/tmp')
+    local db = tmp .. '/algebra_sqlite_fixture.db'
+    local built
+    local function need()
+        if not have then pending('sqlite3 shell not available: ' .. tostring(ver)) return nil end
+        if built == nil then built = assert(R.build(db, 'experiments/sqlite_fixture.sql')) end
+        return R.open(db)
+    end
+    local function class_row(F, i)
+        local out = {}
+        for _, c in ipairs { 't', 'nu', 'i', 'r', 'no' } do out[#out + 1] = F.values[i][c].k end
+        return table.concat(out, '|')
+    end
+
+    it('datatype3 §3.1.1: the affinity of every example typename, by the five rules in order', function()
+        local ex = {
+            INT = 'integer', INTEGER = 'integer', TINYINT = 'integer', SMALLINT = 'integer', MEDIUMINT = 'integer', BIGINT = 'integer',
+            ['UNSIGNED BIG INT'] = 'integer', INT2 = 'integer', INT8 = 'integer',
+            ['CHARACTER(20)'] = 'text', ['VARCHAR(255)'] = 'text', ['VARYING CHARACTER(255)'] = 'text', ['NCHAR(55)'] = 'text',
+            ['NATIVE CHARACTER(70)'] = 'text', ['NVARCHAR(100)'] = 'text', TEXT = 'text', CLOB = 'text',
+            BLOB = 'blob', [''] = 'blob',
+            REAL = 'real', DOUBLE = 'real', ['DOUBLE PRECISION'] = 'real', FLOAT = 'real',
+            NUMERIC = 'numeric', ['DECIMAL(10,5)'] = 'numeric', BOOLEAN = 'numeric', DATE = 'numeric', DATETIME = 'numeric',
+            -- the two the document calls out: the order of the rules decides
+            ['FLOATING POINT'] = 'integer', STRING = 'numeric',
+        }
+        for decl, aff in pairs(ex) do assert.equals(aff, A.affinity(decl), decl) end
+        -- the supplied domain: an affinity's storage classes, NULL unless NOT NULL; exact under STRICT
+        assert.equals('{blob|null|text}', A.show_domain(A.column_domain({ type = 'VARCHAR(20)' })))
+        assert.equals('{blob|text}', A.show_domain(A.column_domain({ type = 'TEXT', notnull = 1 })))
+        assert.equals('{integer}', A.show_domain(A.column_domain({ type = 'INTEGER', notnull = 1 }, true)))
+        assert.equals('{blob|integer|null|real|text}', A.show_domain(A.column_domain({ type = 'INTEGER' })))
+    end)
+
+    it('datatype3 §3.4: the affinity example table, loaded five ways, stores the classes the document prints', function()
+        local rd = need(); if not rd then return end
+        local want = { t1_a = 'text|integer|integer|real|text', t1_b = 'text|integer|integer|real|real',
+            t1_c = 'text|integer|integer|real|integer', t1_d = 'blob|blob|blob|blob|blob', t1_e = 'null|null|null|null|null' }
+        for t, w in pairs(want) do
+            local F = A.read(rd, t)
+            assert.is_true(F.ok, t); assert.equals(1, F.n)
+            assert.equals(w, class_row(F, 1), t)
+        end
+        -- a blob carries its class and no payload; a null is a node of its own
+        local Fd = A.read(rd, 't1_d')
+        assert.equals(0, #(Fd.values[1].t.kids or {})); assert.equals(0, #Fd.refused)
+        -- a TEXT column that received the number 42 holds text '42' (TEXT affinity converts on the way in)
+        local Fs = A.read(rd, 's')
+        assert.equals('text', Fs.values[4].sname.k); assert.equals('42', Fs.values[4].sname.kids[1].v)
+    end)
+
+    it('the supplied template is the declaration, the derived one is the rows: the rows never say more than an affinity admits, and `narrowed` says where they say less', function()
+        local rd = need(); if not rd then return end
+        local F = A.read(rd, 'spj')
+        assert.is_true(F.ok); assert.equals(4, F.n); assert.same({ 'sno', 'pno', 'jno' }, F.keys)
+        for h, e in pairs(F.template.holes) do
+            assert.equals('supplied', e.origin); assert.equals('derived', F.derived.holes[h].origin)
+            assert.is_true(A.entails(F.derived.holes[h].domain, e.domain), h)
+        end
+        assert.is_true(A.instance_of(F.derived, F.template))
+        assert.same({ 'jno', 'pno', 'qty', 'sno' }, F.narrowed)
+        assert.equals('{integer|null}', A.show_domain(F.derived.holes.qty.domain)) -- one NULL quantity
+        assert.equals('{integer}', A.show_domain(F.derived.holes.sno.domain))     -- '300' arrived as text and was stored as integer (INTEGER affinity)
+        -- STRICT: the declared type is exact, so the supplied domain is one class, and the rows agree
+        local S = A.read(rd, 'st')
+        assert.equals('{integer}', A.show_domain(S.template.holes.n.domain))
+        assert.equals('{null|text}', A.show_domain(S.template.holes.label.domain))
+        assert.same({ 'id' }, S.narrowed) -- INTEGER PRIMARY KEY is never null in the rows, though table_info says notnull = 0
+        -- an empty table is a family with no members, not an absence; with no rows the derived domain is open
+        local E = A.read(rd, 'empty_t')
+        assert.is_true(E.ok); assert.equals(0, E.n); assert.is_true(E.complete); assert.same({}, E.narrowed)
+        assert.equals('open', E.derived.holes.a.domain.kind)
+    end)
+
+    it('Codd Figures 5 and 6 read from tables: the same five tuples, projections and point of ambiguity as the LINK.md test', function()
+        local rd = need(); if not rd then return end
+        local Rf, Sf = A.read(rd, 'codd_r'), A.read(rd, 'codd_s')
+        assert.is_true(Rf.ok and Sf.ok)
+        local L = A.link(Rf, Sf, { from = 'part', to = 'part', complete = true })
+        assert.equals(5, #L.tuples)
+        local rows = {}
+        for _, t in ipairs(L.tuples) do
+            rows[#rows + 1] = ('%d %d %d'):format(Rf.values[t.a].supplier.kids[1].v, t.key.kids[1].v, Sf.values[t.b].project.kids[1].v)
+        end
+        table.sort(rows)
+        assert.same({ '1 1 1', '1 1 2', '2 1 1', '2 1 2', '2 2 1' }, rows)
+        local p12, p23 = {}, {}
+        for _, t in ipairs(L.tuples) do p12[t.a] = true; p23[t.b] = true end
+        assert.same({ true, true, true }, p12); assert.same({ true, true, true }, p23) -- the two projections give R and S back
+        assert.equals(1, #L.ambiguity); assert.same({ 1, 2 }, L.ambiguity[1].a); assert.same({ 1, 2 }, L.ambiguity[1].b)
+        assert.is_false(L.is_function); assert.equals(2, L.fan); assert.equals(0, #L.dangling)
+        assert.is_false(A.primary_key(Rf, 'part'))
+    end)
+
+    it('a foreign key is a link, and its dangling members are exactly what PRAGMA foreign_key_check reports', function()
+        local rd = need(); if not rd then return end
+        local spj, s, p = A.read(rd, 'spj'), A.read(rd, 's'), A.read(rd, 'p')
+        local fks = rd.foreign_keys('spj')
+        assert.equals(2, #fks)
+        local links, viol = {}, {}
+        for _, fk in ipairs(fks) do
+            local parent = fk.table == 's' and s or p
+            local L = A.link(spj, parent, { from = fk.from, to = fk.to, complete = true })
+            links[fk.table] = L
+            assert.is_true(L.is_function, fk.table .. ': the parent key is a primary key, so the link is a function (Codd: a foreign key)')
+            for _, i in ipairs(L.dangling) do viol[#viol + 1] = ('%s %d %s'):format('spj', spj.rowid[i], fk.table) end
+        end
+        table.sort(viol)
+        -- the database's own oracle: one violation, the shipment by supplier 9
+        local oracle = {}
+        for _, r in ipairs(rd.foreign_key_check()) do oracle[#oracle + 1] = ('%s %d %s'):format(r.table, r.rowid, r.parent) end
+        table.sort(oracle)
+        assert.same(oracle, viol); assert.same({ 'spj 4 s' }, viol)
+        -- the chain from a shipment to its supplier row, and the dangling one as `absent` (the family is complete)
+        local ch = A.chain(1, { links.s })
+        assert.is_true(ch.ok); assert.same({ 1 }, ch.members)
+        local chd = A.chain(4, { links.s })
+        assert.is_false(chd.ok); assert.equals('absent', chd.absences[1].absence)
+        -- read with a cap: the family is not complete, so the same miss is a `frontier`
+        local s2 = A.read(rd, 's', { limit = 2 })
+        assert.equals(2, s2.n); assert.is_false(s2.complete); assert.is_true(s2.source.truncated)
+        local L2 = A.link(spj, s2, { from = 'sno', to = 'sno', complete = s2.complete })
+        assert.equals('frontier', A.chain(4, { L2 }).absences[1].absence)
+    end)
+
+    it('absences: an unreachable file is `unavailable`, a missing table is `absent`, and a reader without a stamp is refused before it reads', function()
+        local rd = need(); if not rd then return end
+        local gone = A.read(R.open(tmp .. '/no/such/dir/x.db'), 's')
+        assert.is_false(gone.ok); assert.equals('unavailable', gone.absence); assert.truthy(gone.why:find('no stamp'))
+        -- and the shell's own refusal to open, reached when a stamp is supplied from elsewhere, is `unavailable` too
+        local _, kind, why = R.exec(tmp .. '/no/such/dir/x.db', 'select 1;')
+        assert.equals('unavailable', kind); assert.truthy(why:find('unable to open'))
+        local missing = A.read(rd, 'nosuch')
+        assert.is_false(missing.ok); assert.equals('absent', missing.absence); assert.truthy(missing.why:find('no such table'))
+        -- a SQL error the shell reports is a refusal, passed through by name
+        local sqlerr = R.open(db); local inner = sqlerr.read
+        sqlerr.read = function(k, o) if k == 'bad' then local _, kind, why = R.exec(db, 'select * from s where;'); return { ok = false, absence = kind, why = why } end return inner(k, o) end
+        assert.equals('refused', A.read(sqlerr, 'bad').absence)
+        -- the same miss through a reader that does not claim completeness is a frontier
+        local partial = R.open(db); partial.complete = false
+        assert.equals('frontier', A.read(partial, 'nosuch').absence)
+        -- a reader with no stamp function: refused by name, nothing read
+        local reads = 0
+        local nostamp = { via = 'x', complete = true, read = function() reads = reads + 1; return { ok = true, columns = {}, rows = {} } end }
+        local r = A.read(nostamp, 't')
+        assert.equals('unavailable', r.absence); assert.equals(0, reads)
+        -- WAL: the header's write version is 2 and the change counter is not a stamp (fileformat2 §1.3.6)
+        local wal = tmp .. '/algebra_sqlite_wal.db'
+        assert(R.build(wal, 'experiments/sqlite_fixture.sql'))
+        assert(R.exec(wal, 'pragma journal_mode=wal; insert into empty_t values (1, \'x\');'))
+        assert.equals(2, R.header(wal).write_version)
+        local w = A.read(R.open(wal), 's')
+        assert.equals('unavailable', w.absence); assert.truthy(w.why:find('WAL'))
+    end)
+
+    it('the stamp is the header: the change counter moves on a write, the schema cookie on a schema change, and a read family goes stale, never silently', function()
+        local rd = need(); if not rd then return end
+        local F = A.read(rd, 's')
+        assert.is_true(A.fresh(F, rd))
+        local h0 = R.header(db)
+        assert(R.exec(db, "insert into s values (5, 'Clark', 'Oslo');"))
+        local h1 = R.header(db)
+        assert.is_true(h1.change_counter > h0.change_counter); assert.equals(h0.schema_cookie, h1.schema_cookie)
+        local ok, why = A.fresh(F, rd)
+        assert.is_false(ok); assert.truthy(why:find('stale'))
+        assert(R.exec(db, 'alter table s add column phone TEXT;'))
+        local h2 = R.header(db)
+        assert.is_true(h2.schema_cookie > h1.schema_cookie)
+        -- the fixture is rebuilt for the tests after this one
+        built = nil
+        -- an unstamped family is not fresh, whatever the source says
+        assert.is_false(A.fresh({ source = {} }, rd))
+    end)
+
+    it('demand: a verifying trace keyed on the stamp reruns the read only when the source moved (DEMAND.md)', function()
+        local rd = need(); if not rd then return end
+        local store = A.new_store { ['stamp:s'] = rd.stamp() }
+        local reads = 0
+        local tasks = { ['rows:s'] = function(fetch) fetch('stamp:s'); reads = reads + 1; return A.read(rd, 's') end }
+        local log1 = A.build(tasks, 'rows:s', store)
+        assert.same({ 'rows:s' }, log1.executed); assert.equals(1, reads)
+        store.values['stamp:s'] = rd.stamp()
+        local log2 = A.build(tasks, 'rows:s', store)
+        assert.same({}, log2.executed); assert.same({ 'rows:s' }, log2.verified); assert.equals(1, reads)
+        assert(R.exec(db, "insert into s values (6, 'Adams', 'Kyiv');"))
+        store.values['stamp:s'] = rd.stamp()
+        local log3 = A.build(tasks, 'rows:s', store)
+        assert.same({ 'rows:s' }, log3.executed); assert.equals(2, reads); assert.equals(5, store.values['rows:s'].n)
+        built = nil
+    end)
+
+    it('code to catalog: SQL strings in a code family link to the tables the database has, and a misspelt table is dangling (the dblink audit)', function()
+        local rd = need(); if not rd then return end
+        local cat = rd.catalog()
+        local catalog = { template = A.template(node('tbl', hole 'name', hole 'type')), values = {} }
+        for i, r in ipairs(cat) do catalog.values[i] = { name = lit(r.name), type = lit(r.type) } end
+        local code = { template = A.template(node('call', name 'db_query', hole 'q')), values = {
+            { q = lit 'SELECT sname, city FROM s WHERE sno = ?' },
+            { q = lit 'insert into spj values (?, ?, ?, ?)' },
+            { q = lit 'UPDATE "p" SET color = ? WHERE pno = ?' },
+            { q = lit 'select count(*) from "spj"' },             -- a quoted table name
+            { q = lit 'DELETE FROM shipments WHERE jno = ?' }, -- the typo
+            { q = lit 'PRAGMA user_version' },                 -- not a statement the grammar names a table for
+        } }
+        local sql_reader = { template = A.template(emb('sql', node('sql', hole 'verb', hole 'table'))), hole = 'table' }
+        local L = A.link(code, catalog, { from = 'q', to = 'name', read_from = sql_reader, complete = true })
+        assert.equals(4, #L.tuples); assert.same({ 5 }, L.dangling); assert.same({ 6 }, L.unreadable.a)
+        assert.is_true(L.is_function) -- a table name is the catalog's primary key
+        local ch = A.chain(5, { L })
+        assert.equals('absent', ch.absences[1].absence) -- the catalog is complete: the table is not there
+    end)
+end)
+
+describe('keyed alignment: a node declares how its children align (KEYED.md; Kubernetes strategic merge patch; Plotkin per key)', function()
+    local P, K, opt = A.pair, A.keyed, A.optional
+    local function obj(list, o) return K('obj', list, o) end
+    local function vals(V) local vs = {} for h, v in pairs(V) do vs[#vs + 1] = h .. '=' .. A.show(v) end table.sort(vs) return table.concat(vs, ' ') end
+
+    it('a permutation of a keyed node is the same instance: eq, match (equal values, key-step sites), the gate; keyed-ordered tells them apart', function()
+        local T = A.template(obj { P('a', hole 'x'), P('b', hole 'y') })
+        local I1 = obj { P('a', lit(1)), P('b', lit(2)) }
+        local I2 = obj { P('b', lit(2)), P('a', lit(1)) }
+        assert.is_true(A.eq(I1, I2)); assert.equals(A.show(I1), A.show(I2))
+        local m1, m2 = A.match(T, I1), A.match(T, I2)
+        assert.is_true(m1.ok and m2.ok); assert.equals(vals(m1.values), vals(m2.values))
+        assert.equals('a/2', A.key(m1.sites.x.sites[1].path)); assert.equals('a/2', A.key(m2.sites.x.sites[1].path))
+        for _, I in ipairs { I1, I2 } do
+            local m = A.match(T, I)
+            local g = A.gate(T, m.values, I, nil, m.sites)
+            assert.is_true(g.instance.ok and g.instance.agree); assert.is_true(g.values.ok and g.values.agree); assert.is_true(g.template.ok and g.template.agree)
+        end
+        -- declared order: the same two instances are now distinct, and the permuted one refuses by name
+        local To = A.template(obj({ P('a', hole 'x'), P('b', hole 'y') }, { ordered = true }))
+        local O1 = obj({ P('a', lit(1)), P('b', lit(2)) }, { ordered = true })
+        local O2 = obj({ P('b', lit(2)), P('a', lit(1)) }, { ordered = true })
+        assert.is_false(A.eq(O1, O2)); assert.is_true(A.match(To, O1).ok)
+        local r = A.match(To, O2)
+        assert.is_false(r.ok); assert.truthy(r.refusal.why:find('out of order')); assert.equals('absent', A.absence_of(r).absence)
+        -- and a keyed instance never matches a positional template of the same shape, by name
+        local r2 = A.match(T, A.node('obj', P('a', lit(1)), P('b', lit(2))))
+        assert.is_false(r2.ok); assert.truthy(r2.refusal.why:find('^alignment'))
+        -- the discipline is part of the node's identity: the same kids under two disciplines are two terms
+        assert.is_false(A.eq(I1, A.node('obj', P('a', lit(1)), P('b', lit(2)))))
+        assert.is_false(A.eq(I1, O1))
+        -- the lens through a key step: put and rewrite reach a kid by its key, whatever its position
+        local put = A.put(I2, { 'a', 2 }, lit(9))
+        assert.is_true(A.eq(put, obj { P('a', lit(9)), P('b', lit(2)) }))
+        local Tf = A.template(obj { P('a', hole 'x'), P('b', A.node('f', lit(1))) })
+        local Tr, rwhy = A.rewrite(Tf, { 'b', 2 }, lit(7))
+        assert.truthy(Tr, rwhy)
+        assert.is_true(A.eq(Tr.body, obj { P('a', hole 'x'), P('b', lit(7)) }))
+    end)
+
+    it('strategic merge patch: containers merge by name; a container the template does not name is refused; an optional one binds present or absent', function()
+        -- the document's pod: containers merged on `name` (patchStrategy merge, patchMergeKey name)
+        local function c(kids) return A.node('container', unpack(kids)) end
+        local function containers(list) return K('containers', list, { key = 'name' }) end
+        local T = A.template(A.node('spec', P('containers', containers {
+            c { P('name', lit 'nginx'), P('image', hole 'img') },
+            opt(c { P('name', lit 'log-tailer'), P('image', hole 'timg') }, 'tailer'),
+        })))
+        local before = A.node('spec', P('containers', containers { c { P('name', lit 'nginx'), P('image', lit 'nginx-1.0') } }))
+        local after = A.node('spec', P('containers', containers {
+            c { P('name', lit 'log-tailer'), P('image', lit 'log-tailer-1.0') },
+            c { P('name', lit 'nginx'), P('image', lit 'nginx-1.0') },
+        }))
+        local mb, ma = A.match(T, before), A.match(T, after)
+        assert.is_true(mb.ok and ma.ok)
+        assert.equals('img="nginx-1.0" tailer=(absent)', vals(mb.values))
+        assert.equals('img="nginx-1.0" tailer=(present) timg="log-tailer-1.0"', vals(ma.values))
+        -- the presence site sits at the key step; the body site under it
+        assert.equals('1/2/log-tailer', A.key(ma.sites.tailer.sites[1].path))
+        assert.equals('1/2/log-tailer/2/2', A.key(ma.sites.timg.sites[1].path))
+        assert.equals('tailer', ma.sites.timg.sites[1].under[1].h)
+        -- instantiate drops the absent container and rebuilds both pods (order is not identity)
+        assert.is_true(A.eq(A.instantiate(T, mb.values).term, before))
+        assert.is_true(A.eq(A.instantiate(T, ma.values).term, after))
+        -- a third container is a key with no counterpart: refused, and the reading is complete
+        local extra = A.node('spec', P('containers', containers { c { P('name', lit 'nginx'), P('image', lit 'x') }, c { P('name', lit 'sidecar'), P('image', lit 'y') } }))
+        local r = A.match(T, extra)
+        assert.is_false(r.ok); assert.truthy(r.refusal.why:find('sidecar has no counterpart')); assert.equals('absent', A.absence_of(r).absence)
+        -- a required container missing is a refusal by name
+        local none = A.node('spec', P('containers', containers { c { P('name', lit 'log-tailer'), P('image', lit 'y') } }))
+        local r3 = A.match(T, none)
+        assert.is_false(r3.ok); assert.truthy(r3.refusal.why:find('^key nginx is missing'))
+    end)
+
+    it('the gate through an optional pair: values_at and abstract work from a member carrying it; abstract refuses by name from one that lacks it', function()
+        local T = A.template(obj { P('a', hole 'x'), opt(P('b', hole 'y'), 'p') })
+        local I1, I2 = obj { P('a', lit(1)) }, obj { P('b', lit(2)), P('a', lit(1)) }
+        local H = A.sites(T)
+        assert.is_true(H.p.presence); assert.equals('{absent|present}', A.show_domain(H.p.domain))
+        local V1 = A.values_at(I1, H); assert.equals('p=(absent) x=1', vals(V1))
+        local V2 = A.values_at(I2, H); assert.equals('p=(present) x=1 y=2', vals(V2))
+        -- a body hole under an absent pair owes no value: I1 instantiates without y
+        local r1 = A.instantiate(T, V1); assert.is_true(r1.ok); assert.is_true(A.eq(r1.term, I1))
+        assert.is_false(A.instantiate(T, { x = lit(1) }).ok) -- but the presence hole itself is owed
+        local T2 = A.abstract(I2, H)
+        assert.is_true(A.eq(T2.body, T.body)); assert.equals('p', T2.body.kids[2].opt == 'p' and 'p' or T2.body.kids[1].opt)
+        local ok, why = pcall(A.abstract, I1, H)
+        assert.is_false(ok); assert.truthy(tostring(why):find('optional pair b %(hole p%) is absent'))
+    end)
+
+    it('an unordered set of primitives (finalizers, patchStrategy merge) is a keyed node whose keys are its values; setElementOrder is the keyed-ordered reading', function()
+        local function fin(list, o) local kids = {} for i, v in ipairs(list) do kids[i] = lit(v) end return K('finalizers', kids, { key = true, ordered = o }) end
+        assert.is_true(A.eq(fin { 'a', 'b', 'c' }, fin { 'b', 'c', 'a' }))
+        assert.is_false(A.eq(fin({ 'a', 'b', 'c' }, true), fin({ 'b', 'c', 'a' }, true)))
+        assert.equals('(finalizers[key=true] "a" "b" "c")', A.show(fin { 'c', 'a', 'b' }))
+        -- construction refuses a duplicate key, a kid without the merge key, and a hole in a merge-keyed list
+        assert.has_error(function() obj { P('a', lit(1)), P('a', lit(2)) } end)
+        assert.has_error(function() K('containers', { A.node('c', P('image', lit 'x')) }, { key = 'name' }) end)
+        assert.has_error(function() K('containers', { hole 'h' }, { key = 'name' }) end)
+    end)
+
+    it('the positional operators refuse a keyed node by name: classify, unify, trace (join has its own arm)', function()
+        local T = A.template(obj { P('a', hole 'x') })
+        local I = obj { P('a', lit(1)) }
+        assert.equals('unsupported', A.classify(T, { x = lit(1) }, obj { P('a', lit(2)) }).kind)
+        local _, uw = A.unify(T, A.template(obj { P('a', lit(1)) })); assert.truthy(tostring(uw):find('keyed nodes'))
+        local tw = A.trace(T, { x = lit(1) }).why; assert.truthy(tw:find('keyed nodes'))
+        assert.equals('unavailable', A.absence_of({ why = tw }).absence)
+        -- a keyed template against a positional instance of the same kind is a refusal inside join, not an error
+        local r = A.join(T, A.node('obj', P('a', lit(1))))
+        assert.truthy(r); assert.is_true(A.is_hole(r.template.body)) -- the two disciplines disagree: the whole node is a hole
+    end)
+
+    it('generalize over keyed nodes: strategic merge patch\'s two pods give the nginx image as a hole and the log-tailer as an optional container', function()
+        local function c(kids) return A.node('container', unpack(kids)) end
+        local function containers(list) return K('containers', list, { key = 'name' }) end
+        local before = A.node('spec', P('containers', containers { c { P('name', lit 'nginx'), P('image', lit 'nginx-1.0') } }))
+        local after = A.node('spec', P('containers', containers {
+            c { P('name', lit 'log-tailer'), P('image', lit 'log-tailer-1.0') },
+            c { P('name', lit 'nginx'), P('image', lit 'nginx-1.1') },
+        }))
+        local g = A.generalize({ before, after }, {})
+        local T = g.template
+        assert.equals('(spec (pair "containers" (containers[key=name] (?h2:container (pair "name" "log-tailer") (pair "image" "log-tailer-1.0")) (container (pair "name" "nginx") (pair "image" ?h1)))))', A.show(T.body))
+        assert.is_true(T.holes.h2.presence); assert.equals('{absent|present}', A.show_domain(T.holes.h2.domain)); assert.equals('presence', g.notes.h2.why)
+        assert.equals('h1="nginx-1.0" h2=(absent)', vals(g.values[1])); assert.equals('h1="nginx-1.1" h2=(present)', vals(g.values[2]))
+        for i, I in ipairs { before, after } do
+            assert.is_true(A.eq(A.instantiate(T, g.values[i]).term, I))
+            local m = A.match(T, I); assert.is_true(m.ok); assert.equals(vals(g.values[i]), vals(m.values))
+        end
+        -- the order note: two members, keys in different orders, so the order is not stable
+        local list = T.body.kids[1].kids[2]
+        assert.is_false(list.order.stable); assert.equals(2, list.order.support); assert.is_false(list.order.claimed)
+        -- three members that agree on the key order: stable, and claimed at need = 3
+        local o = function(x, y) return obj { P('a', lit(x)), P('b', lit(y)) } end
+        local g3 = A.generalize({ o(1, 2), o(3, 4), o(5, 6) }, {})
+        assert.is_true(g3.template.body.order.stable and g3.template.body.order.claimed); assert.equals(3, g3.template.body.order.support)
+        -- a permuted third member: stable is false, and the template still rebuilds it (keyed, so order is not identity)
+        local g3p = A.generalize({ o(1, 2), o(3, 4), obj { P('b', lit(6)), P('a', lit(5)) } }, {})
+        assert.is_false(g3p.template.body.order.stable)
+        assert.is_true(A.eq(A.instantiate(g3p.template, g3p.values[3]).term, obj { P('a', lit(5)), P('b', lit(6)) }))
+        -- a nested optional: a key present only under a pair that is itself optional is not doubly optional
+        local i1 = obj { P('a', lit(1)) }
+        local i2 = obj { P('a', lit(1)), P('m', obj { P('x', lit(1)) }) }
+        local i3 = obj { P('a', lit(1)), P('m', obj { P('x', lit(2)), P('y', lit(3)) }) }
+        local gn = A.generalize({ i1, i2, i3 }, {})
+        local hs, valueh = {}, nil
+        for h, e in pairs(gn.template.holes) do
+            hs[#hs + 1] = (e.presence and 'presence' or 'value') .. ':' .. A.show_domain(e.domain)
+            if not e.presence then valueh = h end
+        end
+        table.sort(hs)
+        assert.same({ 'presence:{absent|present}', 'presence:{absent|present}', 'value:{lit}' }, hs)
+        assert.is_true(gn.notes[valueh].under_optional) -- its column has a gap: no recursion claim is made over it
+        for i, I in ipairs { i1, i2, i3 } do assert.is_true(A.eq(A.instantiate(gn.template, gn.values[i]).term, I), 'member ' .. i) end
+    end)
+
+    it('MANIFESTS.md as the oracle: generalize over the keyed terms of the Kubernetes manifests reproduces kv_generalize hole for hole', function()
+        local O = dofile('experiments/keyed_oracle.lua')
+        local core = { ['redis-cart'] = true, loadgenerator = true, ['frontend-external'] = true }
+        local want = { -- MANIFESTS.md's table: holes / value / presence / sites / shared / rebuild
+            { 'Deployment', {}, 31, 13, 18, 51, 10, 12 }, { 'Deployment', core, 24, 11, 13, 43, 8, 10 },
+            { 'Service', {}, 8, 5, 3, 9, 1, 12 }, { 'Service', core, 5, 3, 2, 7, 1, 10 }, { 'ServiceAccount', {}, 1, 1, 0, 1, 0, 11 },
+        }
+        for _, w in ipairs(want) do
+            local kv, t = O.run(w[1], w[2], function() end)
+            local tag = w[1] .. (next(w[2]) and ' core' or ' all')
+            assert.equals(w[3], kv.value + kv.presence + kv.array + kv.mixed, tag .. ' kv holes'); assert.equals(w[3], t.value + t.presence + t.array + t.mixed, tag .. ' holes')
+            assert.equals(w[4], t.value, tag .. ' value'); assert.equals(w[5], t.presence, tag .. ' presence')
+            assert.equals(w[6], t.sites, tag .. ' sites'); assert.equals(w[7], t.shared, tag .. ' shared'); assert.equals(w[8], t.rebuild, tag .. ' rebuild')
+            assert.equals(0, t.array + t.mixed, tag .. ' no array/mixed holes')
+        end
+        -- and per group the two agree on every column, not only the totals asserted above
+        for _, w in ipairs(want) do
+            local kv, t = O.run(w[1], w[2], function() end)
+            for _, f in ipairs { 'value', 'presence', 'array', 'mixed', 'sites', 'shared', 'rebuild' } do assert.equals(kv[f], t[f], w[1] .. ' ' .. f) end
+        end
+    end)
+
+    it('join over keyed nodes: a key on one side is carried under a new presence hole; rejoining a member changes nothing; the fold of join reproduces the oracle', function()
+        local function c(kids) return A.node('container', unpack(kids)) end
+        local function containers(list) return K('containers', list, { key = 'name' }) end
+        local before = A.node('spec', P('containers', containers { c { P('name', lit 'nginx'), P('image', lit 'nginx-1.0') } }))
+        local after = A.node('spec', P('containers', containers {
+            c { P('name', lit 'log-tailer'), P('image', lit 'log-tailer-1.0') },
+            c { P('name', lit 'nginx'), P('image', lit 'nginx-1.1') },
+        }))
+        local r = A.join(A.template(before), after)
+        assert.truthy(r, 'join refused')
+        assert.equals('(spec (pair "containers" (containers[key=name] (?j2:container (pair "name" "log-tailer") (pair "image" "log-tailer-1.0")) (container (pair "name" "nginx") (pair "image" ?j1)))))', A.show(r.template.body))
+        assert.same({ 'j1', 'j2' }, r.new); assert.is_true(r.template.holes.j2.presence)
+        local W1, W2 = r.left({}), r.right({})
+        assert.equals('j1="nginx-1.0" j2=(absent)', vals(W1)); assert.equals('j1="nginx-1.1" j2=(present)', vals(W2))
+        assert.is_true(A.eq(A.instantiate(r.template, W1).term, before)); assert.is_true(A.eq(A.instantiate(r.template, W2).term, after))
+        -- match = join with nothing new: a member already admitted moves nothing
+        for _, I in ipairs { before, after } do
+            local r2 = A.join(r.template, I)
+            assert.equals(0, #r2.new + #r2.split + #r2.widened, 'rejoin')
+            local kept = { unpack(r2.kept) }; table.sort(kept)
+            assert.same({ 'j1', 'j2' }, kept)
+        end
+        -- two templates whose optional pairs already carry presence holes: the names are kept
+        local Ta = A.template(obj { P('a', hole 'x'), opt(P('b', hole 'y'), 'p') })
+        local Tb = A.template(obj { P('a', hole 'x2'), opt(P('b', hole 'y2'), 'q'), P('c', lit(3)) })
+        local rj = A.join(Ta, Tb)
+        assert.equals('(obj[keyed] (pair "a" ?x) (?p:pair "b" ?y) (?j1:pair "c" 3))', A.show(rj.template.body))
+        assert.same({ 'p', 'x', 'y' }, (function() local k = {} for _, h in ipairs(rj.kept) do k[#k + 1] = h end table.sort(k) return k end)())
+        -- the FOLD LAW on the manifests: adjoining the Deployments one by one lands on the oracle's numbers
+        local KV = dofile('experiments/kv_terms.lua')
+        local data = dofile('experiments/manifests-data-2026-09-11.lua')
+        for _, w in ipairs { { 'Deployment', 31, 18, 51, 10, 12 }, { 'Service', 8, 3, 9, 1, 12 } } do
+            local docs = {}
+            for _, e in ipairs(data[w[1]]) do docs[#docs + 1] = e.doc end
+            local terms = KV.of_all(docs, A)
+            local T0, Vs = A.template(A.copy(terms[1])), { {} }
+            for i = 2, #terms do local ad, why = A.adjoin(T0, Vs, terms[i]); assert.truthy(ad, w[1] .. ' member ' .. i .. ': ' .. tostring(why)); T0, Vs = ad.template, ad.values end
+            local nh, np, ns, sh, rb = 0, 0, 0, 0, 0
+            local HF = A.sites(T0)
+            for _, e in pairs(HF) do nh = nh + 1; if e.presence then np = np + 1 end; ns = ns + #e.sites; if #e.sites > 1 then sh = sh + 1 end end
+            for i = 1, #terms do local ri = A.instantiate(T0, Vs[i]); if ri.ok and A.eq(ri.term, terms[i]) then rb = rb + 1 end end
+            -- the same SITES and every member rebuilt; the fold's template is the n-ary one up to renaming
+            -- in shape, and it may hold FEWER holes: two columns whose values agree wherever both are
+            -- defined, differing only in which members lack the optional pair above one of them, are
+            -- one hole to the fold and two to the n-ary rule (one hole per value vector, the gap
+            -- counted). The fold's answer is more specific and depends on member order; the n-ary
+            -- answer is the keyed generalizer's and order-free. Measured: 27 against 31 on the
+            -- Deployments, all four merges of that shape; 8 against 8 on the Services.
+            assert.equals(w[4], ns, w[1] .. ' fold sites'); assert.equals(w[6], rb, w[1] .. ' fold rebuild'); assert.equals(w[5], sh, w[1] .. ' fold shared')
+            assert.is_true(nh <= w[2] and np <= w[3], w[1] .. (' fold holes %d presence %d'):format(nh, np))
+            local g = A.generalize(terms, {})
+            local function erase(str) return (str:gsub("%?[%w_.']+", '?')) end
+            assert.equals(erase(A.show(g.template.body)), erase(A.show(T0.body)), w[1] .. ' fold = generalize up to renaming')
+            -- every merge the fold made is gap-compatible: the n-ary holes under one fold hole agree wherever both hold a value
+            local gm = {}
+            for h, e in pairs(A.sites(g.template)) do for _, st in ipairs(e.sites) do gm[A.key(st.path)] = h end end
+            local merges = 0
+            for fh, e in pairs(HF) do
+                local seen = {}
+                for _, st in ipairs(e.sites) do seen[gm[A.key(st.path)]] = true end
+                local list = {}
+                for h in pairs(seen) do list[#list + 1] = h end
+                if #list > 1 then
+                    merges = merges + 1
+                    for i = 1, #terms do
+                        local ref
+                        for _, h in ipairs(list) do
+                            local v = g.values[i][h]
+                            if v ~= nil then
+                                if ref and not A.eq(ref, v) then error(('fold hole %s merges n-ary holes that disagree on member %d'):format(fh, i)) end
+                                ref = ref or v
+                            end
+                        end
+                    end
+                end
+            end
+            if w[1] == 'Deployment' then assert.equals(3, merges) else assert.equals(0, merges) end
+        end
+    end)
+
+    it('a merge-keyed list whose elements under one key diverge in kind: the whole list is the hole, in generalize and in join, and nothing raises later', function()
+        local function list(kids) return K('list', kids, { key = 'name' }) end
+        local a = list { A.node('container', P('name', lit 'x'), P('image', lit 'i1')), A.node('container', P('name', lit 'y'), P('image', lit 'i2')) }
+        local b = list { A.node('container', P('name', lit 'x'), P('image', lit 'i3')), A.node('sidecar', P('name', lit 'y'), P('image', lit 'i2')) }
+        local g = A.generalize({ a, b }, {})
+        assert.is_true(A.is_hole(g.template.body)); assert.equals('alignment', g.notes[g.template.body.h].why)
+        assert.is_true(A.eq(A.instantiate(g.template, g.values[2]).term, b))
+        local r = A.join(A.template(a), b)
+        assert.is_true(A.is_hole(r.template.body)); assert.is_true(A.eq(r.right({})[r.template.body.h], b))
+        -- and the no-raise property: show, eq and match all answer
+        assert.truthy(A.show(g.template.body)); assert.is_true(A.match(g.template, a).ok)
+        -- the same two lists with the kinds agreeing generalize per key as before
+        local b2 = list { A.node('container', P('name', lit 'x'), P('image', lit 'i3')), A.node('container', P('name', lit 'y'), P('image', lit 'i2')) }
+        local g2 = A.generalize({ a, b2 }, {})
+        assert.equals('(list[key=name] (container (pair "name" "x") (pair "image" ?h1)) (container (pair "name" "y") (pair "image" "i2")))', A.show(g2.template.body))
+    end)
+
+    it('removing a member: pin its presence hole to absent and migrate; rewrite the parent without it; an edit that would leave an unkeyed kid is refused by name', function()
+        local function cls(list) return K('class', list) end
+        local c1 = cls { P('run', A.node('body', lit(1))), P('log', A.node('body', lit 'x')) }
+        local c2 = cls { P('run', A.node('body', lit(2))), P('log', A.node('body', lit 'x')) }
+        local c3 = cls { P('run', A.node('body', lit(3))) }
+        local g = A.generalize({ c1, c2, c3 }, {})
+        local T, Vs = g.template, g.values
+        local pres; for h, e in pairs(T.holes) do if e.presence then pres = h end end
+        -- 1. the family stops describing the member: pin its presence to absent; the classes carrying it fall out, by name
+        local T2 = A.pin(T, pres, A.absent())
+        local mig = A.migrate(T, T2, Vs)
+        assert.equals(1, #mig.kept); assert.equals(2, #mig.dropped); assert.truthy(mig.dropped[1].why:find('value differs'))
+        assert.is_true(A.eq(A.instantiate(mig.template, mig.values[3]).term, c3))
+        -- and open undoes it: the pin's premise is gone, the member is optional again
+        local T2b = A.open_hole(T2, pres)
+        assert.is_true(A.match(T2b, c1).ok)
+        -- 2. a hole-free member is removed by rewriting the parent without it
+        local T3 = A.template(cls { P('run', hole 'r'), P('log', A.node('body', lit 'x')) })
+        local T4, why = A.rewrite(T3, {}, cls { P('run', hole 'r') })
+        assert.truthy(T4, why); assert.equals('(class[keyed] (pair "run" ?r))', A.show(T4.body))
+        -- renaming a member through its key step is a rewrite of the pair; a duplicate key is refused
+        local T5 = assert(A.rewrite(T3, { 'log' }, P('trace', A.node('body', lit 'x'))))
+        assert.equals('(class[keyed] (pair "run" ?r) (pair "trace" (body "x")))', A.show(T5.body))
+        local _, dup = A.rewrite(T3, { 'log' }, P('run', A.node('body', lit 'y'))); assert.truthy(dup:find('already a kid'))
+        -- 3. an edit that would leave an unkeyed kid in a keyed node is refused by name, in rewrite and in dig
+        local _, w1 = A.rewrite(T3, { 'log' }, A.node('nothing')); assert.truthy(w1:find('must carry a key'))
+        local _, w2 = A.dig(T3, { 'log' }, 'g'); assert.truthy(w2:find('must carry a key') and w2:find("pair's value"))
+        local T6 = assert(A.dig(T3, { 'log', 2 }, 'g')); assert.equals('(class[keyed] (pair "log" ?g) (pair "run" ?r))', A.show(T6.body))
+        local malformed = { k = 'm', align = 'keyed', kids = { A.node('x') } } -- built by hand: the constructor would have refused it
+        local _, w3 = A.rewrite(T3, { 'log', 2 }, malformed); assert.truthy(w3:find('^rewrite: .*keyed m'))
+        -- 4. detection: a class lacking a required member refuses by name (absent); classifying the removal is still refused
+        local m = A.match(T3, cls { P('run', A.node('body', lit(9))) })
+        assert.is_false(m.ok); assert.truthy(m.refusal.why:find('^key log is missing')); assert.equals('absent', A.absence_of(m).absence)
+        assert.equals('unsupported', A.classify(T3, { r = A.node('body', lit(1)) }, cls { P('run', A.node('body', lit(1))) }).kind)
+        -- 5. removing an INSTANCE from a family is a membership change: the derived domains follow the survivors
+        local T7 = A.rederive_domains(A.copy(T), { Vs[1], Vs[2] })
+        assert.equals('=(present)', A.show_domain(T7.holes[pres].domain))
+    end)
+
+    it('law: over random keyed objects with optional pairs, a permutation of the kids leaves match values and the gate unchanged (200 seeds)', function()
+        local seeds, checked, absent_seen, nested = 200, 0, 0, 0
+        for seed = 1, seeds do
+            local rnd = A.rng and A.rng(seed) or nil
+            math.randomseed(seed)
+            local nk = 2 + (seed % 3)
+            local tkids, ikids, V = {}, {}, {}
+            for i = 1, nk do
+                local key = string.char(96 + i)
+                local v = lit(seed * 7 + i)
+                local body = hole('h' .. i)
+                V['h' .. i] = v
+                if i == nk and seed % 2 == 0 then
+                    -- a nested keyed object as the value
+                    body = obj { P('n', hole('h' .. i)) }
+                    v = obj { P('n', lit(seed)) }
+                    V['h' .. i] = lit(seed)
+                    nested = nested + 1
+                end
+                local pair = P(key, body)
+                if i == 2 then
+                    pair = opt(pair, 'p')
+                    if seed % 3 == 0 then V.p = A.absent(); V['h' .. i] = nil; pair = pair else V.p = A.present() end
+                end
+                tkids[#tkids + 1] = pair
+                if not (i == 2 and seed % 3 == 0) then ikids[#ikids + 1] = P(key, v) end
+            end
+            local T = A.template(obj(tkids))
+            local I = obj(ikids)
+            -- a random permutation of the instance's kids
+            local perm = {}
+            for i = 1, #ikids do perm[i] = ikids[i] end
+            for i = #perm, 2, -1 do local j = 1 + (seed * 31 + i * 17) % i; perm[i], perm[j] = perm[j], perm[i] end
+            local Ip = obj(perm)
+            assert.is_true(A.eq(I, Ip))
+            local m, mp = A.match(T, I), A.match(T, Ip)
+            assert.is_true(m.ok and mp.ok, 'seed ' .. seed .. ': ' .. tostring(m.refusal and m.refusal.why) .. ' / ' .. tostring(mp.refusal and mp.refusal.why))
+            assert.equals(vals(m.values), vals(mp.values))
+            assert.equals(vals(V), vals(m.values), 'seed ' .. seed)
+            local g = A.gate(T, mp.values, Ip, nil, mp.sites)
+            assert.is_true(g.instance.ok and g.instance.agree and g.values.ok and g.values.agree, 'seed ' .. seed)
+            if seed % 3 == 0 then
+                -- the optional pair is absent here: the third leg cannot recover its body and says so
+                assert.is_false(g.template.ok); assert.truthy(tostring(g.template.why):find('optional pair b'), 'seed ' .. seed .. ': ' .. tostring(g.template.why))
+            else
+                assert.is_true(g.template.ok and g.template.agree, 'seed ' .. seed .. ': ' .. tostring(g.template.why))
+            end
+            checked = checked + 1
+            if seed % 3 == 0 then absent_seen = absent_seen + 1 end
+        end
+        assert.is_true(checked == seeds and absent_seen > 50 and nested > 80, ('checked %d absent %d nested %d'):format(checked, absent_seen, nested))
+    end)
+
+    -- ── composite keys (KEYED.md "Composite keys"; JLS §8.4.2; Erlang reference manual §Functions; Kubernetes server-side apply, x-kubernetes-list-map-keys)
+    local function prm(ty, nm) return A.node('param', P('type', lit(ty)), P('name', lit(nm))) end
+    local function meth(nm, params, body) return A.node('method', P('name', lit(nm)), P('params', seq(params)), P('body', body or lit 'x')) end
+    local SIG = { key = { 'name', { field = 'params', by = 'types' } } }
+    local ARITY = { key = { 'name', { field = 'params', by = 'arity' } } }
+
+    it('Kubernetes list-map-keys: ports keyed by (port, protocol) are two entries, keyed by port alone a duplicate; the tuple is compared componentwise, never as a concatenated string', function()
+        local function port(p, proto) return A.node('port', P('port', lit(p)), P('protocol', lit(proto))) end
+        local ports = K('ports', { port(80, 'TCP'), port(80, 'UDP') }, { key = { 'port', 'protocol' } })
+        assert.equals('port=80,protocol=TCP', A.key_of(ports, ports.kids[1]))
+        assert.matches('%[key=port%+protocol%]', A.show(ports))
+        local ok, why = pcall(K, 'ports', { port(80, 'TCP'), port(80, 'UDP') }, { key = 'port' })
+        assert.is_false(ok); assert.matches('duplicate key 80', why)
+        -- a permutation is the same instance, and the key is a path step
+        assert.is_true(A.eq(ports, K('ports', { port(80, 'UDP'), port(80, 'TCP') }, { key = { 'port', 'protocol' } })))
+        local T = A.template(K('ports', { A.node('port', P('port', lit(80)), P('protocol', lit 'TCP'), P('name', hole 'n')) }, { key = { 'port', 'protocol' } }))
+        local m = A.match(T, K('ports', { A.node('port', P('port', lit(80)), P('protocol', lit 'TCP'), P('name', lit 'http')) }, { key = { 'port', 'protocol' } }))
+        assert.is_true(m.ok); assert.equals('http', m.values.n.v); assert.equals('port=80,protocol=TCP/3/2', A.key(m.sites.n.sites[1].path))
+        -- the key fields must be scalars; a missing component is a refusal by name, not an empty component
+        local ok2, why2 = pcall(K, 'ports', { A.node('port', P('port', lit(80))) }, { key = { 'port', 'protocol' } })
+        assert.is_false(ok2); assert.matches('no field protocol', why2)
+        local ok3, why3 = pcall(K, 'ports', { A.node('port', P('port', lit(80)), P('protocol', A.node('x'))) }, { key = { 'port', 'protocol' } })
+        assert.is_false(ok3); assert.matches('protocol is not a scalar', why3)
+        -- a hole is never a key component, plain or measured: a key is an identity, not a variable
+        local ok4, why4 = pcall(K, 'ports', { A.node('port', P('port', hole 'p'), P('protocol', lit 'TCP')) }, { key = { 'port', 'protocol' } })
+        assert.is_false(ok4); assert.matches('key field port is a hole', why4)
+        local ok5, why5 = pcall(K, 'mod', { A.node('method', P('name', lit 'f'), P('params', hole 'ps')) }, { key = { 'name', { field = 'params', by = 'arity' } } })
+        assert.is_false(ok5); assert.matches('key field params is a hole', why5) -- not f/0
+        -- ("x,b=y", "z") and ("x", "y,b=z") are different tuples although their naive concatenations agree
+        local e1 = A.node('r', P('a', lit 'x,b=y'), P('b', lit 'z')); local e2 = A.node('r', P('a', lit 'x'), P('b', lit 'y,b=z'))
+        local rs = K('rs', { e1, e2 }, { key = { 'a', 'b' } })
+        assert.equals(2, #A.keys(rs)); assert.is_true(A.key_of(rs, e1) ~= A.key_of(rs, e2))
+        assert.equals('a=x\\,b\\=y,b=z', A.key_of(rs, e1))
+        local e3 = A.node('r', P('a', lit 'p\\'), P('b', lit 'q')); local e4 = A.node('r', P('a', lit 'p'), P('b', lit '\\q'))
+        assert.is_true(A.key_of(rs, e3) ~= A.key_of(rs, e4))
+    end)
+
+    it('JLS 8.4.2: the signature is the name and the formal parameter types; two override-equivalent methods in one class are a compile-time error (Example 8.4.2-1), the names of the parameters do not enter; move(int,int) and move(String) are two members', function()
+        -- Example 8.4.2-1: class Point { abstract void move(int dx, int dy); void move(int dx, int dy) {} } is an error
+        local ok, why = pcall(K, 'Point', { meth('move', { prm('int', 'dx'), prm('int', 'dy') }, lit 'abstract'), meth('move', { prm('int', 'dx'), prm('int', 'dy') }, lit 'concrete') }, SIG)
+        assert.is_false(ok); assert.matches('duplicate key name=move,params/types=int|int', why, 1, true)
+        -- the parameter names do not enter: move(int a, int b) is the same signature
+        local ok2 = pcall(K, 'Point', { meth('move', { prm('int', 'dx'), prm('int', 'dy') }), meth('move', { prm('int', 'a'), prm('int', 'b') }) }, SIG)
+        assert.is_false(ok2)
+        -- overloads: move(int,int) and move(String) are two keys, and the order in the class does not matter
+        local A1 = K('Point', { meth('move', { prm('int', 'dx'), prm('int', 'dy') }, lit(1)), meth('move', { prm('String', 's') }, lit(2)) }, SIG)
+        local A2 = K('Point', { meth('move', { prm('String', 's') }, lit(3)), meth('move', { prm('int', 'dx'), prm('int', 'dy') }, lit(4)) }, SIG)
+        local B = K('Point', { meth('move', { prm('int', 'dx'), prm('int', 'dy') }, lit(5)) }, SIG)
+        assert.matches('%[key=name%+params/types%]', A.show(A1))
+        assert.same({ 'name=move,params/types=String', 'name=move,params/types=int|int' }, (function() local ks = {} for _, e in ipairs(A.keys(A1)) do ks[#ks + 1] = e.key end return ks end)())
+        -- generalize: the two-int body is a hole over three classes, the String overload's presence is a hole (present, present, absent)
+        local g = A.generalize({ A1, A2, B }, {})
+        local pres, bodies = 0, 0
+        for h, e in pairs(g.template.holes) do if e.presence then pres = pres + 1 else bodies = bodies + 1 end end
+        assert.equals(1, pres); assert.equals(2, bodies)
+        for i, V in ipairs(g.values) do for h, e in pairs(g.template.holes) do if e.presence then assert.equals(i == 3 and 'absent' or 'present', V[h].k) end end end
+        assert.is_true(A.eq(A1, A.instantiate(g.template, g.values[1]).term)); assert.is_true(A.eq(B, A.instantiate(g.template, g.values[3]).term))
+        -- a class whose method has a parameter without a type is refused by name
+        local ok3, why3 = pcall(K, 'C', { A.node('method', P('name', lit 'f'), P('params', seq { A.node('param', P('name', lit 'x')) })) }, SIG)
+        assert.is_false(ok3); assert.matches('parameter 1 of params has no type', why3)
+    end)
+
+    it('Erlang: a function is uniquely defined by module, name and arity (mod:f/N); f/1 and f/2 are two members of one module; f/2 twice is refused', function()
+        local m = K('mod', { meth('f', { prm('any', 'X') }, lit(1)), meth('f', { prm('any', 'X'), prm('any', 'Y') }, lit(2)) }, ARITY)
+        assert.equals('name=f,params/arity=1', A.key_of(m, m.kids[1])); assert.equals('name=f,params/arity=2', A.key_of(m, m.kids[2]))
+        assert.matches('%[key=name%+params/arity%]', A.show(m))
+        -- the types do not enter under arity: f(X) and f(Y) of different declared types are the same f/1
+        local ok, why = pcall(K, 'mod', { meth('f', { prm('int', 'X') }), meth('f', { prm('atom', 'Y') }) }, ARITY)
+        assert.is_false(ok); assert.matches('duplicate key name=f,params/arity=1', why, 1, true)
+        -- mod:f/N is rendered from the key: the string is the tuple, the tuple is the string
+        local function mfa(mod, key) local n, a = key:match('^name=(.-),params/arity=(%d+)$') return mod .. ':' .. n .. '/' .. a end
+        assert.equals('mod:f/2', mfa('mod', A.key_of(m, m.kids[2])))
+        -- a module that lacks f/1 aligns by key with one that has it: a presence hole, no positional shift of f/2
+        local m2 = K('mod', { meth('f', { prm('any', 'X'), prm('any', 'Y') }, lit(2)) }, ARITY)
+        local g = A.generalize({ m, m2 }, {})
+        local pres, other = 0, 0
+        for h, e in pairs(g.template.holes) do if e.presence then pres = pres + 1 else other = other + 1 end end
+        assert.equals(1, pres); assert.equals(0, other) -- f/2 agrees exactly, f/1 is present then absent
+    end)
+
+    it("Codd's composite primary key: salaryhistory' is keyed by (man#, jobdate); primary_key over man alone is false, over the pair true; link over the pair is a function and never matches on a prefix of the tuple", function()
+        local function fam(T, rows) return { template = T, values = rows } end
+        local jobs = fam(A.template(A.node('job', hole 'man', hole 'jobdate', hole 'title')), {
+            { man = lit(7), jobdate = lit(1990), title = lit 'eng' }, { man = lit(7), jobdate = lit(1995), title = lit 'lead' }, { man = lit(8), jobdate = lit(1990), title = lit 'eng' } })
+        local sals = fam(A.template(A.node('sal', hole 'man', hole 'jobdate', hole 'salarydate', hole 'salary')), {
+            { man = lit(7), jobdate = lit(1990), salarydate = lit(1990), salary = lit(100) }, { man = lit(7), jobdate = lit(1990), salarydate = lit(1991), salary = lit(110) },
+            { man = lit(7), jobdate = lit(1995), salarydate = lit(1995), salary = lit(150) }, { man = lit(8), jobdate = lit(1990), salarydate = lit(2000), salary = lit(120) },
+            { man = lit(9), jobdate = lit(1990), salarydate = lit(1990), salary = lit(90) } }) -- man 9 dangles: jobdate 1990 alone would match man 7's job
+        assert.is_false(A.primary_key(jobs, 'man')); assert.is_false(A.primary_key(jobs, 'jobdate'))
+        assert.is_true(A.primary_key(jobs, { 'man', 'jobdate' }))
+        assert.is_false(A.primary_key(sals, { 'man', 'jobdate' })); assert.is_true(A.primary_key(sals, { 'man', 'jobdate', 'salarydate' }))
+        local ok, dups = A.primary_key(jobs, { 'man', 'title' }) -- (7, eng) is unique, but (man, title) is not the key: (7,eng),(7,lead),(8,eng) are distinct: true
+        assert.is_true(ok)
+        local L = A.link(sals, jobs, { from = { 'man', 'jobdate' }, to = { 'man', 'jobdate' } })
+        assert.is_true(L.is_function); assert.equals(4, #L.tuples); assert.equals(1, #L.dangling); assert.equals(5, L.dangling[1])
+        -- a prefix or a permutation of the tuple is not the tuple
+        local Lp = A.link(sals, jobs, { from = { 'jobdate', 'man' }, to = { 'man', 'jobdate' } })
+        assert.equals(0, #Lp.tuples)
+        -- readers apply per component: a reader for jobdate normalizing a string year
+        local sals2 = fam(sals.template, { { man = lit(7), jobdate = lit '1990', salarydate = lit(1990), salary = lit(100) } })
+        local year = function(v) return v.k == 'lit' and lit(tonumber(v.v)) or v end
+        local Lr = A.link(sals2, jobs, { from = { 'man', 'jobdate' }, to = { 'man', 'jobdate' }, read_from = { nil, year } })
+        assert.equals(1, #Lr.tuples) -- a list of readers indexed like the holes: nil for man reads the value as it is, year for jobdate
+        local Lr0 = A.link(sals2, jobs, { from = { 'man', 'jobdate' }, to = { 'man', 'jobdate' } })
+        assert.equals(0, #Lr0.tuples) -- without the reader "1990" and 1990 are different values
+        -- a chain through a composite link names the tuple in its absence, not a table address
+        local Lc = A.link(sals, jobs, { from = { 'man', 'jobdate' }, to = { 'man', 'jobdate' }, complete = true })
+        local ch = A.chain({ 1, 5 }, { Lc })
+        assert.equals(1, #ch.absences); assert.equals('absent', ch.absences[1].absence)
+        assert.matches('member 5: no %(man, jobdate%) with %(man, jobdate%) equal to its %(man, jobdate%)', ch.absences[1].why)
+    end)
+
+    it('the key oracle (KEYED.md "Oracle"): key_of via match and readers partitions the kids as the algebra does; deriving the key over the fixtures gives the signature among the minimal keys and never the name alone', function()
+        local okm, O = pcall(dofile, 'experiments/key_oracle.lua')
+        if not okm or type(O) ~= 'table' then return pending('experiments/key_oracle.lua not readable') end
+        local function port(p, proto) return A.node('port', P('port', lit(p)), P('protocol', lit(proto))) end
+        local ports = K('ports', { port(80, 'TCP'), port(80, 'UDP') }, { key = { 'port', 'protocol' } })
+        local A1 = K('Point', { meth('move', { prm('int', 'dx'), prm('int', 'dy') }, lit(1)), meth('move', { prm('String', 's') }, lit(2)) }, SIG)
+        local m = K('mod', { meth('f', { prm('any', 'X') }, lit(1)), meth('f', { prm('any', 'X'), prm('any', 'Y') }, lit(2)) }, ARITY)
+        local obj = K('obj', { P('a', lit(1)), P('b', lit(2)) })
+        local esc = K('rs', { A.node('r', P('a', lit 'x,b=y'), P('b', lit 'z')), A.node('r', P('a', lit 'x'), P('b', lit 'y,b=z')) }, { key = { 'a', 'b' } })
+        for _, t in ipairs { ports, A1, m, obj, esc } do
+            local r = O.check(t)
+            assert.is_true(r.ok, table.concat(r.disagreements, '; '))
+            assert.equals(r.pairs, r.pairs_agree); assert.equals(0, r.refused_alg_only + r.refused_oracle_only)
+        end
+        -- the oracle reads a positional kid with two repetition holes around the pair and a keyed kid through the lens
+        local _, how = O.field(ports.kids[1], 'protocol'); assert.equals('hedge', how)
+        local _, how2 = O.field(obj, 'a'); assert.equals('lens', how2)
+        -- the oracle refuses what the algebra refuses: a hole in a key field, a missing field, a non-scalar
+        local malformed = { k = 'ports', align = 'keyed', key = { 'port', 'protocol' }, kids = { A.node('port', P('port', hole 'p'), P('protocol', lit 'TCP')), A.node('port', P('port', lit(1))), A.node('port', P('port', lit(1)), P('protocol', A.node('x'))) } }
+        local r = O.check(malformed); assert.equals(3, r.refused_both); assert.is_true(r.ok)
+        -- deriving: Shape has two names, so name alone is not a key and the signature's types are
+        local C = K('Shape', { meth('draw', {}, lit(1)), meth('move', { prm('int', 'dx'), prm('int', 'dy') }, lit(1)), meth('move', { prm('String', 's') }, lit(1)) }, SIG)
+        local d = O.derive { C }
+        assert.is_false(d.is_key { 'name' }); assert.is_true(d.is_key { 'params/types' }); assert.is_true(d.is_key { 'name', 'params/types' })
+        assert.equals(1, d.keysize); assert.is_true(d.spec.is_key); assert.is_false(d.spec.minimal) -- the JLS signature is a superkey of the data's key
+        -- Erlang: over two modules, name alone and arity alone are not keys; name+arity is a minimal key, and so is name+body: the data cannot choose, the schema does
+        local m2 = K('mod', { meth('f', { prm('any', 'X'), prm('any', 'Y') }, lit(2)), meth('g', { prm('any', 'X'), prm('any', 'Y') }, lit(2)) }, ARITY)
+        local e = O.derive { m, m2 }
+        assert.is_false(e.is_key { 'name' }); assert.is_false(e.is_key { 'params/arity' }); assert.is_true(e.is_key { 'name', 'params/arity' }); assert.is_true(e.is_key { 'body', 'name' })
+        assert.equals(2, e.keysize); assert.is_true(e.spec.is_key and e.spec.minimal)
+        -- ports: over two lists neither field alone is a key and the pair is the only minimal key
+        local p2 = O.derive { ports, K('ports', { port(80, 'TCP'), port(443, 'TCP') }, { key = { 'port', 'protocol' } }) }
+        assert.equals(1, #p2.keys); assert.same({ 'port', 'protocol' }, p2.keys[1])
+    end)
+end)
+
+describe('repetition: the period is the unit (Kolpakov and Kucherov 1999, REPETITION.md)', function()
+    local A = require 'algebra'
+    local node, lit, hole, seq = A.node, A.lit, A.hole, A.seq
+    local function word(s) local ks = {}; for c in s:gmatch('%S+') do ks[#ks + 1] = lit(c) end; return ks end
+    local function w(s) return node('w', unpack(word(s))) end
+
+    it('page 1: period, exponent and every maximal repetition of 1011010110110', function()
+        local letters = word('1 0 1 1 0 1 0 1 1 0 1 1 0')
+        assert.equals(2, A.period(word('1 0 1 0 1')))       -- 10101 has period 2
+        assert.equals(2.5, A.exponent(word('1 0 1 0 1')))
+        assert.equals(2, A.exponent(word('a b a b')))        -- a square
+        assert.equals(2, A.period(word('1 0 1')))            -- 101 has period 2 (exponent 1.5: not a repetition)
+        assert.equals(3, A.period(word('1 0 0')))            -- primitive: the period is the length
+        assert.equals(0, A.period({}))
+        local got = {}
+        for _, r in ipairs(A.maximal_repetitions(letters)) do got[#got + 1] = { r.from, r.to, r.period } end
+        -- the paper's list: 10101 (period 2), the prefix 10110101101 (5), the suffix 10110110 (3),
+        -- the prefix 101101 (3), and the three occurrences of 11 (1); 1010 at 4-7 is not maximal
+        assert.same({ { 1, 6, 3 }, { 1, 11, 5 }, { 3, 4, 1 }, { 4, 8, 2 }, { 6, 13, 3 }, { 8, 9, 1 }, { 11, 12, 1 } }, got)
+    end)
+
+    it('a b, a b a b, a b a b a b: the unit is the period (a b), not "a literal"', function()
+        local g = A.generalize { w 'a b', w 'a b a b', w 'a b a b a b' }
+        assert.equals('(w "a" "b" ?h1...)', A.show(g.template.body))
+        assert.equals('rep', g.notes.h1.claimed)
+        assert.equals(2, g.notes.h1.period)
+        assert.equals('@h1.unit/2{0,}', A.show_domain(g.template.holes.h1.domain))
+        assert.equals('(seq "a" "b")', A.show(g.env.defs['h1.unit'].body))
+        assert.is_true(A.match(g.template, w 'a b a b a b a b a b', g.env).ok)
+        local m = A.match(g.template, w 'a b a', g.env)
+        assert.is_false(m.ok); assert.matches('length 1 is not a multiple of the period 2', m.refusal.why)
+        m = A.match(g.template, w 'a b b a', g.env)
+        assert.is_false(m.ok); assert.matches('chunk 1', m.refusal.why)
+        assert.is_true(A.eq(A.instantiate(g.template, g.values[3], g.env).term, w 'a b a b a b'))
+        local chunks = A.unit_values(g.template, 'h1', g.values[3], g.env)
+        assert.equals(2, #chunks)
+    end)
+
+    it('a varying leaf inside the unit: (a ?v) with period 2, the chunks carry the values', function()
+        local g = A.generalize { w 'a 1 a 2', w 'a 3', w 'a 4 a 5 a 6' }
+        assert.equals('(w "a" ?h1... ?h2)', A.show(g.template.body))
+        assert.equals('@h1.unit/2{0,}', A.show_domain(g.template.holes.h1.domain))
+        assert.equals('(seq ?h1.1 "a")', A.show(g.env.defs['h1.unit'].body))
+        local chunks = A.unit_values(g.template, 'h1', g.values[3], g.env)
+        assert.equals(2, #chunks)
+        assert.equals('4', tostring(chunks[1]['h1.1'].v)); assert.equals('5', tostring(chunks[2]['h1.1'].v))
+        assert.equals('6', tostring(g.values[3].h2.v))
+        assert.is_true(A.match(g.template, w 'a 7 a 8 a 9 a 10', g.env).ok)
+        assert.is_false(A.match(g.template, w 'a 7 a', g.env).ok)
+    end)
+
+    it('two lengths: under-determined, the hypothesis names the period', function()
+        local g = A.generalize { w 'a b', w 'a b a b a b' }
+        assert.equals('open', g.notes.h1.claimed); assert.is_true(g.notes.h1.under_determined)
+        assert.equals(2, g.notes.h1.hypothesis.period)
+        -- KK: a b seen once beside nothing is exponent 1, no repetition: the hypothesis falls back to the element
+        assert.equals(1, A.generalize({ w 'a b', w 'a b a b' }).notes.h1.hypothesis.period)
+        assert.equals('(w "a" "b" ?h1...)', A.show(g.template.body))
+    end)
+
+    it('KK: a repetition has exponent at least 2, so one chunk is no period (need = 2)', function()
+        local g = A.generalize({ w '', w 'a b c' }, { need = 2 })
+        assert.equals('rep', g.notes.h1.claimed)
+        assert.equals(1, g.notes.h1.period) -- three literals are elements, not a unit of period 3 seen once
+        assert.equals('@h1.elem{0,}', A.show_domain(g.template.holes.h1.domain))
+    end)
+
+    it('KK: the period is the SMALLEST p; (a b) beats (a b a b) when both divide every run', function()
+        local g = A.generalize { w '', w 'a b a b', w 'a b a b a b a b' }
+        assert.equals(2, g.notes.h1.period)
+        assert.equals('(seq "a" "b")', A.show(g.env.defs['h1.unit'].body))
+    end)
+
+    it('a head column of mixed kinds does not align: no split, no claim (the identical suffix is committed before any anchor)', function()
+        local g = A.generalize { node('w', lit(1), lit 'a', lit 'b'), node('w', A.name 'x', lit 'a', lit 'b', lit 'a', lit 'b'), node('w', node('q'), lit 'a', lit 'b', lit 'a', lit 'b', lit 'a', lit 'b') }
+        assert.equals('(w ?h1... "a" "b")', A.show(g.template.body)) -- the identical suffix is committed first (LCSJOIN.md keeps the ends rule ahead of the anchors)
+        assert.equals('open', g.notes.h1.claimed) -- middles 1 / x a b / (q) a b a b: the mixed column never aligns
+        assert.is_false(g.notes.h1.homogeneous)
+    end)
+
+    it('the element rule stands: distinct literals at three lengths still claim @h1.elem', function()
+        local g = A.generalize { w '1 2 3', w '4 5 6 7', w '8 9 10 11 12' }
+        assert.equals('(w ?h1...)', A.show(g.template.body))
+        assert.equals('@h1.elem{0,}', A.show_domain(g.template.holes.h1.domain))
+        assert.is_true(g.notes.h1.trivial)
+    end)
+
+    it('a fold of join plus rederive claims the same unit; behind a head or tail it claims the shape', function()
+        local env = { defs = {} }
+        local i1, i2, i3 = w 'a b', w 'a b a b', w 'a b a b a b'
+        local r1 = A.join(A.template(i1), i2, { prefix = 'h', env = env })
+        local values = { r1.left({}), r1.right({}) }
+        local r2 = A.join(r1.template, i3, { prefix = 'h', env = env })
+        values = { r2.left(values[1]), r2.left(values[2]), r2.right({}) }
+        local T = r2.template
+        local _, notes = A.rederive_domains(T, values, { env = env })
+        assert.equals('@h1.unit/2{0,}', A.show_domain(T.holes.h1.domain))
+        assert.equals(2, notes.h1.period)
+        assert.is_true(A.match(T, w 'a b a b a b a b', env).ok)
+        assert.is_false(A.match(T, w 'a b a', env).ok)
+        -- the tail case: rederive keeps the hedge whole and claims a seq template (the shape)
+        env = { defs = {} }
+        local j1, j2, j3 = w 'a 1 a 2', w 'a 3', w 'a 4 a 5 a 6'
+        r1 = A.join(A.template(j1), j2, { prefix = 'h', env = env })
+        values = { r1.left({}), r1.right({}) }
+        r2 = A.join(r1.template, j3, { prefix = 'h', env = env })
+        values = { r2.left(values[1]), r2.left(values[2]), r2.right({}) }
+        T = r2.template
+        A.rederive_domains(T, values, { env = env })
+        assert.equals('@h1.shape', A.show_domain(T.holes.h1.domain))
+        assert.equals('(seq ?h1.run... ?h1.tail1.1)', A.show(env.defs['h1.shape'].body))
+        assert.equals('@h1.unit/2{0,}', A.show_domain(env.defs['h1.shape'].holes['h1.run'].domain))
+        assert.is_true(A.match(T, w 'a 7 a 8 a 9 a 10', env).ok)
+        assert.is_false(A.match(T, w 'a 7 a', env).ok)
+        -- generalize proper describes the same sequences with the columns in the body
+        local g = A.generalize { j1, j2, j3 }
+        assert.is_true(A.match(g.template, w 'a 7 a 8 a 9 a 10', g.env).ok)
+    end)
+
+    it('the period survives relax and refuses to meet a different one', function()
+        assert.equals('@u/3{0,}', A.show_domain(A.relax(A.rep(A.ref 'u', 0, nil, 3))))
+        -- unify: an open hedge takes the claim, period included; two explicit claims with
+        -- different periods refuse by name
+        local env = { defs = { u = A.template(seq { lit 'a', lit 'b' }) } }
+        local T = A.template(node('w', hole('h', true)), { h = { domain = A.rep(A.ref 'u', 0, nil, 2), origin = 'derived' } })
+        local U = A.unify(A.template(node('w', hole('q', true))), T, env)
+        assert.is_truthy(U and U.ok ~= false)
+        local _, e = next(U.template.holes)
+        assert.equals('@u/2{0,}', A.show_domain(e.domain))
+        local T1 = A.template(node('w', hole('h', true)), { h = { domain = A.rep(A.kinds { 'lit' }), origin = 'derived' } })
+        local R, why = A.unify(T1, T, env)
+        assert.is_nil(R); assert.matches('periods differ: 1 and 2', why)
+        local defs = { u = A.template(seq { lit 'a', lit 'b' }) }
+        assert.is_true(A.admits(A.rep(A.ref 'u', 0, nil, 2), seq { lit 'a', lit 'b', lit 'a', lit 'b' }, { defs = defs }))
+        local ok, why = A.admits(A.rep(A.ref 'u', 0, nil, 2), seq { lit 'a', lit 'b', lit 'a' }, { defs = defs })
+        assert.is_false(ok); assert.matches('not a multiple of the period 2', why)
+        ok, why = A.admits(A.rep(A.ref 'u', 0, nil, 2), seq { lit 'a', lit 'b', lit 'b', lit 'a' }, { defs = defs })
+        assert.is_false(ok); assert.matches('chunk 2', why)
+    end)
+
+    it('the composite generator (experiments/key_gen.lua): its instances generalize to the fragment', function()
+        local ok, G = pcall(dofile, 'experiments/key_gen.lua')
+        if not ok then return pending('experiments/key_gen.lua not loadable: ' .. tostring(G)) end
+        local function comp(c) return A.instantiate(G.COMP_PLAIN, { c = lit(c), label = lit(c) }).term end
+        local function many(fields)
+            local frags = {}
+            for _, c in ipairs(fields) do frags[#frags + 1] = comp(c) end
+            return A.instantiate(G.MANY, { spec = lit(table.concat(fields, '+')), comps = seq(frags) }).term
+        end
+        local i1, i2, i3 = many { 'a' }, many { 'port', 'protocol' }, many { 'x', 'y', 'z' }
+        local g = A.generalize { i1, i2, i3 }
+        local b = g.template.body
+        assert.equals(5, #b.kids)
+        assert.is_true(A.is_hole(b.kids[2]) and not b.kids[2].rep) -- the spec, a term column inside the old middle
+        assert.equals('src', b.kids[3].k)
+        assert.is_true(A.is_hole(b.kids[4]) and b.kids[4].rep == true) -- the components, a run of period 1
+        local run = b.kids[4].h
+        assert.equals('rep', g.notes[run].claimed); assert.equals(1, g.notes[run].period)
+        -- ~~head == 2: the spec literal and the chunk after it moved out of the middle~~ since LCSJOIN.md
+        -- the chunk after the spec anchors and the spec is a column; nothing is left to move out
+        assert.equals(0, g.notes[run].head)
+        local unit = g.env.defs[run .. '.elem']
+        -- the derived fragment sits BELOW the authored one: one hole where the author wrote two
+        -- (field name and label coincide in every instance; the same underdetermination the key
+        -- oracle found), so it is an instance of the authored fragment and not the other way round
+        assert.is_true(A.instance_of(unit, G.COMP_PLAIN))
+        assert.is_false(A.instance_of(G.COMP_PLAIN, unit))
+        local chunks = A.unit_values(g.template, run, g.values[2], g.env)
+        assert.equals(2, #chunks)
+        local names = {}
+        for _, ch in ipairs(chunks) do for _, v in pairs(ch) do names[#names + 1] = v.v end end
+        assert.same({ 'port', 'protocol' }, names)
+        -- the instance rebuilt from the derived generator prints the same source
+        local back = A.instantiate(g.template, g.values[2], g.env).term
+        assert.is_true(A.eq(back, i2))
+        assert.equals(G.print_lua(back), G.print_lua(i2))
+        -- flattened (each component's kids spliced into the list): the period is the block length
+        local function flat(t)
+            local kids = {}
+            for _, k in ipairs(t.kids) do
+                if k.k == 'comp' then for _, kk in ipairs(k.kids) do kids[#kids + 1] = kk end else kids[#kids + 1] = k end
+            end
+            return A.rebuild(t, kids)
+        end
+        local f = A.generalize { flat(i1), flat(i2), flat(i3) }
+        local fr
+        for _, h in ipairs(A.hole_names(f.template)) do if f.template.holes[h].rep then fr = h end end
+        assert.equals(6, f.notes[fr].period)
+        -- since LCSJOIN.md the identical chunks of the first component anchor, so one period stands
+        -- unrolled as fixed columns (its field name a term hole) and the run claims the periods after
+        -- it: ~~a unit of 2 holes across a component boundary~~ one hole, the unit on the boundary
+        assert.equals(1, f.notes[fr].head)
+        assert.equals(1, #A.hole_names(f.env.defs[fr .. '.unit']))
+        assert.equals('@' .. fr .. '.unit/6{0,}', A.show_domain(f.template.holes[fr].domain))
+        assert.is_true(A.match(f.template, flat(many { 'p' }), f.env).ok) -- one component: the run empty
+        assert.is_true(A.match(f.template, flat(many { 'p', 'q', 'r', 's' }), f.env).ok)
+        assert.is_true(A.eq(A.instantiate(f.template, f.values[3], f.env).term, flat(i3)))
+    end)
+end)
+
+describe('the lossless lua reader (READER.md): tree-sitter terms, unfolded byte for byte', function()
+    local A = require 'algebra'
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+
+    it('print after parse is the identity on every member and on a whole file', function()
+        local F = fixture(); if not F then return end
+        for _, m in ipairs(F.members) do assert.equals(m.source, A.cst_print(m.term)) end
+        assert.equals(F.file.source, A.cst_print(F.file.term))
+        assert.equals(F.file.source, A.grammars.lua.print(F.file.term)) -- the `lua` grammar's print is cst_print
+        assert.is_nil(A.grammars.lua.parse('return 1')) -- without the bridge the grammar reads nothing
+    end)
+
+    it('cst_print concatenates every leaf in order: literals, names, nested kids', function()
+        local t = A.node('call', A.name 'f', A.lit '(', A.node('args', A.name 'x', A.lit ', ', A.lit '1'), A.lit ')')
+        assert.equals('f(x, 1)', A.cst_print(t))
+        assert.has_error(function() A.cst_print(A.node('x', A.hole 'h')) end)
+    end)
+
+    it('the split search of the repetition analysis stops at its budget and says so', function()
+        local w = function(s) local ks = {}; for c in s:gmatch('%S+') do ks[#ks + 1] = A.lit(c) end; return A.node('w', unpack(ks)) end
+        local full = A.generalize { w 'a 1 a 2', w 'a 3', w 'a 4 a 5 a 6' }
+        assert.equals(2, full.notes.h1.period); assert.is_nil(full.notes.h1.truncated)
+        local cut = A.generalize({ w 'a 1 a 2', w 'a 3', w 'a 4 a 5 a 6' }, { split_cap = 1 })
+        assert.is_true(cut.notes.h1.truncated)
+        assert.are_not.equal(2, cut.notes.h1.period)
+        -- the memo does not keep a truncated answer: the same env with the default budget finds the period
+        local env = { defs = {} }
+        A.generalize({ w 'a 1 a 2', w 'a 3', w 'a 4 a 5 a 6' }, { split_cap = 1, env = env })
+        local again = A.generalize({ w 'a 1 a 2', w 'a 3', w 'a 4 a 5 a 6' }, { env = env })
+        assert.equals(2, again.notes.h1.period); assert.is_nil(again.notes.h1.truncated)
+    end)
+
+    it('the first fold: six callbacks generalize to two holes, the module and the report function, and unfold byte-exact', function()
+        local F = fixture(); if not F then return end
+        local six, src = {}, {}
+        for _, m in ipairs(F.members) do if m.line ~= 84 then six[#six + 1] = m.term; src[#src + 1] = m.source end end
+        assert.equals(6, #six)
+        local g = A.generalize(six, { need = 100 })
+        local names = A.hole_names(g.template); table.sort(names)
+        assert.same({ 'h1', 'h2' }, names)
+        local mods, fns = {}, {}
+        for i = 1, 6 do mods[i] = A.cst_print(g.values[i].h1); fns[i] = A.cst_print(g.values[i].h2) end
+        assert.same({ 'cartograph.untangle', 'cartograph.optimize', 'cartograph.narrow', 'cartograph.narrow', 'cartograph.narrow', 'cartograph.lens' }, mods)
+        assert.same({ 'report_blocks', 'report', 'report', 'param_report', 'devirt_report', 'report' }, fns)
+        for i = 1, 6 do assert.equals(src[i], A.cst_print(A.instantiate(g.template, g.values[i]).term)) end
+        -- the statement alignment came from the tree: the holes sit inside string_content and identifier nodes
+        local kinds = {}
+        for _, p in ipairs(A.positions(g.template.body)) do if A.is_hole(p.node) then kinds[#kinds + 1] = A.locate_at(g.template.body, { unpack(p.path, 1, #p.path - 1) }).k end end
+        table.sort(kinds); assert.same({ 'identifier', 'string_content' }, kinds)
+    end)
+
+    it('the seventh callback, without the mat_df line, joins through one hedge', function()
+        local F = fixture(); if not F then return end
+        local six, seventh = {}, nil
+        for _, m in ipairs(F.members) do if m.line ~= 84 then six[#six + 1] = m.term else seventh = m.term end end
+        local g = A.generalize(six, { need = 100 })
+        local j = A.join(g.template, seventh, { env = g.env })
+        assert.is_truthy(j); assert.equals(1, #j.new)
+        assert.is_true(j.template.holes[j.new[1]].rep)
+        assert.is_true(A.match(j.template, seventh, g.env).ok)
+        for _, t in ipairs(six) do assert.is_true(A.match(j.template, t, g.env).ok) end
+    end)
+
+    it('one edit on the template, propagated: every member re-instantiates, compiles, and differs only at that site', function()
+        local F = fixture(); if not F then return end
+        local six, src = {}, {}
+        for _, m in ipairs(F.members) do if m.line ~= 84 then six[#six + 1] = m.term; src[#src + 1] = m.source end end
+        local g = A.generalize(six, { need = 100 })
+        local path
+        for _, p in ipairs(A.positions(g.template.body)) do if p.node.k == 'identifier' and p.node.kids[1].v == 'WARN' then path = p.path end end
+        assert.is_truthy(path)
+        local T2, why = A.rewrite(g.template, path, A.node('identifier', A.lit 'ERROR'))
+        assert.is_truthy(T2, why); assert.equals(1, #T2.edits); assert.equals('rewrite', T2.edits[1].op)
+        for i = 1, 6 do
+            local new = A.cst_print(A.instantiate(T2, g.values[i]).term)
+            assert.equals((src[i]:gsub('vim%.log%.levels%.WARN', 'vim.log.levels.ERROR', 1)), new)
+            assert.is_truthy((loadstring or load)(new), 'member ' .. i .. ' does not compile')
+        end
+    end)
+end)
+
+describe('the recursive fold (FOLD.md; Nevill-Manning and Witten 1997: rule utility, priced by MDL)', function()
+    local A = require 'algebra'
+    local node, lit = A.node, A.lit
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+
+    it('text_size prices a term in bytes, a hole counting one', function()
+        assert.equals(7, A.text_size(node('call', A.name 'f', lit '(', lit 'x', lit ', 1', lit ')')))
+        assert.equals(3, A.text_size(node('x', lit 'ab', A.hole 'h')))
+    end)
+
+    it('p2, rule utility: a column of one member is never a family, and a nested template that does not shorten is refused', function()
+        -- two members whose hole values share a kind but nothing else: (f 1 2 3) vs (f 4 5 6) nested
+        -- would cost the template plus six values, more than the two values as they stand
+        local i1, i2 = node('g', node('f', lit(1), lit(2), lit(3))), node('g', node('f', lit(4), lit(5), lit(6)))
+        local F = A.fold { i1, i2 }
+        assert.is_nil(next(F.families)); assert.equals(F.flat, F.dl)
+        -- a hole present in one member only (under nothing shared) cannot nest: one value is no column
+        local F1 = A.fold({ node('g', node('f', lit(1))), node('g', lit 'x') })
+        assert.is_nil(next(F1.families))
+    end)
+
+    it('recursion lives at the hedges: a varying tail of (h n) elements nests into (h ?x), priced once', function()
+        local function g(...) return node('g', node('f', lit 'a'), ...) end
+        local function h(n) return node('h', lit(n), lit 'x', lit 'y', lit 'z') end
+        local a, b, c = g(h(1), h(2)), g(h(3)), g(h(4), h(5), h(6))
+        local F = A.fold({ a, b, c }, { need = 100 })
+        local hh = next(F.families)
+        assert.is_truthy(hh, 'a nested family at the hedge')
+        local fam = F.families[hh]
+        assert.is_truthy(fam.kinds and fam.kinds.h)
+        assert.equals('(h ?' .. hh .. '.h.1 "x" "y" "z")', A.show(fam.kinds.h.template.body))
+        assert.equals(6, #fam.kinds.h.members)
+        -- priced: the template once plus six inner values, plus six references, against six 5-node terms
+        assert.equals(A.size(fam.kinds.h.template.body) + 1 + 6, fam.kinds.h.dl)
+        assert.is_true(fam.kinds.h.dl + 6 < 30)
+        -- a unit too small to pay for its references is refused: (h n) costs 2, a reference plus an inner value costs 2
+        local small = A.fold({ g(node('h', lit(1)), node('h', lit(2))), g(node('h', lit(3))), g(node('h', lit(4)), node('h', lit(5)), node('h', lit(6))) }, { need = 100 })
+        assert.is_nil(next(small.families))
+        -- the parent pays the template, three sequence formers, six references, and the nested family once
+        assert.equals(A.size(F.template.body) + 1 + 3 + 6 + fam.kinds.h.dl, F.dl)
+        assert.is_true(F.dl < F.flat)
+        for _, I in ipairs { a, b, c } do assert.is_true(A.match(F.template, I, F.env).ok) end
+        -- with positional generalize a TERM hole never holds nodes of one kind (same-kind nodes are
+        -- descended into), so the term branch is reached only where generalize refuses to align
+        -- the depth bound: at depth 0 nothing nests
+        local F0 = A.fold({ a, b, c }, { need = 100, depth = 0 })
+        assert.is_nil(next(F0.families)); assert.equals(F0.flat, F0.dl)
+        -- rule utility at the hedge: one element of a kind is no family
+        local G1 = A.fold({ g(h(1), node('k', lit 'x')), g(h(2)) }, { need = 100 })
+        local fam1 = G1.families[next(G1.families) or '']
+        assert.is_true(fam1 == nil or fam1.kinds.k == nil)
+    end)
+
+    it('the seven callbacks fold to two leaf holes: nothing nests and the description length is the flat one', function()
+        local F = fixture(); if not F then return end
+        local six = {}
+        for _, m in ipairs(F.members) do if m.line ~= 84 then six[#six + 1] = m.term end end
+        local Fd = A.fold(six, { need = 100 })
+        assert.is_nil(next(Fd.families)); assert.equals(Fd.flat, Fd.dl)
+        assert.same({ 'h1', 'h2' }, (function() local n = A.hole_names(Fd.template); table.sort(n); return n end)())
+    end)
+
+    it('the 14 cmd statements of commands/analysis.lua: the block hedge nests its statements by kind, raw > flat > nested, members unfold byte-exact', function()
+        local F = fixture(); if not F then return end
+        local statements = {}
+        for _, p in ipairs(A.positions(F.analysis.term)) do
+            if p.node.k == 'function_call' and A.cst_print(p.node):sub(1, 4) == 'cmd(' then statements[#statements + 1] = p.node end
+        end
+        assert.equals(14, #statements)
+        for _, cost in ipairs { A.size, A.text_size } do
+            local raw = 0
+            for _, s in ipairs(statements) do raw = raw + cost(s) + 1 end
+            local Fd = A.fold(statements, { need = 100, cost = cost })
+            assert.is_true(Fd.flat < raw, 'flat below raw')
+            assert.is_true(Fd.dl < Fd.flat, 'nested below flat')
+            -- the callback body is a hedge over block statements; its if_statement and function_call elements each form a family
+            -- ~~one block hedge with 14 or more if statements~~ since LCSJOIN.md the shared statements
+            -- anchor and the block is two hedges; the if statements and calls are spread over them
+            local ifs, calls = 0, false
+            for _, f in pairs(Fd.families) do
+                if f.kinds and f.kinds.if_statement then ifs = ifs + #f.kinds.if_statement.members end
+                if f.kinds and f.kinds.function_call then calls = true end
+            end
+            assert.is_true(ifs >= 14, 'nested families of if statements'); assert.is_true(calls)
+            assert.is_nil(next(A.fold(statements, { need = 100, cost = cost, depth = 0 }).families))
+            for i, s in ipairs(statements) do
+                assert.equals(A.cst_print(s), A.cst_print(A.instantiate(Fd.template, Fd.values[i], Fd.env).term))
+            end
+        end
+    end)
+
+    it('MDL partition of the 14 callbacks finds the six report callbacks as one family, and partition-then-fold is shorter still', function()
+        local F = fixture(); if not F then return end
+        local callbacks = {}
+        for _, p in ipairs(A.positions(F.analysis.term)) do
+            if p.node.k == 'function_call' and A.cst_print(p.node):sub(1, 4) == 'cmd(' then
+                for _, q in ipairs(A.positions(p.node)) do if q.node.k == 'function_definition' then callbacks[#callbacks + 1] = q.node; break end end
+            end
+        end
+        assert.equals(14, #callbacks)
+        local one = A.fold(callbacks, { need = 100 })
+        local P = A.partition(callbacks, { need = 100 })
+        local sizes = {}
+        for _, fam in ipairs(P.families) do sizes[#sizes + 1] = #(fam.members or fam.instances or {}) end
+        table.sort(sizes, function(x, y) return x > y end)
+        assert.equals(6, sizes[1])
+        local total = 0
+        for _, fam in ipairs(P.families) do
+            local insts = {}
+            for _, i in ipairs(fam.members or fam.instances or {}) do insts[#insts + 1] = callbacks[i] end
+            if #insts >= 2 then total = total + A.fold(insts, { need = 100 }).dl else total = total + A.size(insts[1]) + 1 end
+        end
+        assert.is_true(total < one.dl); assert.is_true(one.dl < one.flat)
+    end)
+end)
+
+describe('shotgun surgery from a template (SURGERY.md; Toomim, Begel, Graham 2004: linked editing)', function()
+    local A = require 'algebra'
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local function id(s) return A.node('identifier', A.lit(s)) end
+    local function call(fn, ...)
+        local kids = { A.lit '(' }
+        for i, a in ipairs({ ... }) do if i > 1 then kids[#kids + 1] = A.lit ', ' end; kids[#kids + 1] = a end
+        kids[#kids + 1] = A.lit ')'
+        return A.node('function_call', id(fn), A.node('arguments', unpack(kids)))
+    end
+    local function find(body, pred) for _, p in ipairs(A.positions(body)) do if pred(p.node) then return p.path, p.node end end end
+    local function copy(V) local W = {}; for h, v in pairs(V) do W[h] = v end; return W end
+    -- Figure 1 of the paper: wake() and wakeAll(), alike but for an `if` where the other has a `while`
+    local function method(name, loop)
+        return A.node('method', A.lit 'void ', A.node('identifier', A.lit(name)), A.lit '() {\n  ',
+            A.node('block', A.node('statement', A.lit 'lock();'), A.lit '\n  ',
+                A.node(loop, A.lit(loop .. ' ('), A.lit 'waiting', A.lit ') ', A.lit 'notify();'), A.lit '\n  ',
+                A.node('statement', A.lit 'unlock();')),
+            A.lit '\n}')
+    end
+    local function family() local g = A.generalize({ method('wake', 'if'), method('wakeAll', 'while') }, { need = 100 }); return g.template, g.values end
+    local function six()
+        local F = fixture(); if not F then return end
+        local ms, insts = {}, {}
+        for _, m in ipairs(F.members) do if m.line ~= 84 then ms[#ms + 1] = m; insts[#insts + 1] = m.term end end
+        local g = A.generalize(insts, { need = 100 })
+        return g.template, g.values, ms
+    end
+
+    it('spans: every position of the whole-file term lies where cst_print puts it', function()
+        local F = fixture(); if not F then return end
+        local S, X = A.spans(F.analysis.term)
+        assert.equals(F.analysis.source, X)
+        for _, p in ipairs(A.positions(F.analysis.term)) do
+            local s = S[A.key(p.path)]
+            assert.equals(A.cst_print(p.node), X:sub(s.from, s.to))
+        end
+        local S2 = A.spans(A.node('x', A.lit 'ab', A.node('empty'), A.name 'n'))
+        assert.same({ from = 3, to = 2 }, S2['2']) -- an empty node sits between its neighbours
+        assert.same({ from = 3, to = 3 }, S2['3'])
+        assert.has_error(function() A.spans(A.node('x', A.hole 'h')) end)
+    end)
+
+    it('Figure 1: linking wake() and wakeAll() finds the name and the loop statement; the loop is one hole, coarser than the paper\'s LCS', function()
+        local T, V = family()
+        local names = A.hole_names(T)
+        assert.equals(2, #names)
+        local kinds = {}
+        for _, h in ipairs(names) do kinds[V[1][h].k] = true end
+        assert.is_true(kinds.lit) -- the name
+        assert.is_true(kinds['if']) -- the whole statement: positional generalize does not align an `if` node with a `while` node
+        assert.equals('void wake() {\n  lock();\n  if (waiting) notify();\n  unlock();\n}', A.cst_print(A.instantiate(T, V[1]).term))
+        assert.equals(0, #A.hunks(T, V[1])) -- no edit, no surgery
+    end)
+
+    it('Figure 2.1: a line typed in one clone lands in every clone, at each clone\'s own offset (a template edit)', function()
+        local T, V = family()
+        local bp, bn = find(T.body, function(n) return n.k == 'block' end)
+        local kids = {}
+        for i, c in ipairs(bn.kids) do kids[#kids + 1] = c; if i == 1 then kids[#kids + 1] = A.lit '\n  '; kids[#kids + 1] = A.node('statement', A.lit 'log("wake");') end end
+        local T2 = assert(A.rewrite(T, bp, A.rebuild(bn, kids)))
+        local hs1, new1 = A.hunks(T, V[1], T2)
+        local hs2, new2 = A.hunks(T, V[2], T2)
+        assert.equals(1, #hs1); assert.equals(1, #hs2)
+        assert.equals('', hs1[1].old); assert.matches('log%("wake"%);', hs1[1].new) -- the gap it takes with it is the LCS tie-break
+        assert.equals(hs1[1].new, hs2[1].new)
+        assert.equals('template', hs1[1].src); assert.equals(1, hs1[1].edit)
+        assert.equals(hs1[1].from + 3, hs2[1].from) -- wakeAll is three bytes longer than wake
+        assert.equals(hs1[1].from - 1, hs1[1].to) -- an insertion
+        assert.equals(new1, A.apply_hunks(A.cst_print(A.instantiate(T, V[1]).term), hs1))
+        assert.equals(new2, A.apply_hunks(A.cst_print(A.instantiate(T, V[2]).term), hs2))
+        assert.equals('void wake() {\n  lock();\n  log("wake");\n  if (waiting) notify();\n  unlock();\n}', new1)
+    end)
+
+    it('Figure 2.2: a change to one clone alone is a value edit: one hunk in that member, none in the other', function()
+        local T, V = family()
+        local h
+        for _, g in ipairs(A.hole_names(T)) do if V[1][g].k == 'lit' then h = g end end
+        local V2 = copy(V[1]); V2[h] = A.lit 'wakeOne'
+        local hs, new = A.hunks(T, V[1], T, V2)
+        assert.equals(1, #hs)
+        assert.equals('wake', hs[1].old); assert.equals('wakeOne', hs[1].new)
+        assert.equals('value', hs[1].src); assert.equals(h, hs[1].hole); assert.is_nil(hs[1].edit)
+        assert.equals(new, A.apply_hunks(A.cst_print(A.instantiate(T, V[1]).term), hs))
+        assert.equals(0, #A.hunks(T, V[2], T, V[2]))
+    end)
+
+    it('Figure 2.3: deleting a line in one clone is a dig and an empty value: a deletion hunk there, nothing elsewhere', function()
+        local T, V = family()
+        local sp = find(T.body, function(n) return n.k == 'statement' and n.kids[1].v == 'lock();' end)
+        local T2 = assert(A.dig(T, sp, 'lock'))
+        local V1 = copy(V[1]); V1.lock = A.seq {}
+        local hs, new = A.hunks(T, V[1], T2, V1)
+        assert.equals(1, #hs)
+        assert.equals('lock();', hs[1].old); assert.equals('', hs[1].new)
+        assert.equals('value', hs[1].src); assert.equals('lock', hs[1].hole); assert.equals(1, hs[1].edit)
+        assert.equals(new, A.apply_hunks(A.cst_print(A.instantiate(T, V[1]).term), hs))
+        local V2 = copy(V[2]); V2.lock = A.locate_at(T.body, sp)
+        assert.equals(0, #A.hunks(T, V[2], T2, V2)) -- the dig alone is a crease, not a cut
+    end)
+
+    it('crease-only edits make no hunks: dig, split, pin and open leave every member\'s sheet as it was', function()
+        local g = A.generalize({ A.node('f', A.lit 'a', A.lit '+', A.lit 'a'), A.node('f', A.lit 'b', A.lit '+', A.lit 'b') }, { need = 100 })
+        local T, V = g.template, g.values
+        local h = A.hole_names(T)[1]
+        assert.equals(2, #A.sites(T)[h].sites) -- Plotkin's rule: one hole, two sites
+        local Ts = assert(A.split(T, h, 2, 'h2'))
+        local Vs = copy(V[1]); Vs.h2 = V[1][h]
+        assert.equals(0, #A.hunks(T, V[1], Ts, Vs))
+        local Tp = assert(A.pin(T, h, A.lit 'a')) -- the pinned hole still takes its one value
+        assert.equals(0, #A.hunks(T, V[1], Tp, V[1]))
+        local To = assert(A.open_hole(Tp, h))
+        assert.equals(0, #A.hunks(Tp, V[1], To, V[1]))
+        local Td = assert(A.dig(T, { 2 }, 'op'))
+        local Vd = copy(V[1]); Vd.op = A.lit '+'
+        assert.equals(0, #A.hunks(T, V[1], Td, Vd))
+    end)
+
+    it('applying hunks refuses a sheet that moved, by name, and overlapping hunks', function()
+        local T, V = family()
+        local h
+        for _, g in ipairs(A.hole_names(T)) do if V[1][g].k == 'lit' then h = g end end
+        local V2 = copy(V[1]); V2[h] = A.lit 'wakeOne'
+        local hs = A.hunks(T, V[1], T, V2)
+        local text = A.cst_print(A.instantiate(T, V[1]).term)
+        local ok, why = A.apply_hunks(text:gsub('wake', 'sleep'), hs)
+        assert.is_nil(ok); assert.matches('expected "wake", the sheet holds "slee"', why, 1, true)
+        local ok2, why2 = A.apply_hunks(text, { { from = 6, to = 9, old = 'wake', new = 'x' }, { from = 8, to = 12, old = 'ke() ', new = 'y' } })
+        assert.is_nil(ok2); assert.matches('overlaps', why2)
+        assert.equals(text, A.apply_hunks(text, {}))
+    end)
+
+    it('the refinement is an LCS over kids: two edits in one list are two hunks, an insertion and a leaf', function()
+        local T, V, ms = six(); if not T then return end
+        local bp, bn = find(T.body, function(n) return n.k == 'block' end)
+        local kids = {}
+        for i, c in ipairs(bn.kids) do kids[#kids + 1] = c; if i == 4 then kids[#kids + 1] = call('assert', id 'store'); kids[#kids + 1] = A.lit '\n        ' end end
+        local T2 = assert(A.rewrite(T, bp, A.rebuild(bn, kids)))
+        local wp = find(T2.body, function(n) return n.k == 'identifier' and n.kids[1].v == 'WARN' end)
+        local T3 = assert(A.rewrite(T2, wp, id 'ERROR'))
+        for i = 1, #ms do
+            local hs, new = A.hunks(T, V[i], T3)
+            assert.equals(2, #hs)
+            assert.equals('', hs[1].old); assert.equals('assert(store)\n        ', hs[1].new); assert.equals(1, hs[1].edit)
+            assert.equals('WARN', hs[2].old); assert.equals('ERROR', hs[2].new); assert.equals(2, hs[2].edit)
+            assert.equals('template', hs[1].src); assert.equals('template', hs[2].src)
+            assert.equals(new, A.apply_hunks(ms[i].source, hs))
+            assert.is_truthy(loadstring(new))
+        end
+    end)
+
+    it('the first fold\'s edit as surgery: WARN to ERROR is one four-byte hunk in each of the six, and the refold gives the edited crease pattern', function()
+        local T, V, ms = six(); if not T then return end
+        local wp = find(T.body, function(n) return n.k == 'identifier' and n.kids[1].v == 'WARN' end)
+        local T2 = assert(A.rewrite(T, wp, id 'ERROR'))
+        local news = {}
+        for i = 1, #ms do
+            local hs, new = A.hunks(T, V[i], T2)
+            assert.equals(1, #hs)
+            assert.equals('WARN', hs[1].old); assert.equals('ERROR', hs[1].new); assert.equals('template', hs[1].src)
+            assert.equals(4, hs[1].to - hs[1].from + 1)
+            assert.equals(new, A.apply_hunks(ms[i].source, hs))
+            assert.equals(A.cst_print(A.instantiate(T2, V[i]).term), new)
+            news[i] = A.instantiate(T2, V[i]).term
+        end
+        -- the paper's guarantee: the common regions stay identical after a simultaneous edit
+        local g2 = A.generalize(news, { need = 100 })
+        assert.is_true(A.instance_of(g2.template, T2))
+        assert.is_true(A.instance_of(T2, g2.template))
+    end)
+
+    it('a hunk behind a hedge lands at each member\'s own offset: the 14 command statements, then the whole file', function()
+        local F = fixture(); if not F then return end
+        local st, paths = {}, {}
+        for _, p in ipairs(A.positions(F.analysis.term)) do
+            if p.node.k == 'function_call' and A.cst_print(p.node):sub(1, 4) == 'cmd(' then st[#st + 1] = p.node; paths[#paths + 1] = p.path end
+        end
+        assert.equals(14, #st)
+        local g = A.generalize(st, { need = 100 })
+        local T = g.template
+        local up = find(T.body, function(n) return n.k == 'unary_expression' and A.cst_print(n) == 'not store' end)
+        assert.is_truthy(up)
+        local hedge_before = false -- the parameters hedge precedes the guard in preorder
+        for h, e in pairs(A.sites(T)) do if e.rep and A.key(e.sites[1].path) < A.key(up) then hedge_before = true end end
+        assert.is_true(hedge_before)
+        local T2 = assert(A.rewrite(T, up, A.node('binary_expression', id 'store', A.lit ' ', A.lit '==', A.lit ' ', A.node('nil', A.lit 'nil'))))
+        local SF = A.spans(F.analysis.term)
+        local file_hunks, whole = {}, {}
+        local offsets = {}
+        for i = 1, 14 do
+            local hs, new = A.hunks(T, g.values[i], T2)
+            assert.equals(1, #hs)
+            assert.equals('not store', hs[1].old); assert.equals('store == nil', hs[1].new); assert.equals('template', hs[1].src)
+            assert.equals(new, A.apply_hunks(A.cst_print(st[i]), hs))
+            offsets[hs[1].from] = true
+            local s = SF[A.key(paths[i])]
+            for _, h in ipairs(A.shift_hunks(hs, s.from - 1)) do file_hunks[#file_hunks + 1] = h end
+            whole[#whole + 1] = { from = s.from, to = s.to, old = A.cst_print(st[i]), new = new }
+        end
+        local n = 0; for _ in pairs(offsets) do n = n + 1 end
+        assert.is_true(n > 1) -- `function (o)` members put the guard further in
+        local patched = assert(A.apply_hunks(F.analysis.source, file_hunks))
+        assert.equals(assert(A.apply_hunks(F.analysis.source, whole)), patched) -- the surgery equals the whole re-instantiation
+        assert.is_truthy(loadstring(patched))
+        assert.equals(#F.analysis.source + 14 * 3, #patched)
+    end)
+
+    it('the surgery reaches the family\'s sites only: renaming mat_df covers 6 of the file\'s 11 occurrences', function()
+        local T, V, ms = six(); if not T then return end
+        local F = fixture()
+        local mp = find(T.body, function(n) return n.k == 'identifier' and n.kids[1].v == 'mat_df' end)
+        local T2 = assert(A.rewrite(T, mp, id 'material_df'))
+        local total = 0
+        for i = 1, #ms do local hs = A.hunks(T, V[i], T2); total = total + #hs; assert.equals('mat_df', hs[1].old) end
+        local _, n = F.analysis.source:gsub('mat_df', '')
+        assert.equals(6, total); assert.equals(11, n)
+    end)
+
+    it('a value the domain refuses is named in the refusal, not silently unfolded', function()
+        local T, V, ms = six(); if not T then return end
+        local V2 = copy(V[1])
+        local h = A.hole_names(T)[1]
+        V2[h] = A.node('identifier', A.lit 'x') -- the hole holds a literal, not a node
+        local hs, why = A.hunks(T, V[1], T, V2)
+        assert.is_nil(hs); assert.matches('^after: rejected ' .. h, why)
+    end)
+
+    it('a value edit inside a hedge is the element\'s own hunk, attributed to the hedge, behind the fixed kid before it', function()
+        local w = function(s) local ks = {}; for c in s:gmatch('%S+') do ks[#ks + 1] = A.lit(c .. ' ') end; return A.node('w', unpack(ks)) end
+        local g = A.generalize({ w 'x a b c y', w 'x a y', w 'x a b y' }, { need = 100 })
+        local T, V = g.template, g.values
+        local h
+        for _, n in ipairs(A.hole_names(T)) do if T.holes[n].rep then h = n end end
+        assert.is_truthy(h)
+        local V2 = copy(V[1])
+        local kids = {}
+        for i, k in ipairs(V[1][h].kids) do kids[i] = k end
+        kids[2] = A.lit 'q '
+        V2[h] = A.seq(kids)
+        local hs, new = A.hunks(T, V[1], T, V2)
+        assert.equals(1, #hs)
+        assert.equals('c ', hs[1].old); assert.equals('q ', hs[1].new) -- `a` is fixed in every member, the hedge is `b c`
+        assert.equals('value', hs[1].src); assert.equals(h, hs[1].hole)
+        assert.equals(new, A.apply_hunks('x a b c y ', hs))
+        assert.equals('x a b q y ', new)
+        assert.equals(0, #A.hunks(T, V[2], T, V[2]))
+    end)
+
+    it('the first element added to an empty hedge is an insertion attributed from the new side', function()
+        local w = function(s) local ks = {}; for c in s:gmatch('%S+') do ks[#ks + 1] = A.lit(c .. ' ') end; return A.node('w', unpack(ks)) end
+        local g = A.generalize({ w 'x a b c y', w 'x a y', w 'x a b y' }, { need = 100 })
+        local T, V = g.template, g.values
+        local h
+        for _, n in ipairs(A.hole_names(T)) do if T.holes[n].rep then h = n end end
+        assert.equals(0, #V[2][h].kids)
+        local V2 = copy(V[2]); V2[h] = A.seq { A.lit 'b ' }
+        local hs, new = A.hunks(T, V[2], T, V2)
+        assert.equals(1, #hs)
+        assert.equals('', hs[1].old); assert.equals('b ', hs[1].new)
+        assert.equals('value', hs[1].src); assert.equals(h, hs[1].hole)
+        assert.equals('x a b y ', new)
+        assert.equals(new, A.apply_hunks('x a y ', hs))
+    end)
+end)
+
+describe('a query template with hedges as the instance (a fix after SURGERY.md): instance_of is reflexive and reads the hedge domains', function()
+    local A = require 'algebra'
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local function w(s) local ks = {}; for c in s:gmatch('%S+') do ks[#ks + 1] = A.lit(c) end; return A.node('w', unpack(ks)) end
+    local function hedged(D, extra) -- (w x ?h... y), optionally with a plain kid beside the hedge
+        local kids = { A.lit 'x', A.hole('h', true) }
+        if extra then kids[#kids + 1] = extra end
+        kids[#kids + 1] = A.lit 'y'
+        return A.template(A.node('w', unpack(kids)), { h = D })
+    end
+    local function why(T1, T2) local m = A.match(T2, T1.body, { hole_domains = T1.holes }); return m.ok, m.refusal and m.refusal.why end
+
+    it('a hedge template is an instance of itself: the toy and the 14 command statements', function()
+        local g = A.generalize({ w 'x a b y', w 'x a y' }, { need = 100 })
+        assert.is_true(A.instance_of(g.template, g.template))
+        local F = fixture(); if not F then return end
+        local st = {}
+        for _, p in ipairs(A.positions(F.analysis.term)) do if p.node.k == 'function_call' and A.cst_print(p.node):sub(1, 4) == 'cmd(' then st[#st + 1] = p.node end end
+        local T = A.generalize(st, { need = 100 }).template
+        assert.is_true(A.instance_of(T, T))
+    end)
+
+    it('subsumption reads the hedge domains: a narrower repetition is an instance of a wider one, not the reverse', function()
+        local narrow = hedged(A.rep(A.kinds { 'lit' }))
+        local wide = hedged(A.rep(A.kinds { 'lit', 's' }))
+        assert.is_true(A.instance_of(narrow, wide))
+        local ok, r = why(wide, narrow)
+        assert.is_false(ok); assert.matches('does not entail', r)
+        assert.is_true(A.entails(A.rep(A.kinds { 'lit' }), A.rep(A.kinds { 'lit', 's' })))
+        assert.is_false(A.entails(A.rep(A.kinds { 'lit', 's' }), A.rep(A.kinds { 'lit' })))
+    end)
+
+    it('the lengths a hedge variable allows are counted against the bounds, plain elements included', function()
+        local at_least_two = hedged(A.rep(A.kinds { 'lit' }, 2))
+        assert.is_false(A.instance_of(hedged(A.rep(A.kinds { 'lit' }, 0), A.lit 'a'), at_least_two)) -- one plain kid plus a possibly empty hedge
+        assert.is_true(A.instance_of(hedged(A.rep(A.kinds { 'lit' }, 1), A.lit 'a'), at_least_two)) -- one plain kid plus at least one
+        local ok, r = why(hedged(A.rep(A.kinds { 'lit' }, 0), A.lit 'a'), at_least_two)
+        assert.is_false(ok); assert.matches('count at least 1, below {2,}', r, 1, true)
+        local at_most_two = hedged(A.rep(A.kinds { 'lit' }, 0, 2))
+        assert.is_false(A.instance_of(hedged(A.rep(A.kinds { 'lit' }, 0)), at_most_two))
+        assert.is_true(A.instance_of(hedged(A.rep(A.kinds { 'lit' }, 0, 1), A.lit 'a'), at_most_two))
+        assert.is_true(A.entails(A.rep(A.kinds { 'lit' }, 1, 1), A.rep(A.kinds { 'lit' }, 0, 2)))
+        assert.is_false(A.entails(A.rep(A.kinds { 'lit' }, 0), A.rep(A.kinds { 'lit' }, 0, 2)))
+    end)
+
+    it('a period claim is not checked across a hedge variable, and says so; an open hedge admits any variable', function()
+        local ok, r = why(hedged(A.rep(A.kinds { 'lit' })), hedged(A.rep(A.kinds { 'lit' }, 0, nil, 2)))
+        assert.is_false(ok); assert.matches('period claim', r)
+        assert.is_true(A.instance_of(hedged(A.rep(A.kinds { 'lit' })), hedged(A.open())))
+        assert.is_false(A.instance_of(hedged(A.open()), hedged(A.rep(A.kinds { 'lit' })))) -- an open variable may hold anything
+        local ok2, r2 = why(hedged(A.open()), hedged(A.rep(A.kinds { 'lit' })))
+        assert.is_false(ok2); assert.matches('does not entail', r2)
+        local ok3 = A.admits_slice(A.rep(A.kinds { 'lit' }), { A.lit 'a' }, {}, {})
+        assert.is_true(ok3) -- no variables: plain admits
+    end)
+
+    it('a template with a period claim is still an instance of itself: identity before the period refusal', function()
+        local insts = { w 'w a 7 a', w 'w a 7 a 8 a', w 'w a 7 a 8 a 9 a' }
+        local J, env = A.template(insts[1]), { defs = {} }
+        for i = 2, #insts do local r = A.join(J, insts[i], { env = env }); J = r.template; env = r.env or env end
+        local values = {}
+        for i, I in ipairs(insts) do values[i] = A.match(J, I, { defs = env.defs }).values end
+        A.rederive_domains(J, values, { env = env })
+        local h = A.hole_names(J)[1]
+        assert.equals(2, J.holes[h].domain.period) -- the fold of join claims the unit with its period (REPETITION.md)
+        assert.is_true(A.instance_of(J, J, env))
+        local with_kid = A.template(A.node('w', A.lit 'w', A.lit 'a', A.lit '7', A.lit 'a', A.hole('q', true), A.lit 'b'), { q = J.holes[h].domain })
+        local m = A.match(J, with_kid.body, { defs = env.defs, hole_domains = with_kid.holes })
+        assert.is_false(m.ok); assert.matches('period claim', m.refusal.why)
+    end)
+end)
+
+describe('the LCS inside join (LCSJOIN.md; Myers 1986: traces, the LCS and the shortest edit script)', function()
+    local A = require 'algebra'
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local lit, node, name = A.lit, A.node, A.name
+    local function w(s) local ks = {}; for c in s:gmatch('%S+') do ks[#ks + 1] = lit(c) end; return node('w', unpack(ks)) end
+    local function letters(s) local t = {}; for c in s:gmatch('.') do t[#t + 1] = lit(c) end; return t end
+    local function H(h) return A.hole(h, true) end
+    local function values(T, I) local m = A.match(T, I); assert.is_true(m.ok, m.refusal and m.refusal.why); return m.values end
+
+    it('Myers Figure 1: abcabba against cbabac has an LCS of length 4 and a shortest edit script of length 5', function()
+        local P = A.lcs(letters 'abcabba', letters 'cbabac')
+        assert.equals(4, #P)
+        local a, b = {}, {}
+        for _, pr in ipairs(P) do a[#a + 1] = ('abcabba'):sub(pr[1], pr[1]); b[#b + 1] = ('cbabac'):sub(pr[2], pr[2]) end
+        assert.equals(table.concat(a), table.concat(b)) -- a trace: a common subsequence
+        for k = 2, #P do assert.is_true(P[k][1] > P[k - 1][1] and P[k][2] > P[k - 1][2]) end
+        assert.equals(5, 7 + 6 - 2 * #P) -- D = N + M - 2L (the paper's 1D 2D 3IB 6D 7IC)
+        assert.equals('cbba', table.concat(a)) -- this prototype's tie-break: the earliest match on both sides
+        assert.same({}, A.lcs(letters 'abc', letters 'xyz'))
+    end)
+
+    it('join anchors the common kids: a changed kid is a term hole, an extra one an insertion hedge, in one list', function()
+        local r = A.join(A.template(w 'x a b y'), w 'x c b d y')
+        assert.equals('(w "x" ?j1 "b" ?j2... "y")', A.show(r.template.body))
+        assert.same({ 'j1', 'j2' }, r.new)
+        assert.equals('(seq)', A.show(values(r.template, w 'x a b y').j2))
+        assert.equals('(seq "d")', A.show(values(r.template, w 'x c b d y').j2))
+        -- the identical-ends rule is the case with no anchor inside
+        assert.equals('(w "x" "a" ?j1...)', A.show(A.join(A.template(w 'x a'), w 'x a b c').template.body))
+        assert.equals('?j1', A.show(A.join(w 'x a', w 'x a b c', { align = 'none' }).template.body)) -- the rigidity stands
+    end)
+
+    it('the forced rule with k hedges places each fixed segment at its leftmost fit, which is the matchers\' first solution', function()
+        local T = A.template(node('f', H 'A', lit 'm', H 'B', lit 'z'))
+        local I = node('f', lit '1', lit '2', lit 'm', lit '3', lit 'z')
+        local r = A.join(T, I)
+        assert.equals('(f ?A... "m" ?B... "z")', A.show(r.template.body)); assert.same({}, r.new)
+        local W, W2 = values(r.template, I), A.match(T, I).values
+        assert.equals(A.show(W2.A), A.show(W.A)); assert.equals(A.show(W2.B), A.show(W.B))
+        local T3 = A.template(node('f', H 'A', lit 'm', H 'B'))
+        local I3 = node('f', lit 'm', lit 'm', lit 'm')
+        local r3 = A.join(T3, I3)
+        assert.equals('(seq)', A.show(r3.frags.A.right)) -- join's own placement: leftmost hedge shortest, A empty, B takes m m
+        assert.equals('(seq "m" "m")', A.show(r3.frags.B.right))
+        assert.equals('(seq)', A.show(values(r3.template, I3).A))
+        assert.equals('(seq)', A.show(A.match(T3, I3).values.A))
+        -- a segment with a term hole inside fits any kid there
+        local T4 = A.template(node('f', H 'A', node('g', A.hole 'p'), H 'B'))
+        local r4 = A.join(T4, node('f', lit '1', node('g', lit 'q'), lit '2'))
+        assert.equals('(f ?A... (g ?p) ?B...)', A.show(r4.template.body)); assert.same({}, r4.new)
+    end)
+
+    it('when no placement fits, the hedges are swallowed by the run they lie in and reported absorbed', function()
+        local T = A.template(node('f', H 'A', lit 'm', H 'B', lit 'z'))
+        local I = node('f', lit '1', lit 'q', lit '3', lit 'z')
+        local r = A.join(T, I)
+        assert.equals('(f ?j1... "z")', A.show(r.template.body))
+        assert.same({ 'j1' }, r.new)
+        assert.equals(2, #r.absorbed)
+        assert.is_true(A.match(r.template, I).ok)
+        assert.is_true(A.match(r.template, node('f', lit 'a', lit 'm', lit 'b', lit 'z')).ok)
+    end)
+
+    it('both sides hedged with the same shape align hedge against hedge; a node with holes anchors by fit, a bare hole never', function()
+        local r = A.join(A.template(node('f', lit 'a', H 'X', lit 'z')), A.template(node('f', lit 'a', H 'Y', lit 'z')))
+        assert.equals('(f "a" ?X... "z")', A.show(r.template.body))
+        local r2 = A.join(A.template(node('f', node('g', A.hole 'h'), lit 'a')), node('f', lit 'x', node('g', lit 'y'), lit 'a'))
+        assert.equals('(f ?j1... (g ?h) "a")', A.show(r2.template.body)) -- the node with a hole inside anchors by fit; x is the insertion
+        local r3 = A.join(A.template(node('f', A.hole 'h', lit 'a')), node('f', lit 'x', lit 'y', lit 'a'))
+        assert.equals('(f ?j1... "a")', A.show(r3.template.body)) -- a bare hole never anchors: absorbed, as HEDGEJOIN.md had it
+    end)
+
+    it('generalize anchors n members: a common subsequence intersected member by member', function()
+        local g = A.generalize({ w 'x a b y', w 'x c b d y', w 'x f b y' }, { need = 100 })
+        assert.equals('(w "x" ?h1 "b" ?h2... "y")', A.show(g.template.body))
+        assert.equals('(seq "d")', A.show(g.values[2].h2)); assert.equals('(seq)', A.show(g.values[3].h2))
+        local g2 = A.generalize({ w 'x a b y', w 'x c b d y', w 'x e y' }, { need = 100 })
+        assert.equals('(w "x" ?h1... "y")', A.show(g2.template.body)) -- b is not in the third member: no anchor inside
+        -- the order dependence the intersection has: the same three members, another order, the same anchors here
+        local g3 = A.generalize({ w 'x e y', w 'x c b d y', w 'x a b y' }, { need = 100 })
+        assert.equals('(w "x" ?h1... "y")', A.show(g3.template.body))
+        for _, G in ipairs { g, g2, g3 } do
+            for i, V in ipairs(G.values) do assert.is_truthy(A.instantiate(G.template, V, G.env).ok, 'member ' .. i) end
+        end
+    end)
+
+    it('the repetition families keep their claims: anchors at the ends only', function()
+        local g = A.generalize({ w 'w a b', w 'w a b a b', w 'w a b a b a b' }, { need = 3 })
+        assert.equals('(w "w" "a" "b" ?h1...)', A.show(g.template.body))
+        assert.equals(2, g.notes.h1.period)
+        local g4 = A.generalize({ w 'a 7 a', w 'a 7 a 8 a', w 'a 7 a 8 a 9 a' }, { need = 3 })
+        assert.equals('(w "a" "7" "a" ?h1...)', A.show(g4.template.body)); assert.equals(2, g4.notes.h1.period)
+    end)
+
+    it('the seventh callback joins over the one missing line (READER.md had one hedge over three statements)', function()
+        local F = fixture(); if not F then return end
+        local six, seventh = {}, nil
+        for _, m in ipairs(F.members) do if m.line ~= 84 then six[#six + 1] = m.term else seventh = m.term end end
+        local g = A.generalize(six, { need = 100 })
+        local j = A.join(g.template, seventh, { env = g.env })
+        assert.same({ 'j1' }, j.new)
+        local f = j.frags.j1
+        assert.equals(2, #f.left.kids); assert.equals(0, #f.right.kids)
+        assert.equals('mat_df(store, n.file)', A.cst_print(f.left.kids[1]))
+        for _, m in ipairs(F.members) do assert.is_true(A.match(j.template, m.term, { defs = g.env.defs }).ok) end
+    end)
+
+    it('the 14 statements: the shared guard anchors, the block is two hedges, every member unfolds and the template is an instance of itself', function()
+        local F = fixture(); if not F then return end
+        local st = {}
+        for _, p in ipairs(A.positions(F.analysis.term)) do if p.node.k == 'function_call' and A.cst_print(p.node):sub(1, 4) == 'cmd(' then st[#st + 1] = p.node end end
+        local g = A.generalize(st, { need = 100 })
+        local hedges = 0
+        for _, e in pairs(g.template.holes) do if e.rep then hedges = hedges + 1 end end
+        assert.equals(7, #A.hole_names(g.template)); assert.equals(4, hedges) -- FOLD.md's ends rule gave 4 holes, 3 hedges
+        for i, s in ipairs(st) do assert.equals(A.cst_print(s), A.cst_print(A.instantiate(g.template, g.values[i], g.env).term)) end
+        assert.is_true(A.instance_of(g.template, g.template, g.env))
+    end)
+end)
+
+describe('classify from hunks (CLASSIFY.md): an edit on one member read through attributed hunks, hedges included', function()
+    local A = require 'algebra'
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local lit, node, hole = A.lit, A.node, A.hole
+    local function w(s) local ks = {}; for c in s:gmatch('%S+') do ks[#ks + 1] = lit(c) end; return node('w', unpack(ks)) end
+    local function family() local g = A.generalize({ w 'x a b c y', w 'x a y', w 'x a b y' }, { need = 100 }); return g.template, g.values end
+    local function rebuilds(C, I2) local r = A.instantiate(C.template, C.values); return r.ok and A.eq(r.term, I2) end
+    local function id(s) return node('identifier', lit(s)) end
+
+    it('an edit inside a hedge is a value edit of the hedge: an element replaced, one inserted, the slice emptied', function()
+        local T, V = family()
+        assert.equals('(w "x" "a" ?h1... "y")', A.show(T.body))
+        local C = A.classify(T, V[1], w 'x a b q y')
+        assert.equals('value', C.kind); assert.equals('(seq "b" "q")', A.show(C.changed[1].to)); assert.is_true(rebuilds(C, w 'x a b q y'))
+        local C2 = A.classify(T, V[1], w 'x a b z c y')
+        assert.equals('value', C2.kind); assert.equals('(seq "b" "z" "c")', A.show(C2.values.h1))
+        local C3 = A.classify(T, V[1], w 'x a y')
+        assert.equals('value', C3.kind); assert.equals('(seq)', A.show(C3.values.h1))
+        assert.equals(0, #C.regions); assert.equals(0, #C.relocated)
+        local P = A.propagate(T, C, V, 1)
+        assert.same({ 1 }, P.values.holes[1].class) -- only the witness held (b c)
+    end)
+
+    it('an insertion touching a hedge boundary belongs to the hedge, on either side; an empty hedge takes its first element', function()
+        local T, V = family()
+        assert.equals('(seq "z" "b" "c")', A.show(A.classify(T, V[1], w 'x a z b c y').values.h1))
+        assert.equals('(seq "b" "c" "z")', A.show(A.classify(T, V[1], w 'x a b c z y').values.h1))
+        local C = A.classify(T, V[2], w 'x a q y')
+        assert.equals('value', C.kind); assert.equals('(seq "q")', A.show(C.values.h1))
+        assert.is_true(rebuilds(C, w 'x a q y'))
+    end)
+
+    it('a fixed kid changed or added in a list that holds a hedge is a template edit: a rewrite carrying the template\'s own hedge', function()
+        local T, V = family()
+        local C = A.classify(T, V[1], w 'x q b c y')
+        assert.equals('template', C.kind); assert.same({ { 2 } }, C.regions) -- template coordinates
+        assert.equals('(w "x" "q" ?h1... "y")', A.show(C.template.body))
+        assert.equals('rewrite', C.template.edits[#C.template.edits].op)
+        local P = A.propagate(T, C, V, 1)
+        assert.same({ 1, 2, 3 }, P.template.clean)
+        assert.equals('(w "x" "q" "b" "y")', A.show(P.template.preview(3)))
+        local C2 = A.classify(T, V[2], w 'x a y z')
+        assert.equals('template', C2.kind); assert.same({ {} }, C2.regions)
+        assert.equals('(w "x" "a" ?h1... "y" "z")', A.show(C2.template.body))
+        assert.is_true(rebuilds(C2, w 'x a y z'))
+        local C3 = A.classify(T, V[1], w 'w x a b c y')
+        assert.equals('(w "w" "x" "a" ?h1... "y")', A.show(C3.template.body))
+        assert.equals(1, #C3.relocated); assert.same({ 3 }, C3.relocated[1].from); assert.same({ 4 }, C3.relocated[1].to)
+        -- the same rewrite by hand: rewrite admits the template's own hedge and refuses one it lacks
+        assert.is_truthy(A.rewrite(T, {}, node('w', lit 'x', lit 'q', hole('h1', true), lit 'y')))
+        local bad, why = A.rewrite(T, {}, node('w', lit 'x', hole('h9', true), lit 'y'))
+        assert.is_nil(bad); assert.matches('unknown hole', why)
+        local bad2, why2 = A.rewrite(A.template(node('w', hole 'p', lit 'y')), {}, node('w', hole('p', true), lit 'y'))
+        assert.is_nil(bad2); assert.matches('repetition/context holes not supported', why2)
+    end)
+
+    it('an edit that crosses a hedge boundary is a straddle naming the hedge; the store law binds a non-linear hedge', function()
+        local T, V = family()
+        local C = A.classify(T, V[1], w 'x c y')
+        assert.equals('straddle', C.kind); assert.equals('h1', C.hole); assert.matches('crossed the boundary of hedge h1', C.why)
+        assert.equals('absent', A.absence_of(C).absence)
+        local g = A.generalize({ node('f', node('l', lit 'a', lit 'b'), node('l', lit 'a', lit 'b')), node('f', node('l', lit 'a'), node('l', lit 'a')), node('f', node('l', lit 'a', lit 'b', lit 'c'), node('l', lit 'a', lit 'b', lit 'c')) }, { need = 100 })
+        assert.equals('(f (l "a" ?h1...) (l "a" ?h1...))', A.show(g.template.body))
+        local one = A.classify(g.template, g.values[1], node('f', node('l', lit 'a', lit 'z'), node('l', lit 'a', lit 'b')))
+        assert.equals('straddle', one.kind); assert.equals('split', one.proposal.op); assert.same({ 1 }, one.sites)
+        local both = A.classify(g.template, g.values[1], node('f', node('l', lit 'a', lit 'z'), node('l', lit 'a', lit 'z')))
+        assert.equals('value', both.kind); assert.equals('(seq "z")', A.show(both.values.h1))
+    end)
+
+    it('a list behind a hedge: the region is reported in template coordinates, not the instance\'s', function()
+        local T = A.template(node('f', hole('h', true), node('l', lit 'a', lit 'b')))
+        local V = { h = A.seq { lit 'x', lit 'y' } }
+        local C = A.classify(T, V, node('f', lit 'x', lit 'y', node('l', lit 'a', lit 'b', lit 'c')))
+        assert.equals('template', C.kind)
+        assert.same({ { 2 } }, C.regions) -- the list sits at instance path 3 behind the two spliced kids
+        assert.equals('(f ?h... (l "a" "b" "c"))', A.show(C.template.body))
+        assert.is_true(rebuilds(C, node('f', lit 'x', lit 'y', node('l', lit 'a', lit 'b', lit 'c'))))
+        local C2 = A.classify(T, V, node('f', lit 'x', lit 'y', node('l', lit 'a', lit 'q')))
+        assert.equals('template', C2.kind); assert.same({ { 2, 2 } }, C2.regions)
+    end)
+
+    it('trace origins carry the site index and the template path', function()
+        local T = A.template(node('f', hole 'x', hole 'x', node('g', hole('r', true))))
+        local r = A.trace(T, { x = lit 'a', r = A.seq { lit 'p', lit 'q' } })
+        assert.equals(1, r.origins['1'].site); assert.equals(2, r.origins['2'].site)
+        assert.same({ 2 }, r.origins['2'].tpath)
+        assert.equals(1, r.origins['3/1'].site); assert.equals(1, r.origins['3/2'].site); assert.same({ 3, 1 }, r.origins['3/2'].tpath)
+    end)
+
+    it('the 14 command statements: one member edited at the shared guard is a template edit that propagates to all; a changed command name is a value edit', function()
+        local F = fixture(); if not F then return end
+        local st = {}
+        for _, p in ipairs(A.positions(F.analysis.term)) do if p.node.k == 'function_call' and A.cst_print(p.node):sub(1, 4) == 'cmd(' then st[#st + 1] = p.node end end
+        local g = A.generalize(st, { need = 100 })
+        local T, Vs = g.template, g.values
+        local hedges = 0
+        for _, e in pairs(T.holes) do if e.rep then hedges = hedges + 1 end end
+        assert.equals(4, hedges)
+        -- the member's instance edited: the unary `not store` becomes `store == nil` (as SURGERY.md did on the template)
+        local up
+        for _, p in ipairs(A.positions(st[3])) do if p.node.k == 'unary_expression' and A.cst_print(p.node) == 'not store' then up = p.path end end
+        local I2 = A.put(st[3], up, node('binary_expression', id 'store', lit ' ', lit '==', lit ' ', node('nil', lit 'nil')))
+        local C = A.classify(T, Vs[3], I2, g.env)
+        assert.equals('template', C.kind, C.why)
+        assert.equals(1, #C.regions); assert.equals(0, #C.changed)
+        assert.is_true(rebuilds(C, I2))
+        local P = A.propagate(T, C, Vs, 3, g.env)
+        assert.equals(14, #P.template.clean); assert.same({}, P.template.refused)
+        for i = 1, 14 do
+            local prev = A.cst_print(P.template.preview(i))
+            assert.equals(1, select(2, prev:gsub('store == nil', '')))
+            assert.equals(A.cst_print(st[i]):gsub('not store', 'store == nil', 1), prev)
+        end
+        local R = P.template.commit({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 })
+        assert.equals(14, #R.families[1].values)
+        -- the command name is the string_content hole: a value edit, member-local
+        local np
+        for _, p in ipairs(A.positions(st[3])) do if p.node.k == 'string_content' then np = p.path; break end end
+        local I3 = A.put(st[3], np, node('string_content', lit 'CartographExtractBlocksX'))
+        local C3 = A.classify(T, Vs[3], I3, g.env)
+        assert.equals('value', C3.kind, C3.why); assert.equals(1, #C3.changed)
+        local P3 = A.propagate(T, C3, Vs, 3, g.env)
+        assert.same({ 3 }, P3.values.holes[1].class)
+    end)
+end)
+
+describe('cascade: the update rule over a link (CASCADE.md; SQL-92 §11.8 ON UPDATE CASCADE)', function()
+    local A = require 'algebra'
+    local lit, node, hole = A.lit, A.node, A.hole
+    local okf, FX = pcall(dofile, 'experiments/lua-defs-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-defs-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    -- department(id, name) referenced by employee(who, dept)
+    local function families()
+        local D = { template = A.template(node('dept', hole 'id', hole 'name')), values = { { id = lit '7', name = lit 'ops' }, { id = lit '8', name = lit 'dev' } } }
+        local E = { template = A.template(node('emp', hole 'who', node('ref', lit 'dept:', hole 'dept'))), values = { { who = lit 'ann', dept = lit '7' }, { who = lit 'bob', dept = lit '8' }, { who = lit 'cy', dept = lit '7' } } }
+        return D, E
+    end
+    local function edit(D, j, W) local V = {}; for h, v in pairs(D.values[j]) do V[h] = v end; for h, v in pairs(W) do V[h] = v end; return A.classify(D.template, D.values[j], A.instantiate(D.template, V).term) end
+
+    it('a referenced key updated reaches every matching row, fixed before the edit; the others keep their key', function()
+        local D, E = families()
+        local L = A.link(E, D, { from = 'dept', to = 'id' })
+        assert.is_true(L.is_function); assert.equals(3, #L.tuples)
+        local C = edit(D, 1, { id = lit '9' })
+        assert.equals('value', C.kind)
+        local R = assert(A.cascade(L, E, D, 1, C))
+        assert.same({ 1, 3 }, R.rows)
+        assert.equals('"7"', A.show(R.key.from)); assert.equals('"9"', A.show(R.key.to))
+        assert.equals('(emp "cy" (ref "dept:" "9"))', A.show(R.preview(3)))
+        local new = R.commit()
+        assert.equals('"9"', A.show(new[1].dept)); assert.equals('"8"', A.show(new[2].dept)); assert.equals('"9"', A.show(new[3].dept))
+        local partial = R.commit({ 1 })
+        assert.equals('"7"', A.show(partial[3].dept)) -- commitment scopes the rows, all by default
+        -- the matching rows are the link's, read before the edit: a later link on the new values agrees
+        local L2 = A.link({ template = E.template, values = new }, { template = D.template, values = { C.values, D.values[2] } }, { from = 'dept', to = 'id' })
+        assert.equals(3, #L2.tuples); assert.equals(0, #L2.dangling)
+    end)
+
+    it('refusals by name: the referenced columns not a key, a collision, a non-value edit, an unchanged key', function()
+        local D, E = families()
+        local L = A.link(E, D, { from = 'dept', to = 'id' })
+        local C = edit(D, 1, { id = lit '8' })
+        local r, why = A.cascade(L, E, D, 1, C)
+        assert.is_nil(r); assert.matches('already the key of member 2', why)
+        local Lr = A.link(D, E, { from = 'id', to = 'dept' }) -- dept is not a key of the employees
+        local r2, why2 = A.cascade(Lr, D, E, 1, C)
+        assert.is_nil(r2); assert.matches('not a key of the referenced family', why2)
+        local Cn = edit(D, 1, { name = lit 'operations' })
+        local r3, why3 = A.cascade(L, E, D, 1, Cn)
+        assert.is_nil(r3); assert.matches('no component of the key id changed', why3)
+        local Ct = A.classify(D.template, D.values[1], node('dept', lit '7', lit 'ops', lit 'x'))
+        local r4, why4 = A.cascade(L, E, D, 1, Ct)
+        assert.is_nil(r4); assert.matches('not a value edit', why4)
+    end)
+
+    it('a key read through a reader is written through its inverse: the value\'s other parts survive; a function reader has none', function()
+        local D = families()
+        local RD = A.template(node('ref', hole 'host', lit ':', hole 'n'))
+        local E = { template = A.template(node('emp', hole 'who', hole 'r')), values = { { who = lit 'ann', r = node('ref', lit 'hq', lit ':', lit '7') }, { who = lit 'bob', r = node('ref', lit 'lab', lit ':', lit '7') } } }
+        local L = A.link(E, D, { from = 'r', to = 'id', read_from = { template = RD, hole = 'n' } })
+        assert.equals(2, #L.tuples)
+        local C = edit(D, 1, { id = lit '9' })
+        local R = assert(A.cascade(L, E, D, 1, C))
+        assert.equals('(ref "hq" ":" "9")', A.show(R.values[1].r)); assert.equals('(ref "lab" ":" "9")', A.show(R.values[2].r))
+        local Lf = A.link(E, D, { from = 'r', to = 'id', read_from = function(v) return v.kids[3] end })
+        local r, why = A.cascade(Lf, E, D, 1, C)
+        assert.is_nil(r); assert.matches('a function reader has no inverse', why)
+    end)
+
+    it('a composite key writes only the changed component, each through its own reader', function()
+        local J = { template = A.template(node('job', hole 'man', hole 'date', hole 'title')), values = { { man = lit 'm1', date = lit '1970', title = lit 'clerk' }, { man = lit 'm1', date = lit '1975', title = lit 'lead' } } }
+        local S = { template = A.template(node('sal', hole 'man', node('at', lit 'y', hole 'year'), hole 'amount')), values = { { man = lit 'm1', year = lit '1970', amount = lit '10' }, { man = lit 'm1', year = lit '1975', amount = lit '20' } } }
+        local L = A.link(S, J, { from = { 'man', 'year' }, to = { 'man', 'date' } })
+        assert.is_true(L.is_function); assert.equals(2, #L.tuples)
+        local C = edit(J, 2, { date = lit '1976' })
+        local R = assert(A.cascade(L, S, J, 2, C))
+        assert.same({ 2 }, R.rows)
+        assert.equals('"1976"', A.show(R.values[2].year)); assert.equals('"m1"', A.show(R.values[2].man))
+        assert.equals('(sal "m1" (at "y" "1976") "20")', A.show(R.preview(2)))
+        -- only the changed component is written: a function reader on the unchanged one (no inverse) is never asked
+        local Lf = A.link(S, J, { from = { 'man', 'year' }, to = { 'man', 'date' }, read_from = { function(v) return v end, nil } })
+        local Rf = assert(A.cascade(Lf, S, J, 2, C))
+        assert.equals('"1976"', A.show(Rf.values[2].year))
+    end)
+
+    it('the referencing domain follows PROPAGATE.md: derived widens and says so, supplied refuses', function()
+        local D, E = families()
+        local hd = 'dept' -- a derived enumerated domain (DOMAINS.md's `enumerate` policy), stated as a hole record
+        local Ef = { template = A.template(node('emp', hole 'who', node('ref', lit 'dept:', hole 'dept')), { dept = { domain = A.alt(A.closed(lit '7'), A.closed(lit '8')), origin = 'derived' } }), values = E.values }
+        local L = A.link(Ef, D, { from = hd, to = 'id' })
+        local C = edit(D, 1, { id = lit '9' })
+        local R = assert(A.cascade(L, Ef, D, 1, C))
+        assert.equals(1, #R.widened); assert.equals(hd, R.widened[1].h)
+        assert.is_true(A.instantiate(R.template, R.values[1]).ok)
+        local Es = { template = A.template(node('emp', hole 'who', node('ref', lit 'dept:', hole 'dept')), { dept = A.alt(A.closed(lit '7'), A.closed(lit '8')) }), values = E.values }
+        local Ls = A.link(Es, D, { from = 'dept', to = 'id' })
+        local r, why = A.cascade(Ls, Es, D, 1, C)
+        assert.is_nil(r); assert.matches('a supplied domain refuses', why)
+    end)
+
+    it('the delete rule: a referenced member dropped names the rows that would dangle', function()
+        local D, E = families()
+        local L = A.link(E, D, { from = 'dept', to = 'id' })
+        assert.same({ 1, 3 }, A.cascade_delete(L, 1).rows)
+        assert.same({}, A.cascade_delete(L, 3).rows)
+        assert.matches('no matching row', A.cascade_delete(L, 3).why)
+    end)
+
+    it('the six report callbacks and the seven declarations: (module, name) is the key, a rename cascades to one call site and only one', function()
+        local F = fixture(); if not F then return end
+        local six, defs = {}, {}
+        for i, m in ipairs(F.six) do six[i] = m.term end
+        for i, d in ipairs(F.defs) do defs[i] = node('def', d.term, node('module', lit(d.module))) end
+        local gA = A.generalize(six, { need = 100 })
+        local gB = A.generalize(defs, { need = 100 })
+        local hmod, hfn
+        for h in pairs(gA.template.holes) do if A.cst_print(gA.values[1][h]):find('^cartograph%.') then hmod = h else hfn = h end end
+        local bmod, bname
+        for h, e in pairs(gB.template.holes) do if not e.rep then local v = gB.values[1][h]; if A.cst_print(v):find('^cartograph%.') then bmod = h elseif v.k == 'lit' then bname = h end end end
+        local L1 = A.link(gA, gB, { from = hfn, to = bname })
+        assert.is_false(L1.is_function); assert.equals(1, #L1.ambiguity) -- report is defined four times
+        local L = A.link(gA, gB, { from = { hmod, hfn }, to = { bmod, bname } })
+        assert.is_true(L.is_function); assert.equals(6, #L.tuples); assert.equals(0, #L.dangling)
+        local j
+        for i, d in ipairs(F.defs) do if d.module == 'cartograph.optimize' and d.name == 'report' then j = i end end
+        local W = {}
+        for h, v in pairs(gB.values[j]) do W[h] = v end
+        W[bname] = lit 'optimize_report'
+        local C = A.classify(gB.template, gB.values[j], A.instantiate(gB.template, W, gB.env).term, gB.env)
+        assert.equals('value', C.kind)
+        local R = assert(A.cascade(L, gA, gB, j, C, { env = gB.env }))
+        assert.equals(1, #R.rows)
+        assert.equals('cartograph.optimize', A.cst_print(gA.values[R.rows[1]][hmod]))
+        assert.equals('optimize_report', A.cst_print(R.values[R.rows[1]][hfn]))
+        -- the surgery: one hunk in the call site, at the function name
+        local hs = A.hunks(R.template, gA.values[R.rows[1]], R.template, R.values[R.rows[1]], gA.env)
+        assert.equals(1, #hs); assert.equals('report', hs[1].old); assert.equals('optimize_report', hs[1].new)
+        -- a rename onto an existing key in the same module refuses
+        local j3
+        for i, d in ipairs(F.defs) do if d.module == 'cartograph.narrow' and d.name == 'report' then j3 = i end end
+        local W3 = {}
+        for h, v in pairs(gB.values[j3]) do W3[h] = v end
+        W3[bname] = lit 'param_report'
+        local C3 = A.classify(gB.template, gB.values[j3], A.instantiate(gB.template, W3, gB.env).term, gB.env)
+        local r, why = A.cascade(L, gA, gB, j3, C3, { env = gB.env })
+        assert.is_nil(r); assert.matches('already the key of member', why)
+    end)
+end)
+
+describe('a registry in a table (REGISTRY.md; SQL-92 §13.10): the first writer for a non-text store, and a rename across the two stores', function()
+    local A = require 'algebra'
+    local lit, node, hole = A.lit, A.node, A.hole
+    local okR, R = pcall(require, 'experiments.sqlite_reader')
+    local have, ver
+    if okR then have, ver = R.available() else have, ver = false, 'experiments/sqlite_reader.lua not found: ' .. tostring(R) end
+    local tmp = (os.getenv('SQLITE_READER_TMP') or os.getenv('TMPDIR') or '/tmp')
+    local n = 0
+    local function fresh_db() -- a fresh copy per test that writes, so no later test reads a mutated row
+        if not have then pending('sqlite3 shell not available: ' .. tostring(ver)) return nil end
+        n = n + 1
+        local db = ('%s/algebra_registry_%d.db'):format(tmp, n)
+        assert(R.build(db, 'experiments/registry_fixture.sql'))
+        return R.open(db), db
+    end
+    local function cell(s) return node('text', lit(s)) end
+    -- code in the reader's shape: reg('flags') as tree-sitter reads it, the key a string_content literal
+    local function call(key) return node('function_call', node('identifier', lit 'reg'), node('arguments', lit '(', node('string', lit "'", node('string_content', lit(key)), lit "'"), lit ')')) end
+    local unwrap = { template = A.template(node('text', hole 'k')), hole = 'k' } -- the table side's reader: a cell to its text
+
+    it('the sql_q grammar prints cells by storage class and identifiers quoted, refuses a blob, and reads its own statement back', function()
+        local st = node('update', node('ident', lit 'registry'), node('set', node('assign', node('ident', lit 'name'), cell "it's"), node('assign', node('ident', lit 'n'), node('integer', lit(3)))), node('where', node('eq', node('ident', lit 'key'), cell 'a'), node('eq', node('ident', lit 'x'), node('null'))))
+        local sql = A.grammars.sql_q.print(st)
+        assert.equals([[UPDATE "registry" SET "name" = 'it''s', "n" = 3 WHERE "key" = 'a' AND "x" = NULL;]], sql)
+        local back = A.grammars.sql_q.parse(sql)
+        assert.equals('update', back.kids[1].n); assert.equals('registry', back.kids[2].v)
+        -- an identifier holding a quote prints doubled (the toy parse does not undo it: a limit of the `sql` grammar's parse)
+        assert.matches('^UPDATE "reg""istry"', A.grammars.sql_q.print(node('update', node('ident', lit 'reg"istry'), node('set', node('assign', node('ident', lit 'n'), node('integer', lit(3)))), node('where', node('eq', node('ident', lit 'k'), cell 'a')))))
+        assert.is_nil(A.grammars.sql_q.print(node('update', node('ident', lit 't'), node('set', node('assign', node('ident', lit 'c'), node('blob'))), node('where', node('eq', node('ident', lit 'k'), node('integer', lit(1)))))))
+        assert.is_nil(A.grammars.sql_q.print(node('update', hole 'table', node('set'), node('where'))))
+    end)
+
+    it('the UPDATE is the row\'s surgery: the changed columns in SET, the old primary key in WHERE, rowid when none is declared, no data when nothing changed', function()
+        local rd = fresh_db(); if not rd then return end
+        local F = A.read(rd, 'registry')
+        assert.is_true(F.ok); assert.equals('registry', F.table); assert.same({ 'key' }, F.keys)
+        assert.equals('(row ?key ?handler ?enabled)', A.show(F.template.body))
+        local W = {}
+        for h, v in pairs(F.values[1]) do W[h] = v end
+        W.key = cell 'feature_flags'
+        local u = assert(A.table_update(F, 1, W))
+        assert.equals([[UPDATE "registry" SET "key" = 'feature_flags' WHERE "key" = 'flags';]], u.sql)
+        assert.is_true(u.verified); assert.same({ 'key' }, u.columns)
+        W.enabled = node('integer', lit(0))
+        local u2 = assert(A.table_update(F, 1, W))
+        assert.same({ 'enabled', 'key' }, (function() table.sort(u2.columns); return u2.columns end)())
+        local N = A.read(rd, 'notes')
+        assert.same({}, N.keys)
+        local u3 = assert(A.table_update(N, 2, { body = cell "isn't" }))
+        assert.equals([[UPDATE "notes" SET "body" = 'isn''t' WHERE "rowid" = 2;]], u3.sql)
+        local r, why = A.table_update(F, 1, F.values[1])
+        assert.is_nil(r); assert.matches('no data', why)
+        local r2, why2 = A.table_update({ template = F.template, values = F.values, keys = F.keys }, 1, W)
+        assert.is_nil(r2); assert.matches('names no table', why2)
+        -- the reader verifies the writer: a table name the parse cannot read back (a doubled quote) leaves the statement unverified
+        local uq = assert(A.table_update({ template = F.template, values = F.values, keys = F.keys, table = 'reg"istry' }, 1, W))
+        assert.is_false(uq.verified); assert.matches('^UPDATE "reg""istry"', uq.sql)
+        assert.equals('absent', A.absence_of({ why = why }).absence)
+    end)
+
+    it('the stamp is the precondition: fresh before the write, stale after it, and a re-read shows the row', function()
+        local rd, db = fresh_db(); if not rd then return end
+        local F = A.read(rd, 'registry')
+        local W = {}
+        for h, v in pairs(F.values[2]) do W[h] = v end
+        W.handler = cell 'handlers.routing'
+        local u = assert(A.table_update(F, 2, W))
+        assert.is_true(A.fresh(F, rd))
+        assert.is_truthy(R.exec(db, u.sql))
+        local ok, why = A.fresh(F, rd)
+        assert.is_false(ok); assert.matches('^stale', why)
+        assert.equals('frontier', A.absence_of({ why = why }).absence)
+        local F2 = A.read(rd, 'registry')
+        assert.equals('handlers.routing', F2.values[2].handler.kids[1].v)
+        assert.are_not.equal(F.source.stamp, F2.source.stamp)
+        -- a supplied domain from the DDL refuses a key of the wrong storage class instead of widening
+        local bad = {}
+        for h, v in pairs(F.values[1]) do bad[h] = v end
+        bad.key = node('integer', lit(7))
+        assert.is_false(A.instantiate(F.template, bad).ok)
+    end)
+
+    it('the rename across the two stores: a registry key row renamed cascades into the code, the UPDATE is the table\'s surgery, and the link holds on the re-read', function()
+        local rd, db = fresh_db(); if not rd then return end
+        local F = A.read(rd, 'registry')
+        local src = { "reg('flags')", "reg('routes')", "reg('flags')", "reg('audit')" }
+        local code = A.generalize({ call 'flags', call 'routes', call 'flags', call 'audit' }, { need = 100 })
+        local hk = A.hole_names(code.template)[1]
+        assert.equals('flags', code.values[1][hk].v)
+        local L = A.link(code, F, { from = hk, to = 'key', read_to = unwrap, complete = true })
+        assert.is_true(L.is_function); assert.equals(4, #L.tuples); assert.same({}, L.dangling)
+        -- the table side: row 1 renamed
+        local W = {}
+        for h, v in pairs(F.values[1]) do W[h] = v end
+        W.key = cell 'feature_flags'
+        local C = A.classify(F.template, F.values[1], A.instantiate(F.template, W).term)
+        assert.equals('value', C.kind); assert.equals('key', C.changed[1].h)
+        local Rc = assert(A.cascade(L, code, F, 1, C))
+        assert.same({ 1, 3 }, Rc.rows)
+        assert.equals('feature_flags', Rc.values[1][hk].v)
+        -- the code's surgery: one hunk per matching member, at the string
+        for _, a in ipairs(Rc.rows) do
+            local hs = A.hunks(Rc.template, code.values[a], Rc.template, Rc.values[a])
+            assert.equals(1, #hs); assert.equals('flags', hs[1].old); assert.equals('feature_flags', hs[1].new)
+            assert.equals("reg('feature_flags')", A.apply_hunks(src[a], hs))
+        end
+        -- the table's surgery: the UPDATE, executed on the scratch database once the stamp still holds
+        local u = assert(A.table_update(F, 1, C.values))
+        assert.is_true(A.fresh(F, rd))
+        assert.is_truthy(R.exec(db, u.sql))
+        assert.is_false((A.fresh(F, rd)))
+        -- both stores re-read: the link is intact; without the cascade the code dangles
+        local F2 = A.read(rd, 'registry')
+        local new = Rc.commit()
+        local L2 = A.link({ template = Rc.template, values = new }, F2, { from = hk, to = 'key', read_to = unwrap, complete = true })
+        assert.equals(4, #L2.tuples); assert.same({}, L2.dangling)
+        local Lneg = A.link(code, F2, { from = hk, to = 'key', read_to = unwrap, complete = true })
+        assert.same({ 1, 3 }, Lneg.dangling)
+        assert.equals('absent', A.chain(1, { Lneg }).absences[1].absence) -- the registry is complete: the key is gone
+        -- a collision onto an existing key refuses
+        local Wc = {}
+        for h, v in pairs(F.values[1]) do Wc[h] = v end
+        Wc.key = cell 'routes'
+        local Cc = A.classify(F.template, F.values[1], A.instantiate(F.template, Wc).term)
+        local r, why = A.cascade(L, code, F, 1, Cc)
+        assert.is_nil(r); assert.matches('already the key of member 2', why)
+        -- the reverse direction is a check: the code renames a key the registry lacks, the link says so
+        local Cr = A.classify(code.template, code.values[2], call 'routing')
+        assert.equals('value', Cr.kind)
+        local vals = {}
+        for i, V in ipairs(code.values) do vals[i] = V end
+        vals[2] = Cr.values
+        local Lr = A.link({ template = code.template, values = vals }, F, { from = hk, to = 'key', read_to = unwrap, complete = true })
+        assert.same({ 2 }, Lr.dangling)
+    end)
+
+    it('dig declares a single-use reference: a one-member family has no hole until the string is dug, then it links like any other', function()
+        local rd = fresh_db(); if not rd then return end
+        local F = A.read(rd, 'registry')
+        local one = A.generalize({ call 'users' }, { need = 100 })
+        assert.same({}, A.hole_names(one.template))
+        local p
+        for _, q in ipairs(A.positions(one.template.body)) do if q.node.k == 'lit' and q.node.v == 'users' then p = q.path end end
+        local T2 = assert(A.dig(one.template, p, 'key', A.kinds { 'lit' }))
+        local V2 = { key = lit 'users' }
+        assert.is_true(A.eq(A.instantiate(T2, V2).term, call 'users'))
+        local L = A.link({ template = T2, values = { V2 } }, F, { from = 'key', to = 'key', read_to = unwrap, complete = true })
+        assert.equals(1, #L.tuples); assert.equals(3, L.tuples[1].b)
+        assert.equals('{lit}', A.show_domain(T2.holes.key.domain)) -- the dug hole's domain is the one given; the key column's is the table's
+    end)
+end)
+
+describe('expressibility (EXPRESS.md; mustache(5), the Handlebars guide): the hbs grammar as a store, and a Lua expression generated as a template', function()
+    local A = require 'algebra'
+    local lit, node, hole = A.lit, A.node, A.hole
+    local G = A.grammars.hbs
+    local function R(tpl, data, partials) return A.hbs_render(assert(G.parse(tpl), 'parse: ' .. tpl), data, partials) end
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    -- Lua terms in the reader's shape
+    local function str(s) return node('string', lit "'", node('string_content', lit(s)), lit "'") end
+    local function id(s) return node('identifier', lit(s)) end
+    local function dot(a, b) return node('dot_index_expression', a, lit '.', id(b)) end
+    local function cat(a, b) return node('binary_expression', a, lit ' ', lit '..', lit ' ', b) end
+    local function bor(a, b) return node('binary_expression', a, lit ' ', lit 'or', lit ' ', b) end
+    local function call(fn, ...) local kids = { lit '(' }; for i, a in ipairs({ ... }) do if i > 1 then kids[#kids + 1] = lit ', ' end; kids[#kids + 1] = a end; kids[#kids + 1] = lit ')'; return node('function_call', fn, node('arguments', unpack(kids))) end
+    local function fmt(f, ...) return call(node('method_index_expression', node('parenthesized_expression', lit '(', str(f), lit ')'), lit ':', id 'format'), ...) end
+    local sample_law = A.hbs_sample_law
+
+    it('mustache(5): variables escape, triple-stash does not, dotted names descend, a miss is empty', function()
+        assert.equals('* Chris\n* \n* &lt;b&gt;GitHub&lt;/b&gt;\n* <b>GitHub</b>\n', R('* {{name}}\n* {{age}}\n* {{company}}\n* {{{company}}}\n', { name = 'Chris', company = '<b>GitHub</b>' }))
+        assert.equals('* Chris &amp; Friends\n* \n* \n* <b>GitHub</b>\n', R('* {{client.name}}\n* {{age}}\n* {{client.company.name}}\n* {{{company.name}}}\n', { client = { name = 'Chris & Friends', age = 50 }, company = { name = '<b>GitHub</b>' } }))
+        assert.equals('* Hello!', R('* {{.}}', 'Hello!'))
+        assert.equals('a &#39;q&#39; &quot;d&quot;', R('{{x}}', { x = "a 'q' \"d\"" }))
+    end)
+
+    it('mustache(5): sections over false, a list, an implicit iterator and an object; the inverted section; the comment; the standalone line', function()
+        assert.equals('Shown.\n', R('Shown.\n{{#person}}\n  Never shown!\n{{/person}}\n', { person = false }))
+        assert.equals('  <b>resque</b>\n  <b>hub</b>\n  <b>rip</b>\n', R('{{#repo}}\n  <b>{{name}}</b>\n{{/repo}}\n', { repo = { { name = 'resque' }, { name = 'hub' }, { name = 'rip' } } }))
+        assert.equals('  <b>resque</b>\n  <b>hub</b>\n  <b>rip</b>\n', R('{{#repo}}\n  <b>{{.}}</b>\n{{/repo}}\n', { repo = { 'resque', 'hub', 'rip' } }))
+        assert.equals('  Hi Jon!\n', R('{{#person?}}\n  Hi {{name}}!\n{{/person?}}\n', { ['person?'] = { name = 'Jon' } }))
+        assert.equals('  No repos :(\n', R('{{#repo}}\n  <b>{{name}}</b>\n{{/repo}}\n{{^repo}}\n  No repos :(\n{{/repo}}\n', { repo = {} }))
+        assert.equals('<h1>Today.</h1>', R('<h1>Today{{! ignore me }}.</h1>', {}))
+        assert.equals('a {{x}} b', R('a {{! not standalone }}{{x}} b', { x = '{{x}}' })) -- an inline comment consumes nothing
+    end)
+
+    it('mustache(5): partials inherit the context and keep the indentation of a standalone tag', function()
+        assert.equals('<h2>Names</h2>\n  <strong>a</strong>\n  <strong>b</strong>\n', R('<h2>Names</h2>\n{{#names}}\n  {{> user}}\n{{/names}}\n', { names = { { name = 'a' }, { name = 'b' } } }, { user = '<strong>{{name}}</strong>\n' }))
+    end)
+
+    it('Handlebars: #if with else, #unless, #each with this, @index, @first and @last, #with; falsiness includes "", 0 and []', function()
+        assert.equals('<h1>Yehuda</h1>', R('{{#if author}}<h1>{{firstName}}</h1>{{else}}<h1>Unknown</h1>{{/if}}', { author = true, firstName = 'Yehuda' }))
+        assert.equals('<h1>Unknown</h1>', R('{{#if author}}<h1>{{firstName}}</h1>{{else}}<h1>Unknown</h1>{{/if}}', {}))
+        assert.equals('no', R('{{#if n}}yes{{else}}no{{/if}}', { n = 0 })); assert.equals('no', R('{{#if s}}yes{{else}}no{{/if}}', { s = '' })); assert.equals('no', R('{{#if l}}yes{{else}}no{{/if}}', { l = {} }))
+        assert.equals('WARNING', R('{{#unless license}}WARNING{{/unless}}', {}))
+        assert.equals(' 0: x  1: y ', R('{{#each array}} {{@index}}: {{this}} {{/each}}', { array = { 'x', 'y' } }))
+        assert.equals('a, b, c', R('{{#each items}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}', { items = { 'a', 'b', 'c' } }))
+        assert.equals('[a]bc', R('{{#each items}}{{#if @first}}[{{this}}]{{else}}{{this}}{{/if}}{{/each}}', { items = { 'a', 'b', 'c' } }))
+        assert.equals('empty', R('{{#each items}}{{this}}{{else}}empty{{/each}}', { items = {} }))
+        assert.equals('Yehuda Katz', R('{{#with person}}{{firstname}} {{lastname}}{{/with}}', { person = { firstname = 'Yehuda', lastname = 'Katz' } }))
+    end)
+
+    it('print then parse is the identity on every term, and a malformed template reads nothing', function()
+        for _, tpl in ipairs { 'a {{x}} {{{y}}} {{#if z}}p{{else}}q{{/if}} {{#each l}}{{this}}{{/each}}{{! c}}{{> p}}', '{{#repo}}<b>{{name}}</b>{{/repo}}{{^repo}}none{{/repo}}', 'plain text only' } do
+            local t = assert(G.parse(tpl))
+            assert.equals(tpl, G.print(t)); assert.is_true(A.eq(G.parse(G.print(t)), t))
+        end
+        assert.is_nil(G.parse('{{#if x}}open')); assert.is_nil(G.parse('{{x')); assert.is_nil(G.parse('{{/x}}'))
+        assert.is_nil(G.print(node('hbs', hole 'h')))
+    end)
+
+    it('the generator: text, raw lookups, concatenation, format directives, table.concat as #each; each as-is claim holds on the samples', function()
+        local H = A.hbs_of(cat(str 'cartograph: no files under ', id 'arg'))
+        assert.equals('as-is', H.kind); assert.equals('cartograph: no files under {{{arg}}}', G.print(H.term)); assert.same({ 'arg' }, H.lookups)
+        local tried, agree = sample_law(H, "'cartograph: no files under ' .. arg")
+        assert.is_true(tried >= 5); assert.equals(tried, agree)
+        local H2 = A.hbs_of(fmt('%s has %d ports', dot(id 'n', 'name'), dot(id 'n', 'count')))
+        assert.equals('as-is', H2.kind); assert.equals('{{{n.name}}} has {{{n.count}}} ports', G.print(H2.term))
+        local H3 = A.hbs_of(call(dot(id 'table', 'concat'), id 'params', str ', '))
+        assert.equals('as-is', H3.kind); assert.equals('{{#each params}}{{{this}}}{{#unless @last}}, {{/unless}}{{/each}}', G.print(H3.term))
+        assert.equals('a, b', A.hbs_render(H3.term, { params = { 'a', 'b' } }))
+        local H4 = A.hbs_of(fmt('100%% of %s', id 'x'))
+        assert.equals('100% of {{{x}}}', G.print(H4.term))
+        local H5 = A.hbs_of(cat(str 'n=', call(id 'tostring', id 'n')))
+        assert.equals('as-is', H5.kind); assert.equals('n={{{n}}}', G.print(H5.term))
+    end)
+
+    it('the generator: an `or`, a width directive, a length, a call and arithmetic are staged, and a bare computation is not a template', function()
+        local H = A.hbs_of(fmt('%s has no ports.', bor(dot(id 'n', 'name'), str '?')))
+        assert.equals('staged', H.kind); assert.equals('{{{name}}} has no ports.', G.print(H.term)); assert.equals('or', H.staged[1].kind) -- the staged lookup named after the path it reads
+        -- why the `or` is staged: Lua's falsiness is not Handlebars': the empty string is truthy in Lua and falsy in Handlebars
+        assert.equals('?', A.hbs_render(assert(G.parse('{{#if n.name}}{{{n.name}}}{{else}}?{{/if}}')), { n = { name = '' } }))
+        assert.equals('', (loadstring("return (function(n) return n.name or '?' end)({ name = '' })")()))
+        assert.equals('?', A.hbs_render(assert(G.parse('{{#if n.name}}{{{n.name}}}{{else}}?{{/if}}')), { n = { name = 0 } })) -- 0 is falsy in Handlebars, not in Lua
+        -- the law itself refutes the if/else translation of the idiom on the empty string, so the census cannot claim it as-is
+        local Hif = { term = assert(G.parse('{{#if n.name}}{{{n.name}}}{{else}}?{{/if}}')), lookups = { 'n.name' }, staged = {}, kind = 'as-is' }
+        local tried, agree, bad = A.hbs_sample_law(Hif, "n.name or '?'")
+        assert.equals(6, tried); assert.is_true(agree < tried); assert.matches('lua "", template "%?"', bad[1])
+        -- a table.concat with a range is a computation, not an #each over the whole list
+        assert.equals('not', A.hbs_of(call(dot(id 'table', 'concat'), id 'segs', str '/', id 'i', id 'j')).kind) -- the whole call is one computation: no template
+        assert.equals('staged', A.hbs_of(cat(str 'path ', call(dot(id 'table', 'concat'), id 'segs', str '/', id 'i', id 'j'))).kind)
+        local H2 = A.hbs_of(fmt('%-44s %s', id 'pt', id 'sz'))
+        assert.equals('staged', H2.kind); assert.equals('format:%-44s', H2.staged[1].kind); assert.equals('{{{pt_text}}} {{{sz}}}', G.print(H2.term))
+        local H3 = A.hbs_of(cat(str 'ports (', node('unary_expression', lit '#', id 'ports')))
+        assert.equals('staged', H3.kind); assert.equals('length', H3.staged[1].kind)
+        local H4 = A.hbs_of(call(id 'report', id 'x'))
+        assert.equals('not', H4.kind); assert.equals('call', H4.staged[1].kind)
+        local H5 = A.hbs_of(cat(str 'total ', node('binary_expression', id 'a', lit ' ', lit '+', lit ' ', id 'b')))
+        assert.equals('staged', H5.kind); assert.equals('arith', H5.staged[1].kind)
+        assert.equals('not', A.hbs_of(bor(id 'a', id 'b')).kind)
+    end)
+
+    it('the staging split: a staged computation gets a readable name and its read paths, and the law holds for the pair, template plus producing side, a missing value included', function()
+        local H = A.hbs_of(fmt('%s has no ports.', bor(dot(id 'n', 'name'), str '?')))
+        assert.equals('staged', H.kind); assert.equals('{{{name}}} has no ports.', G.print(H.term))
+        assert.equals('name', H.staged[1].name); assert.equals('or', H.staged[1].kind); assert.same({ 'n.name' }, H.staged[1].refs)
+        assert.equals("n.name or '?'", H.staged[1].text)
+        local tried, agree, bad = A.hbs_sample_law(H, "('%s has no ports.'):format(n.name or '?')")
+        assert.equals(6, tried); assert.equals(6, agree, bad[1]) -- the sixth sample is the missing value: Lua gives ?, the producing side gives ?
+        -- a length is `<path>_count`; a computation that reads the variable it would be named after takes `_text`
+        local H2 = A.hbs_of(fmt('ports of %s (%d)', bor(dot(id 'n', 'name'), str '?'), node('unary_expression', lit '#', id 'ports')))
+        assert.equals('ports of {{{name}}} ({{{ports_count}}})', G.print(H2.term)); assert.equals('length', H2.staged[2].kind)
+        local band = node('binary_expression', node('binary_expression', id 'size', lit ' ', lit '>', lit ' ', node('number', lit '1')), lit ' ', lit 'and', lit ' ', str 'big')
+        local H3 = A.hbs_of(fmt('%-44s %s', id 'pt', bor(band, str 'small')))
+        assert.equals('{{{pt_text}}} {{{size_text}}}', G.print(H3.term))
+        -- a width directive stages the FORMATTING of its argument, so the producing side pads and the law agrees
+        assert.equals("('%-44s'):format(pt)", H3.staged[1].text); assert.same({ 'pt' }, H3.staged[1].refs)
+        local t3, a3, b3 = A.hbs_sample_law(H3, "('%-44s %s'):format(pt, size > 1 and 'big' or 'small')")
+        assert.equals(2, t3); assert.equals(2, a3, b3[1]) -- only the numeric samples compare with 1; a string or a missing value errors in Lua and is not tried
+        -- a name already a template lookup falls back to sN
+        local H4 = A.hbs_of(cat(cat(id 'name', str ': '), bor(dot(id 'n', 'name'), str '?')))
+        assert.equals('{{{name}}}: {{{s1}}}', G.print(H4.term))
+        -- the sixth sample is a MISSING value: a `%s` lookup prints nil in Lua and nothing in a template, so the claim is as-is when present only
+        local H5 = A.hbs_of(fmt('%s!', id 'x'))
+        assert.equals('as-is', H5.kind)
+        local t5, a5 = A.hbs_sample_law(H5, "('%s!'):format(x)", { samples = 5 })
+        assert.equals(5, t5); assert.equals(5, a5)
+        local t6, a6, b6 = A.hbs_sample_law(H5, "('%s!'):format(x)")
+        if jit then -- LuaJIT (and Lua 5.2+) format nil as "nil"; Lua 5.1's %s refuses a nil and the sample is not tried
+            assert.equals(6, t6); assert.equals(5, a6); assert.matches('lua "nil!", template "!"', b6[1])
+        else
+            assert.equals(5, t6); assert.equals(5, a6)
+        end
+        -- the callee of a call is not a path the computation reads; the name avoids the variable read (`_text`)
+        local H6 = A.hbs_of(cat(str 'n=', call(id 'count', id 'items')))
+        assert.equals('staged', H6.kind); assert.equals('call', H6.staged[1].kind); assert.same({ 'items' }, H6.staged[1].refs); assert.equals('items_text', H6.staged[1].name)
+    end)
+
+    it('the census over commands/analysis.lua: every maximal string-building expression classed, every as-is claim holding on the samples', function()
+        local F = fixture(); if not F then return end
+        local root = F.analysis.term
+        local parent = {}
+        local pos = A.positions(root)
+        local nodes_at = {}
+        for _, p in ipairs(pos) do nodes_at[A.key(p.path)] = p.node end
+        local function is_cat(n) if n.k ~= 'binary_expression' then return false end; for _, c in ipairs(n.kids) do if c.k == 'lit' and c.v == '..' then return true end end; return false end
+        -- a census unit is a MAXIMAL string-building expression: a `..` chain, a format call or a
+        -- table.concat with no such expression above it
+        local function candidate(n)
+            if is_cat(n) then return true end
+            if n.k ~= 'function_call' then return false end
+            local text = A.cst_print(n)
+            return text:find('^%(.-%):format%(') or text:find('^string%.format%(') or text:find('^table%.concat%(')
+        end
+        local cands = {}
+        for _, p in ipairs(pos) do if candidate(p.node) then cands[#cands + 1] = p end end
+        local counts, units = { ['as-is'] = 0, staged = 0, ['not'] = 0 }, 0
+        for _, p in ipairs(cands) do
+            local nested = false
+            for _, q in ipairs(cands) do
+                if #q.path < #p.path then
+                    local pre = true
+                    for i = 1, #q.path do if q.path[i] ~= p.path[i] then pre = false end end
+                    if pre then nested = true end
+                end
+            end
+            if not nested then
+                units = units + 1
+                local H = A.hbs_of(p.node)
+                counts[H.kind] = counts[H.kind] + 1
+                assert.is_true(A.eq(G.parse(G.print(H.term)), H.term))
+                if H.kind == 'as-is' then local tried, agree = sample_law(H, A.cst_print(p.node)); assert.equals(tried, agree, A.cst_print(p.node)) end
+            end
+        end
+        assert.equals(12, units)
+        assert.equals(8, counts['as-is']); assert.equals(4, counts.staged); assert.equals(0, counts['not'])
+    end)
+end)
+
+describe('the render call generator (RENDER.md): the producing side written by a template, read back through it, the move composed', function()
+    local A = require 'algebra'
+    local lit, node, hole = A.lit, A.node, A.hole
+    local G = A.grammars.hbs
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local function str(s) return node('string', lit "'", node('string_content', lit(s)), lit "'") end
+    local function id(s) return node('identifier', lit(s)) end
+    local function dot(a, b) return node('dot_index_expression', a, lit '.', id(b)) end
+    local function cat(a, b) return node('binary_expression', a, lit ' ', lit '..', lit ' ', b) end
+    local function bor(a, b) return node('binary_expression', a, lit ' ', lit 'or', lit ' ', b) end
+    local function call(fn, ...) local kids = { lit '(' }; for i, a in ipairs({ ... }) do if i > 1 then kids[#kids + 1] = lit ', ' end; kids[#kids + 1] = a end; kids[#kids + 1] = lit ')'; return node('function_call', fn, node('arguments', unpack(kids))) end
+    local function fmt(f, ...) return call(node('method_index_expression', node('parenthesized_expression', lit '(', str(f), lit ')'), lit ':', id 'format'), ...) end
+
+    it('the generator prints the call in the reader\'s shape for zero, one and several fields, and the reader is a match through the same template', function()
+        assert.equals("render('x', {})", A.cst_print(A.render_call('x', {})))
+        local one = A.render_call('no_files', { { key = 'arg', value = id 'arg' } })
+        assert.equals("render('no_files', { arg = arg })", A.cst_print(one))
+        local two = A.render_call('ports', { { key = 'name', value = bor(dot(id 'n', 'name'), str '?') }, { key = 'ports_count', value = node('unary_expression', lit '#', id 'ports') } })
+        assert.equals("render('ports', { name = n.name or '?', ports_count = #ports })", A.cst_print(two))
+        local back = assert(A.render_call_of(two))
+        assert.equals('ports', back.name); assert.equals(2, #back.fields)
+        assert.equals('name', back.fields[1].key); assert.equals("n.name or '?'", A.cst_print(back.fields[1].value))
+        assert.equals('ports_count', back.fields[2].key); assert.equals('#ports', A.cst_print(back.fields[2].value))
+        assert.equals(0, #A.render_call_of(A.render_call('x', {})).fields)
+        assert.is_nil(A.render_call_of(call(id 'notify', str 'x')))
+        -- a field holding a comment cannot be inlined on the call's line: refused by name, classed refused
+        local commented = node('binary_expression', id 'a', lit ' ', lit 'or', lit ' ', node('comment', lit '-- default'), lit '\n', str 'x')
+        local r, why = A.render_call('c', { { key = 'a', value = commented } })
+        assert.is_nil(r); assert.matches('holds a comment and cannot be inlined', why)
+        assert.equals('refused', A.absence_of({ why = why }).absence)
+        local mvc, whyc = A.move_to_template(cat(str 'v=', commented), 'c')
+        assert.is_nil(mvc); assert.matches('holds a comment', whyc)
+        -- the instance is its own reading: generate, read back, generate again
+        local again = A.render_call(back.name, back.fields)
+        assert.is_true(A.eq(two, again))
+    end)
+
+    it('the move: lookups flattened to field keys, a staged computation carried as its own node, the call and the template one pair, the law holding on it', function()
+        local mv = A.move_to_template(cat(str 'cartograph: no files under ', id 'arg'), 'no_files')
+        assert.equals('as-is', mv.kind); assert.equals('cartograph: no files under {{{arg}}}', mv.text)
+        assert.equals("render('no_files', { arg = arg })", A.cst_print(mv.call))
+        local mv2 = A.move_to_template(fmt('%s has no ports.', bor(dot(id 'n', 'name'), str '?')), 'no_ports')
+        assert.equals('{{{name}}} has no ports.', mv2.text); assert.equals("render('no_ports', { name = n.name or '?' })", A.cst_print(mv2.call))
+        local t, a, b = A.move_law(mv2, "('%s has no ports.'):format(n.name or '?')")
+        assert.equals(6, t); assert.equals(6, a, b[1])
+        -- a dotted lookup becomes a flat key named by its last segment; the field holds the dotted expression
+        local mv3 = A.move_to_template(fmt('ports of %s (%d) at %s', bor(dot(id 'n', 'name'), str '?'), node('unary_expression', lit '#', id 'ports'), dot(id 'n', 'file')), 'ports')
+        assert.equals('ports of {{{name}}} ({{{ports_count}}}) at {{{file}}}', mv3.text)
+        assert.equals("render('ports', { name = n.name or '?', ports_count = #ports, file = n.file })", A.cst_print(mv3.call))
+        local t3, a3, b3 = A.move_law(mv3, "('ports of %s (%d) at %s'):format(n.name or '?', #ports, n.file)")
+        assert.is_true(t3 >= 3); assert.equals(t3, a3, b3[1])
+        -- a width directive's field is the formatting call as a term, so the call prints it
+        local mv4 = A.move_to_template(fmt('%-44s %s', id 'pt', id 'sz'), 'row')
+        assert.equals("render('row', { pt_text = ('%-44s'):format(pt), sz = sz })", A.cst_print(mv4.call))
+        local t4, a4 = A.move_law(mv4, "('%-44s %s'):format(pt, sz)", { samples = 5 })
+        assert.equals(5, t4); assert.equals(5, a4)
+        -- two lookups sharing a last segment: the second joins its segments
+        local mv5 = A.move_to_template(cat(cat(dot(id 'a', 'name'), str '/'), dot(id 'b', 'name')), 'pair')
+        assert.equals('{{{name}}}/{{{b_name}}}', mv5.text); assert.equals("render('pair', { name = a.name, b_name = b.name })", A.cst_print(mv5.call))
+        -- a table.concat keeps its #each over the flattened key
+        local mv6 = A.move_to_template(cat(str 'items: ', call(dot(id 'table', 'concat'), dot(id 'r', 'items'), str ', ')), 'items')
+        assert.equals('items: {{#each items}}{{{this}}}{{#unless @last}}, {{/unless}}{{/each}}', mv6.text)
+        assert.equals("render('items', { items = r.items })", A.cst_print(mv6.call))
+        local t6, a6, b6 = A.move_law(mv6, "'items: ' .. table.concat(r.items, ', ')")
+        assert.is_true(t6 >= 3); assert.equals(t6, a6, b6[1])
+    end)
+
+    it('over the fixture\'s analysis.lua: every as-is and staged expression generates a call that reads back to its own fields, and the pair holds on the defined samples', function()
+        local F = fixture(); if not F then return end
+        local root = F.analysis.term
+        local pos = A.positions(root)
+        local function is_cat(n) if n.k ~= 'binary_expression' then return false end; for _, c in ipairs(n.kids) do if c.k == 'lit' and c.v == '..' then return true end end; return false end
+        local function candidate(n)
+            if is_cat(n) then return true end
+            if n.k ~= 'function_call' then return false end
+            local text = A.cst_print(n)
+            return text:find('^%(.-%):format%(') or text:find('^string%.format%(') or text:find('^table%.concat%(')
+        end
+        local cands = {}
+        for _, p in ipairs(pos) do if candidate(p.node) then cands[#cands + 1] = p end end
+        local moved, held = 0, 0
+        for _, p in ipairs(cands) do
+            local nested = false
+            for _, q in ipairs(cands) do
+                if #q.path < #p.path then
+                    local pre = true
+                    for i = 1, #q.path do if q.path[i] ~= p.path[i] then pre = false end end
+                    if pre then nested = true end
+                end
+            end
+            if not nested then
+                local mv = assert(A.move_to_template(p.node, 'm' .. moved))
+                if mv.kind ~= 'not' then
+                    moved = moved + 1
+                    local back = assert(A.render_call_of(mv.call))
+                    assert.equals(#mv.fields, #back.fields)
+                    for i, f in ipairs(mv.fields) do assert.equals(f.key, back.fields[i].key); assert.is_true(A.eq(f.value, back.fields[i].value)) end
+                    assert.is_true(A.eq(G.parse(mv.text), mv.template))
+                    local t, a, b = A.move_law(mv, A.cst_print(p.node), { samples = 5 })
+                    if t > 0 and a == t then held = held + 1 end
+                    assert.is_true(t == 0 or a == t, A.cst_print(p.node) .. ' ' .. tostring(b[1]))
+                end
+            end
+        end
+        assert.equals(12, moved); assert.equals(12, held)
+    end)
+end)
+
+describe('the first loop iteration (LOOP.md; Fowler, Extract Function, the catalog example): a family\'s template becomes a helper, its values the calls', function()
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    -- the six report callbacks (the fixture's members 1, 2, 4, 5, 6, 7; member 3 at line 84 is a
+    -- neighbour of another shape): each member is `return function () .. end`, the function_definition inside
+    local SIX = { 1, 2, 4, 5, 6, 7 }
+    local function six_of(F)
+        local six = {}
+        for i, m in ipairs(SIX) do six[i] = F.members[m].term.kids[1].kids[3].kids[1]; assert.equals('function_definition', six[i].k) end
+        return six
+    end
+    local OPTS = { name = 'report_cmd', params = { h1 = 'mod', h2 = 'fn' }, indent = '    ', reindent = '    ' }
+    local function extracted(F)
+        local g = A.generalize(six_of(F), { need = 100 })
+        local X, why = A.extract(g.template, OPTS)
+        assert.is_truthy(X, why)
+        return X, g
+    end
+    local function id(s) return node('identifier', lit(s)) end
+    local function str(x) return node('string', lit "'", node('string_content', x), lit "'") end
+    local function fdef(...) return node('function_definition', lit 'function', lit ' ', node('parameters', lit '(', lit ')'), lit ' ', node('block', ...), lit ' ', lit 'end') end
+    local function fcall(f, ...) local ks = { lit '(' }; for i, a in ipairs({ ... }) do if i > 1 then ks[#ks + 1] = lit ', ' end; ks[#ks + 1] = a end; ks[#ks + 1] = lit ')'; return node('function_call', id(f), node('arguments', unpack(ks))) end
+    local function ret(e) return node('return_statement', lit 'return', lit ' ', node('expression_list', e)) end
+
+    it('conservation: the call template carries the family\'s holes once each and the helper names the parameter at every lift site', function()
+        local F = fixture(); if not F then return end
+        local X, g = extracted(F)
+        assert.same(A.hole_names(g.template), A.hole_names(X.call))
+        local CS = A.sites(X.call)
+        for _, h in ipairs(A.hole_names(X.call)) do assert.equals(1, #CS[h].sites, h) end
+        assert.equals(2, #X.lifts)
+        local rules = {}
+        for _, l in ipairs(X.lifts) do
+            rules[l.hole] = l.rule
+            -- the helper's body sits under local function <name>(..) return <body> end: kids[8] the block, [1] the return, [3] the expression_list, [1] the body
+            local body = X.helper.kids[8].kids[1].kids[3].kids[1]
+            local there = A.locate_at(body, l.at)
+            assert.is_truthy(A.cst_print(there):find(l.param, 1, true), l.hole .. ' lifted at ' .. A.key(l.at) .. ': ' .. A.cst_print(there))
+        end
+        assert.same({ h1 = 'string', h2 = 'field' }, rules)
+        assert.equals("scratch(require(mod)[fn](store, id))", A.cst_print(A.locate_at(X.helper.kids[8].kids[1].kids[3].kids[1], { 5, 13 })))
+        -- the helper's text is a Lua chunk; the call it builds is a function that has not run
+        local src = 'local cmd, live, whole_graph, mat_df, scratch = ...\n' .. A.cst_print(X.helper) .. '\nreturn report_cmd'
+        local chunk = assert(loadstring(src))
+        local report_cmd = chunk(nil, function() return nil end, nil, nil, nil)
+        assert.equals('function', type(report_cmd('cartograph.untangle', 'report_blocks')))
+    end)
+
+    it('the six members become six calls, each verified by the reader and reading back the member\'s own values', function()
+        local F = fixture(); if not F then return end
+        local X, g = extracted(F)
+        local want = { "report_cmd('cartograph.untangle', 'report_blocks')", "report_cmd('cartograph.optimize', 'report')", "report_cmd('cartograph.narrow', 'report')",
+            "report_cmd('cartograph.narrow', 'param_report')", "report_cmd('cartograph.narrow', 'devirt_report')", "report_cmd('cartograph.lens', 'report')" }
+        local calls = {}
+        for i = 1, 6 do
+            local r = A.extract_call(X, g.values[i])
+            assert.is_true(r.ok, r.why); assert.is_true(r.verified)
+            assert.equals(want[i], A.cst_print(r.term))
+            calls[i] = r.term
+            local back = A.extract_call_of(X, r.term)
+            for h, v in pairs(g.values[i]) do assert.is_true(A.eq(back[h], v), h) end
+        end
+        -- the calls are a family whose template is the call template, the values unchanged
+        local g2 = A.generalize(calls, { need = 100 })
+        assert.equals(A.show(X.call.body), A.show(g2.template.body))
+        assert.is_true(A.instance_of(g2.template, X.call) and A.instance_of(X.call, g2.template))
+        for i = 1, 6 do for h, v in pairs(g.values[i]) do assert.is_true(A.eq(g2.values[i][h], v)) end end
+        assert.is_nil(A.extract_call_of(X, calls[1].kids[1])) -- an identifier is not a call of the helper
+    end)
+
+    it('semantics: under one fake environment the extracted call behaves as the callback did, and the require stays inside the callback', function()
+        local F = fixture(); if not F then return end
+        local X, g = extracted(F)
+        local function run(body_src, mod, fn)
+            local log = {}
+            local env = {
+                live = function() return { focused = 7, node = function(id) return { kind = 'function', file = 'f.lua', id = id } end } end,
+                mat_df = function(_, file) log[#log + 1] = 'mat_df ' .. file end,
+                scratch = function(x) log[#log + 1] = 'scratch ' .. tostring(x) end,
+                require = function(m) log[#log + 1] = 'require ' .. m; return setmetatable({}, { __index = function(_, k) return function(_, id) return m .. '.' .. k .. '(' .. tostring(id) .. ')' end end }) end,
+                vim = { notify = function(msg) log[#log + 1] = 'notify ' .. msg end, log = { levels = { WARN = 2 } } },
+                setmetatable = setmetatable, tostring = tostring, type = type,
+            }
+            local chunk = assert(loadstring(body_src))
+            setfenv(chunk, env)
+            local f = chunk(mod, fn)
+            log[#log + 1] = 'built'
+            f()
+            return log
+        end
+        local helper = A.cst_print(X.helper)
+        for i = 1, 6 do
+            local V = g.values[i]
+            local orig = run(F.members[SIX[i]].source, nil, nil)
+            local call = run(helper .. '\nreturn ' .. A.cst_print(A.extract_call(X, V).term), nil, nil)
+            assert.same(orig, call)
+            assert.equals('built', call[1]) -- the require happens when the callback runs, not when the call is made
+            local req
+            for k, l in ipairs(call) do if l == 'require ' .. V.h1.v then req = k end end
+            assert.is_true(req ~= nil and req > 1)
+            assert.equals('scratch ' .. V.h1.v .. '.' .. V.h2.v .. '(7)', call[#call])
+        end
+    end)
+
+    it('the lift rules by name: string content, a field name, a number; a variable, a hedge, a computed value and two ways refused', function()
+        -- string and number
+        local T = A.template(fdef(ret(fcall('g', str(hole 'h1'), node('number', hole 'h2')))))
+        local X = assert(A.extract(T, { name = 'mk' }))
+        assert.equals("local function mk(p1, p2)\n    return function () return g(p1, p2) end\nend", A.cst_print(X.helper))
+        local r = A.extract_call(X, { h1 = lit 'a', h2 = lit '3' })
+        assert.is_true(r.ok); assert.equals("mk('a', 3)", A.cst_print(r.term))
+        -- a field name becomes a bracket index and is passed quoted
+        local T2 = A.template(fdef(ret(fcall('g', node('dot_index_expression', id 'x', lit '.', node('identifier', hole 'h'))))))
+        local X2 = assert(A.extract(T2, { name = 'mk' }))
+        assert.equals("local function mk(p1)\n    return function () return g(x[p1]) end\nend", A.cst_print(X2.helper))
+        assert.equals("mk('f')", A.cst_print(A.extract_call(X2, { h = lit 'f' }).term))
+        assert.same({ h = lit 'f' }, A.extract_call_of(X2, A.extract_call(X2, { h = lit 'f' }).term))
+        -- a variable: refused by name
+        local T3 = A.template(fdef(ret(fcall('g', node('identifier', hole 'h')))))
+        local X3, why3 = A.extract(T3, { name = 'mk' })
+        assert.is_nil(X3); assert.is_truthy(why3:find('names a variable', 1, true), why3)
+        -- the object of a dot index is a variable too
+        local T3b, why3b = A.extract(A.template(fdef(ret(fcall('g', node('dot_index_expression', node('identifier', hole 'h'), lit '.', id 'f'))))), { name = 'mk' })
+        assert.is_nil(T3b); assert.is_truthy(why3b:find('names a variable', 1, true), why3b)
+        -- a hedge: refused
+        local T4 = A.template(fdef(ret(fcall('g', hole('h', true)))))
+        local X4, why4 = A.extract(T4, { name = 'mk' })
+        assert.is_nil(X4); assert.is_truthy(why4:find('is a hedge', 1, true), why4)
+        -- the same hole lifted two ways: refused
+        local T5 = A.template(fdef(ret(fcall('g', str(hole 'h'), node('number', hole 'h')))))
+        local X5, why5 = A.extract(T5, { name = 'mk' })
+        assert.is_nil(X5); assert.is_truthy(why5:find('lifted two ways', 1, true), why5)
+        -- the same hole quoted twice is one argument
+        local T6 = A.template(fdef(ret(fcall('g', str(hole 'h'), node('dot_index_expression', id 'x', lit '.', node('identifier', hole 'h'))))))
+        local X6 = assert(A.extract(T6, { name = 'mk' }))
+        assert.equals("local function mk(p1)\n    return function () return g(p1, x[p1]) end\nend", A.cst_print(X6.helper))
+        assert.equals(1, #A.sites(X6.call).h.sites)
+        -- not a function: refused; a computed value: the writer refuses
+        local X7, why7 = A.extract(A.template(fcall('g', str(hole 'h'))), { name = 'mk' })
+        assert.is_nil(X7); assert.is_truthy(why7:find('not a function_definition', 1, true), why7)
+        local r8 = A.extract_call(X, { h1 = fcall('name'), h2 = lit '3' })
+        assert.is_false(r8.ok); assert.equals('refused', r8.absence); assert.is_truthy(r8.why:find('not a literal', 1, true), r8.why)
+        local r9 = A.extract_call(X, { h1 = lit 'a' })
+        assert.is_false(r9.ok); assert.equals('absent', r9.absence)
+    end)
+
+    it('reindent moves the body\'s own newlines and leaves strings and comments alone', function()
+        local body = fdef(lit '\n    ', node('comment', lit '-- a\n'), node('string', lit '[[', node('string_content', lit 'x\ny'), lit ']]'), lit '\n')
+        local t = A.reindent(body, '  ')
+        assert.equals("function () \n      -- a\n[[x\ny]]\n   end", A.cst_print(t))
+        assert.equals(A.show(body), A.show(A.reindent(body, '')))
+    end)
+
+    it('the price on the fixture (FOLD.md\'s units): far below the six as they stand, above the family record by the helper\'s own words', function()
+        local F = fixture(); if not F then return end
+        local X, g = extracted(F)
+        local six = six_of(F)
+        local raw_n, raw_b = 0, 0
+        for _, m in ipairs(six) do raw_n = raw_n + A.size(m); raw_b = raw_b + A.text_size(m) end
+        local before_n = A.family_dl(g.template, g.values)
+        local before_b = A.family_dl(g.template, g.values, { cost = A.text_size })
+        local after_n = A.size(X.helper) + A.family_dl(X.call, g.values)
+        local after_b = A.text_size(X.helper) + A.family_dl(X.call, g.values, { cost = A.text_size })
+        assert.same({ 1392, 2614 }, { raw_n, raw_b })
+        assert.same({ 245, 572 }, { before_n, before_b })
+        assert.same({ 285, 692 }, { after_n, after_b })
+        assert.is_true(after_n < raw_n and after_b < raw_b)
+        assert.is_true(after_n > before_n and after_b > before_b) -- the declaration, the parameters and one reference per use are the program's own price
+    end)
+end)
+
+describe('destinations (DESTINATION.md; Tsantalis and Chatzigeorgiou 2009, Move Method identification): where a moved text may go, ranked, with the preconditions as refusals', function()
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local function set(...) local S = {}; for _, k in ipairs({ ... }) do S[k] = true end; return S end
+    local function sorted(S) local r = {}; for k in pairs(S) do r[#r + 1] = k end; table.sort(r); return r end
+    local function id(s) return node('identifier', lit(s)) end
+    local function decl(names, ...) -- local a, b = e1, e2
+        local vl = {}
+        for i, n in ipairs(names) do if i > 1 then vl[#vl + 1] = lit ', ' end; vl[#vl + 1] = id(n) end
+        local el = {}
+        for i, e in ipairs({ ... }) do if i > 1 then el[#el + 1] = lit ', ' end; el[#el + 1] = e end
+        return node('variable_declaration', lit 'local', lit ' ', node('assignment_statement', node('variable_list', unpack(vl)), lit ' ', lit '=', lit ' ', node('expression_list', unpack(el))))
+    end
+    local function fcall(f, ...) local ks = { lit '(' }; for i, a in ipairs({ ... }) do if i > 1 then ks[#ks + 1] = lit ', ' end; ks[#ks + 1] = a end; ks[#ks + 1] = lit ')'; return node('function_call', id(f), node('arguments', unpack(ks))) end
+    local function localfn(name, body) return node('function_declaration', lit 'local', lit ' ', lit 'function', lit ' ', id(name), node('parameters', lit '(', id 'p', lit ')'), lit ' ', node('block', body), lit ' ', lit 'end') end
+
+    it('lua_names on the fixture callback: free = the helpers it calls plus the library, binds its locals, no assignment', function()
+        local F = fixture(); if not F then return end
+        local N = A.lua_names(F.members[1].term)
+        assert.same({ 'live', 'mat_df', 'require', 'scratch', 'vim' }, sorted(N.free))
+        assert.same({ 'id', 'n', 'store' }, sorted(N.binds))
+        assert.same({}, sorted(N.assigns))
+        assert.same({ 'cartograph.untangle' }, N.requires)
+        -- the field after a dot and a table key are not reads; a for variable and a parameter are binds
+        local t = node('chunk', decl({ 'a' }, node('dot_index_expression', id 'x', lit '.', id 'field')),
+            node('for_generic_clause', node('variable_list', id 'k', lit ', ', id 'v'), lit ' ', lit 'in', lit ' ', node('expression_list', fcall('pairs', id 'a'))),
+            node('table_constructor', lit '{', node('field', id 'key', lit ' = ', id 'val'), lit '}'),
+            node('assignment_statement', node('variable_list', id 'g'), lit ' = ', node('expression_list', id 'a')))
+        local M2 = A.lua_names(t)
+        assert.same({ 'g', 'pairs', 'val', 'x' }, sorted(M2.free)) -- g is assigned: a free name and an assignment, not a bind; a is local
+        assert.is_true(M2.assigns.g == true and M2.binds.g == nil)
+        assert.same({ 'a', 'k', 'v' }, sorted(M2.binds))
+        -- the block's own scope: nested binds do not count
+        local blk = node('block', decl({ 'outer' }, (lit '1')), localfn('helper', decl({ 'inner' }, (lit '2'))), fcall('use', id 'outer'))
+        assert.same({ 'helper', 'outer' }, sorted(A.lua_scope_binds(blk)))
+        assert.same({ 'inner', 'outer', 'p', 'helper' }, (function() local r = sorted(A.lua_names(blk).binds); table.sort(r, function(a, b) return ({ inner = 1, outer = 2, p = 3, helper = 4 })[a] < ({ inner = 1, outer = 2, p = 3, helper = 4 })[b] end); return r end)())
+    end)
+
+    it('the paper\'s Figure 2 shape: three targets with one accessed entity each tie, the smaller home first, all tied suggested', function()
+        local m = { name = 'removeLocation', entities = set('taskManager_x', 'locationManager_remove', 'location_y'), free = {}, calls = { { home = 'Task' } } }
+        local homes = {
+            { id = 'TaskManager', entities = set('taskManager_x', 'a', 'b', 'c'), bound = {}, reach = set('Task', 'TaskManager') },
+            { id = 'LocationManager', entities = set('locationManager_remove', 'd'), bound = {}, reach = set('Task', 'LocationManager') },
+            { id = 'Location', entities = set('location_y', 'e'), bound = {}, reach = set('Task', 'Location') },
+            { id = 'Elsewhere', entities = set('z'), bound = {}, reach = set('Task') },
+        }
+        local r = A.destinations(m, homes, {})
+        assert.same({ 'Location', 'LocationManager', 'TaskManager' }, { r.candidates[1].id, r.candidates[2].id, r.candidates[3].id }) -- 1 - 1/4, 1 - 1/4, 1 - 1/6
+        assert.equals(3, #r.candidates) -- Elsewhere holds no accessed entity: not a candidate (step 1)
+        assert.equals(2, #r.suggested) -- the two smallest tie at distance 0.75 and are both suggested
+        assert.same({ 'Location', 'LocationManager' }, { r.suggested[1].id, r.suggested[2].id })
+        assert.equals(0.75, r.candidates[1].distance)
+        -- with `all`, a home holding nothing accessed is listed as the prototype's candidate, last
+        local r2 = A.destinations(m, homes, { all = true })
+        assert.equals('Elsewhere', r2.candidates[4].id); assert.equals('prototype', r2.candidates[4].provenance); assert.equals('paper', r2.candidates[1].provenance)
+        -- Definition 2: a home the text already belongs to does not count the text among its entities
+        local r3 = A.destinations({ name = 'f', entities = set('a'), free = {}, calls = {} }, { { id = 'H', entities = set('a', 'f'), bound = {}, holds = true }, { id = 'K', entities = set('a', 'g'), bound = {} } }, {})
+        assert.equals(0, r3.candidates[1].distance); assert.equals('H', r3.candidates[1].id)
+        -- the access count sorts before the distance: a home holding more of the text's entities comes first even when farther
+        local r4 = A.destinations({ name = 'f', entities = set('a', 'b'), free = {}, calls = {} },
+            { { id = 'Near', entities = set('a'), bound = {} }, { id = 'Holds2', entities = set('a', 'b', 'c', 'd', 'e', 'f'), bound = {} } }, {})
+        assert.same({ 'Holds2', 'Near' }, { r4.candidates[1].id, r4.candidates[2].id })
+        assert.is_true(r4.candidates[2].distance < r4.candidates[1].distance)
+    end)
+
+    it('the preconditions refuse by name: a clashing local, an unbound name, an unreachable call, an assigned outer name; plumbing and passing turn refusals into prices', function()
+        local m = { name = 'helper', entities = set('live', 'scratch'), free = set('live', 'scratch', 'vim'), calls = { { home = 'A' }, { home = 'B' } } }
+        local homes = {
+            { id = 'A', entities = set('live', 'scratch', 'x'), bound = set('live', 'scratch', 'x') },
+            { id = 'B', entities = set('live', 'scratch'), bound = set('live', 'scratch', 'helper') },
+            { id = 'C', entities = set('live', 'scratch'), bound = set('live', 'scratch'), reach = set('A', 'B', 'C') },
+            { id = 'D', entities = set('live'), bound = set('live'), reach = set('A', 'B', 'D') },
+            { id = 'E', entities = set('live', 'scratch'), bound = set('live', 'scratch'), plumbing = 7 },
+        }
+        local r = A.destinations(m, homes, { helper_cost = 100, call_extra = 2 })
+        local by = {}
+        for _, c in ipairs(r.candidates) do by[c.id] = c end
+        assert.is_false(by.A.ok); assert.equals('not visible from the call in B', by.A.why[1])
+        assert.is_false(by.B.ok); assert.equals('a local helper is already bound at B', by.B.why[1])
+        assert.is_true(by.C.ok); assert.equals(100, by.C.cost)
+        assert.is_false(by.D.ok); assert.equals('scratch not bound at D', by.D.why[1])
+        assert.is_true(by.E.ok); assert.equals(107, by.E.cost); assert.same({ 'A', 'B' }, by.E.after_plumbing)
+        assert.equals('C', r.suggested[1].id) -- the first ok candidate in the paper's order; E has the same access count and a greater distance
+        assert.same({ 'C', 'E' }, { r.by_price[1].id, r.by_price[2].id })
+        -- vim is outside the system boundary: not required to be bound anywhere
+        -- passing: the unbound name becomes a parameter at a cost per call
+        local r2 = A.destinations(m, homes, { helper_cost = 100, call_extra = 2, parameterize = true })
+        for _, c in ipairs(r2.candidates) do by[c.id] = c end
+        assert.is_true(by.D.ok); assert.same({ 'scratch' }, by.D.parameterized); assert.equals(104, by.D.cost)
+        -- quality precondition 1: an assigned outer name refuses everywhere
+        local r3 = A.destinations({ name = 'h', entities = set('live'), free = set('live'), assigns = set('count'), calls = {} }, homes, {})
+        assert.is_truthy(r3.refused_all:find('assigns an outer name (count)', 1, true))
+        for _, c in ipairs(r3.candidates) do assert.is_false(c.ok) end
+        assert.equals(0, #r3.suggested)
+        -- copies: a composite home pays the helper per copy
+        local r4 = A.destinations(m, { { id = 'two', entities = set('live', 'scratch'), bound = set('live', 'scratch'), reach = set('A', 'B'), copies = 2 } }, { helper_cost = 100 })
+        assert.equals(200, r4.candidates[1].cost)
+        -- the Jaccard distance itself
+        assert.equals(0.5, A.jaccard_distance(set('a', 'b'), set('a', 'b', 'c', 'd'))); assert.equals(0, A.jaccard_distance({}, {})); assert.equals(1, A.jaccard_distance(set 'a', set 'b'))
+    end)
+
+    it('lua_positions: the range after the last needed binding and before the first use, with the four picks named; refusals by name', function()
+        local blk = node('block',
+            decl({ 'live', 'scratch' }, id 'H_live', id 'H_scratch'),   -- 1
+            lit '\n', node('comment', lit '-- c'),                       -- 2, 3
+            decl({ 'other' }, (lit '1')),                                -- 4
+            localfn('reorder', fcall('x')),                              -- 5
+            decl({ 'late' }, (lit '2')),                                 -- 6: a declaration after the opening run is not part of it
+            fcall('cmd', (lit "'A'"), fcall('other_thing')),             -- 7
+            node('comment', lit '-- the use'),                           -- 8
+            fcall('cmd', (lit "'B'"), fcall('helper')),                  -- 9
+            fcall('cmd', (lit "'C'"), fcall('helper')))                  -- 10
+        local P = assert(A.lua_positions(blk, { needs = set('live', 'scratch', 'vim'), calls = { 9, 10 }, name = 'helper' }))
+        assert.same({ from = 1, to = 9 }, { from = P.from, to = P.to })
+        assert.same({ after_needed = 1, after_opening = 4, with_helpers = 5, before_use = 7 }, P.picks)
+        -- a needed name bound only after the first use: refused; a clash: refused; no call: refused
+        local _, why = A.lua_positions(node('block', fcall('cmd', fcall('helper')), decl({ 'live' }, id 'x')), { needs = set('live'), calls = { 1 } })
+        assert.is_truthy(why and why:find('precedes the binding of live', 1, true), tostring(why))
+        local _, why2 = A.lua_positions(blk, { needs = {}, calls = { 9 }, name = 'reorder' })
+        assert.is_truthy(why2:find('reorder is already bound at kid 5', 1, true), why2)
+        local _, why3 = A.lua_positions(blk, { needs = {}, calls = {} })
+        assert.is_truthy(why3:find('no call', 1, true))
+        -- the opening run never reaches past the needed binding when nothing else is bound
+        local P2 = assert(A.lua_positions(node('block', decl({ 'live' }, id 'x'), fcall('cmd', fcall('helper'))), { needs = set('live'), calls = { 2 } }))
+        assert.same({ after_needed = 1, after_opening = 1, before_use = 1 }, P2.picks)
+    end)
+end)
+
+describe('resolution (RESOLVE.md; Néron, Tolmach, Visser, Wachsmuth 2015: scope graphs, resolution paths, the algorithm of Fig. 18)', function()
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local function sorted(S) local r = {}; for k in pairs(S) do r[#r + 1] = k end; table.sort(r); return r end
+    -- a resolution as `name#site by path`, ABSENT, or AMBIGUOUS{..}
+    local function res(G, r)
+        local R = A.resolve(G, r)
+        if R.absent then return 'ABSENT' end
+        local t = {}
+        for _, e in ipairs(R.entries) do t[#t + 1] = G.decls[e.decl].name .. tostring(G.decls[e.decl].site) .. ' by ' .. A.show_path(G, e.path) end
+        table.sort(t)
+        return (R.ambiguous and 'AMBIGUOUS ' or '') .. table.concat(t, ' | ')
+    end
+    local id = function(s) return node('identifier', lit(s)) end
+    local function decl(names, ...) local vl = {}; for i, n in ipairs(names) do if i > 1 then vl[#vl + 1] = lit ', ' end; vl[#vl + 1] = id(n) end; local el = {}; for i, e in ipairs({ ... }) do if i > 1 then el[#el + 1] = lit ', ' end; el[#el + 1] = e end; return node('variable_declaration', lit 'local', lit ' ', node('assignment_statement', node('variable_list', unpack(vl)), lit ' ', lit '=', lit ' ', node('expression_list', unpack(el)))) end
+    local function fcall(f, ...) local ks = { lit '(' }; for i, a in ipairs({ ... }) do if i > 1 then ks[#ks + 1] = lit ', ' end; ks[#ks + 1] = a end; ks[#ks + 1] = lit ')'; return node('function_call', type(f) == 'string' and id(f) or f, node('arguments', unpack(ks))) end
+    local function fdef(params, ...) local pk = { lit '(' }; for i, p in ipairs(params) do if i > 1 then pk[#pk + 1] = lit ', ' end; pk[#pk + 1] = id(p) end; pk[#pk + 1] = lit ')'; return node('function_definition', lit 'function', lit ' ', node('parameters', unpack(pk)), lit ' ', node('block', ...), lit ' ', lit 'end') end
+    local function localfn(name, params, ...) local pk = { lit '(' }; for i, p in ipairs(params) do if i > 1 then pk[#pk + 1] = lit ', ' end; pk[#pk + 1] = id(p) end; pk[#pk + 1] = lit ')'; return node('function_declaration', lit 'local', lit ' ', lit 'function', lit ' ', id(name), node('parameters', unpack(pk)), lit ' ', node('block', ...), lit ' ', lit 'end') end
+    local function dot(a, b) return node('dot_index_expression', type(a) == 'string' and id(a) or a, lit '.', id(b)) end
+    local function str(s) return node('string', lit "'", node('string_content', lit(s)), lit "'") end
+    local function ret(e) return node('return_statement', lit 'return', lit ' ', node('expression_list', e)) end
+    local function chunk(...) return node('chunk', ...) end
+    -- the class and the end of a reference named `name` under a term path, alias hops followed
+    local function where(G, file, name)
+        for rid, r in pairs(G.refs) do
+            if r.name == name and r.file == file and r.kind ~= 'field' and r.kind ~= 'probe' then
+                local T = A.resolve_through(G, rid)
+                local d = T.ends[1] and G.decls[T.ends[1].decl]
+                return A.resolution_class(G, T), d and (d.name .. '@' .. tostring(d.file) .. ':' .. d.kind) or nil, T
+            end
+        end
+    end
+
+    it('Fig. 5 and Fig. 6: duplicate declarations resolve to both; lexical shadowing by the shorter path', function()
+        -- Fig. 5: def a1 = 0; def b2 = a3 + c4; def b5 = b6 + d7; def c8 = 0
+        local G = A.scope_graph()
+        local s1 = A.sg_scope(G, nil, 'global')
+        A.sg_decl(G, s1, 'a', { site = 1 }); A.sg_decl(G, s1, 'b', { site = 2 }); A.sg_decl(G, s1, 'b', { site = 5 }); A.sg_decl(G, s1, 'c', { site = 8 })
+        local a3, c4, b6, d7 = A.sg_ref(G, s1, 'a', { site = 3 }), A.sg_ref(G, s1, 'c', { site = 4 }), A.sg_ref(G, s1, 'b', { site = 6 }), A.sg_ref(G, s1, 'd', { site = 7 })
+        assert.equals('a1 by D(a)', res(G, a3)); assert.equals('c8 by D(c)', res(G, c4))
+        assert.equals('AMBIGUOUS b2 by D(b) | b5 by D(b)', res(G, b6))
+        assert.equals('ABSENT', res(G, d7))
+        -- Fig. 6: def f1 = fix f2 { fun n3 { ifz n4 then 1 else n5*f6(n7-1) } }; def n8 = f9 5
+        G = A.scope_graph()
+        s1 = A.sg_scope(G, nil, 'global'); local s2 = A.sg_scope(G, s1, 'fix'); local s3 = A.sg_scope(G, s2, 'fun')
+        A.sg_decl(G, s1, 'f', { site = 1 }); A.sg_decl(G, s2, 'f', { site = 2 }); A.sg_decl(G, s3, 'n', { site = 3 }); A.sg_decl(G, s1, 'n', { site = 8 })
+        local n4, f6, n7, f9 = A.sg_ref(G, s3, 'n', { site = 4 }), A.sg_ref(G, s3, 'f', { site = 6 }), A.sg_ref(G, s3, 'n', { site = 7 }), A.sg_ref(G, s1, 'f', { site = 9 })
+        assert.equals('f2 by P·D(f)', res(G, f6)) -- P·D beats P·P·D
+        assert.equals('n3 by D(n)', res(G, n4)); assert.equals('n3 by D(n)', res(G, n7))
+        assert.equals('f1 by D(f)', res(G, f9))
+        assert.is_true(A.path_less({ { k = 'D' } }, { { k = 'P' }, { k = 'D' } }))
+        assert.is_true(A.path_less({ { k = 'I' }, { k = 'I' }, { k = 'D' } }, { { k = 'P' }, { k = 'D' } })) -- IP
+        assert.is_false(A.path_less({ { k = 'P' }, { k = 'D' } }, { { k = 'P' }, { k = 'D' } }))
+    end)
+
+    it('Fig. 7, 8, 9: imports beat parents, local declarations beat imports, no parent step after an import', function()
+        -- Fig. 7: def c1; module A2 { import B3; def a4 = b5 + c6 }; module B7 { import C8; def b9 = 0 }; module C10 { def b11 = 1; def c12 = b13 }
+        local G = A.scope_graph()
+        local s1 = A.sg_scope(G, nil, 'global')
+        A.sg_decl(G, s1, 'c', { site = 1 })
+        local s2, s3, s4 = A.sg_scope(G, s1, 'A'), A.sg_scope(G, s1, 'B'), A.sg_scope(G, s1, 'C')
+        A.sg_decl(G, s1, 'A', { site = 2, assoc = s2 }); A.sg_decl(G, s1, 'B', { site = 7, assoc = s3 }); A.sg_decl(G, s1, 'C', { site = 10, assoc = s4 })
+        local B3 = A.sg_ref(G, s2, 'B', { site = 3 }); A.sg_import(G, s2, B3)
+        A.sg_decl(G, s2, 'a', { site = 4 }); local b5, c6 = A.sg_ref(G, s2, 'b', { site = 5 }), A.sg_ref(G, s2, 'c', { site = 6 })
+        local C8 = A.sg_ref(G, s3, 'C', { site = 8 }); A.sg_import(G, s3, C8); A.sg_decl(G, s3, 'b', { site = 9 })
+        A.sg_decl(G, s4, 'b', { site = 11 }); A.sg_decl(G, s4, 'c', { site = 12 }); local b13 = A.sg_ref(G, s4, 'b', { site = 13 })
+        assert.equals('c12 by I(B)·I(C)·D(c)', res(G, c6)) -- the paper's ordering: I·I·D beats P·D
+        assert.equals('b9 by I(B)·D(b)', res(G, b5))         -- D < I at the second step
+        assert.equals('b11 by D(b)', res(G, b13))
+        assert.equals('B7 by P·D(B)', res(G, B3)); assert.equals('C10 by P·D(C)', res(G, C8))
+        -- Fig. 8: def a1; module A2 { def a3; def b4 }; module C5 { import A6; def b7 = a8; def c9 = b10 }
+        G = A.scope_graph(); s1 = A.sg_scope(G, nil, 'global')
+        A.sg_decl(G, s1, 'a', { site = 1 })
+        local sA, sC = A.sg_scope(G, s1, 'A'), A.sg_scope(G, s1, 'C')
+        A.sg_decl(G, s1, 'A', { site = 2, assoc = sA }); A.sg_decl(G, sA, 'a', { site = 3 }); A.sg_decl(G, sA, 'b', { site = 4 })
+        A.sg_decl(G, s1, 'C', { site = 5, assoc = sC })
+        local A6 = A.sg_ref(G, sC, 'A', { site = 6 }); A.sg_import(G, sC, A6)
+        A.sg_decl(G, sC, 'b', { site = 7 }); local a8, b10 = A.sg_ref(G, sC, 'a', { site = 8 }), A.sg_ref(G, sC, 'b', { site = 10 })
+        assert.equals('b7 by D(b)', res(G, b10))      -- D < I
+        assert.equals('a3 by I(A)·D(a)', res(G, a8))  -- I < P
+        -- Fig. 9: def a1; module B2 {}; module C3 { def a4; module D5 { import B6; def e7 = a8 } }
+        G = A.scope_graph(); s1 = A.sg_scope(G, nil, 'global')
+        A.sg_decl(G, s1, 'a', { site = 1 })
+        local sB, sC3 = A.sg_scope(G, s1, 'B'), A.sg_scope(G, s1, 'C')
+        A.sg_decl(G, s1, 'B', { site = 2, assoc = sB }); A.sg_decl(G, s1, 'C', { site = 3, assoc = sC3 })
+        A.sg_decl(G, sC3, 'a', { site = 4 })
+        local sD = A.sg_scope(G, sC3, 'D'); A.sg_decl(G, sC3, 'D', { site = 5, assoc = sD })
+        local B6 = A.sg_ref(G, sD, 'B', { site = 6 }); A.sg_import(G, sD, B6)
+        A.sg_decl(G, sD, 'e', { site = 7 }); local a8b = A.sg_ref(G, sD, 'a', { site = 8 })
+        assert.equals('a4 by P·D(a)', res(G, a8b)) -- I(B)·P·D(a1) is not well-formed
+    end)
+
+    it('Fig. 11, 14, 15: an import never resolves itself; the three let flavours; a qualified name through an anonymous scope', function()
+        -- Fig. 11: module A1 { module A2 { def a3 } }; import A4; def b5 = a6
+        local G = A.scope_graph()
+        local s1 = A.sg_scope(G, nil, 'root'); local sA1 = A.sg_scope(G, s1, 'A1'); local sA2 = A.sg_scope(G, sA1, 'A2')
+        A.sg_decl(G, s1, 'A', { site = 1, assoc = sA1 }); A.sg_decl(G, sA1, 'A', { site = 2, assoc = sA2 }); A.sg_decl(G, sA2, 'a', { site = 3 })
+        local A4 = A.sg_ref(G, s1, 'A', { site = 4 }); A.sg_import(G, s1, A4)
+        A.sg_decl(G, s1, 'b', { site = 5 }); local a6 = A.sg_ref(G, s1, 'a', { site = 6 })
+        assert.equals('A1 by D(A)', res(G, A4)); assert.equals('ABSENT', res(G, a6))
+        -- Fig. 14: def a1 = 0; def b2 = 1; def c3 = 2; let/letrec/letpar a4 = c5, b6 = a7, c8 = b9 in a10 + b11 + c12
+        local function lets(flavour)
+            local G_ = A.scope_graph(); local g = A.sg_scope(G_, nil, 'global')
+            A.sg_decl(G_, g, 'a', { site = 1 }); A.sg_decl(G_, g, 'b', { site = 2 }); A.sg_decl(G_, g, 'c', { site = 3 })
+            local refs = {}
+            if flavour == 'letrec' then
+                local s = A.sg_scope(G_, g, 'letrec')
+                A.sg_decl(G_, s, 'a', { site = 4 }); A.sg_decl(G_, s, 'b', { site = 6 }); A.sg_decl(G_, s, 'c', { site = 8 })
+                refs.c5 = A.sg_ref(G_, s, 'c', { site = 5 }); refs.a7 = A.sg_ref(G_, s, 'a', { site = 7 }); refs.b9 = A.sg_ref(G_, s, 'b', { site = 9 })
+            elseif flavour == 'letpar' then
+                local s = A.sg_scope(G_, g, 'letpar')
+                A.sg_decl(G_, s, 'a', { site = 4 }); A.sg_decl(G_, s, 'b', { site = 6 }); A.sg_decl(G_, s, 'c', { site = 8 })
+                refs.c5 = A.sg_ref(G_, g, 'c', { site = 5 }); refs.a7 = A.sg_ref(G_, g, 'a', { site = 7 }); refs.b9 = A.sg_ref(G_, g, 'b', { site = 9 })
+            else -- sequential: one scope per binding, the initializer in the scope before it
+                local s2 = A.sg_scope(G_, g, 'let1'); refs.c5 = A.sg_ref(G_, g, 'c', { site = 5 }); A.sg_decl(G_, s2, 'a', { site = 4 })
+                local s3 = A.sg_scope(G_, s2, 'let2'); refs.a7 = A.sg_ref(G_, s2, 'a', { site = 7 }); A.sg_decl(G_, s3, 'b', { site = 6 })
+                local s4 = A.sg_scope(G_, s3, 'let3'); refs.b9 = A.sg_ref(G_, s3, 'b', { site = 9 }); A.sg_decl(G_, s4, 'c', { site = 8 })
+            end
+            return { c5 = res(G_, refs.c5), a7 = res(G_, refs.a7), b9 = res(G_, refs.b9) }
+        end
+        assert.same({ c5 = 'c3 by D(c)', a7 = 'a4 by D(a)', b9 = 'b6 by D(b)' }, lets('let'))
+        assert.same({ c5 = 'c8 by D(c)', a7 = 'a4 by D(a)', b9 = 'b6 by D(b)' }, lets('letrec'))
+        assert.same({ c5 = 'c3 by D(c)', a7 = 'a1 by D(a)', b9 = 'b2 by D(b)' }, lets('letpar'))
+        -- Fig. 15: module B1 { module C2 { def c3 = D4.f5(3) }; module D6 { def f7 } }: an anonymous scope with no parent imports D4
+        G = A.scope_graph(); s1 = A.sg_scope(G, nil, 'root')
+        local sB = A.sg_scope(G, s1, 'B'); A.sg_decl(G, s1, 'B', { site = 1, assoc = sB })
+        local sC = A.sg_scope(G, sB, 'C'); A.sg_decl(G, sB, 'C', { site = 2, assoc = sC })
+        local sD = A.sg_scope(G, sB, 'D'); A.sg_decl(G, sB, 'D', { site = 6, assoc = sD }); A.sg_decl(G, sD, 'f', { site = 7 })
+        A.sg_decl(G, sC, 'c', { site = 3 })
+        local D4 = A.sg_ref(G, sC, 'D', { site = 4 })
+        local anon = A.sg_scope(G, nil, 'qualified'); A.sg_import(G, anon, D4)
+        local f5 = A.sg_ref(G, anon, 'f', { site = 5 })
+        assert.equals('f7 by I(D)·D(f)', res(G, f5))
+        assert.equals('D6 by P·D(D)', res(G, D4))
+        -- with a parent, the anonymous scope would leak the lexical context: a name of C's own is not reachable through it
+        local c_in_anon = A.sg_ref(G, anon, 'c', { site = 99 })
+        assert.equals('ABSENT', res(G, c_in_anon))
+        -- two imports of one scope: a declaration one import away beats one two imports away (D < I at the second step)
+        G = A.scope_graph(); s1 = A.sg_scope(G, nil, 'root')
+        local sA, sB2, sD2, sC2 = A.sg_scope(G, s1, 'A'), A.sg_scope(G, s1, 'B'), A.sg_scope(G, s1, 'D'), A.sg_scope(G, s1, 'C')
+        A.sg_decl(G, s1, 'A', { site = 1, assoc = sA }); A.sg_decl(G, s1, 'B', { site = 2, assoc = sB2 }); A.sg_decl(G, s1, 'D', { site = 3, assoc = sD2 }); A.sg_decl(G, s1, 'C', { site = 4, assoc = sC2 })
+        A.sg_decl(G, sA, 'x', { site = 5 }); A.sg_decl(G, sD2, 'x', { site = 6 })
+        local Dref = A.sg_ref(G, sB2, 'D', { site = 7 }); A.sg_import(G, sB2, Dref)
+        local Aref, Bref = A.sg_ref(G, sC2, 'A', { site = 8 }), A.sg_ref(G, sC2, 'B', { site = 9 }); A.sg_import(G, sC2, Aref); A.sg_import(G, sC2, Bref)
+        local x10 = A.sg_ref(G, sC2, 'x', { site = 10 })
+        assert.equals('x5 by I(A)·D(x)', res(G, x10))
+    end)
+
+    it('the Lua mapping: local is the sequential let, local function is self-visible, fields through records, aliases followed, a module across chunks, the call edge as data', function()
+        -- local x = x reads the outer x; local f = function() f() end reads the OUTER f; local function g() g() end reads itself
+        local t = chunk(decl({ 'x' }, (lit '1')), decl({ 'x' }, id 'x'), decl({ 'f' }, fdef({}, fcall 'f')), localfn('g', {}, fcall 'g'))
+        local G = A.lua_scope_graph(t, nil, { file = 'a' }); A.sg_link(G)
+        local seen = {}
+        for _, r in pairs(G.refs) do
+            if r.kind ~= 'probe' then
+                local Rr = A.resolve(G, r.id)
+                local d = Rr.entries[1] and G.decls[Rr.entries[1].decl]
+                seen[#seen + 1] = r.name .. '->' .. (d and (d.name .. ':' .. table.concat(d.site or {}, '/')) or 'absent')
+            end
+        end
+        table.sort(seen)
+        assert.same({ 'f->absent', 'g->g:4/5', 'x->x:1/3/1/1' }, seen) -- x on the right reads the first x (its identifier's true path); the inner f finds no f; g finds itself
+        -- shadowing in a nested function, a parameter, a for variable, a bare assignment
+        local t2 = chunk(decl({ 'store' }, (lit '1')), decl({ 'h' }, fdef({ 'p' }, decl({ 'store' }, fcall('live')), fcall('use', id 'store', id 'p'), node('assignment_statement', node('variable_list', id 'count'), lit ' = ', node('expression_list', (lit '1'))))),
+            node('for_statement', node('for_generic_clause', node('variable_list', id 'k', lit ', ', id 'v'), lit ' ', lit 'in', lit ' ', node('expression_list', fcall('pairs', id 'store'))), node('block', fcall('use', id 'k', id 'v')), lit 'end'))
+        G = A.lua_scope_graph(t2, nil, { file = 'b' }); A.sg_link(G)
+        local by = {}
+        for _, r in pairs(G.refs) do if r.kind ~= 'probe' then local T = A.resolve_through(G, r.id); local d = T.ends[1] and G.decls[T.ends[1].decl]; by[#by + 1] = r.name .. (r.kind == 'assign' and '=' or '') .. '->' .. (d and (d.kind .. ':' .. table.concat(d.site or {}, '/')) or A.resolution_class(G, T)) end end
+        table.sort(by)
+        assert.same({ 'count=->unresolved', 'k->loop:3/1/1/1', 'live->unresolved', 'p->parameter:2/3/5/1/3/2', 'pairs->library:', 'store->lexical:1/3/1/1', 'store->lexical:2/3/5/1/5/1/3/1/1', 'use->unresolved', 'use->unresolved', 'v->loop:3/1/1/3' }, by)
+        -- a loop variable is not visible after the loop; a field of an empty record is opaque, never the lexical name
+        local t3 = chunk(decl({ 'a' }, (lit '1')), decl({ 't' }, node('table_constructor', lit '{', lit '}')),
+            node('for_statement', node('for_generic_clause', node('variable_list', id 'k'), lit ' ', lit 'in', lit ' ', node('expression_list', fcall('pairs', id 't'))), node('block', fcall('use', id 'k')), lit 'end'),
+            fcall('use', id 'k', dot('t', 'a')))
+        G = A.lua_scope_graph(t3, nil, { file = 'c' }); A.sg_link(G)
+        local after_loop, field_a = {}, nil
+        for _, r in pairs(G.refs) do
+            if r.name == 'k' and r.site[1] == 4 then after_loop[#after_loop + 1] = A.resolution_class(G, A.resolve_through(G, r.id)) end
+            if r.name == 'a' and r.kind == 'field' then field_a = A.resolution_class(G, A.resolve_through(G, r.id)) end
+        end
+        assert.same({ 'unresolved' }, after_loop)
+        assert.equals('opaque', field_a)
+    end)
+
+    it('records, aliases, modules and the call edge: H.live resolves through the record to the constructor and on to the local function', function()
+        -- commands.lua: local function live() end; local H = { live = live }; return M (M holds register calls) -- and the group: function M.register(H) local live = H.live; live() end
+        local commands = chunk(localfn('live', {}, ret((lit '1'))), decl({ 'M' }, node('table_constructor', lit '{', lit '}')), decl({ 'H' }, node('table_constructor', lit '{', node('field', id 'live', lit ' = ', id 'live'), lit '}')),
+            node('function_declaration', lit 'function', lit ' ', dot('M', 'register'), node('parameters', lit '(', lit ')'), lit ' ', node('block', fcall(dot(fcall('require', str 'group'), 'register'), id 'H')), lit ' ', lit 'end'), ret(id 'M'))
+        local group = chunk(decl({ 'M' }, node('table_constructor', lit '{', lit '}')),
+            node('function_declaration', lit 'function', lit ' ', dot('M', 'register'), node('parameters', lit '(', id 'H', lit ')'), lit ' ', node('block', decl({ 'live' }, dot('H', 'live')), fcall('live')), lit ' ', lit 'end'), ret(id 'M'))
+        local G = A.lua_scope_graph(commands, nil, { file = 'commands', module = 'commands' })
+        A.lua_scope_graph(group, G, { file = 'group', module = 'group' })
+        A.sg_link(G)
+        assert.is_truthy(G.modules.group and G.modules.commands)
+        -- without the call edge: live inside register is an alias of a field of a parameter without a record: opaque
+        local cls, at = where(G, 'group', 'live')
+        assert.equals('opaque', cls)
+        -- the module edge: require('group').register resolves to the field declared by `function M.register`
+        local mcls
+        for _, r in pairs(G.refs) do if r.name == 'register' and r.file == 'commands' then local T = A.resolve_through(G, r.id); mcls = A.resolution_class(G, T); assert.equals('register@group:field', G.decls[T.ends[1].decl].name .. '@' .. G.decls[T.ends[1].decl].file .. ':' .. G.decls[T.ends[1].decl].kind) end end
+        assert.equals('module', mcls)
+        -- the call edge, supplied as data: H's parameter in group gets the record commands.lua built
+        local Hd
+        for _, d in pairs(G.decls) do if d.name == 'H' and d.assoc and d.file == 'commands' then Hd = d end end
+        local md = G.decls[G.modules.group]
+        for _, d in ipairs(G.scopes[md.assoc].decls.register) do for _, p in ipairs(G.scopes[d.fn_scope].decls.H) do A.sg_bind_param(G, p.id, Hd.assoc) end end
+        G.memo = nil
+        local cls2, at2, T = where(G, 'group', 'live')
+        assert.equals('call', cls2)
+        assert.equals('live@commands:function', at2)
+        assert.equals(3, #T.hops) -- the local alias, the record field, the constructor's value reference
+        -- the paper's end is the first hop: the local alias in the group
+        local d1 = G.decls[T.hops[1].entries[1].decl]
+        assert.equals('live', d1.name); assert.equals('group', d1.file)
+        -- resolve_name: what would `live` mean at the group's chunk scope? nothing lexical there
+        local probe = A.resolve_name(G, G.chunks[2].scope, 'live')
+        assert.is_true(probe.absent)
+        -- an unloaded module is a module reference with no declaration
+        local G2 = A.lua_scope_graph(chunk(decl({ 'u' }, fcall('require', str 'nowhere'))), nil, { file = 'c' }); A.sg_link(G2)
+        local cnt = A.resolve_census(G2)
+        assert.equals(1, cnt.by_class.module); assert.is_nil(cnt.by_class.unresolved); assert.equals(1, cnt.by_class.library) -- the module name stays a module reference (unloaded), `require` itself is library
+        assert.is_true(A.resolve_through(G2, (function() for id, r in pairs(G2.refs) do if r.kind == 'module' then return id end end end)()).absent)
+    end)
+
+    it('the fixture: the builder places a reference for every read of lua_names and a declaration for every bind; clones.lua resolves with no ambiguity', function()
+        local F = fixture(); if not F then return end
+        for _, m in ipairs(F.members) do
+            local N = A.lua_names(m.term)
+            local G = A.lua_scope_graph(m.term, nil, { file = 'm' }); A.sg_link(G)
+            local reads, binds = {}, {}
+            for _, r in pairs(G.refs) do if r.kind ~= 'field' and r.kind ~= 'probe' and r.kind ~= 'module' then reads[r.name] = true end end
+            for _, d in pairs(G.decls) do if d.kind ~= 'library' and d.kind ~= 'field' then binds[d.name] = true end end
+            assert.same(sorted(N.reads), sorted(reads))
+            assert.same(sorted(N.binds), sorted(binds))
+        end
+        local G = A.lua_scope_graph(F.file.term, nil, { file = 'clones', module = 'cartograph.commands.clones' }); A.sg_link(G)
+        local C = A.resolve_census(G)
+        assert.is_nil(C.by_class.ambiguous)
+        local un = {}
+        for id, e in pairs(C.refs) do if e.class == 'unresolved' and G.refs[id].kind ~= 'field' then un[G.refs[id].name] = true end end
+        -- the file alone: its H aliases and its required modules are outside it, nothing else (a field of an unresolved object is unresolved with it)
+        for _, n in ipairs(sorted(un)) do assert.is_true(n:match('^cartograph%.') ~= nil or ({ cmd = 1, live = 1, whole_graph = 1, mat_df = 1, scratch = 1, txn_module = 1, reveal_at = 1 })[n] ~= nil or n == 'H', n) end
+        assert.is_true(C.by_class.lexical > 40 and C.by_class.opaque > 0)
+    end)
+end)
+
+describe('the primitives audit (PRIMITIVES.md; REDERIVE.md\'s rule applied to the additions): the preference primitive, paths as terms, resolve from the calculus', function()
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local function set(...) local S = {}; for _, k in ipairs({ ... }) do S[k] = true end; return S end
+
+    it('best: the refused are never compared, a singleton returns itself, ties come back together, best is idempotent', function()
+        local byv = A.by(function(c) return c.v end)
+        local cands = { { id = 'a', v = 3 }, { id = 'b', v = 1, ok = false, why = { 'no' } }, { id = 'c', v = 2 }, { id = 'd', v = 2 } }
+        local r = A.best(cands, byv)
+        local ids = {}
+        for _, c in ipairs(r) do ids[#ids + 1] = c.id end
+        table.sort(ids)
+        assert.same({ 'c', 'd' }, ids)                      -- b is refused although smallest; c and d tie
+        assert.same(r, A.best(r, byv))                       -- idempotent
+        assert.same({ cands[1] }, A.best({ cands[1] }, byv)) -- a singleton
+        assert.same({}, A.best({ cands[2] }, byv))           -- a refused singleton: nothing admitted
+        assert.equals(1, #A.best(cands, byv, { keep_refused = true })) -- kept, b is the minimum
+        -- lex_order: Fig. 2's order over label sequences, shorter-prefix ties not ordered
+        local lt = A.lex_order({ D = 1, I = 2, P = 3 })
+        assert.is_true(lt({ 'D' }, { 'P', 'D' })); assert.is_true(lt({ 'I', 'I', 'D' }, { 'P', 'D' })); assert.is_false(lt({ 'P', 'D' }, { 'P', 'D' }))
+        assert.is_true(lt({ { k = 'I' }, { k = 'D' } }, { { k = 'I' }, { k = 'I' }, { k = 'D' } }))
+        -- then_: lexicographic composition; by with desc
+        local o = A.then_(A.by(function(c) return c.acc end, true), A.by(function(c) return c.d end))
+        assert.is_true(o({ acc = 2, d = 0.9 }, { acc = 1, d = 0.1 })); assert.is_true(o({ acc = 1, d = 0.1 }, { acc = 1, d = 0.2 })); assert.is_false(o({ acc = 1, d = 0.2 }, { acc = 1, d = 0.1 }))
+    end)
+
+    it('paths as terms: the language P*·I*·D is a template with two hedges and match decides well-formedness', function()
+        local P, I, D_ = { k = 'P' }, { k = 'I', ref = 1 }, { k = 'D', decl = 2 }
+        assert.is_true(A.well_formed_path({ D_ })); assert.is_true(A.well_formed_path({ P, P, D_ })); assert.is_true(A.well_formed_path({ I, I, D_ })); assert.is_true(A.well_formed_path({ P, I, D_ }))
+        assert.is_false(A.well_formed_path({ I, P, D_ })) -- Fig. 9's forbidden shape
+        assert.is_false(A.well_formed_path({ P, I }))     -- no declaration at the end
+        assert.equals('(path (P) (I "1") (D "2"))', A.show(A.path_term({ P, I, D_ })))
+        assert.equals(2, #A.hole_names(A.WF_PATH) - 1)
+    end)
+
+    it('the differential: resolve from the calculus (derive.lua) agrees with the algorithm of Fig. 18 on every reference of the fixture', function()
+        local F = fixture(); if not F then return end
+        local Dv = require 'derive'
+        local hand = A.resolve
+        Dv.apply_to(A, 'resolve')
+        local derived = A.resolve
+        A.resolve = hand
+        if not (os.getenv('DERIVE') or ''):match('all') and not (os.getenv('DERIVE') or ''):match('resolve') then assert.is_true(derived ~= hand) end -- under DERIVE the hand-built one is already the derived one
+        local function answer(f, G, r)
+            local R = f(G, r)
+            local t = {}
+            for _, e in ipairs(R.entries) do t[#t + 1] = tostring(e.decl) .. ':' .. A.show_path(G, e.path) end
+            table.sort(t)
+            return (R.absent and 'absent' or R.ambiguous and 'ambiguous ' or '') .. table.concat(t, '|')
+        end
+        local n, same = 0, 0
+        for _, m in ipairs(F.members) do
+            local G = A.lua_scope_graph(m.term, nil, { file = 'm' }); A.sg_link(G)
+            for id in pairs(G.refs) do n = n + 1; if answer(hand, G, id) == answer(derived, G, id) then same = same + 1 end end
+        end
+        local G = A.lua_scope_graph(F.file.term, nil, { file = 'clones', module = 'cartograph.commands.clones' }); A.sg_link(G)
+        for id in pairs(G.refs) do n = n + 1; if answer(hand, G, id) == answer(derived, G, id) then same = same + 1 end end
+        assert.is_true(n > 300, 'references compared: ' .. n)
+        assert.equals(n, same)
+        -- the seen-imports set in the derived form: Fig. 11's self import does not resolve itself
+        local G2 = A.scope_graph()
+        local s1 = A.sg_scope(G2, nil, 'root'); local sA1 = A.sg_scope(G2, s1, 'A1'); local sA2 = A.sg_scope(G2, sA1, 'A2')
+        A.sg_decl(G2, s1, 'A', { site = 1, assoc = sA1 }); A.sg_decl(G2, sA1, 'A', { site = 2, assoc = sA2 }); A.sg_decl(G2, sA2, 'a', { site = 3 })
+        local A4 = A.sg_ref(G2, s1, 'A', { site = 4 }); A.sg_import(G2, s1, A4); local a6 = A.sg_ref(G2, s1, 'a', { site = 6 })
+        assert.equals(answer(hand, G2, A4), answer(derived, G2, A4)); assert.is_true(derived(G2, a6).absent)
+        -- the review's trap: a declaration added after a resolve is seen by the next resolve (the memo is cleared)
+        local G3 = A.scope_graph(); local g = A.sg_scope(G3, nil, 'g'); local x = A.sg_ref(G3, g, 'x', { site = 1 })
+        assert.is_true(hand(G3, x).absent)
+        A.sg_decl(G3, g, 'x', { site = 2 })
+        assert.is_false(hand(G3, x).absent); assert.equals(1, #hand(G3, x).entries)
+        local y = A.sg_ref(G3, g, 'x', { site = 3 })
+        assert.equals(1, #hand(G3, y).entries)
+        -- and a parameter bound to a record after a resolve: the field goes from opaque to resolved
+        local G4 = A.scope_graph(); local root = A.sg_scope(G4, nil, 'root'); local rec = A.sg_scope(G4, nil, 'record')
+        A.sg_decl(G4, rec, 'live', { site = 1, kind = 'field' })
+        local fn = A.sg_scope(G4, root, 'function'); local H = A.sg_decl(G4, fn, 'H', { site = 2, kind = 'parameter' })
+        local Href = A.sg_ref(G4, fn, 'H', { site = 3 }); local anon = A.sg_scope(G4, nil, 'field'); A.sg_import(G4, anon, Href, 'field')
+        local lref = A.sg_ref(G4, anon, 'live', { site = 4, kind = 'field' })
+        assert.equals('opaque', A.resolution_class(G4, A.resolve_through(G4, lref)))
+        A.sg_bind_param(G4, H, rec)
+        assert.equals('call', A.resolution_class(G4, A.resolve_through(G4, lref)))
+    end)
+
+    it('destinations on the preference primitive: suggested is best under the paper\'s order, cheapest under the price, the block\'s answers unchanged', function()
+        local m = { name = 'h', entities = set('live', 'scratch'), free = set('live', 'scratch'), calls = { { home = 'A' } } }
+        local homes = { { id = 'A', entities = set('live', 'scratch', 'x'), bound = set('live', 'scratch') }, { id = 'C', entities = set('live', 'scratch'), bound = set('live', 'scratch'), plumbing = 7 } }
+        local r = A.destinations(m, homes, { helper_cost = 100 })
+        assert.equals('C', r.suggested[1].id); assert.equals(1, #r.suggested) -- 1 - 2/2 = 0 beats 1 - 2/3; C reaches A after plumbing
+        assert.equals('A', r.cheapest[1].id); assert.equals(1, #r.cheapest)     -- 100 against 107
+        local Dv = require 'derive'
+        local hand = A.destinations
+        Dv.apply_to(A, 'destinations')
+        local r2 = A.destinations(m, homes, { helper_cost = 100 })
+        A.destinations = hand
+        assert.same({ r.suggested[1].id, r.cheapest[1].id, #r.candidates, r.by_price[2].cost }, { r2.suggested[1].id, r2.cheapest[1].id, #r2.candidates, r2.by_price[2].cost })
+    end)
+end)
+
+describe('the Lua mapping as templates (PRIMITIVES.md, the second check): locals.scm\'s captures as the algebra\'s data, a generic builder, judged against the hand-written mapping', function()
+    local okf, FX = pcall(dofile, 'experiments/lua-terms-2026-09-18.lua')
+    local function fixture() if not okf then return pending('experiments/lua-terms-2026-09-18.lua not loadable: ' .. tostring(FX)) end return FX end
+    local id = function(s) return node('identifier', lit(s)) end
+    local function decl(names, ...) local vl = {}; for i, n in ipairs(names) do if i > 1 then vl[#vl + 1] = lit ', ' end; vl[#vl + 1] = id(n) end; local el = {}; for i, e in ipairs({ ... }) do if i > 1 then el[#el + 1] = lit ', ' end; el[#el + 1] = e end; return node('variable_declaration', lit 'local', lit ' ', node('assignment_statement', node('variable_list', unpack(vl)), lit ' ', lit '=', lit ' ', node('expression_list', unpack(el)))) end
+    local function fcall(f, ...) local ks = { lit '(' }; for i, a in ipairs({ ... }) do if i > 1 then ks[#ks + 1] = lit ', ' end; ks[#ks + 1] = a end; ks[#ks + 1] = lit ')'; return node('function_call', type(f) == 'string' and id(f) or f, node('arguments', unpack(ks))) end
+    local function fdef(params, ...) local pk = { lit '(' }; for i, p in ipairs(params) do if i > 1 then pk[#pk + 1] = lit ', ' end; pk[#pk + 1] = id(p) end; pk[#pk + 1] = lit ')'; return node('function_definition', lit 'function', lit ' ', node('parameters', unpack(pk)), lit ' ', node('block', ...), lit ' ', lit 'end') end
+    local function localfn(name, params, ...) local pk = { lit '(' }; for i, p in ipairs(params) do if i > 1 then pk[#pk + 1] = lit ', ' end; pk[#pk + 1] = id(p) end; pk[#pk + 1] = lit ')'; return node('function_declaration', lit 'local', lit ' ', lit 'function', lit ' ', id(name), node('parameters', unpack(pk)), lit ' ', node('block', ...), lit ' ', lit 'end') end
+    local function chunk(...) return node('chunk', ...) end
+
+    it('the fixture: identical declarations, identical references, the same binder for every shared reference; the classes differ only by the alias chain', function()
+        local F = fixture(); if not F then return end
+        local total, same_b, same_c, diffs = 0, 0, 0, {}
+        for _, m in ipairs(F.members) do
+            local c = A.compare_mappings(m.term)
+            assert.same({}, c.decl_only_code); assert.same({}, c.decl_only_templates); assert.same({}, c.ref_only_code); assert.same({}, c.ref_only_templates)
+            total, same_b, same_c = total + c.shared, same_b + c.same_binder, same_c + c.same_class
+        end
+        local c = A.compare_mappings(F.file.term)
+        assert.same({}, c.decl_only_code); assert.same({}, c.decl_only_templates); assert.same({}, c.ref_only_code); assert.same({}, c.ref_only_templates)
+        assert.equals(29, c.decls.code)
+        total, same_b, same_c = total + c.shared, same_b + c.same_binder, same_c + c.same_class
+        assert.equals(total, same_b)
+        assert.is_true(total > 150)
+        assert.is_true(same_c < total) -- the alias chain (module, opaque) is not in the lexical mapping
+        for _, d in ipairs(c.class_diffs) do local a, b = d:match(': (%w+) / (%w+)'); assert.equals('lexical', b); assert.is_true(a == 'module' or a == 'opaque', d) end
+    end)
+
+    it('the regions: local x = x reads the outer x, local function sees itself, a loop variable stays in its loop, the in-list is outside it', function()
+        local t = chunk(decl({ 'x' }, (lit '1')), decl({ 'x' }, id 'x'), localfn('g', { 'p' }, fcall('g', id 'p')),
+            node('for_statement', lit 'for', lit ' ', node('for_generic_clause', node('variable_list', id 'k'), lit ' ', lit 'in', lit ' ', node('expression_list', fcall('pairs', id 'k'))), lit ' ', lit 'do', lit ' ', node('block', fcall('use', id 'k')), lit ' ', lit 'end'),
+            fcall('use', id 'k'))
+        local G = A.scope_graph_from_templates(t, A.SCOPE_TEMPLATES.lua, nil, { file = 't' })
+        local seen = {}
+        for _, r in pairs(G.refs) do
+            local Rr = A.resolve(G, r.id)
+            local d = Rr.entries[1] and G.decls[Rr.entries[1].decl]
+            seen[#seen + 1] = r.name .. '@' .. table.concat(r.site, '/') .. '->' .. (d and (d.kind .. ':' .. table.concat(d.site or {}, '/')) or 'absent')
+        end
+        table.sort(seen)
+        assert.same({ 'g@3/8/1/1->function:3/5',        -- g inside its own body: the local function is self-visible
+            'k@4/3/5/1/2/2->absent',                     -- k in the in-list: outside the loop scope
+            'k@4/7/1/2/2->loop:4/3/1/1',                 -- k in the body: the loop variable
+            'k@5/2/2->absent',                           -- k after the loop: gone
+            'p@3/8/1/2/2->parameter:3/6/2', 'pairs@4/3/5/1/1->library:', 'use@4/7/1/1->absent', 'use@5/1->absent',
+            'x@2/3/5/1->lexical:1/3/1/1' }, seen)        -- local x = x: the right-hand side reads the first x
+        -- the same term through the hand-written mapping: the same binders
+        local c = A.compare_mappings(t)
+        assert.same({}, c.ref_only_code); assert.same({}, c.ref_only_templates); assert.equals(c.shared, c.same_binder)
+        -- repeat .. until: the condition sees the block's tail scope, in both mappings
+        local rp = chunk(node('repeat_statement', lit 'repeat', lit ' ', node('block', decl({ 'w' }, fcall 'step')), lit ' ', lit 'until', lit ' ', fcall('done', id 'w')))
+        local G2 = A.scope_graph_from_templates(rp, A.SCOPE_TEMPLATES.lua, nil, { file = 'r' })
+        local wref
+        for _, r in pairs(G2.refs) do if r.name == 'w' then wref = r end end
+        local Rw = A.resolve(G2, wref.id)
+        assert.is_false(Rw.absent); assert.equals('lexical', G2.decls[Rw.entries[1].decl].kind)
+        local c2 = A.compare_mappings(rp)
+        assert.equals(c2.shared, c2.same_binder); assert.is_true(c2.shared >= 3)
+        -- an if branch's locals do not leak into the elseif condition
+        local ife = chunk(node('if_statement', lit 'if', lit ' ', id 'a', lit ' ', lit 'then', lit ' ', node('block', decl({ 'y' }, (lit '1'))), lit ' ', node('elseif_statement', lit 'elseif', lit ' ', id 'y', lit ' ', lit 'then', lit ' ', node('block', fcall 'z')), lit ' ', lit 'end'))
+        local G3 = A.scope_graph_from_templates(ife, A.SCOPE_TEMPLATES.lua, nil, { file = 'i' })
+        for _, r in pairs(G3.refs) do if r.name == 'y' then assert.is_true(A.resolve(G3, r.id).absent) end end
+        -- the templates are the algebra's own: the local rule is what generalize makes of two declarations
+        local g = A.generalize({ decl({ 'a' }, (lit '1')), decl({ 'b', 'c' }, id 'x', fcall 'f') }, { need = 100 })
+        assert.is_truthy(A.match(A.SCOPE_TEMPLATES.lua.declarations[1].template, decl({ 'a' }, (lit '1'))).ok)
+        assert.is_truthy(A.match(A.SCOPE_TEMPLATES.lua.declarations[1].template, A.instantiate(g.template, g.values[2]).term).ok)
     end)
 end)

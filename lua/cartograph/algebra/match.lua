@@ -4,8 +4,8 @@
 -- ★ 4 shared file-local(s), each (a) a core module-level local, (b) used
 -- here and (c) not defined here — the three conditions, not a guess.
 return function (M, SHARED)
-local child, is_hole, key, unpack =
-    SHARED.child, SHARED.is_hole, SHARED.key, SHARED.unpack
+local child, is_hole, key, same_key, unpack =
+    SHARED.child, SHARED.is_hole, SHARED.key, SHARED.same_key, SHARED.unpack
 
 -- ── match ─────────────────────────────────────────────────────────────────────
 --- Does I instantiate T? Returns { ok, values, sites } or { ok=false, refusal={at, why} }.
@@ -30,18 +30,30 @@ function M.match(T, I, env)
         V[h] = v
         if not site.id then nid = nid + 1; site.id = nid end
         site.within = st.enc
-        local list = { sites = {}, domain = H[h].domain, rep = H[h].rep, ctx = H[h].ctx or nil, origin = H[h].origin, was = H[h].was }
+        if st.under and #st.under > 0 and not site.under then site.under = M.copy(st.under) end
+        local list = { sites = {}, domain = H[h].domain, rep = H[h].rep, ctx = H[h].ctx or nil, origin = H[h].origin, was = H[h].was, presence = H[h].presence or nil }
         for _, x in ipairs(S[h] and S[h].sites or {}) do list.sites[#list.sites + 1] = x end
         list.sites[#list.sites + 1] = site
         S[h] = list
-        return { V = V, S = S, enc = st.enc }
+        return { V = V, S = S, enc = st.enc, under = st.under }
     end
     local function bind(h, v, path, st, site)
         local ok, why
         if is_hole(v) and v.rep and not H[h].rep then
             return fail(path, 'hole ' .. h .. ': a hedge variable cannot fill a term hole')
         end
-        if is_hole(v) and env.hole_domains then
+        local slice_vars = nil -- a hedge hole facing a slice that holds the query's own hedge variables
+        if H[h].rep and type(v) == 'table' and v.k == 'seq' then
+            for _, e in ipairs(v.kids) do if is_hole(e) and e.rep then slice_vars = slice_vars or {}; slice_vars[#slice_vars + 1] = e end end
+        end
+        if slice_vars then
+            local plain, hedges = {}, {}
+            for _, e in ipairs(v.kids) do
+                if is_hole(e) and e.rep then hedges[#hedges + 1] = env.hole_domains and env.hole_domains[e.h] and env.hole_domains[e.h].domain or M.open()
+                else plain[#plain + 1] = e end
+            end
+            ok, why = M.admits_slice(H[h].domain, plain, hedges, env)
+        elseif is_hole(v) and env.hole_domains then
             -- subsumption: a hole facing a hole is admitted iff its domain entails ours
             local d1 = env.hole_domains[v.h] and env.hole_domains[v.h].domain or M.open()
             ok = M.entails(d1, H[h].domain, env)
@@ -124,11 +136,11 @@ function M.match(T, I, env)
                         for j2 = j1 - 1, #L do
                             nid = nid + 1
                             local id = nid -- allocated before the applied hedge is matched: its sites are `within` this one
-                            local inner = { V = st.V, S = st.S, enc = id }
+                            local inner = { V = st.V, S = st.S, enc = id, under = st.under }
                             local r = go_kids(t.kids or {}, list, 1, first + j1 - 1, lpath, inner, first + j2 - 1, function(st2)
                                 local v = with_cursor(slice, p, j1, j2)
                                 local site = { path = child(path, ii), n = n, cursor = { path = p, from = j1, n = j2 - j1 + 1 }, id = id }
-                                local st3 = bind(t.h, v, child(path, ii), { V = st2.V, S = st2.S, enc = st.enc }, site)
+                                local st3 = bind(t.h, v, child(path, ii), { V = st2.V, S = st2.S, enc = st.enc, under = st.under }, site)
                                 if not st3 then return nil end
                                 return go_kids(tk, ik, ti + 1, ii + n, path, st3, iend, k)
                             end)
@@ -185,6 +197,53 @@ function M.match(T, I, env)
         end
         if type(i) ~= 'table' or t.k ~= i.k then
             return fail(path, ('kind %s vs %s'):format(t.k, type(i) == 'table' and tostring(i.k) or 'nil'))
+        end
+        if t.align or i.align then
+            -- KEYED ALIGNMENT (KEYED.md): kids meet by key, never by position; an optional pair
+            -- binds its presence hole present or absent; keyed-ordered also requires the matched
+            -- keys in the template's order; a key the template does not name is a refusal
+            if t.align ~= i.align or not same_key(t.key, i.key) then
+                return fail(path, ('alignment: template %s, instance %s'):format(tostring(t.align or 'positional'), tostring(i.align or 'positional')))
+            end
+            local okt, tks = pcall(M.keys, t)
+            local oki, iks = pcall(M.keys, i)
+            if not okt then return fail(path, 'keyed: ' .. tostring(tks)) end
+            if not oki then return fail(path, 'keyed: ' .. tostring(iks)) end
+            local imap, tset = {}, {}
+            for _, e in ipairs(iks) do imap[e.key] = e end
+            for _, e in ipairs(tks) do tset[e.key] = true end
+            for _, e in ipairs(iks) do
+                if not tset[e.key] then return fail(child(path, e.key), 'key ' .. e.key .. ' has no counterpart in the template') end
+            end
+            local function stepk(j, st1, last_i)
+                if j > #tks then return k(st1) end
+                local e = tks[j]
+                local ie = imap[e.key]
+                local p = child(path, e.key)
+                if ie then
+                    if t.align == 'keyed-ordered' and last_i and ie.i < last_i then
+                        return fail(p, 'keys out of order: ' .. e.key .. ' precedes an earlier key in the instance')
+                    end
+                    local st2 = st1
+                    if e.kid.opt then
+                        st2 = bind(e.kid.opt, M.present(), p, st1, { path = p, presence = true })
+                        if not st2 then return nil end
+                        -- sites matched inside the pair are `under` its presence hole
+                        local u = {}
+                        for _, x in ipairs(st2.under or {}) do u[#u + 1] = x end
+                        u[#u + 1] = { h = e.kid.opt, path = p }
+                        st2 = { V = st2.V, S = st2.S, enc = st2.enc, under = u }
+                    end
+                    return go(e.kid, ie.kid, p, st2, function(st3)
+                        return stepk(j + 1, { V = st3.V, S = st3.S, enc = st3.enc, under = st1.under }, ie.i)
+                    end)
+                end
+                if not e.kid.opt then return fail(p, 'key ' .. e.key .. ' is missing') end
+                local st2 = bind(e.kid.opt, M.absent(), p, st1, { path = p, presence = true })
+                if not st2 then return nil end
+                return stepk(j + 1, st2, last_i)
+            end
+            return stepk(1, st, nil)
         end
         if t.k == 'lit' then
             if t.v == i.v then return k(st) end

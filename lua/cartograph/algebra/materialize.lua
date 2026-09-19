@@ -5,23 +5,16 @@
 -- for; the plan's capture hazards named two of them and the free-identifier
 -- scan (zero on every part already adapted) found the third.
 return function (M, SHARED)
-local child, is_hole, key = SHARED.child, SHARED.is_hole, SHARED.key
--- ⚠ `RUNG_RANK` IS INDEXED, NEVER CALLED — `RUNG_RANK[t]`, three times — so the
--- free-identifier scan (which reads CALL TARGETS) could not see it and the
--- capture hazards did not name it either. THE DONOR'S OWN TESTS FOUND IT, on
--- their first run, with "attempt to index global 'RUNG_RANK'". A third blind
--- spot in the same family: value, call, INDEX.
-local RUNG_RANK = SHARED.RUNG_RANK
+local absence, child, is_hole, key, prefix_of =
+    SHARED.absence, SHARED.child, SHARED.is_hole, SHARED.key, SHARED.prefix_of
 
 function M.is_absence(name) return M.ABSENCE[name] ~= nil end
-
-local function absence(name, at, why, extra)
-    assert(M.ABSENCE[name], 'undeclared absence: ' .. tostring(name)) -- CART-0831: the set is a table
-    local a = { absence = name, at = at, why = why, licenses = M.ABSENCE[name].licenses }
-    for k, v in pairs(extra or {}) do a[k] = v end
-    return a
-end
-
+--- the positive ladder's names in ladder.lua's display order, strongest first. Its rank
+--- order is disputed between ladder.lua and tier.lua (CART-0545); this table is used only
+--- to take the WEAKEST of several member tiers, and the toy resolver emits `linked` alone.
+M.RUNGS = { 'confirmed', 'proven', 'linked', 'typed', 'inferred', 'dynamic', 'refused', 'frontier' }
+local RUNG_RANK = {}
+for i, r in ipairs(M.RUNGS) do RUNG_RANK[r] = i end
 function M.worst_tier(tiers)
     local worst
     for _, t in ipairs(tiers) do
@@ -30,18 +23,9 @@ function M.worst_tier(tiers)
     end
     return worst
 end
-
 local KIND_OF = { mod = 'module', def = 'function', ['local'] = 'var', block = 'region' }
-
 local SITE_OF = { call = 'ref', use = 'use' }
-
 local DEF_FOR = { ref = 'function', use = 'var' }
-
-local function prefix_of(p, q) -- p ancestor-or-equal of q
-    if #p > #q then return false end
-    for i = 1, #p do if p[i] ~= q[i] then return false end end
-    return true
-end
 
 local function under_any(paths, q) for _, p in ipairs(paths) do if prefix_of(p, q) then return p end end end
 
@@ -113,7 +97,6 @@ local function resolve_ground(nodes, sites)
 end
 
 local function edge_key(e) return e.from .. '>' .. e.to .. ':' .. e.kind .. '@' .. e.at end
-
 local function subgraph_key(G, path)
     local ns, es = {}, {}
     for id, n in pairs(G.nodes) do if prefix_of(path, n.range) then ns[#ns + 1] = id .. ':' .. n.kind .. ':' .. tostring(n.name) end end
@@ -122,7 +105,6 @@ local function subgraph_key(G, path)
     table.sort(ns); table.sort(es)
     return table.concat(ns, ' ') .. ' | ' .. table.concat(es, ' ')
 end
-
 local function split_key(k) local p = {}; if k == 'root' then return p end; for s in k:gmatch('[^/]+') do p[#p + 1] = tonumber(s) end; return p end
 
 --- Materialize a term, or a template with its family, onto the closed schema.

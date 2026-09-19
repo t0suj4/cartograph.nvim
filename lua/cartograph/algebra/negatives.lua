@@ -17,6 +17,18 @@ local ABSENCE_RULES = {
     { pat = 'hedge variable cannot fill',          absence = 'absent' },
     { pat = 'budget exceeded',                     absence = 'frontier' }, -- the analysis did not finish
     { pat = 'context variables is not implemented', absence = 'unavailable' },
+    { pat = 'keyed nodes',                          absence = 'unavailable' },
+    { pat = 'is a context hole',                    absence = 'unavailable' }, -- classify: context holes stay unsupported (CLASSIFY.md)
+    { pat = '^stale',                               absence = 'frontier' },    -- a read the source has moved past licenses no write (REGISTRY.md)
+    { pat = 'a blob column cannot be written',      absence = 'refused' },
+    { pat = 'no data: ',                            absence = 'absent' },      -- §13.10 rule 4: no object row to write
+    { pat = 'holds a comment and cannot be inlined', absence = 'refused' },    -- render_call: the writer declines the field (RENDER.md)
+    { pat = 'crossed the boundary of hedge',       absence = 'absent' },      -- classify: the edit does not fit the family's shape (CLASSIFY.md)
+    { pat = 'two hedges meet at',                   absence = 'absent' },
+    { pat = '^key [^ ]+ is missing',                absence = 'absent' },
+    { pat = 'has no counterpart in the template',   absence = 'absent' },
+    { pat = '^alignment: ',                         absence = 'absent' },
+    { pat = '^keys out of order',                   absence = 'absent' },
     { pat = 'does not parse',                      absence = 'absent' },
     { pat = 'not a string',                        absence = 'absent' },
     { pat = 'does not entail',                     absence = 'refused' },
@@ -34,7 +46,6 @@ local ABSENCE_RULES = {
     { pat = 'does not reproduce the edit',         absence = 'refused' },
     { pat = 'domain refuses the new value',        absence = 'refused' },
 }
-
 --- Classify a negative answer: a match result, an instantiate result, a classify result or
 --- a migrate `dropped` record. Returns { absence, licenses, why, cands? }; errors on a
 --- negative it cannot place, which is the point: a bare refusal is unrepresentable.

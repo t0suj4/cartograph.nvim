@@ -10,7 +10,8 @@
 -- ⇒ UNION, THEN PRUNE: the hazards over-report, the scan under-reports, and the
 --   fence is what settles it.
 return function (M, SHARED)
-local family, family_of = SHARED.family, SHARED.family_of
+local family_of, is_hole =
+    SHARED.family_of, SHARED.is_hole
 
 function M.dl(t, cost) return (cost or M.size)(t) end
 
@@ -23,6 +24,145 @@ function M.family_dl(T, Vs, opts)
     return tdl + fam + vdl, { template = tdl, values = vdl, family = fam }
 end
 
+--- a term's cost in BYTES: the length of every leaf's text, a hole counting one (the unit the
+--- reader's terms make natural beside `size`, which counts nodes)
+function M.text_size(t)
+    if type(t) ~= 'table' then return 0 end
+    if t.k == 'lit' then return #tostring(t.v) end
+    if t.k == 'name' then return #tostring(t.n) end
+    if is_hole(t) then return 1 end
+    local n = 0
+    for _, c in ipairs(t.kids or {}) do n = n + M.text_size(c) end
+    return n
+end
+
+-- ── THE RECURSIVE FOLD (FOLD.md; Nevill-Manning and Witten 1997, the two constraints) ──────
+--- generalize, then every term hole's value column is a candidate family of its own, folded
+--- the same way. A nested family is kept when it has at least two members and its description
+--- (template once, inner values per member) is shorter than the column's values as they stand:
+--- SEQUITUR's rule utility, priced by MDL. The value maps do not change (a member's value at a
+--- nested hole is still the term; `nested_values` reads its inner bindings); what changes is
+--- the hole's domain, `@h.of` naming the nested template in the env, and the description
+--- length, which is hierarchical. Depth-bounded. Returns { template, values, env, families =
+--- { [h] = { template, values, members, families, dl, flat } }, dl, flat }.
+function M.fold(instances, opts)
+    opts = opts or {}
+    local depth = opts.depth == nil and 3 or opts.depth
+    local env = opts.env or { defs = {} }
+    env.defs = env.defs or {}
+    local cost, fam = opts.cost or M.size, opts.family_cost or 1
+    local prefix = opts.prefix or 'h'
+    local g = M.generalize(instances, { need = opts.need, env = env, prefix = prefix, grammars = opts.grammars, split_cap = opts.split_cap })
+    local T, Vs = g.template, g.values
+    local families = {}
+    local names = M.hole_names(T)
+    table.sort(names)
+    local function nest(col, members, h, label) -- fold a column; keep it when it pays
+        local sub = M.fold(col, { depth = depth - 1, need = opts.need, prefix = h .. (label and ('.' .. label) or '') .. '.', env = env, grammars = opts.grammars, split_cap = opts.split_cap, cost = cost, family_cost = fam })
+        local before = 0
+        for _, v in ipairs(col) do before = before + cost(v) end
+        -- rule utility, priced: the nested family (template once, inner values) PLUS one reference
+        -- per use must be shorter than the values as they stand
+        if sub.dl + #col < before then
+            local name = h .. (label and ('.' .. label) or '') .. '.of'
+            env.defs[name] = sub.template
+            return { template = sub.template, values = sub.values, members = members, families = sub.families, dl = sub.dl, flat = before, name = name }
+        end
+    end
+    local function nodes_of_one_kind(col)
+        for _, v in ipairs(col) do
+            if type(v) ~= 'table' or v.k == 'lit' or v.k == 'name' or v.k == 'seq' or is_hole(v) or v.k ~= col[1].k then return false end
+        end
+        return #col >= 2 -- rule utility: a family of one is no family
+    end
+    for _, h in ipairs(names) do
+        local e = T.holes[h]
+        if depth > 0 and not e.ctx and not e.presence then
+            if not e.rep then
+                -- a term hole: its column is the candidate family (every value a node of one kind;
+                -- a leaf or a sequence is already a value)
+                local col, members = {}, {}
+                for i = 1, #instances do
+                    local v = Vs[i][h]
+                    if v ~= nil then col[#col + 1] = v; members[#members + 1] = i end
+                end
+                if nodes_of_one_kind(col) then
+                    local f = nest(col, members, h)
+                    if f then
+                        T.holes[h].domain, T.holes[h].origin = M.ref(f.name), 'derived'
+                        families[h] = f
+                    end
+                end
+            else
+                -- a hedge hole: its ELEMENTS, across the members, bucketed by node kind (a
+                -- statement list holds statements of several kinds; each kind is its own
+                -- candidate family); leaves (gaps, tokens) stay values
+                local buckets, order = {}, {}
+                for i = 1, #instances do
+                    local v = Vs[i][h]
+                    for _, x in ipairs(v and v.kids or {}) do
+                        if type(x) == 'table' and x.k ~= 'lit' and x.k ~= 'name' and x.k ~= 'seq' and not is_hole(x) then
+                            if not buckets[x.k] then buckets[x.k] = { col = {}, members = {} }; order[#order + 1] = x.k end
+                            local b = buckets[x.k]
+                            b.col[#b.col + 1] = x; b.members[#b.members + 1] = i
+                        end
+                    end
+                end
+                table.sort(order)
+                local kinds = {}
+                for _, k in ipairs(order) do
+                    local b = buckets[k]
+                    if #b.col >= 2 then
+                        local f = nest(b.col, b.members, h, k)
+                        if f then kinds[k] = f end
+                    end
+                end
+                if next(kinds) then families[h] = { kinds = kinds, members = nil, dl = nil } end
+            end
+        end
+    end
+    -- the description length is hierarchical: the template once, then per hole either its
+    -- values or its nested families (template once, inner values per member) plus what stayed
+    -- a member pays one for each REFERENCE to a nested family (Sequitur's symbol for a rule,
+    -- MDL.md's one per hole), the sequence former per member as `family_dl` does, and the
+    -- elements that did not fold in full; the nested family itself is paid once, inside its dl
+    local dl = cost(T.body) + fam
+    local former = cost(M.seq {})
+    for _, h in ipairs(names) do
+        local f = families[h]
+        if f and f.template then dl = dl + f.dl + #f.members
+        elseif f and f.kinds then
+            local sum = 0
+            for i = 1, #instances do
+                local v = Vs[i][h]
+                if v ~= nil then
+                    sum = sum + former
+                    for _, x in ipairs(v.kids or {}) do
+                        if type(x) == 'table' and f.kinds[x.k] then sum = sum + 1 -- a reference to the nested family
+                        else sum = sum + cost(x) end
+                    end
+                end
+            end
+            for _, kf in pairs(f.kinds) do sum = sum + kf.dl end
+            f.dl = sum
+            dl = dl + sum
+        else
+            for i = 1, #instances do local v = Vs[i][h]; if v ~= nil then dl = dl + cost(v) end end
+        end
+    end
+    local flat = M.family_dl(T, Vs, { cost = cost, family_cost = fam })
+    return { template = T, values = Vs, env = env, families = families, dl = dl, flat = flat, notes = g.notes }
+end
+--- the inner bindings of member i at a nested hole (the nested family's own value map)
+function M.nested_values(F, h, i)
+    local f = F.families[h]
+    if not f then return nil, 'no nested family at ' .. tostring(h) end
+    for k, m in ipairs(f.members) do if m == i then return f.values[k] end end
+    return nil, ('member %d has no value at %s'):format(i, tostring(h))
+end
+
+-- ── MDL partitioning, continued: the price of a partition and the greedy agglomeration (MDL.md) ─────
+-- (after the recursive fold's section, whose `family_of` these share)
 function M.partition_dl(families, opts)
     local total = 0
     for _, f in ipairs(families) do total = total + M.family_dl(f.template, f.values, opts) end

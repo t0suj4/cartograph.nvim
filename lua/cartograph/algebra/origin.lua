@@ -31,18 +31,40 @@ return {
     -- the donor, as it was when this copy was taken
     donor_repo   = '~/tools/templates',
     donor_file   = 'algebra.lua',
-    donor_rev    = 'c07bdd40a0a288a71506c07e48dff5ff91055765',
+    donor_rev    = 'ef782cf222937d2cab1438bdb70d052cef04ac9c',  -- tag handoff-2026-09-19
     donor_clean  = true,     -- the donor working tree had no uncommitted changes
-    vendored_at  = '2026-09-13',
+    vendored_at  = '2026-09-19',
     vendored_by  = 'CART-0912',
+
+    -- ★★★ THE RE-VENDOR (2026-09-19), 47 donor commits after the first cut. The
+    -- donor's own HANDOFF.md (tag handoff-2026-09-19) is written to this session
+    -- and states the one breaking change: a `site` from `lua_scope_graph` is a
+    -- true tree path now. Nothing in this tree stored one, so it did not bite.
+    -- ⚠ THE SPLIT WAS REPLAYED, NOT RE-CUT BY HAND. Each part's old body was
+    -- located in the PREVIOUS donor as line ranges, the ranges mapped onto this
+    -- one by diff, then three repairs the first cut made by hand and the replay
+    -- makes by rule:
+    --   1. a region boundary is snapped so every definition a part owned before
+    --      it still owns (10 one-line constructors sat in the mapped gaps);
+    --   2. a module-level local that lands inside a part but is read by another
+    --      part or by core is PULLED BACK to core (7: `cat`, `derived`,
+    --      `absence`, `below`, `occurs`, `occurrences`, `prefix_of`) — this is
+    --      CART-0924/0925's hazard as a rule instead of a list;
+    --   3. a SHARED name is supplied iff luacheck agrees the part reads it.
+    -- ⚠ AND TWO SECTIONS CAME HOME. `poslens` and `domains` are back in core,
+    -- because the donor now builds templates AT LOAD TIME (`M.RENDER_CALL`,
+    -- `M.SQL_UPDATE`) and `M.template` calls `M.sites` and `M.open`. A part is
+    -- required at the BOTTOM of core, so a section core itself runs eagerly
+    -- cannot be one — the basis is not a section. The acceptance oracle is
+    -- unchanged and is the donor's own spec.
 
     -- sha256 of the bytes as vendored. `vendordrift` compares BOTH sides
     -- against this, which is what separates "we edited it" from "it moved".
-    sha256       = '350ce5c23a564a341685cd5e88a7ec55ade06481f86ca69dd9db3b5ed156ff6f',
-    lines        = 6001,
+    sha256       = 'cb47dd9289987304e80489e147e374024a25007a9df17867c1107166418fc3a5',
+    lines        = 9628,
 
     -- ⚠ ONE LINE OF THE DONOR DOES NOT PORT, AND IT IS DELIBERATELY LEFT IN.
-    -- `core.lua:5999` reads
+    -- `core.lua:3912` reads
     --     if os.getenv('DERIVE') then require('derive').apply_to(M, ...) end
     -- `derive.lua` is a PROTOTYPE-DEVELOPMENT affordance (re-derive the
     -- operators from the four-arrow basis to check the basis still spans them).
@@ -50,11 +72,30 @@ return {
     -- bare top-level module name `derive` on our package.path. Left verbatim so
     -- the copy stays byte-comparable; if we ever want that check it belongs in
     -- `tools/`, not here.
-    unported     = { 'core.lua:5999 — optional `require("derive")`, env-gated on DERIVE' },
+    --
+    -- ★★ TWO MORE UNPORTED KINDS ARRIVED WITH THE RE-VENDOR, AND BOTH COST
+    -- EVIDENCE RATHER THAN BEHAVIOUR:
+    --   `experiments/` — the donor's measurement fixtures (lua-terms, lua-defs,
+    --   key_oracle, key_gen, kv_terms, sqlite_reader, the Kubernetes manifests).
+    --   They are the donor's corpus, not the algebra, and they did not come.
+    --   43 donor tests name them and PEND; the donor wrote that contract itself
+    --   ("a re-vendored spec without experiments/ pends by name") and
+    --   tests/algebradonor_spec.lua honours it. ⇒ THE CODE IS OURS BUT PART OF
+    --   ITS EVIDENCE IS NOT RE-CHECKABLE HERE — the lossless lua reader, the
+    --   scope-graph census and the keyed oracle are the operators affected.
+    --   `M.parsers.lua` — the donor installs a tree-sitter parse hook from
+    --   experiments/lua_reader.lua. Without it `M.grammar('lua').parse` returns
+    --   nil, so the reader-shaped operators are UNAVAILABLE here, not wrong.
+    --   We have tree-sitter; wiring ours in is adaptation, not vendoring.
+    unported     = {
+        'core.lua:3912 — optional `require("derive")`, env-gated on DERIVE',
+        'experiments/* — the donor fixtures 43 vendored tests pend on',
+        'M.parsers.lua — the lua parse hook; the reader operators are unavailable',
+    },
 
-    -- ★★★ THE DONOR'S OWN TESTS CAME TOO (CART-0912). 243 of them over 5240
-    -- lines, vendored BYTE-IDENTICAL to `tests/vendor/algebra_spec.lua` and run
-    -- through a harness shim. ⇒ THIS IS WHAT MAKES THE PROOF OURS RATHER THAN
+    -- ★★★ THE DONOR'S OWN TESTS CAME TOO (CART-0912). 372 of them over 8270
+    -- lines (243 over 5240 at the first cut), vendored BYTE-IDENTICAL to
+    -- `tests/vendor/algebra_spec.lua` and run through a harness shim. ⇒ THIS IS WHAT MAKES THE PROOF OURS RATHER THAN
     -- BORROWED: the code was already ours, and a capability whose evidence lives
     -- in someone else's repository is a capability we cannot re-check after we
     -- change it — and we have changed it, six sections' worth.
@@ -62,6 +103,6 @@ return {
     -- nothing about parts, so they pass only if the adaptation preserved
     -- behaviour exactly.
     spec_file    = 'spec/algebra_spec.lua',
-    spec_sha256  = '437287231debd88d47c0613ce9f91e03b77145c07cad1c6ef027840f20172dc1',
-    spec_lines   = 5240,
+    spec_sha256  = 'e9806eb1c77147bb23de257b9488aec8b1d5b597ba9f8e6ecc485d4d1d780725',
+    spec_lines   = 8270,
 }
