@@ -129,7 +129,31 @@ for _, r in ipairs(roots) do
     -- VERBATIM. That matters: `session.by_root` and `session.owning` compare
     -- against it by string containment, so a band registered under the argv
     -- spelling and a graph carrying the provider's spelling would never match.
-    local ok, data = pcall(index_only and ts.index_only or ts.extract, r)
+    -- ★★★ WARM FIRST. This host called `ts.extract` directly and so paid a COLD
+    -- FOLD ON EVERY START -- 24.3s on this repo, measured twice with identical
+    -- timings and an empty cache directory to prove nothing was being written.
+    -- The editor open has gone through the cache since the cache existed
+    -- (lua/cartograph/init.lua); the server never learned, and nothing noticed
+    -- because a server's startup is paid by whoever is waiting for it rather
+    -- than by a test. It is what kept the MCP client from ever connecting: the
+    -- handshake could not complete inside the client's connect budget.
+    -- ⚠ THE TWO ENTRIES ARE DISTINCT AND MUST STAY SO. `M.open` refuses a thin
+    -- (index-only) cache because a full open consuming one would serve a
+    -- complete-looking graph with ZERO calls; `M.open_index_only` refuses a full
+    -- one. Asking the wrong one is a silent wrong answer, not a slow one.
+    local cachem = require 'cartograph.cache'
+    local data, note
+    if index_only then data, note = cachem.open_index_only(r)
+    else data, note = cachem.open(r) end
+    if note then io.stderr:write(('cartograph mcpserve: %s\n'):format(tostring(note))) end
+    local ok = true
+    if not data then
+        ok, data = pcall(index_only and ts.index_only or ts.extract, r)
+        -- ⚠ SYNCHRONOUS, not save_bg: this process serves and then exits, and a
+        -- background save that never finishes would leave the next start cold
+        -- again -- the same defect one level down.
+        if ok then pcall(cachem.save, data) end
+    end
     if not ok then
         io.stderr:write(('extract failed (%s): %s\n'):format(r, tostring(data)))
         os.exit(1)
