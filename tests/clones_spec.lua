@@ -3641,3 +3641,83 @@ test('clones: a MEMBER of an import is priced too', function ()
         'and it is PRICED as a member of an import')
     vim.fn.delete(root, 'rf')
 end)
+
+-- Mer-S (Baumgartner & Kutsia 2014 §3; BK.md "merge identical stored pairs into one
+-- variable"). The value holes have been grouped by their pair since they were written;
+-- the struct holes never were, so ONE accessor migration reported as eight parameters
+-- and then claimed a single helper was blocked. Merging is not cosmetic: the survey
+-- states about this very file that the unmerged (linear) answer is STRICTLY more
+-- general than the lgg, and the witness runs in tests/vendor/algebra_spec.lua.
+test('clones: Mer-S merges one wrapper divergence at many sites into ONE parameter', function ()
+    local base = '  local a = load(src)\n  local p = trim(a)\n'
+    local body_a = base .. '  emit(p.line)\n  emit(p.line)\n  emit(p.line)\n  persist(a)\n  return a'
+    local body_b = base .. '  emit(acc.line(p))\n  emit(acc.line(p))\n  emit(acc.line(p))\n  persist(a)\n  return a'
+    local root = proj {
+        ['m1.lua'] = fn('mer_one', 'src', body_a),
+        ['m2.lua'] = fn('mer_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'mer_one', 'mer_two')
+    ok(p, 'mer_one and mer_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok(an and #(an.structs or {}) >= 3, 'three sites diverge: ' .. #(an and an.structs or {}))
+    eq(1, an and #(an.fparams or {}), 'and they MERGE to one function parameter')
+    eq(#(an.structs or {}), an and #(an.fparams[1].sites or {}),
+        'which covers every site')
+    -- ⚠ `structs` is UNCHANGED — tools/algebradrive.lua scores it against the
+    -- prototype's own count, and regrouping what it reads would move a comparison.
+    ok(#(an.structs or {}) > #(an.fparams or {}), 'the ungrouped list is still there')
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('at %d+ sites'), 'the proposal states the site count: ' .. txt)
+    ok(txt:find('NOT blocked', 1, true),
+        'and stops claiming a single helper is blocked')
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ★★★ THE KEY IS DE BRUIJN, NOT TEXT (HOPAU.md, Lemmas 4-6: "each store entry's pair
+--- is closed over its argument variables in first-occurrence order and keyed by de
+--- Bruijn form"). Two sites reading DIFFERENT locals through the same wrapper are one
+--- parameter applied to different arguments. Keying on the raw text splits them, which
+--- is the defect the value-hole key already has in the other direction (its key carries
+--- the hole KIND, so one token used twice becomes two parameters).
+test('clones: Mer-S merges sites whose LOCALS differ — the key is de Bruijn', function ()
+    local base = '  local a = load(src)\n  local p = trim(a)\n  local q = trim(a)\n'
+    local body_a = base .. '  emit(p.line)\n  emit(q.line)\n  persist(a)\n  return a'
+    local body_b = base .. '  emit(acc.line(p))\n  emit(acc.line(q))\n  persist(a)\n  return a'
+    local root = proj {
+        ['d1.lua'] = fn('db_one', 'src', body_a),
+        ['d2.lua'] = fn('db_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'db_one', 'db_two')
+    ok(p, 'db_one and db_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok(an and #(an.structs or {}) >= 2, 'two sites diverge, on different locals')
+    eq(1, an and #(an.fparams or {}),
+        'and they still merge — the key is the SHAPE plus the de Bruijn indices')
+    -- the per-site arguments are kept, because that is what the merge costs
+    local f = an and an.fparams[1]
+    local args = {}
+    for _, st in ipairs(f and f.sites or {}) do args[#args + 1] = (st.a or {})[1] end
+    table.sort(args)
+    eq('p,q', table.concat(args, ','), 'and each site keeps its own argument')
+    vim.fn.delete(root, 'rf')
+end)
+
+--- ★ THE TRIPWIRE. A merge that fires on everything ranks nothing: two genuinely
+--- different divergences must stay two parameters.
+test('clones: Mer-S does NOT merge two different wrapper divergences', function ()
+    local base = '  local a = load(src)\n  local p = trim(a)\n'
+    local body_a = base .. '  emit(p.line)\n  emit(p.col)\n  persist(a)\n  return a'
+    local body_b = base .. '  emit(acc.line(p))\n  emit(acc.col(p))\n  persist(a)\n  return a'
+    local root = proj {
+        ['t1.lua'] = fn('tw_one', 'src', body_a),
+        ['t2.lua'] = fn('tw_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'tw_one', 'tw_two')
+    ok(p, 'tw_one and tw_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    eq(2, an and #(an.fparams or {}), 'two distinct pairs stay two parameters')
+    vim.fn.delete(root, 'rf')
+end)

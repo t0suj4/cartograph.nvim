@@ -897,6 +897,39 @@ local function local_deps(node, locals)
     return out
 end
 
+--- ★★★ Mer-S, THE MERGE RULE (Baumgartner & Kutsia 2014 §3, BK.md: "merge identical
+--- stored pairs into one variable; drop empty ones"). It is the same idea as the value
+--- holes' grouping one sort up, and it is NOT cosmetic: merging equal stored pairs is
+--- what makes a generalization LEAST. The survey states it about this very file —
+--- "analyze_pair groups holes by the pair of values, which is Plotkin's rule and gives
+--- the non-linear variant ... the non-linear answer is STRICTLY more specific" — and
+--- the witness runs in our own suite (tests/vendor/algebra_spec.lua, the `linear` flag:
+--- instance_of holds one way and fails the other). ⇒ AN UNMERGED TEMPLATE IS STRICTLY
+--- MORE GENERAL THAN THE LGG, so eight separate struct holes for one divergence were
+--- not a formatting defect: they were a different, worse answer.
+---
+--- ⚠ AND THE KEY IS NOT LITERAL EQUALITY OF THE TWO SIDES. Higher-order Mer is done by
+--- Lemmas 4-6 (HOPAU.md, hopau.lua): "each store entry's pair is closed over its
+--- argument variables in FIRST-OCCURRENCE ORDER and keyed by DE BRUIJN form; equal keys
+--- merge, the permuting matcher being the correspondence of the two orderings". Keying
+--- on the raw text would split `nm -> #info + 1` from `out -> #stats + 1`, which are one
+--- parameter applied to different arguments.
+---
+--- ★ AND `rcanon` ALREADY COMPUTES THE CLOSURE — it collapses every local to `L` and
+--- appends its NAME to `acc` in traversal order. All that was missing is the numbering:
+--- `L` alone cannot tell `f(x, y)` from `f(x, x)`, and the index sequence can.
+--- @return string key, table ordered  the de Bruijn key and the first-occurrence deps
+local function debruijn(e, locals)
+    local acc = {}
+    local shape = rcanon(e, locals or {}, acc)
+    local idx, seq, ordered, n = {}, {}, {}, 0
+    for i, nm in ipairs(acc) do
+        if not idx[nm] then n = n + 1; idx[nm] = n; ordered[n] = nm end
+        seq[i] = idx[nm]
+    end
+    return shape .. '\30' .. table.concat(seq, ','), ordered
+end
+
 -- "nameA / nameB" for a pair, for report headers
 local function p_name(pair) return ('%s / %s'):format(pair.a.name, pair.b.name) end
 
@@ -1135,6 +1168,16 @@ end
 --- The proposal says so and leaves the choice — a rule source may only refuse, and
 --- this is not a rule, it is a price.
 ---
+--- ⚠⚠ AND IT PRICES VALUE HOLES ONLY — A WRAPPER DIVERGENCE IS STRUCTURALLY OUT OF
+--- REACH, NOT MERELY UNHANDLED. `c.line` against `callrec.line(c)` is a STRUCT hole
+--- (`field` facing `call`, why='kind'), struct holes never become parameters, and
+--- `params` drops them before any price is read. So the accessor-seam cluster
+--- CART-0878 names cannot be priced by this mechanism at all. Tested 2026-09-19 by
+--- going and looking, not by reasoning about it: the price has exactly two shapes,
+--- both the import seam, and two instances are not a class. If a wrapper ever needs
+--- a price, the struct hole already carries the two nodes (`xn`/`yn`) it would be
+--- computed from — that is a design change to the price, and it is not made here.
+---
 --- ⚠ AND IT IS THE SPEC'S `import_call`, NOT THE STRING `require`. lua says
 --- `require`, ruby says `require_relative`, php declares none and gets nothing —
 --- which is honest: php's import edges come from `import_query`, a shape this test
@@ -1342,6 +1385,36 @@ function M.analyze_pair(pair)
                 -- measured only, so far: the verdict below still reads `struct > 0`
                 if shares_subterm(h.xn, h.yn) then kind_shared = kind_shared + 1 end
             end
+        end
+    end
+    -- ★★★ Mer-S OVER THE STRUCT HOLES: one FUNCTION parameter per distinct stored pair,
+    -- with every site it covers (see `debruijn`). The value holes above have had this
+    -- since they were written — `params` groups by (kind, a, b) and collects sites —
+    -- and the struct holes never did, so `key_range` in sql.lua against xlang.lua
+    -- reported ONE accessor migration as eight separate parameters and then said a
+    -- single helper was blocked. Merged, it is `Y(c) : c.line = callrec.line(c)`, one
+    -- hole at eight sites, which is what the algebra's own generalize returns.
+    -- ⚠ ADDITIVE: `structs` stays exactly as it was. tools/algebradrive.lua scores our
+    -- struct holes against the prototype's, and regrouping the list it reads would move
+    -- a number that is supposed to be a comparison.
+    -- ⚠ A BARE struct hole (the nil/row-shape cases, no `xn`/`yn`) cannot be keyed and
+    -- is never merged — it is the absence of a pair, not a pair.
+    local fparams, fbykey = {}, {}
+    for _, h in ipairs(structs) do
+        if h.xn and h.yn then
+            local ka, orda = debruijn(h.xn, pair.a.locals)
+            local kb, ordb = debruijn(h.yn, pair.b.locals)
+            local key = ka .. '\31' .. kb
+            local f = fbykey[key]
+            if not f then
+                f = { why = h.why, xn = h.xn, yn = h.yn, deps_a = orda, deps_b = ordb,
+                    sites = {} }
+                fbykey[key] = f; fparams[#fparams + 1] = f
+            end
+            -- the ARGUMENTS at this site: with the de Bruijn key the locals may differ
+            -- between sites, and that is the merge working, not a collision
+            f.sites[#f.sites + 1] = { a = orda, b = ordb }
+            h.fparam = f
         end
     end
     local structural = insdel > 0 or nstruct > 0
@@ -1596,7 +1669,7 @@ function M.analyze_pair(pair)
         end
     end
     return { kind = kind, holes = params, insdel = insdel, drift = drift,
-        struct = nstruct, shape = shape, evidence = evidence,
+        struct = nstruct, shape = shape, evidence = evidence, fparams = fparams,
         struct_why = { arity = why_arity, kind = why_kind, localglobal = why_lg,
             kind_shared = kind_shared },
         -- ★ THE STRUCT HOLES THEMSELVES, which this function has always computed and
@@ -1746,10 +1819,12 @@ function M.extract_proposal(pair, store)
         local L = { ('%s differ structurally (%d inserted/deleted statement(s), %d shape'
             .. ' divergence(s)) — not a clean value-parameterization.')
             :format(p_name(pair), a.insdel, a.struct or 0) }
+        -- ★ ONE ENTRY PER STORED PAIR, NOT PER SITE (Mer-S). `a.fparams` is the merged
+        -- list; `a.structs` is still every occurrence, for the consumers that count them.
         local fn_params = {}
-        for _, h in ipairs(a.structs or {}) do
-            local d = (#(h.deps_a or {}) >= #(h.deps_b or {})) and h.deps_a or h.deps_b
-            if d and #d > 0 then fn_params[#fn_params + 1] = { h = h, deps = d } end
+        for _, f in ipairs(a.fparams or {}) do
+            local d = (#(f.deps_a or {}) >= #(f.deps_b or {})) and f.deps_a or f.deps_b
+            if d and #d > 0 then fn_params[#fn_params + 1] = { f = f, deps = d } end
         end
         if #a.holes > 0 or #fn_params > 0 then
             L[#L + 1] = '  the helper this WOULD take, derived:'
@@ -1757,15 +1832,33 @@ function M.extract_proposal(pair, store)
                 L[#L + 1] = ('    p%d  a VALUE (%s):  %s  /  %s')
                     :format(i, h.kind, tostring(h.a), tostring(h.b))
             end
-            for i, f in ipairs(fn_params) do
+            for i, fp in ipairs(fn_params) do
                 -- a hole reading locals is a FUNCTION of them, not a value
-                L[#L + 1] = ('    f%d  a FUNCTION of (%s)   [%s divergence]')
-                    :format(i, table.concat(f.deps, ', '), tostring(f.h.why or 'kind'))
+                local n = #(fp.f.sites or {})
+                L[#L + 1] = ('    f%d  a FUNCTION of (%s)   [%s divergence]%s')
+                    :format(i, table.concat(fp.deps, ', '), tostring(fp.f.why or 'kind'),
+                        n > 1 and (', at %d sites'):format(n) or '')
             end
         end
-        L[#L + 1] = ('  what blocks a single helper: %s'):format(
-            a.insdel > 0 and ('%d row(s) on one side only'):format(a.insdel)
-            or 'a shape divergence the value-parameterization cannot cross')
+        -- ★★★ Mer-S CHANGED WHAT THIS SENTENCE IS ALLOWED TO SAY. It used to read "a
+        -- shape divergence the value-parameterization cannot cross" whenever any struct
+        -- hole survived — true, and beside the point: a VALUE parameterization cannot
+        -- cross it and a FUNCTION parameter is not a value parameterization. With the
+        -- pairs merged, the eight `c.line` / `callrec.line(c)` sites of key_range are
+        -- ONE parameter covering every divergence, and nothing blocks the helper.
+        local covered = 0
+        for _, f in ipairs(a.fparams or {}) do covered = covered + #(f.sites or {}) end
+        if a.insdel > 0 then
+            L[#L + 1] = ('  what blocks a single helper: %d row(s) on one side only')
+                :format(a.insdel)
+        elseif #fn_params > 0 and covered == (a.struct or 0) then
+            L[#L + 1] = ('  NOT blocked: %d function parameter(s) cover all %d shape'
+                .. ' divergence(s).'):format(#fn_params, a.struct or 0)
+            L[#L + 1] = '    The value parameterization cannot cross them; a FUNCTION parameter is not one.'
+        else
+            L[#L + 1] = '  what blocks a single helper: a shape divergence the'
+                .. ' value-parameterization cannot cross'
+        end
         return L
     end
     local L = {
