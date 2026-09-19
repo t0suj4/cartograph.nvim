@@ -13,6 +13,50 @@ function M.register(H)
     -- not every group uses every helper; keep the binding uniform
     local _ = cmd and live and whole_graph and mat_df and scratch
 
+    -- ★★★ THE SIX REPORT COMMANDS ARE ONE TEMPLATE (CART-0878). Each is: take
+    -- the live store, require a focused function, materialise that file's
+    -- dataflow, and scratch a module's report of it — differing only in WHICH
+    -- report. Generalizing the six over the expression IR gives exactly three
+    -- scalar holes (command name, module, report function) plus the desc.
+    -- ⚠ MEASURED, THE FAMILY ENDS HERE: add CartographExpr (no `mat_df`) and two
+    -- of those holes collapse into ONE HEDGE swallowing the body; add
+    -- CartographUntangle (`whole_graph`) and a second hedge appears. The
+    -- boundary shows up in the hole KIND, not in a distance threshold — which is
+    -- why the other callbacks below keep their own bodies.
+    --
+    -- ★★★ THE REPORT IS A THUNK, AND THAT IS THE WHOLE POINT OF THE DESIGN. The
+    -- obvious extraction takes (module, function) as STRINGS and calls
+    -- `require(mod)[fn]` — it is what an extractor restricted to literal holes
+    -- proposes. MEASURED on our own graph, as DISTINCT (kind, target) facts out
+    -- of this file: 49 before, 44 with strings, 50 with thunks. The string
+    -- version loses SIX REAL FACTS — the imports of `optimize`, `narrow` and
+    -- `lens`, and the references to `report_blocks`, `param_report` and
+    -- `devirt_report`, which would then read as UNCALLED — because
+    -- `require(mod)[fn]` resolves to nothing. The thunk version loses none and
+    -- gains `report_cmd` itself. Both kill exactly the same clones: the near
+    -- tier over commands/ goes 32 -> 7 pairs either way, with the 21-pair
+    -- distance-1 band down to 1.
+    -- ⇒ THE TOOL'S PREFERENCE AND OURS DISAGREE AND THE TOOL CANNOT SEE WHY.
+    -- The two variants are within a comment block of the same size and remove
+    -- the same duplication; only one of them keeps the graph we analyse
+    -- ourselves with. Neither the clone tier nor an MDL price has a term for
+    -- that, which is what CART-0878 records.
+    -- ⚠ `require` STILL RUNS INSIDE THE CALLBACK, not at register time. Lazy
+    -- loading is why these requires are written in the body at all.
+    local function report_cmd(report)
+        return function ()
+            local store = live() if not store then return end
+            local id = store.focused
+            local n = id and store.node(id)
+            if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+                return vim.notify('cartograph: focus a function first',
+                    vim.log.levels.WARN)
+            end
+            mat_df(store, n.file)
+            scratch(report(store, id))
+        end
+    end
+
     -- the reorder lens adds the ordering-constraint note on top of a reveal
     local function reorder_reveal(store, m, spec)
         if not (spec and spec.l0 and m and m.node) then return end
@@ -55,30 +99,14 @@ function M.register(H)
     end, { desc = 'cartograph: independent concerns of the focused fn over the data+control+effect PDG, with the safe-to-split verdict and why-not breakdown (the untangle lens)' })
 
     -- ── extract-blocks: the focused fn's nested loops/branches as helper candidates
-    cmd('CartographExtractBlocks', function ()
-        local store = live() if not store then return end
-        local id = store.focused
-        local n = id and store.node(id)
-        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
-            return vim.notify('cartograph: focus a function first',
-                vim.log.levels.WARN)
-        end
-        mat_df(store, n.file)
-        scratch(require('cartograph.untangle').report_blocks(store, id))
-    end, { desc = 'cartograph: the focused fn\'s control sub-regions (loops/branches) as extract-into-helper candidates, with the (params)->(returns) interface and control-escape verdict — the linear-pipeline decomposition view' })
+    cmd('CartographExtractBlocks', report_cmd(function (store, id)
+        return require('cartograph.untangle').report_blocks(store, id)
+    end), { desc = 'cartograph: the focused fn\'s control sub-regions (loops/branches) as extract-into-helper candidates, with the (params)->(returns) interface and control-escape verdict — the linear-pipeline decomposition view' })
 
     -- ── optimize (LICM): loop-invariant computations of the focused fn ─────
-    cmd('CartographOptimize', function ()
-        local store = live() if not store then return end
-        local id = store.focused
-        local n = id and store.node(id)
-        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
-            return vim.notify('cartograph: focus a function first',
-                vim.log.levels.WARN)
-        end
-        mat_df(store, n.file)
-        scratch(require('cartograph.optimize').report(store, id))
-    end, { desc = 'cartograph: loop-invariant computations of the focused fn (LICM) — pure work whose inputs are all loop-invariant, hoistable above the loop; * = clean, ~ = aliasing/branch-hedged (the optimizing sibling of untangle)' })
+    cmd('CartographOptimize', report_cmd(function (store, id)
+        return require('cartograph.optimize').report(store, id)
+    end), { desc = 'cartograph: loop-invariant computations of the focused fn (LICM) — pure work whose inputs are all loop-invariant, hoistable above the loop; * = clean, ~ = aliasing/branch-hedged (the optimizing sibling of untangle)' })
 
     -- ── expr: Rung-0 lints over the expression IR of the focused fn ───────
     cmd('CartographExpr', function ()
@@ -93,30 +121,14 @@ function M.register(H)
     end, { desc = 'cartograph: Rung-0 expression lints of the focused fn — self-compare / duplicated-operand / bool-comparison / self-assignment / pseudo-ternary / constant-condition / string-concat-in-loop / duplicated-condition, over the per-row expression IR (the expression layer)' })
 
     -- ── narrow: branch-sensitive nil/type narrowing of the focused fn ─────
-    cmd('CartographNarrow', function ()
-        local store = live() if not store then return end
-        local id = store.focused
-        local n = id and store.node(id)
-        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
-            return vim.notify('cartograph: focus a function first',
-                vim.log.levels.WARN)
-        end
-        mat_df(store, n.file)
-        scratch(require('cartograph.narrow').report(store, id))
-    end, { desc = 'cartograph: branch-sensitive narrowing of the focused fn — where a guard (nil-check / truthiness) proves a variable non-nil in a region, over cfg.guards_over (the type sibling of const-fold)' })
+    cmd('CartographNarrow', report_cmd(function (store, id)
+        return require('cartograph.narrow').report(store, id)
+    end), { desc = 'cartograph: branch-sensitive narrowing of the focused fn — where a guard (nil-check / truthiness) proves a variable non-nil in a region, over cfg.guards_over (the type sibling of const-fold)' })
 
     -- ── param-nil: inferred parameter nilability vs the @param annotations ─
-    cmd('CartographParamNil', function ()
-        local store = live() if not store then return end
-        local id = store.focused
-        local n = id and store.node(id)
-        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
-            return vim.notify('cartograph: focus a function first',
-                vim.log.levels.WARN)
-        end
-        mat_df(store, n.file)
-        scratch(require('cartograph.narrow').param_report(store, id))
-    end, { desc = 'cartograph: inferred parameter-nilability of the focused fn (required / optional / unknown) vs its ---@param annotations — an unguarded deref of a param annotated nilable `?` is a real defect (the lua-ls disagreement oracle)' })
+    cmd('CartographParamNil', report_cmd(function (store, id)
+        return require('cartograph.narrow').param_report(store, id)
+    end), { desc = 'cartograph: inferred parameter-nilability of the focused fn (required / optional / unknown) vs its ---@param annotations — an unguarded deref of a param annotated nilable `?` is a real defect (the lua-ls disagreement oracle)' })
 
     -- ── trace: where does a parameter's values come from? ─────────────────
     -- A jumpable lens over trace.lua's incremental API: one row per resolved
@@ -199,17 +211,9 @@ function M.register(H)
     end, { nargs = '?', desc = 'cartograph: trace where parameter [n] of the focused fn gets its values — one row per resolved call site, descend to take the next hop; a frontier (field/global aliasing, dynamic call, vararg) says why it stops' })
 
     -- ── devirt: dispatch sites the narrowing facts can turn static ────────
-    cmd('CartographDevirt', function ()
-        local store = live() if not store then return end
-        local id = store.focused
-        local n = id and store.node(id)
-        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
-            return vim.notify('cartograph: focus a function first',
-                vim.log.levels.WARN)
-        end
-        mat_df(store, n.file)
-        scratch(require('cartograph.narrow').devirt_report(store, id))
-    end, { desc = 'cartograph: devirtualization of the focused fn — a method dispatch `recv:m()` whose receiver a guard narrows to a concrete type is a static-call candidate (string → stdlib target now, certified; other types → blocked on VM receiver typing). The devirt-gap consumer of the type/discriminant facts' })
+    cmd('CartographDevirt', report_cmd(function (store, id)
+        return require('cartograph.narrow').devirt_report(store, id)
+    end), { desc = 'cartograph: devirtualization of the focused fn — a method dispatch `recv:m()` whose receiver a guard narrows to a concrete type is a static-call candidate (string → stdlib target now, certified; other types → blocked on VM receiver typing). The devirt-gap consumer of the type/discriminant facts' })
 
     -- ── field-link: where the focused method's self.field reads are DEFINED ─
     cmd('CartographFields', function ()
@@ -275,17 +279,9 @@ function M.register(H)
         desc = 'cartograph: independent function clusters in the focused file (or a directory arg = god-package scope) over call + shared-written-state edges — inter-function untangle' })
 
     -- ── the branch-value lens: what flows through each CFG branch ────
-    cmd('CartographBranchValues', function ()
-        local store = live() if not store then return end
-        local id = store.focused
-        local n = id and store.node(id)
-        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
-            return vim.notify('cartograph: focus a function first',
-                vim.log.levels.WARN)
-        end
-        mat_df(store, n.file)
-        scratch(require('cartograph.lens').report(store, id))
-    end, { desc = 'cartograph: values LIVE through each CFG branch of the focused fn (~=hedged reaching) — the branch-value lens' })
+    cmd('CartographBranchValues', report_cmd(function (store, id)
+        return require('cartograph.lens').report(store, id)
+    end), { desc = 'cartograph: values LIVE through each CFG branch of the focused fn (~=hedged reaching) — the branch-value lens' })
 
     -- ── PORT CLASSES: anonymous-type compatibility from observed flow ──────
     -- A NAVIGABLE lens, and the descent is the point ([[cartograph-navigation-model]]):
