@@ -3154,10 +3154,10 @@ tools/install-hooks.sh      # git config core.hooksPath .githooks
 
 `git commit --no-verify` bypasses it for a WIP checkpoint.
 
-<!-- @claim readme-agent-verbs: The agent surface serves 27 verbs. -->
-<!-- check: #require('cartograph.agent').ORDER == 27 -->
+<!-- @claim readme-agent-verbs: The agent surface serves 29 verbs. -->
+<!-- check: #require('cartograph.agent').ORDER == 29 -->
 
-## Agent surface (headless, 27 verbs)
+## Agent surface (headless, 29 verbs)
 
 Everything above is the editor. There is a second, equal surface: cartograph
 answers the same questions **headlessly**, over MCP or one-shot JSON, and applies
@@ -3174,6 +3174,14 @@ and why any are not. The write half is a ladder: **plan** (writes nothing) →
 **preview** (writes nothing) → **apply**, and `txn_apply` refuses a plan that was
 never previewed. Every write plan declares the guards it will be checked against,
 and a guard REFUSES rather than warns.
+
+**Planning needs no write capability; applying does** — so `txn_save` writes a
+plan's INVOCATION to a file and `txn_load` re-derives it on an armed host, with
+the reviewable artifact in between. What is saved is the asking, not the plan: a
+plan carries a closure and cannot be serialised at all. If the tree moved in
+between, the load still succeeds and says so — `reviewed_match = false` with the
+changed files named — because the difference is not wrong, it is unreviewed, and
+`txn_apply`'s preview gate is already what stops it.
 
 **An empty answer is a typed claim with a reason attached.** `absent`, `refused`,
 `frontier` and `unavailable` mean different things, and reading one as "nothing

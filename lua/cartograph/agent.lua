@@ -420,6 +420,8 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
     'txn_plan_annotate', 'txn_plan_extract_family', 'txn_preview',
+    -- the handoff: plan on a read-only host, apply on an armed one
+    'txn_save', 'txn_load',
     'journal_list', 'journal_get',
     'txn_apply', 'txn_undo' }
 
@@ -1800,15 +1802,29 @@ end
 -- VERBATIM under one rule (`apply-refused`) and is never parsed back into a
 -- taxonomy — scraping a message is the latent break phase 2 refused to ship.
 
+-- family -> the verb that mints it, so a saved recipe can re-invoke the right one
+local VERB_OF_FAMILY = {
+    move = 'txn_plan_moveset', optimize = 'txn_plan_optimize',
+    declare = 'txn_plan_declare', annotate = 'txn_plan_annotate',
+    ['extract-family'] = 'txn_plan_extract_family',
+}
+
 local PLAN_CAP = 16
 M._plans = {}
 local plan_seq = 0
 
 --- Hold a freshly built plan and hand back its opaque id.
-local function stash_plan(store, plan, family)
+local function stash_plan(store, plan, family, invocation)
     plan_seq = plan_seq + 1
     local id = ('plan-%d'):format(plan_seq)
     M._plans[id] = { id = id, seq = plan_seq, plan = plan, family = family,
+        -- ★ THE INVOCATION THAT PRODUCED IT — what makes the plan RE-DERIVABLE.
+        -- The plan itself cannot leave this process (it carries `edit_of`, a
+        -- closure; `vim.json.encode` refuses it by name), so the artifact that
+        -- crosses a boundary is the ASKING, not the answer. schema.lua said so
+        -- before this was built: a RECIPE "is NOT a list of plans ... AN
+        -- INVOCATION SURVIVES A GENERATION BUMP; A PLAN DOES NOT".
+        invocation = invocation,
         gen = plan.generation or store.generation or 0,
         root = (store.data or {}).root, previewed = false }
     local live = {}
@@ -2019,7 +2035,7 @@ local function v_txn_plan_moveset(store, args)
         rows[#rows + 1] = row or { id = m.id, name = m.name, file = m.file,
             mode = m.mode, ref = NUL }
     end
-    local pid = stash_plan(store, plan, 'move')
+    local pid = stash_plan(store, plan, 'move', { verb = VERB_OF_FAMILY['move'], args = args })
     local notes = ledger_notes(plan)
     -- ★ THE STAGING SIDE EFFECT, DISCLOSED RATHER THAN HIDDEN. plan_moveset does
     -- not merely compute: it CLEARS the live move-set and re-stages its closure,
@@ -2136,7 +2152,7 @@ local function v_txn_plan_extract_family(store, args)
             why = ('%d member(s) were LEFT BEHIND and keep their own bodies — the extraction is incomplete, which is sound (nothing dangles) but not total'):format(#left),
             evidence = { left = left } }
     end
-    local pid = stash_plan(store, plan, 'extract-family')
+    local pid = stash_plan(store, plan, 'extract-family', { verb = VERB_OF_FAMILY['extract-family'], args = args })
     return {
         subject = { plan = pid, verb = plan.verb, node = noderow(store, n.id),
             helper = plan.helper, parameters = plan.nparams,
@@ -2192,7 +2208,7 @@ local function v_txn_plan_optimize(store, args)
         for k, v in pairs(m) do row[k] = v end
         rows[#rows + 1] = row
     end
-    local pid = stash_plan(store, plan, 'optimize')
+    local pid = stash_plan(store, plan, 'optimize', { verb = VERB_OF_FAMILY['optimize'], args = args })
     return {
         subject = { plan = pid, kind = args.kind, verb = plan.verb, node = node_row,
             touched = plan.touched, generation = plan.generation, previewed = false },
@@ -2239,7 +2255,7 @@ local function v_txn_plan_declare(store, args)
             'the reason describes the CONTAINER, not your syntax — read what its members have in common and supply one of that shape, or edit the file directly if it has no shape to match',
             { node = n.id, name = n.name })
     end
-    local pid = stash_plan(store, plan, 'declare')
+    local pid = stash_plan(store, plan, 'declare', { verb = VERB_OF_FAMILY['declare'], args = args })
     return {
         subject = { plan = pid, verb = plan.verb, node = node_row,
             touched = plan.touched, generation = plan.generation, previewed = false },
@@ -2280,7 +2296,7 @@ local function v_txn_plan_annotate(store, args)
             'the reason describes the FILE\'s comment style or the definition\'s position, not your prose — a tree with no line comment anywhere cannot have one sliced from it',
             { node = n.id, name = n.name })
     end
-    local pid = stash_plan(store, plan, 'annotate')
+    local pid = stash_plan(store, plan, 'annotate', { verb = VERB_OF_FAMILY['annotate'], args = args })
     local notes = ledger_notes(plan)
     notes[#notes + 1] = { kind = 'guards', premise = 'what this plan will be checked against',
         why = 'the plan declares `parses` (the file still compiles) and `comment-inert` (the edit changed only comments, re-derived from the written bytes). `parses` alone cannot answer the second: prose carrying a comment terminator can close the comment early and turn the rest into CODE, and the result may parse perfectly.',
@@ -2315,6 +2331,169 @@ local function preview_coverage_note()
             late_bound_rungs = { 'generation', 'refs-witness-clean', 'stamp-cas', 'no-dirty-buffers' } } }
 end
 
+-- ── verbs: txn_save / txn_load ──────────────────────────────────────────────
+-- A PLAN HANDLE IS SESSION-SCOPED AND THAT IS THE PROBLEM THESE CLOSE. Planning
+-- needs no write capability; applying does. So the useful shape is: plan on a
+-- READ-ONLY host, hand the artifact over, apply on an armed one — and in between
+-- the plan is a file a human can read. USER (2026-09-20): "so a read-only session
+-- can switch to write and apply it once planned out."
+--
+-- ⚠⚠ THE GENERATION DOES NOT SURVIVE A SESSION AND THE STAMPS DO. `plan.generation`
+-- is an INGEST COUNTER — two unrelated sessions both sit at 1 after one open, so
+-- comparing it across a handoff is both false-negative and false-positive. What
+-- carries real evidence is `plan.stamps`, which "pins each touched file's disk
+-- stamp so `execute` can refuse on drift" (txn.lua). So `txn_load` VERIFIES EVERY
+-- STAMP AGAINST DISK and only then re-bases the generation — the re-base is
+-- LICENSED BY A FRESH CONTENT CHECK, never assumed.
+-- ⚠ AND `previewed` IS RESET. `txn_apply` refuses a plan that has not been through
+-- `txn_preview`, and preview is what re-runs the dry run against THIS graph. A
+-- loaded plan carrying a previous session's tick would skip the one step that
+-- re-derives it here.
+local PLAN_DIR = 'plans'
+
+local function plans_dir()
+    return vim.fn.stdpath('state') .. '/cartograph/' .. PLAN_DIR
+end
+
+local function v_txn_save(store, args)
+    local e, bad = held_plan(store, args.plan)
+    if not e then return bad end
+    -- ⚠⚠ THE RECIPE, NOT THE PLAN — AND THAT IS NOT A SIMPLIFICATION, IT IS THE
+    -- ONLY THING THAT CAN CROSS. A plan carries `edit_of`, a closure; measured,
+    -- `vim.json.encode` refuses it: "Cannot serialise function: type not
+    -- supported". schema.lua declared the distinction before this verb existed —
+    -- "AN INVOCATION SURVIVES A GENERATION BUMP; A PLAN DOES NOT" — and trying to
+    -- save the plan is what proved it.
+    if not e.invocation or not e.invocation.verb then
+        return refuse('unrecordable-plan',
+            ('plan %s was minted without recording its invocation, so it cannot be'
+                .. ' re-derived elsewhere'):format(e.id),
+            'this is a gap in that planner, not in the plan — it must pass its verb and args to stash_plan')
+    end
+    local schema = require 'cartograph.schema'
+    local art = schema.stamp('recipe', {
+        steps = { { verb = e.invocation.verb, args = e.invocation.args or {} } },
+        root = e.root, family = e.family, saved_at = os.time(),
+        -- the WITNESS: present only if this plan was previewed, because only then
+        -- did a human see anything. Its absence is honest, not a default.
+        reviewed = e.reviewed,
+    })
+    local path = args.path
+    if not path or path == '' then
+        vim.fn.mkdir(plans_dir(), 'p')
+        path = ('%s/%s-%d.json'):format(plans_dir(), tostring(e.family or 'plan'), os.time())
+    end
+    local okj, body = pcall(vim.json.encode, art)
+    if not okj then
+        return refuse('unencodable-recipe', ('the invocation could not be encoded: %s')
+            :format(tostring(body)), 'an argument of that verb is not data')
+    end
+    local fh, ferr = io.open(path, 'w')
+    if not fh then
+        return refuse('unwritable-path', ('cannot write %s: %s'):format(path, tostring(ferr)),
+            'pass a `path` this process may write, or omit it for the state directory')
+    end
+    fh:write(body); fh:close()
+    return { subject = { plan = e.id, path = path },
+             result = { { path = path, verb = e.invocation.verb, family = nn(e.family),
+                 note = 'a RECIPE: the invocation, re-derived on load — not the plan itself' } } }
+end
+
+local function v_txn_load(store, args)
+    local path = args.path
+    if not path or path == '' then
+        return refuse('no-path', 'txn_load needs the `path` a recipe was saved to',
+            'call txn_save first; its row carries the path')
+    end
+    local fh = io.open(path, 'r')
+    if not fh then
+        return refuse('unreadable-path', ('cannot read %s'):format(tostring(path)),
+            'check the path from the txn_save row')
+    end
+    local body = fh:read('*a'); fh:close()
+    local okj, art = pcall(vim.json.decode, body)
+    if not okj or type(art) ~= 'table' then
+        return refuse('unreadable-recipe', ('%s is not a saved recipe'):format(path),
+            'this file was not written by txn_save')
+    end
+    -- ⚠ THREE REFUSALS, NOT ONE. schema.replayable distinguishes no-version /
+    -- older / newer, and rendering them alike would hide which the operator can fix.
+    local schema = require 'cartograph.schema'
+    local sok, swhy = schema.replayable('recipe', art.version)
+    if not sok then
+        return refuse('recipe-schema', tostring(swhy), 're-plan it against this graph')
+    end
+    local root = (store.data or {}).root
+    if art.root ~= root then
+        return refuse('foreign-recipe', ('that recipe was built against %s and this host serves %s')
+            :format(tostring(art.root), tostring(root)), 'load it on the host that serves its root')
+    end
+    local step = (art.steps or {})[1]
+    if type(step) ~= 'table' or not step.verb then
+        return refuse('unreadable-recipe', 'the recipe carries no step',
+            'this file was not written by txn_save')
+    end
+    -- ★ RE-DERIVED, NOT RESTORED. The verb runs again against THIS graph, so a
+    -- tree that moved either re-plans cleanly or refuses on the planner's own
+    -- terms — there is no stale offset to smuggle across, because nothing about
+    -- the old plan is carried.
+    local d = M.answer(store, step.verb, step.args or {})
+    if not d.ok then
+        return refuse('replan-refused',
+            ('re-deriving %s refused: %s'):format(step.verb,
+                tostring(type(d.refusal) == 'table' and d.refusal.reason or d.absence)),
+            'the recipe records what to ask for; the answer is the graph\'s')
+    end
+    local pid = d.subject and d.subject.plan
+    -- ★★★ THE WITNESS CHECK — what makes "derive the plan from the recipe" safe
+    -- for a REVIEW handoff. Re-derivation answers "ask for this again"; a review
+    -- promised "apply what I read". Those differ exactly when the tree moved
+    -- between save and load, which is the normal case for a handoff that is not
+    -- instant. So if the saved recipe carries digests of the after-images its
+    -- author previewed, the freshly derived plan is dry-run here and compared.
+    -- ⚠ A MISMATCH IS A REFUSAL, NOT A WARNING. The armed session would otherwise
+    -- apply an edit whose only review was of a different edit.
+    -- ★★★ A MISMATCH ASKS FOR REVIEW; IT DOES NOT REFUSE. The first cut returned
+    -- `review-stale` and DROPPED the plan, which was wrong twice: the plan is
+    -- perfectly valid — it re-derived cleanly against this tree — and it was
+    -- already unapplyable, because `txn_apply` will not take a plan that has not
+    -- been previewed HERE. The refusal was redundant with that gate and threw
+    -- away a usable answer to enforce it.
+    -- ⚠ THE DIFFERENCE IS NOT WRONG, IT IS UNREVIEWED, and those are different
+    -- claims. hazard.lua's rule applies: a hazard is a row that SAYS HOW TO
+    -- DISCHARGE IT — here, preview it and read the new edit.
+    local reviewed_match, changed = nil, {}
+    if art.reviewed and next(art.reviewed) ~= nil and pid then
+        local held = M._plans[pid]
+        local txn = require 'cartograph.txn'
+        local _, after = txn.dryrun(store, held.plan)
+        for rel, want in pairs(art.reviewed) do
+            local got = after and after[rel] ~= nil and vim.fn.sha256(tostring(after[rel])) or nil
+            if got ~= want then changed[#changed + 1] = rel end
+        end
+        table.sort(changed)
+        reviewed_match = #changed == 0
+    end
+    local notes = {}
+    if reviewed_match == false then
+        notes[#notes + 1] = ('THE DERIVED EDIT IS NOT THE ONE THAT WAS REVIEWED: %d file(s)'
+            .. ' differ (%s). The tree moved since this recipe was saved, so the plan below'
+            .. ' is valid but UNREAD. Preview it and review the new edit before applying —'
+            .. ' txn_apply will refuse it until you do.')
+            :format(#changed, table.concat(changed, ', '))
+    elseif reviewed_match == nil then
+        notes[#notes + 1] = 'this recipe was saved without a preview, so it carries no record'
+            .. ' of what its author saw and nothing here can compare against one'
+    end
+    return { subject = { plan = pid, path = path },
+             result = { { plan = nn(pid), verb = step.verb, family = nn(art.family),
+                 previewed = false,
+                 reviewed_match = reviewed_match == nil and NUL or reviewed_match,
+                 review_changed = #changed > 0 and changed or nil,
+                 note = 're-derived against this graph; preview it before applying' } },
+             notes = #notes > 0 and notes or nil }
+end
+
 local function v_txn_preview(store, args)
     local e, bad = held_plan(store, args.plan)
     if not e then return bad end
@@ -2329,6 +2508,18 @@ local function v_txn_preview(store, args)
             'the reason is the transaction layer\'s own; re-plan once its premise holds')
     end
     e.previewed = true
+    -- ★★★ WHAT WAS REVIEWED, AS A DIGEST. A recipe re-derives the plan on load,
+    -- and re-derivation against a moved tree can hand the armed session an edit
+    -- NOBODY READ. Recording sha256 of each after-image here — the very bytes
+    -- this preview is about to show — lets `txn_load` prove the derivation it
+    -- just made is the same edit, or refuse. Digests, not text: the point is
+    -- equality, and a plan's after-images are the working tree.
+    e.reviewed = {}
+    for _, rel in ipairs(e.plan.touched) do
+        if after[rel] ~= nil then
+            e.reviewed[rel] = vim.fn.sha256(tostring(after[rel]))
+        end
+    end
     local rows = {}
     for _, rel in ipairs(e.plan.touched) do
         local b, a = before[rel], after[rel]
@@ -2915,6 +3106,33 @@ M.VERBS = {
                 desc = 'the prose. Newlines become separate comment lines; the prefix and indentation are taken from the file, not invented' },
         },
         run = v_txn_plan_annotate,
+    },
+    txn_save = {
+        summary = 'SAVE a held plan to a file so another session can apply it. Planning needs no write capability and applying does, so this is the handoff: plan on a read-only host, review the file, apply on an armed one',
+        -- `observation`: the answer carries a PATH, never a rung.
+        tier_basis = 'observation', needs_calls = false,
+        -- `absent` the handle is not held here (session-scoped, 16 most recent)
+        absences = { 'absent' },
+        args = {
+            { name = 'plan', type = 'string', required = true,
+                desc = 'a plan handle from a txn_plan_* verb' },
+            { name = 'path', type = 'string',
+                desc = 'where to write it (default: stdpath(state)/cartograph/plans/)' },
+        },
+        run = v_txn_save,
+    },
+    txn_load = {
+        summary = 'LOAD a saved plan and hold it here, returning a fresh handle. Every stamp the plan pinned is re-checked against disk first, and the plan must still be previewed before it can be applied',
+        tier_basis = 'observation', needs_calls = false,
+        -- `absent`  no such file / it holds no plan
+        -- `refused` a drifted file, a foreign root, or a schema version that
+        --           cannot be replayed — three different repairs, never merged
+        absences = { 'absent', 'refused' },
+        args = {
+            { name = 'path', type = 'string', required = true,
+                desc = 'the path a txn_save row reported' },
+        },
+        run = v_txn_load,
     },
     txn_preview = {
         summary = 'the exact diff a held plan would write, per file, and nothing written — the same edit callback the apply runs',

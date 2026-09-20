@@ -1,6 +1,6 @@
 ---
 name: cartograph
-description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 27 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
+description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 29 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
 ---
 
 # cartograph, for an agent
@@ -99,7 +99,7 @@ instrument and surprising if you forget it.
 
 ## The verbs
 
-27, in the order they may be trusted in. `graph_info` first — it reports which verbs
+29, in the order they may be trusted in. `graph_info` first — it reports which verbs
 are available on *this* graph and host, and why any are not.
 
 ```
@@ -108,9 +108,29 @@ CATALOGUE clones_find  cone  ladder  territory  census  mentions  externals
 VERSION   portability_targets  portability_move  portability_move_calls
 WRITE     txn_plan_moveset  txn_plan_optimize  txn_plan_declare
           txn_plan_annotate  txn_plan_extract_family  txn_preview
+          txn_save  txn_load
           journal_list  journal_get
           txn_apply  txn_undo
 ```
+
+`txn_save` / `txn_load` are the READ-ONLY → WRITE HANDOFF. Planning needs no write
+capability and applying does, so plan on a read-only host, save, and load on an
+armed one — the file in between is reviewable. ⚠ WHAT IS SAVED IS THE INVOCATION,
+NOT THE PLAN: a plan holds a closure (`edit_of`) and cannot be serialised at all,
+so `txn_load` RE-DERIVES the plan against the graph as it then stands. A tree that
+moved therefore re-plans cleanly or refuses on the planner's own terms, and the
+loaded handle still has to go through `txn_preview` before `txn_apply` will take it.
+
+★ PREVIEW BEFORE YOU SAVE, and the artifact carries a WITNESS: `txn_preview`
+records a sha256 of each after-image it showed you, `txn_save` carries those, and
+`txn_load` dry-runs the freshly derived plan and compares. If the tree moved, the
+load still SUCCEEDS — the plan is valid, it simply is not the edit anyone read —
+and the row says `reviewed_match = false`, lists the files in `review_changed`,
+and carries a note you cannot miss. ⚠ IT ASKS FOR REVIEW RATHER THAN REFUSING,
+because refusing would throw away a usable plan to enforce a gate that already
+exists: `txn_apply` will not take a plan that has not been previewed here, so
+previewing IS the review. Save without previewing and there is no witness at all —
+`reviewed_match` comes back null, and that absence is stated rather than defaulted.
 
 Ask `graph_info` before assuming a verb works. Two capability axes are reported
 separately because your next move differs:

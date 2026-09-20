@@ -341,6 +341,10 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- naming no subject: a refusal reachable without touching a byte
         txn_plan_annotate = { args = { text = 'note' }, expect = 'refusal' },
         txn_preview = { args = { plan = 'plan-never-minted' }, expect = 'refusal' },
+        -- the handoff pair. Both refuse here without touching a byte: saving a
+        -- handle this host never minted, and loading a path that does not exist.
+        txn_save = { args = { plan = 'plan-never-minted' }, expect = 'refusal' },
+        txn_load = { args = { path = '/nonexistent/plan.json' }, expect = 'refusal' },
         journal_list = {},
         journal_get = { args = { id = 'no-such-entry' }, expect = 'refusal' },
         -- the two mutating verbs refuse on this host whatever the handle says.
@@ -1203,5 +1207,128 @@ test('agent: the FACT PRICE reaches the agent row', function ()
         if h.literal_dep and tostring(h.literal_dep) ~= 'NUL' then priced = h end
     end
     ok(priced, 'the import-path hole carries its price, not just its value')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── the read-only -> write handoff (CART-0969) ───────────────────────────────
+-- A plan handle is SESSION-scoped, which is what stops a read-only host from
+-- being useful for planning: the thing it produces dies with it. txn_save /
+-- txn_load make the plan an ARTIFACT, and the point is the capability split —
+-- planning needs no write permission, applying does, and in between a human can
+-- read the file.
+
+test('agent: a plan survives save/load, and the LOADED handle must still be previewed', function ()
+    if not ready() then return end
+    local root = mkfixture()
+    ingest(root)
+    -- moveset rather than optimize: this fixture offers the optimizer no CSE
+    -- candidate, and a test that SKIPS is not a test.
+    local made = agent.answer(store, 'txn_plan_moveset',
+        { seed = { idof('M.pub') }, dest = 'lib/new.lua' })
+    local pid = made.ok and made.subject and made.subject.plan
+    ok(pid ~= nil and pid ~= vim.NIL, 'the planner minted a handle: ' .. tostring(pid))
+
+    local saved = agent.answer(store, 'txn_save', { plan = pid })
+    ok(saved.ok, 'the recipe saves: '
+        .. tostring(type(saved.refusal) == 'table' and saved.refusal.reason))
+    local path = saved.result and saved.result[1] and saved.result[1].path
+    ok(path ~= nil and vim.fn.filereadable(path) == 1, 'and the file exists: ' .. tostring(path))
+
+    local loaded = agent.answer(store, 'txn_load', { path = path })
+    ok(loaded.ok, 'it loads back: '
+        .. tostring(type(loaded.refusal) == 'table' and loaded.refusal.reason))
+    local row = loaded.result and loaded.result[1]
+    ok(row and row.plan ~= nil and row.plan ~= pid,
+        'under a FRESH handle, RE-DERIVED not restored: ' .. tostring(row and row.plan))
+    -- ⚠ THE RESET IS THE POINT. `txn_apply` refuses a plan that has not been
+    -- previewed, and preview is what re-runs the dry run against THIS graph. A
+    -- loaded plan carrying a previous session's tick would skip the one step
+    -- that re-derives it here.
+    eq(false, row and row.previewed,
+        'and unpreviewed — the write session must re-derive it before applying')
+    local prev = agent.answer(store, 'txn_preview', { plan = row.plan })
+    ok(prev.ok, 'the loaded handle previews like any other: '
+        .. tostring(type(prev.refusal) == 'table' and prev.refusal.reason))
+    vim.fn.delete(path)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('agent: a recipe re-derives against the CURRENT tree, never a stale offset', function ()
+    if not ready() then return end
+    local root = mkfixture()
+    ingest(root)
+    local made = agent.answer(store, 'txn_plan_moveset',
+        { seed = { idof('M.pub') }, dest = 'lib/new.lua' })
+    ok(made.ok and made.subject and made.subject.plan ~= nil, 'a plan was minted')
+    local saved = agent.answer(store, 'txn_save', { plan = made.subject.plan })
+    local path = saved.result[1].path
+
+    -- ★★ THE WHOLE REASON THIS IS A RECIPE. A saved PLAN would carry line offsets
+    -- from the tree as it was; move the file and those offsets are fiction. A
+    -- recipe carries the ASKING, so the planner runs again here and either
+    -- succeeds against the current text or refuses on its own terms. Neither
+    -- outcome can apply a stale edit, which is the property being asserted.
+    local fd = assert(io.open(root .. '/m.lua', 'a'))
+    fd:write('\n-- a line that moves everything below it\n'); fd:close()
+    ingest(root)   -- the write session sees the changed tree
+
+    local loaded = agent.answer(store, 'txn_load', { path = path })
+    ok(loaded.ok or (type(loaded.refusal) == 'table'),
+        'the load either re-derives or refuses — never silently restores')
+    if loaded.ok then
+        local row = loaded.result[1]
+        ok(row.plan ~= nil, 'it re-derived a plan against the CHANGED tree: '
+            .. tostring(row.plan))
+        eq(false, row.previewed, 'and it still must be previewed before applying')
+    else
+        ok(tostring(loaded.refusal.rule) == 'replan-refused',
+            'and the refusal is the PLANNER\'s, carried by name: '
+            .. tostring(loaded.refusal.rule))
+    end
+    vim.fn.delete(path)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('agent: a recipe that re-derives differently ASKS FOR REVIEW, it does not refuse', function ()
+    if not ready() then return end
+    local root = mkfixture()
+    ingest(root)
+    local made = agent.answer(store, 'txn_plan_moveset',
+        { seed = { idof('M.pub') }, dest = 'lib/new.lua' })
+    ok(made.ok and made.subject.plan ~= nil, 'a plan was minted')
+    -- ★ PREVIEW FIRST — that is what makes a review exist to be checked against.
+    local prev = agent.answer(store, 'txn_preview', { plan = made.subject.plan })
+    ok(prev.ok, 'and previewed: '
+        .. tostring(type(prev.refusal) == 'table' and prev.refusal.reason))
+    local saved = agent.answer(store, 'txn_save', { plan = made.subject.plan })
+    local path = saved.result[1].path
+
+    -- unchanged tree: the derivation matches what was reviewed
+    local same = agent.answer(store, 'txn_load', { path = path })
+    ok(same.ok, 'an unchanged tree loads: '
+        .. tostring(type(same.refusal) == 'table' and same.refusal.reason))
+    eq(true, same.result[1].reviewed_match,
+        'and says the derived edit IS the reviewed one')
+
+    -- now move the tree so the same asking yields different bytes
+    local fd = assert(io.open(root .. '/m.lua', 'a'))
+    fd:write('\nfunction M.added(q) return q end\n'); fd:close()
+    ingest(root)
+    local moved = agent.answer(store, 'txn_load', { path = path })
+    -- ⚠ IT ASKS FOR REVIEW, IT DOES NOT REFUSE. The plan re-derived cleanly and is
+    -- valid; what it is not is READ. Refusing would throw away a usable answer to
+    -- enforce a gate `txn_apply` already applies — it will not take a plan that
+    -- has not been previewed here.
+    ok(moved.ok, 'the load SUCCEEDS — the derived plan is valid, just unreviewed')
+    eq(false, moved.result[1].reviewed_match,
+        'and says plainly that it is not the edit that was reviewed')
+    local names = table.concat(moved.result[1].review_changed or {}, ',')
+    ok(names:find('m.lua', 1, true), 'naming the files whose edit changed: ' .. names)
+    local said = table.concat(moved.notes or {}, ' ')
+    ok(said:find('NOT THE ONE THAT WAS REVIEWED', 1, true),
+        'in a note a caller cannot miss: ' .. said:sub(1, 70))
+    eq(false, moved.result[1].previewed,
+        'and it is unpreviewed, which is what actually stops an apply')
+    vim.fn.delete(path)
     vim.fn.delete(root, 'rf')
 end)
