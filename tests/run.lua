@@ -111,6 +111,27 @@ for _, f in ipairs(vim.fn.glob('tests/*_spec.lua', false, true)) do
     end
 end
 
+-- ── OPT-IN LINE COVERAGE (CART-0990) ───────────────────────────────────────
+-- `COVER=<file>` records every (source, line) the suite executes and writes them there.
+-- Opt-in and off by default for the same reason `SPEC` is: this is a measurement hook,
+-- and a line hook costs real time on every line of every test.
+-- ⚠ IT RECORDS ONLY `lua/cartograph/**`. The hook fires for every line in the process —
+-- the spec files, the harness, nvim's own runtime — and the census only ever asks about
+-- our engine, so filtering in the handler keeps the table small and the join honest.
+local cover
+if vim.env.COVER and vim.env.COVER ~= '' then
+    cover = {}
+    debug.sethook(function (_, line)
+        local i = debug.getinfo(2, 'S')
+        local s = i and i.short_src
+        if s and s:find('lua/cartograph/', 1, true) then
+            local t = cover[s]
+            if not t then t = {}; cover[s] = t end
+            t[line] = true
+        end
+    end, 'l')
+end
+
 local pass, fail, skipped = 0, 0, 0
 print('')
 for _, t in ipairs(reg) do
@@ -127,6 +148,19 @@ for _, t in ipairs(reg) do
         print('        ' .. tostring(err):gsub('\n', '\n        '))
     end
 end
+if cover then
+    debug.sethook()
+    local out = {}
+    for src, lines in pairs(cover) do
+        local rel = src:match('lua/cartograph/.*$') or src
+        for line in pairs(lines) do out[#out + 1] = rel .. ':' .. line end
+    end
+    table.sort(out)
+    local fd = io.open(vim.env.COVER, 'w')
+    if fd then fd:write(table.concat(out, '\n')); fd:close() end
+    print(('coverage: %d executed line(s) under lua/cartograph/'):format(#out))
+end
+
 print(('\n%d passed, %d failed, %d skipped\n'):format(pass, fail, skipped))
 
 if fail > 0 then vim.cmd('cquit 1') else vim.cmd('qall!') end
