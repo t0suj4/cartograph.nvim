@@ -3902,3 +3902,105 @@ test('clones: two locals that SWAP are a rename divergence, not a clean extracti
         'and `rename` is counted in its OWN bucket, not folded into `kind`')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── SIDELESS STRUCT HOLES (CART-0974) ───────────────────────────────────────
+-- A struct hole with no sides is a real divergence and used to be an invisible one:
+-- `{ kind = 'struct' }` and nothing else — no `xn`/`yn` to print, no `why` to bucket,
+-- no span to point at. It counts toward `struct`, so the verdict is `uncrossed`; it
+-- carried no cause, so it fell through into `why_kind`, the number
+-- tools/algebradrive.lua scores against the prototype; and the proposal could not name
+-- it, so a pair with four of five divergences covered read exactly like a pair with
+-- none. Measured before the fix: 24% of struct holes at max_dist 20.
+--
+-- ⚠ THE VERDICT IS NOT WHAT CHANGES. These holes stay in the count on purpose —
+-- dropping them would flip pairs to `covered` and claim a helper covers a divergence
+-- with no term to stand at. What they gain is a cause and a position.
+test('clones: an assignment-width disagreement is named `rowarity`, with a position', function ()
+    -- one row assigns TWO names, its partner one: `local a, b = f(src), nil` against
+    -- `local a = f(src)`. Aligned rows, different statement shape.
+    local body_a = '  local a, b = load(src), nil\n  emit(a)\n  emit(a)\n  return a'
+    local body_b = '  local a = load(src)\n  emit(a)\n  emit(a)\n  return a'
+    local root = proj {
+        ['ra1.lua'] = fn('row_one', 'src', body_a),
+        ['ra2.lua'] = fn('row_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'row_one', 'row_two')
+    ok(p, 'row_one and row_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local w = an and an.struct_why or {}
+    eq(1, w.rowarity, 'the width disagreement is bucketed as `rowarity`')
+    -- ★ ITS OWN BUCKET, NOT `kind` AND NOT `arity`. `arity` is a call's argument list
+    -- or a node's kid list — both INSIDE one expression; this is the statement's shape.
+    eq(0, w.kind or 0, 'and NOT pooled into the bucket algebradrive scores')
+    eq(0, w.arity or 0, 'and not merged into the expression-level arity bucket')
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.why == 'rowarity' then h = x end end
+    ok(h, 'the hole is in `structs`')
+    ok(h.at_a and h.at_b, 'and it carries a position on BOTH sides (both rows exist)')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a control head with a guard the other lacks is `absent`, one-sided span', function ()
+    -- ⚠ TWO DEAD FIXTURES BEFORE THIS ONE, both caught by revert-and-rerun rather than
+    -- by reading. `emit(a, tag)` against `emit(a)` is an argument-list length
+    -- difference — `arity`, INSIDE one call expression, not sideless at all. A guarded
+    -- statement against a bare one is `rowarity`, because a ctrlhead row absorbs its
+    -- body's expressions and the rhs COUNTS then differ. Instrumented instead: all 156
+    -- `absent` holes on our own tree at max_dist 20 come from ONE caller, the last line
+    -- of `anti_unify_row` — `if r1.cond or r2.cond then anti_unify(r1.cond, r2.cond)`.
+    -- So the fixture needs two control heads of EQUAL width where exactly one has a
+    -- condition: an `if` (cond) against a `for ... in` (none).
+    local pre = '  local a = load(src)\n  local b = trim(a)\n'
+    local post = '\n  local c = pack(b)\n  return c'
+    local root = proj {
+        ['ab1.lua'] = fn('abs_one', 'src', pre .. '  if ready(a) then emit(b) end' .. post),
+        ['ab2.lua'] = fn('abs_two', 'src', pre .. '  for _ in pairs(a) do emit(b) end' .. post),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 8, min_rows = 2, min_shared = 1 }),
+        'abs_one', 'abs_two')
+    ok(p, 'abs_one and abs_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    eq(1, (an.struct_why or {}).absent, 'the one-sided condition is bucketed as `absent`')
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.why == 'absent' then h = x end end
+    ok(h, 'the hole is in `structs`')
+    -- ★ THE ASYMMETRY IS THE EVIDENCE: exactly one side carries a position, and which
+    -- one says where the term that exists lives. Nothing can be abstracted over the
+    -- other, which is why this is never a function parameter.
+    ok((h.at_a ~= nil) ~= (h.at_b ~= nil),
+        'exactly ONE side carries a position — the other term does not exist')
+    ok((h.xn ~= nil) ~= (h.yn ~= nil), 'and exactly one side carries a node')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: the blocked sentence NAMES the divergence and counts the covered ones', function ()
+    -- four divergences an fparam covers, plus one assignment-width disagreement that
+    -- nothing can: the shape of `resolve_import` in spec/c.lua vs spec/cpp.lua.
+    local base = '  local a = load(src)\n  local p = trim(a)\n'
+    local body_a = base .. '  local h, extra = seek(p), nil\n  emit(p.line)\n  emit(p.line)\n  return a'
+    local body_b = base .. '  local h = seek(p)\n  emit(acc.line(p))\n  emit(acc.line(p))\n  return a'
+    local root = proj {
+        ['bl1.lua'] = fn('blk_one', 'src', body_a),
+        ['bl2.lua'] = fn('blk_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 8, min_rows = 3, min_shared = 2 }),
+        'blk_one', 'blk_two')
+    ok(p, 'blk_one and blk_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok((an.struct_why or {}).rowarity and an.struct_why.rowarity > 0,
+        'the pair carries a sideless width disagreement')
+    ok(#(an.fparams or {}) > 0, 'AND a merged function parameter')
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('assignment%-width disagreement'),
+        'the blocked sentence NAMES the cause: ' .. txt)
+    ok(txt:find('%[bl%d%.lua:%d+'),
+        'and points at a position, which is what answers "one sub-term away?": ' .. txt)
+    ok(txt:find('ARE covered', 1, true),
+        'and says how many divergences are NOT blocking: ' .. txt)
+    -- ⚠ THE TRIPWIRE: the verdict must NOT have been relaxed to `covered`. A sideless
+    -- hole stays in the count; only the rendering changed.
+    eq('uncrossed', clones.extract_verdict(an).state,
+        'and the verdict is unchanged — a sideless hole still blocks')
+    vim.fn.delete(root, 'rf')
+end)

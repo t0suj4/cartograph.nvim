@@ -434,9 +434,18 @@ for pi = 1, math.min(#pairs_, want_pairs), stride do
                             if x.kind == 'field' or x.kind == 'operator' then fo = true end
                         end
                         local w = ours.struct_why or {}
-                        bump(('   ⤷ struct cause: arity=%d kind=%d localglobal=%d rename=%d')
+                        -- CART-0974: the three SIDELESS causes print here too, and they
+                        -- are why this line was misleading rather than merely short —
+                        -- a hole with no `why` fell through into `kind`, so up to 24% of
+                        -- what this reported as a KIND divergence was a hole with no
+                        -- sides at all. The `cand` predicate below is unaffected (it
+                        -- needs `kind_shared`, which a sideless hole can never earn),
+                        -- but the printed comparison was against a mixed population.
+                        bump(('   ⤷ struct cause: arity=%d kind=%d localglobal=%d'
+                            .. ' rename=%d · sideless: rowarity=%d absent=%d norow=%d')
                             :format(w.arity or 0, w.kind or 0, w.localglobal or 0,
-                                w.rename or 0))
+                                w.rename or 0, w.rowarity or 0, w.absent or 0,
+                                w.norow or 0))
                         bump('   ⤷ over-report by: ' ..
                             ((ours.struct > 0 and fo) and 'BOTH signals'
                              or (ours.struct > 0) and 'STRUCT hole only'

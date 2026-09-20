@@ -1063,10 +1063,47 @@ local function shares_subterm(x, y)
     return hit
 end
 
+--- ★★★ A STRUCT HOLE WITH NO SIDES IS STILL A DIVERGENCE, AND IT USED TO BE AN
+--- INVISIBLE ONE (CART-0974). Three sites below mint `{ kind = 'struct' }` and
+--- nothing else — no `xn`/`yn` to print, no `why` to bucket, no span to point at.
+--- They are counted in `struct`, so `covered ~= struct` and the verdict is
+--- `uncrossed`; they carry no cause, so they fell through the `else` into
+--- `why_kind`, the number tools/algebradrive.lua scores against the prototype; and
+--- the proposal's `differs:` lines cannot name them, so a reader saw parameters
+--- that appear to cover everything under a blanket "something blocks this".
+---
+--- MEASURED over lua/cartograph BEFORE this change, traced to the mint site by
+--- instrumenting each one (a guess would have been wrong: the witness pair's hole
+--- reads like a missing sub-term and is a width disagreement):
+---     max_dist  2    1 of 20 struct holes    rowarity 1
+---     max_dist 20  611 of 2567 (24%)         rowarity 455 · absent 156 · norow 0
+--- ⚠ `norow` NEVER FIRES and is kept as a guard, not a taxonomy entry with a
+--- population: `anti_unify_row` is reached only from a `match` or `sub` op, both of
+--- which imply two rows — a missing row is `ins`/`del` and is counted in `insdel`.
+--- ⚠ `absent` HAS ONE SITE, AND ONLY ONE: all 156 come from this function's last
+--- line, `anti_unify(r1.cond, r2.cond)` where exactly one control head has a
+--- condition. It now carries that side's node and span, so after this change the
+--- FULLY sideless population is `rowarity` alone — 455 of 2567 (18%).
+---
+--- ⚠ AND THEY STAY IN THE COUNT. Dropping them would flip 1 pair at max_dist 2 and
+--- 11 at 20 from `uncrossed` to `covered`, and every flip would claim a helper
+--- covers a divergence that has no term to stand at. The defect is the RENDERING,
+--- not the verdict; what these gain here is a cause and a position. Verified: the
+--- verdict histogram is byte-identical either side of this change.
+---
+--- ★ AND IT UN-MIXES A NUMBER THAT WAS ALREADY BEING SCORED. `why_kind` — the count
+--- tools/algebradrive.lua compares against the prototype's own — goes 1975 -> 1364 at
+--- max_dist 20, because 611 holes in it were never `kind` divergences at all.
 local function anti_unify(e1, e2, la, lb, holes, ctx)
     if e1 == nil and e2 == nil then return true end
     if e1 == nil or e2 == nil then
-        holes[#holes + 1] = { kind = 'struct' }; return false
+        -- `absent`: one side has a sub-term the other does not. ⚠ THE ASYMMETRY IS
+        -- THE EVIDENCE — exactly one of at_a/at_b is non-nil, and which one says
+        -- where the extra sub-term lives. Nothing can be abstracted over a node that
+        -- is not there, so this never becomes a function parameter.
+        holes[#holes + 1] = { kind = 'struct', why = 'absent', xn = e1, yn = e2,
+            at_a = e1 and e1.at or nil, at_b = e2 and e2.at or nil }
+        return false
     end
     if e1.k ~= e2.k then
         -- A struct hole is where the two copies stop having the same SHAPE, and until
@@ -1369,11 +1406,38 @@ local function same_at(x, y)
         and at.el(x) == at.el(y) and at.ec(x) == at.ec(y)
 end
 
+--- WHERE A ROW IS, for the two row-level struct holes below. A row is
+--- `{ lhs = {…}, rhs = {…}, cond? }` and carries NO span of its own (measured) —
+--- its position is its first expression's. Returns nil rather than guessing when the
+--- row is empty, so a caller cannot mistake a missing span for column 1.
+local function row_at(r)
+    if type(r) ~= 'table' then return nil end
+    local e = (r.lhs or {})[1] or (r.rhs or {})[1] or r.cond
+    return e and e.at or nil
+end
+
 local function anti_unify_row(r1, r2, la, lb, holes, imp, ctx)
     local row_start = #holes
-    if not r1 or not r2 then holes[#holes + 1] = { kind = 'struct' }; return false end
+    if not r1 or not r2 then
+        -- `norow`: MEASURED UNREACHED and kept as a guard (see anti_unify's note).
+        -- Both call sites pass rows an alignment op paired, so a one-sided row is an
+        -- `ins`/`del` and never arrives here. Tagged so that if it ever does fire the
+        -- cause is named rather than pooled into `kind`.
+        holes[#holes + 1] = { kind = 'struct', why = 'norow',
+            at_a = row_at(r1), at_b = row_at(r2) }
+        return false
+    end
     if #(r1.lhs or {}) ~= #(r2.lhs or {}) or #(r1.rhs or {}) ~= #(r2.rhs or {}) then
-        holes[#holes + 1] = { kind = 'struct' }; return false
+        -- `rowarity`: the two rows are aligned but their ASSIGNMENT WIDTHS differ —
+        -- `local a = f()` against `local a, b = f()`. ⚠ ITS OWN BUCKET, NOT `arity`:
+        -- that one is a call's argument list or a node's kid list, both INSIDE one
+        -- expression, while this is the statement's shape. Merging distinct structural
+        -- facts to save a bucket is how `why_kind` became a mixed population.
+        -- ★ It is the DOMINANT sideless cause — 455 of 611 at max_dist 20, and the
+        -- only one at the shipped max_dist of 2.
+        holes[#holes + 1] = { kind = 'struct', why = 'rowarity',
+            at_a = row_at(r1), at_b = row_at(r2) }
+        return false
     end
     local ok = true
     -- ★★★ WHICH SIDE A HOLE CAME FROM, RECORDED WHERE IT IS FREE (CART-0941).
@@ -1569,6 +1633,12 @@ function M.analyze_pair(pair)
     -- population, even when it is the right witness.
     local nstruct, why_arity, why_kind, why_lg, kind_shared = 0, 0, 0, 0, 0
     local why_rename = 0
+    -- CART-0974: the three SIDELESS causes, each its own counter for the same reason
+    -- `rename` got one — a new cause falling into `why_kind` moves a number
+    -- tools/algebradrive.lua scores against the prototype. These were ALREADY in it:
+    -- 24% of struct holes at max_dist 20 carried no `why` at all, so that comparison
+    -- has been running against a mixed population.
+    local why_absent, why_rowarity, why_norow = 0, 0, 0
     local structs = {}
     for _, h in ipairs(holes) do
         if h.kind == 'struct' then
@@ -1578,6 +1648,9 @@ function M.analyze_pair(pair)
             h.deps_a = local_deps(h.xn, locals_a)
             h.deps_b = local_deps(h.yn, locals_b)
             if h.why == 'arity' then why_arity = why_arity + 1
+            elseif h.why == 'absent' then why_absent = why_absent + 1
+            elseif h.why == 'rowarity' then why_rowarity = why_rowarity + 1
+            elseif h.why == 'norow' then why_norow = why_norow + 1
             elseif h.why == 'localglobal' then why_lg = why_lg + 1
             -- ⚠ ITS OWN BUCKET, NOT THE `else`. `why_kind` is the number
             -- tools/algebradrive.lua scores against the prototype's own count; letting
@@ -1874,6 +1947,10 @@ function M.analyze_pair(pair)
     return { kind = kind, holes = params, insdel = insdel, drift = drift,
         struct = nstruct, shape = shape, evidence = evidence, fparams = fparams,
         struct_why = { arity = why_arity, kind = why_kind, localglobal = why_lg,
+            -- CART-0974: sideless — a divergence with no term on one or both sides.
+            -- Never a function parameter (there is nothing to abstract over), and
+            -- never pooled into `kind`.
+            absent = why_absent, rowarity = why_rowarity, norow = why_norow,
             rename = why_rename,
             kind_shared = kind_shared },
         -- ★ THE STRUCT HOLES THEMSELVES, which this function has always computed and
@@ -2137,8 +2214,50 @@ function M.extract_proposal(pair, store)
                 .. ' divergence(s).'):format(#fn_params, a.struct or 0)
             L[#L + 1] = '    The value parameterization cannot cross them; a FUNCTION parameter is not one.'
         else
-            L[#L + 1] = '  what blocks a single helper: a shape divergence the'
-                .. ' value-parameterization cannot cross'
+            -- ★★★ NAME THE DIVERGENCE THAT BLOCKS, AND SAY HOW MANY DO NOT
+            -- (CART-0974). The old sentence fired whenever `covered ~= struct` and
+            -- said only that something did — so a pair with four of five divergences
+            -- covered by two function parameters read exactly like a pair with none,
+            -- and the SIDELESS holes doing the blocking could not even be printed:
+            -- they carried no cause and no span. The reader's actual question is "is
+            -- this one sub-term away or not", and only a COUNT plus a POSITION
+            -- answers it.
+            local blocked, lines_of = {}, {}
+            for _, h in ipairs(a.structs or {}) do
+                if h.why == 'absent' or h.why == 'rowarity' or h.why == 'norow' then
+                    blocked[h.why] = (blocked[h.why] or 0) + 1
+                    local w = h.at_a or h.at_b
+                    if w then
+                        local side = h.at_a and pair.a or pair.b
+                        lines_of[#lines_of + 1] = ('%s:%d'):format(side.file, at.sl(w) + 1)
+                    end
+                end
+            end
+            local n_blocked = 0
+            for _, n in pairs(blocked) do n_blocked = n_blocked + n end
+            if n_blocked > 0 then
+                local parts = {}
+                for _, w in ipairs { 'rowarity', 'absent', 'norow' } do
+                    if blocked[w] then
+                        parts[#parts + 1] = ('%d %s'):format(blocked[w],
+                            w == 'rowarity' and 'assignment-width disagreement(s)'
+                            or w == 'absent' and 'sub-term(s) present on one side only'
+                            or 'unpaired row(s)')
+                    end
+                end
+                L[#L + 1] = ('  what blocks a single helper: %s — nothing can be'
+                    .. ' abstracted over a term that is not there%s'):format(
+                    table.concat(parts, ' and '),
+                    #lines_of > 0 and ('  [' .. table.concat(lines_of, ' ') .. ']') or '')
+                if #fn_params > 0 then
+                    L[#L + 1] = ('    the other %d divergence(s) ARE covered, by %d'
+                        .. ' function parameter(s) — this is %d sub-term(s) away.')
+                        :format(verdict.covered, #fn_params, n_blocked)
+                end
+            else
+                L[#L + 1] = '  what blocks a single helper: a shape divergence the'
+                    .. ' value-parameterization cannot cross'
+            end
         end
         return L
     end
