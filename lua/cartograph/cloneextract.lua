@@ -219,7 +219,31 @@ function M.plan(store, pair, opts)
     local syn = EXTRACT[lang]
     local analysis = clones.analyze_pair(pair)
     if analysis.kind ~= 'value' then
+        -- ★ NAME THE CAUSE WHEN THE ANALYSIS HAS ONE. "structural" is a category, not a
+        -- reason: it is the same sentence for a shape difference, an inserted statement
+        -- and a base the call site cannot name, and only the last of those tells the
+        -- caller anything they could act on. CART-0984's `fieldbase` is the first cause
+        -- specific enough to be worth saying out loud, and saying it is what keeps a
+        -- SOUND refusal from reading like an uninteresting one.
         return nil, ('not value-parameterizable (%s) — nothing to lift cleanly'):format(analysis.kind)
+    end
+    -- ★★★ A HOLE THE CALL SITE CANNOT WRITE DOWN (CART-0984). A `field` hole does not
+    -- lift the field NAME, it lifts THE WHOLE ACCESS — `A.unify` and `A.join` share a
+    -- base and differ in one leaf, so the value passed is `A.unify`. That is right
+    -- whenever the base is nameable THERE and silently wrong when it is not: measured on
+    -- our own tree, folding `M.template_meet <-> M.template_join` emitted
+    -- `…(a, b, opts, A.unify, …)` where `A` is `local A = alg.load()` INSIDE the body it
+    -- came from. The result PARSES, the helper exists, both call sites exist — every
+    -- declared guard passes — and the call site does a global read.
+    -- ⚠ NOTHING DOWNSTREAM LOOKS AT A SPAN'S CONTENTS, so this is the only place the
+    -- question gets asked. The `name` arm of `anti_unify` has always asked it ("a local
+    -- the call site cannot name"); the field arm now marks it and this refuses on it.
+    for _, h in ipairs(analysis.holes) do
+        if h.unnameable then
+            return nil, ('the copies differ in a field NAME, but folding them passes the'
+                .. ' whole access, and its base `%s` is a local of the body — not'
+                .. ' something the call site can name'):format(tostring(h.unnameable))
+        end
     end
     -- ★★★ A WRITE TARGET IS NOT A VALUE (CART-0941). Every hole below becomes an
     -- `hp<i>` parameter, is substituted at each of its sites, and is passed the

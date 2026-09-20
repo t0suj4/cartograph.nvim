@@ -1048,6 +1048,33 @@ local function local_deps(node, locals)
     return out
 end
 
+--- ★★★ THE FIRST LOCAL A LIFTED SPAN NEEDS AND THE CALL SITE CANNOT NAME, or nil.
+---
+--- CART-0984: a `field` hole does NOT lift the field name — it lifts THE WHOLE ACCESS,
+--- because `A.unify` and `A.join` share a base and differ in one leaf, so the value the
+--- call site passes is `A.unify`. That is right whenever the base is nameable THERE, and
+--- silently wrong when it is not: measured on our own tree, folding
+--- `M.template_meet <-> M.template_join` emitted `template_meet_extracted(a, b, opts,
+--- A.unify, …)` where `A` is `local A = alg.load()` INSIDE the body it extracted from.
+--- The result parses, the helper exists, both call sites exist — every declared guard
+--- passes — and the call site does a global read: "attempt to index global 'A'".
+---
+--- ★★ THE NAME ARM HAS ALWAYS CHECKED THIS and the field arm never did. A diverging
+--- NAME that is a local outside the parameter set becomes a `localglobal` struct hole,
+--- commented "a local the call site cannot name". This is the same question asked of a
+--- field hole's BASE, and the answer comes from the same set: `pair.a.params`, which
+--- `fn_row_keys` already computes as the parameters a body does not redefine.
+---
+--- ⚠ NO `params` SET MEANS NO CLAIM, SO ANY LOCAL IS UNNAMEABLE. The name arm behaves
+--- the same way (its `ps` is nil and the local falls through to `localglobal`): without
+--- the set we cannot show the call site can name it, and guessing yes is how this got
+--- shipped in the first place.
+local function unnameable_local(node, locals, params)
+    for _, nm in ipairs(local_deps(node, locals)) do
+        if not (params and params[nm]) then return nm end
+    end
+end
+
 --- ★★★ Mer-S, THE MERGE RULE (Baumgartner & Kutsia 2014 §3, BK.md: "merge identical
 --- stored pairs into one variable; drop empty ones"). It is the same idea as the value
 --- holes' grouping one sort up, and it is NOT cosmetic: merging equal stored pairs is
@@ -1271,7 +1298,23 @@ local function anti_unify(e1, e2, la, lb, holes, ctx)
         -- a field-NAME hole lifts as the whole field ACCESS (a value param): e1/e2 ARE
         -- the field nodes, so e1.at/e2.at span `base.name` — the value to pass.
         if e1.n ~= e2.n then
-            holes[#holes + 1] = { kind = 'field', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
+            -- ⚠⚠ THE BASE TRAVELS WITH THE VALUE (CART-0984). `e1.at` spans `base.name`,
+            -- so lifting this hole writes the BASE at every call site. A base the call
+            -- site cannot name makes code that parses and does not run, and no guard
+            -- downstream looks at the span's contents.
+            -- ★★★ MARK IT, DO NOT RECLASSIFY IT. My first cut minted a STRUCT hole here
+            -- and broke two classification tests, correctly: a field divergence off a
+            -- shared base IS selector evidence — `X(base)` with `field:a(◦)` against
+            -- `field:b(◦)` — and that evidence is how a wrapper is told from a
+            -- rows-only difference. Whether the pair is a SELECTOR and whether the hole
+            -- can be LIFTED are two questions, and answering the second by destroying
+            -- the answer to the first is the same mistake as a fact with no accessor
+            -- becoming a conservative gate. The classification stands; the mark travels
+            -- with it and the extract verb refuses on it.
+            holes[#holes + 1] = { kind = 'field', a = e1.n, b = e2.n,
+                at_a = e1.at, at_b = e2.at,
+                unnameable = unnameable_local(e1.b, la, ctx and ctx.pa)
+                    or unnameable_local(e2.b, lb, ctx and ctx.pb) }
         end
         return ok
     elseif k == 'index' then
@@ -1904,6 +1947,19 @@ function M.analyze_pair(pair, store)
     -- a single-site dedup would leave later occurrences un-parameterized — unsound). at_a/
     -- at_b stay as the FIRST site, for display.
     local params, bykey = {}, {}
+    -- a range identifies a site; appending the same one twice is a double edit.
+    -- ⚠ THE SEEN-SET IS A SIDE TABLE KEYED BY THE LIST, not a field on it: `sites_a` is
+    -- an ARRAY that consumers iterate, and hanging a named key off it would hand every
+    -- `pairs()` over the sites a bookkeeping entry that is not a site.
+    local seen_sites = {}
+    local function add_site(list, r)
+        local seen = seen_sites[list]
+        if not seen then seen = {}; seen_sites[list] = seen end
+        local key = ('%d:%d:%d:%d'):format(at.sl(r), at.sc(r), at.el(r), at.ec(r))
+        if seen[key] then return end
+        seen[key] = true
+        list[#list + 1] = r
+    end
     for _, h in ipairs(holes) do
         if h.kind ~= 'struct' then
             local key = h.kind .. '\31' .. tostring(h.a) .. '\31' .. tostring(h.b)
@@ -1932,8 +1988,27 @@ function M.analyze_pair(pair, store)
             -- GROUPING, built field by field, and a field nobody adds here is invisible
             -- downstream however carefully it was computed. Same shape as CART-0964.
             if h.guarded then p.guarded = p.guarded or h.guarded end
-            if h.at_a then p.sites_a[#p.sites_a + 1] = h.at_a end
-            if h.at_b then p.sites_b[#p.sites_b + 1] = h.at_b end
+            -- ★ A PARAMETER IS UNLIFTABLE IF **ANY** OF ITS SITES IS, the same ANY rule
+            -- `side`/`literal_dep`/`guarded` use: lifting the parameter lifts every
+            -- site, so one site whose base the call site cannot name is enough.
+            if h.unnameable then p.unnameable = p.unnameable or h.unnameable end
+            -- ⚠⚠ DEDUPE BY RANGE (CART-0984). The list above is deliberately EVERY
+            -- occurrence — "a single-site dedup would leave later occurrences
+            -- un-parameterized — unsound" — but that is a dedup by VALUE. A leaf minted
+            -- TWICE AT THE SAME POSITION (the field arm re-walks a base, so one
+            -- divergence can be recorded more than once) put the identical range in
+            -- twice, and the substituter applied it twice: the first replacement
+            -- shrinks the line, the second lands on the SHIFTED text and eats whatever
+            -- now sits at those columns.
+            -- MEASURED on our own tree: folding odin.lua's `body_of <-> params_of`
+            -- emitted `if g:named() and g:type() == hp1n return g end` — the `then`
+            -- consumed by a second substitution at stale columns. The `parses` guard
+            -- refused it, so nothing was written; without that guard it would have
+            -- been a silent corruption at every repeated hole.
+            -- ★ SAME RANGE, NOT SAME VALUE: two genuine occurrences of the same leaf
+            -- still get one site each, which is the property the comment above defends.
+            if h.at_a then add_site(p.sites_a, h.at_a) end
+            if h.at_b then add_site(p.sites_b, h.at_b) end
         end
     end
     local kind = structural and 'structural' or (#params == 0 and 'exact' or 'value')
