@@ -1395,6 +1395,9 @@ test('agentwrite: a plan missing a protocol DECLARATION refuses, naming which', 
         -- that says WHY a write happened was the only part of the protocol nothing
         -- checked. It refuses by name now, like the other four.
         { 'desc',     'carries no description' },
+        -- CART-0989: what the plan claims about BEHAVIOUR. Silence here would mean
+        -- "unknown", and unknown rendered as fine is the defect the arc is about.
+        { 'preserves', 'declares no behavioural claim' },
     }
     for _, c in ipairs(cases) do
         local field, words = c[1], c[2]
@@ -1428,6 +1431,77 @@ end)
 -- another one covers it, without driving the other one, is how the `else` in
 -- `txn_apply` came to exist. So the replacement gets the positive test the deleted
 -- gates never had: none of the four verb-specific gates had one.
+-- ── EVERY WRITE VERB STATES WHAT IT PRESERVES (CART-0989) ──────────────────
+--
+-- ★★★ USER: "declare where we permit changed behavior and what requires a review."
+-- `txn.contain_plan` already does this for the FILESYSTEM — every path a plan touches
+-- must be inside the project, one escaping member refuses. This is the same rule one
+-- tier up, and until now NOT ONE WRITE VERB DECLARED A BEHAVIOURAL CLAIM: the five
+-- shipped guards are all textual, and `certificate`/`neutrality` (which RUN the code
+-- and compare) are off the ladder, so their `changed` set had no claim to falsify.
+--
+-- ★ THE SWEEP IS KEYED OFF `agent._families`, like the applyability one, so a planner
+-- added later either declares or is named here.
+test('agentwrite: every family DECLARES what it preserves, from the closed vocabulary', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local VOCAB = { all = true, none = true, unreviewed = true }
+    local missing, claims = {}, {}
+    for _, family in ipairs((function ()
+        local f = {}
+        for k in pairs(SWEEP_CASES) do f[#f + 1] = k end
+        table.sort(f); return f
+    end)()) do
+        local c = SWEEP_CASES[family]
+        ingest(mkroot(c.files()))
+        local p = call(agent._families[family], c.args())
+        local sj = type(p.subject) == 'table' and p.subject or {}
+        if sj.plan and sj.plan ~= NUL then
+            local e = held_plan(sj.plan)
+            local pv = e and e.plan and e.plan.preserves
+            if not VOCAB[pv] then
+                missing[#missing + 1] = family .. '=' .. tostring(pv)
+            end
+            claims[#claims + 1] = family .. ':' .. tostring(pv)
+            -- ⚠ A CLAIM WITHOUT A REASON IS A SLOGAN. Every one says how it is justified.
+            ok(type(e.plan.preserves_why) == 'string' and #e.plan.preserves_why > 0,
+                family .. ' says WHY it claims ' .. tostring(pv))
+        end
+    end
+    eq('', table.concat(missing, ', '),
+        'every family declares a claim from all|none|unreviewed; bad: '
+        .. table.concat(missing, ', '))
+    ok(#claims >= 6, 'the sweep actually reached the planners: ' .. table.concat(claims, ' '))
+end)
+
+-- ★★ AND THE TWO ENDS OF THE VOCABULARY ARE REAL, not decoration.
+test('agentwrite: `replace` claims NOTHING and an all-literal fold claims ALL', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    ingest(mkroot { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N })
+    -- the payload is caller-supplied, so this verb can claim nothing about it — its
+    -- standing hazard has always said so in prose; now it says so as data.
+    local r = call('txn_plan_replace', { node = idof('M.g'),
+        text = 'function M.g(x) return 0 end' })
+    local re = held_plan(r.subject.plan)
+    eq('none', re.plan.preserves, '`replace` makes no behavioural claim')
+    ok((re.plan.preserves_why or ''):find('supplied', 1, true),
+        'and says why: ' .. tostring(re.plan.preserves_why))
+
+    -- ⚠ THE VOCABULARY IS CLOSED, and that is what keeps it from drifting into prose.
+    -- A value outside all|none|unreviewed is refused BY NAME rather than treated as a
+    -- claim nobody can interpret.
+    ingest(mkroot { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N })
+    local q = call('txn_plan_replace', { node = idof('M.g'),
+        text = 'function M.g(x) return 1 end' })
+    eq(true, call('txn_preview', { plan = q.subject.plan }).ok)
+    held_plan(q.subject.plan).plan.preserves = 'mostly'
+    local a = call('txn_apply', { plan = q.subject.plan })
+    local rf = refusal_of(a)
+    ok(rf and (rf.reason or ''):find('all|none|unreviewed', 1, true),
+        'a claim outside the vocabulary is refused: ' .. ((rf and rf.reason) or 'applied!'))
+end)
+
 test('agentwrite: the `parses` guard REFUSES a write that would break the file', function ()
     if not ready() then skip('no treesitter') end
     permit(true)

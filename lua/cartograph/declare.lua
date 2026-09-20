@@ -314,6 +314,13 @@ function M.plan(store, opts)
     }
     plan.refspecs = { { id = plan.target.id, name = plan.target.name,
         ref = plan.target.ref, what = 'symbol' } }
+    -- ⚠ `may_change` IS THE POINT HERE: adding a member CHANGES the container's
+    -- contents, on purpose. That is permitted change, stated rather than smuggled in
+    -- under 'all' (CART-0989).
+    plan.preserves = 'all'
+    plan.preserves_why = 'a member is inserted into one container; the `shape-preserved`'
+        .. ' guard re-derives that the container is the one the plan addressed'
+    plan.may_change = { plan.target.name }
     plan.desc = 'declare: add a member to ' .. plan.target.name
     return txn.protocol(plan, M.edits_for)
 end

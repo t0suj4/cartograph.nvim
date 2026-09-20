@@ -302,7 +302,12 @@ function M.plan(store, pair, opts)
         return nil, 'both functions must be in one supported language (Lua, JavaScript)'
     end
     local syn = EXTRACT[lang]
-    local analysis = clones.analyze_pair(pair)
+    -- ⚠ THE STORE IS NOT OPTIONAL HERE (CART-0989). `move_purity` needs it, and without
+    -- it every non-literal hole comes back `no_store` — so the behavioural verdict said
+    -- `unreviewed` for the right fold and the WRONG REASON ("the caller supplied no
+    -- store" instead of "`require` is io"). A degraded answer that happens to agree with
+    -- the correct one is the most expensive kind to leave in place.
+    local analysis = clones.analyze_pair(pair, store)
     if analysis.kind ~= 'value' then
         -- ★ NAME THE CAUSE WHEN THE ANALYSIS HAS ONE. "structural" is a category, not a
         -- reason: it is the same sentence for a shape difference, an inserted statement
@@ -567,6 +572,15 @@ function M.plan(store, pair, opts)
     -- not refused. Refusing it would throw away a legal refactoring because we cannot
     -- yet prove something about it, which is the opposite of saying what we know.
     plan.behaviour = analysis.behaviour
+    -- ★★★ THE NARROWING DECIDES THE CLAIM (CART-0989). `analysis.behaviour` already
+    -- says whether any hole can carry a behavioural delta; an all-pure fold is neutral
+    -- BY ANALYSIS and claims 'all'. One that is not does NOT get refused — it lands in
+    -- the review bucket by name, which is exactly what the user asked the declaration
+    -- to distinguish. Measured on our own tree: 5 of 6 plannable folds claim 'all'; the
+    -- sixth is `unreviewed` because lifting its hole would move a `require`.
+    plan.preserves = (plan.behaviour and plan.behaviour.neutral) and 'all' or 'unreviewed'
+    plan.preserves_why = (plan.behaviour and plan.behaviour.why)
+        or 'the fold\'s behavioural radius was not established'
     plan.precheck = function (st)
         if next(st.moveset or {}) then
             return 'a move-set is staged — apply or clear it first'
@@ -1042,6 +1056,10 @@ function M.plan_family(store, fam, opts)
     plan.behaviour = { neutral = nil,
         why = 'not computed for a family plan: family_admissibility does not carry'
             .. ' per-hole purity, so the radius is unknown rather than empty' }
+    -- a family plan cannot yet establish its radius, so it says UNREVIEWED rather than
+    -- inheriting the pair path's 'all'. Unknown is not neutral.
+    plan.preserves = 'unreviewed'
+    plan.preserves_why = plan.behaviour.why
     plan.precheck = function (st)
         if next(st.moveset or {}) then
             return 'a move-set is staged — apply or clear it first'

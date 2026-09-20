@@ -596,6 +596,13 @@ local function collect(store, ids, dest, plan, opts)
     for _, m in ipairs(plan.moves) do
         if m.mode ~= 'copy' then departed[#departed + 1] = m.ref end
     end
+    -- ⚠ QUALIFIED BY ITS HAZARDS, DELIBERATELY. A move preserves behaviour when every
+    -- reference is rewritten — which this plan does — but module LOAD-ORDER effects and
+    -- file-local capture are real and are carried as hazards rather than folded into
+    -- the claim. The claim is 'all'; the hazards say where to look.
+    plan.preserves = 'all'
+    plan.preserves_why = 'every reference to a moved symbol is rewritten; load-order and'
+        .. ' capture risks are carried as hazards rather than claimed away'
     plan.desc = { moves = departed, dest = plan.dest }
     return txn.protocol(plan, M.edits_for)
 end

@@ -86,6 +86,14 @@ function M.plan(store, opts)
         .. ' its arity, or relates to what it replaces'):format(n.file, tostring(n.name))
     plan.refspecs = { { id = plan.target.id, name = plan.target.name,
         ref = plan.target.ref, what = 'definition' } }
+    -- ★★★ THE VERB THAT CLAIMS NOTHING, AND NOW SAYS SO AS DATA. Its standing hazard
+    -- has always said it in prose — "the replacement text was supplied, not derived …
+    -- and NOTHING about whether the new text defines `x`, keeps its arity, or relates
+    -- to what it replaces". `preserves = 'none'` is that paragraph where a checker can
+    -- read it, and it is what makes this verb the one that always needs review.
+    plan.preserves = 'none'
+    plan.preserves_why = 'the replacement text was supplied by the caller, not derived'
+        .. ' from the tree: nothing here can claim anything about what it does'
     plan.desc = { name = plan.target.name, file = plan.target.file }
     return txn.protocol(plan, M.edits_for)
 end

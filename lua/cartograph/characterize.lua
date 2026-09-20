@@ -1308,6 +1308,9 @@ function M.plan(store, fn_id, opts)
     local plan = {
         verb = 'characterize', generation = store.generation,
         guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
+        -- CART-0989: characterize WRITES A SPEC and changes no existing code path.
+        preserves = 'all',
+        preserves_why = 'a spec file is written; no existing definition is edited',
         file = node.file, fn = node.name or '?', fn_id = node.id,
         ref = store.ref_of(node.id),
         subject = reach,

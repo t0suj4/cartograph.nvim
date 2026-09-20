@@ -46,6 +46,11 @@ local function stage(store, node, exp, how)
     return txn.protocol({
         verb = 'extract-fn', generation = store.generation,
         guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
+        -- CART-0989: the extracted range's live-in/live-out split comes off the CFG, so
+        -- the helper receives exactly what the range read and returns what it defined.
+        preserves = 'all',
+        preserves_why = 'the helper signature is the extracted range\'s live-in/live-out'
+            .. ' split, read off the CFG',
         file = node.file, fn = node.name or '?', fn_id = node.id,
         ref = store.ref_of(node.id), how = how,
         name = exp.name, params = exp.params, returns = exp.returns,

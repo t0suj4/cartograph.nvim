@@ -751,8 +751,13 @@ test('moveapply: the PLAN field set is pinned to its schema version', function (
     -- are this verb's host coupling — the staged move-set it requires and then spends
     -- — declared on the plan so `txn.apply` can run it without knowing which module
     -- built it. They are CLOSURES, the same standing `edit_of` has had since CART-0375.
+    -- ⚠ `preserves`/`preserves_why` ARE PROTOCOL (CART-0989, schema.PLAN v4): what the
+    -- plan CLAIMS about behaviour. `execute` refuses a plan that declares nothing, the
+    -- same standing `guards`/`refspecs`/`desc` have — silence would mean "unknown", and
+    -- rendering unknown as fine is the defect the whole arc is about.
     local want = { 'consume', 'copy', 'creates', 'desc', 'dest', 'dest_at', 'edit_of',
         'generation', 'guards', 'hazards', 'header', 'imports_add', 'moves', 'precheck',
+        'preserves', 'preserves_why',
         'refspecs', 'rewrites', 'scaffold', 'stamps', 'touched', 'verb' }
     -- `reexports` is v2's addition and appears only when the caller asks for it,
     -- so it is listed as OPTIONAL rather than required: a field that comes and

@@ -215,6 +215,11 @@ function M.plan(store, opts)
     end
     plan.refspecs = { { id = plan.target.id, name = plan.target.name,
         ref = plan.target.ref, what = 'symbol' } }
+    -- prose only, and `comment-inert` REFUSES if the text could close the comment and
+    -- turn the rest into code — which is the only way annotating changes behaviour
+    plan.preserves = 'all'
+    plan.preserves_why = 'comments only; the `comment-inert` guard proves the prose'
+        .. ' cannot terminate the comment early'
     plan.desc = 'annotate: attach prose to ' .. plan.target.name
     return txn.protocol(plan, M.edits_for)
 end

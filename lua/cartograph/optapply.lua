@@ -50,6 +50,12 @@ local M = {}
 --- premises, which are the recorded provenance of an override.
 local function stamp_desc(plan)
     if not plan then return plan end
+    -- all four optimize builders share this: each rewrite is admitted only by the
+    -- optimizer's own soundness gates, and the `spans-unchanged` guard re-derives that
+    -- the text it was authorised against is still there
+    plan.preserves = 'all'
+    plan.preserves_why = 'every rewrite passed `optimize`\'s soundness gates; declined'
+        .. ' sites are carried in the `declined` ledger rather than applied'
     local waivers = {}
     for _, m in ipairs(plan.moves or {}) do
         if m.waived then waivers[#waivers + 1] = m.waived end

@@ -326,6 +326,9 @@ function M.plan(store, id)
             return 'a move-set is staged — apply or clear it first'
         end
     end
+    plan.preserves = 'all'
+    plan.preserves_why = 'the removed copies are EXACT clones of the survivor and every'
+        .. ' call site is repointed to it'
     plan.desc = {
         survivor = plan.survivor.ref, survivor_name = plan.survivor.name,
         removed = vim.tbl_map(function (r) return r.ref end, plan.removed),

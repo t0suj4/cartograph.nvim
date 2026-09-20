@@ -552,6 +552,51 @@ function M.execute(store, plan, desc, edit_of)
     -- refuses is worse than either refusing, because it is discovered later.
     local cok, cwhy = M.contain_plan(plan)
     if not cok then return nil, cwhy end
+    -- ⚠ AFTER THE CONTAINMENT BACKSTOP, NOT BEFORE IT. Placed earlier, this refusal
+    -- PREEMPTED the "refusing to write outside the project" one — caught by CART-0577's
+    -- own test, which builds an escaping plan and got told about a missing field
+    -- instead. A SECURITY refusal must speak before a protocol-completeness one: the
+    -- first is about what the plan would DO, the second about how it was written.
+    -- ★★★ WHAT THIS PLAN CLAIMS ABOUT BEHAVIOUR (CART-0989). USER: "we could use the
+    -- scope work to declare where we permit changed behavior and what requires a review."
+    --
+    -- `contain_plan` above already does this for the FILESYSTEM: every path a plan
+    -- touches must be inside the project, and one escaping member refuses (CART-0577).
+    -- This is the same rule one tier up. Until now NOT ONE WRITE VERB DECLARED A
+    -- BEHAVIOURAL CLAIM — the five shipped guards are all textual, and `certificate`/
+    -- `neutrality`, which RUN the code and compare, are off the ladder entirely. So
+    -- `certificate.check`'s `changed` set had nothing to be compared against: a list of
+    -- facts with no claim to falsify.
+    --
+    -- A CLOSED VOCABULARY, because an open one drifts into prose:
+    --   'all'         every existing symbol's observable behaviour is unchanged
+    --   'none'        NO claim — the payload was supplied, not derived (`replace`)
+    --   'unreviewed'  this plan's claim has not been established. NOT a pass: it is
+    --                 the REVIEW bucket, and it is what the user asked for by name.
+    -- `plan.may_change` is the INTENDED delta — `declare` adds a member, so the
+    -- container's contents change ON PURPOSE. Permitted change, stated rather than
+    -- smuggled in under 'all'.
+    --
+    -- ⚠ IT REFUSES WHEN ABSENT, like `guards`/`refspecs`/`desc`. Silence here would
+    -- mean "unknown", and rendering unknown as fine is the defect this whole arc is
+    -- about. ⚠ AND NOTHING CHECKS THE CLAIM YET (CART-0374's rung): a declaration is
+    -- reviewable by READING before it is checkable by running, and the checker arrives
+    -- to something already written down.
+    local PRESERVES = { all = true, none = true, unreviewed = true }
+    -- ⚠ THE nil CHECK IS REDUNDANT FOR CATCHING AND KEPT FOR THE MESSAGE. `PRESERVES[nil]`
+    -- is falsy, so the vocabulary check below would refuse an absent claim too — with
+    -- "claims `nil`, which is not one of all|none|unreviewed", which describes the value
+    -- rather than telling a builder what to write. Measured by revert: disabling this
+    -- one leaves the plan refused, by the wrong sentence. Do not delete it as duplication.
+    if plan.preserves == nil then
+        return nil, ('the plan for `%s` declares no behavioural claim — a write verb '
+            .. 'must say what it preserves (`plan.preserves = \'all\'|\'none\'|'
+            .. '\'unreviewed\'`)'):format(tostring(plan.verb))
+    end
+    if not PRESERVES[plan.preserves] then
+        return nil, ('the plan for `%s` claims `%s`, which is not one of all|none|'
+            .. 'unreviewed'):format(tostring(plan.verb), tostring(plan.preserves))
+    end
     local before = {}
     for _, rel in ipairs(plan.touched) do
         local t = M.read_file(root, rel)

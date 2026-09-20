@@ -30,7 +30,12 @@ local M = {}
 --- THE PLAN: what a write verb hands to `apply`, and what the journal stores as
 --- its description. Bumped when a field a replayer reads is ADDED, REMOVED, or
 --- CHANGES MEANING.
-M.PLAN = 3 -- v3: `plan.refspecs`, `plan.desc`, `plan.expect` and (where a verb is
+M.PLAN = 4 -- v4: `plan.preserves` / `preserves_why` / `may_change` (CART-0989) — what
+           --     the plan CLAIMS about behaviour, from a closed vocabulary
+           --     (all|none|unreviewed). IT GATES EXECUTION: `execute` refuses a plan
+           --     that declares nothing, so a v3 plan does not apply. USER: "declare
+           --     where we permit changed behavior and what requires a review".
+           -- v3: `plan.refspecs`, `plan.desc`, `plan.expect` and (where a verb is
            --     coupled to host state) `plan.precheck`/`plan.consume` — CART-0982.
            --     Together they are what `apply` used to do by hand, so that ONE
            --     driver runs any plan: `txn.apply`.

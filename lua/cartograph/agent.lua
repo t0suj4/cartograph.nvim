@@ -1016,7 +1016,9 @@ local function v_clones_find(store, args)
     end
     if want ~= 'exact' then
         for _, p in ipairs(clones.near(store)) do
-            local a = clones.analyze_pair(p)
+            -- CART-0989: with the store, so `moves` is a purity verdict rather than
+            -- `no_store`
+            local a = clones.analyze_pair(p, store)
             -- ★★★ THE PROJECTION IS THE ANALYSIS MODULE'S, NOT THIS LOOP'S
             -- (CART-0964). This used to rebuild a hole FIELD BY FIELD under a warning
             -- that said exactly what would go wrong -- "every field the analysis gains
