@@ -54,32 +54,26 @@ local function alias_name(node, src)
     end
 end
 
-local function seq_of(node)
+local function map_of_extracted(node, p1, p2)
     if not node then return nil end
-    if node:type() == 'block_sequence' or node:type() == 'flow_sequence' then
+    if node:type() == p1 or node:type() == p2 then
         return node
     end
     if node:type() == 'block_node' or node:type() == 'flow_node' then
         for c in node:iter_children() do
-            if c:type() == 'block_sequence' or c:type() == 'flow_sequence' then
+            if c:type() == p1 or c:type() == p2 then
                 return c
             end
         end
     end
 end
 
+local function seq_of(node)
+    return map_of_extracted(node, 'block_sequence', 'flow_sequence')
+end
+
 local function map_of(node)
-    if not node then return nil end
-    if node:type() == 'block_mapping' or node:type() == 'flow_mapping' then
-        return node
-    end
-    if node:type() == 'block_node' or node:type() == 'flow_node' then
-        for c in node:iter_children() do
-            if c:type() == 'block_mapping' or c:type() == 'flow_mapping' then
-                return c
-            end
-        end
-    end
+    return map_of_extracted(node, 'block_mapping', 'flow_mapping')
 end
 
 -- the top-level sequence of a document: stream > document > block_node > seq
