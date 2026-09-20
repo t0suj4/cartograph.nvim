@@ -1849,6 +1849,28 @@ local VERB_OF_FAMILY = {
     replace = 'txn_plan_replace',
 }
 
+--- ★★★ WHICH MODULE APPLIES A HELD PLAN, PER FAMILY — AND IT IS TOTAL ON PURPOSE
+--- (CART-0878). This was an if/elseif chain over three families ending in an `else`
+--- that called `optapply.apply`. Every family the chain did not name therefore reached
+--- the OPTIMIZER, which found nothing of its own in the plan and answered "nothing
+--- applicable (0 declined)" — a sentence that reads like a fact about the code.
+---
+--- ⚠⚠ THREE VERBS COULD PLAN AND PREVIEW AND NOT APPLY, and I added two of them the
+--- same day without noticing: `extract-family` (since it shipped), `clone-merge` and
+--- `replace` (both 2026-09-20). Plan and preview were driven in tests; apply was not,
+--- and the `else` turned the omission into a plausible refusal instead of an error.
+--- A table is total by construction and an unmapped family now REFUSES BY NAME, so the
+--- next planner that forgets this line is told, not silently routed.
+local APPLY_OF_FAMILY = {
+    move = 'cartograph.moveapply',
+    declare = 'cartograph.declare',
+    annotate = 'cartograph.annotate',
+    optimize = 'cartograph.optapply',
+    ['extract-family'] = 'cartograph.cloneextract',
+    ['clone-merge'] = 'cartograph.clonemerge',
+    replace = 'cartograph.replace',
+}
+
 local PLAN_CAP = 16
 M._plans = {}
 local plan_seq = 0
@@ -2864,16 +2886,20 @@ local function v_txn_apply(store, args)
             ('plan %s has never been diffed — txn_apply does not write bytes no caller has seen'):format(e.id),
             'call txn_preview with this same plan id, read the diff it returns, then call txn_apply again')
     end
+    local mod = APPLY_OF_FAMILY[e.family]
+    if not mod then
+        return refuse('no-apply-path',
+            ('plan %s is family `%s`, which no module is registered to apply — the plan was built and cannot be written'):format(e.id, tostring(e.family)),
+            'this is a gap in cartograph, not in your request: a planner was added without an entry in APPLY_OF_FAMILY. Nothing was written',
+            { plan = e.id, family = nn(e.family) })
+    end
     local entry, why
-    if e.family == 'move' then
-        entry, why = require('cartograph.moveapply').apply(store, e.plan)
-    elseif e.family == 'declare' then
-        entry, why = require('cartograph.declare').apply(store, e.plan)
-    elseif e.family == 'annotate' then
-        entry, why = require('cartograph.annotate').apply(store, e.plan)
-    else
-        local okA, ent_or_why = require('cartograph.optapply').apply(store, e.plan)
+    if e.family == 'optimize' then
+        -- ⚠ optapply alone returns (ok, entry|why) rather than (entry, why)
+        local okA, ent_or_why = require(mod).apply(store, e.plan)
         if okA then entry = ent_or_why else why = tostring(ent_or_why) end
+    else
+        entry, why = require(mod).apply(store, e.plan)
     end
     if not entry then
         return refuse('apply-refused',

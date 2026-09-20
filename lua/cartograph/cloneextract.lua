@@ -827,6 +827,19 @@ function M.plan_family(store, fam, opts)
     for _, f in ipairs(files) do plan.touched[#plan.touched + 1] = f end
     if xfile then plan.touched[#plan.touched + 1] = dest end
     table.sort(plan.touched)
+    -- ⚠⚠ THE STAMP CAS WAS MISSING FROM EVERY FAMILY PLAN (CART-0878). `M.plan` sets
+    -- `plan.stamps` and this builder did not, so the rung that refuses when a touched
+    -- file changed since planning was simply absent — and `txn.verify` indexed nil
+    -- rather than saying so. Nobody met it because the family verb could not be applied
+    -- at all until today, which is the only reason a missing SAFETY rung stayed quiet.
+    -- ⚠ A CREATED FILE HAS NO PRIOR STAMP, exactly as the pair path has it: stamping a
+    -- file that does not exist yet would refuse the write it is meant to protect.
+    plan.stamps = {}
+    for _, f in ipairs(plan.touched) do
+        if not (plan.creates and plan.creates[f]) then
+            plan.stamps[f] = txn.disk_stamp(store.data.root, f)
+        end
+    end
     -- ★ JOIN THE PLAN PROTOCOL — the one line every builder ends with. Without
     -- it `dryrun` refuses with "this verb has not joined the plan protocol",
     -- which is a correct refusal and an easy one to mistake for a bad plan.
@@ -856,21 +869,32 @@ function M.preview(store, plan)
     return txn.dryrun(store, plan)
 end
 
+--- ⚠⚠ THIS FUNCTION WAS PAIR-ONLY AND A FAMILY PLAN RAISED IN IT (CART-0878). It read
+--- `plan.a`/`plan.b` — the shape `M.plan` builds — while `M.plan_family` builds
+--- `plan.members`, so the family verb could PLAN and PREVIEW and never apply. It did not
+--- refuse: it indexed a nil field. Both shapes are handled here now, because a verb that
+--- can produce a plan it cannot apply is a verb that lies about being finished.
 function M.apply(store, plan)
     if next(store.moveset or {}) then
         return nil, 'a move-set is staged — apply or clear it first'
     end
-    local refspecs = {
-        { id = plan.a.id, name = plan.a.name, ref = plan.a.ref, what = 'clone' },
-        { id = plan.b.id, name = plan.b.name, ref = plan.b.ref, what = 'clone' },
-    }
+    local refspecs = {}
+    if plan.members then
+        for _, m in ipairs(plan.members) do
+            refspecs[#refspecs + 1] = { id = m.id, name = m.name, ref = m.ref, what = 'clone' }
+        end
+    else
+        refspecs[1] = { id = plan.a.id, name = plan.a.name, ref = plan.a.ref, what = 'clone' }
+        refspecs[2] = { id = plan.b.id, name = plan.b.name, ref = plan.b.ref, what = 'clone' }
+    end
     local bad = txn.verify(store, plan, refspecs)
     if bad then return nil, bad end
     -- synthesis gates: every touched/created file parses, and the helper + both calls exist
     local syn = EXTRACT[plan.lang]
     local _, after = M.preview(store, plan)
     if not after then return nil, 'preview failed' end
-    local defsite = plan.xfile and plan.create.file or plan.a.file
+    local defsite = plan.xfile and plan.create.file
+        or (plan.a and plan.a.file) or (plan.members and plan.members[1].file)
     for _, rel in ipairs(plan.touched) do
         if not parses_clean(after[rel] or '', syn.parse) then
             return nil, ('the synthesized %s does not parse — refusing (a synthesis bug, not your code)'):format(rel)
@@ -888,10 +912,18 @@ function M.apply(store, plan)
             ncalls = ncalls + select(2, (after[rel] or ''):gsub(callee:gsub('([^%w])', '%%%1') .. '%(', ''))
         end
     end
-    if ncalls < 2 then return nil, 'a call site is missing from the result — refusing' end
+    -- ★ THE CALL-SITE COUNT IS PER MEMBER, not always two. A family of three rewrites
+    -- three bodies; demanding exactly two would refuse every family larger than a pair,
+    -- and demanding "at least two" for a PAIR is the same check it always was.
+    local want = plan.members and #plan.members or 2
+    if ncalls < want then
+        return nil, ('%d of %d call site(s) are missing from the result — refusing')
+            :format(want - ncalls, want)
+    end
     return txn.execute(store, plan, {
         helper = plan.helper, xfile = plan.xfile,
-        a = plan.a.ref, b = plan.b.ref,
+        a = plan.a and plan.a.ref, b = plan.b and plan.b.ref,
+        members = plan.members and #plan.members or nil,
     })
 end
 

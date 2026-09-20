@@ -1217,3 +1217,125 @@ test('agentwrite: the splice REPLACES — it does not swallow the blank line aft
     eq(1, row.removed, 'exactly the changed body line is removed — not it AND the blank')
     eq(1, row.added, 'and exactly one line replaces it')
 end)
+
+-- ── EVERY PLANNER MUST BE APPLYABLE (CART-0878) ─────────────────────────────
+-- `txn_apply` dispatched over an if/elseif chain naming three families and ending in an
+-- `else` that called `optapply.apply`. Every family the chain did not name therefore
+-- reached the OPTIMIZER, which found nothing of its own in the plan and answered
+-- "nothing applicable (0 declined)" — a sentence that reads like a fact about the code.
+--
+-- ⚠⚠ THREE VERBS COULD PLAN AND PREVIEW AND NOT APPLY: `extract-family` since it
+-- shipped, `clone-merge` and `replace` from the day they were added. Plan and preview
+-- were driven in tests; APPLY was not, and the `else` turned the omission into a
+-- plausible refusal instead of an error.
+--
+-- ★ THIS SWEEP IS THE FENCE, and it drives the whole ladder rather than comparing two
+-- tables: a planner added later either applies or is named here.
+local SWEEP_M = {
+    'local M = {}',
+    'function M.f(x, y)',
+    '  local a = x + y',
+    '  local b = x + y',
+    '  return a, b',
+    'end',
+    'function M.g(x) return M.f(x, 1) end',
+    'function M.norm(p, q)',
+    '  local s = p * p + q * q',
+    '  return s',
+    'end',
+    'return M',
+}
+local SWEEP_N = {
+    'local M = {}',
+    'function M.dist(p, q)',
+    '  local s = p * p + q * q',
+    '  return s',
+    'end',
+    'function M.use(a, b) return M.dist(a, b) end',
+    'return M',
+}
+
+test('agentwrite: every plan a planner produces can actually be APPLIED', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    -- ★ EACH CASE BRINGS ITS OWN FIXTURE. A shared tree made the family case answer
+    -- `absence = no-family` and drop out of the sweep silently; the planners want
+    -- different shapes, so the sweep gives each the shape its own tests use.
+    local cases = {
+        { verb = 'txn_plan_optimize', files = { ['m.lua'] = CSE_LUA },
+          args = function () return { kind = 'cse', node = idof('M.f') } end },
+        { verb = 'txn_plan_clonemerge', files = { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N },
+          args = function () return { node = idof('M.norm') } end },
+        { verb = 'txn_plan_replace', files = { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N },
+          args = function () return { node = idof('M.g'),
+              text = 'function M.g(x) return 0 end' } end },
+        -- ★ THE FAMILY PLANNER CARRIED TWO OF THE THREE DEFECTS (a pair-only `apply`
+        -- that indexed `plan.a` on a member plan, and a `plan_family` that never
+        -- stamped its touched files), so the sweep must actually reach it. This is
+        -- the cross-file fixture from the CART-0973 test, which is known to plan.
+        { verb = 'txn_plan_extract_family',
+          files = { ['one.lua'] = XFILE_A, ['two.lua'] = XFILE_B },
+          args = function () return { node = idof('M.pick_a'), dest = 'shared/pick.lua' } end },
+    }
+    local applied, planless = 0, {}
+    for _, c in ipairs(cases) do
+        ingest(mkroot(c.files))
+        local p = call(c.verb, c.args())
+        local sj = type(p.subject) == 'table' and p.subject or {}
+        if not (sj.plan and sj.plan ~= NUL) then
+            -- ⚠ A PLANLESS ANSWER IS NOT ALWAYS A REFUSAL: two arms of this verb hand
+            -- back `plan = NUL` with an ABSENCE instead, so a refusal-only diagnostic
+            -- reports "no plan and no refusal" and names nothing.
+            local aw = type(p.absence_why) == 'table' and p.absence_why or {}
+            planless[#planless + 1] = c.verb .. ' -> '
+                .. ((refusal_of(p) or {}).reason
+                    or (type(p.absence) == 'string'
+                        and (p.absence .. '/' .. tostring(aw.premise) .. ': '
+                             .. tostring(aw.why)))
+                    or 'no plan, no refusal, no absence')
+        else
+            eq(true, call('txn_preview', { plan = sj.plan }).ok, c.verb .. ' previews')
+            local a = call('txn_apply', { plan = sj.plan })
+            local rf = refusal_of(a)
+            -- ★ THE TWO SHAPES THE MISSING ARM PRODUCED, both named so a regression
+            -- cannot hide as an ordinary refusal:
+            ok(not (rf and rf.rule == 'no-apply-path'),
+                c.verb .. ' has an apply path registered')
+            ok(not (rf and (rf.reason or ''):find('nothing applicable', 1, true)),
+                c.verb .. ' is not silently routed to the optimizer: '
+                .. ((rf and rf.reason) or ''))
+            ok(not (type(a.error) == 'table'),
+                c.verb .. ' applies without raising: ' .. vim.inspect(a.error))
+            eq(true, a.ok, c.verb .. ' applies: ' .. ((rf and rf.reason) or ''))
+            applied = applied + 1
+        end
+    end
+    -- ⚠ NOT `>= 1`: a planner that stops producing a plan would make its arm of this
+    -- sweep vanish SILENTLY, which is the same class of hole as the missing apply arm.
+    -- ★ IT NAMES THE PLANLESS CASE AND ITS REASON, because "3 of 4" sends you reading
+    -- four planners and "extract_family -> absent/no-family: …" sends you to one.
+    eq('', table.concat(planless, ' | '),
+        'every case in the sweep produced a plan; planless: '
+        .. table.concat(planless, ' | '))
+    eq(#cases, applied, 'every case in the sweep planned AND applied')
+end)
+
+test('agentwrite: a plan whose family has NO apply path refuses by name', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    ingest(mkroot { ['m.lua'] = SWEEP_M })
+    local p = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
+    ok(p.subject.plan and p.subject.plan ~= NUL, 'a real plan to corrupt')
+    call('txn_preview', { plan = p.subject.plan })
+    -- ⚠ reach into the held plan and give it a family nothing maps. This is the shape
+    -- a planner added WITHOUT an apply entry produces, and before the dispatch was made
+    -- total it reached optapply and answered "nothing applicable".
+    for _, e in pairs(agent._plans) do
+        if e.id == p.subject.plan then e.family = 'a-family-nobody-registered' end
+    end
+    local a = call('txn_apply', { plan = p.subject.plan })
+    local rf = refusal_of(a)
+    ok(rf, 'it refuses')
+    eq('no-apply-path', rf.rule, 'by name, not as a plausible "nothing applicable"')
+    ok(rf.reason:find('a%-family%-nobody%-registered'), 'naming the family: ' .. rf.reason)
+end)

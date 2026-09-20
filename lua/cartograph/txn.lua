@@ -442,6 +442,14 @@ function M.verify(store, plan, refspecs)
         end
     end
     local root = store.data.root
+    -- ⚠ A PLAN WITH NO `stamps` IS AN INCOMPLETE PLAN, NOT A PASSING ONE. Indexing a
+    -- nil here RAISED, which reaches a caller as an "analysis" error and reads like a
+    -- bug in the tree rather than in the plan (CART-0878: plan_family never set them,
+    -- and the whole stamp-CAS rung was therefore absent). Refusing by name makes the
+    -- omission a contract failure the builder is told about.
+    if type(plan.stamps) ~= 'table' then
+        return 'the plan carries no file stamps — it cannot be verified against disk'
+    end
     for _, rel in ipairs(plan.touched) do
         if M.disk_stamp(root, rel) ~= plan.stamps[rel] then
             return rel .. ' changed on disk since planning — re-plan'
