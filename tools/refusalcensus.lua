@@ -165,7 +165,56 @@ if partition then
     local ch = require 'cartograph.characterize'
     local data = ts.extract(repo .. '/lua'); data.root = data.root or (repo .. '/lua')
     store.ingest(data)
+    local expr = require 'cartograph.expr'
+    --- ★★★ REVERSE TRACING: THE GUARD CHAIN OF A REFUSAL (user, 2026-09-21 — "reverse
+    --- tracing will be useful either way"). Walk the flow row's PARENT chain from the
+    --- refusal back to the function entry; every control ancestor is one conjunct of the
+    --- path condition an input must satisfy to arrive here.
+    ---
+    --- ⇒ IT IS USEFUL WHICHEVER WAY THE ANSWER FALLS, which is why it was worth building
+    --- before deciding anything: a SHALLOW chain is a construction recipe (satisfy these
+    --- N conditions), and a DEEP one is the honest reason a promise is expensive to
+    --- reach rather than a mystery. ★ AND A CONTRADICTORY CHAIN WOULD PROVE A PROMISE
+    --- VACUOUS — the class the census explicitly cannot distinguish today (CART-0985
+    --- shipped one). Detecting contradiction needs more than the chain; collecting the
+    --- chain is the prerequisite either way.
+    ---
+    --- ⚠ IT IS SYNTACTIC NESTING, NOT A PATH CONDITION. An `elseif` arm implies the
+    --- NEGATION of its siblings and a chain does not record that, so the depth is a
+    --- LOWER BOUND on what must be satisfied. Named rather than implied.
+    ---
+    --- ⚠⚠ AND A REFUSAL AFTER A LOOP HAS DEPTH 0 WHILE BEING ONE OF THE HARDEST TO
+    --- REACH. Measured on the very top row of this queue: cloneextract:147 ("no
+    --- statement context encloses it") sits at FUNCTION LEVEL after a `while`, so it has
+    --- no control ancestors — yet arriving there requires the loop to EXHAUST WITHOUT
+    --- the inner `return` firing, which is a condition the parent chain cannot
+    --- represent. ⇒ SORTING BY DEPTH PUTS THE CHEAPEST-LOOKING ENTRY FIRST AND THAT
+    --- ENTRY MAY BE THE MOST EXPENSIVE. Read a depth-0 row as "no conditional above me",
+    --- never as "easy". (This same site is the one already suspected of being vacuous.)
+    local function guards_at(file, line)
+        local d = store.defs_at(file, line)
+        local node = d and d[1]
+        if not node then return nil end
+        local eo = expr.of(store, node.id)
+        local fl = eo and eo.fl
+        if not fl then return nil end
+        local row
+        for i, s in ipairs(fl.stmts or {}) do if s.l == line then row = i; break end end
+        if not row then return nil end
+        local chain, seen = {}, {}
+        local cur = fl.stmts[row].parent
+        while cur and fl.stmts[cur] and not seen[cur] do
+            seen[cur] = true
+            local s = fl.stmts[cur]
+            if s.kind and s.kind ~= 'stmt' then
+                chain[#chain + 1] = { l = s.l, kind = s.kind, pol = s.pol }
+            end
+            cur = s.parent
+        end
+        return chain
+    end
     local srcs, param_q, tree_q, nofn = {}, {}, {}, 0
+    local depth_hist, untraced = {}, 0
     for _, r in ipairs(rows) do
         for _, x in ipairs(r.never) do
             local rel = 'lua/cartograph/' .. r.mod .. '.lua'
@@ -194,7 +243,10 @@ if partition then
                     local l = lines[i] or ''
                     if l:match('^%s*if%s') or l:match('^%s*elseif%s') then guard = i; break end
                 end
-                local item = { mod = r.mod, line = x.line, text = x.text,
+                local chain = guards_at(file, x.line)
+                if chain then depth_hist[#chain] = (depth_hist[#chain] or 0) + 1
+                else untraced = untraced + 1 end
+                local item = { mod = r.mod, line = x.line, text = x.text, depth = chain and #chain,
                     guard = guard, leaf = guard and forkable[guard] and forkable[guard].leaf }
                 if item.leaf then param_q[#param_q + 1] = item
                 else tree_q[#tree_q + 1] = item end
@@ -203,13 +255,27 @@ if partition then
     end
     print(('\n── PARTITION ── %d parameter-forked · %d tree-shaped · %d with no enclosing fn')
         :format(#param_q, #tree_q, nofn))
+    print('\nGUARD DEPTH (reverse-traced) — how many conditions an input must satisfy:')
+    local tot_d = 0
+    for d = 0, 12 do
+        if depth_hist[d] then
+            tot_d = tot_d + depth_hist[d]
+            print(('   %d guard(s): %d'):format(d, depth_hist[d]))
+        end
+    end
+    print(('   traced %d · untraced %d'):format(tot_d, untraced))
+    -- ★ THE QUEUE IS ORDERED BY WHAT IT COSTS TO REACH, not by module
+    table.sort(tree_q, function (a, b) return (a.depth or 99) < (b.depth or 99) end)
     print('\nPARAMETER-FORKED — `characterize.assert_condition` can derive the argument:')
     for _, it in ipairs(param_q) do
         print(('  %-14s %4d  on `%s`  %s'):format(it.mod, it.line, it.leaf, it.text:sub(1, 52)))
     end
     print('\nTREE-SHAPED — needs a constructed fixture (tools/counterexample.lua):')
     for i, it in ipairs(tree_q) do
-        if i <= 18 then print(('  %-14s %4d  %s'):format(it.mod, it.line, it.text:sub(1, 62))) end
+        if i <= 18 then
+            print(('  d%d %-14s %4d  %s')
+                :format(it.depth or -1, it.mod, it.line, it.text:sub(1, 58)))
+        end
     end
     if #tree_q > 18 then print(('  … and %d more'):format(#tree_q - 18)) end
 end
