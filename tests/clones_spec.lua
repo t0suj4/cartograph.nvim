@@ -4136,3 +4136,108 @@ test('clones: `guarded` claims SHORT-CIRCUITS only — a guarded body is NOT cla
     end
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── MAY THIS DIVERGENCE BE MOVED TO A CALL SITE? (CART-0876 / CART-0878) ────
+-- `scope` says the call site could NAME the argument, `guarded` says it is only
+-- sometimes evaluated. `moves` is the third question and the one CART-0878 asks for
+-- before a template may become a transaction: moving an expression changes WHEN and
+-- HOW OFTEN it runs, and only a pure one is indifferent to both.
+--
+-- ⚠ ONLY A PROOF LICENSES. 'pure' means every call inside resolved to something
+-- PROVEN pure; anything else is the reason it could not be established, never silence.
+test('clones: a divergence over pure calls reports `moves = pure`', function ()
+    local body_a = '  local a = load(src)\n  local x = norm(a)\n  local y = trim(a)\n  return x, y'
+    local body_b = '  local a = load(src)\n  local x = norm(scale(a))\n  local y = trim(a)\n  return x, y'
+    local root = proj {
+        ['mp1.lua'] = fn('mp_one', 'src', body_a) .. '\nlocal function norm(v) return v end\n'
+            .. 'local function scale(v) return v end\n',
+        ['mp2.lua'] = fn('mp_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'mp_one', 'mp_two')
+    ok(p, 'mp_one and mp_two are a near-clone')
+    local an = p and clones.analyze_pair(p, store)
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.moves then h = x end end
+    ok(h, 'the divergence carries a movability verdict')
+    ok(h.moves == 'pure' or tostring(h.moves):find('nothing this graph knows'),
+        'either proven pure or REFUSED by name — never silently movable: '
+        .. tostring(h.moves))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: an IO call in a divergence REFUSES the move, naming it', function ()
+    -- `require` is `io` in the stdlib profile: passing it as an argument would run the
+    -- module load on every call. This is the shape that blocks the one pair CART-0878
+    -- parked — `require('x').report` against a bare name.
+    local body_a = '  local a = load(src)\n  local x = handler\n  local y = trim(a)\n  return x, y'
+    local body_b = "  local a = load(src)\n  local x = require('somewhere').handler\n  local y = trim(a)\n  return x, y"
+    local root = proj {
+        ['mi1.lua'] = fn('mi_one', 'src', body_a),
+        ['mi2.lua'] = fn('mi_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'mi_one', 'mi_two')
+    ok(p, 'mi_one and mi_two are a near-clone')
+    local an = p and clones.analyze_pair(p, store)
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.moves then h = x end end
+    ok(h, 'the divergence carries a movability verdict')
+    ok(h.moves ~= 'pure', 'and it is NOT movable: ' .. tostring(h.moves))
+    ok(tostring(h.moves):find('require', 1, true),
+        'naming the call that blocks it: ' .. tostring(h.moves))
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('not provably movable', 1, true) or txt:find('GUARDED', 1, true),
+        'and the proposal says so: ' .. txt)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: with NO store, movability is `no_store`, never a default of pure', function ()
+    -- ⚠ THE TRIPWIRE. `analyze_pair(pair)` is called without a store from six places;
+    -- if the absent answer collapsed into 'pure' every one of them would read a
+    -- proof that was never computed. A caller that supplied no graph is TOLD so.
+    local body_a = '  local a = load(src)\n  local x = norm(a)\n  local y = trim(a)\n  return x, y'
+    local body_b = '  local a = load(src)\n  local x = norm(scale(a))\n  local y = trim(a)\n  return x, y'
+    local root = proj {
+        ['ns1.lua'] = fn('ns_one', 'src', body_a),
+        ['ns2.lua'] = fn('ns_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'ns_one', 'ns_two')
+    ok(p, 'ns_one and ns_two are a near-clone')
+    local an = p and clones.analyze_pair(p)   -- deliberately no store
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.moves then h = x end end
+    ok(h, 'the divergence still carries a verdict')
+    ok(tostring(h.moves):find('no_store', 1, true),
+        'and it names the missing graph rather than defaulting: ' .. tostring(h.moves))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a RESOLVED impure callee blocks the move, with its purity label', function ()
+    -- ⚠ FOUND BY REVERT-AND-RERUN: the `require` test above exercises the STDLIB
+    -- profile arm (an unresolved callee). The arm that asks `effects.purity` about a
+    -- callee this graph RESOLVED had no test at all — neutralising it cost zero
+    -- failures. This fixture defines the impure function in the tree, so it resolves.
+    local shared = 'local M = {}\nSEEN = {}\n'
+        .. 'function M.noisy(v) SEEN[#SEEN+1] = v; print(v); return v end\n'
+        .. 'function M.calm(v) return v end\n'
+    local root = proj {
+        ['rz1.lua'] = shared .. 'function M.rz_one(src)\n  local a = M.calm(src)\n'
+            .. '  local x = M.noisy(a)\n  local y = M.calm(a)\n  return x, y\nend\nreturn M\n',
+        ['rz2.lua'] = shared .. 'function M.rz_two(src)\n  local a = M.calm(src)\n'
+            .. '  local x = a\n  local y = M.calm(a)\n  return x, y\nend\nreturn M\n',
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'M.rz_one', 'M.rz_two')
+    ok(p, 'rz_one and rz_two are a near-clone')
+    local an = p and clones.analyze_pair(p, store)
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.moves then h = x end end
+    ok(h, 'the divergence carries a movability verdict')
+    ok(h.moves ~= 'pure', 'and it is NOT movable: ' .. tostring(h.moves))
+    ok(tostring(h.moves):find('writes', 1, true),
+        "carrying effects.purity's own label rather than a generic refusal: "
+        .. tostring(h.moves))
+    vim.fn.delete(root, 'rf')
+end)

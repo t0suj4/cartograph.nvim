@@ -1587,7 +1587,66 @@ end
 ---                the pair is actually an EXACT clone → :CartographMerge applies directly.
 ---   structural — a shape difference or an inserted/deleted statement; not a clean
 ---                value-parameterization (a callback/restructure, left to the human).
-function M.analyze_pair(pair)
+--- ★★★ CAN THIS EXPRESSION BE MOVED TO A CALL SITE (CART-0876)? `scope` says the call
+--- site could NAME the argument and `guarded` says it is only sometimes evaluated. This
+--- is the third question and the one CART-0878 asks for before a template may become a
+--- transaction: moving an expression changes WHEN and HOW OFTEN it runs, and only a
+--- pure one is indifferent to both.
+---
+--- ⚠ ONLY A PROOF LICENSES, AND ABSENCE IS NEVER THE PROOF. Returns 'pure' when every
+--- call inside the expression resolves to something PROVEN pure, and otherwise a REASON
+--- naming the first thing it could not establish. A hedge does not count: `effects.purity`
+--- spells its hedged tier `pure~`, and a tilde is the analysis saying it had to assume
+--- something. Reading `pure~` as pure is how a hedge becomes a fact.
+---
+--- ⚠ AND ITS OWN FRONTIER, STATED: an expression with NO call is reported pure, which is
+--- true of a literal and a local read and NOT guaranteed of a field read — lua's
+--- `__index` can run code behind `a.b`. Metatable-aware field purity is the type layer's
+--- question, not this one, and claiming it here would be the same over-reach the tilde
+--- above refuses. `no_store` is a distinct answer from `pure`: a caller that passed no
+--- store gets told so rather than defaulted.
+local function move_purity(node, store, fn_id, lang)
+    if not node then return nil end
+    if not store then return 'no_store: the caller supplied no graph to resolve calls in' end
+    local sites, byat = {}, {}
+    local okt, t = pcall(function () return store.topo():sites(fn_id) end)
+    if okt and t then sites = t end
+    for _, c in ipairs(sites) do
+        if c.at then byat[('%d:%d'):format(at.sl(c.at), at.sc(c.at))] = c end
+    end
+    local reason
+    expr.walk(node, function (n)
+        if reason or n.k ~= 'call' then return end
+        local key = n.at and ('%d:%d'):format(at.sl(n.at), at.sc(n.at))
+        local c = key and byat[key]
+        if not c then
+            reason = ('a call this graph did not record (%s)'):format(
+                tostring(n.f and n.f.n or '?'))
+            return
+        end
+        if c.to then
+            local lab = require('cartograph.effects').purity(store, c.to)
+            if lab ~= 'pure' then
+                reason = ('`%s` is %s'):format(tostring(c.callee),
+                    lab and (lab == 'pure~' and 'pure only under a HEDGE' or lab)
+                        or 'unsummarized')
+            end
+            return
+        end
+        -- unresolved: the stdlib profile is the only other authority
+        local sig = lang and require('cartograph.effects')
+            .sig_of(lang, c.full or c.callee, c.method)
+        if not sig then
+            reason = ('`%s` resolves to nothing this graph knows'):format(tostring(c.callee))
+        elseif not sig.pure or sig.io or sig.nondet then
+            reason = ('`%s` is %s in the stdlib profile'):format(tostring(c.callee),
+                sig.io and 'io' or sig.nondet and 'nondeterministic' or 'not declared pure')
+        end
+    end)
+    return reason or 'pure'
+end
+
+function M.analyze_pair(pair, store)
     local holes, insdel, rows = {}, 0, {}
     -- the language's import verb, for the literal-dependency price (see
     -- `literal_dep_sites`). A language that declares none simply gets no price.
@@ -1714,6 +1773,18 @@ function M.analyze_pair(pair)
             -- invisible to it — `report` in `report_cmd#ret` reads as no-local while
             -- being the enclosing function's parameter. The rendering says which claim
             -- this is rather than promising more than the accessor can see.
+            -- ⚠ BOTH SIDES OR NEITHER. A helper's argument is written at BOTH call
+            -- sites, so a divergence is movable only if each side's expression is.
+            -- Reporting the safer side would average two claims, which is the shape of
+            -- every "mostly sound" answer this tool refuses.
+            local mva = move_purity(h.xn, store, pair.a.id, lang)
+            local mvb = move_purity(h.yn, store, pair.b.id, lang)
+            if mva and mvb then
+                h.moves = (mva == 'pure' and mvb == 'pure') and 'pure'
+                    or (mva ~= 'pure' and mva or mvb)
+            else
+                h.moves = mva or mvb
+            end
             if h.why == 'kind' then
                 local da, db = h.deps_a, h.deps_b
                 if #da == 0 and #db == 0 then
@@ -2239,6 +2310,9 @@ function M.export_pair(a)
     for _, h in ipairs(a.structs or {}) do
         structs[#structs + 1] = { why = h.why, a = sidename(h.xn), b = sidename(h.yn),
             a_kind = h.xn and h.xn.k or nil, b_kind = h.yn and h.yn.k or nil,
+            -- CART-0876: 'pure' when BOTH sides may be moved to a call site, else the
+            -- reason the analysis could not establish it.
+            moves = h.moves,
             -- CART-0876: what the call site could pass, and whether it may.
             -- Projected HERE rather than rebuilt by each consumer — the agent
             -- surface gained `why` for free when CART-0974 added it, and gains
@@ -2262,7 +2336,7 @@ end
 --- source and threading the parameters through both call sites (with visibility/scope
 --- correctness) is a verified transaction of its own, deliberately NOT done here. [[cartograph-record-fold-arc]]
 function M.extract_proposal(pair, store)
-    local a = M.analyze_pair(pair)
+    local a = M.analyze_pair(pair, store)
     if a.kind == 'exact' then
         return { ('%s are an EXACT clone after anti-unification (the near-distance was'
             .. ' alpha-renaming) — :CartographMerge applies directly.'):format(p_name(pair)) }
@@ -2306,16 +2380,20 @@ function M.extract_proposal(pair, store)
         -- and a value still cannot be lifted out of a short-circuit.
         local said = {}
         for _, h in ipairs(a.structs or {}) do
-            if h.why == 'kind' and h.scope and not said[h.scope .. tostring(h.guarded)] then
-                said[h.scope .. tostring(h.guarded)] = true
-                if h.guarded then
-                    L[#L + 1] = ('    ⚠ one %s divergence sits under %s — it is'
-                        .. ' evaluated only sometimes, so passing it as an argument'
-                        .. ' would run it always. Not liftable without the effects'
-                        .. ' check. (SHORT-CIRCUITS ONLY — a divergence inside a'
-                        .. ' guarded BLOCK is not detected here; that needs the CFG.)')
-                        :format(h.scope, h.guarded)
-                elseif h.scope == 'param' then
+            -- ⚠ THE DEDUPE KEY CARRIES EVERY AXIS IT REPORTS ON, or one classification
+            -- silently hides another: two holes with the same scope and different
+            -- movability are two different sentences.
+            -- ⚠ THREE ORTHOGONAL AXES, PRINTED INDEPENDENTLY RATHER THAN AS AN
+            -- if-CHAIN. `scope` says whether the call site could NAME the argument,
+            -- `guarded` whether it is always evaluated, `moves` whether moving it is
+            -- effect-safe. A chain reports whichever the author ordered first and
+            -- HIDES the rest — the param line vanished behind an unresolved callee the
+            -- moment `moves` landed, which is how a test caught this.
+            local dk = tostring(h.scope) .. '\31' .. tostring(h.guarded)
+                .. '\31' .. tostring(h.moves)
+            if h.why == 'kind' and h.scope and not said[dk] then
+                said[dk] = true
+                if h.scope == 'param' then
                     L[#L + 1] = '    ↳ a `param` divergence: every local it reads is'
                         .. " a parameter of its own function, so the CALL SITE can"
                         .. ' write the argument — a value, not a function.'
@@ -2324,6 +2402,17 @@ function M.extract_proposal(pair, store)
                         .. ' its own function, so both sides are writable at the call'
                         .. ' site. ⚠ an UPVALUE is invisible here — this says nothing'
                         .. ' about the enclosing scope.'
+                end
+                if h.guarded then
+                    L[#L + 1] = ('    ⚠ …but it sits under %s — evaluated only'
+                        .. ' sometimes, so as an argument it would run always.'
+                        .. ' (SHORT-CIRCUITS ONLY — a divergence inside a guarded BLOCK'
+                        .. ' is not detected here; that needs the CFG.)'):format(h.guarded)
+                end
+                if h.moves and h.moves ~= 'pure' then
+                    L[#L + 1] = ('    ⚠ …and it is not provably movable: %s. Moving an'
+                        .. ' expression changes WHEN and HOW OFTEN it runs, and only a'
+                        .. ' pure one is indifferent to both.'):format(h.moves)
                 end
             end
         end
