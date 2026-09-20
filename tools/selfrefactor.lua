@@ -106,6 +106,7 @@ local clones = require 'cartograph.clones'
 local foldrank = require 'cartograph.foldrank'
 local ce = require 'cartograph.cloneextract'
 local txn = require 'cartograph.txn'
+local neutrality = require 'cartograph.neutrality'
 
 local LUA = work .. '/lua'
 -- ⚠ RE-READ FROM DISK, NEVER TRUST THE SPLICE. `apply` splices its result into the live
@@ -167,13 +168,70 @@ for round = 1, want_n do
     if not plan then die('plan', tostring(why)) end
     local bef, _, dwhy = txn.dryrun(store, plan)
     if not bef then die('preview', tostring(dwhy)) end
+    -- ★★★ THE BEHAVIOUR RUNG (CART-0374), AND IT CHECKS THE CLAIM (CART-0989).
+    -- The witness map is taken BEFORE the write and compared after, and the plan's own
+    -- `preserves` decides what the comparison MEANS.
+    --
+    -- ⚠ WHY NEUTRALITY AND NOT THE CERTIFICATE. `certificate.take` RUNS each symbol, so
+    -- it needs INPUTS, and `opts.fills` is caller-supplied. MEASURED on our own folds:
+    -- 0 observed, 10 uncertifiable — every one "input:<x> is still a hole — fill every
+    -- input before running". That is characterize's founding constraint working as
+    -- designed (cartograph never executes user code, so it cannot know an input), and it
+    -- means THE CERTIFICATE CANNOT BE THIS LOOP'S AUTOMATIC ORACLE. Wiring it anyway
+    -- would have produced a rung that passes by not looking.
+    -- `neutrality` hashes the behaviour WITNESS instead — a hash always computes and a
+    -- run does not — so it needs no inputs and runs on any tree.
+    -- ⚠ IT IS A PROXY AND CLAIMS LESS: it proves a body was NOT TOUCHED. It therefore
+    -- cannot certify the members (they change on purpose) and certifies everything else,
+    -- which is exactly `preserves = 'all'` with the members as `may_change`.
+    local w_before = neutrality.witnesses(store)
     local entry, awhy = txn.apply(store, plan)
     if not entry then die('apply', tostring(awhy)) end
     applied = applied + 1
     log[#log + 1] = { key = want_gone, net = pick.net, helper = plan.helper }
 
-    -- ── the finding must MOVE, measured on a FRESH read ─────────────────────
+    -- ── the CLAIM must hold everywhere it was made ──────────────────────────
     reload()
+    local permitted = { [tostring(plan.helper)] = true }
+    for _, side in ipairs({ plan.a, plan.b }) do
+        if side and side.name then permitted[side.name] = true end
+    end
+    for _, m in ipairs(plan.members or {}) do
+        if m.name then permitted[m.name] = true end
+    end
+    local cmp = neutrality.compare(w_before, neutrality.witnesses(store))
+    local broke = {}
+    for _, d in ipairs(cmp.drifted) do
+        if not permitted[d.name] then broke[#broke + 1] = d.name end
+    end
+    for _, d in ipairs(cmp.removed) do
+        if not permitted[d.name] then broke[#broke + 1] = d.name .. ' (removed)' end
+    end
+    table.sort(broke)
+    if plan.preserves == 'all' then
+        -- ★ A BROKEN PROMISE IS THE FINDING THIS RUNG EXISTS FOR. The plan SAID every
+        -- existing symbol's behaviour is unchanged; a witness that drifted outside the
+        -- members falsifies exactly that sentence.
+        -- ⚠ THE TOTALS RIDE WITH THE VERDICT. "0 drifted outside the fold" is also what
+        -- a witness map that noticed NOTHING would say, and those are opposite facts. If
+        -- `drifted` is 0 overall then the proxy is blind to this edit and the rung is
+        -- inert — so the number that proves it looked is printed next to the one that
+        -- proves the claim held.
+        if not rung('claim', #broke == 0,
+            ('`preserves = all`; %d of %d drifted name(s) fell outside the fold%s')
+                :format(#broke, #cmp.drifted,
+                    #broke > 0 and (': ' .. table.concat(broke, ', ')) or '')) then
+            die('claim', 'the plan promised neutrality and something else moved')
+        end
+    else
+        -- ⚠ NOT A PASS. A plan claiming `none`/`unreviewed` promised nothing, so there is
+        -- nothing to falsify — and saying "PASS" here would read as evidence.
+        rung('claim', true, ('NO CLAIM to check (`preserves = %s`) — %d of %d drifted'
+            .. ' name(s) fell outside the fold'):format(tostring(plan.preserves), #broke,
+                #cmp.drifted))
+    end
+
+    -- ── the finding must MOVE, measured on a FRESH read ─────────────────────
     local now_pairs = #clones.near(store, { max_dist = max_dist })
     local still_there = false
     for _, r in ipairs(foldrank.rank(store, { max_dist = max_dist })) do
