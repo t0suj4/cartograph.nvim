@@ -319,15 +319,24 @@ local function real_donors()
             local h = (an.holes or {})[1]
             if an.kind == 'value' and h and not seen[p.a.file .. tostring(p.a.name)] then
                 seen[p.a.file .. tostring(p.a.name)] = true
-                out[#out + 1] = { file = p.a.file, a = p.a.name, b = p.b.name, hole = h }
+                -- the SIGNATURE LINES are what a structural mutation needs: a body
+                -- statement goes just after them, and "between the copies" is decided
+                -- by which one is lower in the file.
+                local na, nb = store.node(p.a.id), store.node(p.b.id)
+                out[#out + 1] = { file = p.a.file, a = p.a.name, b = p.b.name, hole = h,
+                    sig_a = na and na.range and at.sl(na.range),
+                    sig_b = nb and nb.range and at.sl(nb.range),
+                    end_a = na and na.range and at.el(na.range),
+                    end_b = nb and nb.range and at.el(nb.range) }
             end
         end
     end
     return out
 end
 
+real_donors_cache = real_donors()
 if true then
-    local donors = real_donors()
+    local donors = real_donors_cache
     for _, d in ipairs(donors) do
         local src0 = {}
         for l in io.lines(repo .. '/lua/' .. d.file) do src0[#src0 + 1] = l end
@@ -378,6 +387,126 @@ if true then
             if verdict == 'BROKEN' then bad = bad + 1 end
             rows[#rows + 1] = { name = label, verdict = verdict, detail = detail,
                 donor = true }
+        end
+    end
+end
+
+-- ══ PHASE 3: STRUCTURAL MUTATION OF REAL DONORS (CART-0993 axis A) ═════════
+--
+-- ★★★ VALUE SUBSTITUTION CANNOT REACH THE BUGS THAT MATTERED MOST. CART-0984 needed a
+-- hole whose BASE is a body-local; CART-0985 needed a local bound BETWEEN the copies.
+-- Neither is a value you can drop into a hole — both change the SHAPE of the donor, so
+-- until now they existed only as hand-written synthetic fixtures and the real-tree phase
+-- could not produce them.
+--
+-- ⚠⚠ INSERTING LINES SHIFTS EVERYTHING BELOW, so every edit is collected first and
+-- applied BOTTOM-UP (descending line). Applying top-down would leave each later edit
+-- pointing at stale coordinates — CART-0984's duplicate-substitution bug in a new
+-- costume, and the third time in this arc that bottom-up ordering is the whole trick.
+--
+-- ⚠ AND THE MUTATION MUST KEEP THE PAIR A PAIR. Both members get the SAME inserted
+-- statement, so their row sequences stay aligned; a mutation applied to one side only
+-- turns the near-clone into a structural difference and the verb refuses before the
+-- property is ever asked (measured — that is what UNREACHED means here).
+-- ★★ THE TWO MUTATIONS HAVE COMPLEMENTARY PRECONDITIONS, measured over five real
+-- donors: `body_local_base` CONFIRMED on 4 of 5 because it inserts INTO a body, which
+-- is a statement context wherever the member lives. `local_between` CONFIRMED on 1 of 5
+-- because it inserts BETWEEN the members, which is only a statement context when the
+-- members themselves are statements — on spec/odin.lua, whose members are entries in a
+-- `return { … }` constructor, the mutated donor does not parse, and the tool says so.
+--
+-- ★ AND ONE UNREACHED IS GUARD ORDERING, NOT A FAILED MUTATION: on clones.lua the
+-- mutated pair refuses with CART-0984's "the copies differ in a field NAME" — an
+-- EARLIER promise on the same path fires first, so the one this case aims at is never
+-- asked. A counterexample must clear every guard between the entry and its target, and
+-- nothing here reorders them.
+local STRUCTURAL = {
+    { name = 'REAL donor, base made a BODY-LOCAL', kind = 'body_local_base',
+      expect = 'is a local of the body' },
+    { name = 'REAL donor, a local bound BETWEEN the copies', kind = 'local_between',
+      expect = 'must be inserted above' },
+}
+
+--- @return table|nil lines, string|nil why
+local function mutate(src0, d, kind)
+    if not (d.sig_a and d.sig_b and d.hole.sites_a and d.hole.sites_b) then
+        return nil, 'the donor carries no signature lines'
+    end
+    local lines = {}
+    for i, l in ipairs(src0) do lines[i] = l end
+    -- edits as { line0, kind, text }; `insert_after` adds below that 0-based line
+    local edits = {}
+    local function ins(line0, text) edits[#edits + 1] = { l = line0, text = text } end
+    local subs = {}
+    if kind == 'body_local_base' then
+        ins(d.sig_a, '  local __BL = mkcfg()')
+        ins(d.sig_b, '  local __BL = mkcfg()')
+        subs = { { d.hole.sites_a, '__BL.aa' }, { d.hole.sites_b, '__BL.bb' } }
+    elseif kind == 'local_between' then
+        -- a statement in BOTH bodies that reads it, and the binding between the copies
+        ins(d.sig_a, '  local __q = __SALT')
+        ins(d.sig_b, '  local __q = __SALT')
+        local first_end = math.min(d.end_a, d.end_b)
+        ins(first_end, '')
+        ins(first_end, 'local __SALT = 7')
+    else
+        return nil, 'unknown mutation'
+    end
+    -- substitutions FIRST (they do not move lines), then insertions bottom-up
+    for _, s in ipairs(subs) do
+        local okS, whyS = splice(lines, s[1], s[2])
+        if not okS then return nil, whyS end
+    end
+    table.sort(edits, function (x, y) return x.l > y.l end)
+    for _, e in ipairs(edits) do table.insert(lines, e.l + 2, e.text) end
+    return lines
+end
+
+if true then
+    for _, d in ipairs(real_donors_cache or {}) do
+        local src0 = {}
+        for l in io.lines(repo .. '/lua/' .. d.file) do src0[#src0 + 1] = l end
+        for _, sp in ipairs(STRUCTURAL) do
+            local label = ('%s: %s'):format(d.file:gsub('^cartograph/', ''), sp.name)
+            local verdict, detail
+            local lines, why = mutate(src0, d, sp.kind)
+            if not lines then
+                verdict, detail = 'UNREACHED', tostring(why)
+            else
+                local text = table.concat(lines, '\n')
+                if not parses(text) then
+                    verdict, detail = 'UNREACHED', 'the mutated donor does not parse'
+                else
+                    local dir = root .. '/s' .. #rows
+                    vim.fn.mkdir(dir, 'p')
+                    local fd = assert(io.open(dir .. '/m.lua', 'w'))
+                    fd:write(text); fd:close()
+                    local dat = ts.extract(dir); dat.root = dat.root or dir
+                    store.ingest(dat)
+                    local id
+                    for _, n in ipairs(store.data.nodes) do
+                        if n.name == d.a then id = n.id break end
+                    end
+                    local pair = id and clones.near_of(store, id,
+                        { max_dist = 6, min_rows = 3, min_shared = 2 })[1]
+                    if not pair then
+                        verdict, detail = 'UNREACHED',
+                            'the mutated copies are no longer a near-clone pair'
+                    else
+                        local plan, pwhy = cx.plan(store, pair, {})
+                        if plan then
+                            verdict, detail = 'BROKEN', 'it PLANNED where the promise refuses'
+                        elseif (pwhy or ''):find(sp.expect, 1, true) then
+                            verdict, detail = 'CONFIRMED', pwhy
+                        else
+                            verdict, detail = 'UNREACHED',
+                                ('refused for another reason: %s'):format(tostring(pwhy))
+                        end
+                    end
+                end
+            end
+            if verdict == 'BROKEN' then bad = bad + 1 end
+            rows[#rows + 1] = { name = label, verdict = verdict, detail = detail }
         end
     end
 end
