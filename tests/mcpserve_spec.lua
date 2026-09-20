@@ -334,6 +334,12 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- be a fact about the instrument, and the two are what this envelope
         -- exists to keep apart.
         txn_plan_extract_family = { args = { node = idof('M.caller') } },
+        -- ⚠ ABSENT, NOT A REFUSAL, AND THAT IS THE VERB'S OWN SPLIT (CART-0978).
+        -- This fixture's function has no witness twin, which is a fact about the
+        -- CODE; the other nil `clonemerge.plan` returns — twins that matched the
+        -- data-flow witness and failed the STATEMENT-KIND gate — is a refusal, and
+        -- pooling them would hide the only evidence that the witness is coarse.
+        txn_plan_clonemerge = { args = { node = idof('M.caller') } },
         -- naming no container and no payload: a refusal reachable without
         -- touching a byte, and the one this verb gives most often in the wild —
         -- 70.6% of containers with two or more members share no shape at all

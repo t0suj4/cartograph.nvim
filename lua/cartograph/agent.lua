@@ -440,7 +440,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
-    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_preview',
+    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_preview',
     -- the handoff: plan on a read-only host, apply on an armed one
     'txn_save', 'txn_load',
     'journal_list', 'journal_get',
@@ -1845,6 +1845,7 @@ local VERB_OF_FAMILY = {
     move = 'txn_plan_moveset', optimize = 'txn_plan_optimize',
     declare = 'txn_plan_declare', annotate = 'txn_plan_annotate',
     ['extract-family'] = 'txn_plan_extract_family',
+    ['clone-merge'] = 'txn_plan_clonemerge',
 }
 
 local PLAN_CAP = 16
@@ -2208,6 +2209,84 @@ local function v_txn_plan_extract_family(store, args)
             helper = plan.helper, parameters = plan.nparams,
             members = #plan.members, touched = plan.touched,
             generation = plan.generation, previewed = false },
+        result = rows, notes = notes,
+    }
+end
+
+--- ★★★ THE THIRD APPLY FAMILY, AND THE LAST FINDING SHAPE WITH NO DESTINATION
+--- (CART-0978). CART-0972 drove every finding surface against every planner's declared
+--- arguments: after the position accessor landed, every shape reached something except
+--- one. `clones_find` EXACT groups carry members with refs and there was no verb that
+--- took them. The module has had an apply path since the first transaction —
+--- `:CartographMerge`, a journal entry, the same late-bound ladder — and no plan verb
+--- on this surface. agent.lua's own skipped list said so and was caught STALE once
+--- already (CART-0964), claiming both merge and extract were missing long after
+--- extract landed.
+---
+--- ⚠ NO `partial`, AND THAT IS NOT AN OMISSION — IT IS THE OPPOSITE LAW. Extraction is
+--- sound when incomplete: the helper exists, an admissible member delegates, a skipped
+--- one keeps its own body, and nothing dangles. A merge DELETES the copies and points
+--- their callers at the survivor, so leaving one twin behind rewrites the callers of a
+--- function that still exists. cloneextract's own header states the asymmetry; copying
+--- `partial` across would copy the wrong law with the right spelling.
+---
+--- ⚠ AND `absent` IS NOT `refused` HERE, WHICH IS THE VERB'S ONE INTERESTING ANSWER.
+--- `clonemerge.plan` returns nil twice over: no twin at all, and twins the STATEMENT-
+--- KIND gate threw out after the data-flow witness matched them. The second is the
+--- CART-0892 case — an `if` and a `while` over the same body have the same witness —
+--- and it is the only evidence that the witness is coarse. Reporting both as "no
+--- clones" would hide exactly the finding worth having, so the branch reads the
+--- module's own sentence and splits on it.
+local function v_txn_plan_clonemerge(store, args)
+    local n, bad = write_subject(store, args)
+    if not n then return bad end
+    local cm = require 'cartograph.clonemerge'
+    local node_row = noderow(store, n.id)
+    local plan, why = cm.plan(store, n.id)
+    if not plan then
+        local reason = tostring(why or 'no plan')
+        -- the KIND gate fired: candidates existed and a soundness check declined them
+        if reason:find('STATEMENT KINDS', 1, true) then
+            return refuse('cannot-plan',
+                ('%s has no mergeable clone: %s'):format(tostring(n.name), reason),
+                'the data-flow witness is coarser than the statement kinds — the twin is real duplication but not the same control flow, so merging it would change behaviour. Nothing here can relax that; the witness is what would have to improve',
+                { node = n.id })
+        end
+        -- no candidate at all: a property of the CODE, not of a gate
+        return { subject = { plan = NUL, node = node_row, verb = 'clone-merge' },
+            result = {}, absence = 'absent',
+            absence_why = { premise = 'no-twin',
+                why = ('%s has no witness twin: %s'):format(tostring(n.name), reason),
+                evidence = { node = n.id } } }
+    end
+    local rows = {}
+    for _, r in ipairs(plan.removed or {}) do
+        rows[#rows + 1] = { name = nn(r.name), file = nn(r.file), ref = nn(r.ref),
+            role = 'deleted — its callers are pointed at the survivor' }
+    end
+    for _, r in ipairs(plan.rewrites or {}) do
+        rows[#rows + 1] = { name = nn(r.name), file = nn(r.file), line = nn(r.line),
+            role = 'call site rewritten to the survivor' }
+    end
+    -- ⚠ HAZARDS ARE THE CALLER'S HALF AND RIDE AS A NOTE, not as prose in a summary.
+    -- A merge points callers in another file at a name that must be VISIBLE there, and
+    -- this tool does not guess a language's import wiring — the same rule moveapply
+    -- states where it declines to write one.
+    local notes = {}
+    if #(plan.hazards or {}) > 0 then
+        local hz = {}
+        for _, h in ipairs(plan.hazards) do hz[#hz + 1] = tostring(h) end
+        notes[#notes + 1] = { kind = 'hazard', premise = 'not mechanical here',
+            why = ('%d hazard(s) the merge will NOT resolve — read them before applying'):format(#hz),
+            evidence = { hazards = hz } }
+    end
+    local pid = stash_plan(store, plan, 'clone-merge',
+        { verb = VERB_OF_FAMILY['clone-merge'], args = args })
+    return {
+        subject = { plan = pid, verb = plan.verb, node = node_row,
+            survivor = nn((plan.survivor or {}).name),
+            removed = #(plan.removed or {}), rewrites = #(plan.rewrites or {}),
+            touched = plan.touched, generation = plan.generation, previewed = false },
         result = rows, notes = notes,
     }
 end
@@ -3160,6 +3239,24 @@ M.VERBS = {
             return a
         end)(),
         run = v_txn_plan_extract_family,
+    },
+    txn_plan_clonemerge = {
+        summary = 'PROPOSE merging a function\'s EXACT clones into it — the copies are deleted and their call sites pointed at the survivor. Writes nothing: returns a plan handle for txn_preview',
+        subject = 'node',
+        -- `observation`, like every planner: the answer carries a PLAN, never a rung.
+        tier_basis = 'observation',
+        -- the merge REWRITES CALL SITES, so a thin index cannot answer it — and an
+        -- empty answer there would read as "this function has no clones".
+        needs_calls = true,
+        -- `absent`  the witness found no twin — a fact about the CODE
+        -- `refused` twins matched the data-flow witness and the STATEMENT-KIND gate
+        --           declined them (CART-0892: an `if` and a `while` over the same body
+        --           share a witness). Distinct from `absent` on purpose: it is the only
+        --           evidence that the witness is coarse, and pooling the two would hide
+        --           the finding worth having.
+        absences = { 'absent' },
+        args = ADDRESS,
+        run = v_txn_plan_clonemerge,
     },
     txn_plan_optimize = {
         summary = 'PROPOSE an optimizer rewrite inside one function (cse | localize | hoist | pre). Writes nothing: returns a plan handle for txn_preview, plus the per-site `declined` ledger',

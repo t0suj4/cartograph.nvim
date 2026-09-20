@@ -827,6 +827,11 @@ local XFILE_B = {
 -- truth-checked — `doc.refusal` is NUL on success and indexing it raises. This cost a
 -- probe its numbers earlier in the same arc (CART-0973's own measurement) and then
 -- cost these two tests their first run.
+-- ⚠ AND THE SENTINEL HAS TO BE IN SCOPE TO BE COMPARED AGAINST. `NUL` was used in
+-- this file before it was defined, so every `x ~= NUL` was `x ~= nil` and every
+-- `eq(NUL, …)` expected nil — assertions that read as envelope checks and were not.
+-- Third time in one arc that vim.NIL has cost a measurement its meaning.
+local NUL = vim.NIL
 local function refusal_of(doc) return type(doc.refusal) == 'table' and doc.refusal or nil end
 
 test('agentwrite: a CROSS-FILE family is plannable once `dest` can be given', function ()
@@ -999,4 +1004,103 @@ test('agentwrite: graph_info CARRIES the column, derived from the declaration', 
     for verb, row in pairs(by) do
         eq(agent.VERBS[verb].subject, row.subject, 'the column for ' .. verb)
     end
+end)
+
+-- ── THE THIRD APPLY FAMILY (CART-0978) ──────────────────────────────────────
+-- CART-0972 drove every finding surface against every planner's declared arguments.
+-- After the position accessor landed, every finding shape reached something except one:
+-- `clones_find` EXACT groups carried members with refs and no verb took them. The module
+-- has had an apply path since the first transaction and no plan verb on this surface —
+-- agent.lua's own skipped list said so, and was caught STALE once already (CART-0964).
+local MERGE_A = {
+    'local M = {}',
+    'function M.norm(x, y)',
+    '  local s = x * x + y * y',
+    '  return s',
+    'end',
+    'return M',
+}
+local MERGE_B = {
+    'local M = {}',
+    'function M.dist(x, y)',
+    '  local s = x * x + y * y',
+    '  return s',
+    'end',
+    'function M.use(p, q) return M.dist(p, q) end',
+    'return M',
+}
+-- ⚠ THE SAME DATA-FLOW WITNESS, DIFFERENT CONTROL FLOW (CART-0892). An `if` and a
+-- `while` over the same body are indistinguishable to the witness and must NOT merge.
+local KIND_A = {
+    'local M = {}',
+    'function M.loopy(t)',
+    '  local n = 0',
+    '  if t then n = n + 1 end',
+    '  return n',
+    'end',
+    'return M',
+}
+local KIND_B = {
+    'local M = {}',
+    'function M.whiley(t)',
+    '  local n = 0',
+    '  while t do n = n + 1 end',
+    '  return n',
+    'end',
+    'function M.use(z) return M.whiley(z) end',
+    'return M',
+}
+
+test('agentwrite: an EXACT clone group finally has a planner', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)   -- planning needs no write permission
+    ingest(mkroot { ['a.lua'] = MERGE_A, ['b.lua'] = MERGE_B })
+    local r = call('txn_plan_clonemerge', { node = idof('M.norm') })
+    eq(true, r.ok, 'the twin is mergeable: '
+        .. ((type(r.refusal) == 'table' and r.refusal.reason) or ''))
+    ok(r.subject.plan and r.subject.plan ~= NUL, 'returning a plan handle for txn_preview')
+    eq(1, r.subject.removed, 'one copy is deleted')
+    ok(r.subject.survivor, 'and the survivor is named: ' .. tostring(r.subject.survivor))
+end)
+
+test('agentwrite: a twin the KIND gate throws out REFUSES — it is not an absence', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    ingest(mkroot { ['c.lua'] = KIND_A, ['d.lua'] = KIND_B })
+    local r = call('txn_plan_clonemerge', { node = idof('M.loopy') })
+    eq(false, r.ok, 'a twin that differs in control flow is not merged')
+    local rf = type(r.refusal) == 'table' and r.refusal or nil
+    ok(rf, 'and it REFUSES rather than reporting an absence')
+    eq(NUL, r.absence, 'a refusal is not an absence — the two must never render alike')
+    ok(rf.reason:find('STATEMENT KINDS', 1, true),
+        'naming the gate that declined it: ' .. rf.reason)
+    -- ★ THIS IS THE ONLY EVIDENCE THAT THE WITNESS IS COARSE. Pooling it with "no
+    -- clones found" would hide the finding worth having.
+end)
+
+test('agentwrite: no twin at all is ABSENT, a fact about the code', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    ingest(mkroot { ['m.lua'] = CSE_LUA })
+    local r = call('txn_plan_clonemerge', { node = idof('M.g') })
+    eq(NUL, r.refusal, 'no gate declined anything')
+    eq('absent', r.absence, 'the witness simply found no twin')
+    ok(r.absence_why and r.absence_why.premise == 'no-twin',
+        'and the premise says which: ' .. vim.inspect(r.absence_why))
+end)
+
+test('agentwrite: the merge planner takes NO `partial` — the law is the opposite one', function ()
+    -- ⚠ THE TRIPWIRE. Extraction is sound when incomplete: the helper exists, a skipped
+    -- member keeps its own body, nothing dangles. A merge DELETES the copies and points
+    -- their callers at the survivor, so leaving one twin behind rewrites the callers of
+    -- a function that still exists. Copying `partial` across would copy the wrong law
+    -- with the right spelling.
+    for _, a in ipairs(agent.VERBS.txn_plan_clonemerge.args or {}) do
+        ok(a.name ~= 'partial', 'clonemerge declares no `partial` argument')
+    end
+    local has = false
+    for _, a in ipairs(agent.VERBS.txn_plan_extract_family.args or {}) do
+        if a.name == 'partial' then has = true end
+    end
+    ok(has, 'while extract_family does — the asymmetry is the point, not an oversight')
 end)
