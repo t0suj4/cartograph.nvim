@@ -4004,3 +4004,135 @@ test('clones: the blocked sentence NAMES the divergence and counts the covered o
         'and the verdict is unchanged — a sideless hole still blocks')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE `kind` ARM: WHAT THE CALL SITE COULD PASS (CART-0876) ───────────────
+-- The prototype (NEARBINDERS.md) read every `kind` hole with a bare local on one side
+-- as a PARAMETER whose argument is the local here and the expression there. Measured
+-- over lua/cartograph, that is true of 15% of them: 1173 read a BODY-local, which the
+-- call site cannot name, against 112 `param` and 79 `no-local`. So the existing
+-- "a FUNCTION of (deps)" line is right for the majority and wrong for the rest, and
+-- the pair-level verdict is unchanged either way — only the wording moves.
+test('clones: a kind hole reading only PARAMETERS is call-site-passable', function ()
+    -- `n` is a parameter of both, so the call site can write the argument
+    local body_a = '  local a = load(src)\n  emit(n)\n  local b = trim(a)\n  return b'
+    local body_b = '  local a = load(src)\n  emit(wrap(n))\n  local b = trim(a)\n  return b'
+    local root = proj {
+        ['sp1.lua'] = fn('sc_one', 'src, n', body_a),
+        ['sp2.lua'] = fn('sc_two', 'src, n', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'sc_one', 'sc_two')
+    ok(p, 'sc_one and sc_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.why == 'kind' then h = x end end
+    ok(h, 'the divergence is a `kind` hole')
+    eq('param', h.scope, 'every local it reads is a parameter — the call site has them')
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('CALL SITE can write', 1, true),
+        'and the proposal says so rather than only "a FUNCTION of": ' .. txt)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a kind hole reading a BODY-local is NOT call-site-passable', function ()
+    -- THE TRIPWIRE. `mid` is a body-local: it does not exist at the call site, so this
+    -- really is a function parameter and must not be advertised as a value.
+    local body_a = '  local a = load(src)\n  local mid = step(a)\n  emit(mid)\n  return a'
+    local body_b = '  local a = load(src)\n  local mid = step(a)\n  emit(wrap(mid))\n  return a'
+    local root = proj {
+        ['sb1.lua'] = fn('sb_one', 'src', body_a),
+        ['sb2.lua'] = fn('sb_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'sb_one', 'sb_two')
+    ok(p, 'sb_one and sb_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.why == 'kind' then h = x end end
+    ok(h, 'the divergence is a `kind` hole')
+    eq('body', h.scope, 'it reads a body-local, so only a function parameter carries it')
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(not txt:find('CALL SITE can write', 1, true),
+        'and the proposal does NOT advertise it as a value: ' .. txt)
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠ SHAPE AND EVALUATION ARE DIFFERENT CLAIMS, and this is the one the analysis had
+-- no way to state. `tp = tp or require 'cartograph.transport'` against
+-- `tp = tp or transport` is a real pair in this tree: two closed terms, a perfect
+-- value parameter by shape. Lift it and the module loads on EVERY call instead of
+-- only when `tp` is falsy — a behaviour change that parses, passes the suite, and is
+-- invisible to every gate the transaction has.
+test('clones: a divergence under a short-circuit is flagged, not offered as a lift', function ()
+    local body_a = '  local a = load(src)\n  local x = a or alpha\n  local y = trim(a)\n  return x, y'
+    local body_b = '  local a = load(src)\n  local x = a or fetch()\n  local y = trim(a)\n  return x, y'
+    local root = proj {
+        ['sg1.lua'] = fn('sg_one', 'src', body_a),
+        ['sg2.lua'] = fn('sg_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'sg_one', 'sg_two')
+    ok(p, 'sg_one and sg_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.guarded then h = x end end
+    ok(h, 'the divergence carries the guard')
+    ok(tostring(h.guarded):find('or', 1, true),
+        'naming the short-circuit: ' .. tostring(h.guarded))
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('evaluated only sometimes', 1, true),
+        'and the proposal refuses to offer it as a clean lift: ' .. txt)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: the guard survives the VALUE-hole grouping, not only the struct list', function ()
+    -- ⚠ FOUND BY THE TAG NOT ARRIVING. `a.holes` is not the raw hole list — it is a
+    -- grouping built field by field, so a field nobody copies there is invisible
+    -- however carefully it was computed (CART-0964's shape, third instance).
+    local body_a = '  local a = load(src)\n  local x = a or "alpha"\n  local y = trim(a)\n  return x, y'
+    local body_b = '  local a = load(src)\n  local x = a or "beta"\n  local y = trim(a)\n  return x, y'
+    local root = proj {
+        ['sv1.lua'] = fn('sv_one', 'src', body_a),
+        ['sv2.lua'] = fn('sv_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'sv_one', 'sv_two')
+    ok(p, 'sv_one and sv_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    eq(1, #(an.holes or {}), 'one value parameter')
+    ok(an.holes[1].guarded, 'which carries the guard through the grouping')
+    -- and the projection the agent surface reads carries it too, so that surface
+    -- needs no edit of its own
+    local ex = clones.export_pair(an)
+    ok(ex.holes[1].guarded, 'and export_pair projects it')
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('GUARDED', 1, true), 'and the proposal says so: ' .. txt)
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠ `guarded` MEANS SHORT-CIRCUIT ONLY, AND THE FENCE SAYS SO. The obvious extension
+-- — tag every hole in a row that has a `cond` — is WRONG, and this test is why it is
+-- not there: instrumented, the row carrying a hole from inside `if c then ... end`
+-- reports `cond=false`, because the guarded statement is its own row and the ctrlhead
+-- row holds the CONDITION (carried twice in this IR by design). The tag would have
+-- marked 368 conditions as guarded by themselves. Knowing a row sits inside a guarded
+-- block is a CFG question, already answered by flow's `gw` and by `effects`; wiring
+-- those in is CART-0878's effects check, not this.
+test('clones: `guarded` claims SHORT-CIRCUITS only — a guarded body is NOT claimed', function ()
+    local body_a = '  local a = load(src)\n  if ready(a) then emit(b) end\n  local y = trim(a)\n  return y'
+    local body_b = '  local a = load(src)\n  if ready(a) then emit(wrap(b)) end\n  local y = trim(a)\n  return y'
+    local root = proj {
+        ['gc1.lua'] = fn('gc_one', 'src', body_a),
+        ['gc2.lua'] = fn('gc_two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'gc_one', 'gc_two')
+    ok(p, 'gc_one and gc_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok(#(an.structs or {}) > 0, 'the body divergence is found')
+    for _, x in ipairs(an.structs or {}) do
+        ok(not x.guarded,
+            'and is NOT claimed as guarded — this analysis cannot see the enclosing block')
+    end
+    vim.fn.delete(root, 'rf')
+end)

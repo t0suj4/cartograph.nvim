@@ -1094,6 +1094,26 @@ end
 --- ★ AND IT UN-MIXES A NUMBER THAT WAS ALREADY BEING SCORED. `why_kind` — the count
 --- tools/algebradrive.lua compares against the prototype's own — goes 1975 -> 1364 at
 --- max_dist 20, because 611 holes in it were never `kind` divergences at all.
+--- ★★★ AN OPERAND THAT IS ONLY SOMETIMES EVALUATED CANNOT BE HOISTED TO A CALL SITE
+--- (CART-0876). `tp = tp or require 'cartograph.transport'` against
+--- `tp = tp or transport` is a real pair in this tree, and its divergence reads as a
+--- perfect value parameter — two closed terms, nothing to abstract over. It is not
+--- one: the `require` runs only when `tp` is falsy, and an argument runs always. Lift
+--- it and the module loads on every call. That is a BEHAVIOUR change past every gate
+--- the transaction has, because the result still parses and still passes the tests
+--- that never exercised the falsy branch.
+---
+--- ⚠ THE SET IS THE DECLARED LANGUAGES' SPELLINGS AND ITS GAPS ARE A KNOWN ABSENCE,
+--- not a claim of completeness: a grammar whose short-circuit is spelled some other
+--- way gets NO caveat here, and that is the under-warning direction. Naming the set is
+--- what makes the gap auditable — the alternative, treating every binary operator as
+--- short-circuiting, warns on `a + b` and teaches the reader to ignore it.
+local SHORTCIRCUIT = {
+    ['or'] = true, ['and'] = true,     -- lua, python, ruby, php (the word forms)
+    ['||'] = true, ['&&'] = true,      -- c, cpp, java, javascript, php, rust, zig, go
+    ['??'] = true, ['?:'] = true,      -- php / javascript null-coalescing
+}
+
 local function anti_unify(e1, e2, la, lb, holes, ctx)
     if e1 == nil and e2 == nil then return true end
     if e1 == nil or e2 == nil then
@@ -1241,7 +1261,21 @@ local function anti_unify(e1, e2, la, lb, holes, ctx)
                 at_a = e1.at, at_b = e2.at, at_encloses = true }
         end
         local o1 = anti_unify(e1.l, e2.l, la, lb, holes, ctx)
-        return anti_unify(e1.r, e2.r, la, lb, holes, ctx) and o1
+        -- ⚠ TAGGED BY RANGE, like `side` and `literal_dep`, and for the same reason:
+        -- the fact is a property of WHERE the hole sits, this arm knows every hole the
+        -- right operand just produced, and threading a parameter through the fifteen
+        -- recursion sites is the change this file keeps paying for. Only the RIGHT
+        -- operand is conditional — the left always evaluates.
+        local rstart = #holes
+        local o2 = anti_unify(e1.r, e2.r, la, lb, holes, ctx)
+        if SHORTCIRCUIT[e1.op] or SHORTCIRCUIT[e2.op] then
+            local op = SHORTCIRCUIT[e1.op] and e1.op or e2.op
+            for i = rstart + 1, #holes do
+                holes[i].guarded = holes[i].guarded
+                    or ('the right operand of `%s`'):format(tostring(op))
+            end
+        end
+        return o2 and o1
     else -- table / fn / vararg / ? fallback: compare kid lists
         local k1, k2 = e1.kids or {}, e2.kids or {}
         if #k1 ~= #k2 then
@@ -1507,6 +1541,23 @@ local function anti_unify_row(r1, r2, la, lb, holes, imp, ctx)
             end
         end
     end
+    -- ⚠ WHAT `guarded` DOES NOT COVER, AND WHY THE OBVIOUS EXTENSION IS WRONG
+    -- (CART-0876). A statement inside `if c then ... end` is also conditional, and
+    -- the tempting tag is "every hole in a row with a `cond`". I wrote it, and a test
+    -- refused it: instrumented, the row that carries such a hole reports
+    -- `cond=false` — the guarded statement is its OWN row, and the ctrlhead row holds
+    -- the CONDITION, which this IR deliberately carries twice (in `cond` and in
+    -- `rhs`; tests/synth_spec pins that). So the tag would have marked 368 condition
+    -- holes as guarded by themselves. A condition always evaluates; that is what
+    -- makes it a condition.
+    --
+    -- ⇒ KNOWING A ROW SITS INSIDE A GUARDED BLOCK IS A CFG QUESTION, not one
+    -- `anti_unify_row` can answer from two rows — and it is already answered
+    -- elsewhere: flow's guard summaries (`gw`) and `effects` exist for exactly this.
+    -- Wiring them in is the effects check CART-0878 asks for before a template may
+    -- become a transaction, and it is not this. `guarded` today means SHORT-CIRCUIT
+    -- ONLY, the tests say so, and this paragraph is the absence stated rather than
+    -- an over-claim left standing.
     for i = 1, #(r1.rhs or {}) do ok = anti_unify(r1.rhs[i], r2.rhs[i], la, lb, holes, ctx) and ok end
     if r1.cond or r2.cond then ok = anti_unify(r1.cond, r2.cond, la, lb, holes, ctx) and ok end
     -- ★ TAGGED BY RANGE, the same way `side` is, and for the same reason: the cost is
@@ -1647,6 +1698,38 @@ function M.analyze_pair(pair)
             -- the helper signature this hole would carry, per side
             h.deps_a = local_deps(h.xn, locals_a)
             h.deps_b = local_deps(h.yn, locals_b)
+            -- ★★★ WHAT THE CALL SITE COULD PASS (CART-0876). The prototype's reading —
+            -- "a bare local one side, an expression the other, and every one is a
+            -- PARAMETER whose argument is the local here and the expression there" —
+            -- is decidable from what is already computed, and the answer is not one
+            -- thing. MEASURED over lua/cartograph, `kind` holes only:
+            --     max_dist  2   body 3   param 3   no-local 3
+            --     max_dist 20   body 1158  param 127  no-local 79
+            -- ⇒ 85% NEED a function parameter and the current rendering is right for
+            -- them. The other 15% are values the call site can write down, and saying
+            -- so is the difference between "extract by hand" and "pass this argument".
+            --
+            -- ⚠ `no-local` MEANS NO LOCAL OF *THIS* FUNCTION, NOT A CLOSED TERM.
+            -- `local_deps` reads the function's own locals set, so an UPVALUE is
+            -- invisible to it — `report` in `report_cmd#ret` reads as no-local while
+            -- being the enclosing function's parameter. The rendering says which claim
+            -- this is rather than promising more than the accessor can see.
+            if h.why == 'kind' then
+                local da, db = h.deps_a, h.deps_b
+                if #da == 0 and #db == 0 then
+                    h.scope = 'no-local'
+                else
+                    local safe = true
+                    -- `pair.a.params` is the CALL-SITE-SAFE set `fn_row_keys` already
+                    -- computes: a parameter the body does not redefine. A body-local is
+                    -- not in it, and that is exactly the distinction that decides
+                    -- whether the call site can write the argument down.
+                    local pa, pb = pair.a.params or {}, pair.b.params or {}
+                    for _, x in ipairs(da) do if not pa[x] then safe = false end end
+                    for _, x in ipairs(db) do if not pb[x] then safe = false end end
+                    h.scope = safe and 'param' or 'body'
+                end
+            end
             if h.why == 'arity' then why_arity = why_arity + 1
             elseif h.why == 'absent' then why_absent = why_absent + 1
             elseif h.why == 'rowarity' then why_rowarity = why_rowarity + 1
@@ -1720,6 +1803,14 @@ function M.analyze_pair(pair)
             -- uses: the grouping is by (kind, a, b), so one parameter can hold a priced
             -- site and a free one, and lifting it pays for the priced one regardless.
             if h.literal_dep then p.literal_dep = p.literal_dep or h.literal_dep end
+            -- ★ A PARAMETER IS GUARDED IF **ANY** OF ITS SITES IS, and it has to be the
+            -- ANY rule rather than ALL: lifting the parameter lifts every site, so one
+            -- conditional occurrence is enough to change when that expression runs.
+            -- ⚠ FOUND BY THE TAG NOT ARRIVING. The mint set `guarded` and the value
+            -- hole read nil, because `a.holes` is not the raw hole list — it is this
+            -- GROUPING, built field by field, and a field nobody adds here is invisible
+            -- downstream however carefully it was computed. Same shape as CART-0964.
+            if h.guarded then p.guarded = p.guarded or h.guarded end
             if h.at_a then p.sites_a[#p.sites_a + 1] = h.at_a end
             if h.at_b then p.sites_b[#p.sites_b + 1] = h.at_b end
         end
@@ -2135,6 +2226,9 @@ function M.export_pair(a)
     for _, h in ipairs(a.holes or {}) do
         holes[#holes + 1] = { kind = h.kind, a = h.a, b = h.b,
             side = h.side, dest = h.dest, target = h.target,
+            -- CART-0876: this parameter is evaluated only sometimes, so lifting it
+            -- to a call site would run it always.
+            guarded = h.guarded,
             literal_dep = h.literal_dep }
     end
     local function sidename(n)
@@ -2145,6 +2239,11 @@ function M.export_pair(a)
     for _, h in ipairs(a.structs or {}) do
         structs[#structs + 1] = { why = h.why, a = sidename(h.xn), b = sidename(h.yn),
             a_kind = h.xn and h.xn.k or nil, b_kind = h.yn and h.yn.k or nil,
+            -- CART-0876: what the call site could pass, and whether it may.
+            -- Projected HERE rather than rebuilt by each consumer — the agent
+            -- surface gained `why` for free when CART-0974 added it, and gains
+            -- these the same way (CART-0964's rule).
+            scope = h.scope, guarded = h.guarded,
             deps_a = h.deps_a, deps_b = h.deps_b }
     end
     local fparams = {}
@@ -2198,6 +2297,34 @@ function M.extract_proposal(pair, store)
                 L[#L + 1] = ('    f%d  a FUNCTION of (%s)   [%s divergence]%s')
                     :format(i, table.concat(fp.deps, ', '), tostring(fp.f.why or 'kind'),
                         n > 1 and (', at %d sites'):format(n) or '')
+            end
+        end
+        -- ★★★ WHAT THE CALL SITE COULD PASS, AND WHETHER IT MAY (CART-0876). The
+        -- prototype read every one of these as a parameter; measured, 85% are not.
+        -- A body-local cannot be written at the call site, so those really are
+        -- function parameters and the line above is right. The rest are values —
+        -- and a value still cannot be lifted out of a short-circuit.
+        local said = {}
+        for _, h in ipairs(a.structs or {}) do
+            if h.why == 'kind' and h.scope and not said[h.scope .. tostring(h.guarded)] then
+                said[h.scope .. tostring(h.guarded)] = true
+                if h.guarded then
+                    L[#L + 1] = ('    ⚠ one %s divergence sits under %s — it is'
+                        .. ' evaluated only sometimes, so passing it as an argument'
+                        .. ' would run it always. Not liftable without the effects'
+                        .. ' check. (SHORT-CIRCUITS ONLY — a divergence inside a'
+                        .. ' guarded BLOCK is not detected here; that needs the CFG.)')
+                        :format(h.scope, h.guarded)
+                elseif h.scope == 'param' then
+                    L[#L + 1] = '    ↳ a `param` divergence: every local it reads is'
+                        .. " a parameter of its own function, so the CALL SITE can"
+                        .. ' write the argument — a value, not a function.'
+                elseif h.scope == 'no-local' then
+                    L[#L + 1] = '    ↳ a `no-local` divergence: it reads no local of'
+                        .. ' its own function, so both sides are writable at the call'
+                        .. ' site. ⚠ an UPVALUE is invisible here — this says nothing'
+                        .. ' about the enclosing scope.'
+                end
             end
         end
         -- ★★★ Mer-S CHANGED WHAT THIS SENTENCE IS ALLOWED TO SAY. It used to read "a
@@ -2274,6 +2401,15 @@ function M.extract_proposal(pair, store)
     for i, h in ipairs(a.holes) do
         L[#L + 1] = ('    p%d (%s):  %s  in %s   /   %s  in %s')
             :format(i, h.kind, tostring(h.a), pair.a.name, tostring(h.b), pair.b.name)
+        if h.guarded then
+            -- ⚠ A CLEAN VALUE PARAMETERIZATION IS STILL NOT ALWAYS LIFTABLE. This
+            -- proposal's whole page says the divergence is a value; that is a claim
+            -- about SHAPE. Whether the expression may be MOVED to the call site is a
+            -- claim about evaluation, and a short-circuit or a guard answers it no.
+            L[#L + 1] = ('         ⚠ GUARDED — this leaf sits under %s, so it is'
+                .. ' evaluated only sometimes. As an argument it would run on every'
+                .. ' call; check the effects before lifting.'):format(h.guarded)
+        end
         if h.literal_dep then
             L[#L + 1] = ('         ★ PRICED — this leaf is %s. Passed as a VALUE the'
                 .. ' resolver stops seeing it;'):format(h.literal_dep)
