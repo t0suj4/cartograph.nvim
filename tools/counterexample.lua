@@ -49,13 +49,18 @@ vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 pcall(vim.treesitter.language.add, 'lua')
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
-local keep = false
-for _, a in ipairs(arg or {}) do if a == '--keep' then keep = true end end
+local keep, donors_only = false, false
+for _, a in ipairs(arg or {}) do
+    if a == '--keep' then keep = true end
+    if a == '--donors' then donors_only = true end
+end
 
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local clones = require 'cartograph.clones'
 local cx = require 'cartograph.cloneextract'
+local at = require 'cartograph.at'
+local foldrank = require 'cartograph.foldrank'
 
 -- ── THE DONOR: two copies differing in ONE hole ─────────────────────────────
 -- `%PRE%` is file-scope text, `%BODY%` sits inside both bodies, `%A%`/`%B%` are the
@@ -236,6 +241,143 @@ for i, p in ipairs(PROPERTIES) do
     end
     if verdict == 'BROKEN' then bad = bad + 1 end
     rows[#rows + 1] = { name = p.name, verdict = verdict, detail = detail }
+end
+
+-- ══ PHASE 2: REAL DONORS ═══════════════════════════════════════════════════
+--
+-- ★★★ THE TEMPLATE ABOVE CAN ONLY FIND BUGS INSIDE A SHAPE SOMEBODY WROTE. This phase
+-- takes near-clone pairs OFF OUR OWN TREE and substitutes an adversarial value at the
+-- hole's REAL SPAN, so the surrounding code is whatever the tree actually contains —
+-- the donor IS the context rather than an imitation of one, which is `clones.render`'s
+-- whole argument for substituting into donor text instead of emitting from a template.
+--
+-- ★★ AND IT AIMS AT THE PATH THAT HAS NO COVERAGE. Measured (dec/153): 8 of the 9 lifted
+-- holes on this tree are LITERALS, so the purity analysis those claims rest on is barely
+-- exercised by our own code. Substituting a CALL into a real hole runs exactly the branch
+-- that is otherwise never taken.
+--
+-- ⚠ ONLY VALUE-SUBSTITUTION PROPERTIES FIT HERE. A body-local base or a constructor
+-- member is a STRUCTURAL change to the donor, not a hole value — those stay on the
+-- synthetic template above, and saying so is the honest division rather than pretending
+-- one generator covers both.
+local DONOR_PROPS = {
+    { name = 'two distinct literals stay neutral', a = "'aaa'", b = "'bbb'",
+      preserves = 'all' },
+    { name = 'a `require` in the hole is not movable', a = "require('cfgx').aa",
+      b = "require('cfgx').bb", preserves = 'unreviewed' },
+    -- ★★★ THE DISTINCTION THIS TOOL TAUGHT ME, AND IT NEARLY BECAME A FALSE BUG REPORT.
+    -- My first version asserted `os.time()` / `os.clock()` in a hole must be `unreviewed`,
+    -- and it reported BROKEN on four separate donors — which looks exactly like one root
+    -- cause found four times. It was MY PREMISE that was wrong. What a `field` hole lifts
+    -- is the ACCESS (`os.time`), not the call, so the call site receives the FUNCTION
+    -- VALUE and the invocation stays in the helper body:
+    --     return template_meet_extracted(a, b, opts, os.time, 'unify failed: ')
+    -- Nothing moves, so `pure` is right. Verified by reading the PREVIEW rather than
+    -- trusting the verdict — test the premise, not the consequence.
+    -- ⇒ A CALL ONLY TRAVELS WHEN IT IS IN THE BASE, which is what the `require` row above
+    -- constructs and what `find_bin`'s real `require('cartograph.config').clangd_bin`
+    -- hole is. This row now asserts the true and subtler fact.
+    { name = 'a field off a plain name lifts the FUNCTION, not the call',
+      a = 'os.time', b = 'os.clock', preserves = 'all' },
+}
+
+--- substitute `text` at every span in `sites`, BOTTOM-UP.
+--- ⚠ DESCENDING ORDER IS NOT AN OPTIMISATION. Replacing left-to-right shifts every later
+--- span on the same line, and the second write then lands on stale columns — which is
+--- CART-0984's duplicate-substitution bug exactly, and it ate a `then` when it happened
+--- for real. The convention is `clones.render`'s, derived there rather than assumed:
+--- 0-based, end-exclusive, `l:sub(1, sc) .. to .. l:sub(ec + 1)`.
+local function splice(lines, sites, text)
+    local s = {}
+    for _, r in ipairs(sites or {}) do
+        if at.sl(r) ~= at.el(r) then return nil, 'a multi-line hole span' end
+        s[#s + 1] = r
+    end
+    if #s == 0 then return nil, 'the hole carries no span' end
+    table.sort(s, function (x, y)
+        if at.sl(x) ~= at.sl(y) then return at.sl(x) > at.sl(y) end
+        return at.sc(x) > at.sc(y)
+    end)
+    for _, r in ipairs(s) do
+        local l = lines[at.sl(r) + 1]
+        if not l then return nil, 'a span outside the file' end
+        lines[at.sl(r) + 1] = l:sub(1, at.sc(r)) .. text .. l:sub(at.ec(r) + 1)
+    end
+    return lines
+end
+
+local function real_donors()
+    local data = ts.extract(repo .. '/lua'); data.root = data.root or (repo .. '/lua')
+    store.ingest(data)
+    local out, seen = {}, {}
+    for _, p in ipairs(clones.near(store, { max_dist = 4 })) do
+        if p.a and p.b and p.a.file == p.b.file
+            and not p.a.file:find('^cartograph/algebra/') then
+            local an = clones.analyze_pair(p, store)
+            local h = (an.holes or {})[1]
+            if an.kind == 'value' and h and not seen[p.a.file .. tostring(p.a.name)] then
+                seen[p.a.file .. tostring(p.a.name)] = true
+                out[#out + 1] = { file = p.a.file, a = p.a.name, b = p.b.name, hole = h }
+            end
+        end
+    end
+    return out
+end
+
+if true then
+    local donors = real_donors()
+    for _, d in ipairs(donors) do
+        local src0 = {}
+        for l in io.lines(repo .. '/lua/' .. d.file) do src0[#src0 + 1] = l end
+        for _, dp in ipairs(DONOR_PROPS) do
+            local lines = {}
+            for i, l in ipairs(src0) do lines[i] = l end
+            local okA, whyA = splice(lines, d.hole.sites_a, dp.a)
+            local okB = okA and splice(lines, d.hole.sites_b, dp.b)
+            local label = ('%s: %s'):format(d.file:gsub('^cartograph/', ''), dp.name)
+            local verdict, detail
+            if not okB then
+                verdict, detail = 'UNREACHED', tostring(whyA or 'could not substitute')
+            else
+                local text = table.concat(lines, '\n')
+                if not parses(text) then
+                    verdict, detail = 'UNREACHED', 'the substituted donor does not parse'
+                else
+                    local dir = root .. '/d' .. #rows .. '_' .. #rows
+                    vim.fn.mkdir(dir, 'p')
+                    local fd = assert(io.open(dir .. '/m.lua', 'w'))
+                    fd:write(text); fd:close()
+                    local dat = ts.extract(dir); dat.root = dat.root or dir
+                    store.ingest(dat)
+                    local id
+                    for _, n in ipairs(store.data.nodes) do
+                        if n.name == d.a then id = n.id break end
+                    end
+                    local pair = id and clones.near_of(store, id, { max_dist = 4,
+                        min_rows = 3, min_shared = 2 })[1]
+                    if not pair then
+                        verdict, detail = 'UNREACHED',
+                            'the substituted copies are no longer a near-clone pair'
+                    else
+                        local plan, why = cx.plan(store, pair, {})
+                        if not plan then
+                            verdict, detail = 'UNREACHED', ('refused: %s'):format(tostring(why))
+                        elseif plan.preserves ~= dp.preserves then
+                            verdict, detail = 'BROKEN', ('claims `%s`, expected `%s` — %s')
+                                :format(tostring(plan.preserves), tostring(dp.preserves),
+                                        tostring(plan.preserves_why))
+                        else
+                            verdict, detail = 'CONFIRMED',
+                                ('claims `%s`'):format(plan.preserves)
+                        end
+                    end
+                end
+            end
+            if verdict == 'BROKEN' then bad = bad + 1 end
+            rows[#rows + 1] = { name = label, verdict = verdict, detail = detail,
+                donor = true }
+        end
+    end
 end
 
 print(('counterexample — %d propert%s\n'):format(#PROPERTIES, #PROPERTIES == 1 and 'y' or 'ies'))
