@@ -1764,6 +1764,49 @@ end
 
 function M.node(id) return id and M.by_id[id] or nil end
 
+--- THE DEFINITIONS CONTAINING A POSITION, INNERMOST FIRST (CART-0976).
+---
+--- The sibling of `M.enclosing` below, and missing for the same reason: the chain
+--- lived inline in `agent.v_node_at` and was owned by nobody, so nothing else could
+--- ask it. `lint_run` is the consequence — the largest finding surface in the tool,
+--- 11 rules, and every row carries a POSITION and no node, so `attach_refs` has
+--- nothing to attach and a lint finding can address no planner at all (CART-0972's
+--- measurement).
+---
+--- ⚠ LINE-GRANULAR WITHOUT A COLUMN, AND THAT IS A LIMIT, NOT A CHOICE. `col` is
+--- optional because most callers have only a line — a lint finding does. With one,
+--- containment is compared on both coordinates, which is what CART-0813 needed: a
+--- callback opening on its caller's line is inside that line range, so two
+--- definitions can both contain a bare line and only a column separates them. Without
+--- one they are ordered by SPAN and the innermost wins, which is the best available
+--- answer and exactly what v_node_at has always done.
+---
+--- ⚠ THE MODULE IS NOT IN THE CHAIN: `by_file` is the definitions axis. That is what
+--- makes an EMPTY answer meaningful — a module spans its file, so including it would
+--- put every position inside something and "outside every definition" (a comment, an
+--- import, a top-level statement) could never be said.
+---@return table[] nodes, innermost first; empty when the position is in no definition
+function M.defs_at(file, line, col)
+    local at = require 'cartograph.at'
+    local rows = {}
+    for _, n in ipairs(M.by_file[file] or {}) do
+        if n.range then
+            local sl, sc = at.sl(n.range) + 1, at.sc(n.range)
+            local el, ec = at.el(n.range) + 1, at.ec(n.range)
+            local after_start = sl < line or (sl == line and (col == nil or sc <= col))
+            local before_end = el > line or (el == line and (col == nil or ec >= col))
+            if after_start and before_end then
+                rows[#rows + 1] = { node = n,
+                    span = (el - sl) * 1e6 + (ec - sc) }
+            end
+        end
+    end
+    table.sort(rows, function (a, b) return a.span < b.span end)
+    local out = {}
+    for i, r in ipairs(rows) do out[i] = r.node end
+    return out
+end
+
 --- THE INNERMOST DEFINITION THAT LEXICALLY CONTAINS `id`, or nil (CART-0975).
 ---
 --- WHY IT EXISTS AS AN ACCESSOR AND NOT AS A LOCAL WALK. Three analyses in one arc

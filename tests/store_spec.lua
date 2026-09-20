@@ -282,3 +282,45 @@ test('store.enclosing: ONE-LINE parent and child — line-only would swallow the
     eq(nil, store.enclosing('e.lua::one_outer'),
         'and the function is NOT reported as living inside its own callback')
 end)
+
+-- ── store.defs_at: the containment chain for a POSITION (CART-0976) ─────────
+-- The sibling of store.enclosing, and missing for the same reason: the chain lived
+-- inline in agent.v_node_at and nothing else could ask it. The consequence was that
+-- `lint_run` — the largest finding surface in the tool — carried a position and no
+-- node, so attach_refs had nothing to attach and a lint finding could address no
+-- planner at all.
+test('store.defs_at: the chain innermost first, empty outside every definition', function ()
+    graph({ mod('f.lua', false),
+        fnr('f.lua', 'outer', rng(0, 0, 20, 3)),
+        fnr('f.lua', 'middle', rng(4, 4, 14, 7)),
+        fnr('f.lua', 'inner', rng(6, 8, 9, 11)) })
+    local chain = store.defs_at('f.lua', 8)      -- 1-based line inside all three
+    eq(3, #chain, 'all three contain the line')
+    eq('f.lua::inner', chain[1].id, 'innermost first')
+    eq('f.lua::outer', chain[3].id, 'outermost last')
+    eq(0, #store.defs_at('f.lua', 23), 'a line past every definition is in none')
+end)
+
+test('store.defs_at: the MODULE is never in the chain, so empty MEANS outside', function ()
+    -- a module spans its whole file; if it were eligible every position would be
+    -- inside something and "a comment, an import, a top-level statement" could not
+    -- be said. by_file excludes it by construction and this pins that.
+    graph({ mod('g.lua', false), fnr('g.lua', 'only', rng(4, 0, 8, 3)) })
+    eq(0, #store.defs_at('g.lua', 1), 'line 1 is in the module and in no definition')
+    eq(1, #store.defs_at('g.lua', 6))
+end)
+
+test('store.defs_at: a COLUMN separates two definitions sharing a line', function ()
+    -- ⚠ WITHOUT a column the two are ordered by span and the innermost wins, which is
+    -- the best available answer; WITH one, only the real container matches. That is
+    -- CART-0813's shape — a callback opening on its caller's line.
+    graph({ mod('h.lua', false),
+        fnr('h.lua', 'wrap', rng(2, 0, 2, 60)),
+        fnr('h.lua', 'cb', rng(2, 20, 2, 44)) })
+    local bare = store.defs_at('h.lua', 3)
+    eq(2, #bare, 'a bare line is inside both')
+    eq('h.lua::cb', bare[1].id, 'and the tighter span leads')
+    local left = store.defs_at('h.lua', 3, 5)
+    eq(1, #left, 'column 5 is before the callback opens, so only the wrapper contains it')
+    eq('h.lua::wrap', left[1].id)
+end)

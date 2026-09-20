@@ -586,21 +586,17 @@ local function v_node_at(store, args)
     -- including it would mean every in-range position matches and the `absent`
     -- branch below could never fire. An unreachable branch is a claim nobody can
     -- check (CART-0580), and tests/mcpserve_spec.lua fires this one on a comment.
+    -- ⚠ THE CHAIN MOVED TO store.defs_at (CART-0976) AND THIS IS NOW ITS CALLER, NOT
+    -- ITS OWNER. It lived here and nothing else could ask it, which is why `lint_run`
+    -- rows carry a position and no node: the largest finding surface in the tool could
+    -- address no planner. One owner, two callers — the same correction CART-0975 made
+    -- for the node-to-parent direction.
     local defs = (store.by_file or {})[file] or {}
-    local rows = {}
-    for _, n in ipairs(defs) do
-        if n.range then
-            local sl, el = atr.sl(n.range) + 1, atr.el(n.range) + 1
-            if sl <= line and line <= el then
-                rows[#rows + 1] = { node = n, span = el - sl }
-            end
-        end
-    end
-    table.sort(rows, function (a, b) return a.span < b.span end)
+    local chain = store.defs_at(file, line)
     local out = {}
-    for i, r in ipairs(rows) do
-        out[i] = noderow(store, r.node.id, { start_line = atr.sl(r.node.range) + 1,
-            end_line = atr.el(r.node.range) + 1, depth = i - 1 })
+    for i, n in ipairs(chain) do
+        out[i] = noderow(store, n.id, { start_line = atr.sl(n.range) + 1,
+            end_line = atr.el(n.range) + 1, depth = i - 1 })
     end
     if #out > 0 then return { subject = subject, result = out } end
     return { subject = subject, result = {}, absence = 'absent', absence_why = {
@@ -941,8 +937,20 @@ local function v_lint_run(store, args)
         end
         if not file or rel == file then
             local r = meta[f.rule] or {}
+            -- ★★★ A FINDING THAT NAMES NO NODE CAN ADDRESS NOTHING (CART-0972 /
+            -- CART-0976). Every other finding surface carries `id` and therefore gets
+            -- a durable `ref` from attach_refs for free; these rows carried a POSITION
+            -- and stopped there, so the tool's largest finding source could not hand
+            -- its subject to any planner. `store.defs_at` resolves the innermost
+            -- DEFINITION containing the line, and attach_refs does the rest in the one
+            -- place it is done (CART-0145).
+            -- ⚠ NIL IS A REAL ANSWER AND IS LEFT AS ONE: a finding on a comment, an
+            -- import or a top-level statement is in no definition, and `by_file`
+            -- excludes the module precisely so that can be said.
+            local owner = rel and store.defs_at(rel, f.line or 0)[1]
             rows[#rows + 1] = { rule = f.rule, severity = nn(f.severity), file = nn(rel),
                 line = nn(f.line), message = nn(f.message),
+                id = owner and owner.id or NUL,
                 -- WHAT THE FINDING IS WORTH, from the rule's own declaration:
                 -- an `authoritative` witness is a bug; a `suggestive` one is a
                 -- lead. Acting on them alike is the misread this field prevents.

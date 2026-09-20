@@ -873,3 +873,66 @@ test('agentwrite: `dest` is OPTIONAL — a same-file family neither needs nor ta
         ok(name ~= 'dest', '`dest` is not in the verb\'s required list')
     end
 end)
+
+-- ── A FINDING THAT NAMES NO NODE CAN ADDRESS NOTHING (CART-0976 / CART-0972) ─
+-- Measured before the fix: every other finding surface carries `id` and gets a durable
+-- `ref` from attach_refs for free; lint rows carried file+line and stopped there, so
+-- the tool's LARGEST finding source (11 rules, 2554 rows on its own tree) could hand
+-- its subject to no planner at all. `store.defs_at` resolves the innermost DEFINITION
+-- containing the line; attach_refs does the rest, in the one place it is done.
+--
+-- ★ AND THIS ALONE CLOSED THE FILL. CART-0972's measurement expected to also widen
+-- txn_plan_declare / txn_plan_annotate to accept file+line, since they were the only
+-- planners that refused it. Once a lint row carries a REF they need no widening —
+-- both take `ref` already.
+local LINTABLE = {
+    'local M = {}',
+    '-- a comment on its own line, inside no definition',
+    'local function unreferenced_helper(x)',
+    '  return x + 1',
+    'end',
+    'function M.go(v) return v end',
+    'return M',
+}
+
+test('agentwrite: a lint finding names the definition it sits in and carries its ref', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    ingest(mkroot { ['lf.lua'] = LINTABLE })
+    local doc = call('lint_run', {})
+    ok(type(doc.result) == 'table', 'lint_run answered with rows')
+    local named = 0
+    for _, r in ipairs(doc.result) do
+        if r.id ~= nil and r.id ~= NUL then
+            named = named + 1
+            ok(r.ref ~= nil and r.ref ~= NUL,
+                'a row naming a node also carries its durable ref')
+            ok(r.ref.file and r.ref.name, 'and the ref resolves: ' .. vim.inspect(r.ref))
+        else
+            -- ⚠ NIL IS A REAL ANSWER, not a gap: a finding on a comment, an import or
+            -- a top-level statement is in no definition — sayable only because the
+            -- module is excluded from the containment chain.
+            ok(r.ref == nil or r.ref == NUL,
+                'a row naming no definition carries no ref either')
+        end
+    end
+    ok(named > 0, 'at least one finding sits inside a definition')
+end)
+
+test('agentwrite: a lint finding\'s ref ADDRESSES a planner, which is the whole point', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)   -- planning needs no write permission
+    ingest(mkroot { ['lf.lua'] = LINTABLE })
+    local doc = call('lint_run', {})
+    local sample
+    for _, r in ipairs(doc.result or {}) do
+        if r.ref ~= nil and r.ref ~= NUL then sample = r break end
+    end
+    ok(sample, 'a lint finding carrying a ref')
+    -- txn_plan_annotate takes {ref, text} and the finding supplies BOTH
+    local plan = call('txn_plan_annotate', { ref = sample.ref, text = sample.message })
+    eq(true, plan.ok, 'the finding plans an annotation on the definition it sits in: '
+        .. ((type(plan.refusal) == 'table' and plan.refusal.reason) or ''))
+    ok(plan.subject and plan.subject.plan and plan.subject.plan ~= NUL,
+        'returning a plan handle')
+end)
