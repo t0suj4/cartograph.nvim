@@ -67,6 +67,9 @@ local EXTRACT = {
             return out
         end,
         member_pat = function (name) return ('function M.%s('):format(name) end,
+        -- CART-0985: the node types whose CHILDREN are statements. A helper is a
+        -- statement, so it may only be inserted as a child of one of these.
+        stmt_parents = { chunk = true, block = true },
     },
     javascript = {
         parse = 'javascript',
@@ -79,6 +82,9 @@ local EXTRACT = {
         ret = function (callee, args) return ('return %s(%s);'):format(callee, args) end,
         def_pat = function (name) return ('function %s('):format(name) end,
         module = nil, -- no JS module/import wiring in the spec yet → cross-file refused
+        -- a member of an object literal or a class body is the JS analogue of a lua
+        -- table-constructor field: an expression position, not a statement one.
+        stmt_parents = { program = true, statement_block = true },
     },
 }
 local FILE_LANG = { lua = 'lua', js = 'javascript', jsx = 'javascript',
@@ -101,6 +107,85 @@ local function fresh_name(store, files, base)
 end
 
 -- top-level def names in a file (fn/method/var) — the cross-file move must not read these
+--- ★★★ WHERE A STATEMENT MAY LEGALLY GO (CART-0985), given a member's signature line.
+---
+--- The helper is a STATEMENT (`local function f() … end`). Both builders used to insert
+--- it beside the member, which is right only when the member's own definition sits at a
+--- statement position. MEASURED on `lua/cartograph/spec/odin.lua`, whose whole body is
+--- `return { … }`: `body_of` and `params_of` are ENTRIES IN A TABLE CONSTRUCTOR, so the
+--- helper landed inside the constructor and the file stopped parsing — one `ERROR` node
+--- spanning exactly the inserted lines. The `parses` guard refused it, so nothing was
+--- written; this turns a late, unexplained refusal into an insertion point that works.
+---
+--- ⚠ DROPPING `local` WOULD NOT HAVE FIXED IT, and it is the obvious first guess: a bare
+--- `function (…) … end` IS an expression, so it parses — as a POSITIONAL ARRAY ELEMENT
+--- of the table, binding no name, leaving every call site reading an undefined global.
+--- That trades a parse error for CART-0984's failure mode, which is strictly worse
+--- because no guard catches it.
+---
+--- ★ A MEMBER ALREADY AT STATEMENT LEVEL GETS ITS OWN LINE BACK, unchanged: the walk
+--- stops immediately when the node's parent is already a statement container.
+--- @return integer|nil line0, string|nil why
+local function stmt_line(lines, lang, syn, line0)
+    local parents = syn and syn.stmt_parents
+    if not parents then return line0 end -- no claim for this language: behave as before
+    local src = table.concat(lines, '\n')
+    local okp, parser = pcall(vim.treesitter.get_string_parser, src, syn.parse)
+    if not okp or not parser then return line0 end
+    local okt, tree = pcall(function () return parser:parse()[1] end)
+    if not okt or not tree then return line0 end
+    local text = lines[line0 + 1] or ''
+    local col = #(text:match('^%s*') or '')
+    local node = tree:root():named_descendant_for_range(line0, col, line0, col)
+    if not node then return line0 end
+    while node do
+        local parent = node:parent()
+        if not parent then break end
+        if parents[parent:type()] then return (node:range()) end
+        node = parent
+    end
+    return nil, 'no statement context encloses it'
+end
+
+--- the file-scope locals of `file`, name -> the 0-based line that binds it
+local function file_local_lines(store, file)
+    local s = {}
+    for _, n in ipairs(store.data.nodes) do
+        if n.file == file and n.name and n.range
+            and (n.kind == 'function' or n.kind == 'method' or n.kind == 'var') then
+            local l = at.sl(n.range)
+            if s[n.name] == nil or l < s[n.name] then s[n.name] = l end
+        end
+    end
+    return s
+end
+
+--- ⚠⚠ THE HELPER GOES ABOVE THE MEMBERS, SO IT MUST NOT OUTRUN WHAT IT READS. A body
+--- that reads a file-local bound at or below the insertion line would find it undefined
+--- there — the same call-site-nameability question CART-0984 asks of a hole's VALUE,
+--- asked of the helper's own free names. Returns the offending name, or nil.
+---
+--- ★ IT IS NOT A HOIST-ONLY CHECK, AND MY FIRST CUT WAS. Restricting it to names bound
+--- BETWEEN the hoist line and the member made it UNFIRABLE: the hoist target is the
+--- outermost statement containing the member, so anything between the two is inside that
+--- statement and is not a file-scope binding. A guard that cannot fire is worse than no
+--- guard — it reads as coverage. The real question has nothing to do with hoisting: the
+--- helper is inserted ABOVE THE EARLIER COPY in every case, so a local bound BETWEEN THE
+--- TWO COPIES and read by the shared body was already being outrun, hoist or not.
+--- @return string|nil name
+local function reads_below(store, ids, file, ins0, skip)
+    local lines_of_local = file_local_lines(store, file)
+    for _, id in ipairs(ids) do
+        local ef = require('cartograph.expr').free(store, id)
+        for r in pairs((ef and ef.reads) or {}) do
+            if not (skip and skip[r]) then
+                local l = lines_of_local[r]
+                if l and l >= ins0 then return r end
+            end
+        end
+    end
+end
+
 local function file_locals(store, file)
     local s = {}
     for _, n in ipairs(store.data.nodes) do
@@ -421,10 +506,25 @@ function M.plan(store, pair, opts)
 
     if not xfile then
         -- helper as a local before the earlier copy; both bodies → return helper(…)
-        local sig_indent = indent_of(lines_a[a_sig + 1])
+        -- CART-0985: a statement cannot go beside a member that is not one
+        local member0 = math.min(a_sig, b_sig)
+        local ins0, swhy = stmt_line(lines_a, lang, syn, member0)
+        if not ins0 then
+            return nil, ('the copies are not defined at a statement position (%s), and the'
+                .. ' helper is a statement — there is nowhere in this file to put it')
+                :format(tostring(swhy))
+        end
+        local below = reads_below(store, { a.id, b.id }, a.file, ins0,
+            { [a.name] = true, [b.name] = true })
+        if below then
+            return nil, ('the helper would have to sit above `%s`, which it reads —'
+                .. ' hoisting it out of the enclosing expression would leave that'
+                .. ' undefined'):format(below)
+        end
+        local sig_indent = indent_of(lines_a[ins0 + 1])
         local helper = syn.local_helper(hname, table.concat(hparams, ', '), body, sig_indent)
         plan.files[a.file] = { ops = {
-            { from0b = math.min(a_sig, b_sig), to0b = math.min(a_sig, b_sig) - 1, new = helper },
+            { from0b = ins0, to0b = ins0 - 1, new = helper },
             { from0b = a_open, to0b = a_close, new = { call_line(hname, va.params, 'sites_a', lines_a) } },
             { from0b = b_open, to0b = b_close, new = { call_line(hname, vb.params, 'sites_b', lines_b) } },
         } }
@@ -823,8 +923,28 @@ function M.plan_family(store, fam, opts)
 
     if not xfile then
         -- the helper as a local above the first member in this file
-        local sig_indent = indent_of(linesof[file][spans[donor_i].sig + 1])
-        table.insert(perfile[file], { from0b = earliest[file], to0b = earliest[file] - 1,
+        local mids = {}
+        for _, m in ipairs(plan.members) do
+            if m.file == file then mids[#mids + 1] = m.id end
+        end
+        -- CART-0985: a statement cannot go beside a member that is not one
+        local member0 = earliest[file]
+        local ins0, swhy = stmt_line(linesof[file], lang, syn, member0)
+        if not ins0 then
+            return nil, ('the copies are not defined at a statement position (%s), and the'
+                .. ' helper is a statement — there is nowhere in this file to put it')
+                :format(tostring(swhy))
+        end
+        local mnames = {}
+        for _, m in ipairs(plan.members) do if m.name then mnames[m.name] = true end end
+        local below = reads_below(store, mids, file, ins0, mnames)
+        if below then
+            return nil, ('the helper would have to sit above `%s`, which it reads —'
+                .. ' hoisting it out of the enclosing expression would leave that'
+                .. ' undefined'):format(below)
+        end
+        local sig_indent = indent_of(linesof[file][ins0 + 1])
+        table.insert(perfile[file], { from0b = ins0, to0b = ins0 - 1,
             new = syn.local_helper(hname, table.concat(hparams, ', '), body, sig_indent) })
     else
         -- ⚠ ONE REQUIRE PER FILE, not one per member. A file holding three

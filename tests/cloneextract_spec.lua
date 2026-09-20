@@ -1014,3 +1014,99 @@ test('extract-helper: a CAPTURE-FREE member is not asked to pass a name it lacks
         'no unfollowable remedy: ' .. tostring(why))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── A MEMBER IS NOT ALWAYS A STATEMENT (CART-0985) ──────────────────────────
+--
+-- ★★★ THE HELPER IS A STATEMENT AND THE MEMBERS NEED NOT BE. Both builders inserted it
+-- beside the earlier copy, which is right only when that copy's definition sits at a
+-- statement position. MEASURED on `lua/cartograph/spec/odin.lua` — whose whole body is
+-- `return { … }`, so `body_of`/`params_of` are ENTRIES IN A TABLE CONSTRUCTOR — the
+-- helper landed inside the constructor and the file stopped parsing: one `ERROR` node
+-- spanning exactly the inserted lines.
+--
+-- ⚠ THE `parses` GUARD CAUGHT IT, so nothing was ever written. This fixture exists
+-- because a guard catching a synthesis bug is a REFUSAL, and a verb that can only refuse
+-- a whole family of real code is not finished. The fold is now performed, not declined.
+local CTOR_MODULE =
+    'local node_text = require("u").node_text\n\n'
+    .. 'return {\n'
+    .. '    hooks = {\n'
+    .. '        body_of = function (def)\n'
+    .. '            for c in def:iter_children() do\n'
+    .. '                if c:named() and c:type() == "procedure" then\n'
+    .. '                    for g in c:iter_children() do\n'
+    .. '                        if g:named() and g:type() == "block" then return g end\n'
+    .. '                    end\n'
+    .. '                end\n'
+    .. '            end\n'
+    .. '            return nil\n'
+    .. '        end,\n'
+    .. '        params_of = function (def)\n'
+    .. '            for c in def:iter_children() do\n'
+    .. '                if c:named() and c:type() == "procedure" then\n'
+    .. '                    for g in c:iter_children() do\n'
+    .. '                        if g:named() and g:type() == "parameters" then return g end\n'
+    .. '                    end\n'
+    .. '                end\n'
+    .. '            end\n'
+    .. '            return nil\n'
+    .. '        end,\n'
+    .. '    },\n'
+    .. '}\n'
+
+test('extract-helper: members inside a TABLE CONSTRUCTOR get the helper HOISTED out', function ()
+    if not ready('lua') then skip('no lua parser') end
+    local root = proj { ['m.lua'] = CTOR_MODULE }
+    local p = pair_of('body_of')
+    ok(p, 'the two constructor members are a near-clone pair')
+    local plan, why = cx.plan(store, p)
+    ok(plan, 'and they PLAN — the members not being statements is not a refusal: '
+        .. tostring(why))
+    if plan then
+        local _, after = cx.preview(store, plan)
+        local text = after[plan.a.file]
+        -- ★ THE POINT: the helper is a STATEMENT, so it must be outside the constructor.
+        local hpos = text:find('local function ' .. plan.helper, 1, true)
+        local rpos = text:find('\nreturn {', 1, true)
+        ok(hpos and rpos, 'both the helper and the constructor are in the result')
+        ok(hpos < rpos, 'the helper is hoisted ABOVE `return {`, not inserted inside it')
+        -- ⚠ AND IT PARSES. This is the assertion the old behaviour failed: the result
+        -- carried one ERROR node spanning exactly the inserted helper.
+        local parser = vim.treesitter.get_string_parser(text, 'lua')
+        ok(not parser:parse()[1]:root():has_error(),
+            'the synthesized file parses:\n' .. text)
+        -- and both members really were rewritten to call it
+        local n = select(2, text:gsub(plan.helper .. '%(', ''))
+        ok(n >= 3, 'the helper is defined once and called from both members (' .. n .. ')')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠⚠ THE HELPER IS INSERTED ABOVE THE EARLIER COPY, SO IT MUST NOT OUTRUN WHAT IT READS.
+-- A file-local bound BETWEEN the two copies, and read by the shared body, would be
+-- undefined where the helper lands. This is NOT specific to hoisting — it was already
+-- true of the plain "insert before the earlier copy" behaviour — which is why the guard
+-- asks about the INSERTION LINE and not about the hoist.
+-- ★ MY FIRST CUT ASKED ONLY ABOUT NAMES BOUND BETWEEN THE HOIST LINE AND THE MEMBER,
+-- and that predicate is UNFIRABLE: the hoist target is the outermost statement
+-- containing the member, so anything in between is inside that statement and is not a
+-- file-scope binding. It passed this suite by never firing.
+test('extract-helper: an insertion that would outrun a file-local it reads is REFUSED', function ()
+    if not ready('lua') then skip('no lua parser') end
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\n'
+        .. 'M.alpha = function (x)\n  local y = prep(x)\n  local z = norm(y)\n'
+        .. '  local w = enc(z, SALT, \'json\')\n  return w\nend\n\n'
+        .. 'local SALT = 7\n\n'
+        .. 'M.beta = function (a)\n  local b = prep(a)\n  local c = norm(b)\n'
+        .. '  local d = enc(c, SALT, \'yaml\')\n  return d\nend\n\n'
+        .. 'return M\n' }
+    -- the looser gate this file already keeps for small bodies
+    local p = xpair('M.alpha')
+    ok(p, 'the two copies are a near-clone pair')
+    local plan, why = cx.plan(store, p)
+    ok(not plan, 'it refuses rather than inserting above the binding it reads')
+    ok(why and why:find('SALT', 1, true),
+        'and the refusal NAMES the local it would outrun: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
