@@ -1763,6 +1763,57 @@ function M.clear_stage()
 end
 
 function M.node(id) return id and M.by_id[id] or nil end
+
+--- THE INNERMOST DEFINITION THAT LEXICALLY CONTAINS `id`, or nil (CART-0975).
+---
+--- WHY IT EXISTS AS AN ACCESSOR AND NOT AS A LOCAL WALK. Three analyses in one arc
+--- gave the right answer for a blind reason because nothing could ask "whose scope is
+--- this in?" after extraction: `clones.local_deps` reads ONE function's locals, so a
+--- name bound by an enclosing function reads as bound by nobody
+--- ([[cartograph-terminology]]'s upvalue). scope.lua is per-FILE and dies with the
+--- parse tree by design; `store.scopes()` is the mention index's namespace axis, not a
+--- lexical one; and `agent.v_node_at` computes a containment chain and keeps it
+--- nowhere. Re-deriving containment in a fourth place is the copied-walker bug this
+--- repo has already paid for twice in one day (CART-0746).
+---
+--- ⚠ POSITION-AWARE, NOT LINE-GRANULAR, AND THAT IS NOT A REFINEMENT — IT IS THE BUG
+--- CART-0813 FIXED. A callback opening on its caller's line is CONTAINED by that line
+--- range, so a line-only test makes a function its own parent's sibling (or worse, a
+--- self-loop). Both ends are compared with their columns. The extraction-time `fn_at`
+--- compares the START side only and says its END side has never been observed to need
+--- it — that is an OWNER query, where a late-ending function is the opposite error;
+--- CONTAINMENT is symmetric and has no reason to pick a side.
+---
+--- ⚠ THE MODULE IS EXCLUDED FOR FREE: `by_file` is the DEFINITIONS axis and idx_node
+--- never puts a `module` in it. That exclusion is what makes a nil answer meaningful —
+--- a module spans its whole file, so including it would make every node enclosed and
+--- "top level" unsayable.
+---
+--- Returns the node, or nil when the definition is at file scope (the common case).
+function M.enclosing(id)
+    local at = require 'cartograph.at'
+    local x = M.node(id)
+    if not (x and x.range and x.file) then return nil end
+    local xsl, xsc = at.sl(x.range), at.sc(x.range)
+    local xel, xec = at.el(x.range), at.ec(x.range)
+    local best, bspan
+    for _, n in ipairs(M.by_file[x.file] or {}) do
+        if n.id ~= x.id and n.range then
+            local sl, sc = at.sl(n.range), at.sc(n.range)
+            local el, ec = at.el(n.range), at.ec(n.range)
+            local starts_at_or_before = sl < xsl or (sl == xsl and sc <= xsc)
+            local ends_at_or_after = el > xel or (el == xel and ec >= xec)
+            if starts_at_or_before and ends_at_or_after then
+                -- INNERMOST = the smallest span, lines first and columns as the
+                -- tie-break: two definitions can share a line range and differ only
+                -- in where they open (an inline callback inside a one-line wrapper).
+                local span = (el - sl) * 1e6 + (ec - sc)
+                if not bspan or span < bspan then best, bspan = n, span end
+            end
+        end
+    end
+    return best
+end
 --- Resolve a graph file key to a real path. A multi-root corpus (self://
 --- loaded) carries a `roots` map: the key's first segment is a plugin
 --- label (telescope.nvim/lua/…) that names the real directory. A plain

@@ -4241,3 +4241,59 @@ test('clones: a RESOLVED impure callee blocks the move, with its purity label', 
         .. tostring(h.moves))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── `no-local` MEANT TWO THINGS, AND ONE OF THEM WAS AN UPVALUE (CART-0975) ─
+-- `local_deps` reads ONE function's locals, so a name the ENCLOSING function binds read
+-- as bound by nobody. The distinction decides whether the call site can pass the
+-- argument: an upvalue is in scope where the call would be written, a free global is a
+-- claim about a scope this analysis never looked at. Two of the three `no-local` holes
+-- at the shipped max_dist were upvalues, including the pair CART-0878 parked.
+test('clones: a divergence reading an ENCLOSING binder is `upvalue`, not `no-local`', function ()
+    local mk = function (name, inner)
+        return ('local M = {}\nfunction M.%s(handler)\n  return function (src)\n'):format(name)
+            .. '    local a = load(src)\n    local b = trim(a)\n'
+            .. ('    emit(%s)\n'):format(inner)
+            .. '    return b\n  end\nend\nreturn M\n'
+    end
+    local root = proj {
+        ['uv1.lua'] = mk('wrap_one', 'handler'),
+        ['uv2.lua'] = mk('wrap_two', 'pick(handler)'),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'M.wrap_one#ret', 'M.wrap_two#ret')
+    ok(p, 'the two inner functions are a near-clone')
+    local an = p and clones.analyze_pair(p, store)
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.scope then h = x end end
+    ok(h, 'the divergence carries a scope')
+    eq('upvalue', h.scope, '`handler` is the ENCLOSING function\'s parameter')
+    eq('handler', h.upvalue, 'and the binder is named, not merely counted')
+    local txt = table.concat(clones.extract_proposal(p, store), '\n')
+    ok(txt:find('ENCLOSING definition', 1, true),
+        'and the proposal says the call site can still pass it: ' .. txt)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: with NO store there is no enclosing scope to ask, so `no-local` stands', function ()
+    -- ⚠ THE TRIPWIRE. The upvalue check needs the graph; without it the older,
+    -- caveated answer is kept rather than upgraded on a guess.
+    local mk = function (name, inner)
+        return ('local M = {}\nfunction M.%s(handler)\n  return function (src)\n'):format(name)
+            .. '    local a = load(src)\n    local b = trim(a)\n'
+            .. ('    emit(%s)\n'):format(inner)
+            .. '    return b\n  end\nend\nreturn M\n'
+    end
+    local root = proj {
+        ['uw1.lua'] = mk('wrp_one', 'handler'),
+        ['uw2.lua'] = mk('wrp_two', 'pick(handler)'),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }),
+        'M.wrp_one#ret', 'M.wrp_two#ret')
+    ok(p, 'the two inner functions are a near-clone')
+    local an = p and clones.analyze_pair(p)   -- deliberately no store
+    local h
+    for _, x in ipairs(an.structs or {}) do if x.scope then h = x end end
+    ok(h, 'the divergence still carries a scope')
+    eq('no-local', h.scope, 'and it is NOT upgraded to upvalue without a graph to ask')
+    vim.fn.delete(root, 'rf')
+end)

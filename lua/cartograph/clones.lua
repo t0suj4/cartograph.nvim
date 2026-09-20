@@ -893,6 +893,49 @@ end
 
 local function is_local(n, locals) return locals and locals[n] or false end
 
+--- ★★★ IS THIS NAME BOUND BY AN ENCLOSING DEFINITION (CART-0975)? `local_deps` reads
+--- ONE function's locals, so a name the enclosing function binds — an UPVALUE — reads
+--- as bound by nobody, and `scope = 'no-local'` then means two different things at
+--- once: "a global or a free name" and "the enclosing scope's, which the CALL SITE
+--- would still have". The witness is `report` in commands/analysis.lua's
+--- `report_cmd#ret`, the thunk parameter landed in f68251a; it was classified right by
+--- accident twice before this existed.
+---
+--- ⚠ IT WALKS OUT, ONE LEVEL AT A TIME, AND STOPS AT FILE SCOPE. `store.enclosing`
+--- returns the innermost containing DEFINITION and nil at file scope, so the loop
+--- terminates on the module boundary rather than on a depth guess.
+--- ⚠ AND WITHOUT A STORE IT CANNOT ANSWER, so it says so instead of guessing: the
+--- caller keeps the older, caveated `no-local`.
+local function bound_by_enclosing(node, store, fn_id, seen)
+    if not (node and store and store.enclosing) then return nil end
+    local free = {}
+    expr.walk(node, function (n) if n.k == 'name' and n.n then free[n.n] = true end end)
+    if not next(free) then return nil end
+    local e = store.enclosing(fn_id)
+    local depth = 0
+    while e and depth < 16 do
+        depth = depth + 1
+        local eo = seen[e.id]
+        if eo == nil then
+            local ok, r = pcall(function () return expr.of(store, e.id) end)
+            eo = (ok and r) or false
+            seen[e.id] = eo
+        end
+        if eo then
+            for _, prm in ipairs((eo.fl or {}).params or {}) do
+                if free[prm] then return prm, e end
+            end
+            for _, st in ipairs(eo.stmts or {}) do
+                for _, dfn in ipairs(st.def or {}) do
+                    if free[dfn] then return dfn, e end
+                end
+            end
+        end
+        e = store.enclosing(e.id)
+    end
+    return nil
+end
+
 --- ★★★ THE LOOP BINDERS df NEVER RECORDS AS A DEF (CART-0876). `for _, g in pairs(t)`
 --- puts `g` in `use` and never in `def` — spec/contract.lua says exactly that where it
 --- declares `binders` — so `fn_row_keys`' `locals` (params ∪ df-defs) MISSES every loop
@@ -1741,6 +1784,8 @@ function M.analyze_pair(pair, store)
     -- So tagging the cause fences 8 of 21 soundly and leaves 13 needing the real
     -- question: does one side CONTAIN what the other has bare? One witness is not a
     -- population, even when it is the right witness.
+    -- one expr.of per ENCLOSING definition per pair, not per hole
+    local encl_memo = {}
     local nstruct, why_arity, why_kind, why_lg, kind_shared = 0, 0, 0, 0, 0
     local why_rename = 0
     -- CART-0974: the three SIDELESS causes, each its own counter for the same reason
@@ -1788,7 +1833,12 @@ function M.analyze_pair(pair, store)
             if h.why == 'kind' then
                 local da, db = h.deps_a, h.deps_b
                 if #da == 0 and #db == 0 then
-                    h.scope = 'no-local'
+                    -- CART-0975: `no-local` used to cover the upvalue case too. Ask
+                    -- the enclosing scopes before saying nobody binds it.
+                    local ua = bound_by_enclosing(h.xn, store, pair.a.id, encl_memo)
+                    local ub = bound_by_enclosing(h.yn, store, pair.b.id, encl_memo)
+                    h.scope = (ua or ub) and 'upvalue' or 'no-local'
+                    h.upvalue = ua or ub
                 else
                     local safe = true
                     -- `pair.a.params` is the CALL-SITE-SAFE set `fn_row_keys` already
@@ -2313,6 +2363,8 @@ function M.export_pair(a)
             -- CART-0876: 'pure' when BOTH sides may be moved to a call site, else the
             -- reason the analysis could not establish it.
             moves = h.moves,
+            -- CART-0975: the enclosing binder's name, when `scope == 'upvalue'`
+            upvalue = h.upvalue,
             -- CART-0876: what the call site could pass, and whether it may.
             -- Projected HERE rather than rebuilt by each consumer — the agent
             -- surface gained `why` for free when CART-0974 added it, and gains
@@ -2397,6 +2449,11 @@ function M.extract_proposal(pair, store)
                     L[#L + 1] = '    ↳ a `param` divergence: every local it reads is'
                         .. " a parameter of its own function, so the CALL SITE can"
                         .. ' write the argument — a value, not a function.'
+                elseif h.scope == 'upvalue' then
+                    L[#L + 1] = ('    ↳ an `upvalue` divergence: it reads `%s`, bound by'
+                        .. ' an ENCLOSING definition — in scope where the call would be'
+                        .. ' written, so the call site can still pass it.')
+                        :format(tostring(h.upvalue))
                 elseif h.scope == 'no-local' then
                     L[#L + 1] = '    ↳ a `no-local` divergence: it reads no local of'
                         .. ' its own function, so both sides are writable at the call'

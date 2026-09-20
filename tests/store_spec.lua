@@ -210,3 +210,75 @@ test('index orientation: closest route and return path', function ()
     vim.fn.delete(store.ws_file('/x'))
     store.workset = { ids = {}, refs = {}, pending = {} }
 end)
+
+-- ── store.enclosing: the lexical parent, position-aware (CART-0975) ─────────
+-- Three analyses gave the right answer for a blind reason because nothing could ask
+-- "whose scope is this in?" after extraction. `clones.local_deps` reads ONE function's
+-- locals, scope.lua dies with the parse tree, store.scopes() is a namespace axis, and
+-- agent.v_node_at computes a containment chain and keeps it nowhere.
+local function rng(sl, sc, el, ec)
+    return { start = { line = sl, char = sc }, ['end'] = { line = el, char = ec } }
+end
+local function fnr(file, name, r)
+    return { id = file .. '::' .. name, name = name, kind = 'function',
+        file = file, range = r, order = 0 }
+end
+
+test('store.enclosing: the innermost containing definition, nil at file scope', function ()
+    graph({ mod('a.lua', false),
+        fnr('a.lua', 'outer', rng(0, 0, 20, 3)),
+        fnr('a.lua', 'middle', rng(4, 4, 14, 7)),
+        fnr('a.lua', 'inner', rng(6, 8, 9, 11)),
+        fnr('a.lua', 'sibling', rng(24, 0, 30, 3)) })
+    eq('a.lua::middle', store.enclosing('a.lua::inner').id)
+    eq('a.lua::outer', store.enclosing('a.lua::middle').id)
+    eq(nil, store.enclosing('a.lua::outer'), 'a file-scope definition has no parent')
+    eq(nil, store.enclosing('a.lua::sibling'), 'and neither does one beside it')
+end)
+
+test('store.enclosing: never returns the MODULE, so nil means file scope', function ()
+    -- the module spans the whole file; if it were eligible, every node would be
+    -- enclosed and "top level" would be unsayable. `by_file` excludes it by
+    -- construction and this pins that.
+    graph({ mod('b.lua', false), fnr('b.lua', 'top', rng(0, 0, 9, 3)) })
+    eq(nil, store.enclosing('b.lua::top'))
+end)
+
+-- ⚠ POSITION-AWARE, NOT LINE-GRANULAR — the bug CART-0813 fixed on the owner query.
+-- A callback that OPENS on its parent's line is contained by that line range, so a
+-- line-only test cannot order the two and may pick either.
+test('store.enclosing: a callback opening on its parent\'s LINE is still inside it', function ()
+    graph({ mod('c.lua', false),
+        -- `function outer() cb(function () ... end) end` — both start on line 0
+        fnr('c.lua', 'outer', rng(0, 0, 5, 3)),
+        fnr('c.lua', 'cb', rng(0, 24, 3, 7)) })
+    eq('c.lua::outer', store.enclosing('c.lua::cb').id,
+        'the callback resolves to the function it opens inside')
+    eq(nil, store.enclosing('c.lua::outer'),
+        'and the parent is NOT swallowed by its own child')
+end)
+
+test('store.enclosing: a definition ENDING on its parent\'s line is still inside it', function ()
+    -- the symmetric half. fn_at compares the start side only and says its end side has
+    -- never been observed to need a column; a CONTAINMENT query has no reason to pick.
+    graph({ mod('d.lua', false),
+        fnr('d.lua', 'outer', rng(0, 0, 4, 40)),
+        fnr('d.lua', 'tail', rng(2, 2, 4, 12)) })
+    eq('d.lua::outer', store.enclosing('d.lua::tail').id)
+end)
+
+test('store.enclosing: ONE-LINE parent and child — line-only would swallow the parent', function ()
+    -- ⚠ THE DISCRIMINATING CASE, and the earlier two are not it: both of those give the
+    -- same answer with or without columns, which revert-and-rerun proved by neutralising
+    -- the column test and costing ZERO failures. The shape that separates them is two
+    -- definitions on the SAME line — `function outer() cb(function () return 1 end) end`.
+    -- Compared by line alone each one contains the other, so `enclosing` may return the
+    -- CHILD as the parent's parent. With columns, only one containment holds.
+    graph({ mod('e.lua', false),
+        fnr('e.lua', 'one_outer', rng(0, 0, 0, 52)),
+        fnr('e.lua', 'one_cb', rng(0, 20, 0, 44)) })
+    eq('e.lua::one_outer', store.enclosing('e.lua::one_cb').id,
+        'the callback is inside the function it sits in')
+    eq(nil, store.enclosing('e.lua::one_outer'),
+        'and the function is NOT reported as living inside its own callback')
+end)
