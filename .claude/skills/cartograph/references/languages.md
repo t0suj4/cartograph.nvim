@@ -1,6 +1,6 @@
-# Language support — cartograph.nvim @ 852916f
+# Language support — cartograph.nvim @ 6ad0701, §7 re-checked @ 730a2c9
 
-Everything here was read out of the tree at commit `852916f`, mostly by running the
+Everything here was read out of the tree at `6ad0701` (slot counts re-verified there), mostly by running the
 project's own introspection rather than transcribing prose. Re-derive with the
 commands in each section if HEAD has moved.
 
@@ -350,7 +350,28 @@ One more Lua detail inside the CFG tier: `expr.of` passes
 handling for Lua methods. It is a flow-build flag, not a lint rule, but it means
 Lua methods get one modelling nicety the other 13 do not.
 
-## 7. Verifying a claim instead of guessing
+## 7. The write side gates separately
+
+Analysis coverage does **not** carry over to the edit verbs — they synthesize syntax,
+so they gate on hand-written per-language synthesis tables, not on the capability
+matrix. `:CartographHoistClosure` is hard-gated to Lua
+(`hoistclosure.lua:52`: `only Lua is supported for now`), and
+`:CartographExtractHelperApply` has exactly two entries in `cloneextract.lua`'s
+`EXTRACT` table — `lua` (same-file *and* cross-file) and `javascript` (same-file
+only; its `module` field is `nil`, so cross-file refuses by design).
+
+A language can therefore score well in §2 and still support almost no automated
+rewriting. The full write-side table is in **`refactoring.md`**.
+
+**[re-checked @ 730a2c9]** Both gates are still there, and the scope is now DECLARED
+rather than only enforced: every module carries an `@langs` line that
+`tools/langaudit.lua` fences on each commit. On the **agent** surface it is a field you
+can read — `graph_info` reports a `langs` column per verb, and a subject in another
+language refuses with rule `lang-scope`. The `:Cartograph*` commands in this table do
+not go through that dispatcher and have no such gate, so here the table is still the
+only answer.
+
+## 8. Verifying a claim instead of guessing
 
 Cheapest first:
 

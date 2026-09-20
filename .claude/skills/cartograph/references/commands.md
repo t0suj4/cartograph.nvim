@@ -1,4 +1,4 @@
-# Command and key reference — cartograph.nvim @ 852916f
+# Command and key reference — cartograph.nvim @ 6ad0701 (NOT re-verified since)
 
 79 commands: 77 global + 2 pane-local. All global ones exist at startup (nothing
 loads until one runs); those needing an open graph say so. Groups follow

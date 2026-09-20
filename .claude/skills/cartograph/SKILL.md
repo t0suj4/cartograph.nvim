@@ -202,6 +202,30 @@ The order is the order of trust, and it is enforced:
 3. `journal_list` / `journal_get` — read the history.
 4. `txn_apply`, then `txn_undo` if needed.
 
+⚠ **THIS IS NOT ALL THE WRITE VERBS CARTOGRAPH HAS.** Measured at `730a2c9` — the five
+planners above reach exactly three modules: `moveapply`, `optapply`, `cloneextract`.
+These have **no MCP verb at all**:
+
+| module | what it does |
+|---|---|
+| `clonemerge` | merge an exact clone group — delete the copy, rewrite its call sites |
+| `hoistclosure` | lift a nested closure to a sibling (lua only) |
+| `reorder` | move a statement, certified against a commute verdict |
+| `extract` / `extractapply` | extract a selection into a helper |
+| `untangle` | find the concern boundaries the extract verbs then cut |
+| `certificate` / `neutrality` | prove a rewrite changed nothing |
+
+They are not missing features — they were skipped for scope, and every one is
+driveable headless through the Lua API (`plan → preview → apply`, no cockpit).
+
+If the edit you want is not here, read **`references/refactoring.md`** before concluding
+it cannot be done. That file is the operating procedure for those six: the API call
+shapes, the refusal ladder, and the preconditions no source header states — chief among
+them that `moveapply.apply` compares your plan against the **live** move-set, so a
+programmatic set must `store.stage(id)` or apply refuses every time. ⚠ Those commands do
+NOT go through this dispatcher, so the `langs` column and `lang-scope` do not protect
+them — that file carries its own per-verb language table.
+
 ### Adding to a declared table — `txn_plan_declare`
 
 The commonest edit there is, and the one the other write verbs did not model: a
@@ -306,16 +330,24 @@ Language support is **per-language and uneven**, and a verb working on Lua says
 nothing about Ruby. `graph_info` reports the graph's own frontier; `census` and
 `externals` report what was not resolved. Check before generalising.
 
-`references/` (commands.md, languages.md, reading-output.md) documents the
-**interactive** surface and is pinned to commit `852916f` (2026-07-30). It is stale
-and it is not the agent surface — do not quote its tables as current.
+`references/` documents the **interactive** surface, not this one. Do not quote its
+tables as current without checking — but the four files are not equally stale:
+
+- `commands.md`, `reading-output.md` — pinned at `6ad0701` (2026-07-30), **not**
+  re-verified since. Treat every table as a claim to re-check.
+- `languages.md` — same pin; §7 (the write side) re-checked at `730a2c9`.
+- `refactoring.md` — run-verified at `6ad0701`, **re-checked at `730a2c9`**: all 24 API
+  entry points still exist and the four behavioural warnings still hold. Every claim in
+  it is marked `[re-checked]`, `[as observed]` or `[FIXED since]`, so you can tell which
+  treatment it got. This is the one to trust, and the only document for the six write
+  verbs that have no verb here.
 
 ## Drift check
 
 This file describes the agent surface at:
 
 ```
-commit  c1955fc   The header said the version diff could not be demonstrated; it demonstrates in one call
+commit  730a2c9   langs: the third capability axis — and a fence that reads a grammar's NAME
 ```
 
 Verify before trusting the verb list:

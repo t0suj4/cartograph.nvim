@@ -1,4 +1,4 @@
-# Reading cartograph's output honestly — @ 852916f
+# Reading cartograph's output honestly — @ 6ad0701 (NOT re-verified since)
 
 Cartograph's central design rule is that it never fabricates an answer. Every
 report is written so that *not knowing* is expressible. If you relay a report and
