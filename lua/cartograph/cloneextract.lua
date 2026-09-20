@@ -558,6 +558,15 @@ function M.plan(store, pair, opts)
         { id = plan.b.id, name = plan.b.name, ref = plan.b.ref, what = 'clone' },
     }
     plan.expect = expectation(plan, EXTRACT[plan.lang])
+    -- ★★★ THE FOLD'S BEHAVIOURAL RADIUS RIDES ON THE PLAN (CART-0989). `analyze_pair`
+    -- decides it from the HOLES — the only place an extraction can introduce a delta,
+    -- since the rest of the text is identical — so `neutral` means the radius is EMPTY
+    -- and nothing needs certifying, and otherwise it names the hole and why.
+    -- ⚠ IT IS A DISCLOSURE, NOT A GATE. The user's framing is "declare where we permit
+    -- changed behavior and what requires a review": a non-neutral fold is REVIEWABLE,
+    -- not refused. Refusing it would throw away a legal refactoring because we cannot
+    -- yet prove something about it, which is the opposite of saying what we know.
+    plan.behaviour = analysis.behaviour
     plan.precheck = function (st)
         if next(st.moveset or {}) then
             return 'a move-set is staged — apply or clear it first'
@@ -1024,6 +1033,15 @@ function M.plan_family(store, fam, opts)
             ref = m.ref, what = 'clone' }
     end
     plan.expect = expectation(plan, EXTRACT[plan.lang])
+    -- ⚠ NO CLAIM, SAID OUT LOUD (CART-0989). The pair builder gets its behavioural
+    -- radius from `analyze_pair`'s holes; a FAMILY plan is built from
+    -- `family_admissibility`, which computes admissibility rather than per-hole purity,
+    -- so there is nothing here to derive it from. Leaving the field ABSENT would render
+    -- exactly like "we checked and it is neutral" — the NO_CLAIM-passes defect this arc
+    -- has now met three times. It says it did not look.
+    plan.behaviour = { neutral = nil,
+        why = 'not computed for a family plan: family_admissibility does not carry'
+            .. ' per-hole purity, so the radius is unknown rather than empty' }
     plan.precheck = function (st)
         if next(st.moveset or {}) then
             return 'a move-set is staged — apply or clear it first'

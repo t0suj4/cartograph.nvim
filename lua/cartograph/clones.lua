@@ -1224,7 +1224,7 @@ local function anti_unify(e1, e2, la, lb, holes, ctx)
         -- at_a/at_b (the source span of the diverging leaf, from the expr-IR ranges)
         -- are the exact substitution sites a future extract-helper transaction rewrites.
         holes[#holes + 1] = { kind = 'literal', a = tostring(e1.v), b = tostring(e2.v),
-            at_a = e1.at, at_b = e2.at }
+            at_a = e1.at, at_b = e2.at, xn = e1, yn = e2 }
         return true
     elseif k == 'name' then
         local l1, l2 = is_local(e1.n, la), is_local(e2.n, lb)
@@ -1262,7 +1262,8 @@ local function anti_unify(e1, e2, la, lb, holes, ctx)
         end
         if e1.n == e2.n then return true end
         if not l1 and not l2 then
-            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
+            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n,
+                at_a = e1.at, at_b = e2.at, xn = e1, yn = e2 }
             return true
         end
         -- ★★★ A LOCAL FACING A GLOBAL IS A LEAF DIFFERENCE, SO IT IS A TERM HOLE —
@@ -1288,7 +1289,8 @@ local function anti_unify(e1, e2, la, lb, holes, ctx)
         local lnm = l1 and e1.n or e2.n
         local ps = ctx and (l1 and ctx.pa or ctx.pb)
         if ps and ps[lnm] then
-            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
+            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n,
+                at_a = e1.at, at_b = e2.at, xn = e1, yn = e2 }
             return true
         end
         holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'localglobal' }
@@ -1312,7 +1314,7 @@ local function anti_unify(e1, e2, la, lb, holes, ctx)
             -- becoming a conservative gate. The classification stands; the mark travels
             -- with it and the extract verb refuses on it.
             holes[#holes + 1] = { kind = 'field', a = e1.n, b = e2.n,
-                at_a = e1.at, at_b = e2.at,
+                at_a = e1.at, at_b = e2.at, xn = e1, yn = e2,
                 unnameable = unnameable_local(e1.b, la, ctx and ctx.pa)
                     or unnameable_local(e2.b, lb, ctx and ctx.pb) }
         end
@@ -1338,13 +1340,13 @@ local function anti_unify(e1, e2, la, lb, holes, ctx)
         -- were the ONLY value holes carrying no span at all.
         if e1.op ~= e2.op then
             holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op,
-                at_a = e1.at, at_b = e2.at, at_encloses = true }
+                at_a = e1.at, at_b = e2.at, at_encloses = true, xn = e1, yn = e2 }
         end
         return anti_unify(e1.e, e2.e, la, lb, holes, ctx)
     elseif k == 'bin' then
         if e1.op ~= e2.op then
             holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op,
-                at_a = e1.at, at_b = e2.at, at_encloses = true }
+                at_a = e1.at, at_b = e2.at, at_encloses = true, xn = e1, yn = e2 }
         end
         local o1 = anti_unify(e1.l, e2.l, la, lb, holes, ctx)
         -- ⚠ TAGGED BY RANGE, like `side` and `literal_dep`, and for the same reason:
@@ -1908,6 +1910,30 @@ function M.analyze_pair(pair, store)
                 -- measured only, so far: the verdict below still reads `struct > 0`
                 if shares_subterm(h.xn, h.yn) then kind_shared = kind_shared + 1 end
             end
+        else
+            -- ★★★ PURITY FOR THE HOLES THAT ARE ACTUALLY LIFTED (CART-0989). `moves`
+            -- was computed for STRUCT holes only, and its own argument is about lifted
+            -- values: "a helper's argument is written at BOTH call sites, so a
+            -- divergence is movable only if each side's expression is." Measured on our
+            -- own tree, 0 of 9 lifted holes carried it — the third time in one arc that
+            -- a fact was computed for the divergences that are NOT lifted and absent
+            -- from the ones that ARE (CART-0984 scope, CART-0985 statement context).
+            --
+            -- ★★ A LITERAL IS PURE BY CONSTRUCTION and needs no analysis: it cannot
+            -- have an effect, cannot raise, and its evaluation ORDER is unobservable.
+            -- 8 of those 9 holes are literals, so the cheap answer is the common one.
+            if h.kind == 'literal' then
+                h.moves = 'pure'
+            else
+                local mva = move_purity(h.xn, store, pair.a.id, lang)
+                local mvb = move_purity(h.yn, store, pair.b.id, lang)
+                if mva and mvb then
+                    h.moves = (mva == 'pure' and mvb == 'pure') and 'pure'
+                        or (mva ~= 'pure' and mva or mvb)
+                else
+                    h.moves = mva or mvb
+                end
+            end
         end
     end
     -- ★★★ Mer-S OVER THE STRUCT HOLES: one FUNCTION parameter per distinct stored pair,
@@ -1992,6 +2018,13 @@ function M.analyze_pair(pair, store)
             -- `side`/`literal_dep`/`guarded` use: lifting the parameter lifts every
             -- site, so one site whose base the call site cannot name is enough.
             if h.unnameable then p.unnameable = p.unnameable or h.unnameable end
+            -- ⚠ ANY-IMPURE, NOT ANY-PURE. Lifting the parameter lifts EVERY site, so a
+            -- parameter is only movable if all of its sites are — the mirror of the
+            -- `guarded`/`side` ANY rule, and the same sentence `moves` already makes
+            -- about the two SIDES ("both sides or neither").
+            if h.moves and (p.moves == nil or (p.moves == 'pure' and h.moves ~= 'pure')) then
+                p.moves = h.moves
+            end
             -- ⚠⚠ DEDUPE BY RANGE (CART-0984). The list above is deliberately EVERY
             -- occurrence — "a single-site dedup would leave later occurrences
             -- un-parameterized — unsound" — but that is a dedup by VALUE. A leaf minted
@@ -2231,7 +2264,50 @@ function M.analyze_pair(pair, store)
             else evidence = 'shape' end
         end
     end
+    -- ★★★ THE BEHAVIOURAL RADIUS OF THIS FOLD, DECIDED BY ITS HOLES (CART-0989).
+    --
+    -- USER: "I think we can narrow down the what inside the blast radius." The radius is
+    -- NOT the caller closure — measured on our own tree, the transitive callers of a
+    -- 2-symbol fold reach 725 symbols, 17% of the tree, which is unaffordable as a
+    -- certification set and wrong as a claim. An extraction's text is IDENTICAL except
+    -- at its holes, so the holes are the only place a behavioural delta can enter:
+    -- a value that was evaluated conditionally becomes an eager argument, or an impure
+    -- value's evaluation order moves.
+    --
+    -- ⇒ EVERY HOLE PURE  =>  the fold cannot change behaviour, and the radius is EMPTY.
+    --
+    -- ★★ GUARDED ∧ PURE IS SAFE, and that is the narrowing `guarded` alone cannot make.
+    -- Lifting a guarded hole makes it eager, which matters only if the value can have an
+    -- EFFECT or RAISE. A pure one does neither, so eagerness is unobservable.
+    -- ⚠ WHAT THIS DOES NOT CLAIM: purity here is about EFFECTS. It says nothing about
+    -- non-termination or cost, so an eagerly-evaluated pure-but-divergent expression is
+    -- outside what this verdict covers. Named rather than quietly folded in.
+    local impure, guarded_impure
+    for _, p in ipairs(params) do
+        if p.moves and p.moves ~= 'pure' then
+            impure = impure or { a = p.a, why = p.moves }
+            if p.guarded then guarded_impure = true end
+        elseif p.moves == nil then
+            impure = impure or { a = p.a, why = 'purity was not established' }
+        end
+    end
+    local behaviour
+    if #params == 0 then
+        behaviour = { neutral = true, why = 'no holes: the copies are identical' }
+    elseif not impure then
+        local all_lit = true
+        for _, p in ipairs(params) do if p.kind ~= 'literal' then all_lit = false end end
+        behaviour = { neutral = true, radius = 'empty',
+            why = all_lit and 'every hole is a literal — pure by construction'
+                or 'every hole is pure, so lifting it cannot change what runs' }
+    else
+        behaviour = { neutral = false, radius = 'members',
+            why = ('hole `%s` is not movable: %s%s'):format(tostring(impure.a),
+                tostring(impure.why),
+                guarded_impure and ' — and it is GUARDED, so lifting it also makes it eager' or '') }
+    end
     return { kind = kind, holes = params, insdel = insdel, drift = drift,
+        behaviour = behaviour,
         struct = nstruct, shape = shape, evidence = evidence, fparams = fparams,
         struct_why = { arity = why_arity, kind = why_kind, localglobal = why_lg,
             -- CART-0974: sideless — a divergence with no term on one or both sides.
@@ -2425,6 +2501,9 @@ function M.export_pair(a)
             -- CART-0876: this parameter is evaluated only sometimes, so lifting it
             -- to a call site would run it always.
             guarded = h.guarded,
+            -- CART-0989: 'pure' when the hole may be lifted to a call site without
+            -- changing what runs. A literal is pure by construction.
+            moves = h.moves,
             literal_dep = h.literal_dep }
     end
     local function sidename(n)
@@ -2453,6 +2532,7 @@ function M.export_pair(a)
             sites = #(f.sites or {}) }
     end
     return { holes = holes, structs = structs, fparams = fparams,
+        behaviour = a.behaviour,
         verdict = M.extract_verdict(a) }
 end
 

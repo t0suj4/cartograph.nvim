@@ -1110,3 +1110,58 @@ test('extract-helper: an insertion that would outrun a file-local it reads is RE
         'and the refusal NAMES the local it would outrun: ' .. tostring(why))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE FOLD'S BEHAVIOURAL RADIUS, DECIDED BY ITS HOLES (CART-0989) ─────────
+--
+-- ★★★ USER: "I think we can narrow down the what inside the blast radius." The radius is
+-- NOT the caller closure: measured on our own tree, the transitive callers of a 2-symbol
+-- fold reach 725 symbols (17%). An extraction's text is identical except AT ITS HOLES,
+-- so the holes are the only place a behavioural delta can enter — a conditionally
+-- evaluated value becoming an eager argument, or an impure value's order moving.
+test('extract-helper: an all-LITERAL fold is behaviour-neutral by construction', function ()
+    if not ready('lua') then skip('no lua parser') end
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\n'
+        .. 'M.alpha = function (x)\n  local y = prep(x)\n  local z = norm(y)\n'
+        .. '  local w = enc(z, \'json\')\n  return w\nend\n\n'
+        .. 'M.beta = function (a)\n  local b = prep(a)\n  local c = norm(b)\n'
+        .. '  local d = enc(c, \'yaml\')\n  return d\nend\n\nreturn M\n' }
+    local p = xpair('M.alpha')
+    ok(p, 'a near-clone pair')
+    local an = clones.analyze_pair(p, store)
+    local b = an.behaviour or {}
+    eq(true, b.neutral, 'a literal-only fold cannot change behaviour: ' .. tostring(b.why))
+    eq('empty', b.radius, 'so there is nothing to certify')
+    -- ★ AND THE PURITY FACT REACHES THE HOLES THAT ARE ACTUALLY LIFTED. It was computed
+    -- for STRUCT holes only; measured on our own tree, 0 of 9 lifted holes carried it.
+    for _, h in ipairs(an.holes or {}) do
+        eq('pure', h.moves, 'the lifted hole carries its purity verdict')
+    end
+    -- and it rides on the plan, so a caller need not recompute it
+    local plan = cx.plan(store, p)
+    ok(plan and plan.behaviour and plan.behaviour.neutral,
+        'the plan carries the verdict')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠ THE OTHER HALF, AND IT MUST NOT BE A REFUSAL. A hole whose value has an EFFECT
+-- cannot be lifted without moving that effect to the call site. That is REVIEWABLE, not
+-- illegal — refusing it would discard a legal refactoring because we cannot prove
+-- something about it, which is the opposite of saying what we know.
+test('extract-helper: an IMPURE hole is reported for review, naming the hole', function ()
+    if not ready('lua') then skip('no lua parser') end
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\n'
+        .. 'M.alpha = function (x)\n  local y = prep(x)\n  local z = norm(y)\n'
+        .. '  local w = enc(z, require(\'cfg\').alpha)\n  return w\nend\n\n'
+        .. 'M.beta = function (a)\n  local b = prep(a)\n  local c = norm(b)\n'
+        .. '  local d = enc(c, require(\'cfg\').beta)\n  return d\nend\n\nreturn M\n' }
+    local p = xpair('M.alpha')
+    ok(p, 'a near-clone pair')
+    local an = clones.analyze_pair(p, store)
+    local b = an.behaviour or {}
+    eq(false, b.neutral, 'lifting a `require` moves an effect to the call site')
+    eq('members', b.radius, 'and the radius is the members, not the whole caller closure')
+    ok((b.why or ''):find('not movable', 1, true), 'the reason says so: ' .. tostring(b.why))
+    vim.fn.delete(root, 'rf')
+end)
