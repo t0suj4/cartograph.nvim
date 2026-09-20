@@ -37,7 +37,9 @@ local M = {}
 
 --- Rank near-clone pairs by what folding them would COST.
 --- Returns (rows, refused, unscored) where a row is
----   { a, b, helper, net, added, removed, nparams, hazards, xfile }
+---   { a, b, pair, helper, net, added, removed, nparams, hazards, xfile }
+--- `pair` is the near-clone pair the row was priced from — re-plan from it to act on a
+--- row (see the note at its assignment: the PAIR travels, a plan does not).
 --- sorted by net ascending (most shrinkage first), `refused` is
 ---   { [reason] = count } — the honest other half — and `unscored` is the third,
 --- narrower category: pairs the verb PLANNED but the scorer could not price. Those are
@@ -86,6 +88,21 @@ function M.rank(store, opts)
                     why = tostring(removed) }
             else
                 rows[#rows + 1] = { a = p.a and p.a.name, b = p.b and p.b.name,
+                    -- ★★★ THE PAIR RIDES WITH THE ROW (CART-0878 ORDER 3), because a
+                    -- queue that RANKS work a caller cannot ACT on is a work list you
+                    -- have to re-derive to use. Rows carried names only, so the one
+                    -- thing this queue exists to answer — "fold that one" — needed the
+                    -- caller to re-run discovery and match by name. Same shape as
+                    -- CART-0973: a remedy the interface printed and could not reach.
+                    --
+                    -- ⚠ THE PAIR, NOT THE PLAN, AND THAT IS DELIBERATE. Applying row 1
+                    -- bumps the graph generation, after which every OTHER row's plan
+                    -- names symbols that may have moved — `txn.verify` refuses it by
+                    -- generation, which is correct and is also the end of the idea that
+                    -- a queue could hold plans. compose.lua states the rule: AN
+                    -- INVOCATION SURVIVES A GENERATION BUMP; A PLAN DOES NOT. So the
+                    -- row carries what you re-plan FROM, and the caller re-plans.
+                    pair = p,
                     file = p.a and p.a.file, helper = plan.helper, net = net,
                     added = added, removed = removed, nparams = plan.nparams or 0,
                     hazards = #(plan.hazards or {}), xfile = plan.xfile or false }
