@@ -53,6 +53,41 @@ test('transplant: a target that does not AGREE structurally is refused, not over
         .. tostring(why))
 end)
 
+test('transplant: the QUIET degenerate — the exemplar\'s variable in the target\'s body', function ()
+    local ready = tp.available('lua')
+    if not ready then return skip('algebra/reader unavailable') end
+    -- ⚠⚠ THE ONE THE FIRST GUARD MISSED, and the dangerous one, because it does
+    -- not look wrong. With an extra statement in the target the derivation keeps
+    -- the TARGET's signature and splices the EXEMPLAR's variable into the body:
+    --     -> local function g(y) return wrap(x, DEFAULT) end
+    -- valid Lua, `x` unbound, and NOT equal to b — so a text comparison passes it.
+    -- The operator's own `classify` says `value`, which is the real signal.
+    local out, why = tp.apply(
+        'local function f(x) return wrap(x) end',
+        'local function f(x) return wrap(x, DEFAULT) end',
+        'local function g(y) local z = y return wrap(z) end')
+    eq(nil, out, 'no source is returned when the edit has no context to land in')
+    ok(why and tostring(why):find('derived nothing usable', 1, true),
+        'and the refusal quotes the classification: ' .. tostring(why))
+end)
+
+test('transplant: formatting differences are NOT a degenerate', function ()
+    local ready = tp.available('lua')
+    if not ready then return skip('algebra/reader unavailable') end
+    -- ⚠ THE GUARD MUST NOT OVER-REFUSE. Measured: extra whitespace and a
+    -- multi-line body still classify `template` and derive correctly — it is a
+    -- COMMENT (a node with no counterpart in the exemplar) that defeats the
+    -- agreement, not formatting. A guard that rejected every reformatted target
+    -- would refuse most real code.
+    local out = tp.apply('local function f(x) return wrap(x) end',
+                         'local function f(x) return wrap(x, DEFAULT) end',
+                         'local function g(y)\n  return wrap(y)\nend')
+    ok(out ~= nil, 'a multi-line target still derives')
+    ok(out and out:find('wrap(y, DEFAULT)', 1, true) ~= nil,
+        "under the target's OWN variable: " .. tostring(out))
+    ok(out and out:find('\n  return', 1, true) ~= nil, 'and keeps its line structure')
+end)
+
 test('transplant: a target IDENTICAL to the exemplar legitimately yields b', function ()
     local ready = tp.available('lua')
     if not ready then return skip('algebra/reader unavailable') end

@@ -100,10 +100,28 @@ function M.apply(a_src, b_src, c_src, lang)
     --     distant kind=value     out == b: TRUE    <- this
     -- The guard is exact rather than heuristic: reproducing the exemplar is only
     -- legitimate when the target WAS the exemplar.
-    if out == b_src and c_src ~= a_src then
-        return nil, 'transplant derived nothing: the exemplar and the target do not'
-            .. ' agree structurally, so the result is the exemplar\'s own body.'
-            .. ' Applying it would replace the target rather than edit it.'
+    -- ⚠⚠ THE SIGNAL IS `kind`, NOT THE TEXT — and the first cut had it backwards.
+    -- Guarding on `out == b` caught only the LOUD degenerate (the result IS the
+    -- exemplar). There is a QUIETER one it let through: with a target that has an
+    -- extra statement, the derivation keeps the TARGET's signature and splices the
+    -- EXEMPLAR's variable into the body —
+    --     a  local function f(x) return wrap(x) end
+    --     c  local function g(y) local z = y return wrap(z) end
+    --     -> local function g(y) return wrap(x, DEFAULT) end   <- `x` is not bound
+    -- which is valid Lua referencing an undefined name, is NOT equal to b, and
+    -- would have shipped.
+    -- MEASURED over eight triples: every one of the six legitimate derivations
+    -- classifies `template` — INCLUDING a pure value edit, which is the case one
+    -- would expect to classify `value` — and both degenerates classify `value`.
+    -- That reads off the operator's own definition: a `value` edit is a change
+    -- confined to the context's hole VALUES, so when there is no context every
+    -- change is a value change and the edit degenerates into a wholesale replace.
+    -- ⚠ EIGHT SAMPLES, NOT A PROOF. `out == b_src` is kept as a second net.
+    if (r.kind == 'value' or out == b_src) and c_src ~= a_src then
+        return nil, ('transplant derived nothing usable (classify: %s): the exemplar'
+            .. ' and the target do not agree structurally, so the edit has no context'
+            .. ' to land in. The result would carry the exemplar\'s own names into the'
+            .. ' target rather than editing it.'):format(tostring(r.kind))
     end
     return out, {
         kind = r.kind, route = r.route,
