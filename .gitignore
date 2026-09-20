@@ -7,6 +7,10 @@ scratch/
 # would turn every legitimate refactor into a red diff. Generate, run, discard — or
 # move it out of here by hand once you have decided it is a real test.
 characterized/
+# CART-0991: counterexample-generated tests, PENDING review. Same rule as
+# `characterized/` above — a machine-written test is a local artifact until a human
+# confirms the behaviour, deletes its PENDING line and MOVES it into tests/.
+tests/generated/
 *_char.lua
 
 # editor / OS

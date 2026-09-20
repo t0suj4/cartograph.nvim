@@ -38,6 +38,19 @@ end
 -- skip the current test (sentinel table so the runner can tell it apart)
 function _G.skip(msg) error({ __skip = true, msg = msg }, 0) end
 
+--- ⚠⚠ PENDING — A GENERATED CASE NOBODY HAS REVIEWED YET (CART-0991).
+--- It ERRORS, so inaction cannot turn a machine-written test into coverage; and it is
+--- COUNTED AND RENDERED SEPARATELY, because "nobody has looked at this yet" and
+--- "something broke" are different facts and a runner that spells them the same way
+--- trains people to ignore the first.
+--- ★ IT SITS AFTER A PRE-FILLED ASSERTION, not instead of one. The generator writes the
+--- assertion from what it observed, so review is JUDGEMENT ("is that right?") rather than
+--- AUTHORSHIP ("write the assertion") — and PROMOTION IS DELETING THIS ONE LINE, which is
+--- a smaller, more visible and more attributable act than writing a test.
+--- ⚠ THE CEILING, SAID OUT LOUD: a reviewer who deletes it without reading pins the bug
+--- forever. This makes the act deliberate and greppable; it cannot make review real.
+function _G.PENDING(msg) error({ __pending = true, msg = msg }, 0) end
+
 -- shared fixture writer: `write(root, name, lines)` writes a table of lines to a file.
 -- Was copy-pasted byte-identically across ~10 spec files; hoisted here (a spec that needs
 -- a different `write` still declares its own local, which shadows this). A specfile-local
@@ -132,13 +145,16 @@ if vim.env.COVER and vim.env.COVER ~= '' then
     end, 'l')
 end
 
-local pass, fail, skipped = 0, 0, 0
+local pass, fail, skipped, pending = 0, 0, 0, 0
 print('')
 for _, t in ipairs(reg) do
     local good, err = pcall(t.fn)
     if good then
         pass = pass + 1
         print('  ok    ' .. t.name)
+    elseif type(err) == 'table' and err.__pending then
+        pending = pending + 1
+        print('  PEND  ' .. t.name .. (err.msg and ('  (' .. err.msg .. ')') or ''))
     elseif type(err) == 'table' and err.__skip then
         skipped = skipped + 1
         print('  skip  ' .. t.name .. (err.msg and ('  (' .. err.msg .. ')') or ''))
@@ -161,6 +177,11 @@ if cover then
     print(('coverage: %d executed line(s) under lua/cartograph/'):format(#out))
 end
 
-print(('\n%d passed, %d failed, %d skipped\n'):format(pass, fail, skipped))
+print(('\n%d passed, %d failed, %d skipped%s\n'):format(pass, fail, skipped,
+    pending > 0 and (', %d PENDING REVIEW'):format(pending) or ''))
 
+-- ⚠ PENDING DOES NOT FAIL THE RUN. A generated case awaiting review is not a broken
+-- tree, and gating on it would make the suite unusable the moment anything is generated.
+-- It is loud in the output and counted in the summary; the fence that keeps unreviewed
+-- cases out of the push is that they live outside `tests/*_spec.lua` until promoted.
 if fail > 0 then vim.cmd('cquit 1') else vim.cmd('qall!') end
