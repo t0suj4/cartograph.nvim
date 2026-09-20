@@ -936,3 +936,67 @@ test('agentwrite: a lint finding\'s ref ADDRESSES a planner, which is the whole 
     ok(plan.subject and plan.subject.plan and plan.subject.plan ~= NUL,
         'returning a plan handle')
 end)
+
+-- ── THE FOURTH AXIS: WHAT A VERB IS ADDRESSED AT (CART-0972) ────────────────
+-- CART-0972 was opened to design a finding -> planner table and warned against it in
+-- the same breath. Measured instead: what a finding row HOLDS and what a planner NEEDS
+-- are the SAME FOUR FIELDS (node, ref, file, line). There was no relation to invent —
+-- one accessor was missing (CART-0976) and one fact was unstated, which is this column.
+--
+-- ⚠ DECLARED, NOT INFERRED — and this test is the half that inference CAN decide. A
+-- deriver with special cases would make the answer agree with whatever the args say
+-- rather than with what the verb means, so the query-shaped verbs are declared and
+-- only the ADDRESSABLE shapes are checked against their own arg lists. Same split as
+-- `@langs`: declare everything, fence what is fenceable.
+test('agentwrite: every verb declares what it is ADDRESSED AT', function ()
+    local SHAPES = { node = true, ['node-handle'] = true, set = true, position = true,
+        plan = true, journal = true, path = true, query = true, graph = true }
+    for _, name in ipairs(agent.ORDER) do
+        local v = agent.VERBS[name]
+        ok(v.subject, name .. ' declares a subject shape')
+        ok(SHAPES[v.subject], name .. ' declares a KNOWN shape, not ' .. tostring(v.subject))
+    end
+end)
+
+test('agentwrite: the declared subject shape MATCHES the arguments it accepts', function ()
+    for _, name in ipairs(agent.ORDER) do
+        local v = agent.VERBS[name]
+        local a = {}
+        for _, x in ipairs(v.args or {}) do a[x.name] = true end
+        if v.subject == 'node' then
+            ok(a.node and a.ref and a.file and a.line,
+                name .. ' declares `node` so it must take the FULL address')
+        elseif v.subject == 'node-handle' then
+            ok(a.node and a.ref, name .. ' declares `node-handle` so it takes node and ref')
+            ok(not (a.file and a.line),
+                name .. ' declares `node-handle`, so it must NOT also take a position —'
+                .. ' that would be `node`')
+        elseif v.subject == 'set' then
+            ok(a.seed or a.seed_refs, name .. ' declares `set` so it takes seed/seed_refs')
+        elseif v.subject == 'plan' then
+            ok(a.plan, name .. ' declares `plan` so it takes a plan handle')
+        elseif v.subject == 'position' then
+            ok(a.file and a.line, name .. ' declares `position` so it takes file and line')
+            ok(not a.ref, name .. ' declares `position`, not a node handle')
+        elseif v.subject == 'graph' then
+            ok(not (a.node or a.ref or a.seed or a.plan),
+                name .. ' declares `graph`, so it accepts no subject handle at all')
+        end
+    end
+end)
+
+test('agentwrite: graph_info CARRIES the column, derived from the declaration', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    ingest(mkroot { ['m.lua'] = CSE_LUA })
+    local by = {}
+    for _, row in ipairs(call('graph_info').result) do by[row.verb] = row end
+    eq('node', by.txn_plan_extract_family.subject)
+    eq('node-handle', by.txn_plan_annotate.subject, 'the two that take no position')
+    eq('set', by.txn_plan_moveset.subject)
+    eq('graph', by.lint_run.subject, 'a finding surface is addressed at nothing')
+    -- DERIVED, NOT RETYPED: whatever the verb table declares is what the column shows.
+    for verb, row in pairs(by) do
+        eq(agent.VERBS[verb].subject, row.subject, 'the column for ' .. verb)
+    end
+end)

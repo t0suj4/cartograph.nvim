@@ -468,6 +468,11 @@ local function v_graph_info(store)
             -- serves any. Null is a CLAIM of generality here, not a missing field
             -- — the same reading `needs_calls = false` gets.
             langs = v.langs and table.concat(v.langs, ' ') or NUL,
+            -- CART-0972: what this verb is ADDRESSED AT. An agent holding a finding
+            -- reads its own row's fields against this column to know which verbs the
+            -- handle fits — which is the whole of the routing question that ticket
+            -- was opened to design a table for.
+            subject = v.subject or NUL,
             -- CART-0581: WHICH QUANTIFIER produced the headline `tier`. Without
             -- it, `tier: inferred` from a floor verb and from a peak verb are
             -- the same string carrying opposite claims.
@@ -2815,6 +2820,42 @@ local function v_txn_undo(store)
     }
 end
 
+-- ── THE FOURTH AXIS: WHAT A VERB IS ADDRESSED AT (CART-0972) ────────────────
+-- `needs_calls` is about the GRAPH, `mutates` about the HOST, `langs` about the
+-- SUBJECT'S LANGUAGE. This says what the subject IS, and it exists because an agent
+-- holding a finding could not tell which verbs its handle even fits.
+--
+-- ★★★ THE ROUTING QUESTION'S ANSWER TURNED OUT TO BE THIS, NOT A TABLE. CART-0972 was
+-- opened to design a finding -> planner map and warned against it in the same breath
+-- (dec/134: a fence describes its instances, not the class). Measured instead: what a
+-- finding row HOLDS and what a planner NEEDS are the SAME FOUR FIELDS — node, ref,
+-- file, line. There was no relation to invent; there was one accessor missing
+-- (CART-0976, a position could not name a definition) and one fact nobody stated,
+-- which is this.
+--
+--   'node'         addressed by the full ADDRESS: node | ref | file+line
+--   'node-handle'  node | ref only — no position (declare, annotate)
+--   'set'          a SET of nodes (moveset's seed / seed_refs)
+--   'position'     a file+line that is not resolved to a definition (why, node_at)
+--   'plan'         a plan handle from a txn_plan_* verb
+--   'journal'      a journal entry id
+--   'path'         a file path on disk (txn_load)
+--   'query'        a search or a from/to pair — NOT a subject you can hold
+--   'graph'        the whole graph; no subject at all
+--
+-- ⚠ DECLARED, NOT INFERRED, AND FENCED WHERE INFERENCE CAN DECIDE. The addressable
+-- shapes ARE derivable from the arg names, and tests/agentwrite_spec.lua checks every
+-- one against them; the query-shaped verbs are not (a `from`/`to` pair and a `name`
+-- filter look alike to a deriver and mean different things). Declaring all of them and
+-- checking the half that can be checked is the `@langs` pattern — the alternative, a
+-- deriver with special cases, would make the answer agree with whatever the args say
+-- rather than with what the verb means.
+--
+-- ⚠ AND IT IS NOT IN THE MCP TOOL DESCRIPTION, unlike `langs`. The inputSchema already
+-- names `node`/`ref`/`file`/`line` on every tool, so a client reading tools/list can
+-- see the shape; `langs` had no other expression and had to be written out. A second
+-- rendering of something already visible is a thing to keep in sync for nothing.
+
 -- ── THE VERB TABLE ──────────────────────────────────────────────────────────
 -- `absences` lists the absence values a verb can actually produce. It is
 -- documentation an agent can read, and it is a standing question to the next
@@ -2840,12 +2881,14 @@ local ADDRESS = {
 M.VERBS = {
     graph_info = {
         summary = 'this graph: provider, counts, capability per verb, and the frontier (what was NOT looked at)',
+        subject = 'graph',
         tier_basis = 'observation', absences = {},
         args = {},
         run = v_graph_info,
     },
     node_find = {
         summary = 'find definitions by name (exact, tail — M.foo ~ foo — or substring); each row says HOW it matched',
+        subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'frontier' },
         args = {
             { name = 'query', type = 'string', required = true, desc = 'the name to look for' },
@@ -2856,6 +2899,7 @@ M.VERBS = {
     },
     node_at = {
         summary = 'the definitions containing file:line, innermost first — addressing a position',
+        subject = 'position',
         tier_basis = 'observation', absences = { 'absent', 'frontier' },
         args = {
             { name = 'file', type = 'string', required = true, desc = 'path relative to the graph root (a unique trailing /-segment also resolves)' },
@@ -2865,6 +2909,7 @@ M.VERBS = {
     },
     edges_callers = {
         summary = 'who calls this — each row with its own resolution tier',
+        subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
         absences = { 'absent', 'refused', 'frontier' },
         args = ADDRESS,
@@ -2872,6 +2917,7 @@ M.VERBS = {
     },
     edges_callees = {
         summary = 'what this calls — each row with its own resolution tier; refused and external sites ride as notes',
+        subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
         absences = { 'absent', 'refused', 'frontier' },
         args = ADDRESS,
@@ -2879,6 +2925,7 @@ M.VERBS = {
     },
     why = {
         summary = 'the honesty record for what is at file:line — how a call resolved, or which rule refused it',
+        subject = 'position',
         -- `why` answers about ONE position, so its result is one row and floor
         -- and peak coincide. Declaring the floor anyway keeps the field total:
         -- an agent never has to special-case a missing quantifier.
@@ -2893,6 +2940,7 @@ M.VERBS = {
     },
     lint_run = {
         summary = 'the graph-aware lint findings, each carrying its rule disposition (authoritative vs suggestive)',
+        subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
         absences = { 'absent', 'refused', 'frontier' },
         args = {
@@ -2906,6 +2954,7 @@ M.VERBS = {
 
     clones_find = {
         summary = 'duplicated code: exact structural clone GROUPS and near-clone PAIRS with the value holes that would become a shared helper\'s parameters',
+        subject = 'graph',
         tier_basis = 'observation',
         absences = { 'absent', 'frontier', 'unavailable' },
         needs_calls = true,
@@ -2918,6 +2967,7 @@ M.VERBS = {
     },
     cone = {
         summary = 'everything reachable from a node, transitively — direction `out` (what it reaches) or `in` (what reaches it)',
+        subject = 'node',
         -- NOT 'observation' and NOT 'resolution'. A cone member was reached
         -- THROUGH resolutions, so a null row tier would be a lie if it meant
         -- "no rung applies"; but the path is not kept, so a per-row rung would
@@ -2935,6 +2985,7 @@ M.VERBS = {
     },
     ladder = {
         summary = 'the call-resolution distribution — how many call sites landed on each rung, for one function or the whole graph',
+        subject = 'node',
         tier_basis = 'observation', needs_calls = true,
         -- NOT 'refused', deliberately. A refused call site is itself a RUNG in
         -- this distribution, so a function whose every site was refused comes
@@ -2949,6 +3000,7 @@ M.VERBS = {
     },
     territory = {
         summary = 'the architecture by reachability: which entry point owns each node, plus commons, core and the borders between them',
+        subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
         -- NOT 'unavailable': the one branch that could produce it is a missing
         -- partition, which is a refusal (see v_territory).
@@ -2958,6 +3010,7 @@ M.VERBS = {
     },
     census = {
         summary = "the graph's epistemic state as counts: edges by trust tier, calls by disposition, refusals by rule, the outside-the-corpus buckets",
+        subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
         -- a census of the instrument, like graph_info: it is never empty
         absences = {},
@@ -2966,6 +3019,7 @@ M.VERBS = {
     },
     mentions = {
         summary = 'which FILES mention an identifier — the weaker, name-level question that still answers when resolution refused',
+        subject = 'query',
         tier_basis = 'observation',
         absences = { 'absent', 'frontier' },
         args = {
@@ -2976,6 +3030,7 @@ M.VERBS = {
     },
     externals = {
         summary = 'the external surface: every call base that leaves this graph, with its members, its files and how the boundary was decided',
+        subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
         absences = { 'absent', 'frontier' },
         args = {
@@ -2988,6 +3043,7 @@ M.VERBS = {
 
     portability_targets = {
         summary = 'the environment profiles that ship, and what each can ANSWER — the from/to vocabulary for portability_move; an artifact that can be no target carries the mechanism that stops it',
+        subject = 'graph',
         tier_basis = 'observation',
         -- a description of the INSTRUMENT, like graph_info and census: profiles
         -- ship with the plugin, so this roster is never empty and an absence
@@ -2998,6 +3054,7 @@ M.VERBS = {
     },
     portability_move = {
         summary = 'THE VERSION MOVE, over the READ surface: names this code reads that the OLD environment held and the NEW one does not — the port worklist. This is the strong one; a renamed data global (global.x -> storage.x) lives here and nowhere else',
+        subject = 'query',
         tier_basis = 'observation',
         -- NO `needs_calls`, and that is measured rather than assumed: the read
         -- surface is built by re-parsing each function on demand (expr.of), so
@@ -3023,6 +3080,7 @@ M.VERBS = {
     },
     portability_move_calls = {
         summary = 'the same move over the CALL-derived requirement set — THE WEAKER QUESTION. A name that is READ and never invoked produces no call record, so a data-global rename is invisible here and this verb can answer "0 lost" on a large port. Ask portability_move first; use this only when you specifically mean CALLED names',
+        subject = 'query',
         -- requires() reads the call records, so unlike portability_move this one
         -- genuinely cannot answer on a thin index.
         tier_basis = 'observation', needs_calls = true,
@@ -3053,6 +3111,7 @@ M.VERBS = {
 
     txn_plan_moveset = {
         summary = 'PROPOSE moving symbols to another file (or into a new one — an existing dest is a MOVE, a path that does not exist yet is an EXTRACT-MODULE). Writes nothing: returns a plan handle for txn_preview',
+        subject = 'set',
         tier_basis = 'observation', needs_calls = true,
         -- never empty: the seed is caller-supplied and every way of having no
         -- symbol to move is a refusal (unknown id, stale ref, no address), so an
@@ -3072,6 +3131,7 @@ M.VERBS = {
     },
     txn_plan_extract_family = {
         summary = 'PROPOSE ONE shared helper for a function\'s whole near-clone FAMILY (not just its nearest partner). Writes nothing: returns a plan handle for txn_preview, plus the per-member verdict when it cannot',
+        subject = 'node',
         -- cloneextract's EXTRACT table is the whole language-specific part of the
         -- transaction and it has two entries. ⚠ AND THEY ARE NOT EQUAL: javascript
         -- has no `module` form, so a CROSS-FILE extraction refuses there while a
@@ -3103,6 +3163,7 @@ M.VERBS = {
     },
     txn_plan_optimize = {
         summary = 'PROPOSE an optimizer rewrite inside one function (cse | localize | hoist | pre). Writes nothing: returns a plan handle for txn_preview, plus the per-site `declined` ledger',
+        subject = 'node',
         tier_basis = 'observation', needs_calls = true,
         -- optapply emits lua syntax (`local x = …`), and its ASSIGN table, call-node
         -- test and no-throw `builtins` set are lua's. ⚠ Its own `lang_of` ADMITS all
@@ -3131,6 +3192,7 @@ M.VERBS = {
     },
     txn_plan_declare = {
         summary = 'PROPOSE adding a member to a declared container (a table/array/object literal). Writes nothing: returns a plan handle for txn_preview',
+        subject = 'node-handle',
         tier_basis = 'observation', needs_calls = false,
         -- never empty: the container is caller-supplied and every way of having
         -- nothing to add to is a REFUSAL (unknown symbol, no literal in its
@@ -3151,6 +3213,7 @@ M.VERBS = {
     },
     txn_plan_annotate = {
         summary = 'PROPOSE attaching prose above a definition, in the file\'s own comment style. Writes nothing: returns a plan handle for txn_preview',
+        subject = 'node-handle',
         tier_basis = 'observation', needs_calls = false,
         -- never empty: the subject is caller-supplied and every way of having
         -- nothing to annotate is a REFUSAL (unknown symbol, no prose, no comment
@@ -3168,6 +3231,7 @@ M.VERBS = {
     },
     txn_save = {
         summary = 'SAVE a held plan to a file so another session can apply it. Planning needs no write capability and applying does, so this is the handoff: plan on a read-only host, review the file, apply on an armed one',
+        subject = 'plan',
         -- `observation`: the answer carries a PATH, never a rung.
         tier_basis = 'observation', needs_calls = false,
         -- `absent` the handle is not held here (session-scoped, 16 most recent)
@@ -3182,6 +3246,7 @@ M.VERBS = {
     },
     txn_load = {
         summary = 'LOAD a saved plan and hold it here, returning a fresh handle. Every stamp the plan pinned is re-checked against disk first, and the plan must still be previewed before it can be applied',
+        subject = 'path',
         tier_basis = 'observation', needs_calls = false,
         -- `absent`  no such file / it holds no plan
         -- `refused` a drifted file, a foreign root, or a schema version that
@@ -3195,6 +3260,7 @@ M.VERBS = {
     },
     txn_preview = {
         summary = 'the exact diff a held plan would write, per file, and nothing written — the same edit callback the apply runs',
+        subject = 'plan',
         tier_basis = 'observation',
         -- `absent` = a well-formed plan whose edits produce no textual change.
         absences = { 'absent' },
@@ -3206,6 +3272,7 @@ M.VERBS = {
     },
     journal_list = {
         summary = 'the transaction history for this root, newest first — metadata only (id, when, verb, status, files); journal_get serves the bytes',
+        subject = 'graph',
         tier_basis = 'observation',
         absences = { 'absent' },
         args = {
@@ -3218,6 +3285,7 @@ M.VERBS = {
     },
     journal_get = {
         summary = 'one journal entry in full: its per-file diff, hashes and status — what a transaction actually did',
+        subject = 'journal',
         tier_basis = 'observation',
         absences = { 'absent' },
         args = {
@@ -3227,6 +3295,7 @@ M.VERBS = {
     },
     txn_apply = {
         summary = 'WRITE a held plan to disk, journalled and reversible. Refuses unless the plan has been through txn_preview, and runs the full late-bound ladder before any byte moves',
+        subject = 'plan',
         tier_basis = 'observation', needs_calls = true, mutates = true,
         -- never empty on success: an applied plan touched at least one file.
         absences = {},
@@ -3238,6 +3307,7 @@ M.VERBS = {
     },
     txn_undo = {
         summary = 'roll back the newest applied transaction, restoring every touched file byte-exact — and REFUSE the whole rollback if any of them has changed since',
+        subject = 'graph',
         tier_basis = 'observation', mutates = true,
         absences = { 'absent' },
         args = {},
