@@ -2141,7 +2141,19 @@ local function v_txn_plan_extract_family(store, args)
 
     local v = clones.family_admissibility(fam, store)
     local cx = require 'cartograph.cloneextract'
-    local plan, why = cx.plan_family(store, fam, { partial = args.partial and true or nil })
+    -- ★★★ CART-0973: THE REMEDY WAS UNREACHABLE THROUGH THE INTERFACE THAT PRINTED
+    -- IT. `plan_family` has always taken `opts.dest`, and refused a cross-file family
+    -- with "pass a destination module path" — but this verb had no `dest` argument and
+    -- the refusal pointed at a `:Cartograph*` command an MCP client cannot run. So the
+    -- capability was present, wired, and unaskable: measured, 2 of 25 near-pair
+    -- findings on our own tree ended there. CART-0580 says a refusal a caller cannot
+    -- REACH is not a contract; this is the mirror — a remedy a caller cannot FOLLOW.
+    -- ⚠ OPTIONAL, AND IT MUST STAY SO: a same-file family needs no destination and
+    -- must not start demanding one. Validation is `plan_family`'s (escaping path,
+    -- existing file), passed through exactly as `txn_plan_moveset` passes its own.
+    local plan, why = cx.plan_family(store, fam,
+        { partial = args.partial and true or nil,
+          dest = (args.dest ~= nil and args.dest ~= NUL and args.dest ~= '') and args.dest or nil })
     if not plan then
         -- ★ THE VERDICT RIDES WITH THE REFUSAL. "Cannot plan" plus a per-member
         -- list of who is extractable and why the rest are not is actionable;
@@ -2156,7 +2168,7 @@ local function v_txn_plan_extract_family(store, args)
         return refuse('cannot-plan',
             ('the family of %s (%d members) cannot be extracted: %s')
                 :format(tostring(n.name), #fam.members, tostring(why)),
-            'the per-member verdict says which copies are extractable and why the others are not; `partial = true` extracts the admissible subset when at least two are',
+            'the per-member verdict says which copies are extractable and why the others are not; `partial = true` extracts the admissible subset when at least two are. A family spanning MORE THAN ONE FILE additionally needs `dest`, the project-relative path of the new module the shared helper will live in',
             { node = n.id, members = members,
               liftable = (v and v.n_liftable or 0),
               lifts = (v and v.lifts and table.concat(v.lifts, ', ')) or NUL })
@@ -3073,6 +3085,8 @@ M.VERBS = {
             local a = {
                 { name = 'partial', type = 'boolean',
                     desc = 'extract the ADMISSIBLE subset when some members cannot be (default false: refuse and name them). Sound — a skipped member keeps its own body and nothing dangles — but incomplete' },
+                { name = 'dest', type = 'string',
+                    desc = 'where the shared helper goes, project-relative, when the family spans MORE THAN ONE FILE — a same-file family needs none and ignores it. The path must not exist yet and must not escape the root; both are refused by name. Cross-file also requires the language to have module wiring in its spec: lua does, javascript does not, and that refusal says so' },
             }
             for _, x in ipairs(ADDRESS) do a[#a + 1] = x end
             return a

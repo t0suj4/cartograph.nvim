@@ -786,3 +786,90 @@ test('agentwrite: the language column is on graph_info, and it is DERIVED', func
             'the column for ' .. verb .. ' is the declaration')
     end
 end)
+
+-- ── A REMEDY THE CALLER COULD NOT FOLLOW (CART-0973) ────────────────────────
+-- CART-0580 says a refusal a caller cannot REACH is not a contract. This is the
+-- mirror. `cloneextract.plan_family` has always taken `opts.dest` and refused a
+-- cross-file family with "pass a destination module path" — but this verb had no
+-- `dest` argument, and the underlying refusal named a `:Cartograph*` command an MCP
+-- client cannot run. The capability was present, wired, and unaskable: measured, 2 of
+-- 25 near-pair findings on cartograph's own tree ended there.
+--
+-- ★ AND CROSS-FILE IS THE INTERESTING CASE. One helper wanted by two modules is what
+-- "extract a shared abstraction" means; the same-file families this verb could already
+-- reach are the ones a human spots unaided.
+local XFILE_A = {
+    'local M = {}',
+    'function M.pick_a(items)',
+    '  local out = {}',
+    '  for _, it in ipairs(items) do',
+    "    if type(it) == 'string' then out[#out + 1] = it end",
+    '  end',
+    '  table.sort(out)',
+    '  return out',
+    'end',
+    'return M',
+}
+local XFILE_B = {
+    'local M = {}',
+    'function M.pick_b(items)',
+    '  local out = {}',
+    '  for _, it in ipairs(items) do',
+    "    if type(it) == 'number' then out[#out + 1] = it end",
+    '  end',
+    '  table.sort(out)',
+    '  return out',
+    'end',
+    'return M',
+}
+
+-- ⚠ vim.NIL IS TRUTHY. Every optional envelope field is TYPE-checked, never
+-- truth-checked — `doc.refusal` is NUL on success and indexing it raises. This cost a
+-- probe its numbers earlier in the same arc (CART-0973's own measurement) and then
+-- cost these two tests their first run.
+local function refusal_of(doc) return type(doc.refusal) == 'table' and doc.refusal or nil end
+
+test('agentwrite: a CROSS-FILE family is plannable once `dest` can be given', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    ingest(mkroot { ['one.lua'] = XFILE_A, ['two.lua'] = XFILE_B })
+    local id = idof('M.pick_a')
+    ok(id, 'the fixture yielded a function to aim at')
+
+    -- WITHOUT it: the verb refuses, and the refusal now names the ARGUMENT rather
+    -- than an interactive command no client can run.
+    local no = call('txn_plan_extract_family', { node = id })
+    local nr = refusal_of(no)
+    ok(nr, 'a cross-file family cannot be planned without a destination')
+    eq('cannot-plan', nr.rule)
+    ok(nr.reason:find('spans', 1, true),
+        'the reason says the family spans more than one file: ' .. nr.reason)
+    ok(nr.remedy:find('`dest`', 1, true),
+        'and the REMEDY names the argument, which is the whole point: ' .. nr.remedy)
+
+    -- WITH it: the same family plans.
+    local yes = call('txn_plan_extract_family', { node = id, dest = 'shared/pick.lua' })
+    eq(true, yes.ok, 'and with a destination it plans: '
+        .. ((refusal_of(yes) or {}).reason or ''))
+    ok(yes.subject and yes.subject.plan and yes.subject.plan ~= NUL,
+        'returning a plan handle for txn_preview')
+end)
+
+test('agentwrite: `dest` is OPTIONAL — a same-file family neither needs nor takes one', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    -- ⚠ THE TRIPWIRE. Making the argument required, or passing it through when the
+    -- family is same-file, would break every extraction the verb could already do.
+    ingest(mkroot { ['m.lua'] = CSE_LUA })
+    local id = idof('M.f')
+    local r = call('txn_plan_extract_family', { node = id })
+    local rr = refusal_of(r)
+    ok(not rr or not (rr.reason or ''):find('destination', 1, true),
+        'a same-file subject is never refused FOR WANT OF A DESTINATION: '
+        .. ((rr and rr.reason) or 'planned'))
+    local schema = agent.schema('txn_plan_extract_family')
+    local req = (schema or {}).required or {}
+    for _, name in ipairs(req) do
+        ok(name ~= 'dest', '`dest` is not in the verb\'s required list')
+    end
+end)
