@@ -522,9 +522,15 @@ function M.plan(store, pair, opts)
         local below = reads_below(store, { a.id, b.id }, a.file, ins0,
             { [a.name] = true, [b.name] = true })
         if below then
-            return nil, ('the helper would have to sit above `%s`, which it reads —'
-                .. ' hoisting it out of the enclosing expression would leave that'
-                .. ' undefined'):format(below)
+            -- ⚠ THE MESSAGE USED TO SAY "hoisting it out of the enclosing expression",
+            -- which describes only the HOIST case. CART-0985 broadened the predicate to
+            -- the INSERTION LINE — the helper goes above the earlier copy whether or not
+            -- anything is hoisted — and the wording was left describing the narrow one.
+            -- Found by tools/counterexample.lua on its first working run, with the
+            -- members at statement level and nothing to hoist out of.
+            return nil, ('the helper must be inserted above `%s`, which it reads, so'
+                .. ' `%s` would not yet be defined where the helper lands')
+                :format(below, below)
         end
         local sig_indent = indent_of(lines_a[ins0 + 1])
         local helper = syn.local_helper(hname, table.concat(hparams, ', '), body, sig_indent)
@@ -962,9 +968,15 @@ function M.plan_family(store, fam, opts)
         for _, m in ipairs(plan.members) do if m.name then mnames[m.name] = true end end
         local below = reads_below(store, mids, file, ins0, mnames)
         if below then
-            return nil, ('the helper would have to sit above `%s`, which it reads —'
-                .. ' hoisting it out of the enclosing expression would leave that'
-                .. ' undefined'):format(below)
+            -- ⚠ THE MESSAGE USED TO SAY "hoisting it out of the enclosing expression",
+            -- which describes only the HOIST case. CART-0985 broadened the predicate to
+            -- the INSERTION LINE — the helper goes above the earlier copy whether or not
+            -- anything is hoisted — and the wording was left describing the narrow one.
+            -- Found by tools/counterexample.lua on its first working run, with the
+            -- members at statement level and nothing to hoist out of.
+            return nil, ('the helper must be inserted above `%s`, which it reads, so'
+                .. ' `%s` would not yet be defined where the helper lands')
+                :format(below, below)
         end
         local sig_indent = indent_of(linesof[file][ins0 + 1])
         table.insert(perfile[file], { from0b = ins0, to0b = ins0 - 1,
