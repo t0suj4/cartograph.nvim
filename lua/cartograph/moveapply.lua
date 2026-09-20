@@ -43,6 +43,10 @@
 -- identically; they no longer do (CART-0576).
 
 local M = {}
+
+-- forward: `plan_moveset` stamps a precheck closure that calls this, and the plan is
+-- built long before the refusal-builder is defined.
+local stage_mismatch
 local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
 
@@ -562,6 +566,37 @@ local function collect(store, ids, dest, plan, opts)
     -- ⚠ ROWS, NOT THE BUILDER: `journal.begin` serializes the plan, and a
     -- table carrying a metatable and methods does not survive that.
     plan.receipt, plan._receipt = rc.rows, nil
+    plan.refspecs = {}
+    for _, m in ipairs(plan.moves) do
+        plan.refspecs[#plan.refspecs + 1] = { id = m.id, name = m.name,
+            ref = m.ref, what = 'move' }
+    end
+    -- ★★ THE HOST COUPLING, DECLARED ON THE PLAN (CART-0982). A move-set plan is the
+    -- only one that both READS live host state as a precondition and SPENDS it, and
+    -- neither is a property that could be written down as data at plan time — so they
+    -- ride as closures, the same standing `edit_of` has had since CART-0375. The
+    -- alternative is a table in the driver naming which verbs need staging, which is
+    -- the kind of map this whole arc is deleting.
+    plan.precheck = function (st)
+        local ids = st.staged_ids()
+        local want = {}
+        for _, m in ipairs(plan.moves) do want[m.id] = true end
+        local same = #ids == #plan.moves
+        if same then
+            for _, id in ipairs(ids) do if not want[id] then same = false end end
+        end
+        if not same then return stage_mismatch(st, ids, plan) end
+    end
+    -- ⚠ CONSUMED BEFORE THE WRITE: the splice that follows must not see a frozen graph.
+    plan.consume = function (st) st.clear_stage() end
+    -- every move-set entry's span is READ (to paste into dest), so all are verified by
+    -- `refspecs`; but only MOVE entries DEPART the graph — a COPY leaves its original
+    -- in place, so it is not in the executed move set.
+    local departed = {}
+    for _, m in ipairs(plan.moves) do
+        if m.mode ~= 'copy' then departed[#departed + 1] = m.ref end
+    end
+    plan.desc = { moves = departed, dest = plan.dest }
     return txn.protocol(plan, M.edits_for)
 end
 
@@ -791,7 +826,7 @@ end
 -- changed, and the only safe answer is to re-plan. Opposite instructions, so the
 -- refusal has to say WHICH premise failed — a reader who cannot see the calling
 -- code (an agent) cannot guess it back.
-local function stage_mismatch(store, ids, plan)
+stage_mismatch = function (store, ids, plan)
     if #ids == 0 then
         return ('nothing is staged, so the plan\'s %d move(s) cannot be'
             .. ' confirmed against the live move-set — stage them first'
@@ -870,39 +905,10 @@ end
 --- move-set must still be exactly the plan's moves. On success the
 --- move-set is consumed (cleared before the splice, which a staged
 --- set would freeze).
-function M.apply(store, plan)
-    local ids = store.staged_ids()
-    local want = {}
-    for _, m in ipairs(plan.moves) do want[m.id] = true end
-    local same = #ids == #plan.moves
-    if same then
-        for _, id in ipairs(ids) do
-            if not want[id] then same = false end
-        end
-    end
-    if not same then
-        return nil, stage_mismatch(store, ids, plan)
-    end
-    local txn = require 'cartograph.txn'
-    -- every move-set entry's span is READ (to paste into dest), so all are
-    -- verified; but only MOVE entries DEPART the graph — a COPY leaves its
-    -- original in place, so it is not in the executed move set.
-    local refspecs, departed = {}, {}
-    for _, m in ipairs(plan.moves) do
-        refspecs[#refspecs + 1] = { id = m.id, name = m.name,
-            ref = m.ref, what = 'move' }
-        if m.mode ~= 'copy' then departed[#departed + 1] = m.ref end
-    end
-    local bad = txn.verify(store, plan, refspecs)
-    if bad then return nil, bad end
-    -- consumed: the splice after the writes must not see a frozen graph
-    store.clear_stage()
-    return txn.execute(store, plan, {
-        moves = departed,
-        dest = plan.dest,
-    })
-end
-
+--- The module's face on the generic driver (CART-0982): the stage-match precondition,
+--- the staging it spends, the refspecs and the journal description are all declared on
+--- the plan by `plan_moveset`, so `txn.apply` runs it without knowing this module.
+function M.apply(store, plan) return require('cartograph.txn').apply(store, plan) end
 --- What :CartographApply would write, nothing written: the dry-run
 --- feeding the pre-apply diff.
 function M.preview(store, plan)

@@ -434,7 +434,23 @@ function M.verify(store, plan, refspecs)
         return ('the graph changed since planning (gen %d -> %d) — re-plan')
             :format(plan.generation, store.generation)
     end
-    for _, spec in ipairs(refspecs or {}) do
+    -- ★★★ THE PLAN CARRIES THE RESOLUTIONS IT DEPENDS ON (CART-0982). Building
+    -- refspecs inside each `apply` is what produced CART-0878's defect 2: cloneextract
+    -- read `plan.a`/`plan.b` and raised on a family plan's `plan.members`, because the
+    -- apply had to KNOW THE PLAN'S SHAPE to restate a fact the plan already held. The
+    -- planner knows the shape; the driver must not have to.
+    --
+    -- ⚠ AND `or {}` WAS THE VACUOUS DEFAULT, the same `else` in miniature: a planner
+    -- that simply forgot its refspecs got a verify that checked NOTHING and passed.
+    -- Silence is not "no obligations" — it is an incomplete plan, and it refuses by
+    -- name, exactly as `execute` does for a plan declaring no `guards`.
+    refspecs = refspecs or plan.refspecs
+    if not refspecs then
+        return ('the plan for `%s` declares no refspecs — a write verb must name the '
+            .. 'resolutions its plan depends on (`plan.refspecs = { ... }`), or say '
+            .. '`{}` to declare that it depends on none'):format(tostring(plan.verb))
+    end
+    for _, spec in ipairs(refspecs) do
         local rid, note = store.resolve_ref(spec.ref)
         if not rid or rid ~= spec.id or note then
             return ('%s %s: %s'):format(spec.what or 'symbol', spec.name,
@@ -464,6 +480,48 @@ function M.verify(store, plan, refspecs)
     end
 end
 
+--- ★★★ THE GENERIC DRIVER — RUN ANY PLAN WITHOUT KNOWING WHICH VERB BUILT IT.
+---
+--- USER (CART-0982): "It would be better if we didn't need to write verb's plan
+--- semantics by hand". Before this, every write verb hand-wrote the same five steps in
+--- its own `apply`, and `agent.txn_apply` kept a TABLE mapping each plan family to the
+--- module whose `apply` to call — the fourth copy of one relation, and the third to be
+--- wrong (CART-0878: three verbs could plan and preview and never apply).
+---
+--- ★ THE PRECEDENT IS `edit_of`, AND THE ARGUMENT IS THE SAME SENTENCE AS
+--- planguards' (CART-0375/0769). "A caller holding a plan could not run it without
+--- knowing which module built it, and that is the whole blocker for a generic driver."
+--- Each step that used to be verb code is now something the PLAN declares:
+---   refspecs  the resolutions it depends on        -> M.verify
+---   guards    the obligations it accepts           -> planguards.run, inside execute
+---   edit_of   the edit itself                      -> M.execute
+---   desc      what the journal records             -> M.execute
+---   precheck  a HOST precondition (optional)       -> here
+---   consume   host state it spends (optional)      -> here
+---
+--- ⚠ `precheck` AND `consume` ARE CLOSURES, DELIBERATELY. Everything above them is
+--- data, and data would be better — but a move-set's precondition reads live host
+--- state (which symbols are staged right now) and its `consume` MUTATES that state,
+--- and neither is a property of the plan that could be written down at plan time. A
+--- closure the BUILDER stamps on the plan is still the plan carrying its own
+--- semantics; a table in the driver naming which verbs need staging is not.
+---
+--- ⚠ ORDER IS LOAD-BEARING. `consume` runs AFTER verify and BEFORE execute: the
+--- move-set splice must not see a frozen graph, and spending host state before the
+--- plan is known to be applicable would leave the caller with neither.
+--- @return table|nil entry, string|nil why
+function M.apply(store, plan)
+    if type(plan) ~= 'table' then return nil, 'not a plan' end
+    if plan.precheck then
+        local why = plan.precheck(store, plan)
+        if why then return nil, why end
+    end
+    local bad = M.verify(store, plan)
+    if bad then return nil, bad end
+    if plan.consume then plan.consume(store, plan) end
+    return M.execute(store, plan, plan.desc)
+end
+
 --- Journal-first commit: read every touched file's before-content,
 --- journal.begin, run edit_of(rel, before, all_before) -> after per
 --- file, write, journal.commit, clear the staged txn and splice the
@@ -473,6 +531,18 @@ function M.execute(store, plan, desc, edit_of)
     local nope
     edit_of, nope = resolve_edit(plan, edit_of)
     if not edit_of then return nil, nope end
+    -- ⚠ A WRITE WITH NO DESCRIPTION REFUSES BY NAME, the same rule `guards`,
+    -- `refspecs` and `edit_of` already live under. MEASURED (CART-0982): deleting a
+    -- builder's `plan.desc` broke NOTHING — the journal recorded a nil description and
+    -- the whole suite stayed green, so the one field of the protocol nobody checked
+    -- was the one recording WHY a write happened. The journal is the only thing
+    -- between a bad edit and a lost file; an entry that cannot say what it was for is
+    -- a worse recovery story than no entry, because it looks like a record.
+    desc = desc == nil and plan.desc or desc
+    if desc == nil then
+        return nil, ('the plan for `%s` carries no description — a write verb must say '
+            .. 'what the journal should record (`plan.desc = ...`)'):format(tostring(plan.verb))
+    end
     local root = store.data.root
     -- ★ THE BACKSTOP, AND IT MUST PRECEDE journal.begin: refusing after the journal
     -- opens would leave an entry for a write we never meant to make. Every path the
@@ -524,6 +594,20 @@ function M.execute(store, plan, desc, edit_of)
             return nil, ('the edit for %s could not be built: %s'):format(rel, tostring(out))
         end
         after[rel] = out
+    end
+    -- ★★ A PLAN THAT CHANGES NOTHING IS REFUSED, AND THE CHECK IS GENERIC (CART-0982).
+    -- `optapply` used to answer this per-verb, by counting its own `reps`/`dels`/`ins`
+    -- — which is why the same sentence ("nothing applicable") came out of the ROUTER
+    -- when an unrelated family reached it by accident and it found none of its fields.
+    -- Comparing before to after asks the real question and asks it the same way for
+    -- every verb, so no plan shape can answer it by being unrecognised.
+    local touches = false
+    for _, rel in ipairs(plan.touched) do
+        if after[rel] ~= before[rel] then touches = true; break end
+    end
+    if not touches then
+        return nil, ('the plan for `%s` would change nothing — every file it touches'
+            .. ' comes out byte-identical'):format(tostring(plan.verb))
     end
     local verdicts, failed = require('cartograph.planguards').run(store, plan, before, after)
     plan.guard_verdicts = verdicts

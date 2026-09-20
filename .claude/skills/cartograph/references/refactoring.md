@@ -60,7 +60,7 @@ or a headless `nvim --headless -l`.
 | `clonemerge` | ✅ | copy deleted, call site rewritten, 0 hazards, valid code |
 | `hoistclosure` | ✅ | lifted + dedented correctly; refusal names the captured variable |
 | `reorder` | ✅ | legal move applied; illegal move refused naming the crossed dep |
-| `optapply` (CSE) | ✅ | `local b = x*y+1` → `local b = a`, span-CAS + parse-clean |
+| `optapply` (CSE) | ✅ | `local b = x*y+1` → `local b = a`, guards `spans-unchanged` + `parses` |
 | `cloneextract` (extract-helper) | ✅ | helper synthesized, both bodies became tail calls, 0 hazards |
 | `extract` (pure engine) | ⚠ → ✅ | was **broken** when the selection reads an enclosing param/upvalue; **[FIXED since]** — it now refuses without `fn_params` and crosses the parameter when given it. See the box in "Extract function" |
 
@@ -263,7 +263,7 @@ verdict will happily certify a move you did not mean.
 local oa   = require 'cartograph.optapply'
 local plan = oa.plan_cse(store, fn_id)     -- also plan_localize / plan_hoist / plan_pre
 local lines = oa.preview(store, plan)      -- difftext LINES first (see the box above)
-local ok   = oa.apply(store, plan)         -- span-CAS + parse-clean witness
+local entry, why = oa.apply(store, plan)   -- (entry, why), like every other verb
 oa.run_at(store, 'm.lua', 5)               -- one-shot plan+apply at a site
 oa.report(store, fn_id)                    -- what's applyable, touching nothing
 ```
@@ -418,8 +418,13 @@ Two extra witnesses on top of the ladder, per verb class:
 - **graph-CHANGING** (optapply): the recompute — and any call inside it — *is*
   removed. This is **reported, not rejected**; it is the whole point, and why move's
   preserving witness would not do.
-- **span-CAS**: the exact text at each edit range still equals what the plan captured.
-- **parse-clean**: the edited file re-parses with no ERROR node.
+- **span-CAS** (`spans-unchanged`): the exact text at each edit range still equals what
+  the plan captured.
+- **parse-clean** (`parses`): the edit did not BREAK the file — a DELTA, not an absolute,
+  so it never blocks an edit to an already-broken file and is correct for container
+  formats like `.vue`/`.svelte`.
+- ⚠ Both are **declared guards on the plan** (`plan.guards`), not verb code (CART-0982).
+  `txn.apply(store, plan)` runs ANY plan; every module's `apply` is one delegating line.
 - **synthesis gates** (extract-helper): the result must parse *and* must contain the
   helper plus both rewritten call sites.
 

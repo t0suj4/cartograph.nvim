@@ -159,10 +159,26 @@ local function phases_of(store)
     return true, phaseset
 end
 
-local function parses_clean(text, lang)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, text, lang)
-    if not ok or not parser then return false end
-    return not parser:parse()[1]:root():has_error()
+--- WHAT THE RESULT MUST CONTAIN, stated by the planner for the `synthesized` guard
+--- (CART-0982). `apply` used to compute all of this itself, which is why the driver
+--- could not be generic: it would have needed this module's language table AND to
+--- know whether the plan was a pair or a family.
+---
+--- ⚠ THE CALL-SITE COUNT IS PER MEMBER, not always two. A family of three rewrites
+--- three bodies; demanding exactly two would refuse every family larger than a pair,
+--- and for a PAIR it is the same check it always was.
+local function expectation(plan, syn)
+    local defsite = plan.xfile and plan.create.file
+        or (plan.a and plan.a.file) or (plan.members and plan.members[1].file)
+    return {
+        def = { file = defsite,
+            needle = plan.xfile and syn.member_pat(plan.helper)
+                or syn.def_pat(plan.helper) },
+        calls = { needle = (plan.xfile and plan.helper_call or plan.helper) .. '(',
+            n = plan.members and #plan.members or 2,
+            -- the created module holds the DEFINITION, so its text is not a call site
+            skip = plan.xfile and plan.create.file or nil },
+    }
 end
 
 local function span_text(lines, r)
@@ -372,7 +388,7 @@ function M.plan(store, pair, opts)
 
     local plan = {
         verb = 'extract-helper', generation = store.generation,
-        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
+        guards = { 'parses', 'synthesized' }, -- CART-0769: every text-editing verb owes rung 0
         helper = hname, nparams = #hp, xfile = xfile, lang = lang,
         files = {}, hazards = hazards,
         a = { id = a.id, name = a.name, ref = store.ref_of(a.id), file = a.file },
@@ -413,6 +429,21 @@ function M.plan(store, pair, opts)
     for _, f in ipairs(plan.touched) do
         if not (plan.creates and plan.creates[f]) then plan.stamps[f] = txn.disk_stamp(root, f) end
     end
+    plan.refspecs = {
+        { id = plan.a.id, name = plan.a.name, ref = plan.a.ref, what = 'clone' },
+        { id = plan.b.id, name = plan.b.name, ref = plan.b.ref, what = 'clone' },
+    }
+    plan.expect = expectation(plan, EXTRACT[plan.lang])
+    plan.precheck = function (st)
+        if next(st.moveset or {}) then
+            return 'a move-set is staged — apply or clear it first'
+        end
+    end
+    plan.desc = {
+        helper = plan.helper, xfile = plan.xfile,
+        a = plan.a and plan.a.ref, b = plan.b and plan.b.ref,
+        members = plan.members and #plan.members or nil,
+    }
     return txn.protocol(plan, M.edits_for)
 end
 
@@ -738,7 +769,7 @@ function M.plan_family(store, fam, opts)
 
     local plan = {
         verb = 'extract-family', generation = store.generation,
-        guards = { 'parses' },
+        guards = { 'parses', 'synthesized' },
         helper = hname, nparams = #tmpl.order, xfile = xfile, lang = lang,
         files = {}, hazards = hazards, partial = #take < v.n or nil,
         -- CART-0878: which enclosing locals became parameters. Present only when the
@@ -840,6 +871,25 @@ function M.plan_family(store, fam, opts)
             plan.stamps[f] = txn.disk_stamp(store.data.root, f)
         end
     end
+    -- ★ THE FAMILY'S OWN SHAPE, DECLARED BY THE BUILDER THAT KNOWS IT. `apply` used to
+    -- branch on `plan.members` vs `plan.a`/`plan.b` to rebuild this list, and got it
+    -- wrong in the direction that raised (CART-0878).
+    plan.refspecs = {}
+    for _, m in ipairs(plan.members) do
+        plan.refspecs[#plan.refspecs + 1] = { id = m.id, name = m.name,
+            ref = m.ref, what = 'clone' }
+    end
+    plan.expect = expectation(plan, EXTRACT[plan.lang])
+    plan.precheck = function (st)
+        if next(st.moveset or {}) then
+            return 'a move-set is staged — apply or clear it first'
+        end
+    end
+    plan.desc = {
+        helper = plan.helper, xfile = plan.xfile,
+        a = plan.a and plan.a.ref, b = plan.b and plan.b.ref,
+        members = plan.members and #plan.members or nil,
+    }
     -- ★ JOIN THE PLAN PROTOCOL — the one line every builder ends with. Without
     -- it `dryrun` refuses with "this verb has not joined the plan protocol",
     -- which is a correct refusal and an easy one to mistake for a bad plan.
@@ -869,62 +919,16 @@ function M.preview(store, plan)
     return txn.dryrun(store, plan)
 end
 
---- ⚠⚠ THIS FUNCTION WAS PAIR-ONLY AND A FAMILY PLAN RAISED IN IT (CART-0878). It read
---- `plan.a`/`plan.b` — the shape `M.plan` builds — while `M.plan_family` builds
---- `plan.members`, so the family verb could PLAN and PREVIEW and never apply. It did not
---- refuse: it indexed a nil field. Both shapes are handled here now, because a verb that
---- can produce a plan it cannot apply is a verb that lies about being finished.
-function M.apply(store, plan)
-    if next(store.moveset or {}) then
-        return nil, 'a move-set is staged — apply or clear it first'
-    end
-    local refspecs = {}
-    if plan.members then
-        for _, m in ipairs(plan.members) do
-            refspecs[#refspecs + 1] = { id = m.id, name = m.name, ref = m.ref, what = 'clone' }
-        end
-    else
-        refspecs[1] = { id = plan.a.id, name = plan.a.name, ref = plan.a.ref, what = 'clone' }
-        refspecs[2] = { id = plan.b.id, name = plan.b.name, ref = plan.b.ref, what = 'clone' }
-    end
-    local bad = txn.verify(store, plan, refspecs)
-    if bad then return nil, bad end
-    -- synthesis gates: every touched/created file parses, and the helper + both calls exist
-    local syn = EXTRACT[plan.lang]
-    local _, after = M.preview(store, plan)
-    if not after then return nil, 'preview failed' end
-    local defsite = plan.xfile and plan.create.file
-        or (plan.a and plan.a.file) or (plan.members and plan.members[1].file)
-    for _, rel in ipairs(plan.touched) do
-        if not parses_clean(after[rel] or '', syn.parse) then
-            return nil, ('the synthesized %s does not parse — refusing (a synthesis bug, not your code)'):format(rel)
-        end
-    end
-    local defpat = plan.xfile and syn.member_pat(plan.helper) or syn.def_pat(plan.helper)
-    if not (after[defsite] or ''):find(defpat, 1, true) then
-        return nil, 'the helper definition is missing from the result — refusing'
-    end
-    -- both call sites present (same-file: 2 in one file; cross-file: 1 in each caller)
-    local callee = plan.xfile and plan.helper_call or plan.helper
-    local ncalls = 0
-    for _, rel in ipairs(plan.touched) do
-        if rel ~= (plan.xfile and plan.create.file) then
-            ncalls = ncalls + select(2, (after[rel] or ''):gsub(callee:gsub('([^%w])', '%%%1') .. '%(', ''))
-        end
-    end
-    -- ★ THE CALL-SITE COUNT IS PER MEMBER, not always two. A family of three rewrites
-    -- three bodies; demanding exactly two would refuse every family larger than a pair,
-    -- and demanding "at least two" for a PAIR is the same check it always was.
-    local want = plan.members and #plan.members or 2
-    if ncalls < want then
-        return nil, ('%d of %d call site(s) are missing from the result — refusing')
-            :format(want - ncalls, want)
-    end
-    return txn.execute(store, plan, {
-        helper = plan.helper, xfile = plan.xfile,
-        a = plan.a and plan.a.ref, b = plan.b and plan.b.ref,
-        members = plan.members and #plan.members or nil,
-    })
-end
-
+--- The module's face on the generic driver (CART-0982). Everything this function used
+--- to do by hand — the move-set precondition, the refspecs, the synthesis gates, the
+--- journal description — is now declared on the plan by the builder that knows the
+--- shape, and `txn.apply` runs any plan without knowing which verb built it.
+---
+--- ⚠⚠ AND THE SHAPE BRANCH WENT WITH IT, WHICH IS THE POINT. This function was
+--- PAIR-ONLY: it read `plan.a`/`plan.b` — the shape `M.plan` builds — while
+--- `M.plan_family` builds `plan.members`, so the family verb could PLAN and PREVIEW and
+--- never apply, for as long as it existed (CART-0878). It did not refuse; it indexed a
+--- nil field. An `apply` that must ask what shape its plan is, is an `apply` that can be
+--- wrong about the answer — so the builders declare it and this asks nothing.
+function M.apply(store, plan) return txn.apply(store, plan) end
 return M

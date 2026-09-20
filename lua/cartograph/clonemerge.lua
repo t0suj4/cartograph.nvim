@@ -313,6 +313,24 @@ function M.plan(store, id)
         plan.stamps[f] = disk_stamp(root, f)
     end
     table.sort(plan.touched)
+    plan.refspecs = { { id = plan.survivor.id, name = plan.survivor.name,
+        ref = plan.survivor.ref, what = 'survivor' } }
+    for _, r in ipairs(plan.removed) do
+        plan.refspecs[#plan.refspecs + 1] = { id = r.id, name = r.name,
+            ref = r.ref, what = 'clone' }
+    end
+    -- the host precondition this verb owes, declared rather than written into an
+    -- `apply` the driver would have to dispatch to (CART-0982)
+    plan.precheck = function (st)
+        if next(st.moveset or {}) then
+            return 'a move-set is staged — apply or clear it first'
+        end
+    end
+    plan.desc = {
+        survivor = plan.survivor.ref, survivor_name = plan.survivor.name,
+        removed = vim.tbl_map(function (r) return r.ref end, plan.removed),
+        rewrites = #plan.rewrites,
+    }
     return txn.protocol(plan, M.edits_for)
 end
 
@@ -322,26 +340,8 @@ local edit_file = txn.edit_file
 --- Apply a plan. Every verification failure REFUSES with its reason.
 --- The ladder and the journaled write loop live in cartograph.txn —
 --- this verb contributes its refs, its edits, its one extra rung.
-function M.apply(store, plan)
-    -- one transaction at a time: a staged move-set means the user
-    -- intends a different verb
-    if next(store.moveset or {}) then
-        return nil, 'a move-set is staged — apply or clear it first'
-    end
-    local refspecs = { { id = plan.survivor.id, name = plan.survivor.name,
-        ref = plan.survivor.ref, what = 'survivor' } }
-    for _, r in ipairs(plan.removed) do
-        refspecs[#refspecs + 1] = { id = r.id, name = r.name,
-            ref = r.ref, what = 'clone' }
-    end
-    local bad = txn.verify(store, plan, refspecs)
-    if bad then return nil, bad end
-    return txn.execute(store, plan, {
-        survivor = plan.survivor.ref, survivor_name = plan.survivor.name,
-        removed = vim.tbl_map(function (r) return r.ref end, plan.removed),
-        rewrites = #plan.rewrites,
-    })
-end
+--- Kept as the module's face on the generic driver (CART-0982).
+function M.apply(store, plan) return txn.apply(store, plan) end
 
 --- What :CartographApply would write, nothing written: the dry-run
 --- feeding the pre-apply diff.

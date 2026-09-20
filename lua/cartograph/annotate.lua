@@ -213,6 +213,9 @@ function M.plan(store, opts)
         plan.hazards[#plan.hazards + 1] = ('%s holds no line comment, so the prose '
             .. 'style was taken from %s'):format(n.file, donor)
     end
+    plan.refspecs = { { id = plan.target.id, name = plan.target.name,
+        ref = plan.target.ref, what = 'symbol' } }
+    plan.desc = 'annotate: attach prose to ' .. plan.target.name
     return txn.protocol(plan, M.edits_for)
 end
 
@@ -225,11 +228,7 @@ end
 
 function M.preview(store, plan) return txn.dryrun(store, plan) end
 
-function M.apply(store, plan)
-    local bad = txn.verify(store, plan, { { id = plan.target.id, ref = plan.target.ref,
-        name = plan.target.name, what = 'symbol' } })
-    if bad then return nil, bad end
-    return txn.execute(store, plan, 'annotate: attach prose to ' .. plan.target.name)
-end
+--- Kept as the module's face on the generic driver (CART-0982).
+function M.apply(store, plan) return txn.apply(store, plan) end
 
 return M

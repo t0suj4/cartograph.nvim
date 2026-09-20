@@ -48,7 +48,10 @@ M.VERBS = {
                 { arm = false, reexport = args.reexport })
         end,
         arm = function (store, plan) return require('cartograph.moveapply').arm(store, plan) end,
-        apply = function (store, plan) return require('cartograph.moveapply').apply(store, plan) end,
+        -- ★ THE GENERIC DRIVER (CART-0982). `plan` and `arm` stay per-verb — planning
+        -- IS the verb, and `arm` runs at plan time — but APPLY is no longer something
+        -- a recipe step has to know how to do. A verb added here declares no apply.
+        apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
     },
 }
 

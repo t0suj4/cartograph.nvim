@@ -743,9 +743,17 @@ test('moveapply: the PLAN field set is pinned to its schema version', function (
     local plan = assert(moveapply.plan_extract_ids(st, { n.id }, 'sub/u.lua'))
 
     -- the v2 surface, in sorted order
-    local want = { 'copy', 'creates', 'dest', 'dest_at', 'edit_of', 'generation',
-        'guards', 'hazards', 'header', 'imports_add', 'moves', 'rewrites',
-        'scaffold', 'stamps', 'touched', 'verb' }
+    -- ⚠ `refspecs` IS REQUIRED, NOT OPTIONAL (CART-0982, schema.PLAN v3). A plan
+    -- that omits it is REFUSED by `txn.verify` rather than verified loosely, so it
+    -- is part of the surface a replayer must honour — the same standing as `guards`.
+    -- ⚠ `consume`, `desc` and `precheck` ARE PROTOCOL, NOT PAYLOAD (CART-0982,
+    -- schema.PLAN v3). `desc` is what the journal records; `precheck` and `consume`
+    -- are this verb's host coupling — the staged move-set it requires and then spends
+    -- — declared on the plan so `txn.apply` can run it without knowing which module
+    -- built it. They are CLOSURES, the same standing `edit_of` has had since CART-0375.
+    local want = { 'consume', 'copy', 'creates', 'desc', 'dest', 'dest_at', 'edit_of',
+        'generation', 'guards', 'hazards', 'header', 'imports_add', 'moves', 'precheck',
+        'refspecs', 'rewrites', 'scaffold', 'stamps', 'touched', 'verb' }
     -- `reexports` is v2's addition and appears only when the caller asks for it,
     -- so it is listed as OPTIONAL rather than required: a field that comes and
     -- goes with an option is still part of the schema a replayer reads.

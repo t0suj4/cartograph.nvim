@@ -1255,87 +1255,342 @@ local SWEEP_N = {
     'return M',
 }
 
+-- ★★★ THE CASE LIST IS KEYED BY FAMILY AND CHECKED AGAINST `agent._families`, so it
+-- is TOTAL BY CONSTRUCTION. A hand-kept list would be one more copy of the same
+-- relation, and a copy that drifts is exactly the defect this sweep exists to catch —
+-- the first draft covered 4 of 7 families and read as though it covered all of them.
+local SWEEP_CASES = {
+    move = { files = function () return { ['src.lua'] = SRC_LUA, ['use.lua'] = USE_LUA } end,
+        args = function () return { seed = { idof('M.dbl') }, dest = 'lib/math.lua' } end },
+    optimize = { files = function () return { ['m.lua'] = CSE_LUA } end,
+        args = function () return { kind = 'cse', node = idof('M.f') } end },
+    declare = { files = function () return { ['m.lua'] = {
+            'local SOLE_WRAP = { argument = true, condition_clause = true }',
+            'local function use() return SOLE_WRAP end',
+            'return { use = use, SOLE_WRAP = SOLE_WRAP }' } } end,
+        args = function () return { node = var_id('SOLE_WRAP'),
+            member = 'subscript_list = true' } end },
+    annotate = { files = function () return { ['m.lua'] = {
+            '-- a module', 'local function helper(x)', '    return x + 1', 'end',
+            'return { helper = helper }' } } end,
+        args = function () return { node = idof('helper'), text = 'what it does' } end },
+    ['clone-merge'] = { files = function ()
+            return { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N } end,
+        args = function () return { node = idof('M.norm') } end },
+    replace = { files = function ()
+            return { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N } end,
+        args = function () return { node = idof('M.g'),
+            text = 'function M.g(x) return 0 end' } end },
+    -- ★ THE FAMILY PLANNER CARRIED TWO OF THE THREE DEFECTS CART-0878 FOUND (a
+    -- pair-only `apply` that indexed `plan.a` on a member plan, and a `plan_family`
+    -- that never stamped its touched files), so the sweep must actually reach it.
+    -- Cross-file fixture from the CART-0973 test, which is known to plan.
+    ['extract-family'] = { files = function ()
+            return { ['one.lua'] = XFILE_A, ['two.lua'] = XFILE_B } end,
+        args = function () return { node = idof('M.pick_a'), dest = 'shared/pick.lua' } end },
+}
+
+test('agentwrite: the applyability sweep covers EVERY family the router knows', function ()
+    -- ⚠ THIS IS THE FENCE ON THE FENCE. Without it the sweep below is only as total as
+    -- whoever last added a planner remembered to make it, which is the same discipline
+    -- that let three verbs ship unappliable.
+    local missing, extra = {}, {}
+    for family in pairs(agent._families) do
+        if not SWEEP_CASES[family] then missing[#missing + 1] = family end
+    end
+    for family in pairs(SWEEP_CASES) do
+        if not agent._families[family] then extra[#extra + 1] = family end
+    end
+    table.sort(missing); table.sort(extra)
+    eq('', table.concat(missing, ', '),
+        'every family in agent._families has a sweep case; missing: '
+        .. table.concat(missing, ', '))
+    eq('', table.concat(extra, ', '),
+        'and the sweep names no family the router does not; extra: '
+        .. table.concat(extra, ', '))
+end)
+
 test('agentwrite: every plan a planner produces can actually be APPLIED', function ()
     if not ready() then skip('no treesitter') end
     permit(true)
     -- ★ EACH CASE BRINGS ITS OWN FIXTURE. A shared tree made the family case answer
     -- `absence = no-family` and drop out of the sweep silently; the planners want
-    -- different shapes, so the sweep gives each the shape its own tests use.
-    local cases = {
-        { verb = 'txn_plan_optimize', files = { ['m.lua'] = CSE_LUA },
-          args = function () return { kind = 'cse', node = idof('M.f') } end },
-        { verb = 'txn_plan_clonemerge', files = { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N },
-          args = function () return { node = idof('M.norm') } end },
-        { verb = 'txn_plan_replace', files = { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N },
-          args = function () return { node = idof('M.g'),
-              text = 'function M.g(x) return 0 end' } end },
-        -- ★ THE FAMILY PLANNER CARRIED TWO OF THE THREE DEFECTS (a pair-only `apply`
-        -- that indexed `plan.a` on a member plan, and a `plan_family` that never
-        -- stamped its touched files), so the sweep must actually reach it. This is
-        -- the cross-file fixture from the CART-0973 test, which is known to plan.
-        { verb = 'txn_plan_extract_family',
-          files = { ['one.lua'] = XFILE_A, ['two.lua'] = XFILE_B },
-          args = function () return { node = idof('M.pick_a'), dest = 'shared/pick.lua' } end },
-    }
+    -- different shapes, so each gets the shape its own tests use.
+    local families = {}
+    for family in pairs(SWEEP_CASES) do families[#families + 1] = family end
+    table.sort(families) -- a total order, or the report is not a fact
     local applied, planless = 0, {}
-    for _, c in ipairs(cases) do
-        ingest(mkroot(c.files))
-        local p = call(c.verb, c.args())
+    for _, family in ipairs(families) do
+        local c = SWEEP_CASES[family]
+        local verb = agent._families[family]
+        ingest(mkroot(c.files()))
+        local p = call(verb, c.args())
         local sj = type(p.subject) == 'table' and p.subject or {}
         if not (sj.plan and sj.plan ~= NUL) then
-            -- ⚠ A PLANLESS ANSWER IS NOT ALWAYS A REFUSAL: two arms of this verb hand
-            -- back `plan = NUL` with an ABSENCE instead, so a refusal-only diagnostic
-            -- reports "no plan and no refusal" and names nothing.
+            -- ⚠ A PLANLESS ANSWER IS NOT ALWAYS A REFUSAL: two arms of the family verb
+            -- hand back `plan = NUL` with an ABSENCE instead, so a refusal-only
+            -- diagnostic reports "no plan and no refusal" and names nothing.
             local aw = type(p.absence_why) == 'table' and p.absence_why or {}
-            planless[#planless + 1] = c.verb .. ' -> '
+            planless[#planless + 1] = family .. '/' .. verb .. ' -> '
                 .. ((refusal_of(p) or {}).reason
                     or (type(p.absence) == 'string'
                         and (p.absence .. '/' .. tostring(aw.premise) .. ': '
                              .. tostring(aw.why)))
                     or 'no plan, no refusal, no absence')
         else
-            eq(true, call('txn_preview', { plan = sj.plan }).ok, c.verb .. ' previews')
+            eq(true, call('txn_preview', { plan = sj.plan }).ok, family .. ' previews')
             local a = call('txn_apply', { plan = sj.plan })
             local rf = refusal_of(a)
-            -- ★ THE TWO SHAPES THE MISSING ARM PRODUCED, both named so a regression
-            -- cannot hide as an ordinary refusal:
-            ok(not (rf and rf.rule == 'no-apply-path'),
-                c.verb .. ' has an apply path registered')
-            ok(not (rf and (rf.reason or ''):find('nothing applicable', 1, true)),
-                c.verb .. ' is not silently routed to the optimizer: '
-                .. ((rf and rf.reason) or ''))
+            -- ⚠ TWO PREDICATES WERE REMOVED HERE, DELIBERATELY. They asserted the
+            -- refusal was not `no-apply-path` and did not say "nothing applicable" —
+            -- the two shapes CART-0878's missing arm produced. CART-0982 deleted the
+            -- router that could produce either, so both had become predicates that
+            -- can never fire: a test that cannot fail, which is worse than no test
+            -- because it reads like coverage. `a.ok` is the live assertion, and it
+            -- covers every way an apply can fail to happen.
             ok(not (type(a.error) == 'table'),
-                c.verb .. ' applies without raising: ' .. vim.inspect(a.error))
-            eq(true, a.ok, c.verb .. ' applies: ' .. ((rf and rf.reason) or ''))
+                family .. ' applies without raising: ' .. vim.inspect(a.error))
+            eq(true, a.ok, family .. ' applies: ' .. ((rf and rf.reason) or ''))
             applied = applied + 1
         end
     end
     -- ⚠ NOT `>= 1`: a planner that stops producing a plan would make its arm of this
     -- sweep vanish SILENTLY, which is the same class of hole as the missing apply arm.
-    -- ★ IT NAMES THE PLANLESS CASE AND ITS REASON, because "3 of 4" sends you reading
-    -- four planners and "extract_family -> absent/no-family: …" sends you to one.
+    -- ★ IT NAMES THE PLANLESS CASE AND ITS REASON, because "6 of 7" sends you reading
+    -- seven planners and "extract-family -> absent/no-family: …" sends you to one.
     eq('', table.concat(planless, ' | '),
         'every case in the sweep produced a plan; planless: '
         .. table.concat(planless, ' | '))
-    eq(#cases, applied, 'every case in the sweep planned AND applied')
+    eq(#families, applied, 'every case in the sweep planned AND applied')
 end)
 
-test('agentwrite: a plan whose family has NO apply path refuses by name', function ()
+-- ── AN INCOMPLETE PLAN REFUSES BY NAME, AND THE NAME IS THE TEST ────────────
+--
+-- ★★★ A TEST THAT ASSERTS FAILURE IS SATISFIED BY THE WRONG FAILURE (CART-0983).
+-- The applyability sweep proves these plans DO apply; that a stripped plan does NOT
+-- apply is satisfied equally by a refusal and by a RAISE, and the two are opposite
+-- outcomes — one is a contract, the other is the bug the contract replaced. So each
+-- of the three protocol declarations is stripped in turn and the refusal is matched
+-- on its own words.
+local function held_plan(id)
+    for _, e in pairs(agent._plans) do if e.id == id then return e end end
+end
+
+test('agentwrite: a plan missing a protocol DECLARATION refuses, naming which', function ()
     if not ready() then skip('no treesitter') end
     permit(true)
-    ingest(mkroot { ['m.lua'] = SWEEP_M })
-    local p = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
-    ok(p.subject.plan and p.subject.plan ~= NUL, 'a real plan to corrupt')
-    call('txn_preview', { plan = p.subject.plan })
-    -- ⚠ reach into the held plan and give it a family nothing maps. This is the shape
-    -- a planner added WITHOUT an apply entry produces, and before the dispatch was made
-    -- total it reached optapply and answered "nothing applicable".
-    for _, e in pairs(agent._plans) do
-        if e.id == p.subject.plan then e.family = 'a-family-nobody-registered' end
+    -- field stripped -> the words the refusal must contain
+    local cases = {
+        { 'stamps',   'no file stamps' },
+        { 'refspecs', 'declares no refspecs' },
+        { 'guards',   'declares no guards' },
+        -- ★ `edit_of` IS THE ONE THE OLD `no-apply-path` RULE USED TO STAND IN FOR.
+        -- Until CART-0982 a plan nobody could run was caught by the ROUTER (no module
+        -- registered for its family); now there is no router, and a plan that cannot
+        -- be run is one that did not join the protocol. Same property, named at the
+        -- place that actually knows it.
+        { 'edit_of',  'has not joined the ' },
+        -- ⚠ `desc` WAS THE ONE WITH NO FENCE. Deleting a builder's `plan.desc` left the
+        -- entire suite green while the journal recorded a nil description — the field
+        -- that says WHY a write happened was the only part of the protocol nothing
+        -- checked. It refuses by name now, like the other four.
+        { 'desc',     'carries no description' },
+    }
+    for _, c in ipairs(cases) do
+        local field, words = c[1], c[2]
+        ingest(mkroot { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N })
+        local p = call('txn_plan_clonemerge', { node = idof('M.norm') })
+        ok(p.subject and p.subject.plan and p.subject.plan ~= NUL,
+            'a real plan to strip: ' .. ((refusal_of(p) or {}).reason or ''))
+        eq(true, call('txn_preview', { plan = p.subject.plan }).ok, 'it previews first')
+        local e = held_plan(p.subject.plan)
+        ok(e and e.plan[field] ~= nil, field .. ' is on the plan before stripping')
+        e.plan[field] = nil
+        local a = call('txn_apply', { plan = p.subject.plan })
+        local rf = refusal_of(a)
+        -- ⚠ A RAISE IS NOT A REFUSAL. `txn.verify` indexed a nil `stamps` and threw,
+        -- which reaches a caller as an "analysis" error and reads like a bug in the
+        -- tree rather than an incomplete plan (CART-0878).
+        ok(not (type(a.error) == 'table'), 'stripping `' .. field
+            .. '` REFUSES rather than raising: ' .. vim.inspect(a.error))
+        ok(rf, 'stripping `' .. field .. '` refuses')
+        ok((rf.reason or ''):find(words, 1, true),
+            'and the refusal names it (' .. words .. '): ' .. (rf.reason or ''))
     end
+end)
+
+-- ── THE DECLARED GUARD IS NOW THE ONLY PARSE GATE, SO IT IS FENCED HERE ─────
+--
+-- ★★★ CART-0982 DELETED TWO HAND-ROLLED `parses_clean` COPIES (cloneextract's and
+-- optapply's), on the argument that `txn.execute` already runs the plan's DECLARED
+-- `parses` guard on the same `after` map before it opens the journal. That argument
+-- is only sound if the declared guard actually REFUSES — and removing a check because
+-- another one covers it, without driving the other one, is how the `else` in
+-- `txn_apply` came to exist. So the replacement gets the positive test the deleted
+-- gates never had: none of the four verb-specific gates had one.
+test('agentwrite: the `parses` guard REFUSES a write that would break the file', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local root = mkroot { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N }
+    ingest(root)
+    local before = read(root, 'm.lua')
+    -- an unbalanced body: the payload is caller-supplied and `replace` derives nothing
+    -- about it, which is exactly why `parses` is the guard it declares.
+    local p = call('txn_plan_replace', { node = idof('M.g'),
+        text = 'function M.g(x) return 0' })
+    ok(p.subject and p.subject.plan and p.subject.plan ~= NUL,
+        'planning does not pre-judge the payload: ' .. ((refusal_of(p) or {}).reason or ''))
+    -- ⚠ PREVIEW FIRST: `txn_apply` refuses a plan nobody has diffed, and that rung
+    -- fires BEFORE the guards — so without this the test would pass on the wrong
+    -- refusal and claim the parse guard works.
+    eq(true, call('txn_preview', { plan = p.subject.plan }).ok, 'it previews')
     local a = call('txn_apply', { plan = p.subject.plan })
     local rf = refusal_of(a)
-    ok(rf, 'it refuses')
-    eq('no-apply-path', rf.rule, 'by name, not as a plausible "nothing applicable"')
-    ok(rf.reason:find('a%-family%-nobody%-registered'), 'naming the family: ' .. rf.reason)
+    ok(not (type(a.error) == 'table'), 'it refuses rather than raising: '
+        .. vim.inspect(a.error))
+    ok(rf, 'the apply is refused')
+    -- ★ THE GUARD IS NAMED, which is what makes the refusal actionable — and what
+    -- tells a later reader WHICH check stopped the write now that the verb has none
+    -- of its own.
+    ok((rf.reason or ''):find('parses', 1, true),
+        'and the refusal names the guard: ' .. (rf.reason or ''))
+    eq(before, read(root, 'm.lua'), 'and NOTHING was written')
 end)
+
+-- ── A MIGRATED GUARD MUST ACTUALLY LOOK ────────────────────────────────────
+--
+-- ★★★ NO_CLAIM PASSES. planguards has three verdicts precisely so "I did not check"
+-- does not render as "I checked and it was fine" — which means a guard that was moved
+-- onto the plan but never reaches its data is INVISIBLE in a green suite. CART-0982
+-- moved optapply's span-CAS and cloneextract's synthesis checks out of the verbs; if
+-- either reads a field the planner does not set, every apply still passes and two
+-- safety checks are silently gone. (`spans-unchanged` has an older firing test in
+-- optapply_spec; the synthesis checks had none at all.)
+--
+-- So this asserts the verdict is PASS, never NO_CLAIM, for the verbs that declare them.
+local function verdicts_of(plan_id)
+    local e = held_plan(plan_id)
+    local by = {}
+    for _, r in ipairs((e and e.plan and e.plan.guard_verdicts) or {}) do
+        by[r.guard] = by[r.guard] or {}
+        table.insert(by[r.guard], r.verdict)
+    end
+    return by
+end
+
+test('agentwrite: the guards moved onto the plan REACH their data (no silent NO_CLAIM)', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local pg = require 'cartograph.planguards'
+    -- ⚠ THE VERDICTS ARE READ AFTER PREVIEW, NOT AFTER APPLY. A successful apply
+    -- CONSUMES the held plan, so reading them afterwards finds nothing at all — which
+    -- looked exactly like "the guard did not run" on the first attempt. `txn.dryrun`
+    -- runs the same declared guards over the same `after` map, which is the point of
+    -- the preview rung.
+    local function check(verb, args, guard, rows)
+        local p = call(verb, args)
+        ok(p.subject and p.subject.plan and p.subject.plan ~= NUL,
+            verb .. ' planned: ' .. ((refusal_of(p) or {}).reason or ''))
+        eq(true, call('txn_preview', { plan = p.subject.plan }).ok, verb .. ' previews')
+        local e = held_plan(p.subject.plan)
+        local by = {}
+        for _, r in ipairs((e and e.plan and e.plan.guard_verdicts) or {}) do
+            by[r.guard] = by[r.guard] or {}
+            table.insert(by[r.guard], r.verdict)
+        end
+        ok(by[guard], ('`%s` RAN for %s; declared=%s got=%s'):format(guard, verb,
+            vim.inspect((e and e.plan and e.plan.guards) or 'no plan'), vim.inspect(by)))
+        eq(rows, #by[guard], ('`%s` produced a verdict per thing it checks'):format(guard))
+        for _, v in ipairs(by[guard]) do
+            -- ★ PASS, NEVER NO_CLAIM. A guard that cannot reach its data declines to
+            -- claim, and a declined claim passes — so a migration that broke the wiring
+            -- would leave the suite green and the check gone.
+            eq(pg.PASS, v, ('`%s` reached its data rather than declining to look'):format(guard))
+        end
+        -- and the plan still applies, so the guard is not passing by refusing everything
+        eq(true, call('txn_apply', { plan = p.subject.plan }).ok, verb .. ' applies')
+    end
+
+    ingest(mkroot { ['m.lua'] = CSE_LUA })
+    check('txn_plan_optimize', { kind = 'cse', node = idof('M.f') }, 'spans-unchanged', 1)
+
+    ingest(mkroot { ['one.lua'] = XFILE_A, ['two.lua'] = XFILE_B })
+    -- two rows: the definition the plan promised, and the call sites it promised
+    check('txn_plan_extract_family', { node = idof('M.pick_a'), dest = 'shared/pick.lua' },
+        'synthesized', 2)
+end)
+
+-- ── AND THEY MUST FIRE ──────────────────────────────────────────────────────
+--
+-- ★★★ THREE OF THE FOUR VERB-SPECIFIC GATES HAD NO FIRING TEST IN THEIR WHOLE LIFE
+-- AS VERB CODE: the helper-present check, the call-site count, and cloneextract's
+-- parse gate. A gate that has only ever passed is indistinguishable from one that
+-- cannot fail.
+-- ⚠ THE SPAN-CAS IS THE EXCEPTION AND I FIRST CLAIMED OTHERWISE. optapply_spec drives
+-- it (it falsifies `plan.reps[1].old` and asserts the refusal matches `drift`), and a
+-- grep for the MESSAGE TEXT missed it because the test matches a substring. Searching
+-- for a message is not searching for a test — ask what the check DOES, not what it
+-- says. That test still passes here: the check moved into `spans-unchanged` and the
+-- refusal still contains the word it matches on.
+--
+-- The plan is mutated AFTER preview, which is the honest way to reach them: both
+-- guards compare the plan's RECORD against the real text, so falsifying the record is
+-- the same event as the world moving under a plan that was built correctly.
+test('agentwrite: `spans-unchanged` FAILS when the captured span no longer matches', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local root = mkroot { ['m.lua'] = CSE_LUA }
+    ingest(root)
+    local before = read(root, 'm.lua')
+    local p = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
+    ok(p.subject and p.subject.plan ~= NUL, 'planned')
+    eq(true, call('txn_preview', { plan = p.subject.plan }).ok, 'and previews clean')
+    local e = held_plan(p.subject.plan)
+    ok(e and e.plan.reps and #e.plan.reps > 0, 'the plan captured at least one span')
+    -- ⚠ NEUTRALISE A VALUE, NOT A STRUCTURE: the plan stays well-formed and claims the
+    -- file said something it never said.
+    e.plan.reps[1].old = e.plan.reps[1].old .. '_NOT_WHAT_IS_THERE'
+    local a = call('txn_apply', { plan = p.subject.plan })
+    local rf = refusal_of(a)
+    ok(not (type(a.error) == 'table'), 'it refuses rather than raising: '
+        .. vim.inspect(a.error))
+    ok(rf, 'the apply is refused')
+    ok((rf.reason or ''):find('spans%-unchanged') and (rf.reason or ''):find('drifted'),
+        'the refusal names the guard AND the drift: ' .. (rf.reason or ''))
+    eq(before, read(root, 'm.lua'), 'and NOTHING was written')
+end)
+
+test('agentwrite: `synthesized` FAILS when the promised definition is not in the result', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local root = mkroot { ['one.lua'] = XFILE_A, ['two.lua'] = XFILE_B }
+    ingest(root)
+    local before = read(root, 'one.lua')
+    local p = call('txn_plan_extract_family',
+        { node = idof('M.pick_a'), dest = 'shared/pick.lua' })
+    ok(p.subject and p.subject.plan ~= NUL, 'the family planned')
+    eq(true, call('txn_preview', { plan = p.subject.plan }).ok, 'and previews clean')
+    local e = held_plan(p.subject.plan)
+    ok(e and type(e.plan.expect) == 'table' and e.plan.expect.def,
+        'the plan states what its result must contain')
+    -- the planner promises a definition the generator will not produce — the shape a
+    -- synthesis bug has
+    e.plan.expect.def.needle = 'function THIS_WAS_NEVER_GENERATED('
+    local a = call('txn_apply', { plan = p.subject.plan })
+    local rf = refusal_of(a)
+    ok(not (type(a.error) == 'table'), 'it refuses rather than raising: '
+        .. vim.inspect(a.error))
+    ok(rf, 'the apply is refused')
+    ok((rf.reason or ''):find('synthesized', 1, true)
+        and (rf.reason or ''):find('THIS_WAS_NEVER_GENERATED', 1, true),
+        'the refusal names the guard AND what was missing: ' .. (rf.reason or ''))
+    eq(before, read(root, 'one.lua'), 'and NOTHING was written')
+end)
+
+-- ⚠ THE `no-apply-path` TEST LIVED HERE AND IS GONE WITH THE RULE IT FENCED
+-- (CART-0982). It corrupted a held plan's `family` and asserted the router refused by
+-- name. There is no router: `txn.apply` runs any plan, so a family is no longer a
+-- thing that can fail to route. The property it protected — A PLAN THAT CANNOT BE RUN
+-- REFUSES BY NAME RATHER THAN DOING SOMETHING PLAUSIBLE — moved to the protocol
+-- declaration test above, which strips each of `stamps`, `refspecs`, `guards` and
+-- `edit_of` in turn and matches the refusal's own words.

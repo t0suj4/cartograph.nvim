@@ -248,6 +248,107 @@ end
 --- ONE function, called by BOTH `txn.dryrun` and `txn.execute`, so the preview
 --- and the write cannot disagree about what was checked.
 ---@return table rows, table|nil first_failure
+--- THE SPAN-CAS, AS A GUARD (CART-0982). Every replacement's captured old text is
+--- still exactly what sits at its range, and every deleted line is still the line the
+--- plan captured.
+---
+--- ★★ IT WAS `optapply.apply`'s OWN CODE, and moving it here is what lets the driver
+--- be generic — but it is also the only place the check has ever been TESTED, because
+--- no test drove "span drifted" while it lived in the verb (CART-0982 measured four
+--- verb-specific gates, none with a firing test).
+---
+--- ⚠ `plan.stamps` ALREADY REFUSES A FILE THAT CHANGED ON DISK, so this is not a
+--- duplicate of it: a stamp is whole-file and this is span-grained, and the case it
+--- catches is a plan built against a DIFFERENT REGION of a file that some other plan
+--- in the same session legitimately rewrote.
+---
+--- ⚠ RANGES ARE 0-BASED (treesitter/`at` convention, unlike flow's 1-based rows), so
+--- the 1-based Lua string index is char+1 and the reported line is line+1.
+M.GUARDS['spans-unchanged'] = function (_, plan, before, _)
+    local at = require 'cartograph.at'
+    local rel = plan.rel
+    if not rel then
+        return { { verdict = M.NO_CLAIM,
+            why = 'the plan names no single file to check spans in' } }
+    end
+    local text = before and before[rel]
+    if type(text) ~= 'string' then
+        return { { verdict = M.NO_CLAIM, file = rel,
+            why = 'no before-content was read for this file' } }
+    end
+    local lines = vim.split(text, '\n', { plain = true })
+    for _, r in ipairs(plan.reps or {}) do
+        local sl0 = at.sl(r.at)
+        local cur = (lines[sl0 + 1] or ''):sub(at.sc(r.at) + 1, at.ec(r.at))
+        if cur ~= r.old then
+            return { { verdict = M.FAIL, file = rel,
+                why = ('span drifted at line %d (expected `%s`, found `%s`) — re-plan')
+                    :format(sl0 + 1, tostring(r.old), cur) } }
+        end
+    end
+    for _, d in ipairs(plan.dels or {}) do
+        for i = d.s, d.e do
+            if (lines[i + 1] or '\0') ~= (d.old and d.old[i - d.s + 1]) then
+                return { { verdict = M.FAIL, file = rel,
+                    why = ('span drifted at line %d (delete target changed) — re-plan')
+                        :format(i + 1) } }
+            end
+        end
+    end
+    return { { verdict = M.PASS, file = rel } }
+end
+
+--- WHAT THE PLANNER PROMISED THE RESULT WOULD CONTAIN (CART-0982).
+---
+--- ★★★ THE PLANNER STATES THE EXPECTATION; THE GUARD CHECKS IT. `cloneextract.apply`
+--- used to rebuild the patterns itself at apply time, which meant the driver had to
+--- know the verb's language table and the plan's shape — the same coupling that made
+--- a generic `txn_apply` impossible. The planner already knows both, so it writes
+--- `plan.expect` down and this guard needs neither.
+---
+--- ⚠ IT IS A SYNTHESIS CHECK, NOT A CORRECTNESS ONE. "The helper I said I would write
+--- is in the result, and the call sites I said I would rewrite are there" catches a
+--- synthesis BUG — a generator that silently produced nothing. It says nothing about
+--- whether the extraction preserves behaviour.
+M.GUARDS.synthesized = function (_, plan, _, after)
+    local e = plan.expect
+    if type(e) ~= 'table' then
+        return { { verdict = M.NO_CLAIM, why = 'the plan states no expectation' } }
+    end
+    local rows = {}
+    if type(e.def) == 'table' then
+        local text = (after or {})[e.def.file] or ''
+        rows[#rows + 1] = text:find(e.def.needle, 1, true)
+            and { verdict = M.PASS, file = e.def.file }
+            or { verdict = M.FAIL, file = e.def.file,
+                why = ('the definition the plan promised (`%s`) is missing from the'
+                    .. ' result — a synthesis bug, not your code'):format(e.def.needle) }
+    end
+    if type(e.calls) == 'table' then
+        local n = 0
+        for _, rel in ipairs(plan.touched or {}) do
+            if rel ~= e.calls.skip then
+                local s, init = (after or {})[rel] or '', 1
+                while true do
+                    local i = s:find(e.calls.needle, init, true)
+                    if not i then break end
+                    n = n + 1; init = i + 1
+                end
+            end
+        end
+        rows[#rows + 1] = n >= e.calls.n
+            and { verdict = M.PASS }
+            or { verdict = M.FAIL,
+                why = ('%d of %d call site(s) to `%s` are missing from the result'
+                    .. ' — a synthesis bug, not your code')
+                    :format(e.calls.n - n, e.calls.n, e.calls.needle) }
+    end
+    if #rows == 0 then
+        rows[1] = { verdict = M.NO_CLAIM, why = 'the expectation names nothing to check' }
+    end
+    return rows
+end
+
 function M.run(store, plan, before, after)
     local rows = {}
     for _, name in ipairs((plan and plan.guards) or {}) do

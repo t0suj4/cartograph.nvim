@@ -9,9 +9,11 @@
 -- value-equality over reaching (same expression, same operand reaching-defs, earlier
 -- DOMINATES later); this verb only applies the CLEAN (non-hedged) pairs whose reuse
 -- source `a` is a SINGLE-ASSIGNMENT local (never rebound → safe to reference anywhere it
--- dominates). The apply's OWN witness, on top of txn's generation + file-stamp CAS:
---   • span-CAS  — the exact text at each edit range still equals what the plan captured
---   • parse-clean — the edited file re-parses with no ERROR node
+-- dominates). On top of txn's generation + file-stamp CAS, the plan DECLARES two
+-- guards (CART-0982 — they were this module's own code until then, and are now
+-- `plan.guards`, run by `txn.execute` for any verb that names them):
+--   • `spans-unchanged` — the text at each edit range still equals what the plan captured
+--   • `parses`          — the edit did not BREAK the file (a delta, not an absolute)
 -- A graph-CHANGING edit (the recompute — and any call inside it — is removed) is REPORTED,
 -- not rejected: that is the whole point, and why move's graph-PRESERVING witness won't do.
 --
@@ -19,7 +21,7 @@
 --   local oa = require 'cartograph.optapply'
 --   local plan = oa.plan_cse(store, fn_id)   -- also plan_localize/plan_hoist/plan_pre
 --   local diff = oa.preview(store, plan)      -- dry-run difftext (no writes)
---   local ok = oa.apply(store, plan)          -- span-CAS + parse-clean witness
+--   local entry, why = oa.apply(store, plan)  -- (entry, why), like every other verb
 --   -- one-shot at a source site (what the cursor verbs call):
 --   oa.run_at(store, 'm.lua', 5)              -- plan+apply the opt at m.lua:5
 --   -- oa.report(store, fn_id) lists what's applyable without touching the file
@@ -43,6 +45,20 @@ local at = require 'cartograph.at'
 local builtins = require 'cartograph.builtins'
 
 local M = {}
+
+--- THE JOURNAL DESCRIPTION, ON THE PLAN (CART-0982) — the verb plus any WAIVED
+--- premises, which are the recorded provenance of an override.
+local function stamp_desc(plan)
+    if not plan then return plan end
+    local waivers = {}
+    for _, m in ipairs(plan.moves or {}) do
+        if m.waived then waivers[#waivers + 1] = m.waived end
+    end
+    plan.desc = plan.verb
+        .. (#waivers > 0 and (' under: ' .. table.concat(waivers, '; ')) or '')
+    return plan
+end
+
 
 local ts = require('cartograph.providers.treesitter')
 local spec = ts.spec
@@ -223,9 +239,9 @@ function M.plan_cse(store, fn_id, opts)
             end
         end
     end
-    return txn.protocol({ verb = 'optimize-cse', guards = { 'parses' }, touched = { rel }, generation = store.generation,
+    return stamp_desc(txn.protocol({ verb = 'optimize-cse', guards = { 'parses', 'spans-unchanged' }, refspecs = {}, touched = { rel }, generation = store.generation,
         stamps = { [rel] = txn.disk_stamp(store.data.root, rel) }, rel = rel,
-        reps = reps, moves = moves, declined = declined }, M.edits_for)
+        reps = reps, moves = moves, declined = declined }, M.edits_for))
 end
 
 -- ── localize-upvalue apply ───────────────────────────────────────────────────
@@ -374,9 +390,9 @@ function M.plan_localize(store, fn_id, opts)
             end
         end
     end
-    return txn.protocol({ verb = 'optimize-localize', guards = { 'parses' }, touched = { node.file }, generation = store.generation,
+    return stamp_desc(txn.protocol({ verb = 'optimize-localize', guards = { 'parses', 'spans-unchanged' }, refspecs = {}, touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
-        reps = reps, ins = ins, moves = moves, declined = declined }, M.edits_for)
+        reps = reps, ins = ins, moves = moves, declined = declined }, M.edits_for))
 end
 
 -- POST-condition (repeat/do-while) or const-true loops run at least once → hoisting a
@@ -442,9 +458,9 @@ function M.plan_hoist(store, fn_id, opts)
             end
         end
     end
-    return txn.protocol({ verb = 'optimize-hoist', guards = { 'parses' }, touched = { node.file }, generation = store.generation,
+    return stamp_desc(txn.protocol({ verb = 'optimize-hoist', guards = { 'parses', 'spans-unchanged' }, refspecs = {}, touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
-        dels = dels, ins = ins, moves = moves, declined = declined }, M.edits_for)
+        dels = dels, ins = ins, moves = moves, declined = declined }, M.edits_for))
 end
 
 --- Build a PRE (partial-redundancy) plan: a pure computation in BOTH arms of an
@@ -502,9 +518,9 @@ function M.plan_pre(store, fn_id, opts)
             end
         end
     end
-    return txn.protocol({ verb = 'optimize-pre', guards = { 'parses' }, touched = { node.file }, generation = store.generation,
+    return stamp_desc(txn.protocol({ verb = 'optimize-pre', guards = { 'parses', 'spans-unchanged' }, refspecs = {}, touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
-        reps = reps, ins = ins, moves = moves, declined = declined }, M.edits_for)
+        reps = reps, ins = ins, moves = moves, declined = declined }, M.edits_for))
 end
 
 -- the edit callback for txn (single file: apply this plan's token-replacements). Named
@@ -526,85 +542,41 @@ function M.preview(store, plan)
     return txn.difftext(before, after, plan.touched), before, after
 end
 
--- does `src` parse with no ERROR/MISSING node? (the edit didn't corrupt syntax)
-local function parses_clean(src, lang)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-    if not ok then return false end
-    local root = parser:parse()[1]:root()
-    local bad = false
-    local function rec(n)
-        if bad then return end
-        if n:type() == 'ERROR' or n:missing() then bad = true; return end
-        for c in n:iter_children() do rec(c) end
-    end
-    rec(root)
-    return not bad
-end
-
---- Apply the plan — the FULL verified write. Checks (in order): txn.verify (live graph,
---- same generation, file-stamp CAS, no dirty buffers) → span-CAS (each edit's old text
---- still present) → parse-clean (the edited file re-parses) → txn.execute (journal +
---- write + refresh).
---- @return boolean ok
 --- @return any entry_or_reason  (journal entry on ok, refusal reason otherwise)
 --- @return table? diff_lines
-function M.apply(store, plan)
-    if #(plan.reps or {}) == 0 and #(plan.dels or {}) == 0 and #(plan.ins or {}) == 0 then
-        return false, ('nothing applicable (%d declined)'):format(#(plan.declined or {}))
-    end
-    local refuse = txn.verify(store, plan, {})
-    if refuse then return false, refuse end
-    local root = store.data.root
-    -- span-CAS: the exact text at each range is still what the plan captured.
-    -- NB the rep range is 0-BASED (treesitter/`at` convention, unlike flow's 1-based
-    -- rows): `.start.line`/`.start.char`/`.end.char` are 0-based, so the 1-based Lua
-    -- string index is char+1, and the line report is line+1.
-    local text = txn.read_file(root, plan.rel)
-    if not text then return false, 'cannot read ' .. plan.rel end
-    local lines = vim.split(text, '\n', { plain = true })
-    for _, r in ipairs(plan.reps or {}) do
-        local sl0 = at.sl(r.at) -- 0-based line
-        local cur = (lines[sl0 + 1] or ''):sub(at.sc(r.at) + 1, at.ec(r.at))
-        if cur ~= r.old then
-            return false, ('span drifted at %s:%d (expected `%s`, found `%s`) — re-plan')
-                :format(plan.rel, sl0 + 1, r.old, cur)
-        end
-    end
-    for _, d in ipairs(plan.dels or {}) do -- d.s/d.e 0-based inclusive; d.old = captured lines
-        for i = d.s, d.e do
-            if (lines[i + 1] or '\0') ~= (d.old and d.old[i - d.s + 1]) then
-                return false, ('span drifted at %s:%d (delete target changed) — re-plan')
-                    :format(plan.rel, i + 1)
-            end
-        end
-    end
-    -- parse-clean on the dry-run result BEFORE committing anything
-    local before, after, derr = txn.dryrun(store, plan)
-    if not before then return false, derr or 'dry-run failed' end
-    if not parses_clean(after[plan.rel], lang_of(plan.rel)) then
-        return false, 'the edit would not parse cleanly — refused'
-    end
-    local diff = txn.difftext(before, after, plan.touched)
-    -- journal desc: the verb + any WAIVED premises (the recorded provenance of an override)
-    local waivers = {}
-    for _, m in ipairs(plan.moves or {}) do if m.waived then waivers[#waivers + 1] = m.waived end end
-    local desc = plan.verb .. (#waivers > 0 and (' under: ' .. table.concat(waivers, '; ')) or '')
-    local entry, why = txn.execute(store, plan, desc)
-    if not entry then return false, why end
-    return true, entry, diff
-end
+--- The module's face on the generic driver (CART-0982).
+---
+--- ★★★ AND IT RETURNS `(entry, why)` NOW, LIKE EVERY OTHER VERB. It alone returned
+--- `(ok, entry|why, diff)`, which forced `agent.txn_apply` to keep a conditional on
+--- `family == 'optimize'` even after the dispatch table it lived in was made total —
+--- a verb written to the majority shape and routed through the wrong arm would have
+--- been misread SILENTLY, a falsy entry taken for a refusal or a why-string for an
+--- entry.
+---
+--- ⚠ THE "nothing applicable" EMPTINESS CHECK IS GONE FROM HERE and lives in
+--- `txn.execute` as a comparison of before to after. That sentence coming out of THIS
+--- module is what made CART-0878's defect unreadable: an unrelated family reaching
+--- optapply by accident found none of its fields and answered with it, and the answer
+--- read as a fact about the caller's code.
+function M.apply(store, plan) return txn.apply(store, plan) end
 
 -- shared: apply a (plan, why) pair → the structured result (never throws). Always
 -- carries `declined` (the per-site refusal ledger) so a caller sees BOTH what was
 -- applied and what was refused-with-reason — even when nothing applied.
 local function run_plan(store, plan, why)
     if not plan then return { ok = false, applied = 0, declined = {}, reason = why } end
-    local ok, entry_or_reason, diff = M.apply(store, plan)
-    if not ok then
+    -- ⚠ THE DIFF IS TAKEN BEFORE THE WRITE, because a successful apply is the one
+    -- moment the before-content stops being available. `M.apply` no longer returns it:
+    -- the generic driver has no verb-specific third return, and this is the only
+    -- caller that wanted one.
+    local diff = M.preview(store, plan)
+    local entry, why = M.apply(store, plan)
+    if not entry then
         return { ok = false, applied = 0, moves = plan.moves, declined = plan.declined,
-            reason = entry_or_reason }
+            reason = why }
     end
-    return { ok = true, applied = #plan.moves, moves = plan.moves, declined = plan.declined, diff = diff }
+    return { ok = true, applied = #plan.moves, moves = plan.moves,
+        declined = plan.declined, diff = diff }
 end
 
 --- One-call agent entries (never throw): plan + apply the focused fn's clean rewrites

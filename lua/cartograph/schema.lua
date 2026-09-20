@@ -30,7 +30,17 @@ local M = {}
 --- THE PLAN: what a write verb hands to `apply`, and what the journal stores as
 --- its description. Bumped when a field a replayer reads is ADDED, REMOVED, or
 --- CHANGES MEANING.
-M.PLAN = 2 -- v2: `plan.reexports` (CART-0915) and `captures[].textual`
+M.PLAN = 3 -- v3: `plan.refspecs`, `plan.desc`, `plan.expect` and (where a verb is
+           --     coupled to host state) `plan.precheck`/`plan.consume` — CART-0982.
+           --     Together they are what `apply` used to do by hand, so that ONE
+           --     driver runs any plan: `txn.apply`.
+           --     `plan.refspecs` (CART-0982) — the resolutions a plan depends on,
+           --     moved off each `apply` and onto the plan. IT GATES EXECUTION:
+           --     `txn.verify` now REFUSES a plan that declares none, so a v2 plan
+           --     does not merely verify less, it does not apply at all. That is the
+           --     safe direction and exactly what a version is for — a recorded
+           --     artifact must not execute under a meaning it was not recorded with.
+           -- v2: `plan.reexports` (CART-0915) and `captures[].textual`
            --     (CART-0919), both added 2026-09-13 with no bump, because
            --     nothing could have checked one
            -- v1: moves/rewrites/imports_add/scaffold/hazards/stamps

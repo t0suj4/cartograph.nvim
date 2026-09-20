@@ -84,6 +84,9 @@ function M.plan(store, opts)
         .. ' this plan verifies that %s still PARSES and that the file has not moved'
         .. ' since planning, and NOTHING about whether the new text defines `%s`, keeps'
         .. ' its arity, or relates to what it replaces'):format(n.file, tostring(n.name))
+    plan.refspecs = { { id = plan.target.id, name = plan.target.name,
+        ref = plan.target.ref, what = 'definition' } }
+    plan.desc = { name = plan.target.name, file = plan.target.file }
     return txn.protocol(plan, M.edits_for)
 end
 
@@ -105,12 +108,7 @@ end
 
 function M.preview(store, plan) return txn.dryrun(store, plan) end
 
-function M.apply(store, plan)
-    local bad = txn.verify(store, plan,
-        { { id = plan.target.id, name = plan.target.name, ref = plan.target.ref,
-            what = 'definition' } })
-    if bad then return nil, bad end
-    return txn.execute(store, plan, { name = plan.target.name, file = plan.target.file })
-end
+--- Kept as the module's face on the generic driver (CART-0982).
+function M.apply(store, plan) return txn.apply(store, plan) end
 
 return M

@@ -1835,7 +1835,8 @@ end
 -- Nothing here re-implements the refusal ladder. `txn_apply` calls the FAMILY's
 -- own apply — moveapply.apply / optapply.apply — so generation match, refs
 -- resolving witness-clean, stamp CAS and no-dirty-buffers keep their single home
--- in txn.verify, and optapply's extra span-CAS and parse-clean rungs come along
+-- in txn.verify, and optapply's span-CAS and parse checks come along as the guards it
+-- declares (CART-0982: they are `plan.guards`, not this verb's private code)
 -- for free. The families report their refusals as PROSE; that prose is carried
 -- VERBATIM under one rule (`apply-refused`) and is never parsed back into a
 -- taxonomy — scraping a message is the latent break phase 2 refused to ship.
@@ -1849,27 +1850,11 @@ local VERB_OF_FAMILY = {
     replace = 'txn_plan_replace',
 }
 
---- ★★★ WHICH MODULE APPLIES A HELD PLAN, PER FAMILY — AND IT IS TOTAL ON PURPOSE
---- (CART-0878). This was an if/elseif chain over three families ending in an `else`
---- that called `optapply.apply`. Every family the chain did not name therefore reached
---- the OPTIMIZER, which found nothing of its own in the plan and answered "nothing
---- applicable (0 declined)" — a sentence that reads like a fact about the code.
----
---- ⚠⚠ THREE VERBS COULD PLAN AND PREVIEW AND NOT APPLY, and I added two of them the
---- same day without noticing: `extract-family` (since it shipped), `clone-merge` and
---- `replace` (both 2026-09-20). Plan and preview were driven in tests; apply was not,
---- and the `else` turned the omission into a plausible refusal instead of an error.
---- A table is total by construction and an unmapped family now REFUSES BY NAME, so the
---- next planner that forgets this line is told, not silently routed.
-local APPLY_OF_FAMILY = {
-    move = 'cartograph.moveapply',
-    declare = 'cartograph.declare',
-    annotate = 'cartograph.annotate',
-    optimize = 'cartograph.optapply',
-    ['extract-family'] = 'cartograph.cloneextract',
-    ['clone-merge'] = 'cartograph.clonemerge',
-    replace = 'cartograph.replace',
-}
+--- ★ EXPORTED FOR THE APPLYABILITY SWEEP (CART-0982). The fence that catches a planner
+--- shipped without an apply path can only be total if it enumerates the families from
+--- the same table the router does — a hand-kept case list in the test is one more copy
+--- of the relation, and keeping copies in step is the thing this arc is removing.
+M._families = VERB_OF_FAMILY
 
 local PLAN_CAP = 16
 M._plans = {}
@@ -2886,21 +2871,19 @@ local function v_txn_apply(store, args)
             ('plan %s has never been diffed — txn_apply does not write bytes no caller has seen'):format(e.id),
             'call txn_preview with this same plan id, read the diff it returns, then call txn_apply again')
     end
-    local mod = APPLY_OF_FAMILY[e.family]
-    if not mod then
-        return refuse('no-apply-path',
-            ('plan %s is family `%s`, which no module is registered to apply — the plan was built and cannot be written'):format(e.id, tostring(e.family)),
-            'this is a gap in cartograph, not in your request: a planner was added without an entry in APPLY_OF_FAMILY. Nothing was written',
-            { plan = e.id, family = nn(e.family) })
-    end
-    local entry, why
-    if e.family == 'optimize' then
-        -- ⚠ optapply alone returns (ok, entry|why) rather than (entry, why)
-        local okA, ent_or_why = require(mod).apply(store, e.plan)
-        if okA then entry = ent_or_why else why = tostring(ent_or_why) end
-    else
-        entry, why = require(mod).apply(store, e.plan)
-    end
+    -- ★★★ NO DISPATCH. `txn.apply` runs any plan, because the plan carries what used
+    -- to be verb code — refspecs, guards, edit_of, desc, and (where a verb touches
+    -- host state) precheck and consume. USER, CART-0982: "It would be better if we
+    -- didn't need to write verb's plan semantics by hand".
+    --
+    -- ⚠ WHAT WAS HERE, AND WHY IT IS WORTH THE COMMENT: a table from plan family to
+    -- the module whose `apply` to call, plus a conditional for `optimize` because
+    -- optapply alone returned `(ok, entry|why)`. Before the table it was an if/elseif
+    -- ending in an `else` that called optapply for EVERY unnamed family, so three
+    -- verbs could plan and preview and never apply, and said "nothing applicable"
+    -- while doing it (CART-0878). Each fix left one more copy of one relation; this
+    -- deletes the relation.
+    local entry, why = require('cartograph.txn').apply(store, e.plan)
     if not entry then
         return refuse('apply-refused',
             ('plan %s was NOT applied: %s'):format(e.id, tostring(why)),
