@@ -31,7 +31,15 @@
 
 local here = debug.getinfo(1, 'S').source:sub(2)
 local repo = vim.fn.fnamemodify(here, ':p:h:h')
+-- the census proper needs no engine — it reads source and a coverage file — but
+-- `--partition` asks the GRAPH which guards hinge on a parameter, so the prelude is here
+-- rather than inside the branch, where a missing path would fail after the report.
+vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
+pcall(vim.treesitter.language.add, 'lua')
+package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
+local partition = false
+for _, a in ipairs(arg or {}) do if a == '--partition' then partition = true end end
 local cov_path = (arg and arg[1]) or nil
 if not cov_path then
     print('usage: COVER=/tmp/cov.txt bash tests/run.sh'
@@ -131,6 +139,81 @@ for _, r in ipairs(rows) do
         end
     end
 end
+-- ══ PARTITION THE NEVER-FIRED (CART-0990) ══════════════════════════════════
+--
+-- ★★★ TWO GENERATORS, TWO QUEUES. A promise nobody has triggered needs an input that
+-- reaches it, and which TOOL can build that input depends on what its guard hinges on:
+--   PARAMETER-FORKED  the guard turns on an argument (`opts.lift`, `opts.partial`, a
+--                     dest that exists). `characterize.assert_condition` DERIVES the
+--                     value that flips it — mechanical, no fixture.
+--   TREE-SHAPED       the guard turns on DERIVED ANALYSIS (a hole kind, call-site
+--                     nameability, statement context). No argument controls it; you must
+--                     construct a TREE whose analysis lands there — tools/counterexample.
+--
+-- ★ THE PARTITION KEY IS `characterize.conditions` ITSELF, not a judgement of mine: it
+-- emits a row ONLY when the guard's leaf is a PARAMETER of the enclosing function. So a
+-- refusal whose controlling `if` has a row is forkable by construction.
+--
+-- ⚠ THE CONTROLLING `if` IS FOUND BY TEXT — the refusal line itself if it carries one,
+-- else the nearest preceding `if`/`elseif` at any indent. That is a HEURISTIC and it can
+-- mis-attribute a refusal sitting under a nested guard. It is disclosed rather than
+-- dressed up: the queues are a work ORDER, and a mis-filed item costs a reader one
+-- glance, not a wrong answer about the code.
+if partition then
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local ch = require 'cartograph.characterize'
+    local data = ts.extract(repo .. '/lua'); data.root = data.root or (repo .. '/lua')
+    store.ingest(data)
+    local srcs, param_q, tree_q, nofn = {}, {}, {}, 0
+    for _, r in ipairs(rows) do
+        for _, x in ipairs(r.never) do
+            local rel = 'lua/cartograph/' .. r.mod .. '.lua'
+            local file = 'cartograph/' .. r.mod .. '.lua'
+            if not srcs[rel] then
+                local t = {}
+                for line in io.lines(repo .. '/' .. rel) do t[#t + 1] = line end
+                srcs[rel] = t
+            end
+            local lines = srcs[rel]
+            -- ⚠ `defs_at` RETURNS NODES, NOT WRAPPERS (`out[i] = r.node`, innermost
+            -- first). Reading `defs[1].node` gave nil for every site and the partition
+            -- reported "58 with no enclosing fn" — a uniform zero that reads as a fact
+            -- about the tree and was a fact about my accessor.
+            local defs = store.defs_at(file, x.line)
+            local node = defs and defs[1]
+            if not node then
+                nofn = nofn + 1
+            else
+                local okc, crows = pcall(ch.conditions, store, node, store.content(node))
+                local forkable = {}
+                for _, c in ipairs((okc and crows) or {}) do forkable[c.line] = c end
+                -- the controlling `if`: this line, else the nearest one above it
+                local guard = nil
+                for i = x.line, math.max(1, x.line - 40), -1 do
+                    local l = lines[i] or ''
+                    if l:match('^%s*if%s') or l:match('^%s*elseif%s') then guard = i; break end
+                end
+                local item = { mod = r.mod, line = x.line, text = x.text,
+                    guard = guard, leaf = guard and forkable[guard] and forkable[guard].leaf }
+                if item.leaf then param_q[#param_q + 1] = item
+                else tree_q[#tree_q + 1] = item end
+            end
+        end
+    end
+    print(('\n── PARTITION ── %d parameter-forked · %d tree-shaped · %d with no enclosing fn')
+        :format(#param_q, #tree_q, nofn))
+    print('\nPARAMETER-FORKED — `characterize.assert_condition` can derive the argument:')
+    for _, it in ipairs(param_q) do
+        print(('  %-14s %4d  on `%s`  %s'):format(it.mod, it.line, it.leaf, it.text:sub(1, 52)))
+    end
+    print('\nTREE-SHAPED — needs a constructed fixture (tools/counterexample.lua):')
+    for i, it in ipairs(tree_q) do
+        if i <= 18 then print(('  %-14s %4d  %s'):format(it.mod, it.line, it.text:sub(1, 62))) end
+    end
+    if #tree_q > 18 then print(('  … and %d more'):format(#tree_q - 18)) end
+end
+
 print(('\n⚠ %d of %d named promises in the write path have never fired in the suite.')
     :format(tot.named - tot.named_hit, tot.named))
 print('⚠ NEVER is not a verdict. Read the predicate: a promise no input can reach is'
