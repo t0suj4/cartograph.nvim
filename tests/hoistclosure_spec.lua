@@ -279,3 +279,65 @@ test('hoist-closure: the refusal carries EVERY captured name, sorted', function 
     eq(detail.captured[1], detail.captures)
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── A LOCAL BOUND *AFTER* THE CLOSURE IS NOT IN ITS SCOPE (CART-0979) ───────
+-- The capture and write gates compared this body's names against a FLAT SET of the
+-- enclosing function's locals, with no positions. Lua makes a local visible from its
+-- DECLARATION onward, so a name the enclosing function binds BELOW a nested closure
+-- cannot be read or written by it — and both gates fired on names the closure merely
+-- declares for itself.
+--
+-- ★ THE WITNESS, from driving CART-0878's loop at its second cluster: `key_range` in
+-- sql.lua:147 does `local s, e = text:find(…)` and was refused as "assigns enclosing
+-- local `e`" against `local e = scanned.tables[t]` at :171 — twenty lines BELOW it.
+-- xlang.lua:442 has the IDENTICAL line and was not refused, because its enclosing
+-- function happens to bind no `e`. Two identical functions, two different verdicts;
+-- that disagreement was the tell.
+--
+-- MEASURED over lua/cartograph: refusals on the write gate 236 -> 172, hoistable
+-- 166 -> 179, and NOTHING that hoisted before stopped hoisting.
+local LATE = 'local M = {}\nlocal function outer(t)\n'
+    .. '  local function inner(q)\n    local e = q + 1\n    return e\n  end\n'
+    .. '  local got = inner(t)\n'
+    .. '  local e = got * 2\n'   -- bound AFTER inner: not in inner's scope
+    .. '  return e\nend\nreturn M\n'
+
+local EARLY = 'local M = {}\nlocal function outer(t)\n'
+    .. '  local e = t * 2\n'     -- bound BEFORE inner: genuinely in scope
+    .. '  local function inner(q)\n    e = q + 1\n    return e\n  end\n'
+    .. '  return inner(t)\nend\nreturn M\n'
+
+local BOTH = 'local M = {}\nlocal function outer(t)\n'
+    .. '  local e = t * 2\n'     -- before …
+    .. '  local function inner(q)\n    local e = q + 1\n    return e\n  end\n'
+    .. '  local got = inner(t)\n'
+    .. '  local e = got + 1\n'   -- … and again after
+    .. '  return e\nend\nreturn M\n'
+
+test('hoist-closure: a name the ENCLOSING fn binds BELOW the closure does not block it', function ()
+    local root = proj(LATE)
+    local plan, why = hc.plan(store, id_of('inner'))
+    ok(plan, 'inner declares its own `e`; the enclosing `e` comes later and is not in '
+        .. 'its scope: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('hoist-closure: a name bound BEFORE the closure still blocks it — CART-0905 stands', function ()
+    -- ⚠ THE TRIPWIRE. This is the case the write gate exists for: hoisting turns the
+    -- assignment into a write to a GLOBAL and silently destroys the closure, and it
+    -- PARSES. Narrowing the gate by position must not touch it.
+    local root = proj(EARLY)
+    local plan, why = hc.plan(store, id_of('inner'))
+    ok(not plan, 'a real write to an enclosing local is still refused')
+    ok(tostring(why):find('`e`', 1, true), 'naming it: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('hoist-closure: the EARLIEST binding decides — bound before AND after still blocks', function ()
+    -- ⚠ recording the LAST binding would hide a real capture, so `def_line` keeps the
+    -- minimum. A name in scope at the closure is in scope, whatever happens later.
+    local root = proj(BOTH)
+    local plan, why = hc.plan(store, id_of('inner'))
+    ok(not plan, 'the earlier binding is in scope and still blocks: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)

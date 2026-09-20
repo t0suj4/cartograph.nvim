@@ -84,7 +84,47 @@ function M.plan(store, closure_id)
         local f = body_facts(store, e.id, inner)
         if f then
             for k in pairs(f.params) do encl_locals[k] = true end
-            for k in pairs(f.defs) do encl_locals[k] = true end
+            -- ★★★ A LOCAL BOUND *AFTER* THIS CLOSURE IS NOT IN ITS SCOPE (CART-0979).
+            -- Lua makes a local visible from its DECLARATION onward, so an enclosing
+            -- `local e` twenty lines BELOW a nested closure cannot be read or written
+            -- by it — yet a flat name set says it can, and both gates below then fire
+            -- on a name the closure merely declares for itself.
+            -- ⚠ THE WITNESS: `key_range` in sql.lua:147 does `local s, e = text:find(…)`
+            -- and was refused as "assigns enclosing local `e`" against
+            -- `local e = scanned.tables[t]` at :171. xlang.lua:442 has the IDENTICAL
+            -- line and was not refused, because its enclosing function happens to bind
+            -- no `e`. Found by driving CART-0878's own loop at its second cluster.
+            -- ⚠ PARAMS ARE NOT FILTERED: a parameter is in scope for the whole body,
+            -- so it has no declaration line to be after.
+            -- ⚠ AND AN UNKNOWN LINE STAYS IN THE SET. `def_line` is absent when the
+            -- statement carried no `s.l`; treating that as "declared late" would let a
+            -- real capture through, and this gate's whole doctrine is that refusing
+            -- too much is the only safe direction. MEASURED UNREACHED over
+            -- lua/cartograph — 17002 defs across every function, 0 without a line — so
+            -- it is a GUARD rather than a branch with a population, and a
+            -- neutralisation of it costs no test. Kept, and said so, for the same
+            -- reason `norow` is kept in clones.lua: the day a front end produces a
+            -- statement without `s.l`, the failure should be a refusal and not a
+            -- silent lift.
+            -- ⚠ `<=` IS THE CONSERVATIVE SPELLING AND ITS BOUNDARY IS UNREACHABLE,
+            -- which is worth writing down because it looks like a decision. A name the
+            -- enclosing function binds ON the closure's own first line would stay in
+            -- the set — but such a statement never reaches here at all: `expr.free`'s
+            -- `outside()` skips any statement whose line falls inside a nested range,
+            -- and a same-line binding is exactly that. MEASURED: flipping `<=` to `<`
+            -- changes no verdict anywhere in lua/cartograph, and a fixture written to
+            -- exercise it could not, for this reason. So `<=` is the safe spelling of
+            -- a case that does not arise; do not read it as a claim about Lua's
+            -- within-statement binding order, which a line number cannot express.
+            -- ⚠⚠ TWO COORDINATE SYSTEMS, the trap expr.lua's own header records as
+            -- "SILENT AND WIDENING": `def_line` is 1-BASED (it is `s.l`) and
+            -- `at.sl` is 0-BASED. `dl - 1` is the conversion, and dropping it shifts
+            -- every comparison by a line in the PERMISSIVE direction.
+            local closure_l0 = at.sl(node.range)
+            for k in pairs(f.defs) do
+                local dl = f.def_line and f.def_line[k]
+                if dl == nil or (dl - 1) <= closure_l0 then encl_locals[k] = true end
+            end
         end
     end
     -- ★★★ THE WRITE CAPTURE, WHICH THIS GATE COULD NOT SEE (CART-0905). `reads`

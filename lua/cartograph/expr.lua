@@ -2688,9 +2688,25 @@ function M.free(store, id, opts)
         end
         return true
     end
+    -- ★★★ WHERE A NAME WAS BOUND, NOT ONLY THAT IT WAS (CART-0979). The position
+    -- is already in hand — `s.l` — and was thrown away, so every consumer treated a
+    -- function's locals as a flat set visible everywhere in it. Lua does not work
+    -- that way: a local is in scope from its DECLARATION onward, so a name bound
+    -- AFTER a nested closure is invisible inside it. hoistclosure refused on exactly
+    -- that, calling `local s, e = …` inside a closure a write to an `e` declared
+    -- twenty lines BELOW the closure.
+    -- ⚠ THE EARLIEST BINDING WINS. A name bound before the closure AND again after
+    -- it IS in scope inside it, so recording the last one would hide a real capture.
+    -- ⚠ 1-BASED, like `s.l` and unlike `at.sl` — see the coordinate warning above.
+    -- The field is named `def_line` rather than `line` so a caller cannot mistake
+    -- which system it is in without reading this.
+    local dline = {}
     for _, s in ipairs(eo.fl.stmts or {}) do
         if outside(s) then
-            for _, d in ipairs(s.def or {}) do dset[d] = true end
+            for _, d in ipairs(s.def or {}) do
+                dset[d] = true
+                if s.l and (dline[d] == nil or s.l < dline[d]) then dline[d] = s.l end
+            end
         end
     end
     -- ★★★ READS COME FROM `k == 'name'` NODES, NOT FROM `s.use` (CART-0259).
@@ -2730,7 +2746,12 @@ function M.free(store, id, opts)
             scan(s.expr.cond)
         end
     end
-    return { params = pset, defs = dset, reads = reads, vararg = vararg, locals = pset }
+    -- `def_line` is ADDITIVE: every existing caller reads params/defs/reads and is
+    -- untouched. A name with no recorded line (a statement carrying no `s.l`) is
+    -- simply absent from it, which a consumer must read as "unknown", never as
+    -- "declared at line 0".
+    return { params = pset, defs = dset, reads = reads, vararg = vararg, locals = pset,
+        def_line = dline }
 end
 
 --- ★★★ THE FREE NAMES OF A NODE SET — `(∪ reads) \ (∪ defs ∪ params)`.
