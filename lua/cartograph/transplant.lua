@@ -50,6 +50,13 @@ local M = {}
 --- Is the operator reachable: the algebra loads AND a reader is registered for
 --- `lang`. Returns (true) or (false, why) — never a bare false, because "the
 --- algebra is absent" and "this language has no parser" are different repairs.
+-- @langs any
+-- The operator is the ALGEBRA's, and the algebra is grammar-agnostic: what
+-- decides whether a language is servable is whether a READER is registered for
+-- it, which `M.available` asks and answers by name. Today that is lua alone
+-- (algebraread's audited grammar) — but that is a fact about the reader roster,
+-- not a claim written into this seam, and a second reader widens it with no edit
+-- here.
 function M.available(lang)
     local alg = require 'cartograph.algebra'
     local A, why = alg.load()
@@ -57,6 +64,8 @@ function M.available(lang)
     if type(A.transplant) ~= 'function' then
         return false, 'this algebra revision has no `transplant`'
     end
+    -- @langs-ok the default is the caller's convenience; an unregistered language
+    -- is REFUSED by name on the next line rather than silently read as lua
     lang = lang or 'lua'
     if type((A.parsers or {})[lang]) ~= 'function' then
         return false, ('no reader registered for `%s` (only an audited grammar is'):format(lang)
@@ -74,7 +83,7 @@ end
 --- cannot be attributed — a real ambiguity, and turning it into "no change" would
 --- hide an edit the caller asked for.
 function M.apply(a_src, b_src, c_src, lang)
-    lang = lang or 'lua'
+    lang = lang or 'lua'  -- @langs-ok the same default, checked by M.available below
     local ok, why = M.available(lang)
     if not ok then return nil, why end
     local A = require('cartograph.algebra').load()

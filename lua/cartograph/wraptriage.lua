@@ -12,6 +12,12 @@
 --
 -- This is TRIAGE, not resolution: it changes no `.to`, mints no edge, needs no VERSION
 -- bump. It reads a conflict + the file's reassignment sites and returns a verdict.
+--
+-- @langs lua
+-- The idiom is stated in lua's own grammar (the query below matches an
+-- `assignment_statement`) and the disagreement being triaged is with lua-ls. A
+-- decorator rebind exists in other languages; recognising it there is a second
+-- query, not a wider claim on this one.
 
 local M = {}
 

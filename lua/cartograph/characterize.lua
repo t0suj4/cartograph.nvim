@@ -27,6 +27,28 @@
 -- premise it assumed, with the TIER of each. Without that we have fabricated an
 -- environment and labelled the result a test — and it would look exactly like a real one.
 --
+-- @langs lua
+-- IT WAS ALWAYS LUA AND IT NEVER SAID SO, AND THAT COST A WRONG ANSWER (CART-0304).
+-- The medium is the giveaway: this module EMITS A RUNNABLE LUA FILE, compiles the
+-- subject with lua's own `load`, and `dofile`s the module to satisfy a derived
+-- hole. None of that generalises, and none of it is optional.
+-- ★ THE DEFECT THE DECLARATION EXPOSED, MEASURED BEFORE THE GATE WAS ADDED. Two calls
+-- below — `pm.base_for('lua')` and `effects.sig_of('lua', …)` — read LUA's stdlib
+-- profile for whatever function they were handed. Aimed at a Ruby method
+--     def join(parts); File.open("/tmp/x").read; parts.join(","); end
+-- it did not error, and it did not merely under-hole: it PLANNED, emitted a complete
+-- runnable spec, and DISCHARGED Ruby's `open` and `read` against LUA's io —
+--     · dependency open — satisfied by the runtime, HEDGED: the only stdlib owner …
+--     · dependency read — satisfied by the runtime, which holds every candidate
+--       owner (file, io)
+-- `file` and `io` are Lua's owners. So the premises a supplied stub is supposed to
+-- DISCLOSE were supplied out of a runtime the subject never runs in — this module's
+-- own "a stub is a supplied premise" turned inside out, in Lua source claiming to
+-- characterize a Ruby method. `M.plan` now refuses by name.
+-- ★ AND NOTHING FOUND IT FOR A MONTH, because the assumption is a language NAME and
+-- every audit we had looked for a language's node-type VOCABULARY. langaudit's
+-- oracle 3 exists because of this file.
+
 -- AGENT-DRIVABLE IS A REQUIREMENT, NOT A LATER SURFACE (user, 2026-08-04). Use headless
 -- ([[cartograph-apply-for-agent]]):
 --   local ch = require 'cartograph.characterize'
@@ -1133,6 +1155,18 @@ function M.plan(store, fn_id, opts)
     local lines = store.content(node)
     if not lines then return nil, 'no source for ' .. tostring(node.file) end
     local ts = require 'cartograph.providers.treesitter'
+    -- THE LANGUAGE GATE (CART-0304), and it refuses rather than degrading. Everything
+    -- below assumes lua: the emitted spec is lua source, the subject is compiled with
+    -- lua's `load`, and the environment holes are computed against LUA's stdlib
+    -- profile. Run on another language none of that errors — it simply finds nothing
+    -- in the profile, and emits a spec with FEWER holes than the truth. A quiet wrong
+    -- answer, so the refusal names the language rather than letting it through.
+    local flang = ts.lang_of and ts.lang_of(node.file)
+    if flang ~= 'lua' then
+        return nil, ('characterization emits a runnable LUA spec and reads lua\'s'
+            .. ' stdlib profile; %s is %s'):format(tostring(node.file),
+            flang and ('written in ' .. flang) or 'in no language this graph names')
+    end
     local ctx = holes.ctx_for(store, node, lines,
         ts.annot_tag and ts.annot_tag(node.file),
         ts.attach_pats and ts.attach_pats(node.file))

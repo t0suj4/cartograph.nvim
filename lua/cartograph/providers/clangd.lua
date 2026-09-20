@@ -135,6 +135,9 @@ local function clangd_cmd(bin, root)
     return cmd
 end
 
+-- @langs c cpp
+-- The whole provider is the clangd LSP, which serves exactly these two; the
+-- `.h` ambiguity below is the only place it has to choose between them.
 local function lang_id(file)
     local e = file:match('%.([%w]+)$') or ''
     return (e == 'c' or e == 'h') and 'c' or 'cpp'

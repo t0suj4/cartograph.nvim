@@ -715,3 +715,74 @@ test('agentwrite: txn_plan_annotate distinguishes a MISSING arg from EMPTY prose
     eq('cannot-annotate', d.refusal.rule)
     ok(d.refusal.reason:find('no prose'), d.refusal.reason)
 end)
+
+-- ── THE THIRD CAPABILITY AXIS: LANGUAGE SCOPE (CART-0304) ───────────────────
+-- `needs_calls` is about the GRAPH, `mutates` about the HOST, `langs` about the
+-- SUBJECT. It is fenced here beside the other two because it fails the same way
+-- if it is only documented: a lua-only planner aimed at a ruby function does not
+-- error, it DECLINES every candidate, and every decline it writes is phrased as a
+-- fact about the user's code.
+--
+-- PINNED ON BOTH SIDES, or a `langs` list that refused EVERYTHING would pass:
+-- the ruby subject must refuse AND the lua one must still plan.
+test('agentwrite: a lua-only planner REFUSES a subject in another language', function ()
+    if not ready() then skip('no treesitter') end
+    if not pcall(vim.treesitter.language.add, 'ruby') then skip('no ruby parser') end
+    permit(true)
+    local root = mkroot { ['m.lua'] = CSE_LUA, ['thing.rb'] = {
+        'class Thing',
+        '  def f(x, y)',
+        '    a = x + y',
+        '    b = x + y',
+        '    return a, b',
+        '  end',
+        'end',
+    } }
+    ingest(root)
+
+    local rid
+    for _, n in ipairs(store.data.nodes) do
+        if n.file and n.file:match('%.rb$')
+            and (n.kind == 'function' or n.kind == 'method') then rid = n.id break end
+    end
+    ok(rid, 'the ruby fixture yielded a function node to aim at')
+
+    local r = call('txn_plan_optimize', { kind = 'cse', node = rid })
+    eq(false, r.ok, 'a ruby subject does not get a lua rewrite planned')
+    eq('lang-scope', r.refusal.rule, 'and the rule NAMES the axis it failed')
+    ok(r.refusal.reason:find('ruby', 1, true),
+        'the reason says which language the subject is in: ' .. r.refusal.reason)
+    ok(r.refusal.remedy:find('graph_info', 1, true),
+        'and the remedy points at the column that answers "which verb then": '
+        .. r.refusal.remedy)
+
+    -- THE OTHER SIDE: the same verb, the same graph, a lua subject — still plans.
+    local good = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
+    eq(true, good.ok, 'the declared language is unaffected')
+end)
+
+test('agentwrite: the language column is on graph_info, and it is DERIVED', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    ingest(mkroot { ['m.lua'] = CSE_LUA })
+    local info = call('graph_info')
+    local by = {}
+    for _, row in ipairs(info.result) do by[row.verb] = row end
+
+    eq('lua', by.txn_plan_optimize.langs, 'the lua-only planner says so')
+    eq('lua javascript', by.txn_plan_extract_family.langs,
+        'the two-language planner names both')
+    -- A NULL IS A CLAIM OF GENERALITY, the same reading `needs_calls = false`
+    -- gets — moveapply was BUILT general (it moves text and discloses the wiring
+    -- it will not guess), so its planner declares nothing.
+    eq(vim.NIL, by.txn_plan_moveset.langs, 'a general verb carries null, not a roster')
+    eq(vim.NIL, by.node_find.langs, 'and so does every read verb')
+
+    -- DERIVED, NOT RETYPED: whatever the verb table declares is what the column
+    -- shows, so the two cannot drift.
+    for verb, row in pairs(by) do
+        local v = agent.VERBS[verb]
+        eq(v.langs and table.concat(v.langs, ' ') or vim.NIL, row.langs,
+            'the column for ' .. verb .. ' is the declaration')
+    end
+end)

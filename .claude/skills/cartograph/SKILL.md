@@ -132,14 +132,24 @@ exists: `txn_apply` will not take a plan that has not been previewed here, so
 previewing IS the review. Save without previewing and there is no witness at all —
 `reviewed_match` comes back null, and that absence is stated rather than defaulted.
 
-Ask `graph_info` before assuming a verb works. Two capability axes are reported
-separately because your next move differs:
+Ask `graph_info` before assuming a verb works. Three capability axes are reported
+separately because your next move differs on each:
 
 - **`needs_calls`** — about the GRAPH. On an index-only graph a call verb *refuses*
   rather than answering "none".
 - **`mutates`** — about the HOST. `mcpserve` is **read-only by default**; `--write`
   grants the mutating verbs. Gated verbs are still advertised, with the gate stated
   in their description.
+- **`langs`** — about the SUBJECT. A planner that emits code emits it in *one*
+  language's syntax: `txn_plan_optimize` is `lua`, `txn_plan_extract_family` is
+  `lua javascript`. Aim one at a function in another language and it refuses with
+  rule **`lang-scope`**. **A null `langs` is a claim, not a missing field** — that
+  verb serves any file, which is true of every read verb and of `txn_plan_moveset`
+  (it moves text and *discloses* the wiring it will not guess).
+
+⚠ **A wrong-language planner does not error, so this column is the only warning you
+get.** Before `langs` existed, aiming the lua optimizer at a Ruby function produced
+a clean empty answer with per-site declines phrased as facts about *your* code.
 
 ### The version axis — and pick the right one
 

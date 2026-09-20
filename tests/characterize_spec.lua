@@ -678,3 +678,47 @@ test('characterize: the module LOAD is a premise — derived, or a HOLE, never a
         'and running it reports THAT, not "module not found": ' .. tostring(err2))
     cleanup()
 end)
+
+-- ── THE LANGUAGE GATE (CART-0304) ───────────────────────────────────────────
+-- This module was lua-only from the day it shipped and said so nowhere. It never
+-- ERRORED on another language, which is what made it dangerous. Measured before the
+-- gate existed, on `def join(parts); File.open("/tmp/x").read; …; end`: it PLANNED,
+-- emitted a complete runnable spec, and discharged Ruby's `open` and `read` as
+-- "satisfied by the runtime, which holds every candidate owner (file, io)" — `file`
+-- and `io` being LUA's owners. The premises a supplied stub exists to DISCLOSE came
+-- out of a runtime the subject never runs in, in Lua source claiming to characterize
+-- a Ruby method. This file's own "a stub is a supplied premise", inverted.
+--
+-- THE REFUSAL IS THE CONTRACT, not the fact that a spec is not produced: a caller
+-- has to be able to tell "this language is not served" from "this function has no
+-- holes", and only a named refusal does that.
+test('characterize: a function in another language is REFUSED, by name', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'ruby') then skip('no ruby parser') end
+
+    root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/thing.rb', 'w'))
+    fd:write(table.concat({
+        'class Thing',
+        '  def join(parts)',
+        '    parts.join(",")',
+        '  end',
+        'end',
+    }, '\n') .. '\n'); fd:close()
+    local data = ts.extract(root); data.root = data.root or root; store.ingest(data)
+
+    local rid
+    for _, n in ipairs(store.data.nodes) do
+        if n.file and n.file:match('%.rb$')
+            and (n.kind == 'function' or n.kind == 'method') then rid = n.id break end
+    end
+    ok(rid, 'the ruby fixture yielded a function node to aim at')
+
+    local plan, why = ch.plan(store, rid)
+    ok(not plan, 'a ruby function is not characterized')
+    ok(why and why:find('ruby', 1, true),
+        'and the refusal NAMES the language rather than reading as "no holes": '
+        .. tostring(why))
+    cleanup()
+end)

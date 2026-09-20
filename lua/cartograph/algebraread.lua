@@ -1,5 +1,11 @@
 -- cartograph.algebraread — THE LOSSLESS READER: source text → algebra term (CART-0961).
 --
+-- @langs lua
+-- ONE GRAMMAR IS AUDITED AND THAT IS THE CLAIM. The reader is lossless only where
+-- a round-trip has been proven (`A.cst_print(read(src)) == src`, byte for byte),
+-- and that proof exists for lua. A second grammar is not a wider `@langs` line,
+-- it is a second audit — see the RESERVED note below.
+--
 -- ★★★ THIS IS THE ONE UNPORTED PIECE, AND IT GATES THE WHOLE EDIT SIDE. The
 -- 2026-09-19 re-vendor brought 90 new algebra exports and `origin.unported`
 -- records why 41 of them could not be used: the donor installs its tree-sitter

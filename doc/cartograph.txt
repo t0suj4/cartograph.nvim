@@ -507,7 +507,15 @@ verb refuses is as load-bearing as what it writes — see
   :CartographCharacterize[!] [{file} {line}]
                               a RUNNABLE characterization spec for the
                               focused function (or the one enclosing
-                              {file} {line}). Every value we cannot know
+                              {file} {line}). LUA ONLY, and it says so
+                              rather than trying: the spec it emits IS
+                              lua source, the subject is compiled with
+                              lua's own load(), and the environment holes
+                              are computed against LUA's stdlib profile.
+                              A function in another language is REFUSED
+                              by name — without that gate it produced a
+                              spec with FEWER holes than the truth, which
+                              reads as coverage. Every value we cannot know
                               is a HOLE that ERRORS when the spec runs —
                               never a guessed assertion — so an unfilled
                               spec FAILS instead of reporting coverage it

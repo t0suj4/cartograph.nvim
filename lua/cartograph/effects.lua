@@ -1,3 +1,11 @@
+-- @langs any
+-- THE ANALYSIS IS GENERAL; TWO LANGUAGES ARE MODELLED IN MORE DETAIL. rw/gw/gp come
+-- off the write axis and the CFG and carry no grammar. What lua and php add is
+-- LITERAL TRUTHINESS — the rule that decides whether `f(x, 0)` fires a guarded
+-- write — and `lang_of` below names exactly those two. Everything else gets nil,
+-- which reads as 'may-write': weaker, and true. See truthy_of's warning for what
+-- this looked like when the php branch was the fall-through instead.
+--
 -- EFFECTS: what does calling this function DO to module state — the write
 -- axis + guard summaries + param predicates, discharged per call site.
 -- The first consumer of the analysis ladder's facts ([[cartograph-write-axis]]):
@@ -152,6 +160,21 @@ function M.sig_of(lang, name, is_method)
 end
 
 -- literal truthiness by language family (nil = unknown)
+--
+-- ⚠ EVERY ARM ENDS IN nil, AND IT USED TO END IN PHP (CART-0304). The lua branch
+-- was an `if` and php was the FALL-THROUGH, so a language `lang_of` cannot name —
+-- ruby, javascript, python, every one but two — was given PHP's falsiness. In ruby
+-- `0` and `''` are TRUTHY, so `f(x, 0)` guarding a write returned 'skips': a HARD
+-- claim that the write does not happen, about one that does. The unknown answer is
+-- the sound one — 'may-write' costs a weaker verdict, a wrong 'skips' costs a
+-- missed edge.
+-- ★ LATENT, NOT LIVE, AND SAYING WHICH IS THE POINT. Measured 2026-09-20: `gp` rides
+-- a var_uses edge, and the write classifier populates those for LUA ALONE today —
+-- self 21763 uses / 7 with gp, ruby 0, jquery 0. So the wrong arm was UNREACHABLE
+-- through the pipeline and no shipped answer was wrong. It would have fired on the
+-- first day the write axis reached a second language, which is a direction this
+-- tool is actively going; a defect that is only unreachable by accident is worth
+-- the same fix as one that is firing.
 local function truthy_of(a, lang)
     if not a then return nil end
     if a.k == 'scalar' then
@@ -159,13 +182,17 @@ local function truthy_of(a, lang)
         if lang == 'lua' then
             return v ~= 'false' and v ~= 'nil'
         end
-        -- php: false/null/0/0.0 are falsy
-        return not (v == 'false' or v == 'null' or v == 'NULL'
-            or tonumber(v) == 0)
+        if lang == 'php' then
+            -- php: false/null/0/0.0 are falsy
+            return not (v == 'false' or v == 'null' or v == 'NULL'
+                or tonumber(v) == 0)
+        end
+        return nil -- a language whose literal truthiness is not modelled here
     end
     if a.k == 'lit' then -- a string literal
         if lang == 'lua' then return true end -- every string is truthy
-        return a.v ~= '' and a.v ~= '0'      -- php's falsy strings
+        if lang == 'php' then return a.v ~= '' and a.v ~= '0' end -- php's falsy strings
+        return nil
     end
     return nil -- local/expr/func/…: not a literal, unknown at this site
 end

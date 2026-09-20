@@ -10,6 +10,13 @@
 -- 32 registrations over 17 files, 19 distinct namespaces, and argv reaches NONE
 -- of them because there is no call site to scan. CART-0226's shape: a declared
 -- registry whose export side exists without a call.
+--
+-- @langs erlang
+-- The carrier IS an Erlang idiom: a `{ok, [{iq_handler, …}]}` tuple returned from
+-- an OTP callback. There is no cross-language generalisation to claim here — the
+-- other registration carriers live in their own modules, and a second language
+-- that returns a registration tuple would need its own harvest, not a widened
+-- claim on this one.
 -- ⚠ MEASURED, and the reason it is worth a module: FOUR of those namespaces are
 -- ones the call form never reaches (urn:xmpp:blocking · carbons:2 · push:0 ·
 -- time), so the ejabberd<->converse endpoint join goes 6 -> 10.

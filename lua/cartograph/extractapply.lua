@@ -1,3 +1,8 @@
+-- @langs any
+-- The engine reads live-in/live-out off the CFG and splices LINES; nothing here
+-- is written in one grammar's syntax. The one language name below is the
+-- parse-recheck default and it is waived at its site.
+--
 -- Extract-function APPLY: the txn face of the pure `extract` engine, the way
 -- optapply is the txn face of `optimize` and moveapply is the write half of the
 -- move-set. extract.lua COMPUTES the extraction (params from live-in, returns
@@ -196,6 +201,8 @@ function M.apply(store, plan)
     local _, after = M.preview(store, plan)
     local text = after and after[plan.file] or ''
     local lang = require('cartograph.providers.treesitter').lang_of(plan.file)
+    -- @langs-ok the default FAILS CLOSED: a file no grammar claims is re-parsed as
+    -- lua, which errors, and the extract refuses rather than writing unverified
     local ok, parser = pcall(vim.treesitter.get_string_parser, text, lang or 'lua')
     if not (ok and parser and not parser:parse()[1]:root():has_error()) then
         return nil, 'the extracted result does not parse — refusing'

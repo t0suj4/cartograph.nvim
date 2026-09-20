@@ -126,6 +126,8 @@ M.registry = {
     {
         name = 'nvim-plugin',
         detect = function (root)
+            -- @langs-ok 'lua' is the nvim DIRECTORY name here, not a grammar — these
+            -- detectors read the layout of a project, never its source text
             if has(root, 'plugin') and has(root, 'lua') then
                 return 'plugin/ + lua/ directories'
             end
@@ -135,6 +137,7 @@ M.registry = {
     {
         name = 'nvim-config',
         detect = function (root)
+            -- @langs-ok the nvim DIRECTORY name again, not a grammar
             if has(root, 'init.lua') and has(root, 'lua')
                 and not has(root, 'plugin') then
                 return 'init.lua + lua/ directory'

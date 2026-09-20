@@ -196,6 +196,59 @@ local function comparisons(src)
     return out
 end
 
+-- ── ORACLE 3: A LANGUAGE NAMED OUTRIGHT (CART-0304) ─────────────────────────
+-- The scan above sees a module hardcode one grammar's VOCABULARY. It is blind to
+-- the other half of the same defect: a module that hardcodes the grammar's NAME.
+-- characterize.lua is the witness — `pm.base_for('lua')`, `effects.sig_of('lua',
+-- …)`, no comparison against a node type anywhere, so the audit passed it in
+-- silence while it characterized a Ruby function against Lua's stdlib profile.
+-- hoistclosure's gate is the same shape read the other way: `file:match('%.lua$')`
+-- is real, enforced, and invisible to a search for language comparisons.
+--
+-- THE SUSPECT SHAPE, and it reuses oracle 1's roster rather than a new list: a
+-- string literal that IS an installed grammar's name, sitting in a CALL ARGUMENT
+-- or on either side of a comparison. Those are the two positions where a language
+-- name is a DECISION — which profile to load, which parser to build, which branch
+-- to take.
+--
+-- WHAT STAYS SILENT, and it is the same correct pattern oracle 1 already honours:
+-- a language name as a TABLE KEY or a table VALUE (`{ lua = 'lua', jsx =
+-- 'javascript' }`) is a per-language DISPATCH, not an assumption. A module may
+-- name every language it serves that way and say nothing here.
+--
+-- ⚠ IT CANNOT SEE THE TOO-WIDE DIRECTION. A module declaring `@langs lua ruby`
+-- that only ever names lua is not reported: whether ruby NEEDED handling is a
+-- question about intent, and inferring the declaration from the literals present
+-- would make the audit agree with whatever the code already does — the same trap
+-- oracle 2's comment names. This half is deliberately one-sided: it reports a
+-- language the module NAMES but does not CLAIM, never a language it claims but
+-- does not name.
+local function lang_names(src)
+    local root = vim.treesitter.get_string_parser(src, 'lua'):parse()[1]:root()
+    local out = {}
+    local function walk(n)
+        for c in n:iter_children() do
+            if c:named() then
+                if c:type() == 'string' then
+                    local s = vim.treesitter.get_node_text(c, src):match('^["\'](.-)["\']$')
+                    local p = s and c:parent()
+                    local pt = p and p:type()
+                    if s and langs[s] and (pt == 'arguments' or pt == 'binary_expression') then
+                        local ctx = p:parent() or p
+                        out[#out + 1] = { lit = s, line = c:start() + 1,
+                            role = pt == 'arguments' and 'argument' or 'comparison',
+                            text = vim.treesitter.get_node_text(ctx, src)
+                                :gsub('%s+', ' '):sub(1, 88) }
+                    end
+                end
+                walk(c)
+            end
+        end
+    end
+    walk(root)
+    return out
+end
+
 -- an inline waiver on the finding's line or the line above: `@langs-ok <reason>`.
 -- The reason must be non-empty — a bare marker would let the audit be silenced
 -- without anyone having to say what makes the assumption deliberate.
@@ -209,7 +262,9 @@ local function waiver(lines, ln)
 end
 
 -- ── the audit over one module ───────────────────────────────────────────────
--- Returns (findings, waived) for `src` given its declared language set.
+-- Returns (findings, waived, named) for `src` given its declared language set:
+-- oracle 1's vocabulary findings, the waived ones, and oracle 3's LANGUAGES NAMED
+-- BUT NOT CLAIMED.
 local function audit(src, decl, rel)
     local lines = vim.split(src, '\n', { plain = true })
     local findings, waived = {}, {}
@@ -246,7 +301,27 @@ local function audit(src, decl, rel)
             end
         end
     end
-    return findings, waived
+    -- ── oracle 3 over a DECLARED module ─────────────────────────────────────
+    -- A language this module NAMES in a decision position but does not CLAIM. The
+    -- direction is the one that can be wrong silently: a declaration narrower than
+    -- the code means an agent was told this verb does not serve a language it in
+    -- fact reaches into, and `@langs lua` on a module that also builds a cpp parser
+    -- is a claim about scope that the module itself contradicts.
+    local named = {}
+    for _, s in ipairs(lang_names(src)) do
+        if not decl[s.lit] then
+            local why = waiver(lines, s.line)
+            if why and why ~= '' then
+                s.why = why
+                waived[#waived + 1] = s
+            else
+                if why then s.text = s.text .. '   [@langs-ok with NO reason]' end
+                s.file = rel
+                named[#named + 1] = s
+            end
+        end
+    end
+    return findings, waived, named
 end
 
 -- ── SELFTEST: a zero is meaningless from an audit that cannot fire ──────────
@@ -278,12 +353,37 @@ local SELFTEST = table.concat({
     -- blanket excuse for any expression containing an `or`
     "    if n:type() == 'variable_list' or n:type() == 'expression_list' then return true end",
     'end',
-    'return { planted, tabled, typecheck, waived_case, disjunction, half_disjunction }',
+    -- ORACLE 3. `php` is named in a call argument and NOT declared: MUST fire.
+    'local function names_undeclared(src)',
+    "    return vim.treesitter.get_string_parser(src, 'php')",
+    'end',
+    -- a name INSIDE the declaration is the module doing its declared job: silent
+    'local function names_declared()',
+    "    return pm.base_for('ruby')",
+    'end',
+    -- THE COMPARISON BRANCH NEEDS ITS OWN PLANTED POSITIVE. The tree has zero live
+    -- comparison hits today, so without this the branch could die and the selftest
+    -- would stay green off the argument case alone — a dead predicate passes every
+    -- negative test. This is moveapply's `lang_of(f) == 'go'` shape, the one the kb
+    -- note recorded as invisible to search for 26 days.
+    'local function compares_undeclared(lang)',
+    "    if lang == 'python' then return true end",
+    'end',
+    -- a per-language DISPATCH TABLE names every language it serves and asserts
+    -- nothing about scope — the table position must stay silent even for a
+    -- language the module does not declare
+    "local PARSE = { lua = 'lua', jsx = 'javascript' }",
+    -- and the waiver works here too, on the same one-reason rule
+    'local function waived_name(src)',
+    "    return vim.treesitter.get_string_parser(src, 'go')  -- @langs-ok the payload is always Go",
+    'end',
+    'return { planted, tabled, typecheck, waived_case, disjunction, half_disjunction,',
+    '    names_undeclared, names_declared, compares_undeclared, PARSE, waived_name }',
 }, '\n') .. '\n'
 
 local function selftest()
     local fails = {}
-    local f, w = audit(SELFTEST, { lua = true, ruby = true }, 'selftest')
+    local f, w, nm = audit(SELFTEST, { lua = true, ruby = true }, 'selftest')
     local hit = {}
     for _, x in ipairs(f) do hit[x.lit] = x end
     if not hit['assignment_statement'] then
@@ -313,6 +413,33 @@ local function selftest()
     if #f ~= 2 then
         fails[#fails + 1] = ('expected exactly 2 findings in the fixture, got %d'):format(#f)
     end
+    -- ── oracle 3 ────────────────────────────────────────────────────────────
+    local nml = {}
+    for _, x in ipairs(nm) do nml[x.lit] = x end
+    if not nml['php'] then
+        fails[#fails + 1] = "the planted undeclared `get_string_parser(src, 'php')` was NOT found"
+    end
+    if not nml['python'] then
+        fails[#fails + 1] = "the planted undeclared `lang == 'python'` COMPARISON was NOT found"
+    end
+    if nml['php'] and nml['php'].role ~= 'argument' then
+        fails[#fails + 1] = 'the argument hit is not reported as an argument'
+    end
+    if nml['python'] and nml['python'].role ~= 'comparison' then
+        fails[#fails + 1] = 'the comparison hit is not reported as a comparison'
+    end
+    if nml['ruby'] then
+        fails[#fails + 1] = 'a language the module DECLARES was reported as unclaimed'
+    end
+    if nml['javascript'] then
+        fails[#fails + 1] = 'a per-language DISPATCH TABLE was reported as a scope assumption'
+    end
+    if nml['go'] then
+        fails[#fails + 1] = 'a waived language name was still reported'
+    end
+    if #nm ~= 2 then
+        fails[#fails + 1] = ('expected exactly 2 unclaimed language names, got %d'):format(#nm)
+    end
     return fails
 end
 
@@ -324,14 +451,45 @@ if #sfails > 0 then
     print(('langaudit: SELFTEST FAILED (%d) — refusing to report'):format(#sfails))
     os.exit(1)
 end
-print('  ok — the historical bug and a half-covering or-chain are found; a tabled fix,'
-    .. ' a lua type-check, a waiver and a fully-covering or-chain stay silent')
+print('  ok — the historical bug, a half-covering or-chain and an unclaimed language'
+    .. ' named BOTH WAYS (an argument and a comparison) are found; a tabled fix, a lua'
+    .. ' type-check, two waivers, a fully-covering or-chain, a declared name and a'
+    .. ' dispatch table stay silent')
 print('')
+
+-- ── WHAT THIS FENCE MAY NOT ANNOTATE ────────────────────────────────────────
+-- `lua/cartograph/algebra/` is the VENDORED template algebra, re-vendored from
+-- the donor tree. A `@langs` line there would be OUR comment in SOMEONE ELSE'S
+-- file, and the next re-vendor would either drop it or report it as drift — so
+-- the fence declares its own boundary instead of quietly counting the directory
+-- as clean. The exclusion is REPORTED with its file count, for the same reason
+-- the undeclared list is: a limit nobody can see reads as coverage.
+local EXCLUDE = { ['lua/cartograph/algebra/'] = 'vendored: the donor tree owns these files' }
 
 local files = vim.fn.globpath(repo .. '/lua/cartograph', '**/*.lua', false, true)
 table.sort(files)
+local excluded = {}
+do
+    local keep = {}
+    for _, path in ipairs(files) do
+        local rel = path:sub(#repo + 2)
+        local why
+        for pre, w in pairs(EXCLUDE) do
+            if rel:sub(1, #pre) == pre then why = w break end
+        end
+        if why then
+            excluded[why] = (excluded[why] or 0) + 1
+        else
+            keep[#keep + 1] = path
+        end
+    end
+    files = keep
+end
 
 local findings, waived, declared_n, undeclared, agnostic = {}, {}, 0, {}, 0
+-- oracle 3's two lists: languages NAMED by a declared module outside its claim,
+-- and undeclared modules that name one at all
+local outside, undeclared_lang = {}, {}
 local malformed = {}
 for _, path in ipairs(files) do
     local src = read(path)
@@ -351,11 +509,31 @@ for _, path in ipairs(files) do
                 end
                 if any then undeclared[#undeclared + 1] = rel break end
             end
+            -- ORACLE 3, undeclared side. Reported SEPARATELY from the vocabulary
+            -- list above rather than merged into it: the two say different things
+            -- to whoever fixes them ("this module reads one grammar's node names"
+            -- vs "this module picks a language by name"), and a module can be in
+            -- one without being in the other — characterize is in neither list
+            -- until this one exists.
+            local ns = lang_names(src)
+            if #ns > 0 then
+                local lines2 = vim.split(src, '\n', { plain = true })
+                local keep = {}
+                for _, x in ipairs(ns) do
+                    local why = waiver(lines2, x.line)
+                    if why and why ~= '' then waived[#waived + 1] = x
+                    else keep[#keep + 1] = x end
+                end
+                if #keep > 0 then
+                    undeclared_lang[#undeclared_lang + 1] = { file = rel, sites = keep }
+                end
+            end
         else
             declared_n = declared_n + 1
-            local f, w = audit(src, decl, rel)
+            local f, w, nm = audit(src, decl, rel)
             for _, x in ipairs(f) do findings[#findings + 1] = x end
             for _, x in ipairs(w) do waived[#waived + 1] = x end
+            for _, x in ipairs(nm) do outside[#outside + 1] = x end
         end
     end
 end
@@ -365,6 +543,9 @@ print(('LANGUAGE-ASSUMPTION AUDIT — %d grammar(s) loaded · %d module(s) decla
 if #missing > 0 then
     print(('  parsers NOT installed (their vocabulary is unknown, not empty): %s')
         :format(table.concat(missing, ' ')))
+end
+for why, n in pairs(excluded) do
+    print(('  %d file(s) NOT audited — %s'):format(n, why))
 end
 
 print('')
@@ -395,6 +576,40 @@ if ALL or #undeclared > 0 then
     end
 end
 
+print('')
+print(('== A LANGUAGE NAMED BUT NOT CLAIMED (oracle 3) =='))
+if #outside == 0 then
+    print('  (none)')
+else
+    for _, f in ipairs(outside) do
+        print(('  %s:%d  %s  `%s`'):format(f.file, f.line, f.role, f.text))
+        print(('      names "%s", which this module does not declare'):format(f.lit))
+        print('      -> widen the @langs claim, or waive the site with a reason')
+    end
+end
+
+if ALL or #undeclared_lang > 0 then
+    print('')
+    print('== UNDECLARED: picks a language BY NAME, but claims no @langs ==')
+    if #undeclared_lang == 0 then
+        print('  (none)')
+    else
+        for _, m in ipairs(undeclared_lang) do
+            local seen, names = {}, {}
+            for _, x in ipairs(m.sites) do
+                if not seen[x.lit] then seen[x.lit] = true; names[#names + 1] = x.lit end
+            end
+            table.sort(names)
+            print(('  %s  [%s]'):format(m.file, table.concat(names, ' ')))
+            for _, x in ipairs(m.sites) do
+                print(('      %d  %s  %s'):format(x.line, x.role, x.text))
+            end
+        end
+        print(('  (%d module(s) — the language is a DECISION here; declare it or waive'
+            .. ' the site)'):format(#undeclared_lang))
+    end
+end
+
 if #malformed > 0 then
     print('')
     print('== MALFORMED @langs: not an installed grammar, so the module is NOT audited ==')
@@ -404,9 +619,9 @@ if #malformed > 0 then
 end
 
 print('')
-if #findings > 0 or #malformed > 0 then
-    print(('langaudit: %d FINDING(S), %d malformed declaration(s)')
-        :format(#findings, #malformed))
+if #findings > 0 or #outside > 0 or #malformed > 0 then
+    print(('langaudit: %d FINDING(S), %d language(s) named but not claimed,'
+        .. ' %d malformed declaration(s)'):format(#findings, #outside, #malformed))
     os.exit(1)
 end
 print('langaudit: ok')

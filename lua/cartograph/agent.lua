@@ -97,6 +97,27 @@
 -- why a plan is a HANDLE and not a document, why a ref caveat that is a note on
 -- the read side is a REFUSAL here, and what is deliberately not relaxed.
 
+-- ── THE THIRD CAPABILITY AXIS: LANGUAGE SCOPE (CART-0304) ───────────────────
+-- `needs_calls` asks about the GRAPH, `mutates` about the HOST. `langs` asks
+-- about the SUBJECT: this verb rewrites code, and the syntax it emits belongs to
+-- one language. optapply says `local x = …`; cloneextract synthesises a helper
+-- from a per-language table with two entries. A verb reached on a file it does
+-- not serve does not error — it declines every candidate for reasons that read
+-- like facts about the USER'S CODE, which is the worst available answer.
+--
+-- ⚠ SCOPE WAS REAL BEFORE IT WAS DECLARED, AND THAT IS WHY THIS EXISTS. Measured
+-- across the refactoring family (CART-0304): one module DECLARED its language,
+-- one ENFORCED it through a filename match and declared nothing, two ASSUMED it
+-- with no refusal anywhere, and three were simply unknown. A capability table
+-- cannot have a language column while that is true, and an agent choosing a verb
+-- was being told less than the tree knew.
+--
+-- A NIL `langs` MEANS GENERAL, AND IT IS A CLAIM. moveapply carries `@langs any`
+-- because it was BUILT general — it moves text and discloses the wiring it will
+-- not guess — so the planner over it declares nothing here. That is the same
+-- default as `needs_calls`, and it fails the same way: too WIDE is silent and
+-- too NARROW refuses out loud, so a doubtful verb gets the narrow line.
+--
 -- ── PHASE 4 IS ONE AXIS, NOT A PHASE: THE VERSION AXIS (CART-0595) ──────────
 -- portability.lua's A-to-B diff is the strongest evidence this tool produces
 -- about a port, and until now no agent could reach any of it — the tail of this
@@ -443,6 +464,10 @@ local function v_graph_info(store)
         end
         rows[#rows + 1] = { verb = name, summary = v.summary,
             tier_basis = v.tier_basis, mutates = v.mutates or false,
+            -- CART-0304: the LANGUAGES this verb serves, or null for a verb that
+            -- serves any. Null is a CLAIM of generality here, not a missing field
+            -- — the same reading `needs_calls = false` gets.
+            langs = v.langs and table.concat(v.langs, ' ') or NUL,
             -- CART-0581: WHICH QUANTIFIER produced the headline `tier`. Without
             -- it, `tier: inferred` from a floor verb and from a peak verb are
             -- the same string carrying opposite claims.
@@ -3027,6 +3052,12 @@ M.VERBS = {
     },
     txn_plan_extract_family = {
         summary = 'PROPOSE ONE shared helper for a function\'s whole near-clone FAMILY (not just its nearest partner). Writes nothing: returns a plan handle for txn_preview, plus the per-member verdict when it cannot',
+        -- cloneextract's EXTRACT table is the whole language-specific part of the
+        -- transaction and it has two entries. ⚠ AND THEY ARE NOT EQUAL: javascript
+        -- has no `module` form, so a CROSS-FILE extraction refuses there while a
+        -- same-file helper is synthesised. The verb's scope is the union; the
+        -- narrower half refuses by name at the site.
+        langs = { 'lua', 'javascript' },
         -- ⚠ `observation`, like the other planners: the answer carries a PLAN and
         -- a per-member verdict, never a RUNG. Declaring `derived` would oblige a
         -- `tier_headline` quantifying a summary this verb does not produce
@@ -3051,6 +3082,12 @@ M.VERBS = {
     txn_plan_optimize = {
         summary = 'PROPOSE an optimizer rewrite inside one function (cse | localize | hoist | pre). Writes nothing: returns a plan handle for txn_preview, plus the per-site `declined` ledger',
         tier_basis = 'observation', needs_calls = true,
+        -- optapply emits lua syntax (`local x = …`), and its ASSIGN table, call-node
+        -- test and no-throw `builtins` set are lua's. ⚠ Its own `lang_of` ADMITS all
+        -- fourteen body_field languages, so before this line the verb was REACHED on
+        -- files it does not serve and answered with declines that named the user's
+        -- code — CART-0315 tracks closing the admission itself.
+        langs = { 'lua' },
         -- `absent`  the analysis ran and the code offers no candidate
         -- `refused` candidates existed and every one failed a soundness gate
         -- and NOT 'frontier'/'unavailable': an unparsable source or a language
@@ -3393,6 +3430,37 @@ function M.answer(store, verb, args)
         return refusal { rule = 'thin-index',
             reason = ('this graph is index-only (%d nodes, no call graph), so %s would report an absence that is a property of the INDEX, not of the code'):format(graph.counts.nodes, verb),
             remedy = 'reopen the root without --index-only (a full extract), or ask a verb graph_info reports as available' }
+    end
+
+    -- LANGUAGE SCOPE, last of the three capability axes and the only one that has
+    -- to look at the SUBJECT (CART-0304). It runs after the other two because a
+    -- read-only host and a thin index are answers a caller can act on without
+    -- knowing which file they meant.
+    --
+    -- ★ THE ADDRESS IS RESOLVED HERE AND ITS REFUSAL IS DELIBERATELY DROPPED. A
+    -- verb owns its own addressing errors — the stale-ref `why`, the ref caveat,
+    -- the no-address remedy are all written there and carry more than this block
+    -- could. So a subject we cannot resolve falls through UNCHECKED and the verb
+    -- refuses in its own words; only a subject we CAN name is scope-checked.
+    -- ★ AND THE FILE'S LANGUAGE IS ASKED OF THE PROVIDER, not matched off the
+    -- extension. Nodes carry no `lang` field (measured), `lang_of` is the single
+    -- owner of that question (CART-0410), and a private extension table here
+    -- would be a second roster to drift.
+    if v.langs then
+        local snode = subject_node(store, args)
+        local flang = snode and snode.file
+            and require('cartograph.providers.treesitter').lang_of(snode.file)
+        local serves = false
+        for _, l in ipairs(v.langs) do if l == flang then serves = true break end end
+        if snode and not serves then
+            local names = table.concat(v.langs, ', ')
+            return refusal { rule = 'lang-scope',
+                subject = { node = snode.id, file = snode.file, name = snode.name },
+                reason = ('%s serves %s, and %s is %s. The rewrite it emits is written in one language\'s syntax, so running it here would decline every candidate for reasons that read as facts about YOUR code rather than about this verb'):format(
+                    verb, names, snode.file,
+                    flang and ('written in ' .. flang) or 'in no language this graph names'),
+                remedy = ('ask graph_info for the `langs` column — the verbs with no language of their own serve any file. The read verbs all do, and on the write side so does txn_plan_moveset, which moves text and discloses the wiring it will not guess'):format() }
+        end
     end
 
     local okc, res, usage = pcall(v.run, store, args)

@@ -1,3 +1,10 @@
+-- @langs any
+-- GENERAL BY DESIGN, and the paragraph below is the reason rather than an
+-- omission (CART-0304). What is language-SPECIFIC here is opted into through
+-- spec/contract.lua, never hardcoded: a language that declares no requalification
+-- hook gets its symbols moved and the wiring disclosed as a HAZARD. The single
+-- comparison against a language name is waived at its site.
+--
 -- Move-apply: the founding verb finally writes. The staged move-set
 -- (dd cuts, p sets the destination) becomes a transaction: each
 -- symbol's text leaves its file and lands in the destination —

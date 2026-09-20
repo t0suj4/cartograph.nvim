@@ -11,6 +11,14 @@
 -- lines (not shared with other code). Recursion by its own name is fine — the name follows
 -- it to module scope. Collision → refuse (renaming + call-site rewrite is banked).
 
+-- @langs lua
+-- ENFORCED SINCE IT SHIPPED, DECLARED ONLY NOW (CART-0304). The gate below is a
+-- FILENAME EXTENSION MATCH (`node.file:match('%.lua$')`), which is why a search
+-- for language comparisons found nothing here: the scope was real, refused
+-- correctly, and invisible to every audit. What makes it lua is the emitted
+-- syntax — the hoisted binding is written as `local <name> = <expr>` and the
+-- result is re-parsed with lua's grammar.
+
 local M = {}
 local at = require 'cartograph.at'
 local txn = require 'cartograph.txn'

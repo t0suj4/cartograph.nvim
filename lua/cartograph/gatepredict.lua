@@ -56,6 +56,10 @@ function M.ext_langs(spec, dialect)
         for _, ext in ipairs((type(s) == 'table' and s.exts) or {}) do add(ext, lang) end
     end
     for ext, dname in pairs(dialect or {}) do add(ext, dname) end
+    -- @langs-ok `.h` is the one extension NO spec can claim alone — it is C and
+    -- C++ both, and mapping it to either would make the prediction wrong for the
+    -- other. Everything else in this table comes from the spec roster
+    -- @langs-ok `.h` is C and C++ both; no spec can claim it alone
     if out.h then add('h', 'c') add('h', 'cpp') end
     for _, v in pairs(out) do table.sort(v) end
     return out

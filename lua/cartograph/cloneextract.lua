@@ -36,6 +36,12 @@ local at = require 'cartograph.at'
 
 local function indent_of(line) return (line or ''):match('^%s*') or '' end
 
+-- @langs lua javascript
+-- The table below IS the declaration made machine-readable, and the two are not
+-- equal: javascript has no `module` form, so a CROSS-FILE extraction refuses
+-- there while a same-file helper is synthesised. A third language is an entry
+-- here, not a wider claim.
+
 -- Per-language SYNTHESIS syntax — the only language-specific part of the transaction
 -- (the body span, hole substitution, params, and gates are all language-agnostic). Each
 -- entry: parse (grammar for the parses-clean gate); local_helper(name, params, body,

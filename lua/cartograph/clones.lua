@@ -4206,6 +4206,10 @@ function M.family_verify(fam, store, opts)
     -- mutation: forcing the flag broke no test, because nothing verified a
     -- method donor.
     local dn = store and store.node and store.node(tmpl.donor.id)
+    -- @langs-ok the implicit-receiver harvest the flag selects is lua's `function
+    -- t:m()` alone; every other language's method carries its receiver explicitly,
+    -- so setting the flag there would reparse under a config nothing produced
+    -- @langs-ok lua's implicit receiver; every other method carries it explicitly
     local topts = { method = (dn and dn.kind == 'method') and lang == 'lua' }
 
     local control = M.family_helper_text(fam, store,

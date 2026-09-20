@@ -117,6 +117,8 @@ function M.render(res, err)
     end
     local nodes = M.as_nodes(res)
     if nodes then return M.render_nodes(nodes) end
+    -- @langs-ok the buffer's FILETYPE, and `vim.inspect` output really is lua — the
+    -- doit's own language, which is fixed, not the analysed tree's
     scratch(vim.split(vim.inspect(res), '\n', { plain = true }), 'lua')
 end
 

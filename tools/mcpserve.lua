@@ -221,6 +221,15 @@ local function tools_list()
         local w = v.mutates and (agent.WRITABLE
             and ' THIS VERB WRITES TO THE TREE (journalled; txn_undo reverses it).'
             or ' THIS VERB WRITES TO THE TREE and this host is READ-ONLY: every call REFUSES with rule `read-only`. Planning and previewing still work — start the host with --write to enable it.') or ''
+        -- THE LANGUAGE SCOPE RIDES HERE FOR THE SAME REASON THE WRITE PERMISSION
+        -- DOES (CART-0304): a client that never calls graph_info would otherwise
+        -- pick a lua-only planner for a ruby function and read the refusal as a
+        -- fact about the code. Derived from `v.langs`, never retyped into the
+        -- summary — two renderings of one claim, and only one place to change it.
+        local g = v.langs and (' IT SERVES %s ONLY: a subject in another language'):format(
+            table.concat(v.langs, ' / '):upper())
+            .. ' REFUSES with rule `lang-scope`, because the rewrite it emits is'
+            .. " written in that language's syntax." or ''
         local q = v.tier_headline and (', tier_headline=' .. v.tier_headline .. ' (the headline `tier` is the '
             .. (v.tier_headline == 'floor'
                 and 'WEAKEST rung in the list — the answer is only as good as its shakiest row'
@@ -228,7 +237,7 @@ local function tools_list()
         out[#out + 1] = { name = name, inputSchema = agent.schema(name),
             description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (%s) — never a bare list — plus a `warrant` (%s) saying why nothing OBSERVED it; every verb here is static, so that is `%s`. tier_basis=%s%s.%s')
                 :format(v.summary, kinds_of(tiers.ABSENCE), kinds_of(tiers.WARRANT),
-                    tiers.WARRANT_DEFAULT, v.tier_basis, q, w) }
+                    tiers.WARRANT_DEFAULT, v.tier_basis, q, w .. g) }
     end
     return { tools = out }
 end
