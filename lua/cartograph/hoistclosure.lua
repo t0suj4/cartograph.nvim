@@ -212,6 +212,14 @@ function M.plan(store, closure_id)
     return txn.protocol({
         verb = 'hoist-closure', generation = store.generation,
         guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
+        -- CART-0982: the host precondition, declared rather than written into an
+        -- `apply` the driver would have to dispatch to
+        precheck = function (st)
+            if next(st.moveset or {}) then
+                return 'a move-set is staged — apply or clear it first'
+            end
+        end,
+
         -- CART-0989: a nested closure is hoistable EXACTLY when it captures nothing
         -- from its enclosing function(s) — this verb's whole admission rule — so the
         -- lifted closure means at module scope what it meant nested.
@@ -221,6 +229,9 @@ function M.plan(store, closure_id)
         file = node.file, name = short, anchor = anchor.name,
         src_s0 = s0, src_e0 = e0, src_lines = src_lines, dst0 = dst0,
         ref = store.ref_of(closure_id), fn_id = closure_id,
+        refspecs = { { id = closure_id, name = short,
+            ref = store.ref_of(closure_id), what = 'closure' } },
+        desc = { name = short, from = anchor.name },
         touched = { node.file },
         stamps = { [node.file] = txn.disk_stamp(root, node.file) },
     }, M.edits_for)
@@ -247,19 +258,9 @@ function M.preview(store, plan)
     return txn.dryrun(store, plan)
 end
 
-function M.apply(store, plan)
-    if next(store.moveset or {}) then return nil, 'a move-set is staged — apply or clear it first' end
-    -- txn.verify covers the file-stamp CAS (the whole file is unchanged since planning),
-    -- so the closure's source is guaranteed intact — no separate span-CAS needed.
-    local bad = txn.verify(store, plan, { { id = plan.fn_id, name = plan.name, ref = plan.ref, what = 'closure' } })
-    if bad then return nil, bad end
-    -- the result must parse clean (a body/scope-changing edit)
-    local _, after = M.preview(store, plan)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, after and after[plan.file] or '', 'lua')
-    if not (ok and parser and not parser:parse()[1]:root():has_error()) then
-        return nil, 'the hoisted result does not parse — refusing'
-    end
-    return txn.execute(store, plan, { name = plan.name, from = plan.anchor })
-end
+--- The module's face on the generic driver (CART-0982).
+--- ⚠ ITS `src_lines` ARE DE-INDENTED at plan time, so it must NOT declare the
+--- `source-lines-unchanged` guard `reorder` uses — same field names, different contract.
+function M.apply(store, plan) return require('cartograph.txn').apply(store, plan) end
 
 return M

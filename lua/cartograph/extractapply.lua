@@ -46,6 +46,14 @@ local function stage(store, node, exp, how)
     return txn.protocol({
         verb = 'extract-fn', generation = store.generation,
         guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
+        -- CART-0982: the host precondition, declared rather than written into an
+        -- `apply` the driver would have to dispatch to
+        precheck = function (st)
+            if next(st.moveset or {}) then
+                return 'a move-set is staged — apply or clear it first'
+            end
+        end,
+
         -- CART-0989: the extracted range's live-in/live-out split comes off the CFG, so
         -- the helper receives exactly what the range read and returns what it defined.
         preserves = 'all',
@@ -53,6 +61,9 @@ local function stage(store, node, exp, how)
             .. ' split, read off the CFG',
         file = node.file, fn = node.name or '?', fn_id = node.id,
         ref = store.ref_of(node.id), how = how,
+        refspecs = { { id = node.id, name = node.name or '?',
+            ref = store.ref_of(node.id), what = 'function' } },
+        desc = { name = exp.name, from = node.name or '?' },
         name = exp.name, params = exp.params, returns = exp.returns,
         new_fn = exp.new_fn, call = exp.call,
         replace = exp.replace, insert_before = exp.insert_before,
@@ -192,28 +203,10 @@ function M.preview(store, plan)
     return txn.dryrun(store, plan)
 end
 
-function M.apply(store, plan)
-    if next(store.moveset or {}) then
-        return nil, 'a move-set is staged — apply or clear it first'
-    end
-    -- txn.verify's file-stamp CAS covers the whole file, so the selected span
-    -- is guaranteed intact — no separate span-CAS needed (hoistclosure's note).
-    local bad = txn.verify(store, plan,
-        { { id = plan.fn_id, name = plan.fn, ref = plan.ref, what = 'function' } })
-    if bad then return nil, bad end
-    -- the result must parse: this splices a new function definition and rewrites
-    -- a statement range, so a boundary the analysis mis-read shows up here
-    local _, after = M.preview(store, plan)
-    local text = after and after[plan.file] or ''
-    local lang = require('cartograph.providers.treesitter').lang_of(plan.file)
-    -- @langs-ok the default FAILS CLOSED: a file no grammar claims is re-parsed as
-    -- lua, which errors, and the extract refuses rather than writing unverified
-    local ok, parser = pcall(vim.treesitter.get_string_parser, text, lang or 'lua')
-    if not (ok and parser and not parser:parse()[1]:root():has_error()) then
-        return nil, 'the extracted result does not parse — refusing'
-    end
-    return txn.execute(store, plan,
-        { name = plan.name, from = plan.fn })
-end
+--- The module's face on the generic driver (CART-0982). The move-set precondition, the
+--- refspecs and the journal description are declared on the plan; the hand-rolled parse
+--- gate is gone because `execute` re-runs the DECLARED `parses` guard on the same
+--- `after` map — the third and fourth copies of that check went the same way.
+function M.apply(store, plan) return txn.apply(store, plan) end
 
 return M

@@ -311,7 +311,15 @@ function M.plan_move(store, fn_id, from_line, to_line, through_line)
 
     return require('cartograph.txn').protocol({
         verb = 'reorder', generation = store.generation,
-        guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
+        -- CART-0982: `source-lines-unchanged` was this verb's own span-CAS. Its lines
+        -- are captured VERBATIM (see `src_lines` above), which is what lets it claim the
+        -- guard — hoistclosure's same-named field is de-indented and cannot.
+        guards = { 'parses', 'source-lines-unchanged' },
+        precheck = function (st)
+            if next(st.moveset or {}) then
+                return 'a move-set is staged — apply or clear it first'
+            end
+        end,
         -- CART-0989: reordering is admitted per STATEMENT PAIR by a commutativity
         -- verdict (dataflow dep, shared module state, discharged call effects), and
         -- commutativity IS the behaviour-preservation argument.
@@ -323,6 +331,9 @@ function M.plan_move(store, fn_id, from_line, to_line, through_line)
         from_line = from_line, to_line = to_line, through_line = through_line,
         nstmts = r - p + 1,
         ref = store.ref_of(fn_id), fn_id = fn_id,
+        refspecs = { { id = fn_id, name = m.node.name,
+            ref = store.ref_of(fn_id), what = 'function' } },
+        desc = { name = m.node.name, from = from_line, to = to_line },
         touched = { rel_file },
         stamps = { [rel_file] = require('cartograph.txn').disk_stamp(root, rel_file) },
     }, M.edits_for)
@@ -346,32 +357,9 @@ function M.preview(store, plan)
     return require('cartograph.txn').dryrun(store, plan)
 end
 
-function M.apply(store, plan)
-    local txn = require 'cartograph.txn'
-    if next(store.moveset or {}) then return nil, 'a move-set is staged — apply or clear it first' end
-    local bad = txn.verify(store, plan, { { id = plan.fn_id, name = plan.fn, ref = plan.ref, what = 'function' } })
-    if bad then return nil, bad end
-    -- the moved lines must still be exactly what we planned (span CAS), and the result must
-    -- parse cleanly (a body-changing edit, like optapply)
-    local before, after = M.preview(store, plan)
-    local bl = before and before[plan.file] and vim.split(before[plan.file], '\n', { plain = true })
-    for i, want in ipairs(plan.src_lines) do
-        if not bl or bl[plan.src_s0 + i] ~= want then
-            return nil, 'the source lines changed since planning — re-plan'
-        end
-    end
-    -- parse-clean on the result (a body-changing edit). Grammar from the file ext; if the
-    -- grammar isn't available the sound commute verdict + span-CAS still hold, so skip.
-    local text = after and after[plan.file]
-    local PARSE = { lua = 'lua', js = 'javascript', jsx = 'javascript' }
-    local lang = PARSE[(plan.file:match('%.(%w+)$') or ''):lower()]
-    if lang then
-        local ok, parser = pcall(vim.treesitter.get_string_parser, text or '', lang)
-        if not (ok and parser and not parser:parse()[1]:root():has_error()) then
-            return nil, 'the reordered result does not parse — refusing'
-        end
-    end
-    return txn.execute(store, plan, { fn = plan.fn, moved = plan.from_line .. '→' .. plan.to_line })
-end
+--- The module's face on the generic driver (CART-0982). The move-set precondition, the
+--- refspecs, the journal description and the SPAN-CAS are all declared on the plan now —
+--- the span check became `source-lines-unchanged`, the last verb-specific gate to move.
+function M.apply(store, plan) return require('cartograph.txn').apply(store, plan) end
 
 return M

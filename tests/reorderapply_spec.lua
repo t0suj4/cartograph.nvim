@@ -133,3 +133,45 @@ test('reorder-apply: the write is journaled and the result parses', function ()
     end
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE SPAN-CAS IS A DECLARED GUARD NOW (CART-0982) ───────────────────────
+--
+-- ★★★ `reorder.apply` HAD NO TEST DRIVING IT. The refusal census (CART-0990) measured
+-- the write path's 196 named promises against every line the suite executes, and three
+-- of reorder's had never fired; `plan_move` appears in no other spec's apply path. So
+-- the check that the moved lines are still what was planned — this verb's own span-CAS
+-- until now — was believed rather than driven.
+--
+-- It is `source-lines-unchanged` in planguards today, which is what lets `M.apply` be
+-- one delegating line to the generic driver. Two things must hold for that to be an
+-- improvement rather than a deletion: the guard must REACH ITS DATA (a guard that
+-- cannot is invisible in a green suite — NO_CLAIM passes), and it must BITE.
+test('reorder-apply: the captured source lines are checked, and the guard REACHES them', function ()
+    local root = proj(PURE)
+    local plan, why = ro.plan_move(store, fn_id('f'), 3, 2)
+    ok(plan, 'a free move is certified: ' .. tostring(why))
+    if not plan then return end
+    eq('source-lines-unchanged', plan.guards[2], 'the verb DECLARES the span-CAS')
+
+    local txn = require 'cartograph.txn'
+    local pg = require 'cartograph.planguards'
+    local before = txn.dryrun(store, plan)
+    ok(before, 'it previews')
+    local seen = {}
+    for _, r in ipairs(plan.guard_verdicts or {}) do seen[r.guard] = r.verdict end
+    -- ★ PASS, NEVER NO_CLAIM: `hoistclosure` carries `src_lines`/`src_s0` under the same
+    -- names with a DE-INDENTED meaning, so a guard that silently declined to look would
+    -- be indistinguishable from one checking the wrong contract.
+    eq(pg.PASS, seen['source-lines-unchanged'],
+        'the guard reached the captured lines rather than declining to claim')
+
+    -- ⚠ NEUTRALISE A VALUE, NOT A STRUCTURE: the plan stays well-formed and claims the
+    -- file said something it never said.
+    plan.src_lines[1] = plan.src_lines[1] .. ' -- DRIFTED'
+    local entry, bad = txn.apply(store, plan)
+    eq(nil, entry, 'the apply is refused')
+    ok(tostring(bad):find('source-lines-unchanged', 1, true)
+        and tostring(bad):find('changed since planning', 1, true),
+        'naming the guard and the drift: ' .. tostring(bad))
+    vim.fn.delete(root, 'rf')
+end)

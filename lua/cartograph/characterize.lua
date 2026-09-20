@@ -1362,6 +1362,10 @@ function M.plan(store, fn_id, opts)
             end
         end
     end
+    -- CART-0982: what `apply` used to restate inline
+    plan.refspecs = { { id = plan.fn_id, name = plan.fn, ref = plan.ref,
+        what = 'function' } }
+    plan.desc = { name = plan.path, from = plan.fn }
     return txn.protocol(plan, M.edits_for)
 end
 
@@ -2150,10 +2154,18 @@ end
 --- Write it, verified. The spec must LOAD (a syntax gate on our own output — an
 --- emitter that writes a file Lua cannot parse has failed at its one job) and the
 --- subject function must be unchanged since the plan was staged.
+--- ⚠⚠ NOT A PURE DELEGATE, AND DELIBERATELY SO (CART-0982). This verb keeps two things
+--- the generic driver cannot express:
+---  1. A COMPILE GATE, which is STRONGER than the declared `parses` guard: the spec is
+---     Lua this module GENERATED, and `loadstring` rejects what a tree-sitter parse
+---     accepts. Deleting it as a duplicate would trade a real check for a weaker one.
+---  2. IDEMPOTENCE (CART-0263): re-characterizing writes identical bytes, and a journal
+---     entry per no-op would fill :CartographUndo with steps that undo nothing. It
+---     returns `{ unchanged = true }` — a SUCCESS that is not a journal entry, which
+---     `txn.execute` has no shape for and which would now hit its generic
+---     "would change nothing" REFUSAL (CART-0982). tools/characterize.lua and
+---     runoracle_spec both depend on the benign answer, so the short-circuit stays here.
 function M.apply(store, plan)
-    local bad = txn.verify(store, plan,
-        { { id = plan.fn_id, name = plan.fn, ref = plan.ref, what = 'function' } })
-    if bad then return nil, bad end
     local text = table.concat(M.emit(plan), '\n') .. '\n'
     local chunk, lerr = loadstring(text, plan.path)
     if not chunk then
@@ -2169,8 +2181,7 @@ function M.apply(store, plan)
         return { unchanged = true, path = plan.path,
             desc = { name = plan.path, from = plan.fn } }
     end
-    return txn.execute(store, plan,
-        { name = plan.path, from = plan.fn })
+    return txn.apply(store, plan)
 end
 
 --- Every function a STAGED plan touches, characterized — the arc's first customer.

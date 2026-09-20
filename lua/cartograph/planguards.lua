@@ -349,6 +349,38 @@ M.GUARDS.synthesized = function (_, plan, _, after)
     return rows
 end
 
+--- THE CAPTURED SOURCE LINES ARE STILL THERE (CART-0982's remainder). `reorder` moves a
+--- statement range it read at plan time; if those lines changed since, the move is
+--- against text that no longer exists. It was `reorder.apply`'s own code, and it is the
+--- last verb-specific gate outside the plan.
+---
+--- ⚠⚠ `hoistclosure` HAS `src_lines` AND `src_s0` AND MUST NOT DECLARE THIS GUARD. Its
+--- lines are DE-INDENTED at plan time ("so it sits cleanly at module level"), so they are
+--- deliberately NOT what the file says and every comparison would fail. Two verbs, two
+--- fields with the same names and different meanings — the guard checks a CONTRACT, not
+--- a field name, and only a verb whose lines are verbatim may claim it.
+M.GUARDS['source-lines-unchanged'] = function (_, plan, before, _)
+    local rel = plan.file
+    if not rel or type(plan.src_lines) ~= 'table' or plan.src_s0 == nil then
+        return { { verdict = M.NO_CLAIM,
+            why = 'the plan captured no source lines to compare' } }
+    end
+    local text = before and before[rel]
+    if type(text) ~= 'string' then
+        return { { verdict = M.NO_CLAIM, file = rel,
+            why = 'no before-content was read for this file' } }
+    end
+    local lines = vim.split(text, '\n', { plain = true })
+    for i, want in ipairs(plan.src_lines) do
+        if lines[plan.src_s0 + i] ~= want then
+            return { { verdict = M.FAIL, file = rel,
+                why = ('the captured source line %d changed since planning — re-plan')
+                    :format(plan.src_s0 + i) } }
+        end
+    end
+    return { { verdict = M.PASS, file = rel } }
+end
+
 function M.run(store, plan, before, after)
     local rows = {}
     for _, name in ipairs((plan and plan.guards) or {}) do
