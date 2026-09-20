@@ -1104,3 +1104,116 @@ test('agentwrite: the merge planner takes NO `partial` — the law is the opposi
     end
     ok(has, 'while extract_family does — the asymmetry is the point, not an oversight')
 end)
+
+-- ── THE DESTINATION FOR A RENDERED EDIT (CART-0977) ─────────────────────────
+-- CART-0972 matched every finding surface against every planner's arguments, and one
+-- producer fit on no axis: `transplant` derives new SOURCE TEXT and the planners take a
+-- node, a node SET, or a container plus a member. None took bytes.
+--
+-- ⚠⚠ ITS GUARANTEE IS THE WEAKEST IN THE CATALOGUE, AND THE TESTS BELOW PIN THAT RATHER
+-- THAN HIDING IT. Every other write verb can re-check what it is about to write because
+-- it BUILT it. This one is handed bytes and verifies two things: the result parses, and
+-- the file has not moved since planning.
+local REPL = {
+    'local M = {}',
+    '',
+    '-- doubles a number',
+    'function M.dbl(x)',
+    '  return x * 2',
+    'end',
+    '',
+    'function M.keep(x) return x + 1 end',
+    'return M',
+}
+
+test('agentwrite: a rendered edit finally has a destination', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)   -- planning needs no write permission
+    local root = mkroot { ['r.lua'] = REPL }
+    ingest(root)
+    local r = call('txn_plan_replace', { node = idof('M.dbl'),
+        text = 'function M.dbl(x)\n  return x + x\nend' })
+    eq(true, r.ok, 'the replacement plans: '
+        .. ((type(r.refusal) == 'table' and r.refusal.reason) or ''))
+    ok(r.subject.plan and r.subject.plan ~= NUL, 'returning a plan handle for txn_preview')
+    eq(3, r.subject.replaced_lines, 'the definition was three lines')
+    eq(3, r.subject.new_lines)
+    -- PLANNING WRITES NOTHING, asserted off the disk like every other planner
+    eq(table.concat(REPL, '\n'), read(root, 'r.lua'),
+        'and the file is untouched until apply')
+end)
+
+test('agentwrite: the plan DECLARES what it did not verify, on every answer', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    ingest(mkroot { ['r.lua'] = REPL })
+    -- ★ VALID LUA THAT MEANS SOMETHING ELSE ENTIRELY. The verb accepts it — that is the
+    -- property, not a bug — and the envelope says so without the caller opening the plan.
+    local r = call('txn_plan_replace', { node = idof('M.dbl'),
+        text = 'function M.unrelated() return nil end' })
+    eq(true, r.ok, 'a replacement that redefines a DIFFERENT name still plans')
+    local said
+    for _, n in ipairs(r.notes or {}) do
+        if n.kind == 'unverified-payload' then said = n end
+    end
+    ok(said, 'and the envelope carries the standing declaration as a NOTE')
+    ok(said.why:find('NOTHING about whether', 1, true),
+        'which states what was not checked: ' .. said.why)
+    ok(said.why:find('M.dbl', 1, true), 'naming the definition it will overwrite')
+end)
+
+test('agentwrite: replace declares `parses` and nothing it cannot honour', function ()
+    -- ⚠ THE TRIPWIRE. `comment-inert` belongs to prose and `shape-preserved` to a
+    -- container whose shape was DERIVED; neither has a counterpart here, because
+    -- nothing about the payload was derived. A verb that declared one would be
+    -- claiming a check it cannot run — and txn refuses a plan declaring no guards at
+    -- all, so the empty list is not an option either.
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    ingest(mkroot { ['r.lua'] = REPL })
+    local rp = require 'cartograph.replace'
+    local plan = assert(rp.plan(store, { node = idof('M.dbl'), text = 'function M.dbl() end' }))
+    eq(1, #plan.guards, 'exactly one guard')
+    eq('parses', plan.guards[1])
+    ok(#plan.hazards >= 1, 'and the standing hazard rides on the plan itself')
+    ok(plan.hazards[1]:find('supplied, not derived', 1, true),
+        'saying the payload was not derived: ' .. plan.hazards[1])
+end)
+
+test('agentwrite: empty text and a missing subject REFUSE, by name', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    ingest(mkroot { ['r.lua'] = REPL })
+    local blank = call('txn_plan_replace', { node = idof('M.dbl'), text = '   \n  ' })
+    eq(false, blank.ok, 'whitespace is not a replacement')
+    ok((type(blank.refusal) == 'table' and blank.refusal.reason or ''):find('replacement text'),
+        'and it says so: ' .. vim.inspect(blank.refusal))
+    local gone = call('txn_plan_replace', { node = 'no::such@1', text = 'x = 1' })
+    eq(false, gone.ok, 'an unknown node refuses')
+end)
+
+test('agentwrite: the splice REPLACES — it does not swallow the blank line after', function ()
+    -- ⚠ FOUND BY A NEUTRALISATION, NOT BY READING, AND THE FIRST TEST I WROTE FOR IT
+    -- DID NOT DISCRIMINATE EITHER. `txn.edit_file`'s deletion path swallows one
+    -- trailing blank line so removals do not leave double blanks behind — correct for
+    -- a REMOVAL and wrong for a REPLACEMENT, which puts content back where the old
+    -- content was. replace.lua splices directly for that reason, the same way
+    -- cloneextract does.
+    -- ★ THE PREVIEW'S OWN COUNTS ARE THE DISCRIMINATOR. A three-line definition whose
+    -- body line changes is removed=1/added=1; swallow the blank after it and the
+    -- removal becomes 2. Asked of the accessor rather than guessed — the first version
+    -- of this test pattern-matched `vim.inspect(preview)` and passed either way.
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    ingest(mkroot { ['r.lua'] = REPL })
+    local p = call('txn_plan_replace', { node = idof('M.dbl'),
+        text = 'function M.dbl(x)\n  return x + x\nend' })
+    eq(true, p.ok, 'planned')
+    local pv = call('txn_preview', { plan = p.subject.plan })
+    eq(true, pv.ok, 'previewed: ' .. vim.inspect(pv.refusal))
+    local row
+    for _, r in ipairs(pv.result or {}) do if r.file == 'r.lua' then row = r end end
+    ok(row, 'the preview reports the edited file')
+    eq(1, row.removed, 'exactly the changed body line is removed — not it AND the blank')
+    eq(1, row.added, 'and exactly one line replaces it')
+end)

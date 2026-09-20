@@ -440,7 +440,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
-    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_preview',
+    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_plan_replace', 'txn_preview',
     -- the handoff: plan on a read-only host, apply on an armed one
     'txn_save', 'txn_load',
     'journal_list', 'journal_get',
@@ -1846,6 +1846,7 @@ local VERB_OF_FAMILY = {
     declare = 'txn_plan_declare', annotate = 'txn_plan_annotate',
     ['extract-family'] = 'txn_plan_extract_family',
     ['clone-merge'] = 'txn_plan_clonemerge',
+    replace = 'txn_plan_replace',
 }
 
 local PLAN_CAP = 16
@@ -2288,6 +2289,51 @@ local function v_txn_plan_clonemerge(store, args)
             removed = #(plan.removed or {}), rewrites = #(plan.rewrites or {}),
             touched = plan.touched, generation = plan.generation, previewed = false },
         result = rows, notes = notes,
+    }
+end
+
+--- ★★★ THE ONE PRODUCER THAT FIT NO PLANNER (CART-0977). CART-0972 matched every
+--- finding surface against every planner's arguments and one did not fit on any axis:
+--- `transplant` derives new SOURCE TEXT — the edit a→b applied to c, computed by the
+--- algebra and verified by the reader's own round-trip — and the planners take a node,
+--- a node SET, or a container plus a member. None takes bytes.
+---
+--- ⚠⚠ AND ITS GUARANTEE IS STRICTLY WEAKER THAN EVERY OTHER WRITE VERB'S, which is why
+--- the summary says so and every plan carries it as a hazard. The others can re-check
+--- what they are about to write because they BUILT it; this one is handed bytes. It
+--- verifies that the result parses and that the file has not moved since planning, and
+--- nothing about whether the new text defines the same name, keeps its arity, or
+--- relates to what it replaces. A plan swapping a function for an unrelated one parses
+--- perfectly and passes every gate.
+--- ⚠ NO `needs_calls`, and that is a claim rather than an oversight: this verb does not
+--- touch call sites and does not pretend to. A merge needs the call graph because it
+--- REWRITES callers; this one leaves them exactly as they were, which is also why it
+--- cannot tell you whether they still make sense.
+local function v_txn_plan_replace(store, args)
+    local n, bad = write_subject(store, args)
+    if not n then return bad end
+    local rp = require 'cartograph.replace'
+    local plan, why = rp.plan(store, { node = n.id, text = args.text })
+    if not plan then
+        return refuse('cannot-plan',
+            ('%s cannot be replaced: %s'):format(tostring(n.name), tostring(why)),
+            'the reason above is the verb\'s own; fix the premise it names and plan again',
+            { node = n.id })
+    end
+    local pid = stash_plan(store, plan, 'replace', { verb = VERB_OF_FAMILY['replace'], args = args })
+    -- THE STANDING DECLARATION RIDES AS A NOTE TOO, not only inside plan.hazards: a
+    -- caller reading the envelope must meet it without opening the plan.
+    local notes = { { kind = 'unverified-payload', premise = 'text was supplied, not derived',
+        why = ('the replacement text did not come from this graph, so the plan checks that %s still PARSES and that the file has not moved since planning — and NOTHING about whether the new text defines `%s`, keeps its arity, or relates to what it replaces')
+            :format(n.file, tostring(n.name)),
+        evidence = { replaced_lines = #(plan.old or {}), new_lines = #(plan.new or {}) } } }
+    return {
+        subject = { plan = pid, verb = plan.verb, node = noderow(store, n.id),
+            replaced_lines = #(plan.old or {}), new_lines = #(plan.new or {}),
+            touched = plan.touched, generation = plan.generation, previewed = false },
+        result = { { name = nn(n.name), file = nn(n.file),
+            role = ('%d line(s) replaced by %d'):format(#(plan.old or {}), #(plan.new or {})) } },
+        notes = notes,
     }
 end
 
@@ -3257,6 +3303,28 @@ M.VERBS = {
         absences = { 'absent' },
         args = ADDRESS,
         run = v_txn_plan_clonemerge,
+    },
+    txn_plan_replace = {
+        summary = 'PROPOSE swapping a definition\'s text for text YOU supply — the destination for a rendered edit (transplant). ⚠ ITS GUARANTEE IS THE WEAKEST OF THE WRITE VERBS: the text is not derived from this graph, so the plan checks only that the result PARSES and that the file has not moved. It does NOT check that the replacement defines the same name, keeps its arity, or relates to what it replaces',
+        subject = 'node',
+        tier_basis = 'observation',
+        -- ⚠ NO `needs_calls`: this verb does not touch call sites and does not pretend
+        -- to. The merge verb needs the call graph because it REWRITES callers; this one
+        -- leaves them exactly as they were — which is also why it cannot say whether
+        -- they still make sense afterwards.
+        -- never empty: the subject and the payload are both caller-supplied, and every
+        -- way of having nothing to replace is a REFUSAL (unknown node, no range, empty
+        -- text, a stale range past the end of the file)
+        absences = {},
+        args = (function ()
+            local a = {
+                { name = 'text', type = 'string', required = true,
+                    desc = 'the replacement source, exactly as it should read. Newlines separate lines; nothing is re-indented, because indentation is part of the text you are supplying' },
+            }
+            for _, x in ipairs(ADDRESS) do a[#a + 1] = x end
+            return a
+        end)(),
+        run = v_txn_plan_replace,
     },
     txn_plan_optimize = {
         summary = 'PROPOSE an optimizer rewrite inside one function (cse | localize | hoist | pre). Writes nothing: returns a plan handle for txn_preview, plus the per-site `declined` ledger',

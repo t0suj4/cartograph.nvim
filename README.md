@@ -3154,8 +3154,8 @@ tools/install-hooks.sh      # git config core.hooksPath .githooks
 
 `git commit --no-verify` bypasses it for a WIP checkpoint.
 
-<!-- @claim readme-agent-verbs: The agent surface serves 30 verbs. -->
-<!-- check: #require('cartograph.agent').ORDER == 30 -->
+<!-- @claim readme-agent-verbs: The agent surface serves 31 verbs. -->
+<!-- check: #require('cartograph.agent').ORDER == 31 -->
 
 ## Agent surface (headless, 29 verbs)
 

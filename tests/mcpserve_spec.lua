@@ -340,6 +340,13 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- data-flow witness and failed the STATEMENT-KIND gate — is a refusal, and
         -- pooling them would hide the only evidence that the witness is coarse.
         txn_plan_clonemerge = { args = { node = idof('M.caller') } },
+        -- ⚠ THE WEAKEST WRITE VERB IN THE CATALOGUE, driven here like every other:
+        -- it takes text it did not derive, so its plan checks only that the result
+        -- parses and that the file has not moved. The payload below is deliberately
+        -- VALID Lua that means something else entirely — which the verb accepts, and
+        -- which is exactly the property its summary and its standing hazard state.
+        txn_plan_replace = { args = { node = idof('M.caller'),
+            text = 'function M.caller() return 0 end' } },
         -- naming no container and no payload: a refusal reachable without
         -- touching a byte, and the one this verb gives most often in the wild —
         -- 70.6% of containers with two or more members share no shape at all
