@@ -5215,10 +5215,30 @@ function M.family_admissibility(fam, store, opts)
                 lift_why = ('members capture %d different sets — a helper has one'
                     .. ' signature'):format(n)
             else
-                -- every capturing member agrees; a capture-free sibling needs
-                -- nothing and rides along
+                -- ⚠⚠ A CAPTURE-FREE SIBLING CANNOT RIDE ALONG ONCE THERE IS SOMETHING
+                -- TO LIFT, and this comment used to say it could. A helper has ONE
+                -- signature: lifting `rename` gives it a parameter, and the
+                -- capture-free member's call site would have to pass a name it does
+                -- not have in scope. That is the SAME refusal as "members capture
+                -- different sets" — the empty set is a different set — and it did not
+                -- fire only because `sets` is filled from members with a NON-EMPTY
+                -- capture list.
+                -- ⇒ MEASURED over lua/cartograph at max_dist 3: 11 liftable families
+                -- are uniform and 1 is mixed (algebra/composition.lua:ren with
+                -- algebra/eau.lua:resolve, lifts={rename}). Small, and it would have
+                -- become a WRONG EDIT the moment an apply path trusted `liftable`.
+                -- ⚠ AND THE CAPTURE-FREE MEMBER IS NOT REFUSED OUTRIGHT — it hoists as
+                -- it stands (`capture_free`), which is a different verb. What it
+                -- cannot do is join a helper whose signature it cannot fill.
                 lifts = only
-                for _, rec in ipairs(nested) do liftable[#liftable + 1] = rec.i end
+                for _, rec in ipairs(nested) do
+                    if #(rec.captured or {}) > 0 then liftable[#liftable + 1] = rec.i end
+                end
+                if #liftable < #nested then
+                    lift_why = ('%d member(s) capture nothing, so they cannot pass the'
+                        .. ' lifted parameter(s) (%s) — a helper has one signature')
+                        :format(#nested - #liftable, table.concat(only, ', '))
+                end
             end
         end
     end

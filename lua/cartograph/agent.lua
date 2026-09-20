@@ -2168,6 +2168,10 @@ local function v_txn_plan_extract_family(store, args)
     -- existing file), passed through exactly as `txn_plan_moveset` passes its own.
     local plan, why = cx.plan_family(store, fam,
         { partial = args.partial and true or nil,
+          -- CART-0878: opt in to turning a nested member's captured enclosing
+          -- locals into helper parameters. Opt-IN because it changes the helper's
+          -- signature, which the analysis says is the caller's decision.
+          lift = args.lift and true or nil,
           dest = (args.dest ~= nil and args.dest ~= NUL and args.dest ~= '') and args.dest or nil })
     if not plan then
         -- ★ THE VERDICT RIDES WITH THE REFUSAL. "Cannot plan" plus a per-member
@@ -3278,6 +3282,8 @@ M.VERBS = {
             local a = {
                 { name = 'partial', type = 'boolean',
                     desc = 'extract the ADMISSIBLE subset when some members cannot be (default false: refuse and name them). Sound — a skipped member keeps its own body and nothing dangles — but incomplete' },
+                { name = 'lift', type = 'boolean',
+                    desc = 'a member NESTED in another function is inadmissible because its body reads that function\'s locals — pass true to turn those into PARAMETERS of the helper, which each call site then passes (the names are in scope there, because the call replaces the member\'s BODY and the member stays where it is). ⚠ It CHANGES THE HELPER\'S SIGNATURE, which is why it is opt-in; and a capture the member WRITES is never lifted, because a Lua parameter is by value and the write would update a copy' },
                 { name = 'dest', type = 'string',
                     desc = 'where the shared helper goes, project-relative, when the family spans MORE THAN ONE FILE — a same-file family needs none and ignores it. The path must not exist yet and must not escape the root; both are refused by name. Cross-file also requires the language to have module wiring in its spec: lua does, javascript does not, and that refusal says so' },
             }

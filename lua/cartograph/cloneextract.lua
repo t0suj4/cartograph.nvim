@@ -485,11 +485,41 @@ function M.plan_family(store, fam, opts)
     -- which members are we actually rewriting?
     local take = {}
     for _, i in ipairs(v.admissible) do take[#take + 1] = i end
+    -- ★★★ THE CAPTURE LIFT (CART-0878). A member nested in another function is
+    -- inadmissible because its body reads that function's locals — but those names
+    -- are in scope AT THE CALL SITE, because the replacement lands in the member's
+    -- BODY and the member itself stays where it is. So the capture becomes a
+    -- PARAMETER and each site passes its own. `family_admissibility` has computed
+    -- `liftable` and `lifts` since CART-0904; this is the apply half.
+    --
+    -- ⚠ OPT-IN, BECAUSE IT CHANGES THE HELPER'S SIGNATURE. The analysis says so in
+    -- its own comment — "extractable ONLY IF the captures are lifted, which changes
+    -- the signature, so they ride in `liftable`, not `admissible`, and the caller
+    -- decides". Folding them in silently would be this verb deciding.
+    -- ⚠ AND A TABLE CAPTURE SURVIVES BY REFERENCE, WHICH IS WHY THE WRITE REFUSAL
+    -- STILL BINDS. `line_cache[k] = v` mutates the table a parameter points at, so
+    -- lifting it preserves the effect; `n = n + 1` on a lifted SCALAR updates a copy
+    -- and is silently wrong. The analysis refuses that case (`lift_why` on a write
+    -- capture) and this path never sees it.
+    local lifted
+    if #take < 2 and opts.lift and (v.n_liftable or 0) >= 2 then
+        take = {}
+        for _, i in ipairs(v.liftable) do take[#take + 1] = i end
+        lifted = v.lifts or {}
+    end
     if #take < 2 then
-        if v.n_liftable > 0 then
-            return nil, ('%d member(s) need their captures lifted first (%s) — not'
-                .. ' supported yet'):format(v.n_liftable,
+        -- ⚠ DO NOT OFFER A FLAG THE CALLER ALREADY PASSED. With `lift` given and
+        -- fewer than two liftable members, "pass `lift`" is a remedy that cannot be
+        -- followed — the mirror of CART-0973, reintroduced by this very branch. When
+        -- the flag is set the reason is `lift_why` or the member count, never the flag.
+        if v.n_liftable > 0 and not opts.lift then
+            return nil, ('%d member(s) need their captures lifted (%s): pass `lift`'
+                .. ' to make them parameters of the helper, which each call site then'
+                .. ' passes'):format(v.n_liftable,
                 v.lifts and table.concat(v.lifts, ', ') or 'unknown')
+        end
+        if v.lift_why then
+            return nil, ('the captures cannot be lifted: %s'):format(v.lift_why)
         end
         return nil, ('only %d member(s) are extractable; a helper needs two')
             :format(#take)
@@ -555,8 +585,32 @@ function M.plan_family(store, fam, opts)
         for _, i in ipairs(take) do
             local m = fam.members[i]
             local mv = un.body_extractable(store, m.id)
+            -- ⚠⚠ THIS GATE WAS VACUOUS FOR EXACTLY THE MEMBERS THE LIFT ENABLES, and
+            -- the same early return caused it as caused the lost signature above:
+            -- `body_extractable` answers `{ ok = false, nested = true }` and never
+            -- reaches its read walk, so `mv.reads` is NIL and the loop below ran zero
+            -- times. A lifted cross-file plan therefore passed a gate that had asked
+            -- nothing — measured on CART-0878's own witness, whose helper body reads
+            -- `callrec` (a file-local `require` in both source files) and which would
+            -- have been written into a new module with `callrec` undefined. It parses.
+            -- ⇒ `expr.free` answers for ANY function, nested or not, so the lifted
+            -- path asks it directly.
+            local reads = mv.reads
+            if (reads == nil) and lifted then
+                local ef = require('cartograph.expr').free(store, m.id)
+                reads = ef and ef.reads or nil
+                -- the LIFTED names are about to become parameters, so they are not
+                -- free at the new home; anything else this body reads still has to
+                -- exist there.
+                if reads then
+                    local r2 = {}
+                    for r in pairs(reads) do r2[r] = true end
+                    for _, name in ipairs(lifted) do r2[name] = nil end
+                    reads = r2
+                end
+            end
             local loc = file_locals(store, m.file)
-            for r in pairs(mv.reads or {}) do
+            for r in pairs(reads or {}) do
                 if loc[r] then
                     return nil, ('%s reads file-local `%s` — it cannot move to a'
                         .. ' shared module'):format(m.name or '?', r)
@@ -653,8 +707,25 @@ function M.plan_family(store, fam, opts)
     do  -- the donor's own parameters, then one per hole
         local un = require 'cartograph.untangle'
         local dv = un.body_extractable(store, fam.members[donor_i].id)
-        for _, p in ipairs(dv.params or {}) do hparams[#hparams + 1] = p end
+        -- ⚠⚠ A NESTED MEMBER HAS NO `dv.params`, AND THE FIRST CUT OF THE LIFT LOST
+        -- THE HELPER'S OWN SIGNATURE BECAUSE OF IT. `body_extractable` returns
+        -- `{ ok = false, nested = true }` and nothing else the moment it finds an
+        -- enclosing function — it never reaches the parameter walk. So the lifted
+        -- path takes the DECLARED parameters off the node instead, and the preview
+        -- caught it: the helper came out `(p1, p2, data, line_cache)` with `c` free
+        -- in its body, which parses and is wrong.
+        -- ★ THE CALL SITE CAN PASS THEM because the replacement lands in the member's
+        -- BODY — `key_range(c, key)` keeps its own signature and its parameters are
+        -- in scope where the delegating call is written.
+        local dparams = dv.params
+        if (not dparams or #dparams == 0) and lifted then
+            dparams = (store.node(fam.members[donor_i].id) or {}).params
+        end
+        for _, p in ipairs(dparams or {}) do hparams[#hparams + 1] = p end
         for _, h in ipairs(tmpl.order) do hparams[#hparams + 1] = tmpl.params[h] end
+        -- the lifted captures come LAST, so an existing signature's positions are
+        -- unchanged and the diff reads as an append
+        for _, name in ipairs(lifted or {}) do hparams[#hparams + 1] = name end
     end
 
     -- the helper body: the donor's own text with each hole occurrence replaced
@@ -670,6 +741,9 @@ function M.plan_family(store, fam, opts)
         guards = { 'parses' },
         helper = hname, nparams = #tmpl.order, xfile = xfile, lang = lang,
         files = {}, hazards = hazards, partial = #take < v.n or nil,
+        -- CART-0878: which enclosing locals became parameters. Present only when the
+        -- caller opted in, so its absence is not "none were needed".
+        lifted = (lifted and #lifted > 0) and lifted or nil,
         members = {}, left = {},
     }
     for _, rec in ipairs(v.refused) do
@@ -718,7 +792,13 @@ function M.plan_family(store, fam, opts)
         local m = fam.members[i]
         local mv = un.body_extractable(store, m.id)
         local args = {}
-        for _, p in ipairs(mv.params or {}) do args[#args + 1] = p end
+        -- same reason as the helper's signature above: a nested member's own
+        -- parameters come off the node, and they are in scope at the call site
+        local mparams = mv.params
+        if (not mparams or #mparams == 0) and lifted then
+            mparams = (store.node(m.id) or {}).params
+        end
+        for _, p in ipairs(mparams or {}) do args[#args + 1] = p end
         -- ★ EACH MEMBER PASSES ITS OWN FILLING, read from ITS OWN source at the
         -- span the template recorded for it — never the donor's, and never
         -- another file's line array.
@@ -730,6 +810,11 @@ function M.plan_family(store, fam, opts)
             end
             args[#args + 1] = span_text(linesof[m.file], ext)
         end
+        -- ★ EACH SITE PASSES THE CAPTURE BY NAME, and the name is the same at every
+        -- site by construction: `family_admissibility` only sets `lifts` when every
+        -- capturing member agrees on the whole set, and a member capturing nothing is
+        -- excluded from `liftable` rather than asked to pass a name it lacks.
+        for _, name in ipairs(lifted or {}) do args[#args + 1] = name end
         table.insert(perfile[m.file], { from0b = spans[i].open, to0b = spans[i].close,
             new = { indent_of(linesof[m.file][spans[i].open + 1])
                 .. syn.ret(callee, table.concat(args, ', ')) } })

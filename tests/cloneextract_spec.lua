@@ -823,3 +823,194 @@ test('extract-helper: on a two-level destination only the OUTER selector is the 
         eq(nil, p2, 'so it is refused: ' .. tostring(why))
         vim.fn.delete(root, 'rf')
     end)
+
+-- ── THE CAPTURE LIFT (CART-0878) ────────────────────────────────────────────
+-- A member NESTED in another function is inadmissible because its body reads that
+-- function's locals. But those names are in scope AT THE CALL SITE — the replacement
+-- lands in the member's BODY and the member itself stays where it is — so the capture
+-- becomes a PARAMETER and each site passes its own. `family_admissibility` has computed
+-- `liftable`/`lifts` since CART-0904; this is the apply half, and it is OPT-IN because
+-- it changes the helper's signature.
+local LIFT_SRC = table.concat({
+    'local M = {}',
+    'function M.alpha(items)',
+    '  local cfg = { pad = 1 }',
+    '  local function pick(list)',
+    '    local out = {}',
+    '    for _, it in ipairs(list) do',
+    '      if #it > 2 then out[#out + 1] = it .. cfg.pad end',
+    '    end',
+    '    table.sort(out)',
+    '    return out',
+    '  end',
+    '  return pick(items)',
+    'end',
+    'function M.beta(items)',
+    '  local cfg = { pad = 9 }',
+    '  local function choose(list)',
+    '    local out = {}',
+    '    for _, it in ipairs(list) do',
+    '      if #it > 5 then out[#out + 1] = it .. cfg.pad end',
+    '    end',
+    '    table.sort(out)',
+    '    return out',
+    '  end',
+    '  return choose(items)',
+    'end',
+    'return M',
+}, '\n') .. '\n'
+
+local function fam3(name)
+    return clones.family_of(store, fn_id(name), { max_dist = 3 })
+end
+
+test('extract-helper: a captured enclosing local becomes a PARAMETER each site passes', function ()
+    local root = proj { ['m.lua'] = LIFT_SRC }
+    local fam = fam3('pick')
+    local v = clones.family_admissibility(fam, store)
+    eq(0, v.n_admissible, 'neither member is admissible as it stands — both are nested')
+    eq(2, v.n_liftable, 'but both are LIFTABLE')
+    eq('cfg', table.concat(v.lifts or {}, ','), 'and they agree on what to lift')
+
+    local plan = assert(cx.plan_family(store, fam, { lift = true }))
+    eq('cfg', table.concat(plan.lifted or {}, ','), 'the plan records the lift')
+    local _, after = cx.preview(store, plan)
+    local text = after['m.lua']
+    -- the helper takes the member's OWN parameter, the template hole, then the capture
+    ok(text:find('local function %w+_extracted%(list, p1, cfg%)'),
+        'the signature is (own params, holes, lifted captures): ' .. text:sub(1, 400))
+    -- ★ EACH SITE PASSES ITS OWN `cfg` — the point of the lift. Two enclosing
+    -- functions, two different tables, one helper.
+    local n = select(2, text:gsub('_extracted%(list, %d+, cfg%)', ''))
+    eq(2, n, 'both call sites pass their own cfg: ' .. text)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: without `lift` the refusal NAMES the flag, not "not supported"', function ()
+    -- ⚠ CART-0973's lesson on the same surface: a remedy a caller cannot follow is
+    -- the mirror of a refusal it cannot reach. This used to read "not supported yet".
+    local root = proj { ['m.lua'] = LIFT_SRC }
+    local plan, why = cx.plan_family(store, fam3('pick'), {})
+    eq(nil, plan)
+    ok(tostring(why):find('`lift`', 1, true), 'the refusal names the argument: ' .. tostring(why))
+    ok(tostring(why):find('cfg', 1, true), 'and what would be lifted: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠⚠ THE SOUNDNESS LINE. A Lua parameter is BY VALUE, so lifting a capture the body
+-- ASSIGNS would update a copy and silently drop the write. A TABLE capture is
+-- different — `cfg.pad = 1` mutates through the reference and survives — which is why
+-- the gate is about assigning the NAME, not about touching the value.
+test('extract-helper: a capture the body WRITES is never lifted', function ()
+    local WRITES = LIFT_SRC
+        :gsub('if #it > 2 then out%[#out %+ 1%] = it %.%. cfg%.pad end',
+              'cfg = cfg + 1\n      if #it > 2 then out[#out + 1] = it .. cfg end')
+        :gsub('if #it > 5 then out%[#out %+ 1%] = it %.%. cfg%.pad end',
+              'cfg = cfg + 1\n      if #it > 5 then out[#out + 1] = it .. cfg end')
+    local root = proj { ['m.lua'] = WRITES }
+    local fam = fam3('pick')
+    if fam and #(fam.members or {}) >= 2 then
+        local v = clones.family_admissibility(fam, store)
+        eq(0, v.n_liftable or 0, 'a write capture is not liftable')
+        ok(tostring(v.lift_why):find('WRITES', 1, true),
+            'and says why: ' .. tostring(v.lift_why))
+        local plan, why = cx.plan_family(store, fam, { lift = true })
+        eq(nil, plan, 'so `lift` does not force it')
+        ok(tostring(why):find('cannot be lifted', 1, true) or tostring(why):find('extractable', 1, true),
+            'refusing by name: ' .. tostring(why))
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: a lifted member\'s FILE-LOCAL reads still block a cross-file move', function ()
+    -- ⚠⚠ THIS GATE WAS VACUOUS FOR EXACTLY THE MEMBERS THE LIFT ENABLES, and the
+    -- preview is what caught it. `body_extractable` returns `{ok=false, nested=true}`
+    -- and never reaches its read walk, so `mv.reads` was NIL for every lifted member
+    -- and the free-read loop ran zero times. A lifted cross-file plan therefore passed
+    -- a gate that had asked nothing — the witness (CART-0878's own `key_range`) would
+    -- have been written into a new module reading `callrec`, a file-local `require`.
+    -- It parses.
+    local body = function (nm, fn, lit)
+        return 'local helper = require "somewhere"\nlocal M = {}\n'
+            .. ('function M.%s(items)\n  local cfg = { pad = 1 }\n'):format(nm)
+            .. ('  local function %s(list)\n    local out = {}\n'):format(fn)
+            .. '    for _, it in ipairs(list) do\n'
+            .. ('      if #it > %s then out[#out + 1] = helper.f(it) .. cfg.pad end\n'):format(lit)
+            .. '    end\n    table.sort(out)\n    return out\n  end\n'
+            .. ('  return %s(items)\nend\nreturn M\n'):format(fn)
+    end
+    local root = proj { ['one.lua'] = body('alpha', 'pick', 2),
+                        ['two.lua'] = body('beta', 'choose', 5) }
+    local fam = fam3('pick')
+    if fam and #(fam.members or {}) >= 2 then
+        local v = clones.family_admissibility(fam, store)
+        eq(2, v.n_liftable or 0, 'both are liftable')
+        local plan, why = cx.plan_family(store, fam, { lift = true, dest = 'shared/pk.lua' })
+        eq(nil, plan, 'but the helper body reads a file-local, so it cannot move')
+        ok(tostring(why):find('file%-local'),
+            'and the gate says which: ' .. tostring(why))
+        ok(tostring(why):find('helper', 1, true), 'naming it: ' .. tostring(why))
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠⚠ A CAPTURE-FREE SIBLING CANNOT RIDE ALONG ONCE THERE IS SOMETHING TO LIFT, and the
+-- analysis comment used to say it could. A helper has ONE signature: lifting `cfg` gives
+-- it a parameter, and the capture-free member's call site would have to pass a name it
+-- does not have. That is the SAME refusal as "members capture different sets" — the
+-- empty set is a different set — and it did not fire only because the set table is
+-- filled from members with a NON-EMPTY capture list.
+-- ★ MEASURED before the fix: 11 liftable families on lua/cartograph are uniform and 1
+-- is mixed (algebra/composition.lua:ren with algebra/eau.lua:resolve, lifts={rename}).
+-- Small, and it would have become a WRONG EDIT the moment the apply path trusted
+-- `liftable` — which is what this commit adds.
+local MIXED_SRC = table.concat({
+    'local M = {}',
+    'function M.alpha(items)',
+    '  local cfg = { pad = 1 }',
+    '  local function pick(list)',
+    '    local out = {}',
+    '    for _, it in ipairs(list) do',
+    '      if #it > 2 then out[#out + 1] = it .. cfg.pad end',
+    '    end',
+    '    table.sort(out)',
+    '    return out',
+    '  end',
+    '  return pick(items)',
+    'end',
+    'function M.beta(items)',
+    '  local function choose(list)',
+    '    local out = {}',
+    '    for _, it in ipairs(list) do',
+    '      if #it > 5 then out[#out + 1] = it .. 7 end',
+    '    end',
+    '    table.sort(out)',
+    '    return out',
+    '  end',
+    '  return choose(items)',
+    'end',
+    'return M',
+}, '\n') .. '\n'
+
+test('extract-helper: a CAPTURE-FREE member is not asked to pass a name it lacks', function ()
+    local root = proj { ['m.lua'] = MIXED_SRC }
+    local fam = clones.family_of(store, fn_id('pick'),
+        { max_dist = 4, min_rows = 3, min_shared = 2 })
+    ok(fam and #(fam.members or {}) == 2, 'the two nested members are one family')
+    local v = clones.family_admissibility(fam, store)
+    eq('cfg', table.concat(v.lifts or {}, ','), 'one member captures `cfg`')
+    -- ★ ONE, not two: the capture-free sibling is excluded from `liftable`
+    eq(1, v.n_liftable, 'only the CAPTURING member is liftable')
+    ok(tostring(v.lift_why):find('capture nothing', 1, true),
+        'and the reason names the asymmetry: ' .. tostring(v.lift_why))
+    -- so the lift cannot proceed: a helper needs two members
+    local plan, why = cx.plan_family(store, fam, { lift = true })
+    eq(nil, plan)
+    ok(tostring(why):find('capture nothing', 1, true),
+        'the refusal carries it through: ' .. tostring(why))
+    -- ⚠ AND IT DOES NOT OFFER A FLAG THE CALLER ALREADY PASSED — the mirror of
+    -- CART-0973, which this branch reintroduced until the message was split.
+    ok(not tostring(why):find('pass `lift`', 1, true),
+        'no unfollowable remedy: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
