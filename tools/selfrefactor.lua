@@ -103,6 +103,7 @@ if vim.v.shell_error ~= 0 then die('copy', cp) end
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local clones = require 'cartograph.clones'
+local refresh = require 'cartograph.refresh'
 local foldrank = require 'cartograph.foldrank'
 local ce = require 'cartograph.cloneextract'
 local txn = require 'cartograph.txn'
@@ -117,6 +118,39 @@ local function reload()
     local data = ts.extract(LUA)
     data.root = data.root or LUA
     store.ingest(data)
+end
+
+--- ★★★ RE-READ ONLY WHAT THE FOLD TOUCHED (CART-1003). `refresh.files` RE-EXTRACTS the
+--- named files FROM DISK and splices the result in, so the rule above is kept — the bytes
+--- that changed are read fresh by the same parser. What it does NOT redo is the other 230
+--- files, which the fold did not touch.
+---
+--- ⚠ AND THE EQUIVALENCE WAS MEASURED, NOT ARGUED, because this is a guard's doctrine and
+--- "it should be the same" is how one rots. Against the work tree of a real round (exactly
+--- ONE file differing from ours, verified before the comparison):
+---     COLD post-fold read   55 near-clone pairs   30.5 s
+---     SPLICED              55 near-clone pairs   13.3 s ingest + 0.84 s splice
+---     0 pairs only cold, 0 only spliced — the same set
+--- ⚠ THE KEY IS (name@file, name@file), which collapses pairs that share names at
+--- different lines — so the comparison is over 55 distinct name-pairs, not the loop's own
+--- 60. Both sides use the same key, so the differential is sound; it is coarser than the
+--- loop's count and saying so is cheaper than implying otherwise.
+--- ⚠⚠ MY FIRST RUN OF THIS COMPARISON USED A WORK TREE FROM AN EARLIER SESSION — 13 files
+--- different, not one — and reported 55 vs 52 with 7 disagreements. That was the fixture,
+--- not the splice: a splice told about ONE file cannot reproduce THIRTEEN. Checking
+--- `diff -rq` BEFORE the comparison is what separated them.
+---
+--- ⚠ FALLS BACK TO THE FULL READ, BY NAME. `refresh.files` refuses on a partial
+--- extraction, a dump-based graph or staged changes — states this loop can reach — and a
+--- silent fallback would make the cost unpredictable without saying why.
+--- @param rels table the project-relative paths the plan wrote
+local function reload_touched(rels)
+    if not rels or #rels == 0 then return reload(), 'no files named' end
+    local ok, why = refresh.files(rels)
+    if not ok then
+        print(('  (refresh refused: %s — falling back to a full read)'):format(tostring(why)))
+        return reload()
+    end
 end
 
 local VENDORED = 'cartograph/algebra/'
@@ -191,7 +225,12 @@ for round = 1, want_n do
     log[#log + 1] = { key = want_gone, net = pick.net, helper = plan.helper }
 
     -- ── the CLAIM must hold everywhere it was made ──────────────────────────
-    reload()
+    -- ⚠ ONLY THE FILES THE PLAN WROTE. `entry.files` is what the transaction recorded, so
+    -- this cannot drift from what was actually written the way a recomputed list could.
+    local touched = {}
+    for rel in pairs((entry or {}).files or {}) do touched[#touched + 1] = rel end
+    table.sort(touched)
+    reload_touched(touched)
     local permitted = { [tostring(plan.helper)] = true }
     for _, side in ipairs({ plan.a, plan.b }) do
         if side and side.name then permitted[side.name] = true end
