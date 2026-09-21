@@ -569,12 +569,26 @@ end)
 test('extract-family: an inadmissible member refuses, and opts.partial takes the rest', function ()
     if not ready('lua') then return skip 'no lua parser' end
     need_algebra()
+    -- ★★★ EVERY BODY READS `bias`, AND ONLY pick3 CAPTURES IT (CART-0997). The bodies
+    -- are TEXTUALLY IDENTICAL but for the `K<n>` leaf, so the family is unchanged; what
+    -- differs is where `bias` RESOLVES — a global for pick1/pick2 at module scope, and
+    -- `wrap`'s own local for pick3.
+    -- ⚠ IT HAD TO BE ADDED. This fixture used to rely on NESTING ALONE making pick3
+    -- inadmissible, because `body_extractable` refused every nested function on "may
+    -- capture enclosing upvalues" without asking. It now asks, pick3 captured nothing,
+    -- the family stopped being mixed, and this test SKIPPED ITSELF with "fixture did not
+    -- produce a mixed family". ★ It said so rather than passing — which is the only
+    -- reason the change was caught in the same run.
+    -- ⚠⚠ AND THE FIRST REPAIR WAS WRONG IN THE SAME WAY, one step later: giving pick3
+    -- alone `local acc = bias` against the others' `local acc = 0` made it capture AND
+    -- dropped it out of the near-clone family, so the test skipped for a NEW reason.
+    -- Holding the text identical is what isolates the property under test.
     local function body(n, indent)
         local i = indent and '  ' or ''
         return ([[
 %slocal function pick%s(node)
 %s  if not node then return nil end
-%s  local acc = 0
+%s  local acc = bias
 %s  local seen = {}
 %s  if node.t == 'K%s' then return node end
 %s  for _, c in ipairs(node.kids) do
@@ -585,9 +599,9 @@ test('extract-family: an inadmissible member refuses, and opts.partial takes the
 %send
 ]]):format(i, n, i, i, i, i, n, i, i, n, i, i, i, i)
     end
-    -- pick3 is NESTED inside `wrap`, so it is inadmissible; 1 and 2 are not
     local root = proj { ['m.lua'] = 'local M = {}\n\n' .. body(1) .. '\n' .. body(2)
-        .. '\nlocal function wrap()\n' .. body(3, true) .. '  return pick3\nend\n\nreturn M\n' }
+        .. '\nlocal function wrap()\n  local bias = 0\n' .. body(3, true)
+        .. '  return pick3\nend\n\nreturn M\n' }
     local fam = family_of_fixture()
     if not fam then skip 'fixture yielded no family' end
     local clones = require 'cartograph.clones'

@@ -921,12 +921,65 @@ function M.body_extractable(store, fn_id)
     if node.kind ~= 'function' and node.kind ~= 'method' then
         return { ok = false, reason = 'not a function' }
     end
-    -- (a) nesting: another function in the same file strictly enclosing this one
+    -- (a) nesting. ★★★ IT USED TO REFUSE HERE ON THE SYNTAX ALONE (CART-0997): "is
+    -- anything wrapped around me" — never asking whether the body reads a name the
+    -- enclosing definition binds. MEASURED on lua/cartograph: 1388 functions refused
+    -- that way, and 436 of them — 31.4% — capture NOTHING: 415 become extractable here
+    -- and 21 are caught by the self-recursion check below, which the early return had
+    -- been skipping. The docstring above already
+    -- states the real property ("its free reads are module/global names a same-scope
+    -- helper also sees"), and a capture-free nested function has exactly it.
+    --
+    -- ⚠ THE ANSWER IS NOT COMPUTED HERE. `hoistclosure` has had it since it shipped —
+    -- it is the inverse verb, and its whole gate is "captures nothing" — so this asks
+    -- rather than growing a second implementation of the same walk, which is the
+    -- two-lists defect three of this tree's bugs already were. `M.captures` was split
+    -- out of its planner for this call.
+    --
+    -- ⚠⚠ AND THE EARLY RETURN WAS SKIPPING (b) AND (c). A nested function never reached
+    -- the vararg or self-recursion checks, so admitting one here without falling through
+    -- would trade a conservative refusal for an unsound admission. It falls through.
+    --
+    -- ⚠ RECURSION STAYS REFUSED EVEN THOUGH THE HOIST ALLOWS IT. `hoistclosure` may keep
+    -- a self-call because the NAME travels with the closure; a helper is given a FRESH
+    -- name, so the same call would resolve to something else. Two verbs, two answers,
+    -- and inheriting the hoist's would be wrong here.
+    local nested = false
     for _, m in ipairs(store.data.nodes) do
         if (m.kind == 'function' or m.kind == 'method') and m.id ~= fn_id
             and m.file == node.file and range_contains(m.range, node.range) then
+            nested = true
+            break
+        end
+    end
+    if nested then
+        local hc = require 'cartograph.hoistclosure'
+        local c = hc.captures(store, fn_id)
+        -- ⚠ NO FACTS MEANS NO LICENCE. If the capture analysis cannot answer, the old
+        -- refusal stands — the conservative direction is the only safe one for a gate
+        -- a write verb consults.
+        -- ⚠⚠ AND ONE OF ITS `nil` ANSWERS IS A DISAGREEMENT WITH THIS VERY LOOP:
+        -- `hc.captures` declines with "already at module scope" when IT finds no
+        -- enclosing function. That cannot fire today only because `range_contains` here
+        -- and `contains` there are byte-identical copies of one predicate — which is the
+        -- two-lists defect, not a guarantee (CART-0998). The fallback is written to
+        -- survive the day they drift, and its live population is a nested function with
+        -- no analyzable body.
+        if not c then
             return { ok = false, nested = true,
                 reason = 'nested in another function (may capture enclosing upvalues)' }
+        end
+        if c.writes then
+            return { ok = false, nested = true, captured = { c.writes }, writes = c.writes,
+                reason = ('nested, and assigns the enclosing local `%s` (or shadows it)')
+                    :format(c.writes) }
+        end
+        if c.captured and c.captured[1] then
+            -- ★ NAME THEM. "may capture" told a caller nothing it could act on; the set
+            -- is what a lift would have to turn into parameters.
+            return { ok = false, nested = true, captured = c.captured,
+                reason = ('nested, and captures %d enclosing local(s): %s')
+                    :format(#c.captured, table.concat(c.captured, ', ')) }
         end
     end
     local expr = require 'cartograph.expr'
@@ -952,12 +1005,18 @@ function M.body_extractable(store, fn_id)
             scan(e.cond)
         end
     end
+    -- ⚠ `nested` RIDES ON THESE TOO. Before CART-0997 a nested function never reached
+    -- them, so every nested refusal carried the flag; now a capture-free one falls
+    -- through and may be refused here instead. MEASURED: 21 of the 436 capture-free ones
+    -- land on the recursion check and none on vararg — these
+    -- two — a strictly better reason than "may capture", and dropping the flag on the
+    -- way would silently stop `family_admissibility` asking what they capture.
     if vararg then
-        return { ok = false, vararg = true,
+        return { ok = false, vararg = true, nested = nested or nil,
             reason = 'body uses vararg ... (a helper would need it forwarded)' }
     end
     if recursive then
-        return { ok = false, recursive = true,
+        return { ok = false, recursive = true, nested = nested or nil,
             reason = 'body is self-recursive (the helper name would differ)' }
     end
     -- FREE READS = names used in the body that are neither params nor defined inside it.
@@ -975,7 +1034,12 @@ function M.body_extractable(store, fn_id)
             if not pset[u] and not dset[u] then reads[u] = true end
         end
     end
-    return { ok = true, params = eo.fl.params or {}, method = node.kind == 'method', reads = reads }
+    -- ⚠ `nested` RIDES ON THE OK ANSWER TOO. `family_admissibility` keys its capture
+    -- reporting off `v.nested`, and a capture-free nested member that arrived with the
+    -- flag cleared would look like a top-level one — losing the very distinction this
+    -- change exists to draw.
+    return { ok = true, params = eo.fl.params or {}, method = node.kind == 'method',
+        reads = reads, nested = nested or nil }
 end
 
 --- The lens surface (:CartographExtractBlocks): the focused fn's control blocks as

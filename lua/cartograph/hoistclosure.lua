@@ -44,13 +44,65 @@ local function body_facts(store, id, skip)
     return require('cartograph.expr').free(store, id, { skip = skip })
 end
 
---- Plan to hoist the nested closure `closure_id` to module scope, or (nil, reason).
-function M.plan(store, closure_id)
+--- ★★★ THE ENCLOSING FUNCTION'S FACTS, MEMOISED (CART-0997). `M.captures` asks
+--- `expr.free` of every function that CONTAINS the closure, and those answers depend on
+--- the enclosing function alone — so a big function holding twenty closures recomputed
+--- the same walk twenty times. MEASURED before this existed: a whole-tree
+--- `body_extractable` sweep went 15.2s → 49.4s (3.25×) once nested functions stopped
+--- returning early, and this is where the time went.
+---
+--- ⚠ KEYED ON `store.data` IDENTITY AS WELL AS THE GENERATION, deliberately. The
+--- generation bumps on ingest, but a BAND SWAP replaces `store.data` wholesale — and a
+--- memo that survived one would answer about the other band's tree. `templates.lua`
+--- decision 3 records the same hazard from the other side: a cache must not outlive a
+--- band swap, a stored CLAIM must. This is a cache.
+--- ⚠ AND IT IS A SINGLE-SLOT MEMO, NOT A GROWING MAP OF EVERY GENERATION: the previous
+--- band's entries are dropped, not accumulated, so nothing here grows without bound.
+local encl_memo = { data = nil, gen = nil, by_id = {} }
+local function encl_facts(store, e)
+    local gen = store.generation or 0
+    if encl_memo.data ~= store.data or encl_memo.gen ~= gen then
+        encl_memo = { data = store.data, gen = gen, by_id = {} }
+    end
+    local hit = encl_memo.by_id[e.id]
+    if hit ~= nil then return hit or nil end
+    local inner = {}
+    for _, n2 in ipairs(store.data.nodes) do
+        if (n2.kind == 'function' or n2.kind == 'method') and n2.id ~= e.id
+            and n2.file == e.file and contains(e.range, n2.range) then
+            inner[#inner + 1] = n2.range
+        end
+    end
+    local f = body_facts(store, e.id, inner)
+    encl_memo.by_id[e.id] = f or false
+    return f
+end
+
+--- ★★★ WHAT A NESTED FUNCTION ACTUALLY CAPTURES (CART-0997) — AS FACTS, NOT A REFUSAL.
+--- `M.plan` has computed this since it shipped and has only ever answered "no" with it.
+--- `untangle.body_extractable` needed the same answer, had no way to ask, and so refused
+--- EVERY nested function on "may capture enclosing upvalues". MEASURED on lua/cartograph:
+--- 1388 functions are refused that way and 436 of them — 31.4% — capture nothing at all.
+--- ⚠⚠ THE FIGURE I FIRST PUBLISHED WAS 178, AND IT WAS THE WRONG ACCESSOR'S ANSWER: I
+--- counted `M.plan(...) ~= nil`, which is "fully HOISTABLE" and also folds in the
+--- name-collision check, the whole-line requirement and the `.lua` gate. "Captures
+--- nothing" is strictly weaker and is the property this caller needs. Third time in one
+--- session that a number turned out to be a fact about my accessor.
+---
+--- ⚠ THE ANALYSIS IS LANGUAGE-AGNOSTIC AND THE HOIST IS NOT. `expr.free` answers off the
+--- flow layer for any language; `M.plan`'s `.lua` gate is about the SYNTAX IT EMITS. So
+--- this is callable for JS while the hoist verb is not, and folding the two together
+--- would have made a real capability lua-only for a reason about text.
+---
+--- ⚠ IT REPORTS `vararg` AND `writes` RATHER THAN REFUSING ON THEM. Both are reasons a
+--- HOIST must decline; whether they bar some OTHER verb is that verb's question. This is
+--- the same split this module's header draws between the sound subset and the facts.
+--- @return table|nil facts { encl, anchor, short, self, vararg, writes, captured }
+--- @return string|nil why
+function M.captures(store, closure_id)
     local node = store.node and store.node(closure_id)
     if not node then return nil, 'no such function' end
     if node.kind ~= 'function' and node.kind ~= 'method' then return nil, 'not a function' end
-    if not node.file:match('%.lua$') then return nil, 'only Lua is supported for now' end
-
     -- enclosing functions (same file, strictly containing the closure)
     local encl = {}
     for _, n in ipairs(store.data.nodes) do
@@ -67,21 +119,13 @@ function M.plan(store, closure_id)
     local short = (node.name or ''):match('[%w_]+$') or node.name
     local self = body_facts(store, closure_id)
     if not self then return nil, 'no analyzable body' end
-    if self.vararg then return nil, 'the closure uses vararg `...` from its enclosing scope' end
 
     -- CAPTURE gate: no free read may be a local/param of ANY enclosing function
     local encl_locals = {}
     -- the ranges of EVERY function nested inside this enclosing one: their
     -- declarations are theirs, not the parent's
     for _, e in ipairs(encl) do
-        local inner = {}
-        for _, n2 in ipairs(store.data.nodes) do
-            if (n2.kind == 'function' or n2.kind == 'method') and n2.id ~= e.id
-                and n2.file == e.file and contains(e.range, n2.range) then
-                inner[#inner + 1] = n2.range
-            end
-        end
-        local f = body_facts(store, e.id, inner)
+        local f = encl_facts(store, e)
         if f then
             for k in pairs(f.params) do encl_locals[k] = true end
             -- ★★★ A LOCAL BOUND *AFTER* THIS CLOSURE IS NOT IN ITS SCOPE (CART-0979).
@@ -143,12 +187,15 @@ function M.plan(store, closure_id)
     -- `MF_WRITE`, but no accessor reaches it from here. Refusing BOTH
     -- over-refuses a shadow and never under-refuses a write, which is the only
     -- safe direction for a verb that edits code.
+    -- ⚠ REPORTED, NOT REFUSED, SINCE CART-0997. The refusal belongs to `M.plan`, because
+    -- only the WRITE VERB has an opinion about it — an analysis that refuses cannot be
+    -- asked "what does this closure capture" by anything that is not about to hoist.
+    -- ⚠ AND THE NAME IS THE SMALLEST, NOT `pairs`' FIRST: this used to return inside the
+    -- loop, so the name it reported was chosen by hash order. The same argument the
+    -- `captured` list below already makes, one gate earlier.
+    local writes
     for d in pairs(self.defs) do
-        if d ~= short and encl_locals[d] then
-            return nil, ('assigns enclosing local `%s` (or shadows it) — hoisting'
-                .. ' would write a different variable'):format(d),
-                { writes = d }
-        end
+        if d ~= short and encl_locals[d] and (writes == nil or d < writes) then writes = d end
     end
     -- ★★★ THE WHOLE SET, NOT AN ARBITRARY ELEMENT. `reads` is a SET, so
     -- returning on the first match reports one captured name chosen by hash
@@ -161,18 +208,35 @@ function M.plan(store, closure_id)
         if r ~= short and encl_locals[r] then captured[#captured + 1] = r end
     end
     table.sort(captured)
+    return { encl = encl, anchor = anchor, short = short, self = self,
+        vararg = self.vararg and true or false, writes = writes, captured = captured }
+end
 
-    for _, r in ipairs(captured) do
-        if true then
-            -- ⚠ THE NAME RIDES AS STRUCTURE, NOT ONLY IN THE MESSAGE. A caller
-            -- that needs to know WHICH local is captured — `clones`, deciding
-            -- whether a family's members all capture the same one — would
-            -- otherwise have to parse a string we formatted, which is the
-            -- pattern CART-0746 cost a day to. Extra returns are ignored by
-            -- every existing caller.
-            return nil, ('captures enclosing local `%s` — parameterize it first (extract-helper)'):format(r),
-                { captures = r, captured = captured }
-        end
+--- Plan to hoist the nested closure `closure_id` to module scope, or (nil, reason).
+function M.plan(store, closure_id)
+    local node = store.node and store.node(closure_id)
+    if not node then return nil, 'no such function' end
+    if node.kind ~= 'function' and node.kind ~= 'method' then return nil, 'not a function' end
+    if not node.file:match('%.lua$') then return nil, 'only Lua is supported for now' end
+    -- ⚠ THE ANALYSIS IS `M.captures`, AND THE REFUSALS BELOW ARE THIS VERB'S. Each
+    -- message is unchanged, because 17 specs assert them and a refactoring that moves a
+    -- sentence is a refactoring nobody can review.
+    local c, cwhy = M.captures(store, closure_id)
+    if not c then return nil, cwhy end
+    local encl, anchor, short, self, captured = c.encl, c.anchor, c.short, c.self, c.captured
+    if c.vararg then return nil, 'the closure uses vararg `...` from its enclosing scope' end
+    if c.writes then
+        return nil, ('assigns enclosing local `%s` (or shadows it) — hoisting'
+            .. ' would write a different variable'):format(c.writes),
+            { writes = c.writes }
+    end
+    -- ⚠ THE NAME RIDES AS STRUCTURE, NOT ONLY IN THE MESSAGE. A caller that needs to know
+    -- WHICH local is captured — `clones`, deciding whether a family's members all capture
+    -- the same one — would otherwise have to parse a string we formatted, which is the
+    -- pattern CART-0746 cost a day to. Extra returns are ignored by every existing caller.
+    if captured[1] then
+        return nil, ('captures enclosing local `%s` — parameterize it first (extract-helper)'):format(captured[1]),
+            { captures = captured[1], captured = captured }
     end
 
     -- COLLISION: a module-level def already named `short` (not inside any function)
