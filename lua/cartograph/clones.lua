@@ -1957,12 +1957,27 @@ function M.analyze_pair(pair, store)
             local f = fbykey[key]
             if not f then
                 f = { why = h.why, xn = h.xn, yn = h.yn, deps_a = orda, deps_b = ordb,
-                    sites = {} }
+                    sites = {}, ranges_a = {}, ranges_b = {} }
                 fbykey[key] = f; fparams[#fparams + 1] = f
             end
             -- the ARGUMENTS at this site: with the de Bruijn key the locals may differ
             -- between sites, and that is the merge working, not a collision
             f.sites[#f.sites + 1] = { a = orda, b = ordb }
+            -- ★★★ AND THE SPAN AT THIS SITE, WITHOUT WHICH THE MERGE IS UNSOUND TO
+            -- APPLY (CART-0878). `xn`/`yn` above are the FIRST occurrence's nodes, kept
+            -- for display; an extract that substituted only those would leave every
+            -- later occurrence un-parameterized. That is the same defect the value
+            -- holes' comment names three paragraphs down — "a single-site dedup would
+            -- leave later occurrences un-parameterized — unsound" — and `key_range` is
+            -- where it would bite: ONE parameter, EIGHT sites.
+            -- ⚠ `sites` HERE MEANS THE DEPENDENCY LISTS, NOT THE RANGES. The value
+            -- holes below spell `sites_a`/`sites_b` for ranges, so this file gives
+            -- `sites` two meanings one screen apart; the ranges get an unambiguous name
+            -- rather than a third reading of an overloaded one.
+            -- ⚠ INDEX-ALIGNED WITH `sites` BY CONSTRUCTION — both are appended in this
+            -- one loop, and a consumer reads `sites[k]` beside `ranges_a[k]`.
+            f.ranges_a[#f.ranges_a + 1] = h.xn.at
+            f.ranges_b[#f.ranges_b + 1] = h.yn.at
             h.fparam = f
         end
     end

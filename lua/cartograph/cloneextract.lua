@@ -59,6 +59,10 @@ local EXTRACT = {
             return out
         end,
         ret = function (callee, args) return ('return %s(%s)'):format(callee, args) end,
+        -- CART-0878: a FUNCTION argument. ⚠ IT IS AN EXPRESSION, NOT A STATEMENT --
+        -- it is spliced into an argument list, so it must be one line and must not
+        -- end in a separator.
+        lambda = function (ps, body) return ('function (%s) return %s end'):format(ps, body) end,
         def_pat = function (name) return ('local function %s('):format(name) end,
         module = function (name, ps, body)
             local out = { 'local M = {}', '', ('function M.%s(%s)'):format(name, ps) }
@@ -80,6 +84,10 @@ local EXTRACT = {
             return out
         end,
         ret = function (callee, args) return ('return %s(%s);'):format(callee, args) end,
+        -- ⚠ PARENTHESISED. An arrow function in an argument list does not need them,
+        -- but a body that is itself a `,`-containing expression does, and the cost of
+        -- always writing them is nothing.
+        lambda = function (ps, body) return ('((%s) => (%s))'):format(ps, body) end,
         def_pat = function (name) return ('function %s('):format(name) end,
         module = nil, -- no JS module/import wiring in the spec yet → cross-file refused
         -- a member of an object literal or a class body is the JS analogue of a lua
@@ -293,6 +301,185 @@ end
 
 --- Build a plan to extract `pair` into a helper, or (nil, reason). For a CROSS-FILE pair,
 --- opts.dest (a new module's project-relative path) is required.
+-- ★★★ THE FUNCTION-PARAMETER ADMISSION (CART-0878, the rung this ticket lists first:
+-- "apply for function-valued holes (plumbing)").
+--
+-- A VALUE parameter cannot carry a divergence that reads the body's own locals: the
+-- call site does not have them. A FUNCTION parameter can — the helper applies it to
+-- the locals IT holds, and each call site passes a closure over its own version:
+--
+--     helper(…, fp1)   …   fp1(c)                    -- inside the helper
+--     helper(…, function (c) return c.line end)      -- copy A's call
+--     helper(…, function (c) return callrec.line(c) end)  -- copy B's call
+--
+-- ★★★ AND THE CLOSURE IS WHY THIS IS SOUND WHERE VALUE LIFTING IS NOT. Lifting an
+-- expression to an argument makes it run ALWAYS and run AT THE CALL — which is why the
+-- value path must ask `guarded` and `moves`. A closure is not evaluated when it is
+-- passed; the expression still runs at the point it ran before, once per time it ran
+-- before. So the two objections the value path carries DO NOT APPLY here, and this
+-- path is the more conservative of the two rather than the looser one.
+--
+-- ⚠ WHAT DOES NOT COME FREE IS THE CLOSURE'S FREE NAMES. `function (c) return c.line
+-- end` captures nothing, and that is a property to CHECK, not to hope for: the gate
+-- below requires every dependency to be a PARAMETER of its own function, so the
+-- closure's only free names are its own arguments. A dependency on a body-local is a
+-- real and larger case (the helper holds it, so it still works) and is deliberately
+-- left to the next rung — see the ceiling refusals.
+--
+-- ⚠ ONE PARAMETER, EVERY SITE. Mer-S merges occurrences that agree up to their locals,
+-- so `key_range`'s eight `c.line` / `callrec.line(c)` sites are ONE parameter — and
+-- each site is substituted with ITS OWN arguments (`f.sites[k]`), which is the merge
+-- working rather than a collision. Substituting only the first is the unsoundness the
+-- value holes' comment has warned about since they were written.
+
+--- How many locals a function parameter may take, for now. ⚠ A CEILING, NOT A LAW:
+--- the analysis produces holes of arity up to six on this tree (`Fold:out` vs
+--- `Fold:refusals`), and a helper taking a function of six enclosing locals is a
+--- signature nobody would want to read. Raising it is one number; what the number
+--- BUYS has not been measured, so it starts where the evidence is.
+local MAX_FN_ARITY = 1
+
+--- Admit (or refuse) the structural divergences as FUNCTION parameters.
+--- ⚠ IT TAKES NO SCOPE ARGUMENT, AND THAT IS THE FINDING ABOVE: every question about
+--- whether a dependency is in scope is already answered by the analysis that produced
+--- it. A parameter this function would only ever agree with is a parameter that hides
+--- which module owns the decision.
+--- @return table|nil fps  one entry per merged parameter, in order
+--- @return string|nil why
+local function fn_params_of(analysis)
+    if (analysis.insdel or 0) > 0 then
+        return nil, ('%d row(s) exist on one side only — no single helper covers a body'
+            .. ' the other one does not have'):format(analysis.insdel)
+    end
+    -- ⚠ EVERY struct hole must be covered, not merely some. `extract_verdict`'s
+    -- `covered` state counts sites against `a.struct`, and it counts sites of
+    -- ZERO-dependency parameters too — those are values the value pass did not lift,
+    -- not functions. Deriving the gate from the holes themselves rather than from that
+    -- state keeps the two from drifting apart.
+    for _, h in ipairs(analysis.structs or {}) do
+        if not h.fparam then
+            return nil, 'a shape divergence with no located pair on both sides — there'
+                .. ' is nothing to pass'
+        end
+    end
+    local fps = {}
+    for i, f in ipairs(analysis.fparams or {}) do
+        local na, nb = #(f.deps_a or {}), #(f.deps_b or {})
+        if na == 0 or nb == 0 then
+            -- a divergence depending on no local is a VALUE, and the value pass is
+            -- where it belongs; passing `function () return X end` would hide that.
+            return nil, ('divergence %d depends on no local on one side — it is a value,'
+                .. ' not a function, and the value pass did not lift it'):format(i)
+        end
+        if na ~= nb then
+            return nil, ('divergence %d takes %d local(s) on one side and %d on the'
+                .. ' other — the two closures would not have one arity'):format(i, na, nb)
+        end
+        if na > MAX_FN_ARITY then
+            return nil, ('divergence %d is a function of %d locals; %d is the most this'
+                .. ' verb will synthesize today'):format(i, na, MAX_FN_ARITY)
+        end
+        local nsites = #(f.sites or {})
+        if nsites == 0 or #(f.ranges_a or {}) ~= nsites or #(f.ranges_b or {}) ~= nsites then
+            return nil, ('divergence %d has %d site(s) but %d/%d located span(s) — a site'
+                .. ' with no span cannot be substituted'):format(i, nsites,
+                #(f.ranges_a or {}), #(f.ranges_b or {}))
+        end
+        for k, s in ipairs(f.sites) do
+            if #s.a ~= na or #s.b ~= nb then
+                return nil, ('divergence %d takes a different number of locals at site %d'
+                    .. ' than at site 1 — one parameter cannot have two arities'):format(i, k)
+            end
+            -- ★★★ THE CLOSURE MUST CAPTURE NOTHING, AND IT DOES NOT — the dependency
+            -- becomes the closure's own PARAMETER, so the body has no free name at all.
+            --
+            -- ⚠⚠ MY FIRST CUT REQUIRED EVERY DEPENDENCY TO BE A PARAMETER OF ITS
+            -- FUNCTION, reasoning that "the call site must be able to name it". THAT IS
+            -- THE VALUE PARAMETER'S QUESTION, ASKED OF THE WRONG THING. The call site
+            -- never names it: the helper does, applying the closure to the locals IT
+            -- holds. Measured: the restriction admitted NOTHING — its only effect was to
+            -- refuse two pairs the rest of the planner would have judged on its own.
+            --
+            -- ⚠⚠⚠ AND THE SECOND CUT — "is the name a parameter OR a body local?" — IS A
+            -- GUARD NO INPUT CAN FIRE, which is worse than a wrong one because it reads
+            -- as protection. `deps_a`/`deps_b` come from `local_deps(node, locals_a)`,
+            -- which RETURNS ONLY NAMES IN THAT SET; testing membership in the same set
+            -- afterwards can only ever succeed. It was written, it passed every fixture,
+            -- and it was removed once its firing condition was asked for out loud —
+            -- CART-0985's shape exactly, caught one rung earlier this time.
+            -- ⚠ AND THE FACT IT CONSUMED WENT WITH IT. Removing the guard left
+            -- `analyze_pair` exporting `locals_a`/`locals_b` that nothing read — a
+            -- computed fact with no consumer, which is what three of this session's
+            -- bugs already were. The export was withdrawn in the same change, because
+            -- a field kept "in case" is the same defect one step later.
+            -- ⇒ WHAT ACTUALLY HOLDS, and where it would break: a dependency is in scope
+            -- at its site inside the helper because the helper IS that body and
+            -- `local_deps` only reports names the body binds. If those two sets ever
+            -- stop being the same set, this becomes a real question again — and the
+            -- place it would break is `with_binders`, not here.
+        end
+        fps[#fps + 1] = f
+    end
+    if #fps == 0 then
+        return nil, 'no shape divergence carries a dependency — nothing to pass as a function'
+    end
+    return fps
+end
+
+--- ⚠ THE SECOND INSTRUMENT, AND IT IS HERE FOR A MEASURED REASON (CART-0698).
+--- `fparams` is the first-order reading (Mer-S over struct holes); `hotemplate` derives
+--- the same signature from higher-order pattern anti-unification over an encoding where
+--- locals are BINDERS. The two are independent, and on this tree they DISAGREE on 3 of
+--- the 10 admissible pairs — a merge boundary one of them draws and the other does not.
+--- A disagreement is not proof either is wrong, and it is exactly the state in which a
+--- write verb should not fire.
+---
+--- ⚠ IT COMPARES DEPENDENCY MULTISETS, NOT COUNTS. "3 ≠ 2" refuses correctly and names
+--- nothing; naming the unmatched dependency list says WHICH divergence the two readings
+--- disagree about, which is a sentence a reader can act on.
+---
+--- ⚠ AND IT REFUSES A PADDED DEPENDENCY. `hoau`'s Abs rule renames the right binder to
+--- the left name, so where the two sides differ in arity a real name on one side wears
+--- a synthetic `_p1`/`_d1` from the other. Such a dependency names a position, not a
+--- variable, and no closure can be written for it.
+local function agrees_with_hoau(store, pair, fps)
+    local ho = require 'cartograph.hotemplate'
+    local t, why = ho.of_pair(store, pair)
+    if not t then
+        return nil, ('the higher-order reading refuses this pair (%s), so the two'
+            .. ' analyses cannot be reconciled'):format(tostring(why))
+    end
+    local want = {}
+    for _, f in ipairs(fps) do
+        want[table.concat(f.deps_a, ',')] = (want[table.concat(f.deps_a, ',')] or 0) + 1
+    end
+    for _, h in ipairs(t.holes) do
+        if h.kind ~= 'closed' and h.kind ~= 'rename' then
+            for _, y in ipairs(h.ys) do
+                if y:match('^_[pd]%d') then
+                    return nil, ('a dependency crosses a padded position (`%s`) — the two'
+                        .. ' copies differ in arity there, so it names a position rather'
+                        .. ' than a variable'):format(y)
+                end
+            end
+            local k = table.concat(h.ys, ',')
+            if not want[k] or want[k] == 0 then
+                return nil, ('the two readings of this pair disagree: the higher-order one'
+                    .. ' finds a parameter over (%s) that the merged struct holes do not')
+                    :format(k)
+            end
+            want[k] = want[k] - 1
+        end
+    end
+    for k, n in pairs(want) do
+        if n > 0 then
+            return nil, ('the two readings of this pair disagree: the struct holes find %d'
+                .. ' parameter(s) over (%s) that the higher-order one does not'):format(n, k)
+        end
+    end
+    return true
+end
+
 function M.plan(store, pair, opts)
     if not (pair and pair.a and pair.b) then return nil, 'no near-clone pair' end
     local a, b = pair.a, pair.b
@@ -308,7 +495,16 @@ function M.plan(store, pair, opts)
     -- store" instead of "`require` is io"). A degraded answer that happens to agree with
     -- the correct one is the most expensive kind to leave in place.
     local analysis = clones.analyze_pair(pair, store)
-    if analysis.kind ~= 'value' then
+    -- ★★★ TWO PARAMETERIZATIONS, NOT ONE (CART-0878). A `value` pair folds on values
+    -- alone. A `structural` pair MAY still fold, with the shape divergences becoming
+    -- FUNCTION parameters — that is this ticket's first listed blocker, and it is the
+    -- route `extract_proposal` has been printing as "the helper this WOULD take" while
+    -- the planner refused flatly. MEASURED before building: of 43 near pairs on our own
+    -- tree the planner admitted 5, and 33 of the 38 refusals were this one sentence —
+    -- 10 of them pairs whose divergences are entirely covered by function parameters.
+    -- ⚠ THE DECISION IS DEFERRED, NOT MADE HERE: the admission needs `va`/`vb` (a
+    -- dependency must be a PARAMETER), which are computed below.
+    if analysis.kind ~= 'value' and analysis.kind ~= 'structural' then
         -- ★ NAME THE CAUSE WHEN THE ANALYSIS HAS ONE. "structural" is a category, not a
         -- reason: it is the same sentence for a shape difference, an inserted statement
         -- and a base the call site cannot name, and only the last of those tells the
@@ -367,6 +563,20 @@ function M.plan(store, pair, opts)
     if not vb.ok then return nil, ('%s body not liftable: %s'):format(b.name, vb.reason) end
     if #va.params ~= #vb.params then
         return nil, 'the two functions take a different number of parameters'
+    end
+    -- ── the FUNCTION-PARAMETER admission (CART-0878) ────────────────────────────
+    local fps
+    if analysis.kind == 'structural' then
+        local why
+        fps, why = fn_params_of(analysis)
+        if not fps then
+            -- ⚠ THE OLD SENTENCE IS KEPT AS THE PREFIX, because every caller and every
+            -- census built on it reads "not value-parameterizable"; what changes is that
+            -- it no longer ENDS the conversation — the specific cause follows it.
+            return nil, ('not value-parameterizable (structural): %s'):format(why)
+        end
+        local okh, hwhy = agrees_with_hoau(store, pair, fps)
+        if not okh then return nil, ('not value-parameterizable (structural): %s'):format(hwhy) end
     end
 
     local root = store.data.root
@@ -441,6 +651,13 @@ function M.plan(store, pair, opts)
         for _, p in ipairs(va.params) do if p == name then return nil, 'a parameter is already named ' .. name end end
         hp[i] = name
     end
+    -- the FUNCTION parameters' names, under the same collision check
+    local fpn = {}
+    for i = 1, #(fps or {}) do
+        local name = 'fp' .. i
+        for _, p in ipairs(va.params) do if p == name then return nil, 'a parameter is already named ' .. name end end
+        fpn[i] = name
+    end
     for i, p in ipairs(analysis.holes) do
         -- ★★★ THE LOOP BELOW IS VACUOUS FOR AN EMPTY SITE LIST (CART-0372), and
         -- `call_line` then indexes `p[sites_key][1]` and hands nil to `at.sl`,
@@ -466,6 +683,26 @@ function M.plan(store, pair, opts)
             end
         end
     end
+    -- ⚠ THE SAME TWO QUESTIONS FOR EVERY FUNCTION-PARAMETER SITE, and they are asked
+    -- separately rather than folded into the loop above because the failure MESSAGE is
+    -- what a caller acts on: a multi-line divergence is a different thing to be told
+    -- than a multi-line value. MEASURED: 3 of the 10 covered pairs have a divergence
+    -- that crosses lines (the `txn` message in the cmd#cb family, twice), so this
+    -- refusal is reached by real input rather than kept for symmetry.
+    for i, f in ipairs(fps or {}) do
+        for _, side in ipairs({ { rs = f.ranges_a, open = a_open, close = a_close },
+            { rs = f.ranges_b, open = b_open, close = b_close } }) do
+            for _, r in ipairs(side.rs) do
+                if at.sl(r) ~= at.el(r) then
+                    return nil, ('divergence %d spans multiple lines — a closure body'
+                        .. ' must fit one argument slot'):format(i)
+                end
+                if at.sl(r) < side.open or at.sl(r) > side.close then
+                    return nil, ('divergence %d is outside a body'):format(i)
+                end
+            end
+        end
+    end
 
     local hname = fresh_name(store, xfile and {} or { a.file }, a.name)
     local body_indent = indent_of(lines_a[a_open + 1])
@@ -481,6 +718,19 @@ function M.plan(store, pair, opts)
             subs[off][#subs[off] + 1] = { sc = at.sc(r), ec = at.ec(r), name = hp[i] }
         end
     end
+    -- ★★★ EVERY SITE, WITH ITS OWN ARGUMENTS. Mer-S merged these occurrences because
+    -- they agree up to their locals, so site k is `fp<i>(<site k's locals>)` — not a
+    -- repeat of site 1. `key_range` is eight sites of one parameter; substituting the
+    -- first alone would leave seven divergences in the helper reading A's names while
+    -- B's call passed B's closure.
+    for i, f in ipairs(fps or {}) do
+        for k, r in ipairs(f.ranges_a) do
+            local off = at.sl(r) - a_open
+            subs[off] = subs[off] or {}
+            subs[off][#subs[off] + 1] = { sc = at.sc(r), ec = at.ec(r),
+                name = ('%s(%s)'):format(fpn[i], table.concat(f.sites[k].a, ', ')) }
+        end
+    end
     for off, list in pairs(subs) do
         table.sort(list, function (x, y) return x.sc > y.sc end)
         local l = body[off + 1]
@@ -491,19 +741,30 @@ function M.plan(store, pair, opts)
     local hparams = {}
     for _, p in ipairs(va.params) do hparams[#hparams + 1] = p end
     for _, name in ipairs(hp) do hparams[#hparams + 1] = name end
+    for _, name in ipairs(fpn) do hparams[#hparams + 1] = name end
 
     -- a copy's replacement body: `return <callee>(<its params>, <its fillings>)`
     local function call_line(callee, params, sites_key, src)
+        local side = sites_key == 'sites_a' and 'a' or 'b'
         local args = {}
         for _, p in ipairs(params) do args[#args + 1] = p end
         for _, p in ipairs(analysis.holes) do args[#args + 1] = span_text(src, p[sites_key][1]) end
+        -- ★ THE CLOSURE IS BUILT FROM SITE 1 ON THIS SIDE, and its parameters are site
+        -- 1's dependency list IN THIS SIDE'S OWN NAMES. The helper applies it to each
+        -- site's arguments positionally; the de Bruijn key is what guarantees the two
+        -- orderings correspond, and it is the same key that merged the sites.
+        for _, f in ipairs(fps or {}) do
+            local ranges = side == 'a' and f.ranges_a or f.ranges_b
+            args[#args + 1] = syn.lambda(table.concat(f.sites[1][side], ', '),
+                span_text(src, ranges[1]))
+        end
         return body_indent .. syn.ret(callee, table.concat(args, ', '))
     end
 
     local plan = {
         verb = 'extract-helper', generation = store.generation,
         guards = { 'parses', 'synthesized' }, -- CART-0769: every text-editing verb owes rung 0
-        helper = hname, nparams = #hp, xfile = xfile, lang = lang,
+        helper = hname, nparams = #hp, nfparams = #fpn, xfile = xfile, lang = lang,
         files = {}, hazards = hazards,
         a = { id = a.id, name = a.name, ref = store.ref_of(a.id), file = a.file },
         b = { id = b.id, name = b.name, ref = store.ref_of(b.id), file = b.file },
@@ -587,6 +848,17 @@ function M.plan(store, pair, opts)
     plan.preserves = (plan.behaviour and plan.behaviour.neutral) and 'all' or 'unreviewed'
     plan.preserves_why = (plan.behaviour and plan.behaviour.why)
         or 'the fold\'s behavioural radius was not established'
+    -- ★★★ A FUNCTION PARAMETER DOES NOT WIDEN THE RADIUS, AND SAYING SO IS THE POINT
+    -- (CART-0878). `behaviour` is computed over the VALUE holes, because lifting a value
+    -- makes it run always and run at the call. A closure is not evaluated when it is
+    -- passed: the divergent expression still runs where it ran, as often as it ran. So
+    -- the function parameters contribute nothing to review — the claim above stands on
+    -- the value holes alone, and the reason records WHY the reader need not re-derive it.
+    if #fpn > 0 then
+        plan.preserves_why = ('%s; %d divergence(s) became function parameters, which are'
+            .. ' not evaluated at the call — the expression still runs where it ran')
+            :format(plan.preserves_why, #fpn)
+    end
     plan.precheck = function (st)
         if next(st.moveset or {}) then
             return 'a move-set is staged — apply or clear it first'
