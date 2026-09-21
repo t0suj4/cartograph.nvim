@@ -673,20 +673,45 @@ function M.plan(store, pair, opts)
     local bh = (lang == 'lua') and ba.of(table.concat(lines_a, '\n'), a.file) or nil
     local minted = {}
     local function mint(base)
+        -- ★★★ THE PARAMETER LIST IS EXACT AND STAYS IN THE CHECK. `boundat` is ADDED
+        -- EVIDENCE, never a replacement: a name must clear the donor's declared
+        -- parameters AND whatever the scope graph can see. So this can only ever freshen
+        -- MORE than the old code did, never less — which is the only direction that is
+        -- safe for a name about to be bound.
+        -- ⚠⚠ AND THAT COMPOSITION IS LOAD-BEARING, NOT BELT-AND-BRACES. Three position→
+        -- scope constructions were measured against this tree and all three are
+        -- incomplete: the LINE form interpolates from reference and declaration sites and
+        -- lags a binding with no site before it (318 of 7335 parameters read unbound);
+        -- `fn_scope` is the function's ENTRY scope, so it holds the parameters and NONE
+        -- of the sequential-let body locals (20916 of 21369 missed); and a flat
+        -- file-level list misses body locals by construction. A correct answer needs term
+        -- path containment (`prefix(fn_path, decl.site)`, the route
+        -- `experiments/resolve_census.lua` takes) and is NOT built here — CART-1001.
+        -- ⇒ PATH CONTAINMENT IS NOW BUILT AND IS THE PRIMARY ANSWER; the exact parameter
+        -- list stays in the union because 6.9% of parameters still miss (a function-
+        -- identification mismatch between the store's line and the graph's decl, not a
+        -- containment flaw) and an exact list costs nothing to keep.
+        local taken_here = {}
+        for _, p in ipairs(va.params) do taken_here[p] = true end
+        for k in pairs(minted) do taken_here[k] = true end
         if bh then
-            local nm, why = ba.fresh(bh, a_open, base, minted, a_close)
-            if not nm then return nil, why end
-            minted[nm] = true
-            return nm
+            -- ★ PATH CONTAINMENT FIRST: a name is bound inside this function exactly when
+            -- some declaration's `site` lies under the function's term path. That is the
+            -- construction `experiments/resolve_census.lua` uses, and the only one of the
+            -- three measured here that answers THIS question — body locals missed drop
+            -- from 97.9% (`fn_scope`) to 3.5%.
+            local nm = ba.fresh_by_path(bh, a_open, base, taken_here)
+                or ba.fresh(bh, a_open, base, taken_here, a_close)
+            if nm and not taken_here[nm] then minted[nm] = true; return nm end
         end
         -- ⚠ `base` ALREADY CARRIES THE INDEX (`hp1`, `fp2`). My first cut appended
-        -- another and minted `hp11`; the JS spec caught it, because the fallback is the
-        -- only path a non-Lua file takes.
-        for _, p in ipairs(va.params) do
-            if p == base then return nil, 'a parameter is already named ' .. base end
+        -- another and minted `hp11`; the JS spec caught it, because this path is the only
+        -- one a non-Lua file takes.
+        for i = 1, 64 do
+            local cand = (i == 1) and base or (base .. i)
+            if not taken_here[cand] then minted[cand] = true; return cand end
         end
-        minted[base] = true
-        return base
+        return nil, ('no free name from `%s` within 64 tries'):format(base)
     end
     local hp = {}
     for i = 1, #analysis.holes do

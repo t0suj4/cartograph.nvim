@@ -58,17 +58,36 @@ function M.of(src, file)
     -- ⚠ NOT `#cst_print(subtree)` PER REFERENCE: that reprints the whole file once per
     -- reference and is quadratic on exactly the files worth asking about (2151 refs in
     -- cloneextract.lua). Summing leaf widths costs one pass.
-    local want = {}
+    -- ⚠⚠ DECLARATIONS ARE POSITION SAMPLES TOO, AND LEAVING THEM OUT WAS A REAL BUG.
+    -- My first cut sampled only REFERENCES, so the scope in effect was always the last
+    -- one a reference had witnessed — and a binding with no use yet is invisible to that.
+    -- MEASURED against `cloneextract`'s flat model over 40 files: 45.6% disagreement, all
+    -- of the form "bound by the old model, free by mine", at and just after every
+    -- `local function` declaration. The seam was systematically ONE BINDING BEHIND.
+    -- ⇒ A declaration's `scope` IS the sequential let's successor scope — the one holding
+    -- it — so a decl point says "from here on, this is in effect". With both kinds of
+    -- point the interpolation has a sample at every place the scope actually changes.
+    -- ⚠ IT TOOK A DIFFERENTIAL TO SEE: the module's own spec passed, because a 14-line
+    -- fixture has a reference on nearly every line and the lag never shows.
+    local want, from = {}, {}
     for id, r in pairs(G.refs or {}) do
         if r.site and (r.file == nil or r.file == (file or '?')) then
-            want[table.concat(r.site, ',')] = id
+            local k = table.concat(r.site, ',')
+            want[k] = id; from[k] = 'ref'
+        end
+    end
+    for id, d in pairs(G.decls or {}) do
+        if d.site and (d.file == nil or d.file == (file or '?')) then
+            local k = table.concat(d.site, ',')
+            -- a REF at the same path wins: it is the narrower statement about that spot
+            if want[k] == nil then want[k] = id; from[k] = 'decl' end
         end
     end
     local off_of, pos = {}, 0
     local function walk(n, path)
         if type(n) ~= 'table' then return end
         local key = table.concat(path, ',')
-        if want[key] then off_of[want[key]] = pos end
+        if want[key] then off_of[want[key]] = { off = pos, kind = from[key] } end
         if n.k == 'lit' then
             pos = pos + #tostring(n.v == nil and '' or n.v)
             return
@@ -93,17 +112,159 @@ function M.of(src, file)
         return lo - 1
     end
 
-    local pts = {}
-    for id, o in pairs(off_of) do
-        local r = G.refs[id]
-        if r and r.scope then pts[#pts + 1] = { line = line_of(o), off = o, scope = r.scope } end
+    local pts, decls = {}, {}
+    for id, rec in pairs(off_of) do
+        local e = (rec.kind == 'ref') and G.refs[id] or G.decls[id]
+        if e and e.scope then
+            pts[#pts + 1] = { line = line_of(rec.off), off = rec.off, scope = e.scope, kind = rec.kind }
+        end
+        -- ★ EVERY DECLARATION WITH A PATH, for the containment answer below.
+        if rec.kind == 'decl' and G.decls[id] and G.decls[id].site then
+            local d = G.decls[id]
+            decls[#decls + 1] = { name = d.name, kind = d.kind, site = d.site,
+                line = line_of(rec.off), off = rec.off, fn_scope = d.fn_scope }
+        end
     end
+    table.sort(decls, function (x, y) return x.off < y.off end)
     table.sort(pts, function (x, y) return x.off < y.off end)
     local chunk
     for _, c in ipairs(G.chunks or {}) do chunk = (type(c) == 'table' and c.scope) or c end
-    return { G = G, A = A, chunk = chunk or G.root, points = pts, nrefs = #pts }
+    return { G = G, A = A, chunk = chunk or G.root, points = pts, nrefs = #pts,
+        decls = decls, ndecls = #decls }
 end
 
+--- ★★★ IS `name` BOUND ANYWHERE INSIDE THIS FUNCTION — BY TERM-PATH CONTAINMENT.
+--- USER: "could be worth checking experiments." This is the construction
+--- `experiments/resolve_census.lua` uses (`prefix(path, ref.site)`, :192): every
+--- declaration and reference carries a `site`, a path of child indices into the CST, and
+--- a binding is inside a function exactly when its site lies UNDER the function's path.
+--- Path space, not line space — no interpolation, no ranges, nothing to lag.
+---
+--- ⚠ IT IS THE THIRD CONSTRUCTION AND THE FIRST CORRECT ONE, and the other two are kept
+--- in the module because their failures are the argument for this one:
+---   · LINE INTERPOLATION (`scope_at`) lags a binding with no site before the line —
+---     318 of 7335 parameters read as unbound inside their own function.
+---   · `fn_scope` is EXACT AND ANSWERS A DIFFERENT QUESTION: a function's ENTRY scope
+---     holds its parameters and, because each `local` opens a successor scope, NONE of
+---     its body locals — 20916 of 21369 missed.
+---
+--- ⚠ THE FUNCTION'S PATH IS ITS DECLARATION'S SITE MINUS THE LAST STEP, because the site
+--- addresses the NAME inside the declaration node. That is a claim about the Lua mapping
+--- and it is CHECKED rather than assumed: `M.fn_path` verifies the function's own
+--- parameters lie under the path it returns, and refuses when they do not.
+--- @return table|nil path, string|nil why
+function M.fn_path(h, line0)
+    if not h then return nil, 'no scope graph for this file' end
+    local best
+    for _, d in ipairs(h.decls) do
+        if d.fn_scope and d.line <= line0 and (best == nil or d.line > best.line) then best = d end
+    end
+    if not best then return nil, ('no function declaration at or before line %d'):format(line0) end
+    if #best.site < 2 then return nil, 'the function declaration has no enclosing node' end
+    local path = { unpack and unpack(best.site, 1, #best.site - 1)
+        or table.unpack(best.site, 1, #best.site - 1) }
+    -- ⚠ THE CHECK: this function's own parameters must lie under it. If the mapping ever
+    -- addresses a declaration differently, this refuses instead of silently answering
+    -- "nothing is bound" — which is the direction that mints a colliding name.
+    local nparam, under = 0, 0
+    for _, d in ipairs(h.decls) do
+        if d.kind == 'parameter' and d.off > best.off and d.off < best.off + 1e9 then
+            if M.under(path, d.site) then under = under + 1; nparam = nparam + 1
+            elseif d.line == best.line then nparam = nparam + 1 end
+        end
+    end
+    if nparam > 0 and under == 0 then
+        return nil, 'the function path does not contain its own parameters'
+    end
+    return path, nil
+end
+
+--- is `site` under `path` (a strict-or-equal prefix)?
+function M.under(path, site)
+    if #site < #path then return false end
+    for i = 1, #path do if site[i] ~= path[i] then return false end end
+    return true
+end
+
+--- @return boolean bound, string how
+function M.binds_in(h, line0, name)
+    local path, why = M.fn_path(h, line0)
+    if not path then return false, why or 'no function' end
+    local short = tostring(name):match('[%w_]+$') or name
+    for _, d in ipairs(h.decls) do
+        if d.name == short and M.under(path, d.site) then return true, d.kind end
+    end
+    return false, 'unbound'
+end
+
+--- A name free everywhere inside the function containing `line0`.
+function M.fresh_by_path(h, line0, base, taken)
+    if not h then return nil, 'no scope graph for this file' end
+    local path, why = M.fn_path(h, line0)
+    if not path then return nil, why end
+    taken = taken or {}
+    for i = 1, 64 do
+        local cand = (i == 1) and base or (base .. i)
+        if not taken[cand] and not (M.binds_in(h, line0, cand)) then return cand end
+    end
+    return nil, ('no free name from `%s` within 64 tries'):format(base)
+end
+
+--- ★★★ THE SCOPE A FUNCTION'S BODY IS IN, EXACTLY — no interpolation (CART-1001).
+--- A `function` declaration publishes `fn_scope`: the scope its body lives in. So the
+--- question "is this name bound inside this function" has a DIRECT answer and never
+--- needed a position lookup at all.
+---
+--- ⚠⚠ THIS IS THE PROTOTYPE'S OWN CONSTRUCTION AND I HAND-ROLLED A WORSE ONE FIRST.
+--- `experiments/resolve_census.lua` takes exactly this route — `d.fn_scope` for a
+--- function's scope (:231), and TERM-PATH CONTAINMENT (`prefix(path, ref.site)`, :192)
+--- to select the references inside a subtree. It works in path space; I worked in line
+--- space and interpolated "the scope of the last point at or before this line", which is
+--- systematically ONE BINDING BEHIND wherever a binding has no reference yet. MEASURED:
+--- 37.4% disagreement with `cloneextract`'s flat model, and 318 of 7335 PARAMETERS
+--- reading as unbound inside their own function. USER: "could be worth checking
+--- experiments" — the standing rule, and the construction was sitting there.
+--- @return any|nil scope, string|nil why
+function M.fn_scope(h, name)
+    if not h then return nil, 'no scope graph for this file' end
+    local short = tostring(name):match('[%w_]+$') or name
+    for _, d in pairs(h.G.decls or {}) do
+        if d.fn_scope and d.name == short then return d.fn_scope end
+    end
+    return nil, ('no function declaration named `%s` in this file'):format(tostring(short))
+end
+
+--- Is `name` bound inside the function `fn`? EXACT where `fn_scope` is known.
+--- @return boolean bound, string class
+function M.is_bound_in(h, fn, name)
+    local S, why = M.fn_scope(h, fn)
+    if not S then return false, why or 'no scope' end
+    local ok, T = pcall(h.A.resolve_name, h.G, S, name)
+    if not ok or not T then return false, 'unresolved' end
+    local okc, cls = pcall(h.A.resolution_class, h.G, T)
+    cls = okc and cls or 'unresolved'
+    return cls ~= 'unresolved', cls
+end
+
+--- A name free inside the function `fn`: `base`, `base2`, … (see `M.fresh`).
+function M.fresh_in(h, fn, base, taken)
+    if not h then return nil, 'no scope graph for this file' end
+    local S, why = M.fn_scope(h, fn)
+    if not S then return nil, why end
+    taken = taken or {}
+    for i = 1, 64 do
+        local cand = (i == 1) and base or (base .. i)
+        local bound, cls = M.is_bound_in(h, fn, cand)
+        if not taken[cand] and not (bound and cls ~= 'library') then return cand end
+    end
+    return nil, ('no free name from `%s` within 64 tries in `%s`'):format(base, tostring(fn))
+end
+
+--- ⚠ THE LINE FORM IS AN APPROXIMATION AND IS NOW LABELLED AS ONE. Scopes carry no
+--- ranges, so this interpolates from the sites of references and declarations: the scope
+--- of the last one at or before the line. Where a binding has no site before the line it
+--- LAGS. Prefer `fn_scope`/`is_bound_in` whenever the question is about a named function,
+--- which is every caller in this tree today.
 --- The scope in effect at a 0-based line.
 --- @return any scope id
 function M.scope_at(h, line0)

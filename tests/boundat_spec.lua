@@ -127,3 +127,43 @@ test('★★★ the consumer: a donor already using `hp1` FRESHENS instead of re
     local blob = table.concat(txt, '\n')
     ok(blob:match('hp12'), 'the helper binds a freshened name:\n' .. blob)
 end)
+
+test('★★★ binds_in: TERM-PATH CONTAINMENT sees the body locals the scope route cannot', function ()
+    if not ready() then return end
+    local h = B.of(SRC, 'p.lua')
+    if not h then return end
+    -- `contains` spans lines 3..7 and binds `lo` and `hp1` in its body
+    eq(true,  (B.binds_in(h, 3, 'lo')))
+    eq(true,  (B.binds_in(h, 3, 'hp1')))
+    eq(true,  (B.binds_in(h, 3, 'outer')))   -- a parameter
+    eq(false, (B.binds_in(h, 3, 'zed')))     -- belongs to `other`
+    -- and the mirror, from the other function
+    eq(true,  (B.binds_in(h, 9, 'zed')))
+    eq(false, (B.binds_in(h, 9, 'hp1')))
+    -- ⚠ AN UPVALUE IS NOT A BODY BINDING. `at` is a file-local the body READS; it is not
+    -- declared inside, so containment says false — which is the right answer for
+    -- "may I name a parameter `at`" only together with the caller's own free-name check.
+    eq(false, (B.binds_in(h, 3, 'at')))
+end)
+
+test('fn_path refuses rather than answering "nothing is bound"', function ()
+    if not ready() then return end
+    local h = B.of(SRC, 'p.lua')
+    if not h then return end
+    -- ⚠ THE DIRECTION MATTERS: a wrong "nothing is bound" MINTS A COLLIDING NAME, so the
+    -- construction checks that the path it derives contains the function's own
+    -- parameters and refuses by name when it does not.
+    local path, why = B.fn_path(h, 0)
+    eq(nil, path)
+    ok(why and why:match('no function declaration'), tostring(why))
+end)
+
+test('fresh_by_path steps past a body local, not just a parameter', function ()
+    if not ready() then return end
+    local h = B.of(SRC, 'p.lua')
+    if not h then return end
+    -- `hp1` is a BODY LOCAL of `contains` — invisible to a parameter list and to the
+    -- function's entry scope, and exactly what this construction exists to catch.
+    eq('hp12', B.fresh_by_path(h, 3, 'hp1'))
+    eq('hp1',  B.fresh_by_path(h, 9, 'hp1'))
+end)
