@@ -253,6 +253,16 @@ function M.plan(store, id)
             lines = { s = s, e = atr.el(t.range) },
             ref = store.ref_of(t.id),
         }
+        -- ★★★ THE UNDO ADDRESS (CART-1004). This verb is DESTRUCTIVE: the twin's text is
+        -- gone from the tree after apply, and `removed` above records WHERE it was and
+        -- never WHAT it was — so the inverse had nothing to rebuild from.
+        -- ⚠ THE BYTES WERE NEVER LOST: the journal keeps every touched file's full
+        -- before-text, hashed. What was missing is this pointer INTO it, which is why the
+        -- record carries a span and not a copy — duplicating the source would store twice
+        -- what `before` already holds, in the half that can drift.
+        plan.undo = plan.undo or { kind = 'removed', spans = {} }
+        plan.undo.spans[#plan.undo.spans + 1] =
+            { file = t.file, name = t.name, s = s, e = atr.el(t.range) }
         touched[t.file] = true
         -- the `reg` edge IS "referenced from data" (see moveapply: n.cbarg
         -- conflated this with table-field defs and callback args)

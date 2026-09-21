@@ -896,6 +896,33 @@ function M.plan(store, pair, opts)
         { id = plan.a.id, name = plan.a.name, ref = plan.a.ref, what = 'clone' },
         { id = plan.b.id, name = plan.b.name, ref = plan.b.ref, what = 'clone' },
     }
+    -- ★★★ THE OTHER UNDO SHAPE (CART-1004). This verb is CONSTRUCTIVE, and a soft delete
+    -- does not help it: nothing was erased. What is lost is a RELATION we computed and
+    -- emitted only as text — which parameter stands for which argument at which call site.
+    -- Every byte is still on disk and still insufficient, because recovering the relation
+    -- means re-parsing our own output and trusting nobody edited it since, which is exactly
+    -- what LATE inversion cannot assume.
+    -- ⚠ NOT A SPAN RECORD, AND NOT FORCED INTO ONE: the `kind` discriminator is what keeps
+    -- a single `undo` field honest about carrying two different things.
+    do
+        local params = {}
+        for _, n in ipairs(hp) do params[#params + 1] = n end
+        for _, n in ipairs(fpn) do params[#params + 1] = n end
+        local sites = {}
+        for _, side in ipairs({ { m = a, key = 'sites_a', src = lines_a },
+            { m = b, key = 'sites_b', src = lines_b } }) do
+            local args = {}
+            for _, h in ipairs(analysis.holes) do
+                args[#args + 1] = span_text(side.src, h[side.key][1])
+            end
+            for _, f in ipairs(fps or {}) do
+                local ranges = (side.key == 'sites_a') and f.ranges_a or f.ranges_b
+                args[#args + 1] = span_text(side.src, ranges[1])
+            end
+            sites[#sites + 1] = { file = side.m.file, name = side.m.name, args = args }
+        end
+        plan.undo = { kind = 'relation', helper = hname, params = params, sites = sites }
+    end
     plan.expect = expectation(plan, EXTRACT[plan.lang])
     -- ★★★ THE FOLD'S BEHAVIOURAL RADIUS RIDES ON THE PLAN (CART-0989). `analyze_pair`
     -- decides it from the HOLES — the only place an extraction can introduce a delta,

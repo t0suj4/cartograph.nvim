@@ -661,7 +661,9 @@ function M.execute(store, plan, desc, edit_of)
     end
 
     local journal = require 'cartograph.journal'
-    local entry, jerr = journal.begin(root, plan.verb, desc, before)
+    -- CART-1004: the verb's own undo declaration rides into the entry beside the
+    -- description, so the ADDRESS survives with the bytes `before` already keeps.
+    local entry, jerr = journal.begin(root, plan.verb, desc, before, plan.undo)
     if not entry then return nil, jerr end
     for _, rel in ipairs(plan.touched) do
         local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$')

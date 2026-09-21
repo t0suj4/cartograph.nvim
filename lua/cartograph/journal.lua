@@ -96,7 +96,62 @@ end
 --- `false` means the file did NOT exist before (a create) — its undo
 --- is deletion, never an empty husk. Returns the entry (status
 --- 'pending') or nil, why.
-function M.begin(root, verb, plan, files)
+--- ★★★ `undo` IS THE REPLAY RECORD'S DESTRUCTIVE HALF (CART-1004). USER: "I guess we can
+--- do soft deletes" — and the bytes were never actually lost: `e.files[rel].before` has
+--- held every touched file's prior text since this module shipped, hashed. WHAT WAS LOST
+--- IS THE ADDRESS: nothing said WHICH SPAN of that text mattered, and the plan that knew
+--- (`removed[].lines`) was not stored.
+--- ⇒ SO THIS CARRIES SPANS, NOT BYTES. Duplicating the source into the entry would store
+--- twice what `before` already holds, and store it in the half that can drift.
+--- ⚠ ADDITIVE, AND OLD ENTRIES SIMPLY LACK IT. `M.recover` reports that absence by name
+--- rather than treating a missing record as an empty one — an entry written before this
+--- existed is not an entry with nothing to recover.
+--- ★★★ THE CONSUMER, AND IT SHIPS IN THE SAME CHANGE (CART-1004). A record nobody reads
+--- is the defect this session found six times; this is what makes `undo` a fact with a
+--- reader. It resolves a `kind = 'removed'` record against the entry's OWN before-text and
+--- hands back what the transaction deleted.
+--- ⚠ IT IS THE *SOFT DELETE* MADE GOOD: nothing was ever erased, and this is the pointer
+--- that was missing.
+--- @return table|nil removed { {file, name, lines = {…}} }, string|nil why
+function M.recover(e)
+    if type(e) ~= 'table' then return nil, 'not a journal entry' end
+    local u = e.undo
+    if not u then
+        return nil, ('entry %s carries no undo record — it was written before the verb'
+            .. ' declared one, or the verb declares none'):format(tostring(e.id))
+    end
+    if u.kind ~= 'removed' then
+        return nil, ('this undo record is a `%s`, not a removal — nothing to recover from'
+            .. ' the before-text'):format(tostring(u.kind))
+    end
+    local out = {}
+    for _, sp in ipairs(u.spans or {}) do
+        local f = e.files[sp.file]
+        if not f then
+            return nil, ('the removal names %s, which this entry never touched')
+                :format(tostring(sp.file))
+        end
+        if f.absent or not f.before then
+            return nil, ('%s had no before-text (a create) — nothing was removed from it')
+                :format(tostring(sp.file))
+        end
+        local lines = vim.split(f.before, '\n', { plain = true })
+        -- ⚠ 0-BASED SPANS, because that is what `at.sl`/`at.el` give and what the plans
+        -- record. Converting here rather than at every writer is the single place the two
+        -- coordinate systems meet — the trap expr.lua names as SILENT AND WIDENING.
+        local got = {}
+        for i = (sp.s or 0) + 1, (sp.e or 0) + 1 do got[#got + 1] = lines[i] end
+        if #got == 0 then
+            return nil, ('the removal names lines %s..%s of %s, which the before-text does'
+                .. ' not have'):format(tostring(sp.s), tostring(sp.e), tostring(sp.file))
+        end
+        out[#out + 1] = { file = sp.file, name = sp.name, lines = got }
+    end
+    if #out == 0 then return nil, 'the undo record names no spans' end
+    return out
+end
+
+function M.begin(root, verb, plan, files, undo)
     local id, why = alloc_id(root, verb)
     if not id then return nil, why end
     local e = {
@@ -115,6 +170,7 @@ function M.begin(root, verb, plan, files)
         verb = verb, root = root, ts = os.time(),
         status = 'pending',
         plan = plan,
+        undo = undo,
         files = {},
     }
     for rel, before in pairs(files) do
