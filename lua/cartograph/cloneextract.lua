@@ -645,18 +645,60 @@ function M.plan(store, pair, opts)
     end
 
     -- hole PARAMETERS + validation (single-line, inside each body)
+    -- ★★★ THE HELPER'S PARAMETER NAMES, FRESHENED RATHER THAN REFUSED (CART-1001).
+    -- This used to read `local name = 'hp'..i` and REFUSE when `va.params` held it —
+    -- wrong twice over. Too STRICT: the name is ours to choose, and `fresh_name` thirty
+    -- lines above already loops until free for the helper's own name, so one function
+    -- held two answers to one question. Too WEAK: it tested only the PARAMETERS, so an
+    -- `hp1` among the donor's body locals shadowed the parameter and was never seen.
+    -- ⚠ AND THE ONLY FUNCTION IN THIS TREE THAT TRIPPED IT WAS `top_sequence_extracted`,
+    -- one WE generated — run the verb twice and it refused its own output.
+    -- ⇒ `boundat` answers what is bound ACROSS THE BODY'S LINES, which is the shape the
+    -- question has: a parameter is in scope for the whole body, so a local of the same
+    -- name anywhere inside shadows it.
+    -- ⚠ A FILE WHOSE SCOPE GRAPH WILL NOT BUILD FALLS BACK TO THE OLD PARAMETER CHECK,
+    -- and to refusing. Silently minting a possibly-colliding name would be worse than
+    -- the defect this replaces; the seam is lua-only and says so.
+    local ba = require 'cartograph.boundat'
+    -- ⚠ A COST SHORT-CIRCUIT, NOT A CORRECTNESS GATE, and the distinction is checked:
+    -- `boundat.of` already refuses a non-Lua body BY NAME ("does not parse as `lua`",
+    -- from `algebraread`), so removing this line changes no verdict and no test — it
+    -- only avoids a doomed parse on every JavaScript plan.
+    -- ⚠⚠ I FIRST WROTE IT AS A CORRECTNESS GATE, claiming the lua grammar would
+    -- mis-parse JS into a confident wrong answer. It does not; it errors. The JS spec
+    -- failure that prompted the claim was MY OWN fallback bug (`base .. '1'` on a base
+    -- that already carried its index, minting `hp11`). A guard justified by the wrong
+    -- diagnosis is a guard nobody can later evaluate — third time today that asking
+    -- "what input reaches this line?" changed the answer.
+    local bh = (lang == 'lua') and ba.of(table.concat(lines_a, '\n'), a.file) or nil
+    local minted = {}
+    local function mint(base)
+        if bh then
+            local nm, why = ba.fresh(bh, a_open, base, minted, a_close)
+            if not nm then return nil, why end
+            minted[nm] = true
+            return nm
+        end
+        -- ⚠ `base` ALREADY CARRIES THE INDEX (`hp1`, `fp2`). My first cut appended
+        -- another and minted `hp11`; the JS spec caught it, because the fallback is the
+        -- only path a non-Lua file takes.
+        for _, p in ipairs(va.params) do
+            if p == base then return nil, 'a parameter is already named ' .. base end
+        end
+        minted[base] = true
+        return base
+    end
     local hp = {}
     for i = 1, #analysis.holes do
-        local name = 'hp' .. i
-        for _, p in ipairs(va.params) do if p == name then return nil, 'a parameter is already named ' .. name end end
-        hp[i] = name
+        local nm, why = mint('hp' .. i)
+        if not nm then return nil, why end
+        hp[i] = nm
     end
-    -- the FUNCTION parameters' names, under the same collision check
     local fpn = {}
     for i = 1, #(fps or {}) do
-        local name = 'fp' .. i
-        for _, p in ipairs(va.params) do if p == name then return nil, 'a parameter is already named ' .. name end end
-        fpn[i] = name
+        local nm, why = mint('fp' .. i)
+        if not nm then return nil, why end
+        fpn[i] = nm
     end
     for i, p in ipairs(analysis.holes) do
         -- ★★★ THE LOOP BELOW IS VACUOUS FOR AN EMPTY SITE LIST (CART-0372), and
