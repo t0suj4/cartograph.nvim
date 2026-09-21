@@ -3196,6 +3196,21 @@ ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograp
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# THE HELPER SIGNATURE OF EVERY NEAR-CLONE PAIR. What would an extracted helper
+# actually take? A hole that depends on nothing is a VALUE parameter; a hole over
+# the function's own locals is a FUNCTION parameter, and the call site cannot
+# supply it as a value at all.
+nvim --headless -u NONE -l tools/hocensus.lua 3 --detail
+#   encodes each side as a λ-term with its locals as BINDERS (cartograph.algebra's
+#   ho_* encoders) and anti-unifies the pair (higher-order pattern AU). On this
+#   tree: 43 pairs, 95 holes = 43 closed + 37 dependent + 15 rename, and 21 of the
+#   43 carry a dependent hole.
+#   ⚠ ITS POINT IS TO BE COMPARED, not merely run. The reference is an
+#   independent implementation of the same encoding; the shared half (the algebra)
+#   is byte-identical, so any divergence is the encoder. That join caught a silent
+#   no-op walk that made loop variables vanish — a bug that left every total
+#   looking right.
+
 # DISTIL A PROJECT'S npm DEPENDENCY SURFACE. ★ THE SECURITY CONTROL IS "NEVER
 # INSTALL": `npm install` is what runs postinstall scripts, and this never invokes
 # npm — two text GETs per package (manifest, then its .d.ts), no package code run

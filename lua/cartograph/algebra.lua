@@ -312,6 +312,264 @@ function M.fn_term(f)
     return A.seq(rows)
 end
 
+-- ── THE HIGHER-ORDER ENCODING: LOCALS AS BINDERS (CART-0698 / hoau) ─────────
+--
+-- ★★★ THIS EXISTS TO RECOVER WHAT `M.term` DELIBERATELY THROWS AWAY. `M.term`
+-- collapses every local to `LOCAL_SENTINEL` because `clones.anti_unify`'s alpha
+-- rule says two locals differing is not a hole -- and that rule is right for a
+-- FIRST-ORDER template, where a hole is a value. Its cost is recorded there in
+-- one line: "distinct locals wear one symbol, so a template can say less than
+-- it means". THIS is the thing that makes it say what it means again.
+--
+-- A λ-term keeps each local as a DISTINCT bound variable (params bound at the
+-- top, each row's defs bound over the rows that follow), so higher-order pattern
+-- anti-unification (`A.hoau`) can report, for every difference, WHICH LOCALS IT
+-- DEPENDS ON. That answer is the helper signature:
+--
+--     a hole depending on NO locals   -> a VALUE parameter    (closed)
+--     a hole depending on k locals    -> a FUNCTION parameter of arity k
+--
+-- ⚠ SO THE TWO ENCODERS ARE NOT RIVALS AND NEITHER SUPERSEDES THE OTHER. They
+-- answer different questions and a caller picks by the question: `M.term` for
+-- "what varies", `M.ho_term` for "what varies AND what it is computed from".
+--
+-- ── FOUR DIVERGENCES FROM THE PROTOTYPE, EACH DELIBERATE ────────────────────
+-- The reference implementation is `~/tools/templates/experiments/nearclones_binders.lua`
+-- (user-authored, read-only, measured on this tree). This port differs in four
+-- places, all recorded because a silent divergence is a census nobody can join:
+--
+--  1. DESCENT IS `expr.children`, NOT A PER-KIND SWITCH. The prototype writes
+--     its own descent for field/index/call/un/bin/assign/pair; this is the
+--     second hand-written traversal `M.term` refuses to be (CART-0882), and the
+--     house rule is already paid for -- `children` is what `walk` and `is_pure`
+--     consume, so a kind added there reaches here for free. A kind holding kids
+--     that nothing descends is a VANISHED READ, and that bug has been shipped
+--     twice (CART-0928, and `type` losing 90 reads on zig).
+--  2. ⚠ `type` KEEPS ITS KIDS. The prototype emits `type:<n>` as a LEAF, so
+--     `[N]Air`'s element type vanishes -- the exact loss `expr.children`'s own
+--     comment records. Keeping them is strictly finer and can only turn a false
+--     agreement into an honest hole.
+--  3. ⚠ A VALUELESS `pair` HAS ARITY 1, NOT 2. The prototype pads the missing
+--     value with `app 'nil'`; `children` yields `{key}` alone. The effect is
+--     COARSER on exactly one case -- a keyed entry against a key-and-value entry
+--     is now one Sol over the whole pair rather than a Dec plus a Sol on the
+--     value -- and identical everywhere else. Padding it here would mean
+--     inventing a child the IR does not have.
+--  4. LOOP BINDERS COME FROM `expr.walk`. The prototype walks `kids` plus a
+--     hand-listed field set `{b,i,f,l,r,e,key,val}` plus `a`; `walk` is built on
+--     `children` and covers all of them, so the list cannot fall behind the IR.
+--
+-- ⚠ THE HEAD VOCABULARY IS OTHERWISE THE PROTOTYPE'S, EXACTLY, and that is not
+-- cosmetic: the head is what `hoau`'s Dec compares, so a head that merges two
+-- kinds silently merges two shapes. `kind_of` supplies the discriminant for
+-- bin/un/field/method; `?` and `type` carry theirs directly because `kind_of`
+-- has none for them, and WITHOUT that every `?:for_numeric_clause` would read
+-- as every other `?` node.
+
+--- ⚠ THE SENTINEL IS NOT USED HERE, ON PURPOSE. A local becomes a BOUND
+--- VARIABLE under its own name; collapsing them is the whole thing this encoder
+--- exists to undo.
+--- @param e table|nil expr node
+--- @param locals table|nil set of local names -> true
+--- @param srcmap table|nil side table term -> expr node (see `M.term`)
+--- @return table|nil term
+function M.ho_term(e, locals, srcmap)
+    local A = M.load()
+    if not A then return nil end
+    -- ⚠ A NIL CHILD IS `nil`, NOT NOTHING -- same rule as `row~` below: dropping
+    -- it would shorten one side and align rows that are not counterparts.
+    if e == nil then return A.app('nil') end
+    if type(e) ~= 'table' or e.k == nil then return nil end
+    local k = e.k
+    local t
+    if k == 'lit' then
+        t = A.app('lit:' .. tostring(e.ty) .. ':' .. tostring(e.v))
+    elseif k == 'name' then
+        t = (locals and locals[e.n]) and A.bv(tostring(e.n)) or A.app('name:' .. tostring(e.n))
+    else
+        local kids = {}
+        for _, c in ipairs(require('cartograph.expr').children(e)) do
+            local ct = M.ho_term(c, locals, srcmap)
+            if ct then kids[#kids + 1] = ct end
+        end
+        local kk, disc = M.kind_of(e)
+        local head
+        if disc then head = kk .. ':' .. disc
+        elseif k == '?' then head = '?:' .. tostring(e.t)
+        elseif k == 'type' then head = 'type:' .. tostring(e.n)
+        else head = kk end
+        t = A.app(head, tunpack(kids))
+    end
+    if srcmap then srcmap[t] = e end
+    return t
+end
+
+--- The names a `for` clause BINDS. ⚠ THEY ARE DEFINITIONS, NOT USES, and the
+--- distinction is load-bearing twice: a binder must join `locals` (or the loop
+--- variable encodes as a free name and two loops never align), and its
+--- OCCURRENCE in the clause must encode as `def` (or the binder's own name reads
+--- as a use of a variable that does not exist yet).
+---
+--- ⚠⚠ IT TAKES A ROW, NOT AN EXPRESSION, AND THE DIFFERENCE IS SILENT.
+--- `f.exprs[i]` is a ROW (`{lhs, rhs, cond}`) and carries no `.k`, so handing it
+--- straight to `expr.walk` — which dispatches on `k` — traverses NOTHING and
+--- returns an empty list without erroring. MEASURED: that no-op moved 2 holes of
+--- 95 from `dep` to `closed` on this tree, because a loop variable that never
+--- joins `locals` encodes as a FREE NAME, and a hole over a free name depends on
+--- no binder and reads CLOSED. A value parameter, confidently, where a function
+--- parameter was needed. Caught only by joining against the prototype's census —
+--- no test would have, because the answer stayed well-formed.
+--- @param r table|nil a clone ROW
+--- @return table list of names, in binding order
+function M.ho_loop_binders(r, out)
+    out = out or {}
+    if type(r) ~= 'table' then return out end
+    local expr = require 'cartograph.expr'
+    local function scan(n)
+        if n.k == '?' and type(n.t) == 'string' and n.t:match('^for_.*clause$') then
+            for _, c in ipairs(n.kids or {}) do
+                if c.k == '?' and c.t == 'variable_list' then
+                    for _, v in ipairs(c.kids or {}) do
+                        if v.k == 'name' then out[#out + 1] = v.n end
+                    end
+                elseif c.k == 'name' then
+                    -- a numeric `for`: the FIRST name is the binder, the rest
+                    -- are the bounds and are ordinary uses
+                    out[#out + 1] = c.n
+                    break
+                end
+            end
+        end
+    end
+    -- ⚠ `rhs` AND `cond` ONLY, MIRRORING THE PROTOTYPE: a row's `lhs` holds what
+    -- it ASSIGNS, and `stmts[i].def` already reports those. A loop clause lives
+    -- on the right.
+    for _, x in ipairs(r.rhs or {}) do expr.walk(x, scan) end
+    if r.cond then expr.walk(r.cond, scan) end
+    return out
+end
+
+--- One clone ROW as the three terms `ho_fn_term` nests: lhs, rhs, cond.
+--- @param r table|nil the row ({lhs, rhs, cond}); nil yields the `row~` markers
+--- @param locals table set of local names
+--- @param defs table|nil names DEFINED by this row -- their occurrences encode
+---        as `def`, because a name this row binds is the binder, not a use
+--- @return table lhs, table rhs, table cond
+function M.ho_row_parts(r, locals, defs)
+    local A = M.load()
+    if not A then return nil end
+    if not r then return A.app('row~'), A.app('row~'), A.app('nocond') end
+    local isdef = {}
+    for _, d in ipairs(defs or {}) do isdef[d] = true end
+    --- inside a `for` clause the binder names are definitions, not uses
+    local function enc_def_aware(x)
+        if x.k == '?' and type(x.t) == 'string' and x.t:match('^for_.*clause$') then
+            local kids, first = {}, true
+            for _, c in ipairs(x.kids or {}) do
+                if c.k == '?' and c.t == 'variable_list' then
+                    local vs = {}
+                    for _, v in ipairs(c.kids or {}) do
+                        vs[#vs + 1] = (v.k == 'name' and isdef[v.n]) and A.app('def')
+                            or M.ho_term(v, locals)
+                    end
+                    kids[#kids + 1] = A.app('?:variable_list', tunpack(vs))
+                elseif c.k == 'name' and first and isdef[c.n] then
+                    kids[#kids + 1] = A.app('def')
+                else
+                    kids[#kids + 1] = M.ho_term(c, locals)
+                end
+                first = false
+            end
+            return A.app('?:' .. tostring(x.t), tunpack(kids))
+        end
+        return M.ho_term(x, locals)
+    end
+    local lhs, rhs = {}, {}
+    for _, x in ipairs(r.lhs or {}) do
+        if x.k == 'name' and isdef[x.n] then lhs[#lhs + 1] = A.app('def')
+        else lhs[#lhs + 1] = M.ho_term(x, locals) end
+    end
+    for _, x in ipairs(r.rhs or {}) do rhs[#rhs + 1] = enc_def_aware(x) end
+    return A.app('lhs', tunpack(lhs)), A.app('rhs', tunpack(rhs)),
+        r.cond and A.app('cond', enc_def_aware(r.cond)) or A.app('nocond')
+end
+
+--- The names row `i` brings into scope: its own definitions plus any loop
+--- binders in its expression.
+function M.ho_row_defs(f, stmts, i)
+    local out = {}
+    for _, d in ipairs((stmts[i] or {}).def or {}) do out[#out + 1] = d end
+    for _, d in ipairs(M.ho_loop_binders((f.exprs or {})[i])) do out[#out + 1] = d end
+    return out
+end
+
+--- How many names each KEPT row brings into scope, counting the dropped rows
+--- that precede it -- the input to the pad both sides must share.
+function M.ho_def_counts(f, eo, kept_rows)
+    local stmts, out, prev = eo.fl.stmts, {}, 0
+    for idx, i in ipairs(kept_rows) do
+        local n = 0
+        for j = prev + 1, i - 1 do n = n + #M.ho_row_defs(f, stmts, j) end
+        out[idx] = n + #M.ho_row_defs(f, stmts, i)
+        prev = i
+    end
+    return out
+end
+
+--- A whole FUNCTION as a λ-term: `λ params . row_1(lhs, rhs, cond, λ defs_1 .
+--- row_2(...))`, over the ALIGNED rows only.
+---
+--- ⚠ BINDER LISTS ARE PADDED WITH DUMMIES, AND THE PAD IS COMPUTED OVER BOTH
+--- SIDES BEFORE EITHER TERM IS BUILT. `hoau`'s Abs rule pairs binders
+--- positionally, so two λ-prefixes of different length do not align at all --
+--- one side's third parameter would meet the other's body. The dummies never
+--- occur in either body, so they cost nothing but the alignment.
+---
+--- ⚠ DROPPED ROWS' DEFINITIONS ARE CARRIED FORWARD, NOT DISCARDED. An ins/del
+--- row still brings names into scope for the rows that follow it, and a later
+--- row's hole genuinely depends on them.
+--- @param f table the clone-side record (`locals`, `exprs`)
+--- @param eo table `expr.of(store, id)`
+--- @param kept_rows table statement indices to keep, ascending
+--- @param pad table { params = n, defs = { per kept row } }
+--- @return table|nil term, number nparams
+function M.ho_fn_term(f, eo, kept_rows, pad)
+    local A = M.load()
+    if not A then return nil end
+    local stmts = eo.fl.stmts
+    -- locals := the function's own set + every loop binder. ⚠ A COPY: the clone
+    -- record's set is shared with the rest of the analysis and is not ours.
+    local locals = {}
+    for n in pairs(f.locals or {}) do locals[n] = true end
+    for i = 1, #stmts do
+        for _, d in ipairs(M.ho_loop_binders((f.exprs or {})[i])) do locals[d] = true end
+    end
+    local params = {}
+    for i, p in ipairs(eo.fl.params or {}) do params[i] = p end
+    for i = #params + 1, (pad.params or 0) do params[i] = '_p' .. i end
+    local function nest(idx, carry)
+        if idx > #kept_rows then return A.app('end') end
+        local i = kept_rows[idx]
+        local own = M.ho_row_defs(f, stmts, i)
+        local l, r, c = M.ho_row_parts((f.exprs or {})[i], locals, own)
+        local defs = {}
+        for _, d in ipairs(carry) do defs[#defs + 1] = d end
+        for _, d in ipairs(own) do defs[#defs + 1] = d end
+        local carry2, nxt = {}, kept_rows[idx + 1] or (#stmts + 1)
+        for j = i + 1, nxt - 1 do
+            for _, d in ipairs(M.ho_row_defs(f, stmts, j)) do carry2[#carry2 + 1] = d end
+        end
+        for n = #defs + 1, (pad.defs[idx] or 0) do defs[n] = '_d' .. idx .. '_' .. n end
+        return A.app('row', l, r, c, A.lams(defs, nest(idx + 1, carry2)))
+    end
+    -- the definitions of rows dropped BEFORE the first kept row bind over it
+    local carry0 = {}
+    for j = 1, (kept_rows[1] or 1) - 1 do
+        for _, d in ipairs(M.ho_row_defs(f, stmts, j)) do carry0[#carry0 + 1] = d end
+    end
+    return A.lams(params, nest(1, carry0)), #params
+end
+
 --- ⚠ `A.generalize` RETURNS A RESULT RECORD and so does `A.template`: the
 --- TEMPLATE is `{ body, holes, edits }`, and the TERM is `template.body`. Asking
 --- a template for `.k` yields nil, silently -- which is how a "is this a bare

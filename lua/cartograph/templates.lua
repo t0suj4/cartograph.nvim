@@ -218,6 +218,21 @@ M.SHAPES = {
         producer = 'clones.element_template',
         why = 'a donor plus the positions its members already vary at',
     },
+    -- ★★★ THE HIGHER-ORDER SHAPE (CART-0698 / hoau absorption). Its holes carry
+    -- the LOCALS THEY DEPEND ON, so it is the only recorded shape that names a
+    -- helper SIGNATURE rather than a hole count.
+    higher_order = {
+        matchable = false,
+        producer = 'hotemplate.of_pair',
+        -- ⚠ NOT MATCHABLE FOR THE SAME REASON AS `pair`, AND ONE MORE. It names
+        -- no donor; and even given one, `clones.match` binds VALUES, while a
+        -- dependent hole binds a FUNCTION of the instance's own locals — which
+        -- the first-order matcher has no representation for. Recording that
+        -- distinction is the point: `matchable = false` here is a statement
+        -- about the MATCHER's vocabulary, not about this template's quality.
+        why = 'holes over the function\'s own locals — match() binds values, and a '
+            .. 'dependent hole is a function of bindings the payload has not made yet',
+    },
     pair = {
         matchable = false,
         producer = 'clones.analyze_pair',
@@ -299,6 +314,19 @@ end
 local function copy_body(t)
     local out = { n = t.n, alignable = t.alignable, unkeyed = t.unkeyed,
         donor = t.donor, kind = t.kind, insdel = t.insdel }
+    -- ★★★ THE HIGHER-ORDER SHAPE'S OWN FIELDS. ⚠ THIS FUNCTION IS A WHITELIST,
+    -- so a shape whose fields are absent from it is stored HOLLOW and SILENTLY:
+    -- `record` succeeds, the handle resolves, and every read returns a body with
+    -- nothing in it. A third shape had to either extend this list or be a
+    -- uniform zero, and a uniform zero reads as a clean answer
+    -- ([[ask-the-accessor-not-the-container]]).
+    out.result = t.result
+    out.signature = t.signature
+    out.subject = t.subject
+    out.renaming = t.renaming
+    out.rows = t.rows
+    out.pattern = t.pattern
+    out.rebuild = t.rebuild
     out.holes = t.holes
     out.drift = t.drift
     out.varying = {}
@@ -541,6 +569,14 @@ end
 local function nvarying(body)
     local n = 0
     for _ in pairs(body.varying or {}) do n = n + 1 end
+    -- ★ THE HIGHER-ORDER SHAPE HAS NO `varying` MAP — its holes are a LIST, and
+    -- they have no source span to key one by (a hole is a λ-abstraction over the
+    -- function's binders, not a position in a donor). Without this a recorded
+    -- higher-order template reports `holes = 0` in `M.list`, which is the
+    -- degenerate answer this codebase keeps mistaking for a real one.
+    -- ⚠ GATED ON `signature`, WHICH ONLY THIS SHAPE CARRIES, so the `pair`
+    -- shape's count is left exactly as it was rather than changed in passing.
+    if n == 0 and body.signature then return #(body.holes or {}) end
     return n
 end
 
