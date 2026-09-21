@@ -582,6 +582,32 @@ end
 -- the banked precision refinement.
 local POST_CAP = 30
 
+--- ★★★ THE RESCUE CAP (CART-0999). `POST_CAP` is a COST guard on the common case: a key
+--- in hundreds of functions would make hundreds of candidates and say nothing. But a
+--- function whose EVERY key is over it generates no candidates AT ALL — and that is not a
+--- cost problem, it is a coverage hole, because absence and "no near-clone" render
+--- identically.
+---
+--- ⚠ AND THE HOLE IS ANTI-CORRELATED WITH GENERICITY, so it hides exactly what is most
+--- worth de-duplicating. A small general-purpose helper is MADE of the commonest row
+--- shapes; being duplicated is the property that conceals it. MEASURED on lua/cartograph:
+--- 527 of 3335 indexed functions (15.8%) are blind this way, 133 of them legitimately
+--- (they share no key with anyone at any cap) and 394 only because of the constant.
+--- THE WITNESS: `untangle.range_contains` and `hoistclosure.contains` are byte-identical
+--- but for one free name, and each needs a cap of 45 to be seen at all. Once seen they
+--- align at distance 0 into a `value` pair with ONE `name` hole.
+---
+--- ⇒ SO THE REPAIR IS NOT A BIGGER CAP, IT IS A FLOOR. A key over `POST_CAP` still yields
+--- no candidates — EXCEPT where it is the only thing a function has, in which case its
+--- rarest keys up to `RESCUE_CAP` are admitted. Every function that had candidates before
+--- has exactly the same ones; the pair set is a SUPERSET.
+--- ⚠ NOT A RAISED POST_CAP, AND CART-0949 IS WHY. That ticket rejected raising it — "293
+--- members would become mutually candidate for pairs whose difference the key still
+--- cannot represent: cost without information". That argument holds for ITS population
+--- (table literals collapsing to one token) and NOT for this one, where the key
+--- represents the difference perfectly. A floor keeps the rejection intact.
+local RESCUE_CAP = 64
+
 -- Levenshtein distance + backtrace over two arrays of atomic row-keys.
 -- Returns (dist, ops) where ops is the alignment [{op, i, j}] in forward order
 -- (op ∈ match|sub|del|ins; i indexes a, j indexes b).
@@ -817,6 +843,42 @@ end
 --- { dist, shared, a = {name,file,id,lines,keys}, b = {…}, ops }, sorted by
 --- (shared desc, dist asc). opts.max_dist (default 2), opts.min_rows (default 6),
 --- opts.min_shared (default 3). The per-fn index is generation-cached (see build_index).
+--- Keys admitted ONLY to rescue a function that has no distinctive key of its own.
+--- ⚠ IT IS KEYED BY THE KEY, NOT BY THE FUNCTION, so a rescue key also pairs up the other
+--- members of its posting list. That is a widening beyond the strict intent and it is
+--- kept deliberately: restricting each rescued key to pairs that INCLUDE a blind function
+--- would make the candidate set depend on which side you ask from, and `near` and
+--- `near_of` would then disagree about the same pair.
+--- ⚠⚠ AND `min_shared` IS THE SECOND HALF OF THE SAME BLINDNESS, WHICH COST A MEASUREMENT
+--- TO SEE. Admitting the rescued keys was not enough: the witness pair shares exactly ONE
+--- of them (its other rows' keys are in the hundreds, far over `RESCUE_CAP`), and the
+--- default `min_shared = 2` then dropped it again. Requiring two distinctive keys of a
+--- function that by construction has almost none re-imposes the hole one level down.
+--- ⇒ SO A PAIR WITH A BLIND ENDPOINT NEEDS ONE SHARED KEY, NOT TWO. ⚠ THE TEST IS ON THE
+--- PAIR, NOT ON A SIDE — "either endpoint is blind" is symmetric, so `near` and `near_of`
+--- cannot disagree about the same pair, which a "the focus is blind" rule would allow.
+--- @return table keys  rescued key -> true
+--- @return table blind index -> true
+local function rescue_keys(fns, post)
+    local blind = {}
+    for i, f in ipairs(fns) do
+        local ok = false
+        for _, k in ipairs((rel_keys(f))) do
+            local n = post[k] and #post[k] or 0
+            if n > 1 and n <= POST_CAP then ok = true; break end
+        end
+        if not ok then blind[i] = true end
+    end
+    local keys = {}
+    for i in pairs(blind) do
+        for _, k in ipairs((rel_keys(fns[i]))) do
+            local n = post[k] and #post[k] or 0
+            if n > 1 and n <= RESCUE_CAP then keys[k] = true end
+        end
+    end
+    return keys, blind
+end
+
 function M.near(store, opts)
     local max_dist = (opts and opts.max_dist) or 2
     local min_rows = (opts and opts.min_rows) or 6
@@ -824,9 +886,10 @@ function M.near(store, opts)
     local fns = build_index(store)
     local post = rel_post(store, fns)
     -- candidate pairs = those sharing ≥ min_shared distinctive keys
+    local rescued, blind = rescue_keys(fns, post)
     local shared = {}
-    for _, list in pairs(post) do
-        if #list >= 2 and #list <= POST_CAP then
+    for key, list in pairs(post) do
+        if #list >= 2 and (#list <= POST_CAP or rescued[key]) then
             for x = 1, #list do
                 for y = x + 1, #list do
                     local pk = list[x] * 1000000 + list[y]
@@ -837,8 +900,9 @@ function M.near(store, opts)
     end
     local out = {}
     for pk, cnt in pairs(shared) do
-        if cnt >= min_shared then
-            local p = try_pair(fns, math.floor(pk / 1000000), pk % 1000000, max_dist, min_rows)
+        local x, y = math.floor(pk / 1000000), pk % 1000000
+        if cnt >= min_shared or (cnt >= 1 and (blind[x] or blind[y])) then
+            local p = try_pair(fns, x, y, max_dist, min_rows)
             if p then out[#out + 1] = p end
         end
     end
@@ -859,12 +923,13 @@ function M.near_of(store, fn_id, opts)
     for i, f in ipairs(fns) do if f.id == fn_id then fi = i; break end end
     if not fi then return {} end
     -- partners = functions sharing the focus's distinctive keys, counted
+    local rescued, blind = rescue_keys(fns, post)
     local cnt, fseen = {}, {}
     for _, k in ipairs((rel_keys(fns[fi]))) do
         if not fseen[k] then
             fseen[k] = true
             local list = post[k]
-            if list and #list <= POST_CAP then
+            if list and (#list <= POST_CAP or rescued[k]) then
                 for _, j in ipairs(list) do
                     if j ~= fi then cnt[j] = (cnt[j] or 0) + 1 end
                 end
@@ -873,12 +938,57 @@ function M.near_of(store, fn_id, opts)
     end
     local out = {}
     for j, c in pairs(cnt) do
-        if c >= min_shared then
+        if c >= min_shared or (c >= 1 and (blind[fi] or blind[j])) then
             local p = try_pair(fns, math.min(fi, j), math.max(fi, j), max_dist, min_rows)
             if p then out[#out + 1] = p end
         end
     end
     return sort_pairs(out)
+end
+
+--- ★★★ WHO IS THE NEAR INDEX BLIND TO, AND BY HOW MUCH (CART-0751's question, asked of
+--- this instrument). Candidate pairs come from keys present in ≤ POST_CAP functions. A
+--- function whose EVERY key is over that cap generates NO candidates at all — it is not
+--- reported as a weak match, it is absent, and absence and "no near-clone" render
+--- identically.
+---
+--- ⚠ THE CAP IS ANTI-CORRELATED WITH GENERICITY, which is why this is a systematic blind
+--- spot rather than a tail. A small general-purpose helper is MADE of the commonest row
+--- shapes — `if not x then return false end`, `return true` — so being duplicated is
+--- exactly the property that hides it. `tools/variants.lua` states the same inversion for
+--- similarity search: *"rare" and "not shared with some other arbitrary function" are the
+--- same property*. This is that, arriving in the near tier.
+---
+--- ⚠ IT IS A SECOND POPULATION, NOT CART-0949's. That ticket measured the same constant
+--- hiding table-literal repetition, where the KEY IS TOO COARSE (every table collapses to
+--- `T`), and rejected raising the cap because "the key still cannot represent the
+--- difference — cost without information". HERE THE KEY IS FINE: the witness pair
+--- (`untangle.range_contains` / `hoistclosure.contains`) aligns at distance 0 into a
+--- `value` pair with ONE `name` hole once it is allowed to be a candidate. So the
+--- rejection does not transfer, and telling the two apart needs this measurement.
+---
+--- @return table { total, blind, blind_ids, needed } — `needed` maps a function id to the
+---   SMALLEST posting-list size among its keys, i.e. the cap at which it becomes visible.
+function M.index_blindspot(store)
+    local fns = build_index(store)
+    local post = rel_post(store, fns)
+    local out = { total = #fns, blind = 0, blind_ids = {}, needed = {} }
+    for _, f in ipairs(fns) do
+        local best
+        for _, k in ipairs((rel_keys(f))) do
+            local n = post[k] and #post[k] or 0
+            -- ⚠ A KEY PRESENT IN ONE FUNCTION (ITSELF) IS NOT A CANDIDATE SOURCE, and
+            -- counting it as the minimum would report a function as one cap-point away
+            -- from visibility when no partner exists at any cap.
+            if n > 1 and (best == nil or n < best) then best = n end
+        end
+        if best == nil or best > POST_CAP then
+            out.blind = out.blind + 1
+            out.blind_ids[#out.blind_ids + 1] = f.id
+            out.needed[f.id] = best          -- nil = no shared key at ANY cap
+        end
+    end
+    return out
 end
 
 -- ── anti-unification: refine a near-clone's holes into typed parameters ───────
