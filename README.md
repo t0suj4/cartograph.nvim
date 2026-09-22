@@ -412,6 +412,39 @@ no current content — so it can never do its job again.
 removes them. Dry by default, because deleting a user record should not
 be a side effect of asking about it.
 
+### Putting an abstraction back
+
+Every refactoring verb so far makes code *more* abstract — five of them
+extract, none inline. `:CartographInlineHelper` is the way back out: it takes
+the most recent `extract-helper` transaction and puts the synthesized helper
+back into the bodies it was taken from.
+
+It is **not** `:CartographUndo`. Undo restores every byte of every file that
+transaction touched, discarding whatever you did afterwards. This removes *one
+abstraction* from the tree as it stands now — so if the helper improved in the
+meantime, the improvement is what reaches all its call sites.
+
+That is possible because the fold **wrote down the relation it computed**:
+which argument stood for which parameter at which site. Nothing in the
+resulting source says so, and re-deriving it would mean re-parsing our own
+output and trusting nobody had touched it since. The inverse reads the
+transaction's record instead, and every way that record can stop describing
+the tree is a **named refusal** — a site that no longer delegates, a parameter
+rebound inside the helper, an argument whose free name the helper's body would
+capture, a fold that lifted a *function* parameter (inverting one is a
+beta-reduction, not a substitution), or a cross-file fold (whose inverse must
+also unwire the import). The helper is deleted only if nothing outside the
+recorded sites still calls it; otherwise it stays, and the plan names the
+caller that kept it.
+
+⚠ It is an **inline, not a restore**. The helper wears the *donor* site's
+local names, so the donor comes back byte-identical and the other sites come
+back alpha-equivalent — same behaviour, the helper's variable names. Byte
+restoration is what `:CartographUndo` is for. Over MCP the verb is
+`txn_plan_invert`, and it is the only planner whose subject is a journal entry
+rather than a piece of code, because what it needs was computed once, by the
+fold, and exists nowhere in the text.
+
 `:CartographMerge` needs you to *find* a clone first. `:CartographClones`
 is the finder: it groups every function by an **exact-structural** key —
 the per-statement shape read from the same expression IR that powers
@@ -3154,10 +3187,10 @@ tools/install-hooks.sh      # git config core.hooksPath .githooks
 
 `git commit --no-verify` bypasses it for a WIP checkpoint.
 
-<!-- @claim readme-agent-verbs: The agent surface serves 31 verbs. -->
-<!-- check: #require('cartograph.agent').ORDER == 31 -->
+<!-- @claim readme-agent-verbs: The agent surface serves 32 verbs. -->
+<!-- check: #require('cartograph.agent').ORDER == 32 -->
 
-## Agent surface (headless, 29 verbs)
+## Agent surface (headless, 32 verbs)
 
 Everything above is the editor. There is a second, equal surface: cartograph
 answers the same questions **headlessly**, over MCP or one-shot JSON, and applies

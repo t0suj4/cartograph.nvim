@@ -485,6 +485,21 @@ verb refuses is as load-bearing as what it writes — see
                               pair needs no argument; a CROSS-FILE pair
                               takes a destination module path. Held to
                               the sound subset; refuses outside it
+  :CartographInlineHelper     the INVERSE: inline the most recent
+                              extract-helper back into the sites it was
+                              taken from, reading the argument/parameter
+                              correspondence off that transaction's own
+                              record. NOT :CartographUndo — undo restores
+                              that transaction's bytes and discards later
+                              work; this removes ONE abstraction from the
+                              tree as it stands, so a helper improved
+                              since is what comes back. Each body returns
+                              in the HELPER's local names (inline, not
+                              restore). Refuses by name on capture, a
+                              rebound parameter, a site that stopped
+                              delegating, a function parameter, or a
+                              cross-file fold. The helper is deleted only
+                              if nothing else calls it
   :CartographHoistClosure     lift the focused NESTED closure to module
                               scope — sound only when it captures
                               nothing. Refuses a capture, naming the

@@ -103,6 +103,26 @@ test('★★★ a CONSTRUCTIVE verb declares the RELATION, which no soft delete 
     if not plan.undo then return end
     eq('relation', plan.undo.kind)
     eq(plan.helper, plan.undo.helper)
+    -- ★★★ THE ARITY, NOT THE COUNT (CART-1005). This line read `#params >= 1` and passed
+    -- against a record describing ONE parameter of the helper's TWO — the forwarded half
+    -- was missing, and with it the RENAMING between the two sites. A count is satisfiable
+    -- by any non-empty record; the arity is the correspondence's own invariant, and only
+    -- the first consumer (`invert`) could have discovered the difference.
+    local sig
+    for _, fe in pairs(plan.files) do
+        for _, op in ipairs(fe.ops) do
+            for _, l in ipairs(op.new) do
+                if l:find('function ' .. plan.helper .. '(', 1, true) then sig = l end
+            end
+        end
+    end
+    ok(sig, 'the plan emits the helper signature')
+    if sig then
+        local inside = sig:match('%((.-)%)') or ''
+        local n = 0
+        for _ in inside:gmatch('[^,]+') do n = n + 1 end
+        eq(n, #plan.undo.params)
+    end
     ok(#plan.undo.params >= 1, 'the helper parameters are named')
     eq(2, #plan.undo.sites)
     -- ★ THE CORRESPONDENCE IS THE POINT: each site's arguments, positionally matching
@@ -111,6 +131,15 @@ test('★★★ a CONSTRUCTIVE verb declares the RELATION, which no soft delete 
         eq(#plan.undo.params, #s.args)
         ok(s.file and s.name, 'each site names its member')
     end
+    -- ★ THE FORWARDED HALF IS THE PART THAT WAS MISSING: the helper wears side A's
+    -- parameter names and side B calls it with its own, so `x` at site 1 and `a` at site 2
+    -- stand in the SAME position. That is a renaming, and it is not derivable from the
+    -- synthetic parameters alone.
+    ok(plan.undo.sites[1].args[1] ~= plan.undo.sites[2].args[1],
+        'the forwarded parameter differs between the sites — that is the renaming')
+    eq(plan.undo.file ~= nil, true)
+    eq(plan.undo.call ~= nil, true)
+    ok(plan.undo.body_hash, 'and the helper text has a witness, for the inverse\'s claim')
     local a1 = table.concat(plan.undo.sites[1].args, ',')
     local a2 = table.concat(plan.undo.sites[2].args, ',')
     ok(a1 ~= a2, 'and the two sites differ — that is what the parameter is for')

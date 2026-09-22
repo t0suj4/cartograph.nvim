@@ -440,7 +440,8 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
-    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_plan_replace', 'txn_preview',
+    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_plan_replace',
+    'txn_plan_invert', 'txn_preview',
     -- the handoff: plan on a read-only host, apply on an armed one
     'txn_save', 'txn_load',
     'journal_list', 'journal_get',
@@ -1849,6 +1850,7 @@ local VERB_OF_FAMILY = {
     declare = 'txn_plan_declare', annotate = 'txn_plan_annotate',
     ['extract-family'] = 'txn_plan_extract_family',
     ['clone-merge'] = 'txn_plan_clonemerge',
+    ['inline-helper'] = 'txn_plan_invert',
     replace = 'txn_plan_replace',
 }
 
@@ -2300,6 +2302,84 @@ local function v_txn_plan_clonemerge(store, args)
         subject = { plan = pid, verb = plan.verb, node = node_row,
             survivor = nn((plan.survivor or {}).name),
             removed = #(plan.removed or {}), rewrites = #(plan.rewrites or {}),
+            touched = plan.touched, generation = plan.generation, previewed = false },
+        result = rows, notes = notes,
+    }
+end
+
+--- ★★★ THE FIRST VERB THAT TAKES AN ABSTRACTION APART (CART-1005).
+---
+--- ⚠ ITS SUBJECT IS A TRANSACTION, NOT A NODE, and that is not an accident of plumbing.
+--- Every other planner is asked about a piece of CODE; this one is asked about a piece of
+--- HISTORY, because what it needs — which argument stood for which parameter at which site
+--- — was computed once, by the fold, and exists nowhere in the text. `journal_list` names
+--- the entries; an `id` from one of its rows is the address.
+---
+--- ⚠ AND IT IS NOT `txn_undo`. Undo restores the bytes of every file that transaction
+--- touched, discarding whatever happened since. This removes ONE abstraction from the tree
+--- AS IT STANDS — so a helper improved in the meantime is what comes back to the sites,
+--- which is the entire reason to have it as a refactoring rather than a rollback.
+local function v_txn_plan_invert(store, args)
+    local journal = require 'cartograph.journal'
+    local root = (store.data or {}).root
+    local all = journal.list(root) or {}
+    local target
+    if args.id and args.id ~= '' then
+        for _, e in ipairs(all) do if e.id == args.id then target = e break end end
+        if not target then
+            return refuse('unknown-entry',
+                ('no journal entry %q for %s (%d entr(ies) recorded)')
+                    :format(tostring(args.id), tostring(root), #all),
+                'call journal_list and use an `id` from one of its rows')
+        end
+    else
+        for i = #all, 1, -1 do
+            if all[i].undo and all[i].undo.kind == 'relation' then target = all[i] break end
+        end
+        if not target then
+            return { subject = { plan = NUL, verb = 'inline-helper' }, result = {},
+                absence = 'absent',
+                absence_why = { premise = 'no-invertible-entry',
+                    why = ('no entry in %s\'s journal declares a relation to invert — only a'
+                        .. ' CONSTRUCTIVE verb records one, and today that is extract-helper')
+                        :format(tostring(root)),
+                    evidence = { entries = #all } } }
+        end
+    end
+
+    local plan, why = require('cartograph.invert').of(store, target)
+    if not plan then
+        -- ⚠ EVERY ONE OF THESE IS A NAMED PRECONDITION, not a generic failure: the forward
+        -- verb's refusals read backwards. Reporting them as `absent` would say the tree has
+        -- nothing to inline, which is the opposite of what happened.
+        return refuse('cannot-invert',
+            ('%s cannot be inverted: %s'):format(tostring(target.id), tostring(why)),
+            'read the reason — it names what changed since the fold, or which shape of'
+                .. ' extraction this verb does not reverse',
+            { entry = target.id })
+    end
+    local rows = {}
+    for _, r in ipairs(plan.refspecs or {}) do
+        rows[#rows + 1] = { name = nn(r.name), ref = nn(r.ref),
+            role = 'the helper call becomes this body again, in the HELPER\'s local names' }
+    end
+    if plan.removed_helper then
+        rows[#rows + 1] = { name = nn(plan.helper), role = 'removed — nothing else calls it' }
+    end
+    local notes = {}
+    if not plan.removed_helper then
+        notes[#notes + 1] = ('`%s` is KEPT: %s still call(s) it'):format(plan.helper,
+            table.concat(plan.kept_because or {}, ', '))
+    end
+    if plan.preserves == 'unreviewed' then notes[#notes + 1] = plan.preserves_why end
+    notes[#notes + 1] = 'inline, not restore: each body returns in the helper\'s local'
+        .. ' names, which are the donor site\'s. Byte restoration is txn_undo'
+    local pid = stash_plan(store, plan, 'inline-helper',
+        { verb = VERB_OF_FAMILY['inline-helper'], args = args })
+    return {
+        subject = { plan = pid, verb = plan.verb, entry = target.id, helper = plan.helper,
+            sites = plan.nsites, substitutions = plan.nsubs,
+            removed_helper = plan.removed_helper, preserves = plan.preserves,
             touched = plan.touched, generation = plan.generation, previewed = false },
         result = rows, notes = notes,
     }
@@ -3320,6 +3400,22 @@ M.VERBS = {
         absences = { 'absent' },
         args = ADDRESS,
         run = v_txn_plan_clonemerge,
+    },
+    txn_plan_invert = {
+        summary = 'PROPOSE the INVERSE of a recorded extract-helper — inline the synthesized helper back into the sites it was taken from. ⚠ NOT txn_undo: undo restores that transaction\'s bytes and discards later work; this removes ONE abstraction from the tree as it stands, so a helper improved since is what comes back. Reads the argument/parameter correspondence off the transaction\'s own undo record instead of re-parsing our output. Writes nothing: returns a plan handle for txn_preview',
+        -- ⚠ THE ONLY PLANNER WHOSE SUBJECT IS HISTORY. What it needs was computed by the
+        -- fold and never written as text, so the address is a journal id, not a node.
+        subject = 'journal',
+        tier_basis = 'observation', needs_calls = true,
+        -- `absent` the journal holds no CONSTRUCTIVE transaction — a fact about the
+        --          history, not about the code, and distinct from a named refusal
+        --          (which means one exists and something about it changed).
+        absences = { 'absent' },
+        args = {
+            { name = 'id', type = 'string', required = false,
+                desc = 'an `id` from a journal_list row; omitted, the most recent entry that declares a relation' },
+        },
+        run = v_txn_plan_invert,
     },
     txn_plan_replace = {
         summary = 'PROPOSE swapping a definition\'s text for text YOU supply — the destination for a rendered edit (transplant). ⚠ ITS GUARANTEE IS THE WEAKEST OF THE WRITE VERBS: the text is not derived from this graph, so the plan checks only that the result PARSES and that the file has not moved. It does NOT check that the replacement defines the same name, keeps its arity, or relates to what it replaces',

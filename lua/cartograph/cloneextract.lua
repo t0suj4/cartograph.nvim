@@ -904,14 +904,25 @@ function M.plan(store, pair, opts)
     -- what LATE inversion cannot assume.
     -- ⚠ NOT A SPAN RECORD, AND NOT FORCED INTO ONE: the `kind` discriminator is what keeps
     -- a single `undo` field honest about carrying two different things.
+    -- ★★★ THE FULL POSITIONAL CORRESPONDENCE, AND THE FIRST CUT RECORDED HALF OF IT
+    -- (CART-1005). It listed the SYNTHETIC parameters only -- `hp` and `fpn`, the ones
+    -- this verb mints -- on the reasoning that the FORWARDED ones pass through unchanged.
+    -- They do not. The helper wears SIDE A's parameter names and side B calls it with its
+    -- OWN: `fmt_a_extracted(x, hp1)` is called `fmt_a_extracted(a, 'yaml')`, so inverting
+    -- into B needs `x -> a` and the record could not say so. MEASURED on the spec's own
+    -- fixture: helper arity 2, record arity 1.
+    -- ⇒ SO THE INVARIANT IS `#params == the helper's arity`, and the spec pins it. A record
+    -- that describes fewer parameters than the function has is not a smaller record, it is
+    -- a correspondence with an unstated half -- and the unstated half was a RENAMING.
     do
         local params = {}
-        for _, n in ipairs(hp) do params[#params + 1] = n end
-        for _, n in ipairs(fpn) do params[#params + 1] = n end
+        for _, n in ipairs(hparams) do params[#params + 1] = n end
         local sites = {}
-        for _, side in ipairs({ { m = a, key = 'sites_a', src = lines_a },
-            { m = b, key = 'sites_b', src = lines_b } }) do
+        for _, side in ipairs({ { m = a, key = 'sites_a', src = lines_a, v = va },
+            { m = b, key = 'sites_b', src = lines_b, v = vb } }) do
             local args = {}
+            -- the forwarded half: THIS side's name for the helper's i-th parameter
+            for _, p in ipairs(side.v.params) do args[#args + 1] = p end
             for _, h in ipairs(analysis.holes) do
                 args[#args + 1] = span_text(side.src, h[side.key][1])
             end
@@ -919,9 +930,24 @@ function M.plan(store, pair, opts)
                 local ranges = (side.key == 'sites_a') and f.ranges_a or f.ranges_b
                 args[#args + 1] = span_text(side.src, ranges[1])
             end
-            sites[#sites + 1] = { file = side.m.file, name = side.m.name, args = args }
+            sites[#sites + 1] = { file = side.m.file, name = side.m.name,
+                id = side.m.id, args = args }
         end
-        plan.undo = { kind = 'relation', helper = hname, params = params, sites = sites }
+        plan.undo = {
+            kind = 'relation', helper = hname, params = params, sites = sites,
+            -- ⚠ WHAT THE INVERSE MUST NOT HAVE TO READ FROM `plan`. `plan_version` exists
+            -- because replaying a recorded plan is the fragile path; `journal.recover`
+            -- reads `e.undo` and `e.files` and nothing else, and this record is held to
+            -- the same line. So it carries WHERE the helper is and HOW it is called
+            -- rather than leaving the inverse to re-derive them from `xfile`.
+            file = xfile and dest or a.file,
+            call = plan.helper_call or hname,
+            nfparams = #fpn,
+            -- ★ A WITNESS, NOT A COPY. The bytes are in the entry's `after`; this says
+            -- whether the helper is still the one we wrote, which decides the CLAIM the
+            -- inverse may make -- not whether it may run (see `invert.lua`).
+            body_hash = require('cartograph.journal').hash(table.concat(body, '\n')),
+        }
     end
     plan.expect = expectation(plan, EXTRACT[plan.lang])
     -- ★★★ THE FOLD'S BEHAVIOURAL RADIUS RIDES ON THE PLAN (CART-0989). `analyze_pair`
@@ -948,6 +974,9 @@ function M.plan(store, pair, opts)
     -- passed: the divergent expression still runs where it ran, as often as it ran. So
     -- the function parameters contribute nothing to review — the claim above stands on
     -- the value holes alone, and the reason records WHY the reader need not re-derive it.
+    -- the forward verb's claim travels with the record: the inverse of a fold that
+    -- preserved everything preserves everything BACK, and one that did not cannot.
+    plan.undo.preserves = plan.preserves
     if #fpn > 0 then
         plan.preserves_why = ('%s; %d divergence(s) became function parameters, which are'
             .. ' not evaluated at the call — the expression still runs where it ran')
@@ -1364,6 +1393,7 @@ function M.plan_family(store, fam, opts)
     end
 
     local un = require 'cartograph.untangle'
+    local undo_sites = {}
     for _, i in ipairs(take) do
         local m = fam.members[i]
         local mv = un.body_extractable(store, m.id)
@@ -1396,6 +1426,13 @@ function M.plan_family(store, fam, opts)
                 .. syn.ret(callee, table.concat(args, ', ')) } })
         plan.members[#plan.members + 1] = { id = m.id, name = m.name,
             ref = store.ref_of(m.id), file = m.file }
+        -- ★★★ THE FAMILY RECORDS THE SAME RELATION, AND IT HAD NONE (CART-1005). The pair
+        -- builder declared its `undo` and this one did not, so the only extraction reachable
+        -- through the MCP write axis produced a transaction NOTHING COULD INVERT — a
+        -- capability present, wired, and unreachable by the interface that would use it,
+        -- which is the shape CART-0973 named. `args` above IS the correspondence: it was
+        -- built positionally against `hparams` to emit the call.
+        undo_sites[#undo_sites + 1] = { file = m.file, name = m.name, id = m.id, args = args }
     end
 
     for _, f in ipairs(files) do plan.files[f] = { ops = perfile[f] } end
@@ -1438,6 +1475,15 @@ function M.plan_family(store, fam, opts)
     -- inheriting the pair path's 'all'. Unknown is not neutral.
     plan.preserves = 'unreviewed'
     plan.preserves_why = plan.behaviour.why
+    -- ⚠ N SITES, NOT TWO, AND THE RECORD NEEDED NO NEW SHAPE FOR IT: `sites` was a list
+    -- from the day it was written. A family fold is the case that makes the record earn
+    -- its keep — seven call sites' worth of correspondence, none of it in the text.
+    plan.undo = {
+        kind = 'relation', helper = hname, params = hparams, sites = undo_sites,
+        file = xfile and dest or (plan.members[1] or {}).file,
+        call = callee, nfparams = 0, preserves = plan.preserves,
+        body_hash = require('cartograph.journal').hash(table.concat(body, '\n')),
+    }
     plan.precheck = function (st)
         if next(st.moveset or {}) then
             return 'a move-set is staged — apply or clear it first'
@@ -1453,6 +1499,15 @@ function M.plan_family(store, fam, opts)
     -- which is a correct refusal and an easy one to mistake for a bad plan.
     return txn.protocol(plan, M.edits_for)
 end
+
+--- ★ EXPORTED FOR THE INVERSE (CART-1005), NOT COPIED INTO IT. CART-0998 is open
+--- against exactly this: `range_contains` and `contains` are byte-identical copies of one
+--- predicate in two modules, and a gate now depends on them agreeing. The body span is
+--- the same question here and there -- "where does this function's body start and end" --
+--- and an inverse computing it its own way could disagree with the forward verb about the
+--- very lines it is putting back.
+--- @return integer|nil sig0b, integer open0b, integer close0b
+function M.body_span(store, id, stmt_lines) return body_span(store, id, stmt_lines) end
 
 function M.edits_for(plan)
     return function (rel, before)

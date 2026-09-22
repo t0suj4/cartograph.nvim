@@ -360,6 +360,12 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         txn_load = { args = { path = '/nonexistent/plan.json' }, expect = 'refusal' },
         journal_list = {},
         journal_get = { args = { id = 'no-such-entry' }, expect = 'refusal' },
+        -- ⚠ NAMED ENTRY vs NO ENTRY ARE DIFFERENT ANSWERS, and this drives the first.
+        -- Handed an id nobody minted the verb REFUSES (you asked about something that is
+        -- not there); handed nothing on a journal with no constructive transaction it
+        -- reports an ABSENCE (there is nothing of that kind to ask about). Pooling the
+        -- two would make "no extraction has ever been folded here" read as an error.
+        txn_plan_invert = { args = { id = 'no-such-entry' }, expect = 'refusal' },
         -- the two mutating verbs refuse on this host whatever the handle says.
         -- WHICH rule fires (read-only vs unknown-plan) depends on how the module
         -- flag was left, so only the SHAPE is asserted: coupling this spec to

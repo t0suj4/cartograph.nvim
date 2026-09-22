@@ -116,7 +116,14 @@ function M.of(src, file)
     for id, rec in pairs(off_of) do
         local e = (rec.kind == 'ref') and G.refs[id] or G.decls[id]
         if e and e.scope then
-            pts[#pts + 1] = { line = line_of(rec.off), off = rec.off, scope = e.scope, kind = rec.kind }
+            -- ⚠ `name` AND `site` RIDE ALONG BECAUSE A SUBSTITUTION NEEDS THE OCCURRENCE,
+            -- NOT THE SCOPE (CART-1005). Every consumer until `invert` asked "what is in
+            -- effect HERE"; inlining asks the transposed question — "where does this name
+            -- OCCUR" — and the walk that answers the first already visited every one of
+            -- them. Dropping the name made the second question look like it needed a
+            -- second walker, which is how this codebase grows its fourth half-predicate.
+            pts[#pts + 1] = { line = line_of(rec.off), off = rec.off, scope = e.scope,
+                kind = rec.kind, name = e.name, site = e.site }
         end
         -- ★ EVERY DECLARATION WITH A PATH, for the containment answer below.
         if rec.kind == 'decl' and G.decls[id] and G.decls[id].site then
@@ -177,6 +184,41 @@ function M.fn_path(h, line0)
         return nil, 'the function path does not contain its own parameters'
     end
     return path, nil
+end
+
+--- ★★★ EVERY *USE* OF `name` UNDER `path`, AS BYTE OFFSETS (CART-1005).
+--- The inverse of an extraction substitutes an argument for a parameter, and a
+--- substitution is about OCCURRENCES. `is_bound`/`binds_in` answer about DECLARATIONS;
+--- this is the other side of the same index, and it is the reason `invert` does not
+--- reach for a pattern.
+---
+--- ⚠ WHY NOT `gsub`, WHICH IS WHAT EVERY FIRST CUT OF AN INLINER DOES: `x` occurs inside
+--- `max`, inside `"x"`, and inside `t.x`. Only the first of those three is a reference,
+--- and only the scope graph knows which. The offsets here come from the CST walk whose
+--- law is `cst_print(read(src)) == src` byte for byte, so each is an exact splice point.
+---
+--- ⚠ REFERENCES ONLY — a declaration of the same name is deliberately NOT returned.
+--- ★ AND MEASURED, THIS FILTER CHANGES NOTHING TODAY, which is worth writing down rather
+--- than leaving as an assumption: `invert` is the only caller, it discards offsets outside
+--- the body (so a parameter's own declaration in the signature never reaches it) and it
+--- refuses a parameter that is rebound inside one (so a shadowing declaration never reaches
+--- it either). Dropping the filter leaves the suite green. It stays because `uses` is an
+--- ACCESSOR, not that caller's private step: the next caller will not have both conditions,
+--- and "every occurrence of this name" and "every reference to it" are different questions
+--- that must not share an answer by accident.
+--- @return table uses  { { off, line, site } } ascending by offset
+function M.uses(h, path, name)
+    local out = {}
+    if not (h and h.points) then return out end
+    local short = tostring(name):match('[%w_]+$') or name
+    for _, p in ipairs(h.points) do
+        if p.kind == 'ref' and p.name == short and p.site
+            and (path == nil or M.under(path, p.site)) then
+            out[#out + 1] = { off = p.off, line = p.line, site = p.site }
+        end
+    end
+    table.sort(out, function (x, y) return x.off < y.off end)
+    return out
 end
 
 --- is `site` under `path` (a strict-or-equal prefix)?

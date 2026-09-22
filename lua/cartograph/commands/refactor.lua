@@ -351,6 +351,34 @@ function M.register(H)
             plan.xfile and (' in NEW ' .. plan.create.file) or ''), vim.log.levels.INFO)
     end, { nargs = '?', complete = 'file', desc = 'cartograph: stage the VERIFIED extract-helper transaction for the focused function and its nearest near-clone — synthesizes the shared parameterized helper and rewrites both bodies to tail-call it. Same-file needs no arg; a CROSS-FILE pair takes a destination module path (a new .lua) for the shared helper + require wiring. Constrained to the sound subset (value-parameterizable, body-safe, globals-only for cross-file; Lua or JavaScript, same-file for JS); refuses otherwise. Review :CartographDiff, commit :CartographApply' })
 
+    -- ── the INVERSE of an extraction (CART-1005) ────────────────────
+    -- ⚠ NOT `:CartographUndo`, AND THE DIFFERENCE IS THE WHOLE POINT. Undo restores the
+    -- whole file to its bytes at that transaction, discarding everything done since; this
+    -- stages an ordinary transaction that removes ONE abstraction from the tree as it is
+    -- now. It is also the first verb that takes an abstraction APART — the vocabulary had
+    -- five ways in and none out, which is why a self-refactoring loop could not correct
+    -- itself (CART-1004 reading B).
+    cmd('CartographInlineHelper', function ()
+        local store = live() if not store then return end
+        if store.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+        end
+        local plan, why = require('cartograph.invert').of_last(store)
+        if not plan then
+            return vim.notify('cartograph: cannot invert — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        store.set_txn(plan)
+        vim.notify(('cartograph: inline-helper staged — %s back into %d site(s),'
+            .. ' %d substitution(s)%s%s. Review with :CartographDiff, then'
+            .. ' :CartographApply'):format(plan.helper, plan.nsites, plan.nsubs,
+            plan.removed_helper and ' (the helper is removed)'
+                or (' (kept: ' .. table.concat(plan.kept_because or {}, ', ') .. ' still calls it)'),
+            plan.preserves == 'unreviewed' and ' ⚠ REVIEW: the helper changed since' or ''),
+            vim.log.levels.INFO)
+    end, { desc = 'cartograph: stage the INVERSE of the most recent extract-helper — inline the synthesized helper back into the sites it was taken from, reading the argument/parameter correspondence off the transaction\'s own undo record rather than re-parsing our output. ⚠ NOT :CartographUndo: that restores the file\'s bytes at that transaction and discards later work; this removes one abstraction from the tree as it stands, so a helper improved since is what comes back. Each body returns in the HELPER\'s local names (inline, not restore). Refuses by name on capture, a rebound parameter, a site that stopped delegating, a function parameter, or a cross-file fold. Review :CartographDiff, commit :CartographApply' })
+
     -- ── refactor-neutrality: certify a move/extract changed no behavior ──
     cmd('CartographNeutralitySnapshot', function ()
         local store = live() if not store then return end

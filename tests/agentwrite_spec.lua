@@ -798,6 +798,37 @@ end)
 -- ★ AND CROSS-FILE IS THE INTERESTING CASE. One helper wanted by two modules is what
 -- "extract a shared abstraction" means; the same-file families this verb could already
 -- reach are the ones a human spots unaided.
+-- three near-clones in ONE file: the family fold's own shape, and the shape whose
+-- inverse is expressible (a cross-file fold's inverse must also unwire the import)
+local SAMEFILE_FAMILY = {
+    'local M = {}',
+    'local function fam_a(items)',
+    '  local out = {}',
+    '  for _, it in ipairs(items) do',
+    "    if type(it) == 'string' then out[#out + 1] = it end",
+    '  end',
+    '  table.sort(out)',
+    '  return out',
+    'end',
+    'local function fam_b(items)',
+    '  local out = {}',
+    '  for _, it in ipairs(items) do',
+    "    if type(it) == 'number' then out[#out + 1] = it end",
+    '  end',
+    '  table.sort(out)',
+    '  return out',
+    'end',
+    'local function fam_c(items)',
+    '  local out = {}',
+    '  for _, it in ipairs(items) do',
+    "    if type(it) == 'table' then out[#out + 1] = it end",
+    '  end',
+    '  table.sort(out)',
+    '  return out',
+    'end',
+    'return { fam_a, fam_b, fam_c, M }',
+}
+
 local XFILE_A = {
     'local M = {}',
     'function M.pick_a(items)',
@@ -1288,6 +1319,23 @@ local SWEEP_CASES = {
     ['extract-family'] = { files = function ()
             return { ['one.lua'] = XFILE_A, ['two.lua'] = XFILE_B } end,
         args = function () return { node = idof('M.pick_a'), dest = 'shared/pick.lua' } end },
+    -- ★★★ THE ONLY CASE WITH A `setup`, AND THE REASON IS THE VERB'S SUBJECT (CART-1005).
+    -- Every other planner is asked about CODE, which a fixture supplies; this one is asked
+    -- about HISTORY, so the fixture has to include a transaction. ⚠ AND BUILDING IT THROUGH
+    -- THE VERBS IS THE POINT — the first version of this case could not be written at all,
+    -- because `plan_family` recorded no relation and the MCP write axis therefore could not
+    -- produce an invertible transaction. The sweep is what said so.
+    ['inline-helper'] = {
+        files = function () return { ['m.lua'] = SAMEFILE_FAMILY } end,
+        setup = function ()
+            local p = call('txn_plan_extract_family', { node = idof('fam_a') })
+            local sj = type(p.subject) == 'table' and p.subject or {}
+            if not (sj.plan and sj.plan ~= NUL) then return 'the fold did not plan' end
+            call('txn_preview', { plan = sj.plan })
+            local a = call('txn_apply', { plan = sj.plan })
+            if not a.ok then return 'the fold did not apply' end
+        end,
+        args = function () return {} end },
 }
 
 test('agentwrite: the applyability sweep covers EVERY family the router knows', function ()
@@ -1324,6 +1372,13 @@ test('agentwrite: every plan a planner produces can actually be APPLIED', functi
         local c = SWEEP_CASES[family]
         local verb = agent._families[family]
         ingest(mkroot(c.files()))
+        -- ⚠ A CASE MAY NEED A PRIOR TRANSACTION, and it builds it THROUGH THE VERBS so the
+        -- sweep never proves a planner works against state only the test can produce.
+        if c.setup then
+            local swhy = c.setup()
+            ok(not swhy, family .. ' setup: ' .. tostring(swhy))
+            if swhy then goto continue end
+        end
         local p = call(verb, c.args())
         local sj = type(p.subject) == 'table' and p.subject or {}
         if not (sj.plan and sj.plan ~= NUL) then
@@ -1353,6 +1408,7 @@ test('agentwrite: every plan a planner produces can actually be APPLIED', functi
             eq(true, a.ok, family .. ' applies: ' .. ((rf and rf.reason) or ''))
             applied = applied + 1
         end
+        ::continue::
     end
     -- ⚠ NOT `>= 1`: a planner that stops producing a plan would make its arm of this
     -- sweep vanish SILENTLY, which is the same class of hole as the missing apply arm.
