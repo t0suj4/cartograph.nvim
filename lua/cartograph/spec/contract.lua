@@ -293,6 +293,137 @@ M.SLOTS = {
     entry_names = 'QUIRKS',      -- entry points → belongs in L4 project overlay
 }
 
+-- INAPPLICABLE: (field, language) pairs where the absence is a DECISION, not a todo.
+--
+-- The registry above already drew this distinction and drew it in PROSE -- "DECLARED BY
+-- LUA ONLY, and that is a choice, not a gap ... Absence means NOT DECLARED, never 'no
+-- idiom'". A comment cannot be read by a work-list generator, so every deliberately empty
+-- slot reads as an open task forever. This is that paragraph as DATA.
+--
+-- The reason is REQUIRED and is the whole value: "go is not done" is a todo, "go needs a
+-- package NAME cartograph cannot derive" is a decision with a cause a later reader can
+-- re-open. A pair with no reason is just an unfilled slot claiming to be a decision.
+--
+-- IT ENCODES ONLY WHAT THE TREE ALREADY STATES. Nothing here was inferred from a language's
+-- properties -- inventing a reason would be authoring, and an unfilled slot is the honest
+-- default. A language absent from a field's table is UNFILLED, never "probably fine".
+M.INAPPLICABLE = {
+    module_scaffold = {
+        go = 'a new go file needs a package NAME cartograph cannot derive; it stays a'
+            .. ' hazard, right where it was',
+        python = 'no epilogue to write: nothing to fill module_scaffold with',
+        rust = 'no epilogue to write: nothing to fill module_scaffold with',
+    },
+}
+
+-- PREREQS: what a language needs that this contract DOES NOT OWN.
+--
+-- The ladder governs `M.spec.<lang>`. Two capabilities a new language needs live in the
+-- ALGEBRA instead, so a spec can fill every rung and the language still cannot be read or
+-- scoped by the operators built on it. They are named here because a WORK LIST that omits
+-- them is wrong by more than it looks -- and because the contract had zero mentions of
+-- either (CART-1021/1022 measured four lua-only fences; the contract governs two).
+--
+-- NOT SLOTS. They are not fields of a spec and must not be auditable as ones; `M.audit`
+-- ignores them by construction. They are a DEPENDENCY LIST for the same work item.
+M.PREREQS = {
+    { name = 'reader grammar',  where = 'cartograph.algebraread (the donor algebra)',
+      test = 'algebraread.read(src, lang) returns a term',
+      unlocks = 'transplant, hoau/templates, every operator over terms',
+      filled = { lua = true } },
+    { name = 'scope mapping',   where = 'the algebra, A.<lang>_scope_graph',
+      test = 'A.lua_scope_graph has a counterpart for this language',
+      unlocks = 'boundat, rename, the alias relation, shadow analysis',
+      filled = { lua = true } },
+}
+
+--- THE FIELD-LEVEL WORK LIST. `matrix_report` is GROUP-granular -- javascript shows a
+--- filled IMPORTS while declaring no `import_line`, because a group has ~15 fields and any
+--- one of them fills it. That answers "which capabilities has this language started", never
+--- "what is left", so the matrix is a HEADING and this is the CHECKLIST.
+---
+--- ★★★ AND "REGISTERED BUT NOT DECLARED" IS NOT A GAP, WHICH THE FIRST CUT GOT WRONG.
+--- It listed every registered field a spec omits -- and LUA, the reference implementation,
+--- came out with 73 of them. Most slots are OPTIONAL by design, so the raw count measures
+--- the size of the registry, not the work. ⇒ THE SIGNAL IS PEER PRESSURE: how many OTHER
+--- languages declare this field. A field 15 of 18 declare and this one does not is a real
+--- gap; a field only lua declares is a lua shape, and its absence is the normal case.
+--- `n` rides on every unfilled field and the report ranks by it.
+--- @return table per group: { unfilled = { {field, n} ... }, inapplicable = {field -> reason} }
+function M.gaps(spec, lang)
+    local s = spec[lang]
+    if not s then return nil, ('no spec for `%s`'):format(tostring(lang)) end
+    -- how many specs declare each field, so an absence can be priced against its peers
+    local peers, nlangs = {}, 0
+    for l, other in pairs(spec) do
+        nlangs = nlangs + 1
+        for field in pairs(other) do
+            if l ~= lang then peers[field] = (peers[field] or 0) + 1 end
+        end
+    end
+    local out = { nlangs = nlangs }
+    for _, g in ipairs(M.GROUPS) do out[g.name] = { unfilled = {}, inapplicable = {} } end
+    for field, group in pairs(M.SLOTS) do
+        if s[field] == nil then
+            local why = (M.INAPPLICABLE[field] or {})[lang]
+            local rec = out[group]
+            if why then rec.inapplicable[field] = why
+            else rec.unfilled[#rec.unfilled + 1] = { field = field, n = peers[field] or 0 } end
+        end
+    end
+    for _, g in ipairs(M.GROUPS) do
+        table.sort(out[g.name].unfilled, function (x, y)
+            if x.n ~= y.n then return x.n > y.n end
+            return x.field < y.field
+        end)
+    end
+    return out
+end
+
+--- The work list for ONE language, as report lines: what is missing per rung, what is
+--- deliberately absent and why, and the prerequisites this contract does not own.
+function M.gap_report(spec, lang)
+    local gaps, why = M.gaps(spec, lang)
+    if not gaps then return { 'gap_report: ' .. tostring(why) } end
+    local lines = { ('work list for `%s` -- OWED = an unfilled field that at least half of'
+        .. ' the other %d specs declare; the count in ()s is how many'):format(lang,
+        (gaps.nlangs or 1) - 1), '' }
+    for _, g in ipairs(M.GROUPS) do
+        local rec = gaps[g.name]
+        local nin = 0
+        for _ in pairs(rec.inapplicable) do nin = nin + 1 end
+        -- ⚠ THE HEADLINE IS THE PEER-BACKED COUNT, not the raw one. A field nobody else
+        -- declares is not work this language owes.
+        local owed, shown = 0, {}
+        for _, u in ipairs(rec.unfilled) do
+            if u.n * 2 >= (gaps.nlangs - 1) then
+                owed = owed + 1
+                if #shown < 8 then shown[#shown + 1] = ('%s(%d)'):format(u.field, u.n) end
+            end
+        end
+        -- the MATRIX's signal, carried here so the work list stands alone: a group the
+        -- language fills NOTHING of is a different statement from "owes 2 of 15", and a
+        -- reader should not need both reports to see it
+        local empty = not (M.audit(spec)[lang] or { filled = {} }).filled[g.name]
+        lines[#lines + 1] = ('%-10s %3d owed of %3d unfilled, %d inapplicable%s   (%s)')
+            :format(g.name, owed, #rec.unfilled, nin, empty and '  [GROUP EMPTY]' or '', g.unlocks)
+        if #shown > 0 then
+            lines[#lines + 1] = '             ' .. table.concat(shown, ' ')
+                .. (owed > #shown and (' ... +' .. (owed - #shown)) or '')
+        end
+        for f, r in pairs(rec.inapplicable) do
+            lines[#lines + 1] = ('             [not a todo] %s -- %s'):format(f, r)
+        end
+    end
+    lines[#lines + 1] = ''
+    lines[#lines + 1] = 'PREREQUISITES THIS CONTRACT DOES NOT OWN (a filled ladder is not enough):'
+    for _, p in ipairs(M.PREREQS) do
+        lines[#lines + 1] = ('  %-16s %s   [%s]   unlocks: %s')
+            :format(p.name, p.filled[lang] and 'PRESENT' or 'ABSENT', p.where, p.unlocks)
+    end
+    return lines
+end
+
 -- The audit: classify a spec table's fields against the registry. Returns
 -- per-language { filled = {group -> true}, slots = {field -> true},
 -- unknown = {fields not in the registry} } — unknown ~= {} is a CLOSED-CONTRACT

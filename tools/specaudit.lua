@@ -78,6 +78,20 @@ do
     local contract = require 'cartograph.spec.contract'
     for _, l in ipairs(contract.matrix_report(ts.spec)) do print(l) end
     print('')
+    -- THE FIELD-LEVEL WORK LIST for ONE language (CART-1022). The matrix above is
+    -- GROUP-granular -- a group is filled by any ONE of its ~15 fields -- so it answers
+    -- "which capabilities has this language started" and never "what is left". Pass a
+    -- language to get the checklist, ranked by how many OTHER specs declare each missing
+    -- field, plus the prerequisites the contract does not own.
+    --   nvim --headless -u NONE -l tools/specaudit.lua --lang go
+    local want
+    for i = 1, #(arg or {}) do
+        if arg[i] == '--lang' then want = arg[i + 1] end
+    end
+    if want then
+        for _, l in ipairs(contract.gap_report(ts.spec, want)) do print(l) end
+        print('')
+    end
 end
 
 -- ── 1. compile check: every lang × every query field (corpus-independent) ──
