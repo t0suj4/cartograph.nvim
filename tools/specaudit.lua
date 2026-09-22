@@ -89,7 +89,17 @@ do
         if arg[i] == '--lang' then want = arg[i + 1] end
     end
     if want then
-        for _, l in ipairs(contract.gap_report(ts.spec, want)) do print(l) end
+        -- the registry is harness data; the contract is told, never reaches for it
+        local ncorp = {}
+        for _, cc in pairs(corpora) do
+            if type(cc) == 'table' and cc.lang then
+                ncorp[cc.lang] = (ncorp[cc.lang] or 0) + 1
+            end
+        end
+        ncorp[want] = ncorp[want] or 0
+        for _, l in ipairs(contract.gap_report(ts.spec, want, { corpora = ncorp })) do
+            print(l)
+        end
         print('')
     end
 end

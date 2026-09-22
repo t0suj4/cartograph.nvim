@@ -382,7 +382,11 @@ end
 
 --- The work list for ONE language, as report lines: what is missing per rung, what is
 --- deliberately absent and why, and the prerequisites this contract does not own.
-function M.gap_report(spec, lang)
+--- `opts.corpora` is a map `lang -> n` of how many corpora DECLARE that language, supplied
+--- by the caller. ⚠ PASSED IN RATHER THAN READ: `tools/corpora.lua` is harness, this file is
+--- `lua/`, and a contract that reached into tools/ would invert the dependency. The caller
+--- knows the registry; this only knows what to say about it.
+function M.gap_report(spec, lang, opts)
     local gaps, why = M.gaps(spec, lang)
     if not gaps then return { 'gap_report: ' .. tostring(why) } end
     local lines = { ('work list for `%s` -- OWED = an unfilled field that at least half of'
@@ -414,6 +418,26 @@ function M.gap_report(spec, lang)
         for f, r in pairs(rec.inapplicable) do
             lines[#lines + 1] = ('             [not a todo] %s -- %s'):format(f, r)
         end
+    end
+    -- ★★★ CAN THIS WORK EVER BE CHECKED? A language with no corpus declaring it cannot
+    -- run specaudit's capture-firing pass (the "query capture never fired" report), so every
+    -- field below would be filled with nothing measuring whether it fires. MEASURED
+    -- 2026-09-23: 4 of 18 spec languages -- c, erlang, tsx, typescript -- have no corpus
+    -- declaring them, and the ladder shows them fully filled.
+    -- ⚠ A WORK LIST THAT CANNOT SAY THIS IS WORSE THAN NONE: it reads as 91 concrete tasks
+    -- when the first task is to find something to measure on.
+    local ncorp = opts and opts.corpora and opts.corpora[lang]
+    lines[#lines + 1] = ''
+    if ncorp == nil then
+        lines[#lines + 1] = 'CORPUS: not stated by the caller -- pass opts.corpora to have this checked'
+    elseif ncorp == 0 then
+        lines[#lines + 1] = 'CORPUS: NONE declares this language. Nothing above can be'
+            .. ' MEASURED -- specaudit\'s capture-firing pass needs one, so a filled field'
+            .. ' here would be unverified. FIND A CORPUS FIRST.'
+    else
+        lines[#lines + 1] = ('CORPUS: %d declare(s) this language%s'):format(ncorp,
+            ncorp == 1 and ' -- one project, so a rate from it is that PROJECT\'s idiom as'
+                .. ' much as the language\'s' or '')
     end
     lines[#lines + 1] = ''
     lines[#lines + 1] = 'PREREQUISITES THIS CONTRACT DOES NOT OWN (a filled ladder is not enough):'

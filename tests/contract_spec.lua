@@ -135,3 +135,33 @@ test('★★★ contract: the PREREQUISITES it does not own are named', function
     local lrep = table.concat(contract.gap_report(ts.spec, 'lua'), '\n')
     ok(lrep:match('reader grammar%s+PRESENT'), 'lua has it — the control')
 end)
+
+test('★★★ contract: a work list says whether the work can ever be CHECKED', function ()
+    local ts = require 'cartograph.providers.treesitter'
+    -- ⚠ A LANGUAGE WITH NO CORPUS CANNOT RUN specaudit's capture-firing pass, so every
+    -- field the list names would be filled with nothing measuring whether it fires. The
+    -- list must say so or it reads as N concrete tasks when the first task is different.
+    -- ⚠⚠ AN EXPLICIT ZERO, NOT AN ABSENT KEY. A language missing from the map means the
+    -- caller DID NOT SAY; `= 0` means it looked and found none. Conflating them would let
+    -- "I have no data" render as "this language has no corpus" — the same unstated-vs-none
+    -- distinction this whole contract is about, one level out.
+    local none = table.concat(contract.gap_report(ts.spec, 'lua', { corpora = { lua = 0 } }), '\n')
+    ok(none:match('CORPUS: NONE'), 'no corpus is called out:\n' .. none)
+    ok(none:match('FIND A CORPUS FIRST'), 'and it names the first task')
+    -- a language ABSENT from a non-empty map is UNSTATED, never none
+    local other = table.concat(contract.gap_report(ts.spec, 'lua', { corpora = { go = 1 } }), '\n')
+    ok(other:match('not stated by the caller'), 'absent from the map is unstated:\n' .. other)
+    eq(nil, other:match('CORPUS: NONE'))
+    -- ★ ONE CORPUS IS ONE PROJECT — the caveat must survive, because a single-corpus rate
+    -- conflates the language with that project's idiom (measured on php this session)
+    local one = table.concat(contract.gap_report(ts.spec, 'lua', { corpora = { lua = 1 } }), '\n')
+    ok(one:match("that PROJECT's idiom"), 'the single-corpus caveat:\n' .. one)
+    local many = table.concat(contract.gap_report(ts.spec, 'lua', { corpora = { lua = 8 } }), '\n')
+    ok(many:match('CORPUS: 8 declare'), 'several corpora state the count')
+    eq(nil, many:match("that PROJECT's idiom"))
+    -- ⚠ AND AN UNASKED QUESTION IS NOT AN ANSWER. With no opts the report must say the
+    -- caller did not state it, never imply coverage.
+    local silent = table.concat(contract.gap_report(ts.spec, 'lua'), '\n')
+    ok(silent:match('not stated by the caller'), 'silence is reported as silence')
+    eq(nil, silent:match('CORPUS: NONE'))
+end)
