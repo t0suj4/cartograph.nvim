@@ -441,7 +441,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
     'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_plan_replace',
-    'txn_plan_invert', 'txn_preview',
+    'txn_plan_invert', 'txn_plan_transplant', 'txn_preview',
     -- the handoff: plan on a read-only host, apply on an armed one
     'txn_save', 'txn_load',
     'journal_list', 'journal_get',
@@ -2402,6 +2402,51 @@ end
 --- touch call sites and does not pretend to. A merge needs the call graph because it
 --- REWRITES callers; this one leaves them exactly as they were, which is also why it
 --- cannot tell you whether they still make sense.
+--- THE DERIVED COUNTERPART OF `txn_plan_replace` (CART-1018).
+---
+--- `replace` takes bytes a caller SUPPLIES and says so in a standing hazard. This verb
+--- takes three DEFINITIONS -- the exemplar pair a -> b and the target c -- and lets
+--- `transplant` derive the replacement from the tree, so the resulting plan is marked
+--- `origin = derived`, attributed to the operator, and claims `unreviewed` rather than
+--- `none`.
+---
+--- WHY IT EXISTS AT ALL: `replace` was built because "transplant derives a real source
+--- edit and has nowhere to hand it", and transplant then declined to produce a plan. A
+--- census found `cartograph.replace` with two users, the MCP verb and its test. This is
+--- the wire, and it is the only caller on the axis whose bytes are derived.
+local function v_txn_plan_transplant(store, args)
+    local tp = require 'cartograph.transplant'
+    local okA, whyA = tp.available('lua')
+    if not okA then
+        return { subject = { plan = NUL, verb = 'replace' }, result = {},
+            absence = 'unavailable',
+            absence_why = { premise = 'algebra-unavailable',
+                why = ('the transplant operator is not loadable (%s)'):format(tostring(whyA)),
+                evidence = { checkhealth = 'cartograph' } } }
+    end
+    local n, bad = write_subject(store, args)
+    if not n then return bad end
+    local plan, why = tp.plan(store, { a = args.a, b = args.b, c = n.id })
+    if not plan then
+        return refuse('cannot-derive',
+            ('no derived edit for this triple: %s'):format(tostring(why)),
+            'the operator refuses by name -- a, b and c must agree structurally, and the'
+                .. ' exemplar must demonstrate a difference that reaches the target')
+    end
+    local rows = { { name = nn(plan.target.name), file = nn(plan.target.file),
+        ref = nn(plan.target.ref), role = 'rewritten from the exemplar difference' } }
+    local pid = stash_plan(store, plan, 'replace',
+        { verb = VERB_OF_FAMILY['replace'], args = args })
+    return {
+        subject = { plan = pid, verb = plan.verb, origin = plan.origin,
+            derived_by = plan.derived_by, preserves = plan.preserves,
+            touched = plan.touched, generation = plan.generation, previewed = false },
+        result = rows,
+        notes = { plan.preserves_why, unpack and unpack(plan.hazards or {})
+            or table.unpack(plan.hazards or {}) },
+    }
+end
+
 local function v_txn_plan_replace(store, args)
     local n, bad = write_subject(store, args)
     if not n then return bad end
@@ -3416,6 +3461,28 @@ M.VERBS = {
                 desc = 'an `id` from a journal_list row; omitted, the most recent entry that declares a relation' },
         },
         run = v_txn_plan_invert,
+    },
+    txn_plan_transplant = {
+        summary = 'PROPOSE the edit demonstrated by one pair applied to a third definition -- a DERIVED replacement, not a supplied one. Give the exemplar pair `a` -> `b` and the target `c`; the operator derives c-prime from the tree and the plan records `origin = derived` and claims `unreviewed` rather than `none`. Writes nothing: returns a plan handle for txn_preview',
+        -- THE SUBJECT IS THE DEFINITION BEING REWRITTEN. `a`/`b` are the EXEMPLAR --
+        -- a parameter of the edit, not a second subject -- which is why this is a
+        -- node-handle and not some new triple shape.
+        subject = 'node-handle',
+        -- reads SOURCE TEXT and derives a term; the call graph is not consulted, so
+        -- claiming `needs_calls` would promise a thin-index refusal it cannot give
+        tier_basis = 'observation', needs_calls = false,
+        absences = { 'unavailable' },
+        args = {
+            { name = 'node', type = 'string',
+                desc = 'the definition to rewrite (from a node_find / node_at row, this graph generation only)' },
+            { name = 'ref', type = 'object', shape = 'ref',
+                desc = 'or the DURABLE ref from the same row; a stale or caveated ref REFUSES, as on every write verb' },
+            { name = 'a', type = 'string', required = true,
+                desc = 'the exemplar BEFORE: a definition id whose difference from `b` is the edit to apply' },
+            { name = 'b', type = 'string', required = true,
+                desc = 'the exemplar AFTER: the same definition once the edit was made' },
+        },
+        run = v_txn_plan_transplant,
     },
     txn_plan_replace = {
         summary = 'PROPOSE swapping a definition\'s text for text YOU supply — the destination for a rendered edit (transplant). ⚠ ITS GUARANTEE IS THE WEAKEST OF THE WRITE VERBS: the text is not derived from this graph, so the plan checks only that the result PARSES and that the file has not moved. It does NOT check that the replacement defines the same name, keeps its arity, or relates to what it replaces',

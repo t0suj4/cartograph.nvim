@@ -3187,10 +3187,10 @@ tools/install-hooks.sh      # git config core.hooksPath .githooks
 
 `git commit --no-verify` bypasses it for a WIP checkpoint.
 
-<!-- @claim readme-agent-verbs: The agent surface serves 32 verbs. -->
-<!-- check: #require('cartograph.agent').ORDER == 32 -->
+<!-- @claim readme-agent-verbs: The agent surface serves 33 verbs. -->
+<!-- check: #require('cartograph.agent').ORDER == 33 -->
 
-## Agent surface (headless, 32 verbs)
+## Agent surface (headless, 33 verbs)
 
 Everything above is the editor. There is a second, equal surface: cartograph
 answers the same questions **headlessly**, over MCP or one-shot JSON, and applies

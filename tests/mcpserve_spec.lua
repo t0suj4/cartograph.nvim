@@ -366,6 +366,9 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- reports an ABSENCE (there is nothing of that kind to ask about). Pooling the
         -- two would make "no extraction has ever been folded here" read as an error.
         txn_plan_invert = { args = { id = 'no-such-entry' }, expect = 'refusal' },
+        -- the derived counterpart: a triple that names no definitions refuses without
+        -- touching a byte, and BEFORE the operator is consulted
+        txn_plan_transplant = { args = { node = 'no-such', a = 'x', b = 'y' }, expect = 'refusal' },
         -- the two mutating verbs refuse on this host whatever the handle says.
         -- WHICH rule fires (read-only vs unknown-plan) depends on how the module
         -- flag was left, so only the SHAPE is asserted: coupling this spec to

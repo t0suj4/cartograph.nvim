@@ -79,11 +79,42 @@ function M.plan(store, opts)
         old = old,
         new = vim.split(text, '\n', { plain = true }),
     }
-    -- THE STANDING DECLARATION (see the header). Unconditional on purpose.
-    plan.hazards[#plan.hazards + 1] = ('the replacement text was supplied, not derived:'
-        .. ' this plan verifies that %s still PARSES and that the file has not moved'
-        .. ' since planning, and NOTHING about whether the new text defines `%s`, keeps'
-        .. ' its arity, or relates to what it replaces'):format(n.file, tostring(n.name))
+    -- ★★★ WHERE THE BYTES CAME FROM, DECLARED (CART-1018). The header's "strictly
+    -- weaker guarantee" is true of SUPPLIED text and NOT of text this tree DERIVED -- and
+    -- until now the verb could not tell the two apart, so `transplant` (which derives real
+    -- source, verified by the lossless reader's own round trip) had nowhere to hand it, and
+    -- the standing hazard would have MISDESCRIBED it as un-derived.
+    -- ⚠ IT CHANGES NO GUARD. `guards = { 'parses' }` either way: naming a deriver does not
+    -- make the result checkable, it makes it ATTRIBUTABLE. What moves is the CLAIM.
+    --   supplied  preserves = 'none'        no claim is possible, nobody can be asked
+    --   derived   preserves = 'unreviewed'  a deriver exists and is named; its effect is
+    --                                       not established -- the REVIEW bucket
+    -- ⚠ `origin` IS CLOSED AND `derived` OWES AN AUTHOR. A derived claim with nobody to
+    -- attribute it to is `supplied` wearing a better word, which is the one way this field
+    -- could weaken the verb.
+    local origin = opts.origin or 'supplied'
+    if origin ~= 'supplied' and origin ~= 'derived' then
+        return nil, ('origin `%s` is not one of supplied|derived'):format(tostring(origin))
+    end
+    if origin == 'derived' and (type(opts.derived_by) ~= 'string' or opts.derived_by == '') then
+        return nil, 'a derived replacement must name what derived it (`derived_by`)'
+    end
+    plan.origin = origin
+    plan.derived_by = opts.derived_by
+    if origin == 'supplied' then
+        -- THE STANDING DECLARATION (see the header). Unconditional for supplied text.
+        plan.hazards[#plan.hazards + 1] = ('the replacement text was supplied, not derived:'
+            .. ' this plan verifies that %s still PARSES and that the file has not moved'
+            .. ' since planning, and NOTHING about whether the new text defines `%s`, keeps'
+            .. ' its arity, or relates to what it replaces'):format(n.file, tostring(n.name))
+    else
+        plan.hazards[#plan.hazards + 1] = ('the replacement text was DERIVED by `%s`%s --'
+            .. ' this plan still verifies only that %s PARSES and that the file has not'
+            .. ' moved since planning. What `%s` established is ITS claim to make, and this'
+            .. ' verb neither re-checks nor inherits it'):format(tostring(opts.derived_by),
+            opts.derived_why and (' (' .. tostring(opts.derived_why) .. ')') or '',
+            n.file, tostring(opts.derived_by))
+    end
     plan.refspecs = { { id = plan.target.id, name = plan.target.name,
         ref = plan.target.ref, what = 'definition' } }
     -- ★★★ THE VERB THAT CLAIMS NOTHING, AND NOW SAYS SO AS DATA. Its standing hazard
@@ -91,10 +122,18 @@ function M.plan(store, opts)
     -- and NOTHING about whether the new text defines `x`, keeps its arity, or relates
     -- to what it replaces". `preserves = 'none'` is that paragraph where a checker can
     -- read it, and it is what makes this verb the one that always needs review.
-    plan.preserves = 'none'
-    plan.preserves_why = 'the replacement text was supplied by the caller, not derived'
-        .. ' from the tree: nothing here can claim anything about what it does'
-    plan.desc = { name = plan.target.name, file = plan.target.file }
+    if origin == 'derived' then
+        plan.preserves = 'unreviewed'
+        plan.preserves_why = ('the replacement text was derived by `%s` from this'
+            .. ' tree; this verb established nothing about its effect, so it is'
+            .. ' reviewable rather than unclaimable'):format(tostring(opts.derived_by))
+    else
+        plan.preserves = 'none'
+        plan.preserves_why = 'the replacement text was supplied by the caller, not'
+            .. ' derived from the tree: nothing here can claim anything about what it does'
+    end
+    plan.desc = { name = plan.target.name, file = plan.target.file,
+        origin = origin, derived_by = opts.derived_by }
     return txn.protocol(plan, M.edits_for)
 end
 

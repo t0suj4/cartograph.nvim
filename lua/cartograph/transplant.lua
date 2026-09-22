@@ -19,8 +19,19 @@
 -- ⚠⚠ A PROPOSAL, NEVER A WRITE. Same law as every other verb on this axis: the
 -- result is source to REVIEW. `transplant` itself records nothing on any edit log
 -- ("it derives a term, it does not move a family") and this seam keeps that — no
--- txn, no journal entry, no plan handle. A verb that silently rewrote siblings
--- from one exemplar would be the least reviewable edit in the tool.
+-- txn and no journal entry.
+--
+-- AND THE ORIGINAL VERSION OF THAT PARAGRAPH WENT ONE CLAUSE TOO FAR (CART-1018). It also
+-- refused "no plan handle" -- and in this tree A PLAN IS THE PROPOSAL FORM. A plan is
+-- staged, diffed, guarded, stamped and journalled before a byte moves; refusing to produce
+-- one does not make the edit more reviewable, it makes it LESS, because the caller is then
+-- handed bare text with no diff, no freshness check and no record. The fear in that
+-- sentence is of a WRITE, and a plan is the opposite of one.
+-- THE CONTRADICTION WAS LOAD-BEARING AND MEASURED: `replace` was built (CART-0977) exactly
+-- because "`transplant` derives a real source edit and has nowhere to hand it", and a
+-- census found `cartograph.replace` had TWO users -- the MCP verb and its own test. The
+-- verb was built for a caller that declined to call it, and this paragraph was the reason.
+-- `M.plan` below is the wire.
 --
 -- ⚠ THE READER IS THE PRECONDITION, AND IT IS WHY THIS WORKS AT ALL. Terms come
 -- from `cartograph.algebraread`, whose law is `cst_print(read(src)) == src` byte
@@ -137,6 +148,72 @@ function M.apply(a_src, b_src, c_src, lang)
         applied = r.applied, lifted = r.lifted,
         replaced = r.replaced, dropped = r.dropped,
     }
+end
+
+--- THE WIRE: a derived edit as a REVIEWABLE PLAN (CART-1018).
+--- Takes three definition ids -- the exemplar pair `a` -> `b` and the target `c` -- reads
+--- their source from the tree, derives c-prime through `M.apply`, and hands it to
+--- `replace.plan` with `origin = 'derived'`.
+---
+--- IT DERIVES NOTHING NEW. Every refusal is `M.apply`'s, passed through by name, and the
+--- plan's guard is `replace`'s (`parses`). What the wire adds is PROVENANCE: the
+--- replacement is marked derived and attributed to this operator, so the plan claims
+--- `unreviewed` rather than `none`, and its hazard names the deriver instead of saying the
+--- text was supplied -- which for this caller would have been false.
+--- The language is taken from `c`, the definition being edited.
+--- @return table|nil plan
+--- @return string|nil why
+function M.plan(store, opts)
+    opts = opts or {}
+    local txn = require 'cartograph.txn'
+    local atr = require 'cartograph.at'
+    local src, node = {}, {}
+    for _, which in ipairs({ 'a', 'b', 'c' }) do
+        local id = opts[which]
+        if not id then return nil, ('transplant needs `%s` (a definition id)'):format(which) end
+        local n = store.node(id)
+        if not n then return nil, ('no definition %s for `%s`'):format(tostring(id), which) end
+        if not (n.file and n.range) then
+            return nil, ('`%s` (%s) carries no file range to read'):format(which, tostring(n.name))
+        end
+        local text = txn.read_file(store.data.root, n.file)
+        if not text then return nil, ('cannot read %s'):format(n.file) end
+        local lines = vim.split(text, '\n', { plain = true })
+        local lo, hi = atr.sl(n.range), atr.el(n.range)
+        if not lines[hi + 1] then
+            return nil, ('`%s` (%s) spans lines %d..%d but %s has %d -- the graph is stale')
+                :format(which, tostring(n.name), lo + 1, hi + 1, n.file, #lines)
+        end
+        local got = {}
+        for i = lo, hi do got[#got + 1] = lines[i + 1] end
+        src[which] = table.concat(got, '\n')
+        node[which] = n
+    end
+
+    local ext = (node.c.file:match('%.(%w+)$') or ''):lower()
+    local lang = opts.lang or ({ lua = 'lua', js = 'javascript', jsx = 'javascript',
+        cjs = 'javascript', mjs = 'javascript' })[ext] or ext
+    local out, info = M.apply(src.a, src.b, src.c, lang)
+    if not out then return nil, tostring(info) end
+    -- A NO-OP IS A REFUSAL, NOT A PLAN. `M.apply` kills the degenerate cases by name; this
+    -- catches the remaining one, an edit that lands on `c` and changes nothing. Staging it
+    -- would spend a review on a diff with no content.
+    if out == src.c then
+        return nil, ('the derived edit leaves `%s` unchanged -- the exemplar difference'
+            .. ' does not reach it'):format(tostring(node.c.name))
+    end
+
+    local plan, why = require('cartograph.replace').plan(store, {
+        node = opts.c, text = out, origin = 'derived', derived_by = 'transplant',
+        derived_why = ('%s -> %s applied to %s, kind %s route %s'):format(
+            tostring(node.a.name), tostring(node.b.name), tostring(node.c.name),
+            tostring((info or {}).kind), tostring((info or {}).route)),
+    })
+    if not plan then return nil, why end
+    -- the operator's own account rides along, so a reviewer sees WHAT it did and not only
+    -- that something did
+    plan.transplant = { a = opts.a, b = opts.b, c = opts.c, info = info }
+    return plan
 end
 
 --- Report lines for a derived edit — the reviewable scaffold, in the shape the
