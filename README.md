@@ -1312,6 +1312,28 @@ jenkins-infra all 40 DNS records in `azure`, `digitalocean` and `fastly` resolve
 `for_each` blocks have decidable keys, and 19 of the 27 distinct hosts are also written
 literally somewhere else in the org — none contradicts a resolution.
 
+### XML as data, ambiguity kept
+
+`cartograph.xmlvalue` reads any XML document into the same keyed form as YAML:
+- attributes become `@name`;
+- repeated children become an array;
+- a text-only element becomes its text;
+- namespaces are resolved.
+
+**What implementations disagree on is kept, not decided.** A duplicate attribute keeps every
+value in order, and a separate, named **tiebreaker** chooses later:
+- `reject`: XML 1.0, and measured in expat/ElementTree and Maven's parser;
+- `first`: specified by HTML5;
+- `last`: Python's `html.parser` read through `dict()`;
+- `keep`: every value, undecided.
+
+`xmlvalue.divergences` lists every site where the policies disagree, which is where two
+implementations reading the same file would disagree. Each caller names its tiebreaker. The
+ElementTree join and the POM dialect use `reject`. The POM dialect's repeated property keys use
+`last`, which is Maven's behavior as measured by its model builder. Across 5,431 XML files the
+census finds two such sites, both in wildfly fixtures named `duplicate-attribute.xml`, which test
+WildFly's own parser.
+
 ### The Maven build layer (POMs)
 
 A `pom.xml` is XML data (read by `cartograph.xmlvalue`, like any other XML), and

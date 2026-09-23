@@ -29,6 +29,22 @@
 -- ⚠ Text and attributes are DECODED: the five predefined entities and character references;
 -- CDATA is literal; attribute whitespace (tab, CR, LF) is normalised to spaces; line ends to LF.
 -- An entity the document does not predefine (a DTD entity) is kept as written and counted.
+--
+-- ── AMBIGUITY IS KEPT; A TIEBREAKER DECIDES LATER ───────────────────────────────────────
+-- USER (2026-09-24): "support multiple attributes on XML so the tiebreaker can come in later, it
+-- will be useful for detecting diverging implementation-defined behavior". A DUPLICATE ATTRIBUTE
+-- is not refused by the reader: `@k` holds every value in document order as an array (an
+-- attribute is otherwise always a string, so the array is unambiguous), and `r.duplicates` lists
+-- where. Choosing is a separate, NAMED step — `M.tiebreak(value, policy)` — because implementations
+-- choose differently, and the places where two policies give different answers ARE the divergence
+-- (`M.divergences`). Policies and who is MEASURED to follow each (2026-09-24, one document with
+-- `<x k="first" k="second">`):
+--   reject  XML 1.0 (a well-formedness error); Python's expat/ElementTree ("duplicate attribute");
+--           Maven's MXParser ("duplicated attributes k and k")
+--   first   the HTML5 tokenizer (SPECIFIED: a later duplicate is dropped; not measured here)
+--   last    Python html.parser + `dict(attrs)`, the common lenient idiom (html.parser itself KEEPS both)
+--   keep    no decision: every value, as the reader returns it
+-- A caller that needs XML-conformant data asks for `reject` explicitly (the ElementTree join does).
 
 local M = {}
 
@@ -75,6 +91,7 @@ function M.read(src)
     end
     local undefined = 0
     local bad_cdata = false
+    local duplicates = {}
 
     -- the text of a content piece (CharData / references / CDATA), decoded
     local function piece(n)
@@ -177,10 +194,16 @@ function M.read(src)
         local o, keys, texts, any_child = {}, {}, {}, false
         for _, a in ipairs(raw_attrs) do
             local k = '@' .. resolve(a[1], true)
-            -- a DUPLICATE attribute (after namespace resolution) makes the document not well-formed
-            if o[k] ~= nil then error({ xml_refusal = ('a duplicate attribute %s on <%s>'):format(k, qname or '?') }, 0) end
-            keys[#keys + 1] = k
-            o[k] = a[2]
+            -- a DUPLICATE attribute (after namespace resolution): XML calls it not well-formed, and
+            -- implementations DISAGREE on what to do with it — so every value is kept, in order
+            if o[k] ~= nil then
+                if type(o[k]) == 'string' then o[k] = { a = { o[k] } } end
+                table.insert(o[k].a, a[2])
+                duplicates[#duplicates + 1] = { element = qname or '?', attr = k, count = #o[k].a }
+            else
+                keys[#keys + 1] = k
+                o[k] = a[2]
+            end
         end
         local counts = {}
         if content then
@@ -220,10 +243,82 @@ function M.read(src)
             if bad_cdata then
                 return nil, 'the tree mis-tokenises a CDATA section (its text contains `]]>`) — the tree is wrong, so the document is refused'
             end
-            return { root = name, value = value, undefined_entities = undefined }
+            return { root = name, value = value, undefined_entities = undefined, duplicates = duplicates }
         end
     end
     return nil, 'no root element'
+end
+
+-- ── tiebreakers ─────────────────────────────────────────────────────────────────────────
+M.POLICIES = { 'reject', 'first', 'last', 'keep' }
+
+--- Pick from the values of one ambiguous name under a policy: the value, or nil and why.
+function M.pick(list, policy)
+    if policy == 'first' then return list[1] end
+    if policy == 'last' then return list[#list] end
+    if policy == 'keep' then return { a = list } end
+    if policy == 'reject' then return nil, ('%d values for one name'):format(#list) end
+    error('unknown tiebreak policy ' .. tostring(policy))
+end
+
+--- The value with every duplicate attribute decided by `policy`; nil and why under `reject`.
+function M.tiebreak(v, policy, path)
+    path = path or '$'
+    if type(v) ~= 'table' then return v end
+    if v.a then
+        local a = {}
+        for i, x in ipairs(v.a) do
+            local r, why = M.tiebreak(x, policy, path .. '[' .. i .. ']')
+            if r == nil and why then return nil, why end
+            a[i] = r
+        end
+        return { a = a }
+    end
+    local o, keys = {}, {}
+    for _, k in ipairs(v.keys) do
+        local x = v.o[k]
+        if k:sub(1, 1) == '@' and type(x) == 'table' and x.a then
+            local r, why = M.pick(x.a, policy)
+            if r == nil then return nil, ('a duplicate attribute %s at %s: %s'):format(k, path, why) end
+            x = r
+        else
+            local r, why = M.tiebreak(x, policy, path .. '.' .. k)
+            if r == nil and why then return nil, why end
+            x = r
+        end
+        o[k] = x
+        keys[#keys + 1] = k
+    end
+    return { o = o, keys = keys }
+end
+
+--- ★ WHERE IMPLEMENTATIONS WOULD DISAGREE: every duplicate attribute whose outcome differs between
+--- the given policies (default: all but `keep`). One row per site: path, name, and per policy the
+--- value or `rejected`.
+function M.divergences(v, policies)
+    policies = policies or { 'reject', 'first', 'last' }
+    local out = {}
+    local function walk(x, path)
+        if type(x) ~= 'table' then return end
+        if x.a then for i, y in ipairs(x.a) do walk(y, path .. '[' .. i .. ']') end return end
+        for _, k in ipairs(x.keys) do
+            local y = x.o[k]
+            if k:sub(1, 1) == '@' and type(y) == 'table' and y.a then
+                local outcomes, distinct, seen = {}, 0, {}
+                for _, p in ipairs(policies) do
+                    local r = M.pick(y.a, p)
+                    local shown = r == nil and 'rejected' or (type(r) == 'table' and 'keep' or r)
+                    outcomes[p] = shown
+                    if not seen[shown] then seen[shown] = true; distinct = distinct + 1 end
+                end
+                if distinct > 1 then out[#out + 1] = { path = path, attr = k, values = y.a, outcomes = outcomes } end
+            else
+                walk(y, path .. '.' .. k)
+            end
+        end
+    end
+    walk(v, '$')
+    return out
 end
 
 return M

@@ -61,12 +61,41 @@ test('xmlvalue: entities and character references decode, CDATA is literal; a DT
     eq(1, d.undefined_entities)
 end)
 
-test('xmlvalue: NOT WELL-FORMED is refused by name — a duplicate attribute, a forbidden control character', function ()
+test('xmlvalue: a forbidden control character is refused by name (XML 1.0 forbids it anywhere)', function ()
     ready()
-    local r, why = X.read('<a k="1" k="2"/>')
-    eq(nil, r); ok(why:find('duplicate attribute', 1, true), tostring(why))
     local r2, why2 = X.read('<a>\1</a>')
     eq(nil, r2); ok(why2:find('forbids', 1, true), tostring(why2))
+end)
+
+test('xmlvalue: ★★ a DUPLICATE ATTRIBUTE is KEPT, every value in order — the tiebreaker comes later', function ()
+    ready()
+    local r = assert(X.read('<a k="1" j="x" k="2"><b k="3"/></a>'))
+    eq('1,2', table.concat(r.value.o['@k'].a, ','))
+    eq('@k,@j,b', table.concat(r.value.keys, ','))
+    eq(1, #r.duplicates); eq('@k', r.duplicates[1].attr); eq(2, r.duplicates[1].count)
+    eq('3', r.value.o.b.o['@k'])                     -- a lone attribute stays a string
+end)
+
+test('xmlvalue: ★★ TIEBREAKERS are named policies — reject (XML 1.0, expat, Maven), first (HTML5), last (dict idiom)', function ()
+    ready()
+    local r = assert(X.read('<a k="1" k="2"/>'))
+    local v, why = X.tiebreak(r.value, 'reject')
+    eq(nil, v); ok(why:find('duplicate attribute @k', 1, true), tostring(why))
+    eq('1', X.tiebreak(r.value, 'first').o['@k'])
+    eq('2', X.tiebreak(r.value, 'last').o['@k'])
+    eq(2, #X.tiebreak(r.value, 'keep').o['@k'].a)
+    local clean = assert(X.read('<a k="1"/>'))
+    eq('1', X.tiebreak(clean.value, 'reject').o['@k'])  -- nothing ambiguous: every policy agrees
+end)
+
+test('xmlvalue: ★★★ DIVERGENCES are where policies disagree — equal duplicates still split reject from the rest', function ()
+    ready()
+    local r = assert(X.read('<a><x k="1" k="2"/><y q="same" q="same"/><z ok="1"/></a>'))
+    local d = X.divergences(r.value)
+    eq(2, #d)
+    eq('$.x', d[1].path); eq('rejected', d[1].outcomes.reject); eq('1', d[1].outcomes.first); eq('2', d[1].outcomes.last)
+    eq('$.y', d[2].path); eq('same', d[2].outcomes.first); eq('same', d[2].outcomes.last)
+    eq(1, #X.divergences(r.value, { 'first', 'last' })) -- between lenient readers only x diverges
 end)
 
 test('xmlvalue: ★ the grammar\'s CDATA bug (`]]]>` runs past the terminator) is REFUSED, not trusted (TSGAP-0009)', function ()

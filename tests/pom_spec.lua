@@ -377,3 +377,10 @@ test('pom: ★ a recursive expression makes the model INVALID, as Maven refuses 
     local pr, why = P.projection(e)
     eq(nil, pr); ok(why:find('${s}', 1, true), why)
 end)
+
+test('pom: a DUPLICATE ATTRIBUTE refuses the POM — Maven\'s MXParser does ("duplicated attributes", measured); the reader kept both', function ()
+    ready()
+    local src = pom('<groupId>g</groupId><artifactId>a</artifactId><version>1</version><build><plugins><plugin><artifactId>p</artifactId><configuration><x k="1" k="2"/></configuration></plugin></plugins></build>')
+    local r, why = P.read_pom(src, 'pom.xml')
+    eq(nil, r); ok(why:find('duplicate attribute', 1, true), tostring(why))
+end)

@@ -62,9 +62,13 @@ local JOINS = {
         oracle = { 'python3', REPO .. '/tools/oracles/xml_elementtree.py' },
         max_bytes = 3000000,
         read = function(src)
-            local r, why = require('cartograph.xmlvalue').read(src)
+            local X = require 'cartograph.xmlvalue'
+            local r, why = X.read(src)
             if not r then return nil, why end
-            return { o = { root = r.root, value = r.value }, keys = { 'root', 'value' } }
+            -- ElementTree is XML-CONFORMANT, so the tiebreak joined against it is `reject`
+            local v, twhy = X.tiebreak(r.value, 'reject')
+            if v == nil then return nil, twhy end
+            return { o = { root = r.root, value = v }, keys = { 'root', 'value' } }
         end,
     },
     -- ★ CART-1051: cartograph.pom against MAVEN'S OWN MODEL BUILDER, offline (parents and BOMs from

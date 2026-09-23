@@ -245,11 +245,12 @@ M._trimmed = trimmed
 -- (Maven puts each into java.util.Properties). The XML convention reads a repeated child as an
 -- ARRAY, which is right for XML and made the property VANISH here — wildfly's
 -- microprofile-tck/lra declares three keys twice, and the oracle join named it.
+-- (the tiebreak is xmlvalue's named `last`: MAVEN'S policy for a map key, measured by the oracle join)
 local function collapse_props(v)
     if type(v) ~= 'table' or not v.o then return end
     for _, k in ipairs(v.keys) do
         local x = v.o[k]
-        if type(x) == 'table' and x.a then v.o[k] = x.a[#x.a] end
+        if type(x) == 'table' and x.a then v.o[k] = X.pick(x.a, 'last') end
     end
 end
 
@@ -258,7 +259,11 @@ function M.read_pom(src, rel)
     local r, why = X.read(src)
     if not r then return nil, why end
     if r.root ~= 'project' then return nil, ('not a POM (root <%s>)'):format(tostring(r.root)) end
-    local raw = as_obj(trimmed(r.value))
+    -- a DUPLICATE ATTRIBUTE: Maven's MXParser refuses the POM ("duplicated attributes k and k",
+    -- measured 2026-09-24), so the dialect's tiebreak is `reject` — the reader itself keeps both
+    local value, twhy = X.tiebreak(r.value, 'reject')
+    if value == nil then return nil, twhy end
+    local raw = as_obj(trimmed(value))
     collapse_props(get(raw, 'properties'))
     for _, prof in ipairs(arr(get(get(raw, 'profiles'), 'profile'))) do collapse_props(get(prof, 'properties')) end
     return { path = rel, dir = dirname(rel or ''), raw = raw, entities = r.undefined_entities }
