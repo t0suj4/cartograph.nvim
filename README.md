@@ -1366,16 +1366,36 @@ cannot supply.
 from the system Maven's own jars. It is driven offline: parents and BOMs are resolved only
 inside the tree, nothing is fetched, and no build extension loads, because the model builder is
 not the project builder.
+With the parent POMs and BOMs downloaded:
+- **hive:** 80 of 80 agree.
+- **wildfly:** 278 of 278 agree.
 - **hadoop:** 120 of 121 agree. The one difference is `maven.build.timestamp`, which depends on
   when the build runs.
-- **quarkus:** all 126 POMs that can be judged offline agree.
-- **wildfly, hive:** can't be judged offline, because their root parent is external.
+- **quarkus:** 1,565 agree and none disagree. Both sides refuse 299 test templates that contain
+  recursive expressions, which Maven will not build. Maven rejects another 46 that import
+  placeholder coordinates such as `@project.version@`, which we name as a frontier.
 
-The join found three rules the first version had wrong:
+**Parent POMs and BOMs from outside the tree** come from a local repository, which
+`tools/mavenpoms.lua` fills when you run it:
+- it fetches `.pom` files only, from Maven Central only, and checks each against Central's SHA-1;
+- the tree's `<repositories>` are never followed, and every coordinate is validated before it
+  becomes a path or a URL;
+- every request is recorded in a ledger.
+
+The reader and the oracle both read that store offline. Your choice to download it is the
+consent, until the network barrier (CART-1052) exists.
+
+The join found seven rules the first version had wrong:
 1. Maven trims element text.
 2. A same-key dependency replaces the whole inherited element, so a scope-less child doesn't
    pick up its parent's `provided`.
 3. Profile injection keeps the model's order.
+4. A property key written twice is one property, and the last value wins.
+5. Maven matches an unknown OS family by the OS name, so `<family>Linux</family>` activates on
+   Linux.
+6. A recursive expression makes Maven refuse the whole POM.
+7. The BOM cycle guard had skipped a BOM already visited on a sibling path and cached the
+   truncated result. It now guards only the current chain.
 
 ### Cross-language linking
 
@@ -3381,7 +3401,12 @@ nvim --headless -u NONE -l tools/oraclejoin.lua xml      # or: yaml, pom [--repo
 # skew, no-op property overrides — under a named vantage.
 nvim --headless -u NONE -l tools/pomtree.lua wildfly quarkus hive hadoop [--jdk 21 --os linux] [--profiles a,b]
 #   its model is joined against MAVEN'S OWN MODEL BUILDER by `tools/oraclejoin.lua pom`
-#   (offline; hadoop 120/121, quarkus 126 judged / 0 disagree).
+#   (offline; hive 80/80, wildfly 278/278, hadoop 120/121, quarkus 1565 / 0 disagree).
+
+# DOWNLOAD the parent POMs and BOMs a Maven tree needs — EXPLICITLY, as data: .pom files only,
+# Maven Central only (a tree's <repositories> is never followed), SHA-1 checked, every request
+# in a ledger. Maven's model builder says what is missing, round after round. --dry fetches nothing.
+nvim --headless -u NONE -l tools/mavenpoms.lua hadoop hive wildfly quarkus [--dry]
 
 # THE HELPER SIGNATURE OF EVERY NEAR-CLONE PAIR. What would an extracted helper
 # actually take? A hole that depends on nothing is a VALUE parameter; a hole over

@@ -37,7 +37,8 @@ for _, repo in ipairs(repos) do
     local files = {}
     for _, f in ipairs(J.ls_files(dir)) do if f == 'pom.xml' or f:match('/pom%.xml$') then files[#files + 1] = f end end
     local t0 = vim.uv.hrtime()
-    local model = P.read(dir, files)
+    local lr = vim.fn.isdirectory(P.DEFAULT_REPO) == 1 and P.DEFAULT_REPO or nil
+    local model = P.read(dir, files, { repo = lr })
     local A = P.analyze(model, vantage)
     local lb, vf = 0, {}
     for _, e in pairs(A.effective) do if e.lower_bound then lb = lb + 1 end end
@@ -49,8 +50,10 @@ for _, repo in ipairs(repos) do
     end
     local classed = A.refs.resolved
     for _, n in pairs(A.refs.holes) do classed = classed + n end
-    print(('%s: %d POM(s), %d refused; reactor %d, orphans %d; parents %s; external parents %s')
-        :format(repo, #files, #model.refusals, #A.reactor, #A.orphans, inspect1(A.parent_via), inspect1(A.frontiers)))
+    local ext = 0
+    for _, ok in pairs(model.external) do if ok then ext = ext + 1 end end
+    print(('%s: %d POM(s), %d refused; reactor %d, orphans %d; parents %s; %d read from the local repository; unread external parents %s')
+        :format(repo, #files, #model.refusals, #A.reactor, #A.orphans, inspect1(A.parent_via), ext, inspect1(A.frontiers)))
     print(('  references %d: %d resolved, holes %s%s'):format(A.refs.total, A.refs.resolved, inspect1(A.refs.holes),
         classed == A.refs.total and '' or '  ⚠ UNCLASSED ' .. (A.refs.total - classed)))
     print(('  dependency versions %s; inter-module links %d, version skew %d; no-op overrides %d; missing %d; lower bounds %d  (%.1fs)')

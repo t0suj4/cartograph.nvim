@@ -204,6 +204,24 @@ function merge(dom, rec, path, lead)
 end
 M.merge = merge
 
+-- ── a LOCAL REPOSITORY of POMs outside the tree (Maven's layout) ─────────────────────────
+-- The POMs the user CHOSE to download (tools/mavenpoms.lua: .pom files only, from Maven Central,
+-- into ~/.cache/cartograph/maven-central). Its location comes from the caller, never from the tree:
+-- THE TREE SELECTS WHICH coordinates, it never says WHERE FROM (a POM's <repositories> is ignored).
+-- ⚠ Coordinates are TREE-DERIVED strings, so they are validated before they touch a path or a URL:
+-- one segment each, no `..`, no slash — a hostile `<version>../../x</version>` selects nothing.
+local SEG = '^[%w_][%w%._%-]*$'
+function M.repo_path(g, a, v)
+    for i = 1, 3 do -- not ipairs: it stops at a nil, and a missing version went unchecked (the test caught it)
+        local x = ({ g, a, v })[i]
+        if type(x) ~= 'string' or not x:match(SEG) or x:find('..', 1, true) then
+            return nil, ('not a plain coordinate: %s'):format(tostring(x))
+        end
+    end
+    return ('%s/%s/%s/%s-%s.pom'):format(g:gsub('%.', '/'), a, v, a, v)
+end
+M.DEFAULT_REPO = vim.fn.expand('~/.cache/cartograph/maven-central')
+
 -- ── reading ───────────────────────────────────────────────────────────────────────────
 -- ★ MAVEN'S READER TRIMS: every element's text and every attribute passes through Java's
 -- String.trim() (MavenXpp3Reader; Xpp3DomBuilder for plugin configuration), which strips each
@@ -223,12 +241,27 @@ local function trimmed(v)
 end
 M._trimmed = trimmed
 
+-- ★ PROPERTIES ARE A MAP: a key written twice in one <properties> is ONE property, the LAST value
+-- (Maven puts each into java.util.Properties). The XML convention reads a repeated child as an
+-- ARRAY, which is right for XML and made the property VANISH here — wildfly's
+-- microprofile-tck/lra declares three keys twice, and the oracle join named it.
+local function collapse_props(v)
+    if type(v) ~= 'table' or not v.o then return end
+    for _, k in ipairs(v.keys) do
+        local x = v.o[k]
+        if type(x) == 'table' and x.a then v.o[k] = x.a[#x.a] end
+    end
+end
+
 --- One POM document -> { path, dir, raw } or nil, why.
 function M.read_pom(src, rel)
     local r, why = X.read(src)
     if not r then return nil, why end
     if r.root ~= 'project' then return nil, ('not a POM (root <%s>)'):format(tostring(r.root)) end
-    return { path = rel, dir = dirname(rel or ''), raw = as_obj(trimmed(r.value)), entities = r.undefined_entities }
+    local raw = as_obj(trimmed(r.value))
+    collapse_props(get(raw, 'properties'))
+    for _, prof in ipairs(arr(get(get(raw, 'profiles'), 'profile'))) do collapse_props(get(prof, 'properties')) end
+    return { path = rel, dir = dirname(rel or ''), raw = raw, entities = r.undefined_entities }
 end
 
 -- ⚠ NOT the code walk's EXCLUDE_DIRS: that set drops `build/`, `dist/`, `external/` as vendored
@@ -267,7 +300,8 @@ local function gav(g, a, v) return ('%s:%s:%s'):format(g or '?', a or '?', v or 
 --- @return table model { root, poms = {[rel]=pom}, order, refusals, by_gav = {[gav]={rels}} }
 function M.read(root, files, opts)
     opts = opts or {}
-    local model = { root = root, poms = {}, order = {}, refusals = {}, by_gav = {}, cache = {} }
+    local model = { root = root, poms = {}, order = {}, refusals = {}, by_gav = {}, cache = {},
+        repo = opts.repo, external = {} }
     for _, rel in ipairs(files) do
         local src = (opts.read or function(r) return readf(root .. '/' .. r) end)(rel)
         local pom, why
@@ -287,9 +321,30 @@ function M.read(root, files, opts)
     return model
 end
 
+--- A POM from the LOCAL REPOSITORY (never from the tree), linked to ITS parent in turn. Its key is
+--- `repo:g:a:v`; it has no directory (Maven gives a repository POM no basedir), and it stays out
+--- of `model.order`, which is the tree. nil when there is no repository or the file is absent.
+local function load_external(model, g, a, v)
+    if not model.repo then return nil end
+    local key = 'repo:' .. gav(g, a, v)
+    if model.poms[key] then return key end
+    if model.external[key] == false then return nil end
+    local rel = M.repo_path(g, a, v)
+    local src = rel and readf(model.repo .. '/' .. rel)
+    local pom = src and M.read_pom(src, key)
+    if not pom then model.external[key] = false; return nil end
+    pom.external, pom.dir = true, nil
+    pom.g, pom.a, pom.v = raw_coords(pom)
+    model.poms[key] = pom
+    model.external[key] = true
+    M.link_parent(model, pom)
+    return key
+end
+M._load_external = load_external
+
 --- Maven's parent lookup: relativePath (checked against the declared coordinates), then the
---- tree by coordinates (the reactor), else a frontier. Sets pom.parent / pom.parent_via /
---- pom.frontier.
+--- tree by coordinates (the reactor), then the local repository, else a frontier. Sets
+--- pom.parent / pom.parent_via / pom.frontier.
 function M.link_parent(model, pom)
     local par = get(pom.raw, 'parent')
     if not par then return end
@@ -297,7 +352,7 @@ function M.link_parent(model, pom)
     local rp = get(par, 'relativePath')
     if rp == nil then rp = '../pom.xml' end
     rp = str(rp) or ''
-    if rp ~= '' then
+    if rp ~= '' and not pom.external then
         local path = join(pom.dir, rp)
         if path and not path:match('%.xml$') then path = join(path, 'pom.xml') end
         local cand = path and model.poms[path]
@@ -312,6 +367,11 @@ function M.link_parent(model, pom)
     local hits = model.by_gav[gav(g, a, v)]
     if hits and #hits == 1 and hits[1] ~= pom.path then
         pom.parent, pom.parent_via = hits[1], 'reactor'
+        return
+    end
+    local ext = load_external(model, g, a, v)
+    if ext then
+        pom.parent, pom.parent_via = ext, 'repository'
         return
     end
     pom.frontier = gav(g, a, v)
@@ -344,6 +404,29 @@ local function jdk_matches(spec, jdk)
     if neg then return not r end
     return r
 end
+
+-- ★ MAVEN'S OS FAMILY TEST, ported from plexus-utils `Os.isOs` as the system jar has it (javap):
+-- the known families have their own tests, and ANY OTHER family is `os.name contains family` —
+-- so `<family>Linux</family>`, which is no family at all, matches on Linux (quarkus http3 runtime).
+-- nil when the vantage does not name the OS.
+local function family_matches(want, os_name, path_sep)
+    if not os_name then return nil end
+    local n, f = os_name:lower(), want:lower()
+    local function has(x) return n:find(x, 1, true) ~= nil end
+    if f == 'windows' then return has('windows') end
+    if f == 'os/2' then return has('os/2') end
+    if f == 'netware' then return has('netware') end
+    if f == 'dos' then return path_sep == ';' and not has('netware') end
+    if f == 'mac' then return has('mac') end
+    if f == 'tandem' then return has('nonstop_kernel') end
+    if f == 'unix' then return path_sep == ':' and not has('openvms') and (not has('mac') or n:sub(-1) == 'x') end
+    if f == 'win9x' then return has('windows') and (has('95') or has('98') or has('me') or has('ce')) end
+    if f == 'z/os' then return has('z/os') or has('os/390') end
+    if f == 'os/400' then return has('os/400') end
+    if f == 'openvms' then return has('openvms') end
+    return has(f)
+end
+M._family_matches = family_matches
 
 -- decide one profile: true / false / nil (undecided) and the triggers seen
 local function decide(pom, prof, vantage, exists)
@@ -385,14 +468,19 @@ local function decide(pom, prof, vantage, exists)
             triggers[#triggers + 1] = 'os'
             if vantage.os then
                 local r = true
+                local sep = (vantage.sys and vantage.sys['path.separator']) or vantage.os.path_sep or ':'
                 for _, f in ipairs({ 'name', 'family', 'arch', 'version' }) do
                     local want = str(get(v, f))
                     if want then
                         local neg = want:sub(1, 1) == '!'
                         if neg then want = want:sub(2) end
-                        local have = vantage.os[f]
-                        if have == nil then r = nil; break end
-                        local m = want:lower() == tostring(have):lower()
+                        local m
+                        if f == 'family' then m = family_matches(want, vantage.os.name, sep)
+                        else
+                            local have = vantage.os[f]
+                            if have ~= nil then m = want:lower() == tostring(have):lower() end
+                        end
+                        if m == nil then r = nil; break end
                         if neg then m = not m end
                         r = r and m
                     end
@@ -403,6 +491,7 @@ local function decide(pom, prof, vantage, exists)
             triggers[#triggers + 1] = 'file'
             local ex, miss = str(get(v, 'exists')), str(get(v, 'missing'))
             local function probe(p)
+                if pom.external then return false end -- a repository POM has no basedir
                 -- relative to the POM's directory; `${basedir}` IS that directory (the root's is '')
                 local rest = p:match('^%${project%.basedir}/?(.*)$') or p:match('^%${basedir}/?(.*)$') or p
                 if rest:find('%${') or rest:sub(1, 1) == '/' then return nil end
@@ -650,7 +739,7 @@ end
 -- the managed entries of an interpolated model, BOMs imported (in-tree ones read, others frontier).
 -- `raw` is the same list UNINTERPOLATED (interpolation keeps positions), whose keys name the
 -- declaring POM: Maven merges by the raw key, before any `${}` is resolved.
-local function managed(model, eff_model, raw_model, declared_in, vantage, imports, seen)
+local function managed(model, eff_model, raw_model, declared_in, vantage, imports)
     local out, index = {}, {}
     local function add(d, from)
         local k = dep_key(d)
@@ -665,11 +754,10 @@ local function managed(model, eff_model, raw_model, declared_in, vantage, import
     for _, b in ipairs(boms) do
         local g, a, v = str(get(b, 'groupId')), str(get(b, 'artifactId')), str(get(b, 'version'))
         local hits = model.by_gav[gav(g, a, v)]
-        local brel = hits and #hits == 1 and hits[1] or nil
+        local brel = hits and #hits == 1 and hits[1] or load_external(model, g, a, v)
         imports[#imports + 1] = { gav = gav(g, a, v), rel = brel }
-        if brel and not seen[brel] then
-            seen[brel] = true
-            local beff = M.effective(model, brel, vantage, seen)
+        if brel then
+            local beff = M.effective(model, brel, vantage)
             if beff then
                 for _, e in ipairs(beff.dm) do add(e.d, 'bom:' .. brel) end
                 -- ★ AN IN-TREE BOM'S OWN FRONTIER IMPORTS ARE OURS TOO: quarkus-bom (in the tree)
@@ -688,11 +776,24 @@ end
 --- @return table|nil eff { path, model, coords, deps, dm, imports, refs, lineage, frontier,
 ---   applied, undecided, contingent, lower_bound }
 --- @return string|nil why
-function M.effective(model, rel, vantage, seen)
+-- ⚠ THE CYCLE GUARD IS THE CURRENT CHAIN (`model.inprogress`), NOT EVERYTHING VISITED: a guard over
+-- the whole traversal skipped a BOM already seen on a SIBLING path and then MEMOISED the cut-short
+-- result, so an answer depended on the order POMs were asked in (wildfly: a version present when
+-- one POM was traced alone, missing inside the join; a BOM with 88 managed entries of 265).
+function M.effective(model, rel, vantage)
     vantage = vantage or {}
     local key = 'E' .. rel .. '\0' .. vkey(vantage)
     if model.cache[key] then return model.cache[key] end
     if not model.poms[rel] then return nil, 'no POM ' .. rel end
+    model.inprogress = model.inprogress or {}
+    if model.inprogress[key] then return nil, 'a BOM import cycle through ' .. rel end
+    model.inprogress[key] = true
+    local eff, why = M._effective(model, rel, vantage, key)
+    model.inprogress[key] = nil
+    return eff, why
+end
+
+function M._effective(model, rel, vantage, key)
     local asm, err = assemble(model, rel, vantage)
     if not asm then return nil, err end
     local raw = asm.model
@@ -702,7 +803,6 @@ function M.effective(model, rel, vantage, seen)
     local refs = { total = 0, resolved = 0, holes = {}, list = {} }
     local m = interp_tree(raw, ctx, '$', refs)
     local imports = {}
-    seen = seen or { [rel] = true }
     -- where each lineage entry was declared: the nearest POM whose own (profile-injected) model has the key
     local declared_in = {}
     for _, r in ipairs(asm.lineage) do
@@ -712,7 +812,7 @@ function M.effective(model, rel, vantage, seen)
             if declared_in[k] == nil then declared_in[k] = r end
         end
     end
-    local dm, dmi = managed(model, m, raw, declared_in, vantage, imports, seen)
+    local dm, dmi = managed(model, m, raw, declared_in, vantage, imports)
     -- management injection
     local deps = {}
     for _, d in ipairs(arr(get(get(m, 'dependencies'), 'dependency'))) do
@@ -742,14 +842,23 @@ function M.effective(model, rel, vantage, seen)
             packaging = str(get(m, 'packaging')) or 'jar' },
     }
     eff.lower_bound = #asm.undecided > 0 or asm.contingent
+    -- ★ A RECURSIVE EXPRESSION IS AN ERROR TO MAVEN, anywhere in the model: it refuses to build the
+    -- POM. The model is kept (it still navigates) and marked INVALID, with the reason Maven gives —
+    -- 299 quarkus test templates (`resources-filtered/`, filtered by their tests before use) write
+    -- `<maven.compiler.source>${maven.compiler.source}</maven.compiler.source>`.
+    for _, h in ipairs(refs.list) do
+        if h.class == 'cycle' then eff.invalid = ('a recursive expression cycle in ${%s}'):format(h.inner or h.expr); break end
+    end
     model.cache[key] = eff
     return eff
 end
 
---- ★ THE PROJECTION: what this reader CLAIMS about one effective model, in the kv form — the
+--- ★ THE PROJECTION: what this reader CLAIMS about one effective model, in the kv form (nil and the
+--- reason for a model Maven would refuse) — the
 --- contract the Maven oracle (tools/oracles/maven_effective.py) is joined on. Anything outside
 --- it (super-POM repositories, resources, reporting) is not claimed and not compared.
 function M.projection(eff)
+    if eff.invalid then return nil, eff.invalid end -- Maven would not build it either
     local function norm(v)
         if type(v) ~= 'string' then return v end
         return (v:gsub('%${project%.basedir}', '${basedir}'):gsub('%${pom%.basedir}', '${basedir}'))
@@ -880,7 +989,7 @@ local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
 --- Mint the Maven build layer into `data`. Idempotent under refresh.
 function M.attach(data, opts)
     local stats = { files = 0, reactor = 0, orphans = 0, refused = 0, links = 0, skew = 0, noops = 0, undefined = 0,
-        missing = 0, frontiers = 0, lower_bound = 0 }
+        missing = 0, frontiers = 0, lower_bound = 0, external = 0 }
     if not data or not data.root then data.pom = nil; return stats end
     local keep, mine = {}, {}
     for _, n in ipairs(data.nodes or {}) do if n.pom then mine[n.id] = true else keep[#keep + 1] = n end end
@@ -891,7 +1000,11 @@ function M.attach(data, opts)
     end
     local files = (opts and opts.files) or M.find(data.root, opts and opts.transport)
     if #files == 0 then data.pom = nil; return stats end
-    local model = M.read(data.root, files)
+    -- the local repository (tools/mavenpoms.lua): read OFFLINE when it exists — its POMs are data
+    -- the user chose to download; nothing here fetches
+    local repo = opts and opts.repo
+    if repo == nil and vim.fn.isdirectory(M.DEFAULT_REPO) == 1 then repo = M.DEFAULT_REPO end
+    local model = M.read(data.root, files, { repo = repo or nil })
     local A = M.analyze(model, opts and opts.vantage)
     data.nodes = data.nodes or {}
     data.edges = data.edges or {}
@@ -920,6 +1033,7 @@ function M.attach(data, opts)
         data.edges[#data.edges + 1] = { from = l.from, to = l.to, kind = 'use', pom = 'dependency', scope = l.scope, at = {} }
     end
     stats.refused = #model.refusals
+    for _, ok in pairs(model.external) do if ok then stats.external = stats.external + 1 end end
     stats.reactor, stats.orphans = #A.reactor, #A.orphans
     stats.links, stats.skew, stats.noops = #A.links, #A.skew, #A.noops
     stats.undefined = #A.holes
@@ -932,8 +1046,9 @@ end
 function M.summary(s)
     if not s or s.files == 0 then return nil end
     return ('maven: %d POM(s), %d in the reactor, %d outside it; %d inter-module link(s), %d version skew;'
-        .. ' %d external parent(s); %d no-op override(s); %d undefined reference(s), %d missing module/version%s%s')
-        :format(s.files, s.reactor, s.orphans, s.links, s.skew, s.frontiers, s.noops, s.undefined, s.missing,
+        .. ' %d parent(s)/BOM(s) read from the local repository, %d external parent(s) unread; %d no-op override(s);'
+        .. ' %d undefined reference(s), %d missing module/version%s%s')
+        :format(s.files, s.reactor, s.orphans, s.links, s.skew, s.external, s.frontiers, s.noops, s.undefined, s.missing,
             s.lower_bound > 0 and (' — %d effective model(s) are LOWER BOUNDS (undecided profiles)'):format(s.lower_bound) or '',
             s.refused > 0 and (' — %d refused'):format(s.refused) or '')
 end

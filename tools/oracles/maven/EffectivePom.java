@@ -7,8 +7,12 @@
 // reactor's model pool does); anything else is refused, never fetched — so a POM whose lineage
 // leaves the tree comes back as an error, and that is the honest answer offline.
 //
-// stdin : NUL-separated pom.xml paths.  argv: <outdir> [profile,ids]
+// A second pool is a LOCAL REPOSITORY in Maven's layout (g/a/v/a-v.pom) holding POMs the user
+// chose to download (tools/mavenpoms.lua); it is read, never written, and never fetched into here.
+//
+// stdin : NUL-separated pom.xml paths.  argv: <outdir> [profile,ids] [local repository]
 // stdout: NUL-separated records  OK <path> <file>  |  PARTIAL <path> <file>  |  ERR <path> <message>
+//         and, last, MISSING <g:a:v> for every coordinate neither pool had
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -24,10 +28,17 @@ public class EffectivePom {
     static final String OFFLINE = "not in the tree (offline oracle)";
     static final java.util.regex.Pattern IMPORT = java.util.regex.Pattern.compile("import POM ([^:\\s]+):([^:\\s]+):");
 
+    static File LOCAL_REPO;
+    static final Set<String> MISSING = new TreeSet<>();
+
     static class TreeOnly implements ModelResolver {
         ModelSource find(String g, String a, String v) throws UnresolvableModelException {
             File f = POOL.get(g + ":" + a + ":" + v);
-            if (f == null) throw new UnresolvableModelException(OFFLINE, g, a, v);
+            if (f == null && LOCAL_REPO != null && g != null && a != null && v != null) {
+                File r = new File(LOCAL_REPO, g.replace('.', '/') + "/" + a + "/" + v + "/" + a + "-" + v + ".pom");
+                if (r.isFile()) f = r;
+            }
+            if (f == null) { MISSING.add(g + ":" + a + ":" + v); throw new UnresolvableModelException(OFFLINE, g, a, v); }
             return new FileModelSource(f);
         }
         public ModelSource resolveModel(String g, String a, String v) throws UnresolvableModelException { return find(g, a, v); }
@@ -71,6 +82,7 @@ public class EffectivePom {
         File outdir = new File(argv[0]);
         outdir.mkdirs();
         List<String> profiles = argv.length > 1 && !argv[1].isEmpty() ? Arrays.asList(argv[1].split(",")) : List.of();
+        if (argv.length > 2 && !argv[2].isEmpty() && new File(argv[2]).isDirectory()) LOCAL_REPO = new File(argv[2]);
         String in = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
         List<String> paths = new ArrayList<>();
         for (String p : in.split("\0")) if (!p.isEmpty()) paths.add(p);
@@ -141,6 +153,7 @@ public class EffectivePom {
                 rec(out, "ERR", p, e.toString());
             }
         }
+        for (String m : MISSING) rec(out, "MISSING", m);
         out.flush();
     }
 }

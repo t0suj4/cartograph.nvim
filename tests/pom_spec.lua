@@ -166,7 +166,7 @@ test('pom: PROFILES AS VANTAGES — activeByDefault yields, `!prop` decides, os 
     eq(nil, P._get(props, 'o'))
     eq(1, #e.undecided); eq('mac', e.undecided[1].id)
     eq(true, e.lower_bound)
-    local e2 = assert(P.effective(m, 'pom.xml', { props = { skipIt = 'true' }, os = { family = 'mac' } }))
+    local e2 = assert(P.effective(m, 'pom.xml', { props = { skipIt = 'true' }, os = { name = 'mac os x' } }))
     local p2 = P._get(e2.model, 'properties')
     eq(nil, P._get(p2, 'n')); eq('1', P._get(p2, 'o')); eq(false, e2.lower_bound)
 end)
@@ -299,4 +299,81 @@ test('pom: ★★★ JOINED AGAINST MAVEN ITSELF — the model builder, offline,
         ok(d == nil, rel .. ': ' .. vim.inspect(d))
     end
     vim.fn.delete(dir, 'rf')
+end)
+
+-- ── the downloaded POMs (tools/mavenpoms.lua → a LOCAL REPOSITORY), and what the full join taught:
+-- hadoop 120/121, hive 80/80, wildfly 278/278, quarkus 1565 agree / 0 disagree / 299 refused by both ──
+
+test('pom: ★★ a coordinate is a PLAIN SEGMENT before it becomes a path or a URL — the tree cannot steer either', function ()
+    eq('org/jboss/jboss-parent/51/jboss-parent-51.pom', (P.repo_path('org.jboss', 'jboss-parent', '51')))
+    for _, bad in ipairs({ { 'g', 'a', '../../etc' }, { 'g/x', 'a', '1' }, { 'g', 'a', '@project.version@' },
+        { '\\io.quarkus', 'a', '1' }, { 'g', 'a', '1..2' }, { 'g', 'a', nil } }) do
+        eq(nil, (P.repo_path(bad[1], bad[2], bad[3])))
+    end
+end)
+
+test('pom: ★★ an EXTERNAL parent and BOM come from the LOCAL REPOSITORY — resolved, not `beyond`', function ()
+    ready()
+    local repo = vim.fn.tempname()
+    local function put(g, a, v, body)
+        local rel = assert(P.repo_path(g, a, v))
+        vim.fn.mkdir(repo .. '/' .. vim.fn.fnamemodify(rel, ':h'), 'p')
+        local fd = assert(io.open(repo .. '/' .. rel, 'w')); fd:write(pom(body)); fd:close()
+    end
+    -- a FILE activation in a repository POM is false: Maven gives it no basedir (and ours must not crash on one)
+    put('org.apache', 'apache', '35', '<groupId>org.apache</groupId><artifactId>apache</artifactId><version>35</version><packaging>pom</packaging><properties><from.apache>yes</from.apache></properties>'
+        .. '<profiles><profile><id>f</id><activation><file><exists>${basedir}/pom.xml</exists></file></activation><properties><filed>1</filed></properties></profile></profiles>')
+    put('ext', 'bom', '7', '<groupId>ext</groupId><artifactId>bom</artifactId><version>7</version><packaging>pom</packaging><dependencyManagement><dependencies><dependency><groupId>d</groupId><artifactId>x</artifactId><version>3</version></dependency></dependencies></dependencyManagement>')
+    local files = { ['pom.xml'] = pom([[<parent><groupId>org.apache</groupId><artifactId>apache</artifactId><version>35</version></parent>
+      <groupId>g</groupId><artifactId>a</artifactId><version>1</version><properties><p>${from.apache}</p></properties>
+      <dependencyManagement><dependencies><dependency><groupId>ext</groupId><artifactId>bom</artifactId><version>7</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement>
+      <dependencies><dependency><groupId>d</groupId><artifactId>x</artifactId></dependency></dependencies>]]) }
+    local m = P.read('/nonexistent', { 'pom.xml' }, { read = function(r) return files[r] end, repo = repo })
+    eq('repository', m.poms['pom.xml'].parent_via)
+    local e = assert(P.effective(m, 'pom.xml'))
+    eq('yes', P._get(P._get(e.model, 'properties'), 'p'))
+    eq(nil, P._get(P._get(e.model, 'properties'), 'filed'))
+    eq('3', e.deps[1].v); eq('bom:repo:ext:bom:7', e.deps[1].version_from)
+    eq(nil, e.frontier)
+    eq(1, #m.order)                                  -- the repository is not the tree
+    vim.fn.delete(repo, 'rf')
+end)
+
+test('pom: ★ a property key written twice is ONE property, the last value (wildfly lra) — not an array', function ()
+    ready()
+    local e = assert(P.effective(tree { ['pom.xml'] = pom('<groupId>g</groupId><artifactId>a</artifactId><version>1</version><properties><k>1</k><j>x</j><k>2</k></properties>') }, 'pom.xml'))
+    eq('2', P._get(P._get(e.model, 'properties'), 'k'))
+end)
+
+test('pom: ★★ the BOM cycle guard is the CURRENT CHAIN — an answer does not depend on the order POMs are asked in', function ()
+    ready()
+    local function imp(a) return '<dependency><groupId>g</groupId><artifactId>' .. a .. '</artifactId><version>1</version><type>pom</type><scope>import</scope></dependency>' end
+    local function bom(a, dm) return pom('<groupId>g</groupId><artifactId>' .. a .. '</artifactId><version>1</version><packaging>pom</packaging><dependencyManagement><dependencies>' .. dm .. '</dependencies></dependencyManagement>') end
+    local files = {
+        ['c/pom.xml'] = bom('c', '<dependency><groupId>d</groupId><artifactId>fromc</artifactId><version>9</version></dependency>'),
+        ['b/pom.xml'] = bom('b', imp('c')),
+        ['a/pom.xml'] = bom('a', imp('c') .. imp('b')),   -- C first, then B, which imports C again
+    }
+    local m = tree(files)
+    assert(P.effective(m, 'a/pom.xml'))              -- evaluating A first used to cache B WITHOUT C
+    local b = assert(P.effective(m, 'b/pom.xml'))
+    eq(1, #b.dm); eq('g', 'g')
+    eq('d:fromc:jar:', b.dm[1].key)
+end)
+
+test('pom: ★ Maven\'s OS FAMILY test — known families have rules, any other is `os.name contains it` (`Linux`)', function ()
+    eq(true, P._family_matches('Linux', 'linux', ':'))
+    eq(true, P._family_matches('unix', 'linux', ':'))
+    eq(false, P._family_matches('windows', 'linux', ':'))
+    eq(false, P._family_matches('mac', 'linux', ':'))
+    eq(true, P._family_matches('mac', 'mac os x', ':'))
+    eq(nil, P._family_matches('unix', nil, ':'))
+end)
+
+test('pom: ★ a recursive expression makes the model INVALID, as Maven refuses it — kept for navigation, refused by the projection', function ()
+    ready()
+    local e = assert(P.effective(tree { ['pom.xml'] = pom('<groupId>g</groupId><artifactId>a</artifactId><version>1</version><properties><s>${s}</s></properties>') }, 'pom.xml'))
+    ok(e.invalid and e.invalid:find('recursive', 1, true), tostring(e.invalid))
+    local pr, why = P.projection(e)
+    eq(nil, pr); ok(why:find('${s}', 1, true), why)
 end)

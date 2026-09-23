@@ -20,6 +20,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, 'maven', 'EffectivePom.java')
 CP = '/usr/share/maven/lib/*'
 CACHE = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'cartograph', 'maven-oracle')
+# the POMs the user chose to download (tools/mavenpoms.lua), in Maven's layout; read-only here
+LOCAL_REPO = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'cartograph', 'maven-central')
 
 def compiled():
     cls = os.path.join(CACHE, 'EffectivePom.class')
@@ -59,11 +61,14 @@ def project(root, basedir):
 paths = [p for p in sys.stdin.read().split('\0') if p]
 out = {}
 with tempfile.TemporaryDirectory() as tmp:
-    r = subprocess.run(['java', '-cp', compiled() + ':' + CP, 'EffectivePom', tmp, os.environ.get('POM_PROFILES', '')],
+    r = subprocess.run(['java', '-cp', compiled() + ':' + CP, 'EffectivePom', tmp, os.environ.get('POM_PROFILES', ''),
+                        os.environ.get('POM_LOCAL_REPO', LOCAL_REPO)],
                        input='\0'.join(paths).encode(), capture_output=True, check=True)
     f = r.stdout.decode('utf-8').split('\0')
-    i = 0
-    while i + 2 < len(f):
+    i, missing = 0, []
+    while i < len(f) and f[i]:
+        if f[i] == 'MISSING':
+            missing.append(f[i + 1]); i += 2; continue
         kind, p, rest = f[i], f[i + 1], f[i + 2]
         i += 3
         if kind in ('OK', 'PARTIAL'):
@@ -72,4 +77,8 @@ with tempfile.TemporaryDirectory() as tmp:
             if kind == 'PARTIAL' and 'value' in out[p]: out[p]['partial'] = True
         else:
             out[p] = {'error': rest[:200]}
-json.dump(out, sys.stdout, ensure_ascii=False)
+# `--missing`: print only the coordinates neither the tree nor the local repository had
+if '--missing' in sys.argv:
+    json.dump(sorted(set(missing)), sys.stdout)
+else:
+    json.dump(out, sys.stdout, ensure_ascii=False)

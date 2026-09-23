@@ -72,7 +72,7 @@ local JOINS = {
     -- (the model builder reads the JVM's java.version and os.*; ours is told the same).
     pom = {
         lang = 'xml',
-        repos = { '~/git/hadoop' },
+        repos = { '~/git/hadoop', '~/git/hive', '~/git/wildfly', '~/git/quarkus' },
         match = function(f) return f == 'pom.xml' or f:match('/pom%.xml$') end,
         oracle = { 'python3', REPO .. '/tools/oracles/maven_effective.py' },
         read_input = function(input)
@@ -82,7 +82,9 @@ local JOINS = {
             if not cache[input.repo] then
                 local files = {}
                 for _, f in ipairs(J.ls_files(input.repo)) do if f == 'pom.xml' or f:match('/pom%.xml$') then files[#files + 1] = f end end
-                cache[input.repo] = P.read(input.repo, files)
+                -- the same local repository the oracle reads (tools/mavenpoms.lua fills it), or none
+                local lr = vim.fn.isdirectory(P.DEFAULT_REPO) == 1 and P.DEFAULT_REPO or nil
+                cache[input.repo] = P.read(input.repo, files, { repo = lr })
             end
             local model = cache[input.repo]
             if not model.poms[input.rel] then
