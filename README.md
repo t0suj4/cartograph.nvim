@@ -3300,6 +3300,17 @@ ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograp
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# JOIN A READER AGAINST AN INDEPENDENT ORACLE, per file — the acceptance test every data
+# reader gets (CART-1044). Six outcomes, none dropped: agree, disagree, refused by us,
+# rejected by the oracle, both refused, unopenable; disagreements GROUPED BY CAUSE (the first
+# structural difference: kind, path, detail), so one defect read 64 times is one group.
+nvim --headless -u NONE -l tools/oraclejoin.lua xml      # or: yaml
+#   xml: 5,514 files — 5,428 agree (every readable pom.xml), 1 cause of disagreement (DTD
+#   entities are deliberately not expanded), 11 refused with reasons, 0 the oracle rejects
+#   and we accept. Oracles live in tools/oracles/ and read their inputs NUL-SEPARATED: a
+#   whitespace-split path list once made five files silently unopenable. A join with no
+#   agreement at all prints VACUOUS — suspect the harness before the reader.
+
 # THE HELPER SIGNATURE OF EVERY NEAR-CLONE PAIR. What would an extracted helper
 # actually take? A hole that depends on nothing is a VALUE parameter; a hole over
 # the function's own locals is a FUNCTION parameter, and the call site cannot
