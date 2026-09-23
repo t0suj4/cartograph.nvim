@@ -524,4 +524,165 @@ function M.propagate(T, C, Vs, i, env, opts)
     end
     return out
 end
+
+-- ── classify an observation of ONE member of a KEYED family (CART-1041, CART-1040) ──
+-- `classify` above refuses keyed nodes by name ("classify reads positional regions"), and
+-- `kv_generalize` had no match or classify at all, so a keyed template (a locale file, a
+-- manifest read as data) could be recovered but never compared against. This is the keyed
+-- twin, with THE SAME KIND VOCABULARY so one consumer reads both:
+--   'none'      the observation equals the member's unfolding
+--   'value'     every hole the member reaches changed consistently at ALL its sites (the
+--               store law), presence holes included: the family's shape still holds
+--   'template'  a fixed part changed: a fixed scalar differs, a required key vanished, a key
+--               the family never had appeared, a kind or an array length changed
+--   'mixed'     both
+--   'straddle'  a NON-LINEAR hole changed at some of its sites only: the member broke an
+--               invariant the family keeps (two keys that always carry the same text); the
+--               proposal is the positional one — split those sites into their own hole
+-- Paths are KEY PATHS (`$.js.user_api_key.title`), native for keyed data. For a 'value'
+-- result `rebuilds` says whether substituting the new values into the template reproduces
+-- the observation exactly — the classification checked against the observation itself.
+--- @param R table  a `kv_generalize` result
+--- @param i integer the member observed
+--- @param I2 any    the observed value (kv form)
+function M.kv_classify(R, i, I2)
+    local ABS, kind_of = M.KV_ABSENT, M.kv_kind
+    local byid = {}
+    for _, h in ipairs(R.holes) do byid[h.id] = h end
+    local tchanges, seen, order = {}, {}, {}
+    local function tchange(path, what, from, to, hole)
+        tchanges[#tchanges + 1] = { path = path, what = what, from = from, to = to, hole = hole }
+    end
+    local function note(h, path, v)
+        local s = seen[h.id]
+        if not s then s = { h = h, sites = {} }; seen[h.id] = s; order[#order + 1] = h.id end
+        s.sites[#s.sites + 1] = { path = path, new = v }
+    end
+    local walk
+    walk = function(t, v, path)
+        if type(t) ~= 'table' or t.null then -- a fixed scalar (or null)
+            if v == ABS then tchange(path, 'removed', t, ABS)
+            elseif not M.kv_eq(t, v) then tchange(path, 'changed', t, v) end
+            return
+        end
+        if t.hole then
+            local h = byid[t.hole]
+            -- a REQUIRED position the member had, now gone: the family's shape broke here
+            if v == ABS and h.values[i] ~= ABS then return tchange(path, 'removed', h.values[i], ABS, h.id) end
+            return note(h, path, v)
+        end
+        if t.opt then
+            note(byid[t.opt.hole], path, v ~= ABS)
+            if v ~= ABS then walk(t.body, v, path) end
+            return
+        end
+        if t.o then
+            if kind_of(v) ~= 'obj' then return tchange(path, v == ABS and 'removed' or 'kind', 'object', v) end
+            for _, k in ipairs(t.keys) do walk(t.o[k], v.o[k] == nil and ABS or v.o[k], path .. '.' .. k) end
+            for _, k in ipairs(v.keys) do
+                if t.o[k] == nil then tchange(path .. '.' .. k, 'added', ABS, v.o[k]) end
+            end
+            return
+        end
+        if t.ka then -- an array keyed by its merge field: compare as the object it aligned as
+            if kind_of(v) ~= 'arr' then return tchange(path, 'kind', 'keyed array', v) end
+            local o, keys = {}, {}
+            for _, x in ipairs(v.a) do
+                if kind_of(x) ~= 'obj' or x.o[t.keyfield] == nil then return tchange(path, 'kind', 'keyed array', v) end
+                local kk = tostring(x.o[t.keyfield]); o[kk] = x; keys[#keys + 1] = kk
+            end
+            return walk(t.ka, { o = o, keys = keys }, path .. '[' .. t.keyfield .. ']')
+        end
+        if t.a then
+            if kind_of(v) ~= 'arr' or #v.a ~= #t.a then
+                return tchange(path, 'length', #t.a, kind_of(v) == 'arr' and #v.a or v)
+            end
+            for j, x in ipairs(t.a) do walk(x, v.a[j], path .. '[' .. j .. ']') end
+            return
+        end
+    end
+    walk(R.template, I2, '$')
+
+    local vchanges, straddles = {}, {}
+    table.sort(order)
+    for _, id in ipairs(order) do
+        local s = seen[id]
+        local old, first, consistent, changed, to = s.h.values[i], nil, true, {}, nil
+        -- ⚠ A PRESENCE THAT WAS NOT APPLICABLE (the parent absent: ABS) AND IS NOW `false` DID
+        -- NOT CHANGE — both say "not there". Without this, a parent appearing with one child
+        -- reported every sibling as vanished (Discourse, `be` and js.topic_entrance).
+        local function same(new)
+            if s.h.kind == 'presence' and old == ABS and new == false then return true end
+            return M.kv_eq(new, old)
+        end
+        for _, st in ipairs(s.sites) do
+            if not same(st.new) then changed[#changed + 1] = st.path; if to == nil then to = st.new end end
+            if first == nil then first = st.new elseif not M.kv_eq(st.new, first) then consistent = false end
+        end
+        if #changed > 0 then
+            if consistent and #changed == #s.sites then
+                local paths = {}
+                for _, st in ipairs(s.sites) do paths[#paths + 1] = st.path end
+                vchanges[#vchanges + 1] = { hole = id, kind = s.h.kind, from = old, to = first, sites = paths }
+            else
+                straddles[#straddles + 1] = { hole = id, kind = s.h.kind, sites = changed, of = #s.sites, from = old, to = to }
+            end
+        end
+    end
+
+    local out = { changes = tchanges, values = vchanges, straddles = straddles }
+    if #straddles > 0 then
+        local st = straddles[1]
+        out.kind = 'straddle'
+        out.hole, out.sites = st.hole, st.sites
+        out.why = ('hole %s: changed at %d of its %d site(s) only; the store law binds all of them')
+            :format(st.hole, #st.sites, st.of)
+        out.proposal = { op = 'split', h = st.hole, sites = st.sites,
+            why = 'split these sites off into their own hole, then classify again' }
+    elseif #tchanges > 0 and #vchanges > 0 then out.kind = 'mixed'
+    elseif #tchanges > 0 then out.kind = 'template'
+    elseif #vchanges > 0 then out.kind = 'value'
+    else out.kind = 'none' end
+
+    if out.kind == 'value' then
+        -- ★ THE CLASSIFICATION, CHECKED AGAINST THE OBSERVATION: substitute and compare
+        local nv = {}
+        for _, c in ipairs(vchanges) do nv[c.hole] = c.to end
+        local function inst(t)
+            if type(t) ~= 'table' then return t end
+            if t.hole then
+                local v = nv[t.hole]; if v == nil then v = byid[t.hole].values[i] end
+                return v
+            end
+            if t.opt then
+                local p = nv[t.opt.hole]; if p == nil then p = byid[t.opt.hole].values[i] end
+                if p ~= true then return ABS end
+                return inst(t.body)
+            end
+            if t.ka then
+                local ob = inst(t.ka)
+                if ob == ABS then return ABS end
+                local a = {}
+                for _, key in ipairs(ob.keys) do a[#a + 1] = ob.o[key] end
+                return { a = a }
+            end
+            if t.a then
+                local a = {}
+                for j, x in ipairs(t.a) do a[j] = inst(x) end
+                return { a = a }
+            end
+            if t.o then
+                local o, keys = {}, {}
+                for _, key in ipairs(t.keys) do
+                    local v = inst(t.o[key])
+                    if v ~= ABS then o[key] = v; keys[#keys + 1] = key end
+                end
+                return { o = o, keys = keys }
+            end
+            return t
+        end
+        out.rebuilds = M.kv_eq(inst(R.template), I2)
+    end
+    return out
+end
 end

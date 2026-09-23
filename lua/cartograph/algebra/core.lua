@@ -2421,6 +2421,7 @@ local function kv_ser(v)
     return '{' .. table.concat(parts, ',') .. '}'
 end
 M.kv_ser = kv_ser
+M.kv_kind = kv_kind -- CART-1041: `kv_classify` (classify.lua) reads the same kinds
 function M.kv_eq(x, y) return kv_ser(x) == kv_ser(y) end
 
 function M.kv_generalize(instances, opts)
