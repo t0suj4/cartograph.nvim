@@ -276,6 +276,12 @@ function M.open(dump_path, opts)
             local tfs = require('cartograph.terraform').attach(data)
             local tfline = require('cartograph.terraform').summary(tfs)
             if tfline then vim.notify('cartograph: ' .. tfline, vim.log.levels.INFO) end
+            -- the MAVEN BUILD layer (CART-1051): POMs read as XML data and put through Maven's
+            -- model builder statically — inheritance, interpolation (holes kept by class),
+            -- profiles as vantages, dependencyManagement as linking; inter-module `use` edges.
+            local pms = require('cartograph.pom').attach(data)
+            local pmline = require('cartograph.pom').summary(pms)
+            if pmline then vim.notify('cartograph: ' .. pmline, vim.log.levels.INFO) end
             local kopts
             if data.helmfile then
                 local rest = {}

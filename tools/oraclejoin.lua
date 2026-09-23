@@ -18,6 +18,23 @@ local function readf(p)
     return s
 end
 
+local JOIN_STATE = {}
+
+-- the vantage the JVM gives Maven's model builder: java.version and os.* (Maven's `unix` family for Linux)
+local jvm
+local function JVM_VANTAGE()
+    if jvm then return jvm end
+    local sys = {}
+    for line in vim.fn.system({ 'java', '-XshowSettings:properties', '-version' }):gmatch('[^\n]+') do
+        local k, v = line:match('^%s+([%w%.]+) = (.*)$')
+        if k then sys[k] = v end
+    end
+    local name = (sys['os.name'] or ''):lower()
+    jvm = { sys = sys, jdk = sys['java.version'],
+        os = { name = name, family = name == 'linux' and 'unix' or name, arch = sys['os.arch'], version = sys['os.version'] } }
+    return jvm
+end
+
 local JOINS = {
     yaml = {
         lang = 'yaml',
@@ -48,6 +65,33 @@ local JOINS = {
             local r, why = require('cartograph.xmlvalue').read(src)
             if not r then return nil, why end
             return { o = { root = r.root, value = r.value }, keys = { 'root', 'value' } }
+        end,
+    },
+    -- ★ CART-1051: cartograph.pom against MAVEN'S OWN MODEL BUILDER, offline (parents and BOMs from
+    -- the tree only, no extension loads). Joined on `pom.projection`, per POM, under the JVM's vantage
+    -- (the model builder reads the JVM's java.version and os.*; ours is told the same).
+    pom = {
+        lang = 'xml',
+        repos = { '~/git/hadoop' },
+        match = function(f) return f == 'pom.xml' or f:match('/pom%.xml$') end,
+        oracle = { 'python3', REPO .. '/tools/oracles/maven_effective.py' },
+        read_input = function(input)
+            local P = require 'cartograph.pom'
+            local cache = JOIN_STATE.pom or {}
+            JOIN_STATE.pom = cache
+            if not cache[input.repo] then
+                local files = {}
+                for _, f in ipairs(J.ls_files(input.repo)) do if f == 'pom.xml' or f:match('/pom%.xml$') then files[#files + 1] = f end end
+                cache[input.repo] = P.read(input.repo, files)
+            end
+            local model = cache[input.repo]
+            if not model.poms[input.rel] then
+                for _, r in ipairs(model.refusals) do if r.path == input.rel then return nil, r.why end end
+                return nil, 'not read'
+            end
+            local eff, why = P.effective(model, input.rel, JVM_VANTAGE())
+            if not eff then return nil, why end
+            return P.projection(eff)
         end,
     },
 }
@@ -82,7 +126,7 @@ for _, r in ipairs(spec.repos) do
                 local size = vim.fn.getfsize(p)
                 if spec.max_bytes and size > spec.max_bytes then skipped[#skipped + 1] = p .. ' (too large)'
                 elseif size >= 0 then
-                    inputs[#inputs + 1] = { id = p, path = p }
+                    inputs[#inputs + 1] = { id = p, path = p, repo = dir, rel = f }
                     paths[#paths + 1] = p
                 else
                     inputs[#inputs + 1] = { id = p, path = p } -- a tracked path that is not a readable file
@@ -98,6 +142,7 @@ local report = J.run {
     inputs = inputs,
     oracle_map = map,
     read = function(input)
+        if spec.read_input then return spec.read_input(input) end
         local src = readf(input.path)
         if not src then return J.UNOPENABLE end
         return spec.read(src)
@@ -106,3 +151,25 @@ local report = J.run {
 print(('JOIN %s (%.1f s)'):format(name, (vim.uv.hrtime() - t0) / 1e9))
 for _, l in ipairs(J.lines(report, { show = show })) do print(l) end
 if #skipped > 0 then print(('skipped: %d  e.g. %s'):format(#skipped, skipped[1])) end
+if spec.read_input and JOIN_STATE.pom then
+    -- ★ THE VANTAGE'S OWN COUNTER: if the JVM's properties never reached us (they are printed on
+    -- stderr), every jdk/os profile stays undecided while Maven applied them, and agreement would
+    -- hold only on the axis profiles do not touch
+    local lb, judged = 0, 0
+    local v = JVM_VANTAGE()
+    for _, model in pairs(JOIN_STATE.pom) do
+        for rel in pairs(model.poms) do
+            local eff = require('cartograph.pom').effective(model, rel, v)
+            if eff then judged = judged + 1; if eff.lower_bound then lb = lb + 1 end end
+        end
+    end
+    local n = 0
+    for _ in pairs(v.sys) do n = n + 1 end
+    print(('vantage: java %s, os %s/%s, %d system properties; %d of %d model(s) still LOWER BOUNDS (undecided profiles)')
+        :format(tostring(v.jdk), tostring(v.os.name), tostring(v.os.arch), n, lb, judged))
+end
+local partial = 0
+for _, v in pairs(map) do if v.partial then partial = partial + 1 end end
+if partial > 0 then
+    print(('oracle PARTIAL: %d model(s) built without imports it may not fetch (the same frontier on both sides)'):format(partial))
+end

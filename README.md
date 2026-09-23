@@ -1312,6 +1312,71 @@ jenkins-infra all 40 DNS records in `azure`, `digitalocean` and `fastly` resolve
 `for_each` blocks have decidable keys, and 19 of the 27 distinct hosts are also written
 literally somewhere else in the org — none contradicts a resolution.
 
+### The Maven build layer (POMs)
+
+A `pom.xml` is XML data (read by `cartograph.xmlvalue`, like any other XML), and
+`cartograph.pom` is only the **dialect**: what Maven's model builder does to those documents
+before any plugin runs. It keeps four relations apart, because a POM tree is not one graph:
+**inheritance** (`<parent>`, found at `relativePath`, whose default is `../pom.xml`, then among the
+tree's POMs by coordinates, else an external parent named by its GAV), **aggregation**
+(`<modules>`, which is not inherited, and which a profile can extend), **interpolation** (`${x}`
+looked up in the effective model) and **linking** (a version-less dependency takes its version
+from the `dependencyManagement` entry that supplies it, through the lineage and through imported
+BOMs).
+
+The effective model follows Maven's order. First each lineage POM's active profiles are
+injected. Then the lineage is assembled with the child dominant: properties merge by key, and
+dependencies, managed dependencies, plugins and executions merge by their key. Everything is
+interpolated next, including `<packaging>`: hadoop writes `${packagingType}` there and sets it
+per profile. Finally BOMs are imported and management is injected.
+
+**Profiles are vantages, not defaults.** A profile activated by `jdk`, `os` or a property is
+decided by the environment you name (`{ profiles, props, jdk, os }`). Anything the vantage
+cannot decide is left out and listed, and the effective model says it is a **lower bound**. A
+`file` activation is decided, because the file is in the tree. On hive the empty vantage leaves
+70 lower bounds, and `--jdk 21 --os linux` leaves 3.
+
+**An unresolved reference is kept literal, as Maven keeps it, and gets a class:**
+- `basedir`, `env`, `settings`, `system`, `maven`: facts about the machine that runs the build;
+- `beyond`: the lineage ends at an external parent, which may define it;
+- `profile`: defined only in a profile that wasn't applied;
+- `late`: inside a plugin's `<configuration>`, where the plugin evaluates it at run time;
+- `undefined`: a real finding.
+
+Every dependency version names its source: `declared`, `managed:<pom>`, `bom:<pom>` or
+`frontier:<GAV>`. An in-tree BOM's own external imports travel with its entries. Each POM is a
+module node, with `use` edges for parent, module and inter-module dependency. A dependency on a
+reactor module's coordinates at another version is counted as **skew**, not linked.
+
+Measured with `tools/pomtree.lua` over wildfly, quarkus, hive and hadoop (2,389 POMs, none
+refused):
+- **Links:** 9,910 inter-module links and zero skew.
+- **References:** 329,509 `${}` references, each either resolved or classed.
+- **Missing versions:** only 2, both in quarkus test fixtures that are broken on purpose.
+- **Undefined:** 101, all in quarkus. 99 of them are `<phase>${maven-enforcer-plugin.phase}</phase>` in
+  `independent-projects/*`. The root POM sets that property, but those projects inherit from
+  `quarkus-parent`, the root's own parent, so within their lineage the enforcer execution stays
+  dormant unless `-D` supplies a phase.
+
+Nothing here runs Maven or fetches a parent POM, because the analysed tree can select but
+cannot supply.
+
+**Acceptance is Maven itself.** `tools/oraclejoin.lua pom` joins every POM's projection
+(coordinates, properties, dependencies, managed versions, modules) against the model builder
+from the system Maven's own jars. It is driven offline: parents and BOMs are resolved only
+inside the tree, nothing is fetched, and no build extension loads, because the model builder is
+not the project builder.
+- **hadoop:** 120 of 121 agree. The one difference is `maven.build.timestamp`, which depends on
+  when the build runs.
+- **quarkus:** all 126 POMs that can be judged offline agree.
+- **wildfly, hive:** can't be judged offline, because their root parent is external.
+
+The join found three rules the first version had wrong:
+1. Maven trims element text.
+2. A same-key dependency replaces the whole inherited element, so a scope-less child doesn't
+   pick up its parent's `provided`.
+3. Profile injection keeps the model's order.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:
@@ -3304,12 +3369,19 @@ plugin's runtime path, never required from `lua/cartograph/`.
 # reader gets (CART-1044). Six outcomes, none dropped: agree, disagree, refused by us,
 # rejected by the oracle, both refused, unopenable; disagreements GROUPED BY CAUSE (the first
 # structural difference: kind, path, detail), so one defect read 64 times is one group.
-nvim --headless -u NONE -l tools/oraclejoin.lua xml      # or: yaml
+nvim --headless -u NONE -l tools/oraclejoin.lua xml      # or: yaml, pom [--repos ~/git/quarkus]
 #   xml: 5,514 files — 5,428 agree (every readable pom.xml), 1 cause of disagreement (DTD
 #   entities are deliberately not expanded), 11 refused with reasons, 0 the oracle rejects
 #   and we accept. Oracles live in tools/oracles/ and read their inputs NUL-SEPARATED: a
 #   whitespace-split path list once made five files silently unopenable. A join with no
 #   agreement at all prints VACUOUS — suspect the harness before the reader.
+
+# THE MAVEN BUILD LAYER OVER REAL TREES (CART-1051): reactor vs orphans, parents, every
+# `${}` reference resolved or CLASSED, every dependency version's source, inter-module links and
+# skew, no-op property overrides — under a named vantage.
+nvim --headless -u NONE -l tools/pomtree.lua wildfly quarkus hive hadoop [--jdk 21 --os linux] [--profiles a,b]
+#   its model is joined against MAVEN'S OWN MODEL BUILDER by `tools/oraclejoin.lua pom`
+#   (offline; hadoop 120/121, quarkus 126 judged / 0 disagree).
 
 # THE HELPER SIGNATURE OF EVERY NEAR-CLONE PAIR. What would an extracted helper
 # actually take? A hole that depends on nothing is a VALUE parameter; a hole over
