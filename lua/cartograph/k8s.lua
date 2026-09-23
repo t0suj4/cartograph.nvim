@@ -327,6 +327,13 @@ function M.dir_of(data, service)
 end
 
 function M.summary(s)
+    -- ⚠ A REFUSAL-ONLY RESULT IS STILL A RESULT (CART-1043): with no manifest read but documents
+    -- refused, the old `files == 0 -> nil` made the refusal counter silent exactly when the whole
+    -- layer was refused (113 of 113 helmfile/values documents on jenkins-infra).
+    if s and s.files == 0 and (s.refused or 0) > 0 then
+        return ('k8s: 0 manifests read, %d document(s) refused (%s)'):format(s.refused,
+            table.concat(s.refusals or {}, '; '):sub(1, 160))
+    end
     if not s or s.files == 0 then return nil end
     local unm = {}
     for i in pairs(s.unmapped) do unm[#unm + 1] = i end

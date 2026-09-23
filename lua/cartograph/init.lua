@@ -264,7 +264,21 @@ function M.open(dump_path, opts)
             -- back to its code plus the declared service topology (CART-0830).
             -- Runs BEFORE proto/xlang so the `deploys` edges exist while the
             -- contract is being bound.
-            local kb = require('cartograph.k8s').attach(data)
+            -- the HELM RELEASE layer (CART-1042): a helmfile repo holds releases and layered
+            -- values, not manifests. It runs FIRST and CLAIMS its files, so k8s does not count
+            -- every values file as a failed manifest (113 of 113 on jenkins-infra's repo).
+            local hfs = require('cartograph.helmfile').attach(data)
+            local hfline = require('cartograph.helmfile').summary(hfs)
+            if hfline then vim.notify('cartograph: ' .. hfline, vim.log.levels.INFO) end
+            local kopts
+            if data.helmfile then
+                local rest = {}
+                for _, f in ipairs(require('cartograph.k8s').find(data.root)) do
+                    if not data.helmfile.claimed[f] then rest[#rest + 1] = f end
+                end
+                kopts = { files = rest }
+            end
+            local kb = require('cartograph.k8s').attach(data, kopts)
             local kbline = require('cartograph.k8s').summary(kb)
             if kbline then
                 vim.notify('cartograph: ' .. kbline,

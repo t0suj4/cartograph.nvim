@@ -1252,6 +1252,29 @@ about a service, since the graph has no node at that granularity. Materialising
 them would smear one span across every file of the caller, so that is opt-in
 (`--coarse`) and its cost is printed either way.
 
+### The Helm release layer
+
+An infrastructure repo driven by [helmfile](https://github.com/helmfile/helmfile) holds no
+manifests at all: each `clusters/<name>.yaml` declares **releases** (a chart, a pinned version,
+a namespace) and each release **layers** values files — shared `config/x.yaml`, then
+`config/<cluster>/x.yaml`. `cartograph.helmfile` reads that as a session post-pass. Every
+helmfile and every values file it reads becomes a module node with a `use` edge from the
+helmfile, and the data the layer carries rides on `data.helmfile`: each release's
+**effective values** (the layers merged by Helm's own rule — maps merge, lists and scalars
+replace, `null` deletes), the state of every layer, **no-op overrides** (a cluster file
+restating what the shared one already says), the **hosts** each release serves, and **chart
+families** with their version skew. `helmfile.family(data, chart)` anchors every release of a
+chart over its effective values: what all deployments of the chart share, and the parameters
+each one sets.
+
+It is honest about what it cannot read: a `.gotmpl` values file is a template, not data, so it
+is skipped and the release is marked as a **lower bound**; `secrets:` point into a private
+repository and are counted as a frontier. And it **claims** its files, so the manifest reader
+no longer counts every values file as a failed manifest. On jenkins-infra's
+`kubernetes-management` that is 4 clusters, 55 releases and 65 values layers; the manifest
+reader had refused all 113 documents — and, until its summary was fixed to report a
+refusal-only result, said nothing.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:
