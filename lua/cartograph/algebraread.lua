@@ -19,7 +19,9 @@
 -- ★★ IT IS ADAPTATION, NOT VENDORING, AND THAT IS WHY IT IS ITS OWN FILE.
 -- `lua/cartograph/algebra/*` is the donor's code under a stamp that
 -- `tools/vendordrift.lua` watches; a hand-written module dropped in there would
--- read as donor drift forever, and the parts fence walks that directory
+-- read as donor drift forever [⚠ SUPERSEDED 2026-09-23: the copy is AUTHORITATIVE and
+-- our edits are the normal state — `origin.authority`, CART-1041; the parts-protocol
+-- point below still holds], and the parts fence walks that directory
 -- expecting every file to be `return function (M, SHARED)`. Wiring OUR
 -- tree-sitter in is a behaviour change we author, so it lands beside the seam
 -- with its own test rather than inside a mechanical copy.

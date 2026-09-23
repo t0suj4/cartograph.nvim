@@ -28,6 +28,16 @@
 -- at vendor time cannot be recovered by re-deriving it later.
 
 return {
+    -- ★★★ AUTHORITY (user, 2026-09-23): "We can take ownership of algebra and declare our
+    -- vendored copy authoritative until we absorb it into cartograph." THE COPY IS THE
+    -- SOURCE OF TRUTH from this date: we edit it (DIVERGED is the normal state, not a
+    -- finding), and a change in the donor is a PROPOSAL to review and port by hand, never a
+    -- correction that overrides ours. `tools/vendordrift.lua` reads this field. The donor
+    -- stays read-only to us (it is user-authored); the stamp below still records where the
+    -- copy came from, which is provenance, not authority.
+    authority       = 'vendored',
+    authority_since = '2026-09-23',
+
     -- the donor, as it was when this copy was taken
     donor_repo   = '~/tools/templates',
     donor_file   = 'algebra.lua',
@@ -60,6 +70,8 @@ return {
 
     -- sha256 of the bytes as vendored. `vendordrift` compares BOTH sides
     -- against this, which is what separates "we edited it" from "it moved".
+    -- ⚠ PROVENANCE, NOT A CHECK OF THE CURRENT FILE: under the vendored authority the
+    -- copy is expected to differ from this forever.
     sha256       = 'cb47dd9289987304e80489e147e374024a25007a9df17867c1107166418fc3a5',
     lines        = 9628,
 

@@ -9,6 +9,7 @@
 -- the DRIVER's load path (tools/algebradrive.lua, CART-0881) into the shipped
 -- tree so analysis can ask it questions -- not vendoring its source.
 --
+-- ⚠ SUPERSEDED 2026-09-23 (user): the vendored copy is AUTHORITATIVE — `origin.authority`, CART-1041.
 -- ★★ WHY NOT VENDOR IT. A copy is a second authority that drifts, which is the
 -- failure this whole arc exists to avoid (CART-0746: A COPIED WALKER IS A
 -- COPIED BUG). The user has frozen the prototype for the duration of this work
@@ -650,6 +651,8 @@ end
 --- Both sit in the VENDORED core, whose local edits are the in-progress split
 --- (CART-0912) watched by tools/vendordrift.lua. Bending it here would put a semantic
 --- change underneath a structural divergence.
+--- ⚠ SUPERSEDED 2026-09-23 (user): the vendored copy is AUTHORITATIVE (`origin.authority`,
+--- CART-1041), so bending `family_of` IS now allowed — the exit condition below is reachable.
 ---
 --- ⚠ SO THIS IS A SECOND FAMILY SELECTOR BESIDE `partition` — EXACTLY THE SHAPE OF
 --- THE DEFECT THIS SESSION KEEPS FINDING (CART-0932, two set-builders; CART-0928, two

@@ -94,6 +94,7 @@ function M.check(u)
     -- origin, several vendored artifacts
     if u.stamp_field then
         stamp = { sha256 = stamp[u.stamp_field], vendored_at = stamp.vendored_at,
+            authority = stamp.authority, authority_since = stamp.authority_since,
             donor_repo = stamp.donor_repo, donor_rev = stamp.donor_rev }
     end
     local copy_sha = sha256(u.copy)
@@ -123,6 +124,26 @@ function M.check(u)
         stamp_sha = stamp.sha256, donor_path = donor_path, stamp = stamp }
 end
 
+--- ★★ WHICH STATES FAIL THE GATE depends on WHO IS AUTHORITATIVE (`origin.authority`).
+--- Before 2026-09-23 the donor was the truth and any movement was worth a look. Once the
+--- COPY is authoritative, our own edits (DIVERGED) are the normal state and never fail;
+--- a donor change (ORIGIN MOVED / BOTH MOVED) is an UNREVIEWED PROPOSAL, and that still
+--- fails, because someone should decide whether to port it — silence would be the
+--- drift-without-knowing this tool exists to prevent.
+--- @return integer severity 0 = fine, 1 = gate-failing
+--- @return string label
+function M.severity(state, stamp)
+    local vendored = stamp and stamp.authority == 'vendored'
+    if state == 'IDENTICAL' or state == 'UNAVAILABLE' then return 0, 'nothing moved' end
+    if vendored and (state == 'DIVERGED' or state == 'DIVERGED (donor unavailable)') then
+        return 0, 'our edits — the copy is authoritative'
+    end
+    if vendored and (state == 'ORIGIN MOVED' or state == 'BOTH MOVED') then
+        return 1, 'the donor moved — a PROPOSAL to review and port by hand, not a correction'
+    end
+    return 1, 'moved'
+end
+
 function M.run(opts)
     opts = opts or {}
     local worst = 0
@@ -139,7 +160,10 @@ function M.run(opts)
             r.donor_sha == nil and '— UNAVAILABLE, not a match'
             or (r.donor_sha == r.stamp_sha and '=' or '★ DIFFERS — the donor moved')))
         print(('  donor path   %s'):format(r.donor_path))
-        if r.state ~= 'IDENTICAL' and r.state ~= 'UNAVAILABLE' then worst = 1 end
+        local sev, label = M.severity(r.state, r.stamp)
+        print(('  authority    %s — %s'):format(r.stamp.authority == 'vendored'
+            and ('the vendored copy, since ' .. tostring(r.stamp.authority_since)) or 'the donor', label))
+        if sev > worst then worst = sev end
     end
     -- a report by default; a gate only when asked, so a pre-commit hook can use
     -- it without every local edit to the vendored file failing a commit

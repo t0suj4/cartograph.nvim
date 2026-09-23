@@ -99,6 +99,24 @@ test('algebra vendoring: the drift fence separates WE moved from THEY moved', fu
     vim.fn.delete(dir, 'rf')
 end)
 
+--- ★★★ AUTHORITY DECIDES WHAT FAILS THE GATE (user, 2026-09-23: the vendored copy is
+--- authoritative). Our edits never fail it; an unreviewed DONOR change still does, as a
+--- proposal. Without the field the old rule stands: any movement fails.
+test('algebra vendoring: under a vendored authority, our edits pass the gate and donor moves do not', function ()
+    local V = { authority = 'vendored', authority_since = '2026-09-23' }
+    eq(0, (drift.severity('IDENTICAL', V)))
+    eq(0, (drift.severity('DIVERGED', V)))
+    eq(0, (drift.severity('DIVERGED (donor unavailable)', V)))
+    eq(1, (drift.severity('ORIGIN MOVED', V)))
+    eq(1, (drift.severity('BOTH MOVED', V)))
+    local _, why = drift.severity('ORIGIN MOVED', V)
+    ok(why:find('PROPOSAL', 1, true), why)
+    -- the pre-authority rule, for a stamp without the field
+    eq(1, (drift.severity('DIVERGED', {})))
+    -- and the real stamp declares it
+    eq('vendored', require('cartograph.algebra.origin').authority)
+end)
+
 --- ★★★ THE EXCLUSION MUST BE DELIBERATE. The algebra's own 6001 lines call its
 --- own arrows constantly; counting them would report every export as shipped.
 --- This drives `M.uses` over a fixture whose ONLY file is under the vendored
