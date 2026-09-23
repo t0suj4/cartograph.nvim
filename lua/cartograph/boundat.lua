@@ -84,10 +84,15 @@ function M.of(src, file)
         end
     end
     local off_of, pos = {}, 0
+    -- ★ EVERY PATH'S OFFSET, so a ref and a decl sharing a path both get one (`off_of`
+    -- keeps the ref-wins rule for the line samples; `rebind` needs every occurrence, and a
+    -- binder that lost its path to a ref would otherwise have no position at all).
+    local pos_at = {}
     local function walk(n, path)
         if type(n) ~= 'table' then return end
         local key = table.concat(path, ',')
         if want[key] then off_of[want[key]] = { off = pos, kind = from[key] } end
+        pos_at[key] = pos_at[key] or pos
         if n.k == 'lit' then
             pos = pos + #tostring(n.v == nil and '' or n.v)
             return
@@ -136,7 +141,15 @@ function M.of(src, file)
     table.sort(pts, function (x, y) return x.off < y.off end)
     local chunk
     for _, c in ipairs(G.chunks or {}) do chunk = (type(c) == 'table' and c.scope) or c end
+    local ref_off, decl_off = {}, {}
+    for id, r in pairs(G.refs or {}) do
+        if r.site and (r.file == nil or r.file == (file or '?')) then ref_off[id] = pos_at[table.concat(r.site, ',')] end
+    end
+    for id, d in pairs(G.decls or {}) do
+        if d.site and (d.file == nil or d.file == (file or '?')) then decl_off[id] = pos_at[table.concat(d.site, ',')] end
+    end
     return { G = G, A = A, chunk = chunk or G.root, points = pts, nrefs = #pts,
+        ref_off = ref_off, decl_off = decl_off,
         decls = decls, ndecls = #decls }
 end
 

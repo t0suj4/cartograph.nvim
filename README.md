@@ -437,6 +437,17 @@ also unwire the import). The helper is deleted only if nothing outside the
 recorded sites still calls it; otherwise it stays, and the plan names the
 caller that kept it.
 
+The result is then checked **name by name**. The splice records where every
+byte of each new body came from (the helper's body, or the recorded argument),
+and the `bindings-preserved` guard resolves the file before and after and pairs
+each moved name with its source. A helper name that means something else at the
+site — say a `local prep` declared between the helper and its callers, so the
+inlined `prep(...)` would read the local instead of the global — fails the
+guard, and so does an argument the helper's body would capture. The verdicts
+head `:CartographDiff` (and the agent's `txn_preview` notes), so you see
+`guard 'bindings-preserved' FAILS …` while reviewing; `:CartographApply`
+refuses on it.
+
 ⚠ It is an **inline, not a restore**. The helper wears the *donor* site's
 local names, so the donor comes back byte-identical and the other sites come
 back alpha-equivalent — same behaviour, the helper's variable names. Byte

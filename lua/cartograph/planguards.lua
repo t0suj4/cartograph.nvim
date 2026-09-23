@@ -381,6 +381,132 @@ M.GUARDS['source-lines-unchanged'] = function (_, plan, before, _)
     return { { verdict = M.PASS, file = rel } }
 end
 
+--- ★★★ NO REFERENCE WAS RE-POINTED (CART-1038) — the law at the level of NAMES.
+--- `parses` says the file still compiles; this says every name still means what it meant.
+--- Both texts are resolved by the algebra's Lua scope graph (`rebind`), and each reference
+--- in the result is paired with its counterpart before the edit: unchanged text by the
+--- diff, MOVED text by the origins the plan declares. A reference whose binding changed
+--- when its token did not (a capture), or a local-reading name renamed to a free one (a
+--- partial rename), fails the guard.
+---
+--- ★★ A MOVE DECLARES ITS ORIGINS, OR IT IS UNCHECKED TEXT. `plan.origins[rel]` is a list of
+--- `{ op = <index into plan.files[rel].ops>, segs = { {off, len, from} } }`: these bytes of
+--- that op's new text (joined by newlines) are a verbatim copy of `from` in the before-text.
+--- The op's position in the result is computed from the ops' own line arithmetic (what
+--- `cloneextract.edits_for` applies), and EVERY SEGMENT IS RE-READ FROM THE RESULT AND
+--- COMPARED: a plan whose origins do not match the text it produced fails here as a
+--- synthesis bug, rather than being checked against positions that are not there.
+--- ⚠ LUA-ONLY: another language is a NO_CLAIM, and so is a file that did not parse before.
+local function line_starts0(text) -- 0-based line -> byte offset
+    local st = { [0] = 0 }
+    local n = 0
+    for i = 1, #text do if text:byte(i) == 10 then n = n + 1; st[n] = i end end
+    return st
+end
+local function absolute_origins(plan, rel, pre, post)
+    local fo = plan.origins and plan.origins[rel]
+    if not fo then return nil end
+    local ops = plan.files and plan.files[rel] and plan.files[rel].ops or {}
+    local st = line_starts0(post)
+    local out = {}
+    for g, entry in ipairs(fo) do
+        local op = ops[entry.op]
+        if not op then
+            return nil, ('the plan declares origins for op %s, which it does not have'):format(tostring(entry.op))
+        end
+        local shift = 0
+        for _, o in ipairs(ops) do
+            if o.from0b < op.from0b then shift = shift + #o.new - (o.to0b - o.from0b + 1) end
+        end
+        local base = st[op.from0b + shift]
+        if not base then return nil, ('op %d lands past the end of the result'):format(entry.op) end
+        for _, sg in ipairs(entry.segs or {}) do
+            local a = { off = base + sg.off, len = sg.len, from = sg.from, group = g }
+            if post:sub(a.off + 1, a.off + a.len) ~= pre:sub(sg.from + 1, sg.from + sg.len) then
+                return nil, ('the result does not hold the text the plan says op %d copied from byte %d'
+                    .. ' — a synthesis bug, not your code'):format(entry.op, sg.from)
+            end
+            out[#out + 1] = a
+        end
+    end
+    return out
+end
+--- The line hunks the ops make, in vim.diff's `indices` form — and CHECKED: every line
+--- outside an op must be the same line in the result, or the ops do not describe the edit.
+local function op_hunks(plan, rel, pre, post)
+    local ops = {}
+    for _, o in ipairs(plan.files[rel].ops) do ops[#ops + 1] = o end
+    table.sort(ops, function (x, y) return x.from0b < y.from0b end)
+    local la = vim.split(pre, '\n', { plain = true })
+    local lb = vim.split(post, '\n', { plain = true })
+    local hunks, shift, a = {}, 0, 0 -- a: next unchecked 0-based before-line
+    local function same_until(upto)
+        while a < upto do
+            if la[a + 1] ~= lb[a + shift + 1] then return false end
+            a = a + 1
+        end
+        return true
+    end
+    for _, o in ipairs(ops) do
+        if not same_until(o.from0b) then return nil end
+        local ac, bc = o.to0b - o.from0b + 1, #o.new
+        local afirst, bfirst = o.from0b + 1, o.from0b + shift + 1
+        hunks[#hunks + 1] = { ac == 0 and afirst - 1 or afirst, ac, bc == 0 and bfirst - 1 or bfirst, bc }
+        a = o.to0b + 1
+        shift = shift + bc - ac
+    end
+    if not same_until(#la) then return nil end
+    return hunks
+end
+M.GUARDS['bindings-preserved'] = function (_, plan, before, after)
+    local ts = require 'cartograph.providers.treesitter'
+    local rebind = require 'cartograph.rebind'
+    local rows, rels = {}, {}
+    for rel in pairs(after or {}) do rels[#rels + 1] = rel end
+    table.sort(rels)
+    for _, rel in ipairs(rels) do
+        local pre, post = (before or {})[rel], after[rel]
+        if ts.parse_lang(rel) ~= 'lua' then
+            rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel,
+                why = 'the binding check is Lua-only (the scope graph is Lua\'s mapping)' }
+        elseif type(pre) ~= 'string' then
+            rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel,
+                why = 'a created file has no before-text to compare bindings against' }
+        else
+            local origins, owhy = absolute_origins(plan, rel, pre, post)
+            if owhy then
+                rows[#rows + 1] = { verdict = M.FAIL, file = rel, why = owhy }
+            else
+                local hunks
+                if origins then
+                    hunks = op_hunks(plan, rel, pre, post)
+                    if not hunks then
+                        rows[#rows + 1] = { verdict = M.FAIL, file = rel,
+                            why = 'the result differs from the before-text outside the lines the plan says it'
+                                .. ' replaced — a synthesis bug, not your code' }
+                        goto continue
+                    end
+                end
+                local v, vwhy = rebind.check(pre, post, { file = rel, origins = origins, hunks = hunks })
+                if not v then
+                    rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel, why = tostring(vwhy) }
+                elseif not v.ok then
+                    local r = v.refusals[1]
+                    rows[#rows + 1] = { verdict = M.FAIL, file = rel, refusals = v.refusals,
+                        why = r.why .. (#v.refusals > 1 and (' (and %d more)'):format(#v.refusals - 1) or '') }
+                else
+                    rows[#rows + 1] = { verdict = M.PASS, file = rel, counts = v.counts,
+                        -- ⚠ WHAT WAS NOT CHECKED IS SAID: a new name with no origin has no
+                        -- before to compare with (an insertion, or a move that declared none)
+                        unchecked = v.counts.introduced > 0 and v.counts.introduced or nil }
+                end
+            end
+        end
+        ::continue::
+    end
+    return rows
+end
+
 function M.run(store, plan, before, after)
     local rows = {}
     for _, name in ipairs((plan and plan.guards) or {}) do
@@ -415,6 +541,29 @@ end
 function M.refusal(row)
     return ('guard `%s` failed%s: %s'):format(row.guard,
         row.file and (' on ' .. row.file) or '', row.why or 'no reason given')
+end
+
+--- The verdicts as display lines, for the surfaces a person or an agent reads a preview in.
+--- ⚠ THE PREVIEW COMPUTED THESE AND NOTHING SHOWED THEM (CART-1038): `txn.dryrun` has stored
+--- `plan.guard_verdicts` since CART-0769, and neither `:CartographDiff` nor `txn_preview` read
+--- the field — so a guard FAIL was first seen as an apply refusal, after the review it was
+--- meant to inform.
+--- @return table lines  a summary line, then one line per row that is not PASS
+function M.lines(rows)
+    local out, pass = {}, 0
+    for _, r in ipairs(rows or {}) do
+        if r.verdict == M.PASS then pass = pass + 1
+        else
+            out[#out + 1] = ('guard `%s` %s%s: %s'):format(tostring(r.guard),
+                r.verdict == M.FAIL and 'FAILS' or 'makes no claim',
+                r.file and (' on ' .. r.file) or '', r.why or 'no reason given')
+        end
+    end
+    local fails = 0
+    for _, r in ipairs(rows or {}) do if r.verdict == M.FAIL then fails = fails + 1 end end
+    table.insert(out, 1, ('guards: %d passed, %d failed, %d made no claim%s'):format(pass, fails,
+        #out - fails, fails > 0 and ' — the apply will REFUSE' or ''))
+    return out
 end
 
 --- Rows that are not PASS — what a preview should show. A NO_CLAIM is included

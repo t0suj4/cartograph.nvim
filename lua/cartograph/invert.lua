@@ -241,13 +241,14 @@ function M.of(store, entry)
             end
         end
     end
-    table.sort(subs, function (x, y) return x.off > y.off end) -- splice right to left
+    table.sort(subs, function (x, y) return x.off < y.off end) -- emitted left to right
 
     local hbody = src:sub(body_from + 1, body_to)
     local hind = (lines[hs.open + 1] or ''):match('^%s*') or ''
 
     -- ── per site: check it still delegates, then splice ──────────────────────
     local ops, refspecs, site_ids, nsubs = {}, {}, {}, 0
+    local origins = {}      -- per op: where each byte of its new text was copied from
     for _, s in ipairs(rec.sites) do
         -- ⚠ IDENTITY FIRST, NAME ONLY AS A FALLBACK. A tail-name match returns whichever
         -- node the list yields first, and a file may hold `local function tidy` beside
@@ -297,22 +298,46 @@ function M.of(store, entry)
             local _ = i
         end
 
-        local text = hbody
-        for _, sub in ipairs(subs) do
-            local rel = sub.off - body_from
-            text = text:sub(1, rel) .. s.args[sub.i] .. text:sub(rel + sub.len + 1)
-            nsubs = nsubs + 1
-        end
-        -- reindent from the helper's body indent to the site's
+        -- ★★ THE SPLICE RECORDS ITS ORIGINS AS IT GOES (CART-1038). Every byte of the new
+        -- body is either a verbatim copy of the helper's body, a verbatim copy of a recorded
+        -- argument at the call, or re-indentation. The `bindings-preserved` guard resolves
+        -- the file before and after and pairs each copied name with its SOURCE, so a helper
+        -- name that means something else at the site (a local declared between them, a
+        -- site-local shadowing an upvalue) or an argument the body captures is refused on
+        -- the result — the one thing a diff cannot pair, because the text MOVED.
+        local wpos = have:find(want, 1, true)
+        local argoff, ao = {}, offs[ss.open + 1] + wpos - 1 + #rec.call + 1
+        for i, a in ipairs(s.args) do argoff[i] = ao; ao = ao + #a + 2 end
         local sind = (lines[ss.open + 1] or ''):match('^%s*') or ''
-        local new = {}
-        for _, l in ipairs(vim.split(text, '\n', { plain = true })) do
-            if hind ~= '' and hind ~= sind and l:sub(1, #hind) == hind then
-                new[#new + 1] = sind .. l:sub(#hind + 1)
-            else
-                new[#new + 1] = l
-            end
+        local out, segs, olen = {}, {}, 0
+        local function emit(str, from)
+            if str == '' then return end
+            out[#out + 1] = str
+            if from then segs[#segs + 1] = { off = olen, len = #str, from = from } end
+            olen = olen + #str
         end
+        local blines = vim.split(hbody, '\n', { plain = true })
+        local lo, k = body_from, 1
+        for li, l in ipairs(blines) do
+            -- reindent from the helper's body indent to the site's
+            local pos = 0
+            if hind ~= '' and hind ~= sind and l:sub(1, #hind) == hind then
+                emit(sind, nil); pos = #hind
+            end
+            while subs[k] and subs[k].off < lo + #l do
+                local sub = subs[k]
+                local rel = sub.off - lo
+                emit(l:sub(pos + 1, rel), lo + pos)
+                emit(s.args[sub.i], argoff[sub.i])
+                nsubs = nsubs + 1
+                pos, k = rel + sub.len, k + 1
+            end
+            emit(l:sub(pos + 1), lo + pos)
+            if li < #blines then emit('\n', lo + #l) end
+            lo = lo + #l + 1
+        end
+        local new = vim.split(table.concat(out), '\n', { plain = true })
+        origins[#origins + 1] = { op = #ops + 1, segs = segs }
         ops[#ops + 1] = { from0b = ss.open, to0b = ss.close, new = new }
         refspecs[#refspecs + 1] = { id = snode.id, name = snode.name,
             ref = store.ref_of(snode.id), what = 'site' }
@@ -342,7 +367,8 @@ function M.of(store, entry)
 
     local plan = {
         verb = 'inline-helper', generation = store.generation,
-        guards = { 'parses' },
+        guards = { 'parses', 'bindings-preserved' },
+        origins = { [rec.file] = origins },
         helper = rec.helper, from_entry = entry.id, lang = 'lua',
         files = { [rec.file] = { ops = ops } },
         touched = { rec.file },

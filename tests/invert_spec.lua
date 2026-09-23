@@ -84,6 +84,19 @@ test('★★★ the round trip: extract, invert, and the relation comes back', f
     ok(got:match("local function fmt_b%(a%)\n  local y = prep%(a%)"),
         'the parameter is the site\'s, the locals are the helper\'s:\n' .. got)
     ok(got:match("encode%(z, 'yaml'%)"), 'and the divergence went back where it came from')
+
+    -- ★★ AND EVERY NAME STILL MEANS WHAT IT MEANT (CART-1038): the splice declared where each
+    -- byte came from, so every reference in the two new bodies pairs with its source — none
+    -- is left unchecked, and none was re-pointed
+    local row
+    for _, r in ipairs(plan.guard_verdicts or {}) do
+        if r.guard == 'bindings-preserved' then row = r end
+    end
+    ok(row, 'the plan declares the binding guard and the preview ran it')
+    if not row then return end
+    eq('pass', row.verdict)
+    eq(nil, row.unchecked)
+    ok(row.counts and row.counts.kept > 0, 'and it paired references: ' .. vim.inspect(row.counts))
 end)
 
 test('the inverse applies, and the tree is left without the abstraction', function ()
@@ -267,6 +280,42 @@ test('a renamed or removed helper refuses, and a site that stopped delegating re
         local r2, w2 = inv.of(store, entry)
         eq(nil, r2); ok(w2:match('no longer delegates'), tostring(w2))
     end)
+
+test('★★★ a HELPER name that means something else at the site fails the binding guard', function ()
+    if not ready() then return end
+    -- the helper reads the GLOBAL `prep`; a `local prep` declared after the helper and
+    -- before the sites means the inlined `prep(...)` would read the local. No argument is
+    -- involved, so the name-set capture check (arguments vs body binders) cannot see it.
+    local entry, root, bad = folded()
+    ok(entry, tostring(bad))
+    if not entry then return end
+    local text = txn.read_file(root, 'm.lua')
+    local edited = text:gsub('\nlocal function fmt_a%(', "\nlocal prep = require('other')\n\nlocal function fmt_a(", 1)
+    ok(edited ~= text, 'the fixture edit landed')
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(edited); fd:close()
+    store.ingest(ts.extract(root))
+
+    local plan, why = inv.of(store, entry)
+    ok(plan, 'it still PLANS — the check is on the result: ' .. tostring(why))
+    if not plan then return end
+    inv.preview(store, plan)
+    local row
+    for _, r in ipairs(plan.guard_verdicts or {}) do
+        if r.guard == 'bindings-preserved' then row = r end
+    end
+    ok(row, 'the preview ran the binding guard')
+    if not row then return end
+    eq('fail', row.verdict)
+    ok(row.why:match('`prep`') and row.why:match('moved there from'), row.why)
+    -- ★ AND THE PREVIEW SURFACES SAY SO, before the apply does
+    local lines = require('cartograph.planguards').lines(plan.guard_verdicts)
+    ok(lines[1]:match('1 failed') and lines[1]:match('the apply will REFUSE'), lines[1])
+    ok(table.concat(lines, '\n'):match('guard `bindings%-preserved` FAILS on m.lua'), table.concat(lines, '\n'))
+    -- and the write refuses on it
+    local e2, awhy = txn.apply(store, plan)
+    eq(nil, e2)
+    ok(tostring(awhy):match('bindings%-preserved'), tostring(awhy))
+end)
 
 test('★★★ a substitution that would CAPTURE refuses, naming both halves', function ()
     if not ready() then return end

@@ -1724,3 +1724,29 @@ end)
 -- REFUSES BY NAME RATHER THAN DOING SOMETHING PLAUSIBLE — moved to the protocol
 -- declaration test above, which strips each of `stamps`, `refspecs`, `guards` and
 -- `edit_of` in turn and matches the refusal's own words.
+
+test('agentwrite: a preview carries the GUARD VERDICTS — an inline says every name still binds', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local root = mkroot { ['m.lua'] = SAMEFILE_FAMILY }
+    ingest(root)
+    local p = call('txn_plan_extract_family', { node = idof('fam_a') })
+    ok(p.ok and p.subject.plan, 'the fold plans: ' .. vim.inspect(p.absence_why or p.refusal))
+    call('txn_preview', { plan = p.subject.plan })
+    local a = call('txn_apply', { plan = p.subject.plan })
+    ok(a.ok, 'the fold applies: ' .. vim.inspect(a.refusal))
+    local q = call('txn_plan_invert', {})
+    ok(q.ok and q.subject.plan, 'the inverse plans: ' .. vim.inspect(q.absence_why or q.refusal))
+    local d = call('txn_preview', { plan = q.subject.plan })
+    eq(true, d.ok)
+    local gv
+    for _, n in ipairs(d.notes) do if n.kind == 'guard-verdicts' then gv = n end end
+    ok(gv, 'the preview carries a guard-verdicts note: ' .. vim.inspect(d.notes))
+    if not gv then return end
+    local seen = {}
+    for _, r in ipairs(gv.evidence.verdicts) do seen[r.guard] = r.verdict end
+    eq('pass', seen['bindings-preserved'])
+    eq('pass', seen.parses)
+    ok(gv.why:match('0 failed'), gv.why)
+    permit(false)
+end)

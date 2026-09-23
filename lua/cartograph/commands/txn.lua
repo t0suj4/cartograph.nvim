@@ -23,8 +23,17 @@ function M.register(H)
         if not before then
             return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
         end
-        scratch(require('cartograph.txn')
-            .difftext(before, after, st.txn.touched), 'diff')
+        local lines = require('cartograph.txn').difftext(before, after, st.txn.touched)
+        -- the verdicts of the plan's own guards head the diff: a FAIL here is the refusal
+        -- :CartographApply will give, seen while it can still inform the review
+        if st.txn.guard_verdicts then
+            local head = {}
+            for _, l in ipairs(require('cartograph.planguards').lines(st.txn.guard_verdicts)) do
+                head[#head + 1] = '# ' .. l
+            end
+            for i = #head, 1, -1 do table.insert(lines, 1, head[i]) end
+        end
+        scratch(lines, 'diff')
     end, { desc = 'cartograph: the exact diff the staged transaction would write' })
 
     cmd('CartographApply', function ()

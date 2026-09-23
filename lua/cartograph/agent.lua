@@ -2847,6 +2847,19 @@ local function v_txn_preview(store, args)
     end
     local notes = ledger_notes(e.plan)
     notes[#notes + 1] = preview_coverage_note()
+    -- ★ WHAT THE PLAN'S DECLARED GUARDS SAID ABOUT THESE BYTES (CART-1038). The dry run has
+    -- computed them since CART-0769; without this note an agent met a guard FAIL only as the
+    -- apply's refusal, after the review it should have shaped.
+    local pg = require 'cartograph.planguards'
+    local gv, npass = {}, 0
+    for _, r in ipairs(e.plan.guard_verdicts or {}) do
+        if r.verdict == pg.PASS then npass = npass + 1 end
+        gv[#gv + 1] = { guard = r.guard, verdict = r.verdict, file = r.file, why = r.why }
+    end
+    notes[#notes + 1] = { kind = 'guard-verdicts',
+        premise = 'the plan\'s declared guards, run on this preview\'s before/after text',
+        why = table.concat(pg.lines(e.plan.guard_verdicts), ' · '),
+        evidence = { passed = npass, verdicts = gv } }
     local subject = { plan = e.id, verb = e.plan.verb, touched = e.plan.touched,
         creates = creates_list(e.plan), generation = e.gen, previewed = true }
     if #rows == 0 then
