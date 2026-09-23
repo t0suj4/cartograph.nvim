@@ -270,6 +270,12 @@ function M.open(dump_path, opts)
             local hfs = require('cartograph.helmfile').attach(data)
             local hfline = require('cartograph.helmfile').summary(hfs)
             if hfline then vim.notify('cartograph: ' .. hfline, vim.log.levels.INFO) end
+            -- the DECLARED CLOUD layer (CART-1042): Terraform read and EVALUATED statically —
+            -- a DNS record's host is its name plus a zone that may be a module output three hops
+            -- away; what needs Terraform to run (computed ids, for_each) is reported unknown.
+            local tfs = require('cartograph.terraform').attach(data)
+            local tfline = require('cartograph.terraform').summary(tfs)
+            if tfline then vim.notify('cartograph: ' .. tfline, vim.log.levels.INFO) end
             local kopts
             if data.helmfile then
                 local rest = {}

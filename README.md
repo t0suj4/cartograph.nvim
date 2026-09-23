@@ -1275,6 +1275,43 @@ no longer counts every values file as a failed manifest. On jenkins-infra's
 reader had refused all 113 documents — and, until its summary was fixed to report a
 refusal-only result, said nothing.
 
+### The declared cloud layer (Terraform)
+
+A DNS record in Terraform rarely spells the host it declares. jenkins-infra's
+`agent-2.trusted.ci.jenkins.io` is written as
+
+```hcl
+resource "azurerm_dns_a_record" "trusted_permanent_agent_2" {
+  name      = "agent-2"
+  zone_name = module.trusted_ci_jenkins_io_letsencrypt.zone_name
+```
+
+— the zone is an output of a local module whose input is a literal three hops away.
+`cartograph.terraform` parses every `.tf` file into blocks and a small expression tree, and
+**evaluates it statically**: literals and templates, locals, variable defaults, module inputs
+bound per instance, module outputs, data-source and resource arguments, operators,
+conditionals, a decidable `count` (the `var.x ? 1 : 0` switch, or `length()` of a counted
+data source, with `count.index` bound), and the functions the corpus actually uses. Each DNS
+record — Azure DNS and private DNS, DigitalOcean, Fastly service domains — gets its host.
+
+What only Terraform knows is an **opaque value**, not a dead end: a computed attribute (an IP
+address, an id) is a named hole carrying its canonical address — the innermost resource
+attribute, followed through module outputs — so two references to the same thing are *equal*
+without knowing its value, and a template or string function around one keeps its shape as a
+**partial** host (`«…ip_address»-lb.example.org`). Records that point at one opaque target share
+an **endpoint**: `trusted.ci.jenkins.io` and `assets.trusted.ci.jenkins.io` resolve to the same
+controller VM's private address. An id resolves through the resource it *belongs* to — a zone
+passed as `private_dns_zone_id` is that zone's declared name — never by parsing the id. `for_each`
+is instances per key (maps, sets, `for` expressions, `yamldecode(file("${path.module}/…"))`
+read inside the tree only), `count` per index, and `can`/`try` catch an absent attribute but
+never a real unknown. What cannot even be named — an unimplemented function, a condition over
+an opaque value, a set of opaque ids — stays **unknown with its reason**. A provider fact is used
+only where the provider documents it (`digitalocean_domain.id` is the domain name). Each `.tf`
+file is a module node, and a module call is a `use` edge to the child module's files. On
+jenkins-infra all 40 DNS records in `azure`, `digitalocean` and `fastly` resolve, 27 of 29
+`for_each` blocks have decidable keys, and 19 of the 27 distinct hosts are also written
+literally somewhere else in the org — none contradicts a resolution.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:
