@@ -30,8 +30,9 @@ end)
 
 test('yamlvalue: quoting — double-quoted escapes, single-quoted doubled quote', function ()
     ready()
-    local v = one('a: "x\\ty"\nb: \'it\'\'s\'\n')
+    local v = one('a: "x\\ty"\nb: \'it\'\'s\'\nc: "\\u00e9"\n')
     eq('x\ty', v.o.a)
+    eq('\u{e9}', v.o.c) -- a \\u escape (LuaJIT has no utf8 library: encoded by hand)
     eq("it's", v.o.b)
 end)
 

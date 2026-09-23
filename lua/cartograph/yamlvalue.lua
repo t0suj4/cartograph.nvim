@@ -21,10 +21,22 @@ local M = {}
 
 local function node_text(node, src) return vim.treesitter.get_node_text(node, src) end
 
+-- ⚠ LuaJIT HAS NO `utf8` LIBRARY (it is Lua 5.3's): encode code points by hand
+local function utf8char(cp)
+    if not cp or cp < 0 or cp > 0x10FFFF then return nil end
+    if cp < 0x80 then return string.char(cp) end
+    if cp < 0x800 then return string.char(0xC0 + math.floor(cp / 0x40), 0x80 + cp % 0x40) end
+    if cp < 0x10000 then
+        return string.char(0xE0 + math.floor(cp / 0x1000), 0x80 + math.floor(cp / 0x40) % 0x40, 0x80 + cp % 0x40)
+    end
+    return string.char(0xF0 + math.floor(cp / 0x40000), 0x80 + math.floor(cp / 0x1000) % 0x40,
+        0x80 + math.floor(cp / 0x40) % 0x40, 0x80 + cp % 0x40)
+end
+
 local function unescape_double(s)
     local map = { n = '\n', t = '\t', r = '\r', ['"'] = '"', ['\\'] = '\\', ['/'] = '/', ['0'] = '\0',
         a = '\a', b = '\b', e = '\27', f = '\f', v = '\v', [' '] = ' ', N = '\u{85}', _ = '\u{a0}' }
-    return (s:gsub('\\(u%x%x%x%x)', function (u) return utf8.char(tonumber(u:sub(2), 16)) end)
+    return (s:gsub('\\(u%x%x%x%x)', function (u) return utf8char(tonumber(u:sub(2), 16)) end)
         :gsub('\\(x%x%x)', function (x) return string.char(tonumber(x:sub(2), 16)) end)
         :gsub('\\(.)', function (c) return map[c] or ('\\' .. c) end))
 end
