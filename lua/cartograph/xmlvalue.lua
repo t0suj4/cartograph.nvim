@@ -45,6 +45,23 @@
 --   last    Python html.parser + `dict(attrs)`, the common lenient idiom (html.parser itself KEEPS both)
 --   keep    no decision: every value, as the reader returns it
 -- A caller that needs XML-conformant data asks for `reject` explicitly (the ElementTree join does).
+--
+-- ── MORE AMBIGUITY, SAME SHAPE (2026-09-24, "do the other ambiguous cases") ────────────────
+--   DTD ENTITIES   a reference to an INTERNAL entity the document declares (`<!ENTITY e "x">`) is
+--                  `{ amb = 'entity', literal = '&e;…', expand = 'x…' }` in `r.raw`; an EXTERNAL one
+--                  (`SYSTEM "file:…"`) is NEVER fetched, so its expansion is unknown, with the reason;
+--                  expansion stops at depth 10 or 100000 bytes (the billion-laughs shape)
+--   CONTROL CHARS  a character XML 1.0 forbids (U+0001…) no longer refuses the read: `r.forbidden`
+--                  lists each, and the policy decides
+-- `r.value` = `decide(r, M.READER)`: duplicates kept, entities literal, control characters kept —
+-- what this reader returned before, less the control-character refusal. Measured 2026-09-24:
+--                   duplicate attr   internal entity   control char
+--   expat (Python)  reject           expand            reject
+--   JAXP (JDK 21)   reject           expand            reject
+--   REXML (Ruby)    reject           expand            reject
+--   Maven MXParser  reject           REJECT            KEEP (its own writer then refuses it)
+--   html.parser     keep → last      literal           keep
+--   HTML5 (spec)    first            literal           keep (a parse error, the character kept)
 
 local M = {}
 
@@ -85,9 +102,52 @@ function M.read(src)
     if root:has_error() then return nil, 'the xml does not parse (tree-sitter reports an error node)' end
     -- ⚠ WELL-FORMEDNESS THE GRAMMAR DOES NOT ENFORCE (measured against ElementTree): XML 1.0 forbids
     -- C0 control characters other than tab/LF/CR anywhere (a hive test plan carries a raw U+0001)
-    local bad = src:find('[\1-\8\11\12\14-\31]')
-    if bad then
-        return nil, ('a character XML 1.0 forbids (U+%04X) at byte %d'):format(src:byte(bad), bad)
+    local forbidden = {}
+    for pos in src:gmatch('()[\1-\8\11\12\14-\31]') do
+        forbidden[#forbidden + 1] = { cp = src:byte(pos), byte = pos }
+    end
+    -- the DTD's INTERNAL general entities (parameter entities and external ones are not expandable
+    -- here: an external entity is never fetched)
+    local decl, external = {}, {}
+    for c in root:iter_children() do
+        if c:type() == 'prolog' then
+            for d in c:iter_children() do
+                if d:type() == 'doctypedecl' then
+                    for g in d:iter_children() do
+                        if g:type() == 'GEDecl' then
+                            local gname, gval, ext
+                            for x in g:iter_children() do
+                                if x:type() == 'Name' then gname = node_text(x, src)
+                                elseif x:type() == 'EntityValue' then gval = node_text(x, src):sub(2, -2)
+                                elseif x:type() == 'ExternalID' then ext = true end
+                            end
+                            if gname and decl[gname] == nil and external[gname] == nil then
+                                if ext then external[gname] = true else decl[gname] = gval or '' end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    -- the replacement text of an entity, references inside it expanded; nil and why
+    local function expand(name, depth, budget)
+        if external[name] then return nil, ('&%s; is an EXTERNAL entity (never fetched)'):format(name) end
+        local v = decl[name]
+        if v == nil then return nil, ('&%s; is not declared'):format(name) end
+        if depth > 10 then return nil, 'entity expansion deeper than 10 (a billion-laughs shape)' end
+        local failed
+        local out = v:gsub('&#x%x+;', charref):gsub('&#%d+;', charref):gsub('&([%w_.:-]+);', function(n)
+            if failed then return '' end
+            if PREDEF[n] then return PREDEF[n] end
+            local r, why = expand(n, depth + 1, budget)
+            if r == nil then failed = why; return '' end
+            return r
+        end)
+        if failed then return nil, failed end
+        budget.n = budget.n + #out
+        if budget.n > 100000 then return nil, 'entity expansion beyond 100000 bytes (a billion-laughs shape)' end
+        return out
     end
     local undefined = 0
     local bad_cdata = false
@@ -115,10 +175,30 @@ function M.read(src)
             for c in n:iter_children() do if c:type() == 'Name' then name = node_text(c, src) end end
             if name and PREDEF[name] then return PREDEF[name] end
             undefined = undefined + 1
-            return node_text(n, src)
+            local lit = node_text(n, src)
+            if name and (decl[name] ~= nil or external[name]) then
+                local x, why = expand(name, 1, { n = 0 })
+                return { literal = lit, expand = x, why = why, name = name }
+            end
+            return lit
         end
         if t == 'CharRef' then return charref(node_text(n, src)) or node_text(n, src) end
         return nil
+    end
+    -- join text parts; any ENTITY part makes the whole an ambiguity node with both readings
+    local function join_parts(parts)
+        local amb = false
+        for _, p in ipairs(parts) do if type(p) == 'table' then amb = true; break end end
+        if not amb then return table.concat(parts) end
+        local lit, exp, why, names = {}, {}, nil, {}
+        for _, p in ipairs(parts) do
+            if type(p) == 'table' then
+                lit[#lit + 1] = p.literal
+                names[#names + 1] = p.name
+                if p.expand == nil then why = why or p.why else exp[#exp + 1] = p.expand end
+            else lit[#lit + 1] = p; exp[#exp + 1] = p end
+        end
+        return { amb = 'entity', literal = table.concat(lit), expand = (why == nil) and table.concat(exp) or nil, why = why, names = names }
     end
 
     local function attr_value(av)
@@ -135,12 +215,28 @@ function M.read(src)
             -- the quotes are anonymous children; the pieces are the decoded parts, but plain text
             -- between references is not a named child — rebuild from the raw text instead
             local raw = node_text(av, src):sub(2, -2)
-            local s = raw:gsub('&#x%x+;', charref):gsub('&#%d+;', charref):gsub('&(%a+);', function (n)
-                if PREDEF[n] then return PREDEF[n] end
-                undefined = undefined + 1
-                return '&' .. n .. ';'
-            end)
-            out = { s }
+            local parts, last = {}, 1
+            local s = raw:gsub('&#x%x+;', charref):gsub('&#%d+;', charref)
+            for a, n, b in s:gmatch('()&([%w_.:-]+);()') do
+                parts[#parts + 1] = s:sub(last, a - 1)
+                if PREDEF[n] then parts[#parts + 1] = PREDEF[n]
+                else
+                    undefined = undefined + 1
+                    if decl[n] ~= nil or external[n] then
+                        local x, why = expand(n, 1, { n = 0 })
+                        parts[#parts + 1] = { literal = '&' .. n .. ';', expand = x, why = why, name = n }
+                    else parts[#parts + 1] = '&' .. n .. ';' end
+                end
+                last = b
+            end
+            parts[#parts + 1] = s:sub(last)
+            local j = join_parts(parts)
+            if type(j) == 'table' then
+                j.literal = j.literal:gsub('[\t\r\n]', ' ')
+                if j.expand then j.expand = j.expand:gsub('[\t\r\n]', ' ') end
+                return j
+            end
+            out = { j }
         end
         return (table.concat(out):gsub('[\t\r\n]', ' '))
     end
@@ -224,9 +320,10 @@ function M.read(src)
                 end
             end
         end
-        local text = table.concat(texts)
+        local text = join_parts(texts)
         if #keys == 0 and not any_child then return name, text end
-        if text:find('%S') then
+        local plain = type(text) == 'table' and text.literal or text
+        if plain:find('%S') then
             if o['#text'] == nil then keys[#keys + 1] = '#text' end
             o['#text'] = text
         end
@@ -243,7 +340,9 @@ function M.read(src)
             if bad_cdata then
                 return nil, 'the tree mis-tokenises a CDATA section (its text contains `]]>`) — the tree is wrong, so the document is refused'
             end
-            return { root = name, value = value, undefined_entities = undefined, duplicates = duplicates }
+            local r = { root = name, raw = value, undefined_entities = undefined, duplicates = duplicates, forbidden = forbidden }
+            r.value = M.decide(r, M.READER)
+            return r
         end
     end
     return nil, 'no root element'
@@ -290,6 +389,109 @@ function M.tiebreak(v, policy, path)
         keys[#keys + 1] = k
     end
     return { o = o, keys = keys }
+end
+
+-- ── implementations: how each decides every kind of ambiguity (measured, see the header) ─────
+M.READER = { ['duplicate-attribute'] = 'keep', entity = 'literal', ['control-char'] = 'keep' }
+M.IMPLEMENTATIONS = {
+    expat = { ['duplicate-attribute'] = 'reject', entity = 'expand', ['control-char'] = 'reject' },
+    jaxp = { ['duplicate-attribute'] = 'reject', entity = 'expand', ['control-char'] = 'reject' },
+    rexml = { ['duplicate-attribute'] = 'reject', entity = 'expand', ['control-char'] = 'reject' },
+    maven = { ['duplicate-attribute'] = 'reject', entity = 'reject', ['control-char'] = 'keep' },
+    ['html.parser+dict'] = { ['duplicate-attribute'] = 'last', entity = 'literal', ['control-char'] = 'keep' },
+    html5 = { ['duplicate-attribute'] = 'first', entity = 'literal', ['control-char'] = 'keep', spec = true },
+}
+
+--- A read document DECIDED under an implementation profile: its value, or nil and why.
+function M.decide(r, profile)
+    profile = profile or M.READER
+    if #(r.forbidden or {}) > 0 and profile['control-char'] == 'reject' then
+        local f = r.forbidden[1]
+        return nil, ('a character XML 1.0 forbids (U+%04X) at byte %d'):format(f.cp, f.byte)
+    end
+    local function walk(v, path)
+        if type(v) ~= 'table' then return v end
+        if v.amb == 'entity' then
+            local pol = profile.entity
+            if pol == 'literal' then return v.literal end
+            if pol == 'reject' then return nil, ('could not resolve entity &%s; (this implementation reads no DTD)'):format(v.names[1]) end
+            if v.expand == nil then return nil, v.why end
+            return v.expand
+        end
+        if v.a then
+            local a = {}
+            for i, x in ipairs(v.a) do local d, why = walk(x, path .. '[' .. i .. ']'); if d == nil then return nil, why end; a[i] = d end
+            return { a = a }
+        end
+        local o, keys = {}, {}
+        for _, k in ipairs(v.keys) do
+            local x = v.o[k]
+            if k:sub(1, 1) == '@' and type(x) == 'table' and x.a then
+                local picked, why = M.pick(x.a, profile['duplicate-attribute'])
+                if picked == nil then return nil, ('a duplicate attribute %s at %s: %s'):format(k, path, why) end
+                if type(picked) == 'table' and picked.a then
+                    local a = {}
+                    for i, y in ipairs(picked.a) do local d, dwhy = walk(y, path); if d == nil then return nil, dwhy end; a[i] = d end
+                    x = { a = a }
+                else
+                    local d, dwhy = walk(picked, path); if d == nil then return nil, dwhy end; x = d
+                end
+            else
+                local d, why = walk(x, path .. '.' .. k)
+                if d == nil then return nil, why end
+                x = d
+            end
+            o[k] = x; keys[#keys + 1] = k
+        end
+        return { o = o, keys = keys }
+    end
+    return walk(r.raw or r.value, '$')
+end
+
+--- ★ WHERE IMPLEMENTATIONS WOULD DISAGREE (a read document and implementation NAMES): every
+--- duplicate attribute, entity reference and forbidden character whose outcome differs. Rows:
+--- { path, kind, outcomes = {name -> outcome} }.
+function M.implementation_divergences(r, names)
+    if not names then names = {}; for n in pairs(M.IMPLEMENTATIONS) do names[#names + 1] = n end; table.sort(names) end
+    local out = {}
+    local function row(path, kind, detail, outcome_of)
+        local outcomes, seen, distinct = {}, {}, 0
+        for _, n in ipairs(names) do
+            local o = outcome_of(M.IMPLEMENTATIONS[n])
+            outcomes[n] = o
+            if not seen[o] then seen[o] = true; distinct = distinct + 1 end
+        end
+        if distinct > 1 then out[#out + 1] = { path = path, kind = kind, detail = detail, outcomes = outcomes } end
+    end
+    if #(r.forbidden or {}) > 0 then
+        row('$', 'control-char', ('U+%04X at byte %d'):format(r.forbidden[1].cp, r.forbidden[1].byte), function(p)
+            return p['control-char'] == 'reject' and 'rejected' or 'kept'
+        end)
+    end
+    local function walk(v, path)
+        if type(v) ~= 'table' then return end
+        if v.amb == 'entity' then
+            row(path, 'entity', v.literal, function(p)
+                if p.entity == 'literal' then return 'literal ' .. v.literal end
+                if p.entity == 'reject' then return 'rejected' end
+                return v.expand and ('expanded ' .. v.expand) or ('rejected: ' .. v.why)
+            end)
+            return
+        end
+        if v.a then for i, x in ipairs(v.a) do walk(x, path .. '[' .. i .. ']') end return end
+        for _, k in ipairs(v.keys) do
+            local x = v.o[k]
+            if k:sub(1, 1) == '@' and type(x) == 'table' and x.a then
+                row(path, 'duplicate-attribute', k, function(p)
+                    local picked = M.pick(x.a, p['duplicate-attribute'])
+                    if picked == nil then return 'rejected' end
+                    return type(picked) == 'table' and 'kept all' or ('the value ' .. tostring(picked))
+                end)
+            else walk(x, path .. '.' .. k) end
+        end
+    end
+    walk(r.raw or r.value, '$')
+    return out
 end
 
 --- ★ WHERE IMPLEMENTATIONS WOULD DISAGREE: every duplicate attribute whose outcome differs between

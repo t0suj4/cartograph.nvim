@@ -65,8 +65,9 @@ local JOINS = {
             local X = require 'cartograph.xmlvalue'
             local r, why = X.read(src)
             if not r then return nil, why end
-            -- ElementTree is XML-CONFORMANT, so the tiebreak joined against it is `reject`
-            local v, twhy = X.tiebreak(r.value, 'reject')
+            -- decided as EXPAT decides (ElementTree is expat): duplicates and control characters
+            -- rejected, internal entities EXPANDED
+            local v, twhy = X.decide(r, X.IMPLEMENTATIONS.expat)
             if v == nil then return nil, twhy end
             return { o = { root = r.root, value = v }, keys = { 'root', 'value' } }
         end,
@@ -101,6 +102,32 @@ local JOINS = {
         end,
     },
 }
+
+-- ★ CART-1053: yamlvalue's IMPLEMENTATION PROFILES, each joined against the real implementation over
+-- the same corpus — what PyYAML/ruamel/Psych/YAML::XS/yq LOAD, every scalar "type:value", against
+-- `yamlvalue.typed(doc.raw, profile)`. One row per implementation: `yaml:<name>`.
+do
+    local oracles = {
+        ['pyyaml-safe'] = { 'python3', REPO .. '/tools/oracles/yaml_typed.py', 'pyyaml-safe' },
+        ['ruamel-safe'] = { 'python3', REPO .. '/tools/oracles/yaml_typed.py', 'ruamel-safe' },
+        ['psych-safe'] = { 'ruby', REPO .. '/tools/oracles/yaml_typed.rb' },
+        ['yaml-xs'] = { 'perl', REPO .. '/tools/oracles/yaml_typed.pl' },
+        yq = { 'python3', REPO .. '/tools/oracles/yaml_typed_yq.py' },
+    }
+    for impl, cmd in pairs(oracles) do
+        JOINS['yaml:' .. impl] = {
+            -- ORDERED: key order is one of the things implementations differ on (where a merge puts
+            -- the merged keys), so it is compared, not sorted away
+            lang = 'yaml', repos = JOINS.yaml.repos, match = JOINS.yaml.match, oracle = cmd, ordered = true,
+            read = function(src)
+                local Y = require 'cartograph.yamlvalue'
+                local docs, why = Y.read(src)
+                if not docs then return nil, why end
+                return Y.typed_stream(docs, Y.IMPLEMENTATIONS[impl])
+            end,
+        }
+    end
+end
 
 local name = arg[1]
 local spec = name and JOINS[name]
@@ -147,6 +174,7 @@ if not map then print('the oracle failed: ' .. tostring(why)); os.exit(1) end
 local report = J.run {
     inputs = inputs,
     oracle_map = map,
+    ordered = spec.ordered,
     read = function(input)
         if spec.read_input then return spec.read_input(input) end
         local src = readf(input.path)

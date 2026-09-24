@@ -105,14 +105,17 @@ M._cause_key = cause_key
 ---   inputs  = { id | {id=, …} },                       -- the population
 ---   read    = function(input) -> value | nil, why | M.UNOPENABLE,
 ---   oracle  = function(input) -> value | nil, why,      -- or `oracle_map = { [id] = {value=} | {error=} }`
----   eq      = function(a, b) -> bool,                   -- default: kv_ser equality
+---   eq      = function(a, b) -> bool,                   -- default: kv_ser equality — ⚠ which
+---             IGNORES KEY ORDER (kv_ser sorts keys): "agree" means equal AS UNORDERED MAPS
+---   ordered = true                                      -- key order counts too (first_difference)
 ---   examples = n (per group, default 3) }
 --- @return table report { counts, groups (sorted by size), refusals, rejections, vacuous }
 function M.run(spec)
     local counts = { total = 0, agree = 0, disagree = 0, refused = 0, rejected = 0, both = 0, unopenable = 0 }
     local groups, order, refusals, rejections = {}, {}, {}, {}
     local keep = spec.examples or 3
-    local eq = spec.eq or function(a, b) return kv_ser(a) == kv_ser(b) end
+    local eq = spec.eq or (spec.ordered and function(a, b) return M.first_difference(a, b) == nil end)
+        or function(a, b) return kv_ser(a) == kv_ser(b) end
     for _, input in ipairs(spec.inputs) do
         local id = type(input) == 'table' and input.id or input
         counts.total = counts.total + 1

@@ -1312,27 +1312,56 @@ jenkins-infra all 40 DNS records in `azure`, `digitalocean` and `fastly` resolve
 `for_each` blocks have decidable keys, and 19 of the 27 distinct hosts are also written
 literally somewhere else in the org — none contradicts a resolution.
 
-### XML as data, ambiguity kept
+### Ambiguity kept: YAML and XML as their implementations read them
 
-`cartograph.xmlvalue` reads any XML document into the same keyed form as YAML:
-- attributes become `@name`;
-- repeated children become an array;
-- a text-only element becomes its text;
-- namespaces are resolved.
+`cartograph.yamlvalue` and `cartograph.xmlvalue` read documents into the keyed form. Where real
+implementations **disagree**, the readers keep every reading instead of choosing one. The
+disagreements are recorded in `doc.raw` / `r.raw`:
+- every plain YAML scalar, whose type is the resolver's decision;
+- duplicate keys and duplicate attributes, with every value kept. Which YAML keys are the *same*
+  key is each language's own equality, not the text: in PyYAML `true:`/`yes:` and `010:`/`8:` are
+  one key, while in YAML::XS and yq `1:`/`"1":` are. The value's type never matters;
+- YAML merge keys;
+- explicit YAML tags (`!Sub`, `!!str`);
+- DTD entity references, with both the literal and the expansion (an external entity is never
+  fetched, and expansion stops at the billion-laughs limit);
+- XML control characters.
 
-**What implementations disagree on is kept, not decided.** A duplicate attribute keeps every
-value in order, and a separate, named **tiebreaker** chooses later:
-- `reject`: XML 1.0, and measured in expat/ElementTree and Maven's parser;
-- `first`: specified by HTML5;
-- `last`: Python's `html.parser` read through `dict()`;
-- `keep`: every value, undecided.
+`value` is still what the reader always returned, so existing consumers are unaffected.
 
-`xmlvalue.divergences` lists every site where the policies disagree, which is where two
-implementations reading the same file would disagree. Each caller names its tiebreaker. The
-ElementTree join and the POM dialect use `reject`. The POM dialect's repeated property keys use
-`last`, which is Maven's behavior as measured by its model builder. Across 5,431 XML files the
-census finds two such sites, both in wildfly fixtures named `duplicate-attribute.xml`, which test
-WildFly's own parser.
+**An implementation is a profile.** A profile says how that implementation decides each kind of
+ambiguity. Each profile was measured, and ported from the installed sources where there are any:
+- **YAML:** PyYAML, ruamel, Psych, YAML::XS, yq.
+- **XML:** expat, JAXP, REXML, Maven's MXParser, `html.parser`, and HTML5 (from the spec only).
+
+`decide(raw, profile)` gives the value that implementation would produce, `typed(raw, profile)`
+gives the typed scalars it would load, and `divergences` lists the sites where the named
+implementations part ways.
+
+**Each YAML profile is checked against its real implementation, key order counted** (`tools/oraclejoin.lua yaml:<impl>`):
+- all five agree on 266 of 266 judgeable jenkins-infra files;
+- all five agree on every judgeable file of hadoop, quarkus, wildfly and hive (584 to 588 of 606,
+  the rest refused by both sides);
+- PyYAML and Psych also agree on 452 of 452 files from five Ansible roles.
+
+Across 1,275 YAML files, 19 files have real divergences:
+- 20 merged mappings that the spec-conformant merge (explicit keys win) and the override merge
+  (Psych, yq) build differently;
+- 9 GitHub Actions `on:` keys, which are the boolean `true` to PyYAML and Psych;
+- 4 CloudFormation `!Sub` tags, which PyYAML and ruamel reject, Psych and YAML::XS ignore, and yq
+  keeps;
+- a duplicate key in quarkus's Vale configuration: ruamel rejects the file, yq keeps both values;
+- hiera `PasswordAuthentication: no`, a boolean to Psych and a string to ruamel and yq.
+
+**What was learned is serialized with provenance.** `tools/ambiguity.lua --write` runs every
+implementation on the probe documents and writes `lua/cartograph/spec/knowledge/ambiguity.jsonl`:
+- **witnesses:** implementation, exact version, input (text and SHA-256), site, outcome, time;
+- **promises:** each code profile, with its warrants (the witnesses it rests on, the source files
+  it was ported from, corpus-join results, spec sentences) and a count of refutations.
+
+`tests/knowledge_spec.lua` re-checks every stored witness against the current code, offline. A
+change that contradicts a measured fact fails, and the failure names the implementation, the
+version, the input and the site.
 
 ### The Maven build layer (POMs)
 
@@ -3417,6 +3446,15 @@ nvim --headless -u NONE -l tools/oraclejoin.lua xml      # or: yaml, pom [--repo
 #   and we accept. Oracles live in tools/oracles/ and read their inputs NUL-SEPARATED: a
 #   whitespace-split path list once made five files silently unopenable. A join with no
 #   agreement at all prints VACUOUS — suspect the harness before the reader.
+
+# MEASURE how YAML/XML implementations decide ambiguous input and SERIALIZE it with provenance
+# (CART-1053): witnesses (implementation, version, input sha256, site, outcome, time) and promises
+# (the code's profiles, each with its warrants and refutation count). --write stores the JSONL that
+# tests/knowledge_spec.lua re-checks; --joins also records the corpus joins as warrants.
+nvim --headless -u NONE -l tools/ambiguity.lua [--write] [--joins]
+#   730 witnesses (+2 gaps the yq oracle cannot measure), 5 YAML + 5 XML implementations, 22 probes, 0 refutations. The per-implementation joins:
+#   tools/oraclejoin.lua yaml:pyyaml-safe | yaml:ruamel-safe | yaml:psych-safe | yaml:yaml-xs | yaml:yq
+#   (ORDERED: key order counts — the default join compares maps unordered, as kv_ser sorts keys).
 
 # THE MAVEN BUILD LAYER OVER REAL TREES (CART-1051): reactor vs orphans, parents, every
 # `${}` reference resolved or CLASSED, every dependency version's source, inter-module links and

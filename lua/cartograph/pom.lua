@@ -259,9 +259,10 @@ function M.read_pom(src, rel)
     local r, why = X.read(src)
     if not r then return nil, why end
     if r.root ~= 'project' then return nil, ('not a POM (root <%s>)'):format(tostring(r.root)) end
-    -- a DUPLICATE ATTRIBUTE: Maven's MXParser refuses the POM ("duplicated attributes k and k",
-    -- measured 2026-09-24), so the dialect's tiebreak is `reject` — the reader itself keeps both
-    local value, twhy = X.tiebreak(r.value, 'reject')
+    -- decided as MAVEN'S MXParser does (measured 2026-09-24): a duplicate attribute refuses the POM,
+    -- a DTD entity refuses it ("could not resolve entity"), a control character is KEPT — the
+    -- reader itself kept every reading
+    local value, twhy = X.decide(r, X.IMPLEMENTATIONS.maven)
     if value == nil then return nil, twhy end
     local raw = as_obj(trimmed(value))
     collapse_props(get(raw, 'properties'))

@@ -103,3 +103,12 @@ test('oraclejoin: an oracle\'s `partial` caveat travels with its value (the Mave
     eq(true, map.a.partial); eq(nil, map.b.partial); eq('1', map.a.value)
     vim.fn.delete(dir, 'rf')
 end)
+
+test('oraclejoin: ⚠ the default join compares maps UNORDERED (kv_ser sorts keys); `ordered = true` makes key order count', function ()
+    local a = { o = { x = '1', y = '2' }, keys = { 'x', 'y' } }
+    local b = { o = { x = '1', y = '2' }, keys = { 'y', 'x' } }
+    eq(1, J.run { inputs = { 'i' }, oracle_map = { i = { value = b } }, read = function() return a end }.counts.agree)
+    local r = J.run { inputs = { 'i' }, oracle_map = { i = { value = b } }, read = function() return a end, ordered = true }
+    eq(1, r.counts.disagree)
+    ok(r.groups[1].cause:find('order', 1, true), r.groups[1].cause)
+end)

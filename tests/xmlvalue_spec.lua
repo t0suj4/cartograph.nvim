@@ -57,14 +57,18 @@ test('xmlvalue: entities and character references decode, CDATA is literal; a DT
     eq('x & y', r.value.o['@k'])
     eq('t < AB<raw>', r.value.o['#text'] or r.value)
     local d = assert(X.read('<?xml version="1.0"?>\n<!DOCTYPE a [\n  <!ENTITY lol "lol">\n]>\n<a>&lol;</a>\n'))
-    eq('&lol;', d.value)              -- never expanded: the billion-laughs file stays one entity
+    eq('&lol;', d.value)              -- the READER's value keeps it literal; expanding is a policy
     eq(1, d.undefined_entities)
 end)
 
-test('xmlvalue: a forbidden control character is refused by name (XML 1.0 forbids it anywhere)', function ()
+test('xmlvalue: a forbidden control character is KEPT and listed — expat refuses it, Maven keeps it (measured)', function ()
     ready()
-    local r2, why2 = X.read('<a>\1</a>')
-    eq(nil, r2); ok(why2:find('forbids', 1, true), tostring(why2))
+    local r = assert(X.read('<a>b\1c</a>'))
+    eq(1, #r.forbidden); eq(1, r.forbidden[1].cp)
+    eq('b\1c', r.value)
+    local v, why = X.decide(r, X.IMPLEMENTATIONS.expat)
+    eq(nil, v); ok(why:find('forbids', 1, true), tostring(why))
+    eq('b\1c', X.decide(r, X.IMPLEMENTATIONS.maven))
 end)
 
 test('xmlvalue: ★★ a DUPLICATE ATTRIBUTE is KEPT, every value in order — the tiebreaker comes later', function ()
@@ -104,4 +108,44 @@ test('xmlvalue: ★ the grammar\'s CDATA bug (`]]]>` runs past the terminator) i
     local r, why = X.read('<a><d><![CDATA[p]]]></d><d><![CDATA[q]]></d></a>')
     eq(nil, r)
     ok(why:find('CDATA', 1, true), tostring(why))
+end)
+
+test('xmlvalue: ★★ a DTD ENTITY keeps both readings — expat/JAXP/REXML expand (nested too), Maven refuses, html.parser keeps it literal', function ()
+    ready()
+    local r = assert(X.read('<?xml version="1.0"?>\n<!DOCTYPE a [\n<!ENTITY e "x">\n<!ENTITY n "&e;&e;">\n]>\n<a><s>&e;</s><t>&n;</t><u k="&e;!"/></a>\n'))
+    eq('entity', r.raw.o.s.amb)
+    eq('x', X.decide(r, X.IMPLEMENTATIONS.expat).o.s)
+    eq('xx', X.decide(r, X.IMPLEMENTATIONS.jaxp).o.t)
+    eq('x!', X.decide(r, X.IMPLEMENTATIONS.rexml).o.u.o['@k'])
+    eq('&n;', X.decide(r, X.IMPLEMENTATIONS['html.parser+dict']).o.t)
+    local v, why = X.decide(r, X.IMPLEMENTATIONS.maven)
+    eq(nil, v); ok(why:find('could not resolve entity', 1, true), tostring(why))
+end)
+
+test('xmlvalue: ★★ an EXTERNAL entity is NEVER fetched, and a billion-laughs expansion stops at its limit', function ()
+    ready()
+    -- (the internal subset starts on its own line: tree-sitter-xml refuses `[<!ENTITY` — TSGAP-0010)
+    local r = assert(X.read('<!DOCTYPE a [\n<!ENTITY x SYSTEM "file:///etc/passwd">\n]>\n<a>&x;</a>'))
+    local v, why = X.decide(r, X.IMPLEMENTATIONS.expat)
+    eq(nil, v); ok(why:find('EXTERNAL', 1, true), tostring(why))
+    local lol = { '<!DOCTYPE a [\n<!ENTITY l0 "lollollollollollollollollollol">\n' }
+    for i = 1, 9 do lol[#lol + 1] = ('<!ENTITY l%d "%s">\n'):format(i, ('&l' .. (i - 1) .. ';'):rep(10)) end
+    lol[#lol + 1] = ']>\n<a>&l9;</a>'
+    local bomb = assert(X.read(table.concat(lol)))
+    local v2, why2 = X.decide(bomb, X.IMPLEMENTATIONS.expat)
+    eq(nil, v2); ok(why2:find('billion-laughs', 1, true), tostring(why2))
+    eq('&l9;', bomb.value)                           -- the reader's own value never expands
+end)
+
+test('xmlvalue: ★★★ IMPLEMENTATION divergences — one document, the sites where named parsers part ways', function ()
+    ready()
+    local r = assert(X.read('<?xml version="1.0"?>\n<!DOCTYPE a [\n<!ENTITY e "x">\n]>\n<a k="1" k="2"><s>&e;</s>\1</a>'))
+    local rows = X.implementation_divergences(r, { 'expat', 'maven', 'html.parser+dict' })
+    local kinds = {}
+    for _, row in ipairs(rows) do kinds[row.kind] = row end
+    eq('rejected', kinds['control-char'].outcomes.expat); eq('kept', kinds['control-char'].outcomes.maven)
+    eq('expanded x', kinds.entity.outcomes.expat); eq('rejected', kinds.entity.outcomes.maven)
+    eq('literal &e;', kinds.entity.outcomes['html.parser+dict'])
+    eq('the value 2', kinds['duplicate-attribute'].outcomes['html.parser+dict'])
+    eq(0, #X.implementation_divergences(assert(X.read('<a k="1">t</a>'))))
 end)
