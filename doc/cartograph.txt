@@ -363,9 +363,10 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               the callers that run this function inside
                               a loop over a growing collection, and the
                               callees it runs inside its own. Builtins
-                              are priced from the spec's call_costs; an
-                              unpriced call is a named hole (depth >=N).
-                              A shape, not a cost
+                              are priced from the spec's call_costs, a
+                              search also by its pattern's backtracking
+                              degree (a hole); an unpriced call is a named
+                              hole (depth >=N). A shape, not a cost
   :CartographUntangle         independent concerns over the
                               data+control+effect PDG, with the
                               safe-to-split verdict and its why-not

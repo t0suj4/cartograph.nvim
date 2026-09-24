@@ -7,7 +7,8 @@
 --
 -- ── AN ENTRY ─────────────────────────────────────────────────────────────────────
 --   cost   'const' | 'n' | 'nlogn'       the growth in ONE argument (nlogn counts as one loop level)
---   arg    which argument grows it: 1-based; 0 = the method's RECEIVER (`s:gsub(...)`)
+--   arg    which argument grows it: 1-based; 0 = the method's RECEIVER (`s:gsub(...)`); a method's
+--          other positions EXCLUDE the receiver (`s:find(p, 1, true)`: pattern = 1, plain = 3)
 --   arity  { [nargs] = <entry> }         an arity decides the shape (`table.insert(t, v)` appends,
 --                                         `table.insert(t, pos, v)` shifts)
 --   calls  { arg = k, per = 'element' | 'once' }   a function argument this builtin INVOKES:
@@ -16,6 +17,10 @@
 --   src    the citation. ★ A 'const' ENTRY SUPPRESSES A FINDING and must cite why it is constant
 --          ([[cartograph-stdlib-profile]]: a fact that suppresses is a promise and needs a travelling
 --          citation; one that produces is safe). 'n'/'nlogn' entries produce and cite what they read.
+--   pattern  which argument is a search PATTERN (loopcost prices its backtracking with the spec's
+--          pattern_degree: a literal of degree >= 2 is a `backtrack` hole, a non-literal a `dynamic` one)
+--   plain    which argument, when the literal `true`, makes the search PLAIN (no pattern, no hole)
+--   no_anchor  a leading `^` is a LITERAL character for this function, not an anchor (5.1/LuaJIT gmatch)
 --   by_name  the entry matches a METHOD by its name alone (`x:match(p)`): the receiver's type is not
 --          known, so the cost is believed by name and loopcost says so on the finding.
 -- Keyed by the call's spelled name (`c.full`): 'table.sort', 'vim.tbl_contains'; a method by ':name'.
@@ -40,19 +45,19 @@ return {
     ['unpack'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.1: returns the elements t[i..j]' },
     ['table.unpack'] = { cost = 'n', arg = 1, src = 'Lua 5.2+ manual §6.6: returns the elements t[i..j]' },
     -- ── string (functions and methods; the method is believed by NAME) ──
-    ['string.find'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4.1: pattern matching scans the subject' },
-    ['string.match'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4.1: pattern matching scans the subject' },
-    ['string.gmatch'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4.1: iterates over the subject' },
-    ['string.gsub'] = { cost = 'n', arg = 1, calls = { arg = 3, per = 'element' },
+    ['string.find'] = { cost = 'n', arg = 1, pattern = 2, plain = 4, src = 'Lua 5.1 manual §5.4.1: pattern matching scans the subject' },
+    ['string.match'] = { cost = 'n', arg = 1, pattern = 2, src = 'Lua 5.1 manual §5.4.1: pattern matching scans the subject' },
+    ['string.gmatch'] = { cost = 'n', arg = 1, pattern = 2, no_anchor = true, src = 'Lua 5.1 manual §5.4.1: iterates over the subject' },
+    ['string.gsub'] = { cost = 'n', arg = 1, pattern = 2, calls = { arg = 3, per = 'element' },
         src = 'Lua 5.1 manual §5.4.1: every match replaced; a function repl is called per match' },
     ['string.rep'] = { cost = 'n', arg = 2, src = 'Lua 5.1 manual §5.4: n copies of s' },
     ['string.lower'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4: a copy, every character' },
     ['string.upper'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4: a copy, every character' },
     ['string.reverse'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4: a copy, every character' },
-    [':find'] = { cost = 'n', arg = 0, by_name = true, src = 'as string.find, believed by the method name' },
-    [':match'] = { cost = 'n', arg = 0, by_name = true, src = 'as string.match, believed by the method name' },
-    [':gmatch'] = { cost = 'n', arg = 0, by_name = true, src = 'as string.gmatch, believed by the method name' },
-    [':gsub'] = { cost = 'n', arg = 0, by_name = true, calls = { arg = 2, per = 'element' },
+    [':find'] = { cost = 'n', arg = 0, pattern = 1, plain = 3, by_name = true, src = 'as string.find, believed by the method name' },
+    [':match'] = { cost = 'n', arg = 0, pattern = 1, by_name = true, src = 'as string.match, believed by the method name' },
+    [':gmatch'] = { cost = 'n', arg = 0, pattern = 1, no_anchor = true, by_name = true, src = 'as string.gmatch, believed by the method name' },
+    [':gsub'] = { cost = 'n', arg = 0, pattern = 1, by_name = true, calls = { arg = 2, per = 'element' },
         src = 'as string.gsub, believed by the method name' },
     [':rep'] = { cost = 'n', arg = 1, by_name = true, src = 'as string.rep, believed by the method name' },
     [':lower'] = { cost = 'n', arg = 0, by_name = true, src = 'as string.lower, believed by the method name' },

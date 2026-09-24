@@ -1013,6 +1013,8 @@ return {
     -- what a builtin CALL costs, for loopcost (CART-1057): an entry per spelled name, each cited;
     -- a call with no entry and no graph node is a HOLE, never a zero (spec/lua_costs.lua)
     call_costs = require 'cartograph.spec.lua_costs',
+    -- how far a PATTERN can backtrack (an upper bound, a hole in loopcost; spec/lua_patterns.lua)
+    pattern_degree = require('cartograph.spec.lua_patterns').degree,
     -- load-time side effects (ported from the retired lua-ls --graph
     -- CLI): assigning a global, mutating a global-rooted table
     -- (function table.x() included), or a bare call at the top

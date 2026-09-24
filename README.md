@@ -3192,6 +3192,16 @@ many findings each would decide, are a work list. Its first run pointed at a res
 decided by the call graph's components, once, so an answer never depends on which function
 was asked first.
 
+A string search is priced by its **pattern** as well as its subject. Lua's matcher retries an
+unanchored pattern from every start and each quantified item against the rest, so the worst
+case grows as the subject's length to a *degree*: one for the scan, plus the longest chain of
+unbounded items whose classes can trade characters (decided by asking Lua's own matcher which
+bytes each class accepts). The trim idiom `^%s*(.-)%s*$` is quadratic in one call (0.17 s at
+2,000 characters, 2.75 s at 8,000). That bound is an upper bound on adversarial input, so it
+rides as a `backtrack` hole, never as certified depth; a plain `find` has none, and a pattern
+held in a variable is a `dynamic` hole. `tools/patternjoin.lua` times each sample pattern on
+backtracking-prone inputs and checks no measured exponent exceeds its degree.
+
 These are suggestions until you ask for them to be *applied*. `optapply` is the piece
 that acts: it takes the CSE-reuse finding and rewrites the source — `local b = x + y`
 becomes `local b = a` where an earlier `local a = x + y` already holds the value — through
@@ -4033,6 +4043,10 @@ nvim --headless -u NONE -l tools/profile.lua ghost server
 # hidden / visible, each with its chain). A lens that flags 1,300 shapes has not located a hot
 # spot by flagging it; the counts are printed so the precision can be read.
 nvim --headless -u NONE -l tools/perfscan.lua lua/cartograph [--files <pattern>] [--out rows.tsv]
+# A LUA PATTERN'S BACKTRACKING DEGREE JOINED AGAINST LUA'S OWN MATCHER: each pattern timed at four
+# sizes on inputs built from characters its classes accept and reject; a measured growth exponent
+# ABOVE the degree refutes the bound (below confirms nothing: the adversarial input may be missing).
+nvim --headless -u NONE -l tools/patternjoin.lua ['<pattern>' ...]
 # THE CLONE LADDER, and one DEFECT tier riding the same index. Default is
 # function-granular exact clones; --blocks is contiguous statement runs ranked
 # by how many files they span; --near is whole functions within a couple of

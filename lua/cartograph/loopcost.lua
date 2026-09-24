@@ -315,15 +315,15 @@ function M.analyze(store, data, opts)
             local l = cb_at[k] or {}; l[#l + 1] = n; cb_at[k] = l
         end
     end
-    local lang_costs = {}
-    local function costs_for(file)
+    local lang_spec = {}
+    local function spec_for(file)
         local lang = file and expr.lang_of(file)
         if not lang then return nil end
-        local t = lang_costs[lang]
+        local t = lang_spec[lang]
         if t == nil then
             local ok, sp = pcall(require, 'cartograph.spec.' .. lang)
-            t = ok and type(sp) == 'table' and sp.call_costs or false
-            lang_costs[lang] = t
+            t = ok and type(sp) == 'table' and sp or false
+            lang_spec[lang] = t
         end
         return t or nil
     end
@@ -450,7 +450,7 @@ function M.analyze(store, data, opts)
         end
         return nil
     end
-    local function builtin_cost(entry, key, c, ctx)
+    local function builtin_cost(entry, key, c, ctx, spec)
         local e = entry.arity and entry.arity[argv.n(c) - (c.method and 1 or 0)] or nil
         local cost = (e and e.cost) or entry.cost
         local arg = (e and e.arg) or entry.arg or 1
@@ -464,6 +464,25 @@ function M.analyze(store, data, opts)
             if f then
                 rec.c = entry.calls.per == 'element' and rec.c + f.c or math.max(rec.c, f.c)
                 rec.holes, rec.fvia = f.holes, f
+            end
+        end
+        -- THE PATTERN (only where the subject is input-sized: backtracking multiplies ITS length).
+        -- An upper bound needs adversarial input, so it is a HOLE, never certified depth.
+        if entry.pattern and rec.size and rec.size ~= 'none' then
+            local function at_arg(i) return argv.at(c, c.method and i + 1 or i) end
+            local pa = entry.plain and at_arg(entry.plain)
+            if not (pa and pa.v == 'true') then
+                local pp = at_arg(entry.pattern)
+                if pp and pp.k == 'lit' and pp.v and spec and spec.pattern_degree then
+                    local d = spec.pattern_degree(pp.v, entry.no_anchor)
+                    rec.pattern, rec.degree = pp.v, d
+                    if d >= 2 then
+                        rec.holes = merge(rec.holes, { { name = ('%s %q <= n^%d'):format(key, pp.v, d), class = 'backtrack',
+                            degree = d, file = c.file, line = (c.line or 0) + 1 } })
+                    end
+                elseif pp then
+                    rec.holes = merge(rec.holes, { hole_of(key .. ' <pattern>', c, 'dynamic') })
+                end
             end
         end
         return rec
@@ -492,12 +511,13 @@ function M.analyze(store, data, opts)
             local sub = depth(g)
             return { c = sub.c, holes = sub.holes, node = g, how = how, sub = sub }
         end
-        local costs = costs_for(c.file or fn.file)
+        local spec = spec_for(c.file or fn.file)
+        local costs = spec and spec.call_costs
         if costs then
             local key = c.full or c.callee -- `full` is nil on some bare calls; the callee is the name
             local entry = key and costs[key]
             if not entry and c.method and c.callee then key = ':' .. c.callee; entry = costs[key] end
-            if entry then return builtin_cost(entry, key, c, ctx) end
+            if entry then return builtin_cost(entry, key, c, ctx, spec) end
         end
         return { c = 0, holes = { hole_of(c.full or c.callee, c) } }
     end
@@ -662,7 +682,7 @@ local function builtin_text(rec)
     return ('-> %s[%s%s]%s'):format(rec.builtin,
         rec.cost == 'const' and 'const' or ((rec.log and 'n log n' or 'n') .. ' over ' .. (rec.argname or rec.size or '?')
             .. (rec.size == 'shared' and ' shared' or '') .. (rec.size == 'none' and ' (bounded)' or '')),
-        rec.by_name and ', by name' or '', '')
+        rec.by_name and ', by name' or '', rec.pattern and (' pattern %q degree %d'):format(rec.pattern, rec.degree) or '')
 end
 function M.chain(f)
     local parts = {}

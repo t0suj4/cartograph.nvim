@@ -4,6 +4,7 @@
 -- `hidden-shared` scan (the pre-fix tree: fn_at at #28 and #29 of 105 in that class, 5,127 findings
 -- over 4,549 functions in all). A shape, not a cost: ranking the true hot spot first needs a workload.
 -- builtins.lua: what builtin calls cost (spec/lua_costs.lua) and how an UNKNOWN aggregates (a hole).
+-- patterns.lua: what a search PATTERN adds (spec/lua_patterns.lua): a backtracking bound, as a hole.
 -- Fixture: tests/fixtures/loopcost/shapes.lua, one arm per shape.
 
 local ts = require 'cartograph.providers.treesitter'
@@ -194,6 +195,59 @@ test('builtins: ★ RECURSION is a hole, decided by the call graph\'s components
     for _, x in ipairs(R2.findings) do b[#b + 1] = x.fn .. '|' .. x.line .. '|' .. x.kind .. '|' .. loopcost.depth_text(x) end
     table.sort(a); table.sort(b)
     eq(a, b)
+end)
+
+-- the findings made inside patterns.lua function `fnname`
+local function in_pat(fnname)
+    local out = {}
+    for _, f in ipairs(analyze().findings) do
+        if f.fn:match('^patterns%.lua::' .. fnname:gsub('%.', '%%.') .. '@') then out[#out + 1] = f end
+    end
+    return out
+end
+local function hole_classes(f)
+    local out = {}
+    for _, h in ipairs(f.holes or {}) do out[#out + 1] = h.class end
+    table.sort(out)
+    return out
+end
+
+test('patterns: the backtracking DEGREE of a Lua pattern (an upper bound; overlap decided by Lua\'s own matcher)', function ()
+    local deg = require('cartograph.spec.lua_patterns').degree
+    local cases = {
+        { 'abc', 1 }, { '^abc', 1 }, { '%s*x', 2 }, { '^%s*x', 1 }, { '^(.-)%s*$', 2 },
+        { '^%s*(.-)%s*$', 3 }, { '^%d+%.%d+$', 1 }, { '(%w+)=(%w+)', 2 }, { '%b()', 2 },
+        { '^[%w_]+$', 1 }, { '.*,.*', 3 }, { '^([^=]+)=(.*)$', 1 }, { '%f[%w]foo', 1 },
+        { '([^/]+)$', 2 }, { '%.([%w]+)$', 1 }, { 'x.-y', 2 },
+    }
+    for _, c in ipairs(cases) do eq(c[2], deg(c[1]), c[1]) end
+    -- gmatch (5.1/LuaJIT): a leading ^ is a LITERAL character (measured: '^%s*x' over '^ x ab ^x' yields
+    -- '^ x' and '^x'), so it is a bounded first item disjoint from %s — degree 1; unanchored %s*x is 2
+    eq(1, deg('^%s*x', true)); eq(2, deg('%s*x', true))
+    eq(1, deg('^.*x')); eq(2, deg('^.*x', true), 'a literal ^ that `.` swallows: the scan stays')
+end)
+
+test('patterns: ★ the trim idiom per element is certified 2 PLUS a backtrack hole — the bound is a hole, never certified', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local f = in_pat('M.trim_each')
+    eq(1, #f)
+    eq(2, f[1].depth); eq({ 'backtrack' }, hole_classes(f[1])); eq(3, f[1].holes[1].degree)
+    eq('>=2', loopcost.depth_text(f[1]))
+end)
+
+test('patterns: a PLAIN find and an anchored single run add no hole; a pattern in a variable is a dynamic hole', function ()
+    if not has_lua() then skip 'no lua parser' end
+    eq({}, hole_classes(in_pat('M.plain_each')[1]))
+    local d = in_pat('M.digits_each')[1]
+    eq({}, hole_classes(d)); eq(1, d.inner.degree)
+    eq({ 'dynamic' }, hole_classes(in_pat('M.dyn_each')[1]))
+    eq(0, #in_pat('M.trim_lines'), 'a bounded subject: backtracking multiplies nothing input-sized')
+end)
+
+test('patterns: gmatch scans every start of an unanchored run — degree 2, a hole', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local f = in_pat('M.words_each')[1]
+    eq({ 'backtrack' }, hole_classes(f)); eq(2, f.holes[1].degree)
 end)
 
 test('fn_at index: innermost_index answers exactly what the linear scan answered (random nested ranges, columns, ties)', function ()
