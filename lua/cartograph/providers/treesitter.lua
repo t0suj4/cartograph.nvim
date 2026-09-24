@@ -4882,6 +4882,42 @@ end
 --- so this set is too -- a file whose only var is outside the wanted name set
 --- reads as having none. That path materializes one file for one query and its
 --- mentions were already narrowed; noted rather than papered over.
+--- THE INNERMOST FUNCTION RANGE CONTAINING A LINE, as an index built once per range list
+--- (CART-1056). `fn_at` was a linear scan of the file's ranges, called once per call site and
+--- once per mention: calls x functions per file. Hive's 12 MB ThriftHiveMetastore.java made
+--- resolve_setup QUADRATIC (3.6 s -> 16.2 s -> 53.9 s over 5/10/20% of the file) and the whole
+--- repo ran for hours. Found blind by cartograph's own loopcost lens (CART-1057).
+--- ★ THE SAME ANSWER, NOT A NEW RULE: of the ranges that contain the line, the greatest start
+--- wins and, among equal starts, the LAST in list order (the scan's `r.s >= best.s`). `A[L]` holds
+--- that answer over the ranges that contain L unconditionally; with `col_aware`, a range STARTING
+--- on L contains L only when it opens at or before `col` (CART-0813), so those sit in `S[L]` and
+--- are decided per query. Pinned against the linear scan in tests/loopcost_spec.lua.
+local function innermost_index(ranges, col_aware)
+    local A, S = {}, {}
+    for _, r in ipairs(ranges) do
+        local from = r.s
+        if col_aware then
+            local b = S[r.s] or {}; b[#b + 1] = r; S[r.s] = b
+            from = r.s + 1
+        end
+        for L = from, r.e do
+            local cur = A[L]
+            if not cur or r.s >= cur.s then A[L] = r end
+        end
+    end
+    return function(line, col)
+        local best = A[line]
+        local b = S[line]
+        if b then
+            for _, r in ipairs(b) do
+                if (col == nil or (r.sc or 0) <= col) and (not best or r.s >= best.s) then best = r end
+            end
+        end
+        return best
+    end
+end
+M._innermost_index = innermost_index
+
 local function var_files(L)
     local s = L._varfiles
     if not s then
@@ -4922,12 +4958,10 @@ local function reduce_mentions(file, buf, L)
     local fnref_ok = L.fn_ranges[file] ~= nil
     local fnrefs = buf.fnrefs
     local names = buf.names
+    local at_line -- built on the first query (innermost_index; a file may ask none)
     local function fn_at(line)
-        local best
-        for _, r in ipairs(ranges) do
-            if r.s <= line and line <= r.e
-                and (not best or r.s >= best.s) then best = r end
-        end
+        at_line = at_line or innermost_index(ranges, false)
+        local best = at_line(line)
         return best and best.id
     end
     local useEdge, regEdge = {}, {}
@@ -5848,7 +5882,7 @@ end
 ---@param root string
 ---@return table data  the schema-1 graph (ready for store.ingest)
 function M.extract(root, opts)
-    if M.PROFILE then prof = {}; prof._t0 = vim.uv.hrtime() end
+    if M.PROFILE then prof = { files = {} }; prof._t0 = vim.uv.hrtime() end
     -- turn over per-EXTRACTION derived state ([[cartograph-validity]]): the spec
     -- layer's per-root memos (package identity, addon/plugin layout) derive from a
     -- TREE, so a cheap validity key does not exist for them — they key on this
@@ -6004,15 +6038,14 @@ function M.extract(root, opts)
     --- ⚠ THE START SIDE ONLY. A function ENDING on a later call's line is the
     --- opposite error and needs the end column to fix; it has never been observed,
     --- so it is left alone rather than changed without a witness.
+    local fn_index = {} -- file -> { n = #ranges when built, at = innermost_index(...) }
     local function fn_at(file, line, col)
-        local best
-        for _, r in ipairs(fnRanges[file] or {}) do
-            local starts_before = r.s < line
-                or (r.s == line and (col == nil or (r.sc or 0) <= col))
-            if starts_before and line <= r.e and (not best or r.s >= best.s) then
-                best = r
-            end
-        end
+        local rs = fnRanges[file]
+        if not rs then return nil end
+        local ix = fn_index[file]
+        -- rebuilt if the file's ranges changed since (every caller today runs after extraction)
+        if not ix or ix.n ~= #rs then ix = { n = #rs, at = innermost_index(rs, true) }; fn_index[file] = ix end
+        local best = ix.at(line, col)
         return best and best.id
     end
 
@@ -7637,7 +7670,14 @@ local MATCH_OPTS = { match_limit = 65536 }
         end
     end
 
+    -- PER-FILE WALL (CART-1056): a phase total cannot say WHICH INPUT is slow, and "narrow a
+    -- performance issue down" means to a file first. Each file's wall is closed when the NEXT
+    -- iteration starts (the loop body ends on a goto label, which admits no statement after it)
+    -- and the last one after the loop. Off by default, like every accumulator here.
+    local _pfile, _pfile_name
     for _, file in ipairs(files) do
+        if _pfile then prof.files[_pfile_name] = (prof.files[_pfile_name] or 0) + (vim.uv.hrtime() - _pfile) end
+        _pfile = pstart(); _pfile_name = file
         local src, rerr = tp.read_source(abs(file))
         if not src then
             -- UNAVAILABLE is not absence: the file is known to exist, we simply
@@ -7790,6 +7830,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         end
         ::next_file::
     end
+    if _pfile then prof.files[_pfile_name] = (prof.files[_pfile_name] or 0) + (vim.uv.hrtime() - _pfile) end
 
     -- the monkey-patch fence: mark foreign assignments now that every file's
     -- imports are known, then let a module's own declaration win the key
@@ -8101,10 +8142,6 @@ local MATCH_OPTS = { match_limit = 65536 }
     for _, n in ipairs(nodes) do node_index[n.id] = n end
     local function literal_flow(p)
         local fnid = fn_at(p.file, p.at.start.line)
-        local fnode
-        for _, r in ipairs(fnRanges[p.file] or {}) do
-            if r.id == fnid then fnode = r end
-        end
         local varname = p.full:match('^%$([%w_]+)$')
         if not (varname and fnid) then return nil end
         local fnode_n = node_index[fnid]

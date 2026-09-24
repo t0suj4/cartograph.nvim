@@ -1010,6 +1010,9 @@ return {
     -- would otherwise link to the one module that defines M.format
     stdlib_prefixes = { 'string.', 'table.', 'math.', 'os.', 'io.',
         'coroutine.', 'debug.', 'bit.', 'jit.', 'ffi.', 'vim.' },
+    -- what a builtin CALL costs, for loopcost (CART-1057): an entry per spelled name, each cited;
+    -- a call with no entry and no graph node is a HOLE, never a zero (spec/lua_costs.lua)
+    call_costs = require 'cartograph.spec.lua_costs',
     -- load-time side effects (ported from the retired lua-ls --graph
     -- CLI): assigning a global, mutating a global-rooted table
     -- (function table.x() included), or a bare call at the top

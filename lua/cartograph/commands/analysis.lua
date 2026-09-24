@@ -108,6 +108,11 @@ function M.register(H)
         return require('cartograph.optimize').report(store, id)
     end), { desc = 'cartograph: loop-invariant computations of the focused fn (LICM) — pure work whose inputs are all loop-invariant, hoistable above the loop; * = clean, ~ = aliasing/branch-hedged (the optimizing sibling of untangle)' })
 
+    -- ── loopcost: input-sized loop nesting ACROSS CALLS around the focused fn (CART-1057)
+    cmd('CartographLoopCost', report_cmd(function (store, id)
+        return require('cartograph.loopcost').report(store, id)
+    end), { desc = 'cartograph: the callers that run the focused fn inside an input-sized loop, and the callees it runs inside its own — the hidden quadratic (a linear scan in a callee x a loop in its caller); hidden-shared = the callee scans state that outlives the call. A shape, not a cost' })
+
     -- ── expr: Rung-0 lints over the expression IR of the focused fn ───────
     cmd('CartographExpr', function ()
         local store = live() if not store then return end

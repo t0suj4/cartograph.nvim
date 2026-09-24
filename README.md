@@ -3159,6 +3159,39 @@ once (partial-redundancy elimination). Dominance is judged on the control-arm pa
 value computed in one branch is never mistaken for available in a sibling branch it never
 reaches.
 
+Every lens above looks inside **one** function, and the quadratic that made a whole-repo
+extraction of Apache Hive run for hours was harmless inside its own: a linear scan of a
+file's function ranges, called once per call site. `:CartographLoopCost` looks **across
+calls**. A loop is *input-sized* when it walks something that is not a constant — a
+parameter, an upvalue, a field, a list built up at run time — and a function's depth is its
+own nesting of such loops plus, for each call, the loops around the call and the callee's
+depth. A depth of two reached through a call is a *hidden* nesting, neither function shows
+it alone, and the report prints the chain: `loop over {pending} -> fn_at (lexical) -> loop
+over {fnRanges,file}`. It ranks a callee that scans **shared state** — an upvalue or global
+that outlives the call — first (`hidden-shared`), because a nested loop is usually a
+partition (per file, that file's matches: linear in total) or a fan-out over a node's
+children, and the product that bites is a lookup that scans a whole-run table once per
+element. A call name matching refused is followed by **lexical scope** when exactly one
+same-named function is visible from it (`lexical` on the finding). It is a *shape*, not a
+cost: ten elements nested in ten is nothing, and ranking the real hot spot first needs a
+workload. On cartograph's own tree, before the fix, it named that hot spot blind — #28 of
+105 shared-state scans, 5,127 shapes over 4,549 functions — where the per-function lenses
+had scored 0 of 57. It cannot see memoization: a build behind `if not cache[k]` still reads
+as a loop per call.
+
+A **builtin** is priced from the language spec's cost table (`spec/lua_costs.lua`): the
+argument it grows with, an arity rule where the arity decides (`table.insert(t, v)` appends,
+`table.insert(t, pos, v)` shifts), the function arguments it invokes (a sort's comparator, a
+`pcall`'s callee), and a citation — a *constant* entry hides a finding, so it must say why.
+`vim.tbl_contains(seen, k)` inside a loop over every call is the `fn_at` shape with no user
+callee at all, and it is found. A call nobody can price is a **hole**, never a zero: the value
+is a certified depth plus the named unknowns along the chain (`unresolved`, `uncosted`,
+`dynamic`, `recursive`), a finding with holes reads `depth >=N`, and the holes, counted by how
+many findings each would decide, are a work list. Its first run pointed at a resolver bug:
+366 of 378 string `:gsub` calls were linked to one project method named `gsub`. Recursion is
+decided by the call graph's components, once, so an answer never depends on which function
+was asked first.
+
 These are suggestions until you ask for them to be *applied*. `optapply` is the piece
 that acts: it takes the CSE-reuse finding and rewrites the source — `local b = x + y`
 becomes `local b = a` where an earlier `local a = x + y` already holds the value — through
@@ -3991,7 +4024,15 @@ nvim --headless -u NONE -l tools/dfconsumers.lua
 # (52% of ghost) and the fusion win that followed (a redundant per-statement
 # subtree walk, −43% flow.build) — MEASURE, don't guess (the obvious FFI
 # micro-opt profiled as pure noise).
+# + PER FILE: the slowest inputs and each language's ms per KB, so a pathological FILE and a
+# pathological LANGUAGE read apart (--top N). The phase profiler found hive's quadratic phase;
+# the per-file rows showed it was no single slow file.
 nvim --headless -u NONE -l tools/profile.lua ghost server
+# EVERY PERFORMANCE LENS OVER EVERY FUNCTION OF A TREE, with the denominator: LICM, CSE, the
+# expression lints, and loopcost's input-sized loop nesting across calls (hidden-shared /
+# hidden / visible, each with its chain). A lens that flags 1,300 shapes has not located a hot
+# spot by flagging it; the counts are printed so the precision can be read.
+nvim --headless -u NONE -l tools/perfscan.lua lua/cartograph [--files <pattern>] [--out rows.tsv]
 # THE CLONE LADDER, and one DEFECT tier riding the same index. Default is
 # function-granular exact clones; --blocks is contiguous statement runs ranked
 # by how many files they span; --near is whole functions within a couple of

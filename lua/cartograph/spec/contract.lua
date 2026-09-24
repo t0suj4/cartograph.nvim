@@ -194,6 +194,9 @@ M.SLOTS = {
     -- accessor's transform from its own body (`$GLOBALS['g_' . $p_option]`)
     -- rather than be told the convention. A declared convention would be an
     -- authored guess, and a wrong one fabricates reads corpus-wide.
+    -- WHAT A BUILTIN CALL COSTS (CART-1057): `{ [spelled name] = { cost, arg, arity?, calls?, src } }`,
+    -- read by loopcost. A 'const' entry suppresses a finding and must cite why.
+    call_costs = 'ANALYSIS',
     global_table = 'ANALYSIS', concat_op = 'ANALYSIS',
     -- ...and whether a FILE-SCOPE var is unconditionally reachable through that
     -- table. php: yes, `$x = 1;` at file scope IS `$GLOBALS['x']`. lua: NO, and
