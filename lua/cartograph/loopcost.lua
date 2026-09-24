@@ -65,14 +65,15 @@ local M = {}
 -- caught: `items` (python's dict method) in it silently dropped every variable named `items`.
 
 local function const_ctor(node)
-    -- a table constructor with at least one element, every leaf a literal
+    -- a table constructor of BOUNDED SIZE: it has as many elements as it spells, whatever their
+    -- values (`{ '^local%s+' .. esc, ... }` is two elements) — unless its LAST element is a call or
+    -- `...`, which expand to any number of values. (The first cut demanded literal leaves, and read
+    -- prologue.lua's two-pattern list as input-sized.)
     if not node or node.k ~= 'table' or not node.kids or #node.kids == 0 then return false end
-    local ok = true
-    expr.walk(node, function(n)
-        local k = n.k
-        if k == 'name' or k == 'call' or k == 'index' or k == 'field' or k == 'fn' or k == 'vararg' then ok = false end
-    end)
-    return ok
+    local last = node.kids[#node.kids]
+    local v = last and (last.k == 'pair' and nil or last)
+    if v and (v.k == 'call' or v.k == 'vararg') then return false end
+    return true
 end
 
 --- innermost-enclosing lookup over one file's function spans, built once: sort by start,
@@ -147,10 +148,18 @@ local function loops_of(store, fn)
                 if head:find('%f[%w_]in%s+' .. pv .. '%s*,') then return nil end
                 for pre, post in head:gmatch('(.?)%f[%w_]' .. pv .. '%f[^%w_](%s*[%(%.:]?)') do
                     local p1 = post:gsub('%s', '')
-                    if pre ~= '.' and pre ~= ':' and p1 ~= '(' then
-                        if p1 == '' then return 'value' end
-                        -- `v.x(` / `v:x(` = a receiver; `v.x` alone = a field read of v (a value)
-                        local rest = head:match('%f[%w_]' .. pv .. '%f[^%w_]%s*[%.:]%s*[%w_]+%s*(.?)')
+                    if pre ~= '.' and pre ~= ':' then
+                        if p1 == '' then return 'value' end -- followed by neither `(` nor `.`/`:`
+                        -- ONE walk decides: `v(` = CALLED, `v.x(` / `v.a.b:c(` = a RECEIVER (a module or an
+                        -- object, any depth), `v.x` alone = a field read of v (a value)
+                        local at = head:find('%f[%w_]' .. pv .. '%f[^%w_]')
+                        local j = at and at + #v
+                        while j do
+                            local _, e2 = head:find('^%s*[%.:]%s*[%w_]+', j)
+                            if not e2 then break end
+                            j = e2 + 1
+                        end
+                        local rest = j and head:match('^%s*(.?)', j) or ''
                         if rest ~= '(' and rest ~= '"' and rest ~= "'" and rest ~= '{' then return 'value' end
                     end
                 end
@@ -182,7 +191,19 @@ local function loops_of(store, fn)
             for j = i + 1, #rows do
                 if not within(i, j) then e = math.max(r.l, rows[j].l - 1); break end
             end
-            out[#out + 1] = { row = i, line = r.l, last = e, kind = r.t, input = #iterates > 0,
+            -- A MAYBE-LOOP: nothing input-sized is named, but the head CALLS something for its
+            -- collection (`ipairs(vim.api.nvim_list_bufs())`, `while more() do`) — a size nobody knows.
+            -- Not a certified level (that would be a guess) and not a zero (that would hide it): a hole.
+            local maybe
+            if #iterates == 0 then
+                for callee in head:gmatch('([%a_][%w_%.:]*)%s*%(') do
+                    local base = callee:match('([%w_]+)$')
+                    if base ~= 'ipairs' and base ~= 'pairs' and base ~= 'next' and base ~= 'for' and base ~= 'while' then
+                        maybe = callee; break
+                    end
+                end
+            end
+            out[#out + 1] = { row = i, line = r.l, last = e, kind = r.t, input = #iterates > 0, maybe = maybe,
                 iterates = iterates, const_by_name = #const_by_name > 0 and const_by_name or nil,
                 shared = #shared > 0 and shared or nil, head_use = r.use or {} }
         end
@@ -402,24 +423,37 @@ function M.analyze(store, data, opts)
         end
         return L or nil
     end
-    local function around(loops, line, callee_name)
-        local n, chain = 0, {}
+    -- the input-sized loops around a line (certified), and the MAYBE-loops around it (holes)
+    local function around(loops, line, callee_name, file)
+        local n, chain, mh = 0, {}, nil
         for _, L in ipairs(loops) do
-            if L.input and line >= L.line and line <= L.last then
+            if (L.input or L.maybe) and line >= L.line and line <= L.last then
                 local in_head = false
                 if line == L.line and callee_name then
                     for _, v in ipairs(L.head_use) do if v == callee_name then in_head = true end end
                 end
-                if not in_head then n = n + 1; chain[#chain + 1] = L end
+                if not in_head then
+                    if L.input then n = n + 1; chain[#chain + 1] = L
+                    else
+                        mh = merge(mh, { { name = ('loop over %s()'):format(L.maybe), class = 'dynamic',
+                            file = file, line = L.line } })
+                    end
+                end
             end
         end
-        return n, chain
+        return n, chain, mh
     end
     -- an ARGUMENT's size, by the loop head's predicate: none (a literal, a loop binder = the current
     -- element, a constant) | param | local | shared (an upvalue/global) | expr (not a plain name)
     local function arg_size(ctx, c, i)
         local name, k
-        if i == 0 then name = (c.full or ''):match('^([%w_]+)[:%.]'); k = name and 'local' or 'expr'
+        if i == 0 then
+            -- the RECEIVER's text is `full` minus `:callee`: a plain name or a field/index of one
+            -- (`x.name`, `t[1]`) is classed by its BASE name, as a loop head is; anything else — a
+            -- call result (`src:sub(a, b)`), a parenthesized expression — has an unknown size
+            local recv = (c.full or ''):match('^(.*)[:%.][%w_]+$') or ''
+            if recv:find('[%(%)]') or not recv:match('^[%a_]') then return 'expr', recv end
+            name = recv:match('^([%a_][%w_]*)'); k = 'local'
         else
             -- ⚠ a METHOD call's argv carries its RECEIVER first (`text:find(line)` -> text, line)
             local a = argv.at(c, c.method and i + 1 or i)
@@ -457,7 +491,11 @@ function M.analyze(store, data, opts)
         local rec = { c = 0, builtin = key, by_name = entry.by_name, log = cost == 'nlogn', cost = cost }
         if cost ~= 'const' then
             rec.size, rec.argname = arg_size(ctx, c, arg)
-            if rec.size ~= 'none' then rec.c = 1 end
+            -- an expression's size is NOT KNOWN: a hole, never a certified level (the rule for
+            -- every unknown), e.g. the slice in `src:sub(a, b):match(p)`
+            if rec.size == 'expr' then
+                rec.holes = merge(rec.holes, { hole_of(('%s over %s'):format(key, rec.argname or 'an expression'), c, 'dynamic') })
+            elseif rec.size ~= 'none' then rec.c = 1 end
         end
         if entry.calls then
             local f = func_arg_cost(c, entry.calls.arg)
@@ -468,13 +506,14 @@ function M.analyze(store, data, opts)
         end
         -- THE PATTERN (only where the subject is input-sized: backtracking multiplies ITS length).
         -- An upper bound needs adversarial input, so it is a HOLE, never certified depth.
-        if entry.pattern and rec.size and rec.size ~= 'none' then
+        if entry.pattern and rec.size and rec.size ~= 'none' and rec.size ~= 'expr' then
             local function at_arg(i) return argv.at(c, c.method and i + 1 or i) end
             local pa = entry.plain and at_arg(entry.plain)
             if not (pa and pa.v == 'true') then
                 local pp = at_arg(entry.pattern)
                 if pp and pp.k == 'lit' and pp.v and spec and spec.pattern_degree then
-                    local d = spec.pattern_degree(pp.v, entry.no_anchor)
+                    local text = spec.unescape and spec.unescape(pp.v) or pp.v
+                    local d = spec.pattern_degree(text, entry.no_anchor)
                     rec.pattern, rec.degree = pp.v, d
                     if d >= 2 then
                         rec.holes = merge(rec.holes, { { name = ('%s %q <= n^%d'):format(key, pp.v, d), class = 'backtrack',
@@ -539,17 +578,17 @@ function M.analyze(store, data, opts)
             end
         end
         for _, L in ipairs(loops) do
-            if L.input then
-                local n, chain = around(loops, L.line, nil)
-                consider({ c = n, loops = chain, visible = true })
+            if L.input or L.maybe then
+                local n, chain, mh = around(loops, L.line, nil, fn.file)
+                consider({ c = n, loops = chain, visible = L.input and true or nil, holes = mh })
             end
         end
         if ctx then
             for _, c in ipairs(calls_of[fn.id] or {}) do
                 local cc = callee_cost(c, ctx, fn)
                 if cc.c > 0 or (cc.holes and #cc.holes > 0) then
-                    local n, chain = around(loops, (c.line or 0) + 1, c.callee)
-                    consider({ c = n + cc.c, holes = cc.holes, loops = chain, via = cc })
+                    local n, chain, mh = around(loops, (c.line or 0) + 1, c.callee, fn.file)
+                    consider({ c = n + cc.c, holes = merge(cc.holes, mh), loops = chain, via = cc })
                 end
             end
         end
@@ -611,7 +650,7 @@ function M.analyze(store, data, opts)
             for _, c in ipairs(calls_of[fn.id] or {}) do
                 stats.calls = stats.calls + 1
                 local line = (c.line or 0) + 1
-                local n, chain = around(loops, line, c.callee)
+                local n, chain, mh = around(loops, line, c.callee, fn.file)
                 if n > 0 then
                     stats.calls_in_input_loops = stats.calls_in_input_loops + 1
                     local cc = callee_cost(c, ctx, fn)
@@ -625,20 +664,21 @@ function M.analyze(store, data, opts)
                         stats.holes[cl] = (stats.holes[cl] or 0) + 1
                     end
                     local total = n + cc.c
+                    local holes = merge(cc.holes, mh)
                     local kind
                     if total >= 2 then kind = scans_shared(cc) and 'hidden-shared' or 'hidden'
-                    elseif cc.holes and #cc.holes > 0 then kind = 'possible' end
+                    elseif holes and #holes > 0 then kind = 'possible' end
                     local key = (cc.node and cc.node.id or cc.builtin or c.full or c.callee or '?') .. '\0' .. chain[#chain].line
                     if kind and not seen[key] then
                         seen[key] = true
                         local sh = kind == 'hidden-shared' and scans_shared(cc) or nil
                         findings[#findings + 1] = { kind = kind, fn = fn.id, file = fn.file, line = line,
-                            depth = total, holes = cc.holes, outer = chain,
+                            depth = total, holes = holes, outer = chain,
                             callee = cc.node and cc.node.id, builtin = cc.builtin, how = cc.how,
                             inner = cc.node and cc.sub or cc, shared = sh and sh.shared or nil,
                             accumulator = sh and outer_accumulates(fn.file, chain, fn) or nil }
                         if kind == 'possible' then
-                            for _, h in ipairs(cc.holes) do
+                            for _, h in ipairs(holes) do
                                 local hk = h.name .. '\0' .. h.class
                                 hole_count[hk] = (hole_count[hk] or 0) + 1
                             end
@@ -720,9 +760,25 @@ function M.chain(f)
     return table.concat(parts, '  ')
 end
 
---- `depth 2` or `depth >=1` — a finding with holes is a lower bound
+--- THE UPPER BOUND a finding's holes allow: a `backtrack` hole is a BOUNDED unknown (its pattern's
+--- degree, an upper bound itself), every other class is unbounded. Holes on one chain and on tied
+--- chains are merged into one set, so the extras are SUMMED — a safe over-estimate, never an under one.
+--- @return number  certified depth + sum(degree - 1) over backtrack holes, or math.huge
+function M.upper(f)
+    local u = f.depth
+    for _, h in ipairs(f.holes or {}) do
+        if h.class == 'backtrack' and h.degree then u = u + h.degree - 1 else return math.huge end
+    end
+    if f.holes and f.holes.more then return math.huge end
+    return u
+end
+
+--- `depth 2`, `depth 2..4` (only bounded holes) or `depth >=1` (an unbounded one)
 function M.depth_text(f)
-    return ((f.holes and #f.holes > 0) and '>=' or '') .. tostring(f.depth)
+    if not (f.holes and #f.holes > 0) then return tostring(f.depth) end
+    local u = M.upper(f)
+    if u == math.huge then return '>=' .. f.depth end
+    return f.depth .. '..' .. u
 end
 
 --- The cockpit view for ONE function (:CartographLoopCost): the callers that run it inside an

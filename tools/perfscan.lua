@@ -1,6 +1,6 @@
 -- perfscan — every shipped PERFORMANCE lens over every function of a tree, with its DENOMINATOR.
 --
---   nvim --headless -u NONE -l tools/perfscan.lua <root> [--files <lua pattern>] [--out <file>]
+--   nvim --headless -u NONE -l tools/perfscan.lua <root> [--files <lua pattern>] [--out <file>] [--priced N]
 --
 -- The lenses are per-function (`optimize.licm` / `optimize.cse` / `exprlint.lint`), plus the
 -- interprocedural `loopcost` (CART-1057: input-sized loop nesting across calls); nothing ran
@@ -18,10 +18,12 @@ local optimize = require 'cartograph.optimize'
 local exprlint = require 'cartograph.exprlint'
 
 local root, pat, outp
+local TOP_PRICED = 20
 local i = 1
 while i <= #arg do
     if arg[i] == '--files' then pat = arg[i + 1]; i = i + 1
     elseif arg[i] == '--out' then outp = arg[i + 1]; i = i + 1
+    elseif arg[i] == '--priced' then TOP_PRICED = tonumber(arg[i + 1]); i = i + 1
     else root = arg[i] end
     i = i + 1
 end
@@ -89,6 +91,30 @@ do
     for j = 1, math.min(15, #LC.worklist) do
         local w = LC.worklist[j]
         print(('    %5d  %-32s [%s]'):format(w.findings, w.name, w.class))
+    end
+end
+do
+    -- PRICED BY THE PATTERN: findings a backtrack hole raises (certified .. upper), worst bound first
+    local priced, hist = {}, {}
+    for rank, f in ipairs(LC.findings) do
+        local u = loopcost.upper(f)
+        if u ~= math.huge and u > f.depth then priced[#priced + 1] = { rank = rank, f = f, u = u } end
+        local key = u == math.huge and ('>=' .. f.depth) or (f.depth == u and tostring(u) or (f.depth .. '..' .. u))
+        hist[key] = (hist[key] or 0) + 1
+    end
+    table.sort(priced, function(a, b)
+        if a.u ~= b.u then return a.u > b.u end
+        if a.f.depth ~= b.f.depth then return a.f.depth > b.f.depth end
+        return a.rank < b.rank
+    end)
+    local hk = vim.tbl_keys(hist); table.sort(hk)
+    local hs = {}
+    for _, k in ipairs(hk) do hs[#hs + 1] = k .. ':' .. hist[k] end
+    print('  depth distribution (certified, certified..upper, >= open): ' .. table.concat(hs, '  '))
+    print(('  PRICED BY THE PATTERN (%d finding(s) a backtrack hole raises; worst upper bound first):'):format(#priced))
+    for j = 1, math.min(TOP_PRICED, #priced) do
+        local x = priced[j]
+        print(('    %s:%d  %s %s  %s'):format(x.f.file, x.f.line, x.f.kind, loopcost.depth_text(x.f), loopcost.chain(x.f)))
     end
 end
 local rk = vim.tbl_keys(per_rule); table.sort(rk, function(a, b) return per_rule[a] > per_rule[b] end)

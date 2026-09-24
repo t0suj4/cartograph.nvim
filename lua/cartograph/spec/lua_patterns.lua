@@ -22,7 +22,11 @@
 -- never as certified depth: backtracking needs adversarial input, which the lens cannot see.
 -- Acceptance: tools/patternjoin.lua times every sample pattern on backtracking-prone inputs and
 -- checks the measured exponent never exceeds the degree.
--- ⚠ The pattern is the literal's SOURCE text (argv's `v`): a Lua escape (`"\n"`) is not decoded.
+-- The pattern arrives as the literal's SOURCE text (argv's `v`); `unescape` decodes a short string's
+-- escapes first. It rarely moves a degree (`.` swallows `\n` either way) — it matters inside a class
+-- (`[^\n]` is not `[^\\n]`) and in the hole's name.
+-- ⚠ k8s.lua's document split `(.-)\n%-%-%-%s*\n` is degree 3 here and is not quadratic in practice: a
+-- gmatch whose matches CONSUME the text cannot retry from every start. The bound does not model that.
 
 local M = {}
 
@@ -122,6 +126,15 @@ function M.degree(pat, no_anchor)
     if scan == 1 and items[1] and not items[1].unb and items[2] and items[2].unb
         and not overlaps(items[1].cls, items[2].cls) then scan = 0 end
     return math.max(1, scan + best), best
+end
+
+--- a short string literal's SOURCE text -> its value (argv carries the text between the quotes):
+--- \n \t \r \a \b \f \v \\ \" \' and \ddd. ⚠ A long string ([[...]]) has no escapes and argv does not
+--- say which it was; a backslash in one would be misread (rare in a pattern).
+local ESC = { n = '\n', t = '\t', r = '\r', a = '\a', b = '\b', f = '\f', v = '\v', ['\\'] = '\\', ['"'] = '"', ["'"] = "'" }
+function M.unescape(text)
+    return (text:gsub('\\(%d%d?%d?)', function(d) return string.char(tonumber(d) % 256) end)
+        :gsub('\\(.)', function(ch) return ESC[ch] or ch end))
 end
 
 return M

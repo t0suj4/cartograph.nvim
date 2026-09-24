@@ -3202,6 +3202,14 @@ rides as a `backtrack` hole, never as certified depth; a plain `find` has none, 
 held in a variable is a `dynamic` hole. `tools/patternjoin.lua` times each sample pattern on
 backtracking-prone inputs and checks no measured exponent exceeds its degree.
 
+A backtrack hole is a **bounded** unknown, so a finding carrying only those reads
+`certified..upper` — `2..4`: two nested levels are proven, the pattern can add two more — and
+any other hole leaves it open (`>=2`). Priced over cartograph itself: 5,218 shapes over 4,601
+functions, 1,107 certified exactly, 78 bounded by a pattern, the rest open. Two more unknowns
+became holes on the way, each first read as a number: a receiver that is itself an expression
+(`src:sub(a, b):match(p)` searches the slice, not `src`), and a **maybe-loop** — a loop over a
+call result nobody sized (`ipairs(vim.api.nvim_list_bufs())`), which is neither a level nor a zero.
+
 These are suggestions until you ask for them to be *applied*. `optapply` is the piece
 that acts: it takes the CSE-reuse finding and rewrites the source — `local b = x + y`
 becomes `local b = a` where an earlier `local a = x + y` already holds the value — through

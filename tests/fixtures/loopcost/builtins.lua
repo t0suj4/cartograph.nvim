@@ -124,4 +124,36 @@ function M.cycle_each(groups)
     end
 end
 
+-- (12) a constructor of NON-literal elements is still BOUNDED in size (two patterns), and a
+-- module call two levels deep in a head is not the collection (`vim.fn.globpath(root, ...)`)
+function M.decl_like(lines, name)
+    local esc = name:gsub('%W', '%%%0')
+    local pats = { '^local%s+function%s+' .. esc, '^local%s+' .. esc }
+    local n = 0
+    for _, l in ipairs(lines) do
+        for _, p in ipairs(pats) do
+            if l:find(p) then n = n + 1 end
+        end
+    end
+    for _, g in ipairs(vim.fn.globpath(name, '*.lua', false, true)) do
+        n = n + #g
+    end
+    return n
+end
+
+-- (13) a MAYBE-LOOP: a loop over a call result nobody sized (`vim.api.nvim_list_bufs()`) is a hole,
+-- not a level and not a zero; its caller's loop still certifies its own level and the helper's
+function M.per_buf(words)
+    local n = 0
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+        n = n + b + heavy(words)
+    end
+    return n
+end
+function M.per_buf_each(groups)
+    for _, g in ipairs(groups) do
+        M.per_buf(g)
+    end
+end
+
 return M

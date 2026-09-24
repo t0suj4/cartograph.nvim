@@ -232,7 +232,10 @@ test('patterns: ★ the trim idiom per element is certified 2 PLUS a backtrack h
     local f = in_pat('M.trim_each')
     eq(1, #f)
     eq(2, f[1].depth); eq({ 'backtrack' }, hole_classes(f[1])); eq(3, f[1].holes[1].degree)
-    eq('>=2', loopcost.depth_text(f[1]))
+    -- a backtrack hole is BOUNDED: certified 2, at most 2 + (3 - 1)
+    eq(4, loopcost.upper(f[1])); eq('2..4', loopcost.depth_text(f[1]))
+    -- an unbounded hole keeps the bound open
+    eq(math.huge, loopcost.upper(in_pat('M.dyn_each')[1])); eq('>=2', loopcost.depth_text(in_pat('M.dyn_each')[1]))
 end)
 
 test('patterns: a PLAIN find and an anchored single run add no hole; a pattern in a variable is a dynamic hole', function ()
@@ -244,10 +247,37 @@ test('patterns: a PLAIN find and an anchored single run add no hole; a pattern i
     eq(0, #in_pat('M.trim_lines'), 'a bounded subject: backtracking multiplies nothing input-sized')
 end)
 
+test('patterns: ★ a receiver is classed by its TEXT — a call result is a hole, a field of a param is certified', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local sl = in_pat('M.slice_each')[1]
+    eq('possible', sl.kind); eq(1, sl.depth); eq({ 'dynamic' }, hole_classes(sl))
+    local fe = in_pat('M.field_each')[1]
+    eq(2, fe.depth); eq({ 'backtrack' }, hole_classes(fe)); eq('2..3', loopcost.depth_text(fe))
+    eq('cfg', fe.inner.argname)
+    eq('(.-)\n%-', require('cartograph.spec.lua_patterns').unescape('(.-)\\n%-'), 'short-string escapes decoded')
+end)
+
 test('patterns: gmatch scans every start of an unanchored run — degree 2, a hole', function ()
     if not has_lua() then skip 'no lua parser' end
     local f = in_pat('M.words_each')[1]
     eq({ 'backtrack' }, hole_classes(f)); eq(2, f.holes[1].degree)
+end)
+
+test('builtins: a constructor of non-literal elements is BOUNDED (as many as it spells); a deep module call is not the collection', function ()
+    if not has_lua() then skip 'no lua parser' end
+    eq(0, #in_fn('M.decl_like'), vim.inspect(vim.tbl_map(function(f) return loopcost.chain(f) end, in_fn('M.decl_like'))))
+end)
+
+test('builtins: ★ a MAYBE-LOOP (over a call result nobody sized) is a hole — the caller reads >=2, not 3 and not 2', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local f = in_fn('M.per_buf_each')
+    eq(1, #f)
+    eq(2, f[1].depth, loopcost.chain(f[1]))
+    local maybe = false
+    for _, h in ipairs(f[1].holes or {}) do
+        if h.name == 'loop over vim.api.nvim_list_bufs()' and h.class == 'dynamic' then maybe = true end
+    end
+    ok(maybe, loopcost.chain(f[1]))
 end)
 
 test('fn_at index: innermost_index answers exactly what the linear scan answered (random nested ranges, columns, ties)', function ()

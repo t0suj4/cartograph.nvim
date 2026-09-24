@@ -199,6 +199,8 @@ M.SLOTS = {
     call_costs = 'ANALYSIS',
     -- a search PATTERN's backtracking degree in the subject's length (an upper bound): (pat, no_anchor) -> int
     pattern_degree = 'ANALYSIS',
+    -- a string literal's source text -> its value (argv keeps the text between the quotes)
+    unescape = 'ANALYSIS',
     global_table = 'ANALYSIS', concat_op = 'ANALYSIS',
     -- ...and whether a FILE-SCOPE var is unconditionally reachable through that
     -- table. php: yes, `$x = 1;` at file scope IS `$GLOBALS['x']`. lua: NO, and
