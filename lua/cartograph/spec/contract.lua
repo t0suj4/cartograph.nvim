@@ -100,6 +100,10 @@ M.SLOTS = {
     -- derivable from the PATH (go's package, rust's last segment). The @bind
     -- capture wins where the source states an alias; this fills the rest.
     import_bind_path = 'IMPORTS',
+    -- the IMPORTER's own facts, read once per file from its tree and passed to resolve_import as
+    -- its 5th argument: java's is the file's source root (its path minus its declared package),
+    -- which decides a class declared in several modules (CART-0675).
+    import_context = 'IMPORTS',
     -- the DESTRUCTURED bind: a language whose import can bind several names at
     -- once, none of which the @bind capture (a single identifier) can see.
     -- `const {expect} = require('chai')` -> { expect = 'expect' }; a renaming

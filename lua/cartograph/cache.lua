@@ -401,7 +401,15 @@ end
 -- ⚠ NOT HEDGED, deliberately, and for the same reason a folded `k='lit'` argument
 -- is not: the set-once gate IS the soundness claim. Marking these `inferred` would
 -- put a ~ on a path the file states outright in two pieces.
-M.VERSION = 194 -- v194: A COMPUTED IMPORT PATH IS STILL A PATH (CART-0944), above.
+-- v194: A COMPUTED IMPORT PATH IS STILL A PATH (CART-0944), above.
+-- v195: A JAVA IMPORT RESOLVES PAST A MAVEN MODULE SEGMENT (CART-0675). resolve_import tried the
+-- bare path and `src/{main,test}/java/` only, so at an AGGREGATOR root every cross-module import was
+-- lost (hive 0 import edges resolved of 47,804 resolvable, hadoop 0 of 86,935). A candidate is now any
+-- file ending in `/<package path>/<Class>.java`; a class declared in several modules resolves only
+-- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
+-- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
+-- 0 wrong over eight corpora.
+M.VERSION = 195 -- v195: A JAVA IMPORT RESOLVES PAST A MAVEN MODULE SEGMENT (CART-0675), above.
                -- v193: A NESTED RETURNED CLOSURE IS A NODE (CART-0926)
                -- v192: A BRACKETED KEY IS STILL A KEY (CART-0927)
                -- v191: A LUA INLINE CLOSURE IS A NODE (CART-0813)

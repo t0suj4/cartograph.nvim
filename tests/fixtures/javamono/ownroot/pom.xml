@@ -1,0 +1,5 @@
+<project><modelVersion>4.0.0</modelVersion>
+  <groupId>com.x</groupId><artifactId>ownroot</artifactId><version>1.0</version>
+  <packaging>pom</packaging>
+  <modules><module>mod_a</module><module>mod_b</module><module>mod_c</module></modules>
+</project>

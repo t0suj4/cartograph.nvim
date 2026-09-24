@@ -6819,6 +6819,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- imports
         if spec.import_query then
             q = parse_query(lang, spec.import_query)
+            local ictx = spec.import_context and spec.import_context(tsroot, src, file)
             if q then
                 -- iter_matches, not iter_captures: predicates (#eq?) only
                 -- apply to matches; iter_captures would yield raw captures
@@ -6843,7 +6844,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         local site = sr * 4096 + sc
                         local rawpath = node_text(pathn, src)
                         local target = spec.resolve_import(
-                            rawpath, importable, file, root)
+                            rawpath, importable, file, root, ictx)
                         if not target and bindn then
                             -- a BARE specifier: not relative, not absolute, not a
                             -- URL. `lodash/fp` and `@scope/pkg` keep their package

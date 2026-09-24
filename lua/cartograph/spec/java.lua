@@ -29,6 +29,37 @@ local function NOOP() end
 -- of every receiver lexically, so a call's receiver often resolves to a
 -- concrete class by a bounded lexical lookup — no flow analysis, no server.
 -- The base name of a type node: `List<Pet>` -> List, `a.b.Foo` -> Foo.
+-- ── IMPORTS PAST A MODULE SEGMENT (CART-0675) ────────────────────────────────
+-- A class's file is `<source root>/<package path>/<Class>.java`, and in a multi-module tree the
+-- source root carries a module prefix (`mod_core/src/main/java/`, hive's `serde/src/java/`, a
+-- generated `src/gen/thrift/gen-javabean/`). The layout, not a list of conventional roots, is the
+-- evidence: a candidate is any file whose path ENDS in `/<package path>/<Class>.java` at a
+-- directory boundary — the WHOLE package path, never a tail of it (`com/other/core/Registry.java`
+-- is not `com.example.core.Registry`).
+-- ⚠ SEVERAL CANDIDATES ARE THE SAME FQN IN SEVERAL MODULES (shaded copies, per-module test
+-- stubs, a copy under test resources). The importer's own source root sees its own class first;
+-- otherwise which copy it compiles against is a CLASSPATH fact, and this refuses rather than pick.
+-- ★ THE IMPORTER'S SOURCE ROOT IS ITS PATH MINUS ITS DECLARED PACKAGE (`import_context`), not a
+-- path prefix: the index root `''` prefixes every path, so a prefix test made a class sitting at
+-- the root "the importer's own" for every module (the rootcopy fixture). A file whose directory
+-- does not spell its package has no source root, and its duplicates are refused.
+-- basename -> {files}, memoized per fileset (weak keys: dies with the fileset).
+local JAVA_BASENAMES = setmetatable({}, { __mode = 'k' })
+
+local function java_basenames(files)
+    local idx = JAVA_BASENAMES[files]
+    if not idx then
+        idx = {}
+        for f in pairs(files) do
+            local b = f:match('([^/]+%.java)$')
+            if b then local l = idx[b] or {}; l[#l + 1] = f; idx[b] = l end
+        end
+        for _, l in pairs(idx) do table.sort(l) end
+        JAVA_BASENAMES[files] = idx
+    end
+    return idx
+end
+
 local function java_base_type(tnode, src)
     if not tnode then return nil end
     local t = tnode:type()
@@ -801,15 +832,51 @@ return {
         'Map.', 'Set.', 'Collections.', 'Arrays.', 'Optional.',
         'Stream.', 'Integer.', 'Long.', 'Math.', 'Files.', 'Paths.' },
     import_query = [=[ (import_declaration (scoped_identifier) @path) ]=],
-    resolve_import = function (path, files, _)
-        -- com.example.pkg.Class -> the in-repo suffix .../pkg/Class.java
+    -- the importer's source root, from its own `package` declaration (see JAVA_BASENAMES)
+    import_context = function (tsroot, src, file)
+        local pkg = ''
+        for child in tsroot:iter_children() do
+            if child:type() == 'package_declaration' then
+                for n in child:iter_children() do
+                    local t = n:type()
+                    if t == 'scoped_identifier' or t == 'identifier' then pkg = node_text(n, src) end
+                end
+                break
+            end
+        end
+        local tail = (pkg ~= '' and pkg:gsub('%s', ''):gsub('%.', '/') .. '/' or '') .. file:match('[^/]*$')
+        if file == tail then return { srcroot = '' } end
+        if file:sub(-#tail - 1) == '/' .. tail then return { srcroot = file:sub(1, #file - #tail) } end
+        return {}
+    end,
+    resolve_import = function (path, files, _, _, ctx)
+        -- com.example.pkg.Class -> <source root>/com/example/pkg/Class.java, the root being the
+        -- index root, `src/main/java/`, or any module's (see JAVA_BASENAMES): ONE candidate rule,
+        -- so a class at the root and a copy in a module are two candidates, not a silent preference
         local segs = {}
         for seg in path:gmatch('[%w_]+') do segs[#segs + 1] = seg end
-        for i = 1, #segs do
+        if #segs == 0 then return nil end
+        local full = table.concat(segs, '/') .. '.java'
+        local tail, cands = '/' .. full, {}
+        for _, f in ipairs(java_basenames(files)[segs[#segs] .. '.java'] or {}) do
+            if f == full or f:sub(-#tail) == tail then cands[#cands + 1] = f end
+        end
+        if #cands == 1 then return cands[1] end
+        if #cands > 1 then
+            local own = ctx and ctx.srcroot
+            if own then
+                for _, c in ipairs(cands) do
+                    if c:sub(1, #c - #full) == own then return c end
+                end
+            end
+            return nil
+        end
+        -- no file spells the whole package: the index root may sit INSIDE a source root
+        -- (`src/main/java/com/example` indexed alone holds com.example.core.Registry as
+        -- `core/Registry.java`), so try the shorter suffixes
+        for i = 2, #segs do
             local cand = table.concat(segs, '/', i) .. '.java'
             if files[cand] then return cand end
-            -- maven layout: the suffix sits under some src root the
-            -- rel path includes; try the common prefix
             for _, pre in ipairs({ 'src/main/java/', 'src/test/java/' }) do
                 if files[pre .. cand] then return pre .. cand end
             end

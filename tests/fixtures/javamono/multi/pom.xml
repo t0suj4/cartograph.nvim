@@ -1,0 +1,5 @@
+<project><modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId><artifactId>aggregator</artifactId><version>1.0</version>
+  <packaging>pom</packaging>
+  <modules><module>mod_core</module><module>mod_app</module></modules>
+</project>

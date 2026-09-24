@@ -3468,6 +3468,13 @@ nvim --headless -u NONE -l tools/pomtree.lua wildfly quarkus hive hadoop [--jdk 
 # in a ledger. Maven's model builder says what is missing, round after round. --dry fetches nothing.
 nvim --headless -u NONE -l tools/mavenpoms.lua hadoop hive wildfly quarkus [--dry]
 
+# JAVA IMPORTS JOINED AGAINST THE FILES' OWN PACKAGE DECLARATIONS (CART-0675): per import site,
+# agree / missed / wrong / ambiguous (refused or the importer's own copy) / external / member class.
+# A class resolves through ANY source root, module segment included; a class several modules
+# declare resolves to the importer's own source root or is refused.
+nvim --headless -u NONE -l tools/javaimports.lua hive hadoop wildfly quarkus [--show N]
+#   0 wrong over 8 corpora (615,423 agree); every aggregator root resolved 0 before.
+
 # THE HELPER SIGNATURE OF EVERY NEAR-CLONE PAIR. What would an extracted helper
 # actually take? A hole that depends on nothing is a VALUE parameter; a hole over
 # the function's own locals is a FUNCTION parameter, and the call site cannot
