@@ -115,8 +115,6 @@ local function holes_by_id(plan)
     return t
 end
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'lua')
 end
 
@@ -693,8 +691,6 @@ end)
 -- has to be able to tell "this language is not served" from "this function has no
 -- holes", and only a named refusal does that.
 test('characterize: a function in another language is REFUSED, by name', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'ruby') then skip('no ruby parser') end
 
     root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')

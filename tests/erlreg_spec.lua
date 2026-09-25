@@ -16,8 +16,6 @@ local ts = require 'cartograph.providers.treesitter'
 local erlreg = require 'cartograph.erlreg'
 
 local function have_erlang()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'erlang')
         and pcall(vim.treesitter.get_string_parser, '', 'erlang')
 end

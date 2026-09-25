@@ -6,8 +6,6 @@ local flow = require 'cartograph.flow'
 local tsspec = require('cartograph.providers.treesitter').spec -- per-language cfg (regime lives here now)
 
 local function ready(lang)
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, lang or 'php')
 end
 

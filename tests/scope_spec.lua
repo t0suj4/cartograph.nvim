@@ -77,8 +77,6 @@ local function idents(root, name, acc)
 end
 
 local function setup()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     local okp, parser = pcall(vim.treesitter.get_string_parser, SRC, 'java')
     if not okp then return nil end
     local root = parser:parse()[1]:root()

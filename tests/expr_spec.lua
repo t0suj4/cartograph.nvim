@@ -9,8 +9,6 @@ local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 
 local function ready(lang)
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, lang or 'lua')
 end
 
@@ -699,8 +697,6 @@ test('expr: key() handles an ASSIGN node, whose `t` is a TARGET and not a type s
 end)
 
 test('expr: an INTERPOLATED string is not a literal — its reads reach the IR', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'bash') then skip 'no bash parser' end
     -- ★★ CART-0665. `"$prefix-${n}"` is a bash `string` whose kids are a simple_expansion
     -- and an expansion — two variable READS — and the literal branch returned
@@ -734,8 +730,6 @@ test('expr: an INTERPOLATED string is not a literal — its reads reach the IR',
 end)
 
 test('expr: a string with no expression in it is STILL a literal', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     -- ⚠ THE OTHER DIRECTION, and it is what keeps the rule from being a bash shim: the
     -- test is the KIDS, not the language. A lua string's only named child is
@@ -760,8 +754,6 @@ end)
 
 test('expr: a declared binder\'s own names are DEFS, not reads — and only where declared',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not (pcall(vim.treesitter.language.add, 'bash')
         and pcall(vim.treesitter.language.add, 'lua')) then skip 'no parsers' end
     -- ★ CART-0665. `local i len` binds two names; the IR reported both as READS while du

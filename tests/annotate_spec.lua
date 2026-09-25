@@ -11,8 +11,6 @@ local annotate = require 'cartograph.annotate'
 local pg = require 'cartograph.planguards'
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'lua')
 end
 
@@ -188,8 +186,6 @@ end)
 -- hazard does not exist, so the fixtures proved nothing. Testing in the
 -- convenient language instead of the affected one is how a guard ships untested.
 local function py_ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'python')
 end
 

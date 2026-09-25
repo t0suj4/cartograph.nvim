@@ -8,8 +8,6 @@ local K = require 'cartograph.k8s'
 local A = assert(require('cartograph.algebra').load())
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'yaml') then skip('no yaml tree-sitter parser') end
 end
 

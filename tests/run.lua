@@ -97,6 +97,11 @@ do
         for n in sel:gmatch('[^,]+') do only[n] = true end
     end
 end
+-- COMMON SETUP, once for every unit this file loads (hoisted by cartograph: redundancy.lua, 247 copies removed)
+do
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+end
 for _, f in ipairs(vim.fn.glob('tests/*_spec.lua', false, true)) do
     if not only or only[f:match('([^/]+)%.lua$')] then
         -- A LOAD-TIME FAILURE MUST EXIT, NOT ESCAPE. Both paths below used to raise out of

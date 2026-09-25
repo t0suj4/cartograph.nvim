@@ -46,8 +46,6 @@ test('at fold: post-fold arrivals stay raw, read through the same seam', functio
 end)
 
 test('at fold: real extract parity through store.ingest', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')

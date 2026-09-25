@@ -17,8 +17,6 @@ local cm = require 'cartograph.clonemerge'
 local journal = require 'cartograph.journal'
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'lua')
 end
 local function proj(src)

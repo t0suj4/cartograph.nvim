@@ -13,8 +13,6 @@ local java = require 'cartograph.spec.java'
 local FIX = vim.fn.getcwd() .. '/tests/fixtures/javamono/'
 
 local function has_java()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'java')
 end
 

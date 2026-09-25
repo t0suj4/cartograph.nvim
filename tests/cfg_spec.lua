@@ -3,8 +3,6 @@
 local cfg = require 'cartograph.cfg'
 
 local function ready_lang(lang)
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, lang)
 end
 local function ready() return ready_lang('php') end

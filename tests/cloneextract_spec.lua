@@ -11,8 +11,6 @@ local cx = require 'cartograph.cloneextract'
 
 -- make a tree-sitter grammar available (JS is not built in); skip a test if absent
 local function ready(lang)
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, lang)
 end
 

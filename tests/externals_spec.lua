@@ -6,8 +6,6 @@ local store = require 'cartograph.store'
 local externals = require 'cartograph.externals'
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'lua')
 end
 
@@ -66,8 +64,6 @@ test('references: a read inside a CONDITION is counted once, not twice',
     -- over by exactly its number of conditions.
     local store = require 'cartograph.store'
     local ts = require 'cartograph.providers.treesitter'
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/m.lua', 'w'))
@@ -103,8 +99,6 @@ test('references: a loop header is two rows and its read counts once',
     -- repeat. AN OCCURRENCE COUNTER IS NOT, and this is one.
     local store = require 'cartograph.store'
     local ts = require 'cartograph.providers.treesitter'
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/m.lua', 'w'))

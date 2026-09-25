@@ -30,8 +30,6 @@ local function have(lang)
     -- readable. ★ THE READABILITY QUESTION HAS TWO REGISTRIES and one of them
     -- is not treesitter.
     if lang == 'proto' then return true end
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, lang)
         and pcall(vim.treesitter.get_string_parser, '', lang)
 end

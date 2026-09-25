@@ -19,8 +19,6 @@ local ts = require 'cartograph.providers.treesitter'
 local argv = require 'cartograph.argv'
 
 local function have(lang)
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, lang)
         and pcall(vim.treesitter.get_string_parser, '', lang)
 end

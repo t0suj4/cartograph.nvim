@@ -297,8 +297,6 @@ local function fixture()
 end
 
 test('transport: an UNAVAILABLE file stays a stamped unparsed frontier', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local root = fixture()
@@ -327,8 +325,6 @@ end)
 -- the path parallel.lua ships through a jobfile.
 test('transport: extract accepts a declarative spec, same graph as the default',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local root = fixture()
@@ -350,8 +346,6 @@ end)
 -- whose module node is unparsed, which is narrow enough to be sound and lives in
 -- one place, so extract and relink cannot drift.
 test('transport: a call into an UNAVAILABLE file is NOT disposed external', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local root = fixture()
@@ -475,8 +469,6 @@ end)
 -- process — the exact path a module-level anything could never reach.
 test('transport: a MULTI-ROOT parallel extract resolves labels in workers',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local par = require 'cartograph.parallel'
     local A, B = vim.fn.tempname(), vim.fn.tempname()

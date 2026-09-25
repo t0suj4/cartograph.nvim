@@ -52,8 +52,6 @@ test('atlas: every label from edge facts', function ()
 end)
 
 test('atlas: end-to-end on a real extract', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
@@ -82,8 +80,6 @@ test('atlas: end-to-end on a real extract', function ()
 end)
 
 test('atlas fields: a multi-writer var decomposes per field', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
@@ -118,8 +114,6 @@ test('atlas fields: a multi-writer var decomposes per field', function ()
 end)
 
 test('atlas fields: a whole-var write hedges every field claim', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')

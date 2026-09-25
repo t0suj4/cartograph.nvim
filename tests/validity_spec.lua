@@ -139,8 +139,6 @@ end)
 -- that CANNOT resolve until the package appears.
 test('validity: a second extraction sees a package added since the first',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local root = vim.fn.tempname()

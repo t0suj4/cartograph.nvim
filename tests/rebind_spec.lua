@@ -7,8 +7,6 @@
 local RB = require 'cartograph.rebind'
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     local okl = pcall(vim.treesitter.language.add, 'lua')
     if not okl then skip('no lua tree-sitter parser') end
 end

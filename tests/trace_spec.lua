@@ -105,8 +105,6 @@ end)
 test('trace: shadow disambiguation — a shadowed local traces its OWN defs', function ()
     -- needs a REAL file: binder resolution parses from disk (scope-model
     -- phase 1); synthetic-graph tests above exercise the name fallback
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'lua') then
         skip 'no lua parser'
     end

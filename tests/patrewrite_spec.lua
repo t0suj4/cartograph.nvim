@@ -12,8 +12,6 @@ local txn = require 'cartograph.txn'
 local FIX = vim.fn.getcwd() .. '/tests/fixtures/patrewrite/trims.lua'
 
 local function has_lua()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'lua')
 end
 

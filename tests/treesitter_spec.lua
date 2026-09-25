@@ -690,8 +690,6 @@ end)
 
 test('treesitter: haskell — equations merge, where stays interior, imports', function ()
     -- the parser lives in nvim-treesitter's dir; tests run with bare rtp
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'haskell') then
         skip 'no haskell parser'
     end
@@ -725,8 +723,6 @@ test('treesitter: haskell — equations merge, where stays interior, imports', f
 end)
 
 test('treesitter: cpp — methods, qualified calls, includes', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'cpp') then
         skip 'no cpp parser'
     end
@@ -754,8 +750,6 @@ test('treesitter: cpp — methods, qualified calls, includes', function ()
 end)
 
 test('treesitter: scheme — defines, named-let interior, use-modules', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'scheme') then
         skip 'no scheme parser'
     end
@@ -967,8 +961,6 @@ test('compile_plan: detects the build system and its configure command', functio
 end)
 
 test('xlang: string-key dispatch links JS to the C++ handler', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not (pcall(vim.treesitter.get_string_parser, '', 'cpp')
         and pcall(vim.treesitter.get_string_parser, '', 'javascript')) then
         skip 'missing parsers'
@@ -1008,8 +1000,6 @@ test('xlang: string-key dispatch links JS to the C++ handler', function ()
 end)
 
 test('php: functions, qualified methods, requires, hook fan-out', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'php') then
         skip 'no php parser'
     end
@@ -1077,8 +1067,6 @@ test('php: functions, qualified methods, requires, hook fan-out', function ()
 end)
 
 test('frontier: minified bundles are opaque but reachable by text search', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'javascript') then
         skip 'no javascript parser'
     end
@@ -1107,8 +1095,6 @@ test('frontier: minified bundles are opaque but reachable by text search', funct
 end)
 
 test('frontier: landings are content-keyed cache — regeneration evicts them', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'javascript') then
         skip 'no javascript parser'
     end
@@ -1277,8 +1263,6 @@ test('discovery explain: every gate has a verdict with numbers', function ()
 end)
 
 test('parse-time callables: the cheap tier handles arrays and prefixes', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'php') then
         skip 'no php parser'
     end
@@ -1301,8 +1285,6 @@ test('parse-time callables: the cheap tier handles arrays and prefixes', functio
 end)
 
 test('deep tier: the fallback for graphs without argv kinds', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'php') then
         skip 'no php parser'
     end
@@ -1468,8 +1450,6 @@ test('factories: many keys, no callables — the lookup half', function ()
 end)
 
 test('sql: embedded queries make tables first-class entities', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'php') then
         skip 'no php parser'
     end
@@ -1501,8 +1481,6 @@ test('sql: embedded queries make tables first-class entities', function ()
 end)
 
 test('live refresh: splice, remap, and both directions of relink', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local refresh = require 'cartograph.refresh'
     -- a disposable two-file project
@@ -1629,8 +1607,6 @@ test('parallel priority order: attention first, then recency', function ()
 end)
 
 test('parallel extraction: identical graph to sequential', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local par = require 'cartograph.parallel'
     local root = vim.fn.getcwd() .. '/tests/fixtures'
@@ -1728,8 +1704,6 @@ end)
 -- MEASURED on ghost before the fix: serial 3, parallel 1 — and the node FLAGS
 -- were 3 both ways, so the two halves of one fact disagreed only in parallel.
 test('parallel: a worker-discovered frontier file reaches data.unparsed', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('javascript') then skip 'no javascript parser' end
     local par = require 'cartograph.parallel'
     local root = vim.fn.tempname()
@@ -1774,8 +1748,6 @@ test('parallel: a worker-discovered frontier file reaches data.unparsed', functi
 end)
 
 test('parallel audit: a slice-locally settled return chain re-derives', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('java') then skip 'no java parser' end
     local par = require 'cartograph.parallel'
     local gd = require 'cartograph.graphdiff'
@@ -1831,8 +1803,6 @@ test('parallel audit: a slice-locally settled return chain re-derives', function
 end)
 
 test('mention index: globals reconcile in UNCHANGED files, both ways', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local cache = require 'cartograph.cache'
     local root = vim.fn.tempname()
@@ -1882,8 +1852,6 @@ test('mention index: globals reconcile in UNCHANGED files, both ways', function 
 end)
 
 test('incremental cache: warm open re-extracts only the diff', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local cache = require 'cartograph.cache'
     local root = vim.fn.tempname()
@@ -2006,8 +1974,6 @@ test('incremental cache: warm open re-extracts only the diff', function ()
 end)
 
 test('async cache: load_async / open_async match the blocking path exactly', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local cache = require 'cartograph.cache'
     local root = vim.fn.tempname()
@@ -2075,8 +2041,6 @@ test('async cache: load_async / open_async match the blocking path exactly', fun
 end)
 
 test('async cache: a multi-tick load closes once (no double-close race)', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local cache = require 'cartograph.cache'
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
@@ -2103,8 +2067,6 @@ test('async cache: a multi-tick load closes once (no double-close race)', functi
 end)
 
 test('python: class-qualified methods, stdlib gate, decorator cbarg', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('python') then skip 'no python parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/pyproj')
     store.ingest(data)
@@ -2137,8 +2099,6 @@ test('python: class-qualified methods, stdlib gate, decorator cbarg', function (
 end)
 
 test('monorepo: the workspace package scopes js bare names', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('javascript') then skip 'no javascript parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/monoproj')
     store.ingest(data)
@@ -2167,8 +2127,6 @@ test('monorepo: the workspace package scopes js bare names', function ()
 end)
 
 test('ruby: qualified defs, file-scoped bare calls, honest frontiers', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('ruby') then skip 'no ruby parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/rubyproj')
     store.ingest(data)
@@ -2219,8 +2177,6 @@ end)
 -- "some supertype in the corpus declares this name". Mirrors
 -- cartograph-design/examples/negative/java-liveness.
 test('java: an inheritance-contract member gets an alibi, four look-alikes do not', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('java') then skip 'no java parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local function put(name, lines)
@@ -2278,8 +2234,6 @@ test('java: an inheritance-contract member gets an alibi, four look-alikes do no
 end)
 
 test('java: a registering marker annotation is cbarg, an inert one is not', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('java') then skip 'no java parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     -- package-private throughout: provably_dead returns early on
@@ -2343,8 +2297,6 @@ test('java: a registering marker annotation is cbarg, an inert one is not', func
 end)
 
 test('java: class-qualified, annotation cbarg, public exported', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('java') then skip 'no java parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/javaproj')
     store.ingest(data)
@@ -2445,8 +2397,6 @@ test('java: class-qualified, annotation cbarg, public exported', function ()
 end)
 
 test('go: receiver-qualified methods, package scope, init entry, caps', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('go') then skip 'no go parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/goproj')
     store.ingest(data)
@@ -2481,8 +2431,6 @@ test('go: receiver-qualified methods, package scope, init entry, caps', function
 end)
 
 test('rust: impl-qualified methods, crate scope, trait/test cbarg, pub', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('rust') then skip 'no rust parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/rustproj')
     store.ingest(data)
@@ -2517,8 +2465,6 @@ test('rust: impl-qualified methods, crate scope, trait/test cbarg, pub', functio
 end)
 
 test('django loop: routes are entities, templates link, audit fires', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('python') then skip 'no python parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/djproj')
     local dj = require('cartograph.django').attach(data)
@@ -2545,8 +2491,6 @@ test('django loop: routes are entities, templates link, audit fires', function (
 end)
 
 test('symfony loop: yaml routes are entities, twig + code link, audit fires', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('php') then skip 'no php parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/sfproj')
     local sf = require('cartograph.symfony').attach(data)
@@ -2598,8 +2542,6 @@ test('symfony loop: yaml routes are entities, twig + code link, audit fires', fu
 end)
 
 test('symfony: resource imports make discovery partial — no false unregistered', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root .. '/config/routes', 'p')
     vim.fn.mkdir(root .. '/templates', 'p')
@@ -2637,8 +2579,6 @@ test('symfony: resource imports make discovery partial — no false unregistered
 end)
 
 test('ansible loop: handlers are entities, notify links, no-op audit fires', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('yaml') then skip 'no yaml parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/ansproj')
     local a = require('cartograph.ansible').attach(data)
@@ -2695,8 +2635,6 @@ test('ansible loop: handlers are entities, notify links, no-op audit fires', fun
 end)
 
 test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local refresh = require 'cartograph.refresh'
     local journal = require 'cartograph.journal'
@@ -2875,8 +2813,6 @@ test('refs: witness, ordinal, drift, rename, ambiguity', function ()
 end)
 
 test('refs: refresh follows reordered twins by witness, not position', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local refresh = require 'cartograph.refresh'
     local root = vim.fn.tempname()
@@ -3147,8 +3083,6 @@ test('live oracle: the diff classifies missing, leaked and unknown', function ()
 end)
 
 test('sfc containers: script regions, template calls, handler cbarg', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not (has_parser('vue') and has_parser('svelte')) then
         skip 'no vue/svelte parser'
     end
@@ -3206,8 +3140,6 @@ test('sfc containers: script regions, template calls, handler cbarg', function (
 end)
 
 test('php: attributes register, $this->/self:: resolve in-class', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('php') then skip 'no php parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
     store.ingest(data)
@@ -3279,8 +3211,6 @@ test('php: attributes register, $this->/self:: resolve in-class', function ()
 end)
 
 test('php: malformed files survive — cyclic/self/orphan parent:: never hang or mislink', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('php') then skip 'no php parser' end
     -- extraction must COMPLETE over a dir of pathological files: cyclic and
     -- self-referential inheritance, parent:: with no superclass, a truncated
@@ -3313,8 +3243,6 @@ test('php: malformed files survive — cyclic/self/orphan parent:: never hang or
 end)
 
 test('php: transitive parent:: walk is bounded — a deep chain does not run away', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('php') then skip 'no php parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
@@ -3357,8 +3285,6 @@ test('php: transitive parent:: walk is bounded — a deep chain does not run awa
 end)
 
 test('every language survives malformed files — no crash, no hang, torn containment', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     -- Per language: a CLEAN file with a `survivor` def, plus sibling files
     -- that are broken (truncated mid-def), pure garbage, and empty. Contract:
     -- extraction never throws or hangs, the graph stays well-formed, the good
@@ -3429,8 +3355,6 @@ test('every language survives malformed files — no crash, no hang, torn contai
 end)
 
 test('containers survive malformed SFCs — the script region still yields defs', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('javascript') then skip 'no javascript parser' end
     -- a truncated template/markup expression must degrade to an empty region,
     -- not crash — the valid <script> def still extracts
@@ -3468,8 +3392,6 @@ test('containers survive malformed SFCs — the script region still yields defs'
 end)
 
 test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local refresh = require 'cartograph.refresh'
     local journal = require 'cartograph.journal'
@@ -3600,8 +3522,6 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
 end)
 
 test('extract-module: new file, header, adhesion, undo deletes', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local refresh = require 'cartograph.refresh'
     local journal = require 'cartograph.journal'
@@ -3721,8 +3641,6 @@ test('extract-module: new file, header, adhesion, undo deletes', function ()
 end)
 
 test('adhesion declines file headers: the license stays', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local mv = require 'cartograph.moveapply'
     local root = vim.fn.tempname()
@@ -3761,8 +3679,6 @@ test('adhesion declines file headers: the license stays', function ()
 end)
 
 test('move wiring: import line written, call sites requalified', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local journal = require 'cartograph.journal'
     local mv = require 'cartograph.moveapply'
@@ -3910,8 +3826,6 @@ print('plugin-smoke-ok')
 end)
 
 test('source: a def renders with its leading doc comment, file header declined', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
@@ -3939,8 +3853,6 @@ test('source: a def renders with its leading doc comment, file header declined',
 end)
 
 test('source: the pane keeps ONE shown range — the body it holds — not one per node ever shown (CART-1068)', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
@@ -3980,8 +3892,6 @@ test('source: the pane keeps ONE shown range — the body it holds — not one p
 end)
 
 test('source: a top-level statement widens to its enclosing block', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
@@ -4013,8 +3923,6 @@ test('source: a top-level statement widens to its enclosing block', function ()
 end)
 
 test('lua: top-level GLOBAL assignments are vars (a flat globals module)', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     -- a module that is a flat list of GLOBAL assignments (X = ...), not
     -- `local` — bnw's globals.lua. These must extract as var nodes so the
@@ -4043,8 +3951,6 @@ test('lua: top-level GLOBAL assignments are vars (a flat globals module)', funct
 end)
 
 test('lua: visibility is declared, and a deferred local stays private', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     -- CART-0231: before spec/lua.lua declared `exported_def`, EVERY lua node carried
     -- exported = nil, and consumers reading the field as a boolean read absence as
@@ -4085,8 +3991,6 @@ test('lua: visibility is declared, and a deferred local stays private', function
 end)
 
 test('self:m() picks the VENDORED copy in its own file, not nothing', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     -- CART-0241. chain_lookup refused ANY corpus-wide duplicate, and an addon corpus
     -- VENDORS its libraries — `AceConfigDialog:GetStatusTable` exists 24 times on wow, once
@@ -4134,8 +4038,6 @@ test('self:m() picks the VENDORED copy in its own file, not nothing', function (
 end)
 
 test('CRLF: one canonical source text for analysis, raw bytes for the write path', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     -- CART-0238. Extraction used to read with transport.read (io.open, CR kept) while
     -- store.content reads with vim.fn.readfile (CR stripped), so on a CRLF file the same
@@ -4218,8 +4120,6 @@ test('CRLF: one canonical source text for analysis, raw bytes for the write path
 end)
 
 test('lua: a confined file-local is not a cross-file call target', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     -- CART-0230. The unique-name matcher used to answer a bare `helper()` in ANY file
     -- with the only `helper` in the workspace, even when that def is a `local function`
@@ -4262,8 +4162,6 @@ test('lua: a confined file-local is not a cross-file call target', function ()
 end)
 
 test('lua: the escape rule reads the same off the mention walk as off its own query', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     -- CART-0236. The confinement fact now rides the mention walk (spec.escape_nonvalue)
     -- instead of a second per-file traversal (spec.escape_names) — measured 15% of the
@@ -4330,8 +4228,6 @@ test('lua: the escape rule reads the same off the mention walk as off its own qu
 end)
 
 test('lua effects: load-time side effects on module nodes', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/effects')
     local eff = {}
@@ -4346,8 +4242,6 @@ test('lua effects: load-time side effects on module nodes', function ()
 end)
 
 test('luals oracle: references settle what names refuse', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local luals = require 'cartograph.providers.luals'
     local bin_ok = vim.fn.executable('lua-language-server') == 1
@@ -4376,8 +4270,6 @@ test('luals oracle: references settle what names refuse', function ()
 end)
 
 test('luals async: settles the same, without blocking the caller', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local bin_ok = vim.fn.executable('lua-language-server') == 1
         or vim.fn.executable(vim.fn.expand(
@@ -4399,8 +4291,6 @@ test('luals async: settles the same, without blocking the caller', function ()
 end)
 
 test('refusals are places: an ambiguous call keeps its candidates', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     -- alpha.lua and beta.lua both define M.roll; user.lua calls it BARE (roll(x))
     -- — no require-alias receiver, so module-alias can't narrow it: genuinely
@@ -4425,8 +4315,6 @@ test('refusals are places: an ambiguous call keeps its candidates', function ()
 end)
 
 test('registration edges: a dispatch table is a descendable alibi', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/registry')
     store.ingest(data)
@@ -4460,8 +4348,6 @@ end)
 -- exposed it. tools/resolveparity is the corpus-scale ratchet; this is the
 -- shape, in the suite, where a regression would be attributable.
 test('registry mentions do not dispatch-mark: same tier from either driver', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
@@ -4515,8 +4401,6 @@ test('registry mentions do not dispatch-mark: same tier from either driver', fun
 end)
 
 test('ladder: the epistemic distribution and refusal ranking', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local ladder = require 'cartograph.ladder'
     -- luaoracle: user.lua's guess() calls roll BARE — a refused (ambiguous) call
@@ -4538,8 +4422,6 @@ test('ladder: the epistemic distribution and refusal ranking', function ()
 end)
 
 test('bash: functions, command calls, source imports, vars + df', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('bash') then skip 'no bash parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local function put(f, t)
@@ -4606,8 +4488,6 @@ test('bash: node-local torn — a parse error does not tear the file', function 
     -- class contexts; bash defs have no enclosing context, and one exotic
     -- construct tears 98% of testssl.sh (26k lines, error at 580) under
     -- it. spec.torn_by_node: only defs whose OWN subtree errors are torn.
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('bash') then skip 'no bash parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local src = table.concat({
@@ -4653,8 +4533,6 @@ test('bash: eval aperture — namespaced defless call refuses with witness', fun
     -- KNOWN fn namespace with no visible def is corpus-internal, not an
     -- external command — with conjuring sites present, the honest answer
     -- is refusal-with-witness. Bare unknown commands stay silent.
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('bash') then skip 'no bash parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local function put(f, t)
@@ -4698,8 +4576,6 @@ end)
 test('typed strings: sql sink flow + confidence tiers', function ()
     -- sink position = CONFIDENT (the API contract types the arg);
     -- content sniffing = ~ by design (typed-strings v1)
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('php') then skip 'no php parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/a.php', 'w'))
@@ -4739,8 +4615,6 @@ test('typed strings: literal-flow analyzer — multi-def hedge, appends, heredoc
     -- the mantis cut: sequential $t_query reuse flows via the NEAREST
     -- plain assignment (hedged ~ — a branch may have chosen), `.=`
     -- appends preserve the base as a PREFIX, heredocs read verbatim
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('php') then skip 'no php parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/m.php', 'w'))
@@ -4796,8 +4670,6 @@ test('typed strings: literal-flow analyzer — multi-def hedge, appends, heredoc
 end)
 
 test('typed strings: eval head is the real callee (bash code sink)', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('bash') then skip 'no bash parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/m.sh', 'w'))
@@ -4923,8 +4795,6 @@ test('argv: PHP 8 named arguments unwrap to the value node', function ()
 end)
 
 test('field alias: `local f = mod.field` makes a bare f() resolve into that module', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     -- CART-0237. SE writes `local make_recipe = data_util.make_recipe` and then calls it
     -- bare 226 times. Those used to name-match a PRIVATE `local function make_recipe` in an
@@ -5423,8 +5293,6 @@ end)
 -- target by tail-matching the variable's name would be the fabrication the
 -- absence vocabulary exists to prevent.
 test('php: a call dispatched through a variable is RECORDED and dynamic', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('php') then skip 'no php parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/d.php', 'w'))
@@ -5464,8 +5332,6 @@ end)
 -- missing purely to the cap, in the files that chain the most, with no counter
 -- moving. This asserts the cap is not back.
 test('treesitter: a long fluent chain does not silently lose calls to the match cap', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('php') then skip 'no php parser' end
     local N = 400 -- comfortably past the 256 default
     local chain = {}
@@ -5506,8 +5372,6 @@ end)
 -- "tighten this to function level" now fails here instead of silently losing
 -- the whole population it was built to catch.
 test('java: an annotation the corpus reads AND invokes registers; one it only reads does not', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('java') then skip 'no java parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local function put(name, lines)

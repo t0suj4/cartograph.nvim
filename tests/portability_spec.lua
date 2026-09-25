@@ -7,8 +7,6 @@
 local port = require 'cartograph.portability'
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.get_string_parser, '', 'ruby')
 end
 
@@ -532,8 +530,6 @@ test('versionfloor: no manifest means no declaration, not a guess', function ()
 end)
 
 test('portability: declared_for links a runtime to its ecosystem ruler', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -549,8 +545,6 @@ test('portability: declared_for links a runtime to its ecosystem ruler', functio
 end)
 
 test('portability: the report states the MOVE, both ends named', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -567,8 +561,6 @@ end)
 -- with NO declaration the old header is kept verbatim: a report that cannot name
 -- the move must not imply one
 test('portability: an undeclared project keeps the plain header', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -676,8 +668,6 @@ local function factorio_tree(files)
 end
 
 local function lua_ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'lua')
 end
 
@@ -1080,8 +1070,6 @@ end)
 
 test('portability: the report groups by reason and claims no porting work',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -1112,8 +1100,6 @@ end)
 -- every unknown gets exactly one reason, so the groups partition the list rather
 -- than sampling it — otherwise a reader cannot trust the counts
 test('portability: the reason groups PARTITION the unknown names', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -1143,8 +1129,6 @@ end)
 -- well as methods. Before that a miss inside a global's class was indistinguishable
 -- from an attribute the artifact never held, so no bucket could be earned.
 test('portability: a call to a member a COMPLETE class lacks is ABSENT', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -1213,8 +1197,6 @@ local function refs_fixture(body)
 end
 
 test('externals: a read is a reference; a CALL is not', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -1233,8 +1215,6 @@ test('externals: a read is a reference; a CALL is not', function ()
 end)
 
 test('externals: a read rooted at a local or param is NOT external', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -1255,8 +1235,6 @@ end)
 -- was declared; the heuristic is gone and nothing is withheld, which is the
 -- difference between guessing and knowing.
 test('externals: a loop-bound receiver is a LOCAL, with nothing withheld', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -1278,8 +1256,6 @@ test('externals: a loop-bound receiver is a LOCAL, with nothing withheld', funct
 end)
 
 test('portability: the reference report names the real porting work', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
@@ -1355,8 +1331,6 @@ test('portability: no profile module name contains a dot', function ()
 end)
 
 test('portability: reference_diff reports what the move LOST', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local pm = require 'cartograph.spec.profile'
     if not (pm.load('lua-factorio-11') and pm.load('lua-factorio')) then
@@ -1641,8 +1615,6 @@ end)
 
 test('portability: the report splits receivers by reason and counts none as provided',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local pm = require 'cartograph.spec.profile'
     if not pm.load('lua-factorio') then skip 'no lua-factorio profile' end
@@ -1807,8 +1779,6 @@ end)
 
 test('class space: a REAL removal is found where the receiver cannot be typed',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local pm = require 'cartograph.spec.profile'
     if not (pm.load('lua-factorio') and pm.load('lua-factorio-api-11')) then
@@ -1905,8 +1875,6 @@ end)
 
 test('shape move: a real removal is found in the DETERMINED bucket',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local pm = require 'cartograph.spec.profile'
     if not (pm.load('lua-factorio') and pm.load('lua-factorio-api-11')) then
@@ -2020,8 +1988,6 @@ end)
 
 test('nested data stage: the reader walks nested literals, arrays transparent',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local pm = require 'cartograph.spec.profile'
     if not pm.load('lua-factorio-proto-11') then skip 'no proto profile' end
@@ -2065,8 +2031,6 @@ end)
 
 test('data stage: an unregistered table literal is NOT an unadjudicated prototype',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local pm = require 'cartograph.spec.profile'
     if not (pm.load('lua-factorio-proto-11') and pm.load('lua-factorio-proto-20')) then
@@ -2114,8 +2078,6 @@ end)
 
 test('data stage: an ARRAY of prototypes registered by name expands to its elements',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local pm = require 'cartograph.spec.profile'
     if not pm.load('lua-factorio-proto-11') then skip 'no proto profile' end
@@ -2224,8 +2186,6 @@ end)
 
 test('data stage: a READ of a removed prototype path is reported, and separately',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local pm = require 'cartograph.spec.profile'
     if not (pm.load('lua-factorio-proto-11') and pm.load('lua-factorio-proto-20')) then

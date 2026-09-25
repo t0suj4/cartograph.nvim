@@ -8,8 +8,6 @@ local redundancy = require 'cartograph.redundancy'
 local FIX = vim.fn.getcwd() .. '/tests/fixtures/redundancy'
 
 local function has_lua()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'lua')
 end
 

@@ -21,8 +21,6 @@ local rp = require 'cartograph.replace'
 local txn = require 'cartograph.txn'
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then return false end
     return (require('cartograph.transplant').available('lua'))
 end

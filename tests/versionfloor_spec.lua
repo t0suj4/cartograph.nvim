@@ -7,8 +7,6 @@
 local vf = require 'cartograph.versionfloor'
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.get_string_parser, '', 'ruby')
 end
 
@@ -185,8 +183,6 @@ local PY_SNIPPETS = {
 }
 
 local function py_ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.get_string_parser, '', 'python')
 end
 
@@ -269,8 +265,6 @@ local JS_SNIPPETS = {
 }
 
 local function js_ready(lang)
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.get_string_parser, '', lang)
 end
 

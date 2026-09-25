@@ -7,8 +7,6 @@
 local P = require 'cartograph.pom'
 
 local function ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'xml') then skip('no xml tree-sitter parser') end
 end
 

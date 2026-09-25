@@ -134,8 +134,6 @@ end)
 -- Integration test — real cpp extraction (flow def-positions + source scan).
 local ts = require 'cartograph.providers.treesitter'
 local function cpp_ready()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'cpp')
 end
 
@@ -332,8 +330,6 @@ test('annot: the type is ONE token, and the comment after it is not part of it',
 end)
 
 test('annotation-mismatch: a name check, with the three exclusions', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local root = vim.fn.tempname()
@@ -376,8 +372,6 @@ test('annotation-mismatch: a name check, with the three exclusions', function ()
 end)
 
 test('dead-confined: provable only with all three premises', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local lint = require 'cartograph.lint'
@@ -593,8 +587,6 @@ end)
 
 test('tag-coverage: a walker that misses a tag its own module constructs is asked about',
     function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     -- ★ CART-0662, built from the bug it would have caught — fixed in 5903841. expr.key
     -- had a case for 11 expression kinds and none for `assign`, whose `t` holds a TARGET
@@ -670,8 +662,6 @@ end)
 -- ambiguous call, so the refusal records n=9 and keeps p1..p8 — and p9 exists
 -- ONLY in the tail that was never stored.
 test('refusal shadow: a candidate in the ELIDED TAIL still blocks', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local lint = require 'cartograph.lint'

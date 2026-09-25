@@ -146,8 +146,6 @@ end)
 -- rule left every warm cache confidently stale. stamp_of existed and nothing
 -- consumed it.
 test('ecosystem: a spec edit INVALIDATES a warm graph cache', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local cache = require 'cartograph.cache'
     local ts = require 'cartograph.providers.treesitter'
@@ -263,8 +261,6 @@ end)
 test('ecosystem roster: a cross-package require resolves INTO a zip', function ()
     if vim.fn.executable('zip') ~= 1 then skip 'no zip CLI' end
     if not require('cartograph.zip').available() then skip 'no zlib' end
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local d = mods_fixture()
@@ -399,8 +395,6 @@ end)
 -- with teeth: it runs per top-level directory on a 353-addon tree. Both marker
 -- kinds must still mark.
 test('ecosystem: a .toc dir and a manifest dir are BOTH boundaries', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local root = vim.fn.tempname()
@@ -436,8 +430,6 @@ end)
 -- a VARIANT toc (named for something other than its directory) still marks, which
 -- is the manifest_ext fallback and the reason it costs a scandir
 test('ecosystem: a variant .toc name still marks the directory', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
     local root = vim.fn.tempname()
@@ -483,8 +475,6 @@ test('ecosystem roster: a corrupt archive member is a frontier, not the boundary
     function ()
     if vim.fn.executable('zip') ~= 1 then skip 'no zip CLI' end
     if not require('cartograph.zip').available() then skip 'no zlib' end
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local zip = require 'cartograph.zip'
     local transport = require 'cartograph.transport'

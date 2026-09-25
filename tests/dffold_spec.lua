@@ -74,8 +74,6 @@ test('df fold: dual mode serves a mixed graph (refresh nodes stay raw)', functio
 end)
 
 test('df fold: real extract parity end-to-end', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
