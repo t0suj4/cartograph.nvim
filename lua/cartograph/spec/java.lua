@@ -395,7 +395,54 @@ local function jvt_fields(node, src, out) -- name -> {ty}
         end
     end
 end
+-- ★ THE BINDERS A BLOCK DOES NOT DECLARE (CART-1077): `for (T x : xs)`, `catch (T e)` and try-with-resources
+-- `(T r = ...)` bind a TYPED name outside any local_variable_declaration, so none of them had a type and every call
+-- on them (`field.getFieldName()` over a thrift `_Fields` loop) fell to the repo-wide name join. A multi-catch
+-- `catch (A | B e)` has no single declared type: it binds e UNTYPED (a param answers anyway, ending the walk).
+local function jvt_binders(node, src, out) -- name -> {ty}
+    local t = node:type()
+    local function put(nm, ty)
+        if nm then
+            local base = ty and java_base_type(ty, src) or nil
+            out[node_text(nm, src)] = { ty = base ~= 'var' and base or nil }
+        end
+    end
+    if t == 'enhanced_for_statement' then
+        put(node:field('name')[1], node:field('type')[1])
+    elseif t == 'catch_clause' then
+        for _, c in inext, node, -1 do
+            if c:type() == 'catch_formal_parameter' then
+                local ty
+                for _, cc in inext, c, -1 do
+                    if cc:type() == 'catch_type' and cc:named_child_count() == 1 then ty = cc:named_child(0) end
+                end
+                put(c:field('name')[1], ty)
+            end
+        end
+    elseif t == 'try_with_resources_statement' then
+        local rs = node:field('resources')[1]
+        for _, r in (rs and inext or NOOP), rs, -1 do
+            if r:type() == 'resource' then put(r:field('name')[1], r:field('type')[1]) end
+        end
+    end
+end
+-- simple name -> fully qualified name, from a file's explicit single-type imports (`import a.b.C;`; static and
+-- on-demand imports are not bindings of a type name). Memoized for the LAST file only: calls are qualified file by file.
+local imports_src, imports_map
+local function java_imports(src)
+    if src == imports_src then return imports_map end
+    local m = {}
+    for fq in src:gmatch('\n%s*import%s+([%w_%.]+)%s*;') do
+        local simple = fq:match('([%w_]+)$')
+        if simple and simple:match('^%u') then m[simple] = fq end
+    end
+    imports_src, imports_map = src, m
+    return m
+end
 local JAVA_SCOPES = {
+    enhanced_for_statement  = { kind = 'param', harvest = jvt_binders },
+    catch_clause            = { kind = 'param', harvest = jvt_binders },
+    try_with_resources_statement = { kind = 'param', harvest = jvt_binders },
     block                   = { kind = 'local', harvest = jvt_locals },
     constructor_body        = { kind = 'local', harvest = jvt_locals },
     method_declaration      = { kind = 'param', harvest = jvt_params },
@@ -660,7 +707,8 @@ return {
                 -- a @Qualifier on the receiver field disambiguates which of
                 -- an interface's several impls it holds (resolve_interface)
                 if cls then qual = java_field_qualifier(calln, objname, src) end
-                if not cls and not defer and objname:match('^%u') then
+                -- (a class name may lead with underscores: thrift nests `_Fields` in every struct, CART-1077)
+                if not cls and not defer and objname:match('^_*%u') then
                     -- no binder and PascalCase: a STATIC call on the
                     -- class named right here (convention-sound; the
                     -- qualification just exact/tail-matches like any
@@ -688,12 +736,44 @@ return {
                 if fo and fo:type() == 'this' and ff then
                     cls, hedge = java_var_type(
                         model, node_text(ff, src), calln, true)
+                elseif ff and fo and node_text(ff, src):match('^_*%u') and node_text(ff, src):find('%l') then
+                    -- (a CLASS name has lower case: `Version.CURRENT.m()` names a static FIELD, all caps, and its
+                    -- type is Version's to declare, not `CURRENT` — found by the server gate's removed-edge witness)
+                    -- a QUALIFIED CLASS receiver, `org.apache.thrift.TBaseHelper.compareTo(..)` or `Outer.Inner.m()`
+                    -- (CART-1077): a chain of plain identifiers whose last segment is a class name and whose head is
+                    -- NOT a variable in scope is a static call on that class. A variable head (`cfg.Inner.m()`) is
+                    -- left alone: that is field access through a value.
+                    local head, ok = fo, true
+                    while head and head:type() == 'field_access' do head = head:field('object')[1] end
+                    if not (head and head:type() == 'identifier') then ok = false end
+                    local cur = fo
+                    while ok and cur and cur:type() == 'field_access' do
+                        local f2 = cur:field('field')[1]
+                        if not (f2 and f2:type() == 'identifier') then ok = false end
+                        cur = cur:field('object')[1]
+                    end
+                    if ok then
+                        local ht = node_text(head, src)
+                        local vt, _, vd = java_var_type(model, ht, calln)
+                        if vt == nil and vd == nil then cls = node_text(ff, src) end
+                    end
                 end
             end
         end
         -- a JDK-typed receiver dispatches into the stdlib, not a project
         -- def: leave it bare for the stdlib_names/prefix gate to skip
         if cls and JAVA_JDK_TYPES[cls] then return nil end
+        -- ★ AN EXPLICITLY IMPORTED JDK CLASS IS NOT THE PROJECT'S CLASS OF THE SAME SIMPLE NAME (CART-1077): Version.java
+        -- imports java.lang.reflect.Field, and elasticsearch has its own script.field.Field, so `field.getName()` was
+        -- typed to the project's Field by simple name. Qualify with the FULL name instead: it can match no project def,
+        -- and the resolver's typed-receiver rule reads it as external. (Found by the server gate's added-edge witness.)
+        if cls then
+            local fq = java_imports(src)[cls]
+            if fq and (fq:match('^java%.') or fq:match('^javax%.') or fq:match('^jdk%.')
+                or fq:match('^sun%.') or fq:match('^com%.sun%.')) then
+                return fq .. '::' .. name, hedge, nil, qual
+            end
+        end
         -- the hedge rides the qualification: a hedged qualification makes
         -- the resulting edge INFERRED even where resolution is confident.
         -- 4th value = the receiver field's @Qualifier bean name (or nil).

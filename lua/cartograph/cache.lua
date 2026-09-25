@@ -409,7 +409,9 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 195 -- v195: A JAVA IMPORT RESOLVES PAST A MAVEN MODULE SEGMENT (CART-0675), above.
+M.VERSION = 196 -- v196: A JAVA RECEIVER'S DECLARED TYPE IS USED (CART-1077): for/catch/try binders typed, `_X` and fully
+-- qualified class receivers are static calls, and a receiver of a non-project class is external (EXT.typed) instead of a
+-- repo-wide name match. Prior: v195: A JAVA IMPORT RESOLVES PAST A MAVEN MODULE SEGMENT (CART-0675), above.
                -- v193: A NESTED RETURNED CLOSURE IS A NODE (CART-0926)
                -- v192: A BRACKETED KEY IS STILL A KEY (CART-0927)
                -- v191: A LUA INLINE CLOSURE IS A NODE (CART-0813)

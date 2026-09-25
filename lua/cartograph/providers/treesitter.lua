@@ -59,6 +59,9 @@ M.EXT = {
     -- the resolution lands at the TYPE-INFERRED tier rather than as a lexical
     -- fact: the name is certain, the RECEIVER is a hedge.
     stdlib_uniq = { disp = 'external', why = 'stdlib', inferred = true },
+    -- a call whose receiver's DECLARED class is not the project's (CART-1077): `TProtocol::getScheme` with no
+    -- project class TProtocol and none deriving from it. Known external by the code's own type annotation.
+    typed  = { disp = 'external', why = 'typed-receiver' },
     stdalias = { disp = 'external', why = 'std-alias' },-- a call whose root name is
                                                         -- bound to the stdlib via an explicit
                                                         -- `const X = std....` binding in its file
@@ -7913,6 +7916,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         end
     end
     local aperture_refusal = aperture_refuser(ns_pfx, apertures, global_witness)
+    local project_classes -- CART-1077: lazily, the class names the project defines, extends or implements
     local function resolve(name, file)
         -- 1-2 char names are shadow-bait for WORKSPACE matching (pattern
         -- vars, loop counters — noise-dominated in every language), but a
@@ -8069,6 +8073,31 @@ local MATCH_OPTS = { match_limit = 65536 }
             local ar = aperture_refusal(name, file)
             if ar then return nil, nil, ar end
             return nil, nil, nil, prof_ext(spec, name) or EXT.nodef
+        end
+        -- ★ A TYPED RECEIVER OF A NON-PROJECT CLASS (CART-1077): `TProtocol::getScheme`, `TBaseHelper::compareTo`.
+        -- qualify_call named the receiver's DECLARED class; no project def carries that class and no project class
+        -- extends or implements it, so no project method can be the target: external. The tail join below (every
+        -- getScheme in the tree) answered a question the code had already answered. A PROJECT class without the
+        -- method (inherited from a parent) keeps the old path, and so does any class a project class derives from.
+        if spec and spec.qualify_call then
+            local qcls = name:match('^([%w_$%.]+)::[%w_]+$') -- a dotted head is a FULLY qualified JDK class
+            if qcls then
+                if not project_classes then
+                    project_classes = {}
+                    for k in pairs(exact) do
+                        local c = k:match('^([%w_$]+)::')
+                        if c then project_classes[c] = true end
+                    end
+                    for _, e in ipairs(data.extends or {}) do
+                        if e.child then project_classes[e.child] = true end
+                        if e.parent then project_classes[e.parent] = true end
+                    end
+                    for _, e in ipairs(data.implements or {}) do
+                        for _, v in pairs(e) do if type(v) == 'string' then project_classes[v] = true end end
+                    end
+                end
+                if not project_classes[qcls] then return nil, nil, nil, EXT.typed end
+            end
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
@@ -8803,6 +8832,7 @@ function M.relink(data, touched)
         data.edges[#data.edges + 1] = e
     end
     local bind_of, binding_reaches = binding_index(data.edges)
+    local project_classes -- CART-1077: lazily, the class names the project defines, extends or implements
     local function resolve(name, file)
         -- short names: same-file tier only (see extract's resolve, the
         -- synjs q3 witness); cross-file fallbacks stay noise-gated
@@ -8935,6 +8965,31 @@ function M.relink(data, touched)
             local ar = aperture_refusal(name, file)
             if ar then return nil, nil, ar end
             return nil, nil, nil, prof_ext(spec, name) or EXT.nodef
+        end
+        -- ★ A TYPED RECEIVER OF A NON-PROJECT CLASS (CART-1077): `TProtocol::getScheme`, `TBaseHelper::compareTo`.
+        -- qualify_call named the receiver's DECLARED class; no project def carries that class and no project class
+        -- extends or implements it, so no project method can be the target: external. The tail join below (every
+        -- getScheme in the tree) answered a question the code had already answered. A PROJECT class without the
+        -- method (inherited from a parent) keeps the old path, and so does any class a project class derives from.
+        if spec and spec.qualify_call then
+            local qcls = name:match('^([%w_$%.]+)::[%w_]+$') -- a dotted head is a FULLY qualified JDK class
+            if qcls then
+                if not project_classes then
+                    project_classes = {}
+                    for k in pairs(exact) do
+                        local c = k:match('^([%w_$]+)::')
+                        if c then project_classes[c] = true end
+                    end
+                    for _, e in ipairs(data.extends or {}) do
+                        if e.child then project_classes[e.child] = true end
+                        if e.parent then project_classes[e.parent] = true end
+                    end
+                    for _, e in ipairs(data.implements or {}) do
+                        for _, v in pairs(e) do if type(v) == 'string' then project_classes[v] = true end end
+                    end
+                end
+                if not project_classes[qcls] then return nil, nil, nil, EXT.typed end
+            end
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
