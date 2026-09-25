@@ -329,3 +329,61 @@ test('fn_at index: innermost_index answers exactly what the linear scan answered
     end
     ok(checked > 40000, 'queries compared: ' .. checked)
 end)
+
+-- concat.lua: an ACCUMULATING CONCATENATION (`s = s .. x`) is an operator with a cost — its target's size
+local function in_concat(fnname)
+    local out = {}
+    for _, f in ipairs(analyze().findings) do
+        if f.fn:match('^concat%.lua::' .. fnname:gsub('[%.:]', '%%%0') .. '@') then out[#out + 1] = f end
+    end
+    return out
+end
+local function concat_depth(fnname)
+    for _, n in ipairs(store.data.nodes) do
+        if n.id:match('^concat%.lua::' .. fnname:gsub('[%.:]', '%%%0') .. '@') then return analyze().depth_of(n.id) end
+    end
+end
+
+test('concat: a local grown per element is VISIBLE depth 2; reset per outer element and grown per inner, depth 3', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local f = in_concat('M.join')
+    eq(1, #f)
+    eq('visible', f[1].kind)
+    eq(2, f[1].depth)
+    eq('s', f[1].concat.target)
+    ok(loopcost.chain(f[1]):find('concat@10 grows s', 1, true), loopcost.chain(f[1]))
+    local r = in_concat('M.rows')
+    eq(1, #r)
+    eq(3, r[1].depth, 'the outer loop re-declares s: it runs n times, it does not grow s')
+end)
+
+test('concat: a flushed buffer, a constant loop, a per-element field — no size grows, no finding', function ()
+    if not has_lua() then skip 'no lua parser' end
+    eq(0, #in_concat('M.wrap'))
+    eq(0, #in_concat('M.pair'))
+    eq(0, #in_concat('M.mark'))
+    eq(1, concat_depth('M.wrap').c, 'the loop alone')
+    eq(0, concat_depth('M.pair').c, 'a constant loop grows nothing: the concat costs nothing either')
+    eq(0, #in_concat('M.shadow'))
+    eq(1, concat_depth('M.shadow').c, '`local s = s .. x` binds anew each trip: the loop alone')
+end)
+
+test('concat: ★ an upvalue grown in a LOOP-FREE function, called per element, is hidden-shared depth 2', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local f = to('note')
+    eq(1, #f)
+    eq('hidden-shared', f[1].kind)
+    eq(2, f[1].depth)
+    eq({ 'log' }, f[1].shared)
+    local d = concat_depth('note')
+    eq(1, d.c)
+    ok(d.concat and d.concat.shared, 'the upvalue is state outliving the call')
+end)
+
+test('concat: a field of a PARAMETER arrives input-sized (depth 1) but is not shared state', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local d = concat_depth('Buf:push')
+    eq(1, d.c)
+    eq('self.buf', d.concat.target)
+    eq(nil, d.concat.shared)
+end)

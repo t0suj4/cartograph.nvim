@@ -103,8 +103,95 @@ local function span_index(spans)
     end
 end
 
+--- ACCUMULATION BY CONCATENATION (`s = s .. x`, `self.buf = self.buf .. chunk`): an OPERATOR with a
+--- cost. A string is copied whole by every concatenation, so the row costs the target's CURRENT
+--- size, and its level is the degree of that size:
+---   growth  the input-sized loops around the row that do not also hold a RESET of the target (a
+---           non-accumulating assignment, a `local` declaration, a rebinding of its base object, or
+---           the loop that binds the base: each iteration a fresh element) — the string grows per trip
+---   entry   1 when the target ARRIVES input-sized: a string parameter, a field of a parameter, or
+---           state outliving the call (an upvalue/global, or a field of one)
+---   level = max(growth, entry); a local built from nothing in a loop-free function is 0
+--- ★ THE COMPOSED CASE IS THE NEW ONE: `buf = buf .. x` on an upvalue, in a function with no loop,
+--- called once per element of an outer walk, is quadratic across calls, and no per-function lens
+--- (exprlint's concat-in-loop) can see it — there is no loop where the concat is. It is `shared`
+--- (ranked as hidden-shared), the same predicate as a loop over an upvalue. A field of `self` is a
+--- parameter's, not shared, exactly as a loop over `self.items` is.
+--- ⚠ Like a shared loop, a shared string may be reset in ANOTHER function (a flush): not checked.
+--- The binder of a loop is read from the head TEXT (CART-1061), as role() does.
+local PLAIN_ASSIGN = { assignment_statement = true, assignment = true, assignment_expression = true }
+local function target_text(e)
+    if e.k == 'name' then return e.n end
+    if e.k == 'field' then return target_text(e.b) .. '.' .. e.n end
+    if e.k == 'index' then return target_text(e.b) .. '[]' end
+    return '?'
+end
+local function accumulations(rows, loops, params, bound, lines, op)
+    if not op then return {} end
+    local function within(L, r)
+        local p = rows[r].parent
+        while p and p ~= 0 do if p == L then return true end; p = rows[p].parent end
+        return false
+    end
+    local function root_of(e)
+        while e and (e.k == 'field' or e.k == 'index') do e = e.b end
+        return e and e.k == 'name' and e.n or nil
+    end
+    -- every row that (re)binds a NAME or assigns a TARGET, by structural key
+    local binds, assigns, acc = {}, {}, {}
+    for i, r in ipairs(rows) do
+        local e = r.expr
+        for _, l in ipairs(e and e.lhs or {}) do
+            if l.k == 'name' then local t = binds[l.n] or {}; t[#t + 1] = i; binds[l.n] = t end
+            if expr.is_pure(l) then local k = expr.key(l); local t = assigns[k] or {}; t[#t + 1] = i; assigns[k] = t end
+        end
+        -- a declaration (`local s = s .. x`) makes a NEW binding from the old one: not an accumulation
+        if e and PLAIN_ASSIGN[r.t or ''] and e.lhs and e.rhs and #e.lhs == 1 and #e.rhs == 1
+            and e.rhs[1].k == 'bin' and e.rhs[1].op == op and expr.is_pure(e.lhs[1]) then
+            local lk, self_read = expr.key(e.lhs[1]), false
+            expr.walk(e.rhs[1], function(x)
+                if not self_read and (x.k == 'name' or x.k == 'field' or x.k == 'index')
+                    and expr.is_pure(x) and expr.key(x) == lk then self_read = true end
+            end)
+            if self_read then acc[i] = { key = lk, target = target_text(e.lhs[1]), lhs = e.lhs[1] } end
+        end
+    end
+    local out = {}
+    for i, a in pairs(acc) do
+        local l = a.lhs
+        local root = root_of(l)
+        if root then
+            local resets = {}
+            for _, j in ipairs(assigns[a.key] or {}) do if not acc[j] or acc[j].key ~= a.key then resets[#resets + 1] = j end end
+            if l.k ~= 'name' then for _, j in ipairs(binds[root] or {}) do resets[#resets + 1] = j end end
+            local growth, chain = 0, {}
+            for _, L in ipairs(loops) do
+                if L.input and within(L.row, i) then
+                    local head = lines[L.line] or ''
+                    local binders = head:match('for%s+(.-)%s+in%f[%s]') or head:match('for%s+([%w_]+)%s*=') or ''
+                    local binds_root = binders:find('%f[%w_]' .. root:gsub('%p', '%%%0') .. '%f[^%w_]') ~= nil
+                    local reset_inside = false
+                    for _, j in ipairs(resets) do if within(L.row, j) then reset_inside = true; break end end
+                    if not binds_root and not reset_inside then growth = growth + 1; chain[#chain + 1] = L end
+                end
+            end
+            local rebound = false
+            for _, j in ipairs(binds[root] or {}) do if not acc[j] then rebound = true end end
+            local outlives = not params[root] and not bound[root] and not rebound
+            local entry = (params[root] or outlives) and 1 or 0
+            local level = math.max(growth, entry)
+            if level > 0 then
+                out[#out + 1] = { row = i, line = rows[i].l, level = level, growth = growth,
+                    target = a.target or root, shared = outlives and #resets == 0 or nil, param = params[root] or nil }
+            end
+        end
+    end
+    table.sort(out, function(x, y) return x.row < y.row end)
+    return out
+end
+
 --- one function's loops: which are input-sized, what they iterate, and each loop's line span.
-local function loops_of(store, fn)
+local function loops_of(store, fn, spec)
     local got = expr.of(store, fn.id)
     local fl = got and got.fl
     if not fl or not fl.stmts or #fl.stmts == 0 then return nil end
@@ -216,7 +303,8 @@ local function loops_of(store, fn)
             if rhs and #rhs == 1 and const_ctor(rhs[1]) then const[v] = true end
         end
     end
-    return { loops = out, bound = got.bound or {}, params = params, defs = defrow, const = const }
+    return { loops = out, bound = got.bound or {}, params = params, defs = defrow, const = const,
+        accums = accumulations(rows, out, params, got.bound or {}, lines, spec and spec.concat_op) }
 end
 
 --- @param store table   an ingested store
@@ -256,7 +344,7 @@ function M.analyze(store, data, opts)
         if c.fn then local l = calls_of[c.fn] or {}; l[#l + 1] = c; calls_of[c.fn] = l end
     end
     local stats = { fns = 0, analysed = 0, loops = 0, input_loops = 0, calls = 0,
-        calls_in_input_loops = 0, followed_graph = 0, followed_lexical = 0, refused = 0 }
+        calls_in_input_loops = 0, followed_graph = 0, followed_lexical = 0, refused = 0, accums = 0 }
 
     local callee_memo = {}
     local callee_of_raw, resolve_lexical
@@ -417,7 +505,7 @@ function M.analyze(store, data, opts)
     local function loops_for(fn)
         local L = loops_memo[fn.id]
         if L == nil then
-            local ok, got = pcall(loops_of, store, fn)
+            local ok, got = pcall(loops_of, store, fn, spec_for(fn.file))
             L = ok and got or false
             loops_memo[fn.id] = L
         end
@@ -583,6 +671,11 @@ function M.analyze(store, data, opts)
                 consider({ c = n, loops = chain, visible = L.input and true or nil, holes = mh })
             end
         end
+        -- an ACCUMULATING CONCATENATION costs its target's size (accumulations() above)
+        for _, A in ipairs(ctx and ctx.accums or {}) do
+            local n, chain, mh = around(loops, A.line, nil, fn.file)
+            consider({ c = n + A.level, loops = chain, visible = true, holes = mh, concat = A })
+        end
         if ctx then
             for _, c in ipairs(calls_of[fn.id] or {}) do
                 local cc = callee_cost(c, ctx, fn)
@@ -629,6 +722,7 @@ function M.analyze(store, data, opts)
                 rec = rec.fvia
             else
                 for _, L in ipairs(rec.loops or {}) do if L.shared then return L end end
+                if rec.concat and rec.concat.shared then return { shared = { rec.concat.target } } end
                 local v = rec.via
                 if rec.sub then rec = rec.sub elseif v then rec = v.sub or v else rec = nil end
             end
@@ -646,6 +740,7 @@ function M.analyze(store, data, opts)
             stats.analysed = stats.analysed + 1
             stats.loops = stats.loops + #loops
             for _, L in ipairs(loops) do if L.input then stats.input_loops = stats.input_loops + 1 end end
+            stats.accums = stats.accums + #(ctx.accums or {})
             local seen = {}
             for _, c in ipairs(calls_of[fn.id] or {}) do
                 stats.calls = stats.calls + 1
@@ -689,7 +784,8 @@ function M.analyze(store, data, opts)
             local own = depth(fn)
             if own.visible and own.c >= 2 then
                 findings[#findings + 1] = { kind = 'visible', fn = fn.id, file = fn.file,
-                    line = own.loops[#own.loops].line, depth = own.c, outer = own.loops }
+                    line = own.concat and own.concat.line or own.loops[#own.loops].line, depth = own.c,
+                    outer = own.loops, concat = own.concat }
             end
         end
     end
@@ -736,7 +832,14 @@ function M.chain(f)
                 L.const_by_name and (' (+const by name: ' .. table.concat(L.const_by_name, ',') .. ')') or '')
         end
     end
+    local function concat_text(A)
+        if A then
+            parts[#parts + 1] = ('concat@%d grows %s [size n^%d%s]'):format(A.line, A.target, A.level,
+                A.shared and ', shared' or (A.param and ', from a param' or ''))
+        end
+    end
     loops_text(f.outer)
+    concat_text(f.concat)
     local rec, callee, how = f.inner, f.callee, f.how
     local guard = 0
     while rec and guard < 32 do
@@ -748,6 +851,7 @@ function M.chain(f)
         else
             if callee then parts[#parts + 1] = ('-> %s%s'):format(callee, how == 'lexical' and ' (lexical)' or '') end
             loops_text(rec.loops)
+            concat_text(rec.concat)
             local v = rec.via
             if not v then break end
             if v.node then callee, how, rec = v.node.id, v.how, v.sub
