@@ -197,6 +197,8 @@ M.SLOTS = {
     -- WHAT A BUILTIN CALL COSTS (CART-1057): `{ [spelled name] = { cost, arg, arity?, calls?, src } }`,
     -- read by loopcost. A 'const' entry suppresses a finding and must cite why.
     call_costs = 'ANALYSIS',
+    -- the calls that add or remove a table slot (retained.lua): `{ grow = { [name] = argpos }, shrink = ... }`
+    container_ops = 'ANALYSIS',
     -- a search PATTERN's backtracking degree in the subject's length (an upper bound): (pat, no_anchor) -> int
     pattern_degree = 'ANALYSIS',
     -- a string literal's source text -> its value (argv keeps the text between the quotes)

@@ -1017,6 +1017,13 @@ return {
     -- what a builtin CALL costs, for loopcost (CART-1057): an entry per spelled name, each cited;
     -- a call with no entry and no graph node is a HOLE, never a zero (spec/lua_costs.lua)
     call_costs = require 'cartograph.spec.lua_costs',
+    -- the calls that ADD a slot to a table or REMOVE one, for retained.lua: `{ [spelled name] = the
+    -- container's argument position }`. `wipe`/`table.wipe` are WoW's, `table.clear` is LuaJIT's
+    -- (require 'table.clear'); `table.insert` of any arity adds one element.
+    container_ops = {
+        grow = { ['table.insert'] = 1, rawset = 1 },
+        shrink = { ['table.remove'] = 1, wipe = 1, ['table.wipe'] = 1, ['table.clear'] = 1 },
+    },
     -- how far a PATTERN can backtrack (an upper bound, a hole in loopcost; spec/lua_patterns.lua)
     pattern_degree = require('cartograph.spec.lua_patterns').degree,
     -- a short string literal's source text -> its value, before a pattern is measured

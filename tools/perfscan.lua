@@ -84,12 +84,20 @@ for rank, f in ipairs(LB.findings) do
     hit(f.file, f.line, lb_rule[f.kind], ('#%d bytes %s  %s'):format(rank, loopcost.depth_text(f), loopcost.chain(f)))
 end
 
+-- RETAINED GROWTH: state outliving a call, grown by it, never shrunk (retained.lua)
+local retained = require 'cartograph.retained'
+local t_rg = vim.uv.hrtime()
+local RG = retained.analyze(store, data, { files = pat })
+t_rg = (vim.uv.hrtime() - t_rg) / 1e9
+for _, f in ipairs(RG.findings) do hit(f.file, f.line, 'retained-' .. f.how, retained.text(f)) end
 local total = #rows
 print(('perfscan %s%s: %d function(s) (%d unsupported by the expression IR), %d finding(s)')
     :format(root, pat and (' [' .. pat .. ']') or '', fns, unsupported, total))
 print(('  loopcost: %.1fs over %d function(s); %d loop(s), %d input-sized; %d call(s) inside input loops: callee via graph %d, via lexical scope %d, refused %d')
     :format(t_lc, LC.stats.analysed, LC.stats.loops, LC.stats.input_loops, LC.stats.calls_in_input_loops,
         LC.stats.followed_graph, LC.stats.followed_lexical, LC.stats.refused))
+print(('  retained: %.1fs; %d container(s) grown across calls in %d function(s), %d with a shrink, reset or weak table; %d grow / %d shrink site(s)')
+    :format(t_rg, RG.stats.containers, RG.stats.fns, RG.stats.suppressed, RG.stats.grow_sites, RG.stats.shrink_sites))
 print(('  loopcost bytes: %.1fs; %d allocation site(s), %d accumulation(s)'):format(t_lb, LB.stats.allocs, LB.stats.accums))
 do
     local hc = {}
