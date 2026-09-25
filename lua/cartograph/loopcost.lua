@@ -713,7 +713,10 @@ function M.analyze(store, data, opts)
         if a.findings ~= b.findings then return a.findings > b.findings end
         return a.name < b.name
     end)
-    return { findings = findings, stats = stats, worklist = worklist }
+    -- depth_of(id): any function's { c, holes, loops, via } — for callers that price functions, not
+    -- call sites (the name-word prior measurement, CART-1057)
+    return { findings = findings, stats = stats, worklist = worklist,
+        depth_of = function(id) local n = by_id[id]; return n and depth(n) or nil end }
 end
 
 --- a finding's chain, for display: the outer loops, then each callee (a node, a costed builtin, a
