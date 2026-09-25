@@ -365,6 +365,11 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               linear equivalents; each rule is checked
                               against Lua's matcher and measured linear.
                               Review :CartographDiff, commit :CartographApply
+  :CartographIndexScan [file] stage index-a-scan: a repeated equality-
+                              filter loop over the same list iterates the
+                              key's bucket (list order kept, rebuilt when
+                              the list grows). Static candidates; price
+                              them with tools/idxprofile.lua on a workload
   :CartographLoopCost         input-sized loop nesting ACROSS CALLS:
                               the callers that run this function inside
                               a loop over a growing collection, and the

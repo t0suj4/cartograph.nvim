@@ -295,6 +295,26 @@ function M.register(H)
             vim.log.levels.INFO)
     end, { nargs = '?', complete = 'file', desc = 'cartograph: stage the VERIFIED rewrite of backtracking search idioms in this file (or the named one) — the trim idiom and its kin become linear equivalents, each rule checked against Lua\'s own matcher on 114k inputs and measured linear; a method site carries the premise that its subject is a string; declined sites say why. Review :CartographDiff, commit :CartographApply' })
 
+    -- ── index a scan: a repeated equality-filter loop iterates its key's bucket (CART-1057)
+    cmd('CartographIndexScan', function (o)
+        local store = live() if not store then return end
+        local root = (store.data or {}).root
+        local rel = o.args ~= '' and o.args or nil
+        if not rel then
+            local abs = vim.api.nvim_buf_get_name(0)
+            if root and abs:sub(1, #root + 1) == root .. '/' then rel = abs:sub(#root + 2) end
+        end
+        if not rel then return vim.notify('cartograph: open a file inside the graph, or name one', vim.log.levels.WARN) end
+        local ix = require 'cartograph.idxrewrite'
+        local plan, why = ix.plan(store, rel)
+        scratch(ix.report(store, rel))
+        if not plan then return vim.notify('cartograph: no index-a-scan — ' .. tostring(why), vim.log.levels.INFO) end
+        store.set_txn(plan)
+        vim.notify(('cartograph: index-a-scan staged — %d loop(s) in %s, %d declined. Static candidates only:'
+            .. ' price them with tools/idxprofile.lua on a workload before applying. Review :CartographDiff, then :CartographApply')
+            :format(#plan.moves, rel, #(plan.declined or {})), vim.log.levels.INFO)
+    end, { nargs = '?', complete = 'file', desc = 'cartograph: stage INDEX-A-SCAN for this file (or the named one) — a repeated `for _, v in ipairs(L) do if v.F == K then ... end end` over the same list iterates the key\'s bucket instead (an in-file helper, list order kept, rebuilt when the list grows, the if kept, non-primitive keys scan as written). Guards decline an else branch, a key reading the element, a fresh list per call, a reassigned field, a removed/replaced element. The CPU-for-memory trade is priced on a workload by tools/idxprofile.lua. Review :CartographDiff, commit :CartographApply' })
+
     -- ── extract-helper proposal: the focused fn's best near-clone → a helper ──
     cmd('CartographExtractHelper', function ()
         local store = live() if not store then return end

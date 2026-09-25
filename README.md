@@ -3222,6 +3222,19 @@ its subject twice, so a subject containing a call is declined rather than duplic
 trim is rewritten only where its second return value is already dropped; a method site carries the
 premise that its subject is a string; `@cg-ignore: pattern-rewrite` keeps a site as written.
 
+The second remedy, `:CartographIndexScan`, is the `fn_at` cure made general for its one sound case: a
+loop that filters a list by one field's equality, run again and again over the same list, iterates
+that key's bucket instead — `ipairs(cg_bucket(L, 'F', K) or L)`, the helper written into the file,
+the list's order kept, the bucket rebuilt whenever the list grows, the original `if` still in place,
+and any key that is not a string, boolean or ordinary number scanning the list exactly as written.
+It declines, each with its reason, an `else` branch, a key that reads the element, a list built fresh
+per call, a field reassigned in the file and an element removed or replaced. An index trades memory
+for time, and whether that trade pays is a question about a workload, not about the code:
+`tools/idxprofile.lua` runs one with every candidate probed and prices each site — element touches
+the scan costs against the index's build and walk, and the bucket entries it would hold (on the
+fixture, x634 fewer touches for 2,000 entries at one site; x2.4 at another, kept). A plan given that
+profile applies only what it measured worth applying.
+
 These are suggestions until you ask for them to be *applied*. `optapply` is the piece
 that acts: it takes the CSE-reuse finding and rewrites the source — `local b = x + y`
 becomes `local b = a` where an earlier `local a = x + y` already holds the value — through
@@ -4067,6 +4080,9 @@ nvim --headless -u NONE -l tools/perfscan.lua lua/cartograph [--files <pattern>]
 # sizes on inputs built from characters its classes accept and reject; a measured growth exponent
 # ABOVE the degree refutes the bound (below confirms nothing: the adversarial input may be missing).
 nvim --headless -u NONE -l tools/patternjoin.lua ['<pattern>' ...]
+# PROFILE-GUIDED INDEX-A-SCAN: run a workload with one module's candidate scans probed; per site the
+# calls, element touches the scan costs, touches the index would cost, bucket entries it would hold.
+nvim --headless -u NONE -l tools/idxprofile.lua <module> <file.lua> <workload.lua> [--ratio N]
 # THE CLONE LADDER, and one DEFECT tier riding the same index. Default is
 # function-granular exact clones; --blocks is contiguous statement runs ranked
 # by how many files they span; --near is whole functions within a couple of
