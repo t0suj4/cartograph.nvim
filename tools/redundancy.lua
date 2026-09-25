@@ -36,7 +36,7 @@ end
 if R.why then print('  refused: ' .. R.why) end
 local by = {}
 for _, f in ipairs(R.findings) do by[f.kind] = by[f.kind] or {}; table.insert(by[f.kind], f) end
-for _, kind in ipairs({ 'hoist', 'redundant', 'redundant-via' }) do
+for _, kind in ipairs({ 'missing', 'order-dependent', 'possible', 'hoist', 'redundant', 'redundant-via' }) do
     local l = by[kind] or {}
     print(('  %-14s %d'):format(kind, #l))
     for j = 1, math.min(kind == 'hoist' and #l or show, #l) do print('    ' .. redundancy.text(l[j])) end

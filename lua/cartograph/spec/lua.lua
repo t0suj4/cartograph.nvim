@@ -1038,12 +1038,29 @@ return {
         ['vim.fn.isdirectory'] = ':help isdirectory() — returns whether a directory exists; no side effect',
         ['vim.fn.filereadable'] = ':help filereadable() — returns whether a file is readable; no side effect',
         ['os.getenv'] = 'Lua 5.1 manual §5.8: returns the value of an environment variable',
+        ['vim.o.runtimepath:find'] = 'string.find on the option\'s current value (Lua 5.1 manual §5.4.1): a pure search',
     },
+    -- calls that NEED a fact established first (redundancy.lua's missing half): `lang` = the argument naming the
+    -- language, `step` = the FAMILY (idempotent_steps' `family`) any spelling of which satisfies the need. A need PRODUCES a finding (the safe
+    -- direction), and each is cited. `pcall(f, ...)` of one of these needs it too (the argument shifts by one).
+    needs_facts = {
+        ['vim.treesitter.get_string_parser'] = { lang = 2, step = 'runtimepath',
+            src = 'measured 2026-09-25, nvim 0.11.5 -u NONE: raises for a non-bundled language until its parser dir is on the runtimepath' },
+        ['vim.treesitter.get_parser'] = { lang = 2, step = 'runtimepath', src = 'as get_string_parser (the same loader)' },
+        ['vim.treesitter.language.add'] = { lang = 1, step = 'runtimepath',
+            src = 'measured 2026-09-25, nvim 0.11.5: returns nil (does NOT raise) for a non-bundled language without its parser dir' },
+    },
+    -- the parsers nvim SHIPS (no setup needed): a need for one of these is no need. It SUPPRESSES findings, so it is
+    -- measured, not recalled.
+    bundled_parsers = { c = true, lua = true, vim = true, vimdoc = true, query = true, markdown = true, markdown_inline = true,
+        src = 'measured 2026-09-25, nvim 0.11.5 -u NONE --noplugin: exactly these seven load; bash/python/js/cpp/php/scheme/rust/haskell do not' },
     idempotent_steps = {
-        ['vim.opt.rtp:append'] = { arg = 1, src = 'measured 2026-09-25, nvim 0.11.5: two appends of one dir leave one runtimepath entry' },
-        ['vim.opt.runtimepath:append'] = { arg = 1, src = 'as vim.opt.rtp:append (the same option)' },
-        ['vim.opt.rtp:prepend'] = { arg = 1, src = 'runtimepath denies duplicates (as :append, measured there)' },
-        ['vim.treesitter.language.add'] = { arg = 1, src = 'measured 2026-09-25, nvim 0.11.5: a second add of a loaded language succeeds' },
+        -- `family`: what the step establishes, for a NEED to match any spelling of it (needs_facts name families)
+        ['vim.opt.rtp:append'] = { arg = 1, family = 'runtimepath', src = 'measured 2026-09-25, nvim 0.11.5: two appends of one dir leave one runtimepath entry' },
+        ['vim.opt.runtimepath:append'] = { arg = 1, family = 'runtimepath', src = 'as vim.opt.rtp:append (the same option)' },
+        ['vim.opt.rtp:prepend'] = { arg = 1, family = 'runtimepath', src = 'runtimepath denies duplicates (as :append, measured there)' },
+        ['vim.opt.runtimepath:prepend'] = { arg = 1, family = 'runtimepath', src = 'as vim.opt.rtp:prepend (the same option)' },
+        ['vim.treesitter.language.add'] = { arg = 1, family = 'treesitter-language', src = 'measured 2026-09-25, nvim 0.11.5: a second add of a loaded language succeeds' },
     },
     container_ops = {
         grow = { ['table.insert'] = 1, rawset = 1 },

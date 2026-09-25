@@ -96,3 +96,34 @@ test('redundancy: a prelude step before the units load makes every unit step red
     eq(1, #hoists, 'only ~/late is suggested')
     ok(hoists[1].fact.key:find('late', 1, true), hoists[1].fact.key)
 end)
+
+-- THE MISSING HALF (CART-1070): needs a run order does not guarantee. Fixture: tests/fixtures/redundancy/needs.
+test('needs: missing, order-dependent (same unit: passes alone; another unit: fails alone), possible', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local R = analyze('needs')
+    local m = at(R, 'missing', 'a0_spec.lua', 3)
+    ok(m, 'a0: nothing sets it up first')
+    local a2 = at(R, 'order-dependent', 'a_spec.lua', 6)
+    ok(a2, 'a2: after a1 of the same unit')
+    eq('passes', a2.alone)
+    local b1 = at(R, 'order-dependent', 'b_spec.lua', 11)
+    ok(b1, 'b1: through the helper, set up only by a_spec')
+    eq('fails', b1.alone)
+    eq('has', b1.via)
+    ok(at(R, 'possible', 'b_spec.lua', 25), 'b5: a loop variable is not a language anyone can read')
+end)
+
+test('needs: nothing for a bundled parser, a self-guarded setup, or try-set-up-retry (another spelling of the family)', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local R = analyze('needs')
+    eq(nil, any_at(R, 'b_spec.lua', 14), 'b2: lua is bundled')
+    eq(nil, any_at(R, 'b_spec.lua', 18), 'b3: the self-guarded append before it')
+    eq(nil, any_at(R, 'b_spec.lua', 21), 'b4: parser_for retries after runtimepath:prepend')
+end)
+
+test('needs: a guarded setup in a do-block before the load loop satisfies every unit', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local R = analyze('prelude')
+    eq(nil, any_at(R, 'e_spec.lua', 2), 'e1: the prelude set it up')
+    ok(at(R, 'redundant', 'c_spec.lua', 3), 'and the unit copies still read redundant through the do-block')
+end)

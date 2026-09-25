@@ -205,6 +205,8 @@ M.SLOTS = {
     deterministic_calls = 'ANALYSIS',
     -- calls that read state and change nothing (hoistsetup.lua's guard deletion): `{ [spelled call] = src }`
     effect_free_calls = 'ANALYSIS',
+    -- calls that need an idempotent fact first, and the parsers the runtime ships (redundancy.lua's missing half)
+    needs_facts = 'ANALYSIS', bundled_parsers = 'ANALYSIS',
     -- a search PATTERN's backtracking degree in the subject's length (an upper bound): (pat, no_anchor) -> int
     pattern_degree = 'ANALYSIS',
     -- a string literal's source text -> its value (argv keeps the text between the quotes)
