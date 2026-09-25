@@ -1412,9 +1412,18 @@ local H_LANG = 'c' -- until a tree says otherwise; `.h` stays in c.exts as the d
 -- ⚠ MODULE-LEVEL AND KEYED BY FILE, not a closure local, because the functions
 -- pass and the calls pass are DIFFERENT FUNCTIONS (`extract_calls`) — a per-file
 -- upvalue is simply not in scope there. Keyed by file so two files' identical
--- positions cannot collide, and never cleared: a worker is a process, and the
--- entries are a few per file.
+-- positions cannot collide.
+-- ★ RESET PER FILE (CART-1067). It was "never cleared: a worker is a process", but
+-- extraction also runs IN the long-lived process — the editor session, the MCP
+-- server, every on-demand re-extract — and there it kept every callback position
+-- of every extraction for the life of the process (found by retained.lua; wow: 2753
+-- entries, 2.9 MB of heap per extraction). A file's defs pass and calls pass run
+-- back to back inside the per-file loop, and on-demand materialization re-extracts
+-- a file with BOTH passes, so an entry is dead once its file is done: the loop
+-- starts each file with an empty table.
 local ANON_AT = {}
+--- how many callback positions ANON_AT holds right now (tests and measurements, CART-1067)
+function M._anon_at_count() local n = 0; for _ in pairs(ANON_AT) do n = n + 1 end; return n end
 local EXT_ELANG = {} -- ext -> { lang|false, spec|false }
 local EXT_PLANG = {} -- ext -> lang|false
 
@@ -7676,6 +7685,7 @@ local MATCH_OPTS = { match_limit = 65536 }
     -- and the last one after the loop. Off by default, like every accumulator here.
     local _pfile, _pfile_name
     for _, file in ipairs(files) do
+        ANON_AT = {} -- the previous file's callback positions are dead (CART-1067)
         if _pfile then prof.files[_pfile_name] = (prof.files[_pfile_name] or 0) + (vim.uv.hrtime() - _pfile) end
         _pfile = pstart(); _pfile_name = file
         local src, rerr = tp.read_source(abs(file))
