@@ -387,3 +387,86 @@ test('concat: a field of a PARAMETER arrives input-sized (depth 1) but is not sh
     eq('self.buf', d.concat.target)
     eq(nil, d.concat.shared)
 end)
+
+-- alloc.lua: the BYTES unit — one algebra, allocation sites for events, builtins priced by `alloc`
+local RB
+local function bytes()
+    if RB then return RB end
+    analyze()
+    RB = loopcost.analyze(store, store.data, { unit = 'bytes' })
+    return RB
+end
+local function alloc_depth(fnname, R)
+    for _, n in ipairs(store.data.nodes) do
+        if n.id:match('^alloc%.lua::' .. fnname:gsub('[%.:]', '%%%0') .. '@') then return (R or bytes()).depth_of(n.id) end
+    end
+end
+-- THE ORACLE: run the fixture and measure the bytes it allocates at two sizes (GC stopped, JIT off,
+-- distinct strings so nothing is interned twice); the growth exponent is log2 of the ratio
+local function measured(fnname, extra)
+    local F = dofile(FIX .. '/alloc.lua')
+    local f = assert(F[fnname:match('[%w_]+$')])
+    local function run(n)
+        local xs = {}
+        for i = 1, n do xs[i] = 'v' .. i end
+        local arg2 = extra and extra(n) -- built OUTSIDE the measured window
+        collectgarbage('collect'); collectgarbage('stop')
+        local before = collectgarbage('count')
+        local keep = f(xs, arg2)
+        local kb = collectgarbage('count') - before
+        collectgarbage('restart')
+        return kb, keep
+    end
+    local jit_on = jit and jit.status and jit.status()
+    if jit then jit.off() end
+    local a, b = run(200), run(400)
+    if jit and jit_on then jit.on() end
+    if a <= 0 and b <= 0 then return 0 end -- nothing allocated at either size: bounded
+    return math.log(b / a) / math.log(2)
+end
+
+test('bytes: ★ the static degree MATCHES the measured allocation growth, function by function', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local cases = {
+        { 'M.pairs_of', 2 },
+        { 'M.members', 1, function(n) local ys = {} for i = 1, n do ys[i] = 'w' .. i end return ys end }, { 'M.grid', 2 }, { 'M.thunks', 1 }, { 'M.snapshots', 2 },
+        { 'M.finds', 0, function(n) return ('x'):rep(n) end },
+        { 'M.stepped', 1 }, { 'M.opts_once', 1 },
+    }
+    for _, cs in ipairs(cases) do
+        local d = alloc_depth(cs[1])
+        local e = measured(cs[1], cs[3])
+        ok(math.abs(e - cs[2]) < 0.35, ('%s measured n^%.2f, expected %d'):format(cs[1], e, cs[2]))
+        eq(cs[2], d.c, cs[1] .. ' static bytes degree')
+        eq(0, d.holes and #d.holes or 0, cs[1] .. ' certified whole')
+    end
+end)
+
+test('bytes: a scan that allocates nothing is time 2 but bytes 1 — the two units disagree where they should', function ()
+    if not has_lua() then skip 'no lua parser' end
+    eq(2, analyze().depth_of((function ()
+        for _, n in ipairs(store.data.nodes) do if n.id:match('^alloc%.lua::M%.members@') then return n.id end end
+    end)()).c)
+    eq(1, alloc_depth('M.members').c)
+end)
+
+test('bytes: findings carry the unit and name the allocation site; a helper allocating per element is hidden', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local got
+    for _, f in ipairs(bytes().findings) do
+        if f.callee and f.callee:match('^alloc%.lua::row@') then got = f end
+    end
+    ok(got, 'the call to row() per element')
+    eq('hidden', got.kind)
+    eq('bytes', got.unit)
+    eq(2, got.depth)
+    ok(loopcost.chain(got):find('alloc@29 table', 1, true), loopcost.chain(got))
+end)
+
+test('loopcost: a constructor KEY in a loop head is not an iterated name (time unit too)', function ()
+    if not has_lua() then skip 'no lua parser' end
+    for _, n in ipairs(store.data.nodes) do
+        if n.id:match('^alloc%.lua::M%.opts_once@') then eq(1, analyze().depth_of(n.id).c, 'the inner loop walks a one-key constructor') end
+        if n.id:match('^alloc%.lua::M%.stepped@') then eq(2, analyze().depth_of(n.id).c, 'time counts both loops') end
+    end
+end)

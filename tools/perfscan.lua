@@ -74,6 +74,15 @@ local lc_rule = { ['hidden-shared'] = 'loop-scan-shared', hidden = 'loop-nesting
 for rank, f in ipairs(LC.findings) do
     hit(f.file, f.line, lc_rule[f.kind], ('#%d depth %s  %s'):format(rank, loopcost.depth_text(f), loopcost.chain(f)))
 end
+-- the same algebra in the BYTES unit: allocation sites, builtins priced by what they allocate
+local t_lb = vim.uv.hrtime()
+local LB = loopcost.analyze(store, data, { files = pat, unit = 'bytes' })
+t_lb = (vim.uv.hrtime() - t_lb) / 1e9
+local lb_rule = { ['hidden-shared'] = 'alloc-shared', hidden = 'alloc-nesting-hidden', visible = 'alloc-nesting-visible',
+    possible = 'alloc-nesting-possible' }
+for rank, f in ipairs(LB.findings) do
+    hit(f.file, f.line, lb_rule[f.kind], ('#%d bytes %s  %s'):format(rank, loopcost.depth_text(f), loopcost.chain(f)))
+end
 
 local total = #rows
 print(('perfscan %s%s: %d function(s) (%d unsupported by the expression IR), %d finding(s)')
@@ -81,6 +90,7 @@ print(('perfscan %s%s: %d function(s) (%d unsupported by the expression IR), %d 
 print(('  loopcost: %.1fs over %d function(s); %d loop(s), %d input-sized; %d call(s) inside input loops: callee via graph %d, via lexical scope %d, refused %d')
     :format(t_lc, LC.stats.analysed, LC.stats.loops, LC.stats.input_loops, LC.stats.calls_in_input_loops,
         LC.stats.followed_graph, LC.stats.followed_lexical, LC.stats.refused))
+print(('  loopcost bytes: %.1fs; %d allocation site(s), %d accumulation(s)'):format(t_lb, LB.stats.allocs, LB.stats.accums))
 do
     local hc = {}
     for cl, n in pairs(LC.stats.holes or {}) do hc[#hc + 1] = cl .. ' ' .. n end

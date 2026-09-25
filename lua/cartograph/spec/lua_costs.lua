@@ -21,6 +21,9 @@
 --          pattern_degree: a literal of degree >= 2 is a `backtrack` hole, a non-literal a `dynamic` one)
 --   plain    which argument, when the literal `true`, makes the search PLAIN (no pattern, no hole)
 --   no_anchor  a leading `^` is a LITERAL character for this function, not an anchor (5.1/LuaJIT gmatch)
+--   alloc  what the call ALLOCATES, for loopcost's bytes unit: 'const' | 'n' | 'captures' (a find:
+--          bounded unless its literal pattern captures). ABSENT = the time cost, an upper bound (a call
+--          cannot allocate more than it runs). A LOWER alloc suppresses and cites, in `alloc_src`.
 --   by_name  the entry matches a METHOD by its name alone (`x:match(p)`): the receiver's type is not
 --          known, so the cost is believed by name and loopcost says so on the finding.
 -- Keyed by the call's spelled name (`c.full`): 'table.sort', 'vim.tbl_contains'; a method by ':name'.
@@ -34,18 +37,19 @@ local FAST = 'LuaJIT fast function (a fixed number of VM operations; not measure
 
 return {
     -- ── table ──
-    ['table.insert'] = { cost = 'n', arg = 1, src = LUA51 .. ': "shifting up other elements to open space"',
+    ['table.insert'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = LUA51 .. ': inserts ONE element (the shift moves, it does not copy)', src = LUA51 .. ': "shifting up other elements to open space"',
         arity = { [2] = { cost = 'const', src = LUA51 .. ': "The default value for pos is n+1" — an append shifts nothing' } } },
-    ['table.remove'] = { cost = 'n', arg = 1, src = LUA51 .. ': "shifting down other elements to close up the space"',
+    ['table.remove'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = LUA51 .. ': removes one element and returns it', src = LUA51 .. ': "shifting down other elements to close up the space"',
         arity = { [1] = { cost = 'const', src = LUA51 .. ': "The default value for pos is n" — the last element, nothing shifts' } } },
     ['table.concat'] = { cost = 'n', arg = 1, src = LUA51 .. ': concatenates list[i..j], every element read' },
-    ['table.sort'] = { cost = 'nlogn', arg = 1, calls = { arg = 2, per = 'element' },
+    ['table.sort'] = { cost = 'nlogn', arg = 1, alloc = 'const', alloc_src = LUA51 .. ': "Sorts list elements in a given order, in-place"', calls = { arg = 2, per = 'element' },
         src = LUA51 .. ': sorts list elements in place (a comparison sort); comp is called per comparison' },
-    ['table.maxn'] = { cost = 'n', arg = 1, src = LUA51 .. ': "the largest positive numerical index" — a traversal' },
+    ['table.maxn'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = 'returns a number', src = LUA51 .. ': "the largest positive numerical index" — a traversal' },
     ['unpack'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.1: returns the elements t[i..j]' },
     ['table.unpack'] = { cost = 'n', arg = 1, src = 'Lua 5.2+ manual §6.6: returns the elements t[i..j]' },
     -- ── string (functions and methods; the method is believed by NAME) ──
-    ['string.find'] = { cost = 'n', arg = 1, pattern = 2, plain = 4, src = 'Lua 5.1 manual §5.4.1: pattern matching scans the subject' },
+    ['string.find'] = { cost = 'n', arg = 1, pattern = 2, plain = 4, alloc = 'captures',
+        alloc_src = 'Lua 5.1 manual §5.4: "returns the indices ... If the pattern has captures, ... the captured values are also returned"', src = 'Lua 5.1 manual §5.4.1: pattern matching scans the subject' },
     ['string.match'] = { cost = 'n', arg = 1, pattern = 2, src = 'Lua 5.1 manual §5.4.1: pattern matching scans the subject' },
     ['string.gmatch'] = { cost = 'n', arg = 1, pattern = 2, no_anchor = true, src = 'Lua 5.1 manual §5.4.1: iterates over the subject' },
     ['string.gsub'] = { cost = 'n', arg = 1, pattern = 2, calls = { arg = 3, per = 'element' },
@@ -54,7 +58,7 @@ return {
     ['string.lower'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4: a copy, every character' },
     ['string.upper'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4: a copy, every character' },
     ['string.reverse'] = { cost = 'n', arg = 1, src = 'Lua 5.1 manual §5.4: a copy, every character' },
-    [':find'] = { cost = 'n', arg = 0, pattern = 1, plain = 3, by_name = true, src = 'as string.find, believed by the method name' },
+    [':find'] = { cost = 'n', arg = 0, pattern = 1, plain = 3, by_name = true, alloc = 'captures', alloc_src = 'as string.find', src = 'as string.find, believed by the method name' },
     [':match'] = { cost = 'n', arg = 0, pattern = 1, by_name = true, src = 'as string.match, believed by the method name' },
     [':gmatch'] = { cost = 'n', arg = 0, pattern = 1, no_anchor = true, by_name = true, src = 'as string.gmatch, believed by the method name' },
     [':gsub'] = { cost = 'n', arg = 0, pattern = 1, by_name = true, calls = { arg = 2, per = 'element' },
@@ -91,11 +95,11 @@ return {
     ['math.random'] = { cost = 'const', src = FAST }, ['math.sqrt'] = { cost = 'const', src = FAST },
     ['os.time'] = { cost = 'const', src = FAST }, ['os.clock'] = { cost = 'const', src = FAST },
     -- ── neovim runtime (an ENVIRONMENT; each line read in shared.lua) ──
-    ['vim.tbl_contains'] = { cost = 'n', arg = 1, src = SHARED .. '309 (a loop over t)' },
-    ['vim.list_contains'] = { cost = 'n', arg = 1, src = SHARED .. '339 (a loop over t)' },
+    ['vim.tbl_contains'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = SHARED .. '309 (returns a boolean)', src = SHARED .. '309 (a loop over t)' },
+    ['vim.list_contains'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = SHARED .. '339 (returns a boolean)', src = SHARED .. '339 (a loop over t)' },
     ['vim.tbl_keys'] = { cost = 'n', arg = 1, src = SHARED .. '218 (pairs over t)' },
     ['vim.tbl_values'] = { cost = 'n', arg = 1, src = SHARED .. '235 (pairs over t)' },
-    ['vim.tbl_count'] = { cost = 'n', arg = 1, src = SHARED .. '714 (pairs over t)' },
+    ['vim.tbl_count'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = SHARED .. '714 (returns a number)', src = SHARED .. '714 (pairs over t)' },
     ['vim.tbl_map'] = { cost = 'n', arg = 2, calls = { arg = 1, per = 'element' }, src = SHARED .. '253 (func per element)' },
     ['vim.tbl_filter'] = { cost = 'n', arg = 2, calls = { arg = 1, per = 'element' }, src = SHARED .. '271 (func per element)' },
     ['vim.tbl_extend'] = { cost = 'n', arg = 2, src = SHARED .. '429 (copies every argument table)' },
@@ -106,9 +110,9 @@ return {
     ['vim.split'] = { cost = 'n', arg = 1, src = SHARED .. '202 (gsplit over s)' },
     ['vim.gsplit'] = { cost = 'n', arg = 1, src = SHARED .. '106 (iterates s)' },
     ['vim.trim'] = { cost = 'n', arg = 1, src = SHARED .. '791 (a match over s)' },
-    ['vim.islist'] = { cost = 'n', arg = 1, src = SHARED .. '682 (pairs over t)' },
-    ['vim.tbl_islist'] = { cost = 'n', arg = 1, src = SHARED .. '667 (pairs over t)' },
-    ['vim.isarray'] = { cost = 'n', arg = 1, src = SHARED .. '636 (pairs over t)' },
+    ['vim.islist'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = SHARED .. '682 (returns a boolean)', src = SHARED .. '682 (pairs over t)' },
+    ['vim.tbl_islist'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = SHARED .. '667 (returns a boolean)', src = SHARED .. '667 (pairs over t)' },
+    ['vim.isarray'] = { cost = 'n', arg = 1, alloc = 'const', alloc_src = SHARED .. '636 (returns a boolean)', src = SHARED .. '636 (pairs over t)' },
     ['vim.tbl_flatten'] = { cost = 'n', arg = 1, src = SHARED .. '576 (every nested element)' },
     ['vim.tbl_isempty'] = { cost = 'const', src = SHARED .. '357 (next(t) == nil: one step)' },
     ['vim.startswith'] = { cost = 'const', src = SHARED .. '811 (compares the prefix only)' },

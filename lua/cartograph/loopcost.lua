@@ -44,6 +44,16 @@
 --     position in the head's first line.
 --   NO SIZES: a shape, not a cost; the verdict needs a workload (CART-1058).
 --
+-- ── THE BYTES UNIT (opts.unit = 'bytes') ───────────────────────────────────────────
+-- The same algebra over ALLOCATION: the events are allocation sites (a table, a closure, a string
+-- built by concatenation, an append — allocations() below) instead of loops, and a builtin costs
+-- what it ALLOCATES (`alloc` in call_costs; absent = its time cost, an upper bound). Bytes never
+-- exceed time per function, so the bytes findings are the time findings that ALSO allocate at that
+-- degree: GC churn, and the memory side of a time/memory trade (idxrewrite's index).
+-- ★ ACCEPTED BY MEASUREMENT: the spec runs the fixture and measures allocated bytes at two sizes
+-- (GC stopped, JIT off — deterministic), and the static degree must match the growth exponent.
+-- ⚠ With the JIT on, LuaJIT's allocation SINKING can remove an allocation this counts: an upper bound.
+--
 -- ── CALLEES: THE CALL GRAPH, THEN LEXICAL SCOPE ─────────────────────────────────────
 -- A call the resolver linked (`c.to`) is followed. A BARE call it refused is resolved here by
 -- LEXICAL SCOPE when exactly one same-named function is visible from the call: defined in the
@@ -190,6 +200,40 @@ local function accumulations(rows, loops, params, bound, lines, op)
     return out
 end
 
+--- ALLOCATION SITES (the BYTES unit): a row that creates a fresh object — a table constructor, a
+--- closure, a string built by the concatenation operator (not an accumulation: accumulations() prices
+--- those by the target's size), or an APPEND (`t[#t + 1] = v`, which grows t by one slot). Each is a
+--- bounded allocation (size degree 0); what makes it grow is the loops around it, counted by the
+--- caller of this list exactly as for a call. A closure's own body is not this function's (the `fn`
+--- node is an opaque leaf), so a helper's `{}` is priced where the helper is called.
+local function allocations(rows, op, accums, LOOP)
+    local skip = {}
+    for _, a in ipairs(accums) do skip[a.row] = true end
+    local out = {}
+    for i, r in ipairs(rows) do
+        local e, what = r.expr, nil
+        local function scan(list, side)
+            for _, x in ipairs(list or {}) do
+                expr.walk(x, function(n)
+                    if what then return end
+                    if n.k == 'table' then what = 'table'
+                    elseif n.k == 'fn' then what = 'closure'
+                    elseif side == 'rhs' and op and n.k == 'bin' and n.op == op and not skip[i] then what = 'string'
+                    elseif side == 'lhs' and n.k == 'index' and n.i and n.i.k == 'bin' and n.i.op == '+'
+                        and n.i.l and n.i.l.k == 'un' and n.i.l.op == '#' then what = 'append' end
+                end)
+            end
+        end
+        if e and not (r.t or ''):find('^if') then scan(e.rhs, 'rhs'); scan(e.lhs, 'lhs') end
+        -- a FOR head's expressions are evaluated ONCE per entry into the loop (a while/repeat condition
+        -- is evaluated per trip, and stays counted)
+        local p = r.parent and rows[r.parent]
+        local head = (LOOP[r.t or ''] or (p and LOOP[p.t or ''] and (r.t or ''):find('clause'))) and (r.t or ''):find('^for') and true or nil
+        if what then out[#out + 1] = { row = i, line = r.l, what = what, size = 0, head = head } end
+    end
+    return out
+end
+
 --- one function's loops: which are input-sized, what they iterate, and each loop's line span.
 local function loops_of(store, fn, spec)
     local got = expr.of(store, fn.id)
@@ -233,8 +277,10 @@ local function loops_of(store, fn, spec)
                 -- lua's explicit generic-for triple `for _, c in inext, n, -1`: the FIRST
                 -- expression is the iterator function, the state after it is what is walked
                 if head:find('%f[%w_]in%s+' .. pv .. '%s*,') then return nil end
-                for pre, post in head:gmatch('(.?)%f[%w_]' .. pv .. '%f[^%w_](%s*[%(%.:]?)') do
+                for pre, post, eq1 in head:gmatch('(.?)%f[%w_]' .. pv .. '%f[^%w_](%s*[%(%.:]?)(=?=?)') do
                     local p1 = post:gsub('%s', '')
+                    -- `{ plain = true }` in a head: a constructor KEY, not a read (du lists it as a use)
+                    if eq1 == '=' and p1 == '' then pre = '.' end
                     if pre ~= '.' and pre ~= ':' then
                         if p1 == '' then return 'value' end -- followed by neither `(` nor `.`/`:`
                         -- ONE walk decides: `v(` = CALLED, `v.x(` / `v.a.b:c(` = a RECEIVER (a module or an
@@ -303,8 +349,9 @@ local function loops_of(store, fn, spec)
             if rhs and #rhs == 1 and const_ctor(rhs[1]) then const[v] = true end
         end
     end
+    local accums = accumulations(rows, out, params, got.bound or {}, lines, spec and spec.concat_op)
     return { loops = out, bound = got.bound or {}, params = params, defs = defrow, const = const,
-        accums = accumulations(rows, out, params, got.bound or {}, lines, spec and spec.concat_op) }
+        accums = accums, allocs = allocations(rows, spec and spec.concat_op, accums, LOOP) }
 end
 
 --- @param store table   an ingested store
@@ -314,6 +361,11 @@ end
 --- @return table { findings = {...}, stats = {...} }
 function M.analyze(store, data, opts)
     opts = opts or {}
+    -- THE UNIT: 'time' (steps; the default) or 'bytes' (allocation). ONE algebra, two sets of events:
+    -- time counts loops, calls and accumulations; bytes counts allocation sites, calls and
+    -- accumulations, and prices a builtin by its `alloc` (default: its time cost — a call cannot
+    -- allocate more than it runs, so the default is an upper bound and a lower one must cite).
+    local BYTES = opts.unit == 'bytes'
     local fns, by_id, by_file_name, spans_of = {}, {}, {}, {}
     for _, n in ipairs(data.nodes or {}) do
         if (n.kind == 'function' or n.kind == 'method') and n.file and n.range then
@@ -344,7 +396,7 @@ function M.analyze(store, data, opts)
         if c.fn then local l = calls_of[c.fn] or {}; l[#l + 1] = c; calls_of[c.fn] = l end
     end
     local stats = { fns = 0, analysed = 0, loops = 0, input_loops = 0, calls = 0,
-        calls_in_input_loops = 0, followed_graph = 0, followed_lexical = 0, refused = 0, accums = 0 }
+        calls_in_input_loops = 0, followed_graph = 0, followed_lexical = 0, refused = 0, accums = 0, allocs = 0 }
 
     local callee_memo = {}
     local callee_of_raw, resolve_lexical
@@ -512,10 +564,10 @@ function M.analyze(store, data, opts)
         return L or nil
     end
     -- the input-sized loops around a line (certified), and the MAYBE-loops around it (holes)
-    local function around(loops, line, callee_name, file)
+    local function around(loops, line, callee_name, file, in_for_head)
         local n, chain, mh = 0, {}, nil
         for _, L in ipairs(loops) do
-            if (L.input or L.maybe) and line >= L.line and line <= L.last then
+            if (L.input or L.maybe) and line >= L.line and line <= L.last and not (in_for_head and line == L.line) then
                 local in_head = false
                 if line == L.line and callee_name then
                     for _, v in ipairs(L.head_use) do if v == callee_name then in_head = true end end
@@ -576,6 +628,20 @@ function M.analyze(store, data, opts)
         local e = entry.arity and entry.arity[argv.n(c) - (c.method and 1 or 0)] or nil
         local cost = (e and e.cost) or entry.cost
         local arg = (e and e.arg) or entry.arg or 1
+        local function at_arg(i) return argv.at(c, c.method and i + 1 or i) end
+        if BYTES then
+            local a = (e and e.alloc) or entry.alloc
+            if a == 'captures' then
+                -- a find returns indices, plus a substring per CAPTURE: bounded unless the pattern
+                -- captures (or is not a literal, or the search is not plain)
+                local pa = entry.plain and at_arg(entry.plain)
+                local pp = entry.pattern and at_arg(entry.pattern)
+                local text = pp and pp.k == 'lit' and pp.v and (spec and spec.unescape and spec.unescape(pp.v) or pp.v)
+                local captures = not text or text:gsub('%%.', ''):find('(', 1, true)
+                a = ((pa and pa.v == 'true') or not captures) and 'const' or 'n'
+            end
+            cost = a or (cost == 'nlogn' and 'n' or cost)
+        end
         local rec = { c = 0, builtin = key, by_name = entry.by_name, log = cost == 'nlogn', cost = cost }
         if cost ~= 'const' then
             rec.size, rec.argname = arg_size(ctx, c, arg)
@@ -594,8 +660,7 @@ function M.analyze(store, data, opts)
         end
         -- THE PATTERN (only where the subject is input-sized: backtracking multiplies ITS length).
         -- An upper bound needs adversarial input, so it is a HOLE, never certified depth.
-        if entry.pattern and rec.size and rec.size ~= 'none' and rec.size ~= 'expr' then
-            local function at_arg(i) return argv.at(c, c.method and i + 1 or i) end
+        if not BYTES and entry.pattern and rec.size and rec.size ~= 'none' and rec.size ~= 'expr' then
             local pa = entry.plain and at_arg(entry.plain)
             if not (pa and pa.v == 'true') then
                 local pp = at_arg(entry.pattern)
@@ -665,11 +730,16 @@ function M.analyze(store, data, opts)
                 best = nb
             end
         end
-        for _, L in ipairs(loops) do
+        for _, L in ipairs(BYTES and {} or loops) do
             if L.input or L.maybe then
                 local n, chain, mh = around(loops, L.line, nil, fn.file)
                 consider({ c = n, loops = chain, visible = L.input and true or nil, holes = mh })
             end
+        end
+        -- an ALLOCATION SITE (bytes): the loops around it
+        for _, A in ipairs(BYTES and ctx and ctx.allocs or {}) do
+            local n, chain, mh = around(loops, A.line, nil, fn.file, A.head)
+            consider({ c = n + A.size, loops = chain, visible = true, holes = mh, alloc = A })
         end
         -- an ACCUMULATING CONCATENATION costs its target's size (accumulations() above)
         for _, A in ipairs(ctx and ctx.accums or {}) do
@@ -741,6 +811,7 @@ function M.analyze(store, data, opts)
             stats.loops = stats.loops + #loops
             for _, L in ipairs(loops) do if L.input then stats.input_loops = stats.input_loops + 1 end end
             stats.accums = stats.accums + #(ctx.accums or {})
+            stats.allocs = stats.allocs + #(ctx.allocs or {})
             local seen = {}
             for _, c in ipairs(calls_of[fn.id] or {}) do
                 stats.calls = stats.calls + 1
@@ -767,7 +838,7 @@ function M.analyze(store, data, opts)
                     if kind and not seen[key] then
                         seen[key] = true
                         local sh = kind == 'hidden-shared' and scans_shared(cc) or nil
-                        findings[#findings + 1] = { kind = kind, fn = fn.id, file = fn.file, line = line,
+                        findings[#findings + 1] = { kind = kind, unit = opts.unit, fn = fn.id, file = fn.file, line = line,
                             depth = total, holes = holes, outer = chain,
                             callee = cc.node and cc.node.id, builtin = cc.builtin, how = cc.how,
                             inner = cc.node and cc.sub or cc, shared = sh and sh.shared or nil,
@@ -784,8 +855,8 @@ function M.analyze(store, data, opts)
             local own = depth(fn)
             if own.visible and own.c >= 2 then
                 findings[#findings + 1] = { kind = 'visible', fn = fn.id, file = fn.file,
-                    line = own.concat and own.concat.line or own.loops[#own.loops].line, depth = own.c,
-                    outer = own.loops, concat = own.concat }
+                    line = (own.concat or own.alloc or own.loops[#own.loops]).line, depth = own.c,
+                    outer = own.loops, concat = own.concat, alloc = own.alloc, unit = opts.unit }
             end
         end
     end
@@ -838,8 +909,12 @@ function M.chain(f)
                 A.shared and ', shared' or (A.param and ', from a param' or ''))
         end
     end
+    local function alloc_text(A)
+        if A then parts[#parts + 1] = ('alloc@%d %s'):format(A.line, A.what) end
+    end
     loops_text(f.outer)
     concat_text(f.concat)
+    alloc_text(f.alloc)
     local rec, callee, how = f.inner, f.callee, f.how
     local guard = 0
     while rec and guard < 32 do
@@ -852,6 +927,7 @@ function M.chain(f)
             if callee then parts[#parts + 1] = ('-> %s%s'):format(callee, how == 'lexical' and ' (lexical)' or '') end
             loops_text(rec.loops)
             concat_text(rec.concat)
+            alloc_text(rec.alloc)
             local v = rec.via
             if not v then break end
             if v.node then callee, how, rec = v.node.id, v.how, v.sub
