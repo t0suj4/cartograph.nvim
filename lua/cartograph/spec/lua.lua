@@ -1032,6 +1032,13 @@ return {
         ['vim.fn.fnamemodify'] = 'a pure string transform of its arguments (for a fixed cwd)',
         ['vim.fs.joinpath'] = 'a pure string join',
     },
+    -- calls that READ state and change nothing (hoistsetup.lua may delete a guard `if` whose condition only calls
+    -- these, or deterministic_calls): a premise that PRODUCES an edit, so each is cited
+    effect_free_calls = {
+        ['vim.fn.isdirectory'] = ':help isdirectory() — returns whether a directory exists; no side effect',
+        ['vim.fn.filereadable'] = ':help filereadable() — returns whether a file is readable; no side effect',
+        ['os.getenv'] = 'Lua 5.1 manual §5.8: returns the value of an environment variable',
+    },
     idempotent_steps = {
         ['vim.opt.rtp:append'] = { arg = 1, src = 'measured 2026-09-25, nvim 0.11.5: two appends of one dir leave one runtimepath entry' },
         ['vim.opt.runtimepath:append'] = { arg = 1, src = 'as vim.opt.rtp:append (the same option)' },

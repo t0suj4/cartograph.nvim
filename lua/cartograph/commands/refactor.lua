@@ -315,6 +315,20 @@ function M.register(H)
             :format(#plan.moves, rel, #(plan.declined or {})), vim.log.levels.INFO)
     end, { nargs = '?', complete = 'file', desc = 'cartograph: stage INDEX-A-SCAN for this file (or the named one) — a repeated `for _, v in ipairs(L) do if v.F == K then ... end end` over the same list iterates the key\'s bucket instead (an in-file helper, list order kept, rebuilt when the list grows, the if kept, non-primitive keys scan as written). Guards decline an else branch, a key reading the element, a fresh list per call, a reassigned field, a removed/replaced element. The CPU-for-memory trade is priced on a workload by tools/idxprofile.lua. Review :CartographDiff, commit :CartographApply' })
 
+    -- ── hoist setup: an idempotent step set up in many units -> once in the common setup (CART-1070)
+    cmd('CartographHoistSetup', function (o)
+        local store = live() if not store then return end
+        local hs = require 'cartograph.hoistsetup'
+        local opts = { prelude = o.args ~= '' and o.args or nil }
+        local plan, why = hs.plan(store, opts)
+        scratch(hs.report(store, opts))
+        if not plan then return vim.notify('cartograph: no setup to hoist — ' .. tostring(why), vim.log.levels.INFO) end
+        store.set_txn(plan)
+        vim.notify(('cartograph: hoist-setup staged — into %s, %d change(s) in %d file(s), %d declined.'
+            .. ' Review with :CartographDiff, then :CartographApply; afterwards run each touched unit ALONE (SPEC=<name>)')
+            :format(plan.prelude, #plan.moves, #plan.touched, #plan.declined), vim.log.levels.INFO)
+    end, { nargs = '?', complete = 'file', desc = 'cartograph: stage HOIST-SETUP — an idempotent setup step (declared in the spec, e.g. vim.opt.rtp:append) repeated across the units a test prelude loads is set up ONCE in that prelude (the file defining _G.test, or the named one), before its load loop; every copy in the units is deleted, with its guard when that is all the guard held and its local when nothing reads it any more. Declines a shared line, an effectful guard, a step inside an expression. Premises (idempotent, order-insensitive) ride on the plan. Review :CartographDiff, commit :CartographApply' })
+
     -- ── extract-helper proposal: the focused fn's best near-clone → a helper ──
     cmd('CartographExtractHelper', function ()
         local store = live() if not store then return end

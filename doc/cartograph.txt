@@ -370,6 +370,13 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               key's bucket (list order kept, rebuilt when
                               the list grows). Static candidates; price
                               them with tools/idxprofile.lua on a workload
+  :CartographHoistSetup [prelude]
+                              stage hoist-setup: an idempotent setup step
+                              repeated across the units a test prelude
+                              loads is set up once in that prelude, and
+                              every copy is deleted (with an emptied guard
+                              and an unused local). Premises ride on the
+                              plan; run each touched unit alone after
   :CartographLoopCost         input-sized loop nesting ACROSS CALLS:
                               the callers that run this function inside
                               a loop over a growing collection, and the

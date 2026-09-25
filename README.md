@@ -3235,6 +3235,15 @@ the scan costs against the index's build and walk, and the bucket entries it wou
 fixture, x634 fewer touches for 2,000 entries at one site; x2.4 at another, kept). A plan given that
 profile applies only what it measured worth applying.
 
+A third remedy works on SETUP rather than on loops: `:CartographHoistSetup` (`cartograph.redundancy` finds it,
+`tools/redundancy.lua` reports it). An idempotent step the spec declares and cites (`vim.opt.rtp:append(dir)`),
+repeated across the units a test prelude loads, is set up ONCE in that prelude, before its load loop, and every copy
+is deleted, with the guard it sat in and the local it read when those become empty or unused. What counts as already
+set up follows the harness's real run order: the prelude, the unit's own top level, earlier statements that always run
+first; never another unit's top level or a sibling test, because crediting those is how a test passes only in the
+full suite. Every hoist carries its premises (the step is idempotent, measured; setting it up earlier changes nothing
+else, unchecked), and the check for the unchecked one is to run each touched unit alone.
+
 These are suggestions until you ask for them to be *applied*. `optapply` is the piece
 that acts: it takes the CSE-reuse finding and rewrites the source — `local b = x + y`
 becomes `local b = a` where an earlier `local a = x + y` already holds the value — through

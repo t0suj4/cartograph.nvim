@@ -203,6 +203,8 @@ M.SLOTS = {
     idempotent_steps = 'ANALYSIS',
     -- calls returning the same value for the same arguments within one run: `{ [spelled call] = src }`
     deterministic_calls = 'ANALYSIS',
+    -- calls that read state and change nothing (hoistsetup.lua's guard deletion): `{ [spelled call] = src }`
+    effect_free_calls = 'ANALYSIS',
     -- a search PATTERN's backtracking degree in the subject's length (an upper bound): (pat, no_anchor) -> int
     pattern_degree = 'ANALYSIS',
     -- a string literal's source text -> its value (argv keeps the text between the quotes)
