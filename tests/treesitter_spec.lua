@@ -3930,6 +3930,47 @@ test('source: a def renders with its leading doc comment, file header declined',
     vim.fn.delete(root, 'rf')
 end)
 
+test('source: the pane keeps ONE shown range — the body it holds — not one per node ever shown (CART-1068)', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/b.lua', 'w'))
+    fd:write(table.concat({
+        '-- one doubles.',           -- 1 (0-based 0)
+        'local function one(x)',     -- 2
+        '  return x * 2',
+        'end',
+        '',
+        '-- two triples.',           -- 6 (0-based 5)
+        'local function two(x)',     -- 7
+        '  return x * 3',
+        'end', '' }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    store.ingest(data)
+    local one, two
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'one' then one = n elseif n.name == 'two' then two = n end
+    end
+    local src = require('cartograph.panes.source')
+    src._body_lines(one)
+    src._body_lines(two)
+    eq(two.id, src._shown.id, 'the record is the last body rendered')
+    local at = require 'cartograph.at'
+    eq(math.max(0, at.sl(two.range) - 3), src._shown.start, 'two is shown with its three lines of context')
+    eq(nil, src._shown_start, 'no per-node table')
+    -- the rendered body maps from its doc comment; another node falls back to its own range
+    local first = src._buf_row(two, src._shown.start)
+    ok(first, 'the first shown line has a row')
+    eq(first + (at.sl(two.range) - src._shown.start), src._buf_row(two, at.sl(two.range)), 'rows follow file lines')
+    -- a node that is not the rendered body falls back to its OWN range, not a stale record
+    eq(first, src._buf_row(one, at.sl(one.range)), 'one maps from its own first line')
+    eq(nil, src._buf_row(one, at.sl(one.range) - 1), 'above its own range: no row')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('source: a top-level statement widens to its enclosing block', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

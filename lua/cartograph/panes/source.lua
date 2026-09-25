@@ -16,12 +16,18 @@ local ns = vim.api.nvim_create_namespace('cartograph_source_hl')
 
 local M = { cur = nil, ctx = nil }
 
--- node id -> 0-based first shown file line. A def's body is shown together
--- with its leading DOC COMMENT (the block right above the signature), so the
--- shown range starts above node.range.start; buf_row maps against this.
-M._shown_start = {}
--- node id -> 0-based last shown file line (a top-level var widens to its region)
-M._shown_end = {}
+-- THE BODY THE BUFFER HOLDS: { id, start, last } — its node and its 0-based first
+-- and last shown file lines. A def's body is shown together with its leading DOC
+-- COMMENT (the block right above the signature), so `start` sits above
+-- node.range.start, and a top-level var widens `last` to its region; buf_row maps
+-- against this.
+-- ★ ONE RECORD, NOT A TABLE PER NODE ID (CART-1068). Two tables keyed by node id
+-- kept an entry for every node ever shown, for the life of the session (found by
+-- retained.lua). The pane holds ONE body at a time, and every buf_row call maps
+-- into the body just rendered (`M.ctx or M.cur`); an older entry was stale (the
+-- file may have changed since) or dead (node ids churn on re-ingest), so any
+-- node other than the rendered one falls back to its own range.
+M._shown = nil
 
 -- The smallest `region` node (a run of top-level statements) that encloses a
 -- file-scope `var`, or nil. A lone top-level statement reads as an isolated
@@ -153,8 +159,7 @@ local function body_lines(node)
             all, atr.sl(shown.range), pats)
         if not header then ds = up end
     end
-    M._shown_start[node.id] = ds
-    M._shown_end[node.id] = atr.el(shown.range)
+    M._shown = { id = node.id, start = ds, last = atr.el(shown.range) }
     -- external edits (git checkout, codegen) never fire BufWritePost: the
     -- range below may not line up with the fresh bytes — say so
     local stale = store.stale(node.file)
@@ -182,8 +187,9 @@ end
 local function buf_row(node, file_line)
     -- map against the first SHOWN line (doc comment included), not the def's
     -- signature line — otherwise highlights/jumps are off by the doc height
-    local start = M._shown_start[node.id] or atr.sl(node.range)
-    local last = M._shown_end[node.id] or atr.el(node.range)
+    local sh = M._shown and M._shown.id == node.id and M._shown or nil
+    local start = sh and sh.start or atr.sl(node.range)
+    local last = sh and sh.last or atr.el(node.range)
     if file_line < start or file_line > last then return nil end
     return HEADER_ROWS + (file_line - start)
 end
@@ -504,8 +510,9 @@ function M.context(ctx)
     end
 end
 
--- test seam: the def's rendered body lines (doc-comment included), without a
--- window. Also populates M._shown_start[node.id].
+-- test seams: the def's rendered body lines (doc-comment included), without a
+-- window — it also records M._shown — and the file-line -> buffer-row map.
 M._body_lines = body_lines
+M._buf_row = buf_row
 
 return M
