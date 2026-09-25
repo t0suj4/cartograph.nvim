@@ -478,7 +478,11 @@ return {
     -- own direct name children are the bindings.
     binders = {
         { node = 'for_generic_clause', child = 'variable_list' },
-        { node = 'for_numeric_clause' },
+        -- `field`: only the child in that grammar field binds. `for i = a, n, step` has FOUR direct
+        -- name children and binds one; collecting all four read `n` as a local (CART-1065: loopcost
+        -- saw `for i = 1, n` as a constant loop, externals missed a global limit). clones.lua's
+        -- binder walk already stopped at the first name.
+        { node = 'for_numeric_clause', field = 'name' },
     },
     -- RESOLUTION BOUNDARY (the .toc scoping adapter): in a WoW-addon
     -- tree every addon vendors the same libraries (353 Ace3 copies),

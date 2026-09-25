@@ -1882,3 +1882,11 @@ test('expr: a STATIC-path inclusion keyword stays opaque', function ()
     end
     eq(0, calls, 'python `import a.b` is not modelled as a call')
 end)
+
+test('bound_names: a lua numeric for binds its NAME only — not the start, limit or step it reads (CART-1065)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local src = 'local function f(a, n, step, t)\n  for i = a, n, step do t[i] = 1 end\n  for _, v in pairs(t) do print(v) end\nend'
+    local root = vim.treesitter.get_string_parser(src, 'lua'):parse()[1]:root()
+    local got = expr.bound_names(root, src, ts.spec.lua.binders)
+    eq({ i = true, _ = true, v = true }, got)
+end)

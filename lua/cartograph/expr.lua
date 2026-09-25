@@ -2554,7 +2554,8 @@ local BINDNAME = { identifier = true, name = true, variable_name = true }
 ---
 --- THE RULE, one shape for three grammars: a binder's own direct name children are
 --- bindings, plus every name inside a declared `child` container. The `body` field is
---- never descended.
+--- never descended. A declared `field` narrows the direct children to that grammar
+--- field (lua's numeric `for`: `name`, not `start`/`end`/`step`, CART-1065).
 --- Lua `for_generic_clause` puts them in a `variable_list`; `for_numeric_clause` has
 --- the name directly. JS `for_in_statement` has it directly. PHP `foreach_statement`
 --- binds through a `pair`, or directly.
@@ -2579,7 +2580,7 @@ function M.bound_names(fn, src, binders)
         local b = by_node[n:type()]
         if b then
             for c, field in n:iter_children() do
-                if c:named() and field ~= 'body' then
+                if c:named() and field ~= 'body' and (not b.field or field == b.field) then
                     if BINDNAME[c:type()] then out[txt(c, src)] = true
                     elseif b.child and c:type() == b.child then collect_names(c) end
                 end

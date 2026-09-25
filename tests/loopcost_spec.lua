@@ -470,3 +470,32 @@ test('loopcost: a constructor KEY in a loop head is not an iterated name (time u
         if n.id:match('^alloc%.lua::M%.stepped@') then eq(2, analyze().depth_of(n.id).c, 'time counts both loops') end
     end
 end)
+
+-- bounded.lua (CART-1065): a numeric for's trips bounded by its own start (math.min(X + K, n))
+local function bounded_depth(fnname)
+    for _, n in ipairs(store.data.nodes) do
+        if n.id:match('^bounded%.lua::' .. fnname:gsub('[%.:]', '%%%0') .. '@') then return analyze().depth_of(n.id) end
+    end
+end
+
+test('bounded: a numeric for bounded by math.min(start + K, n), or by start + K, is not input-sized', function ()
+    if not has_lua() then skip 'no lua parser' end
+    eq(0, bounded_depth('M.window').c)
+    eq(0, bounded_depth('M.window_call').c, 'the same base through a call')
+    eq(0, bounded_depth('M.four').c)
+    eq(0, bounded_depth('M.window').holes and #bounded_depth('M.window').holes or 0, 'not a maybe-loop either')
+end)
+
+test('bounded: a min whose arguments both grow, or a non-literal step, stays input-sized', function ()
+    if not has_lua() then skip 'no lua parser' end
+    eq(1, bounded_depth('M.prefix').c)
+    eq(1, bounded_depth('M.stepped').c)
+end)
+
+test('bounded: a caller running the bounded window per element is linear — no hidden finding', function ()
+    if not has_lua() then skip 'no lua parser' end
+    eq(1, bounded_depth('M.all').c)
+    for _, f in ipairs(analyze().findings) do
+        ok(not (f.callee and f.callee:match('^bounded%.lua::M%.window@')), 'finding through window: ' .. loopcost.chain(f))
+    end
+end)

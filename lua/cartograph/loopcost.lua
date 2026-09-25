@@ -234,6 +234,45 @@ local function allocations(rows, op, accums, LOOP)
     return out
 end
 
+--- A NUMERIC FOR'S TRIP BOUND (CART-1065): `for l = X + 1, math.min(X + 12, #lines)` runs at most 12
+--- times whatever X and lines are, but it READS both, so the head predicate called it input-sized.
+--- Decided on the IR, not the text: split start and limit into (base, literal offset); the same base
+--- (by structural key) on both sides bounds the trips by the offsets' difference, and a `math.min`
+--- limit is bounded when ANY argument is. Only for a missing or positive literal step.
+--- ⚠ EQUAL KEYS ARE TAKEN AS EQUAL VALUES: `f(c) + 1, math.min(f(c) + 12, n)` assumes f(c) returns the
+--- same number twice in one head (xlang's callrec.line is such a call). Returns the bound, or nil.
+local function numeric_trips(clause)
+    local kids = clause and clause.k == '?' and (clause.t or ''):find('numeric') and clause.kids
+    if not kids then return nil end
+    local start, limit, step = kids[2], kids[3], kids[4]
+    if not (start and limit) then return nil end
+    if step and not (step.k == 'lit' and (tonumber(step.v) or 0) > 0) then return nil end
+    local function off(e)
+        if e.k == 'lit' and tonumber(e.v) then return '', tonumber(e.v) end
+        if e.k == 'bin' and (e.op == '+' or e.op == '-') and e.r and e.r.k == 'lit' and tonumber(e.r.v) then
+            return expr.key(e.l), (e.op == '+' and 1 or -1) * tonumber(e.r.v)
+        end
+        if e.k == 'bin' and e.op == '+' and e.l and e.l.k == 'lit' and tonumber(e.l.v) then return expr.key(e.r), tonumber(e.l.v) end
+        return expr.key(e), 0
+    end
+    local sk, so = off(start)
+    local function bound(l)
+        local f = l.k == 'call' and l.f
+        if f and f.k == 'field' and f.n == 'min' and f.b and f.b.k == 'name' and f.b.n == 'math' then
+            local best
+            for _, a in ipairs(l.a or {}) do
+                local t = bound(a)
+                if t and (not best or t < best) then best = t end
+            end
+            return best
+        end
+        local lk, lo = off(l)
+        if lk == sk then return math.max(0, lo - so + 1) end
+        return nil
+    end
+    return bound(limit)
+end
+
 --- one function's loops: which are input-sized, what they iterate, and each loop's line span.
 local function loops_of(store, fn, spec)
     local got = expr.of(store, fn.id)
@@ -268,6 +307,7 @@ local function loops_of(store, fn, spec)
             for _, v in ipairs(r.def or {}) do bound[v] = true end
             local iterates, const_by_name, shared = {}, {}, {}
             local head = lines[r.l] or ''
+            local trips = numeric_trips(r.expr and r.expr.rhs and r.expr.rhs[1])
             -- WHAT A NAME IS IN THE HEAD, by its position in the head's text: called (`ipairs(t)`,
             -- `inext(n)`; ONE mechanism, the text, not the call records beside it), the receiver of a call (`q:iter_matches(root)`,
             -- `math.min(a, b)`: the module or object, not the collection), or a field (`st.def`, which
@@ -298,7 +338,7 @@ local function loops_of(store, fn, spec)
                 end
                 return nil
             end
-            for _, v in ipairs(r.use or {}) do
+            for _, v in ipairs(trips and {} or r.use or {}) do
                 if not bound[v] and v ~= '_' and role(v) == 'value' then
                     local defs = defrow[v]
                     local constant = false
@@ -328,7 +368,7 @@ local function loops_of(store, fn, spec)
             -- collection (`ipairs(vim.api.nvim_list_bufs())`, `while more() do`) — a size nobody knows.
             -- Not a certified level (that would be a guess) and not a zero (that would hide it): a hole.
             local maybe
-            if #iterates == 0 then
+            if #iterates == 0 and not trips then
                 for callee in head:gmatch('([%a_][%w_%.:]*)%s*%(') do
                     local base = callee:match('([%w_]+)$')
                     if base ~= 'ipairs' and base ~= 'pairs' and base ~= 'next' and base ~= 'for' and base ~= 'while' then
@@ -336,7 +376,7 @@ local function loops_of(store, fn, spec)
                     end
                 end
             end
-            out[#out + 1] = { row = i, line = r.l, last = e, kind = r.t, input = #iterates > 0, maybe = maybe,
+            out[#out + 1] = { row = i, line = r.l, last = e, kind = r.t, input = #iterates > 0, maybe = maybe, trips = trips,
                 iterates = iterates, const_by_name = #const_by_name > 0 and const_by_name or nil,
                 shared = #shared > 0 and shared or nil, head_use = r.use or {} }
         end
