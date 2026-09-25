@@ -274,6 +274,27 @@ function M.register(H)
         scratch(require('cartograph.optapply').report(store, id))
     end, { desc = 'cartograph: DRY-RUN the CSE-reuse rewrite of the focused fn (optapply) — the diff an apply would write, txn-journaled + CAS/span/parse-verified; the headless apply verb is optapply.run/apply' })
 
+    -- ── pattern rewrite: backtracking search idioms -> verified linear equivalents (CART-1057)
+    cmd('CartographPatternRewrite', function (o)
+        local store = live() if not store then return end
+        local root = (store.data or {}).root
+        local rel = o.args ~= '' and o.args or nil
+        if not rel then
+            -- path -> graph-relative key by the root prefix (the open.lua idiom; there is no store.rel)
+            local abs = vim.api.nvim_buf_get_name(0)
+            if root and abs:sub(1, #root + 1) == root .. '/' then rel = abs:sub(#root + 2) end
+        end
+        if not rel then return vim.notify('cartograph: open a file inside the graph, or name one', vim.log.levels.WARN) end
+        local pr = require 'cartograph.patrewrite'
+        local plan, why = pr.plan(store, rel)
+        scratch(pr.report(store, rel))
+        if not plan then return vim.notify('cartograph: no pattern rewrite — ' .. tostring(why), vim.log.levels.INFO) end
+        store.set_txn(plan)
+        vim.notify(('cartograph: pattern rewrite staged — %d site(s) in %s, %d declined.'
+            .. ' Review with :CartographDiff, then :CartographApply'):format(#plan.moves, rel, #(plan.declined or {})),
+            vim.log.levels.INFO)
+    end, { nargs = '?', complete = 'file', desc = 'cartograph: stage the VERIFIED rewrite of backtracking search idioms in this file (or the named one) — the trim idiom and its kin become linear equivalents, each rule checked against Lua\'s own matcher on 114k inputs and measured linear; a method site carries the premise that its subject is a string; declined sites say why. Review :CartographDiff, commit :CartographApply' })
+
     -- ── extract-helper proposal: the focused fn's best near-clone → a helper ──
     cmd('CartographExtractHelper', function ()
         local store = live() if not store then return end

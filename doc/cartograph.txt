@@ -359,6 +359,12 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
   :CartographOptimize         loop-invariant computations (LICM): pure
                               work hoistable above the loop. * = clean,
                               ~ = aliasing- or branch-hedged
+  :CartographPatternRewrite [file]
+                              stage the verified rewrite of backtracking
+                              search idioms (the trim idiom and kin) into
+                              linear equivalents; each rule is checked
+                              against Lua's matcher and measured linear.
+                              Review :CartographDiff, commit :CartographApply
   :CartographLoopCost         input-sized loop nesting ACROSS CALLS:
                               the callers that run this function inside
                               a loop over a growing collection, and the

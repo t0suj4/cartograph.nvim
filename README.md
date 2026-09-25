@@ -3210,6 +3210,18 @@ became holes on the way, each first read as a number: a receiver that is itself 
 (`src:sub(a, b):match(p)` searches the slice, not `src`), and a **maybe-loop** — a loop over a
 call result nobody sized (`ipairs(vim.api.nvim_list_bufs())`), which is neither a level nor a zero.
 
+The first **remedy** is `:CartographPatternRewrite`: it stages the rewrite of backtracking search
+idioms into linear equivalents, through the same plan / `:CartographDiff` / `:CartographApply`
+transaction as every other write verb. It is a catalog, not pattern surgery — the trim idiom and
+its kin — and a rule applies only after two checks: a differential one (both expressions through
+Lua's own matcher on 114,111 generated inputs; one difference refuses the rule) and a measured one
+(the new expression must grow linearly). The second check is not decoration: the obvious rewrite,
+`(s:match('^%s*(.*%S)') or '')`, answers exactly like the trim idiom on every input and is
+quadratic on an all-whitespace string, so the trim tests for all-whitespace first. That form reads
+its subject twice, so a subject containing a call is declined rather than duplicated; a `gsub`
+trim is rewritten only where its second return value is already dropped; a method site carries the
+premise that its subject is a string; `@cg-ignore: pattern-rewrite` keeps a site as written.
+
 These are suggestions until you ask for them to be *applied*. `optapply` is the piece
 that acts: it takes the CSE-reuse finding and rewrites the source — `local b = x + y`
 becomes `local b = a` where an earlier `local a = x + y` already holds the value — through
