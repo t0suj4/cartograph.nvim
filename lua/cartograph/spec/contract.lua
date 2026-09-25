@@ -199,6 +199,10 @@ M.SLOTS = {
     call_costs = 'ANALYSIS',
     -- the calls that add or remove a table slot (retained.lua): `{ grow = { [name] = argpos }, shrink = ... }`
     container_ops = 'ANALYSIS',
+    -- effects whose second run changes nothing (redundancy.lua): `{ [spelled call] = { arg, src } }`, each cited
+    idempotent_steps = 'ANALYSIS',
+    -- calls returning the same value for the same arguments within one run: `{ [spelled call] = src }`
+    deterministic_calls = 'ANALYSIS',
     -- a search PATTERN's backtracking degree in the subject's length (an upper bound): (pat, no_anchor) -> int
     pattern_degree = 'ANALYSIS',
     -- a string literal's source text -> its value (argv keeps the text between the quotes)

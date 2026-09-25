@@ -1020,6 +1020,24 @@ return {
     -- the calls that ADD a slot to a table or REMOVE one, for retained.lua: `{ [spelled name] = the
     -- container's argument position }`. `wipe`/`table.wipe` are WoW's, `table.clear` is LuaJIT's
     -- (require 'table.clear'); `table.insert` of any arity adds one element.
+    -- effects that are IDEMPOTENT: once has the effect of twice (redundancy.lua). A premise that PRODUCES
+    -- "hoist it" / "delete it" suggestions, so each entry is MEASURED and cites it. `arg` = the argument that
+    -- names what is established (the fact is the step plus that argument).
+    -- calls that return the SAME value for the same arguments within one run (redundancy.lua's closed arguments):
+    -- a premise that MERGES facts across sites (produces suggestions), so each is cited. Not vim.fn.tempname,
+    -- which returns a new name per call.
+    deterministic_calls = {
+        ['vim.fn.expand'] = 'expands `~` and $VARS from an environment fixed for the process',
+        ['vim.fn.stdpath'] = 'a fixed directory per kind for the process',
+        ['vim.fn.fnamemodify'] = 'a pure string transform of its arguments (for a fixed cwd)',
+        ['vim.fs.joinpath'] = 'a pure string join',
+    },
+    idempotent_steps = {
+        ['vim.opt.rtp:append'] = { arg = 1, src = 'measured 2026-09-25, nvim 0.11.5: two appends of one dir leave one runtimepath entry' },
+        ['vim.opt.runtimepath:append'] = { arg = 1, src = 'as vim.opt.rtp:append (the same option)' },
+        ['vim.opt.rtp:prepend'] = { arg = 1, src = 'runtimepath denies duplicates (as :append, measured there)' },
+        ['vim.treesitter.language.add'] = { arg = 1, src = 'measured 2026-09-25, nvim 0.11.5: a second add of a loaded language succeeds' },
+    },
     container_ops = {
         grow = { ['table.insert'] = 1, rawset = 1 },
         shrink = { ['table.remove'] = 1, wipe = 1, ['table.wipe'] = 1, ['table.clear'] = 1 },
