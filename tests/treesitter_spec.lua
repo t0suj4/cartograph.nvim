@@ -9,7 +9,15 @@ local atr = require 'cartograph.at'
 local store = require 'cartograph.store'
 local lint  = require 'cartograph.lint'
 
+-- The parsers live in nvim-treesitter's directory, which a bare `nvim -u NONE` does
+-- not have on its runtimepath. THE HELPER ADDS IT, so a test is correct when its spec
+-- runs ALONE (CART-1069): 68 tests appended it by hand, and three `forms` tests that
+-- did not passed only because an earlier test in the full run had.
+local TSDIR = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
 local function has_parser(lang)
+    if vim.fn.isdirectory(TSDIR) == 1 and not vim.o.runtimepath:find(TSDIR, 1, true) then
+        vim.opt.rtp:append(TSDIR)
+    end
     return pcall(vim.treesitter.get_string_parser, '', lang)
 end
 
