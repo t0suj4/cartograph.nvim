@@ -145,7 +145,10 @@ function M.attach(data)
         unvalued = 0, unresolved = 0, refused = {}, by_ns = {}, rows = {} }
     local root = data and data.root
     if not root or root:match('^%w+://') then return stats end
-    if not pcall(vim.treesitter.language.add, 'erlang') then
+    -- the RESULT decides, not the pcall: in nvim 0.11 language.add returns nil for a missing parser without raising,
+    -- so `if not pcall(...)` never took this branch and the refusal below could not fire (CART-1075)
+    local okp, loaded = pcall(vim.treesitter.language.add, 'erlang')
+    if not (okp and loaded == true) then
         -- ⚠ NO PARSER IS NOT "NO REGISTRATIONS". Report it rather than
         -- returning a clean zero, which is the absence-as-silence class this
         -- repo keeps filing.

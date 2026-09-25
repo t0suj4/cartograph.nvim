@@ -7,7 +7,7 @@ local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'odin')
+    return parser_available('odin')
 end
 
 local function extract(root)

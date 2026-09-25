@@ -7,7 +7,7 @@
 local P = require 'cartograph.pom'
 
 local function ready()
-    if not pcall(vim.treesitter.language.add, 'xml') then skip('no xml tree-sitter parser') end
+    if not parser_available('xml') then skip('no xml tree-sitter parser') end
 end
 
 -- a tree from a { [rel] = src } map; `exists` answers file activation from the same map

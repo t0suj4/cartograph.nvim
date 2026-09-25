@@ -12,7 +12,7 @@ local jsspec = require 'cartograph.spec.javascript'
 local ts = require 'cartograph.providers.treesitter'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'javascript')
+    return parser_available('javascript')
 end
 
 --- run import_members over the first string literal in `src`

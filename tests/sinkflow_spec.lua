@@ -8,7 +8,7 @@ local store = require 'cartograph.store'
 local sinkflow = require 'cartograph.sinkflow'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'php')
+    return parser_available('php')
 end
 
 local function write(root, rel, text)

@@ -60,6 +60,14 @@ function _G.write(root, name, lines)
     fd:write(table.concat(lines, '\n')); fd:close()
 end
 
+-- does tree-sitter REALLY have this language? NOT `pcall(vim.treesitter.language.add, l)`: in nvim 0.11 a missing
+-- parser makes language.add RETURN nil (the pcall still succeeds), so that guard can never skip — 37 guards here were
+-- that form (CART-1075). language.add returns true once the language is loaded, so the result is read, not the pcall.
+function _G.parser_available(lang)
+    local ok, loaded = pcall(vim.treesitter.language.add, lang)
+    return ok and loaded == true
+end
+
 -- shared fixture: `mkroot(name, src)` makes a temp dir with one file (src = a string) and
 -- returns the dir. Also copy-pasted identically; same shadowing rule as `write`.
 function _G.mkroot(name, src)

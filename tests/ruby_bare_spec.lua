@@ -10,7 +10,7 @@ local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'ruby')
+    return parser_available('ruby')
 end
 
 local function extract(root)

@@ -134,7 +134,7 @@ end)
 -- Integration test — real cpp extraction (flow def-positions + source scan).
 local ts = require 'cartograph.providers.treesitter'
 local function cpp_ready()
-    return pcall(vim.treesitter.language.add, 'cpp')
+    return parser_available('cpp')
 end
 
 test('lint resource-leak: a reassigned raw `new` with no drop leaks; released/RAII do not', function ()

@@ -186,7 +186,7 @@ end)
 -- hazard does not exist, so the fixtures proved nothing. Testing in the
 -- convenient language instead of the affected one is how a guard ships untested.
 local function py_ready()
-    return pcall(vim.treesitter.language.add, 'python')
+    return parser_available('python')
 end
 
 test('annotate: a shebang is never taken as a comment style (python)', function ()

@@ -7,7 +7,7 @@ local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 local dts = dofile(repo .. '/tools/dtsread.lua')
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'typescript')
+    return parser_available('typescript')
 end
 
 local function surface(src, opts)

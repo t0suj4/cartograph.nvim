@@ -691,7 +691,7 @@ end)
 -- has to be able to tell "this language is not served" from "this function has no
 -- holes", and only a named refusal does that.
 test('characterize: a function in another language is REFUSED, by name', function ()
-    if not pcall(vim.treesitter.language.add, 'ruby') then skip('no ruby parser') end
+    if not parser_available('ruby') then skip('no ruby parser') end
 
     root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/thing.rb', 'w'))

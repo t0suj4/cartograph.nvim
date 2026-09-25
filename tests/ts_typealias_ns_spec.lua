@@ -8,7 +8,7 @@ local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'typescript')
+    return parser_available('typescript')
 end
 
 test('typealias: type X = … → browse-only type node', function ()

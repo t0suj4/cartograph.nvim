@@ -8,7 +8,7 @@ local ts = require 'cartograph.providers.treesitter'
 local profmod = require 'cartograph.spec.profile'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'ruby')
+    return parser_available('ruby')
 end
 local function write(root, name, lines)
     local dir = vim.fn.fnamemodify(root .. '/' .. name, ':h')

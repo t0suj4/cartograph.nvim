@@ -6,7 +6,7 @@
 local erl = require 'cartograph.spec.erlang'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'erlang')
+    return parser_available('erlang')
 end
 
 --- classify the first macro_call_expr in `src` as the call loop would

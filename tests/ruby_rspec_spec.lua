@@ -9,7 +9,7 @@
 local ts = require 'cartograph.providers.treesitter'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'ruby')
+    return parser_available('ruby')
 end
 
 local function callstate(root, callee, packs)

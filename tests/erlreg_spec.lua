@@ -16,7 +16,7 @@ local ts = require 'cartograph.providers.treesitter'
 local erlreg = require 'cartograph.erlreg'
 
 local function have_erlang()
-    return pcall(vim.treesitter.language.add, 'erlang')
+    return parser_available('erlang')
         and pcall(vim.treesitter.get_string_parser, '', 'erlang')
 end
 

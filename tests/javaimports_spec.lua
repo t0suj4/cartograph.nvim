@@ -13,7 +13,7 @@ local java = require 'cartograph.spec.java'
 local FIX = vim.fn.getcwd() .. '/tests/fixtures/javamono/'
 
 local function has_java()
-    return pcall(vim.treesitter.language.add, 'java')
+    return parser_available('java')
 end
 
 -- the import edges of an extraction, as `from -> to` strings

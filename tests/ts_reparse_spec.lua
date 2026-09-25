@@ -11,7 +11,7 @@ local store = require 'cartograph.store'
 local detail = require 'cartograph.detail'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'typescript')
+    return parser_available('typescript')
 end
 
 local TS = table.concat({

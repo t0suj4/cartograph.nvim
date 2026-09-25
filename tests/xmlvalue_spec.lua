@@ -6,7 +6,7 @@
 local X = require 'cartograph.xmlvalue'
 
 local function ready()
-    if not pcall(vim.treesitter.language.add, 'xml') then skip('no xml tree-sitter parser') end
+    if not parser_available('xml') then skip('no xml tree-sitter parser') end
 end
 
 test('xmlvalue: attributes are @keys, repeated children an ARRAY, a text-only element its text', function ()

@@ -9,7 +9,7 @@ local Y = require 'cartograph.yamlvalue'
 local X = require 'cartograph.xmlvalue'
 
 local function ready()
-    if not pcall(vim.treesitter.language.add, 'yaml') then skip('no yaml tree-sitter parser') end
+    if not parser_available('yaml') then skip('no yaml tree-sitter parser') end
 end
 
 local function rows()

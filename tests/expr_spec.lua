@@ -297,7 +297,7 @@ test('lua 5.4 attribute: a binding modifier is neither a field nor a read (CART-
     end
 
     -- THE VETO MUST NOT OVER-FIRE: `attribute` in PYTHON is a real field access
-    if pcall(vim.treesitter.language.add, 'python') then
+    if parser_available('python') then
         local psrc = 'x = a.b\n'
         local proot = vim.treesitter.get_string_parser(psrc, 'python'):parse()[1]:root()
         -- python wraps the assignment in an expression_statement; harvest_row wants the
@@ -697,7 +697,7 @@ test('expr: key() handles an ASSIGN node, whose `t` is a TARGET and not a type s
 end)
 
 test('expr: an INTERPOLATED string is not a literal — its reads reach the IR', function ()
-    if not pcall(vim.treesitter.language.add, 'bash') then skip 'no bash parser' end
+    if not parser_available('bash') then skip 'no bash parser' end
     -- ★★ CART-0665. `"$prefix-${n}"` is a bash `string` whose kids are a simple_expansion
     -- and an expansion — two variable READS — and the literal branch returned
     -- `{k='lit'}` and dropped them. Measured on the pinned bash corpus: 17360 strings,
@@ -754,7 +754,7 @@ end)
 
 test('expr: a declared binder\'s own names are DEFS, not reads — and only where declared',
     function ()
-    if not (pcall(vim.treesitter.language.add, 'bash')
+    if not (parser_available('bash')
         and pcall(vim.treesitter.language.add, 'lua')) then skip 'no parsers' end
     -- ★ CART-0665. `local i len` binds two names; the IR reported both as READS while du
     -- had them in `def` — 378 rows on testssl.sh, the largest disagreement left after the

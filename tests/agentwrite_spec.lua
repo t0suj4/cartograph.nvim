@@ -725,7 +725,7 @@ end)
 -- the ruby subject must refuse AND the lua one must still plan.
 test('agentwrite: a lua-only planner REFUSES a subject in another language', function ()
     if not ready() then skip('no treesitter') end
-    if not pcall(vim.treesitter.language.add, 'ruby') then skip('no ruby parser') end
+    if not parser_available('ruby') then skip('no ruby parser') end
     permit(true)
     local root = mkroot { ['m.lua'] = CSE_LUA, ['thing.rb'] = {
         'class Thing',

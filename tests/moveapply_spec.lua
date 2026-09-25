@@ -467,7 +467,7 @@ end)
 -- parses, and nothing refused.
 
 local function php_ready()
-    return pcall(vim.treesitter.language.add, 'php')
+    return parser_available('php')
 end
 
 -- ★★ THE REGRESSION THAT MATTERS MOST, AND IT IS WHY THE PREDICATE IS SYNTACTIC.

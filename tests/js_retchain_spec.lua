@@ -7,7 +7,7 @@
 local jsspec = require 'cartograph.spec.javascript'
 
 local function ready()
-    return pcall(vim.treesitter.language.add, 'javascript')
+    return parser_available('javascript')
 end
 
 --- the first call_expression whose source text starts with `prefix`. Both helpers
