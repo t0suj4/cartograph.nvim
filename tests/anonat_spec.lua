@@ -41,3 +41,14 @@ test('anon_at: a later extraction of OTHER files does not keep the first one\'s 
     eq(1, ts._anon_at_count(), 'only c.lua\'s one callback')
     vim.fn.delete(d, 'rf')
 end)
+
+-- CART-1056: elang_for is memoized PER FILE (the resolver asked it once per call x candidate pair: 32% of samples on
+-- hive). The memo must never hold a stale `.h` answer: set_h_lang resets it.
+test('elang memo: a .h file follows set_h_lang, never a stale per-file answer', function ()
+    local was = ts.h_lang()
+    ts.set_h_lang('c')
+    eq('c', ts.lang_of('x/stale.h'))
+    ts.set_h_lang('cpp')
+    eq('cpp', ts.lang_of('x/stale.h'), 'the per-file memo was reset with the .h decision')
+    ts.set_h_lang(was)
+end)

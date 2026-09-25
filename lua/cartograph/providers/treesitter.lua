@@ -1425,6 +1425,12 @@ local ANON_AT = {}
 --- how many callback positions ANON_AT holds right now (tests and measurements, CART-1067)
 function M._anon_at_count() local n = 0; for _ in pairs(ANON_AT) do n = n + 1 end; return n end
 local EXT_ELANG = {} -- ext -> { lang|false, spec|false }
+-- file -> { lang|false, spec|false }: elang_for's answer PER FILE (CART-1056). The resolver asks it once per
+-- (pending call x same-name candidate) pair, and on hive's standalone-metastore that pattern match on the path was
+-- 32% of every sample. A file's answer is PURE within one extraction (`.h` is decided once per tree; the disclaim
+-- depends only on the full name), so it is computed once. Reset by set_h_lang, which runs once at the start of
+-- every extraction: it holds at most one tree's files (retained.lua's rule, applied to itself).
+local FILE_ELANG = {}
 local EXT_PLANG = {} -- ext -> lang|false
 
 --- The language `.h` means for a tree, from its FULL file list. Pure — the caller
@@ -1439,8 +1445,12 @@ end
 
 --- Adopt a tree's answer. ★ THIS IS THE ONE THING THAT MAKES THE BY-EXTENSION MEMOS
 --- STALE, so it is the one thing that clears them — see the note above EXT_ELANG.
+-- ★ It also RESETS the per-file memo on EVERY call, change or not: set_h_lang is called exactly once per extraction,
+-- at its start, which makes it the per-extraction reset (CART-1056). It is done HERE and not in M.extract because
+-- M.extract sits at LuaJIT's 60-upvalue limit: one more local referenced there fails the module load.
 function M.set_h_lang(v)
     v = (v == 'cpp') and 'cpp' or 'c'
+    FILE_ELANG = {}
     if v ~= H_LANG then
         H_LANG = v
         EXT_ELANG['h'], EXT_PLANG['h'] = nil, nil
@@ -1536,7 +1546,15 @@ end
 --     every call, hit or miss. Cheap: a handful of suffix compares against a list
 --     that is empty for every language but php.
 -- (declared above, next to set_h_lang, so the writer can reach it)
+local elang_uncached
 local function elang_for(file)
+    local fh = FILE_ELANG[file]
+    if fh then return fh[1] or nil, fh[2] or nil end
+    local lang, spec = elang_uncached(file)
+    FILE_ELANG[file] = { lang or false, spec or false }
+    return lang, spec
+end
+function elang_uncached(file)
     local ext = file:match('%.([%w]+)$') or ''
     local hit = EXT_ELANG[ext]
     if hit then
