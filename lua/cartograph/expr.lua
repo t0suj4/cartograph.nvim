@@ -1014,6 +1014,24 @@ function build_core(node, src, lang)
                 method = false, selid = sel_is_id(o[2], lang) }
         end
     end
+    -- ★ A NAME THAT IS NOT A VARIABLE (CART-1121): spec.name_skip names the field (erlang's macro name in
+    -- `?MODULE`); the node builds from its other children, so a macro's arguments are still read. du and
+    -- flow.pattern_parts skip the same field, from the same declaration.
+    do
+        specs = specs or require('cartograph.providers.treesitter').spec
+        local sp = specs and lang and specs[lang]
+        local sf = sp and sp.name_skip and sp.name_skip[t]
+        if sf then
+            local sn = node:field(sf)[1]
+            local kids = {}
+            for c in node:iter_children() do
+                if c:named() and not (sn and c:id() == sn:id()) and not tsutil.is_comment(c) then
+                    kids[#kids + 1] = build(c, src, lang)
+                end
+            end
+            return { k = '?', t = t, kids = kids }
+        end
+    end
     -- ★ A PATTERN NESTED IN A VALUE BINDS, IT DOES NOT READ (CART-0957): a `fun({_N, C}, []) -> …` or a
     -- `case … of {ok, X} -> …` inside an expression. Its pattern field contributes only what the pattern
     -- EVALUATES (flow.pattern_parts), the rest of the node builds as usual — du draws the same line.
@@ -1024,7 +1042,7 @@ function build_core(node, src, lang)
         local pn = pf and node:field(pf)[1]
         if pn then
             local flow = require 'cartograph.flow'
-            local _, reads = flow.pattern_parts(pn, src, flow.leaf_ids(sp.df_ids), sp.pattern.reads)
+            local _, reads = flow.pattern_parts(pn, src, flow.leaf_ids(sp.df_ids), sp.pattern.reads, sp.name_skip)
             local kids = {}
             for c in node:iter_children() do
                 if c:named() and c:id() ~= pn:id() and not tsutil.is_comment(c) then kids[#kids + 1] = build(c, src, lang) end
@@ -1625,7 +1643,7 @@ function M.harvest_row(node, src, hint, lang)
             local flow = require 'cartograph.flow'
             local lhs, rhs = {}, { build(r, src, lang) }
             local names, reads = flow.pattern_parts(l, src, flow.leaf_ids(s and s.df_ids),
-                s and s.pattern and s.pattern.reads)
+                s and s.pattern and s.pattern.reads, s and s.name_skip)
             for _, nm in ipairs(names) do lhs[#lhs + 1] = { k = 'name', n = nm } end
             for _, x in ipairs(reads) do rhs[#rhs + 1] = build(x, src, lang) end
             return { lhs = lhs, rhs = rhs }
@@ -2475,6 +2493,7 @@ local function flow_cfg(lang, s, method)
         mods = s.binding_modifiers, -- CART-0234
         binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
         pattern = s.pattern, -- pattern binding (CART-0957); FOUR cfg sites, all must agree
+        name_skip = s.name_skip, -- a name that is not a variable (CART-1121)
         body_of = s.body_of, params_of = s.params_of, -- CART-0305
         fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
         method = method or false,
@@ -2687,6 +2706,7 @@ function M.of_module(store, mod_id)
         mods = s.binding_modifiers, -- CART-0234
         binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
         pattern = s.pattern, -- pattern binding (CART-0957); FOUR cfg sites, all must agree
+        name_skip = s.name_skip, -- a name that is not a variable (CART-1121)
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
     return { fl = flow.build(root, src, cfg), lang = lang, node = node,

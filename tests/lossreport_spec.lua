@@ -76,12 +76,27 @@ test('lossreport: STAGED — a registration tuple is dark after extraction and c
     ok(later >= 1, 'a dark root after extraction is touched in the final graph')
 end)
 
-test('lossreport: with no handler to resolve, the post-pass claims nothing', function ()
+test('lossreport: with no handler to resolve, the registration tuple stays dark in the final graph too', function ()
     need()
-    -- ⚠ the tuple itself is TOUCHED at extraction here, and wrongly: flow reads `?NS_X` / `?MODULE` as uses of
-    -- variables NS_X and MODULE (a phantom read the self-gate cannot see — the IR makes it too; filed apart)
+    -- (before CART-1121 the tuple was TOUCHED here, through the phantom uses of MODULE and NS_X that flow read off
+    -- the macro names — the report is what found that)
     local R = run('-module(m).\nstart(_, _) ->\n    [{iq_handler, ejabberd_local, ?NS_X, ?MODULE, missing}].\n')
     local later = 0
     for _, r in pairs(R.rows) do later = later + (r.later or 0) end
     eq(0, later, 'erlreg minted nothing, so nothing was claimed later')
+    local t = row(R, 'tuple')
+    ok(t and t.ext == 1 and t.fin == 1, 'and the tuple is one dark construct at both stages')
+end)
+
+test('lossreport: an import edge touches its statement (its `from` is a MODULE id, the file itself)', function ()
+    if not parser_available('javascript') then skip 'no javascript parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/lib', 'p')
+    local function put(rel, text) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close() end
+    put('lib/util.js', 'export function helper() { return 1; }\n')
+    -- a declaration FIRST: the file's statement-run `region` node starts at the first statement and would touch it
+    put('main.js', "const a = 1;\nimport { helper } from './lib/util.js';\nimport 'missing-package';\n")
+    local R = report.run(root, { lang = 'javascript' })
+    local imp = R.rows['import_statement']
+    ok(imp and imp.fin == 1, 'only the import that produced NO edge (a package not in the tree) is dark')
 end)

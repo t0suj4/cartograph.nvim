@@ -6658,6 +6658,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     blocks = spec.blocks,                   -- attached blocks (part B)
                     binder_fields = spec.binder_fields,     -- destructuring/imports (CART-0358)
                     pattern = spec.pattern,                 -- pattern binding (CART-0957)
+                    name_skip = spec.name_skip,             -- a name that is not a variable (CART-1121)
                     regime = spec.regime, method = method and lang == 'lua' }
                 end
                 if prev and prev.name == name then
@@ -7379,8 +7380,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                                         and 'fn' or 'file'
                                 end
                             else
+                                -- ★ THE SITE IS THE PATH (CART-1122), as a call's is its callee name: import
+                                -- edges carried no `at`, so an import could not be navigated to from its edge
+                                -- and the loss report counted every import statement dark (2586 on converse.js)
                                 local e = { from = file, to = target,
-                                    kind = 'import', bind = bind }
+                                    kind = 'import', bind = bind, at = { pos_of(pathn) } }
                                 -- all three fields together or none: setting
                                 -- `site` on a site whose KIND is unknown would
                                 -- claim half a fact
@@ -7856,6 +7860,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                             local pt = calln:parent()
                             local ptt = pt and pt:type() or ''
                             edges[#edges + 1] = { from = file, to = target, kind = 'import',
+                                at = { pos_of(arg1n or calln) }, -- the path argument (CART-1122)
                                 bind = spec.import_bind
                                     and spec.import_bind(calln, src) or nil,
                                 sideeffect = (ptt == 'chunk' or ptt == 'block'
@@ -7871,7 +7876,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         local target = spec.resolve_import(pl, importable, file, root)
                         if target and target ~= file then
                             edges[#edges + 1] = { from = file, to = target,
-                                kind = 'import', inferred = true }
+                                kind = 'import', inferred = true, at = { pos_of(arg1n or calln) } }
                         end
                     end
                     -- instance chain `root.field.method()`: the root's TYPE and

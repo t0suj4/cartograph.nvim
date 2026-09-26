@@ -285,6 +285,10 @@ M.SLOTS = {
     -- binding-only BY GRAMMAR (the `_pattern` suffix and the import cluster) — a node
     -- that can also appear in a value position must never be listed.
     binder_fields = 'ANALYSIS',
+    -- A NAME THAT IS NOT A VARIABLE (CART-1121): <node type> -> <field> whose leaves are neither def nor use.
+    -- erlang's `?MODULE` is (macro_call_expr name: (var)), the same node type as a variable; flow's du, its
+    -- pattern_parts and the expression IR all read this one declaration, so they cannot draw it differently.
+    name_skip = 'ANALYSIS',
     -- PATTERN BINDING (CART-0957): { fields = <node type -> the field that IS a pattern>, params = <the
     -- fn head is a pattern>, single_assignment = <a bound name in a pattern is a match, a use> }. A
     -- pattern binds every name under it at any depth, which binder_fields (per node TYPE) cannot say when

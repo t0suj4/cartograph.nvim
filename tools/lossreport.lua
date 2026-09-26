@@ -101,7 +101,8 @@ function M.anchors(data, callcover, files)
         end
     end
     for _, e in ipairs(data.edges or {}) do
-        local file = e.file or (e.from and e.from:match('^([^:]+)::')) or nil
+        -- a def id is `file::name`; a MODULE id (an import edge's `from`) is the file itself
+        local file = e.file or (e.from and (e.from:match('^([^:]+)::') or e.from)) or nil
         local ats = e.at
         if ats and ats.start then ats = { ats } end
         for _, r in ipairs(ats or {}) do

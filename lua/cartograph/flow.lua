@@ -427,6 +427,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
     local ids = (lang and lang.ids) or DFID
     local mods, bindf = lang and lang.mods, lang and lang.binder_fields
     local patf, patr = lang and lang.patf, lang and lang.patr
+    local nskip = lang and lang.name_skip -- a field whose leaves are not variables (CART-1121)
     if not root then return {}, {}, false, {}, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
     local blks = {} -- ATTACHED BLOCKS skipped on the way (see the 'always' stop below)
@@ -445,6 +446,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         local bodyc = (stop_body and ctrlset and ctrlset[t])
             and M.body_children(node, ctrlset, clauseset) or nil
         local asgleft, decld, k, declist, rngskip, bindset, bindskip, flatskip
+        local nsn = nskip and nskip[t] and node:field(nskip[t])[1]
         -- ★★ A DESTRUCTURING PATTERN DECIDES DEF-POSITION FOR ITS OWN CHILDREN (CART-0358),
         -- and it does so UNCONDITIONALLY — this branch is first, and it ignores the incoming
         -- `defpos`. That is what makes ONE table cover three sites that had nothing in
@@ -585,6 +587,8 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
               -- a LISTED-BUT-NOT-CHOSEN binder field (the foreign name of an
               -- aliased import): not a binding, and not a local read either.
               if bindskip and bindskip[c:id()] then goto skipchild end
+              -- a name that is not a variable (a macro name): neither def nor use (CART-1121)
+              if nsn and c:id() == nsn:id() then goto skipchild end
               -- ★ AN 'always' STOP IS AN ATTACHED BLOCK, AND du IS WHAT FINDS IT (part B).
               -- A ruby `xs.each do |x| … end` hangs its block off a `call` that can sit
               -- ANYWHERE inside the statement — `q = xs.map { … }` puts it under an
@@ -1057,7 +1061,7 @@ function M.build(fnnode, src, cfg)
     -- point in the walk, and du already carried nine positional arguments — a tenth would
     -- have meant nil-padding at three of the six call sites, which is how a caller ends up
     -- passing the wrong table. One bundle, passed unchanged by every caller.
-    local lang = { ids = ids, mods = cfg.mods, binder_fields = cfg.binder_fields,
+    local lang = { ids = ids, mods = cfg.mods, binder_fields = cfg.binder_fields, name_skip = cfg.name_skip, -- CART-1121
         patf = cfg.pattern and cfg.pattern.fields, patr = cfg.pattern and cfg.pattern.reads } -- CART-0957
     local stmts = {}
     local emit, region, clause -- fwd
@@ -1518,7 +1522,7 @@ function M.build(fnnode, src, cfg)
     if not cfg.seq then
         if cfg.pattern and cfg.pattern.params then
             params = M.pattern_names((cfg.pfield and fnnode:field(cfg.pfield)[1])
-                or (cfg.params_of and cfg.params_of(fnnode)), src, ids, cfg.pattern.reads)
+                or (cfg.params_of and cfg.params_of(fnnode)), src, ids, cfg.pattern.reads, cfg.name_skip)
         else
             params = param_names(fnnode, src, cfg.pfield, cfg.method or false, cfg.params_of)
         end
@@ -1582,7 +1586,7 @@ end
 --- one-level rule found none of them: the IQ handlers measured 0 of 11. A repeated name (`f(X, X)`) binds
 --- once; the repeat is a match test, and single_assignment settles uses. du, the head params and the
 --- expression harvest all read patterns through this, so they cannot draw the line differently.
-function M.pattern_parts(node, src, ids, reads)
+function M.pattern_parts(node, src, ids, reads, skip)
     local out, seen, readn = {}, {}, {}
     if not node then return out, readn end
     ids = ids or DFID
@@ -1595,8 +1599,11 @@ function M.pattern_parts(node, src, ids, reads)
     local function walk(n)
         local rf = reads and reads[n:type()]
         local rn = rf and n:field(rf)[1]
+        -- `skip` (spec.name_skip, CART-1121): a field whose leaves are not variables — a macro name binds nothing
+        local sf = skip and skip[n:type()]
+        local sn = sf and n:field(sf)[1]
         for c in n:iter_children() do
-            if c:named() then
+            if c:named() and not (sn and c:id() == sn:id()) then
                 if rn and c:id() == rn:id() then readn[#readn + 1] = c
                 else leaf(c); walk(c) end
             end
@@ -1606,7 +1613,7 @@ function M.pattern_parts(node, src, ids, reads)
     walk(node)
     return out, readn
 end
-function M.pattern_names(node, src, ids, reads) return (M.pattern_parts(node, src, ids, reads)) end
+function M.pattern_names(node, src, ids, reads, skip) return (M.pattern_parts(node, src, ids, reads, skip)) end
 
 --- ★ SINGLE ASSIGNMENT (CART-0957): in erlang a name is bound once per clause, and a pattern that names
 --- an ALREADY-BOUND variable does not rebind it — it MATCHES against it, a read. du cannot know what is

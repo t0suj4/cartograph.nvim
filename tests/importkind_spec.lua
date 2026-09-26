@@ -175,3 +175,36 @@ test('import kind: the imports axis SHOWS a re-running include', function ()
     eq(true, by['again.php'].rerun, 'include does, and the row says so')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ★ AN IMPORT EDGE CARRIES ITS SITE (CART-1122). All 1501 import edges on converse.js had no `at`, so an import
+-- could not be navigated to from its edge, and the loss report counted every import statement dark. The site is
+-- the PATH, as a call's site is its callee name: for a query-captured import (js `from './x'`) the string, for an
+-- import CALL (lua `require('x')`) the path argument.
+test('import site: a query-captured import edge points at its path', function ()
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/lib', 'p')
+    write(root, 'lib/util.js', { 'export function helper() { return 1; }' })
+    write(root, 'main.js', { '// a comment first', "import { helper } from './lib/util.js';",
+        'export function go() { return helper(); }' })
+    local data = ts.extract(root)
+    local e
+    for _, x in ipairs(data.edges) do if x.kind == 'import' and x.from == 'main.js' then e = x end end
+    ok(e and e.at and e.at[1], 'the import edge has a site')
+    eq(1, e.at[1].start.line, 'the second line (0-based 1)')
+    eq(23, e.at[1].start.char, "at the path string, `'./lib/util.js'`")
+    vim.fn.delete(root, 'rf')
+end)
+
+test('import site: an import CALL edge points at its path argument', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'b.lua', { 'return { x = 1 }' })
+    write(root, 'a.lua', { "local b = require('b')", 'return b.x' })
+    local data = ts.extract(root)
+    local e
+    for _, x in ipairs(data.edges) do if x.kind == 'import' and x.from == 'a.lua' then e = x end end
+    ok(e and e.at and e.at[1], 'the require edge has a site')
+    eq(0, e.at[1].start.line)
+    eq(18, e.at[1].start.char, "at the argument `'b'`")
+    vim.fn.delete(root, 'rf')
+end)

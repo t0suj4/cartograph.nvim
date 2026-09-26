@@ -409,7 +409,9 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 206 -- v206: AN ERLANG `fun` IS A SCOPE OF ITS OWN (CART-1106): its clauses are rows (arms under a pre-condition
+M.VERSION = 207 -- v207: A MACRO NAME IS NOT A VARIABLE (CART-1121, spec.name_skip): erlang's `?MODULE` no longer records a
+--- use (or, in a pattern, a binding) of MODULE; and an IMPORT EDGE CARRIES ITS SITE (CART-1122): `at` = the path.
+--- Prior: v206: AN ERLANG `fun` IS A SCOPE OF ITS OWN (CART-1106): its clauses are rows (arms under a pre-condition
 --- loop head) instead of being folded into the row carrying it, its head names shadow, nothing it binds is visible
 --- after it, and a case in a case's SUBJECT keeps its arms. The ejabberd/src self-gate 138 -> 33, all match tests.
 --- Prior: v205: A STITCHED MULTI-CLAUSE FLOW PROJECTS TO EVERY CLAUSE BODY'S STATEMENTS (flow.coarse): the

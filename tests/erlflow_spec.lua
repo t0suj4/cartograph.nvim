@@ -219,6 +219,19 @@ test('erlflow/fun: extraction and expr.of give a fun the same rows', function ()
     ok(found, 'the stored flow has the fun clause as a row')
 end)
 
+test('erlflow: a MACRO NAME is not a variable — neither a use in a value nor a binding in a pattern (CART-1121)', function ()
+    need()
+    local E = require 'cartograph.expr'
+    local eo = E.of_text('f(X) ->\n    Y = {?MODULE, ?NS_X, X},\n    Y.\n', 'erlang')
+    local r1 = eo.fl.stmts[1]
+    eq({ 'X' }, r1.use, 'MODULE and NS_X are not variables'); eq({ 'X' }, E.reads(r1.expr))
+    -- in a head: `?NS_X` inside a record pattern binds nothing; a macro's ARGUMENTS are still read
+    local eo2 = E.of_text('f(#iq{xmlns = ?NS_X} = IQ) ->\n    ?match(ok, g(?MODULE, IQ)).\n', 'erlang')
+    eq({ 'IQ' }, eo2.fl.params, 'NS_X is not bound by the head')
+    eq({ 'IQ' }, eo2.fl.stmts[1].use, 'the macro call reads its argument IQ, not MODULE')
+    eq({}, E.gate(eo2.fl, 'erlang'))
+end)
+
 test('erlflow: a function of several clauses is ONE record, its clauses the arms (expr.of and extraction agree)', function ()
     need()
     local by, store = extract('-module(m).\nf(0) -> 1;\nf(N) when N > 0 -> N * f(N - 1).\ng(A) -> A.\n')

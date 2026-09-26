@@ -245,6 +245,11 @@ return {
     -- ⚠ NOT YET: a NAMED fun's `name` (`fun Loop(N) -> Loop(N - 1) end`, 3 in ejabberd) binds in its own
     -- clauses and reads here as a free use; and a comprehension's generator scopes the same way (1 of the 93).
     blocks = { anonymous_fun = false },
+    -- ★ A MACRO NAME IS NOT A VARIABLE (CART-1121). `?MODULE` / `?NS_X` parse as (macro_call_expr name: (var)),
+    -- and every reader of `var` leaves took them for variables: `Y = {?MODULE, ?NS_X, X}` recorded uses of MODULE
+    -- and NS_X, a read of something nothing defines, and in a pattern (`#iq{xmlns = ?NS_X}`) a BINDING of NS_X. The
+    -- self-gate could not see it: du and the IR made the same mistake. A macro's ARGUMENTS stay expressions.
+    name_skip = { macro_call_expr = 'name' },
     preloop = { anonymous_fun = true },
     pattern = {
         -- the field of each node type that IS a pattern (every name under it binds, at any depth)
