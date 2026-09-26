@@ -22,7 +22,7 @@ local function build_flow(store, node)
     -- resolve with the family spec (javascript) but PARSE with the real grammar
     -- (typescript for .ts — TS syntax errors out under the JS grammar)
     local plang = ts.parse_lang(node.file)
-    local pok, parser = pcall(vim.treesitter.get_string_parser, src, plang)
+    local pok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, plang), plang)
     if not pok then return nil, 'no parser for ' .. tostring(plang) end
     -- the SPEC lang, not the parse lang: typescript/tsx derive their spec from
     -- javascript's table, so both resolve to the same set and the parse-lang

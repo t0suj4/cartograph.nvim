@@ -34,7 +34,7 @@ local txn = require 'cartograph.txn'
 local tsutil = require 'cartograph.spec.tsutil'
 
 local function parse_root(text, lang)
-    local okp, parser = pcall(vim.treesitter.get_string_parser, text, lang)
+    local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(text, lang), lang)
     if not okp or not parser then return nil end
     local okt, tree = pcall(function () return parser:parse()[1] end)
     if not okt or not tree then return nil end

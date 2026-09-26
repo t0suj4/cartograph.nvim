@@ -2349,7 +2349,7 @@ local function parse_root(src, lang, lines)
     pc.miss = pc.miss + 1
     -- release BEFORE parsing: two trees alive at once is the peak we are cutting
     M.parse_release()
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
     if not ok then return nil end
     local tree = parser:parse()[1]
     local root = tree and tree:root() or nil
@@ -2468,7 +2468,7 @@ function M.of_text(src, lang, opts)
     if not lang or not spec[lang] then
         return nil, 'no expression spec for ' .. tostring(lang)
     end
-    local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
     if not okp or not parser then return nil, 'no parser for ' .. tostring(lang) end
     local okt, trees = pcall(parser.parse, parser)
     if not okt or not trees or not trees[1] then return nil, 'the text did not parse' end

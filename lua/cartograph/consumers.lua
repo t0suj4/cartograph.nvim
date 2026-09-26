@@ -517,7 +517,7 @@ end
 --- Scan one Lua source string. spec = { calls = {occurrences='list'},
 --- fields = {at='any'} }. Returns { seeds, derefs, escapes }.
 function M.scan(src, file, spec)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, 'lua'), 'lua')
     if not ok or not parser then return nil, 'no lua parser' end
     local root = parser:parse()[1]:root()
     local s = Scan.new(src, file, spec)

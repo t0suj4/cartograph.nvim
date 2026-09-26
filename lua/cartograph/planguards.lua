@@ -53,7 +53,7 @@ M.GUARDS = {}
 
 local function parses(text, lang)
     if not lang or not text then return nil end
-    local ok, p = pcall(vim.treesitter.get_string_parser, text, lang)
+    local ok, p = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(text, lang), lang)
     if not ok or not p then return nil end
     local okt, tree = pcall(function () return p:parse()[1] end)
     if not okt or not tree then return false end
@@ -180,7 +180,7 @@ end
 ---@return string|nil skeleton, nil when the language has no parser here
 function M.code_skeleton(text, lang)
     if type(text) ~= 'string' or not lang then return nil end
-    local okp, parser = pcall(vim.treesitter.get_string_parser, text, lang)
+    local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(text, lang), lang)
     if not okp or not parser then return nil end
     local okt, tree = pcall(function () return parser:parse()[1] end)
     if not okt or not tree then return nil end

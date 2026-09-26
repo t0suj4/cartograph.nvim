@@ -215,6 +215,11 @@ function M.ingest(data, opts)
     pcall(function ()
         require('cartograph.providers.treesitter').set_h_lang(data and data.h_lang)
     end)
+    -- and the Lua dialect it was parsed under (luadialect.lua): a later re-parse of a Lua file must read `global`
+    -- the way the build did. A graph predating the field carries none: the pre-5.5 default, what built it.
+    pcall(function ()
+        require('cartograph.luadialect').set(data and data.lua_dialect and data.lua_dialect.version)
+    end)
     M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it
     M._frontier_cache = {}
     M._content_cache = {}

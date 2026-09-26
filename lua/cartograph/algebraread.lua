@@ -88,7 +88,7 @@ M.RESERVED = { hole = true, seq = true, lit = true, name = true, pair = true,
 --- @param lang string tree-sitter language
 --- @return table|nil term, string|nil why
 local function read(A, src, lang)
-    local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
     if not okp or not parser then
         return nil, ('no tree-sitter parser for `%s`'):format(lang)
     end

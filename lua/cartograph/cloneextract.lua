@@ -138,7 +138,7 @@ local function stmt_line(lines, lang, syn, line0)
     local parents = syn and syn.stmt_parents
     if not parents then return line0 end -- no claim for this language: behave as before
     local src = table.concat(lines, '\n')
-    local okp, parser = pcall(vim.treesitter.get_string_parser, src, syn.parse)
+    local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, syn.parse), syn.parse)
     if not okp or not parser then return line0 end
     local okt, tree = pcall(function () return parser:parse()[1] end)
     if not okt or not tree then return line0 end

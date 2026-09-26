@@ -351,7 +351,7 @@ function M.scan(lang, src)
         bynode[f.node] = bynode[f.node] or {}
         table.insert(bynode[f.node], f)
     end
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
     if not ok then return nil, 'no ' .. lang .. ' parser' end
     local ok2, trees = pcall(function () return parser:parse() end)
     local root = ok2 and trees and trees[1] and trees[1]:root()
@@ -707,7 +707,7 @@ function M.syntax_facts(store, which, prefix)
         -- NOT `local ok, parser = src and pcall(...)`: an `and` expression is
         -- adjusted to ONE value, so parser would always be nil
         local ok, parser = false, nil
-        if src then ok, parser = pcall(vim.treesitter.get_string_parser, src, lang) end
+        if src then ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang) end
         local trees = ok and parser and parser:parse()
         local root = trees and trees[1] and trees[1]:root()
         if root then

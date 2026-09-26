@@ -196,7 +196,7 @@ end
 
 --- every catalog site in one Lua source: { rule, range, old, new, premise? } and the declined ones
 function M.sites(src)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, 'lua'), 'lua')
     if not ok then return {}, { { reason = 'cannot parse' } } end
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })

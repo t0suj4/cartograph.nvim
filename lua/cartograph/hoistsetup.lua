@@ -26,7 +26,7 @@ local M = {}
 
 -- every named node of a file's tree, keyed by `type:start_row` (0-based)
 local function node_index(src, lang)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
     if not ok or not parser then return nil end
     local tree = parser:parse()[1]
     local idx = {}

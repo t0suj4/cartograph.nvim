@@ -47,6 +47,7 @@ if job.phase == 'parse' then
         -- deriving it here would answer C for a C++ repo and this chunk would be
         -- parsed against a different grammar than its siblings.
         h_lang = job.h_lang,
+        lua_dialect = job.lua_dialect,
         -- the DECLARATIVE transport spec, rebuilt here: a module-level registry
         -- in the parent would not exist in this process at all
         transport = job.transport,

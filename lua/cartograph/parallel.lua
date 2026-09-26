@@ -454,7 +454,7 @@ function M.demand(file)
     local chunk = ts.extract(s.root,
         { files = { file }, fileset = s.fileset, skip_idpass = true,
             abs = s.abs, packs = s.packs, profile = s.profile,
-            h_lang = s.h_lang, transport = s.transport })
+            h_lang = s.h_lang, lua_dialect = s.lua_dialect, transport = s.transport })
     merge_chunk(s, chunk)
     s.arrived[file] = true -- even if unreadable: don't retry per descend
     if s.on_chunk then s.on_chunk(s.done, s.total, s.acc) end
@@ -515,12 +515,14 @@ function M.extract(root, o)
     -- divergence that shows up ONLY in refs is a resolution-side reader that was never
     -- told, and node equality is what makes it look fine.
     ts.set_h_lang(o.h_lang)
+    -- the Lua dialect likewise: resolved ONCE here (and adopted by the parent, which relinks), shipped explicitly
+    o.lua_dialect = o.lua_dialect or ts.lua_dialect_for(root, nil)
 
     local nw = math.min(o.workers or M.default_workers(),
         math.max(1, math.ceil(#files / M.BATCH)))
     if nw < 2 then
         o.on_done(ts.extract(root, { files = files, abs = abs, packs = o.packs,
-            profile = o.profile, h_lang = o.h_lang, transport = tstack }))
+            profile = o.profile, h_lang = o.h_lang, lua_dialect = o.lua_dialect, transport = tstack }))
         return
     end
     local rtp = worker_rtp()
@@ -537,12 +539,13 @@ function M.extract(root, o)
         -- none can disagree about which environment it is resolving against
         profile = o.profile,
         h_lang = o.h_lang, -- the merged graph carries it, as the inline build does
+        lua_dialect = o.lua_dialect,
         capabilities = { calls = true, litdata = true, df = 'lite' },
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
         mentions = {}, _no_parser = {}, _unparsed = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
-        packs = o.packs, profile = o.profile, h_lang = o.h_lang,
+        packs = o.packs, profile = o.profile, h_lang = o.h_lang, lua_dialect = o.lua_dialect,
         transport = tstack, wmetrics = {} }
     M._session = s
 
@@ -747,7 +750,7 @@ function M.extract(root, o)
         for _, fb in ipairs(failed) do -- sequential fallback, honest
             merge_chunk(s, ts.extract(root, { files = fb,
                 fileset = files, skip_idpass = true, abs = abs, packs = o.packs,
-                profile = o.profile, h_lang = o.h_lang,
+                profile = o.profile, h_lang = o.h_lang, lua_dialect = o.lua_dialect,
                 transport = tstack }))
         end
         canonicalize()
@@ -807,6 +810,7 @@ function M.extract(root, o)
             fileset = files, rtp = rtp, roots = o.roots, packs = o.packs,
             profile = o.profile,
             h_lang = o.h_lang, -- the parent's whole-tree answer (CART-0410)
+            lua_dialect = o.lua_dialect,
             transport = tspec, -- the serialisable half; the worker rebuilds it
             foldstore = s.foldstore }, -- worker folds df/flow + ships the store once
             function (chunk, res)

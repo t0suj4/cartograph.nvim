@@ -1471,6 +1471,25 @@ end
 
 function M.h_lang() return H_LANG end
 
+-- ★ THE LUA DIALECT (lua/cartograph/luadialect.lua): tree-sitter-lua reads `global` as Lua 5.5's keyword, which
+-- deletes every read of Factorio 1.x's `global` table. A pre-5.5 root is parsed from a VIEW with each whole word
+-- `global` spelled `_lobal` (same length, an identifier to the grammar); node text is always read from the original
+-- bytes, so the name is still `global`. Like h_lang this is a per-TREE decision: the parent resolves it (.luarc.json,
+-- .luacheckrc, profile, else the pre-5.5 default), threads it to workers, records it on the graph, and store.ingest
+-- re-adopts it for later re-parses. On M because M.extract is at LuaJIT's upvalue limit.
+function M.lua_dialect_for(root, opts)
+    local ld = require('cartograph.luadialect')
+    local d = opts and opts.lua_dialect
+    local v, src
+    if type(d) == 'table' then v, src = d.version, d.source else v, src = ld.resolve(root) end
+    ld.set(v)
+    return { version = v, source = src }
+end
+function M.parse_view(lang, src)
+    if lang ~= 'lua' then return src end
+    return require('cartograph.luadialect').view(src, lang)
+end
+
 -- ★★ THE QUESTION SPLITS IN TWO, AND CONFLATING THEM WAS A BUG (CART-0412).
 -- "which spec claims this EXTENSION" depends on nothing but the extension and is
 -- worth caching. "does this spec DISCLAIM this particular FILE" depends on the whole
@@ -4388,7 +4407,7 @@ function M.forms(file, sr, sc, er, ec, opts)
     if not (lang and spec) then return {} end
     local src = transport.read_source(file)
     if not src then return {} end
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, M.parse_view(lang, src), lang)
     if not ok then return {} end
     local tree = parser:parse()[1]
     if not tree then return {} end
@@ -4490,7 +4509,7 @@ function M.names(file, sr, sc, er, ec)
     if not (lang and spec) then return {} end
     local src = transport.read_source(file)
     if not src then return {} end
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, M.parse_view(lang, src), lang)
     if not ok then return {} end
     local tree = parser:parse()[1]
     if not tree then return {} end
@@ -5569,7 +5588,7 @@ local function id_pass(root, files, L, abs, tp)
             if clang then lang, spec = 'javascript', M.spec.javascript end
             local src = tp.read_source(abs(file))
             local okp, parser = pcall(vim.treesitter.get_string_parser,
-                src or '', clang or lang)
+                M.parse_view(clang or lang, src or ''), clang or lang)
             if src and okp then
                 local troots = container_trees(parser, clang)
                     or { { root = parser:parse()[1]:root(), spec = spec,
@@ -6290,6 +6309,8 @@ function M.extract(root, opts)
         -- they cannot re-derive this, and deriving it from a loaded SHARD would be
         -- wrong anyway (a shard can be all headers). store.ingest re-adopts it.
         h_lang = M.h_lang(),
+        -- the Lua dialect this graph was parsed under (see M.lua_dialect_for), with where it came from
+        lua_dialect = M.lua_dialect_for(root, opts),
         nodes = {}, edges = {}, calls = {}, stamps = {} }
     local nodes, edges, calls = data.nodes, data.edges, data.calls
     local no_parser = {}
@@ -8066,12 +8087,12 @@ local MATCH_OPTS = { match_limit = 65536 }
             -- only as long as their tree (and its owning parser) does
             local function parse_into()
                 local _pp = pstart()
-                rawtree = raw_parse(lang, src)
+                rawtree = raw_parse(lang, M.parse_view(lang, src))
                 if rawtree then
                     tsroot = rawtree:root()
                 else
                     local okp, parser =
-                        pcall(vim.treesitter.get_string_parser, src, lang)
+                        pcall(vim.treesitter.get_string_parser, M.parse_view(lang, src), lang)
                     if not okp then padd('parse', _pp) return false end
                     keepparser = parser
                     tsroot = parser:parse()[1]:root()

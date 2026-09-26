@@ -409,7 +409,10 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 200 -- v200: C/C++ DEFS ARE TORN BY DAMAGED CONTEXT, NOT BY POSITION (CART-1084): a def after a file's first
+M.VERSION = 201 -- v201: THE LUA DIALECT DECIDES HOW `global` PARSES (luadialect.lua): tree-sitter-lua reads it as Lua 5.5's
+-- keyword; a pre-5.5 root (.luarc.json / .luacheckrc / profile / the default) is parsed from a view with `global`
+-- masked to an identifier, text still read from the original bytes. The manifest records the dialect (a changed
+-- declaration is a miss) and now also h_lang, which it used to drop. Prior: v200: C/C++ DEFS ARE TORN BY DAMAGED CONTEXT, NOT BY POSITION (CART-1084): a def after a file's first
 -- parse error is indexed unless its own subtree has an error, an ancestor is ERROR, or an ancestor is not a structural
 -- container (the class-body-parsed-as-function-body shape); a function-like macro only by its own error or an ERROR
 -- ancestor. Prior: v199: C AND C++ ARE ONE LINKAGE FAMILY IN THE NAME JOIN (CART-1079): a bare call reaches a free function
@@ -2410,6 +2413,14 @@ local function read_manifest(root)
         if m.ecosystem_stamp ~= M._artifact_key() then
             return nil, dir
         end
+        -- LUA DIALECT IDENTITY: `.luarc.json` / `.luacheckrc` / the profile decide how `global` parses, so a changed
+        -- declaration is a clean miss. An old manifest records none: it was built with the pre-5.5 reading, which
+        -- is also what an undeclared root resolves to now, so it stays valid.
+        local ok_ld, ld = pcall(require, 'cartograph.luadialect')
+        if ok_ld then
+            local recorded = type(m.lua_dialect) == 'table' and m.lua_dialect.version or nil
+            if recorded ~= (ld.resolve(nroot)) then return nil, dir end
+        end
         return m, dir
     end
     return nil, dir
@@ -2654,6 +2665,9 @@ local function manifest_of(data, sizes)
         stamps = data.stamps, unparsed = data.unparsed,
         capabilities = data.capabilities, no_parser = data.no_parser,
         packs = data.packs, profile = data.profile, profile_stamp = profile_stamp,
+        -- per-TREE parse decisions a warm graph must keep: what `.h` meant (CART-0410; before this the manifest
+        -- dropped it and a warm graph re-parsed headers as C) and the Lua dialect (luadialect.lua)
+        h_lang = data.h_lang, lua_dialect = data.lua_dialect,
         -- INDEX-ONLY marker ([[cartograph-thin-index]] warm serving): a thin cache
         -- (defs only, no call graph) MUST stay marked across the round-trip so a warm
         -- reopen still reports is_index_only() — else the honesty guards (LSP caps
@@ -2907,6 +2921,7 @@ local function empty_data(m)
         -- restore the activation context so a refresh on a warm graph relinks with
         -- the SAME packs/profile it was built with (empty_data dropped both before)
         packs = m.packs, profile = m.profile,
+        h_lang = m.h_lang, lua_dialect = m.lua_dialect,
         -- carry the thin-index marker back so is_index_only() holds on a warm reopen
         index_only = m.index_only,
         nodes = {}, edges = {}, calls = {}, names = {} }
