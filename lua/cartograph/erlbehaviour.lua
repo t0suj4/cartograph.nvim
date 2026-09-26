@@ -200,6 +200,7 @@ function M.contract(files, read, runtime)
                     for _, c in ipairs(rb and rb.callbacks or {}) do
                         if c.name == n.name and c.arity == ar then
                             base.producer, base.app, base.release = 'runtime', rb.app, A.version
+                            base.otp = rb.otp -- true: an OTP application; false: installed into the runtime by others
                             base.optional = c.optional
                             return base
                         end

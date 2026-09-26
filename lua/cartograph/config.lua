@@ -72,6 +72,18 @@ M.unparsed = true
 --   setup{ pins = { { file = 'src/hooks.php', line = 88, to = 'my_handler' } } }
 M.pins = nil
 
+-- SCOPED SETTINGS: a deliberate exception to what cartograph derives, for one part of the world. User rule
+-- (2026-09-26): "I'll choose derivation over a hand-maintained list almost every time. The only exceptions to the
+-- rule is when I want it there, expressed through scoped configuration." So a derived answer is the default
+-- everywhere, and an override is keyed by the path prefix it applies to (the longest matching prefix wins; a
+-- key no scope sets falls back to the global setting of that name). Read through M.for_root(root, key).
+--   setup{ scoped = { ['/home/me/work/brotardcast/ejabberd'] = { behaviour_suppliers = 'otp' } } }
+-- Keys read today:
+--   behaviour_suppliers  'derived' (default: every supplier the runtime proves — OTP's own applications and
+--                        libraries installed into it, each named in the alibi) | 'otp' (only applications the OTP
+--                        installer shipped, per the runtime's releases/<rel>/installed_application_versions)
+M.scoped = nil
+
 -- registry auto-discovery (Greenspun detection): verbs that register
 -- callables under string keys are found and linked without configuration
 M.discover = true
@@ -314,6 +326,24 @@ function M.apply(opts)
         end
         M.user_set[k] = true
     end
+end
+
+--- the value of `key` for a tree at `root`: the longest `scoped` prefix that contains `root` and sets `key`,
+--- else the global setting of that name (nil when neither)
+function M.for_root(root, key)
+    if type(M.scoped) == 'table' and root then
+        local r = (vim.fn.fnamemodify(root, ':p'):gsub('/+$', ''))
+        local best, blen
+        for prefix, t in pairs(M.scoped) do
+            local p = (vim.fn.fnamemodify(vim.fn.expand(prefix), ':p'):gsub('/+$', ''))
+            if type(t) == 'table' and t[key] ~= nil and (r == p or r:sub(1, #p + 1) == p .. '/')
+                    and (not blen or #p > blen) then
+                best, blen = t[key], #p
+            end
+        end
+        if blen then return best end
+    end
+    return M[key]
 end
 
 return M

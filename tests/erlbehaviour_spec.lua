@@ -180,3 +180,60 @@ test('otp-api artifact: the runtime\'s behaviour callbacks are distilled, with o
     eq(nil, by['handle_call/3'].optional)
     eq(true, by['handle_info/2'] and by['handle_info/2'].optional, 'handle_info/2 is optional')
 end)
+
+test('config.for_root: a scoped exception applies inside its prefix only (longest wins), else the global value', function ()
+    local config = require 'cartograph.config'
+    local saved_scoped, saved_global = config.scoped, config.behaviour_suppliers
+    config.behaviour_suppliers = nil
+    config.scoped = { ['/w/app'] = { behaviour_suppliers = 'otp' }, ['/w/app/vendored'] = { behaviour_suppliers = 'derived' } }
+    local ok_run, err = pcall(function ()
+        eq('otp', config.for_root('/w/app', 'behaviour_suppliers'))
+        eq('otp', config.for_root('/w/app/src', 'behaviour_suppliers'), 'a tree inside the scope')
+        eq('derived', config.for_root('/w/app/vendored/x', 'behaviour_suppliers'), 'the longer prefix wins')
+        eq(nil, config.for_root('/w/application', 'behaviour_suppliers'), 'a sibling that shares a string prefix is outside')
+        config.behaviour_suppliers = 'derived'
+        eq('derived', config.for_root('/elsewhere', 'behaviour_suppliers'), 'outside every scope: the global setting')
+    end)
+    config.scoped, config.behaviour_suppliers = saved_scoped, saved_global
+    if not ok_run then error(err, 0) end
+end)
+
+test('lint: an installed library behaviour is alibied by default; a scoped `otp` restriction keeps OTP\'s own only', function ()
+    if not have_erlang() then skip('no erlang parser') end
+    local A = require('cartograph.spec.profile').load('otp-api')
+    if not (A and A.behaviours and A.behaviours.p1_server and A.behaviours.p1_server.otp == false) then
+        skip('the checked-in otp-api profile carries no installed-library behaviour (p1_server)')
+    end
+    local config = require 'cartograph.config'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/srv.erl', 'w'))
+    fd:write('-module(srv).\n-behaviour(p1_server).\n-behaviour(gen_server).\nhandle_call(R, F, S) -> {reply, R, F, S}.\ninit(A) -> {ok, A}.\n')
+    fd:close()
+    local function alibi_kinds()
+        local data = ts.extract(root)
+        store.ingest(data)
+        local ali = lint.alibi(store)
+        local out = {}
+        for _, n in ipairs(data.nodes) do
+            if n.name == 'handle_call' or n.name == 'init' then
+                for _, a in ipairs(ali(n).alibis) do
+                    if a.kind == 'behaviour-callback' then out[n.name] = a.evidence.behaviour end
+                end
+            end
+        end
+        return out
+    end
+    local saved = config.scoped
+    local ok_run, err = pcall(function ()
+        config.scoped = nil
+        local d = alibi_kinds()
+        ok(d.handle_call and d.init, 'derived default: both callbacks alibied')
+        config.scoped = { [root] = { behaviour_suppliers = 'otp' } }
+        local o = alibi_kinds()
+        eq('gen_server', o.init, 'init/1 is still gen_server\'s (OTP)')
+        eq('gen_server', o.handle_call, 'handle_call/3 now comes from gen_server only, never p1_server')
+    end)
+    config.scoped = saved
+    vim.fn.delete(root, 'rf')
+    if not ok_run then error(err, 0) end
+end)

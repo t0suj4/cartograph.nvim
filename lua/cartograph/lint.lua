@@ -1347,8 +1347,19 @@ local function contract_alibi(store)
             local l = store.content({ file = f })
             return l and table.concat(l, '\n') or nil
         end,
-        -- the runtime's behaviours come from the DISTILLED artifact (tools/erldistill.lua), never a name table
-        function () return require('cartograph.spec.profile').load('otp-api') end)
+        -- the runtime's behaviours come from the DISTILLED artifact (tools/erldistill.lua), never a name table;
+        -- a SCOPED setting may restrict them to OTP's own applications — the split is derived too (the artifact's
+        -- per-behaviour `otp`, from the runtime's installed_application_versions), only the choice is configured
+        function ()
+            local A = require('cartograph.spec.profile').load('otp-api')
+            local want = require('cartograph.config').for_root(store.data and store.data.root, 'behaviour_suppliers')
+            if A and want == 'otp' and A.behaviours then
+                local kept = {}
+                for m, b in pairs(A.behaviours) do if b.otp then kept[m] = b end end
+                A = setmetatable({ behaviours = kept }, { __index = A })
+            end
+            return A
+        end)
     local sup, sub, mem = {}, {}, {}
     local function add(child, kind, name)
         if not (child and name) then return end
@@ -1685,7 +1696,7 @@ function M.alibi(store)
                   file = ct.behaviour_file, line = ct.behaviour_line,
                   producer = ct.producer, callback = ct.callback, arity = ct.arity, optional = ct.optional,
                   callback_file = ct.callback_file, callback_line = ct.callback_line,
-                  app = ct.app, release = ct.release })
+                  app = ct.app, release = ct.release, otp = ct.otp })
         elseif ct and ct.reverse then
             -- the reverse: the EVIDENCE is the implementor a deletion would break
             alibi('inheritance-contract', 'matched',

@@ -65,6 +65,14 @@ local script = ([[
   Rel = erlang:system_info(otp_release),
   {ok, F} = file:open("%s", [write]),
   io:format(F, "@release ~s~n", [Rel]),
+  %% WHICH APPLICATIONS ARE OTP'S OWN: the OTP installer records the applications it shipped in
+  %% releases/<Rel>/installed_application_versions. Everything else under lib/ was installed there by
+  %% someone else (a distro's p1_utils, xmpp). Derived from the runtime, never a hand-kept list.
+  case file:read_file(filename:join([code:root_dir(), "releases", Rel, "installed_application_versions"])) of
+    {ok, IAV} -> lists:foreach(fun(A) -> io:format(F, "@otpapp ~s~n", [A]) end,
+                               string:lexemes(binary_to_list(IAV), "\n\r "));
+    _ -> io:format(F, "@otpapp-unknown~n", [])
+  end,
   %% ⚠ THE LIB TREE IS NOT ALL OF OTP. `erlang`, `init`, `erl_prim_loader` and
   %% the rest are PRELOADED — compiled into the emulator, with no path under
   %% /lib/erlang/lib — so filtering on that path silently dropped the single most
@@ -124,12 +132,16 @@ local nsset, namespaces, free, vocab, sigs = {}, {}, {}, {}, {}
 local release, nmod, nexp, nbif = 'unknown', 0, 0, 0
 -- behaviour module -> { [name/arity] = { name, arity, optional } }, flattened to a sorted list below
 local bcb, bopt, bapp, nbeh = {}, {}, {}, 0
+local otp_apps, otp_known = {}, false
 for line in io.lines(tmp) do
     local rel = line:match('^@release%s+(%S+)')
     local bif, bifa = line:match('^@bif%s+(%S+)%s+(%d+)$')
     local cbtag, cbm, cbf, cba = line:match('^@(%a+)%s+(%S+)%s+(%S+)%s+(%d+)$')
     if rel then
         release = rel
+    elseif line:match('^@otpapp%s') then
+        otp_apps[line:match('^@otpapp%s+(%S+)')] = true
+        otp_known = true
     elseif line:match('^@app%s') then
         local am, ap = line:match('^@app%s+(%S+)%s+(%S+)$')
         -- `/usr/lib/erlang/lib/stdlib-4.3.1.3/ebin/gen_server.beam` -> `stdlib-4.3.1.3`
@@ -203,7 +215,12 @@ for m, t in pairs(bcb) do
         if a.name ~= b.name then return a.name < b.name end
         return a.arity < b.arity
     end)
-    behaviours[m] = { app = bapp[m], callbacks = l }
+    -- otp: true = an application the OTP installer shipped (or a preloaded module), false = installed into the
+    -- runtime's lib dir by someone else, nil = the runtime did not say (no installed_application_versions)
+    local app = bapp[m]
+    local otp
+    if app == 'preloaded' then otp = true elseif otp_known then otp = otp_apps[app] == true end
+    behaviours[m] = { app = app, callbacks = l, otp = otp }
     nbeh = nbeh + 1
 end
 
@@ -226,6 +243,7 @@ local prof = {
     vocab = vocab,
     sigs = sigs,
     behaviours = behaviours,
+    otp_apps = (function () local l = {} for a in pairs(otp_apps) do l[#l + 1] = a end table.sort(l) return l end)(),
 }
 
 local fd = assert(io.open(out, 'wb'))

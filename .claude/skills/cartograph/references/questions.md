@@ -106,6 +106,12 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | The runtime tier from outside the process (OpenTelemetry spans) | `tools/otelobserve.lua <corpus|dir> --spans <file>` |
 | How do real YAML/XML implementations decide ambiguous input? | `tools/ambiguity.lua [--write] [--joins]` |
 
+## Making a deliberate exception (derive by default; scope an override)
+
+| Question | How |
+|---|---|
+| How do I override a DERIVED answer for one tree only? | `setup{ scoped = { [path prefix] = { key = value } } }`, read by `config.for_root(root, key)` (longest prefix wins, global fallback). User rule: derivation over hand-maintained lists; exceptions only through scoped configuration. Keys today: `behaviour_suppliers = 'derived' \| 'otp'` |
+
 ## In-process: library calls that answer a question
 
 | Question | Call |
