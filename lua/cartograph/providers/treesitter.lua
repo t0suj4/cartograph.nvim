@@ -4861,6 +4861,7 @@ end
 -- whole extract, and it asked a tree this one is already holding.
 local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local scopes = spec.scopes
+    local wrapctx -- statement wrapper node id -> the body context its children belong to (see stmtctx)
     local idt = spec.mention_types or MENTION_ID
     local wgate, is_write, guards = spec.write_gate, spec.is_write, spec.guards
     local wq, wqn = {}, 0 -- queued write mentions (stride 5, see below)
@@ -4927,6 +4928,9 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             end
         end
         local bodyctx = dfreg and dfreg[n:id()]
+        -- the statements' owner: the body itself, or a body's STATEMENT WRAPPER (go's statement_list) whose
+        -- children are the body's statements
+        local stmtctx = bodyctx or (wrapctx and wrapctx[n:id()])
         if bodyctx then
             fdepth = fdepth + 1
             fnstack[fdepth] = bodyctx.node -- always: pw attribution
@@ -4999,12 +5003,21 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             local cdefpos, cdfid
             if nctx > 0 then
                 cnamed = c:named()
-                if bodyctx and cnamed and not tsutil.COMMENT[ct] then
-                    -- a body's direct named children ARE its statements
-                    bodyctx.cur = { l = c:range() + 1,
-                        def = {}, use = {}, dep = {} }
-                    bodyctx.sd, bodyctx.su = {}, {}
-                    bodyctx.stmts[#bodyctx.stmts + 1] = bodyctx.cur
+                if stmtctx and cnamed and not tsutil.COMMENT[ct] then
+                    if STMT_WRAPPERS[ct] then
+                        -- ★ A WRAPPER IS NOT A STATEMENT (go 0.12's statement_list sits between a block and
+                        -- its statements): its children are, exactly as flow's region() flattens it. Without
+                        -- this the oracle df saw ONE statement per block while flow saw the real ones, and
+                        -- dfparity read 5405 partition mismatches on go that were the ORACLE's (CART-1104).
+                        wrapctx = wrapctx or {}
+                        wrapctx[c:id()] = stmtctx
+                    else
+                        -- a body's direct named children ARE its statements
+                        stmtctx.cur = { l = c:range() + 1,
+                            def = {}, use = {}, dep = {} }
+                        stmtctx.sd, stmtctx.su = {}, {}
+                        stmtctx.stmts[#stmtctx.stmts + 1] = stmtctx.cur
+                    end
                 end
                 if dfon and cnamed then
                     if dfk == 1 then cdefpos = c == asgleft
