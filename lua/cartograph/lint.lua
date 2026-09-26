@@ -1319,12 +1319,25 @@ end
 --- LANGUAGE-NEUTRAL BY CONSTRUCTION: it reads whatever `super_query`/`iface_query` the
 --- spec declared and is simply inert where none is (measured: 0 hits on 39,748 wow lua
 --- methods, 0 on cartograph's own lua, 13 on grocy php, 1,436 on elasticsearch libs).
+---
+--- ★ AND THE REVERSE (CART-0714): a SUPERTYPE member is kept alive BY ITS IMPLEMENTORS. Deleting
+--- `Validator::check` breaks every `@Override public void check(String)` beneath it, even when nothing calls it
+--- through the interface — the same two maps read downward (an inverted `sup`). Measured upstream on cni-cross:
+--- 1,013 of 4,435 surviving dead-function findings were interface members with an in-corpus implementor. The
+--- guards mirror the forward ones: a member with NO implementor stays dead (the discrimination — "an interface
+--- member is never dead" would pass trivially and destroy the surface), an implementor of a DIFFERENT ARITY is
+--- not an implementor, and an implementor OUTSIDE the corpus cannot be seen, so it alibis nothing (the member
+--- stays reported; the honest verdict there is frontier, which this rule does not claim either way).
+--- ⚠ WHAT IT DOES NOT MEASURE: a member AND all its implementors with zero callers are a dead FAMILY; each alibis
+--- the other here. The rule answers "may I delete THIS node alone", not "is the family used".
 local function contract_alibi(data)
-    local sup, mem = {}, {}
+    local sup, sub, mem = {}, {}, {}
     local function add(child, kind, name)
         if not (child and name) then return end
         local l = sup[child]; if not l then l = {}; sup[child] = l end
         l[#l + 1] = { kind = kind, name = name }
+        local d = sub[name]; if not d then d = {}; sub[name] = d end
+        d[#d + 1] = { kind = kind, name = child }
     end
     for _, r in ipairs(data.implements or {}) do add(r.child, 'implements', r.iface) end
     for _, r in ipairs(data.extends or {}) do add(r.child, 'extends', r.parent) end
@@ -1359,6 +1372,25 @@ local function contract_alibi(data)
                                 member = hit.name, file = hit.file, arity = ar }
                         end
                         nq[#nq + 1] = sp.name
+                    end
+                end
+            end
+            q = nq; depth = depth + 1
+        end
+        -- the REVERSE: down the subtype chain, to an in-corpus class that defines this member at this arity
+        seen, q, depth = { [cls] = true }, { cls }, 0
+        while #q > 0 and depth < 12 do
+            local nq = {}
+            for _, c in ipairs(q) do
+                for _, sb in ipairs(sub[c] or {}) do
+                    if not seen[sb.name] then
+                        seen[sb.name] = true
+                        local hit = mem[sb.name] and mem[sb.name][m] and mem[sb.name][m][ar]
+                        if hit and hit.id ~= n.id then
+                            return { via = sb.kind == 'extends' and 'overridden-by' or 'implemented-by',
+                                subtype = sb.name, member = hit.name, file = hit.file, arity = ar, reverse = true }
+                        end
+                        nq[#nq + 1] = sb.name
                     end
                 end
             end
@@ -1623,7 +1655,13 @@ function M.alibi(store)
                 n.regfrom and { file = n.regfrom } or nil)
         end
         local ct = contract(n)
-        if ct then
+        if ct and ct.reverse then
+            -- the reverse: the EVIDENCE is the implementor a deletion would break
+            alibi('inheritance-contract', 'matched',
+                ('%s %s: deleting this declaration breaks that member (a compile error under @Override)')
+                    :format(ct.via == 'overridden-by' and 'overridden by' or 'implemented by', ct.subtype),
+                { via = ct.via, subtype = ct.subtype, member = ct.member, file = ct.file, arity = ct.arity })
+        elseif ct then
             -- the EVIDENCE is the offending pair — the supertype declaration a reader
             -- can open — not a sentence about inheritance
             alibi('inheritance-contract', 'matched',

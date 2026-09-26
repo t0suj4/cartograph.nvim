@@ -2233,6 +2233,51 @@ test('java: an inheritance-contract member gets an alibi, four look-alikes do no
     eq(nil, contract('MarkerOnly::strayValue', 0), 'a MARKER interface declares no members')
 end)
 
+-- CART-0714. THE REVERSE: a supertype member is kept alive by its IMPLEMENTORS — deleting the declaration breaks
+-- the @Override beneath it. Measured on elasticsearch libs: 307 of 1,558 dead-function findings were such members
+-- (their only alibi). The guards are the fixture, mirroring the forward test above: no implementor stays dead,
+-- a different arity is not an implementor.
+test('java: a supertype member is alibied by its implementor; an orphan and a wrong-arity look-alike are not', function ()
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(name, lines)
+        local fd = assert(io.open(root .. '/' .. name, 'w'))
+        fd:write(table.concat(lines, '\n')); fd:close()
+    end
+    put('Validator.java', { 'package com.example.inv;', 'interface Validator { void check(String s); }' })
+    put('Orphan.java', { 'package com.example.inv;', 'interface Orphan { void neverInvoked(); }' })
+    put('Runner.java', { 'package com.example.inv;', 'interface Runner { void run(int x); }' })
+    put('Impl.java', {
+        'package com.example.inv;',
+        'class Impl implements Validator, Runner {',
+        '    @Override public void check(String s) { }',   -- implements Validator::check
+        '    public void run() { }',                        -- NOT Runner::run: arity 0 vs 1
+        '}' })
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    store.ingest(data)
+    local ali = lint.alibi(store)
+    local function contract(nm, arity)
+        for _, n in ipairs(data.nodes) do
+            if n.name == nm and #(n.params or {}) == arity then
+                for _, a in ipairs(ali(n).alibis) do
+                    if a.kind == 'inheritance-contract' then return a end
+                end
+                return nil
+            end
+        end
+        return 'NO SUCH NODE'
+    end
+    local hit = contract('Validator::check', 1)
+    ok(type(hit) == 'table', 'the declaration is kept alive by its implementor: ' .. vim.inspect(hit))
+    eq('implemented-by', hit.evidence.via)
+    eq('Impl', hit.evidence.subtype)
+    eq('Impl::check', hit.evidence.member)
+    eq('matched', hit.tier)
+    eq(nil, contract('Orphan::neverInvoked', 0), 'NO implementor: the member stays dead')
+    eq(nil, contract('Runner::run', 1), 'an implementor of a DIFFERENT ARITY is not an implementor')
+end)
+
 test('java: a registering marker annotation is cbarg, an inert one is not', function ()
     if not has_parser('java') then skip 'no java parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
