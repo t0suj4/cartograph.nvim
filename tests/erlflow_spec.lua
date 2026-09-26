@@ -171,3 +171,16 @@ test('erlflow: the coarse df of a multi-clause function has every clause body\'s
     local df = require 'cartograph.df'
     eq(5, df.count(by.f), 'two + three statements: the clauses head and its arms are transparent')
 end)
+
+test('erlflow: a binary of plain string segments in a head is a constant; one with a size is opaque', function ()
+    need()
+    local s = require('cartograph.providers.treesitter').spec.erlang
+    local src = 'f(#disco_info{node = <<"urn:x">>}, <<"a", "b">>, <<X:8>>) -> X.\n'
+    local root = vim.treesitter.get_string_parser(src, 'erlang'):parse()[1]:root()
+    local args = root:named_child(0):named_child(0):field('args')[1]
+    local per = {}
+    for a in args:iter_children() do if a:named() then per[#per + 1] = s.pattern.paths(a, src) end end
+    eq('urn:x', per[1][1].value); eq('binary', per[1][1].ty)
+    eq('ab', per[2][1].value)
+    eq(0, #per[3], 'a sized segment claims nothing')
+end)

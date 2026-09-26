@@ -35,7 +35,8 @@ end
 -- the CONSTANTS it demands. For an XMPP handler that is the request it accepts, in the terms the codec spec
 -- declares (CART-1096). Returns a flat list of facts over ONE pattern node:
 --   { name = 'N', path = steps }            a binding (`_` is a wildcard and binds nothing)
---   { value = 'get', ty = 'atom', path }    a constant the input must equal (atom/integer/float/string/char)
+--   { value = 'get', ty = 'atom', path }    a constant the input must equal (atom/integer/float/string/char, and
+--                                           `binary` for a `<<"…">>` of plain string segments, value unquoted)
 -- steps, outermost first: { rec = 'iq', field = 'sub_els' } a record field · { tuple = i, arity = n } ·
 -- { elem = i, len = n, closed = bool } a list element · { head = true } / { tail = true } a cons ·
 -- { map = 'k' } a map key's value · { rec = 'disco_info' } (no field) ends a `{ record = R }` fact: a
@@ -60,6 +61,16 @@ local function pattern_paths(pat, src)
             if nm ~= '_' then out[#out + 1] = { name = nm, path = path } end
         elseif PAT_LIT[t] then
             out[#out + 1] = { value = T(n), ty = PAT_LIT[t], path = path }
+        elseif t == 'binary' then
+            -- a binary of plain string segments (`<<"urn:x">>`, `<<"a", "b">>`) is a CONSTANT, its value the joined
+            -- text without quotes; one with a size, a type or a variable (`<<X:8>>`) stays opaque
+            local parts, plain = {}, true
+            for _, e in ipairs(n:field('elements')) do
+                local el = e:field('element')[1]
+                if not el or el:type() ~= 'string' or e:field('size')[1] or e:field('types')[1] then plain = false; break end
+                parts[#parts + 1] = T(el):sub(2, -2)
+            end
+            if plain and #parts > 0 then out[#out + 1] = { value = table.concat(parts), ty = 'binary', path = path } end
         elseif t == 'match_expr' then
             walk(n:field('lhs')[1], path); walk(n:field('rhs')[1], path)
         elseif t == 'record_expr' then
