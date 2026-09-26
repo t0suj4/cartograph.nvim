@@ -6,6 +6,7 @@
 --                         per-item against the saved baseline snapshot
 --                         (graphdiff), print the census + timing. Exit 1 on
 --                         any failure — CI-shaped.
+--   gate <corpus> --kinds also print the nodes gained and lost BY KIND (+ name shape) vs the baseline
 --   gate <corpus> --save  extract and (re)write the baseline snapshot. Do
 --                         this on a KNOWN-GOOD rev; the next plain run diffs
 --                         against it.
@@ -18,14 +19,15 @@ local bench = dofile(here .. '/bench.lua')
 local snapshot = dofile(here .. '/snapshot.lua')
 
 local name = arg and arg[1]
-local save, parallel = false, false
+local save, parallel, kinds = false, false, false
 for i = 2, #(arg or {}) do
     if arg[i] == '--save' then save = true end
     if arg[i] == '--parallel' then parallel = true end
+    if arg[i] == '--kinds' then kinds = true end
 end
 if not name then
     print('usage: nvim --headless -u NONE -l tools/gate.lua <corpus>'
-        .. ' [--save] [--parallel]')
+        .. ' [--save] [--parallel] [--kinds]')
     os.exit(2)
 end
 
@@ -202,6 +204,16 @@ else
         local det, d = gd.detail(base, cur,
             { a = 'baseline', b = 'current', decides = 'b', limit = 8 })
         for _, l in ipairs(det or gd.report(d, { limit = 25 })) do print('  ' .. l) end
+        if kinds then
+            -- --kinds: nodes gained and lost by kind + name shape (graphdiff.by_kind), the view every grammar-drift
+            -- read needs first; advisory, it does not change the verdict
+            local bk = gd.by_kind(base, cur)
+            -- print, like every other line of this tool: mixing io.write with nvim's print reorders and glues lines
+            print('  NODES BY KIND (baseline -> current):')
+            for _, r in ipairs(bk.removed) do print(('    - %6d  %-22s e.g. %s'):format(r.n, r.class, r.example)) end
+            for _, r in ipairs(bk.added) do print(('    + %6d  %-22s e.g. %s'):format(r.n, r.class, r.example)) end
+            if #bk.removed == 0 and #bk.added == 0 then print('    (no node gained or lost)') end
+        end
         if not gd.empty(d) then
             -- THE RULE corpora.lua has always documented and this file did not honour:
             -- "UNPINNED (no rev): living corpora … the gate surfaces rev drift as

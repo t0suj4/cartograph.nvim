@@ -221,3 +221,22 @@ test('witness: a target with no ::name still names something openable', function
     ok(rows:find('is `nio/tasks%.lua` imported there at all%?'), rows)
     ok(not rows:find('`%?`'), rows)
 end)
+
+test('graphdiff.by_kind: nodes gained and lost, classed by kind + name shape, with an example each', function ()
+    local gd = require 'cartograph.graphdiff'
+    local base = { nodes = {
+        { id = 'a.cpp::X::~X@1', kind = 'method', name = 'X::~X' },
+        { id = 'a.cpp::X::X@2', kind = 'method', name = 'X::X' },
+        { id = 'a.cpp::f@3', kind = 'function', name = 'f' },
+        { id = 'a.cpp::keep@4', kind = 'function', name = 'keep' } } }
+    local cur = { nodes = {
+        { id = 'a.cpp::keep@4', kind = 'function', name = 'keep' },
+        { id = 'a.cpp::g@5', kind = 'function', name = 'g' },
+        { id = 'a.cpp::h@6', kind = 'function', name = 'h' },
+        { id = 'a.cpp::ns.v@7', kind = 'var', name = 'ns.v' } } }
+    local bk = gd.by_kind(base, cur)
+    local function flat(rows) local o = {} for _, r in ipairs(rows) do o[#o + 1] = r.class .. '=' .. r.n end return o end
+    eq({ 'function bare=1', 'method ctor=1', 'method dtor=1' }, flat(bk.removed))
+    eq({ 'function bare=2', 'var qualified=1' }, flat(bk.added))
+    eq('a.cpp::g@5', bk.added[1].example, 'the example is the smallest id, so the output is stable')
+end)

@@ -150,6 +150,33 @@ end
 
 --- Save a slim snapshot under a name. Records the repo rev so a later diff
 --- can say WHICH version the baseline came from. Returns the path.
+--- THE DF DISTRIBUTION of an extraction: function count, df statements, one-statement functions and a small
+--- histogram. Recorded in every saved baseline's meta, because df is a DERIVED PROJECTION (coarse(flow)) that
+--- counts/struct never compare: a flow change once collapsed every merged erlang function to one df statement
+--- (one-statement fns 5603 -> 6073) and no column moved. matrix's `dfshape` column diffs it.
+function M.dfshape(data)
+    local df = require 'cartograph.df'
+    local out = { fns = 0, stmts = 0, one = 0, hist = {} }
+    for _, n in ipairs((data and data.nodes) or {}) do
+        if (n.kind == 'function' or n.kind == 'method') and df.present(n) then
+            local c = df.count(n)
+            out.fns, out.stmts = out.fns + 1, out.stmts + c
+            if c == 1 then out.one = out.one + 1 end
+            local b = c >= 10 and '10+' or tostring(c)
+            out.hist[b] = (out.hist[b] or 0) + 1
+        end
+    end
+    return out
+end
+
+--- the dfshape comparison as one line, or nil when identical
+function M.dfshape_diff(a, b)
+    if not (a and b) then return nil end
+    if a.fns == b.fns and a.stmts == b.stmts and a.one == b.one and vim.deep_equal(a.hist, b.hist) then return nil end
+    return ('df functions %d -> %d, statements %d -> %d, one-statement functions %d -> %d')
+        :format(a.fns, b.fns, a.stmts, b.stmts, a.one, b.one)
+end
+
 function M.save(name, data, meta)
     vim.fn.mkdir(M.dir, 'p')
     local rev, dirty, cver, parsers = tool_identity()
@@ -160,7 +187,8 @@ function M.save(name, data, meta)
         meta = vim.tbl_extend('force', { rev = rev, when = os.date('!%Y-%m-%dT%H:%M:%SZ'),
             tool_dirty = dirty or nil, cache_version = cver,
             parsers = parsers, -- the nvim + parser builds: a grammar change moves the graph with no code edit
-            slim_version = M.SLIM_VERSION },
+            slim_version = M.SLIM_VERSION,
+            dfshape = M.dfshape(data) }, -- the derived df projection, which struct cannot see
             meta or {}),
         data = M.slim(data),
     })

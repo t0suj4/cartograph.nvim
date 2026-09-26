@@ -218,6 +218,45 @@ function M.diff(a, b, opts)
 end
 
 --- No differences at all?
+--- NODES GAINED AND LOST BY KIND (promoted from the throwaway every roster drift read used, CART-1092): the
+--- per-item diff says WHICH nodes moved; this says WHAT KIND moved, which is the first question a grammar
+--- upgrade raises (a grammar that starts reading local declarations as functions shows up as `+ function bare`).
+--- Class = node kind + a NAME SHAPE, a display heuristic, not a fact: `dtor` (a `~`), `ctor` (`X::X`),
+--- `qualified` (a `::` or `.` in the name), else `bare`.
+--- -> { removed = { {class, n, example}… }, added = { … } } each sorted by count, largest first
+function M.by_kind(a, b)
+    local function index(g)
+        local t = {}
+        for _, n in ipairs((g and g.nodes) or {}) do if n.id then t[n.id] = n end end
+        return t
+    end
+    local function class(n)
+        local nm = n.name or ''
+        local shape
+        if nm:find('~', 1, true) then shape = 'dtor'
+        elseif nm:match('([%w_]+)::%1$') then shape = 'ctor'
+        elseif nm:find('::', 1, true) or nm:find('.', 1, true) then shape = 'qualified'
+        else shape = 'bare' end
+        return (n.kind or '?') .. ' ' .. shape
+    end
+    local A, B = index(a), index(b)
+    local function side(x, y)
+        local counts, ex = {}, {}
+        for id, n in pairs(x) do
+            if not y[id] then
+                local k = class(n)
+                counts[k] = (counts[k] or 0) + 1
+                if not ex[k] or id < ex[k] then ex[k] = id end
+            end
+        end
+        local rows = {}
+        for k, v in pairs(counts) do rows[#rows + 1] = { class = k, n = v, example = ex[k] } end
+        table.sort(rows, function (p, q) return p.n > q.n or (p.n == q.n and p.class < q.class) end)
+        return rows
+    end
+    return { removed = side(A, B), added = side(B, A) }
+end
+
 function M.empty(d)
     return #d.nodes.added == 0 and #d.nodes.removed == 0
         and #d.edges.added == 0 and #d.edges.removed == 0 and #d.edges.changed == 0

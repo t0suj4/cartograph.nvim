@@ -23,6 +23,8 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 |---|---|
 | Do all corpora still produce their pinned counts / the saved graph, and do the oracles agree? | `tools/matrix.lua [<corpus>...] [--cols counts,struct,dfpar,fold,silent,cache,par] [--save] [--jobs N]` |
 | One corpus against its pin and baseline | `tools/gate.lua <corpus> [--save]` |
+| WHAT KIND of node moved vs the baseline (a grammar upgrade reading locals as functions shows as `+ function bare`) | `tools/gate.lua <corpus> --kinds` (graphdiff.by_kind) |
+| Did the DF distribution move? (a derived projection counts/struct never compare) | `tools/matrix.lua <corpus> --cols dfshape` — vs the distribution the baseline recorded at `--save` |
 | Does the expression IR read what dataflow reads (the two-implementation self-gate)? | `tools/exprcensus.lua <dir> [--lang <l>] [--show <class>]` |
 | Which inferred edges does the code contradict (fabrication)? | `tools/fabcensus.lua <corpus|path> [--show <bucket>]` |
 | REVERSE: which REFUSED calls could the calling file's own import/require binding settle? (a work list) | `tools/fabcensus.lua <root> --backward` — buckets settles / settles-by-shape / several / via-reexport / bound-lacks |
@@ -51,6 +53,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | Distil a surface into an L2 environment profile | `tools/nodedistill.lua`, `tools/npmdistill.lua <corpus|dir>`, `tools/domdistill.lua`, `tools/erldistill.lua`, `tools/hrldistill.lua --from <dir-or-.hrl>`, `tools/dtsread.lua` |
 | The Maven build layer, and the java import resolver against package declarations | `tools/pomtree.lua <repo>…`, `tools/javaimports.lua <repo>…` (⚠ `tools/mavenpoms.lua` DOWNLOADS from Maven Central — network) |
 | Does the stage partition carry the JS runner globals? | `tools/stagefit.lua <corpus|dir> [--decl <key>]` |
+| A fact the tree lacks: who CONSUMES it (other repos' manifests), where the dependencies it selects are on disk, who produces the callbacks its -behaviour lines owe — each cited by the selecting line | `tools/producers.lua <root> [--search DIR]... [--lib DIR]...` (CART-1118; finds, attaches nothing) |
 
 ## Dead or alive?
 
@@ -117,11 +120,11 @@ write it again from scratch.
 
 | Question | What was found | Ticket |
 |---|---|---|
-| How is each server-sent term formed (literal / var / call / pattern / parameter / case)? | ejabberd 184 sites: 47% encodable, 33% calls, 14% pattern-bound, 4% case, 2% params (2026-09-26) | CART-1112 (partly `xmppserver --sends`) |
-| Which dead-function findings are callbacks of a declared `-behaviour`? | ejabberd 1258 of 3313 (38%) — false positives (2026-09-26) | CART-1117 |
-| Which artifact on disk could produce a missing fact (manifests → consumers, `-callback` → obligations)? | ejabberd → xmpp, converse → @converse/headless (2026-09-26) | CART-1118 |
-| Nodes gained/lost per kind between a saved baseline and the current graph | used for every roster drift read in CART-1092 (2026-09-26) | promote: a `gate` / `matrix` view |
-| `df.count` distribution before/after a flow change (a derived projection no column compares) | caught a merged-function collapse 5603 → 6073 (2026-09-26) | promote: a matrix column |
+| Which dead-function findings are callbacks of a declared `-behaviour`? | ejabberd 1258 of 3313 (38%) — false positives (2026-09-26) | CART-1117 (fix in progress) |
+
+Closed 2026-09-26 (promoted to a tool): the send-site term census → `tools/xmppserver.lua --sends` (holes by step);
+producer discovery → `tools/producers.lua`; nodes gained/lost by kind → `tools/gate.lua --kinds`; the df distribution
+before/after → the matrix `dfshape` column.
 
 ## Backlog: tools not yet phrased as a question
 

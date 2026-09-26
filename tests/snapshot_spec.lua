@@ -251,3 +251,16 @@ test('snapshot: a different PARSER set is an epoch note even when the extraction
         return meta and meta.parsers
     end)())
 end)
+
+test('snapshot.dfshape: the df distribution a baseline records, and a diff that names what moved', function ()
+    local snapshot = dofile('tools/snapshot.lua')
+    local function fn(id, n) local st = {} for i = 1, n do st[i] = { l = i, def = {}, use = {}, dep = {} } end
+        return { id = id, kind = 'function', df = { stmts = st } } end
+    local a = snapshot.dfshape({ nodes = { fn('f', 1), fn('g', 3), fn('h', 12), { id = 'v', kind = 'var' } } })
+    eq(3, a.fns); eq(16, a.stmts); eq(1, a.one)
+    eq({ ['1'] = 1, ['3'] = 1, ['10+'] = 1 }, a.hist)
+    eq(nil, snapshot.dfshape_diff(a, a), 'identical: no line')
+    -- the collapse this exists for: a multi-statement function becomes one statement
+    local b = snapshot.dfshape({ nodes = { fn('f', 1), fn('g', 1), fn('h', 12) } })
+    eq('df functions 3 -> 3, statements 16 -> 14, one-statement functions 1 -> 2', snapshot.dfshape_diff(a, b))
+end)

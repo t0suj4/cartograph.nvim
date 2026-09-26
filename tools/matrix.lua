@@ -24,6 +24,8 @@
 --           silent-drop lint swept per corpus, not just on self)
 --   cache   cold==warm: cache.save → cache.load (redirected to a scratch
 --           dir) reproduces the graph per-item (msgpack/shard fidelity)
+--   dfshape the DF DISTRIBUTION (functions, statements, one-statement functions, histogram) vs the one the
+--           baseline recorded at --save: a derived projection struct cannot see; reported (~), never gated
 --   struct  per-item graphdiff vs the saved baseline snapshot (gate.lua's
 --           diff half; --save re-baselines exactly like gate --save)
 --   par     inline==parallel: a second, worker-pipeline extraction diffs
@@ -52,7 +54,7 @@ local here = SELF:match('^(.*)/matrix%.lua$')
 local function say(s) io.stdout:write(s .. '\n') end
 
 local COLS = { 'counts', 'valid', 'mem', 'rows', 'expr', 'dfpar', 'fold', 'silent',
-    'cache', 'key', 'struct', 'par' }
+    'cache', 'key', 'struct', 'dfshape', 'par' }
 -- the minutes-tier corpora (scale extracts); everything else is seconds
 local HEAVY = { server = true, v8 = true, sylius = true, ghost = true,
     blesh = true, gforth = true, openfirmware = true, bwipp = true,
@@ -114,7 +116,7 @@ end
 --     fold round-trip, silent-local and cold==warm are properties of whatever graph they
 --     are handed, so a subset is a perfectly good subject for them.
 local SCOPE_UNGATED = { rows = true, expr = true, dfpar = true }
-local SCOPE_NA = { counts = true, mem = true, key = true, struct = true, par = true }
+local SCOPE_NA = { counts = true, mem = true, key = true, struct = true, dfshape = true, par = true }
 local SCOPE_NOTE = { 'SCOPED (--file): a corpus-wide baseline cannot judge a subset' }
 
 -- `--file` also SKIPS the not-applicable columns rather than merely refusing their verdict:
@@ -606,6 +608,19 @@ local function run_row(name)
     end
 
     local slim = snapshot.slim(data)
+
+    -- dfshape: the DF DISTRIBUTION against the one the baseline recorded when it was saved (snapshot.dfshape). df is
+    -- a derived projection struct never compares — a flow change once collapsed every merged erlang function to one
+    -- df statement and no column moved. Reported (`~`), never gated: a df change can be an improvement.
+    if wanted('dfshape') and not opts.save then
+        local base, meta = snapshot.load(name)
+        if not (base and meta and meta.dfshape) then
+            cell('dfshape', 'NOBASE', { base and 'baseline predates the dfshape field: --save records it' or tostring(meta) })
+        else
+            local line = snapshot.dfshape_diff(meta.dfshape, snapshot.dfshape(data))
+            cell('dfshape', line and '~' or 'OK', line and { line } or nil)
+        end
+    end
 
     if wanted('struct') then
         if opts.save then
