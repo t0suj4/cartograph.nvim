@@ -63,7 +63,7 @@ test('parseview: cpp masks a namespace-scope `= default` / `= delete` to a same-
     local src = 'struct A {};\nA::A() = default;\nvoid f(int) =\n  delete ;\nstruct B { B& operator=(const B&) = delete; B() = default; virtual int g() = 0; };\nbool h = a == default_v;\n'
     local v = pv.view(src, 'cpp')
     eq(#src, #v, 'length preserved')
-    eq('struct A {};\nA::A() { }      ;\nvoid f(int) {\n  }      ;\nstruct B { B& operator=(const B&) = delete; B() = default; virtual int g() = 0; };\nbool h = a == default_v;\n', v)
+    eq('struct A {};\nA::A() { ;}     ;\nvoid f(int) {\n  ;}     ;\nstruct B { B& operator=(const B&) = delete; B() = default; virtual int g() = 0; };\nbool h = a == default_v;\n', v)
 end)
 
 test('cpp: a namespace-scope defaulted ctor is a definition, and a deleted one does not swallow the next', function ()
@@ -71,12 +71,12 @@ test('cpp: a namespace-scope defaulted ctor is a definition, and a deleted one d
     local ts = require 'cartograph.providers.treesitter'
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/a.cpp', 'w'))
-    fd:write('struct A { A(); ~A(); void run(); A& operator=(const A&) = delete; };\nvoid f(int) = delete;\nA::A() = default;\nA::~A() = default;\nvoid A::run() {}\nvoid user() { A a; a.run(); }\n')
+    fd:write('struct A { A(); ~A(); void run(); A& operator=(const A&) = delete; bool operator==(const A&) const; };\nvoid f(int) = delete;\nA::A() = default;\nA::~A() = default;\nbool A::operator==(const A&) const = default;\nstruct C { C& operator=(const C&); };\nC& C::operator=(const C&) = default;\nvoid A::run() {}\nvoid user() { A a; a.run(); }\n')
     fd:close()
     local data = ts.extract(root)
     vim.fn.delete(root, 'rf')
     local got = {}
     for _, n in ipairs(data.nodes) do if n.kind == 'method' then got[#got + 1] = n.name end end
     table.sort(got)
-    eq({ 'A::A', 'A::operator=', 'A::run', 'A::~A' }, got, 'both defaulted members are definitions, and run after them survives')
+    eq({ 'A::A', 'A::operator=', 'A::operator==', 'A::run', 'A::~A', 'C::operator=' }, got, 'both defaulted members are definitions, and run after them survives')
 end)

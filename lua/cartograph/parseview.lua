@@ -18,7 +18,7 @@
 --           the same text INSIDE a class body parses correctly (a method with a default/delete clause), and `{}` there
 --           turns `X& operator=(const X&) = delete;` into a brace-initialised FIELD: the first cut was a regex and lost 16
 --           methods on colobot. So the file is parsed once, the misread shapes are found at namespace scope, and only
---           their bytes change. `= 0;` (pure virtual) is never touched.
+--           their bytes change, to `{;}` (see cpp_mask). `= 0;` (pure virtual) is never touched.
 -- Every parse site routes through M.view: providers/treesitter.lua M.parse_view, and the analysis re-parses (expr,
 -- lens, write verbs, lints) that used to call luadialect.view directly.
 local M = {}
@@ -58,6 +58,8 @@ local CPP_ASSIGN = { assignment_expression = true }
 local CPP_CALL = { call_expression = true }
 local CPP_FDECL = { function_declarator = true }
 local CPP_DELETE = { delete_expression = true }
+local CPP_IDENT = { identifier = true }
+local CPP_WRAPDECL = { reference_declarator = true, pointer_declarator = true }
 local function cpp_misreads(root, src)
     local spans = {}
     local function kw_span(eq, kw)
@@ -83,11 +85,18 @@ local function cpp_misreads(root, src)
         end
         if t == 'init_declarator' then
             -- `void f(int) = delete;` -> (init_declarator declarator: (function_declarator) value: (delete_expression ...))
+            -- `X& X::operator=(const X&) = default;` -> (init_declarator declarator: (reference_declarator
+            --     (function_declarator ...)) value: (identifier "default")): a return type before the name reads so
             local d, v = n:field('declarator')[1], n:field('value')[1]
-            if d and v and CPP_FDECL[d:type()] and CPP_DELETE[v:type()] then
+            while d and CPP_WRAPDECL[d:type()] do d = d:named_child(0) end
+            if d and v and CPP_FDECL[d:type()] then
                 local eq, kw
                 for c in n:iter_children() do if not c:named() and c:type() == '=' then eq = c end end
-                for c in v:iter_children() do if not c:named() and c:type() == 'delete' then kw = c; break end end
+                if CPP_DELETE[v:type()] then
+                    for c in v:iter_children() do if not c:named() and c:type() == 'delete' then kw = c; break end end
+                elseif CPP_IDENT[v:type()] and vim.treesitter.get_node_text(v, src) == 'default' then
+                    kw = v
+                end
                 kw_span(eq, kw)
             end
             return
@@ -106,10 +115,12 @@ local function cpp_mask(src, spans)
     for _, sp in ipairs(spans) do
         local s, e = sp[1] + 1, sp[2] -- 1-based inclusive
         local seg = src:sub(s, e)
-        -- `{` + the whitespace as written (newlines stay) + `}` + spaces to the keyword's length
+        -- `{` + the whitespace as written (newlines stay) + `;}` + spaces to the keyword's length. ★ `{;}`, NOT `{}`:
+        -- after a return type (`X& X::operator=(const X&) {}`) the grammar reads `{}` as a BRACE INITIALIZER and the
+        -- definition is still a declaration; a `;` cannot sit in an initializer list, so `{;}` can only be a body
         local ws = seg:match('^=(%s*)')
         out[#out + 1] = src:sub(i, s - 1)
-        out[#out + 1] = '{' .. ws .. '}' .. string.rep(' ', #seg - #ws - 2)
+        out[#out + 1] = '{' .. ws .. ';}' .. string.rep(' ', #seg - #ws - 3)
         i = e + 1
     end
     out[#out + 1] = src:sub(i)
