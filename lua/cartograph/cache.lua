@@ -409,7 +409,10 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 204 -- v204: ERLANG HAS A FLOW LAYER (CART-0957): a clause head and every pattern bind (spec.pattern),
+M.VERSION = 205 -- v205: A STITCHED MULTI-CLAUSE FLOW PROJECTS TO EVERY CLAUSE BODY'S STATEMENTS (flow.coarse): the
+--- 'clauses' head and its clause arms are transparent, so a merged erlang function's df is no longer ONE row (v204
+--- collapsed them: one-statement functions 5603 -> 6073 on ejabberd; now 3925, df statements 24402). Prior: v204:
+--- ERLANG HAS A FLOW LAYER (CART-0957): a clause head and every pattern bind (spec.pattern),
 --- case/receive/if arms are alternative rows, a bound name in a pattern is a match test (flow.single_assignment),
 --- and a merged multi-clause function's flow covers every clause as arms (flow.append_clause), not the first
 --- clause alone. Prior: v203: THE PARSE VIEW GROWS PAST LUA (parseview.lua, CART-1092): scheme masks a symbol-initial `@`

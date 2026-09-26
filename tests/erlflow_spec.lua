@@ -164,3 +164,10 @@ test('erlflow: a head path says a list is closed and how long, and a field-less 
     eq({ head = true }, per[2][1].path[1], 'a cons is head/tail, not an element')
     eq({ elem = 2, len = 2, closed = true }, per[3][2].path[1])
 end)
+
+test('erlflow: the coarse df of a multi-clause function has every clause body\'s statements, not one head row', function ()
+    need()
+    local by = extract('-module(m).\nf(0) -> a(), b();\nf(N) -> c(N), d(N), e(N).\n')
+    local df = require 'cartograph.df'
+    eq(5, df.count(by.f), 'two + three statements: the clauses head and its arms are transparent')
+end)

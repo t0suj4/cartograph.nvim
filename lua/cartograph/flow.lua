@@ -1689,10 +1689,25 @@ function M.coarse(flow)
     -- per-row flag: a flag would have to survive the columnar fold, and a set the store
     -- silently drops is exactly how PRELOOP broke (CART-0382). M.record attaches `cls`.
     local BLK = flow.cls and flow.cls.blocks
-    -- map each row to its top-level ancestor (parent==0)
+    -- ★ A STITCHED MULTI-CLAUSE RECORD (flow.append_clause, CART-0957) HAS ONE TOP-LEVEL ROW, the 'clauses' head,
+    -- and every clause below it as an arm. Aggregating to parent==0 would make each merged erlang function ONE
+    -- statement (measured on ejabberd: one-statement functions 5603 -> 6073, df statements 15985 -> 15052 — the
+    -- merged functions collapsed). The head and its clause arms are TRANSPARENT here: the statements are each
+    -- clause body's top rows, in order, and the heads' names are the record's params, which seed `inputs`.
+    local stitched = stmts[1] and stmts[1].kind == 'clauses'
+    local skip = {}
+    if stitched then
+        skip[1] = true
+        for i, s in ipairs(stmts) do if s.parent == 1 and s.kind == 'arm' then skip[i] = true end end
+    end
+    local function is_root(s)
+        if stitched then return skip[s.parent] == true and s.parent ~= 1 end
+        return s.parent == 0
+    end
+    -- map each row to its top-level ancestor (parent==0, or a clause body's top row when stitched)
     local top = {}
     for i, s in ipairs(stmts) do
-        top[i] = s.parent == 0 and i or top[s.parent]
+        if not skip[i] then top[i] = is_root(s) and i or top[s.parent] end
     end
     -- ORDER-SENSITIVE aggregation (df's per-statement rule): rows are in
     -- pre-order DFS = df's walk order. A name is a USE only if used before it
@@ -1701,7 +1716,8 @@ function M.coarse(flow)
     local order, def, use, sd, su = {}, {}, {}, {}, {}
     for i, s in ipairs(stmts) do
         local t = top[i]
-        if s.parent == 0 then
+        if not t then goto nextrow end -- a transparent row (a stitched head or clause arm)
+        if t == i then
             order[#order + 1] = i
             def[t], use[t], sd[t], su[t] = {}, {}, {}, {}
         end
@@ -1732,6 +1748,7 @@ function M.coarse(flow)
                 if not sd[t][nm] then sd[t][nm] = true; def[t][#def[t] + 1] = nm end
             end
         end
+        ::nextrow::
     end
     local out = {}
     for _, i in ipairs(order) do
