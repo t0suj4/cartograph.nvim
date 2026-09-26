@@ -399,6 +399,15 @@ end
 -- subtree, which is also why the `try` head needed zeroing by hand in CART-0386 — that was
 -- the symptom, this is the cause. Same seam-feeds-one-function shape as PRELOOP, IF_T, TRY_T
 -- and CATCH before it; this is the FIFTH consumer holding a base set the spec never reached.
+-- ★ A DEEP TREE CONTINUES ON A FRESH LUA STACK (CART-1082). du's `rec` recurses once per
+-- tree level, and one Lua stack holds only ~2000-3000 of its frames: wine's d3d11 test has
+-- a 3177-deep `comma_expression` chain (tree-sitter-c misparses an `#if 0` block inside an
+-- array initializer), and the overflow killed the WHOLE extraction, not the one function.
+-- Every DU_SEG levels the next call runs inside a new coroutine, which owns its own Lua
+-- stack; upvalues are shared, so the walk's state is untouched, and a tree shallower than
+-- DU_SEG (all normal code) never takes the branch, so output is identical. An explicit
+-- stack was measured first: identical output, but ~7% slower on a whole extraction.
+local DU_SEG = 1000
 local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
     local ids = (lang and lang.ids) or DFID
     local mods, bindf = lang and lang.mods, lang and lang.binder_fields
@@ -407,6 +416,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
     local blks = {} -- ATTACHED BLOCKS skipped on the way (see the 'always' stop below)
     local rmw, rmwseen = {}, {} -- read-modify-write LHS names (see the branch below)
     local sus = SUSPEND[root:type()] or false
+    local depth = 0 -- rec frames on the CURRENT Lua stack (see DU_SEG)
     local function rec(node, defpos)
         local t = node:type()
         -- ★ THE BODY-FIELD STOP IS PER NODE, NOT PER ROOT (CART-0414). An `else if`
@@ -605,7 +615,18 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
                         useen[nm] = true; use[#use + 1] = nm
                     end
                 end
-                rec(c, cdefpos)
+                if depth < DU_SEG then
+                    depth = depth + 1; rec(c, cdefpos); depth = depth - 1
+                else
+                    local saved = depth; depth = 0
+                    local co = coroutine.create(rec)
+                    local ok, err = coroutine.resume(co, c, cdefpos)
+                    depth = saved
+                    if not ok then error(err, 0) end
+                    -- a yield inside the segment (coop.tick) would stop HERE, not at the scheduler, and
+                    -- the walk would end half done and look complete: refuse by name instead
+                    if coroutine.status(co) ~= 'dead' then error('flow du: a deep-tree segment yielded (CART-1082)', 0) end
+                end
               end
               ::skipchild::
             end

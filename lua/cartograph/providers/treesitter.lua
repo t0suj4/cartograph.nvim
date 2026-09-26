@@ -4860,6 +4860,15 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local ctxs, nctx = {}, 0 -- open df contexts (dfrec only), innermost last
     local fnstack, fdepth = {}, 0 -- enclosing fn NODES, for pw attribution
     -- (tracked always — decoupled from the df-record build ctxs above)
+    -- ★ A DEEP TREE CONTINUES ON A FRESH LUA STACK (CART-1082). walk recurses once per
+    -- tree level, and one Lua stack holds ~2000-3000 of its frames: wine's d3d11 test has
+    -- a 3177-deep `comma_expression` chain, and the overflow killed the WHOLE extraction.
+    -- Every WALK_SEG levels the next call runs inside a new coroutine, which owns its own
+    -- Lua stack; upvalues are shared, so the walk's state is untouched, and a tree
+    -- shallower than WALK_SEG (all normal code) never takes the branch — output and JIT
+    -- traces are unchanged. An explicit stack would mean rewriting this hot walk's
+    -- pre/post hooks (scope push/pop, the df body finalize) for one pathological shape.
+    local WALK_SEG, wdepth = 1000, 0
 
     local function walk(n, defpos, dfon)
         local nt = n:type()
@@ -5090,7 +5099,19 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             if head and (cnamed or cnamed == nil and c:named()) then
                 head = false
             end
-            if c:child(0) then walk(c, cdefpos, cdfon) end
+            if c:child(0) then
+                if wdepth < WALK_SEG then
+                    wdepth = wdepth + 1; walk(c, cdefpos, cdfon); wdepth = wdepth - 1
+                else
+                    local saved = wdepth; wdepth = 0
+                    local co = coroutine.create(walk)
+                    local ok, err = coroutine.resume(co, c, cdefpos, cdfon)
+                    wdepth = saved
+                    if not ok then error(err, 0) end
+                    -- a yield inside the segment would stop HERE and leave the walk half done: refuse
+                    if coroutine.status(co) ~= 'dead' then error('collect_mentions: a deep-tree segment yielded (CART-1082)', 0) end
+                end
+            end
             i = i + 1
             c = n:child(i)
             ::continue_child::
