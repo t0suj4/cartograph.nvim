@@ -202,6 +202,16 @@ return {
     qualify_call = function (calln, name, src)
         if calln:type() ~= 'call' then return nil end
         local e = calln:field('expr')[1]
+        -- ★ THE NEW GRAMMAR NESTS A REMOTE CALL THE OTHER WAY ROUND (tree-sitter-erlang under nvim-treesitter main,
+        -- 2026-09-26): `lists:map(F, X)` is (remote module: (remote_module module: (atom)) fun: (call expr: (atom)
+        -- args: ...)), the `call` INSIDE the remote, where it used to be (call expr: (remote ...)). Read that way the
+        -- inner call looks LOCAL, so the module was dropped and 9064 ejabberd calls fell to no-def (resolution 93.7%
+        -- -> 67.2%). When this call is the `fun` of a remote, the remote is the qualifier.
+        local par = calln:parent()
+        if (not e or e:type() ~= 'remote') and par and par:type() == 'remote' then
+            local f = par:field('fun')[1]
+            if f and f:id() == calln:id() then e = par end
+        end
         -- ★ A LOCAL CALL KEYS BY name/arity, meeting the alt key above, so a call
         -- with four arguments reaches `store_room/4` and not its five-argument
         -- sibling. The argument count is at the site and needs no type
