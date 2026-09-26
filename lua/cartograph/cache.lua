@@ -409,7 +409,10 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 205 -- v205: A STITCHED MULTI-CLAUSE FLOW PROJECTS TO EVERY CLAUSE BODY'S STATEMENTS (flow.coarse): the
+M.VERSION = 206 -- v206: AN ERLANG `fun` IS A SCOPE OF ITS OWN (CART-1106): its clauses are rows (arms under a pre-condition
+--- loop head) instead of being folded into the row carrying it, its head names shadow, nothing it binds is visible
+--- after it, and a case in a case's SUBJECT keeps its arms. The ejabberd/src self-gate 138 -> 33, all match tests.
+--- Prior: v205: A STITCHED MULTI-CLAUSE FLOW PROJECTS TO EVERY CLAUSE BODY'S STATEMENTS (flow.coarse): the
 --- 'clauses' head and its clause arms are transparent, so a merged erlang function's df is no longer ONE row (v204
 --- collapsed them: one-statement functions 5603 -> 6073 on ejabberd; now 3925, df statements 24402). Prior: v204:
 --- ERLANG HAS A FLOW LAYER (CART-0957): a clause head and every pattern bind (spec.pattern),

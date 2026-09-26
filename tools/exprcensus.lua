@@ -28,6 +28,9 @@
 --   binder    — `extra` ⊆ the row's own DEF names: the IR reads what the row BINDS
 --   extra     — the IR reads a name du does not (a leaked nested body, a field selector)
 --   missing   — du reads a name the IR does not (a table KEY, a java annotation)
+--   match     — every missing name is a MATCH TEST (erlang: a pattern naming a bound variable, settled by
+--               flow.single_assignment over the rows; one row cannot see it). A known residue, named so it
+--               stops hiding real `missing` rows (CART-1106)
 --   both      — disagreement in both directions on one row
 --
 --   nvim --headless -u NONE -l tools/exprcensus.lua <dir> [--lang <l>] [--show <class>]
@@ -99,6 +102,7 @@ function M.check(store)
                     for _, x in ipairs(d.extra) do if not dset[x] then all_defs = false end end
                     local axis = (#d.missing == 0 and all_defs and 'binder')
                         or (#d.missing == 0 and 'extra')
+                        or (#d.extra == 0 and d.match and #d.match == #d.missing and 'match')
                         or (#d.extra == 0 and 'missing') or 'both'
                     local key = axis .. ':' .. tostring(s.t or s.kind or '?')
                     cats.total = cats.total + 1

@@ -229,9 +229,23 @@ return {
     -- PATTERN: a clause head, a match's left side, a case arm, a generator, a fun head, a catch.
     df_ids = { var = true },
     body = { clause_body = true },
-    ctrl = { case_expr = true, receive_expr = true, if_expr = true, try_expr = 'try' },
+    ctrl = { case_expr = true, receive_expr = true, if_expr = true, try_expr = 'try', anonymous_fun = true },
     clause = { cr_clause = 'arm', if_clause = 'arm', receive_after = 'arm',
-        catch_clause = 'catch', try_after = 'finally' },
+        catch_clause = 'catch', try_after = 'finally', fun_clause = 'arm' },
+    -- ★ A `fun` IS A SCOPE OF ITS OWN (CART-1106), and until this it was folded into the row carrying it: its
+    -- head names became DEFS of the enclosing statement, its body's bindings leaked into the names bound after
+    -- it (so a later real binding read as a match test: 34 of the 93 missing names in ejabberd/src's self-gate),
+    -- and a match test inside it against an outer name was invisible to the IR. It is ruby's attached block
+    -- (CART-0363 part B) in erlang spelling: du stops at it wherever it hangs in a statement and hands it back
+    -- as rows of its own, the head a PRE-CONDITION LOOP (a fun runs 0..n times, later), each `fun_clause` an
+    -- ARM. flow.single_assignment gives the arms the erlang scope rule: a fun head binds FRESH (it shadows an
+    -- outer name), its body sees the outer names, and nothing it binds is visible after it.
+    -- `false`: the binder list is per CLAUSE (each arm's pattern), not on the block node — the map's value is
+    -- the block's own binder field and a fun has none. (`fun f/1` is `internal_fun`, not this node.)
+    -- ⚠ NOT YET: a NAMED fun's `name` (`fun Loop(N) -> Loop(N - 1) end`, 3 in ejabberd) binds in its own
+    -- clauses and reads here as a free use; and a comprehension's generator scopes the same way (1 of the 93).
+    blocks = { anonymous_fun = false },
+    preloop = { anonymous_fun = true },
     pattern = {
         -- the field of each node type that IS a pattern (every name under it binds, at any depth)
         fields = { match_expr = 'lhs', cr_clause = 'pat', generator = 'lhs', b_generator = 'lhs',

@@ -234,7 +234,9 @@ M.SLOTS = {
     -- ATTACHED BLOCKS (part B): <block node type> -> <binder-list field>. Ruby's `do…end`
     -- and `{…}` hang off a call ANYWHERE in a statement, so du stops at them and hands
     -- them back to be emitted as rows of their own. `block` is in eight grammars, which
-    -- is exactly why this is a spec key and not a base set.
+    -- is exactly why this is a spec key and not a base set. `false` = a block whose binders
+    -- are per CLAUSE (erlang's `fun`: each fun_clause is an arm with its own pattern,
+    -- CART-1106) — still a block; readers test the key with `~= nil`.
     blocks = 'ANALYSIS',
     -- LOCAL DECLARATIONS, per language: which node type IS a declaration statement, for the
     -- expression harvest's name=value split. C spells it `declaration`, which is a node type

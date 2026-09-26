@@ -1262,8 +1262,10 @@ function build_core(node, src, lang)
     -- with a nil lang); filed as CART-0931 rather than fixed inside this one.
     local boundary
     if lang then
+        -- `~= nil`: a block's value is its binder field, and erlang's `fun` declares `false` (its binders
+        -- are per clause) — it is a boundary all the same (CART-1106)
         boundary = FNSTOP_OF[lang][t]
-            or (CLS_OF[lang].blocks and CLS_OF[lang].blocks[t]) or false
+            or (CLS_OF[lang].blocks and CLS_OF[lang].blocks[t] ~= nil) or false
     else
         boundary = ALLOCFN[t] or false
     end
@@ -1595,7 +1597,7 @@ function M.harvest_row(node, src, hint, lang)
             if c:named() then
                 local ct = c:type()
                 if not tsutil.COMMENT[ct] and not B[ct] and not C[ct]
-                    and not (BLK and BLK[ct]) and not (bskip and bskip[c:id()])
+                    and not (BLK and BLK[ct] ~= nil) and not (bskip and bskip[c:id()])
                     and not (bodyc and bodyc[c:id()]) then
                     if CT[ct] then -- a nested head: its condition, never its body
                         local sub = M.harvest_row(c, src, 'ctrlhead', lang)
@@ -1613,7 +1615,8 @@ function M.harvest_row(node, src, hint, lang)
     local t = node:type()
     -- ★ A MATCH BINDS ITS PATTERN (CART-0957): the names in the pattern are the row's targets, the value is
     -- read. A name already bound is a match test, which single_assignment moves to du's `use` and this side
-    -- cannot see (one row): the self-gate reports those as `binder`, the honest residue.
+    -- cannot see (one row): the self-gate hands those back as `match` (single_assignment records them in
+    -- `st.match`), the honest residue — NOT as `missing`, which is what they read as before CART-1106.
     if PATMATCH[t] then
         local l, r = node:field('lhs')[1], node:field('rhs')[1]
         if l and r then
@@ -2762,7 +2765,11 @@ local FN_FALLBACK = require('cartograph.providers.treesitter').flow_stop('lua')
 --- `lang` must be the language the flow was BUILT for — pass `of()`'s `lang` field.
 --- Omitting it falls back to lua, which is what the lua-only test fixtures want and
 --- is wrong for anything else, so pass it.
---- @return table[] { row, line, reads, du, missing, extra }
+--- ★ `match` (CART-1106): the part of `missing` that is a MATCH TEST — a pattern naming an already-bound
+--- variable, which flow.single_assignment settles over the rows in order (`st.match`) and this side cannot
+--- see from one row. A row whose every missing name is one is still returned, so a caller can count the
+--- class; `missing` keeps them, so nothing that compared `missing` before moves.
+--- @return table[] { row, line, reads, du, missing, extra, match }
 function M.gate(fl, lang)
     local FNDECL = lang
         and require('cartograph.providers.treesitter').flow_stop(lang)
@@ -2780,7 +2787,13 @@ function M.gate(fl, lang)
             for n in pairs(reads) do if not du[n] then extra[#extra + 1] = n end end
             if #missing > 0 or #extra > 0 then
                 table.sort(missing); table.sort(extra)
-                bad[#bad + 1] = { row = i, line = s.l, missing = missing, extra = extra }
+                local mt = {}
+                if s.match then
+                    local ms = {}
+                    for _, n in ipairs(s.match) do ms[n] = true end
+                    for _, n in ipairs(missing) do if ms[n] then mt[#mt + 1] = n end end
+                end
+                bad[#bad + 1] = { row = i, line = s.l, missing = missing, extra = extra, match = mt }
             end
         end
     end

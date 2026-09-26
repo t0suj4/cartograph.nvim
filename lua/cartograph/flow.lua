@@ -111,7 +111,10 @@ local HEADFIELD = { preproc_if = 'condition', preproc_elif = 'condition',
     preproc_ifdef = 'name', preproc_ifndef = 'name', preproc_else = false,
     -- erlang (CART-0957): `case X of` evaluates only its subject; `receive` and `if` evaluate nothing
     -- themselves, their arms do. All three node types are erlang's alone across the loaded grammars.
-    case_expr = 'expr', receive_expr = false, if_expr = false }
+    case_expr = 'expr', receive_expr = false, if_expr = false,
+    -- …and a `fun` (CART-1106) evaluates nothing where it stands: its clauses are arms, run later. Erlang's
+    -- alone across the 45 installed grammars (checked by language.inspect).
+    anonymous_fun = false }
 -- a clause whose case LABEL is a CHILD rather than a `value` field (java `switch_label`)
 local CASELABEL = { switch_label = true }
 -- control forms with an acquire step that runs BEFORE the head, like a three-part for's
@@ -1157,6 +1160,11 @@ function M.build(fnnode, src, cfg)
         local hfd = HEADFIELD[t]
         local dunode = node
         if hfd ~= nil then dunode = hfd and node:field(hfd)[1] or nil end
+        -- ★ AND A HEAD FIELD HOLDS NONE OF THE HEAD'S OWN REGIONS (CART-1106), so nothing in it is stopped
+        -- as one: erlang's `case (case T of [C] -> C; _ -> T end) of` has a whole case in its SUBJECT, and the
+        -- type-based stop dropped that inner case's arms from the head row while the IR kept them (45 of the
+        -- 138 ejabberd/src self-gate rows, every one this shape).
+        if dunode ~= node then sb = false end
         local d, u, sus, rmw, blks
         if dunode then
             d, u, sus, rmw, blks = du(dunode, src, sb, lang, FN, DUSTOP,
@@ -1515,7 +1523,7 @@ function M.build(fnnode, src, cfg)
             params = param_names(fnnode, src, cfg.pfield, cfg.method or false, cfg.params_of)
         end
     end
-    if cfg.pattern and cfg.pattern.single_assignment then M.single_assignment(stmts, params) end
+    if cfg.pattern and cfg.pattern.single_assignment then M.single_assignment(stmts, params, cls.blocks) end
     return { stmts = stmts, cfg = cfg, preloop = PRELOOP_, cls = cls, params = params }
 end
 
@@ -1606,27 +1614,35 @@ function M.pattern_names(node, src, ids, reads) return (M.pattern_parts(node, sr
 --- `use`, and `_` (the wildcard) is neither. ARMS ARE SCOPES: each arm starts from the names bound before
 --- its head, and what follows the head sees the union of the arms (a name bound in only some arms is
 --- rejected by the compiler, so the union is exact for code that compiles).
-function M.single_assignment(stmts, params)
+--- ★ A CLOSURE IS A SCOPE THAT GIVES NOTHING BACK (CART-1106). `blocks` = the record's attached-block types
+--- (cls.blocks); an arm under such a head (a `fun` clause) binds its HEAD names FRESH even when bound outside
+--- — a fun head shadows — its body sees the outer names (a pattern naming one is a match test, a use), and
+--- what it binds is NOT visible after the fun. ★ Each name moved from def to use is kept in `st.match`: the
+--- match tests, which the expression IR cannot see from one row, so its self-gate names them as their own
+--- class instead of an unexplained `missing` (they are not marked on the IR — the gate's two sides must stay
+--- two derivations).
+function M.single_assignment(stmts, params, blocks)
     local kids = {}
     for i, st in ipairs(stmts) do
         local p = st.parent or 0
         local l = kids[p]; if not l then l = {}; kids[p] = l end
         l[#l + 1] = i
     end
-    local function settle(st, bound)
-        local d, u, useen = {}, {}, {}
+    local function settle(st, bound, fresh)
+        local d, u, useen, mt = {}, {}, {}, nil
         for _, nm in ipairs(st.use or {}) do
             if nm ~= '_' and not useen[nm] then useen[nm] = true; u[#u + 1] = nm end
         end
         for _, nm in ipairs(st.def or {}) do
             if nm == '_' then -- the wildcard binds nothing
-            elseif bound[nm] then
+            elseif bound[nm] and not fresh then
                 if not useen[nm] then useen[nm] = true; u[#u + 1] = nm end
+                mt = mt or {}; mt[#mt + 1] = nm
             else
                 bound[nm] = true; d[#d + 1] = nm
             end
         end
-        st.def, st.use = d, u
+        st.def, st.use, st.match = d, u, mt
         if st.rmw then -- the wildcard is no read-modify-write either
             local r = {}
             for _, nm in ipairs(st.rmw) do if nm ~= '_' then r[#r + 1] = nm end end
@@ -1635,10 +1651,28 @@ function M.single_assignment(stmts, params)
     end
     local function copy(t) local o = {} for k in pairs(t) do o[k] = true end return o end
     local visit
-    local function children(p, bound)
+    local function is_block(st) return blocks and st.t and blocks[st.t] ~= nil end
+    local hasblk = {} -- rows with a closure among their children: only those need the `pre` snapshot
+    for _, st in ipairs(stmts) do if st.parent and is_block(st) then hasblk[st.parent] = true end end
+    -- `pre`: the names bound BEFORE row p settled. A closure hanging off p sees those, not p's own bindings —
+    -- erlang matches AFTER evaluating the value, so in `S = foldl(fun(..) -> S = g() .. end, ..)` the inner S
+    -- is a fresh local, not a match test against the outer one (ejabberd_auth.erl:559).
+    local function children(p, bound, pre)
         local base, union
+        -- a closure head's arms: each from a COPY of the outer names, its head binding fresh, nothing returned
+        local ps = p > 0 and stmts[p]
+        if ps and is_block(ps) then
+            for _, i in ipairs(kids[p] or {}) do
+                local scope = copy(bound)
+                settle(stmts[i], scope, stmts[i].pol == 'arm')
+                children(i, scope)
+            end
+            return bound
+        end
         for _, i in ipairs(kids[p] or {}) do
-            if stmts[i].pol == 'arm' then
+            if is_block(stmts[i]) then
+                visit(i, copy(pre or bound)) -- gives nothing back
+            elseif stmts[i].pol == 'arm' then
                 base = base or copy(bound)
                 local out = visit(i, copy(base))
                 union = union or {}
@@ -1651,8 +1685,9 @@ function M.single_assignment(stmts, params)
         return bound
     end
     function visit(i, bound)
+        local pre = hasblk[i] and copy(bound) or nil
         settle(stmts[i], bound)
-        return children(i, bound)
+        return children(i, bound, pre)
     end
     local bound = {}
     for _, nm in ipairs(params or {}) do bound[nm] = true end
@@ -1883,8 +1918,16 @@ function M.successors(flow)
                 local lb = s.label and extend(lbls, s.label, { brk = nxt, cont = r }) or lbls
                 add(r, wire(kids['body'], r, nxt, r, lb)) -- body, back-edge to head
                 if s.const ~= true then add(r, nxt) end
+                -- ★ A LOOP WHOSE BODY IS ALTERNATIVE ARMS (CART-1106): an erlang `fun` runs 0..n times and each
+                -- run takes ONE of its clauses — head -> each arm -> its body -> back to the head. Wired as a
+                -- sequence (the generic path below) the arms would chain arm1 -> arm2 as if both ran.
+                for _, arm in ipairs(kids['arm'] or {}) do
+                    add(r, arm)
+                    local ak = region[arm]
+                    add(arm, wire(ak and ak['body'], r, nxt, r, lb))
+                end
                 for pol, rr in pairs(kids) do -- python for/while `else`, etc.
-                    if pol ~= 'body' then add(r, wire(rr, nxt, brk, cont, lbls)) end
+                    if pol ~= 'body' and pol ~= 'arm' then add(r, wire(rr, nxt, brk, cont, lbls)) end
                 end
             elseif kids and TRY_OF(flow)[t] then
                 -- exception edges: a throw may occur at ANY try-body point, so

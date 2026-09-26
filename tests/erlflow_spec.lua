@@ -91,6 +91,134 @@ test('erlflow: each arm is its own scope — a name bound in arm 1 is bound AGAI
     eq({ { 'Y' }, { 'Y' } }, defs)
 end)
 
+-- ── A `fun` IS A SCOPE OF ITS OWN (CART-1106) ─────────────────────────────────────────────────────────────
+-- Before, a fun was folded into the row carrying it: its head names were DEFS of that row, its body's bindings
+-- leaked into what came after (a later real binding read as a match test), and a match test inside it against
+-- an outer name was invisible to the IR. ejabberd/src's self-gate: 138 rows, 33 after, every one a match test.
+
+test('erlflow/fun: a fun gets rows of its own — its head binds in its ARM, not in the row carrying it', function ()
+    need()
+    local fl = rows_of('f(L) ->\n    lists:foreach(fun({_Id, Pid, _T}) -> s(Pid) end, L).\n')
+    local carry = fl.stmts[1]
+    eq({}, carry.def, 'the call row binds nothing')
+    local head = row(fl, function (s) return s.t == 'anonymous_fun' end)
+    ok(head, 'the fun is a row')
+    local arm = row(fl, function (s) return s.t == 'fun_clause' end)
+    ok(arm and arm.pol == 'arm', 'each clause is an arm')
+    eq({ '_Id', 'Pid', '_T' }, arm.def)
+    local body = row(fl, function (s) return s.parent and fl.stmts[s.parent] == arm end)
+    ok(body and has(body.use, 'Pid'), 'the body reads Pid in the fun scope')
+end)
+
+test('erlflow/fun: a fun head SHADOWS an outer name — it binds fresh, it is not a match test', function ()
+    need()
+    local fl = rows_of('f(X, L) ->\n    lists:map(fun(X) -> X + 1 end, L).\n')
+    local arm = row(fl, function (s) return s.t == 'fun_clause' end)
+    eq({ 'X' }, arm.def); ok(not has(arm.use, 'X'), 'not a use of the outer X')
+    eq(nil, arm.match)
+end)
+
+test('erlflow/fun: nothing a fun binds is visible after it', function ()
+    need()
+    local fl = rows_of('f(L) ->\n    lists:foreach(fun(E) -> Y = E, Y end, L),\n    Y = 1,\n    Y.\n')
+    local after = row(fl, function (s) return s.l == 3 end)
+    eq({ 'Y' }, after.def, 'Y = 1 binds: the fun\'s Y never left the fun')
+    eq(nil, after.match)
+end)
+
+test('erlflow/fun: a fun sees the names bound BEFORE its row, not the row\'s own binding', function ()
+    need()
+    -- erlang matches after evaluating the value: the inner Set is a fresh local (ejabberd_auth.erl:559)
+    local fl = rows_of('f(P) ->\n    Set = lists:foldl(fun(S, R) -> Set = g(S), [Set | R] end, [], P),\n    Set.\n')
+    eq({ 'Set' }, fl.stmts[1].def)
+    local inner = row(fl, function (s) return s.t == 'match_expr' and s.parent and s.parent > 1 end)
+    eq({ 'Set' }, inner.def, 'a fresh binding inside the fun')
+    eq(nil, inner.match)
+end)
+
+test('erlflow/fun: a pattern inside a fun naming an OUTER bound variable is a match test, a use', function ()
+    need()
+    local fl = rows_of('host_down(Host) ->\n    lists:foreach(fun(P) -> case r(P) of Host -> ok; _ -> no end end, l()).\n')
+    local arm = row(fl, function (s) return s.t == 'cr_clause' end)
+    eq({}, arm.def); ok(has(arm.use, 'Host'), 'Host is matched, not rebound')
+    eq({ 'Host' }, arm.match)
+end)
+
+test('erlflow: a case in a case SUBJECT keeps its arms on the head row (du and the IR agree)', function ()
+    need()
+    local E = require 'cartograph.expr'
+    local eo = E.of_text('f(Tlv) ->\n    case (case Tlv of [C] -> C; _ -> Tlv end) of\n        {1, V} -> V\n    end.\n', 'erlang')
+    local head = eo.fl.stmts[1]
+    eq({ 'C' }, head.def); ok(has(head.use, 'Tlv'))
+    eq({}, E.gate(eo.fl, 'erlang'))
+end)
+
+test('erlflow/fun: the self-gate agrees on every fun shape; a top-level match test is named `match`', function ()
+    need()
+    local E = require 'cartograph.expr'
+    for _, src in ipairs({
+        'f(P) ->\n    Set = lists:foldl(fun({S, U}, R) -> Set = g(S), [Set | R] end, [], P),\n    Set.\n',
+        'h(Host) ->\n    lists:foreach(fun(#s2s{pid = P}) -> case r(P) of Host -> ok; _ -> no end end, l()).\n',
+        'g() ->\n    case lists:filter(fun(Host) -> ok(Host) end, a()) of\n        [] -> ok\n    end.\n',
+    }) do
+        local eo = E.of_text(src, 'erlang')
+        eq({}, E.gate(eo.fl, 'erlang'), src)
+    end
+    local eo = E.of_text('f(F) ->\n    {ok, Mod, Bin} = c(F),\n    {module, Mod} = l(Bin).\n', 'erlang')
+    local bad = E.gate(eo.fl, 'erlang')
+    eq(1, #bad); eq({ 'Mod' }, bad[1].missing); eq({ 'Mod' }, bad[1].match)
+end)
+
+test('erlflow/fun: the CFG runs a fun 0..n times, ONE clause per run (head -> each arm, no arm -> arm)', function ()
+    need()
+    local flow = require 'cartograph.flow'
+    local fl = rows_of('f(L) ->\n    lists:map(fun(0) -> a; (N) -> N end, L),\n    done.\n')
+    local S = flow.successors(fl).succ
+    local h = select(2, row(fl, function (s) return s.t == 'anonymous_fun' end))
+    local arms = {}
+    for i, s in ipairs(fl.stmts) do if s.parent == h and s.pol == 'arm' then arms[#arms + 1] = i end end
+    eq(2, #arms)
+    local function edge(a, b) for _, x in ipairs(S[a] or {}) do if x == b then return true end end return false end
+    ok(edge(h, arms[1]) and edge(h, arms[2]), 'the head reaches each arm')
+    ok(not edge(arms[1], arms[2]), 'arm 1 does not fall into arm 2')
+    local nxt = select(2, row(fl, function (s) return s.l == 3 end))
+    ok(edge(h, nxt), 'zero trips: the head skips to the next statement')
+    local b2 = select(2, row(fl, function (s) return s.parent == arms[2] end))
+    ok(edge(b2, h), 'a clause body returns to the head (another call)')
+end)
+
+test('erlflow/fun: the STORED flow runs a fun 0..n times too, in a multi-clause function as well', function ()
+    need()
+    -- the stitched record (append_clause) is stored without its class table; flow.record must re-attach the spec's
+    -- preloop, or the fun head falls back to the arm branch: exactly one run, no zero-trip, no back edge
+    local by = extract('-module(m).\ng(0, L) -> lists:map(fun(Y) -> Y end, L), done;\ng(N, _) -> N.\n')
+    local flow = require 'cartograph.flow'
+    local rec = flow.record(by.g)
+    local S = flow.successors(rec).succ
+    local function edge(a, b) for _, x in ipairs(S[a] or {}) do if x == b then return true end end return false end
+    local h, arm, body, nxt
+    for i, s in ipairs(rec.stmts) do
+        if s.t == 'anonymous_fun' then h = i
+        elseif s.t == 'fun_clause' then arm = i
+        elseif h and s.parent == arm then body = i
+        elseif h and s.t == 'atom' then nxt = i end
+    end
+    ok(h and arm and body and nxt, 'the fun, its arm, its body and the statement after it are rows')
+    ok(edge(h, arm), 'head -> arm'); ok(edge(body, h), 'body -> head (another run)')
+    ok(edge(h, nxt), 'head -> the next statement (zero runs)')
+end)
+
+test('erlflow/fun: extraction and expr.of give a fun the same rows', function ()
+    need()
+    local by, store = extract('-module(m).\nf(L) -> lists:map(fun(X) -> X + 1 end, L).\n')
+    local eo = require('cartograph.expr').of(store, by.f.id)
+    local rec = require('cartograph.flow').record(by.f)
+    eq(#eo.fl.stmts, #rec.stmts)
+    local found = false
+    for _, s in ipairs(rec.stmts) do if s.t == 'fun_clause' then found = true; eq({ 'X' }, s.def) end end
+    ok(found, 'the stored flow has the fun clause as a row')
+end)
+
 test('erlflow: a function of several clauses is ONE record, its clauses the arms (expr.of and extraction agree)', function ()
     need()
     local by, store = extract('-module(m).\nf(0) -> 1;\nf(N) when N > 0 -> N * f(N - 1).\ng(A) -> A.\n')
