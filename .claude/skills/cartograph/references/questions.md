@@ -57,7 +57,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | Question | Instrument |
 |---|---|
 | What does a vendored artifact reach for, and does anything supply it? | `tools/surface.lua` |
-| Distil a surface into an L2 environment profile | `tools/nodedistill.lua`, `tools/npmdistill.lua <corpus|dir>`, `tools/domdistill.lua`, `tools/erldistill.lua`, `tools/hrldistill.lua --from <dir-or-.hrl>`, `tools/dtsread.lua` |
+| Distil a surface into an L2 environment profile | `tools/nodedistill.lua`, `tools/npmdistill.lua <corpus|dir>`, `tools/domdistill.lua`, `tools/erldistill.lua` (now also OTP behaviour callbacks), `tools/hrldistill.lua --from <dir-or-.hrl>`, `tools/dtsread.lua` |
 | The Maven build layer, and the java import resolver against package declarations | `tools/pomtree.lua <repo>…`, `tools/javaimports.lua <repo>…` (⚠ `tools/mavenpoms.lua` DOWNLOADS from Maven Central — network) |
 | Does the stage partition carry the JS runner globals? | `tools/stagefit.lua <corpus|dir> [--decl <key>]` |
 | A fact the tree lacks: who CONSUMES it (other repos' manifests), where the dependencies it selects are on disk, who produces the callbacks its -behaviour lines owe — each cited by the selecting line | `tools/producers.lua <root> [--search DIR]... [--lib DIR]...` (CART-1118; finds, attaches nothing) |
@@ -66,7 +66,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 
 | Question | Instrument |
 |---|---|
-| Which functions are dead / possibly dead, and why is this one alive? | lint `dead-confined`, `dead-function` (MCP `lint_run`, `:CartographLint`); the alibi verb (`lint.alibi(store)`, MCP `why`) — inheritance contract both ways since CART-0714 |
+| Which functions are dead / possibly dead, and why is this one alive? | lint `dead-confined`, `dead-function` (MCP `lint_run`, `:CartographLint`); the alibi verb (`lint.alibi(store)`, MCP `why`) — inheritance contract both ways since CART-0714; erlang `-behaviour` callbacks (the tree's `-callback` + the otp-api profile's `behaviours`, alibi kind `behaviour-callback`) since CART-1117 |
 | Which records does an erlang tree declare and never use; which fields are never named? | `tools/erlrecordcensus.lua --unused` |
 
 ## Across the wire: the XMPP triple (ejabberd × payload spec × converse.js)
@@ -127,9 +127,8 @@ write it again from scratch.
 
 | Question | What was found | Ticket |
 |---|---|---|
-| Which dead-function findings are callbacks of a declared `-behaviour`? | ejabberd 1258 of 3313 (38%) — false positives (2026-09-26) | CART-1117 (fix in progress) |
 
-Closed 2026-09-26 (promoted to a tool): the send-site term census → `tools/xmppserver.lua --sends` (holes by step);
+Closed 2026-09-26 (promoted to a tool): behaviour callbacks read as dead → the `behaviour-callback` alibi (CART-1117); the send-site term census → `tools/xmppserver.lua --sends` (holes by step);
 producer discovery → `tools/producers.lua`; nodes gained/lost by kind → `tools/gate.lua --kinds`; the df distribution
 before/after → the matrix `dfshape` column.
 

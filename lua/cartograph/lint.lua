@@ -1330,7 +1330,25 @@ end
 --- stays reported; the honest verdict there is frontier, which this rule does not claim either way).
 --- ⚠ WHAT IT DOES NOT MEASURE: a member AND all its implementors with zero callers are a dead FAMILY; each alibis
 --- the other here. The rule answers "may I delete THIS node alone", not "is the family used".
-local function contract_alibi(data)
+---
+--- ★ AND ERLANG'S CONTRACT (CART-1117): `-behaviour(B)` obliges a module to define B's callbacks, and B's
+--- engine (gen_mod, gen_server's loop) invokes them through a VARIABLE module — no name graph binds that
+--- call. Measured on ejabberd: 1258 of 3313 dead-function findings (38%) named such a callback. Same premise
+--- shape as the java one (a declaration the caller binds to, NAME + ARITY, tier `matched`), so it lives in
+--- this ONE predicate and all three consumers see it or none does. The erlang half (the parser read of
+--- -behaviour / -callback, the producer choice) is cartograph.erlbehaviour; it is asked only of `.erl` nodes,
+--- so no other language pays a read. Its guards: a same-named function of a different ARITY stays dead, a
+--- module that does not DECLARE the behaviour gets nothing, and an OPTIONAL callback that is defined is
+--- still a callback.
+local function contract_alibi(store)
+    local data = store.data
+    local beh = require('cartograph.erlbehaviour').contract(store.files,
+        function (f)
+            local l = store.content({ file = f })
+            return l and table.concat(l, '\n') or nil
+        end,
+        -- the runtime's behaviours come from the DISTILLED artifact (tools/erldistill.lua), never a name table
+        function () return require('cartograph.spec.profile').load('otp-api') end)
     local sup, sub, mem = {}, {}, {}
     local function add(child, kind, name)
         if not (child and name) then return end
@@ -1353,7 +1371,8 @@ local function contract_alibi(data)
     end
     return function (n)
         local cls, m = (n.name or ''):match('^(.*)::([^:]+)$')
-        if not cls then return nil end
+        -- no `Class::member` shape: the only contract left to ask is a behaviour's (inert off `.erl`)
+        if not cls then return beh(n) end
         local ar = #(n.params or {})
         -- breadth-first over the supertype chain (a class may reach its contract
         -- through an abstract base), visited-guarded because a corpus can spell a
@@ -1477,7 +1496,7 @@ local function dead_confined_findings(store)
     local band = store.topo()
     local xmlh = store.toc and store.toc.handlers or {}
     local occurs_once = occurs_once_in_file(store)
-    local contract = contract_alibi(store.data)
+    local contract = contract_alibi(store)
     local shadow_id, shadow_name, shadow_trunc = refusal_shadow(store.data)
     for _, n in ipairs(store.data.nodes) do
         if provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract) then
@@ -1577,7 +1596,7 @@ function M.alibi(store)
     local band = store.topo()
     local xmlh = (store.toc and store.toc.handlers) or {}
     local occurs_once = occurs_once_in_file(store)
-    local contract = contract_alibi(store.data)
+    local contract = contract_alibi(store)
     local shadow_id, shadow_name, shadow_trunc = refusal_sites(store.data) -- site LISTS, truthy like the boolean sets
     local content = {}
     -- the lines a name occurs on, for the frontier evidence. Same word-bounded text
@@ -1655,7 +1674,19 @@ function M.alibi(store)
                 n.regfrom and { file = n.regfrom } or nil)
         end
         local ct = contract(n)
-        if ct and ct.reverse then
+        if ct and ct.via == 'behaviour' then
+            -- the EVIDENCE is the pair a reader can open: the module's -behaviour line, and the callback
+            -- declaration it obliges (a -callback in the tree, or the runtime's behaviour_info, by app)
+            alibi('behaviour-callback', 'matched',
+                ('a callback of -behaviour(%s)%s: %s invokes it through a variable module, which no call graph binds%s')
+                    :format(ct.behaviour, ct.macro and (' (via ?' .. ct.macro .. ')') or '',
+                        ct.behaviour, ct.optional and ' (an optional callback, defined here)' or ''),
+                { behaviour = ct.behaviour, macro = ct.macro, define_line = ct.define_line,
+                  file = ct.behaviour_file, line = ct.behaviour_line,
+                  producer = ct.producer, callback = ct.callback, arity = ct.arity, optional = ct.optional,
+                  callback_file = ct.callback_file, callback_line = ct.callback_line,
+                  app = ct.app, release = ct.release })
+        elseif ct and ct.reverse then
             -- the reverse: the EVIDENCE is the implementor a deletion would break
             alibi('inheritance-contract', 'matched',
                 ('%s %s: deleting this declaration breaks that member (a compile error under @Override)')
@@ -2157,7 +2188,7 @@ M.rules = {
             -- THIS LIST IS THE ONE THAT DECIDES THE POPULATION, not provably_dead's:
             -- the rule reports what that predicate could NOT prove, so a premise added
             -- there alone suppresses nothing here. Both, or neither (CART-0674).
-            local contract = contract_alibi(store.data)
+            local contract = contract_alibi(store)
             for _, n in ipairs(store.data.nodes) do
                 if not provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once, contract)
                     and (n.kind == 'function' or n.kind == 'method')

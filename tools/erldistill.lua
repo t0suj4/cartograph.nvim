@@ -33,6 +33,11 @@
 --          defining a function that clashes with an auto-imported BIF (short of
 --          an explicit `-compile({no_auto_import, ...})`), so this set is the one
 --          that genuinely cannot be a project function.
+--   behaviours  EVERY OTP BEHAVIOUR's callbacks (CART-1117): `Mod:behaviour_info(callbacks)` and
+--          `(optional_callbacks)`, asked of each module that exports behaviour_info/1. OTP's sources are
+--          not on the machine but the runtime is, and the runtime's answer is the compiled -callback set.
+--          Read by lint's `behaviour-callback` alibi ONLY when the analysed module's -behaviour line names
+--          the behaviour — the tree selects, this supplies.
 
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 -- the DATA artifact, composed by spec/profile/otp.lua — which adds the minting
@@ -75,7 +80,29 @@ local script = ([[
       case catch M:module_info(exports) of
         L when is_list(L) ->
           lists:foreach(fun({Fn, A}) ->
-            io:format(F, "~s ~s ~p~n", [MB, atom_to_list(Fn), A]) end, L);
+            io:format(F, "~s ~s ~p~n", [MB, atom_to_list(Fn), A]) end, L),
+          %% a BEHAVIOUR module answers behaviour_info/1 (the compiler generates it
+          %% from the module's own -callback attributes): the callbacks, and which
+          %% of them are optional. The runtime's answer, not a list from memory.
+          case lists:member({behaviour_info, 1}, L) of
+            true ->
+              Emit = fun(Tag, Q) ->
+                  case catch M:behaviour_info(Q) of
+                    CL when is_list(CL) ->
+                      lists:foreach(fun({CF, CA}) when is_atom(CF), is_integer(CA) ->
+                          io:format(F, "~s ~s ~s ~p~n", [Tag, MB, atom_to_list(CF), CA]);
+                         (_) -> ok end, CL);
+                    _ -> ok
+                  end
+                end,
+              %% WHICH APPLICATION supplies it: the runtime's lib tree holds whatever is installed there
+              %% (a distro's ejabberd deps sit beside stdlib), so the evidence names the app and version
+              W = code:which(M),
+              io:format(F, "@app ~s ~s~n", [MB, case is_list(W) of true -> W; false -> "preloaded" end]),
+              Emit("@cb", callbacks),
+              Emit("@opt", optional_callbacks);
+            false -> ok
+          end;
         _ -> ok
       end
     end, Mods),
@@ -95,11 +122,22 @@ end
 
 local nsset, namespaces, free, vocab, sigs = {}, {}, {}, {}, {}
 local release, nmod, nexp, nbif = 'unknown', 0, 0, 0
+-- behaviour module -> { [name/arity] = { name, arity, optional } }, flattened to a sorted list below
+local bcb, bopt, bapp, nbeh = {}, {}, {}, 0
 for line in io.lines(tmp) do
     local rel = line:match('^@release%s+(%S+)')
     local bif, bifa = line:match('^@bif%s+(%S+)%s+(%d+)$')
+    local cbtag, cbm, cbf, cba = line:match('^@(%a+)%s+(%S+)%s+(%S+)%s+(%d+)$')
     if rel then
         release = rel
+    elseif line:match('^@app%s') then
+        local am, ap = line:match('^@app%s+(%S+)%s+(%S+)$')
+        -- `/usr/lib/erlang/lib/stdlib-4.3.1.3/ebin/gen_server.beam` -> `stdlib-4.3.1.3`
+        if am then bapp[am] = ap:match('/lib/erlang/lib/([^/]+)/') or ap end
+    elseif cbtag == 'cb' or cbtag == 'opt' then
+        local t = cbtag == 'cb' and bcb or bopt
+        t[cbm] = t[cbm] or {}
+        t[cbm][cbf .. '/' .. cba] = { name = cbf, arity = tonumber(cba) }
     elseif bif then
         -- an auto-imported BIF: callable with no module, so it is a `free` name.
         -- ⚠⚠ KEYED BOTH BARE AND ARITY-QUALIFIED. `prof_ext` looks `free` up with
@@ -150,6 +188,25 @@ end
 table.sort(namespaces)
 for _, s in pairs(sigs) do table.sort(s.arities) end
 
+-- ★ BEHAVIOUR CALLBACKS (CART-1117). `behaviours[mod] = { app = 'stdlib-4.3.1.3', callbacks = { … } }`, each
+-- callback { name, arity, optional = true|nil }, SORTED by name then arity (an array in a checked-in artifact must
+-- not depend on the hash seed). lint's `behaviour-callback` alibi reads it when a module's -behaviour line
+-- names an OTP behaviour: the analysed tree SELECTS the entry, this artifact SUPPLIES its obligation.
+-- An optional callback is still a callback — optional means may-be-absent, not never-called.
+local behaviours = {}
+for m, t in pairs(bcb) do
+    local l = {}
+    for key, c in pairs(t) do
+        l[#l + 1] = { name = c.name, arity = c.arity, optional = (bopt[m] and bopt[m][key]) and true or nil }
+    end
+    table.sort(l, function (a, b)
+        if a.name ~= b.name then return a.name < b.name end
+        return a.arity < b.arity
+    end)
+    behaviours[m] = { app = bapp[m], callbacks = l }
+    nbeh = nbeh + 1
+end
+
 local prof = {
     schema = 1,
     runtime = 'otp-api',
@@ -159,7 +216,7 @@ local prof = {
     -- no content reason, and this file is CHECKED IN — a regeneration would
     -- produce a whole-file diff that hides whether anything actually changed.
     -- Derived from what the artifact IS instead.
-    stamp = ('otp-%s-%dm-%de'):format(release, nmod, nexp),
+    stamp = ('otp-%s-%dm-%de-%db'):format(release, nmod, nexp, nbeh),
     sig_kind = 'erlang',
     sig_root = '/usr/lib/erlang/lib',
     types = {},          -- erlang has no namespaced type surface of this shape
@@ -168,10 +225,11 @@ local prof = {
     free = free,
     vocab = vocab,
     sigs = sigs,
+    behaviours = behaviours,
 }
 
 local fd = assert(io.open(out, 'wb'))
 fd:write(vim.mpack.encode(prof))
 fd:close()
-print(('erldistill: OTP %s — %d modules, %d exports, %d auto-imported BIFs -> %s')
-    :format(release, nmod, nexp, nbif, out:gsub('^' .. vim.pesc(repo) .. '/', '')))
+print(('erldistill: OTP %s — %d modules, %d exports, %d auto-imported BIFs, %d behaviours -> %s')
+    :format(release, nmod, nexp, nbif, nbeh, (out:gsub('^' .. vim.pesc(repo) .. '/', ''))))
