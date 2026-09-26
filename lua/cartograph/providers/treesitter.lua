@@ -4577,13 +4577,23 @@ local function container_trees(parser, clang)
     -- dead in today's nvim the change costs one boolean, and if a parser or nvim
     -- update reopens it the failure is countable instead of invisible.
     if not pcall(parser.parse, parser, true) then return out, true end
+    -- ★ ONE REGION PER (language, range). Query files from two places on the runtimepath can inject the same text
+    -- twice: a stale master-era nvim-treesitter queries/svelte/injections.scm still says `; inherits: html_tags`, so
+    -- html_tags was inherited twice and every <script> became two identical javascript trees, which minted every
+    -- script definition twice (bump@5 and bump@5~2) and made each handler name ambiguous (CART-1091). Two identical
+    -- trees can never be two regions, whatever the query setup, so the second is dropped.
+    local seen = {}
     parser:for_each_tree(function (tree, ltree)
         local hl = ltree:lang()
         if hl ~= clang and M.spec[hl] then
             local rt = tree:root()
-            local sr, sc, er = rt:range()
-            out[#out + 1] = { root = rt, lang = hl, spec = M.spec[hl],
-                s = sr, c = sc, e = er }
+            local sr, sc, er, ec = rt:range()
+            local key = hl .. ':' .. sr .. ':' .. sc .. ':' .. er .. ':' .. ec
+            if not seen[key] then
+                seen[key] = true
+                out[#out + 1] = { root = rt, lang = hl, spec = M.spec[hl],
+                    s = sr, c = sc, e = er }
+            end
         end
     end)
     table.sort(out, function (a, b)
