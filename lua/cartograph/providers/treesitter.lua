@@ -3263,6 +3263,30 @@ local function resolve_returns(cv, node_index, exact, addref, data)
             deferred[dn] = i
         end
     end
+    -- ★ FIELD DEFERRALS (CART-1077): `var.f.m()` with var's class known records rt = { owner, fld }. f's DECLARED type,
+    -- read from data.fieldtypes and inherited along data.extends, is the receiver type. A field two files declare
+    -- differently for one owner name is ambiguous (false) and settles nothing.
+    local fmap, fsuper
+    local function field_type(owner, fld)
+        if not fmap then
+            fmap = {}
+            for _, f in ipairs((data and data.fieldtypes) or {}) do
+                local t = fmap[f.typename]; if not t then t = {}; fmap[f.typename] = t end
+                if t[f.field] == nil then t[f.field] = f.ftype
+                elseif t[f.field] ~= f.ftype then t[f.field] = false end
+            end
+            fsuper = build_super((data and data.extends) or {})
+        end
+        local cur, seen = owner, {}
+        while cur and not seen[cur] do
+            seen[cur] = true
+            local t = fmap[cur]
+            local ft = t and t[fld]
+            if ft ~= nil then return ft or nil end
+            cur = fsuper[cur]
+        end
+        return nil
+    end
     local n, rounds = 0, 0
     repeat
         local progress = false
@@ -3273,10 +3297,11 @@ local function resolve_returns(cv, node_index, exact, addref, data)
             local settled = false
             do
                 local crt = cget(ci, 'rt')
-                local dci = callidx[cget(ci, 'file') .. '\31' .. crt.r .. '\31' .. crt.c]
+                local dci = not crt.fld and callidx[cget(ci, 'file') .. '\31' .. crt.r .. '\31' .. crt.c] or nil
                 local dto = dci and cget(dci, 'to')
                 local dnode = dto and node_index[dto]
                 local ret = dnode and dnode.ret
+                if crt.fld then ret = field_type(crt.owner, crt.fld) end
                 if not ret and dci then ret = staged[dci] end
                 -- ⚠ AND THE DETERMINING CALL MAY NOT BE RESOLVED YET, because the
                 -- profile MINT runs after every resolution pass — so `sinon
@@ -3578,6 +3603,36 @@ local RESOLVE_PASSES = {
         local retn, rounds = resolve_returns(x.cv, x.node_index, x.exact, x.addref, x.data)
         x.ret_resolved, x.ret_rounds = retn, rounds
         return retn end },
+    -- ★ THE FALLBACK FOR FIELD DEFERRALS (CART-1077): a `var.f.m()` the rounds could not type (an undeclared field, a
+    -- generic or JDK field type) gets the name join it skipped, now, BEFORE every later pass, so they see the same
+    -- state they always did. The same resolve() the first pass uses: identical to the old path for these calls.
+    { name = 'field_fallback', run = function (x)
+        if not x.resolve then return 0 end
+        local cget, cset = x.cv.get, x.cv.set
+        local n = 0
+        for i = 1, x.cv.n do
+            local rt = cget(i, 'rt')
+            if rt and rt.fld and not cget(i, 'to') and not cget(i, 'refused') and not cget(i, 'ext') then
+                local file = cget(i, 'file')
+                local target, inferred, refused, ext = x.resolve(cget(i, 'full') or cget(i, 'callee'), file)
+                if target then
+                    local hedged = inferred or cget(i, 'hedge') ~= nil
+                    cset(i, 'to', target.id)
+                    cset(i, 'inferred', hedged or nil)
+                    local cfn = cget(i, 'fn')
+                    if cfn then
+                        local cline = cget(i, 'line')
+                        x.addref(cfn, target.id, cget(i, 'at') or { start = { line = cline, char = 0 },
+                            ['end'] = { line = cline, char = 0 } }, hedged)
+                    end
+                    n = n + 1
+                else
+                    cset(i, 'refused', refused)
+                    cset(i, 'ext', not refused and ext or nil)
+                end
+            end
+        end
+        return n end },
     { name = 'self', run = function (x)
         -- data.selft_seed: a whole-graph self-type map carried into a PARTIAL call set
         -- (demand materialization). nil on every whole-graph path, so extract/relink
@@ -8444,7 +8499,10 @@ local MATCH_OPTS = { match_limit = 65536 }
             local from = not p.call.full and fn_at(p.file, p.at.start.line)
             local shadowed = from and node_index[from]
                 and localdecl_shadow(p.call.callee, p.file, node_index[from], parent_fn, exact)
-            if not shadowed then
+            -- ★ A FIELD-DEFERRED CALL SKIPS THE NAME JOIN HERE (CART-1077): its receiver's type is settled by the
+            -- return-type rounds once every file is in; the join runs afterwards ONLY if they cannot (field_fallback).
+            local fdef = p.call.rt and p.call.rt.fld
+            if not shadowed and not fdef then
                 target, inferred, refused, ext = resolve(p.full or p.call.callee, p.file)
             end
         end
@@ -8510,7 +8568,7 @@ local MATCH_OPTS = { match_limit = 65536 }
     local unparsed_now = {}
     for _, f in ipairs(minified or {}) do unparsed_now[#unparsed_now + 1] = f end
     for _, f in ipairs(cunparsed or {}) do unparsed_now[#unparsed_now + 1] = f end
-    local resolve_ctx = { calls = calls, data = data, exact = exact,
+    local resolve_ctx = { calls = calls, data = data, exact = exact, resolve = resolve,
         tail = tail, addref = addref, node_index = node_index,
         scope_of = scope_of, consts = constDefs, parent_fn = parent_fn,
         unparsed = unparsed_now }
@@ -9137,7 +9195,7 @@ function M.relink(data, touched)
                 -- local-shadow gate (see extract): a JS/TS const/let/var-bound bare
                 -- callee with no same-file def is not a global — leave it for
                 -- resolve_local_callable (refuse fn-value) below
-            else
+            elseif not (cget(i, 'rt') and cget(i, 'rt').fld) then -- a field deferral waits for the rounds (see extract)
                 target, inferred, refused, ext = resolve(cfull or ccallee, cfile)
             end
             if target then
@@ -9196,7 +9254,7 @@ function M.relink(data, touched)
     -- ([[cartograph-resolution-pipeline]]): one list, two drivers. relink's ctx
     -- passes consts=nil (const-fold keys are extract-only); node_index was
     -- built above, before the resolve loop.
-    n = n + run_resolve_passes({ calls = data.calls, data = data, exact = exact,
+    n = n + run_resolve_passes({ calls = data.calls, data = data, exact = exact, resolve = resolve,
         tail = tail, addref = addref, node_index = node_index,
         scope_of = scope_of, consts = nil, parent_fn = parent_fn,
         -- relink reads the roster off the graph, where extract could not: by this

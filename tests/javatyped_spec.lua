@@ -64,3 +64,27 @@ test('javatyped: an ALL-CAPS segment is a static field, not a class — Ver.CURR
     local m = calls2()['10:minimum']
     ok(not (m.ext and m.ext.why == 'typed-receiver'), 'CURRENT is a field of Ver, not a class named CURRENT')
 end)
+
+-- the project-wide field-type table: `var.f.m()` through f's DECLARED type (CART-1077, 57% of the remaining join on hive)
+local function calls3()
+    local data = ts.extract(FIX)
+    local out = {}
+    for _, c in ipairs(data.calls) do
+        if c.file == 'Use3.java' then out[(c.line + 1) .. ':' .. c.callee] = c end
+    end
+    return out
+end
+
+test('javatyped: var.f.m() is typed by f\'s declared type, inherited fields included (both names exist elsewhere)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local c = calls3()
+    eq('Item.java::Item::name@1', c['4:name'].to, 'h.item.name(): Holder.item is an Item')
+    eq('Item.java::Item::name@1', c['5:name'].to, 's.item.name(): SubHolder inherits Holder.item')
+end)
+
+test('javatyped: an undeclared field falls back to the old name join (still refused as ambiguous, not dropped)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local c = calls3()['6:name']
+    eq(nil, c.to)
+    eq('ambiguous', type(c.refused) == 'table' and c.refused.rule or nil, 'Item::name and Other::name, as before')
+end)

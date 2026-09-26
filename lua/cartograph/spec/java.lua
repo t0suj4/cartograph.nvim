@@ -439,6 +439,47 @@ local function java_imports(src)
     imports_src, imports_map = src, m
     return m
 end
+-- ★ A PROJECT-WIDE FIELD-TYPE TABLE (CART-1077): every field of every class, `Owner.field -> declared type`, for
+-- data.fieldtypes (the side table zig already fills, cached per file and merged across workers). It types `var.f.m()`:
+-- var's class is known, and f's declared type there is the receiver's type. That shape was 57% of what still paid the
+-- repo-wide name join on hive (`struct.environmentContext.read(iprot)`). An explicitly imported JDK type is recorded by
+-- its FULL name, so it can never be mistaken for a project class of the same simple name.
+local JAVA_TYPE_DECLS = { class_declaration = true, enum_declaration = true, interface_declaration = true,
+    record_declaration = true }
+local function java_scan_fields(tsroot, src)
+    local rows, imports = {}, java_imports(src)
+    local function field_rows(owner, fd)
+        local ty = java_base_type(fd:field('type')[1], src)
+        if not ty or ty == 'var' then return end
+        local fq = imports[ty]
+        if fq and (fq:match('^java%.') or fq:match('^javax%.') or fq:match('^jdk%.')) then ty = fq end
+        for _, d in inext, fd, -1 do
+            if d:type() == 'variable_declarator' then
+                local dn = d:field('name')[1]
+                if dn then rows[#rows + 1] = { typename = owner, field = node_text(dn, src), ftype = ty } end
+            end
+        end
+    end
+    -- ONLY TYPE DECLARATIONS AND THEIR BODIES are walked, never a method body: a whole-tree walk of the 12 MB thrift
+    -- file was part of a measured +9 s. (A class declared INSIDE a method, anonymous or local, is not indexed.)
+    local function decl(n)
+        local nm, body = n:field('name')[1], n:field('body')[1]
+        local owner = nm and node_text(nm, src)
+        local function members(b)
+            for _, c in (b and inext or NOOP), b, -1 do
+                local t = c:type()
+                if t == 'field_declaration' then if owner then field_rows(owner, c) end
+                elseif t == 'enum_body_declarations' then members(c) -- an enum's fields sit one level down
+                elseif JAVA_TYPE_DECLS[t] then decl(c) end -- nested types own their fields
+            end
+        end
+        members(body)
+    end
+    for _, c in inext, tsroot, -1 do
+        if JAVA_TYPE_DECLS[c:type()] then decl(c) end
+    end
+    return rows
+end
 local JAVA_SCOPES = {
     enhanced_for_statement  = { kind = 'param', harvest = jvt_binders },
     catch_clause            = { kind = 'param', harvest = jvt_binders },
@@ -682,6 +723,7 @@ return {
         end
         return ret
     end,
+    scan_fields = java_scan_fields,
     qualify_call = function (calln, name, src, model)
         if calln:type() ~= 'method_invocation' then return nil end
         local obj = calln:field('object')[1]
@@ -736,6 +778,14 @@ return {
                 if fo and fo:type() == 'this' and ff then
                     cls, hedge = java_var_type(
                         model, node_text(ff, src), calln, true)
+                elseif ff and fo and fo:type() == 'identifier' and not node_text(ff, src):match('^_*%u') then
+                    -- ★ `var.f.m()` with var's type KNOWN (CART-1077): f's declared type in var's class types the
+                    -- receiver. That class may be in a file not parsed yet, so the call is DEFERRED to the
+                    -- return-type rounds, which read data.fieldtypes once every file is in. ONE scope lookup: this
+                    -- branch runs for every `x.f.m()`, and the lookup is the cost (measured: a doubled call was part of
+                    -- a +9 s extract_calls on hive's metastore).
+                    local vt = java_var_type(model, node_text(fo, src), calln)
+                    if vt and not JAVA_JDK_TYPES[vt] then defer = { owner = vt, fld = node_text(ff, src) } end
                 elseif ff and fo and node_text(ff, src):match('^_*%u') and node_text(ff, src):find('%l') then
                     -- (a CLASS name has lower case: `Version.CURRENT.m()` names a static FIELD, all caps, and its
                     -- type is Version's to declare, not `CURRENT` — found by the server gate's removed-edge witness)
