@@ -143,3 +143,9 @@ test('erlflow: the expression IR reads `X#rec.f` as a field with its record, and
     ok(not has(reads, '_N'), 'a fun head binds: the IR does not read _N (C is read by the fun body, on both sides)')
     eq({}, expr.gate(fl, 'erlang'), 'and the self-gate agrees with du on every row')
 end)
+
+test('erlang: mentions are off BY DECLARATION (an explicit empty set), not by the grammar lacking `identifier`', function ()
+    local s = require('cartograph.providers.treesitter').spec.erlang
+    ok(type(s.mention_types) == 'table', 'mention_types is a table, so `or { identifier = true }` never applies')
+    eq(nil, next(s.mention_types), 'and it names no node type: atoms are not mentions (CART-0845)')
+end)

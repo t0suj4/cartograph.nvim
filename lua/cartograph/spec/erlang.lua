@@ -325,7 +325,11 @@ return {
     -- every one of them would index the language's punctuation. Measured on
     -- ELDAPv3.erl: 2114 atoms against 880 calls. Mentions stay off until there is
     -- a measurement that says which atoms are references.
-    mention_types = nil,
+    -- ★ EXPLICITLY NONE, not nil (CART-0845). Both readers say `spec.mention_types or <default>`, and the
+    -- default is `{ identifier = true }`: `nil` meant "off" only because this grammar has no `identifier`
+    -- node — true of nvim 0.11's and 0.12's tree-sitter-erlang, and a grammar accident, not a decision.
+    -- An empty table is truthy and matches nothing, so the refusal is now what the code says.
+    mention_types = {},
     vars = nil,
     is_method = function () return false end,
     -- OTP entry points: `start/2` and `start_link/2` are how a supervisor reaches
