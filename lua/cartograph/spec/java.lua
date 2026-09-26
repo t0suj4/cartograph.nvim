@@ -439,6 +439,181 @@ local function java_imports(src)
     imports_src, imports_map = src, m
     return m
 end
+-- ★ RETURN FLOW (CART-1077): a method whose declared return is its OWN type variable (`<S extends IScheme> S scheme(p)`)
+-- erases to its bound, and the bound is often a library interface the project reaches only through library classes, so
+-- the declared type can settle nothing. Its RETURN EXPRESSIONS can: thrift's generated
+--   return (StandardScheme.class.equals(p.getScheme()) ? STANDARD_SCHEME_FACTORY : TUPLE_SCHEME_FACTORY).getScheme();
+-- names two `private static final ... = new XStandardSchemeFactory()` fields, and each factory's getScheme() declares a
+-- project class as its return. This summarises those expressions as TERMS for the return-type rounds to evaluate once
+-- every file is in: `=C` is exactly class C (a `new C()`), `C` is C or any project subclass (a declared type), and each
+-- `>m` step replaces the set by m's declared returns. Terms are joined with `|`. All or nothing: one return expression
+-- this cannot read and there is no summary. Measured on hive's metastore: 1,814 of 1,836 type-variable chain calls,
+-- 8.8M candidate scans -> 3.7k. What it READS is syntax in this file; what the terms MEAN is decided against the graph.
+local JAVA_JDK_PREFIX = { 'java.', 'javax.', 'jdk.', 'sun.', 'com.sun.' }
+local function java_jdk_import(fq)
+    if not fq then return false end
+    for _, p in ipairs(JAVA_JDK_PREFIX) do if fq:sub(1, #p) == p then return true end end
+    return false
+end
+-- a class body's fields: name -> { ty = type node, init = value node, final = bool }, memoized per body for the last file
+local flowfields_src, flowfields = nil, {}
+local function java_body_fields(body, src)
+    if src ~= flowfields_src then flowfields_src, flowfields = src, {} end
+    local key = body:id()
+    local out = flowfields[key]
+    if out then return out end
+    out = {}
+    for c in body:iter_children() do
+        if c:type() == 'field_declaration' then
+            local ty = c:field('type')[1]
+            local fin = false
+            for m in c:iter_children() do
+                if m:type() == 'modifiers' then fin = node_text(m, src):match('%f[%w]final%f[%W]') ~= nil end
+            end
+            for d in c:iter_children() do
+                if d:type() == 'variable_declarator' then
+                    local nm = d:field('name')[1]
+                    if nm then out[node_text(nm, src)] = { ty = ty, init = d:field('value')[1], final = fin } end
+                end
+            end
+        end
+    end
+    flowfields[key] = out
+    return out
+end
+local function java_ret_flow(defn, src, tvars)
+    local _, cnode = java_enclosing_class(defn, src)
+    local cname = cnode and cnode:field('name')[1]
+    local body = cnode and cnode:field('body')[1]
+    if not (cname and body) then return nil end
+    local fields = java_body_fields(body, src)
+    local imports = java_imports(src)
+    -- names bound in the method (params, locals): an identifier that is one of them is not the field of that name
+    local bound = {}
+    local function bind(n)
+        local t = n:type()
+        if t == 'formal_parameter' or t == 'spread_parameter' or t == 'variable_declarator'
+            or t == 'catch_formal_parameter' or t == 'resource' then
+            local nm = n:field('name')[1]
+            if nm then bound[node_text(nm, src)] = true end
+        end
+        for c in n:iter_children() do if c:named() then bind(c) end end
+    end
+    bind(defn)
+    -- a type NAME the project may define: a plain identifier, not a type variable, not the JDK's
+    local function tname(tnode)
+        local t = tnode and tnode:type()
+        local base = t == 'type_identifier' and tnode or (t == 'generic_type' and tnode:child(0)) or nil
+        if not (base and base:type() == 'type_identifier') then return nil end
+        local s = node_text(base, src)
+        if tvars[s] or JAVA_JDK_TYPES[s] or java_jdk_import(imports[s]) then return nil end
+        return s
+    end
+    local terms
+    local function field_terms(name, depth)
+        if bound[name] then return nil end
+        local f = fields[name]
+        if not f then return nil end
+        if f.final and f.init then return terms(f.init, depth + 1) end
+        local s = tname(f.ty)
+        return s and { s } or nil
+    end
+    terms = function(e, depth)
+        if not e or depth > 8 then return nil end
+        local t = e:type()
+        if t == 'parenthesized_expression' then return terms(e:named_child(0), depth + 1)
+        elseif t == 'null_literal' then return {}
+        elseif t == 'ternary_expression' then
+            local a = terms(e:field('consequence')[1], depth + 1)
+            local b = a and terms(e:field('alternative')[1], depth + 1)
+            if not b then return nil end
+            for _, x in ipairs(b) do a[#a + 1] = x end
+            return a
+        elseif t == 'object_creation_expression' then
+            if e:field('body')[1] then return nil end -- an anonymous class has no name to look a method up on
+            local s = tname(e:field('type')[1])
+            return s and { '=' .. s } or nil
+        elseif t == 'cast_expression' then
+            local s = tname(e:field('type')[1])
+            return s and { s } or nil
+        elseif t == 'identifier' then
+            return field_terms(node_text(e, src), depth)
+        elseif t == 'field_access' then
+            local o, f = e:field('object')[1], e:field('field')[1]
+            if o and o:type() == 'this' and f then return field_terms(node_text(f, src), depth) end
+            return nil
+        elseif t == 'method_invocation' then
+            local o, nm = e:field('object')[1], e:field('name')[1]
+            if not nm then return nil end
+            local base
+            if not o or o:type() == 'this' then base = { node_text(cname, src) }
+            else base = terms(o, depth + 1) end
+            if not base then return nil end
+            local m = node_text(nm, src)
+            for i, x in ipairs(base) do base[i] = x .. '>' .. m end
+            return base
+        end
+        return nil
+    end
+    local all, seen = {}, {}
+    local ok = true
+    local function walk(n)
+        if not ok then return end
+        local t = n:type()
+        if t == 'lambda_expression' or t == 'class_body' then return end
+        if t == 'return_statement' then
+            local ts_ = terms(n:named_child(0), 0)
+            if not ts_ then ok = false; return end
+            for _, x in ipairs(ts_) do if not seen[x] then seen[x] = true; all[#all + 1] = x end end
+        end
+        for c in n:iter_children() do if c:named() then walk(c) end end
+    end
+    local b = defn:field('body')[1]
+    if b then walk(b) end
+    if not ok or #all == 0 then return nil end
+    return table.concat(all, '|')
+end
+-- the type variables a method declares (`<S extends X, T>` -> { S = true, T = true })
+local function java_tvars(defn, src)
+    local tps = defn:field('type_parameters')[1]
+    if not tps then return nil end
+    local tvars = {}
+    for _, tp in inext, tps, -1 do
+        if tp:type() == 'type_parameter' then
+            local id = tp:named_child(0)
+            if id and id:type() == 'type_identifier' then tvars[node_text(id, src)] = true end
+        end
+    end
+    return tvars
+end
+-- ★ WHICH CHAINS THE FIRST PASS MAY SKIP: a chained call `m(..).g()` whose head `m` is declared exactly once in the
+-- calling class, returns its own type variable and has a return flow. The rounds settle it from the flow; the name
+-- join the first pass would have paid runs afterwards only if they cannot (the same fallback field deferrals use).
+-- Memoized per class body for the last file.
+local tvheads_src, tvheads = nil, {}
+local function java_tvflow_heads(body, src)
+    if src ~= tvheads_src then tvheads_src, tvheads = src, {} end
+    local key = body:id()
+    local out = tvheads[key]
+    if out then return out end
+    out = {}
+    local count = {}
+    for c in body:iter_children() do
+        if c:type() == 'method_declaration' then
+            local nm = c:field('name')[1]
+            local s = nm and node_text(nm, src)
+            if s then
+                count[s] = (count[s] or 0) + 1
+                local tvars = java_tvars(c, src)
+                local ret = tvars and java_base_type(c:field('type')[1], src)
+                if ret and tvars[ret] and java_ret_flow(c, src, tvars) then out[s] = true end
+            end
+        end
+    end
+    for s in pairs(out) do if count[s] > 1 then out[s] = nil end end
+    tvheads[key] = out
+    return out
+end
 -- ★ A PROJECT-WIDE FIELD-TYPE TABLE (CART-1077): every field of every class, `Owner.field -> declared type`, for
 -- data.fieldtypes (the side table zig already fills, cached per file and merged across workers). It types `var.f.m()`:
 -- var's class is known, and f's declared type there is the receiver's type. That shape was 57% of what still paid the
@@ -721,7 +896,8 @@ return {
                 end
             end
         end
-        return ret
+        -- no Class<T> binds it: the return EXPRESSIONS may still say which classes come back (see java_ret_flow)
+        return ret, nil, java_ret_flow(defn, src, tvars)
     end,
     scan_fields = java_scan_fields,
     qualify_call = function (calln, name, src, model)
@@ -769,6 +945,14 @@ return {
                 if vn then
                     local r2, c2 = vn:range()
                     defer = { r = r2, c = c2 }
+                    -- a head declared in this class with a return flow: the rounds settle it, so the first pass
+                    -- skips the name join (tv = type-variable head; see java_tvflow_heads)
+                    local ho = obj:field('object')[1]
+                    if not ho or ho:type() == 'this' then
+                        local _, cnode = java_enclosing_class(calln, src)
+                        local body = cnode and cnode:field('body')[1]
+                        if body and java_tvflow_heads(body, src)[node_text(vn, src)] then defer.tv = true end
+                    end
                 end
             elseif ot == 'object_creation_expression' then
                 -- new Foo().m(): the type is right here

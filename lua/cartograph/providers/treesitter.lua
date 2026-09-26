@@ -3287,6 +3287,109 @@ local function resolve_returns(cv, node_index, exact, addref, data)
         end
         return nil
     end
+    -- ★ RETURN FLOW (CART-1077): a head returning its own type variable carries `retflow`, its return expressions as
+    -- terms (spec/java.lua java_ret_flow): `=C` exactly C, `C` C or a project subclass, `>m` = m's declared returns.
+    -- Evaluated here, against every file: the TARGETS of `callee` on the classes the flow yields, or nil when any step
+    -- leaves the project (a library class, an inherited library method, a duplicate name) — a partial set would be a
+    -- claim about every runtime class, so there is none. Class names resolve in the file that named them first (a
+    -- nested class shadows a same-named one elsewhere), then corpus-wide only when unique.
+    local fsup2, fkids
+    local function flow_targets(flow, file0, callee, clang)
+        if not fkids then
+            fsup2, fkids = {}, {}
+            local function base(t) return t and (t:gsub('<.*$', ''):match('([%w_$]+)%s*$')) end
+            for _, e in ipairs((data and data.extends) or {}) do
+                local c, p = e.child, base(e.parent)
+                if c and p then
+                    if fsup2[c] == nil then fsup2[c] = p elseif fsup2[c] ~= p then fsup2[c] = false end
+                    local k = fkids[p]; if not k then k = {}; fkids[p] = k end
+                    k[#k + 1] = c
+                end
+            end
+            for _, e in ipairs((data and data.implements) or {}) do
+                local c, p = e.child, base(e.iface)
+                if c and p then
+                    local k = fkids[p]; if not k then k = {}; fkids[p] = k end
+                    k[#k + 1] = c
+                end
+            end
+        end
+        local sep = (M.spec[clang] and M.spec[clang].methodsep) or '::'
+        -- a method OWN to class c: the unique fit, same-file first; false = ambiguous
+        local function own(c, m, file)
+            local fit, dup
+            for _, node in ipairs(exact[c .. sep .. m] or {}) do
+                if elang_for(node.file) == clang then
+                    if fit then dup = true else fit = node end
+                end
+            end
+            if not dup then return fit end
+            fit = nil
+            for _, node in ipairs(exact[c .. sep .. m]) do
+                if node.file == file and elang_for(node.file) == clang then
+                    if fit then return false end
+                    fit = node
+                end
+            end
+            return fit or false
+        end
+        -- own or inherited through PROJECT classes; nil = not found in the project (it may be a library's)
+        local function inh(c, m, file)
+            local cur, seen = c, {}
+            while cur and not seen[cur] do
+                seen[cur] = true
+                local f = own(cur, m, file)
+                if f ~= nil then return f or nil end
+                cur = fsup2[cur]
+            end
+            return nil
+        end
+        -- the methods `m` dispatches to on the set; nil on any hole
+        local function dispatch(set, m)
+            local out, have = {}, {}
+            for _, el in ipairs(set) do
+                local f = inh(el.c, m, el.file)
+                if not f then return nil end
+                if not have[f.id] then have[f.id] = true; out[#out + 1] = f end
+                if not el.exact then -- every project subclass may override it
+                    local stack, seen = { el.c }, { [el.c] = true }
+                    while #stack > 0 do
+                        local cur = table.remove(stack)
+                        for _, k in ipairs(fkids[cur] or {}) do
+                            if not seen[k] then
+                                seen[k] = true
+                                if #out > 64 then return nil end
+                                stack[#stack + 1] = k
+                                local o = own(k, m, el.file)
+                                if o == false then return nil end
+                                if o and not have[o.id] then have[o.id] = true; out[#out + 1] = o end
+                            end
+                        end
+                    end
+                end
+            end
+            return out
+        end
+        local set = {}
+        for term in flow:gmatch('[^|]+') do
+            local ex = term:sub(1, 1) == '='
+            local steps = {}
+            for part in (ex and term:sub(2) or term):gmatch('[^>]+') do steps[#steps + 1] = part end
+            local cur = { { c = steps[1], exact = ex, file = file0 } }
+            for si = 2, #steps do
+                local ms = dispatch(cur, steps[si])
+                if not ms then return nil end
+                cur = {}
+                for _, mnode in ipairs(ms) do
+                    if not mnode.ret or mnode.retflow then return nil end
+                    cur[#cur + 1] = { c = mnode.ret, exact = false, file = mnode.file }
+                end
+            end
+            for _, el in ipairs(cur) do set[#set + 1] = el end
+        end
+        if #set == 0 then return nil end
+        return dispatch(set, callee)
+    end
     local n, rounds = 0, 0
     repeat
         local progress = false
@@ -3423,6 +3526,34 @@ local function resolve_returns(cv, node_index, exact, addref, data)
                         if cfn then addref(cfn, fit.id, cget(ci, 'at'), true, true) end
                         n = n + 1
                         progress = true
+                        settled = true
+                    end
+                end
+                -- the head's declared return is its own type variable and says nothing; its RETURN FLOW may
+                if not settled and dnode and dnode.retflow and ret == dnode.ret and not crt.fld then
+                    local tg = flow_targets(dnode.retflow, dnode.file, ccallee, elang_for(cget(ci, 'file')))
+                    if tg and #tg == 1 then
+                        local fit = tg[1]
+                        cset(ci, 'to', fit.id)
+                        if not cget(ci, 'full') then
+                            cset(ci, 'full', fit.name)
+                            cset(ci, 'rtfull', true)
+                        end
+                        cset(ci, 'inferred', true)
+                        cset(ci, 'tinf', true)
+                        cset(ci, 'refused', nil)
+                        cset(ci, 'ext', nil)
+                        local cfn = cget(ci, 'fn')
+                        if cfn then addref(cfn, fit.id, cget(ci, 'at'), true, true) end
+                        n = n + 1
+                        progress = true
+                        settled = true
+                    elseif tg and #tg > 1 then
+                        -- DYNAMIC DISPATCH over a set the flow proved complete: refused, with every target named
+                        -- instead of every same-named method in the corpus
+                        table.sort(tg, function(a, b) return a.id < b.id end)
+                        cset(ci, 'refused', refusal('ambiguous', tg))
+                        cset(ci, 'ext', nil)
                         settled = true
                     end
                 end
@@ -3604,7 +3735,7 @@ local RESOLVE_PASSES = {
         x.ret_resolved, x.ret_rounds = retn, rounds
         return retn end },
     -- ★ THE FALLBACK FOR FIELD DEFERRALS (CART-1077): a `var.f.m()` the rounds could not type (an undeclared field, a
-    -- generic or JDK field type) gets the name join it skipped, now, BEFORE every later pass, so they see the same
+    -- generic or JDK field type), or a type-variable chain whose return flow did not settle, gets the name join it skipped, now, BEFORE every later pass, so they see the same
     -- state they always did. The same resolve() the first pass uses: identical to the old path for these calls.
     { name = 'field_fallback', run = function (x)
         if not x.resolve then return 0 end
@@ -3612,7 +3743,7 @@ local RESOLVE_PASSES = {
         local n = 0
         for i = 1, x.cv.n do
             local rt = cget(i, 'rt')
-            if rt and rt.fld and not cget(i, 'to') and not cget(i, 'refused') and not cget(i, 'ext') then
+            if rt and (rt.fld or rt.tv) and not cget(i, 'to') and not cget(i, 'refused') and not cget(i, 'ext') then
                 local file = cget(i, 'file')
                 local target, inferred, refused, ext = x.resolve(cget(i, 'full') or cget(i, 'callee'), file)
                 if target then
@@ -6372,8 +6503,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     binder_fields = spec.binder_fields,     -- destructuring/imports (CART-0358)
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
-                local dret, dretclass
-                if spec.def_ret then dret, dretclass = spec.def_ret(defn, src) end
+                local dret, dretclass, dretflow
+                if spec.def_ret then dret, dretclass, dretflow = spec.def_ret(defn, src) end
                 -- df (step 6): a custom-df lang (haskell) builds its own; every
                 -- generic body_field lang DERIVES df from flow.coarse — the
                 -- coarse projection of the fine rows already built, no second
@@ -6431,6 +6562,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- generic `Class<T>` return: the arg index binding T (the
                     -- return-type rounds read the call's class-literal there)
                     retclass = dretclass,
+                    -- a type-variable return's RETURN FLOW: terms the rounds evaluate (java_ret_flow, CART-1077)
+                    retflow = dretflow,
                     df = dfrec,
                     flow = fl and { stmts = fl.stmts, params = fl.params } or nil }
                 lastFn[file] = nodes[#nodes]
@@ -8501,7 +8634,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                 and localdecl_shadow(p.call.callee, p.file, node_index[from], parent_fn, exact)
             -- ★ A FIELD-DEFERRED CALL SKIPS THE NAME JOIN HERE (CART-1077): its receiver's type is settled by the
             -- return-type rounds once every file is in; the join runs afterwards ONLY if they cannot (field_fallback).
-            local fdef = p.call.rt and p.call.rt.fld
+            -- (and a TYPE-VARIABLE head with a return flow, rt.tv, the same way)
+            local fdef = p.call.rt and (p.call.rt.fld or p.call.rt.tv)
             if not shadowed and not fdef then
                 target, inferred, refused, ext = resolve(p.full or p.call.callee, p.file)
             end
@@ -8776,7 +8910,7 @@ local function build_symtab(nodes)
             end
         end
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name,
-            ret = n.ret, retclass = n.retclass, arrow = n.arrow,
+            ret = n.ret, retclass = n.retclass, retflow = n.retflow, arrow = n.arrow,
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy
             -- and the parallel graph disagrees with the inline one (CART-0616)
@@ -9195,7 +9329,8 @@ function M.relink(data, touched)
                 -- local-shadow gate (see extract): a JS/TS const/let/var-bound bare
                 -- callee with no same-file def is not a global — leave it for
                 -- resolve_local_callable (refuse fn-value) below
-            elseif not (cget(i, 'rt') and cget(i, 'rt').fld) then -- a field deferral waits for the rounds (see extract)
+            elseif not (cget(i, 'rt') and (cget(i, 'rt').fld or cget(i, 'rt').tv)) then -- a field or type-variable
+                -- deferral waits for the rounds (see extract)
                 target, inferred, refused, ext = resolve(cfull or ccallee, cfile)
             end
             if target then
