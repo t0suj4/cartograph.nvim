@@ -200,11 +200,6 @@ end
 -- purpose, so the join tests it rather than reading the same helper twice.
 local ruby_attr_generator = {
     name = 'ruby.attr', source = 'spec', why = 'Module#attr_* defines accessor methods (RB_ATTR)',
-    select = function (node, src)
-        if node:type() ~= 'call' then return false end
-        local m = node:field('method')[1]
-        return m ~= nil and RB_ATTR[node_text(m, src)] ~= nil
-    end,
     context = function (node, src)
         local sing = false
         local p = node:parent()
@@ -221,52 +216,30 @@ local ruby_attr_generator = {
         return nil, 'no enclosing class or module'
     end,
     project = { simple_symbol = function (s) return (s:gsub('^:', '')) end },
-    forms = function (A)
-        local fs = {}
-        local verbs = {}
+    lang = 'ruby',
+    forms = (function ()
+        -- per verb, the three receivers as SOURCE: bare (the owner, `#` or `.` from context), `singleton_class.`
+        -- (a singleton method, `Owner.x` — ruby_synth_defs gets this wrong, CART-1126) and a constant
+        -- (`Thread.attr_accessor :x` defines `Thread#x`)
+        local fs, verbs = {}, {}
         for v in pairs(RB_ATTR) do verbs[#verbs + 1] = v end
         table.sort(verbs)
+        local syms = { 'simple_symbol', 'string' }
         for _, v in ipairs(verbs) do
-            local mode = RB_ATTR[v]
-            local out = {}
-            if mode:find('r') then
-                out[#out + 1] = { each = 'syms', as = 's', ok = '^[%a_][%w_]*$',
-                    T = A.template(A.node('def', A.hole('owner'), A.hole('sep'), A.hole('s'))) }
+            local function outs(prefix)
+                local o = {}
+                if RB_ATTR[v]:find('r') then o[#o + 1] = { prefix .. '$s', each = 'syms', as = 's', ok = '^[%a_][%w_]*$' } end
+                if RB_ATTR[v]:find('w') then o[#o + 1] = { prefix .. '$s=', each = 'syms', as = 's', ok = '^[%a_][%w_]*$' } end
+                return o
             end
-            if mode:find('w') then
-                out[#out + 1] = { each = 'syms', as = 's', ok = '^[%a_][%w_]*$',
-                    T = A.template(A.node('def', A.hole('owner'), A.hole('sep'), A.hole('s'), A.lit('='))) }
-            end
-            fs[#fs + 1] = { name = v, out = out,
-                T = A.template(A.node('call', A.node('identifier', A.lit(v)), A.node('argument_list', A.hole('syms', true))),
-                    { syms = A.rep(A.kinds({ 'simple_symbol', 'string' }), 1) }) }
-            -- `singleton_class.attr_accessor :x` defines a SINGLETON method, `Owner.x` (activesupport writes 40 of
-            -- these). ruby_synth_defs ignores the receiver and emits `Owner#x`; the join is what showed it. Any
-            -- other receiver fits no form and refuses by shape.
-            local sout = {}
-            for i, o in ipairs(out) do
-                local kids = { A.hole('owner'), A.lit('.'), A.hole('s') }
-                if i == 2 or (not mode:find('r')) then kids[4] = A.lit('=') end
-                sout[i] = { each = o.each, as = o.as, ok = o.ok, T = A.template(A.node('def', unpack(kids))) }
-            end
-            -- `Thread.attr_accessor :x` (a CONSTANT receiver) defines the accessor ON THAT CLASS, `Thread#x`, not on
-            -- the class whose body the call sits in — ruby_synth_defs credits the enclosing class
-            local cout = {}
-            for i, o in ipairs(out) do
-                local kids = { A.hole('recv'), A.lit('#'), A.hole('s') }
-                if i == 2 or (not mode:find('r')) then kids[4] = A.lit('=') end
-                cout[i] = { each = o.each, as = o.as, ok = o.ok, T = A.template(A.node('def', unpack(kids))) }
-            end
-            fs[#fs + 1] = { name = 'Constant.' .. v, out = cout,
-                T = A.template(A.node('call', A.hole('recv'), A.node('identifier', A.lit(v)),
-                    A.node('argument_list', A.hole('syms', true))),
-                    { recv = A.kinds({ 'constant', 'scope_resolution' }), syms = A.rep(A.kinds({ 'simple_symbol', 'string' }), 1) }) }
-            fs[#fs + 1] = { name = 'singleton_class.' .. v, out = sout,
-                T = A.template(A.node('call', A.node('identifier', A.lit('singleton_class')), A.node('identifier', A.lit(v)),
-                    A.node('argument_list', A.hole('syms', true))), { syms = A.rep(A.kinds({ 'simple_symbol', 'string' }), 1) }) }
+            fs[#fs + 1] = { name = v, site = v .. ' __syms__', holes = { syms = syms }, out = outs('$owner$sep') }
+            fs[#fs + 1] = { name = 'singleton_class.' .. v, site = 'singleton_class.' .. v .. ' __syms__',
+                holes = { syms = syms }, out = outs('$owner.') }
+            fs[#fs + 1] = { name = 'Constant.' .. v, site = '__recv.' .. v .. ' __syms__',
+                holes = { syms = syms, recv = { 'constant', 'scope_resolution' } }, out = outs('$recv#') }
         end
         return fs
-    end,
+    end)(),
 }
 
 -- Ruby R4 inheritance + mixin scan: the ancestor edges that recover R2/R3's

@@ -20,16 +20,28 @@
 --                    "not a value" — a `var` where a registration supplies a macro — is exactly this)
 --   reason 'context' the generator needs an enclosing context (a class, a module) and there is none
 --
--- A DECLARATION: { name, source = 'spec'|'derived'|'profile', why,
---   select(node, src) -> bool,
+-- A DECLARATION: { name, lang, wrap?, source = 'spec'|'derived'|'profile', why,
+--   select(node, src) -> bool   OPTIONAL: by default DERIVED from the forms — a node is a site when its type is a
+--                               form's root type and it carries that form's LITERAL leaves at the same positions
+--                               (`attr_accessor` as kid 1, or kid 2 after a receiver; `iq_handler` first in a tuple),
+--                               so a site whose arguments refuse is still in the population and refuses by name,
 --   context(node, src, file) -> { name = text… } | nil, why      values a site gets from where it sits
 --   project = { [kind] = fn(text) -> text }                        how a leaf reads as a name (`:foo` -> `foo`)
---   forms(A) -> { { name, T = template, out = { { T = template, each = hole, as = hole, only = { kind… },
---                                                  ok = lua pattern, check = hole }… } }… } }
---     `each` generates once per element of a repeated hole (bound as `as`), `only` keeps elements of those kinds
---     (`delegate :a, :b, to: :x` — the pair is an option, not a method), `ok` filters on the element's projected
---     name, or on hole `check`'s when there is no `each`.
--- `forms` takes the algebra so a spec can declare generators without loading it.
+--   forms = { { name, site = <SOURCE SNIPPET>, holes = { h = { kind… } }, out = { <OUTPUT>… } }… } }
+--
+-- ★★ A FORM IS WRITTEN AS SOURCE (CART-1125, the lever the third reader named): `has_many __assoc, __rest__` is
+-- parsed with the language's own grammar and read by the same converter as a real site, with each PLACEHOLDER leaf
+-- turned into a hole — `__name` a hole, `__name__` a repeated one (both parse as an identifier in ruby and as a
+-- variable in erlang). The template is therefore the grammar's own shape and cannot drift from what a site parses
+-- to. `wrap` (a format string) gives the snippet a context its grammar needs, for a grammar whose top level does not
+-- admit the site's shape (erlang's does: a bare `{…}` parses); the site is the DEEPEST node spanning exactly the
+-- snippet, and a snippet that parses only through error recovery refuses. `holes` gives domains: a list of kinds
+-- (`{ 'simple_symbol' }`, for a repeated hole each element's); no entry is open. (No least count: an empty argument
+-- list converts to a LEAF, so no site ever offers a repeated hole zero elements — a knob no input could reach.)
+-- An OUTPUT is a text template, `'$owner#$assoc='` (a `def` whose name is the parts joined), or
+-- `{ kind = 'registration', parts = { '$key', '$mod', '$fn' } }`. Options on either: `each` generates once per
+-- element of a repeated hole (bound as `as`), `only` keeps elements of those kinds (`delegate :a, to: :x` — the pair
+-- is an option, not a method), `ok` filters on the element's projected name, or on hole `check`'s without `each`.
 --
 -- A FACT: { gen, form, kind (the output node's type), parts = { text… } (its kids, projected), name (parts joined),
 --           site = { sl, sc, el, ec } (the site), at = { … } (the repeated element's node, when `each`), file }
@@ -74,6 +86,139 @@ local function holes_of(A, T)
     return out
 end
 
+-- a placeholder leaf: `__name__` (a repeated hole) or `__name`
+local function placeholder(text)
+    local r = text:match('^__([%a][%w_]-)__$')
+    if r then return r, true end
+    local n = text:match('^__([%a][%w_]*)$')
+    if n then return n, false end
+end
+
+--- a SOURCE SNIPPET as a template: parsed with `lang` (inside `wrap`, when given), the deepest node spanning exactly
+--- the snippet read by M.term, placeholder leaves turned into holes with the declared domains.
+function M.snippet(A, lang, snippet, holes, wrap)
+    local text = wrap and wrap:format(snippet) or snippet
+    local off = wrap and (text:find(snippet, 1, true) - 1) or 0
+    local ok, parser = pcall(vim.treesitter.get_string_parser, text, lang)
+    local root = ok and parser and parser:parse()[1]:root()
+    if not root then return nil, 'no ' .. lang .. ' parser' end
+    -- a snippet its grammar only RECOVERS from (an erlang tuple with no function around it) is not a shape the
+    -- grammar gives a site: refuse rather than template the error recovery
+    if root:has_error() then return nil, ('`%s` does not parse as %s%s'):format(snippet, lang, wrap and '' or ' (a wrap?)') end
+    local best
+    local function find(n)
+        local _, _, sb, _, _, eb = n:range(true)
+        if sb == off and eb == off + #snippet and n:named() then best = n end
+        for c in n:iter_children() do find(c) end
+    end
+    find(root)
+    if not best then return nil, 'no node spans the snippet `' .. snippet .. '`' end
+    local reps = {}
+    local function holify(t)
+        if t.k ~= 'lit' and #(t.kids or {}) == 1 and t.kids[1].k == 'lit' then
+            local name, rep = placeholder(tostring(t.kids[1].v))
+            if name then reps[name] = rep; return A.hole(name, rep or nil) end
+        end
+        if not t.kids then return t end
+        local kids = {}
+        for i, k in ipairs(t.kids) do kids[i] = holify(k) end
+        return A.node(t.k, unpack(kids))
+    end
+    local body = holify(M.term(A, best, text))
+    -- the GRAMMAR FIELD of each direct kid: the term keeps positions, not fields, and a selector needs both —
+    -- `delegate :a` has `delegate` as its METHOD, `delegate.respond_to?(:x)` as its RECEIVER, both at kid 1
+    local fields = {}
+    local is_comment = require('cartograph.spec.tsutil').is_comment
+    for c, fld in best:iter_children() do
+        if c:named() and not is_comment(c) then fields[#fields + 1] = fld or false end
+    end
+    local domains = {}
+    for name, rep in pairs(reps) do
+        local d = holes and holes[name]
+        local kinds = d and #d > 0 and A.kinds(d) or nil
+        domains[name] = rep and A.rep(kinds or A.open(), 0) or kinds
+    end
+    local T = A.template(body, domains)
+    T.kid_fields = fields
+    return T
+end
+
+--- an OUTPUT text template (`'$owner#$assoc='`) as the kids it instantiates to: holes and literal runs
+local function out_kids(A, text)
+    local kids, i = {}, 1
+    while i <= #text do
+        local s, e, name = text:find('%$([%a_][%w_]*)', i)
+        if not s then kids[#kids + 1] = A.lit(text:sub(i)); break end
+        if s > i then kids[#kids + 1] = A.lit(text:sub(i, s - 1)) end
+        kids[#kids + 1] = A.hole(name)
+        i = e + 1
+    end
+    return kids
+end
+
+-- a declaration's forms compiled once: sites and outputs as algebra templates
+local function compile(A, gen)
+    local fs = {}
+    for _, f in ipairs(gen.forms) do
+        local T, why = M.snippet(A, gen.lang, f.site, f.holes, gen.wrap)
+        if not T then error(('generator %s form %s: %s'):format(gen.name, f.name or f.site, why), 0) end
+        local out = {}
+        for _, o in ipairs(f.out) do
+            local body
+            if type(o[1]) == 'string' then
+                body = A.node(o.kind or 'def', unpack(out_kids(A, o[1])))
+            else
+                local parts = {}
+                for i, p in ipairs(o.parts) do
+                    local k = out_kids(A, p)
+                    parts[i] = #k == 1 and k[1] or A.node('part', unpack(k))
+                end
+                body = A.node(o.kind, unpack(parts))
+            end
+            out[#out + 1] = { T = A.template(body), each = o.each, as = o.as, only = o.only, ok = o.ok, check = o.check }
+        end
+        fs[#fs + 1] = { name = f.name or f.site, T = T, out = out }
+    end
+    return fs
+end
+
+-- the selector a declaration's forms imply: per form, its root type and its direct literal leaves by position
+local function derived_select(forms)
+    local keys = {}
+    for _, f in ipairs(forms) do
+        local lits = {}
+        for i, k in ipairs(f.T.body.kids or {}) do
+            if k.k ~= 'hole' and #(k.kids or {}) == 1 and k.kids[1].k == 'lit' then
+                lits[#lits + 1] = { i = i, k = k.k, v = tostring(k.kids[1].v), f = f.T.kid_fields and f.T.kid_fields[i] }
+            end
+        end
+        keys[#keys + 1] = { root = f.T.body.k, lits = lits }
+    end
+    local is_comment = require('cartograph.spec.tsutil').is_comment
+    return function (node, src)
+        local t = node:type()
+        local kids, flds
+        for _, key in ipairs(keys) do
+            if key.root == t then
+                if not kids then
+                    kids, flds = {}, {}
+                    for c, fld in node:iter_children() do
+                        if c:named() and not is_comment(c) then kids[#kids + 1] = c; flds[#kids] = fld or false end
+                    end
+                end
+                local all = true
+                for _, l in ipairs(key.lits) do
+                    local c = kids[l.i]
+                    if not (c and c:type() == l.k and c:named_child_count() == 0 and (l.f == nil or flds[l.i] == l.f)
+                            and vim.treesitter.get_node_text(c, src) == l.v) then all = false; break end
+                end
+                if all then return true end
+            end
+        end
+        return false
+    end
+end
+
 local function top_rep(T)
     for _, k in ipairs(T.body.kids or {}) do if k.k == 'hole' and k.rep then return true end end
     return false
@@ -83,10 +228,11 @@ end
 function M.read(gen, troot, src, file)
     local A, err = algebra()
     if not A then return nil, err end
-    gen._forms = gen._forms or gen.forms(A)
+    gen._forms = gen._forms or compile(A, gen)
+    gen._select = gen._select or gen.select or derived_select(gen._forms)
     local facts, refusals, selected = {}, {}, 0
     local function visit(node)
-        if gen.select(node, src) then
+        if gen._select(node, src) then
             selected = selected + 1
             local I = M.term(A, node, src)
             local site = I.at
@@ -171,37 +317,25 @@ end
 function M.from_erlreg(carriers)
     local out = {}
     for _, c in ipairs(carriers) do
+        -- one form per declared arity, written as the tuple itself: `{iq_handler, __p2, __key, __fn}`
+        local forms, arities = {}, {}
+        for n in pairs(c.arities) do arities[#arities + 1] = n end
+        table.sort(arities)
+        for _, n in ipairs(arities) do
+            local map, role = c.arities[n], {}
+            for r, i in pairs(map) do if type(i) == 'number' then role[i] = r end end
+            local els = { c.tag }
+            for i = 2, n do els[i] = '__' .. (role[i] or ('p' .. i)) end
+            -- the POSITIVE kind requirement (erlreg's `element` note): a registration supplies a namespace macro and a
+            -- function atom; a pattern supplies vars, a type supplies type applications
+            forms[#forms + 1] = { name = 'arity' .. n, site = '{' .. table.concat(els, ', ') .. '}',
+                holes = { key = { 'macro_call_expr' }, fn = { 'atom' } },
+                out = { { kind = 'registration', parts = { '$key', map.mod == 'context' and '$cmod' or '$mod', '$fn' } } } }
+        end
         out[#out + 1] = {
-            name = 'erlang.' .. c.tag, source = 'derived', why = c.why,
-            select = function (node, src)
-                if node:type() ~= 'tuple' then return false end
-                local first = node:named_child(0)
-                return first ~= nil and first:type() == 'atom' and vim.treesitter.get_node_text(first, src) == c.tag
-            end,
-            context = function (_, _, file)
-                return { cmod = (file or ''):match('([^/]+)%.erl$') or '' }
-            end,
-            forms = function (A)
-                local fs = {}
-                local arities = {}
-                for n in pairs(c.arities) do arities[#arities + 1] = n end
-                table.sort(arities)
-                for _, n in ipairs(arities) do
-                    local map = c.arities[n]
-                    local role = {}
-                    for r, i in pairs(map) do if type(i) == 'number' then role[i] = r end end
-                    local kids = { A.node('atom', A.lit(c.tag)) }
-                    for i = 2, n do kids[i] = A.hole(role[i] or ('p' .. i)) end
-                    -- the POSITIVE kind requirement (erlreg's `element` note): a registration supplies a namespace
-                    -- macro and a function atom; a pattern supplies vars, a type supplies type applications
-                    local T = A.template(A.node('tuple', unpack(kids)),
-                        { key = A.kinds({ 'macro_call_expr' }), fn = A.kinds({ 'atom' }) })
-                    local mod = map.mod == 'context' and A.hole('cmod') or A.hole('mod')
-                    fs[#fs + 1] = { name = 'arity' .. n, T = T,
-                        out = { { T = A.template(A.node('registration', A.hole('key'), mod, A.hole('fn'))) } } }
-                end
-                return fs
-            end,
+            name = 'erlang.' .. c.tag, lang = 'erlang', source = 'derived', why = c.why,
+            context = function (_, _, file) return { cmod = (file or ''):match('([^/]+)%.erl$') or '' } end,
+            forms = forms,
         }
     end
     return out
