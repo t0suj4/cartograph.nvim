@@ -409,7 +409,10 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 198 -- v198: A TYPE-VARIABLE RETURN IS TYPED BY ITS RETURN FLOW (CART-1077): a java method returning its own
+M.VERSION = 199 -- v199: C AND C++ ARE ONE LINKAGE FAMILY IN THE NAME JOIN (CART-1079): a bare call reaches a free function
+-- across the two (a .c definition always; a C++ one only with extern "C" evidence, node.clink, on its definition or a header
+-- prototype); methods, namespaced and qualified calls never cross. And a C/C++ `static` or a source-file macro is FILE-LOCAL
+-- (node.flocal, confined; CART-1081). Prior: v198: A TYPE-VARIABLE RETURN IS TYPED BY ITS RETURN FLOW (CART-1077): a java method returning its own
 -- type variable carries `retflow` (its return expressions as type terms: final-field initializers, `new`, ternaries, declared
 -- method returns); the return-type rounds evaluate it to the dispatch targets, and a chain on such a head (`scheme(p).read()`,
 -- rt.tv) skips the first-pass name join. Prior: v197: A JAVA FIELD'S DECLARED TYPE TYPES `var.f.m()` (CART-1077): data.fieldtypes gains java rows

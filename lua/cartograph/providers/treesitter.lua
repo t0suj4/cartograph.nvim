@@ -352,8 +352,16 @@ local function NOOP() end
 -- `escapes` nil; either nil means NOT ASKED. Reading those as "no" is exactly the
 -- absence-as-falseness bug that made this guard's first version fire on 99.5% of
 -- the population and kill every correct edge in the sample.
+-- source files some other file #includes (a UNITY build: odin's main.cpp includes every .cpp). Such a file is a header
+-- in all but name: its statics and macros are visible to the whole translation unit, so its file-local marks do not
+-- confine. Rebuilt from the import edges by each resolver driver (M._set_clink). Measured: without it, 6,451 of odin's
+-- calls into string.cpp's macros went from resolved to blocked.
+local C_INCLUDED = {}
 local function confined(n, cfile)
-    return n.file ~= cfile and n.exported == false and n.escapes == false
+    -- (or file-local by LINKAGE, which no escape widens: a C `static` reached through a pointer is still not reachable
+    -- by NAME from another file, CART-1081)
+    return n.file ~= cfile and ((n.exported == false and n.escapes == false)
+        or (n.flocal == true and not C_INCLUDED[n.file]))
 end
 
 -- ── per-language specs ───────────────────────────────────────────────────────
@@ -1561,22 +1569,77 @@ end
 -- a candidate from another language unconditionally, so filtering the list first is the same answer, but it was paid
 -- per call and per candidate: a thrift C++ `read` walked ~5,750 `read` defs, most of them Java and PHP, to keep its
 -- own language's. 67k calls made 53M candidate visits, 49.7M of them from C++ and PHP. The filtered list is cached
--- per list and rebuilt when the list grows or when set_h_lang replaces the language memo (a `.h` file can change
--- language). Order is preserved, so the fit set, and every refusal built from it, is unchanged. Exposed on M
--- because M.extract is at LuaJIT's upvalue limit.
+-- per list and rebuilt when the list grows. It is keyed by linkage FAMILY (below), and the only language that moves
+-- at runtime is a `.h` file's (set_h_lang), which stays inside the C family either way, so the language memo is not
+-- part of the key. Order is preserved, so the fit set, and every refusal built from it, is what admits alone would
+-- give. Exposed on M because M.extract is at LuaJIT's upvalue limit.
+-- ★ C AND C++ ARE ONE LINKAGE FAMILY (CART-1079). A name never crosses languages in the join, and c/cpp were two
+-- languages, so a `.cpp` call through an `extern "C"` header into a `.c` definition was REFUSED `blocked` (probed), in
+-- every tree mixing the two: 11 checkouts with >=20 files of each (llvm 11.6k .c / 32.8k C++, chromium, wine, zig,
+-- scip, hadoop, luanti...). The bridge is exactly what C linkage can carry: a FREE function (no method, no `::`
+-- scope) reached by a BARE call. A C++ method or a namespaced function is not callable from C, and a qualified C++
+-- call does not name a C function. The candidate list is filtered by FAMILY; join_lang_ok decides per candidate.
+-- Direction matters. A `.c` definition has C linkage, so a C++ call may reach it. A C++ definition is callable from C
+-- only with C linkage: the name must be declared inside `extern "C"` somewhere (the definition, or a prototype in a
+-- header), which is CLINK, rebuilt from the nodes by each resolver driver (M._set_clink). A NAMESPACED C++ function
+-- has an unqualified node name, so without that evidence `ns::f` would read as a free `f` (the fixture caught it).
+-- A header's own definitions (static inline) are shared by both languages whatever set_h_lang guessed.
+local JOIN_FAMILY = { c = 'c-family', cpp = 'c-family' }
+local function join_key(l) return (l and JOIN_FAMILY[l]) or l or false end
+local CLINK = {}
+-- ★ UNIQUE BY ELIMINATION IS NOT UNIQUE WHEN THE REAL DEFINITION IS TORN (CART-1081/1084). Confinement removes the
+-- file-local copies of a name (d8.cc's own `#define CHECK`), and when what is left is ONE candidate the join resolves to
+-- it. But a torn definition is never indexed: v8's base/logging.h::CHECK is torn (58.5% of v8's functions are), so the
+-- survivor was bigint-inl.h's private CHECK and 2,866 calls resolved to it; scip's def.h::SCIP_CALL likewise left a TEST
+-- header's copy answering 43k calls. So: when confinement is what made the fit unique, a torn definition of the same
+-- name in another file is a candidate we can see and cannot index, and the call is refused with both named. Resolution
+-- that did not depend on confinement is untouched; the general rule (a torn twin always blocks) is CART-1084's.
+local C_TORN = {}
+function M._torn_twins(name, fit)
+    if not (fit and JOIN_FAMILY[elang_for(fit.file) or '']) then return nil end
+    local tl = name:match('([%w_]+)$')
+    local out
+    for _, n in ipairs((tl and C_TORN[tl]) or {}) do
+        if n.file ~= fit.file then out = out or {}; out[#out + 1] = n end
+    end
+    return out
+end
+function M._set_clink(nodes, edges)
+    CLINK = {}
+    C_TORN = {}
+    for _, n in ipairs(nodes or {}) do
+        if n.clink then CLINK[n.name] = true end
+        if n.torn and (n.kind == 'function' or n.kind == 'method') and not n.decl and JOIN_FAMILY[elang_for(n.file) or ''] then
+            local tl = n.name:match('([%w_]+)$')
+            if tl then local l = C_TORN[tl]; if not l then l = {}; C_TORN[tl] = l end; l[#l + 1] = n end
+        end
+    end
+    C_INCLUDED = {}
+    for _, e in ipairs(edges or {}) do
+        if e.kind == 'import' and type(e.to) == 'string' then C_INCLUDED[e.to] = true end
+    end
+end
+function M._join_lang_ok(n, clang, dotted)
+    local nl = elang_for(n.file)
+    if nl == clang then return true end
+    if dotted or not (nl and clang) or JOIN_FAMILY[nl] == nil or JOIN_FAMILY[nl] ~= JOIN_FAMILY[clang] then return false end
+    if n.kind ~= 'function' or n.name:find('::', 1, true) or n.name:find('.', 1, true) then return false end
+    if n.file:match('%.h$') or nl == 'c' then return true end
+    return CLINK[n.name] == true
+end
 local LANG_LISTS = setmetatable({}, { __mode = 'k' })
 function M._lang_list(list, clang)
     local e = LANG_LISTS[list]
-    if not e or e.n ~= #list or e.memo ~= FILE_ELANG then
-        e = { n = #list, memo = FILE_ELANG, by = {} }
+    if not e or e.n ~= #list then
+        e = { n = #list, by = {} }
         LANG_LISTS[list] = e
     end
-    local key = clang or false
+    local key = join_key(clang)
     local out = e.by[key]
     if not out then
         out = {}
         for _, n in ipairs(list) do
-            if elang_for(n.file) == clang then out[#out + 1] = n end
+            if join_key(elang_for(n.file)) == key then out[#out + 1] = n end
         end
         e.by[key] = out
     end
@@ -6589,6 +6652,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                     retclass = dretclass,
                     -- a type-variable return's RETURN FLOW: terms the rounds evaluate (java_ret_flow, CART-1077)
                     retflow = dretflow,
+                    -- declared inside `extern "C"` (C/C++ join bridge, CART-1079)
+                    clink = spec.clink and spec.clink(defn, src) or nil,
+                    -- file-local by linkage (C `static`, a macro in a source file): confined (CART-1081)
+                    flocal = spec.flocal and spec.flocal(defn, src, file) or nil,
                     df = dfrec,
                     flow = fl and { stmts = fl.stmts, params = fl.params } or nil }
                 lastFn[file] = nodes[#nodes]
@@ -6825,7 +6892,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                         id = uid(('%s::%s@%d'):format(file, name, sp.start.line)),
                         file = file, range = sp, order = sp.start.line,
                         torn = torn, decl = cat == 'proto' or nil,
-                        macro = cat == 'macrofn' or nil }
+                        macro = cat == 'macrofn' or nil,
+                        clink = spec.clink and spec.clink(defn, src) or nil,
+                        flocal = spec.flocal and spec.flocal(defn, src, file) or nil }
                     nodes[#nodes + 1] = node
                     -- prototypes never index; a fn-like macro resolves
                     if not torn and cat == 'macrofn' then
@@ -8130,6 +8199,7 @@ local MATCH_OPTS = { match_limit = 65536 }
     end
     local aperture_refusal = aperture_refuser(ns_pfx, apertures, global_witness)
     local project_classes -- CART-1077: lazily, the class names the project defines, extends or implements
+    M._set_clink(nodes, edges) -- the C/C++ join bridge's extern "C" evidence + included sources (CART-1079/1081)
     local function resolve(name, file)
         -- 1-2 char names are shadow-bait for WORKSPACE matching (pattern
         -- vars, loop counters — noise-dominated in every language), but a
@@ -8238,6 +8308,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 or (spec and spec.hash_qualified
                     and name:find('#', 1, true) ~= nil)
             local fitset = {}
+            local elim = 0 -- candidates dropped ONLY by file-local confinement (see M._torn_twins)
             for _, n in ipairs(cands) do
                 local fits
                 if dotted then
@@ -8256,13 +8327,20 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- a name never crosses LANGUAGES: that is xlang's job,
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
-                if fits and elang_for(n.file) ~= clang then fits = false end
+                if fits and not M._join_lang_ok(n, clang, dotted) then fits = false end
                 -- a confined file-local is not a candidate for a call in another
                 -- file, however unique its name is here (CART-0230)
-                if fits and confined(n, file) then fits = false end
+                if fits and confined(n, file) then fits = false; if n.flocal then elim = elim + 1 end end
                 if fits then fitset[#fitset + 1] = n end
             end
-            if #fitset == 1 then return fitset[1], true end
+            if #fitset == 1 then
+                local tw = elim > 0 and M._torn_twins(name, fitset[1])
+                if tw then
+                    for _, t in ipairs(tw) do fitset[#fitset + 1] = t end
+                    return nil, nil, refusal('ambiguous', fitset)
+                end
+                return fitset[1], true
+            end
             -- the refusal is a PLACE: who was refused, and by which rule
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or cands)
@@ -8321,6 +8399,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 or name:find('::', 1, true) ~= nil
                 or (spec and spec.hash_qualified
                     and name:find('#', 1, true) ~= nil)
+            local elim = 0 -- candidates dropped ONLY by file-local confinement (see M._torn_twins)
             local function admits(n)
                 local fits
                 if dotted then
@@ -8339,8 +8418,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- a name never crosses LANGUAGES: that is xlang's job,
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
-                if fits and elang_for(n.file) ~= clang then fits = false end
-                if fits and confined(n, file) then fits = false end -- CART-0230
+                if fits and not M._join_lang_ok(n, clang, dotted) then fits = false end
+                if fits and confined(n, file) then fits = false; if n.flocal then elim = elim + 1 end end -- CART-0230
                 -- the binding the CALL SITE wrote down beats a corpus-wide
                 -- name match (CART-0628)
                 -- ★ A BOUND RECEIVER IS NOT THIS PASS'S BUSINESS AT ALL. The
@@ -8396,10 +8475,18 @@ local MATCH_OPTS = { match_limit = 65536 }
                 ::no_agree::
             end
             local fitset = {}
+            elim = 0
             for _, n in ipairs(M._lang_list(tc, clang)) do
                 if admits(n) then fitset[#fitset + 1] = n end
             end
-            if #fitset == 1 then return fitset[1], true end
+            if #fitset == 1 then
+                local tw = elim > 0 and M._torn_twins(name, fitset[1])
+                if tw then
+                    for _, t in ipairs(tw) do fitset[#fitset + 1] = t end
+                    return nil, nil, refusal('ambiguous', fitset)
+                end
+                return fitset[1], true
+            end
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or tc)
         end
@@ -8936,7 +9023,7 @@ local function build_symtab(nodes)
             end
         end
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name,
-            ret = n.ret, retclass = n.retclass, retflow = n.retflow, arrow = n.arrow,
+            ret = n.ret, retclass = n.retclass, retflow = n.retflow, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy
             -- and the parallel graph disagrees with the inline one (CART-0616)
@@ -9051,6 +9138,7 @@ function M.relink(data, touched)
     end
     local bind_of, binding_reaches = binding_index(data.edges)
     local project_classes -- CART-1077: lazily, the class names the project defines, extends or implements
+    M._set_clink(data.nodes, data.edges) -- the C/C++ join bridge's extern "C" evidence + included sources (CART-1079/1081)
     local function resolve(name, file)
         -- short names: same-file tier only (see extract's resolve, the
         -- synjs q3 witness); cross-file fallbacks stay noise-gated
@@ -9135,6 +9223,7 @@ function M.relink(data, touched)
                 or (spec and spec.hash_qualified
                     and name:find('#', 1, true) ~= nil)
             local fitset = {}
+            local elim = 0 -- candidates dropped ONLY by file-local confinement (see M._torn_twins)
             for _, n in ipairs(cands) do
                 local fits
                 if dotted then
@@ -9153,13 +9242,20 @@ function M.relink(data, touched)
                 -- a name never crosses LANGUAGES: that is xlang's job,
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
-                if fits and elang_for(n.file) ~= clang then fits = false end
+                if fits and not M._join_lang_ok(n, clang, dotted) then fits = false end
                 -- a confined file-local is not a candidate for a call in another
                 -- file, however unique its name is here (CART-0230)
-                if fits and confined(n, file) then fits = false end
+                if fits and confined(n, file) then fits = false; if n.flocal then elim = elim + 1 end end
                 if fits then fitset[#fitset + 1] = n end
             end
-            if #fitset == 1 then return fitset[1], true end
+            if #fitset == 1 then
+                local tw = elim > 0 and M._torn_twins(name, fitset[1])
+                if tw then
+                    for _, t in ipairs(tw) do fitset[#fitset + 1] = t end
+                    return nil, nil, refusal('ambiguous', fitset)
+                end
+                return fitset[1], true
+            end
             -- the refusal is a PLACE: who was refused, and by which rule
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or cands)
@@ -9218,6 +9314,7 @@ function M.relink(data, touched)
                 or name:find('::', 1, true) ~= nil
                 or (spec and spec.hash_qualified
                     and name:find('#', 1, true) ~= nil)
+            local elim = 0 -- candidates dropped ONLY by file-local confinement (see M._torn_twins)
             local function admits(n)
                 local fits
                 if dotted then
@@ -9236,8 +9333,8 @@ function M.relink(data, touched)
                 -- a name never crosses LANGUAGES: that is xlang's job,
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
-                if fits and elang_for(n.file) ~= clang then fits = false end
-                if fits and confined(n, file) then fits = false end -- CART-0230
+                if fits and not M._join_lang_ok(n, clang, dotted) then fits = false end
+                if fits and confined(n, file) then fits = false; if n.flocal then elim = elim + 1 end end -- CART-0230
                 -- the binding the CALL SITE wrote down beats a corpus-wide
                 -- name match (CART-0628)
                 -- ★ A BOUND RECEIVER IS NOT THIS PASS'S BUSINESS AT ALL. The
@@ -9293,10 +9390,18 @@ function M.relink(data, touched)
                 ::no_agree::
             end
             local fitset = {}
+            elim = 0
             for _, n in ipairs(M._lang_list(tc, clang)) do
                 if admits(n) then fitset[#fitset + 1] = n end
             end
-            if #fitset == 1 then return fitset[1], true end
+            if #fitset == 1 then
+                local tw = elim > 0 and M._torn_twins(name, fitset[1])
+                if tw then
+                    for _, t in ipairs(tw) do fitset[#fitset + 1] = t end
+                    return nil, nil, refusal('ambiguous', fitset)
+                end
+                return fitset[1], true
+            end
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or tc)
         end

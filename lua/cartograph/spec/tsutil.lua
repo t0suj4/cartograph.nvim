@@ -143,6 +143,42 @@ function M.truncated(r)
         and r.n ~= nil and r.n > #r.cands
 end
 
+-- ★ C LINKAGE (CART-1079): is this C/C++ declaration inside `extern "C"`, i.e. under a linkage_specification whose
+-- value is "C"? `extern "C" int f() {}` and `extern "C" { int f(); }` both parse that way. A C++ function a C file
+-- can call must have C linkage, so this is the evidence the name join's C/C++ bridge asks for (providers/treesitter.lua
+-- M._join_lang_ok): a definition, or a prototype in a header, is enough.
+-- ★ FILE-LOCAL C/C++ NAMES (CART-1081): a `static` free function and a function-like macro defined in a SOURCE file are
+-- invisible to every other file by name, however unique the name looks corpus-wide. Headers are exempt: their contents
+-- are included textually, so a header's `static inline` or macro IS visible to each includer. A static MEMBER function
+-- (in a class body) has class linkage and is exempt too. Found when the C/C++ join bridge (CART-1079) linked
+-- luanti's noise.cpp `next()` to lua's llex.c `next` macro and codeql's scanner.cc `advance` to another grammar's static.
+local C_HEADER = { h = true, hh = true, hpp = true, hxx = true, inl = true, ipp = true, tcc = true }
+function M.c_file_local(defn, src, file)
+    local ext = file and file:match('%.([%w]+)$')
+    if not ext or C_HEADER[ext:lower()] then return false end
+    local t = defn:type()
+    if t == 'preproc_function_def' then return true end
+    if t ~= 'function_definition' then return false end
+    local p = defn:parent()
+    if p and p:type() == 'field_declaration_list' then return false end
+    for c in defn:iter_children() do
+        if c:type() == 'storage_class_specifier' and M.node_text(c, src) == 'static' then return true end
+    end
+    return false
+end
+
+function M.c_linkage(defn, src)
+    local p = defn
+    while p do
+        if p:type() == 'linkage_specification' then
+            local v = p:field('value')[1]
+            return v ~= nil and M.node_text(v, src) == '"C"'
+        end
+        p = p:parent()
+    end
+    return false
+end
+
 function M.complete(r)
     return type(r) == 'table' and r.cands ~= nil
         and r.n ~= nil and r.n <= #r.cands

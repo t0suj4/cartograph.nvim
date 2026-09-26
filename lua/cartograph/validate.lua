@@ -24,6 +24,8 @@ M.NODE_FIELDS = {
     params = true, locals = true, arrow = true, torn = true, decl = true, macro = true, cbarg = true,
     unparsed = true, df = true, flow = true, data = true, ctype = true, ret = true,
     retclass = true, -- generic Class<T> return: arg index binding the return var
+    flocal = true,   -- C/C++: file-local by linkage (static, a source-file macro), CART-1081
+    clink = true,    -- C/C++: declared inside extern "C" (the C/C++ join bridge, CART-1079)
     retflow = true,  -- type-variable return: the return expressions as type terms (java_ret_flow, CART-1077)
     entry = true, exported = true, effects = true, apertures = true,
     annos = true,   -- (CART-0722) registration-CANDIDATE marks: annotation names

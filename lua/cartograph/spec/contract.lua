@@ -57,6 +57,8 @@ M.SLOTS = {
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
     exported_def = 'SCOPE&KEY',    -- visibility (pub/export) detection
+    flocal = 'SCOPE&KEY',          -- C/C++: file-local by linkage (static, a source-file macro), CART-1081
+    clink = 'SCOPE&KEY',           -- C/C++: declared inside extern "C" (the C/C++ join bridge, CART-1079)
     escape_names = 'SCOPE&KEY',    -- names mentioned in a VALUE position in a file:
                                    -- the other half of exported_def, since a
                                    -- file-local's VALUE can still leave (CART-0230).

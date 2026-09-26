@@ -8,6 +8,8 @@ local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 
 return {
+    clink = tsutil.c_linkage, -- extern "C" evidence for the C/C++ join bridge (CART-1079)
+    flocal = tsutil.c_file_local, -- `static` / source-file macro: invisible outside its file (CART-1081)
     is_write = tsutil.cfamily_is_write,
     -- the PREFILTER: every immediate parent type a write mention can have here.
     -- Without it the classifier is never invoked (v147 shipped that mistake).

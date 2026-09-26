@@ -1,5 +1,5 @@
 -- the name join's language-partitioned candidate lists (M._lang_list, CART-1056): same members and order as filtering
--- per candidate, and never stale when the list grows or a `.h` file changes language.
+-- per candidate, and never stale when the list grows; C and C++ are one linkage family (CART-1079).
 
 local ts = require 'cartograph.providers.treesitter'
 
@@ -17,14 +17,14 @@ test('langlist: a list that GREW is filtered again (a minted node appended after
     eq(2, #ts._lang_list(list, 'java'), 'a cached answer for the shorter list would drop the new node')
 end)
 
-test('langlist: set_h_lang invalidates it (a .h file is C or C++ by the tree, not the extension)', function ()
+test('langlist: C and C++ share one list (the linkage family); a .h file is in it whichever way set_h_lang reads it', function ()
     local prev = ts.h_lang()
-    local list = { { id = 1, file = 'inc/a.h' } }
-    ts.set_h_lang('c')
-    eq(1, #ts._lang_list(list, 'c'))
-    eq(0, #ts._lang_list(list, 'cpp'))
-    ts.set_h_lang('cpp')
-    eq(0, #ts._lang_list(list, 'c'), 'the C answer must not survive the switch')
-    eq(1, #ts._lang_list(list, 'cpp'))
+    local list = { { id = 1, file = 'inc/a.h' }, { id = 2, file = 'src/b.c' }, { id = 3, file = 'src/c.cpp' },
+        { id = 4, file = 'X.java' } }
+    for _, h in ipairs({ 'c', 'cpp' }) do
+        ts.set_h_lang(h)
+        eq({ 1, 2, 3 }, vim.tbl_map(function (n) return n.id end, ts._lang_list(list, 'c')), 'h_lang ' .. h)
+        eq({ 1, 2, 3 }, vim.tbl_map(function (n) return n.id end, ts._lang_list(list, 'cpp')), 'h_lang ' .. h)
+    end
     ts.set_h_lang(prev)
 end)
