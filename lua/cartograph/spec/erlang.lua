@@ -30,6 +30,68 @@ local function arity_of(n)
     return k
 end
 
+-- ★ A PATTERN AS A READ SET (CART-0957). A clause head `f(#iq{type = get, sub_els = [#disco_info{node = N}]} = IQ)`
+-- says what the function reads from its argument: the names it binds, each with the PATH it is taken from, and
+-- the CONSTANTS it demands. For an XMPP handler that is the request it accepts, in the terms the codec spec
+-- declares (CART-1096). Returns a flat list of facts over ONE pattern node:
+--   { name = 'N', path = steps }            a binding (`_` is a wildcard and binds nothing)
+--   { value = 'get', ty = 'atom', path }    a constant the input must equal (atom/integer/float/string/char)
+-- steps, outermost first: { rec = 'iq', field = 'sub_els' } a record field · { tuple = i, arity = n } ·
+-- { elem = i } a list element · { head = true } / { tail = true } a cons · { map = 'k' } a map key's value.
+-- A match inside a pattern (`#iq{} = IQ`) is an ALIAS: both sides sit at the same path. Anything else (a
+-- binary, a macro) is opaque: nothing is claimed below it.
+local PAT_LIT = { atom = 'atom', integer = 'integer', float = 'float', string = 'string', char = 'char' }
+local function pattern_paths(pat, src)
+    local out = {}
+    local function T(n) return vim.treesitter.get_node_text(n, src) end
+    local function push(path, step)
+        local p = {}
+        for i, x in ipairs(path) do p[i] = x end
+        p[#p + 1] = step
+        return p
+    end
+    local function walk(n, path)
+        if not n then return end
+        local t = n:type()
+        if t == 'var' then
+            local nm = T(n)
+            if nm ~= '_' then out[#out + 1] = { name = nm, path = path } end
+        elseif PAT_LIT[t] then
+            out[#out + 1] = { value = T(n), ty = PAT_LIT[t], path = path }
+        elseif t == 'match_expr' then
+            walk(n:field('lhs')[1], path); walk(n:field('rhs')[1], path)
+        elseif t == 'record_expr' then
+            local rn = n:field('name')[1]
+            local rec = rn and T(rn):gsub('^#', '') or '?'
+            for _, f in ipairs(n:field('fields')) do
+                local fname = f:field('name')[1]
+                local fe = f:field('expr')[1]
+                local val = fe and (fe:field('expr')[1] or fe) or nil
+                if fname and val then walk(val, push(path, { rec = rec, field = T(fname) })) end
+            end
+        elseif t == 'tuple' then
+            local kids = n:field('expr')
+            for i, c in ipairs(kids) do walk(c, push(path, { tuple = i, arity = #kids })) end
+        elseif t == 'list' then
+            for i, c in ipairs(n:field('exprs')) do
+                if c:type() == 'pipe' then
+                    walk(c:field('lhs')[1], push(path, { head = true }))
+                    walk(c:field('rhs')[1], push(path, { tail = true }))
+                else
+                    walk(c, push(path, { elem = i }))
+                end
+            end
+        elseif t == 'map_expr' then
+            for _, f in ipairs(n:field('fields')) do
+                local k, v = f:field('key')[1], f:field('value')[1]
+                if k and v then walk(v, push(path, { map = T(k) })) end
+            end
+        end
+    end
+    walk(pat, {})
+    return out
+end
+
 return {
     -- the callee sits in `expr`, which is either an `atom` (local call) or a
     -- `remote` (module-qualified). tree-sitter-erlang gives BOTH the same parent.
@@ -139,6 +201,26 @@ return {
     end,
     params_field = 'args',
     body_field = 'body',
+    -- ★★ THE FLOW LAYER (CART-0957). Before this erlang declared none of it and a whole `case` was ONE
+    -- opaque row with no names at all; the IQ handlers' heads bound nothing (params {} on 11 of 11).
+    -- An erlang body is a `clause_body` of expressions; control is case/receive/try/if, whose CLAUSES are
+    -- ARMS (a pattern and/or guard over a body, one of several alternatives), and a name is BOUND by a
+    -- PATTERN: a clause head, a match's left side, a case arm, a generator, a fun head, a catch.
+    df_ids = { var = true },
+    body = { clause_body = true },
+    ctrl = { case_expr = true, receive_expr = true, if_expr = true, try_expr = 'try' },
+    clause = { cr_clause = 'arm', if_clause = 'arm', receive_after = 'arm',
+        catch_clause = 'catch', try_after = 'finally' },
+    pattern = {
+        -- the field of each node type that IS a pattern (every name under it binds, at any depth)
+        fields = { match_expr = 'lhs', cr_clause = 'pat', generator = 'lhs', b_generator = 'lhs',
+            map_generator = 'lhs', fun_clause = 'args', catch_clause = 'pat', try_stack = 'class' },
+        -- the parts of a pattern that are EVALUATED, not bound: a binary segment's size (`<<X:Len>>`)
+        reads = { bin_element = 'size', map_field = 'key' }, -- and a map pattern's key (`#{K := V}`)
+        params = true,             -- the clause head is a pattern: flow.pattern_names
+        single_assignment = true,  -- a bound name in a pattern is a match test (a use): flow.single_assignment
+        paths = pattern_paths,     -- WHERE each name comes from, and the constants a pattern demands
+    },
     -- erlang has no nested named functions; a `fun` is anonymous. So every named
     -- definition is top level, and this keeps clause-local `fun`s out of the index.
     toplevel_only = true,

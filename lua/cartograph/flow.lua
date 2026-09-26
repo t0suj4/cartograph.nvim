@@ -108,7 +108,10 @@ local BODYFIELD = { for_range_loop = true, enhanced_for_statement = true,
 -- `false` = the form has no head at all (`#else`), which blanks it the way a TRY head is
 -- blanked: a container is not a computation.
 local HEADFIELD = { preproc_if = 'condition', preproc_elif = 'condition',
-    preproc_ifdef = 'name', preproc_ifndef = 'name', preproc_else = false }
+    preproc_ifdef = 'name', preproc_ifndef = 'name', preproc_else = false,
+    -- erlang (CART-0957): `case X of` evaluates only its subject; `receive` and `if` evaluate nothing
+    -- themselves, their arms do. All three node types are erlang's alone across the loaded grammars.
+    case_expr = 'expr', receive_expr = false, if_expr = false }
 -- a clause whose case LABEL is a CHILD rather than a `value` field (java `switch_label`)
 local CASELABEL = { switch_label = true }
 -- control forms with an acquire step that runs BEFORE the head, like a three-part for's
@@ -348,6 +351,8 @@ end
 -- def-position passes THROUGH these transparent wrappers to the inner name.
 -- `reference_declarator` (C++ `Type &r`) has no `declarator` field — its only
 -- named child IS the inner declarator — so it rides the blanket WRAP path.
+-- the sticky def-position of a PATTERN subtree (du, CART-0957): truthy, and distinct from `true`
+local PAT = 'pat'
 local WRAP = { variable_list = true, variable_name = true,
     reference_declarator = true, exception_variable = true } -- ruby `rescue … => e`
 -- C/C++ declarator wrappers WITH a `declarator` field (a `*`/`[]` around the
@@ -418,6 +423,7 @@ local DU_SEG = 1000
 local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
     local ids = (lang and lang.ids) or DFID
     local mods, bindf = lang and lang.mods, lang and lang.binder_fields
+    local patf, patr = lang and lang.patf, lang and lang.patr
     if not root then return {}, {}, false, {}, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
     local blks = {} -- ATTACHED BLOCKS skipped on the way (see the 'always' stop below)
@@ -450,7 +456,19 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         -- `k = defpos and WRAP[t] or false` (a pattern is in no WRAP set), so every bound
         -- name fell through to `use` — a DEF counted as a READ OF THE STATEMENT DEFINING IT.
         local bf = bindf and bindf[t]
-        if bf then
+        local pf = patf and patf[t]
+        local patnode, patread
+        -- ★ A PATTERN BINDS EVERY NAME IN IT, AT ANY DEPTH (CART-0957). erlang's `{ok, X} = f()`, a case
+        -- arm's `#iq{to = To}`, a generator's `Z <- L`: the same tuple/list/record node types sit in VALUE
+        -- position elsewhere, so binder_fields (a per-node-type rule) cannot say it; the CONTEXT does. A
+        -- spec-declared field (`pattern.fields`) opens the context and it is STICKY (PAT) down the subtree.
+        -- A name already bound is a match test, a USE: `single_assignment` below settles that per row.
+        if defpos == PAT then
+            -- …except a part a pattern EVALUATES (a binary segment's size, `<<X:Len>>`): pattern.reads
+            k = 11; patread = patr and patr[t] and node:field(patr[t])[1] or nil
+        elseif pf then
+            patnode = node:field(pf)[1]; k = 12
+        elseif bf then
             bindset, bindskip = {}, {}
             if bf == true then
                 for c in node:iter_children() do
@@ -603,6 +621,8 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
                     for _, dd in ipairs(declist) do if same(c, dd) then cdefpos = true; break end end
                 elseif k == 8 then cdefpos = not rngskip[c:id()] -- cpp range-for declarator
                 elseif k == 9 then cdefpos = (ct == 'exception_variable') -- ruby rescue binding
+                elseif k == 11 then cdefpos = not (patread and same(c, patread)) and PAT or false
+                elseif k == 12 then cdefpos = (patnode and same(c, patnode)) and PAT or false
                 else cdefpos = k end
                 if ids[ct] then
                     local nm = txt(c, src)
@@ -1034,7 +1054,8 @@ function M.build(fnnode, src, cfg)
     -- point in the walk, and du already carried nine positional arguments — a tenth would
     -- have meant nil-padding at three of the six call sites, which is how a caller ends up
     -- passing the wrong table. One bundle, passed unchanged by every caller.
-    local lang = { ids = ids, mods = cfg.mods, binder_fields = cfg.binder_fields }
+    local lang = { ids = ids, mods = cfg.mods, binder_fields = cfg.binder_fields,
+        patf = cfg.pattern and cfg.pattern.fields, patr = cfg.pattern and cfg.pattern.reads } -- CART-0957
     local stmts = {}
     local emit, region, clause -- fwd
 
@@ -1294,6 +1315,26 @@ function M.build(fnnode, src, cfg)
     -- a clause (else/elseif/case/catch): elseif is its own guard (control row);
     -- the rest region their statements under `parent`
     function clause(node, parent)
+        -- ★ AN ARM (CART-0957): a pattern and/or guard over a body, ONE OF SEVERAL ALTERNATIVES. Declared by
+        -- the spec's clause map (`cr_clause = 'arm'`); no base type has the role. The row's du walks the
+        -- clause with its body stopped, so the pattern's names are DEFS (pattern.fields) and the guard's are
+        -- uses — the case-label path reads a label as a use, which is right for `case 1:` and wrong for a
+        -- pattern that binds. successors wires each arm as an alternative from the head.
+        if CLAUSEMAP and CLAUSEMAP[node:type()] == 'arm' then
+            local d, u, _, _, ablk = du(node, src, true, lang, FN, DUSTOP, CTRL_, CLAUSE_)
+            local idx = #stmts + 1
+            stmts[idx] = { l = line(node), c = startcol(node), kind = 'arm', parent = parent,
+                pol = 'arm', def = d, use = u, t = node:type() }
+            emit_blocks(ablk, idx)
+            local b = node:field('body')[1]
+            if b and BODY_[b:type()] then region(b, idx, 'body')
+            else
+                for c in node:iter_children() do
+                    if c:named() and BODY_[c:type()] then region(c, idx, 'body') end
+                end
+            end
+            return
+        end
         if CASE_[node:type()] then
             -- a switch case: the `value` label is a USE; the statement body is
             -- REGIONED as rows (was folded into the case row, hiding it from the
@@ -1449,6 +1490,11 @@ function M.build(fnnode, src, cfg)
     -- back to `fnnode` itself — that walks the parameters as bogus statements.
     local body = cfg.seq and fnnode
         or (cfg.body_of and cfg.body_of(fnnode)) or fn_body(fnnode)
+    -- a clause head's GUARD (`f(X) when X > 0 ->`) runs before the body and reads names: its own row first
+    if cfg.pattern and cfg.pattern.params and not cfg.seq then
+        local g = fnnode:field('guard')[1]
+        if g then emit(g, 0, nil) end
+    end
     if body then region(body, 0, nil) end
     -- `cfg.method` seeds an implicit 'self' param — a per-language POLICY the
     -- caller decides (df seeds self only for lua colon-methods: `method and
@@ -1460,9 +1506,157 @@ function M.build(fnnode, src, cfg)
     -- persistence paths for two classes is exactly how the preloop bug happened: build
     -- stashed one field, the store dropped it, and the CFG phases fell back to base. One
     -- table, one accessor, one fallback.
-    return { stmts = stmts, cfg = cfg, preloop = PRELOOP_, cls = cls,
-        params = (not cfg.seq)
-            and param_names(fnnode, src, cfg.pfield, cfg.method or false, cfg.params_of) or {} }
+    local params = {}
+    if not cfg.seq then
+        if cfg.pattern and cfg.pattern.params then
+            params = M.pattern_names((cfg.pfield and fnnode:field(cfg.pfield)[1])
+                or (cfg.params_of and cfg.params_of(fnnode)), src, ids, cfg.pattern.reads)
+        else
+            params = param_names(fnnode, src, cfg.pfield, cfg.method or false, cfg.params_of)
+        end
+    end
+    if cfg.pattern and cfg.pattern.single_assignment then M.single_assignment(stmts, params) end
+    return { stmts = stmts, cfg = cfg, preloop = PRELOOP_, cls = cls, params = params }
+end
+
+--- ★ A FUNCTION OF SEVERAL CLAUSES IS ONE FUNCTION WITH ALTERNATIVE ARMS (CART-0957). erlang's
+--- `f(0) -> 1; f(N) -> N * f(N - 1).` is two `function_clause` nodes that the graph merges into ONE
+--- node (merge_equations); its flow used to be the FIRST clause's alone, and expr.of found no single tree
+--- node spanning the merged range and returned nil (5 of the 11 IQ handlers). The stitched record has a
+--- head row (kind 'clauses') whose arms are the clauses — each arm row DEFINES that clause's head names,
+--- its rows sit under it — so successors wires the alternatives exactly as it wires a `case`.
+---   acc: a flow record ({stmts, params, ...}) for the clauses so far, or nil; `fl` the next clause's
+---   record; `node` that clause's tree node; `first` the FIRST clause's node, needed once, to give the
+---   first clause its arm row when acc is still a plain single-clause record. Returns acc (mutated).
+--- `params` of the stitched record is the union of the heads' names, in order, so a consumer reading
+--- params still finds every name a head binds.
+function M.append_clause(acc, fl, node, first)
+    local function arm_row(n, rec)
+        return { l = line(n), c = startcol(n), kind = 'arm', parent = 1, pol = 'arm',
+            def = { unpack(rec.params or {}) }, use = {}, t = n:type() }
+    end
+    local function graft(out, rec, armidx)
+        local off = #out
+        for _, st in ipairs(rec.stmts or {}) do
+            local r = {}
+            for k, v in pairs(st) do r[k] = v end
+            if (st.parent or 0) == 0 then r.parent = armidx; r.pol = 'body'
+            else r.parent = st.parent + off end
+            out[#out + 1] = r
+        end
+    end
+    local function union(ps, more)
+        local seen = {}
+        for _, p in ipairs(ps) do seen[p] = true end
+        for _, p in ipairs(more or {}) do if not seen[p] then seen[p] = true; ps[#ps + 1] = p end end
+    end
+    if not acc then return fl end
+    -- stitched already = its first row is the 'clauses' head (no extra field: node records are schema-closed)
+    if not (acc.stmts and acc.stmts[1] and acc.stmts[1].kind == 'clauses') then
+        local out = { { l = line(first), c = startcol(first), kind = 'clauses', parent = 0,
+            def = {}, use = {}, t = 'clauses' } }
+        out[2] = arm_row(first, acc)
+        graft(out, acc, 2)
+        acc.stmts = out
+        acc.params = { unpack(acc.params or {}) }
+    end
+    local out = acc.stmts
+    out[#out + 1] = arm_row(node, fl)
+    graft(out, fl, #out)
+    union(acc.params, fl.params)
+    return acc
+end
+
+--- ★ WHAT A PATTERN BINDS AND WHAT IT READS (CART-0957): every leaf name under `node`, at any depth, in
+--- source order, once, the wildcard `_` excluded — except under a field the pattern EVALUATES
+--- (`reads`, node type -> field: a binary segment's size), whose nodes come back as the second list, to be
+--- read. An erlang clause head IS a pattern (`f(#iq{to = To} = IQ)` binds To and IQ), and param_names'
+--- one-level rule found none of them: the IQ handlers measured 0 of 11. A repeated name (`f(X, X)`) binds
+--- once; the repeat is a match test, and single_assignment settles uses. du, the head params and the
+--- expression harvest all read patterns through this, so they cannot draw the line differently.
+function M.pattern_parts(node, src, ids, reads)
+    local out, seen, readn = {}, {}, {}
+    if not node then return out, readn end
+    ids = ids or DFID
+    local function leaf(c)
+        if ids[c:type()] then
+            local nm = txt(c, src)
+            if nm ~= '_' and not seen[nm] then seen[nm] = true; out[#out + 1] = nm end
+        end
+    end
+    local function walk(n)
+        local rf = reads and reads[n:type()]
+        local rn = rf and n:field(rf)[1]
+        for c in n:iter_children() do
+            if c:named() then
+                if rn and c:id() == rn:id() then readn[#readn + 1] = c
+                else leaf(c); walk(c) end
+            end
+        end
+    end
+    leaf(node) -- the pattern may itself BE a name (`L = f()`)
+    walk(node)
+    return out, readn
+end
+function M.pattern_names(node, src, ids, reads) return (M.pattern_parts(node, src, ids, reads)) end
+
+--- ★ SINGLE ASSIGNMENT (CART-0957): in erlang a name is bound once per clause, and a pattern that names
+--- an ALREADY-BOUND variable does not rebind it — it MATCHES against it, a read. du cannot know what is
+--- bound (it sees one row), so this settles it over the rows in order: a def of a bound name moves to
+--- `use`, and `_` (the wildcard) is neither. ARMS ARE SCOPES: each arm starts from the names bound before
+--- its head, and what follows the head sees the union of the arms (a name bound in only some arms is
+--- rejected by the compiler, so the union is exact for code that compiles).
+function M.single_assignment(stmts, params)
+    local kids = {}
+    for i, st in ipairs(stmts) do
+        local p = st.parent or 0
+        local l = kids[p]; if not l then l = {}; kids[p] = l end
+        l[#l + 1] = i
+    end
+    local function settle(st, bound)
+        local d, u, useen = {}, {}, {}
+        for _, nm in ipairs(st.use or {}) do
+            if nm ~= '_' and not useen[nm] then useen[nm] = true; u[#u + 1] = nm end
+        end
+        for _, nm in ipairs(st.def or {}) do
+            if nm == '_' then -- the wildcard binds nothing
+            elseif bound[nm] then
+                if not useen[nm] then useen[nm] = true; u[#u + 1] = nm end
+            else
+                bound[nm] = true; d[#d + 1] = nm
+            end
+        end
+        st.def, st.use = d, u
+        if st.rmw then -- the wildcard is no read-modify-write either
+            local r = {}
+            for _, nm in ipairs(st.rmw) do if nm ~= '_' then r[#r + 1] = nm end end
+            st.rmw = r[1] and r or nil
+        end
+    end
+    local function copy(t) local o = {} for k in pairs(t) do o[k] = true end return o end
+    local visit
+    local function children(p, bound)
+        local base, union
+        for _, i in ipairs(kids[p] or {}) do
+            if stmts[i].pol == 'arm' then
+                base = base or copy(bound)
+                local out = visit(i, copy(base))
+                union = union or {}
+                for k in pairs(out) do union[k] = true end
+            else
+                visit(i, bound)
+            end
+        end
+        if union then for k in pairs(union) do bound[k] = true end end
+        return bound
+    end
+    function visit(i, bound)
+        settle(stmts[i], bound)
+        return children(i, bound)
+    end
+    local bound = {}
+    for _, nm in ipairs(params or {}) do bound[nm] = true end
+    children(0, bound)
 end
 
 --- coarse projection: df's partition — TOP-LEVEL statements, each aggregating
@@ -1726,6 +1920,19 @@ function M.successors(flow)
                     if kids[pol] then hasfalse = true end
                 end
                 if not hasfalse then add(r, nxt) end -- no default → no arm may match
+            elseif kids and kids['arm'] then
+                -- ARMS ARE ALTERNATIVES (CART-0957): the head reaches each arm, each arm its own body,
+                -- every body the join. No arm matching is a runtime error (erlang case_clause /
+                -- function_clause), not a fall-through, so the head has no edge to `nxt` of its own.
+                -- (a `try` with `of` arms is routed by the TRY branch above, as an over-approximation)
+                for _, arm in ipairs(kids['arm']) do
+                    add(r, arm)
+                    local ak = region[arm]
+                    add(arm, wire(ak and ak['body'], nxt, brk, cont, lbls))
+                end
+                for pol, rr in pairs(kids) do -- anything else under an arm head: sound over-approx
+                    if pol ~= 'arm' then add(r, wire(rr, nxt, brk, cont, lbls)) end
+                end
             elseif kids then -- match/try/other control head: sound over-approx
                 for _, rr in pairs(kids) do add(r, wire(rr, nxt, brk, cont, lbls)) end
                 add(r, nxt)

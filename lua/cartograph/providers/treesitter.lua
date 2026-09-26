@@ -6517,6 +6517,10 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- LINE, not node: TSNode identity does not survive across
         -- traversals (== is a metamethod, table keys are raw).
         local fnDefLines = {}
+        -- a MERGED EQUATION's clauses (CART-0957), per node: the first clause's tree node and the FULL flow
+        -- record the later clauses are stitched into as arms (flow.append_clause), so node.flow/df cover
+        -- every clause rather than the first one alone.
+        local mergeFirst, mergeFlow = {}, {}
         -- a multi-assignment (`a, b = 1, 2`) cross-products name×value in
         -- the query, so dedup by the (name,line) id it produces
         local seen_var = {}
@@ -6642,7 +6646,32 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local prev = not aname and spec.merge_equations and lastFn[file]
                 local mkey = spec.merge_key and spec.merge_key(defn, src) or nil
                 if prev and spec.merge_key and lastKey[file] ~= mkey then prev = nil end
+                local function fl_cfg()
+                    return {
+                    pfield = spec.params_field, df_ids = spec.df_ids,
+                    mods = spec.binding_modifiers, -- CART-0234
+                    body_of = spec.body_of, params_of = spec.params_of, -- CART-0305
+                    fn_types = M.flow_stop(lang), -- the nested-fn STOP, not the
+                    -- enclosure set: only where a node is minted to hold the rows
+                    ctrl = spec.ctrl, preloop = spec.preloop,
+                    body = spec.body, clause = spec.clause, -- CART-0363
+                    blocks = spec.blocks,                   -- attached blocks (part B)
+                    binder_fields = spec.binder_fields,     -- destructuring/imports (CART-0358)
+                    pattern = spec.pattern,                 -- pattern binding (CART-0957)
+                    regime = spec.regime, method = method and lang == 'lua' }
+                end
                 if prev and prev.name == name then
+                    -- this clause's rows join the node's flow as a new arm (CART-0957), and the
+                    -- coarse df is re-derived from the stitched record, as it is for any def
+                    local acc = mergeFlow[prev]
+                    if acc and not defs_only then
+                        flowmod.append_clause(acc, flowmod.build(defn, src, fl_cfg()), defn, mergeFirst[prev])
+                        prev.flow = { stmts = acc.stmts, params = acc.params }
+                        if not spec.dataflow and not legacy_df then
+                            local co, inputs = flowmod.coarse(acc)
+                            prev.df = { inputs = inputs, stmts = co }
+                        end
+                    end
                     prev.range['end'] = sp['end']
                     for _, r in ipairs(fnRanges[file] or {}) do
                         if r.id == prev.id then r.e = sp['end'].line break end
@@ -6663,17 +6692,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- it's a cheap signature read the index/summaries want.
                 local _pf = pstart()
                 local fl = not defs_only and (spec.body_field or spec.body_of)
-                    and flowmod.build(defn, src, {
-                    pfield = spec.params_field, df_ids = spec.df_ids,
-                    mods = spec.binding_modifiers, -- CART-0234
-                    body_of = spec.body_of, params_of = spec.params_of, -- CART-0305
-                    fn_types = M.flow_stop(lang), -- the nested-fn STOP, not the
-                    -- enclosure set: only where a node is minted to hold the rows
-                    ctrl = spec.ctrl, preloop = spec.preloop,
-                    body = spec.body, clause = spec.clause, -- CART-0363
-                    blocks = spec.blocks,                   -- attached blocks (part B)
-                    binder_fields = spec.binder_fields,     -- destructuring/imports (CART-0358)
-                    regime = spec.regime, method = method and lang == 'lua' }) or nil
+                    and flowmod.build(defn, src, fl_cfg()) or nil
                 padd('flow.build', _pf)
                 local dret, dretclass, dretflow
                 if spec.def_ret then dret, dretclass, dretflow = spec.def_ret(defn, src) end
@@ -6743,6 +6762,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     df = dfrec,
                     flow = fl and { stmts = fl.stmts, params = fl.params } or nil }
                 lastFn[file] = nodes[#nodes]
+                if spec.merge_equations and fl then mergeFirst[nodes[#nodes]], mergeFlow[nodes[#nodes]] = defn, fl end
                 lastKey[file] = mkey
                 if wantesc and escpend then escpend[#escpend + 1] = nodes[#nodes] end
                 -- register this body in dfreg: ALWAYS (cheap — one entry) so

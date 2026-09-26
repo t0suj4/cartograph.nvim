@@ -244,7 +244,8 @@ local LIT = { number = 'num', integer = 'num', float = 'num', string = 'str',
     -- rewrites. INCOMPLETE MAPS UNDER-REPORT; COLLIDING MAPS FABRICATE — and so
     -- does a map that reads a value in the wrong base.
 }
-local NAME = { identifier = true, name = true }
+local NAME = { identifier = true, name = true,
+    var = true } -- erlang's variable (CART-0957); `var` is a node type in no other loaded grammar
 -- THE PARTS OF A STRING THAT CARRY NO EXPRESSION. Everything else nested in a string node
 -- is one — see the interpolation note in build_core. Named per grammar because these are
 -- the pieces themselves, not a list of the languages that interpolate:
@@ -744,6 +745,13 @@ local ASSIGN = { assignment_statement = true, assignment = true,
 -- (CART-0316).
 local PLAIN_ASSIGN = { assignment_statement = true, assignment = true,
     assignment_expression = true, variable_assignment = true }
+-- erlang (CART-0957), tabled because this module's @langs does not include it:
+--   PATMATCH  `Pat = Expr`: the pattern side BINDS (flow.pattern_names, the rule du uses), the value side reads
+--   RECFIELD  `X#rec.f`: a field read that also names its record
+local PATMATCH = { match_expr = true }
+local RECFIELD = { record_field_expr = true }
+--   WILDCARD  a name node whose text `_` is the wildcard (erlang `var`; `_` is an ordinary name elsewhere)
+local WILDCARD = { var = true }
 
 -- ★ DOES du COUNT THIS SELECTOR? (CART-0402) The `k` in `a.k` is a leaf du reads only
 -- when the grammar spells it with a type in that language's `ids` set — `identifier` in
@@ -980,7 +988,10 @@ function build_core(node, src, lang)
     -- because BOTH sides move together here: js `df_ids` gains the same name, so the
     -- self-gate stays a test of the rule and not of one copy of it.
     if NAME[t] or t == 'shorthand_property_identifier' then
-        return { k = 'name', n = txt(node, src) }
+        local nm = txt(node, src)
+        -- erlang's wildcard `_` (CART-0957) names nothing: it neither binds nor reads, and du drops it
+        if nm == '_' and WILDCARD[t] then return { k = '?', t = t, kids = {} } end
+        return { k = 'name', n = nm }
     end
     if t == 'variable_name' then -- php $x: the inner name is the variable
         local inner = node:named_child(0)
@@ -999,6 +1010,37 @@ function build_core(node, src, lang)
         if o[1] and o[2] then
             return { k = 'field', b = build(o[1], src, lang), n = txt(o[2], src),
                 method = false, selid = sel_is_id(o[2], lang) }
+        end
+    end
+    -- ★ A PATTERN NESTED IN A VALUE BINDS, IT DOES NOT READ (CART-0957): a `fun({_N, C}, []) -> …` or a
+    -- `case … of {ok, X} -> …` inside an expression. Its pattern field contributes only what the pattern
+    -- EVALUATES (flow.pattern_parts), the rest of the node builds as usual — du draws the same line.
+    do
+        specs = specs or require('cartograph.providers.treesitter').spec
+        local sp = specs and lang and specs[lang]
+        local pf = sp and sp.pattern and sp.pattern.fields and sp.pattern.fields[t]
+        local pn = pf and node:field(pf)[1]
+        if pn then
+            local flow = require 'cartograph.flow'
+            local _, reads = flow.pattern_parts(pn, src, flow.leaf_ids(sp.df_ids), sp.pattern.reads)
+            local kids = {}
+            for c in node:iter_children() do
+                if c:named() and c:id() ~= pn:id() and not tsutil.is_comment(c) then kids[#kids + 1] = build(c, src, lang) end
+            end
+            for _, x in ipairs(reads) do kids[#kids + 1] = build(x, src, lang) end
+            return { k = '?', t = t, kids = kids }
+        end
+    end
+    -- erlang `X#rec.f` (CART-0957): a field READ whose base is X, and which also names the RECORD the
+    -- field belongs to (`rec`), because an erlang field name means nothing without its record
+    if RECFIELD[t] then
+        local b, f, r = node:field('expr')[1], node:field('field')[1], node:field('name')[1]
+        -- the field and record NAMES are their inner atoms: the wrappers' text carries `.` / `#`
+        f = f and (f:field('name')[1] or f)
+        r = r and (r:field('name')[1] or r)
+        if b and f then
+            return { k = 'field', b = build(b, src, lang), n = txt(f, src), rec = r and txt(r, src) or nil,
+                method = false, selid = false } -- the field name is an atom: du never counts it
         end
     end
     if METHOD[t] and not VETO(lang, t) then
@@ -1547,6 +1589,23 @@ function M.harvest_row(node, src, hint, lang)
         return { lhs = lhs, rhs = rhs, cond = cond and build(cond, src, lang) or nil }
     end
     local t = node:type()
+    -- ★ A MATCH BINDS ITS PATTERN (CART-0957): the names in the pattern are the row's targets, the value is
+    -- read. A name already bound is a match test, which single_assignment moves to du's `use` and this side
+    -- cannot see (one row): the self-gate reports those as `binder`, the honest residue.
+    if PATMATCH[t] then
+        local l, r = node:field('lhs')[1], node:field('rhs')[1]
+        if l and r then
+            specs = specs or require('cartograph.providers.treesitter').spec
+            local s = specs and lang and specs[lang]
+            local flow = require 'cartograph.flow'
+            local lhs, rhs = {}, { build(r, src, lang) }
+            local names, reads = flow.pattern_parts(l, src, flow.leaf_ids(s and s.df_ids),
+                s and s.pattern and s.pattern.reads)
+            for _, nm in ipairs(names) do lhs[#lhs + 1] = { k = 'name', n = nm } end
+            for _, x in ipairs(reads) do rhs[#rhs + 1] = build(x, src, lang) end
+            return { lhs = lhs, rhs = rhs }
+        end
+    end
     -- ★ AN `expression_statement` WRAPPING A PLAIN ASSIGNMENT, unwrapped exactly as
     -- lua's `local x = e` is below. js and python put `y = x` inside one, so the
     -- ASSIGN branch never saw it and the whole statement harvested as a single rhs
@@ -2390,6 +2449,7 @@ local function flow_cfg(lang, s, method)
         blocks = s.blocks,                          -- attached blocks (part B)
         mods = s.binding_modifiers, -- CART-0234
         binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
+        pattern = s.pattern, -- pattern binding (CART-0957); FOUR cfg sites, all must agree
         body_of = s.body_of, params_of = s.params_of, -- CART-0305
         fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
         method = method or false,
@@ -2403,6 +2463,54 @@ local function fn_node(node, root, lang)
     local fnt = ts.fn_types(lang)
     while d do if fnt[d:type()] then return d end; d = d:parent() end
     return nil
+end
+
+-- ★ THE HEADS AS READ SETS (CART-0957): per clause, the spec's pattern.paths over each argument — the names a
+-- head binds WITH the path each comes from, and the constants it demands (`#iq.type = get`). A PARALLEL field:
+-- fl.params stays a list of names, which dfparity, coarse and the du gate read that way.
+local function head_facts(clauses, src, s)
+    local paths = s.pattern and s.pattern.paths
+    if not paths then return nil end
+    local out = {}
+    for k, c in ipairs(clauses) do
+        local args = s.params_field and c:field(s.params_field)[1]
+        local facts, i = {}, 0
+        if args then
+            for a in args:iter_children() do
+                if a:named() and not tsutil.is_comment(a) then
+                    i = i + 1
+                    for _, f in ipairs(paths(a, src)) do f.arg = i; facts[#facts + 1] = f end
+                end
+            end
+        end
+        out[k] = { line = (select(1, c:range())) + 1, arity = i, facts = facts }
+    end
+    return out
+end
+
+-- the CLAUSES of a merged equation (CART-0957): the function-type nodes that START inside the node's
+-- range, in order, not descending into one. Only asked when fn_node found no single enclosing node, which
+-- is exactly the merged case (the range spans several sibling clauses, so their common ancestor is the
+-- file). nil unless there are at least two.
+local function merged_clauses(node, root, lang)
+    if not root then return nil end
+    local sl, el = at.sl(node.range), at.el(node.range)
+    local fnt = ts.fn_types(lang)
+    local out = {}
+    local function walk(n)
+        for c in n:iter_children() do
+            if c:named() then
+                local r0, _, r1 = c:range()
+                if r1 >= sl and r0 <= el then
+                    if fnt[c:type()] then
+                        if r0 >= sl then out[#out + 1] = c end
+                    else walk(c) end
+                end
+            end
+        end
+    end
+    walk(root)
+    return (#out > 1) and out or nil
 end
 
 --- the focused fn's flow record WITH per-row `.expr` harvested (aligned 1:1). INC 1
@@ -2420,13 +2528,29 @@ function M.of(store, fn_id)
     -- "no statements"; here the refusal already falls out, so nothing changes.
     local src, lines = file_src(store, node)
     src = src or ''
-    local fn = fn_node(node, parse_root(src, lang, lines), lang)
+    local root = parse_root(src, lang, lines)
+    local fn = fn_node(node, root, lang)
+    if not fn and s.merge_equations then
+        -- ★ A MERGED EQUATION HAS NO ONE NODE (CART-0957): stitch its clauses as arms of one record
+        local cls = merged_clauses(node, root, lang)
+        if not cls then return nil end
+        local flow = require 'cartograph.flow'
+        local cfg = flow_cfg(lang, s, false)
+        local acc, bound = nil, {}
+        for _, c in ipairs(cls) do
+            acc = flow.append_clause(acc, flow.build(c, src, cfg), c, cls[1])
+            for k, v in pairs(M.bound_names(c, src, s.binders) or {}) do bound[k] = v end
+        end
+        return { fl = acc, lang = lang, node = node, clauses = #cls, bound = bound,
+            heads = head_facts(cls, src, s) }
+    end
     if not fn then return nil end
     local cfg = flow_cfg(lang, s, (node.kind == 'method') and lang == 'lua')
     local flow = require 'cartograph.flow'
     local fl = flow.build(fn, src, cfg)
     return { fl = fl, lang = lang, node = node,
-        bound = M.bound_names(fn, src, s.binders) }
+        bound = M.bound_names(fn, src, s.binders),
+        heads = s.pattern and head_facts({ fn }, src, s) or nil }
 end
 
 --- The language `M.of` would use for a file, or nil when this layer does not
@@ -2537,6 +2661,7 @@ function M.of_module(store, mod_id)
         blocks = s.blocks,                  -- THREE cfg sites; all must agree
         mods = s.binding_modifiers, -- CART-0234
         binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
+        pattern = s.pattern, -- pattern binding (CART-0957); FOUR cfg sites, all must agree
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
     return { fl = flow.build(root, src, cfg), lang = lang, node = node,

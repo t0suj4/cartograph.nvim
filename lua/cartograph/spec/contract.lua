@@ -283,6 +283,11 @@ M.SLOTS = {
     -- binding-only BY GRAMMAR (the `_pattern` suffix and the import cluster) — a node
     -- that can also appear in a value position must never be listed.
     binder_fields = 'ANALYSIS',
+    -- PATTERN BINDING (CART-0957): { fields = <node type -> the field that IS a pattern>, params = <the
+    -- fn head is a pattern>, single_assignment = <a bound name in a pattern is a match, a use> }. A
+    -- pattern binds every name under it at any depth, which binder_fields (per node TYPE) cannot say when
+    -- the same tuple/list/record types also sit in value position. erlang declares it.
+    pattern = 'ANALYSIS',
     -- the node type that may WRAP a binding target in this language (js
     -- `parenthesized_expression`): `({body: b} = await x)` is the only way to destructure
     -- into EXISTING bindings, because a statement may not begin with `{`. A bare type test

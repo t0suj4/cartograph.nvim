@@ -409,7 +409,10 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 203 -- v203: THE PARSE VIEW GROWS PAST LUA (parseview.lua, CART-1092): scheme masks a symbol-initial `@`
+M.VERSION = 204 -- v204: ERLANG HAS A FLOW LAYER (CART-0957): a clause head and every pattern bind (spec.pattern),
+--- case/receive/if arms are alternative rows, a bound name in a pattern is a match test (flow.single_assignment),
+--- and a merged multi-clause function's flow covers every clause as arms (flow.append_clause), not the first
+--- clause alone. Prior: v203: THE PARSE VIEW GROWS PAST LUA (parseview.lua, CART-1092): scheme masks a symbol-initial `@`
 --- and guile's `#{...}#` (the 0.12 grammar rejects both; one turned tree-il.scm into a single ERROR) and tears node-locally;
 --- cpp turns `= default` / `= delete` into a same-length `{}` (a namespace-scope defaulted ctor was an assignment, and a
 --- deleted one swallowed the next declaration). Prior: v202: THE NVIM 0.12 GRAMMARS (CART-1087 phase 0), one bump for the set: go's statement_list is a body
