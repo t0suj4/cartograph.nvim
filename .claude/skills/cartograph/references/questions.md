@@ -33,6 +33,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | Which captures and query slots does each language bind, and which slots could a language fill that it does not (PROJECTING)? | `tools/specaudit.lua --capabilities [--top=N]` (no corpus needed; rediscovers CART-0692) |
 | Same corpus, same graph twice? (per layer) | `tools/determinism.lua <corpus|dir> [--runs N]` |
 | Does a data reader agree with an independent implementation, row by row? | `tools/oraclejoin.lua <join> [--repos a,b,…] [--show N]` |
+| Does a GENERATOR declaration read what the hand-rolled reader it re-expresses reads? (metaprogramming as one relation) | `tools/generatorjoin.lua erlreg <root> \| ruby <corpus> [--show N]` — rows keyed by site, both directions, refusals by reason. ejabberd erlreg 26/26; discourse models 371/371; activesupport 159 equal + 40 where the ORIGINAL ignores the receiver |
 | Does a module compare node types its declared languages lack? (the language fence) | `tools/langaudit.lua [--all]` |
 | What can this tree NOT be falsified by? Which promises has any test triggered? | `tools/instrumentcensus.lua lines` · `tools/refusalcensus.lua /tmp/cov.txt` |
 | Construct the input that breaks a promise instead of searching for one | `tools/counterexample.lua [--keep]` |
@@ -121,6 +122,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | One multi-clause erlang function as one record, arms as alternatives | `expr.of(store, fn_id).fl` (stitched; `flow.successors(fl)`) |
 | What XML a record pattern accepts | `xmppspec.lift(facts, spec)` + `xmppspec.render(V)` |
 | What value (term) an erlang expression builds | `erlterms.term(node, src, ctx)` + `erlterms.status(term)` |
+| Read a metaprogram's sites: what a site of a declared shape GENERATES, with the site on every fact | `require('cartograph.generators').read(gen, troot, src, file)` → facts, refusals (shape / hole / context), selected; declarations: `spec.<lang>.generators`, `generators.from_erlreg(erlreg.CARRIERS)` |
 | Run the enrichment passes the open path runs (xlang, sql, frameworks, k8s/proto, erlreg, db) over extracted data | `require('cartograph.postpass').run(data, { say = fn, skip = { name = true } })` — `PASSES` is the one declared sequence |
 | A module's visible records; its record uses; unused records/fields | `erlrecords.new{…}:scope(f)`, `:uses(f)`, `:check(f)`, `erlrecords.usage(E, files, root)` |
 | Every stx template in a directory (namespaces harvested first) | `stx.scan(dir, {all})`, `stx.templates(src, {resolve})`, `stx.inventory(recs)` |

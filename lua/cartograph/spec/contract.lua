@@ -176,6 +176,10 @@ M.SLOTS = {
     -- EMITTERS: convention defs synthesized from the tree (the `scans` family —
     -- one named-fact-stream slot when touched, spec-layering)
     synth_defs = 'EMITTERS', cbarg_def = 'EMITTERS', cbarg_within = 'EMITTERS',
+    -- GENERATOR DECLARATIONS (CART-1125): a site selector, the forms a site may take as algebra templates, what each
+    -- form generates. Read by cartograph.generators with match/instantiate; the first step joins them against the
+    -- hand-rolled emitter they re-express, and nothing reads them at extraction yet.
+    generators = 'EMITTERS',
     field_fn_cbarg = 'EMITTERS', scan_ctors = 'EMITTERS',
     scan_ancestors = 'EMITTERS', scan_super = 'EMITTERS',
     scan_bare_calls = 'EMITTERS', ctor_query = 'EMITTERS',
