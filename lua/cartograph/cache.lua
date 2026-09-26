@@ -409,7 +409,10 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 201 -- v201: THE LUA DIALECT DECIDES HOW `global` PARSES (luadialect.lua): tree-sitter-lua reads it as Lua 5.5's
+M.VERSION = 202 -- v202: THE NVIM 0.12 GRAMMARS (CART-1087 phase 0), one bump for the set: go's statement_list is a body
+-- (flow regions through it, forms descend it; CART-1088), a container region injected twice is extracted once (CART-1091),
+-- a macro-typed constrained C++ constructor is named from its real declarator (CART-1090), and an erlang remote call keeps
+-- its module under the nested (remote ... fun: (call ...)) shape (CART-1100). Prior: v201: THE LUA DIALECT DECIDES HOW `global` PARSES (luadialect.lua): tree-sitter-lua reads it as Lua 5.5's
 -- keyword; a pre-5.5 root (.luarc.json / .luacheckrc / profile / the default) is parsed from a view with `global`
 -- masked to an identifier, text still read from the original bytes. The manifest records the dialect (a changed
 -- declaration is a miss) and now also h_lang, which it used to drop. Prior: v200: C/C++ DEFS ARE TORN BY DAMAGED CONTEXT, NOT BY POSITION (CART-1084): a def after a file's first

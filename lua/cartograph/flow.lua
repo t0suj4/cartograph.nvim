@@ -31,7 +31,14 @@ local COMMENT = tsutil.COMMENT
 -- a region body: lua `block`, C/php `compound_statement`, JS/TS `statement_block`,
 -- java `switch_block` (a switch's cases live in one, and it is NOT a `block`)
 local BODY = { block = true, compound_statement = true, statement_block = true,
-    switch_block = true }
+    switch_block = true,
+    -- tree-sitter-go 2346a3a (nvim-treesitter main) wraps every block and case body in a statement_list:
+    -- (block (statement_list ...)), (expression_case value: ... (statement_list ...)). It IS a body; only go's
+    -- grammar has the node type (checked with language.inspect over all 18), so listing it is language-safe
+    statement_list = true }
+-- a pure statement WRAPPER, flattened into the region that holds it. Not every BODY: a bare `{ }` block nested in a C
+-- region stays one row (opening those is CART-0362's decision, and would move every C/java/js function)
+local STMT_LIST = { statement_list = true }
 -- control statements: recurse into their sub-regions
 local CTRL = { if_statement = true, while_statement = true, for_statement = true,
     for_numeric_statement = true, for_generic_statement = true,
@@ -1277,7 +1284,8 @@ function M.build(fnnode, src, cfg)
             if c:named() then
                 local ct = c:type()
                 if not COMMENT[ct] then
-                    if CLAUSE_[ct] then clause(c, parent) else emit(c, parent, pol) end
+                    if STMT_LIST[ct] then region(c, parent, pol) -- go's wrapper: its children ARE this region's
+                    elseif CLAUSE_[ct] then clause(c, parent) else emit(c, parent, pol) end
                 end
             end
         end

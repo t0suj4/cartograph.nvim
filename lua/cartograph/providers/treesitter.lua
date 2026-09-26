@@ -4075,6 +4075,9 @@ end
 -- Used to walk ONE level of nesting into a compound statement.
 local SUBSTMT_BLOCKS = {
     block = true, compound_statement = true, statement_block = true,
+    -- go's statement_list (tree-sitter-go 2346a3a): the wrapper between a block or case and its statements, so a
+    -- block holding only it flattens and a case's body is found through it (go-only node type)
+    statement_list = true,
     suite = true, do_block = true, declaration_list = true,
     field_declaration_list = true, class_body = true, switch_body = true,
     -- php/java `switch_block`, rust `match_block`; ruby's `then` is the BODY
@@ -4107,6 +4110,9 @@ local SUBSTMT_BLOCKS = {
 -- is deliberately a named set and not a general rule: splicing every block-inside-a-block
 -- would dissolve a bare `{ }` scope in c++ into its parent, which is a real construct.
 local SPLICE_BLOCKS = { enum_body_declarations = true }
+-- a pure statement WRAPPER that starts on the row of its first statement but is never itself the statement: position
+-- mode descends into it (go's statement_list, tree-sitter-go 2346a3a; the only grammar of the 18 with that node type)
+local STMT_WRAPPERS = { statement_list = true } -- go
 -- Named children of a block that are NOT statements. ruby's do_block carries its
 -- `|x|` parameter list beside the body; the parameters have a home in the detail lens
 -- and the signature, not in a list of statements.
@@ -4451,7 +4457,9 @@ function M.forms(file, sr, sc, er, ec, opts)
             for _, c in inext, node, -1 do
                 if c:named() and not tsutil.is_comment(c) then
                     local csr, _, cer = c:range()
-                    if container and csr == sr then return c end
+                    -- a pure statement WRAPPER (go's statement_list) starts on the same row as its first
+                    -- statement but is never the statement: descend into it instead of answering it
+                    if container and csr == sr and not STMT_WRAPPERS[c:type()] then return c end
                     if sr >= csr and sr <= cer then
                         local f = find_stmt(c)
                         if f then return f end

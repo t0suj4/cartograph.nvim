@@ -927,6 +927,27 @@ test('flow: labeled break jumps to the OUTER loop exit, not the inner (go)', fun
     ok(not has(cfg.succ, brk, work), 'break Outer does NOT fall to the inner-loop exit (work)')
 end)
 
+-- nvim 0.12 / tree-sitter-go 2346a3a wraps every case body in a statement_list (CART-1088): the case's statements are
+-- still ROWS of their own under the case row, not one opaque row for the wrapper
+test('flow: a go case body is regioned through its statement_list, one row per statement', function ()
+    if not ready('go') then skip 'no go parser' end
+    local fn, src = parse_fn(table.concat({
+        'func f(x int) {',
+        '  switch x {',
+        '  case 1:',
+        '    g()',
+        '    gg()',
+        '  default:',
+        '    h()',
+        '  }',
+        '}',
+    }, '\n'), 'go')
+    local fl = flow.build(fn, src, { regime = tsspec.go.regime })
+    ok(row(fl, 'stmt', 4) and row(fl, 'stmt', 5), 'g() and gg() are separate rows')
+    ok(row(fl, 'stmt', 7), 'the default arm body is a row')
+    eq(nil, rowt(fl, 'statement_list'), 'the wrapper itself is never a row')
+end)
+
 test('flow: labeled continue targets the OUTER loop head (js)', function ()
     if not ready('javascript') then skip 'no js parser' end
     local fn, src = parse_fn(table.concat({
