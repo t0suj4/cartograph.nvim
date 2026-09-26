@@ -45,6 +45,13 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | Does the parse view (lua dialect, scheme `@`, cpp `= default`) fix a misread? | `tools/tsdump.lua <lang> <file> --view` |
 | "Walk a corpus and count that" without writing a file | `tools/probe.lua <corpus|dir> --expr '<chunk>'` |
 
+## Is it already here? (ask BEFORE implementing something or searching elsewhere)
+
+| Question | Instrument |
+|---|---|
+| Does the tree already contain this functionality, compiled out by default? How is it turned on? (erlang + rebar + autoconf) | `tools/features.lua <root> [--all]` — configure switch and default -> rebar variable -> macro / dependency -> the `-ifdef` code it compiles out, with line ranges and functions. ejabberd: SIP (~1,400 lines, `--enable-sip`), Elixir, roster gateway workaround, multihost SQL schema |
+| Is a missing dependency or behaviour producer really missing, or just behind a disabled feature? | `tools/producers.lua <root>` marks each one `[compiled out by default: MACRO — ./configure --enable-x]` |
+
 ## What does the tree reach for? (environment, dependencies)
 
 | Question | Instrument |

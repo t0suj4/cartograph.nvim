@@ -39,14 +39,27 @@ for _, c in ipairs(cons) do w(('    %s  %s:%d  %s'):format(rel(c.root), rel(c.fi
 
 local deps = P.deps(root)
 local att = P.attachable(root, deps, repos, libs)
+-- functionality compiled out by default (tools/features.lua): a dependency or an obligation it gates is OPTIONAL,
+-- not missing — say how to turn it on, or a reader will reimplement it or look for it elsewhere
+local EF = require 'cartograph.erlfeatures'
+local feats = EF.features(root)
+local dep_gate = {}
+for _, f in ipairs(feats) do
+    if f.defined_by_default == false then for _, d in ipairs(f.deps) do dep_gate[d.name] = f end end
+end
+local function gate_note(f)
+    return ('  [compiled out by default: %s — %s]'):format(f.macro,
+        f.configure and ('./configure ' .. (f.configure.flag or '?')) or ('rebar var ' .. f.var))
+end
 local found = 0
 for _, a in ipairs(att) do if #a.candidates > 0 then found = found + 1 end end
 w(('\n  DEPENDENCIES the tree selects: %d, with a candidate source on this machine: %d'):format(#deps, found))
 for _, a in ipairs(att) do
     local c = a.candidates[1]
-    w(('    %-18s %s:%d  -> %s'):format(a.dep.name, rel(a.dep.file), a.dep.line,
+    w(('    %-18s %s:%d  -> %s%s'):format(a.dep.name, rel(a.dep.file), a.dep.line,
         c and (rel(c.path) .. ' (' .. c.how .. (c.source and ', has src/' or ', no src/') .. ')'
-            .. (#a.candidates > 1 and (' +' .. (#a.candidates - 1) .. ' more') or '')) or 'NOT ON THIS MACHINE'))
+            .. (#a.candidates > 1 and (' +' .. (#a.candidates - 1) .. ' more') or '')) or 'NOT ON THIS MACHINE',
+        dep_gate[a.dep.name] and gate_note(dep_gate[a.dep.name]) or ''))
 end
 
 local rows, by = P.obligations(root, att)
@@ -57,6 +70,15 @@ w(('\n  OBLIGATIONS: %d -behaviour line(s); producer of the callbacks: tree %d, 
 local bs = {}
 for b, x in pairs(by) do bs[#bs + 1] = { b = b, n = x.n, p = x.producer } end
 table.sort(bs, function (a, b) return a.n > b.n or (a.n == b.n and a.b < b.b) end)
+-- an obligation whose EVERY -behaviour line sits in code compiled out by default is optional, not missing
+local off = {}
+for _, r in ipairs(rows) do
+    local f = EF.disabled_at(feats, r.file, r.line)
+    off[r.behaviour] = off[r.behaviour] or { all = true }
+    if f then off[r.behaviour].f = f else off[r.behaviour].all = false end
+end
 for _, x in ipairs(bs) do
-    w(('    %-26s x%-3d %s%s'):format(x.b, x.n, x.p.kind, x.p.file and ('  ' .. rel(x.p.file)) or ''))
+    local o = off[x.b]
+    w(('    %-26s x%-3d %s%s%s'):format(x.b, x.n, x.p.kind, x.p.file and ('  ' .. rel(x.p.file)) or '',
+        (o and o.all and o.f) and gate_note(o.f) or ''))
 end
