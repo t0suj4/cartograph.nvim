@@ -1898,6 +1898,13 @@ The rules:
   short bound name like `go` is still a gap), and in practice reports nothing.
 - **redundant-require** — a pure module `require`d only for effect, but it has
   none, so the require does nothing.
+- **use-without-require** (Lua, info, suggestive) — the reverse: a file uses a
+  global another file defines (or a module another file publishes as a global,
+  `Zone = require 'zone'`) without requiring it, so it works only through load
+  order. A work list — a manifest-loaded global API is a design, not a defect.
+  `tools/userequire.lua <corpus>` prints the full classification, including the
+  uses that are NOT findings (a require the import extractor missed, a guessed
+  cross-file resolution the caller cannot name).
 - **call-cycle** — mutual recursion / cyclic call clusters (plain self-recursion
   is not flagged). Structural, and a load-order signal.
 - **swallowed-type** — every `~` (name-inferred) call betrays a receiver whose

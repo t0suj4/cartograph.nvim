@@ -2193,6 +2193,43 @@ M.rules = {
             return out
         end,
     },
+    {   -- THE REVERSE OF redundant-require ([[cartograph-bidirectional-instruments]]):
+        -- a lua file that uses what another file defines as a GLOBAL with no require of
+        -- it — it works through load order, a leaked global, or someone else's require.
+        -- The classification (and why most uses without a require are NOT this) lives in
+        -- cartograph.userequire, shared with tools/userequire.lua so the census and the
+        -- rule cannot drift. A PROMISE over the corpus: "nothing requires G here" and
+        -- the load-order sub-class read every file's imports, so a scope cut refuses it.
+        -- SUGGESTIVE: a manifest-loaded global API (a .toc, Factorio's data stage) is a
+        -- design, not a defect — this is a work list.
+        name = 'use-without-require', severity = 'info', quantifier = 'promise', closed_over = 'corpus',
+        disposition = 'suggestive',
+        run = function (store)
+            local ur = require 'cartograph.userequire'
+            -- the same reader store.lua uses for source text (a file it cannot read
+            -- comes back nil, and the classifier files that as `unread`, never a finding)
+            local transport = require 'cartograph.transport'
+            local res = ur.classify(store.data, function (f)
+                return transport.read_source(store.abs(f))
+            end)
+            local out = {}
+            for _, g in ipairs(ur.findings(res)) do
+                local names = table.concat(g.names, ', ', 1, math.min(#g.names, 4))
+                    .. (#g.names > 4 and (', +' .. (#g.names - 4)) or '')
+                local msg
+                if g.via then
+                    -- the global is PUBLISHED by g.via; g.gfile's own table is local
+                    msg = ("uses global %s — '%s' publishes '%s' — without requiring it (%s)")
+                        :format(names, g.via, g.gfile, g.sub)
+                else
+                    msg = ("uses global %s defined in '%s' without requiring it (%s)")
+                        :format(names, g.gfile, g.sub)
+                end
+                out[#out + 1] = { file = store.abs(g.file), line = (g.line or 0) + 1, message = msg }
+            end
+            return out
+        end,
+    },
     {
         name = 'call-cycle', severity = 'warn', quantifier = 'witness', disposition = 'suggestive',
         -- a cycle is a FACT, but mutual recursion is legal: the defect is a judgement

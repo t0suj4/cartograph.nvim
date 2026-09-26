@@ -4,6 +4,8 @@
 --   nvim --headless -u NONE -l tools/fabcensus.lua <corpus|path> [--show <bucket>]
 --     buckets: pinned · contradicted · suspect · undecided · hop-pinned
 --              · hop-contradicted · reexport      (--show and --group take any)
+--   nvim --headless -u NONE -l tools/fabcensus.lua <corpus|path> --backward
+--     THE SECOND DIRECTION — a WORK LIST, not a gate. See "BACKWARD" below.
 --
 -- WHY THIS EXISTS. RESOLUTION's gate (CART-0598) is a PAIR — resolution% rises AND
 -- the fabricated fraction falls — because roughly a tenth of the inferred tier is
@@ -149,6 +151,37 @@
 --   * anything about the tiers above `inferred`. This is a census of one rung.
 --   * a parameter REBOUND inside its own callee, the one-hop analogue of the
 --     rebound-receiver hole above, and untested for the same reason.
+--
+-- ── BACKWARD (--backward): REFUSALS THE FILE'S OWN BINDING COULD SPEAK TO ──────
+-- Everything above measures the FALSE-POSITIVE direction: an edge we SAID that the
+-- binding contradicts. The reverse is the FALSE-NEGATIVE direction, and nothing
+-- measured it ([[cartograph-bidirectional-instruments]]): a call we REFUSED whose
+-- receiver IS bound by an import in the calling file.
+--
+--   POPULATION   every call carrying `refused` (any rule).
+--   CANDIDATE    a dotted, non-method call `X.name(…)` whose X the calling file binds
+--                to a module (the same `binds` table, duplicate-drop included, that
+--                the forward pin reads), or an inline `require('m').name(…)`.
+--
+-- Each candidate is sorted by what the BOUND FILE itself defines under that name:
+--   settles           exactly one def there — the binding alone picks it
+--   settles-by-shape  several defs there, exactly one of the call's shape (a dot
+--                     call and one non-method def) — binding + syntax pick it
+--   several           several defs of the same shape in the bound file (a
+--                     redefinition, a conditional def) — the binding narrows, never
+--                     decides
+--   via-reexport      the bound file defines none, but imports (≤2 hops) or shares a
+--                     directory with a file that does — the barrel shape again
+--   bound-lacks       the bound file defines no such member and reaches no file that
+--                     does: a member minted by a form we do not extract (assigned from
+--                     a call's result, set in a loop, metatable), or a wrong call
+--
+-- ⚠ A WORK LIST WITH STRUCTURAL FALSE POSITIVES, NOT A DEFECT RATE. `settles` says the
+-- binding COULD decide, not that the refusal is WRONG — the refusal may be a
+-- deliberate scope rule, and "the bound file defines one `name`" is a syntactic count
+-- that cannot see a member overwritten at runtime. `bound-lacks` is a witness that
+-- the GRAPH is missing a def, not that the code is. Read the sites before believing
+-- any count; the rows print grouped for exactly that reason.
 local here = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/[^/]*$')
 package.path = './lua/?.lua;./lua/?/init.lua;' .. package.path
 local bench = dofile(here .. '/bench.lua')
@@ -163,10 +196,11 @@ if not target then
     print('  buckets: pinned contradicted suspect undecided hop-pinned hop-contradicted')
     os.exit(2)
 end
-local show, group
+local show, group, backward
 for i = 2, #(arg or {}) do
     if arg[i] == '--show' then show = arg[i + 1] end
     if arg[i] == '--group' then group = arg[i + 1] end
+    if arg[i] == '--backward' then backward = true end
 end
 
 local reg = dofile(here .. '/corpora.lua')
@@ -369,6 +403,251 @@ local function reexport_hop(bound, target)
         if two and two[target] then return 2 end
     end
     return nil
+end
+
+-- ── BACKWARD (see the header) ──────────────────────────────────────────────
+-- Runs INSTEAD of the forward census and exits, so the forward output is byte-for-
+-- byte what it was when the flag is absent.
+local BACK_BUCKETS = { 'settles', 'settles-by-shape', 'several', 'via-reexport',
+    'bound-lacks' }
+local function run_backward()
+    local function out(s) io.write(s, '\n') end
+    -- file -> member tail -> defs. The bound file's OWN defs are the only evidence
+    -- the binding brings, so the index is keyed by file first.
+    -- A def is indexed under its own name AND its persisted alt keys (n.altkeys):
+    -- lua's `local function hash … M.hash = hash` is a member only through the alt
+    -- key the spec mints for the re-export (CART-0612), and without it the bound
+    -- file "lacks" a member it plainly exports.
+    local defs_in, definers = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.file and n.kind ~= 'module' and n.name then
+            local seen = {}
+            for _, nm in ipairs({ n.name, unpack(n.altkeys or {}) }) do
+                local t = type(nm) == 'string' and nm:match('([%w_]+)$')
+                if t and not seen[t] then
+                    seen[t] = true
+                    local f = defs_in[n.file]
+                    if not f then f = {}; defs_in[n.file] = f end
+                    local l = f[t]
+                    if not l then l = {}; f[t] = l end
+                    l[#l + 1] = n
+                    local d = definers[t]
+                    if not d then d = {}; definers[t] = d end
+                    d[n.file] = true
+                end
+            end
+        end
+    end
+    local function is_method_def(n)
+        return n.kind == 'method' or (n.name and n.name:find(':', 1, true) ~= nil)
+    end
+    --- The file an inline require's fragment names, when EXACTLY ONE file answers.
+    --- A lua module `a.b` is `a/b.lua` OR `a/b/init.lua`, and the match must start at
+    --- a path boundary: `require('cartograph')` otherwise lands on plugin/cartograph.lua
+    --- (an unrelated file with the right suffix) instead of lua/cartograph/init.lua.
+    --- Two answers is a refusal, not a pick.
+    local function frag_file(frag)
+        local init = frag:gsub('%.lua$', '/init.lua')
+        local hit
+        for f in pairs(files) do
+            for _, fr in ipairs({ frag, init }) do
+                if f == fr or f:sub(-#fr - 1) == '/' .. fr then
+                    if hit and hit ~= f then return nil end
+                    hit = f
+                end
+            end
+        end
+        return hit
+    end
+
+    local n_refused, by_rule, cand_rule, cand_inline, by_shape = 0, {}, {}, {}, {}
+    local R = {}
+    for _, k in ipairs(BACK_BUCKETS) do R[k] = {} end
+    local n_cand = 0
+    for _, call in ipairs(data.calls) do
+        local r = call.refused
+        if r and not call.to then
+            n_refused = n_refused + 1
+            local rule = type(r) == 'table' and r.rule or tostring(r)
+            by_rule[rule] = (by_rule[rule] or 0) + 1
+            -- the ROOT of the receiver chain, whatever the call's shape: `X.name`,
+            -- `X:name` and `X.a.name` are all pinned at X by the same binding.
+            -- ⚠ ONLY A PURE IDENTIFIER PATH. The 2026-09-02 hand prototype took the
+            -- root of ANY chain, and 9 of the 47 rows it would give today are
+            -- `callrec.callee(c):match(…)` — a method on a call's RESULT, whose receiver
+            -- the binding says nothing about (read by hand, all 9 false). A call inside
+            -- the chain ends the binding's reach.
+            local full = call.full
+            local path_ok = full and full:match('^[%a_][%w_]*[.:][%a_][%w_.:]*$')
+                and not full:find('[.:][.:]')
+            local recv = path_ok and full:match('^([%a_][%w_]*)[.:]') or nil
+            local bound = recv and binds[call.file] and binds[call.file][recv]
+            -- the member PATH under the root, `a.name` for `X.a.name`: a chain names a
+            -- nested member, and matching it on its last segment alone let
+            -- `pg.GUARDS.parses` count the file-local `parses` as a rival
+            local mpath = path_ok and full:gsub('^[%a_][%w_]*[.:]', ''):gsub(':', '.') or nil
+            local shape = call.method and 'method'
+                or (call.full and call.full:match('^[%a_][%w_]*%.[%w_]+$') and 'dot')
+                or 'chain'
+            local inline = false
+            if not bound and not call.method then
+                local frag = inline_require(call.full)
+                if frag then
+                    bound = frag_file(frag); recv = frag; inline = true; shape = 'dot'
+                    mpath = call.callee
+                end
+            end
+            local name = call.callee
+            if bound and name then
+                n_cand = n_cand + 1
+                cand_rule[rule] = (cand_rule[rule] or 0) + 1
+                if inline then cand_inline[rule] = (cand_inline[rule] or 0) + 1 end
+                -- the bound file's defs REACHABLE THROUGH THE MODULE: a `local function`
+                -- there (exported == false) is not a member, whatever its name
+                local function names_path(n)
+                    for _, nm in ipairs({ n.name, unpack(n.altkeys or {}) }) do
+                        nm = type(nm) == 'string' and nm:gsub(':', '.') or ''
+                        if nm == mpath or nm:sub(-#mpath - 1) == '.' .. mpath then
+                            return true
+                        end
+                    end
+                    return false
+                end
+                local here_defs = {}
+                for _, n in ipairs((defs_in[bound] or {})[name] or {}) do
+                    local reach = n.exported ~= false or (n.altkeys and #n.altkeys > 0)
+                    if reach and names_path(n) then here_defs[#here_defs + 1] = n end
+                end
+                local k, pick
+                if #here_defs == 1 then
+                    k, pick = 'settles', here_defs[1]
+                elseif #here_defs > 1 then
+                    local shaped = {}
+                    for _, n in ipairs(here_defs) do
+                        if is_method_def(n) == (shape == 'method') then
+                            shaped[#shaped + 1] = n
+                        end
+                    end
+                    if #shaped == 1 then k, pick = 'settles-by-shape', shaped[1]
+                    else k = 'several' end
+                else
+                    k = 'bound-lacks'
+                    -- sorted: a `pairs` walk picked a different definer per run
+                    local fs = {}
+                    for f in pairs(definers[name] or {}) do fs[#fs + 1] = f end
+                    table.sort(fs)
+                    -- the definer must define the member PATH, not just its last
+                    -- segment: `store.loc_provider.get` (a field set at runtime) was
+                    -- acquitted by callcols.lua's unrelated `M.get`
+                    local function defines_path(f)
+                        for _, n in ipairs((defs_in[f] or {})[name] or {}) do
+                            if names_path(n) then return true end
+                        end
+                        return false
+                    end
+                    for _, f in ipairs(fs) do
+                        if f ~= bound and defines_path(f)
+                            and (reexport_hop(bound, f) or same_unit(bound, f)) then
+                            k, pick = 'via-reexport', { id = f .. '::' .. name, file = f }
+                            break
+                        end
+                    end
+                end
+                by_shape[shape] = (by_shape[shape] or 0) + 1
+                R[k][#R[k] + 1] = { call = call, rule = rule, recv = recv, bound = bound,
+                    pick = pick, ndefs = #here_defs, inline = inline, mpath = mpath }
+            end
+        end
+    end
+    local sum = 0
+    for _, k in ipairs(BACK_BUCKETS) do sum = sum + #R[k] end
+    if sum ~= n_cand then
+        out(('⚠ BACKWARD PARTITION BROKEN: %d bucketed vs %d candidates'):format(sum, n_cand))
+    end
+
+    out(('FABRICATION CENSUS, BACKWARD — %s'):format(root))
+    out('')
+    out('WORK LIST, NOT A GATE. The reverse of the forward census: calls we REFUSED whose')
+    out("receiver the calling file's own import binds. `settles` means the binding COULD")
+    out('decide, not that the refusal is wrong; read the sites before believing a count.')
+    out('')
+    local rules = {}
+    for k in pairs(by_rule) do rules[#rules + 1] = k end
+    table.sort(rules)
+    out(('population: %d refused call(s); %d candidate(s) with a bound receiver = %.1f%%')
+        :format(n_refused, n_cand, n_refused > 0 and 100 * n_cand / n_refused or 0))
+    for _, k in ipairs(rules) do
+        local c, i = cand_rule[k] or 0, cand_inline[k] or 0
+        out(('  rule %-12s %7d refused  %6d bound  (%d by an import binding, %d inline require)')
+            :format(k, by_rule[k], c, c - i, i))
+    end
+    out(('  by call shape: %d `X.name`, %d `X:name`, %d `X.a.name` (inline requires count as the first)')
+        :format(by_shape.dot or 0, by_shape.method or 0, by_shape.chain or 0))
+    out(('  substrate: %d import edge(s), %d carrying a bound local name')
+        :format(n_import, n_import_bound))
+    if n_import_bound == 0 then
+        out('  ⚠ NO IMPORT EDGE NAMES ITS LOCAL: this direction is BLIND here, and a 0 below')
+        out('    is the oracle not speaking, not the corpus coming back clean.')
+    end
+    out('')
+    local NOTE = {
+        settles = 'the bound file defines exactly one — the binding alone picks it',
+        ['settles-by-shape'] = 'several there, exactly one of the call\'s shape (dot vs method)',
+        several = 'several of the same shape in the bound file — narrows, never decides',
+        ['via-reexport'] = 'the bound file defines none but reaches a definer (≤2 import hops / same dir)',
+        ['bound-lacks'] = 'the bound file defines none and reaches no definer — an unminted def form?',
+    }
+    for _, k in ipairs(BACK_BUCKETS) do
+        out(('  %-17s %6d  %s'):format(k, #R[k], NOTE[k]))
+    end
+    -- one listing per (bucket, binding kind): an inline require and an import binding
+    -- are different mechanisms with different fixes, and a mixed list sorted by size
+    -- buries the smaller kind below the cap
+    for _, k in ipairs(BACK_BUCKETS) do
+      for _, kind in ipairs({ 'import binding', 'inline require' }) do
+        local rows = {}
+        for _, row in ipairs(R[k]) do
+            if row.inline == (kind == 'inline require') then rows[#rows + 1] = row end
+        end
+        if #rows > 0 then
+            local seen, order = {}, {}
+            for _, row in ipairs(rows) do
+                local key = ('%s.%s  bound -> %s'):format(tostring(row.recv),
+                    tostring(row.mpath or row.call.callee), row.bound)
+                local g = seen[key]
+                if not g then
+                    g = { key = key, n = 0, rules = {}, row = row }
+                    seen[key] = g
+                    order[#order + 1] = g
+                end
+                g.n = g.n + 1
+                g.rules[row.rule] = true
+            end
+            table.sort(order, function (a, b)
+                if a.n ~= b.n then return a.n > b.n end
+                return a.key < b.key
+            end)
+            out('')
+            out(('── %s, by %s: %d row(s) in %d group(s) (receiver.member => bound file) ──')
+                :format(k, kind, #rows, #order))
+            for i, g in ipairs(order) do
+                if i > 40 then out(('  … %d more group(s)'):format(#order - 40)); break end
+                local rl = {}
+                for x in pairs(g.rules) do rl[#rl + 1] = x end
+                table.sort(rl)
+                local p = g.row.pick and ('   => %s'):format(g.row.pick.id) or
+                    (g.row.ndefs > 1 and ('   (%d defs there)'):format(g.row.ndefs) or '')
+                out(('  %4d  %s  [%s]%s'):format(g.n, g.key, table.concat(rl, ','), p))
+                -- call.line is 0-BASED (the forward listings print it raw)
+                out(('        first at %s:%d'):format(g.row.call.file, (g.row.call.line or -1) + 1))
+            end
+        end
+      end
+    end
+end
+if backward then
+    run_backward()
+    os.exit(0)
 end
 
 local STD = stdlib_members()

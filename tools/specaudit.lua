@@ -24,6 +24,12 @@
 --   nvim --headless -l tools/specaudit.lua ruby rails    -- explicit corpora
 --   ... --extract     re-extract when a corpus has no snapshot (else skipped)
 --   ... --files=N     per-(corpus,lang) query-run sample cap (default 150)
+--   nvim --headless -l tools/specaudit.lua --capabilities [--top=N]
+--       the DERIVED CAPABILITY MATRIX (CART-0693, lua/cartograph/capmatrix.lua):
+--       which capture names each spec binds per provider pass, the dispatched
+--       captures NO spec binds (dead kernel), and the PROJECTING work list —
+--       slots a grammar could fill and its spec leaves empty. Corpus-free: it
+--       exits before any snapshot or extraction. ⚠ A WORK LIST, NOT A GATE.
 
 local REPO = (function ()
     local src = debug.getinfo(1, 'S').source:sub(2)
@@ -42,13 +48,29 @@ local DEFAULT = { 'desynced', 'server', 'grocy', 'cpp', 'ghost', 'scheme',
     'haskell', 'blesh', 'erlang' }
 
 local names, EXTRACT, FILECAP = {}, false, 150
+local CAPS, CAPTOP = false, nil
 for _, a in ipairs(arg or {}) do
-    if a == '--extract' then EXTRACT = true
+    if a == '--capabilities' then CAPS = true
+    elseif a:match('^%-%-top=%d+$') then CAPTOP = tonumber(a:match('%d+'))
+    elseif a == '--extract' then EXTRACT = true
     elseif a:match('^%-%-files=%d+$') then
         FILECAP = tonumber(a:match('%d+')) or FILECAP
     elseif not a:match('^%-%-') then names[#names + 1] = a end
 end
 if #names == 0 then names = DEFAULT end
+
+-- ── --capabilities: the derived capture matrix, then EXIT (no corpus work) ──
+if CAPS then
+    local cm = require 'cartograph.capmatrix'
+    local fd = assert(io.open(REPO .. '/lua/cartograph/providers/treesitter.lua', 'r'))
+    local src = fd:read('*a'); fd:close()
+    local R = cm.derive(ts.spec, cm.passes(src), cm.live_opts())
+    local contract = require 'cartograph.spec.contract'
+    for _, l in ipairs(cm.report(R, { top = CAPTOP, slots_registered = contract.SLOTS })) do
+        io.write(l, '\n')
+    end
+    os.exit(0)
+end
 
 local extlang = {}
 for lang, spec in pairs(ts.spec) do

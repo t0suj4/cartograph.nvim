@@ -101,7 +101,7 @@ Registered rules at this commit: `resource-leak`, `member-leak`, `null-deref`,
 `ansible-audit`, `ansible-vars`, `layering`, `clone`, `access-point`,
 `registry-audit`, `pair-audit`, `schema-mirror`, `greenspun`, `dynamic-dispatch`,
 `load-order`, `listener-audit`, `swallowed-type`, `dead-function`,
-`redundant-require`, `call-cycle`.
+`redundant-require`, `use-without-require`, `call-cycle`.
 
 Language-locked ones are in `languages.md` §5. These are **structural smells, not
 proofs** — a dynamically-invoked function can still read as "no caller".

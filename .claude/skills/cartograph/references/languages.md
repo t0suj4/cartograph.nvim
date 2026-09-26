@@ -172,6 +172,10 @@ resolved.
 
 Also Lua-only by oracle: `:CartographEscalate`, `:CartographFieldHarvest`.
 
+The `use-without-require` lint (`lua/cartograph/userequire.lua`) is Lua-only by
+construction: it reads lua `require` edges and decides "global" from the absence of
+a `local` binding. It skips every non-`.lua` file silently.
+
 `:CartographPrototypes[!]` needs an environment profile **with a data stage** —
 today only `lua-factorio`. It says so when there is none.
 
