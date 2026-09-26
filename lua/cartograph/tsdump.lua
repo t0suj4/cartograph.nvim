@@ -34,7 +34,7 @@ function M.lines(src, lang, opts)
     opts = opts or {}
     local anon = opts.anon ~= false
     local bytes = src
-    if opts.view then bytes = require('cartograph.luadialect').view(src, lang, opts.dialect) end
+    if opts.view then bytes = require('cartograph.parseview').view(src, lang, opts.dialect) end
     local plang = lang_for(lang, opts.parser)
     local root = vim.treesitter.get_string_parser(bytes, plang):parse()[1]:root()
     local out = {}

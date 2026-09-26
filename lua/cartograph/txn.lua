@@ -123,7 +123,7 @@ function M.enclosing_syntax(file, range, text)
     if not okp then return nil end
     local lang = ts.parse_lang(file)
     if not lang then return nil end
-    local okr, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(text, lang), lang)
+    local okr, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(text, lang), lang)
     if not okr or not parser then return nil end
     local okt, tree = pcall(function () return parser:parse()[1] end)
     if not okt or not tree then return nil end

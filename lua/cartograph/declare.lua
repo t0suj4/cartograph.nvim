@@ -83,7 +83,7 @@ local function gap_of(lines, ms)
 end
 
 local function parse_root(text, lang)
-    local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(text, lang), lang)
+    local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(text, lang), lang)
     if not okp or not parser then return nil, 'cannot parse ' .. tostring(lang) end
     local okt, tree = pcall(function () return parser:parse()[1] end)
     if not okt or not tree then return nil, 'cannot parse ' .. tostring(lang) end

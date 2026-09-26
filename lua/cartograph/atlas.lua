@@ -188,7 +188,7 @@ function M.fields(store, id, cache)
                         local src = fd:read('*a')
                         fd:close()
                         local okp, parser =
-                            pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
+                            pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
                         if okp and parser then
                             local okt, tree = pcall(function ()
                                 return parser:parse()[1]

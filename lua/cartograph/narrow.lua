@@ -444,7 +444,7 @@ local STMT_BLOCK = {
     block_body = true, ['else'] = true,
 }
 local function fn_node(node, src, lang)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
     if not ok then return nil end
     local root = parser:parse()[1]:root()
     local sl, sc, el, ec = at.sl(node.range), at.sc(node.range),

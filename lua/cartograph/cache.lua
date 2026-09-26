@@ -409,7 +409,10 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 202 -- v202: THE NVIM 0.12 GRAMMARS (CART-1087 phase 0), one bump for the set: go's statement_list is a body
+M.VERSION = 203 -- v203: THE PARSE VIEW GROWS PAST LUA (parseview.lua, CART-1092): scheme masks a symbol-initial `@`
+--- and guile's `#{...}#` (the 0.12 grammar rejects both; one turned tree-il.scm into a single ERROR) and tears node-locally;
+--- cpp turns `= default` / `= delete` into a same-length `{}` (a namespace-scope defaulted ctor was an assignment, and a
+--- deleted one swallowed the next declaration). Prior: v202: THE NVIM 0.12 GRAMMARS (CART-1087 phase 0), one bump for the set: go's statement_list is a body
 -- (flow regions through it, forms descend it; CART-1088), a container region injected twice is extracted once (CART-1091),
 -- a macro-typed constrained C++ constructor is named from its real declarator (CART-1090), and an erlang remote call keeps
 -- its module under the nested (remote ... fun: (call ...)) shape (CART-1100). Prior: v201: THE LUA DIALECT DECIDES HOW `global` PARSES (luadialect.lua): tree-sitter-lua reads it as Lua 5.5's

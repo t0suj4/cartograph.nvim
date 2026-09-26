@@ -29,7 +29,7 @@ local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or 
 --- @return table[] { name, factory, line } (name/factory may be dotted; line is 1-based)
 function M.reassigns(src)
     local out = {}
-    local ok, p = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, 'lua'), 'lua')
+    local ok, p = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, 'lua'), 'lua')
     if not ok then return out end
     local root = p:parse()[1]:root()
     local ok2, q = pcall(vim.treesitter.query.parse, 'lua', [[

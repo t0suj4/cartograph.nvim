@@ -145,7 +145,7 @@ end
 
 --- every candidate loop in one Lua source: sites (rewritable) and declined (near misses, with reasons)
 function M.sites(src)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, 'lua'), 'lua')
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, 'lua'), 'lua')
     if not ok then return {}, { { reason = 'cannot parse' } } end
     local root = parser:parse()[1]:root()
     local sites, declined = {}, {}

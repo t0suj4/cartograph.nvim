@@ -32,7 +32,7 @@ local function file_parse(store, file, cache)
     if e ~= nil then return e end
     local node = { file = file } -- content() only needs .file
     local src = table.concat(store.content(node) or {}, '\n')
-    local ok, p = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, 'lua'), 'lua')
+    local ok, p = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, 'lua'), 'lua')
     e = ok and { root = p:parse()[1]:root(), src = src } or false
     cache[file] = e
     return e

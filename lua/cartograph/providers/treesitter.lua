@@ -1490,8 +1490,8 @@ function M.lua_dialect_for(root, opts)
     return { version = v, source = src }
 end
 function M.parse_view(lang, src)
-    if lang ~= 'lua' then return src end
-    return require('cartograph.luadialect').view(src, lang)
+    -- lua's dialect view, scheme's `@` mask, cpp's misread `= default` (lua/cartograph/parseview.lua); identity elsewhere
+    return require('cartograph.parseview').view(src, lang)
 end
 
 -- ★★ THE QUESTION SPLITS IN TWO, AND CONFLATING THEM WAS A BUG (CART-0412).

@@ -56,6 +56,11 @@ return {
         -- The fix is a positional `fn_of` hook, the twin of odin's body_of: CART-0307.
         fn_types = {},
         mention_types = { symbol = true },
+        -- ★ NODE-LOCAL TEARING (nvim 0.12, CART-1092). A lisp def is a top-level `(define ...)` form with no enclosing
+        -- qualifier to lose, so an error tears only the def it sits in. Under the default policy ONE error hid the rest of
+        -- the file: the new tree-sitter-scheme rejects Guile's `@`-prefixed symbols (`@prompt`, boot-9.scm line 66 of
+        -- 4323; `@apply`, r4rs.scm line 35), and the guile gate lost 716 refs, edges like %print-module -> module-name.
+        torn_by_node = true,
         toplevel_parent = 'program', -- internal defines are a function's interior
         is_method = function () return false end,
         entry_names = { main = true },

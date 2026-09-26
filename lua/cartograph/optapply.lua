@@ -187,7 +187,7 @@ function M.plan_cse(store, fn_id, opts)
     local defcount = {}
     for _, r in ipairs(rows) do for _, d in ipairs(r.def or {}) do defcount[d] = (defcount[d] or 0) + 1 end end
     local src = table.concat(store.content(node) or {}, '\n')
-    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
     if not ok then return nil, 'cannot parse ' .. rel, 'unparsable' end
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })
@@ -330,7 +330,7 @@ function M.plan_localize(store, fn_id, opts)
     for _, p in ipairs((fl and fl.params) or {}) do bound[p] = true end
     for _, r in ipairs((fl and fl.stmts) or {}) do for _, d in ipairs(r.def or {}) do bound[d] = true end end
     local src = table.concat(store.content(node) or {}, '\n')
-    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
     if not ok then return nil, 'cannot parse', 'unparsable' end
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })
@@ -491,7 +491,7 @@ function M.plan_pre(store, fn_id, opts)
     for _, p in ipairs((fl and fl.params) or {}) do bound[p] = true end
     for _, r in ipairs((fl and fl.stmts) or {}) do for _, d in ipairs(r.def or {}) do bound[d] = true end end
     local src = table.concat(store.content(node) or {}, '\n')
-    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.luadialect').view(src, lang), lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
     if not ok then return nil, 'cannot parse', 'unparsable' end
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })
