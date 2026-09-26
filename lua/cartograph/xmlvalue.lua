@@ -92,6 +92,16 @@ local function charref(s)
     return nil
 end
 
+--- Decode the five predefined entities and character references in a piece of text or an
+--- attribute value; any other reference is kept as written (stx.lua reads template pieces with it).
+function M.decode(s)
+    -- ONE pass: `&#38;lt;` is the text `&lt;`, not `<` (a second pass would decode it twice)
+    return (s:gsub('&(#?[%w]+);', function(n)
+        if n:sub(1, 1) == '#' then return charref('&' .. n .. ';') end
+        return PREDEF[n]
+    end))
+end
+
 --- Read one document into { root, value, undefined_entities } or nil and why.
 function M.read(src)
     local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'xml')
