@@ -24,7 +24,11 @@
 --   select(node, src) -> bool,
 --   context(node, src, file) -> { name = text… } | nil, why      values a site gets from where it sits
 --   project = { [kind] = fn(text) -> text }                        how a leaf reads as a name (`:foo` -> `foo`)
---   forms(A) -> { { name, T = template, out = { { T = template, each = hole, as = hole, ok = lua pattern }… } }… } }
+--   forms(A) -> { { name, T = template, out = { { T = template, each = hole, as = hole, only = { kind… },
+--                                                  ok = lua pattern, check = hole }… } }… } }
+--     `each` generates once per element of a repeated hole (bound as `as`), `only` keeps elements of those kinds
+--     (`delegate :a, :b, to: :x` — the pair is an option, not a method), `ok` filters on the element's projected
+--     name, or on hole `check`'s when there is no `each`.
 -- `forms` takes the algebra so a spec can declare generators without loading it.
 --
 -- A FACT: { gen, form, kind (the output node's type), parts = { text… } (its kids, projected), name (parts joined),
@@ -136,18 +140,20 @@ function M.read(gen, troot, src, file)
                                     why = table.concat(r.unfilled or {}, ',') .. table.concat(r.rejected or {}, ',') }
                             end
                         end
+                        local only = nil
+                        if o.only then only = {}; for _, k in ipairs(o.only) do only[k] = true end end
                         if o.each then
                             for _, e in ipairs((V[o.each] and V[o.each].kids) or {}) do
                                 local ename = text(e, gen.project)
-                                if not o.ok or ename:match(o.ok) then
+                                if (not only or only[e.k]) and (not o.ok or ename:match(o.ok)) then
                                     local Vx = {}
                                     for h, v in pairs(V) do Vx[h] = v end
                                     Vx[o.as] = e
                                     emit(Vx, e.at)
                                 end
                             end
-                        else
-                            emit(V, nil)
+                        elseif not (o.ok and o.check) or text(V[o.check], gen.project):match(o.ok) then
+                            emit(V, o.check and V[o.check].at or nil)
                         end
                     end
                 end

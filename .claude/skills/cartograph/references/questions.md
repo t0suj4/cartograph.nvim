@@ -33,7 +33,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | Which captures and query slots does each language bind, and which slots could a language fill that it does not (PROJECTING)? | `tools/specaudit.lua --capabilities [--top=N]` (no corpus needed; rediscovers CART-0692) |
 | Same corpus, same graph twice? (per layer) | `tools/determinism.lua <corpus|dir> [--runs N]` |
 | Does a data reader agree with an independent implementation, row by row? | `tools/oraclejoin.lua <join> [--repos a,b,…] [--show N]` |
-| Does a GENERATOR declaration read what the hand-rolled reader it re-expresses reads? (metaprogramming as one relation) | `tools/generatorjoin.lua erlreg <root> \| ruby <corpus> [--show N]` — rows keyed by site, both directions, refusals by reason. ejabberd erlreg 26/26; discourse models 371/371; activesupport 159 equal + 40 where the ORIGINAL ignores the receiver |
+| Does a GENERATOR declaration read what the hand-rolled reader it re-expresses reads? (metaprogramming as one relation) | `tools/generatorjoin.lua erlreg <root> \| ruby <corpus> \| rails <corpus> [--show N]` — rows keyed by site, both directions, refusals by reason. ejabberd erlreg 26/26; ruby.attr discourse 371/371, activesupport 159 equal + 40 where the ORIGINAL ignores the receiver; rails.dsl discourse 1276/1276 |
 | Does a module compare node types its declared languages lack? (the language fence) | `tools/langaudit.lua [--all]` |
 | What can this tree NOT be falsified by? Which promises has any test triggered? | `tools/instrumentcensus.lua lines` · `tools/refusalcensus.lua /tmp/cov.txt` |
 | Construct the input that breaks a promise instead of searching for one | `tools/counterexample.lua [--keep]` |

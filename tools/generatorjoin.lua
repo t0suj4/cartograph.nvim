@@ -2,6 +2,7 @@
 --
 --   nvim --headless -u NONE -l tools/generatorjoin.lua erlreg <erlang root>      [--show N]
 --   nvim --headless -u NONE -l tools/generatorjoin.lua ruby <corpus|dir>         [--show N]
+--   nvim --headless -u NONE -l tools/generatorjoin.lua rails <corpus|dir>        [--show N]
 --
 -- The acceptance test for re-expressing a reader as a declaration read by cartograph.generators is a ROW JOIN
 -- against the original ([[convergence-is-not-confirmation]]: diff ROWS, not totals), keyed by site, both
@@ -12,6 +13,8 @@
 --            would resolve through xlang.handler_by_module, so an equal edge count would witness nothing.
 --   ruby     rows (file, line, col of the symbol, emitted name) from ruby_synth_defs against the `ruby.attr`
 --            declaration. The owner walk is independent on the generator side, so it IS tested.
+--   rails    the same rows from the rails pack's ruby_rails_synth against its `rails.dsl` declaration (the THIRD
+--            reader: associations and delegate).
 -- Each side prints its own nonzero count first: an empty run is not a pass.
 
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
@@ -79,17 +82,18 @@ function M.erlreg(root)
     }
 end
 
---- ruby_synth_defs vs the `ruby.attr` declaration, over every .rb file under root
-function M.ruby(root)
+--- a def-emitter (`synth(tsroot, src) -> {name, node}`) vs a generator declaration, over every .rb file under root
+function M.ruby(root, synth, gen)
     local spec = require 'cartograph.spec.ruby'
-    local gen = spec.generators[1]
+    synth = synth or spec.synth_defs
+    gen = gen or spec.generators[1]
     local a, b, reasons, selected, files = {}, {}, {}, 0, 0
     for _, rel in ipairs(ts.list_files(root)) do
         if rel:match('%.rb$') then
             local troot, src = parse(root .. '/' .. rel, 'ruby')
             if troot then
                 files = files + 1
-                for _, d in ipairs(spec.synth_defs(troot, src)) do
+                for _, d in ipairs(synth(troot, src)) do
                     local l, c = d.node:start()
                     a[('%s:%d:%d %s'):format(rel, l + 1, c, d.name)] = true
                 end
@@ -133,10 +137,12 @@ local function main()
         for _, x in ipairs(R.refusals) do
             io.write(('  refused "%s": erlreg %d  generator[%s] %d\n'):format(x[1], x[2], x[3], x[4]))
         end
-    elseif which == 'ruby' then
-        R = M.ruby(root)
-        io.write(('ruby_synth_defs vs ruby.attr  %s  (%d .rb files)\n  rows: synth_defs %d  generator %d  (sites selected %d)\n')
-            :format(root, R.files, R.a_rows, R.b_rows, R.selected))
+    elseif which == 'ruby' or which == 'rails' then
+        local pack = which == 'rails' and ts.packs.rails or nil
+        R = M.ruby(root, pack and pack.synth_defs, pack and pack.generators[1])
+        io.write(('%s vs %s  %s  (%d .rb files)\n  rows: original %d  generator %d  (sites selected %d)\n')
+            :format(pack and 'ruby_rails_synth' or 'ruby_synth_defs', pack and 'rails.dsl' or 'ruby.attr',
+                root, R.files, R.a_rows, R.b_rows, R.selected))
         for reason, x in pairs(R.reasons) do
             io.write(('  generator refused [%s] %d  e.g. %s\n'):format(reason, x.n, table.concat(x.ex, ' | ')))
         end

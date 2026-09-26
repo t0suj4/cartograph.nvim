@@ -79,3 +79,26 @@ test('generatorjoin: the two-way diff names what each side has alone', function 
     local d = J.diff({ x = true, y = true }, { y = true, z = true })
     eq(1, d.both); eq({ 'x' }, d.only_a); eq({ 'z' }, d.only_b)
 end)
+
+test('generators/rails.dsl (the THIRD reader): an association names itself first; delegate generates per symbol', function ()
+    if not parser_available('ruby') then skip 'no ruby parser' end
+    local gen = require('cartograph.providers.treesitter').packs.rails.generators[1]
+    local src = table.concat({
+        'class Post',
+        '  belongs_to :author, -> { where(active: true) }, optional: true', -- options after the name are not names
+        '  has_many :comments',
+        '  has_many :things?',                                             -- a symbol but not a method name: filtered
+        '  delegate :name, :email, to: :author, prefix: true',             -- the pairs are options (`only`)
+        '  has_one "legacy"',                                              -- a string name: the assoc hole refuses
+        '  has_many :"bad name"',                                          -- delimited: refused
+        'end',
+    }, '\n') .. '\n'
+    local facts, refusals, selected = G.read(gen, tree(src, 'ruby'), src, 'post.rb')
+    eq(6, selected)
+    eq({ 'Post#author', 'Post#author=', 'Post#comments', 'Post#comments=', 'Post#email', 'Post#name' }, names(facts))
+    eq({ 'hole', 'hole' }, reasons(refusals))
+    -- `check`: a single-hole output is filtered by name too, and points at that hole's node
+    local by = {}
+    for _, f in ipairs(facts) do by[f.name] = f end
+    eq(1, by['Post#author'].at[1])
+end)

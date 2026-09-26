@@ -711,8 +711,55 @@ local function ruby_rails_synth(tsroot, src)
     return out
 end
 
-
-
+-- ★ THE SAME DSL AS A GENERATOR DECLARATION (CART-1125, the third reader): read by cartograph.generators, joined row
+-- for row against ruby_rails_synth by tools/generatorjoin.lua. An association's FIRST argument is its name (the
+-- rest are options: a scope lambda, `dependent:`); `delegate`'s symbol arguments are methods and its pairs are
+-- options. The owner is the nearest class or module (associations are instance methods).
+local rails_generator = {
+    name = 'rails.dsl', source = 'spec', why = 'ActiveRecord associations and ActiveSupport delegate define methods',
+    select = function (node, src)
+        -- @langs-ok ruby `call` node — a ruby pack declaration
+        if node:type() ~= 'call' then return false end
+        local m = node:field('method')[1]
+        local mn = m and node_text(m, src)
+        return mn ~= nil and (RB_ASSOC[mn] or mn == 'delegate') or false
+    end,
+    context = function (node, src)
+        local p = node:parent()
+        while p do
+            local t = p:type()
+            if t == 'class' or t == 'module' then
+                local nn = p:field('name')[1]
+                if nn then return { owner = node_text(nn, src) } end
+                return nil, 'an anonymous class'
+            end
+            p = p:parent()
+        end
+        return nil, 'no enclosing class or module'
+    end,
+    project = { simple_symbol = function (s) return (s:gsub('^:', '')) end },
+    forms = function (A)
+        local IDENT = '^[%a_][%w_]*$'
+        local fs = {}
+        local verbs = {}
+        for v in pairs(RB_ASSOC) do verbs[#verbs + 1] = v end
+        table.sort(verbs)
+        for _, v in ipairs(verbs) do
+            fs[#fs + 1] = { name = v,
+                T = A.template(A.node('call', A.node('identifier', A.lit(v)),
+                    A.node('argument_list', A.hole('assoc'), A.hole('rest', true))),
+                    { assoc = A.kinds({ 'simple_symbol' }), rest = A.rep(A.open(), 0) }),
+                out = { { check = 'assoc', ok = IDENT, T = A.template(A.node('def', A.hole('owner'), A.lit('#'), A.hole('assoc'))) },
+                    { check = 'assoc', ok = IDENT, T = A.template(A.node('def', A.hole('owner'), A.lit('#'), A.hole('assoc'), A.lit('='))) } } }
+        end
+        fs[#fs + 1] = { name = 'delegate',
+            T = A.template(A.node('call', A.node('identifier', A.lit('delegate')), A.node('argument_list', A.hole('args', true))),
+                { args = A.rep(A.open(), 1) }),
+            out = { { each = 'args', as = 's', only = { 'simple_symbol' }, ok = IDENT,
+                T = A.template(A.node('def', A.hole('owner'), A.lit('#'), A.hole('s'))) } } }
+        return fs
+    end,
+}
 
 -- Zig-R5 receiver typing. `fn m(self: *Foo, x: Bar) { self.a(); x.b() }` — a
 -- call `recv.method()` is typed by finding `recv` in the NEAREST enclosing
@@ -5818,6 +5865,7 @@ M.packs = {
             params = true, render = true, perform = true, process = true,
             valid = true, present = true, blank = true, errors = true },
         synth_defs = ruby_rails_synth,
+        generators = { rails_generator }, -- CART-1125: the same DSL, declared for the shared engine
         -- R5b-more receiver typing ([[cartograph-ruby-arc]]): ActiveRecord class
         -- FINDERS that return a model INSTANCE. `x = User.find(id); x.foo` types
         -- x as User (→ User#foo), riding the R5 ctor-bind path (spec.ctor_finders
