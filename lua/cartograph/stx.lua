@@ -706,6 +706,60 @@ M.attr_shown = attr_shown
 --- holes = { {site, fill, attr, element, expr, from}.. } }. A spliced fragment whose own namespace is
 --- `none` takes the namespace in scope at its splice site (`via = 'spliced'`), which is what
 --- Strophe's textual splice does.
+--- THE DIRECTORY PASS, shared by tools/stxcensus.lua and the wire merge (xmppmerge.lua): pass 1 harvests the
+--- namespace tables (addNamespace calls, exported consts) from the population, pass 2 reads every file's templates
+--- under the resolver built from them. `opts.all` includes test files (their own exports then resolve the tests);
+--- by default a test's constants are not the client's. -> { dir, files = { { rel, recs }… }, resolve, ns_files }
+local function is_test_path(rel)
+    for seg in rel:gmatch('[^/]+') do
+        if seg == 'tests' or seg == 'test' or seg == '__tests__' or seg == 'spec' then return true end
+    end
+    local base = rel:match('[^/]+$')
+    return base:match('%.test%.') ~= nil or base:match('%.spec%.') ~= nil
+end
+M.is_test_path = is_test_path
+
+function M.scan(dir, opts)
+    opts = opts or {}
+    local rels = {}
+    for name, kind in vim.fs.dir(dir, { depth = 50 }) do
+        if kind == 'file' and (name:match('%.[mc]?js$') or (name:match('%.ts$') and not name:match('%.d%.ts$'))) then
+            if opts.all or not is_test_path(name) then rels[#rels + 1] = name end
+        end
+    end
+    table.sort(rels)
+    local function read(p)
+        local fd = io.open(p, 'rb'); if not fd then return nil end
+        local s = fd:read('a'); fd:close(); return s
+    end
+    local ns, exported, ns_files = {}, {}, 0
+    for _, rel in ipairs(rels) do
+        local src = read(dir .. '/' .. rel)
+        if src and (src:find('addNamespace', 1, true) or src:find('export const', 1, true)) then
+            local h = M.harvest(src)
+            if h then
+                ns_files = ns_files + 1
+                for k, v in pairs(h.ns) do ns[k] = v end
+                for k, v in pairs(h.exported) do
+                    if exported[k] == nil then exported[k] = v elseif not vim.deep_equal(exported[k], v) then exported[k] = false end
+                end
+            end
+        end
+    end
+    local resolve = M.resolver({ ns = ns, exported = exported })
+    local files = {}
+    for _, rel in ipairs(rels) do
+        local src = read(dir .. '/' .. rel)
+        local recs, why
+        if src and src:find('stx`', 1, true) then
+            recs, why = M.templates(src, { resolve = resolve })
+            if not recs then error(rel .. ': ' .. tostring(why)) end
+        end
+        files[#files + 1] = { rel = rel, recs = recs or {}, has_src = src ~= nil }
+    end
+    return { dir = dir, files = files, resolve = resolve, ns_files = ns_files, ns = ns, exported = exported }
+end
+
 function M.inventory(recs)
     local by_id = {}
     for _, r in ipairs(recs) do by_id[r.id] = r end

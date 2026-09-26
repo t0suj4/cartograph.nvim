@@ -34,46 +34,9 @@ while arg[i] do
 end
 if not dir then io.stderr:write('usage: stxcensus.lua <dir> [--all] [--stanzas] [--json <out>]\n'); os.exit(2) end
 
-local function is_test(rel)
-    for seg in rel:gmatch('[^/]+') do
-        if seg == 'tests' or seg == 'test' or seg == '__tests__' or seg == 'spec' then return true end
-    end
-    local base = rel:match('[^/]+$')
-    return base:match('%.test%.') ~= nil or base:match('%.spec%.') ~= nil
-end
-
-local files = {}
-for name, kind in vim.fs.dir(dir, { depth = 50 }) do
-    if kind == 'file' and (name:match('%.[mc]?js$') or (name:match('%.ts$') and not name:match('%.d%.ts$'))) then
-        if all or not is_test(name) then files[#files + 1] = name end
-    end
-end
-table.sort(files)
-
-local function read(p)
-    local fd = io.open(p, 'rb'); if not fd then return nil end
-    local s = fd:read('a'); fd:close(); return s
-end
-
--- pass 1: the namespace tables, from the censused population (production only by default: a
--- test's constants are not the client's; with --all the tests' own exports resolve the tests)
-local ns, exported, ns_files = {}, {}, 0
-for _, rel in ipairs(files) do
-    do
-        local src = read(dir .. '/' .. rel)
-        if src and (src:find('addNamespace', 1, true) or src:find('export const', 1, true)) then
-            local h = stx.harvest(src)
-            if h then
-                ns_files = ns_files + 1
-                for k, v in pairs(h.ns) do ns[k] = v end
-                for k, v in pairs(h.exported) do
-                    if exported[k] == nil then exported[k] = v elseif not vim.deep_equal(exported[k], v) then exported[k] = false end
-                end
-            end
-        end
-    end
-end
-local resolve = stx.resolver({ ns = ns, exported = exported })
+-- the directory pass (namespace harvest, then templates) is stx.scan, shared with the wire merge
+local scan = stx.scan(dir, { all = all })
+local ns_files, ns = scan.ns_files, scan.ns
 
 -- pass 2: the templates
 local T = { files = 0, stx_files = 0, templates = 0, ok = 0, fragments = 0, nested = 0, bound = 0, stanzas = 0,
@@ -81,13 +44,11 @@ local T = { files = 0, stx_files = 0, templates = 0, ok = 0, fragments = 0, nest
     stanza_rows = {}, escaped_attrs = {} }
 local function inc(t, k, n) t[k] = (t[k] or 0) + (n or 1) end
 local records = {}
-for _, rel in ipairs(files) do
+for _, f in ipairs(scan.files) do
+    local rel, recs = f.rel, f.recs
     T.files = T.files + 1
-    local src = read(dir .. '/' .. rel)
-    if src and src:find('stx`', 1, true) then
-        local recs, why = stx.templates(src, { resolve = resolve })
-        if not recs then error(rel .. ': ' .. tostring(why)) end
-        if #recs > 0 then
+    if #recs > 0 then
+        do
             T.stx_files = T.stx_files + 1
             local okn = 0
             for _, r in ipairs(recs) do
