@@ -149,3 +149,18 @@ test('erlang: mentions are off BY DECLARATION (an explicit empty set), not by th
     ok(type(s.mention_types) == 'table', 'mention_types is a table, so `or { identifier = true }` never applies')
     eq(nil, next(s.mention_types), 'and it names no node type: atoms are not mentions (CART-0845)')
 end)
+
+test('erlflow: a head path says a list is closed and how long, and a field-less record pattern is a fact of its own', function ()
+    need()
+    local s = require('cartograph.providers.treesitter').spec.erlang
+    local src = 'f(#iq{sub_els = [#disco_info{}]}, [A | _], [B, C]) -> ok.\n'
+    local root = vim.treesitter.get_string_parser(src, 'erlang'):parse()[1]:root()
+    local args = root:named_child(0):named_child(0):field('args')[1]
+    local per = {}
+    for a in args:iter_children() do if a:named() then per[#per + 1] = s.pattern.paths(a, src) end end
+    local r = per[1][1]
+    eq('disco_info', r.record, '`#disco_info{}` still says a disco_info sits there')
+    eq({ elem = 1, len = 1, closed = true }, r.path[2], '`[X]` is exactly one element')
+    eq({ head = true }, per[2][1].path[1], 'a cons is head/tail, not an element')
+    eq({ elem = 2, len = 2, closed = true }, per[3][2].path[1])
+end)

@@ -37,7 +37,9 @@ end
 --   { name = 'N', path = steps }            a binding (`_` is a wildcard and binds nothing)
 --   { value = 'get', ty = 'atom', path }    a constant the input must equal (atom/integer/float/string/char)
 -- steps, outermost first: { rec = 'iq', field = 'sub_els' } a record field · { tuple = i, arity = n } ·
--- { elem = i } a list element · { head = true } / { tail = true } a cons · { map = 'k' } a map key's value.
+-- { elem = i, len = n, closed = bool } a list element · { head = true } / { tail = true } a cons ·
+-- { map = 'k' } a map key's value · { rec = 'disco_info' } (no field) ends a `{ record = R }` fact: a
+-- record pattern with no fields, `#disco_info{}`.
 -- A match inside a pattern (`#iq{} = IQ`) is an ALIAS: both sides sit at the same path. Anything else (a
 -- binary, a macro) is opaque: nothing is claimed below it.
 local PAT_LIT = { atom = 'atom', integer = 'integer', float = 'float', string = 'string', char = 'char' }
@@ -63,6 +65,9 @@ local function pattern_paths(pat, src)
         elseif t == 'record_expr' then
             local rn = n:field('name')[1]
             local rec = rn and T(rn):gsub('^#', '') or '?'
+            -- a record with NO field patterns (`#disco_info{}`) still says what sits here: a record fact, whose
+            -- path ends in a record step without a field (the lift reads it as "this child is a disco_info")
+            if #n:field('fields') == 0 then out[#out + 1] = { record = rec, path = push(path, { rec = rec }) } end
             for _, f in ipairs(n:field('fields')) do
                 local fname = f:field('name')[1]
                 local fe = f:field('expr')[1]
@@ -73,12 +78,17 @@ local function pattern_paths(pat, src)
             local kids = n:field('expr')
             for i, c in ipairs(kids) do walk(c, push(path, { tuple = i, arity = #kids })) end
         elseif t == 'list' then
-            for i, c in ipairs(n:field('exprs')) do
+            -- an element step says how long the list is and whether it is CLOSED: `[X]` is exactly one element,
+            -- `[X | _]` at least one — the lift needs the difference to state "exactly one child"
+            local kids = n:field('exprs')
+            local closed = true
+            for _, c in ipairs(kids) do if c:type() == 'pipe' then closed = false end end
+            for i, c in ipairs(kids) do
                 if c:type() == 'pipe' then
                     walk(c:field('lhs')[1], push(path, { head = true }))
                     walk(c:field('rhs')[1], push(path, { tail = true }))
                 else
-                    walk(c, push(path, { elem = i }))
+                    walk(c, push(path, { elem = i, len = #kids, closed = closed }))
                 end
             end
         elseif t == 'map_expr' then
