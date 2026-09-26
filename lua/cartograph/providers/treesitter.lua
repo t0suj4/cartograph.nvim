@@ -275,6 +275,10 @@ end
 --- ★ AN ORDINARY CONSTRUCTOR NEVER NESTS: `Widget(int a) : count_(a) {}` puts the
 --- field_initializer_list beside the declarator, one level, and this loop does not fire.
 --- Measured: 14 fabricated names in v8's handles.h / maybe-handles.h / tagged.h, 0 after.
+--- ★ THIS IS THE OLDER GRAMMAR'S SHAPE. The tree-sitter-cpp that came with nvim 0.12 parks the
+--- real signature in an ERROR child BEFORE the def's declarator instead, and the capture lands
+--- on the member-init `HandleBase(handle)`; that one is cpp's `name_node` hook (CART-1090).
+--- Kept for an older parser; under the installed one no test reaches this loop.
 --- ★ ONLY `function_declarator`. A function returning a function pointer nests through
 --- `parenthesized_declarator`/`pointer_declarator` and is named `(*makeFn(inta))` today —
 --- the same class of defect, a different (unmeasured) population, its own ticket.
@@ -6539,6 +6543,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                     and defn:parent():type() ~= spec.toplevel_parent) then
                 local name = aname
                 if not name then
+                    -- a spec may say the capture landed on the WRONG node (cpp: a
+                    -- constrained ctor's member-init, CART-1090) and hand back the real one
+                    if spec.name_node then namen = spec.name_node(defn) or namen end
                     name = name_text(namen, src)
                     if spec.qualify then name = spec.qualify(name, defn, src) end
                 end

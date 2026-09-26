@@ -314,6 +314,13 @@ M.SLOTS = {
     -- question exists for lua `t.f = function() end` on a local table, so this
     -- belongs with a shared LOCALITY predicate once a second language needs it.
     skip_def = 'QUIRKS',
+    -- the def's NAME NODE when the `functions` query's @name capture landed on the wrong
+    -- node: cpp's macro-typed constrained constructor parks its real signature in an ERROR
+    -- and exposes the member-init `Base(x)` as the declarator (CART-1090). Generalization
+    -- candidate: CART-0435's function_declarator descent in name_text answers the same
+    -- question for the older nested shape, and both belong in one "which declarator is
+    -- the signature" predicate once a second grammar needs it.
+    name_node = 'QUIRKS',
     entry_names = 'QUIRKS',      -- entry points → belongs in L4 project overlay
 }
 

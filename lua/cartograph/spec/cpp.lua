@@ -7,6 +7,54 @@
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 
+--- ★★ THE REAL SIGNATURE OF A MACRO-TYPED CONSTRAINED CONSTRUCTOR SITS IN AN ERROR NODE
+--- (CART-1090, the tree-sitter-cpp that came with nvim 0.12 / nvim-treesitter `main`).
+---
+---     V8_INLINE Handle(Handle<S> handle)
+---       requires(is_subtype_v<S, T>)
+---         : HandleBase(handle) {}
+---
+---     function_definition
+---       type: type_identifier "V8_INLINE"          <- the macro takes the type slot
+---       ERROR                                      <- BEFORE the declarator field
+---         function_declarator                      <- the REAL signature
+---           declarator: identifier "Handle"
+---           parameters: parameter_list "(Handle<S> handle)"
+---           requires_clause "requires(…)"          <- now placed correctly, INSIDE it
+---         ":"
+---       declarator: function_declarator            <- what `declarator: (_) @name` sees
+---         declarator: identifier "HandleBase"      <- the member-init's BASE, not a name
+---         parameters: parameter_list "(handle)"    <- its ARGUMENTS
+---       body: compound_statement
+---
+--- The older grammar (CART-0435) nested the real signature one level INSIDE the def's
+--- declarator instead; name_text's function_declarator descent still covers that shape.
+--- Here the capture never reaches the signature at all, so the constructor was minted as
+--- `Handle::HandleBase` / `Tagged::Base` — a method that does not exist.
+---
+--- ★ THE GATE IS FOUR STRUCTURAL CONDITIONS, NO TEXT: a direct ERROR child that sits
+--- BEFORE the `declarator` field, holding a direct `function_declarator`, which carries a
+--- `requires_clause`. An ordinary member-init ctor (`V8_INLINE Widget(int a) : n(a) {}`)
+--- puts its ERROR AFTER the declarator and holds no declarator there; a well-formed
+--- constrained function (`void f(S s) requires C<S> {}`) has no ERROR at all. The
+--- `requires_clause` condition keeps this to the one measured construct.
+local function constrained_sig(def)
+    if def:type() ~= 'function_definition' then return nil end
+    for c, field in def:iter_children() do
+        if field == 'declarator' then return nil end
+        if c:type() == 'ERROR' then
+            for d in c:iter_children() do
+                if d:type() == 'function_declarator' then
+                    for r in d:iter_children() do
+                        if r:type() == 'requires_clause' then return d end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 return {
     clink = tsutil.c_linkage, -- extern "C" evidence for the C/C++ join bridge (CART-1079)
     flocal = tsutil.c_file_local, -- `static` / source-file macro: invisible outside its file (CART-1081)
@@ -244,13 +292,27 @@ return {
         -- SECOND `function_declarator` whose `parameters` is the misparsed member-init args
         -- (CART-0435), so the outermost one answers the wrong list. Same descent the name walk
         -- makes, for the same reason.
+        -- ★ AND FIRST THE ERROR-HELD SIGNATURE (CART-1090): under the newer grammar the def's
+        -- own declarator is the member-init `HandleBase(handle)`, so the descent above would
+        -- answer its ARGUMENTS. `constrained_sig` is the same node `name_node` names the def
+        -- from, so the name and the parameter list come from ONE declarator.
         params_of = function (def)
+            local sig = constrained_sig(def)
+            if sig then return sig:field('parameters')[1] end
             local d, last = def:field('declarator')[1], nil
             while d do
                 if d:type() == 'function_declarator' then last = d end
                 d = d:field('declarator')[1]
             end
             return last and last:field('parameters')[1] or nil
+        end,
+        -- ★ THE NAME NODE, when the capture landed on the wrong declarator (CART-1090): a
+        -- macro-typed constrained constructor with a member-init list keeps its real
+        -- signature in an ERROR child and exposes the member-init as `declarator:`. See
+        -- `constrained_sig` above for the tree. nil = keep the query's capture.
+        name_node = function (def)
+            local sig = constrained_sig(def)
+            return sig and sig:field('declarator')[1] or nil
         end,
         body_field = 'body',
         -- a lambda is a function SCOPE, not a def: it never reaches the

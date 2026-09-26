@@ -508,7 +508,8 @@ local function cpp_nodes(text)
     local data = ts.extract(root)
     local names = {}
     for _, n in ipairs(data.nodes or {}) do
-        if n.kind == 'function' or n.kind == 'method' then names[n.name] = true end
+        -- the NODE, not `true`: still truthy for every ok(n[…]), and a test can read params
+        if n.kind == 'function' or n.kind == 'method' then names[n.name] = n end
     end
     vim.fn.delete(root, 'rf')
     return names
@@ -635,11 +636,18 @@ test('extract: a REAL qualified name keeps its qualification — the negative co
 -- ★ THE MACRO IN THE TYPE SLOT IS LOAD-BEARING IN THE FIXTURE: without `V8_INLINE` the
 -- parser reads a constructor, parks `: Base(x)` in a field_initializer_list and the bug does
 -- not reproduce. Measured — my first fixture came back green on unfixed code.
+-- ★★ THE GRAMMAR MOVED UNDER THIS TEST (CART-1090, nvim 0.12 / nvim-treesitter `main`). The
+-- newer tree-sitter-cpp places `requires_clause` INSIDE the real function_declarator, but
+-- that declarator now sits in an ERROR child BEFORE the def's `declarator:` field, and the
+-- field holds the member-init `HandleBase(handle)` — so the capture minted `Handle::HandleBase`
+-- and `Tagged::Base`, and out of class a bare `Base`. The fix is cpp's `name_node` hook
+-- (spec/cpp.lua `constrained_sig`); the nested-declarator descent above it in name_text is
+-- kept for the older grammar, and NOTHING HERE EXERCISES IT ANY MORE — its guard is vacuous
+-- under the installed parser.
 test('extract: a C++20 requires-clause is not glued into the constructor NAME', function ()
     if not ready('cpp') then skip 'no cpp parser' end
-    -- RED IF: the name capture stops descending through nested function_declarators — either
-    -- spelling of the constraint, `requires(expr)` and the paren-less `requires expr`,
-    -- produces the identical two-level shape and both must survive it.
+    -- RED IF: the constructor's name stops coming from its OWN signature — either spelling of
+    -- the constraint, `requires(expr)` and the paren-less `requires expr`, must survive it.
     local n = cpp_nodes('#define V8_INLINE inline\n'
         .. 'template <typename T>\nclass Handle {\n public:\n'
         .. '  template <typename S>\n  V8_INLINE Handle(Handle<S> handle)\n'
@@ -656,11 +664,27 @@ test('extract: a C++20 requires-clause is not glued into the constructor NAME', 
     ok(n['Tagged::Tagged'], 'the paren-less constraint spelling too')
     eq(nil, n['Tagged(Addressptr)requiresstd::is_same_v<This,MaybeObject>:Base'],
         'whose glued name also loses the class, because `std::` looks like qualification')
+    -- the NEWER grammar's fabrication: the member-init's base, minted as a method
+    eq(nil, n['Handle::HandleBase'], 'the member-init base is not a method of the class')
+    eq(nil, n['Tagged::Base'], 'in either constraint spelling')
+    -- ★ THE PARAMETERS COME FROM THE SAME SIGNATURE AS THE NAME. The member-init args
+    -- `(handle)` parse as a parameter_declaration with only a TYPE, so reading them answers
+    -- an EMPTY list. RED IF: params_of stops consulting the ERROR-held signature.
+    eq({ 'handle' }, n['Handle::Handle'] and n['Handle::Handle'].params,
+        'the constrained ctor carries its real parameter, not the member-init arguments')
+    eq({ 'ptr' }, n['Tagged::Tagged'] and n['Tagged::Tagged'].params, 'both spellings')
     -- NEGATIVE CONTROLS. An ordinary constructor with a member-initializer list does NOT
     -- nest its declarator, and an ordinary qualified definition is untouched by any of this.
     -- RED IF: the descent starts firing on the one-level shape and truncates real names.
     ok(n['Widget::Widget'], 'an ordinary constructor keeps the name it has today')
     ok(n['ns::f'], 'and a qualified definition keeps its qualifier')
+    -- OUT OF CLASS, the same construct lost the class entirely (`Base`). The expected name
+    -- is what the NO-MACRO twin of this definition yields (measured: `A<T>::A`), not a guess.
+    local o = cpp_nodes('#define V8_INLINE inline\ntemplate <typename T>\n'
+        .. 'template <typename S>\n'
+        .. 'V8_INLINE A<T>::A(A<S> h) requires(is_v<S, T>) : Base(h) {}\n')
+    ok(o['A<T>::A'], 'an out-of-class constrained ctor is named as its no-macro twin is')
+    eq(nil, o['Base'], 'and NOT after the member-init base')
 end)
 
 test('expr: key() handles an ASSIGN node, whose `t` is a TARGET and not a type string',
