@@ -332,7 +332,14 @@ Language support is **per-language and uneven**, and a verb working on Lua says
 nothing about Ruby. `graph_info` reports the graph's own frontier; `census` and
 `externals` report what was not resolved. Check before generalising.
 
-`references/` documents the **interactive** surface, not this one. Do not quote its
+**Before you do anything by hand, read `references/questions.md`**: every instrument in `tools/`, indexed by the
+QUESTION it answers (which client request reaches which handler, what a handler sends, which records are unused,
+did the grammar change the tree, …), the in-process calls that answer a question, and what was done by hand and
+still has no tool. It is FENCED (`tests/questions_index_spec.lua` fails when a tool is missing from it), so unlike
+the files below it cannot go stale by omission. Standing rule (user, 2026-09-26): find what cartograph can do for
+you first, and write every discovery about its capabilities there in the same commit.
+
+The other `references/` files document the **interactive** surface, not this one. Do not quote their
 tables as current without checking — but the four files are not equally stale:
 
 - `commands.md`, `reading-output.md` — pinned at `6ad0701` (2026-07-30), **not**
