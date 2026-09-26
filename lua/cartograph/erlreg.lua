@@ -252,13 +252,27 @@ function M.attach(data)
                                     local from = enclosing(n.file, line)
                                     local fid = (from and from.id) or n.file
                                     local k = fid .. '\31' .. h
-                                    if not refEdge[k] then
-                                        local e = { from = fid, to = h, kind = 'ref',
+                                    -- ★ THE SITE IS THE TUPLE (CART-0847): the edge used to carry `at = {}`, so a
+                                    -- registration could not be navigated to, and the loss report — which reads
+                                    -- claims off positions — saw every registration tuple as dark. An existing
+                                    -- edge between the same pair gains the site too.
+                                    local tn = els[1]:parent()
+                                    local a1, a2, a3, a4 = tn:range()
+                                    local site = { start = { line = a1, char = a2 }, ['end'] = { line = a3, char = a4 } }
+                                    local e = refEdge[k]
+                                    if not e then
+                                        e = { from = fid, to = h, kind = 'ref',
                                             at = {}, xlang = true, erlreg = true }
                                         refEdge[k] = e
                                         data.edges[#data.edges + 1] = e
                                         stats.edges = stats.edges + 1
                                     end
+                                    e.at = e.at or {}
+                                    local dup = false
+                                    for _, x in ipairs(e.at) do
+                                        if x.start and x.start.line == a1 and x.start.char == a2 then dup = true end
+                                    end
+                                    if not dup then e.at[#e.at + 1] = site end
                                 end
                                 stats.regs = stats.regs + 1
                                 if uri then

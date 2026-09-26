@@ -25,7 +25,8 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | One corpus against its pin and baseline | `tools/gate.lua <corpus> [--save]` |
 | WHAT KIND of node moved vs the baseline (a grammar upgrade reading locals as functions shows as `+ function bare`) | `tools/gate.lua <corpus> --kinds` (graphdiff.by_kind) |
 | Did the DF distribution move? (a derived projection counts/struct never compare) | `tools/matrix.lua <corpus> --cols dfshape` — vs the distribution the baseline recorded at `--save` |
-| Does the expression IR read what dataflow reads (the two-implementation self-gate)? | `tools/exprcensus.lua <dir> [--lang <l>] [--show <class>]` |
+| Does the expression IR read what dataflow reads (the two-implementation self-gate)? | `tools/exprcensus.lua <dir> [--lang <l>] [--show <class>]` — class `match` = a match test the IR cannot see from one row (named, not a defect) |
+| What did extraction SEE and not RECORD? Which constructs leave no fact in the graph (the L2 loss)? Is an absence "the code does not do that" or "the schema had no slot"? | `tools/lossreport.lua <corpus|dir> [--lang L] [--top N] [--show TYPE]` — maximal dark subtrees by type and position, staged (extraction vs after the post-passes), a WITNESS line that must decline calls. ejabberd/src: -spec 3391, record constructs, macro args, data tuples, exports; converse.js: imports (no site on import edges), TS declarations |
 | Which inferred edges does the code contradict (fabrication)? | `tools/fabcensus.lua <corpus|path> [--show <bucket>]` |
 | REVERSE: which REFUSED calls could the calling file's own import/require binding settle? (a work list) | `tools/fabcensus.lua <root> --backward` — buckets settles / settles-by-shape / several / via-reexport / bound-lacks |
 | Which files USE another file's export (or global) with no require of it — working by load order? (a work list) | `tools/userequire.lua <corpus>`; lint rule `use-without-require` (info, suggestive) |
@@ -120,6 +121,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | One multi-clause erlang function as one record, arms as alternatives | `expr.of(store, fn_id).fl` (stitched; `flow.successors(fl)`) |
 | What XML a record pattern accepts | `xmppspec.lift(facts, spec)` + `xmppspec.render(V)` |
 | What value (term) an erlang expression builds | `erlterms.term(node, src, ctx)` + `erlterms.status(term)` |
+| Run the enrichment passes the open path runs (xlang, sql, frameworks, k8s/proto, erlreg, db) over extracted data | `require('cartograph.postpass').run(data, { say = fn, skip = { name = true } })` — `PASSES` is the one declared sequence |
 | A module's visible records; its record uses; unused records/fields | `erlrecords.new{…}:scope(f)`, `:uses(f)`, `:check(f)`, `erlrecords.usage(E, files, root)` |
 | Every stx template in a directory (namespaces harvested first) | `stx.scan(dir, {all})`, `stx.templates(src, {resolve})`, `stx.inventory(recs)` |
 | Server endpoints, a handler's heads, its sends | `xmppserver.endpoints(data)`, `.reads(store, h)`, `.sends(dir, {E, spec})` |
