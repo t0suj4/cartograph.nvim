@@ -138,15 +138,17 @@ function M.parse_source(src, path)
 
     local in_define = false
     local function field_list(n)
-        local out = {}
+        local out, wild = {}, false
         for _, rf in ipairs(n:field('fields')) do
             local nm = f1(rf, 'name')
-            -- `#r{_ = V}` sets every unnamed field: a wildcard, not a field reference
+            -- `#r{_ = V}` sets every unnamed field: a wildcard, not a field reference (but it TOUCHES them all)
             if nm and nm:type() == 'atom' then
                 out[#out + 1] = { name = atom(text(nm)), line = rf:start() + 1 }
+            elseif nm then
+                wild = true
             end
         end
-        return out
+        return out, wild
     end
     local function record_name(n)
         local rn = f1(n, 'name')
@@ -172,7 +174,8 @@ function M.parse_source(src, path)
                 u.fields = (fnm and fnm:type() == 'atom') and { { name = atom(text(fnm)), line = fnm:start() + 1 } }
                     or {}
             else
-                u.fields = field_list(n)
+                u.fields, u.wildcard = field_list(n)
+                u.wildcard = u.wildcard or nil
             end
             facts.uses[#facts.uses + 1] = u
         elseif t == 'call' then
@@ -419,6 +422,67 @@ function M.new(opts)
 end
 
 --- The ordered field names: the identity two same-named records are compared on.
+--- ★ THE REVERSE OF `check` (declaration -> uses): which records the corpus DECLARES and nothing uses, and which
+--- fields of a used record no use ever names. A WORK LIST, not a verdict: a field can be read POSITIONALLY
+--- (element/2, setelement/3 — counted per module and flagged, never subtracted), a record can be used only inside
+--- a -define body in a header (not graded here), and a record exported in a header may be used by a consumer
+--- OUTSIDE the tree (the reason only records declared under `root` are reported). `record_info/2` and a
+--- `#r{_ = V}` wildcard touch every field.
+---   files: the modules to read uses from; root: the tree whose DECLARATIONS are reported
+--- -> { records = { {decl, uses, value_uses, type_only} }, unused = { decl… }, fields = { {decl, field, positional} },
+---      declared = n }
+function M.usage(E, files, root)
+    root = abs(root)
+    local decls, used = {}, {}
+    local function key(d) return (d.file or '?') .. ':' .. tostring(d.line) .. ':' .. d.name end
+    for _, f in ipairs(files) do
+        local S = E:scope(f)
+        for _, d in pairs(S.records or {}) do
+            if d.file and d.file:sub(1, #root + 1) == root .. '/' then decls[key(d)] = d end
+        end
+        for _, vs in pairs(S.variants or {}) do
+            for _, d in ipairs(vs) do
+                if d.file and d.file:sub(1, #root + 1) == root .. '/' then decls[key(d)] = d end
+            end
+        end
+        local src = read(abs(f))
+        local positional = src and (src:find('%f[%w_]element%(') or src:find('%f[%w_]setelement%(')) and true or false
+        for _, u in ipairs(E:uses(f)) do
+            local d = u.name and S.records[u.name]
+            if d then
+                local k = key(d)
+                local r = used[k]
+                if not r then r = { n = 0, value = 0, fields = {}, all = false, positional = false }; used[k] = r end
+                r.n = r.n + 1
+                if u.ctx ~= 'type' then r.value = r.value + 1 end
+                if u.kind == 'record_info' or u.wildcard then r.all = true end
+                for _, fl in ipairs(u.fields or {}) do r.fields[fl.name] = true end
+                if positional then r.positional = true end
+            end
+        end
+    end
+    local out = { records = {}, unused = {}, fields = {}, declared = 0 }
+    local keys = {}
+    for k in pairs(decls) do keys[#keys + 1] = k end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        local d, r = decls[k], used[k]
+        out.declared = out.declared + 1
+        if not r then out.unused[#out.unused + 1] = d
+        else
+            out.records[#out.records + 1] = { decl = d, uses = r.n, value_uses = r.value, type_only = r.value == 0 }
+            if not r.all then
+                for _, fl in ipairs(d.fields or {}) do
+                    if not r.fields[fl.name] then
+                        out.fields[#out.fields + 1] = { decl = d, field = fl.name, positional = r.positional }
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
 function M.signature(decl)
     local t = {}
     for i, f in ipairs(decl.fields) do t[i] = f.name or '?' end

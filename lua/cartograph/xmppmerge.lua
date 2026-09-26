@@ -512,7 +512,28 @@ function M.merge(opts)
     local sdata = ts.extract(opts.server)
     store.ingest(sdata)
     local endpoints = X.endpoints(sdata)
-    local by_uri, reads_cache = {}, {}
+    -- ★ THE SERVER'S POINT OF VIEW, recorded while the client's is computed (one pass, two readings): every
+    -- registered handler with the namespaces it serves (handler -> namespaces, the endpoint relation inverted),
+    -- and per clause the requests that REACH it, the ones it would accept but an earlier clause takes
+    -- (SHADOWED), and the ones it REJECTS, with the field.
+    local server = {}
+    local function srv(e)
+        local h = server[e.handler]
+        if not h then
+            h = { handler = e.handler, mod = e.mod, fn = e.fn, uris = {}, carriers = {}, clauses = {} }
+            server[e.handler] = h
+        end
+        if e.uri and not vim.tbl_contains(h.uris, e.uri) then h.uris[#h.uris + 1] = e.uri end
+        h.carriers[e.carrier] = true
+        return h
+    end
+    local function clause_slot(h, k)
+        local c = h.clauses[k]
+        if not c then c = { reached = {}, shadowed = {}, rejected = {} }; h.clauses[k] = c end
+        return c
+    end
+    for _, e in ipairs(endpoints) do if e.handler then srv(e) end end
+    local by_uri, reads_cache, requested = {}, {}, {}
     for _, e in ipairs(endpoints) do
         if e.uri and e.handler then
             local l = by_uri[e.uri]; if not l then l = {}; by_uri[e.uri] = l end
@@ -600,6 +621,7 @@ function M.merge(opts)
                 local child = kids[1]
                 local uri = child and ((child.el.ns and child.el.ns.uri) or child.inherit)
                 local row = { file = f.rel, line = r.line, owner = o and o.id, uri = uri, type = ty, candidates = {} }
+                if uri then requested[uri] = true end
                 rows[#rows + 1] = row
                 local cands = uri and by_uri[uri] or nil
                 if not cands then
@@ -671,9 +693,13 @@ function M.merge(opts)
                                 if U then cterm = ct; break end
                             end
                             if U then
-                                if cand.clause then cand.shadowed[#cand.shadowed + 1] = k
+                                local sh = server[e.handler]
+                                if cand.clause then
+                                    cand.shadowed[#cand.shadowed + 1] = k
+                                    if sh then table.insert(clause_slot(sh, k).shadowed, row) end
                                 else
                                     cand.clause = k
+                                    if sh then table.insert(clause_slot(sh, k).reached, row) end
                                     cand.binds = {}
                                     for g, t in pairs(U.right or {}) do
                                         if g:sub(1, 2) == 'S:' then
@@ -690,6 +716,9 @@ function M.merge(opts)
                             else
                                 local where = path_names(cterm, at, spec)
                                 cand.rejected[#cand.rejected + 1] = { clause = k, why = why, at = where }
+                                if server[e.handler] then
+                                    table.insert(clause_slot(server[e.handler], k).rejected, { row = row, why = why, at = where })
+                                end
                                 local key = (where ~= '' and where or '(top)') .. ': ' .. tostring(why):gsub('"[^"]*"', '"…"')
                                 stats.reasons[key] = (stats.reasons[key] or 0) + 1
                             end
@@ -704,7 +733,24 @@ function M.merge(opts)
             end
         end
     end
-    return { rows = rows, stats = stats }
+    -- every clause of every registered handler gets a slot, the unreached ones included, with the reason
+    for h, rec in pairs(server) do
+        local rd = reads(h)
+        rec.nclauses = rd and #(rd.heads or {}) or 0
+        rec.heads = rd and rd.heads or {}
+        local asked = false
+        for _, u in ipairs(rec.uris) do if requested[u] then asked = true end end
+        rec.asked = asked
+        for k = 1, rec.nclauses do
+            local c = clause_slot(rec, k)
+            if #c.reached > 0 then c.status = 'reached'
+            elseif not asked then c.status = 'no request to its namespace'
+            elseif #c.shadowed > 0 then c.status = 'shadowed'
+            elseif #c.rejected > 0 then c.status = 'every request rejected'
+            else c.status = 'not tried' end
+        end
+    end
+    return { rows = rows, stats = stats, server = server }
 end
 
 -- exported for the spec

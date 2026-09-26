@@ -1,12 +1,18 @@
 -- xmppmerge — MERGE across the wire, censused: every converse.js function that builds an IQ request, joined to the
 -- ejabberd handler clause that accepts it (unify ∘ compose over the decoded record; lua/cartograph/xmppmerge.lua).
 --
---   nvim --headless -u NONE -l tools/xmppmerge.lua [--client DIR] [--server DIR] [--spec FILE] [--rows] [--check-absent]
+--   nvim --headless -u NONE -l tools/xmppmerge.lua [--client DIR] [--server DIR] [--spec FILE] [--rows] [--server-view]
+--        [--check-absent]
 --
 -- Defaults: --client ~/work/brotardcast/converse.js/src  --server ~/work/brotardcast/ejabberd
 --           --spec ~/git/xmpp/specs/xmpp_codec.spec  (all read-only)
 -- --rows          one block per request: its owner, and per candidate handler the clause it reaches, the clauses it
 --                 shadows, each rejecting clause with the field and the clash, and the names bound across the wire
+-- --server-view   THE SERVER'S POINT OF VIEW, the same pass read the other way: per registered handler the namespaces
+--                 it serves, and per clause whether a client request REACHES it (and from which client functions),
+--                 only SHADOWS it (an earlier clause takes the request), is REJECTED by every request (with the
+--                 field), or has no client request to its namespace at all. An unreached clause is a WORK LIST:
+--                 server behaviour this client never uses, or a request this reader does not see.
 -- --check-absent  the ORACLE for the absent-attribute rule: xmppmerge.absent_value against every generated
 --                 `decode_<xml>_attr_<name>(__TopXMLNS, undefined) -> V` clause in the spec's sibling src/ directory
 -- Known-nonzero counters: requests must equal the IQ get/set templates stxcensus reports, and owned + unowned the same.
@@ -16,12 +22,13 @@ package.path = here .. '/lua/?.lua;' .. here .. '/lua/?/init.lua;' .. package.pa
 
 local o = { client = '~/work/brotardcast/converse.js/src', server = '~/work/brotardcast/ejabberd',
     spec = '~/git/xmpp/specs/xmpp_codec.spec' }
-local want_rows, check_absent = false, false
+local want_rows, check_absent, server_view = false, false, false
 local i = 1
 while arg[i] do
     local a = arg[i]
     if a == '--rows' then want_rows = true
     elseif a == '--check-absent' then check_absent = true
+    elseif a == '--server-view' then server_view = true
     elseif a:match('^%-%-') and arg[i + 1] then o[a:sub(3)] = arg[i + 1]; i = i + 1
     else io.stderr:write('unknown argument ' .. a .. '\n'); os.exit(2) end
     i = i + 1
@@ -121,3 +128,46 @@ if want_rows then
     end
 end
 for _, h in ipairs(st.unknown_holes or {}) do if want_rows then io.write('  unknown content hole: ', h, '\n') end end
+
+-- the server's point of view
+local hs = {}
+for _, rec in pairs(R.server or {}) do hs[#hs + 1] = rec end
+table.sort(hs, function (a, b) return (a.mod or '') .. ':' .. (a.fn or '') < (b.mod or '') .. ':' .. (b.fn or '') end)
+local by_status, asked, reached_h, nclauses = {}, 0, 0, 0
+for _, rec in ipairs(hs) do
+    if rec.asked then asked = asked + 1 end
+    local any = false
+    for k = 1, rec.nclauses do
+        nclauses = nclauses + 1
+        local c = rec.clauses[k]
+        by_status[c.status] = (by_status[c.status] or 0) + 1
+        if c.status == 'reached' then any = true end
+    end
+    if any then reached_h = reached_h + 1 end
+end
+print(('  server view: handlers %d, with a client request to their namespace %d, reached %d; clauses %d: %s')
+    :format(#hs, asked, reached_h, nclauses, top(by_status, 6)))
+if server_view then
+    local X = require 'cartograph.xmppserver'
+    for _, rec in ipairs(hs) do
+        local cs = {}
+        for c in pairs(rec.carriers) do cs[#cs + 1] = c end
+        table.sort(cs)
+        io.write(('\n%s:%s  [%s]  %s\n'):format(rec.mod or '?', rec.fn or '?', table.concat(cs, ','), table.concat(rec.uris, '  ')))
+        for k = 1, rec.nclauses do
+            local c = rec.clauses[k]
+            local owners, seen = {}, {}
+            for _, r in ipairs(c.reached) do
+                local o = r.owner or (r.file .. ':' .. r.line)
+                if not seen[o] then seen[o] = true; owners[#owners + 1] = o end
+            end
+            io.write(('  #%d %-28s %s\n'):format(k, c.status, X.head_line(rec.heads[k] or {})))
+            for _, o in ipairs(owners) do io.write('       <- ', o, '\n') end
+            if c.status == 'every request rejected' then
+                local why = {}
+                for _, x in ipairs(c.rejected) do why[(x.at ~= '' and x.at or '(top)') .. ': ' .. tostring(x.why)] = true end
+                for w in pairs(why) do io.write('       rejects ', w, '\n') end
+            end
+        end
+    end
+end

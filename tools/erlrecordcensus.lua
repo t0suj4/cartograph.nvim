@@ -2,7 +2,10 @@
 -- dependency roots attached read-only (CART-1095).
 --
 --   nvim --headless -u NONE -l tools/erlrecordcensus.lua [--root DIR] [--app NAME=DIR]... [--lib DIR]...
---        [--no-default-apps] [--rows] [--erl]
+--        [--no-default-apps] [--rows] [--erl] [--unused]
+--   --unused  THE REVERSE (declaration -> uses): records declared in the tree that no module uses, and fields of a
+--             used record that no use names — a WORK LIST (positional element/2 access and header -define bodies
+--             are not seen; see erlrecords.usage).
 --
 -- ★★★ THE ORACLE IS THE COMPILER. erl_lint rejects an unknown record and an unknown field, so in a tree that
 -- compiles, EVERY `#r{f = …}`, `#r.f`, `X#r.f`, `X#r{…}`, is_record(X, r), record_info(_, r) resolves to a record
@@ -39,7 +42,7 @@ local ROOTS = {
     libs = {},
 }
 
-local want_rows, want_erl = false, false
+local want_rows, want_erl, want_unused = false, false, false
 do
     local i = 1
     local apps, libs, noapps = {}, {}, false
@@ -54,6 +57,7 @@ do
         elseif a == '--no-default-apps' then noapps = true
         elseif a == '--rows' then want_rows = true
         elseif a == '--erl' then want_erl = true
+        elseif a == '--unused' then want_unused = true
         else print('unknown argument: ' .. a); os.exit(2) end
         i = i + 1
     end
@@ -309,6 +313,25 @@ print(('    uses of a name with >1 field list %d · of the resolved ones, a last
 print('      (rule: "last" = the greatest `path:line` string among a name\'s declaration sites; any single choice is')
 print('       one module\'s view, and this number moves with the choice)')
 
+if want_unused then
+    local U = ER.usage(E, files, root)
+    local type_only, positional = 0, 0
+    for _, r in ipairs(U.records) do if r.type_only then type_only = type_only + 1 end end
+    for _, f in ipairs(U.fields) do if f.positional then positional = positional + 1 end end
+    local rel = function (p) return (p:gsub('^' .. vim.pesc(root) .. '/', '')) end
+    io.write(('\nREVERSE (declaration -> uses), a work list: %d record(s) declared under the root; %d never used by any module, '
+        .. '%d used only in type specs; %d field(s) of used records never named by a use (%d in modules that also call '
+        .. 'element/setelement, so possibly read by position)\n'):format(U.declared, #U.unused, type_only, #U.fields, positional))
+    for _, d in ipairs(U.unused) do io.write(('  unused record  #%s  %s:%d\n'):format(d.name, rel(d.file), d.line)) end
+    for _, r in ipairs(U.records) do
+        if r.type_only then io.write(('  types only     #%s  %s:%d\n'):format(r.decl.name, rel(r.decl.file), r.decl.line)) end
+    end
+    for _, f in ipairs(U.fields) do
+        io.write(('  unnamed field  #%s.%s  %s:%d%s\n'):format(f.decl.name, f.field, rel(f.decl.file), f.decl.line,
+            f.positional and '  (module uses element/setelement)' or ''))
+    end
+end
+
 if not want_erl then return end
 
 -- ── --erl: the REAL preprocessor, joined row by row ─────────────────────────────────────────────────────────────
@@ -518,3 +541,4 @@ print(('                       in a file where epp rejected a form for an undefi
     :format(epp_rej, #only_ours))
 for i = 1, math.min(10, #only_ours) do print('      only erlrecords: ' .. only_ours[i]:sub(#root + 2)) end
 vim.fn.delete(tmp, 'rf')
+

@@ -264,3 +264,34 @@ process_local_iq(#iq{type = get, sub_els = [#disco_info{node = Node}]} = IQ) -> 
     eq(1, (s.iq or {}).ok); eq(1, (s.disco_info or {}).ok)
     vim.fn.delete(base, 'rf')
 end)
+
+test('erlrecords.usage: the REVERSE — declared-but-unused records, fields no use names, wildcard / record_info / types', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local ER = require 'cartograph.erlrecords'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/src', 'p'); vim.fn.mkdir(root .. '/include', 'p')
+    local function w(p, t) local fd = assert(io.open(root .. '/' .. p, 'w')); fd:write(t); fd:close() end
+    w('include/x.hrl', '-record(a, {f1, f2}).\n-record(b, {g}).\n-record(c, {h1, h2}).\n-record(d, {i}).\n-record(e, {j}).\n')
+    w('src/m.erl', table.concat({
+        '-module(m).',
+        '-include("x.hrl").',
+        '-spec t() -> #e{}.',
+        'f() -> #a{f1 = 1}.',
+        'g(X) -> X#c{_ = 0}.',
+        'h() -> record_info(fields, d).',
+        't() -> ok.', '' }, '\n'))
+    local E = ER.new { include_dirs = { root .. '/include' } }
+    local U = ER.usage(E, { root .. '/src/m.erl' }, root)
+    vim.fn.delete(root, 'rf')
+    eq(5, U.declared)
+    local unused = {}
+    for _, d in ipairs(U.unused) do unused[#unused + 1] = d.name end
+    eq({ 'b' }, unused, 'b is declared and never used')
+    local fields = {}
+    for _, f in ipairs(U.fields) do fields[#fields + 1] = f.decl.name .. '.' .. f.field end
+    table.sort(fields)
+    eq({ 'a.f2', 'e.j' }, fields, 'a.f2 is never named; the wildcard touches c, record_info touches d')
+    local types = {}
+    for _, r in ipairs(U.records) do if r.type_only then types[#types + 1] = r.decl.name end end
+    eq({ 'e' }, types, 'e appears only in a -spec')
+end)

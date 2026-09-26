@@ -118,10 +118,15 @@ export function viaCall(api) {
 local SERVER = [[
 -module(mod_t).
 start(Host) ->
-    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_DISCO_INFO, ?MODULE, process_iq).
+    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_DISCO_INFO, ?MODULE, process_iq),
+    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_VERSION, ?MODULE, process_iq),
+    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_DISCO_ITEMS, ?MODULE, other_iq).
 process_iq(#iq{type = set} = IQ) -> IQ;
 process_iq(#iq{type = get, from = #jid{luser = _U}, sub_els = [#disco_info{node = <<"special">>}]} = IQ) -> IQ;
-process_iq(#iq{type = get, sub_els = [#disco_info{node = Node}]} = IQ) -> {IQ, Node}.
+process_iq(#iq{type = get, sub_els = [#disco_info{node = Node}]} = IQ) -> {IQ, Node};
+process_iq(#iq{type = get} = IQ) -> IQ;
+process_iq(#iq{type = error} = IQ) -> IQ.
+other_iq(#iq{type = get} = IQ) -> IQ.
 ]]
 
 local function write(path, text)
@@ -161,7 +166,7 @@ test('xmppmerge: a request reaches the FIRST clause it unifies with, later ones 
     eq('sub_els.[].node', rej[2], '#2 rejects on the node, by field name — NOT on `from`: the server stamps it')
     local info = row(R, '::info@')
     eq(2, info.candidates[1].clause, 'a client HOLE may be "special": #2 is reachable, the join over-approximates')
-    eq({ 3 }, info.candidates[1].shadowed)
+    eq({ 3, 4 }, info.candidates[1].shadowed)
     eq(1, row(R, '::setter@').candidates[1].clause)
 end)
 
@@ -201,4 +206,25 @@ test('xmppmerge: the absent-attribute rule matches the generated decoder shapes'
     eq('', M.absent_value({ dec = '{xmpp_lang, check, []}' }).v, 'a checker keeps the binary')
     eq('absent', M.absent_value({ required = true }).k, 'a required attribute: a decode error')
     eq('available', M.absent_value({ default = 'available' }).v, 'an explicit default wins')
+end)
+
+test('xmppmerge: the SERVER view — handler -> namespaces, and per clause reached / shadowed / rejected / unasked', function ()
+    need()
+    local R = run()
+    local h, other
+    for _, rec in pairs(R.server) do
+        if rec.fn == 'process_iq' then h = rec elseif rec.fn == 'other_iq' then other = rec end
+    end
+    table.sort(h.uris)
+    eq({ 'http://jabber.org/protocol/disco#info', 'jabber:iq:version' }, h.uris, 'one handler, two namespaces')
+    eq(5, h.nclauses)
+    local st = {}
+    for k = 1, 5 do st[k] = h.clauses[k].status end
+    eq({ 'reached', 'reached', 'reached', 'shadowed', 'every request rejected' }, st)
+    local who = {}
+    for _, r in ipairs(h.clauses[3].reached) do who[#who + 1] = r.owner:match('::(%w+)@') end
+    table.sort(who)
+    -- `caller` only passes a fragment: the request is BUILT, and owned, by wrap()
+    eq({ 'plain', 'viaCall', 'withLocal', 'wrap' }, who, 'clause #3 lists the client functions that reach it')
+    eq('no request to its namespace', other.clauses[1].status, 'disco#items: registered, never asked')
 end)
