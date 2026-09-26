@@ -6437,9 +6437,13 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- inside the def's own subtree. bash needs this — one exotic
         -- parameter expansion at line 580 must not tear the remaining 98%
         -- of a 26k-line script (testssl.sh, ble.sh contribs measured).
-        local function torn_of(dn, sp)
+        local function torn_of(dn, sp, dname)
             if spec.torn_by_node then
                 return errow ~= nil and dn:has_error() or nil
+            end
+            -- C/C++ (CART-1084): torn when the def's own CONTEXT is damaged, wherever the file's first error is
+            if spec.torn_context then
+                return errow ~= nil and spec.torn_context(dn, dname) or nil
             end
             return errow and sp.start.line >= errow or nil
         end
@@ -6587,7 +6591,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     fnDefLines[sp.start.line] = true
                     goto fn_done
                 end
-                local torn = torn_of(defn, sp)
+                local torn = torn_of(defn, sp, name)
                 -- FINE flow rows (df-strangler step 4): eager per-fn flow, folded
                 -- at ingest (store.ingest). Coverage MATCHES the generic df
                 -- (body_field langs) — haskell's custom-dataflow model isn't

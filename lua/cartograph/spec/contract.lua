@@ -294,6 +294,7 @@ M.SLOTS = {
     -- QUIRKS (quarantine): single-language shims. Rule — each carries a comment
     -- naming its generalization candidate, or it shouldn't be here.
     torn_by_node = 'QUIRKS',     -- node-local tearing after a parse error
+    torn_context = 'QUIRKS',     -- C/C++: torn when the def's CONTEXT is damaged (CART-1084)
     toplevel_only = 'QUIRKS', toplevel_parent = 'QUIRKS', is_top = 'QUIRKS',
     block_container = 'QUIRKS',  -- grammar shape → coarse-region container
     -- the FIELD holding a call's argument container, when the grammar does not

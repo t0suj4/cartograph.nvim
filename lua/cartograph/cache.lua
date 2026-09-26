@@ -409,7 +409,10 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 199 -- v199: C AND C++ ARE ONE LINKAGE FAMILY IN THE NAME JOIN (CART-1079): a bare call reaches a free function
+M.VERSION = 200 -- v200: C/C++ DEFS ARE TORN BY DAMAGED CONTEXT, NOT BY POSITION (CART-1084): a def after a file's first
+-- parse error is indexed unless its own subtree has an error, an ancestor is ERROR, or an ancestor is not a structural
+-- container (the class-body-parsed-as-function-body shape); a function-like macro only by its own error or an ERROR
+-- ancestor. Prior: v199: C AND C++ ARE ONE LINKAGE FAMILY IN THE NAME JOIN (CART-1079): a bare call reaches a free function
 -- across the two (a .c definition always; a C++ one only with extern "C" evidence, node.clink, on its definition or a header
 -- prototype); methods, namespaced and qualified calls never cross. And a C/C++ `static` or a source-file macro is FILE-LOCAL
 -- (node.flocal, confined; CART-1081). Prior: v198: A TYPE-VARIABLE RETURN IS TYPED BY ITS RETURN FLOW (CART-1077): a java method returning its own

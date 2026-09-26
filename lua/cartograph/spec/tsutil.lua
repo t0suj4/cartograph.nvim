@@ -167,6 +167,76 @@ function M.c_file_local(defn, src, file)
     return false
 end
 
+-- ★ C/C++ TEARING BY CONTEXT, NOT BY POSITION (CART-1084). The default torn policy tears every def after a file's first
+-- parse error, calibrated on truncated PHP classes whose later methods float unqualified. In C/C++ that tore 58.5% of v8's
+-- functions (41k of them torn by POSITION ALONE: clean subtree, clean ancestors) and hid the real definitions of v8's
+-- CHECK and scip's SCIP_CALL behind a distant error. What the default protects against is real, and it has a SHAPE in
+-- C++: error recovery parses a class body as a FUNCTION body, so its inline methods come out as free functions nested
+-- inside a bogus function_definition (v8 instruction.h `successors`, bigint.cc `set_digit`, sampled). A genuine
+-- definition only ever sits under structural containers. So a def is torn when its HEAD has an error (a function's
+-- body may hold errors without moving its name), an ancestor is an ERROR node, or an ancestor is anything but a
+-- structural container. A function-like macro is
+-- self-contained (its extent is the #define and its continuations): only its own error or an ERROR ancestor tears it.
+local C_STRUCTURAL = {
+    translation_unit = true, declaration_list = true, namespace_definition = true, linkage_specification = true,
+    template_declaration = true, field_declaration_list = true, class_specifier = true, struct_specifier = true,
+    union_specifier = true, friend_declaration = true, preproc_if = true, preproc_ifdef = true, preproc_else = true,
+    preproc_elif = true, preproc_elifdef = true,
+}
+-- does `n` hold an actual ERROR node? has_error() alone is not the question: it is also true for MISSING tokens, and on
+-- a preproc_function_def it can be true with NO ERROR or MISSING node anywhere below (scip def.h SCIP_CALL_ABORT@342,
+-- luanti mini-gmp.c gmp_umul_ppmm@102, both kept by the old positional rule because they precede the first ERROR). The
+-- positional rule only ever looked at ERROR nodes, so this does too; has_error() is only the pruning hint.
+local function has_error_node(n)
+    if n:type() == 'ERROR' then return true end
+    if not n:has_error() then return false end
+    for c in n:iter_children() do
+        if has_error_node(c) then return true end
+    end
+    return false
+end
+-- is this function_definition's declarator a qualified name (`X::m`, `ns::f`, `X::~X`, `X::operator=`)?
+local C_DECL_WRAP = { pointer_declarator = true, reference_declarator = true, parenthesized_declarator = true,
+    attributed_declarator = true }
+local function c_qualified_def(dn)
+    if dn:type() ~= 'function_definition' then return false end
+    local d = dn:field('declarator')[1]
+    while d and C_DECL_WRAP[d:type()] do d = d:field('declarator')[1] or d:named_child(0) end
+    if not (d and d:type() == 'function_declarator') then return false end
+    local name = d:field('declarator')[1]
+    return name ~= nil and name:type() == 'qualified_identifier'
+end
+function M.c_torn_context(dn, dname)
+    -- the def's IDENTITY is its head (type, declarator, name), not its body: an error inside the body does not move
+    -- the name, and the old positional rule kept exactly those defs when they started before the first error (7kaa
+    -- OGAMENCY.cpp disp_picture, OSPREOFF.cpp use_offset_method: clean heads at top level, ERRORs in the body)
+    local body = dn:type() == 'function_definition' and dn:field('body')[1] or nil
+    if body then
+        local bid = body:id()
+        for c in dn:iter_children() do
+            if c:id() ~= bid and has_error_node(c) then return true end
+        end
+    elseif has_error_node(dn) then
+        return true
+    end
+    -- a QUALIFIED declarator (`void MacroAssembler::LoadPC(...)`) names its own class: what the structural check guards
+    -- against is an UNQUALIFIED inline method that lost its class, and a qualified one cannot. v8's
+    -- macro-assembler-ppc.cc nests every later definition inside a function body (an #if/#else with braces split across
+    -- the branches), and 213 correctly named methods there were torn by the structural check alone.
+    -- and so does a def cartograph NAMED with its class (`JSCallReducerAssembler::ReceiverInput`, recovered from a class
+    -- body parsed as a function body, the old rule's pre-error survivors): only an UNQUALIFIED name is at risk
+    local free = dn:type() == 'preproc_function_def' or c_qualified_def(dn)
+        or (dname ~= nil and dname:find('::', 1, true) ~= nil)
+    local p = dn:parent()
+    while p do
+        local t = p:type()
+        if t == 'ERROR' then return true end
+        if not free and not C_STRUCTURAL[t] then return true end
+        p = p:parent()
+    end
+    return false
+end
+
 function M.c_linkage(defn, src)
     local p = defn
     while p do
