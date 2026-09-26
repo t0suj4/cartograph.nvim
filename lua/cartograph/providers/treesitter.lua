@@ -1557,6 +1557,31 @@ local function elang_for(file)
     FILE_ELANG[file] = { lang or false, spec or false }
     return lang, spec
 end
+-- ★ THE NAME JOIN, PARTITIONED BY LANGUAGE (profile of resolve_setup on hive's metastore, CART-1056). `admits` rejects
+-- a candidate from another language unconditionally, so filtering the list first is the same answer, but it was paid
+-- per call and per candidate: a thrift C++ `read` walked ~5,750 `read` defs, most of them Java and PHP, to keep its
+-- own language's. 67k calls made 53M candidate visits, 49.7M of them from C++ and PHP. The filtered list is cached
+-- per list and rebuilt when the list grows or when set_h_lang replaces the language memo (a `.h` file can change
+-- language). Order is preserved, so the fit set, and every refusal built from it, is unchanged. Exposed on M
+-- because M.extract is at LuaJIT's upvalue limit.
+local LANG_LISTS = setmetatable({}, { __mode = 'k' })
+function M._lang_list(list, clang)
+    local e = LANG_LISTS[list]
+    if not e or e.n ~= #list or e.memo ~= FILE_ELANG then
+        e = { n = #list, memo = FILE_ELANG, by = {} }
+        LANG_LISTS[list] = e
+    end
+    local key = clang or false
+    local out = e.by[key]
+    if not out then
+        out = {}
+        for _, n in ipairs(list) do
+            if elang_for(n.file) == clang then out[#out + 1] = n end
+        end
+        e.by[key] = out
+    end
+    return out
+end
 function elang_uncached(file)
     local ext = file:match('%.([%w]+)$') or ''
     local hit = EXT_ELANG[ext]
@@ -8358,7 +8383,8 @@ local MATCH_OPTS = { match_limit = 65536 }
             -- unique agreement the block below runs exactly as it did.
             if dotted then
                 local agree
-                for _, list in ipairs({ tail[tl] or {}, exact[tl] or {} }) do
+                local lt, le = tail[tl], exact[tl]
+                for _, list in ipairs({ lt and M._lang_list(lt, clang) or {}, le and M._lang_list(le, clang) or {} }) do
                     for _, n in ipairs(list) do
                         if recv_agrees(name, n.name) and admits(n) then
                             if agree and agree.id ~= n.id then agree = nil; goto no_agree end
@@ -8370,7 +8396,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 ::no_agree::
             end
             local fitset = {}
-            for _, n in ipairs(tc) do
+            for _, n in ipairs(M._lang_list(tc, clang)) do
                 if admits(n) then fitset[#fitset + 1] = n end
             end
             if #fitset == 1 then return fitset[1], true end
@@ -9254,7 +9280,8 @@ function M.relink(data, touched)
             -- unique agreement the block below runs exactly as it did.
             if dotted then
                 local agree
-                for _, list in ipairs({ tail[tl] or {}, exact[tl] or {} }) do
+                local lt, le = tail[tl], exact[tl]
+                for _, list in ipairs({ lt and M._lang_list(lt, clang) or {}, le and M._lang_list(le, clang) or {} }) do
                     for _, n in ipairs(list) do
                         if recv_agrees(name, n.name) and admits(n) then
                             if agree and agree.id ~= n.id then agree = nil; goto no_agree end
@@ -9266,7 +9293,7 @@ function M.relink(data, touched)
                 ::no_agree::
             end
             local fitset = {}
-            for _, n in ipairs(tc) do
+            for _, n in ipairs(M._lang_list(tc, clang)) do
                 if admits(n) then fitset[#fitset + 1] = n end
             end
             if #fitset == 1 then return fitset[1], true end
