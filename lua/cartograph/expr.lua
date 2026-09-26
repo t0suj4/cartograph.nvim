@@ -750,6 +750,8 @@ local PLAIN_ASSIGN = { assignment_statement = true, assignment = true,
 --   RECFIELD  `X#rec.f`: a field read that also names its record
 local PATMATCH = { match_expr = true }
 local RECFIELD = { record_field_expr = true }
+--   RECCONS   `#r{f = V}` / `X#r{f = V}` in a VALUE position: a constructed record (CART-1112)
+local RECCONS = { record_expr = true, record_update_expr = true }
 --   WILDCARD  a name node whose text `_` is the wildcard (erlang `var`; `_` is an ordinary name elsewhere)
 local WILDCARD = { var = true }
 
@@ -1030,6 +1032,26 @@ function build_core(node, src, lang)
             for _, x in ipairs(reads) do kids[#kids + 1] = build(x, src, lang) end
             return { k = '?', t = t, kids = kids }
         end
+    end
+    -- ★ A RECORD BUILT IN A VALUE POSITION IS A TABLE (CART-1112): `#disco_info{node = N}` is an allocation whose
+    -- field values READ names, exactly the shape `table` already gives Lua/JS constructors, tagged with its RECORD.
+    -- An update `X#r{f = V}` carries its BASE as the first kid (it is read) and as `base`. A pattern never gets
+    -- here: the nested-pattern branch above skips a pattern field before it is built.
+    if RECCONS[t] then
+        local rn = node:field('name')[1]
+        rn = rn and (rn:field('name')[1] or rn)
+        local kids, base = {}, nil
+        local bn = node:field('expr')[1]
+        if bn then base = build(bn, src, lang); kids[1] = base end
+        for _, rf in ipairs(node:field('fields')) do
+            local fname = rf:field('name')[1]
+            local fe = rf:field('expr')[1]
+            local vn = fe and (fe:field('expr')[1] or fe)
+            local key = { k = 'lit', ty = 'str', v = fname and txt(fname, src) or '_' }
+            local val = vn and build(vn, src, lang) or nil
+            kids[#kids + 1] = { k = 'pair', key = key, val = val, kids = val and { key, val } or { key } }
+        end
+        return { k = 'table', rec = rn and txt(rn, src) or nil, base = base, kids = kids }
     end
     -- erlang `X#rec.f` (CART-0957): a field READ whose base is X, and which also names the RECORD the
     -- field belongs to (`rec`), because an erlang field name means nothing without its record

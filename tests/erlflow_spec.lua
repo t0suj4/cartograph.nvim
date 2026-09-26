@@ -184,3 +184,17 @@ test('erlflow: a binary of plain string segments in a head is a constant; one wi
     eq('ab', per[2][1].value)
     eq(0, #per[3], 'a sized segment claims nothing')
 end)
+
+test('erlflow: a record built in a value position is a TABLE with its record, an update reads its base', function ()
+    need()
+    local expr = require 'cartograph.expr'
+    local fl = rows_of('f(IQ, Node) ->\n    R = IQ#iq{type = result},\n    xmpp:make_iq_result(R, #disco_info{node = Node}).\n')
+    local tbl = {}
+    for _, st in ipairs(fl.stmts) do
+        expr.walk(st.expr.rhs[1], function (x) if x.k == 'table' and x.rec then tbl[#tbl + 1] = x end end)
+    end
+    eq(2, #tbl, 'the update and the construction')
+    eq('iq', tbl[1].rec); ok(tbl[1].base and tbl[1].base.n == 'IQ', 'the update carries its base')
+    eq('disco_info', tbl[2].rec)
+    eq({}, expr.gate(fl, 'erlang'), 'the IR still reads what du reads (IQ, R, Node)')
+end)

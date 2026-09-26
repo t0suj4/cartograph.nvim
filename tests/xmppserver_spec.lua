@@ -58,3 +58,29 @@ test('xmppserver: a handler reads what its heads destructure — constants and b
     eq('#iq.type=set', X.head_line(rd.heads[2]))
     eq(nil, (X.reads(store, nil)), 'no handler, no read set')
 end)
+
+test('xmppserver.sends: what a handler SENDS, as a term — a literal response, a routed parameter, a call', function ()
+    need()
+    local X = require 'cartograph.xmppserver'
+    local ER = require 'cartograph.erlrecords'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/src', 'p')
+    local fd = assert(io.open(root .. '/src/mod_s.erl', 'w'))
+    fd:write([[
+-module(mod_s).
+-record(disco_info, {node = <<>>, identities = [], features = [], xdata = []}).
+process_iq(IQ) -> xmpp:make_iq_result(IQ, #disco_info{features = [<<"urn:x">>]}).
+forward(Pkt) -> ejabberd_router:route(Pkt).
+later(IQ) -> xmpp:make_iq_result(IQ, build()).
+]])
+    fd:close()
+    local rows = X.sends(root .. '/src', { E = ER.new {} })
+    vim.fn.delete(root, 'rf')
+    eq(3, #rows)
+    local by = {}
+    for _, r in ipairs(rows) do by[r.fn] = r end
+    eq('complete', by['process_iq/1'].status)
+    eq('disco_info', by['process_iq/1'].record)
+    eq('(rec:disco_info "" (nil) (cons "urn:x" (nil)) (nil))', require('cartograph.algebra').load().show(by['process_iq/1'].term))
+    eq('opaque', by['forward/1'].status, 'a routed parameter: step 4')
+    eq('opaque', by['later/1'].status, 'a call result: step 3')
+end)

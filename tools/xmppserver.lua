@@ -1,7 +1,12 @@
 -- xmppserver — the SERVER leg of the XMPP triple, censused: every registered IQ endpoint, its handler, and what the
 -- handler's clause heads read from the request (CART-1087 phase 2; the library is lua/cartograph/xmppserver.lua).
 --
---   nvim --headless -u NONE -l tools/xmppserver.lua [<server-root>] [--rows] [--spec <xmpp_codec.spec>]
+--   nvim --headless -u NONE -l tools/xmppserver.lua [<server-root>] [--rows] [--spec <xmpp_codec.spec>] [--sends]
+--
+-- --sends  THE SERVER'S WRITES (CART-1108 via CART-1112 step 1): every place a handler sends (the payload of
+--          xmpp:make_iq_result, the stanza given to ejabberd_router:route) with the TERM it encodes to — complete,
+--          partial (the structure is known, some values flow from a call / a parameter / the matched request), or
+--          opaque — and whether its record is one the codec spec puts on the wire. Holes name the step that fills them.
 --
 -- <server-root> defaults to ~/work/brotardcast/ejabberd. --rows prints one line per endpoint and clause, and under
 -- it the request that clause ACCEPTS, lifted through the codec spec (xmppspec.lift, CART-1096); --spec defaults to
@@ -13,11 +18,12 @@ vim.opt.rtp:append(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 local here = debug.getinfo(1, 'S').source:sub(2):match('(.*)/tools/') or '.'
 package.path = here .. '/lua/?.lua;' .. here .. '/lua/?/init.lua;' .. package.path
 
-local root, want_rows, specpath = nil, false, nil
+local root, want_rows, specpath, want_sends = nil, false, nil, false
 local i = 1
 while arg[i] do
     local a = arg[i]
     if a == '--rows' then want_rows = true
+    elseif a == '--sends' then want_sends = true
     elseif a == '--spec' then i = i + 1; specpath = arg[i]
     else root = a end
     i = i + 1
@@ -107,4 +113,29 @@ print(spec and ('  lifted through %s: %d clause head(s), %d frontier row(s)%s'):
 if want_rows then
     print('')
     for _, l in ipairs(out) do io.write(l, "\n") end
+end
+
+if want_sends then
+    local ER = require 'cartograph.erlrecords'
+    local E = ER.new { include_dirs = { root .. '/include' },
+        apps = { xmpp = vim.fn.fnamemodify(specpath, ':h:h') } }
+    local srows = X.sends(root .. '/src', { E = E, spec = spec })
+    local st, why, onwire, recs = {}, {}, 0, 0
+    for _, r in ipairs(srows) do
+        st[r.verb .. ' ' .. r.status] = (st[r.verb .. ' ' .. r.status] or 0) + 1
+        if r.record then recs = recs + 1; if r.wire and #r.wire > 0 then onwire = onwire + 1 end end
+        for _, w in pairs(r.holes) do
+            local k = w:gsub('^[%w_]+: ', ''):gsub('#[%w_]+%.[%w_]+ ', '#R.f ')
+            why[k] = (why[k] or 0) + 1
+        end
+    end
+    io.write(('\n  SENDS %d site(s): %s\n'):format(#srows, top(st, 8)))
+    io.write(('  encoded to a record term %d, of which the codec spec puts on the wire %d\n'):format(recs, onwire))
+    io.write(('  holes by the step that would fill them: %s\n'):format(top(why, 8)))
+    if want_rows then
+        local A = require('cartograph.algebra').load()
+        for _, r in ipairs(srows) do
+            io.write(('  %-8s %s:%d %s  %s  %s\n'):format(r.status, r.file, r.line, r.fn, r.verb, A.show(r.term):sub(1, 160)))
+        end
+    end
 end
