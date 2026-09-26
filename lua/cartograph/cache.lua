@@ -2380,6 +2380,7 @@ end
 local function artifact_key()
     pcall(require, 'cartograph.spec.profile')
     pcall(require, 'cartograph.spec.ecosystem')
+    pcall(require, 'cartograph.parserid') -- the nvim + parser builds (a grammar change moves the graph)
     return require('cartograph.validity').artifact_key()
 end
 

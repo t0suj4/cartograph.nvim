@@ -144,20 +144,22 @@ local function tool_identity()
     local dirty = false
     for _, l in ipairs(st or {}) do if l:match('%S') then dirty = true break end end
     local okv, cache = pcall(require, 'cartograph.cache')
-    return rev, dirty, okv and cache.VERSION or nil
+    local okp, parserid = pcall(require, 'cartograph.parserid')
+    return rev, dirty, okv and cache.VERSION or nil, okp and parserid.key() or nil
 end
 
 --- Save a slim snapshot under a name. Records the repo rev so a later diff
 --- can say WHICH version the baseline came from. Returns the path.
 function M.save(name, data, meta)
     vim.fn.mkdir(M.dir, 'p')
-    local rev, dirty, cver = tool_identity()
+    local rev, dirty, cver, parsers = tool_identity()
     local blob = vim.mpack.encode({
         version = 1, -- the SNAPSHOT FORMAT version; the extraction epoch is
                      -- meta.cache_version, and conflating the two is the bug
                      -- this comment exists to prevent
         meta = vim.tbl_extend('force', { rev = rev, when = os.date('!%Y-%m-%dT%H:%M:%SZ'),
             tool_dirty = dirty or nil, cache_version = cver,
+            parsers = parsers, -- the nvim + parser builds: a grammar change moves the graph with no code edit
             slim_version = M.SLIM_VERSION },
             meta or {}),
         data = M.slim(data),
@@ -196,6 +198,18 @@ function M.tool_verdict(meta)
         epoch = ('baseline written at extraction VERSION %s, tree is at %d — a diff'
             .. ' against it MIXES that change with yours')
             :format(tostring(meta.cache_version), nowv)
+    end
+    -- THE PARSER IDENTITY is an extraction epoch too: a different nvim or parser build moves the graph with no edit
+    -- to this tree (nvim bundles c and lua), so it joins the epoch note rather than hiding behind a matching VERSION
+    local okp, parserid = pcall(require, 'cartograph.parserid')
+    local nowp = okp and parserid.key() or nil
+    if nowp and meta.parsers and meta.parsers ~= nowp then
+        local pn = ('baseline was extracted with [%s], this run uses [%s] — a diff against it MIXES the grammar'
+            .. ' change with yours'):format(meta.parsers, nowp)
+        epoch = epoch and (epoch .. '; ' .. pn) or pn
+    elseif nowp and not meta.parsers and not epoch then
+        epoch = 'baseline records no parser identity (saved before the field existed); resave to make a grammar'
+            .. ' change answerable'
     end
     -- THE PROJECTION CHECK COMES FIRST, and it must, because it EXPLAINS a diff
     -- the other two notes cannot: a stale projection makes every edge with

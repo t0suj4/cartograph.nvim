@@ -88,8 +88,9 @@ end)
 
 test('snapshot: the tool verdict names the era, and MISSING is not MISMATCHED', function ()
     local V = require('cartograph.cache').VERSION
-    -- a baseline from this era vouches for itself: no sentence at all
-    local e, d = snapshot.tool_verdict({ cache_version = V })
+    local P = require('cartograph.parserid').key()
+    -- a baseline from this era (extractor AND parsers) vouches for itself: no sentence at all
+    local e, d = snapshot.tool_verdict({ cache_version = V, parsers = P })
     eq(nil, e); eq(nil, d)
     -- an OLDER era: the diff is a mixture, and the sentence has to say so rather
     -- than let a reader call it extractor drift
@@ -105,7 +106,7 @@ test('snapshot: the tool verdict names the era, and MISSING is not MISMATCHED', 
     ok(e3 and e3:find('no extraction VERSION'), tostring(e3))
     ok(not e3:find('MIXES'), 'unknown is not a mismatch')
     -- the dirty half is independent of the era half
-    local e4, d4 = snapshot.tool_verdict({ cache_version = V, tool_dirty = true })
+    local e4, d4 = snapshot.tool_verdict({ cache_version = V, parsers = P, tool_dirty = true })
     eq(nil, e4)
     ok(d4 and d4:find('UNCOMMITTED'), tostring(d4))
     eq(nil, (snapshot.tool_verdict(nil)))
@@ -171,10 +172,11 @@ end)
 -- explanation, and concludes extractor regression.
 test('snapshot: a stale PROJECTION is its own verdict, separate from the epoch', function ()
     local V = require('cartograph.cache').VERSION
-    local _, _, proj = snapshot.tool_verdict({ cache_version = V,
+    local P = require('cartograph.parserid').key()
+    local _, _, proj = snapshot.tool_verdict({ cache_version = V, parsers = P,
         slim_version = snapshot.SLIM_VERSION })
     eq(nil, proj) -- current projection: silent
-    local e2, d2, p2 = snapshot.tool_verdict({ cache_version = V, slim_version = 1 })
+    local e2, d2, p2 = snapshot.tool_verdict({ cache_version = V, parsers = P, slim_version = 1 })
     ok(p2 and p2:find('DIFFERENT SET OF FIELDS'), tostring(p2))
     -- and it does NOT masquerade as either of the other two facts
     eq(nil, e2)
@@ -227,4 +229,25 @@ test('snapshot: the field map is fenced by CARDINALITY, not contents', function 
     eq(2, snapshot.slim(b).edges[1].nflds)
     ok(not gd.empty(gd.diff(snapshot.slim(a), snapshot.slim(b))),
         'field capture switching on is visible')
+end)
+
+-- nvim 0.12 upgrade prep: nvim bundles the c and lua parsers, so a grammar can change under a baseline whose extraction
+-- VERSION still matches. That has to be a sentence, or a grammar change reads as extractor drift.
+test('snapshot: a different PARSER set is an epoch note even when the extraction VERSION matches', function ()
+    local V = require('cartograph.cache').VERSION
+    local P = require('cartograph.parserid').key()
+    local e = snapshot.tool_verdict({ cache_version = V, parsers = 'nvim 0.11.5; 35 parsers deadbeefdeadbeef' })
+    ok(e and e:find('MIXES the grammar change'), tostring(e))
+    ok(e:find('nvim 0.11.5', 1, true) and e:find(P, 1, true), 'names both parser sets')
+    -- MISSING reads as unknown (every baseline saved before the field existed), not as a mismatch
+    local e2 = snapshot.tool_verdict({ cache_version = V })
+    ok(e2 and e2:find('no parser identity'), tostring(e2))
+    ok(not e2:find('MIXES'), 'unknown is not a mismatch')
+    -- and a save records it
+    eq(P, (function ()
+        local path = snapshot.save('parserid_spec_tmp', { nodes = {}, edges = {}, calls = {} }, {})
+        local _, meta = snapshot.load('parserid_spec_tmp')
+        os.remove(path)
+        return meta and meta.parsers
+    end)())
 end)
