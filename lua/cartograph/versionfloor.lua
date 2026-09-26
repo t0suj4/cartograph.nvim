@@ -145,8 +145,13 @@ M.FEATURES = {
                 end
                 return false
             end },
+        -- ★ NO DISTINCT NODE ANY MORE (CART-1089). The tree-sitter-python that came with
+        -- nvim 0.12 dropped `except_group_clause`: `except* E:` is a plain `except_clause`
+        -- whose anonymous children are `except` THEN `*` — two tokens, there is no `except*`
+        -- token. A plain `except` has no `*` child, and a starred VALUE would be a named
+        -- `list_splat`, so the anonymous `*` is exactly the group form.
         { id = 'except-star', v = '3.11', desc = 'except* exception group',
-            node = 'except_group_clause' },
+            node = 'except_clause', test = function (n) return anon(n, '*') end },
         { id = 'type-parameter', v = '3.12', desc = 'def f[T]() type parameter',
             node = 'type_parameter' },
     },

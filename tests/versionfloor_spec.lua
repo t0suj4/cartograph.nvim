@@ -209,6 +209,16 @@ test('versionfloor: f(*args) is NOT literal unpacking (the 3.5 false positive)',
         'literal unpacking still counts')
 end)
 
+test('versionfloor: a plain except is NOT except* (CART-1089)', function ()
+    if not py_ready() then skip('no python parser') end
+    -- both are `except_clause` under the newer grammar; only the anonymous `*` tells them
+    -- apart. RED IF: the detector keys on the node type alone and every except fires 3.11.
+    eq(false, ids(vf.scan('python', 'try:\n    pass\nexcept TypeError:\n    pass\n'))
+        ['except-star'] or false, 'a plain except clause must not raise the floor to 3.11')
+    eq(false, ids(vf.scan('python', 'try:\n    pass\nexcept:\n    pass\n'))
+        ['except-star'] or false, 'nor a bare except')
+end)
+
 test('versionfloor: a plain string is not an f-string', function ()
     if not py_ready() then skip('no python parser') end
     eq(0, #vf.scan('python', 'x = "hi {name}"\n'), 'braces in a plain string are just braces')
