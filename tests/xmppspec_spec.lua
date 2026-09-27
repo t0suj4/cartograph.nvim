@@ -537,3 +537,12 @@ test('xmppspec.encode: an xmlns attribute that is a FIELD sets the namespace; se
     eq('(tuple "xmlel" "dyn" (list) (list))', A.show((X.encode(s, A.node('rec:dyn', L(''), L('')), 'urn:b'))))
     eq('(tuple "xmlel" "dyn" (list (tuple "xmlns" "urn:a")) (list))', A.show((X.encode(s, A.node('rec:dyn', L(''), L('')), 'urn:x'))))
 end)
+
+test('xmppspec: the absent value of a CDATA is <<>> whatever decodes it; a list default is the empty list', function ()
+    local A = require('cartograph.algebra').load()
+    -- an attribute with a converting decoder is undefined when absent; a cdata with one is still <<>>
+    eq('"undefined"', A.show(X.absent_value({ dec = '{base64, mime_decode, []}' })))
+    eq('""', A.show(X.absent_value({ dec = '{base64, mime_decode, []}' }, true)))
+    eq('""', A.show(X.absent_value({ kind = 'cdata', dec = '{base64, mime_decode, []}' })))
+    eq('(list)', A.show(X.absent_value({ default = '[]' })))
+end)

@@ -64,7 +64,7 @@ local T = {
     call = { call = true }, remote = { remote = true }, case = { case_expr = true }, ifx = { if_expr = true },
     clause = { function_clause = true }, arm = { cr_clause = true }, fn = { anonymous_fun = true },
     funclause = { fun_clause = true }, macro = { macro_call_expr = true }, map = { map_expr = true },
-    binop = { binary_op_expr = true }, unop = { unary_op_expr = true }, lc = { list_comprehension = true },
+    binop = { binary_op_expr = true }, unop = { unary_op_expr = true }, lc = { list_comprehension = true }, try = { try_expr = true },
     generator = { generator = true },
     decl = { fun_decl = true }, funref = { internal_fun = true, external_fun = true }, extfun = { external_fun = true },
 }
@@ -98,6 +98,16 @@ local CONVERT = {
     integer_to_binary = function (a) local t = a[1]; return #a == 1 and t.k == 'lit' and t.lk == 'int' and binlit(t.v) or nil end,
     iolist_to_binary = function (a) local s = textof(a[1]); return s and binlit(s) or nil end,
     list_to_binary = function (a) local s = textof(a[1]); return s and binlit(s) or nil end,
+    -- the decoders' direction (dec_enum, dec_int): a known binary back to an atom or an integer
+    binary_to_atom = function (a) local t = a[1]; if t.k == 'lit' and (t.lk == 'bin' or t.lk == nil) then local l = A().lit(t.v); l.lk = 'atom'; return l end end,
+    binary_to_existing_atom = function (a) local t = a[1]; if t.k == 'lit' and (t.lk == 'bin' or t.lk == nil) then local l = A().lit(t.v); l.lk = 'atom'; return l end end,
+    binary_to_integer = function (a)
+        local t = a[1]
+        local n = #a == 1 and t.k == 'lit' and (t.lk == 'bin' or t.lk == nil) and tostring(t.v):match('^%s*([+-]?%d+)%s*$')
+        if n then local l = A().lit(tostring(tonumber(n))); l.lk = 'int'; return l end
+    end,
+    integer_to_list = function (a) local t = a[1]; if #a == 1 and t.k == 'lit' and t.lk == 'int' then local l = A().lit(t.v); l.lk = 'str'; return l end end,
+    list_to_atom = function (a) local t = a[1]; if t.k == 'lit' and (t.lk == 'str' or t.lk == nil) then local l = A().lit(t.v); l.lk = 'atom'; return l end end,
     byte_size = function (a)
         local t = a[1]
         if t.k == 'lit' and (t.lk == 'bin' or t.lk == nil) then local l = A().lit(tostring(#tostring(t.v))); l.lk = 'int'; return l end
@@ -417,9 +427,12 @@ local function join_all(S, vals, why_empty, why_diff)
     -- an unknown is a bare hole, but "one of these replies" is what a reader asks (CART-1135's response leg). Kept
     -- beside the hole (S.alts, capped, a hole arm's own alternatives flattened in) — the union the lattice lacks.
     if acc.k == 'hole' and #live > 1 then
-        local alts, seen_alt = {}, {}
+        local alts, seen_alt, opened = {}, {}, {}
         local function add(v)
             if v.k == 'hole' and S.alts[v.h] then
+                -- a hole's alternatives can mention a hole whose own do (a loop's value joined into itself): once each
+                if opened[v.h] then return end
+                opened[v.h] = true
                 for _, w in ipairs(S.alts[v.h]) do add(w) end
                 return
             end
@@ -1671,6 +1684,42 @@ function M.eval(x, env, S)
     end
     if T.call[t] or T.remote[t] then return call_value(x, env, S) end
     if T.lc[t] and not M.OFF.lc then return comprehension(x, env, S) end
+    if T.try[t] and not M.OFF.try then
+        -- ★ try Body [of Clauses] catch … end (CART-1138: xmpp's generated decoders wrap every conversion in one).
+        -- The value is the body's, through the `of` clauses as a case would; a catch arm runs only if the body raises,
+        -- and one that may: a known (ground) body value raises nothing, so its catch arms are left out; an unknown one
+        -- may, and its arms join in — a re-raising arm (erlang:error, the decoders' way) drops out as a raise does.
+        local exprs = x:field('exprs')
+        local bv = fresh(S, 'an empty try')
+        for _, e in ipairs(exprs) do bv = M.eval(e, env, S) end
+        local vals = {}
+        if bv ~= RAISE then
+            local ofs = x:field('clauses')
+            if #ofs == 0 then vals[#vals + 1] = bv
+            else
+                for _, cl in ipairs(ofs) do
+                    local verdict, vars = bind(cl:field('pat')[1], bv, env, S)
+                    local aenv = verdict ~= 'no' and with_vars(env, vars) or nil
+                    if verdict ~= 'no' then
+                        local gv = M.guard(cl, aenv, S)
+                        if gv == 'no' then verdict = 'no' elseif gv == 'maybe' then verdict = 'maybe' end
+                    end
+                    if verdict ~= 'no' then
+                        local le = last_expr(cl)
+                        vals[#vals + 1] = le and M.eval(le, aenv, S) or fresh(S, 'an empty arm')
+                        if verdict == 'yes' then break end
+                    end
+                end
+            end
+        end
+        if bv == RAISE or not ground_term(bv) then
+            for _, cc in ipairs(x:field('catch')) do
+                local le = last_expr(cc)
+                vals[#vals + 1] = le and M.eval(le, env, S) or fresh(S, 'an empty catch arm')
+            end
+        end
+        return join_all(S, vals, 'a try none of whose arms returns')
+    end
     if T.binop[t] and not M.OFF.ops then return binop(x, env, S) end
     if T.unop[t] and not M.OFF.ops then
         local op = x:child(0) and txt(x:child(0), src)

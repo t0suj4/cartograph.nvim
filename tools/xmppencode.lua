@@ -52,58 +52,11 @@ local P = X.program(xmpp .. '/src', E, { otp = o.otp })
 
 local unpack = table.unpack or unpack
 local function lit(v, lk) local l = A.lit(v); l.lk = lk; return l end
-local JID = A.node('rec:jid', lit('u', 'bin'), lit('s', 'bin'), lit('r', 'bin'), lit('u', 'bin'), lit('s', 'bin'), lit('r', 'bin'))
-
--- a sample value for a source, by its decoder; nil when there is none
-local function sample(src)
-    local dec = src.dec or ''
-    if dec == '' or dec:find('xmpp_lang', 1, true) then return lit('x', 'bin') end
-    local enums = dec:match('dec_enum,%s*%[%[([^%]]*)%]')
-    if enums then
-        local first = vim.trim((enums:match('^([^,]+)') or '')):gsub("^'(.*)'$", '%1')
-        if first ~= '' then return lit(first, 'atom') end
-    end
-    if dec:find('dec_int', 1, true) then return lit('1', 'int') end
-    if dec:find('dec_bool', 1, true) then return lit('true', 'atom') end
-    if dec:find('{jid,', 1, true) then return JID end
-    return nil
-end
-
 local unsampled = 0
--- a record term for entry E: minimal or maximal, `depth` levels of children
 local function term_for(E, maximal, depth)
-    local R = E.result
-    local kids = {}
-    for fi, f in ipairs(R.fields or {}) do
-        if type(f) == 'table' and f.const ~= nil then kids[fi] = lit(tostring(f.const):gsub("^'(.*)'$", '%1'), 'atom')
-        elseif f == '$_els' then kids[fi] = A.node('list')
-        elseif f == '$_' then kids[fi] = lit('undefined', 'atom')
-        else
-            local srcs = XS.label_sources(E, f)
-            local s1 = srcs[1]
-            if s1.kind == 'attr' or s1.kind == 'cdata' then
-                local required = s1.required == true or s1.required == 'true'
-                local v = (required or maximal) and sample(s1) or nil
-                if (required or maximal) and not v then unsampled = unsampled + 1 end
-                kids[fi] = v or XS.absent_value(s1)
-                if kids[fi].k == 'absent' then kids[fi] = lit('undefined', 'atom') end
-            elseif s1.kind == 'ref' then
-                local many = false
-                for _, r in ipairs(srcs) do if r.max ~= 1 then many = true end end
-                local items = {}
-                if maximal and depth > 0 and many then
-                    local RE = spec.entries[s1.name]
-                    local c = RE and RE.result and RE.result.kind == 'record' and term_for(RE, true, depth - 1)
-                    if c then items[1] = c end
-                end
-                -- a single child at its absent value: the ref's declared default, else undefined
-                local absent = (s1.default ~= nil and s1.default ~= '$unset') and XS.absent_value({ default = s1.default })
-                    or lit('undefined', 'atom')
-                kids[fi] = many and A.node('list', unpack(items)) or absent
-            else kids[fi] = lit('undefined', 'atom') end
-        end
-    end
-    return A.node('rec:' .. R.record, unpack(kids, 1, #(R.fields or {})))
+    local t, n = XS.sample_term(spec, E, maximal, depth)
+    unsampled = unsampled + n
+    return t
 end
 
 -- our encoder's primitives: the library's OWN enc function, evaluated

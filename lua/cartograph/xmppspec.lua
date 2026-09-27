@@ -873,14 +873,20 @@ local unpack = table.unpack or unpack
 -- accepts); else one with a converting decoder -> `undefined`; else `<<>>`. The same for cdata; a single ref ->
 -- `undefined`. ACCEPTED BY AN ORACLE: tools/xmppmerge.lua --check-absent compares this rule with every generated
 -- clause (408 on xmpp 02893ce). THE ENCODER's omission rule is its inverse: a value equal to it is not written.
-function M.absent_value(src)
+function M.absent_value(src, is_cdata)
     local a = A()
     if src.default ~= nil and src.default ~= '$unset' then
         local d = tostring(src.default)
+        -- a list default (caps' `exts = []`) is the empty list, not the text "[]"
+        if vim.trim(d) == '[]' then return a.node('list') end
         d = d:match('^<<"(.*)">>$') or (d == '<<>>' and '') or d:gsub("^'(.*)'$", '%1')
         return a.lit(d)
     end
     if src.required == true or src.required == 'true' then return a.node('absent') end
+    -- ★ TOUCH-UP (CART-1138, the grammar's round trip): an absent CDATA is <<>> whatever decodes it. The generated
+    -- `decode_<x>_cdata(__TopXMLNS, <<>>) -> <<>>` precedes the converting clause (sasl_challenge's base64), unlike an
+    -- attribute's `(…, undefined) -> undefined`. The attribute oracle (408 clauses) never saw a cdata.
+    if is_cdata or src.kind == 'cdata' then return a.lit('') end
     -- a CHECKER keeps the binary (xmpp_lang validates, it does not convert): absent stays <<>>. Found by the oracle
     -- (tools/xmppmerge.lua --check-absent): the first cut said `undefined` and the generated code disagreed on 15
     -- xml:lang / hreflang attributes out of 408.
@@ -916,8 +922,18 @@ M.choose_top = choose_top
 function M.encode(spec, term, top, opts)
     opts = opts or {}
     local a = A()
-    local function lit(v) return a.lit(v) end
-    local function same(x, y) return x and y and x.k == y.k and x.k == 'lit' and tostring(x.v) == tostring(y.v) end
+    -- every name and value on the wire is a binary; the element and text tags are atoms (fxml's #xmlel{} / {xmlcdata, _})
+    local function lit(v)
+        local l = a.lit(v)
+        l.lk = (v == 'xmlel' or v == 'xmlcdata') and 'atom' or 'bin'
+        return l
+    end
+    -- equal to the absent value: a literal by its text, a list default ([]) structurally
+    local function same(x, y)
+        if not (x and y and x.k == y.k) then return false end
+        if x.k == 'lit' then return tostring(x.v) == tostring(y.v) end
+        return x.k ~= 'hole' and a.eq(x, y)
+    end
     local enc_entry
     -- the -xml a term encodes by: a record's first entry (spec order); a tuple / label / const value needs its ref's
     local function by_term(t)
@@ -972,7 +988,7 @@ function M.encode(spec, term, top, opts)
         local cd = E.cdata or { label = '$cdata' }
         local cv = value_of(cd.label)
         if cv ~= nil and cv.k == 'hole' then kids[#kids + 1] = a.node('tuple', lit('xmlcdata'), cv)
-        elseif cv ~= nil and not same(cv, M.absent_value(cd)) then
+        elseif cv ~= nil and not same(cv, M.absent_value(cd, true)) then
             kids[#kids + 1] = a.node('tuple', lit('xmlcdata'), encode_value(cd, cv, E))
         end
         local seen_label = {}
@@ -1030,6 +1046,79 @@ function M.encode(spec, term, top, opts)
     local E = by_term(term)
     if not E then return nil, 'no -xml produces ' .. tostring(term.k) end
     return enc_entry(E, term, top or '')
+end
+
+--- SAMPLE TERMS for an entry, the oracles' input (tools/xmppencode.lua, tools/xmppgrammar.lua): MINIMAL (every field
+--- at the value the decoder gives an absent one, required attributes at a sample) or MAXIMAL (every attribute and cdata
+--- at a sample, every list ref with one sampled child, `depth` levels). A sample follows the field's decoder: an
+--- enumeration's first value, an integer 1, a boolean true, a jid u@s/r, a plain binary "x". -> term, unsampled count
+function M.sample_term(spec, E, maximal, depth)
+    local a = A()
+    local function lit(v, lk) local l = a.lit(v); l.lk = lk; return l end
+    local JID = a.node('rec:jid', lit('u', 'bin'), lit('s', 'bin'), lit('r', 'bin'), lit('u', 'bin'), lit('s', 'bin'), lit('r', 'bin'))
+    local unsampled = 0
+    local function sample(src)
+        local dec = src.dec or ''
+        if dec == '' or dec:find('xmpp_lang', 1, true) then return lit('x', 'bin') end
+        local enums = dec:match('dec_enum,%s*%[%[([^%]]*)%]')
+        if enums then
+            local first = vim.trim((enums:match('^([^,]+)') or '')):gsub("^'(.*)'$", '%1')
+            if first ~= '' then return lit(first, 'atom') end
+        end
+        if dec:find('dec_int', 1, true) then return lit('1', 'int') end
+        if dec:find('dec_bool', 1, true) then return lit('true', 'atom') end
+        if dec:find('{jid,', 1, true) then return JID end
+        return nil
+    end
+    local function term_for(E2, max, d)
+        local R = E2.result
+        local kids = {}
+        for fi, f in ipairs(R.fields or {}) do
+            if type(f) == 'table' and f.const ~= nil then kids[fi] = lit((tostring(f.const):gsub("^'(.*)'$", '%1')), 'atom')
+            elseif f == '$_els' then kids[fi] = a.node('list')
+            elseif f == '$_' then
+                -- a field not on the wire keeps the record's DECLARED default (iq/message/presence meta = #{})
+                local decl = (spec.decls or {})[R.record] or (spec.records or {})[R.record]
+                local fld = decl and decl.fields and decl.fields[fi]
+                local d = fld and fld.default
+                kids[fi] = d and require('cartograph.erlterms').default_term(d) or lit('undefined', 'atom')
+            else
+                local srcs = M.label_sources(E2, f)
+                local s1 = srcs[1]
+                if s1.kind == 'attr' or s1.kind == 'cdata' then
+                    local required = s1.required == true or s1.required == 'true'
+                    -- an xmlns attribute that is a field names the element's namespace: "" chooses it; free text would
+                    -- move the element to a namespace no -xml decodes
+                    local v = (required or max) and (s1.kind == 'attr' and s1.name == 'xmlns' and lit('', 'bin') or sample(s1)) or nil
+                    if (required or max) and not v then unsampled = unsampled + 1 end
+                    kids[fi] = v or M.absent_value(s1)
+                    if kids[fi].k == 'absent' then kids[fi] = lit('undefined', 'atom') end
+                elseif s1.kind == 'ref' then
+                    local many = false
+                    for _, r in ipairs(srcs) do if r.max ~= 1 then many = true end end
+                    local items = {}
+                    if max and d > 0 and many then
+                        local RE = spec.entries[s1.name]
+                        local c = RE and RE.result and RE.result.kind == 'record' and term_for(RE, true, d - 1)
+                        if c then items[1] = c end
+                    end
+                    local absent = (s1.default ~= nil and s1.default ~= '$unset') and M.absent_value({ default = s1.default })
+                        or lit('undefined', 'atom')
+                    -- a REQUIRED single child (min = 1: carbons' forwarded, a mix join) has no absent value: sample one
+                    local single_required = not many and tonumber(s1.min) == 1
+                    if single_required then
+                        local RE = spec.entries[s1.name]
+                        local c = RE and RE.result and RE.result.kind == 'record' and d >= 0 and term_for(RE, max, d - 1)
+                        if c then absent = c else unsampled = unsampled + 1 end
+                    end
+                    kids[fi] = many and a.node('list', unpack(items)) or absent
+                else kids[fi] = lit('undefined', 'atom') end
+            end
+        end
+        return a.node('rec:' .. R.record, unpack(kids, 1, #(R.fields or {})))
+    end
+    local t = term_for(E, maximal, depth or 1)
+    return t, unsampled
 end
 
 --- one -xml entry's encoding of a value (a record, a tuple, or the scalar of a label/const result)

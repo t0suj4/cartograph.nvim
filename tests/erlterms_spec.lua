@@ -594,3 +594,19 @@ test('erlterms: -ifdef variants are SEPARATE definitions — joined across build
     ET.OFF = {}
     eq({ '"old_x"' }, merged)
 end)
+
+test('erlterms: try — the body through its of-clauses; a catch arm only when the body may raise; the decoders\' conversions', function ()
+    need()
+    local ET = require 'cartograph.erlterms'
+    -- a known body raises nothing: the catch arm is left out
+    eq('(tuple "ok" "a")', (last_term('f() -> try binary_to_existing_atom(<<"a">>, utf8) of R -> {ok, R} catch _:_ -> bad end.\n')))
+    -- an unknown body may raise: the catch arm joins; a re-raising arm drops out as a raise does
+    local j = last_term('f(X) -> try g(X) of R -> {ok, R} catch _:_ -> bad end.\n')
+    ok(j:find('^%?'), 'ok | bad: ' .. j)
+    ok((last_term('f(X) -> try g(X) of R -> {ok, R} catch _:_ -> erlang:error(bad) end.\n')):find('^%(tuple "ok" %?'), 'a re-raising catch drops out')
+    eq('"42"', (last_term('f() -> integer_to_list(binary_to_integer(<<"42">>)).\n')))
+    ET.OFF = { try = true }
+    local off = last_term('f() -> try binary_to_existing_atom(<<"a">>, utf8) of R -> {ok, R} catch _:_ -> bad end.\n')
+    ET.OFF = {}
+    ok(off:find('^%?'), 'the try evaluation observes: ' .. off)
+end)
