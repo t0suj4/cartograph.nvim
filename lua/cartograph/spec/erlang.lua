@@ -365,6 +365,24 @@ return {
     -- before a DOT (`prof_ext`). The source text is unchanged; only the
     -- RESOLUTION KEY is normalised, exactly as php rewrites `$this->m` to
     -- `Class::m`.
+    -- ★ `fun f/N` NAMES A FUNCTION OF THIS MODULE AS A VALUE (CART-1132): passed to lists:map, stored in a list of
+    -- handlers, returned. The key is its name/arity alt key; the provider mints the reference. `fun m:f/N` (an
+    -- external_fun) is cross-module and not read here yet; a macro or variable arity names nothing.
+    fun_refs = function (tsroot, src)
+        local out = {}
+        local function walk(n)
+            if n:type() == 'internal_fun' then
+                local f, a = n:field('fun')[1], n:field('arity')[1]
+                local v = a and (a:field('value')[1] or a)
+                if f and f:type() == 'atom' and v and v:type() == 'integer' then
+                    out[#out + 1] = { key = vim.treesitter.get_node_text(f, src) .. '/' .. vim.treesitter.get_node_text(v, src), node = n }
+                end
+            end
+            for c in n:iter_children() do if c:named() then walk(c) end end
+        end
+        walk(tsroot)
+        return out
+    end,
     -- ★ A VARIABLE MODULE IS DYNAMIC DISPATCH (CART-1129). `Mod:start(Host)` names no module, and qualify_call below
     -- rightly declines to guess one — but declining to name the KEY left the CALL with its bare name, which the
     -- generic resolver then matched: 270 of 519 such calls on ejabberd resolved to a wrong same-named function. The

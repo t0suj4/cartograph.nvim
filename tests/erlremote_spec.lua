@@ -62,3 +62,19 @@ test('erlang: a function is exported by name AND arity from -export, quoted atom
     eq(true, v['m.erl g/2'], 'a quoted export names the bare atom'); eq(false, v['m.erl h/2'])
     eq(true, v['t.erl k/0'], 'export_all')
 end)
+
+-- CART-1132: `fun f/N` names a function of the same module as a VALUE. It minted nothing, so a function passed to
+-- lists:map or kept in a handler list had no caller (47 of 76 dead-function findings on ejabberd after the export fix).
+test('erlang: `fun f/N` is a hedged reference to f/N of the same module (by arity; a self-reference is not one)', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, s) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(s); fd:close() end
+    put('m.erl', '-module(m).\n-export([h/0, loop/1]).\nh() -> lists:map(fun k/1, [1]), [fun j/2].\n'
+        .. 'k(X) -> X.\nj(A, B) -> {A, B}.\nj(A) -> A.\nloop(X) -> F = fun loop/1, F(X).\n')
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local refs = {}
+    for _, e in ipairs(data.edges) do if e.kind == 'ref' then refs[#refs + 1] = e.from .. ' -> ' .. e.to .. (e.inferred and ' ~' or '') end end
+    table.sort(refs)
+    eq({ 'm.erl::h@2 -> m.erl::j@4 ~', 'm.erl::h@2 -> m.erl::k@3 ~' }, refs, 'j/2 (not j/1), k/1; loop names itself: no edge')
+end)

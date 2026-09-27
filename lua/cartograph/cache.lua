@@ -409,7 +409,9 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 209 -- v209: ERLANG FUNCTIONS CARRY THEIR EXPORT VERDICT (CART-1131, spec.exported_def from -export / export_all):
+M.VERSION = 210 -- v210: AN ERLANG `fun f/N` IS A REFERENCE (CART-1132, spec.fun_refs): the named function of the same module
+--- gets the callback convention's hedged ref from the enclosing function (47 of 76 dead-function findings on ejabberd).
+--- Prior: v209: ERLANG FUNCTIONS CARRY THEIR EXPORT VERDICT (CART-1131, spec.exported_def from -export / export_all):
 --- the dead-function rule reported exported functions as dead (1216 of 1770 on ejabberd, +472 in export_all modules).
 --- Prior: v208: AN ERLANG CALL ON A VARIABLE MODULE IS DYNAMIC (CART-1129, spec.dynamic_call): `Mod:f()` no longer
 --- goes to the name resolver, which matched 270 of 519 on ejabberd to ONE same-named function (the dispatcher's own, or

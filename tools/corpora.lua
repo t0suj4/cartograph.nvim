@@ -276,7 +276,7 @@ return {
         root = HOME .. '/work/brotardcast/ejabberd',
         repo = 'https://github.com/processone/ejabberd',
         rev = '2f226abdfa1f',
-        expected = { refs = 29882, nodes = 15084 }, -- 2026-09-27 v208 (CART-1129): -241 refs, each a variable-module call `Mod:f()` name-matched to ONE same-named function — the dispatcher's own (ejabberd_auth:start/2) or an arbitrary one of the real implementers; 555 calls now dynamic (284 were resolved, 268 refused ambiguous/samefile), nothing else moved. Prior pin 2026-09-26 (v203, nvim 0.12 grammars, CART-1094): 41930 calls, 95.2% resolved (the arc's 93.7% was the 0.11 grammar); before CART-1100 (the 0.12 nested remote/call shape) the same tree read 67.2%.
+        expected = { refs = 29966, nodes = 15084 }, -- 2026-09-27 v210 (CART-1132): +84 refs, every one a hedged (~) reference minted for a `fun f/N` value (2 more are occurrences on existing call edges); no call or node moved. v208 (CART-1129): -241 refs, each a variable-module call `Mod:f()` name-matched to ONE same-named function — the dispatcher's own (ejabberd_auth:start/2) or an arbitrary one of the real implementers; 555 calls now dynamic (284 were resolved, 268 refused ambiguous/samefile), nothing else moved. Prior pin 2026-09-26 (v203, nvim 0.12 grammars, CART-1094): 41930 calls, 95.2% resolved (the arc's 93.7% was the 0.11 grammar); before CART-1100 (the 0.12 nested remote/call shape) the same tree read 67.2%.
         notes = 'ejabberd, 353 .erl + 37 .hrl, ~159k lines. 50.3%% resolution at'
             .. ' the first spec. ARITY IS PART OF THE IDENTITY here and the graph'
             .. ' keys by name: 8.3%% of functions merge away (802 of 9650) — see'

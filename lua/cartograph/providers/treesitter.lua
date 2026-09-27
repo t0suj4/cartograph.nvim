@@ -6420,6 +6420,7 @@ function M.extract(root, opts)
     local varFiles = {}       -- file -> true if it DEFINES a var (a mention target)
     local mentions = {}        -- file -> packed mention buffer (Stage B)
     local pending = {}         -- unresolved references, matched after all files
+    local funrefs = {}         -- `fun f/N` values (spec.fun_refs, CART-1132), minted after resolution
 
     -- ids are file::name@line — two same-name defs on ONE line (minified
     -- bundles, same-line C++ prototypes) must not silently ALIAS in every
@@ -7985,6 +7986,15 @@ local MATCH_OPTS = { match_limit = 65536 }
                 end
             end
         end
+        -- ★ A FUNCTION PASSED AS A VALUE (CART-1132): erlang's `fun f/N` names a function of THIS module without
+        -- calling it — `lists:map(fun pp/2, …)`, `[fun handler/7]`. It minted nothing, so the function had no caller:
+        -- 47 of the 76 dead-function findings left on ejabberd after the export fix. Collected here and minted after
+        -- the resolution loop, the callback convention (a hedged ref from the enclosing fn, a reg at module level).
+        if spec.fun_refs then
+            for _, r in ipairs(spec.fun_refs(tsroot, src)) do
+                funrefs[#funrefs + 1] = { file = file, key = r.key, at = pos_of(r.node) }
+            end
+        end
         -- R4 `super` keyword: emit a call resolved by resolve_ruby_ancestors
         -- (superx path) to the ANCESTOR's same-named method. full=nil so the
         -- main loop leaves it unresolved (and sets c.fn); it never self-matches
@@ -8935,6 +8945,26 @@ local MATCH_OPTS = { match_limit = 65536 }
                         addreg(p.file, t2.id, p.at)
                     end
                 end
+            end
+        end
+    end
+
+    -- `fun f/N` references (collected per file above): the target is in the SAME file by the language's rule, so
+    -- this needs no resolver — the file's function with that name/arity key. A function naming itself (a recursive
+    -- `fun loop/1`) is not a reason it is alive, and is skipped.
+    if #funrefs > 0 then
+        local byk = {}
+        for _, n in ipairs(nodes) do
+            if (n.kind == 'function' or n.kind == 'method') and n.file then
+                for _, k in ipairs(n.altkeys or {}) do byk[n.file .. '\0' .. k] = byk[n.file .. '\0' .. k] or n end
+            end
+        end
+        for _, r in ipairs(funrefs) do
+            local t = byk[r.file .. '\0' .. r.key]
+            if t then
+                local from = fn_at(r.file, r.at.start.line, r.at.start.char)
+                if from and from ~= t.id then addref(from, t.id, r.at, true)
+                elseif not from then addreg(r.file, t.id, r.at) end
             end
         end
     end

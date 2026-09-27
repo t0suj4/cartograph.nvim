@@ -167,6 +167,9 @@ M.SLOTS = {
     -- a predicate over the CALL node for a dynamic call whose name node's type does not show it (erlang's
     -- `Mod:f()`: the module is computed, the name is an atom) — CART-1129
     dynamic_call = 'TYPES',
+    -- A FUNCTION NAMED AS A VALUE, not called (erlang `fun f/N`): (tsroot, src) -> { {key = 'f/N', node} }; the target
+    -- is the same file's function with that alt key, minted as the callback convention's hedged ref (CART-1132)
+    fun_refs = 'EMITTERS',
     -- the KEY child that takes a dynamic callee BACK to static: `t['name']()`
     -- names its member in the source. Cross-language by construction — every
     -- bracket/subscript grammar has literal keys (CART-0345)
