@@ -4088,6 +4088,20 @@ function M.import_ctx(root, files)
     return { root = root, files = set }
 end
 
+-- the rebind / export / dead-import hooks a move writes through (CART-1146, CART-1147); nil = not declared
+function M.local_bind(file, name, expr)
+    local _, spec = elang_for(file)
+    return spec and spec.local_bind and spec.local_bind(name, expr) or nil
+end
+function M.member_export(file, tbl, name)
+    local _, spec = elang_for(file)
+    return spec and spec.member_export and spec.member_export(tbl, name) or nil
+end
+function M.import_alias(file, line)
+    local _, spec = elang_for(file)
+    return spec and spec.import_alias and spec.import_alias(line) or nil
+end
+
 -- patterns matching this file's import lines (new-import placement)
 function M.import_pats(file)
     local _, spec = elang_for(file)

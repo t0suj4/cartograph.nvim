@@ -30,7 +30,11 @@ local M = {}
 --- THE PLAN: what a write verb hands to `apply`, and what the journal stores as
 --- its description. Bumped when a field a replayer reads is ADDED, REMOVED, or
 --- CHANGES MEANING.
-M.PLAN = 4 -- v4: `plan.preserves` / `preserves_why` / `may_change` (CART-0989) — what
+M.PLAN = 5 -- v5: `plan.exports` / `rebinds` / `dead_imports` (CART-1146, CART-1147) — the move's
+           --     export of a moved LOCAL from its new home, the name bound again in its old file, and the
+           --     import a rewrite left dead, replaced in place or removed. The edit callback reads all three,
+           --     so a v4 replay would write a move that no longer matches what its plan text says.
+           -- v4: `plan.preserves` / `preserves_why` / `may_change` (CART-0989) — what
            --     the plan CLAIMS about behaviour, from a closed vocabulary
            --     (all|none|unreviewed). IT GATES EXECUTION: `execute` refuses a plan
            --     that declares nothing, so a v3 plan does not apply. USER: "declare

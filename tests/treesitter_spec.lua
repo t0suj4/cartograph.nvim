@@ -2729,10 +2729,17 @@ test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
     store.ingest(ts.extract(root))
     root = store.data.root
     journal.wipe(root)
+    -- a FUNCTION of that name first: after a move rebinds a moved local (CART-1146) its old file holds a VAR of the
+    -- same name, and pairs() order would pick either
     local function byname(nm)
+        local var
         for id, n in pairs(store.by_id) do
-            if n.name == nm then return id end
+            if n.name == nm then
+                if n.kind == 'function' or n.kind == 'method' then return id end
+                var = var or id
+            end
         end
+        return var
     end
 
     -- the plan: salute is greet's witness twin; both callers rewrite;
@@ -3477,10 +3484,17 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
     store.ingest(ts.extract(root))
     root = store.data.root
     journal.wipe(root)
+    -- a FUNCTION of that name first: after a move rebinds a moved local (CART-1146) its old file holds a VAR of the
+    -- same name, and pairs() order would pick either
     local function byname(nm)
+        local var
         for id, n in pairs(store.by_id) do
-            if n.name == nm then return id end
+            if n.name == nm then
+                if n.kind == 'function' or n.kind == 'method' then return id end
+                var = var or id
+            end
         end
+        return var
     end
 
     -- refusals: nothing staged; then no destination
@@ -3500,12 +3514,14 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
     eq(1, #plan.moves)
     eq('traveler', plan.moves[1].name)
     eq(6, plan.dest_at) -- 0-based index of `return M`
-    -- the stays() call site is disclosed, not rewritten
-    local disclosed
+    -- ★ the stays() call site is KEPT WORKING, not disclosed (CART-1146): `traveler` is file-local and a.lua still
+    -- calls it by name, so b.lua exports it and a.lua binds the name again where the definition was. Until then this
+    -- test pinned the disclosure — and the plan it described left `traveler(2)` calling nil.
+    eq(1, #plan.rebinds)
+    eq('traveler', plan.rebinds[1].name)
     for _, h in ipairs(plan.hazards) do
-        if h:match('call site') and h:match('a.lua') then disclosed = true end
+        ok(not (tostring(h):match('call site') and tostring(h):match('a.lua')), 'no call site left behind: ' .. tostring(h))
     end
-    ok(disclosed, require('cartograph.hazard').text(plan.hazards))
 
     -- verb rung: the move-set changed after planning -> refuse
     store.set_txn(plan)
@@ -3522,6 +3538,8 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
     eq(0, #store.staged_ids()) -- the move-set was consumed
 
     local expectedA = table.concat({
+        "local b = require 'b'",
+        'local traveler = b.traveler',
         'local function stays()',
         '  return traveler(2)',
         'end',
@@ -3536,6 +3554,7 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
         'local function traveler(x)',
         '  return x + 7',
         'end',
+        'M.traveler = traveler',
         '',
         'return M',
         '' }, '\n')
@@ -3545,14 +3564,11 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
     -- the graph followed: traveler now lives in b.lua
     local t2 = store.node(byname('traveler'))
     eq('b.lua', t2 and t2.file)
-    -- …and the caller is NOT relinked, which is the plan's own disclosure made good.
-    -- This move rewrote no call site (`the stays() call site is disclosed, not
-    -- rewritten`, asserted above), so a.lua still says a bare `traveler(2)` while
-    -- b.lua declares `local function traveler` — at runtime that is nil. Before
-    -- CART-0230 the graph re-minted the edge by unique name and read as if the move
-    -- had been wired: the hazard told the user to fix a call the graph called fine.
-    ok(not vim.tbl_contains(store.usedby[byname('traveler')] or {}, byname('stays')),
-        'the un-wired call site stays unresolved, matching the hazard')
+    -- …and the caller IS relinked, because the move now WIRES it (CART-1146): a.lua binds `traveler` to
+    -- b.traveler, which b.lua exports. (Before, the move left a bare `traveler(2)` calling nil, and this line pinned
+    -- the graph refusing the edge, CART-0230 — the graph was right then and is right now: the edge follows the wiring.)
+    ok(vim.tbl_contains(store.usedby[byname('traveler')] or {}, byname('stays')),
+        'the rebound call site resolves to the moved function')
 
     -- byte-exact undo
     local r, rw = journal.rollback(root)
@@ -3604,10 +3620,17 @@ test('extract-module: new file, header, adhesion, undo deletes', function ()
     store.ingest(ts.extract(root))
     root = store.data.root
     journal.wipe(root)
+    -- a FUNCTION of that name first: after a move rebinds a moved local (CART-1146) its old file holds a VAR of the
+    -- same name, and pairs() order would pick either
     local function byname(nm)
+        local var
         for id, n in pairs(store.by_id) do
-            if n.name == nm then return id end
+            if n.name == nm then
+                if n.kind == 'function' or n.kind == 'method' then return id end
+                var = var or id
+            end
         end
+        return var
     end
 
     store.stage(byname('nomad'))
@@ -3635,21 +3658,31 @@ test('extract-module: new file, header, adhesion, undo deletes', function ()
     eq('applied', entry.status)
     eq(0, #store.staged_ids())
 
+    -- ★ keeper() still calls nomad by name, so the new module EXPORTS it and a.lua binds the name again where the
+    -- definition was (CART-1146). This test used to pin a.lua calling a nomad that no longer existed there.
     local expectedA = table.concat({
         'local function anchor()',
         '  return 1',
         'end',
         '',
+        "local util = require 'sub.util'",
+        'local nomad = util.nomad',
         'local function keeper()',
         '  return nomad(4)',
         'end',
         '' }, '\n')
     local expectedU = table.concat({
+        'local M = {}',
+        '',
         '-- doc line: travels with the def',
         '-- second doc line',
         'local function nomad(x)',
         '  return x * 3',
         'end',
+        '',
+        'M.nomad = nomad',
+        '',
+        'return M',
         '' }, '\n')
     eq(expectedA, readf('a.lua'))
     eq(expectedU, readf('sub/util.lua'))
@@ -3771,10 +3804,17 @@ test('move wiring: import line written, call sites requalified', function ()
     store.ingest(ts.extract(root))
     root = store.data.root
     journal.wipe(root)
+    -- a FUNCTION of that name first: after a move rebinds a moved local (CART-1146) its old file holds a VAR of the
+    -- same name, and pairs() order would pick either
     local function byname(nm)
+        local var
         for id, n in pairs(store.by_id) do
-            if n.name == nm then return id end
+            if n.name == nm then
+                if n.kind == 'function' or n.kind == 'method' then return id end
+                var = var or id
+            end
         end
+        return var
     end
 
     store.stage(byname('M.foo'))

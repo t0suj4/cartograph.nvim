@@ -754,7 +754,10 @@ test('moveapply: the PLAN field set is pinned to its schema version', function (
     local want = { 'consume', 'copy', 'creates', 'desc', 'dest', 'dest_at', 'edit_of',
         'generation', 'guards', 'hazards', 'header', 'imports_add', 'moves', 'precheck',
         'preserves', 'preserves_why',
-        'refspecs', 'rewrites', 'scaffold', 'stamps', 'touched', 'verb' }
+        'refspecs', 'rewrites', 'scaffold', 'stamps', 'touched', 'verb',
+        -- v5 (CART-1146/1147): what the edit callback also writes — exports, rebinds, dead imports
+        'dead_imports', 'exports', 'rebinds' }
+    table.sort(want)
     -- `reexports` is v2's addition and appears only when the caller asks for it,
     -- so it is listed as OPTIONAL rather than required: a field that comes and
     -- goes with an option is still part of the schema a replayer reads.
@@ -1005,4 +1008,127 @@ test('moveapply: a local the moved set BINDS is not a capture, even read by a ch
         'a name the set binds itself is not disclosed: ' .. txt)
     -- and the genuine one still is
     ok(txt:find('outside', 1, true), 'a name from outside the set IS: ' .. txt)
+end)
+
+-- ── CART-1146 / CART-1147: the untangling cases (xmppspec.term -> erllit, 2026-09-27) ───────────────────────────
+-- m.lua: a LOCAL helper the moving function uses AND a staying function still calls by name; gen.lua: a generic reader
+-- that reached m.term through a function-local require — the dependency the move exists to cut.
+local UNTANGLE = {
+    ['m.lua'] = table.concat({
+        '-- m — a module with a generic reader inside',
+        'local M = {}',
+        '',
+        "local function unq(s) return (s:gsub(\"'\", '')) end",
+        '',
+        'function M.term(s) return { v = unq(s) } end',
+        '',
+        "function M.parse(s) return unq(s) .. '!' end",
+        '',
+        'return M',
+    }, '\n'),
+    ['gen.lua'] = table.concat({
+        '-- gen — a generic reader: it must not need m once the reader moves',
+        'local G = {}',
+        'function G.read(s)',
+        "    local X = require 'm'",
+        '    return X.term(s)',
+        'end',
+        'return G',
+    }, '\n'),
+}
+
+local function untangle_apply()
+    local st = ingest_files(UNTANGLE)
+    local root = st.data.root
+    local term, unq = node_by(st, 'M.term'), node_by(st, 'unq', 'function')
+    local plan, err = moveapply.plan_extract_ids(st, { term.id, unq.id }, 'lit.lua', { reexport = true })
+    ok(plan, 'planned: ' .. tostring(err))
+    st.clear_stage(); st.stage(term.id); st.stage(unq.id); st.set_dest('lit.lua')
+    local okay, why = moveapply.apply(st, plan)
+    ok(okay, 'applied: ' .. tostring(why))
+    local function read(rel) return table.concat(vim.fn.readfile(root .. '/' .. rel), '\n') end
+    return root, plan, read
+end
+
+test('moveapply (CART-1146): a moved LOCAL the old file still calls is exported and REBOUND there — both modules run', function ()
+    if not ready() then skip('no lua parser') end
+    local root, plan, read = untangle_apply()
+    local m, lit = read('m.lua'), read('lit.lua')
+    ok(lit:find('M.unq = unq', 1, true), 'the new module exports the helper: ' .. lit)
+    ok(m:find('local unq = lit.unq', 1, true), 'the old module rebinds it where it was: ' .. m)
+    local _, requires = m:gsub("require 'lit'", '')
+    eq(1, requires, 'ONE require of the new home: the re-export reuses the rebind\'s alias: ' .. m)
+    for _, h in ipairs(plan.hazards) do
+        ok(not tostring(h):find('requalify them yourself', 1, true), 'no call site left behind: ' .. tostring(h))
+    end
+    -- ⚠ RUN IT: the defect was code that parses and fails at the first call
+    package.path = root .. '/?.lua;' .. package.path
+    package.loaded['m'], package.loaded['lit'], package.loaded['gen'] = nil, nil, nil
+    local okm, M = pcall(require, 'm')
+    ok(okm, 'm loads: ' .. tostring(M))
+    eq('a!', okm and M.parse("'a'"), 'the staying caller still reaches the helper')
+    eq('b', okm and M.term("'b'").v, 'the re-exported function works')
+end)
+
+test('moveapply (CART-1147): the require a rewrite made DEAD is replaced in place, and nothing lands above a header', function ()
+    if not ready() then skip('no lua parser') end
+    local root, _, read = untangle_apply()
+    local gen = read('gen.lua')
+    ok(not gen:find("require 'm'", 1, true), 'gen no longer requires m: ' .. gen)
+    ok(gen:find("    local lit = require 'lit'", 1, true), 'the new require sits where the dead one was: ' .. gen)
+    eq('-- gen — a generic reader: it must not need m once the reader moves', vim.split(gen, '\n')[1], 'the header stays first')
+    package.path = root .. '/?.lua;' .. package.path
+    package.loaded['m'], package.loaded['lit'], package.loaded['gen'] = nil, nil, nil
+    local okg, G = pcall(require, 'gen')
+    ok(okg, 'gen loads: ' .. tostring(G))
+    eq('c', okg and G.read("'c'").v)
+    eq(nil, package.loaded['m'], 'and running it never loads m')
+end)
+
+test('moveapply (CART-1147): a require still used elsewhere in the file is KEPT', function ()
+    if not ready() then skip('no lua parser') end
+    local files = vim.deepcopy(UNTANGLE)
+    files['gen.lua'] = table.concat({
+        '-- gen',
+        'local G = {}',
+        'function G.read(s)',
+        "    local X = require 'm'",
+        '    return X.term(s), X.parse(s)',
+        'end',
+        'return G',
+    }, '\n')
+    local st = ingest_files(files)
+    local term, unq = node_by(st, 'M.term'), node_by(st, 'unq', 'function')
+    local plan = assert(moveapply.plan_extract_ids(st, { term.id, unq.id }, 'lit.lua', { reexport = true }))
+    st.clear_stage(); st.stage(term.id); st.stage(unq.id); st.set_dest('lit.lua')
+    ok(moveapply.apply(st, plan))
+    local gen = table.concat(vim.fn.readfile(st.data.root .. '/gen.lua'), '\n')
+    ok(gen:find("local X = require 'm'", 1, true), 'X.parse still needs m: ' .. gen)
+    ok(gen:find('lit.term(s)', 1, true), 'and the moved call is requalified')
+    -- the NEW import goes after the header comment, never above it (no top-level import to follow here)
+    eq('-- gen', vim.split(gen, '\n')[1], 'the header stays first: ' .. gen)
+    ok(gen:find("-- gen\nlocal lit = require 'lit'", 1, true), 'the new require right under it: ' .. gen)
+end)
+
+test('moveapply (CART-0923): a callee only an INFERRED name-guess reaches is no "should import" advice', function ()
+    if not ready() then skip('no lua parser') end
+    -- `s:gsub` in the moved code tail-matches hazard.lua's M.gsub by name alone; the move needs no import of it
+    local st = ingest_files {
+        ['hazard.lua'] = 'local M = {}\nfunction M.gsub(x) return x end\nreturn M\n',
+        ['m.lua'] = "local M = {}\nfunction M.clean(s) return (s:gsub('x', '')) end\nreturn M\n",
+    }
+    local clean = node_by(st, 'M.clean')
+    local plan = assert(moveapply.plan_extract_ids(st, { clean.id }, 'lit.lua', { reexport = true }))
+    for _, h in ipairs(plan.hazards) do
+        ok(not tostring(h):find('should import hazard.lua', 1, true), 'no import advice from a name guess: ' .. tostring(h))
+    end
+end)
+
+test('moveapply (CART-1146): a language that cannot write the rebind REFUSES by name — never the broken move', function ()
+    if not parser_available('python') then skip('no python parser') end
+    local st = ingest_files { ['a.py'] = 'def helper(x):\n    return x + 1\n\n\ndef user():\n    return helper(2)\n' }
+    local helper = node_by(st, 'helper', 'function')
+    local plan, err = moveapply.plan_extract_ids(st, { helper.id }, 'b.py')
+    ok(not plan, 'refused, not planned')
+    ok(err and err:find('still called by name', 1, true) and err:find('a.py', 1, true), 'named: ' .. tostring(err))
 end)

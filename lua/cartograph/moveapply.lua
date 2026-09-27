@@ -186,7 +186,7 @@ end
 -- the evidence, not about the code. It is disclosed as a hazard either way, and
 -- refused unless the caller says what to do -- `reexport` wires the old name to
 -- the new home so the surface is preserved by construction.
-local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts)
+local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts, introduced)
     local per, order = {}, {}
     for _, m in ipairs(plan.moves) do
         if m.mode ~= 'copy' then
@@ -285,7 +285,9 @@ local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts)
                 return nil, ('cannot wire a re-export in %s: no `return %s` line'
                     .. ' to insert before'):format(rel, e.table)
             end
-            local block = { '', ('-- re-exported from %s so %s keeps its surface'):format(dest, e.table), line }
+            local block = { '', ('-- re-exported from %s so %s keeps its surface'):format(dest, e.table) }
+            -- a rebind above already required the new home under this alias (CART-1146): one require, not two
+            if not (introduced and introduced[rel] == alias) then block[#block + 1] = line end
             for _, n in ipairs(e.names) do
                 block[#block + 1] = ('%s.%s = %s.%s'):format(e.table, n, alias, n)
             end
@@ -429,23 +431,37 @@ local function collect(store, ids, dest, plan, opts)
     plan.rewrites, plan.imports_add = {}, {}
     local in_move = {}
     for _, id in ipairs(ids) do in_move[id] = true end
-    local binds = {} -- file -> { target file -> local alias }
+    local binds, bind_at = {}, {} -- file -> { target file -> local alias }, and the import's position
     for _, e in ipairs(store.data.edges or {}) do
         if e.kind == 'import' and e.bind then
             binds[e.from] = binds[e.from] or {}
             binds[e.from][e.to] = e.bind
+            bind_at[e.from] = bind_at[e.from] or {}
+            bind_at[e.from][e.to] = type(e.at) == 'table' and e.at[1] or e.at
         end
     end
-    local function import_at(ls, pats)
+    -- where a NEW import goes: after the file's last top-level import; with none, after its HEADER comment block —
+    -- never above it (CART-1147: the first cut put `local erllit = require …` above erlfeatures' header)
+    local function import_at(ls, pats, file)
         local last = -1
         for i, l in ipairs(ls) do
             for _, p in ipairs(pats or {}) do
                 if l:match(p) then last = i - 1 break end
             end
         end
-        return last
+        if last >= 0 or not okp then return last end
+        local cpats = ts.attach_pats(file) or {}
+        local header = -1
+        for i, l in ipairs(ls) do
+            local is_c = false
+            for _, p in ipairs(cpats) do if l:match(p) then is_c = true break end end
+            if not is_c then break end
+            header = i - 1
+        end
+        return header
     end
     local imports, rw_left = {}, {} -- per-file: planned import / leftovers
+    local need_rebind, rw_alias = {}, {} -- moved local -> bare calls left in its old file; file -> alias -> rewrites
     for _, m in ipairs(plan.moves) do
         local tailname = m.name:match('([%w_]+)$')
         -- a COPY leaves the original in place, so its callers must NOT be
@@ -461,6 +477,12 @@ local function collect(store, ids, dest, plan, opts)
                 local srcAlias = binds[F] and binds[F][m.file]
                 local ok_site = srcAlias and token
                     and token == (srcAlias .. '.' .. tailname)
+                -- ★ A LOCAL CALLED BY NAME IN THE FILE IT LEAVES (CART-1146): no alias reaches it, so no rewrite can;
+                -- the old file must BIND the name again (decided below, after the scaffold is known)
+                local bare_home = F == m.file and token == tailname and not m.name:find('.', 1, true)
+                -- and a `M.term(...)` in the file M.term leaves is satisfied by the re-export, when there is one
+                local srctbl = F == m.file and opts and opts.reexport and okp and ls and ts.module_table(F, ls)
+                local via_reexport = srctbl and token == m.name and m.name == (srctbl .. '.' .. tailname)
                 local destAlias = ok_site and binds[F] and binds[F][dest]
                 if ok_site and not destAlias then
                     local imp2 = imports[F]
@@ -471,7 +493,7 @@ local function collect(store, ids, dest, plan, opts)
                         if line and alias and not table.concat(ls, '\n')
                             :find('%f[%w_]' .. alias .. '%f[^%w_]') then
                             imp2 = { text = line, alias = alias,
-                                after = import_at(ls, ts.import_pats(F)) }
+                                after = import_at(ls, ts.import_pats(F), F) }
                         else
                             imp2 = false
                         end
@@ -483,12 +505,48 @@ local function collect(store, ids, dest, plan, opts)
                     plan.rewrites[#plan.rewrites + 1] = { file = F, at = at,
                         to = destAlias .. '.' .. tailname }
                     touched[F] = true
+                    local ra = rw_alias[F] or {}
+                    rw_alias[F] = ra
+                    ra[srcAlias] = ra[srcAlias] or { n = 0, target = m.file }
+                    ra[srcAlias].n = ra[srcAlias].n + 1
+                elseif bare_home and m.mode ~= 'copy' then
+                    need_rebind[m.id] = (need_rebind[m.id] or 0) + 1
+                elseif via_reexport and m.mode ~= 'copy' then
+                    local _ = via_reexport   -- wired by surface_loss's re-export block
                 else
                     rw_left[F] = (rw_left[F] or 0) + 1
                 end
             end
         end
     end
+    -- ★ THE IMPORT A REWRITE LEAVES DEAD (CART-1147). Requalifying `X.term` to `erllit.term` can leave
+    -- `local X = require 'xmppspec'` with no use at all — and then the move did not cut the dependency it existed to
+    -- cut. Dead = the alias occurs only in its own import line and at the sites just rewritten, and the line is ONE
+    -- import (the language's import_alias says so). Then it is REPLACED by the new import, in place and at its
+    -- indentation (a function-local require stays function-local), or deleted when no new import is needed.
+    plan.dead_imports = {}
+    for F, per in pairs(rw_alias) do
+        local text, ls = file_text(F), file_lines(F)
+        for alias, ra in pairs(per) do
+            local at = bind_at[F] and bind_at[F][ra.target]
+            local L = at and atr.sl(at)
+            local lt = L and ls and ls[L + 1]
+            if lt and okp and ts.import_alias(F, lt) == alias then
+                local n = 0
+                for _ in (text or ''):gmatch('%f[%w_]' .. alias:gsub('%p', '%%%0') .. '%f[^%w_]') do n = n + 1 end
+                if n == 1 + ra.n then
+                    local imp2 = imports[F]
+                    local d = { file = F, line = L, alias = alias }
+                    if imp2 then
+                        d.to = lt:match('^(%s*)') .. imp2.text
+                        imports[F] = false
+                    end
+                    plan.dead_imports[#plan.dead_imports + 1] = d
+                end
+            end
+        end
+    end
+    table.sort(plan.dead_imports, function (a, b) return a.file < b.file end)
     for F, imp2 in pairs(imports) do
         if imp2 then
             plan.imports_add[#plan.imports_add + 1] = { file = F,
@@ -507,11 +565,9 @@ local function collect(store, ids, dest, plan, opts)
             .. ' reference the old home — requalify them yourself')
             :format(rw_left[F], F)
     end
-    for _, f in ipairs(imp.requires_add) do
-        if not (imports[f] and imports[f] ~= false) then
-            plan.hazards[#plan.hazards + 1] = f .. ' should import ' .. dest
-        end
-    end
+    local wired = {} -- files the plan gives an import of dest: added, or put in place of a dead one
+    for F, imp2 in pairs(imports) do if imp2 then wired[F] = true end end
+    for _, d in ipairs(plan.dead_imports) do if d.to then wired[d.file] = true end end
     for _, f in ipairs(imp.dest_requires) do
         plan.hazards[#plan.hazards + 1] = dest .. ' should import ' .. f
     end
@@ -520,9 +576,60 @@ local function collect(store, ids, dest, plan, opts)
     if okp and plan.creates and plan.creates[dest] then
         module_scaffold(plan, dest, ts, file_lines)
     end
+    -- ★ THE REBIND (CART-1146): a moved LOCAL still called by name in its old file is EXPORTED from the new home and
+    -- BOUND again in the old one, where its definition was — so every one of those calls keeps working unchanged.
+    -- Written through the language's hooks only; a language without them REFUSES by name, because the alternative is
+    -- the first cut's plan: it parsed, passed its guard, and failed at the first call (12 of 13 xmppspec specs).
+    plan.exports, plan.rebinds = {}, {}
+    local introduced = {} -- file -> the alias a rebind's new import introduced there
+    if next(need_rebind) then
+        local creating = plan.creates and plan.creates[dest]
+        local dtbl = plan.scaffold and plan.scaffold.name
+        if okp and not dtbl and creating then
+            -- only locals move: the new file still needs a table to export them through
+            local pre, post = ts.module_scaffold(dest, 'M')
+            if pre and post then plan.scaffold = { name = 'M', pre = pre, post = post }; dtbl = 'M' end
+        end
+        if okp and not dtbl and not creating then dtbl = ts.module_table(dest, file_lines(dest) or {}) end
+        for _, m in ipairs(plan.moves) do
+            local calls = need_rebind[m.id]
+            if calls then
+                local name = m.name:match('([%w_]+)$')
+                local exp = okp and dtbl and ts.member_export(dest, dtbl, name)
+                local alias, intro = binds[m.file] and binds[m.file][dest] or introduced[m.file], nil
+                if okp and not alias then
+                    local line, a = ts.import_line(m.file, dest, ts.import_ctx(store.data.root, store.files))
+                    if line and a and not (file_text(m.file) or ''):find('%f[%w_]' .. a .. '%f[^%w_]') then
+                        alias, intro = a, line
+                    end
+                end
+                local bind = okp and alias and ts.local_bind(m.file, name, alias .. '.' .. name)
+                if not (exp and bind) then
+                    return nil, ('%s is file-local and still called by name %d time(s) in %s, which it leaves: %s. Move'
+                        .. ' those callers with it, or keep %s where it is'):format(m.name, calls, m.file,
+                        not exp and ('%s has no module table to export it through'):format(dest)
+                        or ('%s cannot bind the name again from %s'):format(m.file, dest), m.name)
+                end
+                plan.exports[#plan.exports + 1] = exp
+                local lines = {}
+                if intro then lines[#lines + 1] = intro; introduced[m.file] = alias end
+                lines[#lines + 1] = bind
+                plan.rebinds[#plan.rebinds + 1] = { file = m.file, after = m.lines.s - 1, lines = lines,
+                    name = name, calls = calls }
+                touched[m.file] = true
+            end
+        end
+    end
     if okp then
-        local okl, whyl = surface_loss(store, plan, dest, ts, file_lines, in_move, opts)
+        local okl, whyl = surface_loss(store, plan, dest, ts, file_lines, in_move, opts, introduced)
         if not okl then return nil, whyl end
+    end
+    for f in pairs(introduced) do wired[f] = true end
+    for _, r in ipairs(plan.reexports or {}) do wired[r.file] = true end
+    for _, f in ipairs(imp.requires_add) do
+        if not wired[f] then
+            plan.hazards[#plan.hazards + 1] = f .. ' should import ' .. dest
+        end
     end
     for f in pairs(touched) do
         plan.touched[#plan.touched + 1] = f
@@ -563,6 +670,8 @@ local function collect(store, ids, dest, plan, opts)
             .. ' from the source (the idiom must be MECHANICAL or nothing is written)')
     end
     if plan.reexports then rc:did('re-exports wired', #plan.reexports) end
+    if plan.rebinds and #plan.rebinds > 0 then rc:did('moved locals exported and rebound in their old file', #plan.rebinds) end
+    if plan.dead_imports and #plan.dead_imports > 0 then rc:did('imports a rewrite left dead removed or replaced', #plan.dead_imports) end
     -- ⚠ ROWS, NOT THE BUILDER: `journal.begin` serializes the plan, and a
     -- table carrying a metatable and methods does not survive that.
     plan.receipt, plan._receipt = rc.rows, nil
@@ -940,6 +1049,10 @@ function M.edits_for(plan)
                     out[#out + 1] = src[i]
                 end
             end
+            if plan.exports and #plan.exports > 0 then
+                out[#out + 1] = ''
+                vim.list_extend(out, plan.exports)
+            end
             if plan.scaffold then
                 out[#out + 1] = ''
                 vim.list_extend(out, plan.scaffold.post)
@@ -963,6 +1076,7 @@ function M.edits_for(plan)
                     ins[#ins + 1] = src[i]
                 end
             end
+            for _, x in ipairs(plan.exports or {}) do ins[#ins + 1] = x end
             if (lines[at + 1] or ''):match('%S') then
                 ins[#ins + 1] = ''
             end
@@ -989,6 +1103,20 @@ function M.edits_for(plan)
             for _, r in ipairs(plan.reexports or {}) do
                 if r.file == rel then
                     ins[#ins + 1] = { after = r.after, lines = r.lines }
+                end
+            end
+            for _, r in ipairs(plan.rebinds or {}) do
+                if r.file == rel then ins[#ins + 1] = { after = r.after, lines = r.lines } end
+            end
+            for _, d in ipairs(plan.dead_imports or {}) do
+                if d.file == rel then
+                    if d.to then
+                        local l = lines[d.line + 1] or ''
+                        reps[#reps + 1] = { at = { start = { line = d.line, char = 0 },
+                            ['end'] = { line = d.line, char = #l } }, to = d.to }
+                    else
+                        dels[#dels + 1] = { s = d.line, e = d.line }
+                    end
                 end
             end
             return require('cartograph.txn').edit_file(before, dels, reps, ins)

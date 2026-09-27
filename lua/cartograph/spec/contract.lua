@@ -141,6 +141,9 @@ M.SLOTS = {
     -- language with no epilogue to write (python, rust) has nothing to fill
     -- module_scaffold with. Absence means NOT DECLARED, never "no idiom".
     module_table = 'IMPORTS', module_scaffold = 'IMPORTS',
+    -- a moved LOCAL still called in its old file: exported from the new home, rebound in the old (CART-1146); and a
+    -- single-binding import line a rewrite leaves dead, recognised so it can go (CART-1147). Lua only, as above.
+    local_bind = 'IMPORTS', member_export = 'IMPORTS', import_alias = 'IMPORTS',
     std_aliases = 'IMPORTS',        -- per-file names bound to the stdlib (std-alias disposition)
 
     -- TYPES: receiver / return / chain / field typing (the D-measurement's

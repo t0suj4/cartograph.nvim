@@ -958,6 +958,15 @@ return {
     end,
     -- lines that ARE imports (placement: a new one goes after the last)
     import_pats = { '^local%s+[%w_,%s]-=%s*require%f[%W]', '^require%f[%W]' },
+    -- THE REBIND AND THE EXPORT a move writes when a LOCAL it takes is still called by name in its old file
+    -- (CART-1146): the new home exports it, the old one binds the name again where the definition was
+    local_bind = function (name, expr) return ('local %s = %s'):format(name, expr) end,
+    member_export = function (tbl, name) return ('%s.%s = %s'):format(tbl, name, name) end,
+    -- the alias a line binds when it is ONE import and nothing else (`local X = require 'm'`, any indentation),
+    -- else nil: a dead one may be removed or replaced whole (CART-1147), anything richer is left alone
+    import_alias = function (line)
+        return line:match("^%s*local%s+([%a_][%w_]*)%s*=%s*require%s*%(?%s*['\"][^'\"]+['\"]%s*%)?%s*$")
+    end,
     -- THE MODULE IDIOM, read side (CART-0542): which file-local name this file
     -- binds as its module table. Answered from the file's own LINES, and
     -- deliberately STRICTLY: the trailing `return X` and a bare `local X = {}`

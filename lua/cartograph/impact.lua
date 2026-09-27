@@ -83,12 +83,26 @@ function M.compute(store, moveset, dest)
         end
     end
 
-    -- dest must require: modules holding deps of the moved symbols that stay put
+    -- dest must require: modules holding deps of the moved symbols that stay put.
+    -- ★ ONLY DEPS AN EDGE ABOVE `inferred` REACHES (CART-0923). An inferred edge is the unique-NAME guess, and on
+    -- method calls it fabricates: moving xmppspec.term produced five "erllit should import X" lines — `text:gsub` as
+    -- hazard.gsub, `node:field()` as xmppspec's own M.field (a CYCLE), `table.concat` as a test file's local —
+    -- every one advice to add an import the moved code does not need.
+    local tier = require 'cartograph.tier'
+    local trusted = {} -- moved id -> dep -> an edge above inferred reaches it
+    if dest then
+        for _, e in ipairs(store.data.edges or {}) do
+            if e.kind == 'ref' and in_move[e.from] and tier.of(e) ~= 'inferred' then
+                trusted[e.from] = trusted[e.from] or {}
+                trusted[e.from][e.to] = true
+            end
+        end
+    end
     local dest_req = {}
     if dest then
         for _, id in ipairs(moveset) do
             for _, dep in ipairs(band:callees(id)) do
-                local dn = not in_move[dep] and store.node(dep)
+                local dn = not in_move[dep] and trusted[id] and trusted[id][dep] and store.node(dep)
                 local dfile = dn and dn.file
                 if dfile and dfile ~= dest and not imports_already(band, dest, dfile) then
                     dest_req[dfile] = true
