@@ -131,6 +131,11 @@ M.PASSES = {
     { name = 'erldispatch',
         run = function (data) return require('cartograph.erldispatch').attach(data) end,
         say = function (s) return require('cartograph.erldispatch').summary(s), INFO end },
+    -- A KEYED REGISTRY'S DISPATCH (CART-1130/1128): each site that RUNS a key reaches the handlers registered under
+    -- it — registrations from the derived interpreter's tuples and direct calls, the key and handler positions derived
+    { name = 'erlhooks',
+        run = function (data) return require('cartograph.erlhooks').attach(data) end,
+        say = function (s) return require('cartograph.erlhooks').summary(s), INFO end },
     -- ONE CALL, TWO DEFINITIONS, ONE PER BUILD (CART-1133): a same-file refusal whose candidates sit in mutually
     -- exclusive -ifdef/-ifndef/-else branches reaches the SET, each member under one configuration
     { name = 'erlvariants',
