@@ -41,14 +41,14 @@ local function erl_terms(path)
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, 'erlang')
     if not ok then return {} end
     local root = parser:parse()[1]:root()
-    local XS = require 'cartograph.xmppspec'
+    local erllit = require 'cartograph.erllit'
     local out = {}
     local function walk(n)
         for c in n:iter_children() do
             if c:named() then
                 local t = c:type()
                 -- a tuple or list literal: read it as a term and stop (its insides are part of the term)
-                if t == 'tuple' or t == 'list' then out[#out + 1] = XS.term(c, src)
+                if t == 'tuple' or t == 'list' then out[#out + 1] = erllit.term(c, src)
                 else walk(c) end
             end
         end

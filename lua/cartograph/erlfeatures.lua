@@ -78,14 +78,14 @@ function M.rebar(root)
     if not src then return out end
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, 'erlang')
     if not ok then return out end
-    local XS = require 'cartograph.xmppspec'
+    local erllit = require 'cartograph.erllit'
     local troot = parser:parse()[1]:root()
     local terms = {}
     local function collect(n)
         for c in n:iter_children() do
             if c:named() then
                 local t = c:type()
-                if t == 'tuple' or t == 'list' then terms[#terms + 1] = XS.term(c, src) else collect(c) end
+                if t == 'tuple' or t == 'list' then terms[#terms + 1] = erllit.term(c, src) else collect(c) end
             end
         end
     end
