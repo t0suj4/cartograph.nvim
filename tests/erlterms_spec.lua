@@ -241,9 +241,11 @@ test('erlterms: simple recursion is a LOOP — the state and the value iterated 
             'ids([H | T]) -> [#disco_info{node = H} | ids(T)].', '' }, '\n'),
         user = table.concat({
             '-module(user).',
-            'a() -> loops:build([<<"urn:a">>]).',
+            'a(L) -> loops:build(L).',
             'b() -> loops:wait(3).',
-            'c() -> loops:ids([<<"x">>, <<"y">>]).', '' }, '\n'),
+            'c(L) -> loops:ids(L).',
+            'k() -> loops:build([<<"urn:a">>]).',
+            'm() -> loops:ids([<<"x">>, <<"y">>]).', '' }, '\n'),
     }
     local m = P:module('user')
     local function at(fn)
@@ -253,18 +255,28 @@ test('erlterms: simple recursion is a LOOP — the state and the value iterated 
         local t, holes, S = ET.term(last, m.src, m.ctx)
         return A.show(t), holes, S
     end
-    local a, ah, S = at('a/0')
+    local a, ah, S = at('a/1')
     ok(a:find('^%(rec:disco_info "n" %(nil%) %?%S+ %(nil%)%)$'), 'the base clause under the loop state: ' .. a)
-    ok(table.concat(reasons(ah), '|'):find('loop variable of loops:build/2', 1, true), 'features is the loop variable')
+    -- features is what the accumulator became: [] on the first pass, a loop variable after — the join of the two
+    local found = false
+    for _, w in pairs(S.reasons) do if w:find('loop variable of loops:build/2', 1, true) then found = true end end
+    ok(found, 'the accumulator is a loop variable: ' .. a .. ' ' .. table.concat(reasons(ah), '|'))
     ok(S.stats.loops >= 1 and S.stats.iterations >= 2, 'the loop is counted')
     eq('(rec:disco_info "done" (nil) (nil) (nil))', (at('b/0')))
-    local c, ch, S3 = at('c/0')
+    local c, ch, S3 = at('c/1')
     ok(c:find('^%?'), 'a list builder joins nil and cons: ' .. c)
     ok(table.concat(reasons(ch), '|'):find('one of cons | nil', 1, true), table.concat(reasons(ch), '|'))
     eq(0, S3.stats.unconverged)
+    -- a KNOWN spine folds exactly: the recursion is structural (the Tail of a known list)
+    eq('(rec:disco_info "n" (nil) (cons "urn:a" (nil)) (nil))', (at('k/0')))
+    eq('(cons (rec:disco_info "x" (nil) (nil) (nil)) (cons (rec:disco_info "y" (nil) (nil) (nil)) (nil)))', (at('m/0')))
+    ET.OFF = { spine = true }
+    local m2 = at('m/0')
+    ET.OFF = {}
+    ok(m2:find('^%?'), 'the spine fold observes: joined into the loop it is only one of cons | nil: ' .. m2)
     -- the guard observes: without the loop the self-call is a cut and nothing comes back
     ET.OFF = { loops = true }
-    local a2 = at('a/0')
+    local a2 = at('a/1')
     local b2 = at('b/0')
     ET.OFF = {}
     ok(a2:find('^%?'), 'no loop model: ' .. a2)
@@ -287,4 +299,72 @@ test('erlterms: yes means CERTAIN — a bound variable or a repeated one in a pa
     ET.OFF = {}
     eq('(rec:disco_info "a" (nil) (nil) (nil))', s2, 'the guard observes (bound variable)')
     eq('(rec:disco_info "a" (nil) (nil) (nil))', rep2, 'the guard observes (repeated variable)')
+end)
+
+test('erlterms: a fun is a value — closures apply with their clauses and captured variables; lists folds run from source', function ()
+    need()
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    local P = program {
+        -- the shape of OTP's own lists.erl: a guarded entry, a foldr helper, a tail foldl, and a BIF stub
+        mylists = table.concat({
+            '-module(mylists).',
+            'map(F, List) when is_function(F, 1) -> case List of [Hd | Tail] -> [F(Hd) | map_1(F, Tail)]; [] -> [] end.',
+            'map_1(F, [Hd | Tail]) -> [F(Hd) | map_1(F, Tail)];',
+            'map_1(_F, []) -> [].',
+            'foldl(F, Acc, [H | T]) -> foldl(F, F(H, Acc), T);',
+            'foldl(_F, Acc, []) -> Acc.',
+            'reverse(_, _) -> erlang:nif_error(undef).', '' }, '\n'),
+        user = table.concat({
+            '-module(user).',
+            'item(N) -> #disco_info{node = N}.',
+            -- a closure over a variable of its creator
+            'a() -> Ns = <<"urn:x">>, mylists:map(fun(F) -> #disco_info{node = Ns, features = [F]} end, [<<"f1">>, <<"f2">>]).',
+            -- a named local function as a fun, and a remote one
+            'b() -> mylists:map(fun item/1, [<<"n1">>]).',
+            'c() -> mylists:map(fun user:item/1, [<<"n2">>]).',
+            -- a foldl whose accumulator is built by the fun
+            'd() -> mylists:foldl(fun(X, Acc) -> [X | Acc] end, [], [<<"p">>, <<"q">>]).',
+            -- apply/2 and apply/3
+            'e() -> F = fun(X) -> #disco_info{node = X} end, apply(F, [<<"ap">>]).',
+            'g() -> apply(user, item, [<<"ap3">>]).',
+            -- a named fun sees itself
+            'h() -> L = fun Loop([]) -> done; Loop([_ | T]) -> Loop(T) end, L([1, 2]).',
+            -- a BIF whose source is a stub is not its body
+            'k() -> mylists:reverse([1], []).',
+            -- a closure made inside a call keeps that call's variables
+            'mk(N) -> fun(X) -> #disco_info{node = N, features = [X]} end.',
+            'n() -> F = user:mk(<<"cap">>), F(<<"x">>).',
+            -- a fun applied to the wrong number of arguments matches no clause
+            'w() -> F = fun(X) -> X end, F(1, 2).', '' }, '\n'),
+    }
+    local m = P:module('user')
+    local function at(fn, off)
+        ET.OFF = off or {}
+        local cl = m.fns[fn][1]
+        local last
+        for c in cl:field('body')[1]:iter_children() do if c:named() then last = c end end
+        local t, holes = ET.term(last, m.src, m.ctx)
+        ET.OFF = {}
+        return A.show(t), holes
+    end
+    eq('(cons (rec:disco_info "urn:x" (nil) (cons "f1" (nil)) (nil)) (cons (rec:disco_info "urn:x" (nil) (cons "f2" (nil)) (nil)) (nil)))', (at('a/0')))
+    eq('(cons (rec:disco_info "n1" (nil) (nil) (nil)) (nil))', (at('b/0')))
+    eq('(cons (rec:disco_info "n2" (nil) (nil) (nil)) (nil))', (at('c/0')))
+    eq('(cons "q" (cons "p" (nil)))', (at('d/0')))
+    eq('(rec:disco_info "ap" (nil) (nil) (nil))', (at('e/0')))
+    eq('(rec:disco_info "ap3" (nil) (nil) (nil))', (at('g/0')))
+    eq('"done"', (at('h/0')))
+    local k, kh = at('k/0')
+    ok(k:find('^%?'), k)
+    ok(table.concat(reasons(kh), '|'):find('a BIF (its source is a nif_error stub)', 1, true), table.concat(reasons(kh), '|'))
+    eq('(rec:disco_info "cap" (nil) (cons "x" (nil)) (nil))', (at('n/0')))
+    local w, wh = at('w/0')
+    ok(w:find('^%?') and table.concat(reasons(wh), '|'):find('no clause', 1, true), 'arity: ' .. w .. ' ' .. table.concat(reasons(wh), '|'))
+    -- the guards observe
+    local nf = at('a/0', { funs = true })
+    ok(nf:find('^%(cons %?%S+ %(cons %?%S+ %(nil%)%)%)$'), 'without fun values the spine is known, the elements are not: ' .. nf)
+    local ks = at('k/0', { stubs = true })
+    local _, ksh = at('k/0', { stubs = true })
+    ok(not table.concat(reasons(ksh), '|'):find('stub', 1, true), 'without the stub rule the body is evaluated: ' .. ks)
 end)

@@ -91,7 +91,8 @@ M.SEND_VERBS = {
 local ERLT = { call = { call = true }, remote = { remote = true }, clause = { function_clause = true } }
 
 --- Every send site in the erlang files of `dir`, with the term the value encodes to.
---- opts = { E = erlrecords env (the module record scopes), spec = xmppspec (optional: is the record on the wire?) }
+--- opts = { E = erlrecords env (the module record scopes), spec = xmppspec (optional: is the record on the wire?),
+---          deps = { src dir, … }, otp = an OTP source root (the runtime's version; optional) }
 --- -> rows { file, line, fn (enclosing clause name/arity), verb, term, holes, status, record, wire = entry names },
 ---    stats (the summary session's counters: summaries, memo_hits, recursive cuts, depth cuts, budget)
 function M.sends(dir, opts)
@@ -109,6 +110,13 @@ function M.sends(dir, opts)
         dirs[#dirs + 1] = { dir = d .. '/src', E = ER.new { include_dirs = { d .. '/include' }, apps = E.apps } }
     end
     for _, d in ipairs(opts.deps or {}) do dirs[#dirs + 1] = d end
+    -- the RUNTIME's own source (opts.otp: an OTP source tree of the version that runs, the caller's): lists:map/foldl
+    -- and the rest are read from their definitions, not listed. After the tree and its dependencies.
+    if opts.otp then
+        local incs = vim.fn.glob(opts.otp .. '/lib/*/include', false, true)
+        local OE = ER.new { include_dirs = incs, libs = { opts.otp .. '/lib' } }
+        for _, d in ipairs(vim.fn.glob(opts.otp .. '/lib/*/src', false, true)) do dirs[#dirs + 1] = { dir = d, E = OE } end
+    end
     local P = ET.program { dirs = dirs, E = E }
     local S = ET.session()
     local verbs = {}

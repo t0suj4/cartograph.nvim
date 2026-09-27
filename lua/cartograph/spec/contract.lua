@@ -305,6 +305,9 @@ M.SLOTS = {
     -- CALLS THAT NEVER RETURN (CART-1112): <auto-imported BIF name> -> true for the ones that RAISE. A term summary
     -- drops such an arm from a join instead of generalizing every join to a bare hole.
     raises = 'ANALYSIS',
+    -- A BIF'S SOURCE STUB (CART-1130): { ['<mod>:<fn>'] = true } for the call a BIF's source body makes in place of an
+    -- implementation (erlang:nif_error). A function every clause of which only makes that call is a BIF, not its body.
+    bif_stub = 'ANALYSIS',
     -- PATTERN BINDING (CART-0957): { fields = <node type -> the field that IS a pattern>, params = <the
     -- fn head is a pattern>, single_assignment = <a bound name in a pattern is a match, a use> }. A
     -- pattern binds every name under it at any depth, which binder_fields (per node TYPE) cannot say when

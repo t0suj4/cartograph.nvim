@@ -59,9 +59,10 @@ local T = {
     call = { call = true }, remote = { remote = true }, case = { case_expr = true }, ifx = { if_expr = true },
     clause = { function_clause = true }, arm = { cr_clause = true }, fn = { anonymous_fun = true },
     funclause = { fun_clause = true }, macro = { macro_call_expr = true }, map = { map_expr = true },
-    decl = { fun_decl = true },
+    decl = { fun_decl = true }, funref = { internal_fun = true, external_fun = true }, extfun = { external_fun = true },
 }
 local RAISES = require('cartograph.spec.erlang').raises or {}
+local STUB = require('cartograph.spec.erlang').bif_stub or {}
 
 -- the macro vocabulary the erlang spec reads call arguments with (erl-macros, distilled from the dependency's
 -- headers by tools/hrldistill.lua): ?NS_DISCO_INFO -> its URI
@@ -99,7 +100,7 @@ end
 -- ── the session: hole names, their reasons, the summary memo and counters ────────────────────────────────────────
 function M.session()
     return { n = 0, reasons = {}, domains = {}, kinds = {}, memo = {}, stack = {}, depth = 0, evals = 0, top = {},
-        loops = {}, stats = { recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
+        funs = {}, nfun = 0, loops = {}, stats = { applies = 0, stubs = 0, unfolded = 0, recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
             iterations = 0, unconverged = 0 } }
 end
 
@@ -567,6 +568,23 @@ end
 -- ever leaves (no base case) never returns. Only DIRECT self-recursion is a loop; a call back into a function
 -- deeper on the stack (mutual recursion) stays a counted cut.
 M.MAX_ITER = 8
+M.MAX_SPINE = 64    -- levels of a structural recursion folded exactly before it joins into the loop
+
+-- some argument of the self-call is a proper subterm of the same argument of the current one (and that argument
+-- is not a hole): structural recursion on a known spine
+local function decreasing(new, cur)
+    local a = A()
+    local function sub(t, x)
+        for _, c in ipairs(t.kids or {}) do
+            if c == x or a.eq(c, x) or sub(c, x) then return true end
+        end
+        return false
+    end
+    for i = 1, math.min(#new, #cur) do
+        if cur[i].k ~= 'hole' and new[i].k ~= 'hole' and sub(cur[i], new[i]) then return true end
+    end
+    return false
+end
 
 local function loop(m, id, clauses, args, S)
     local a = A()
@@ -575,7 +593,7 @@ local function loop(m, id, clauses, args, S)
     S.loops[id] = L
     S.stats.loops = S.stats.loops + 1
     for i = 1, M.MAX_ITER do
-        L.value, L.next = value, nil
+        L.value, L.next, L.args = value, nil, state.kids
         local vals = run_clauses(m, id, clauses, state.kids, S)
         local nvalue = join_all(S, vals, ('%s: no clause admits the arguments'):format(id))
         -- no self-call was made: not a loop, the one pass is the value
@@ -613,9 +631,43 @@ local function summary(P, mod, fn, args, S)
     if not clauses then return fresh(S, ('%s:%s (not defined there)'):format(mod, key)) end
     local a = A()
     local id = mod .. ':' .. key
+    -- a BIF whose source body is a stub (every clause only calls erlang:nif_error): not its meaning
+    m.stub = m.stub or {}
+    if m.stub[key] == nil then
+        local all = true
+        for _, cl in ipairs(clauses) do
+            local le = last_expr(cl)
+            local ok = false
+            if le and T.remote[le:type()] then
+                local mn = le:field('module')[1]
+                local ma = mn and (mn:field('module')[1] or mn:named_child(0))
+                local f = le:field('fun')[1]
+                local fe = f and f:field('expr')[1]
+                ok = ma and fe and STUB[txt(ma, m.src) .. ':' .. txt(fe, m.src)] or false
+            end
+            all = all and ok
+        end
+        m.stub[key] = all
+    end
+    if m.stub[key] and not M.OFF.stubs then
+        S.stats.stubs = S.stats.stubs + 1
+        return fresh(S, ('%s: a BIF (its source is a nif_error stub)'):format(id))
+    end
     -- a self-call inside its own loop: record the next state, answer with the current approximation
     local L = S.loops[id]
     if L and S.cur == id and not M.OFF.loops then
+        -- ★ A KNOWN SPINE IS FOLDED EXACTLY (USER: "most recursions can be expressed as foldl or foldr"). When an
+        -- argument of the self-call is a PROPER SUBTERM of the same argument now (the Tail of a known [H | Tail]),
+        -- the recursion is structural and terminates: evaluate it as it runs, one level deeper, instead of joining it
+        -- into the loop. lists:map(F, [A, B]) is then [F(A), F(B)], not "one of cons | nil".
+        if not M.OFF.spine and L.args and (L.spine or 0) < M.MAX_SPINE and decreasing(args, L.args) then
+            local saved = L.args
+            L.args, L.spine = args, (L.spine or 0) + 1
+            S.stats.unfolded = S.stats.unfolded + 1
+            local r = join_all(S, run_clauses(m, id, clauses, args, S), ('%s: no clause admits the arguments'):format(id))
+            L.args, L.spine = saved, L.spine - 1
+            return r
+        end
         local st = a.node('tuple', unpack(args, 1, #args))
         L.next = L.next and join_all(S, { L.next, st }, 'nothing', ('a loop variable of %s (it changes across iterations)'):format(id)) or st
         return L.value
@@ -651,6 +703,54 @@ local function summary(P, mod, fn, args, S)
     return r
 end
 
+-- ★★ A FUN IS A VALUE (CART-1130's open item, and what lists:map/foldl/foreach need: every one of them calls its
+-- argument). An anonymous fun evaluates to a CLOSURE term `fun:<n>` — its clauses and the environment it was created
+-- in are kept beside it (S.funs), so the term itself joins and unifies by identity. `fun f/N` / `fun m:f/N` are
+-- closures naming a function. Applying one runs its clauses against the arguments exactly as a call does; a named
+-- fun (`fun Loop(N) -> … Loop(N - 1) end`) sees itself under its name. Anything else in callee position is a hole.
+function M.apply(fv, args, S)
+    local id = fv.k and fv.k:match('^fun:(%d+)$')
+    local F = id and S.funs[tonumber(id)]
+    if not F then return fresh(S, 'a call to a fun value we cannot see') end
+    if F.mod then
+        local P = F.program
+        if not P then return fresh(S, 'a call result (no program to summarize it)') end
+        if F.arity ~= #args then return fresh(S, ('fun %s:%s/%d applied to %d argument(s)'):format(F.mod, F.fn, F.arity, #args)) end
+        return summary(P, F.mod, F.fn, args, S)
+    end
+    if S.depth >= M.MAX_DEPTH then S.stats.depth = S.stats.depth + 1; return fresh(S, 'call depth ' .. M.MAX_DEPTH) end
+    S.depth = S.depth + 1
+    S.stats.applies = S.stats.applies + 1
+    local vals = {}
+    for _, cl in ipairs(F.clauses) do
+        local cenv = with_vars(F.env, {})
+        if F.name then cenv.vars[F.name] = fv end
+        local verdict = 'yes'
+        local ps = named(cl:field('args')[1])
+        if #ps ~= #args then verdict = 'no' end
+        for i, p in ipairs(verdict ~= 'no' and ps or {}) do
+            local v, bv = bind(p, args[i], cenv, S)
+            if v == 'no' then verdict = 'no'; break end
+            if v == 'maybe' then verdict = 'maybe' end
+            for nm, t in pairs(bv) do cenv.vars[nm] = t end
+        end
+        if verdict ~= 'no' then
+            if guarded(cl, F.env.src) and not M.OFF.guards then verdict = 'maybe' end
+            local le = last_expr(cl)
+            vals[#vals + 1] = le and M.eval(le, cenv, S) or fresh(S, 'an empty fun body')
+            if verdict == 'yes' then break end
+        end
+    end
+    S.depth = S.depth - 1
+    return join_all(S, vals, 'a fun no clause of which admits the arguments')
+end
+
+local function closure(S, F)
+    S.nfun = S.nfun + 1
+    S.funs[S.nfun] = F
+    return A().node('fun:' .. S.nfun)
+end
+
 local function call_value(x, env, S)
     local src, ctx = env.src, env.ctx
     local c, mod = x, ctx.module
@@ -672,7 +772,17 @@ local function call_value(x, env, S)
         end
     end
     local e = c:field('expr')[1]
-    if not e or not T.atom[e:type()] then return fresh(S, 'a call to a fun value') end
+    if not e then return fresh(S, 'a call of an unusual shape') end
+    if not T.atom[e:type()] then
+        -- `F(Args)`: the callee is a VALUE — a fun, applied with its own clauses and the environment it closed over
+        if M.OFF.funs then return fresh(S, 'a call to a fun value') end
+        local fv = M.eval(e, env, S)
+        if fv == RAISE then return RAISE end
+        local args = {}
+        for i, an in ipairs(named(c:field('args')[1])) do args[i] = M.eval(an, env, S) end
+        if has_raise(args) then return RAISE end
+        return M.apply(fv, args, S)
+    end
     local fn = txt(e, src):gsub("^'(.*)'$", '%1')
     local args = {}
     for i, an in ipairs(named(c:field('args')[1])) do args[i] = M.eval(an, env, S) end
@@ -681,6 +791,20 @@ local function call_value(x, env, S)
     local here = P and mod == ctx.module and P:module(mod)
     local local_def = here and here.fns[fn .. '/' .. #args]
     if not M.OFF.raises and RAISES[fn] and (mod == 'erlang' or (x == c and not local_def)) then return RAISE end
+    -- apply(F, [A…]) and apply(M, F, [A…]): the auto-imported erlang:apply, its argument list read off the term
+    if fn == 'apply' and not M.OFF.funs and (mod == 'erlang' or (x == c and not local_def)) and (#args == 2 or #args == 3) then
+        local list = {}
+        local l = args[#args]
+        while l.k == 'cons' do list[#list + 1] = l.kids[1]; l = l.kids[2] end
+        if l.k ~= 'nil' then return fresh(S, 'an apply whose argument list is not known') end
+        if #args == 2 then return M.apply(args[1], list, S) end
+        local am, af = args[1], args[2]
+        if not (am.k == 'lit' and am.lk == 'atom' and af.k == 'lit' and af.lk == 'atom') then
+            return fresh(S, 'a dynamic call (apply/3 of values)')
+        end
+        if not P then return fresh(S, 'a call result (no program to summarize it)') end
+        return summary(P, am.v, af.v, list, S)
+    end
     if not P or M.OFF.calls then return fresh(S, 'a call result (no program to summarize it)') end
     if x == c and not local_def then return fresh(S, ('%s/%d: a BIF or an imported function'):format(fn, #args)) end
     return summary(P, mod, fn, args, S)
@@ -831,6 +955,24 @@ function M.eval(x, env, S)
         return join_all(S, vals, 'an if with no arm')
     end
     if T.call[t] or T.remote[t] then return call_value(x, env, S) end
+    if T.fn[t] and not M.OFF.funs then
+        local cls = x:field('clauses')
+        local nn = cls[1] and cls[1]:field('name')[1]
+        return closure(S, { clauses = cls, env = env, name = nn and txt(nn, src) or nil })
+    end
+    if T.funref[t] and not M.OFF.funs then
+        local fnn, an = x:field('fun')[1], x:field('arity')[1]
+        local av = an and (an:field('value')[1] or an)
+        local mod = ctx.module
+        if T.extfun[t] then
+            local mn = x:field('module')[1]
+            local ma = mn and (mn:field('name')[1] or mn:named_child(0))
+            mod = ma and T.atom[ma:type()] and (txt(ma, src):gsub("^'(.*)'$", '%1')) or nil
+        end
+        local arity = av and tonumber(txt(av, src))
+        if not (mod and fnn and T.atom[fnn:type()] and arity) then return fresh(S, 'a fun reference to a value') end
+        return closure(S, { mod = mod, fn = (txt(fnn, src):gsub("^'(.*)'$", '%1')), arity = arity, program = ctx.program })
+    end
     return fresh(S, 'a ' .. t .. ' value')
 end
 

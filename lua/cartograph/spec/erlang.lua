@@ -298,6 +298,10 @@ return {
     -- exception). Their source is not installed with OTP, so no -spec no_return() can be read for them; a function
     -- of the tree or a dependency that only raises is found by evaluating its body, not listed (CART-1112).
     raises = { error = true, exit = true, throw = true },
+    -- A BIF'S SOURCE IS A STUB: OTP's lists.erl, erlang.erl and friends give a BIF a body that only calls
+    -- erlang:nif_error (the runtime replaces it). Such a body is not the function's meaning, and evaluating it would
+    -- read every BIF as "never returns" (CART-1130: term summaries over OTP source).
+    bif_stub = { ['erlang:nif_error'] = true },
     preloop = { anonymous_fun = true },
     pattern = {
         -- the field of each node type that IS a pattern (every name under it binds, at any depth)

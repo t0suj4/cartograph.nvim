@@ -2,6 +2,7 @@
 -- handler's clause heads read from the request (CART-1087 phase 2; the library is lua/cartograph/xmppserver.lua).
 --
 --   nvim --headless -u NONE -l tools/xmppserver.lua [<server-root>] [--rows] [--spec <xmpp_codec.spec>] [--sends]
+--        [--otp <OTP source root>]   (default ~/git/otp_src_<the installed OTP_VERSION>, when present)
 --
 -- --sends  THE SERVER'S WRITES (CART-1108 via CART-1112): every place a handler sends (the payload of
 --          xmpp:make_iq_result, the stanza given to ejabberd_router:route) with the TERM it evaluates to — complete,
@@ -19,12 +20,13 @@ vim.opt.rtp:append(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 local here = debug.getinfo(1, 'S').source:sub(2):match('(.*)/tools/') or '.'
 package.path = here .. '/lua/?.lua;' .. here .. '/lua/?/init.lua;' .. package.path
 
-local root, want_rows, specpath, want_sends = nil, false, nil, false
+local root, want_rows, specpath, want_sends, otp = nil, false, nil, false, nil
 local i = 1
 while arg[i] do
     local a = arg[i]
     if a == '--rows' then want_rows = true
     elseif a == '--sends' then want_sends = true
+    elseif a == '--otp' then i = i + 1; otp = arg[i]
     elseif a == '--spec' then i = i + 1; specpath = arg[i]
     else root = a end
     i = i + 1
@@ -121,7 +123,14 @@ if want_sends then
     local E = ER.new { include_dirs = { root .. '/include' },
         apps = { xmpp = vim.fn.fnamemodify(specpath, ':h:h') } }
     local t0 = vim.uv.hrtime()
-    local srows, sst = X.sends(root .. '/src', { E = E, spec = spec })
+    -- the runtime's source: --otp, else an OTP tree of the INSTALLED version under ~/git if one is there
+    if not otp then
+        local fd = io.open('/usr/lib/erlang/releases/' .. (vim.fn.glob('/usr/lib/erlang/releases/*', false, true)[1] or ''):match('[^/]*$') .. '/OTP_VERSION')
+        local v = fd and vim.trim(fd:read('a')); if fd then fd:close() end
+        local cand = v and vim.fn.expand('~/git/otp_src_' .. v)
+        if cand and vim.fn.isdirectory(cand) == 1 then otp = cand end
+    end
+    local srows, sst = X.sends(root .. '/src', { E = E, spec = spec, otp = otp and vim.fn.expand(otp) })
     local ms = (vim.uv.hrtime() - t0) / 1e6
     local st, why, onwire, recs, oneof, oneof_wire = {}, {}, 0, 0, 0, 0
     for _, r in ipairs(srows) do
@@ -141,12 +150,14 @@ if want_sends then
         end
     end
     io.write(('\n  SENDS %d site(s): %s\n'):format(#srows, top(st, 8)))
+    io.write(('  runtime source: %s\n'):format(otp or 'none (lists, maps, … stay holes; --otp <OTP source root>)'))
     io.write(('  encoded to a record term %d, of which the codec spec puts on the wire %d; one of several records %d '
         .. '(every member on the wire: %d)\n'):format(recs, onwire, oneof, oneof_wire))
     io.write(('  holes by reason: %s\n'):format(top(why, 12)))
     io.write(('  summaries %d evaluated, %d memo hits; %d loop(s) in %d iteration(s), %d unconverged; cut: %d mutual '
-        .. 'recursion, %d at depth, %d by budget; %.0f ms\n'):format(sst.summaries, sst.memo_hits, sst.loops,
-        sst.iterations, sst.unconverged, sst.recursive, sst.depth, sst.budget, ms))
+        .. 'recursion, %d at depth, %d by budget; %d fun application(s), %d BIF stub(s); %.0f ms\n'):format(sst.summaries,
+        sst.memo_hits, sst.loops, sst.iterations, sst.unconverged, sst.recursive, sst.depth, sst.budget, sst.applies,
+        sst.stubs, ms))
     if want_rows then
         local A = require('cartograph.algebra').load()
         for _, r in ipairs(srows) do
