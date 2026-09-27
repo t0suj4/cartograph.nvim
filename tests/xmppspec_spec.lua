@@ -546,3 +546,21 @@ test('xmppspec: the absent value of a CDATA is <<>> whatever decodes it; a list 
     eq('""', A.show(X.absent_value({ kind = 'cdata', dec = '{base64, mime_decode, []}' })))
     eq('(list)', A.show(X.absent_value({ default = '[]' })))
 end)
+
+test('xmppspec.sample_term: a decoder no rule names is RUN on candidate texts — the first it decodes completely is the sample', function ()
+    if not have_erlang() then skip 'no erlang parser' end
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local fd = assert(io.open(dir .. '/t.erl', 'w'))
+    -- `x` is refused, `1` accepted: the sample is the decoder's own answer for "1"
+    fd:write('-module(t).\nprep(<<"x">>) -> erlang:error(badarg);\nprep(S) -> {prepped, S}.\n'); fd:close()
+    local s = X.parse_source([=[
+-xml(h, #elem{name = <<"h">>, xmlns = <<"urn:h">>, module = t, result = {h, '$host'},
+     attrs = [#attr{name = <<"host">>, required = true, dec = {prep, []}, enc = {prep, []}}]}).
+]=], 'h.spec')
+    local E = s.entries.h
+    eq('(rec:h (tuple "prepped" "1"))', A.show((X.sample_term(s, E, false, 1, ET.program { dirs = { dir } }))))
+    eq('(rec:h "undefined")', A.show((X.sample_term(s, E, false, 1))), 'without the library the attribute stays unsampled')
+end)

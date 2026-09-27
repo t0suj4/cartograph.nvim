@@ -54,7 +54,7 @@ local unpack = table.unpack or unpack
 local function lit(v, lk) local l = A.lit(v); l.lk = lk; return l end
 local unsampled = 0
 local function term_for(E, maximal, depth)
-    local t, n = XS.sample_term(spec, E, maximal, depth)
+    local t, n = XS.sample_term(spec, E, maximal, depth, P)
     unsampled = unsampled + n
     return t
 end

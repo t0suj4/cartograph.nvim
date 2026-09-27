@@ -85,7 +85,7 @@ for _, name in ipairs(spec.order) do
         st.entries = st.entries + 1
         for _, maximal in ipairs { false, true } do
             st.samples = st.samples + 1
-            local r = XS.sample_term(spec, E, maximal, 1)
+            local r = XS.sample_term(spec, E, maximal, 1, G.program)
             local el = XS.encode_entry(spec, E, r, '', { enc = function (text, v, E2)
                 local m, f = text:match('^{%s*([%w_]+)%s*,%s*([%w_]+)%s*,')
                 if not m then f = text:match('^{%s*([%w_]+)%s*,'); m = E2.module end

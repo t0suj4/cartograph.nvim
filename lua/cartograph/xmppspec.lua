@@ -1051,13 +1051,15 @@ end
 --- SAMPLE TERMS for an entry, the oracles' input (tools/xmppencode.lua, tools/xmppgrammar.lua): MINIMAL (every field
 --- at the value the decoder gives an absent one, required attributes at a sample) or MAXIMAL (every attribute and cdata
 --- at a sample, every list ref with one sampled child, `depth` levels). A sample follows the field's decoder: an
---- enumeration's first value, an integer 1, a boolean true, a jid u@s/r, a plain binary "x". -> term, unsampled count
-function M.sample_term(spec, E, maximal, depth)
+--- enumeration's first value, an integer 1, a boolean true, a jid u@s/r, a plain binary "x". Given the library's program
+--- `P` (erlterms), a decoder none of those names is RUN instead: the first candidate text it decodes completely gives
+--- the sample (xep0220's nameprep, xep0215's dec_host). -> term, unsampled count
+function M.sample_term(spec, E, maximal, depth, P)
     local a = A()
     local function lit(v, lk) local l = a.lit(v); l.lk = lk; return l end
     local JID = a.node('rec:jid', lit('u', 'bin'), lit('s', 'bin'), lit('r', 'bin'), lit('u', 'bin'), lit('s', 'bin'), lit('r', 'bin'))
     local unsampled = 0
-    local function sample(src)
+    local function sample(src, E2)
         local dec = src.dec or ''
         if dec == '' or dec:find('xmpp_lang', 1, true) then return lit('x', 'bin') end
         local enums = dec:match('dec_enum,%s*%[%[([^%]]*)%]')
@@ -1068,6 +1070,16 @@ function M.sample_term(spec, E, maximal, depth)
         if dec:find('dec_int', 1, true) then return lit('1', 'int') end
         if dec:find('dec_bool', 1, true) then return lit('true', 'atom') end
         if dec:find('{jid,', 1, true) then return JID end
+        -- ★ DERIVED, not listed: the decoder itself says which text it accepts (`{f, []}` or `{m, f, []}`)
+        local m, f = dec:match('^{%s*([%w_]+)%s*,%s*([%w_]+)%s*,%s*%[%s*%]%s*}$')
+        if not m then f = dec:match('^{%s*([%w_]+)%s*,%s*%[%s*%]%s*}$'); m = E2 and E2.module end
+        if P and m and f then
+            local ET = require 'cartograph.erlterms'
+            for _, text in ipairs { 'x', '1', 'u@s/r' } do
+                local t = ET.call(P, m, f, { lit(text, 'bin') }, ET.session())
+                if ET.status(t) == 'complete' then return t end
+            end
+        end
         return nil
     end
     local function term_for(E2, max, d)
@@ -1089,7 +1101,7 @@ function M.sample_term(spec, E, maximal, depth)
                     local required = s1.required == true or s1.required == 'true'
                     -- an xmlns attribute that is a field names the element's namespace: "" chooses it; free text would
                     -- move the element to a namespace no -xml decodes
-                    local v = (required or max) and (s1.kind == 'attr' and s1.name == 'xmlns' and lit('', 'bin') or sample(s1)) or nil
+                    local v = (required or max) and (s1.kind == 'attr' and s1.name == 'xmlns' and lit('', 'bin') or sample(s1, E2)) or nil
                     if (required or max) and not v then unsampled = unsampled + 1 end
                     kids[fi] = v or M.absent_value(s1)
                     if kids[fi].k == 'absent' then kids[fi] = lit('undefined', 'atom') end

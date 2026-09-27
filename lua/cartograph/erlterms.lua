@@ -222,7 +222,7 @@ end
 -- ── the session: hole names, their reasons, the summary memo and counters ────────────────────────────────────────
 function M.session()
     return { n = 0, reasons = {}, domains = {}, kinds = {}, alts = {}, hedges = {}, elems = {}, memo = {}, stack = {}, depth = 0, evals = 0, top = {},
-        funs = {}, nfun = 0, loops = {}, stats = { applies = 0, stubs = 0, unfolded = 0, refused = 0, onepass = 0, recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
+        funs = {}, nfun = 0, loops = {}, stats = { applies = 0, stubs = 0, natives = 0, unfolded = 0, refused = 0, onepass = 0, recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
             iterations = 0, unconverged = 0 } }
 end
 
@@ -1168,9 +1168,20 @@ local function loop(m, id, clauses, args, S)
     return fresh(S, ('a loop of %s that did not converge in %d iterations'):format(id, M.MAX_ITER))
 end
 
+-- a NATIVE MODEL the program was given (P.natives, id -> fn(args) -> term | nil): the meaning of a function whose
+-- Erlang source is absent or only a nif_error stub (p1natives). Never consulted for a real definition.
+local function native(P, id, args, S)
+    local ev = not M.OFF.natives and P.natives and P.natives[id]
+    local r = ev and ev(args)
+    if r then S.stats.natives = S.stats.natives + 1 end
+    return r
+end
+
 local function summary(P, mod, fn, args, S)
     local m = P:module(mod)
-    if not m then return fresh(S, ('a call into %s (no source)'):format(mod)) end
+    if not m then
+        return native(P, mod .. ':' .. fn .. '/' .. #args, args, S) or fresh(S, ('a call into %s (no source)'):format(mod))
+    end
     local key = fn .. '/' .. #args
     local clauses = m.fns[key]
     if not clauses then return fresh(S, ('%s:%s (not defined there)'):format(mod, key)) end
@@ -1197,7 +1208,7 @@ local function summary(P, mod, fn, args, S)
     if m.stub[key] and not M.OFF.stubs then
         -- a stub with a known meaning (the NIF's documented behaviour) answers for known arguments
         local ev = not M.OFF.bifs and STUB_EVAL[id]
-        local r = ev and ev(args)
+        local r = ev and ev(args) or native(P, id, args, S)
         if r then return r end
         S.stats.stubs = S.stats.stubs + 1
         return fresh(S, ('%s: a BIF (its source is a nif_error stub)'):format(id))
@@ -1841,9 +1852,12 @@ end
 ---          src — the caller supplies where a dependency lives, the tree only names the module; a dependency's own
 ---          record env resolves ITS includes), E = erlrecords env (for plain dirs),
 ---          ctx_of = fn(src, path, P) -> ctx (optional: records from elsewhere than an include graph),
----          defines = { MACRO = true | false } (a VANTAGE: the build's defines pick one -ifdef variant; none -> all) }
+---          defines = { MACRO = true | false } (a VANTAGE: the build's defines pick one -ifdef variant; none -> all),
+---          natives = { ['mod:fn/n'] = fn(args) -> term | nil } (models of NIFs: consulted only where the source is
+---          absent or a nif_error stub — p1natives) }
 function M.program(opts)
-    local P = { dirs = opts.dirs or {}, E = opts.E, ctx_of = opts.ctx_of, defines = opts.defines, mods = {} }
+    local P = { dirs = opts.dirs or {}, E = opts.E, ctx_of = opts.ctx_of, defines = opts.defines, natives = opts.natives,
+        mods = {} }
     function P:module(name)
         if not name then return nil end
         local m = self.mods[name]

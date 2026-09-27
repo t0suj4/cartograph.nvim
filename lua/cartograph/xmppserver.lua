@@ -111,7 +111,9 @@ function M.program(dir, E, opts)
         local OE = ER.new { include_dirs = incs, libs = { opts.otp .. '/lib' } }
         for _, d in ipairs(vim.fn.glob(opts.otp .. '/lib/*/src', false, true)) do dirs[#dirs + 1] = { dir = d, E = OE } end
     end
-    return ET.program { dirs = dirs, E = E }
+    -- the p1 libraries' NIFs (jid's splitter, stringprep) as their observed models: a JID the tree reads is then known
+    return ET.program { dirs = dirs, E = E, natives = opts.natives ~= false
+        and (opts.natives or require('cartograph.p1natives').models) or nil }
 end
 
 -- the hole reasons that are the REQUEST (or a parameter): what the response leg exists to fill
