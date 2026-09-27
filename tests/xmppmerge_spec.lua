@@ -228,3 +228,44 @@ test('xmppmerge: the SERVER view — handler -> namespaces, and per clause reach
     eq({ 'plain', 'viaCall', 'withLocal', 'wrap' }, who, 'clause #3 lists the client functions that reach it')
     eq('no request to its namespace', other.clauses[1].status, 'disco#items: registered, never asked')
 end)
+
+test('xmppmerge: a spec result TUPLE ({\'$node\', \'$x\'}) is a plain tuple — the head that destructures it accepts', function ()
+    need()
+    local root = vim.fn.tempname()
+    local spec = SPEC .. [=[
+-record(tq, {cfg :: 'undefined' | {binary(), 'undefined' | binary()}}).
+
+-xml(tq,
+     #elem{name = <<"tq">>,
+           xmlns = <<"http://jabber.org/protocol/pubsub#owner">>,
+           module = t,
+           result = {tq, '$cfg'},
+           refs = [#ref{name = tcfg, min = 0, max = 1, label = '$cfg'}]}).
+
+-xml(tcfg,
+     #elem{name = <<"cfg">>,
+           xmlns = <<"http://jabber.org/protocol/pubsub#owner">>,
+           module = t,
+           result = {'$node', '$x'},
+           attrs = [#attr{name = <<"node">>}, #attr{name = <<"x">>}]}).
+]=]
+    write(root .. '/client/t.js', [[
+export function cfg(api) {
+    return api.sendIQ(stx`<iq xmlns="jabber:client" type="get"><tq xmlns="http://jabber.org/protocol/pubsub#owner"><cfg node="n"/></tq></iq>`);
+}
+]])
+    write(root .. '/server/src/mod_tq.erl', [[
+-module(mod_tq).
+start(Host) ->
+    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_PUBSUB_OWNER, ?MODULE, tq_iq).
+tq_iq(#iq{sub_els = [#tq{cfg = {Node, _}}]} = IQ) -> {IQ, Node};
+tq_iq(IQ) -> IQ.
+]])
+    write(root .. '/specs/xmpp_codec.spec', spec)
+    local R = require('cartograph.xmppmerge').merge({ client = root .. '/client', server = root .. '/server',
+        spec = root .. '/specs/xmpp_codec.spec' })
+    local r = row(R, '::cfg@')
+    ok(r, 'the request is found')
+    eq('accepted', r.verdict)
+    eq(1, r.candidates[1].clause, 'the {Node, _} head accepts the decoded tuple: ' .. vim.inspect(r.candidates[1].rejected))
+end)

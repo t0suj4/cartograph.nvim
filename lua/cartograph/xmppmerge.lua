@@ -264,7 +264,10 @@ function decode(el, rec, ctx, inherit)
             else slots[i] = value_of(f) end
         end
         for _, i in ipairs(elsat) do slots[i] = value_of('$_els') end
-        local k = R.kind == 'record' and ('rec:' .. R.record) or ('tuple:' .. names[1])
+        -- ★ a spec `result = {'$a', '$b'}` IS an anonymous erlang tuple: `tuple`, the kind the server side (erlterms,
+        -- and this module's own head patterns) builds. Labelling it `tuple:<entry>` made pubsub#owner's configure
+        -- {Node, undefined} clash with iq_pubsub_owner's `configure = {Node, undefined}` pattern (CART-1135).
+        local k = R.kind == 'record' and ('rec:' .. R.record) or 'tuple'
         return a.node(k, unpack(slots, 1, #(R.fields or {}))), names[1]
     end
     if R.kind == 'label' then return value_of(R.label) or a.node('absent'), names[1] end
@@ -700,9 +703,10 @@ function M.merge(opts)
                             local S = { n = 0, notes = stats.notes }
                             local sterm = ai and pattern(facts, spec, S) or a.hole('S#any')
                             local U, why, at
-                            for _, ct in ipairs(terms) do
-                                U, why, at = a.unify(a.template(ct), a.template(sterm))
-                                if U then cterm = ct; break end
+                            local ct
+                            for _, t in ipairs(terms) do
+                                U, why, at = a.unify(a.template(t), a.template(sterm))
+                                if U then cterm, ct = t, t; break end
                             end
                             if U then
                                 local sh = server[e.handler]
@@ -711,6 +715,9 @@ function M.merge(opts)
                                     if sh then table.insert(clause_slot(sh, k).shadowed, row) end
                                 else
                                     cand.clause = k
+                                    -- the REQUEST as a term, for the response leg (xmppserver.responses, CART-1135):
+                                    -- which argument carries it, the handler's arity, and what the client holes mean
+                                    cand.request, cand.arg, cand.arity, cand.holes = ct, ai, h.arity, ctx.holes
                                     if sh then table.insert(clause_slot(sh, k).reached, row) end
                                     cand.binds = {}
                                     for g, t in pairs(U.right or {}) do

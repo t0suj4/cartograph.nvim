@@ -2,7 +2,7 @@
 -- ejabberd handler clause that accepts it (unify ∘ compose over the decoded record; lua/cartograph/xmppmerge.lua).
 --
 --   nvim --headless -u NONE -l tools/xmppmerge.lua [--client DIR] [--server DIR] [--spec FILE] [--rows] [--server-view]
---        [--check-absent]
+--        [--check-absent] [--responses [--otp DIR]]
 --
 -- Defaults: --client ~/work/brotardcast/converse.js/src  --server ~/work/brotardcast/ejabberd
 --           --spec ~/git/xmpp/specs/xmpp_codec.spec  (all read-only)
@@ -22,13 +22,14 @@ package.path = here .. '/lua/?.lua;' .. here .. '/lua/?/init.lua;' .. package.pa
 
 local o = { client = '~/work/brotardcast/converse.js/src', server = '~/work/brotardcast/ejabberd',
     spec = '~/git/xmpp/specs/xmpp_codec.spec' }
-local want_rows, check_absent, server_view = false, false, false
+local want_rows, check_absent, server_view, want_responses = false, false, false, false
 local i = 1
 while arg[i] do
     local a = arg[i]
     if a == '--rows' then want_rows = true
     elseif a == '--check-absent' then check_absent = true
     elseif a == '--server-view' then server_view = true
+    elseif a == '--responses' then want_responses = true
     elseif a:match('^%-%-') and arg[i + 1] then o[a:sub(3)] = arg[i + 1]; i = i + 1
     else io.stderr:write('unknown argument ' .. a .. '\n'); os.exit(2) end
     i = i + 1
@@ -171,3 +172,45 @@ if server_view then
         end
     end
 end
+
+-- ── THE RESPONSE LEG (CART-1135): each accepted request run through its handler with the client's request term ──
+if want_responses then
+    local X = require 'cartograph.xmppserver'
+    local ER = require 'cartograph.erlrecords'
+    local A = require('cartograph.algebra').load()
+    local xmpp = vim.fn.fnamemodify(o.spec, ':h:h')
+    local E = ER.new { include_dirs = { o.server .. '/include' }, apps = { xmpp = xmpp } }
+    -- the runtime's source: --otp, else an OTP tree of the INSTALLED version under ~/git if one is there
+    local otp = o.otp
+    if not otp then
+        local rel = vim.fn.glob('/usr/lib/erlang/releases/*', false, true)[1]
+        local fd = rel and io.open(rel .. '/OTP_VERSION')
+        local v = fd and vim.trim(fd:read('a')); if fd then fd:close() end
+        local cand = v and vim.fn.expand('~/git/otp_src_' .. v)
+        if cand and vim.fn.isdirectory(cand) == 1 then otp = cand end
+    end
+    local t0 = vim.uv.hrtime()
+    local rows, tot = X.responses(R, o.server .. '/src', { E = E, otp = otp })
+    print(('\n  RESPONSES %d accepted request/handler pair(s), evaluated %d: complete %d  partial %d  one of several %d  opaque %d   (%.0f ms)'):format(
+        tot.requests, tot.evaluated, tot.complete or 0, tot.partial or 0, tot['one-of'] or 0, tot.opaque or 0, (vim.uv.hrtime() - t0) / 1e6))
+    print(('  holes in the replies (through their alternatives): the REQUEST\'s %d with every argument unknown -> %d with the client\'s '
+        .. 'request; what the client itself leaves unknown %d; the server\'s own %d -> %d'):format(tot.input_before, tot.input_after,
+        tot.client or 0, tot.other_before or 0, tot.other_after or 0))
+    print(('  complete without the request: %d   runtime source: %s'):format(tot.base_complete, otp or 'none'))
+    if want_rows then
+        for _, r in ipairs(rows) do
+            print(('  %-8s %s:%d -> %s:%s #%d  holes %d->%d  %s'):format(r.status, r.file, r.line, r.mod, r.fn, r.clause,
+                r.input_before, r.input_after, A.show(r.response):sub(1, 200)))
+            if r.status == 'opaque' then
+                local _, w = next(r.holes)
+                print('           why: ' .. tostring(w))
+            end
+            for _, alt in ipairs(r.alts or {}) do print('           | ' .. A.show(alt):sub(1, 180)) end
+            if os.getenv('BASEHOLES') then
+                print('           base ' .. A.show(r.base):sub(1, 180))
+                for h, w in pairs(r.base_holes) do print('           base ' .. h .. ': ' .. w) end
+            end
+        end
+    end
+end
+

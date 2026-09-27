@@ -84,3 +84,33 @@ later(IQ) -> xmpp:make_iq_result(IQ, build()).
     eq('opaque', by['forward/1'].status, 'a routed parameter: step 4')
     eq('opaque', by['later/1'].status, 'a call result: step 3')
 end)
+
+test('xmppserver.responses: an accepted request run through its handler is THAT request\'s reply; the request fills its holes', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local X = require 'cartograph.xmppserver'
+    local ER = require 'cartograph.erlrecords'
+    local A = require('cartograph.algebra').load()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local fd = assert(io.open(dir .. '/h.erl', 'w'))
+    fd:write(table.concat({
+        '-module(h).',
+        '-record(iq, {id = <<>>, type, lang = <<>>, from, to, sub_els = [], meta = #{}}).',
+        'process(#iq{type = get} = IQ) -> IQ#iq{type = result, sub_els = [pong]};',
+        'process(#iq{type = set} = IQ) -> IQ#iq{type = error};',
+        'process(_) -> ignore.', '' }, '\n'))
+    fd:close()
+    -- the client's request, as the merge decodes it: a get with its id, the envelope unknown
+    local req = A.node('rec:iq', A.lit('q1'), A.lit('get'), A.lit(''), A.hole('C1'), A.hole('C2'), A.node('list'), A.node('map'))
+    local merged = { rows = { { file = 'c.js', line = 7, candidates = { { clause = 1, request = req, arg = 1, arity = 1,
+        mod = 'h', fn = 'process', holes = { C1 = 'from (stamped by the server)', C2 = 'to' } } } } } }
+    local rows, tot = X.responses(merged, dir, { E = ER.new {} })
+    eq(1, #rows)
+    -- first match: the get clause alone, its reply built from the request
+    eq('(rec:iq "q1" "result" "" ?C1 ?C2 (list "pong") (map))', A.show(rows[1].response))
+    eq('partial', rows[1].status)
+    eq(0, rows[1].input_after, 'nothing of the request is left unknown')
+    ok(rows[1].input_before > 0, 'with every argument unknown the reply is made of the request\'s unknowns')
+    eq(2, rows[1].client_holes, 'what the client itself leaves unknown is counted apart')
+    eq(1, tot.requests)
+end)

@@ -51,6 +51,7 @@ local unpack = table.unpack or unpack
 local function A() return assert(require('cartograph.algebra').load()) end
 
 M.MAX_DEPTH = 6     -- nested summary evaluations along one path
+M.MAX_ALTS = 12     -- the arms kept beside a join that says nothing at the root (S.alts)
 M.BUDGET = 20000    -- summary evaluations per session (a runaway guard, counted when hit)
 M.UNROLL = 1        -- how many times one function may be on the evaluation stack (1: a recursive call is a hole)
 
@@ -63,10 +64,13 @@ local T = {
     call = { call = true }, remote = { remote = true }, case = { case_expr = true }, ifx = { if_expr = true },
     clause = { function_clause = true }, arm = { cr_clause = true }, fn = { anonymous_fun = true },
     funclause = { fun_clause = true }, macro = { macro_call_expr = true }, map = { map_expr = true },
+    binop = { binary_op_expr = true }, unop = { unary_op_expr = true },
     decl = { fun_decl = true }, funref = { internal_fun = true, external_fun = true }, extfun = { external_fun = true },
 }
 local RAISES = require('cartograph.spec.erlang').raises or {}
 local STUB = require('cartograph.spec.erlang').bif_stub or {}
+-- the type-test guard BIFs and the literal node kinds each admits (the spec's guard_kinds, a language fact)
+local GUARD_KINDS = require('cartograph.spec.erlang').guard_kinds or {}
 
 -- the macro vocabulary the erlang spec reads call arguments with (erl-macros, distilled from the dependency's
 -- headers by tools/hrldistill.lua): ?NS_DISCO_INFO -> its URI
@@ -83,6 +87,7 @@ end
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
 local function lit(v, lk) local l = A().lit(v); l.lk = lk; return l end
 local RAISE = { k = 'raise' }   -- the value of an expression that never returns; never leaves this module
+local binop                     -- the operators (defined beside M.eval)
 
 local function named(x)
     local out = {}
@@ -101,9 +106,40 @@ local function guarded(clause, src)
     return g ~= nil and vim.trim(txt(g, src)) ~= 'true'
 end
 
+-- a term's truth: lit true / lit false (atoms, or a literal of unknown kind) / nil when not known
+local function truth(t)
+    if t and t.k == 'lit' and (t.lk == 'atom' or t.lk == nil) then
+        if t.v == 'true' then return true elseif t.v == 'false' then return false end
+    end
+    return nil
+end
+
+--- ★ A GUARD IS EVALUATED, THREE-VALUED (CART-1135: `if El == undefined -> []; true -> [El] end` in
+--- xmpp:make_iq_result joined [] with [El] because every guard read as "maybe"). A guard is a disjunction (`;`) of
+--- conjunctions (`,`) of expressions, each evaluated with the clause's own bindings: all true -> yes, any false ->
+--- that conjunction is no, otherwise maybe. -> 'yes' | 'no' | 'maybe'
+function M.guard(clause, env, S)
+    local g = clause:field('guard')[1]
+    if not g then return 'yes' end
+    if M.OFF.guards then return 'yes' end
+    if M.OFF.guardeval then return guarded(clause, env.src) and 'maybe' or 'yes' end
+    local any_maybe = false
+    for _, gc in ipairs(g:field('clauses')) do
+        local conj = 'yes'
+        for _, e in ipairs(gc:field('exprs')) do
+            local v = truth(M.eval(e, env, S))
+            if v == false then conj = 'no'; break end
+            if v == nil then conj = 'maybe' end
+        end
+        if conj == 'yes' then return 'yes' end
+        if conj == 'maybe' then any_maybe = true end
+    end
+    return any_maybe and 'maybe' or 'no'
+end
+
 -- ── the session: hole names, their reasons, the summary memo and counters ────────────────────────────────────────
 function M.session()
-    return { n = 0, reasons = {}, domains = {}, kinds = {}, hedges = {}, elems = {}, memo = {}, stack = {}, depth = 0, evals = 0, top = {},
+    return { n = 0, reasons = {}, domains = {}, kinds = {}, alts = {}, hedges = {}, elems = {}, memo = {}, stack = {}, depth = 0, evals = 0, top = {},
         funs = {}, nfun = 0, loops = {}, stats = { applies = 0, stubs = 0, unfolded = 0, refused = 0, onepass = 0, recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
             iterations = 0, unconverged = 0 } }
 end
@@ -301,6 +337,22 @@ local function join_all(S, vals, why_empty, why_diff)
     -- ★ THE LATTICE HAS NO UNION: arms of different kinds (#iq, #message, #presence out of xmpp:set_from_to on an
     -- unknown stanza) generalize to a bare hole. The set of kinds the arms had is kept beside it (S.kinds), so a
     -- consumer can still say "one of these records" where the term says nothing.
+    -- ★ AND THE ARMS THEMSELVES, when the join says nothing at the root: the lgg of an error reply, a result reply and
+    -- an unknown is a bare hole, but "one of these replies" is what a reader asks (CART-1135's response leg). Kept
+    -- beside the hole (S.alts, capped, a hole arm's own alternatives flattened in) — the union the lattice lacks.
+    if acc.k == 'hole' and #live > 1 then
+        local alts, seen_alt = {}, {}
+        local function add(v)
+            if v.k == 'hole' and S.alts[v.h] then
+                for _, w in ipairs(S.alts[v.h]) do add(w) end
+                return
+            end
+            local key = v.k == 'hole' and ('?' .. (S.reasons[v.h] or '')) or A().show(v)
+            if not seen_alt[key] and #alts < M.MAX_ALTS then seen_alt[key] = true; alts[#alts + 1] = v end
+        end
+        for _, v in ipairs(live) do add(v) end
+        S.alts[acc.h] = alts
+    end
     if acc.k == 'hole' and #live > 1 then
         local ks, seen = {}, {}
         for _, v in ipairs(live) do
@@ -634,7 +686,10 @@ local function run_clauses(m, id, clauses, args, S)
             for nm, t in pairs(bv) do cenv.vars[nm] = t end
         end
         if verdict ~= 'no' then
-            if guarded(cl, m.src) and not M.OFF.guards then verdict = 'maybe' end
+            local gv = M.guard(cl, cenv, S)
+            if gv == 'no' then verdict = 'no' elseif gv == 'maybe' then verdict = 'maybe' end
+        end
+        if verdict ~= 'no' then
             local le = last_expr(cl)
             vals[#vals + 1] = le and M.eval(le, cenv, S) or fresh(S, 'an empty body')
             if verdict == 'yes' then break end
@@ -1044,7 +1099,10 @@ function M.apply(fv, args, S)
             for nm, t in pairs(bv) do cenv.vars[nm] = t end
         end
         if verdict ~= 'no' then
-            if guarded(cl, F.env.src) and not M.OFF.guards then verdict = 'maybe' end
+            local gv = M.guard(cl, cenv, S)
+            if gv == 'no' then verdict = 'no' elseif gv == 'maybe' then verdict = 'maybe' end
+        end
+        if verdict ~= 'no' then
             local le = last_expr(cl)
             vals[#vals + 1] = le and M.eval(le, cenv, S) or fresh(S, 'an empty fun body')
             if verdict == 'yes' then break end
@@ -1100,6 +1158,25 @@ local function call_value(x, env, S)
     local here = P and mod == ctx.module and P:module(mod)
     local local_def = here and here.fns[fn .. '/' .. #args]
     if not M.OFF.raises and RAISES[fn] and (mod == 'erlang' or (x == c and not local_def)) then return RAISE end
+    -- a TYPE TEST (is_binary/1 …, the spec's guard_kinds): yes when the term is of an admitted kind, no when it is
+    -- known to be of another, a hole when it is unknown
+    if GUARD_KINDS[fn] and #args == 1 and not M.OFF.typetests and (mod == 'erlang' or (x == c and not local_def)) then
+        local v = args[1]
+        local function kind_of(t)
+            if t.k == 'hole' then return nil end
+            if t.k == 'lit' then
+                return ({ atom = 'atom', int = 'integer', float = 'float', bin = 'binary', str = 'string' })[t.lk or ''] or nil
+            end
+            if t.k == 'list' then return 'list' end
+            if t.k == 'tuple' or t.k:match('^rec:') then return 'tuple' end
+            if t.k == 'map' then return 'map_expr' end
+            return 'other'
+        end
+        local k = kind_of(v)
+        if not k then return fresh(S, fn .. ' of an unknown') end
+        for _, admitted in ipairs(GUARD_KINDS[fn]) do if admitted == k then return lit('true', 'atom') end end
+        return lit('false', 'atom')
+    end
     -- apply(F, [A…]) and apply(M, F, [A…]): the auto-imported erlang:apply, its argument list read off the term
     if fn == 'apply' and not M.OFF.funs and (mod == 'erlang' or (x == c and not local_def)) and (#args == 2 or #args == 3) then
         local list = {}
@@ -1120,6 +1197,68 @@ local function call_value(x, env, S)
     if not P or M.OFF.calls then return fresh(S, 'a call result (no program to summarize it)') end
     if x == c and not local_def then return fresh(S, ('%s/%d: a BIF or an imported function'):format(fn, #args)) end
     return summary(P, mod, fn, args, S)
+end
+
+-- ── OPERATORS, three-valued: a comparison of two terms that are known (or that clash structurally), the short-circuit
+-- booleans, integer arithmetic. Anything that depends on a hole is a hole — a wrong `false` would drop an arm.
+local function ground(t)
+    if t.k == 'hole' then return false end
+    for _, c in ipairs(t.kids or {}) do if not ground(c) then return false end end
+    return true
+end
+local function same(a, b)
+    -- nil: not known. Ground terms compare exactly (lk included where both have one); a structural clash is false.
+    if ground(a) and ground(b) then
+        local function eqk(x, y)
+            if x.k ~= y.k then return false end
+            if x.k == 'lit' then return x.v == y.v and (x.lk == nil or y.lk == nil or x.lk == y.lk) end
+            if #(x.kids or {}) ~= #(y.kids or {}) then return false end
+            for i = 1, #(x.kids or {}) do if not eqk(x.kids[i], y.kids[i]) then return false end end
+            return true
+        end
+        return eqk(a, b)
+    end
+    local v = M.match(a, b)
+    if v == 'no' then return false end
+    return nil
+end
+function binop(x, env, S)
+    local src = env.src
+    local op = x:child(1) and txt(x:child(1), src)
+    local l = M.eval(x:field('lhs')[1], env, S)
+    if l == RAISE then return RAISE end
+    if op == 'andalso' or op == 'orelse' then
+        local lb = truth(l)
+        if op == 'andalso' and lb == false then return lit('false', 'atom') end
+        if op == 'orelse' and lb == true then return lit('true', 'atom') end
+        local r = M.eval(x:field('rhs')[1], env, S)
+        if r == RAISE then return RAISE end
+        if lb ~= nil then return r end
+        local rb = truth(r)
+        if op == 'andalso' and rb == false then return lit('false', 'atom') end
+        if op == 'orelse' and rb == true then return lit('true', 'atom') end
+        return fresh(S, ('an %s of an unknown'):format(op))
+    end
+    local r = M.eval(x:field('rhs')[1], env, S)
+    if r == RAISE then return RAISE end
+    if op == '==' or op == '=:=' or op == '/=' or op == '=/=' then
+        local e = same(l, r)
+        if e == nil then return fresh(S, 'a comparison of unknowns') end
+        if op == '/=' or op == '=/=' then e = not e end
+        return lit(e and 'true' or 'false', 'atom')
+    end
+    local ln = l.k == 'lit' and l.lk == 'int' and tonumber(l.v)
+    local rn = r.k == 'lit' and r.lk == 'int' and tonumber(r.v)
+    if ln and rn then
+        if op == '<' then return lit(ln < rn and 'true' or 'false', 'atom') end
+        if op == '>' then return lit(ln > rn and 'true' or 'false', 'atom') end
+        if op == '=<' then return lit(ln <= rn and 'true' or 'false', 'atom') end
+        if op == '>=' then return lit(ln >= rn and 'true' or 'false', 'atom') end
+        if op == '+' then return lit(tostring(ln + rn), 'int') end
+        if op == '-' then return lit(tostring(ln - rn), 'int') end
+        if op == '*' then return lit(tostring(ln * rn), 'int') end
+    end
+    return fresh(S, 'a ' .. tostring(op) .. ' value')
 end
 
 -- ── VALUES ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1245,10 +1384,14 @@ function M.eval(x, env, S)
         local vals = {}
         for _, cl in ipairs(x:field('clauses')) do
             local verdict, vars = bind(cl:field('pat')[1], subj, env, S)
+            local aenv = verdict ~= 'no' and with_vars(env, vars) or nil
             if verdict ~= 'no' then
-                if guarded(cl, src) and not M.OFF.guards then verdict = 'maybe' end
+                local gv = M.guard(cl, aenv, S)
+                if gv == 'no' then verdict = 'no' elseif gv == 'maybe' then verdict = 'maybe' end
+            end
+            if verdict ~= 'no' then
                 local le = last_expr(cl)
-                vals[#vals + 1] = le and M.eval(le, with_vars(env, vars), S) or fresh(S, 'an empty arm')
+                vals[#vals + 1] = le and M.eval(le, aenv, S) or fresh(S, 'an empty arm')
                 if verdict == 'yes' then break end
             end
         end
@@ -1258,13 +1401,29 @@ function M.eval(x, env, S)
         if M.OFF.join then return fresh(S, 'a case/if value') end
         local vals = {}
         for _, cl in ipairs(x:field('clauses')) do
-            local le = last_expr(cl)
-            vals[#vals + 1] = le and M.eval(le, env, S) or fresh(S, 'an empty arm')
-            if not guarded(cl, src) then break end
+            local gv = M.guard(cl, env, S)
+            if gv ~= 'no' then
+                local le = last_expr(cl)
+                vals[#vals + 1] = le and M.eval(le, env, S) or fresh(S, 'an empty arm')
+                if gv == 'yes' then break end
+            end
         end
         return join_all(S, vals, 'an if with no arm')
     end
     if T.call[t] or T.remote[t] then return call_value(x, env, S) end
+    if T.binop[t] and not M.OFF.ops then return binop(x, env, S) end
+    if T.unop[t] and not M.OFF.ops then
+        local op = x:child(0) and txt(x:child(0), src)
+        local v = M.eval(x:field('operand')[1], env, S)
+        if v == RAISE then return RAISE end
+        if op == 'not' then
+            local b = truth(v)
+            if b ~= nil then return lit(b and 'false' or 'true', 'atom') end
+            return fresh(S, 'a negation of an unknown')
+        end
+        if op == '-' and v.k == 'lit' and v.lk == 'int' and tonumber(v.v) then return lit(tostring(-tonumber(v.v)), 'int') end
+        return fresh(S, 'a unary ' .. tostring(op) .. ' value')
+    end
     if T.fn[t] and not M.OFF.funs then
         local cls = x:field('clauses')
         local nn = cls[1] and cls[1]:field('name')[1]
@@ -1312,6 +1471,22 @@ function M.elements(S, h)
     if #els == 1 then return els[1] end
     local G = A().generalize(els)
     return G and G.template and G.template.body or nil
+end
+
+--- THE VALUE OF A CALL `mod:fn(args…)` — the callee's clauses against the argument terms, as any call inside an
+--- evaluation. The response leg (xmppserver.responses) calls a handler with the CLIENT's request term.
+--- -> term, holes { name -> reason }
+function M.call(P, mod, fn, args, S)
+    S = S or M.session()
+    local tm = summary(P, mod, fn, args, S)
+    if tm == RAISE then tm = fresh(S, 'never returns (every path raises)') end
+    local holes = {}
+    local function walk(t)
+        if t.k == 'hole' then holes[t.h] = S.reasons[t.h] or 'unnamed'; return end
+        for _, c in ipairs(t.kids or {}) do walk(c) end
+    end
+    walk(tm)
+    return tm, holes
 end
 
 --- a term's completeness: 'complete' (no holes), 'partial', or 'opaque' (the term IS a hole)

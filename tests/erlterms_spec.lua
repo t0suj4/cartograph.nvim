@@ -97,13 +97,28 @@ test('erlterms: a case is the join of the arms its subject may take, first match
     local shown, holes = last_term(body('Q', '{ok, V}'))
     ok(shown:find('^%(rec:disco_info %?%S+ %(list%) %(list%) %(list%)%)$'), shown)
     ok(table.concat(reasons(holes), '|'):find('a join', 1, true), 'the differing field says it is a join')
-    -- a guard makes the first arm only maybe: both arms join
-    local g = last_term(body('{ok, <<"n">>}', '{ok, V} when V /= <<"x">>'))
-    ok(g:find('^%(rec:disco_info %?'), 'a guarded arm does not end the match: ' .. g)
+    -- a guard over an UNKNOWN makes the first arm only maybe: both arms join
+    local g = last_term(body('{ok, Q}', '{ok, V} when V /= <<"x">>'))
+    ok(g:find('^%(rec:disco_info %?'), 'a guard nobody can decide does not end the match: ' .. g)
     ET.OFF = { guards = true }
-    local g2 = last_term(body('{ok, <<"n">>}', '{ok, V} when V /= <<"x">>'))
+    local g2 = last_term(body('{ok, Q}', '{ok, V} when V /= <<"x">>'))
     ET.OFF = {}
-    eq('(rec:disco_info "n" (list) (list) (list))', g2, 'the guard observes')
+    ok(g2:find('^%(rec:disco_info %?'), 'the guard observes (reading it as yes takes the first arm alone): ' .. g2)
+    -- a guard over KNOWN values is evaluated: true takes the arm (first match), false skips it
+    eq('(rec:disco_info "n" (list) (list) (list))', (last_term(body('{ok, <<"n">>}', '{ok, V} when V /= <<"x">>'))))
+    eq('(rec:disco_info "e" (list) (list) (list))', (last_term(body('{ok, <<"x">>}', '{ok, V} when V /= <<"x">>'))))
+    -- and the operators: andalso short-circuits on false, a comparison of two knowns decides, one of an unknown does not
+    eq('(rec:disco_info "e" (list) (list) (list))', (last_term(body('{ok, <<"x">>}', '{ok, V} when is_binary(V) andalso V == <<"y">>'))))
+    -- short-circuits: a false left side of andalso decides whatever the right is, and so does a false right side
+    eq('(rec:disco_info "e" (list) (list) (list))', (last_term(body('{ok, <<"x">>}', '{ok, V} when is_atom(V) andalso Q'))))
+    eq('(rec:disco_info "e" (list) (list) (list))', (last_term(body('{ok, <<"x">>}', '{ok, V} when Q andalso V == <<"y">>'))))
+    -- a type test decides on a known term (the spec's guard_kinds)
+    eq('(rec:disco_info "e" (list) (list) (list))', (last_term(body('{ok, <<"x">>}', '{ok, V} when is_atom(V)'))))
+    eq('(rec:disco_info "x" (list) (list) (list))', (last_term(body('{ok, <<"x">>}', '{ok, V} when is_binary(V)'))))
+    ET.OFF = { guardeval = true }
+    local g3 = last_term(body('{ok, <<"x">>}', '{ok, V} when V /= <<"x">>'))
+    ET.OFF = {}
+    ok(g3:find('^%(rec:disco_info %?'), 'the evaluation observes: without it a decidable guard is maybe: ' .. g3)
     -- literal kinds: the atom `get` does not match the binary <<"get">>, though the wire sees both as "get"
     local k = last_term('f() -> case <<"get">> of get -> #disco_info{node = <<"atom">>}; _ -> #disco_info{node = <<"bin">>} end.\n')
     eq('(rec:disco_info "bin" (list) (list) (list))', k)
@@ -141,7 +156,9 @@ test('erlterms: a call is its callee\'s clauses against the argument terms — r
             'codec() -> lib_codec.',
             'dyn(X) -> Mod = codec(), Mod:build(X).',
             'loop(N) -> loop(N).',
-            'ping(X) -> pong(X).', 'pong(X) -> ping(X).', '' }, '\n'),
+            'ping(X) -> pong(X).', 'pong(X) -> ping(X).',
+            'pick(X) when X == a -> #iq{id = <<"one">>};',
+            'pick(_) -> #iq{id = <<"two">>}.', '' }, '\n'),
         lib_codec = '-module(lib_codec).\nbuild(Id) -> {iq, Id, set, <<>>, undefined, undefined, [], #{}}.\n',
         user = table.concat({
             '-module(user).',
@@ -149,7 +166,8 @@ test('erlterms: a call is its callee\'s clauses against the argument terms — r
             'b(Q) -> lib:result(Q).',
             'c() -> lib:dyn(<<"x">>).',
             'd() -> lib:loop(1).',
-            'e() -> lib:ping(1).', '' }, '\n'),
+            'e() -> lib:ping(1).',
+            'p() -> lib:pick(b).', '' }, '\n'),
     }
     local m = P:module('user')
     local A = require('cartograph.algebra').load()
@@ -177,6 +195,8 @@ test('erlterms: a call is its callee\'s clauses against the argument terms — r
     ok(c_tuple:find('^%(tuple "iq"'), 'the record-tuple identity observes: ' .. c_tuple)
     local _, _, _, c_dyn = at('c/0', { dynmod = true })
     ok(c_dyn:find('^%?'), 'the module evaluation observes: ' .. c_dyn)
+    -- a function head whose guard is FALSE for the argument is skipped: pick(b) is the second clause alone
+    eq('(rec:iq "two" "undefined" "" "undefined" "undefined" (list) (map))', (at('p/0')))
     -- a loop no clause ever leaves never returns
     local d, dh = at('d/0')
     ok(d:find('^%?'), d)

@@ -90,18 +90,11 @@ M.SEND_VERBS = {
 }
 local ERLT = { call = { call = true }, remote = { remote = true }, clause = { function_clause = true } }
 
---- Every send site in the erlang files of `dir`, with the term the value encodes to.
---- opts = { E = erlrecords env (the module record scopes), spec = xmppspec (optional: is the record on the wire?),
----          deps = { src dir, … }, otp = an OTP source root (the runtime's version; optional) }
---- -> rows { file, line, fn (enclosing clause name/arity), verb, term, holes, status, record, wire = entry names },
----    stats (the summary session's counters: summaries, memo_hits, recursive cuts, depth cuts, budget)
-function M.sends(dir, opts)
-    opts = opts or {}
+--- THE PROGRAM a call is summarized over (CART-1112 step 3): the tree's own modules, then each dependency's src —
+--- the dependency roots the record resolver was given (the caller's), selected by the modules the calls name — then
+--- the runtime's own source (opts.otp). Shared by sends and responses.
+function M.program(dir, E, opts)
     local ET = require 'cartograph.erlterms'
-    local E = opts.E
-    local rows = {}
-    -- THE PROGRAM a call is summarized over (CART-1112 step 3): the tree's own modules, then each dependency's src —
-    -- the dependency roots the record resolver was given (the caller's), selected by the modules the calls name
     local dirs = { dir }
     -- a dependency's own files resolve their includes against ITS include/ (rebar's default {i, "include"} for an
     -- app), not the tree's
@@ -117,7 +110,102 @@ function M.sends(dir, opts)
         local OE = ER.new { include_dirs = incs, libs = { opts.otp .. '/lib' } }
         for _, d in ipairs(vim.fn.glob(opts.otp .. '/lib/*/src', false, true)) do dirs[#dirs + 1] = { dir = d, E = OE } end
     end
-    local P = ET.program { dirs = dirs, E = E }
+    return ET.program { dirs = dirs, E = E }
+end
+
+-- the hole reasons that are the REQUEST (or a parameter): what the response leg exists to fill
+local INPUT = { '^parameter %d', 'part of parameter', 'a field the pattern does not mention', 'a part of the subject it does not state' }
+local function is_input(w)
+    for _, p in ipairs(INPUT) do if w:find(p) then return true end end
+    return false
+end
+
+--- THE RESPONSE LEG (CART-1135): each client request the merge ACCEPTED, run through its handler with the CLIENT's
+--- request term as the argument that carries it — the reply the handler returns for THAT request. Beside it the
+--- same handler with every argument unknown: the holes the request filled are the difference.
+--- merged = xmppmerge.merge(...) result; opts = { E, otp, deps } as sends
+--- -> rows { file, line, owner, handler, mod, fn, clause, response, holes, status, base, base_holes, input_before,
+---           input_after }, totals
+function M.responses(merged, dir, opts)
+    opts = opts or {}
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    local P = M.program(dir, opts.E, opts)
+    local rows = {}
+    local tot = { requests = 0, evaluated = 0, complete = 0, partial = 0, opaque = 0, ['one-of'] = 0, input_before = 0, input_after = 0,
+        base_complete = 0 }
+    for _, row in ipairs(merged.rows or {}) do
+        for _, c in ipairs(row.candidates or {}) do
+            if c.clause and c.request and c.arg and c.arity and c.mod and c.fn then
+                tot.requests = tot.requests + 1
+                local S = ET.session()
+                for h, why in pairs(c.holes or {}) do S.reasons[h] = 'the client: ' .. tostring(why) end
+                local args, base = {}, {}
+                for i = 1, c.arity do
+                    local hole = A.hole('P' .. i)
+                    S.reasons['P' .. i] = ('parameter %d of %s:%s/%d'):format(i, c.mod, c.fn, c.arity)
+                    base[i] = hole
+                    args[i] = (i == c.arg) and c.request or hole
+                end
+                local t, holes = ET.call(P, c.mod, c.fn, args, S)
+                local bt, bholes = ET.call(P, c.mod, c.fn, base, S)
+                -- the holes of a reply, through its alternatives: by what they are
+                local function census(term)
+                    local n = { input = 0, client = 0, other = 0 }
+                    local seen = {}
+                    local function walk(x)
+                        if x.k == 'hole' then
+                            if S.alts[x.h] and not seen[x.h] then
+                                seen[x.h] = true
+                                for _, y in ipairs(S.alts[x.h]) do walk(y) end
+                                return
+                            end
+                            if seen[x.h] then return end
+                            seen[x.h] = true
+                            local w = S.reasons[x.h] or ''
+                            if w:find('^the client: ') then n.client = n.client + 1
+                            elseif is_input(w) then n.input = n.input + 1
+                            else n.other = n.other + 1 end
+                            return
+                        end
+                        for _, y in ipairs(x.kids or {}) do walk(y) end
+                    end
+                    walk(term)
+                    return n
+                end
+                local cn, bn = census(t), census(bt)
+                local nin, nbin = cn.input, bn.input
+                local st, bst = ET.status(t), ET.status(bt)
+                -- a bare hole whose arms were kept: the reply is ONE OF those (S.alts)
+                local alts = t.k == 'hole' and S.alts[t.h] or nil
+                if alts then st = 'one-of' end
+                tot.evaluated = tot.evaluated + 1
+                tot[st] = (tot[st] or 0) + 1
+                if bst == 'complete' then tot.base_complete = tot.base_complete + 1 end
+                tot.input_before, tot.input_after = tot.input_before + nbin, tot.input_after + nin
+                rows[#rows + 1] = { file = row.file, line = row.line, owner = row.owner, handler = c.handler, mod = c.mod,
+                    fn = c.fn, clause = c.clause, response = t, alts = alts, holes = holes, status = st, base = bt, base_holes = bholes,
+                    base_status = bst, input_before = nbin, input_after = nin, client_holes = cn.client,
+                    other_before = bn.other, other_after = cn.other }
+                tot.client = (tot.client or 0) + cn.client
+                tot.other_before, tot.other_after = (tot.other_before or 0) + bn.other, (tot.other_after or 0) + cn.other
+            end
+        end
+    end
+    return rows, tot
+end
+
+--- Every send site in the erlang files of `dir`, with the term the value encodes to.
+--- opts = { E = erlrecords env (the module record scopes), spec = xmppspec (optional: is the record on the wire?),
+---          deps = { src dir, … }, otp = an OTP source root (the runtime's version; optional) }
+--- -> rows { file, line, fn (enclosing clause name/arity), verb, term, holes, status, record, wire = entry names },
+---    stats (the summary session's counters: summaries, memo_hits, recursive cuts, depth cuts, budget)
+function M.sends(dir, opts)
+    opts = opts or {}
+    local ET = require 'cartograph.erlterms'
+    local E = opts.E
+    local rows = {}
+    local P = M.program(dir, E, opts)
     local S = ET.session()
     local verbs = {}
     for _, v in ipairs(M.SEND_VERBS) do verbs[v.fn] = verbs[v.fn] or {}; verbs[v.fn][v.mod] = v end
