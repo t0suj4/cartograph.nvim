@@ -127,6 +127,13 @@ local function lua_is_write(c, n)
     return not (wrap and wrap:type() == 'variable_declaration')
 end
 
+-- the Lua builtins whose (first) result is a STRING: a receiver `f(…):m()` with f among them is a string (string_receiver)
+local STRING_RETURNS = {
+    tostring = true, ['table.concat'] = true, ['string.format'] = true, ['string.rep'] = true, ['string.sub'] = true,
+    ['string.gsub'] = true, ['string.lower'] = true, ['string.upper'] = true, ['string.reverse'] = true,
+    ['string.char'] = true,
+}
+
 --- Which file-local name this file binds as its MODULE TABLE, from its own lines.
 --- Deliberately STRICT: a trailing `return X` AND a bare `local X = {}` must both be
 --- present. A file that builds its export some other way (`return { helper = helper }`,
@@ -958,6 +965,32 @@ return {
     end,
     -- lines that ARE imports (placement: a new one goes after the last)
     import_pats = { '^local%s+[%w_,%s]-=%s*require%f[%W]', '^require%f[%W]' },
+    -- ★ A RECEIVER THAT IS A STRING BY SYNTAX (CART-1062): `('%s'):format(x)`, `('a' .. b):gsub(…)`,
+    -- `tostring(x):sub(1)`. Lua's `(s):m(…)` IS `string.m(s, …)` for a string s, so the call is the stdlib's and no
+    -- project function can be its target. MEASURED on this repo: 4,624 of the calls to the six method names the
+    -- name-match fabricated (format 4,330) have a parenthesized string-literal receiver, and every one of them had
+    -- resolved into a project def (terraform's FUNCS.format, hazard.lua's string-API delegates, algebra's M.rep).
+    -- A LANGUAGE FACT, declared here: which expressions are strings (a literal, a `..` concatenation, and the
+    -- builtins below that return one).
+    string_receiver = function (namen, src)
+        if not namen or namen:type() ~= 'method_index_expression' then return false end
+        local r = namen:named_child(0)
+        while r and r:type() == 'parenthesized_expression' do r = r:named_child(0) end
+        if not r then return false end
+        local t = r:type()
+        if t == 'string' then return true end
+        if t == 'binary_expression' then
+            for c in r:iter_children() do
+                if not c:named() and vim.treesitter.get_node_text(c, src) == '..' then return true end
+            end
+            return false
+        end
+        if t == 'function_call' then
+            local f = r:field('name')[1]
+            return f ~= nil and STRING_RETURNS[vim.treesitter.get_node_text(f, src)] == true
+        end
+        return false
+    end,
     -- THE REBIND AND THE EXPORT a move writes when a LOCAL it takes is still called by name in its old file
     -- (CART-1146): the new home exports it, the old one binds the name again where the definition was
     local_bind = function (name, expr) return ('local %s = %s'):format(name, expr) end,

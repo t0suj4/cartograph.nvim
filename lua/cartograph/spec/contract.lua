@@ -144,6 +144,8 @@ M.SLOTS = {
     -- a moved LOCAL still called in its old file: exported from the new home, rebound in the old (CART-1146); and a
     -- single-binding import line a rewrite leaves dead, recognised so it can go (CART-1147). Lua only, as above.
     local_bind = 'IMPORTS', member_export = 'IMPORTS', import_alias = 'IMPORTS',
+    -- a method call whose receiver is a string BY SYNTAX is the stdlib string method (CART-1062)
+    string_receiver = 'IMPORTS',
     std_aliases = 'IMPORTS',        -- per-file names bound to the stdlib (std-alias disposition)
 
     -- TYPES: receiver / return / chain / field typing (the D-measurement's

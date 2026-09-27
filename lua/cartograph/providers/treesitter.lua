@@ -7600,6 +7600,13 @@ local MATCH_OPTS = { match_limit = 65536 }
                         local q, h, d, qn = spec.qualify_call(calln, full, src, jvt_sm)
                         full, qhedge, qdefer, qqual = q or full, h, d, qn
                     end
+                    -- ★ A STRING RECEIVER MAKES IT THE STDLIB'S (CART-1062): `('%s'):format(x)` keys `string.format`,
+                    -- which the spec's stdlib prefixes answer as external — instead of the name-match landing it on
+                    -- the one project def called `format` (4,330 of them did, on terraform's FUNCS.format)
+                    if method and spec.string_receiver and spec.string_receiver(namen, src) then
+                        local mem = rawfull:match(':([%w_]+)$')
+                        if mem then full = 'string.' .. mem end
+                    end
                     -- ★ AND A PACKAGE-BOUND RECEIVER BECOMES ITS PACKAGE. `_.map()`
                     -- keys `lodash.map`, which is what the L2 profile's namespace
                     -- set and its member check are keyed by — so the npm surface

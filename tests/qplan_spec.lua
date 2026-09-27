@@ -71,9 +71,24 @@ test('qplan territory: every form the laws reach agrees with territory.compute, 
         eq(want, TR.rows(QP.eval(plan, inputs)), A().show(plan))
     end
     eq('core 2 nil B [e1,e2]', want.leaf)   -- both entries reach it: the core, entered at a border
-    local stats = TR.qplan_stats(inputs.seeds, inputs.graph, 1)
-    local best = QP.rewrite(P.plan, P.laws, stats)
-    ok(A().show(best):find('seedsets', 1, true) or A().show(best):find('classify_bits', 1, true), A().show(best))
+    -- ⚠ NO MEASURED COST HERE. The first version ranked by qplan_stats, which TIMES this machine (qplan.units): on an
+    -- 8-node fixture the naive plan can honestly be cheapest, so it flaked (2 of 4 full-suite runs, caught by the
+    -- pre-commit hook). And the FORMULA model at whole-repo scale deterministically keeps the naive plan — the known
+    -- mis-ranking (CART-1142) that the sampled cost exists to fix. So two claims, each deterministic:
+    --   the SEARCH reaches every fused form, and it picks the minimum under the cost it is GIVEN — here the whole
+    --   repo's measured medians (tools/qplan.lua, ms), as a fixed function.
+    local MEASURED = {
+        ['(classify (invert (close_each ?seeds ?graph)) ?seeds ?graph)'] = 1940,
+        ['(classify (seedsets ?seeds ?graph "worklist") ?seeds ?graph)'] = 1783,
+        ['(classify (seedsets ?seeds ?graph "scc") ?seeds ?graph)'] = 710,
+        ['(classify_bits ?seeds ?graph "worklist")'] = 1700,
+        ['(classify_bits ?seeds ?graph "scc")'] = 690,
+    }
+    local best, log = QP.rewrite(P.plan, P.laws, {}, { cost = function (p) return MEASURED[A().show(p)] or math.huge end })
+    local seen = {}
+    for _, e in ipairs(log.explored) do seen[A().show(e.plan)] = true end
+    for k in pairs(MEASURED) do ok(seen[k], 'the search reaches ' .. k) end
+    eq('(classify_bits ?seeds ?graph "scc")', A().show(best))
 end)
 
 test('qplan.eval_many: plans sharing a subplan compute it ONCE, and each still gets its own answer', function ()
