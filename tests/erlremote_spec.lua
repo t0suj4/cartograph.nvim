@@ -44,3 +44,21 @@ test('erlang: `Mod:f(...)` on a variable module is DYNAMIC, never name-matched (
     eq('dynamic', (require('cartograph.census').disp(dyn)))
     eq('backend.erl::start@2', lit and lit.to, 'a literal module still resolves into its file')
 end)
+
+-- CART-1131: an erlang function's visibility is its module's -export list (or -compile(export_all)). Without it the
+-- dead-function rule reported exported functions as dead: 1216 of 1770 findings on ejabberd, 472 more in export_all.
+test('erlang: a function is exported by name AND arity from -export, quoted atoms unquoted, everything under export_all', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, s) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(s); fd:close() end
+    -- `'g'/2` exported QUOTED, `g` defined bare: the same atom
+    put('m.erl', "-module(m).\n-export([f/1, 'g'/2]).\nf(X) -> X.\nf(X, Y) -> {X, Y}.\ng(A, B) -> h(A, B).\nh(A, B) -> {A, B}.\n")
+    put('t.erl', '-module(t).\n-compile([export_all, nowarn_export_all]).\nk() -> ok.\n')
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local v = {}
+    for _, n in ipairs(data.nodes) do if n.kind == 'function' then v[n.file .. ' ' .. n.altkeys[1]] = n.exported end end
+    eq(true, v['m.erl f/1']); eq(false, v['m.erl f/2'], 'the same name at another arity is not exported')
+    eq(true, v['m.erl g/2'], 'a quoted export names the bare atom'); eq(false, v['m.erl h/2'])
+    eq(true, v['t.erl k/0'], 'export_all')
+end)

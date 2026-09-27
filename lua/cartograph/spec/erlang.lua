@@ -30,6 +30,34 @@ local function arity_of(n)
     return k
 end
 
+-- ★ WHAT A MODULE EXPORTS (CART-1131): its -export([f/1, …]) lists, or everything under -compile(export_all) — read
+-- once per source (every def of a file asks). Quoted atoms compare unquoted (`'g'/2` exports g/2).
+local exp_src, exp_set, exp_all
+local function unq(s) return (s:gsub("^'(.*)'$", '%1')) end
+local function exports_of(root, src)
+    if exp_src == src then return exp_set, exp_all end
+    local set, all = {}, false
+    for form in root:iter_children() do
+        local t = form:type()
+        if t == 'export_attribute' then
+            for _, fa in ipairs(form:field('funs')) do
+                local f, a = fa:field('fun')[1], fa:field('arity')[1]
+                local v = a and (a:field('value')[1] or a)
+                if f and v then set[unq(vim.treesitter.get_node_text(f, src)) .. '/' .. vim.treesitter.get_node_text(v, src)] = true end
+            end
+        elseif t == 'compile_options_attribute' then
+            local o = form:field('options')[1]
+            local function scan(n)
+                if n:type() == 'atom' and vim.treesitter.get_node_text(n, src) == 'export_all' then all = true end
+                for c in n:iter_children() do if c:named() then scan(c) end end
+            end
+            if o then scan(o) end
+        end
+    end
+    exp_src, exp_set, exp_all = src, set, all
+    return set, all
+end
+
 -- ★ A PATTERN AS A READ SET (CART-0957). A clause head `f(#iq{type = get, sub_els = [#disco_info{node = N}]} = IQ)`
 -- says what the function reads from its argument: the names it binds, each with the PATH it is taken from, and
 -- the CONSTANTS it demands. For an XMPP handler that is the request it accepts, in the terms the codec spec
@@ -201,6 +229,17 @@ return {
     -- Without it, `merge_equations` folds the two into one node: 802 of 9650
     -- functions on ejabberd (8.3%), worst case `join` with FOUR arities.
     merge_key = function (defn) return arity_of(defn) end,
+    -- ★ VISIBILITY IS THE -export LIST (CART-1131). Without this every erlang function node carried no verdict, so the
+    -- dead-function rule's `exported()` never fired: 1216 of its 1770 findings on ejabberd were exported functions,
+    -- 472 more sat in export_all modules. true = exported (name/arity in an -export list, or export_all), false = local.
+    exported_def = function (defn, src)
+        local root = defn
+        while root:parent() do root = root:parent() end
+        local set, all = exports_of(root, src)
+        if all then return true end
+        local nm = defn:field('name')[1]
+        return nm ~= nil and set[unq(vim.treesitter.get_node_text(nm, src)) .. '/' .. arity_of(defn)] == true
+    end,
     -- ★ AND THE SAME FACT, DECLARED FOR THE RESOLVER (CART-0797). erlang has no
     -- varargs and no default arguments, so the argument count at a call site is a
     -- SOUND discriminator among same-named definitions — which is what lets

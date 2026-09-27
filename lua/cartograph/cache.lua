@@ -409,7 +409,9 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 208 -- v208: AN ERLANG CALL ON A VARIABLE MODULE IS DYNAMIC (CART-1129, spec.dynamic_call): `Mod:f()` no longer
+M.VERSION = 209 -- v209: ERLANG FUNCTIONS CARRY THEIR EXPORT VERDICT (CART-1131, spec.exported_def from -export / export_all):
+--- the dead-function rule reported exported functions as dead (1216 of 1770 on ejabberd, +472 in export_all modules).
+--- Prior: v208: AN ERLANG CALL ON A VARIABLE MODULE IS DYNAMIC (CART-1129, spec.dynamic_call): `Mod:f()` no longer
 --- goes to the name resolver, which matched 270 of 519 on ejabberd to ONE same-named function (the dispatcher's own, or
 --- an arbitrary implementer: a definite single edge where the truth is a set). dead-function 1850 -> 1858: eight backend
 --- functions were alive only through such an edge, and the population step (CART-1130) is what restores them.
