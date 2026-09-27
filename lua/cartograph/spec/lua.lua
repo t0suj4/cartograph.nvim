@@ -146,10 +146,20 @@ local STRING_RETURNS = {
 local STRING_METHODS = { sub = true, gsub = true, format = true, lower = true, upper = true, rep = true,
     reverse = true, match = true }
 
--- the string library's members: the only methods a string receiver has (Lua 5.1-5.4 / LuaJIT)
-local STRING_LIB = { byte = true, char = true, dump = true, find = true, format = true, gmatch = true, gsub = true,
-    len = true, lower = true, match = true, rep = true, reverse = true, sub = true, upper = true, pack = true,
-    unpack = true, packsize = true }
+-- the string library's members: the only methods a string receiver has — DERIVED from the distilled `luajit` profile
+-- (tools/luadistill.lua introspects `string` in the interpreter that runs the code), not listed; the 5.1 set if the
+-- profile is missing
+local STRING_LIB = (function ()
+    local ok, P = pcall(function () return require('cartograph.spec.profile').load('luajit') end)
+    local m = ok and P and P.types and P.types.string and P.types.string.members
+    if type(m) == 'table' and next(m) then
+        local out = {}
+        for k in pairs(m) do out[k] = true end
+        return out
+    end
+    return { byte = true, char = true, dump = true, find = true, format = true, gmatch = true, gsub = true,
+        len = true, lower = true, match = true, rep = true, reverse = true, sub = true, upper = true }
+end)()
 
 local stringish -- forward: an identifier is typed by the expressions assigned to it
 local STRING_CACHE = { src = nil, seen = {} } -- the last file's verdicts, keyed by declaration node id
@@ -1211,6 +1221,12 @@ return {
         end
         return stringish(r, src, 0, STRING_CACHE.seen) == true
     end,
+    -- ★ A STRING-LIBRARY METHOD ON AN UNTYPED RECEIVER HAS TWO OWNERS (CART-1150, the sizing probe): the string
+    -- library AND whatever project def shares the name — hazard.lua deliberately gives its objects the string API, so
+    -- 301 of 315 parameter receivers were string-OR-hazard by their own requirement sets. The resolver refuses such a
+    -- call as ambiguous (rule `vocab`, the project candidates named) instead of tail-matching the project def. A
+    -- receiver the string_receiver rule TYPED was keyed `string.*` before resolution and never reaches this.
+    method_vocab = STRING_LIB,
     -- THE REBIND AND THE EXPORT a move writes when a LOCAL it takes is still called by name in its old file
     -- (CART-1146): the new home exports it, the old one binds the name again where the definition was
     local_bind = function (name, expr) return ('local %s = %s'):format(name, expr) end,

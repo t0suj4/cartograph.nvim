@@ -8654,6 +8654,13 @@ local MATCH_OPTS = { match_limit = 65536 }
                     for _, t in ipairs(tw) do fitset[#fitset + 1] = t end
                     return nil, nil, refusal('ambiguous', fitset)
                 end
+                -- ★ A BUILTIN TYPE'S METHOD ON AN UNTYPED RECEIVER HAS TWO OWNERS (CART-1150): the string library's and this
+                -- one project def's. This line is the GUESS — the workspace-unique name, no receiver evidence (a receiver
+                -- that AGREES by name returned above) — so a string-library member refuses here instead, its candidate
+                -- named. Several candidates already refused as `ambiguous`, none left the call outside: both unchanged.
+                -- `self:m()` resolves before this; a receiver typed as a string was keyed `string.*` at extraction.
+                local mem = spec and spec.method_vocab and name:match(':([%w_]+)$')
+                if mem and spec.method_vocab[mem] then return nil, nil, refusal('vocab', fitset) end
                 return fitset[1], true
             end
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
@@ -9589,6 +9596,13 @@ function M.relink(data, touched)
                     for _, t in ipairs(tw) do fitset[#fitset + 1] = t end
                     return nil, nil, refusal('ambiguous', fitset)
                 end
+                -- ★ A BUILTIN TYPE'S METHOD ON AN UNTYPED RECEIVER HAS TWO OWNERS (CART-1150): the string library's and this
+                -- one project def's. This line is the GUESS — the workspace-unique name, no receiver evidence (a receiver
+                -- that AGREES by name returned above) — so a string-library member refuses here instead, its candidate
+                -- named. Several candidates already refused as `ambiguous`, none left the call outside: both unchanged.
+                -- `self:m()` resolves before this; a receiver typed as a string was keyed `string.*` at extraction.
+                local mem = spec and spec.method_vocab and name:match(':([%w_]+)$')
+                if mem and spec.method_vocab[mem] then return nil, nil, refusal('vocab', fitset) end
                 return fitset[1], true
             end
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',

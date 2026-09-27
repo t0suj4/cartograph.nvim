@@ -146,6 +146,8 @@ M.SLOTS = {
     local_bind = 'IMPORTS', member_export = 'IMPORTS', import_alias = 'IMPORTS',
     -- a method call whose receiver is a string BY SYNTAX is the stdlib string method (CART-1062)
     string_receiver = 'IMPORTS',
+    -- the method names a builtin receiver type owns: an untyped receiver's call to one is AMBIGUOUS (CART-1150)
+    method_vocab = 'IMPORTS',
     std_aliases = 'IMPORTS',        -- per-file names bound to the stdlib (std-alias disposition)
 
     -- TYPES: receiver / return / chain / field typing (the D-measurement's

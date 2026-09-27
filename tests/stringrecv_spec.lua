@@ -1,6 +1,7 @@
 -- A STRING RECEIVER IS THE STDLIB'S (CART-1062): `('%s'):format(x)` is `string.format`, so no project def named
--- `format` can be its target — the name-match used to land 4,330 such calls on one project function. Pinned both ways:
--- a receiver that is NOT a string by syntax still resolves as it did.
+-- `format` can be its target — the name-match used to land 4,330 such calls on one project function. And (CART-1150)
+-- a string-library method on an UNTYPED receiver is AMBIGUOUS: refused as `vocab`, never tail-matched. Pinned both ways:
+-- every case says which of the two it is.
 
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
@@ -15,15 +16,24 @@ local function ingest(files)
     return store
 end
 
--- the callers of `name` in `file`: { caller name… }
-local function callers(st, file, name)
-    local out = {}
-    for _, n in ipairs(st.data.nodes) do
-        if n.file == file and n.name == name then
-            for _, c in ipairs(st.usedby[n.id] or {}) do out[#out + 1] = st.by_id[c].name end
+-- what each function's calls to `member` became: `string` (keyed the stdlib's, external), `vocab` (refused: a string-
+-- library method on an untyped receiver is AMBIGUOUS, CART-1150), `edge` (resolved into a project def). A function
+-- with several such calls reads their distinct outcomes joined.
+local function outcomes(st, member)
+    local by = {}
+    for _, c in ipairs(st.data.calls) do
+        if c.callee == member and c.fn then
+            local fname = (st.by_id[c.fn] or {}).name or c.fn
+            local o = (c.full or ''):match('^string%.') and 'string'
+                or (c.refused and c.refused.rule == 'vocab' and 'vocab') or (c.to and 'edge') or 'other'
+            by[fname] = by[fname] or {}
+            by[fname][o] = true
         end
     end
-    table.sort(out)
+    local out = {}
+    for f, set in pairs(by) do
+        local l = vim.tbl_keys(set); table.sort(l); out[f] = table.concat(l, '+')
+    end
     return out
 end
 
@@ -39,8 +49,9 @@ test('stringrecv: a string-literal, concatenation or tostring() receiver never r
             'function U.name(obj) return obj:format(1) end',
             'return U', '' }, '\n'),
     }
-    eq({ 'U.name' }, callers(st, 'fmt.lua', 'M.format'), 'only the untyped receiver still name-matches')
-    eq({}, callers(st, 'fmt.lua', 'M.rep'), 'a concatenation is a string')
+    eq({ ['U.lit'] = 'string', ['U.tos'] = 'string', ['U.name'] = 'vocab' }, outcomes(st, 'format'),
+        'typed receivers are the stdlib\'s; the untyped one is refused as ambiguous, never matched to M.format')
+    eq({ ['U.cat'] = 'string' }, outcomes(st, 'rep'), 'a concatenation is a string')
 end)
 
 test('stringrecv (CART-1150): a LOCAL only ever assigned strings is typed — and a reassigned one, a hazard object and a parameter are NOT', function ()
@@ -62,8 +73,12 @@ test('stringrecv (CART-1150): a LOCAL only ever assigned strings is typed — an
             "function U.pos() local s, n = ('x'):gsub('a', 'b'); return n:sub(1) end",
             'return U', '' }, '\n'),
     }
-    eq({ 'U.obj', 'U.re', 'U.via' }, callers(st, 'hz.lua', 'M.gsub'), 'typed locals leave; a reassigned one and a hazard object stay')
-    eq({ 'U.par', 'U.pos', 'U.via' }, callers(st, 'hz.lua', 'M.sub'), 'a chain of string locals leaves; a parameter, a hazard method result and a second result stay')
+    -- ⚠ the hazard OBJECT is refused too: its receiver's type is unknown, and the string library owns `gsub` as much as
+    -- hazard.lua does — the honest answer is the ambiguity (the correct edge is a guess this graph no longer makes)
+    eq({ ['U.a'] = 'string', ['U.c'] = 'string', ['U.pos'] = 'string', ['U.re'] = 'vocab', ['U.obj'] = 'vocab',
+        ['U.via'] = 'vocab' }, outcomes(st, 'gsub'), 'typed locals are the stdlib\'s; a reassigned one and a hazard object refuse')
+    eq({ ['U.b'] = 'string', ['U.c'] = 'string', ['U.par'] = 'vocab', ['U.via'] = 'vocab', ['U.pos'] = 'vocab' },
+        outcomes(st, 'sub'), 'a chain of string locals is the stdlib\'s; a parameter, a hazard method result and a second result refuse')
 end)
 
 test('stringrecv (CART-1150): a declaration LATER on the same line is not the binding', function ()
@@ -72,7 +87,7 @@ test('stringrecv (CART-1150): a declaration LATER on the same line is not the bi
         ['hz.lua'] = 'local M = {}\nfunction M.gsub(self, p) return p end\nreturn M\n',
         ['use.lua'] = "local U = {}\nfunction U.a(s) local r = s:gsub('x', ''); local s = 'y'; return r end\nreturn U\n",
     }
-    eq({ 'U.a' }, callers(st, 'hz.lua', 'M.gsub'), 'the parameter s is untyped; the later local s does not reach back')
+    eq({ ['U.a'] = 'vocab' }, outcomes(st, 'gsub'), 'the parameter s is untyped; the later local s does not reach back')
 end)
 
 test('stringrecv (CART-1150): a BUILT-IN record field is typed — debug.getinfo(…).source is a string; its number fields and a project table are not', function ()
@@ -87,7 +102,8 @@ test('stringrecv (CART-1150): a BUILT-IN record field is typed — debug.getinfo
             "function U.proj(t) local r = { source = t }; return r.source:sub(1) end",
             'return U', '' }, '\n'),
     }
-    eq({ 'U.num', 'U.proj' }, callers(st, 'hz.lua', 'M.sub'), 'the string fields leave; a number field and a project record stay')
+    eq({ ['U.direct'] = 'string', ['U.via'] = 'string', ['U.num'] = 'vocab', ['U.proj'] = 'vocab' }, outcomes(st, 'sub'),
+        'the string fields are the stdlib\'s; a number field and a project record refuse')
 end)
 
 test('stringrecv (CART-1150): a file handle is a built-in record — fd:read() is a string, fd:close() is not', function ()
@@ -100,7 +116,7 @@ test('stringrecv (CART-1150): a file handle is a built-in record — fd:read() i
             "function U.other(t) local s = t:read('a'); return s:gsub('x', '') end",
             'return U', '' }, '\n'),
     }
-    eq({ 'U.other' }, callers(st, 'hz.lua', 'M.gsub'), 'a read from io.open is a string; a read from anything else is not known')
+    eq({ ['U.r'] = 'string', ['U.other'] = 'vocab' }, outcomes(st, 'gsub'), 'a read from io.open is a string; a read from anything else is not known')
 end)
 
 -- an nvim-plugin layout (plugin/ + lua/) activates the `nvim` profile: the runtime's own declared returns
@@ -129,7 +145,31 @@ test('stringrecv (CART-1150): the NVIM profile types a runtime call\'s declared 
         'return U', '' }, '\n')
     local st = ingest_tree { ['plugin/p.lua'] = '-- entry\n', ['lua/p/hz.lua'] = hz, ['lua/p/use.lua'] = use }
     eq('nvim', st.data.profile, 'the plugin shape activated the profile')
-    eq({ 'U.chr', 'U.pos' }, callers(st, 'lua/p/hz.lua', 'M.gsub'), 'declared string returns leave; getpos (a tuple) and getchar (integer|string) stay')
+    eq({ ['U.tx'] = 'string', ['U.sys'] = 'string', ['U.pos'] = 'vocab', ['U.chr'] = 'vocab' }, outcomes(st, 'gsub'),
+        'declared string returns are the stdlib\'s; getpos (a tuple) and getchar (integer|string) refuse')
     st = ingest_tree { ['lua/p/hz.lua'] = hz, ['lua/p/use.lua'] = use }
-    eq({ 'U.chr', 'U.pos', 'U.sys', 'U.tx' }, callers(st, 'lua/p/hz.lua', 'M.gsub'), 'no plugin shape, no environment: nothing typed')
+    eq({ ['U.tx'] = 'vocab', ['U.sys'] = 'vocab', ['U.pos'] = 'vocab', ['U.chr'] = 'vocab' }, outcomes(st, 'gsub'),
+        'no plugin shape, no environment: nothing typed, all ambiguous')
+end)
+
+test('stringrecv (CART-1150): the ambiguity gate is NARROW — self:m() and a non-string method still resolve, and a refusal names its candidate', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local st = ingest {
+        ['hz.lua'] = table.concat({
+            'local M = {}',
+            'function M:gsub(p) return p end',
+            'function M:close() end',
+            'function M:tidy(p) return self:gsub(p) end', -- the method's own class: resolves
+            'function M.tidy2(self, p) return self:gsub(p) end', -- an explicit self, dot-defined
+            'return M', '' }, '\n'),
+        ['use.lua'] = 'local U = {}\nfunction U.shut(x) return x:close() end\nfunction U.g(x) return x:gsub(1) end\nreturn U\n',
+    }
+    eq({ ['M:tidy'] = 'edge', ['M.tidy2'] = 'edge', ['U.g'] = 'vocab' }, outcomes(st, 'gsub'),
+        'self:gsub resolves, colon- or dot-defined; an untyped x:gsub refuses')
+    eq({ ['U.shut'] = 'edge' }, outcomes(st, 'close'), 'close is no string-library member: the gate does not touch it')
+    for _, c in ipairs(st.data.calls) do
+        if c.callee == 'gsub' and c.refused then
+            eq({ 'hz.lua::M:gsub@1' }, c.refused.cands, 'the refusal is a PLACE: the project candidate is named')
+        end
+    end
 end)
