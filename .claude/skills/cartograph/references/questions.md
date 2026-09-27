@@ -140,6 +140,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | Every stx template in a directory (namespaces harvested first) | `stx.scan(dir, {all})`, `stx.templates(src, {resolve})`, `stx.inventory(recs)` |
 | Server endpoints, a handler's heads, its sends | `xmppserver.endpoints(data)`, `.reads(store, h)`, `.sends(dir, {E, spec})` |
 | The whole client × server merge, both points of view | `xmppmerge.merge{client, server, spec}` → `.rows`, `.server` |
+| Rewrite a COMPOSED analysis into a faster equivalent, and prove the rewrite (query plans: a plan is a term, laws are template pairs with declared side conditions, the unoptimized plan is the oracle) | `tools/qplan.lua <corpus|dir>` (territory: checker vs territory.compute, the explored plans, sampled vs formula cost, per-form rows + medians, the lowered kernel); library `require('cartograph.qplan')` (`.register`, `.eval`, `.eval_many` shared subplans, `.law`, `.rewrite` search, `.sampled_cost`, `.check`), `require('cartograph.solve').solve{…}` (the shared monotone solver, CART-1037), `require('cartograph.qlower')` (lift Lua to a trivia-stripped term, fold under stated facts, lower back) (CART-1142) |
 | unify / join / instantiate terms | `require('cartograph.algebra').load()` → `A.unify`, `A.join`, `A.instantiate` (⚠ `join` generalizes = keeps what is SHARED; `unify` combines — MERGE is `unify ∘ compose`) |
 
 ## Done by hand, not yet a tool

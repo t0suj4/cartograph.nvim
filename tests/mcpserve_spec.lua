@@ -519,6 +519,31 @@ test('agent: "nothing was comparable" and "no clones" are different answers', fu
     eq('no-entry-points', t.absence_why.premise)
 end)
 
+test('agent: territory rows are CLIPPED largest-first with a note, and the basis is per language (CART-1141)', function ()
+    -- three callerless Lua functions: `big` owns two more nodes, the others none
+    synth({
+        { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 },
+        { id = 'a.lua::big', kind = 'function', name = 'big', file = 'a.lua', line = 1, order = 1 },
+        { id = 'a.lua::x', kind = 'function', name = 'x', file = 'a.lua', line = 5, order = 2 },
+        { id = 'a.lua::y', kind = 'function', name = 'y', file = 'a.lua', line = 9, order = 3 },
+        { id = 'a.lua::p', kind = 'function', name = 'p', file = 'a.lua', line = 13, order = 4 },
+        { id = 'a.lua::q', kind = 'function', name = 'q', file = 'a.lua', line = 17, order = 5 },
+    }, { { kind = 'ref', from = 'a.lua::big', to = 'a.lua::p' }, { kind = 'ref', from = 'a.lua::p', to = 'a.lua::q' } })
+    local t = agent.answer(store, 'territory', { limit = 1 })
+    eq(1, #t.result)
+    eq('big', t.result[1].name)
+    local clip, basis
+    for _, n in ipairs(t.notes) do
+        if n.kind == 'clipped' then clip = n end
+        if n.kind == 'entry-basis' then basis = n end
+    end
+    ok(clip, 'a clip is a note')
+    eq(3, clip.evidence.entries)
+    eq('apparent', basis.premise)
+    eq({ 'lua apparent 3' }, basis.evidence.by_language)
+    eq(3, #agent.answer(store, 'territory', {}).result, 'the default limit keeps all three')
+end)
+
 -- EVERY DECLARED ABSENCE MUST HAVE A BRANCH THAT EMITS IT. `frontier` is the one
 -- the fixture root cannot produce — every file in it parses — so the unparsed
 -- frontier is built by hand. Without this the four verbs below would advertise a

@@ -59,3 +59,20 @@ test('territory: summary tallies territories, commons, core, borders', function 
     local terr_n = 0; for _ in pairs(s.territories) do terr_n = terr_n + 1 end
     eq(3, terr_n) -- e1, e2, e3 each own private code
 end)
+
+test('territory.roots: chosen PER LANGUAGE — declared entries where a language has one, callerless functions and regions elsewhere (CART-1141)', function ()
+    local nodes = {
+        { id = 'c_main', kind = 'function', file = 'a.c', entry = true },
+        { id = 'c_orphan', kind = 'function', file = 'a.c' },          -- callerless, but C is rooted in its declared main
+        { id = 'lua_top', kind = 'region', file = 'tools/t.lua' },     -- a script's top-level code
+        { id = 'lua_f', kind = 'function', file = 'tools/t.lua' },     -- called by the region: not a root
+        { id = 'lua_lib', kind = 'function', file = 'lib.lua' },       -- callerless: an apparent root
+        { id = 'lua_mod', kind = 'module', file = 'lib.lua' },         -- a module node is never a root
+    }
+    local usedby = { lua_f = { 'lua_top' } }
+    local lang = { c = 'c', lua = 'lua' }
+    local roots, basis = require('cartograph.territory').roots(nodes, usedby, function (f) return lang[f:match('%.(%w+)$')] end)
+    eq({ 'c_main', 'lua_top', 'lua_lib' }, roots)
+    eq({ declared = true, n = 1 }, basis.c)
+    eq({ declared = false, n = 2 }, basis.lua)
+end)

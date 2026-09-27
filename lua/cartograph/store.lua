@@ -1558,28 +1558,27 @@ end
 M._territory = nil
 
 --- The territory partition, computed on demand and cached (cleared on
---- re-ingest). Roots = declared entry points (n.entry) if any exist, else the
---- call graph's APPARENT sources (function nodes with no callers) — tagged via
---- `.declared`. nil until a graph is open.
+--- re-ingest). Roots are chosen PER LANGUAGE (territory.roots): a language with
+--- a declared entry point (n.entry) is rooted in those, any other in its
+--- APPARENT sources (functions, methods and top-level regions with no callers).
+--- `.declared` = some language was rooted in declared entries; `.basis` says which,
+--- per language. nil until a graph is open.
 function M.territory()
     if M._territory then return M._territory end
     if not M.data then return nil end
-    local roots, declared = {}, false
-    for _, n in ipairs(M.data.nodes) do
-        if (n.kind == 'function' or n.kind == 'method') and n.entry then
-            roots[#roots + 1] = n.id; declared = true
-        end
+    local ts = require 'cartograph.providers.treesitter'
+    local lang_cache = {}
+    local function lang_of(file)
+        local l = lang_cache[file]
+        if l == nil then l = ts.parse_lang(file) or false; lang_cache[file] = l end
+        return l or nil
     end
-    if #roots == 0 then -- fall back to apparent sources (no callers)
-        for _, n in ipairs(M.data.nodes) do
-            if (n.kind == 'function' or n.kind == 'method')
-                and not (M.usedby[n.id] and #M.usedby[n.id] > 0) then
-                roots[#roots + 1] = n.id
-            end
-        end
-    end
-    local t = require('cartograph.territory').compute(roots, M.uses, M.usedby)
-    t.declared = declared
+    local TR = require 'cartograph.territory'
+    local roots, basis = TR.roots(M.data.nodes, M.usedby, lang_of)
+    local t = TR.compute(roots, M.uses, M.usedby)
+    t.basis = basis
+    t.declared = false
+    for _, b in pairs(basis) do if b.declared then t.declared = true end end
     M._territory = t
     return t
 end

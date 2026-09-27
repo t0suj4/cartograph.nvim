@@ -1300,7 +1300,8 @@ end
 
 -- ── verb: territory ─────────────────────────────────────────────────────────
 
-local function v_territory(store)
+local function v_territory(store, args)
+    args = args or {}
     local t = store.territory()
     if not t then
         -- A MISSING PARTITION IS A CAPABILITY STATEMENT, NOT AN ABSENCE IN THE
@@ -1311,25 +1312,50 @@ local function v_territory(store)
             'open a root first; graph_info reports whether this graph carries nodes at all')
     end
     local s = require('cartograph.territory').summary(t)
-    local rows = {}
+    -- ★ CLIPPED, LARGEST FIRST (CART-1141 made a Lua graph root in every callerless function: 8,133 entries on the
+    -- self graph, one row each). Sorted before rows are built, so only the kept ones pay for noderow.
+    local limit = math.max(1, math.floor(tonumber(args.limit) or 100))
+    local order = {}
     for _, e in ipairs(t.entries) do
-        local r = noderow(store, e, { class = 'entry', nodes = s.territories[e] or 0 })
+        local n = store.by_id and store.by_id[e]
+        order[#order + 1] = { id = e, nodes = s.territories[e] or 0, at = n and (tostring(n.file) .. ':' .. ('%08d'):format(n.line or 0)) or tostring(e) }
+    end
+    table.sort(order, function (x, y)
+        if x.nodes ~= y.nodes then return x.nodes > y.nodes end
+        return x.at < y.at
+    end)
+    local rows = {}
+    for _, o in ipairs(order) do
+        if #rows >= limit then break end
+        local r = noderow(store, o.id, { class = 'entry', nodes = o.nodes })
         if r then rows[#rows + 1] = r end
     end
-    table.sort(rows, function (x, y)
-        if x.nodes ~= y.nodes then return x.nodes > y.nodes end
-        return tostring(x.file) .. tostring(x.line) < tostring(y.file) .. tostring(y.line)
-    end)
     local notes = {}
+    if #order > limit then
+        notes[#notes + 1] = { kind = 'clipped', why =
+            ('%d entry points, the %d with the largest territories returned — raise `limit` to see the rest'):format(#order, #rows),
+            evidence = { entries = #order, limit = limit } }
+    end
     -- ★ THE ONE THING THAT DECIDES WHETHER THIS ANSWER IS WORTH ANYTHING. With
     -- no declared entry points the partition falls back to APPARENT sources —
     -- functions nothing calls — which on a graph full of refused calls is a
     -- partition of the resolver's failures, not of the architecture.
-    notes[#notes + 1] = { kind = 'entry-basis', premise = t.declared and 'declared' or 'apparent',
-        why = t.declared
+    -- ★ PER LANGUAGE (CART-1141): a language with a declared entry is rooted in it, the others in their apparent
+    -- sources — so one fixture's `main` no longer decides for every Lua script.
+    local langs, nd, na = {}, 0, 0
+    for l, b in pairs(t.basis or {}) do
+        langs[#langs + 1] = ('%s %s %d'):format(l, b.declared and 'declared' or 'apparent', b.n)
+        if b.declared then nd = nd + b.n else na = na + b.n end
+    end
+    table.sort(langs)
+    local premise = (nd > 0 and na > 0) and 'mixed' or (nd > 0 and 'declared') or 'apparent'
+    notes[#notes + 1] = { kind = 'entry-basis', premise = premise,
+        why = premise == 'declared'
             and ('%d entry point(s) are DECLARED on the graph, so this partition is rooted in stated intent'):format(t.k)
-            or ('no entry point is declared, so the roots are APPARENT — every function with no caller in this graph (%d of them). A refused or unresolved call leaves its target callerless, so an unresolved graph produces spurious roots and the partition is only as good as the resolution.'):format(t.k),
-        evidence = { entries = t.k, declared = t.declared } }
+            or premise == 'apparent'
+            and ('no entry point is declared, so the roots are APPARENT — every function, method or top-level region with no caller in this graph (%d of them). A refused or unresolved call leaves its target callerless, so an unresolved graph produces spurious roots and the partition is only as good as the resolution.'):format(t.k)
+            or ('roots chosen PER LANGUAGE: %d DECLARED entry point(s) where a language states them, %d APPARENT ones (no caller) where it does not — %s. The apparent part is only as good as the resolution.'):format(nd, na, table.concat(langs, ', ')),
+        evidence = { entries = t.k, declared = t.declared, by_language = langs } }
     notes[#notes + 1] = { kind = 'shared-ground', premise = 'partition',
         why = ('%d node(s) are commons (reached by several entries), %d are core (reached by every entry), and %d are BORDERS — where a feature\'s path first meets more-shared ground, i.e. the natural API of a shared subsystem'):format(s.commons, s.core, s.borders),
         evidence = { commons = s.commons, core = s.core, borders = s.borders,
@@ -3283,7 +3309,9 @@ M.VERBS = {
         -- NOT 'unavailable': the one branch that could produce it is a missing
         -- partition, which is a refusal (see v_territory).
         absences = { 'absent', 'frontier' },
-        args = {},
+        args = {
+            { name = 'limit', type = 'integer', desc = 'max entry rows, largest territory first (default 100); a clip is reported as a note' },
+        },
         run = v_territory,
     },
     census = {
