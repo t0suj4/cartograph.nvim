@@ -126,6 +126,11 @@ M.PASSES = {
             local line = require('cartograph.erlreg').summary(er)
             if line then return line, #er.refused > 0 and WARN or INFO end
         end },
+    -- ★ WHAT A DYNAMIC `Mod:f(...)` CAN RUN (CART-1130): the implementers of the behaviour that obliges `f` — the call
+    -- stays dynamic, the population becomes hedged edges with the -callback as provenance
+    { name = 'erldispatch',
+        run = function (data) return require('cartograph.erldispatch').attach(data) end,
+        say = function (s) return require('cartograph.erldispatch').summary(s), INFO end },
     -- a configured database: its tables join the graph and the code's SQL entities link to them (session pass)
     { name = 'dblink',
         run = function (data) return require('cartograph.dblink').attach(data) end,
