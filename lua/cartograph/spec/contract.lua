@@ -302,6 +302,9 @@ M.SLOTS = {
     -- TYPE-TEST GUARDS (CART-1125): <guard BIF> -> the literal node kinds it admits. A derived generator reads an
     -- interpreter clause's guard three-valued against a site (yes / no / unknown).
     guard_kinds = 'ANALYSIS',
+    -- CALLS THAT NEVER RETURN (CART-1112): <auto-imported BIF name> -> true for the ones that RAISE. A term summary
+    -- drops such an arm from a join instead of generalizing every join to a bare hole.
+    raises = 'ANALYSIS',
     -- PATTERN BINDING (CART-0957): { fields = <node type -> the field that IS a pattern>, params = <the
     -- fn head is a pattern>, single_assignment = <a bound name in a pattern is a match, a use> }. A
     -- pattern binds every name under it at any depth, which binder_fields (per node TYPE) cannot say when

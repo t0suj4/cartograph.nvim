@@ -92,36 +92,33 @@ local ERLT = { call = { call = true }, remote = { remote = true }, clause = { fu
 
 --- Every send site in the erlang files of `dir`, with the term the value encodes to.
 --- opts = { E = erlrecords env (the module record scopes), spec = xmppspec (optional: is the record on the wire?) }
---- -> rows { file, line, fn (enclosing clause name/arity), verb, term, holes, status, record, wire = entry names }
+--- -> rows { file, line, fn (enclosing clause name/arity), verb, term, holes, status, record, wire = entry names },
+---    stats (the summary session's counters: summaries, memo_hits, recursive cuts, depth cuts, budget)
 function M.sends(dir, opts)
     opts = opts or {}
     local ET = require 'cartograph.erlterms'
     local E = opts.E
     local rows = {}
+    -- THE PROGRAM a call is summarized over (CART-1112 step 3): the tree's own modules, then each dependency's src —
+    -- the dependency roots the record resolver was given (the caller's), selected by the modules the calls name
+    local dirs = { dir }
+    -- a dependency's own files resolve their includes against ITS include/ (rebar's default {i, "include"} for an
+    -- app), not the tree's
+    local ER = require 'cartograph.erlrecords'
+    for _, d in pairs(E and E.apps or {}) do
+        dirs[#dirs + 1] = { dir = d .. '/src', E = ER.new { include_dirs = { d .. '/include' }, apps = E.apps } }
+    end
+    for _, d in ipairs(opts.deps or {}) do dirs[#dirs + 1] = d end
+    local P = ET.program { dirs = dirs, E = E }
+    local S = ET.session()
     local verbs = {}
     for _, v in ipairs(M.SEND_VERBS) do verbs[v.fn] = verbs[v.fn] or {}; verbs[v.fn][v.mod] = v end
     for _, f in ipairs(vim.fn.glob(dir .. '/*.erl', false, true)) do
         local fd = io.open(f, 'rb'); local src = fd and fd:read('a'); if fd then fd:close() end
         if src and (src:find('make_iq_result', 1, true) or src:find('ejabberd_router:route', 1, true)) then
             local root = vim.treesitter.get_string_parser(src, 'erlang'):parse()[1]:root()
-            local scope = E and E:scope(f)
-            local ctx = {
-                module = src:match('%-module%(%s*([%w_]+)%s*%)'),
-                record_fields = function (rec)
-                    local d = scope and scope.records[rec]
-                    if not d then return nil end
-                    local out = {}
-                    for i, fl in ipairs(d.fields) do out[i] = fl.name end
-                    return out
-                end,
-                defaults = function (rec)
-                    local d = scope and scope.records[rec]
-                    if not d then return nil end
-                    local out = {}
-                    for _, fl in ipairs(d.fields) do out[fl.name] = fl.default end
-                    return out
-                end,
-            }
+            local m = P:adopt(f, src)
+            local ctx = m and m.ctx or ET.file_ctx(src, f, E, P)
             local function walk(x)
                 for c in x:iter_children() do
                     if ERLT.call[c:type()] then
@@ -140,7 +137,15 @@ function M.sends(dir, opts)
                             end
                             local an = args[v.arg]
                             if an then
-                                local term, holes = ET.term(an, src, ctx)
+                                local term, holes = ET.term(an, src, ctx, S)
+                                -- a bare hole the join left over different record kinds: the SET of records
+                                local set
+                                for _, k in ipairs(term.k == 'hole' and S.kinds[term.h] or {}) do
+                                    local rn = k:match('^rec:(.+)$')
+                                    if not rn then set = nil; break end
+                                    set = set or {}
+                                    set[#set + 1] = rn
+                                end
                                 local cl = c
                                 while cl and not ERLT.clause[cl:type()] do cl = cl:parent() end
                                 local fnm = cl and cl:field('name')[1]
@@ -151,7 +156,7 @@ function M.sends(dir, opts)
                                 rows[#rows + 1] = { file = f:sub(#dir + 2), line = c:start() + 1,
                                     fn = fnm and (vim.treesitter.get_node_text(fnm, src) .. '/' .. arity) or '?',
                                     verb = v.mod .. ':' .. v.fn, what = v.what, term = term, holes = holes,
-                                    status = ET.status(term), record = rec,
+                                    status = set and 'one-of' or ET.status(term), record = rec, records = set,
                                     wire = rec and opts.spec and opts.spec.by_record and opts.spec.by_record[rec] or nil }
                             end
                         end
@@ -162,7 +167,7 @@ function M.sends(dir, opts)
             walk(root)
         end
     end
-    return rows
+    return rows, S.stats
 end
 
 --- A head's request shape in one line: the constants it demands and the records it destructures, by path.

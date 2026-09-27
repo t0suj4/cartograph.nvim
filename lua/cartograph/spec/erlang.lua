@@ -294,6 +294,10 @@ return {
     -- listed kind is `yes`, a literal of another kind `no`, anything else (a var, a macro, a call) `unknown`.
     guard_kinds = { is_integer = { 'integer' }, is_atom = { 'atom' }, is_float = { 'float' },
         is_binary = { 'binary' }, is_list = { 'list', 'string' }, is_tuple = { 'tuple' }, is_map = { 'map_expr' } },
+    -- THE AUTO-IMPORTED BIFs THAT NEVER RETURN, a language fact (the reference manual's error/exit/throw raise an
+    -- exception). Their source is not installed with OTP, so no -spec no_return() can be read for them; a function
+    -- of the tree or a dependency that only raises is found by evaluating its body, not listed (CART-1112).
+    raises = { error = true, exit = true, throw = true },
     preloop = { anonymous_fun = true },
     pattern = {
         -- the field of each node type that IS a pattern (every name under it binds, at any depth)

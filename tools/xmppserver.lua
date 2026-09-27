@@ -3,10 +3,11 @@
 --
 --   nvim --headless -u NONE -l tools/xmppserver.lua [<server-root>] [--rows] [--spec <xmpp_codec.spec>] [--sends]
 --
--- --sends  THE SERVER'S WRITES (CART-1108 via CART-1112 step 1): every place a handler sends (the payload of
---          xmpp:make_iq_result, the stanza given to ejabberd_router:route) with the TERM it encodes to — complete,
---          partial (the structure is known, some values flow from a call / a parameter / the matched request), or
---          opaque — and whether its record is one the codec spec puts on the wire. Holes name the step that fills them.
+-- --sends  THE SERVER'S WRITES (CART-1108 via CART-1112): every place a handler sends (the payload of
+--          xmpp:make_iq_result, the stanza given to ejabberd_router:route) with the TERM it evaluates to — complete,
+--          partial (the structure is known, some values are the matched request's unstated parts, a parameter, a
+--          join), one-of (arms of different records: the set), or opaque — and whether its record is one the codec
+--          spec puts on the wire. Calls are summarized over the tree and the xmpp dependency's source; holes say why.
 --
 -- <server-root> defaults to ~/work/brotardcast/ejabberd. --rows prints one line per endpoint and clause, and under
 -- it the request that clause ACCEPTS, lifted through the codec spec (xmppspec.lift, CART-1096); --spec defaults to
@@ -119,19 +120,32 @@ if want_sends then
     local ER = require 'cartograph.erlrecords'
     local E = ER.new { include_dirs = { root .. '/include' },
         apps = { xmpp = vim.fn.fnamemodify(specpath, ':h:h') } }
-    local srows = X.sends(root .. '/src', { E = E, spec = spec })
-    local st, why, onwire, recs = {}, {}, 0, 0
+    local t0 = vim.uv.hrtime()
+    local srows, sst = X.sends(root .. '/src', { E = E, spec = spec })
+    local ms = (vim.uv.hrtime() - t0) / 1e6
+    local st, why, onwire, recs, oneof, oneof_wire = {}, {}, 0, 0, 0, 0
     for _, r in ipairs(srows) do
         st[r.verb .. ' ' .. r.status] = (st[r.verb .. ' ' .. r.status] or 0) + 1
         if r.record then recs = recs + 1; if r.wire and #r.wire > 0 then onwire = onwire + 1 end end
+        if r.records then
+            oneof = oneof + 1
+            local all = spec and spec.by_record and true
+            for _, rn in ipairs(r.records) do all = all and spec.by_record[rn] and #spec.by_record[rn] > 0 end
+            if all then oneof_wire = oneof_wire + 1 end
+        end
         for _, w in pairs(r.holes) do
-            local k = w:gsub('^[%w_]+: ', ''):gsub('#[%w_]+%.[%w_]+ ', '#R.f ')
+            local k = w:gsub('^[%w_]+: ', ''):gsub('#[%w_]+%.[%w_]+ ', '#R.f '):gsub('parameter %d+ of %S+', 'parameter')
+                :gsub('[%w_]+:[%w_]+/%d+', 'M:f/n'):gsub('^[%w_]+/%d+: ', 'f/n: '):gsub('call into [%w_]+', 'call into M')
+                :gsub('^%?[%w_]+ ', '?M ')
             why[k] = (why[k] or 0) + 1
         end
     end
     io.write(('\n  SENDS %d site(s): %s\n'):format(#srows, top(st, 8)))
-    io.write(('  encoded to a record term %d, of which the codec spec puts on the wire %d\n'):format(recs, onwire))
-    io.write(('  holes by the step that would fill them: %s\n'):format(top(why, 8)))
+    io.write(('  encoded to a record term %d, of which the codec spec puts on the wire %d; one of several records %d '
+        .. '(every member on the wire: %d)\n'):format(recs, onwire, oneof, oneof_wire))
+    io.write(('  holes by reason: %s\n'):format(top(why, 12)))
+    io.write(('  summaries %d evaluated, %d memo hits; cut: %d recursive, %d at depth, %d by budget; %.0f ms\n'):format(
+        sst.summaries, sst.memo_hits, sst.recursive, sst.depth, sst.budget, ms))
     if want_rows then
         local A = require('cartograph.algebra').load()
         for _, r in ipairs(srows) do
