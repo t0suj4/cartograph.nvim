@@ -165,11 +165,22 @@ end
 local decode
 local ENVELOPE = { from = true, to = true, id = true, ['xml:lang'] = true }
 
-local function cons_list(items, tail)
+-- a FLAT list (the encoding erlterms builds on the server side, CART-1130 flat sequences): list(e1 … en), and an
+-- unseen rest is a HEDGE hole — a sequence of unknown length, not one more element
+local function flat_list(items, tail)
     local a = A()
-    local t = tail or a.node('nil')
-    for i = #items, 1, -1 do t = a.node('cons', items[i], t) end
-    return t
+    local kids = {}
+    for _, x in ipairs(items) do kids[#kids + 1] = x end
+    if tail then
+        if tail.k == 'list' then for _, x in ipairs(tail.kids or {}) do kids[#kids + 1] = x end
+        elseif tail.k == 'hole' then kids[#kids + 1] = a.hole(tail.h, true)
+        else
+            local t = tail
+            for i = #items, 1, -1 do t = a.node('cons', items[i], t) end
+            return t
+        end
+    end
+    return a.node('list', unpack(kids, 1, #kids))
 end
 
 -- decode one element: -> term, entry name | nil
@@ -218,7 +229,7 @@ function decode(el, rec, ctx, inherit)
         if s1.kind == 'els' then
             local items = {}
             for i, k in ipairs(kids) do if not claimed[i] then items[#items + 1] = (decode(k.el, k.rec, ctx, k.inherit or uri)) end end
-            return cons_list(items, open and fresh(ctx, 'unseen children (a content hole)') or nil)
+            return flat_list(items, open and fresh(ctx, 'unseen children (a content hole)') or nil)
         end
         if s1.kind == 'ref' then
             local items, many = {}, false
@@ -237,7 +248,7 @@ function decode(el, rec, ctx, inherit)
                     end
                 end
             end
-            if many then return cons_list(items, open and fresh(ctx, 'unseen ' .. label .. ' children') or nil) end
+            if many then return flat_list(items, open and fresh(ctx, 'unseen ' .. label .. ' children') or nil) end
             if #items >= 1 then return items[1] end
             return open and fresh(ctx, 'unseen ' .. label) or a.lit('undefined')
         end
@@ -322,10 +333,10 @@ local function pattern(facts, spec, S)
             local items = {}
             local n = node.list.len or 0
             for i = 1, n do items[i] = conv(node.list.items[i]) end
-            return cons_list(items, not node.list.closed and fresh_s() or nil)
+            return flat_list(items, not node.list.closed and fresh_s() or nil)
         end
         if node.cons then
-            return a.node('cons', conv(node.cons.head), conv(node.cons.tail))
+            return flat_list({ conv(node.cons.head) }, conv(node.cons.tail))
         end
         if node.tuple then
             local items = {}
@@ -360,6 +371,7 @@ local function path_names(term, at, spec)
         if k:sub(1, 4) == 'rec:' then
             local names = XS.record_fields(spec, k:sub(5))
             out[#out + 1] = names and names[i] or s
+        elseif k == 'list' then out[#out + 1] = '[]'
         elseif k == 'cons' then out[#out + 1] = (i == 1) and '[]' or '|'
         else out[#out + 1] = s end
         t = t.kids[i]
@@ -754,6 +766,7 @@ function M.merge(opts)
 end
 
 -- exported for the spec
+M._flat_list = flat_list
 M._decode = function (el, rec, spec, by_id)
     local ctx = { spec = spec, by_id = by_id or {}, holes = {}, n = 0, notes = {} }
     return decode(el, rec, ctx), ctx

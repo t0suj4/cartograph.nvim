@@ -130,7 +130,7 @@ if want_sends then
         local cand = v and vim.fn.expand('~/git/otp_src_' .. v)
         if cand and vim.fn.isdirectory(cand) == 1 then otp = cand end
     end
-    local srows, sst = X.sends(root .. '/src', { E = E, spec = spec, otp = otp and vim.fn.expand(otp) })
+    local srows, sst, ss = X.sends(root .. '/src', { E = E, spec = spec, otp = otp and vim.fn.expand(otp) })
     local ms = (vim.uv.hrtime() - t0) / 1e6
     local st, why, onwire, recs, oneof, oneof_wire = {}, {}, 0, 0, 0, 0
     for _, r in ipairs(srows) do
@@ -154,6 +154,28 @@ if want_sends then
     io.write(('  encoded to a record term %d, of which the codec spec puts on the wire %d; one of several records %d '
         .. '(every member on the wire: %d)\n'):format(recs, onwire, oneof, oneof_wire))
     io.write(('  holes by reason: %s\n'):format(top(why, 12)))
+    -- THE SEQUENCES: a list of unknown length in a send term, and what its elements are (erlterms.elements)
+    do
+        local ET = require 'cartograph.erlterms'
+        local A = require('cartograph.algebra').load()
+        local seqs, claimed, kinds = 0, 0, {}
+        local function walk(t)
+            if t.k == 'hole' and t.rep then
+                seqs = seqs + 1
+                local el = ET.elements(ss, t.h)
+                if el and el.k ~= 'hole' then
+                    claimed = claimed + 1
+                    local k = el.k == 'lit' and 'lit' or el.k
+                    kinds[k] = (kinds[k] or 0) + 1
+                end
+                return
+            end
+            for _, c in ipairs(t.kids or {}) do walk(c) end
+        end
+        for _, r in ipairs(srows) do walk(r.term) end
+        io.write(('  sequences of unknown length %d, with an element claim %d (%s)\n'):format(seqs, claimed, top(kinds, 8)))
+        local _ = A
+    end
     io.write(('  summaries %d evaluated, %d memo hits; %d loop(s) in %d iteration(s), %d unconverged; cut: %d mutual '
         .. 'recursion, %d at depth, %d by budget; %d fun application(s), %d BIF stub(s); %.0f ms\n'):format(sst.summaries,
         sst.memo_hits, sst.loops, sst.iterations, sst.unconverged, sst.recursive, sst.depth, sst.budget, sst.applies,

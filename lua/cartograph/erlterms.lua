@@ -33,7 +33,11 @@
 --                    ⚠ IN A PATTERN an unmentioned field is a WILDCARD, never its default.
 --   X#r{f = V}       the base's term with those fields replaced; an unknown base leaves the others as holes
 --   X#r.f            the base's field
---   [A, B | T]       cons(A, cons(B, T))      atom / integer / plain binary -> lit (quotes and <<"">> dropped)
+--   [A, B | T]       list(A, B, T…): a FLAT sequence (CART-1130 flat sequences). A tail that is a known list is
+--                    spliced in; an unknown tail is a HEDGE hole (?T…, the algebra's sequence variable), so a join of
+--                    lists of different lengths is list(?j…) with a repetition claim over its elements, not a bare
+--                    hole. A tail known to be something else (an improper list) keeps cons(A, cons(B, T)).
+--                    atom / integer / plain binary -> lit (quotes and <<"">> dropped)
 --   {A, B}           tuple(A, B)
 --   ?NS_X / ?MODULE  the macro's value from the distilled vocabulary / the module's own name; #{} -> map
 -- A literal carries `lk` (its kind: atom, bin, str, int, float) beside `v`. A.eq reads only k/v/n/kids, so the wire
@@ -99,8 +103,8 @@ end
 
 -- ── the session: hole names, their reasons, the summary memo and counters ────────────────────────────────────────
 function M.session()
-    return { n = 0, reasons = {}, domains = {}, kinds = {}, memo = {}, stack = {}, depth = 0, evals = 0, top = {},
-        funs = {}, nfun = 0, loops = {}, stats = { applies = 0, stubs = 0, unfolded = 0, recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
+    return { n = 0, reasons = {}, domains = {}, kinds = {}, hedges = {}, elems = {}, memo = {}, stack = {}, depth = 0, evals = 0, top = {},
+        funs = {}, nfun = 0, loops = {}, stats = { applies = 0, stubs = 0, unfolded = 0, refused = 0, recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
             iterations = 0, unconverged = 0 } }
 end
 
@@ -115,9 +119,56 @@ local function subst(t, map)
     if t.k == 'hole' then return map[t.h] or t end
     if not t.kids then return t end
     local kids, changed = {}, false
-    for i, c in ipairs(t.kids) do kids[i] = subst(c, map); changed = changed or kids[i] ~= c end
+    for _, c in ipairs(t.kids) do
+        local v = subst(c, map)
+        changed = changed or v ~= c
+        -- a hedge variable's value is a seq: it SPLICES into its parent's children, it is not one child
+        if v.k == 'seq' and c.k == 'hole' then
+            for _, x in ipairs(v.kids or {}) do kids[#kids + 1] = x end
+        else kids[#kids + 1] = v end
+    end
     return changed and A().rebuild(t, kids) or t
 end
+
+-- ── FLAT LISTS: list(e1 … en), a hedge hole for an unknown rest ────────────────────────────────────────────────────
+-- the hedge hole standing for an unknown tail term `t` (one per term hole, so the same Rest is the same sequence)
+local function hedge_of(S, t)
+    local h = S.hedges[t.h]
+    if not h then
+        S.n = S.n + 1
+        h = A().hole('R' .. S.n, true)
+        S.reasons[h.h] = S.reasons[t.h] or 'the rest of a list'
+        S.hedges[t.h] = h
+    end
+    return h
+end
+local function hfresh(S, why)
+    S.n = S.n + 1
+    local h = A().hole('R' .. S.n, true)
+    S.reasons[h.h] = why
+    return h
+end
+-- [items | tail]: splice a known list, a hedge for an unknown one, cons for an improper tail
+local function mklist(S, items, tail)
+    local a = A()
+    if tail == nil then return a.node('list', unpack(items, 1, #items)) end
+    if tail.k == 'list' then
+        local kids = {}
+        for _, x in ipairs(items) do kids[#kids + 1] = x end
+        for _, x in ipairs(tail.kids or {}) do kids[#kids + 1] = x end
+        return a.node('list', unpack(kids, 1, #kids))
+    end
+    if tail.k == 'hole' then
+        local kids = {}
+        for _, x in ipairs(items) do kids[#kids + 1] = x end
+        kids[#kids + 1] = tail.rep and tail or hedge_of(S, tail)
+        return a.node('list', unpack(kids, 1, #kids))
+    end
+    local tm = tail
+    for i = #items, 1, -1 do tm = a.node('cons', items[i], tm) end
+    return tm
+end
+M.mklist = function (items, tail, S) return mklist(S or M.session(), items, tail) end
 
 local function has_raise(kids) for _, c in ipairs(kids) do if c == RAISE then return true end end return false end
 local function mk(k, kids) if has_raise(kids) then return RAISE end return A().node(k, unpack(kids, 1, #kids)) end
@@ -173,8 +224,16 @@ function M.match(pat, subj, mine)
     local arity = {}
     pat, subj = as_tuples(pat, arity), as_tuples(subj, arity)
     if not M.OFF.kinds and kinds_clash(pat, subj) then return 'no' end
-    local U = a.unify(a.template(pat), a.template(subj))
-    if not U then return 'no' end
+    local U, why = a.unify(a.template(pat), a.template(subj))
+    if not U then
+        -- a STRUCTURAL clash is no; a refusal (a budget, several hedges in one list, a shape unify does not solve,
+        -- a join's summary domain) is not knowledge: the arm may run
+        local w = tostring(why or '')
+        if w:match('^kind ') or w:match('^literal ') or w:match('^name ') or w:match('^arity') or w:match('no finite instance') then
+            return 'no'
+        end
+        return 'maybe', {}, w
+    end
     local verdict, back = 'yes', {}
     for g, t in pairs(U.right) do
         if t.k == 'hole' then
@@ -212,7 +271,26 @@ local function join_all(S, vals, why_empty, why_diff)
         for n, f in pairs(J.frags or {}) do
             local kept = f.left and f.left.k == 'hole' and f.left.h == n and f.right and f.right.k == 'hole' and f.right.h == n
             if not kept then
-                ren[n] = fresh(S, why_diff or 'the arms differ here (a join)')
+                local hr = J.template.holes[n]
+                if hr and hr.rep then
+                    -- a SEQUENCE the arms disagree on the length of: a hedge hole, and its elements' template
+                    ren[n] = hfresh(S, why_diff and (why_diff .. ' (a sequence)') or 'the arms differ here (a sequence: a list of …)')
+                    local els = {}
+                    for _, side in ipairs { f.left, f.right } do
+                        if side and side.k == 'seq' then
+                            for _, x in ipairs(side.kids or {}) do
+                                if x.k == 'hole' and x.rep then
+                                    for _, y in ipairs(S.elems[x.h] or {}) do els[#els + 1] = y end
+                                else els[#els + 1] = x end
+                            end
+                        elseif side and side.k == 'hole' and side.rep then
+                            for _, y in ipairs(S.elems[side.h] or {}) do els[#els + 1] = y end
+                        elseif side and side.k ~= 'hole' then els[#els + 1] = side end
+                    end
+                    if #els > 0 then S.elems[ren[n].h] = els end
+                else
+                    ren[n] = fresh(S, why_diff or 'the arms differ here (a join)')
+                end
                 -- the join's DOMAIN for the hole: which values or kinds the arms put there (A.join's summary)
                 local d = J.template.holes[n] and J.template.holes[n].domain
                 if d then S.domains[ren[n].h] = d end
@@ -244,7 +322,7 @@ local function default_term(text, S)
     if text == nil then return lit('undefined', 'atom') end
     text = vim.trim(text):gsub('%s*::.*$', '')
     if text == '<<>>' or text == '<<"">>' then return lit('', 'bin') end
-    if text == '[]' then return a.node('nil') end
+    if text == '[]' then return a.node('list') end
     if text == '#{}' then return a.node('map') end
     local b = text:match('^<<"(.*)">>$')
     if b then return lit(b, 'bin') end
@@ -357,12 +435,20 @@ function M.pattern(x, env, S)
         if T.list[t] then
             local items, tail = {}, nil
             for _, c in ipairs(n:field('exprs')) do
-                if T.pipe[c:type()] then items[#items + 1] = conv(c:field('lhs')[1]); tail = conv(c:field('rhs')[1])
+                if T.pipe[c:type()] then
+                    items[#items + 1] = conv(c:field('lhs')[1])
+                    local r = c:field('rhs')[1]
+                    local nm = r and real(r)
+                    if r and T.var[r:type()] and not nm then tail = hfresh(S, 'a wildcard'); mine[tail.h] = true
+                    elseif nm and not env.vars[nm] and not binds[nm] and not bound_before(r, nm, src) then
+                        -- the tail VARIABLE of a pattern binds a SEQUENCE: a hedge hole, its value a list
+                        tail = hfresh(S, 'pattern variable ' .. nm)
+                        mine[tail.h] = true
+                        binds[nm] = tail
+                    else tail = conv(r) end
                 else items[#items + 1] = conv(c) end
             end
-            local tm = tail or A().node('nil')
-            for i = #items, 1, -1 do tm = A().node('cons', items[i], tm) end
-            return tm
+            return mklist(S, items, tail)
         end
         if T.tuple[t] then
             local items = {}
@@ -382,11 +468,17 @@ end
 -- bind a pattern against a subject: the verdict and the variables' values
 local function bind(patnode, subj, env, S)
     local p, binds, mine = M.pattern(patnode, env, S)
-    local verdict, vals = M.match(p, subj, mine)
+    local verdict, vals, refused = M.match(p, subj, mine)
+    if refused then S.stats.refused = S.stats.refused + 1 end
     if verdict == 'no' then return 'no' end
     local out = {}
     for nm, t in pairs(binds) do
         local v = subst(t, vals)
+        -- a tail variable bound a sequence: as a value it is the list of those elements
+        if t.k == 'hole' and t.rep then
+            if v.k == 'seq' then v = A().node('list', unpack(v.kids or {}, 1, #(v.kids or {})))
+            elseif v.k == 'hole' then v = A().node('list', v) end
+        end
         -- still the pattern's own hole: the variable names a part of the subject the subject does not state
         if v.k == 'hole' and (S.reasons[v.h] or ''):match('^pattern variable') then
             S.reasons[v.h] = nm .. ': a part of the subject it does not state'
@@ -580,10 +672,45 @@ local function decreasing(new, cur)
         end
         return false
     end
+    -- a flat list's tail is a proper SUFFIX of its children
+    local function suffix(c, n)
+        if c.k ~= 'list' or n.k ~= 'list' then return false end
+        local ck, nk = c.kids or {}, n.kids or {}
+        if #nk >= #ck then return false end
+        for j = 1, #nk do if not a.eq(ck[#ck - #nk + j], nk[j]) then return false end end
+        return true
+    end
     for i = 1, math.min(#new, #cur) do
-        if cur[i].k ~= 'hole' and new[i].k ~= 'hole' and sub(cur[i], new[i]) then return true end
+        if cur[i].k ~= 'hole' and new[i].k ~= 'hole' and (suffix(cur[i], new[i]) or sub(cur[i], new[i])) then return true end
     end
     return false
+end
+
+-- ★ WIDENING AT THE LOOP HEAD. A join aligns the fixed ends of two sequences, so an accumulator that grows by one
+-- element per pass — list(?R…) then list(?R'…, H) then list(?R''…, H', H) — never repeats and the loop never
+-- converges. At the loop head a list that already holds a hedge hole is widened to ONE sequence of unknown length,
+-- its elements kept as the element claim: the chain is then bounded again (a list is either of known length or
+-- list(?X…)).
+local function widen(S, t)
+    if not t.kids then return t end
+    local kids, changed = {}, false
+    for i, c in ipairs(t.kids) do kids[i] = widen(S, c); changed = changed or kids[i] ~= c end
+    if t.k == 'list' then
+        local has = false
+        for _, c in ipairs(kids) do if c.k == 'hole' and c.rep then has = true end end
+        if has and #kids > 1 then
+            local h = hfresh(S, 'a loop variable (a list that changes length across iterations)')
+            local els = {}
+            for _, c in ipairs(kids) do
+                if c.k == 'hole' and c.rep then for _, y in ipairs(S.elems[c.h] or {}) do els[#els + 1] = y end
+                elseif c.k ~= 'hole' then els[#els + 1] = c
+                else els[#els + 1] = c end
+            end
+            if #els > 0 then S.elems[h.h] = els end
+            return A().node('list', h)
+        end
+    end
+    return changed and A().rebuild(t, kids) or t
 end
 
 local function loop(m, id, clauses, args, S)
@@ -607,6 +734,7 @@ local function loop(m, id, clauses, args, S)
         local nstate = state
         if L.next then
             nstate = join_all(S, { state, L.next }, 'nothing', ('a loop variable of %s (it changes across iterations)'):format(id))
+            if not M.OFF.widen then nstate = widen(S, nstate) end
         end
         S.stats.iterations = S.stats.iterations + 1
         if iso(nvalue, value) and iso(nstate, state) then S.loops[id] = nil; return value end
@@ -795,8 +923,11 @@ local function call_value(x, env, S)
     if fn == 'apply' and not M.OFF.funs and (mod == 'erlang' or (x == c and not local_def)) and (#args == 2 or #args == 3) then
         local list = {}
         local l = args[#args]
-        while l.k == 'cons' do list[#list + 1] = l.kids[1]; l = l.kids[2] end
-        if l.k ~= 'nil' then return fresh(S, 'an apply whose argument list is not known') end
+        if l.k ~= 'list' then return fresh(S, 'an apply whose argument list is not known') end
+        for _, x in ipairs(l.kids or {}) do
+            if x.k == 'hole' and x.rep then return fresh(S, 'an apply whose argument count is not known') end
+            list[#list + 1] = x
+        end
         if #args == 2 then return M.apply(args[1], list, S) end
         local am, af = args[1], args[2]
         if not (am.k == 'lit' and am.lk == 'atom' and af.k == 'lit' and af.lk == 'atom') then
@@ -879,9 +1010,7 @@ function M.eval(x, env, S)
             else items[#items + 1] = M.eval(c, env, S) end
         end
         if has_raise(items) or tail == RAISE then return RAISE end
-        local tm = tail or a.node('nil')
-        for i = #items, 1, -1 do tm = a.node('cons', items[i], tm) end
-        return tm
+        return mklist(S, items, tail)
     end
     if T.tuple[t] then
         local items = {}
@@ -991,6 +1120,17 @@ function M.term(node, src, ctx, S)
     end
     walk(tm)
     return tm, holes, S
+end
+
+--- THE ELEMENT CLAIM of a sequence hole: the generalization (A.generalize) of every element the joined lists put
+--- there — "a list of #disco_info{node = ?}", where A.join's own summary says only "{rec:disco_info}{0,}". nil when
+--- no element was seen (a sequence nothing is known about).
+function M.elements(S, h)
+    local els = S.elems[h]
+    if not els or #els == 0 then return nil end
+    if #els == 1 then return els[1] end
+    local G = A().generalize(els)
+    return G and G.template and G.template.body or nil
 end
 
 --- a term's completeness: 'complete' (no holes), 'partial', or 'opaque' (the term IS a hole)

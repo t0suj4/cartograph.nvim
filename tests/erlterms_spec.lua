@@ -37,7 +37,7 @@ end
 test('erlterms: a record literal takes its declared defaults for the fields it does not set', function ()
     need()
     local shown, _, st = last_term('f() -> #disco_info{node = <<"x">>, features = [<<"urn:a">>]}.\n')
-    eq('(rec:disco_info "x" (nil) (cons "urn:a" (nil)) (nil))', shown)
+    eq('(rec:disco_info "x" (list) (list "urn:a") (list))', shown)
     eq('complete', st)
 end)
 
@@ -48,7 +48,7 @@ test('erlterms: a variable is its single-assignment binding; an update keeps the
         '    D = #disco_info{node = ?NS_DISCO_INFO},',
         '    I = #iq{type = result, sub_els = [D]},',
         '    I#iq{id = ?MODULE}.', '' }, '\n'))
-    eq('(rec:iq "mod_t" "result" "" "undefined" "undefined" (cons (rec:disco_info "http://jabber.org/protocol/disco#info" (nil) (nil) (nil)) (nil)) (map))', shown)
+    eq('(rec:iq "mod_t" "result" "" "undefined" "undefined" (list (rec:disco_info "http://jabber.org/protocol/disco#info" (list) (list) (list))) (map))', shown)
     eq({}, reasons(holes))
 end)
 
@@ -92,10 +92,10 @@ test('erlterms: a case is the join of the arms its subject may take, first match
             '    case X of ' .. arm1 .. ' -> #disco_info{node = V}; _ -> #disco_info{node = <<"e">>} end.', '' }, '\n')
     end
     -- a known subject takes the first arm alone
-    eq('(rec:disco_info "n" (nil) (nil) (nil))', (last_term(body('{ok, <<"n">>}', '{ok, V}'))))
+    eq('(rec:disco_info "n" (list) (list) (list))', (last_term(body('{ok, <<"n">>}', '{ok, V}'))))
     -- an unknown subject may take either: the join keeps what the arms share
     local shown, holes = last_term(body('Q', '{ok, V}'))
-    ok(shown:find('^%(rec:disco_info %?%S+ %(nil%) %(nil%) %(nil%)%)$'), shown)
+    ok(shown:find('^%(rec:disco_info %?%S+ %(list%) %(list%) %(list%)%)$'), shown)
     ok(table.concat(reasons(holes), '|'):find('a join', 1, true), 'the differing field says it is a join')
     -- a guard makes the first arm only maybe: both arms join
     local g = last_term(body('{ok, <<"n">>}', '{ok, V} when V /= <<"x">>'))
@@ -103,14 +103,14 @@ test('erlterms: a case is the join of the arms its subject may take, first match
     ET.OFF = { guards = true }
     local g2 = last_term(body('{ok, <<"n">>}', '{ok, V} when V /= <<"x">>'))
     ET.OFF = {}
-    eq('(rec:disco_info "n" (nil) (nil) (nil))', g2, 'the guard observes')
+    eq('(rec:disco_info "n" (list) (list) (list))', g2, 'the guard observes')
     -- literal kinds: the atom `get` does not match the binary <<"get">>, though the wire sees both as "get"
     local k = last_term('f() -> case <<"get">> of get -> #disco_info{node = <<"atom">>}; _ -> #disco_info{node = <<"bin">>} end.\n')
-    eq('(rec:disco_info "bin" (nil) (nil) (nil))', k)
+    eq('(rec:disco_info "bin" (list) (list) (list))', k)
     ET.OFF = { kinds = true }
     local k2 = last_term('f() -> case <<"get">> of get -> #disco_info{node = <<"atom">>}; _ -> #disco_info{node = <<"bin">>} end.\n')
     ET.OFF = {}
-    eq('(rec:disco_info "atom" (nil) (nil) (nil))', k2, 'the kind check observes')
+    eq('(rec:disco_info "atom" (list) (list) (list))', k2, 'the kind check observes')
 end)
 
 -- a two-module program in a temp dir; records come from RECS for every module
@@ -173,7 +173,7 @@ test('erlterms: a call is its callee\'s clauses against the argument terms — r
     ok(not b_raise:find('^%(rec:iq'), 'the guard observes: kept, the raise arm makes it a bare hole: ' .. b_raise)
     -- the module is a value that evaluates to one atom: the call is static; the tuple {iq, …} IS #iq{…}
     local c, _, _, c_tuple = at('c/0', { rectuple = true })
-    eq('(rec:iq "x" "set" "" "undefined" "undefined" (nil) (map))', c)
+    eq('(rec:iq "x" "set" "" "undefined" "undefined" (list) (map))', c)
     ok(c_tuple:find('^%(tuple "iq"'), 'the record-tuple identity observes: ' .. c_tuple)
     local _, _, _, c_dyn = at('c/0', { dynmod = true })
     ok(c_dyn:find('^%?'), 'the module evaluation observes: ' .. c_dyn)
@@ -201,7 +201,7 @@ test('erlterms: a record matches a tuple pattern; a join keeps a shared hole\'s 
     local ET = require 'cartograph.erlterms'
     local A = require('cartograph.algebra').load()
     -- #iq{} IS {iq, _, …}: generated code matches records as tuples
-    eq('(rec:disco_info "t" (nil) (nil) (nil))', (last_term(table.concat({
+    eq('(rec:disco_info "t" (list) (list) (list))', (last_term(table.concat({
         'f(#iq{} = Q) ->',
         '    case Q of {iq, _, _, _, _, _, _, _} -> #disco_info{node = <<"t">>}; _ -> #disco_info{node = <<"o">>} end.',
         '' }, '\n'))))
@@ -220,7 +220,7 @@ test('erlterms: a record matches a tuple pattern; a join keeps a shared hole\'s 
         end
     end
     walk(root)
-    eq('(rec:disco_info "f" (nil) (nil) (nil))', A.show((ET.term(use, src, CTX))))
+    eq('(rec:disco_info "f" (list) (list) (list))', A.show((ET.term(use, src, CTX))))
 end)
 
 test('erlterms: simple recursion is a LOOP — the state and the value iterated to a fixpoint', function ()
@@ -256,24 +256,28 @@ test('erlterms: simple recursion is a LOOP — the state and the value iterated 
         return A.show(t), holes, S
     end
     local a, ah, S = at('a/1')
-    ok(a:find('^%(rec:disco_info "n" %(nil%) %?%S+ %(nil%)%)$'), 'the base clause under the loop state: ' .. a)
+    -- features is the accumulator: a list whose length the loop does not know
+    ok(a:find('^%(rec:disco_info "n" %(list%) %(list %?%S+%.%.%.%) %(list%)%)$'), 'the base clause under the loop state: ' .. a)
     -- features is what the accumulator became: [] on the first pass, a loop variable after — the join of the two
     local found = false
     for _, w in pairs(S.reasons) do if w:find('loop variable of loops:build/2', 1, true) then found = true end end
     ok(found, 'the accumulator is a loop variable: ' .. a .. ' ' .. table.concat(reasons(ah), '|'))
     ok(S.stats.loops >= 1 and S.stats.iterations >= 2, 'the loop is counted')
-    eq('(rec:disco_info "done" (nil) (nil) (nil))', (at('b/0')))
-    local c, ch, S3 = at('c/1')
-    ok(c:find('^%?'), 'a list builder joins nil and cons: ' .. c)
-    ok(table.concat(reasons(ch), '|'):find('one of cons | nil', 1, true), table.concat(reasons(ch), '|'))
+    eq('(rec:disco_info "done" (list) (list) (list))', (at('b/0')))
+    -- a list builder over an UNKNOWN list: a sequence of unknown length, and the claim about its elements
+    local c, _, S3 = at('c/1')
+    local h = c:match('^%(list %?(%S+)%.%.%.%)$')
+    ok(h, 'a list of unknown length: ' .. c)
+    local el = ET.elements(S3, h)
+    ok(el and A.show(el):find('^%(rec:disco_info %?%S+ %(list%) %(list%) %(list%)%)$'), 'a list of #disco_info{node = ?}: ' .. (el and A.show(el) or 'nil'))
     eq(0, S3.stats.unconverged)
     -- a KNOWN spine folds exactly: the recursion is structural (the Tail of a known list)
-    eq('(rec:disco_info "n" (nil) (cons "urn:a" (nil)) (nil))', (at('k/0')))
-    eq('(cons (rec:disco_info "x" (nil) (nil) (nil)) (cons (rec:disco_info "y" (nil) (nil) (nil)) (nil)))', (at('m/0')))
+    eq('(rec:disco_info "n" (list) (list "urn:a") (list))', (at('k/0')))
+    eq('(list (rec:disco_info "x" (list) (list) (list)) (rec:disco_info "y" (list) (list) (list)))', (at('m/0')))
     ET.OFF = { spine = true }
     local m2 = at('m/0')
     ET.OFF = {}
-    ok(m2:find('^%?'), 'the spine fold observes: joined into the loop it is only one of cons | nil: ' .. m2)
+    ok(m2:find('^%(list %?%S+%.%.%.%)$'), 'the spine fold observes: joined into the loop the length is lost: ' .. m2)
     -- the guard observes: without the loop the self-call is a cut and nothing comes back
     ET.OFF = { loops = true }
     local a2 = at('a/1')
@@ -297,8 +301,8 @@ test('erlterms: yes means CERTAIN — a bound variable or a repeated one in a pa
     local s2 = last_term(src)
     local rep2 = last_term('f(X, Y) -> case {X, Y} of {Z, Z} -> #disco_info{node = <<"a">>}; _ -> #disco_info{node = <<"b">>} end.\n')
     ET.OFF = {}
-    eq('(rec:disco_info "a" (nil) (nil) (nil))', s2, 'the guard observes (bound variable)')
-    eq('(rec:disco_info "a" (nil) (nil) (nil))', rep2, 'the guard observes (repeated variable)')
+    eq('(rec:disco_info "a" (list) (list) (list))', s2, 'the guard observes (bound variable)')
+    eq('(rec:disco_info "a" (list) (list) (list))', rep2, 'the guard observes (repeated variable)')
 end)
 
 test('erlterms: a fun is a value — closures apply with their clauses and captured variables; lists folds run from source', function ()
@@ -348,23 +352,61 @@ test('erlterms: a fun is a value — closures apply with their clauses and captu
         ET.OFF = {}
         return A.show(t), holes
     end
-    eq('(cons (rec:disco_info "urn:x" (nil) (cons "f1" (nil)) (nil)) (cons (rec:disco_info "urn:x" (nil) (cons "f2" (nil)) (nil)) (nil)))', (at('a/0')))
-    eq('(cons (rec:disco_info "n1" (nil) (nil) (nil)) (nil))', (at('b/0')))
-    eq('(cons (rec:disco_info "n2" (nil) (nil) (nil)) (nil))', (at('c/0')))
-    eq('(cons "q" (cons "p" (nil)))', (at('d/0')))
-    eq('(rec:disco_info "ap" (nil) (nil) (nil))', (at('e/0')))
-    eq('(rec:disco_info "ap3" (nil) (nil) (nil))', (at('g/0')))
+    eq('(list (rec:disco_info "urn:x" (list) (list "f1") (list)) (rec:disco_info "urn:x" (list) (list "f2") (list)))', (at('a/0')))
+    eq('(list (rec:disco_info "n1" (list) (list) (list)))', (at('b/0')))
+    eq('(list (rec:disco_info "n2" (list) (list) (list)))', (at('c/0')))
+    eq('(list "q" "p")', (at('d/0')))
+    eq('(rec:disco_info "ap" (list) (list) (list))', (at('e/0')))
+    eq('(rec:disco_info "ap3" (list) (list) (list))', (at('g/0')))
     eq('"done"', (at('h/0')))
     local k, kh = at('k/0')
     ok(k:find('^%?'), k)
     ok(table.concat(reasons(kh), '|'):find('a BIF (its source is a nif_error stub)', 1, true), table.concat(reasons(kh), '|'))
-    eq('(rec:disco_info "cap" (nil) (cons "x" (nil)) (nil))', (at('n/0')))
+    eq('(rec:disco_info "cap" (list) (list "x") (list))', (at('n/0')))
     local w, wh = at('w/0')
     ok(w:find('^%?') and table.concat(reasons(wh), '|'):find('no clause', 1, true), 'arity: ' .. w .. ' ' .. table.concat(reasons(wh), '|'))
     -- the guards observe
     local nf = at('a/0', { funs = true })
-    ok(nf:find('^%(cons %?%S+ %(cons %?%S+ %(nil%)%)%)$'), 'without fun values the spine is known, the elements are not: ' .. nf)
+    ok(nf:find('^%(list %?%S+ %?%S+%)$'), 'without fun values the spine is known, the elements are not: ' .. nf)
     local ks = at('k/0', { stubs = true })
     local _, ksh = at('k/0', { stubs = true })
     ok(not table.concat(reasons(ksh), '|'):find('stub', 1, true), 'without the stub rule the body is evaluated: ' .. ks)
+end)
+
+test('erlterms: lists are FLAT on both sides of the wire — the server term and the client decode build the same list', function ()
+    local ET = require 'cartograph.erlterms'
+    local XM = require 'cartograph.xmppmerge'
+    local A = require('cartograph.algebra').load()
+    local x, y = A.lit('x'), A.lit('y')
+    local S = ET.session()
+    -- closed, a known tail spliced, an unknown rest as a hedge hole
+    eq(A.show(XM._flat_list({ x, y })), A.show(ET.mklist({ x, y }, nil, S)))
+    eq(A.show(XM._flat_list({ x }, A.node('list', y))), A.show(ET.mklist({ x }, A.node('list', y), S)))
+    local cl, sv = XM._flat_list({ x }, A.hole('T')), ET.mklist({ x }, A.hole('T'), S)
+    eq('(list "x" ?T...)', A.show(cl))
+    ok(sv.kids[2].rep, 'the server side rest is a hedge hole too: ' .. A.show(sv))
+    -- and the two unify: the client's rest against the server's
+    ok(A.unify(A.template(cl), A.template(A.node('list', x, y))), 'a request list unifies with a longer known list')
+    -- an improper tail stays cons, on both sides
+    eq(A.show(XM._flat_list({ x }, A.lit('z'))), A.show(ET.mklist({ x }, A.lit('z'), S)))
+end)
+
+test('erlterms: a list pattern binds its tail as a SEQUENCE; two hedges in one list are a refusal, not a no', function ()
+    need()
+    local shown = last_term(table.concat({
+        'f() ->',
+        '    [H | T] = [<<"a">>, <<"b">>, <<"c">>],',
+        '    #disco_info{node = H, features = T}.', '' }, '\n'))
+    eq('(rec:disco_info "a" (list) (list "b" "c") (list))', shown)
+    -- an ALIAS of a list pattern is the whole list: the tail's sequence splices back in, it is not one element
+    eq('(rec:disco_info "e" (list) (list "a" "b") (list))', (last_term(
+        'f() -> case [<<"a">>, <<"b">>] of [_H | _T] = L -> #disco_info{node = <<"e">>, features = L} end.\n')))
+    -- unify refuses a list with a hedge on each side of fixed elements; that is not knowledge, so both arms join
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    local S = ET.session()
+    local v = ET.match(A.node('list', A.hole('p1', true), A.lit('m'), A.hole('p2', true)),
+        A.node('list', A.hole('s1', true), A.lit('m'), A.hole('s2', true)))
+    eq('maybe', v, 'a refusal reads as maybe')
+    local _ = S
 end)

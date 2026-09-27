@@ -80,7 +80,7 @@ later(IQ) -> xmpp:make_iq_result(IQ, build()).
     for _, r in ipairs(rows) do by[r.fn] = r end
     eq('complete', by['process_iq/1'].status)
     eq('disco_info', by['process_iq/1'].record)
-    eq('(rec:disco_info "" (nil) (cons "urn:x" (nil)) (nil))', require('cartograph.algebra').load().show(by['process_iq/1'].term))
+    eq('(rec:disco_info "" (list) (list "urn:x") (list))', require('cartograph.algebra').load().show(by['process_iq/1'].term))
     eq('opaque', by['forward/1'].status, 'a routed parameter: step 4')
     eq('opaque', by['later/1'].status, 'a call result: step 3')
 end)

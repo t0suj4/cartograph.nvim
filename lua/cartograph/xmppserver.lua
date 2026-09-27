@@ -175,7 +175,7 @@ function M.sends(dir, opts)
             walk(root)
         end
     end
-    return rows, S.stats
+    return rows, S.stats, S
 end
 
 --- A head's request shape in one line: the constants it demands and the records it destructures, by path.
