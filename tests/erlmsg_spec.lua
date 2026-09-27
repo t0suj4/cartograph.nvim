@@ -71,3 +71,55 @@ test('erlmsg.unify: three-valued over the syntax', function ()
     eq('unknown', u('{get, K}', 'Msg'), 'a variable message could be anything')
     eq('no', u('stop', '{stop}')); eq('yes', u("'a'", 'a'))
 end)
+
+-- gen_statem: the callback mode decides the receiver. handle_event_function -> handle_event/4 (event type, content);
+-- state_functions -> every state function (the current state is dynamic), gen_statem's own arity-3 callbacks
+-- (terminate/3) excluded — read from the otp-api profile.
+local STATEM = {
+    ['hs.erl'] = table.concat({
+        '-module(hs).',
+        '-behaviour(gen_statem).',
+        'callback_mode() -> handle_event_function.',
+        'handle_event({call, From}, {get, K}, _S, D) -> {keep_state, D, [{reply, From, K}]};',
+        'handle_event(cast, {put, K}, _S, D) -> {keep_state, K};',
+        'handle_event(info, {tick}, _S, D) -> {keep_state, D};',           -- another event source: not "unreached"
+        'handle_event(cast, never, _S, D) -> {keep_state, D}.',             -- no site casts it
+    }, '\n') .. '\n',
+    ['sf.erl'] = table.concat({
+        '-module(sf).',
+        '-behaviour(gen_statem).',
+        'callback_mode() -> state_functions.',
+        'halt() -> gen_statem:cast(?MODULE, stop).',
+        'idle({call, From}, go, D) -> {next_state, busy, D, [{reply, From, ok}]};',
+        'idle(cast, _Any, D) -> {keep_state, D}.',
+        'busy(cast, stop, D) -> {stop, normal, D}.',
+        'terminate(_R, _S, _D) -> ok.',                                     -- a callback, not a state
+    }, '\n') .. '\n',
+    ['user.erl'] = table.concat({
+        '-module(user).',
+        'a(P) -> gen_statem:call(P, {get, 1}).',
+        'b(P) -> gen_statem:cast(P, {put, 2}).',
+        'c(P) -> gen_statem:call(P, {put, 3}).',                             -- {put, _} is only a CAST clause
+    }, '\n') .. '\n',
+}
+
+test('erlmsg/gen_statem: handle_event_function admits by event type; state_functions reach every handling state', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for f, s in pairs(STATEM) do local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(s); fd:close() end
+    local data = ts.extract(root)
+    local s = require('cartograph.erlmsg').attach(data)
+    vim.fn.delete(root, 'rf')
+    local edges = {}
+    for _, e in ipairs(data.edges) do
+        if e.msg then edges[#edges + 1] = ('%s->%s %s@%s'):format(e.from:match('::([%w_]+)'), e.to:match('::([%w_]+)'), e.msg, table.concat(e.clauses, ',')) end
+    end
+    table.sort(edges)
+    eq({ 'a->handle_event statem_call@4', 'b->handle_event statem_cast@5', 'halt->busy statem_cast@7', 'halt->idle statem_cast@6' }, edges,
+        'the cast to ?MODULE reaches idle (its catch-all) and busy; terminate/3 is not a state; c reaches nothing')
+    eq(1, s.unknown_target, '{put, 3} as a CALL: the only {put, _} clause admits cast')
+    local un = {}
+    for _, u in ipairs(s.unreached) do un[#un + 1] = u.module .. ':' .. u.pattern end
+    table.sort(un)
+    eq({ 'hs:never', 'sf:go' }, un, 'info {tick} is another event source; idle go is only CALLed and nothing calls it')
+end)

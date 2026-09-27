@@ -88,14 +88,38 @@ function M.unify(p, ps, v, vs)
     return 'unknown'
 end
 
-local VERB = { call = 'handle_call', cast = 'handle_cast' }
+-- does an event-type pattern (a gen_statem clause's first argument) admit this verb's event? `call` is delivered as
+-- {call, From}, `cast` as the atom cast; a variable admits both
+local function admits(p, src, verb)
+    local t = p:type()
+    if t == 'var' then return true end
+    local T = vim.treesitter.get_node_text
+    if verb == 'call' then
+        if t ~= 'tuple' then return false end
+        local k = named(p)
+        return #k == 2 and (k[1]:type() == 'var' or (k[1]:type() == 'atom' and unq(T(k[1], src)) == 'call'))
+    end
+    return t == 'atom' and unq(T(p, src)) == 'cast'
+end
+
+-- the site verbs, by behaviour: which kind of server a call targets and which event it sends
+local SITES = { ['gen_server'] = 'server', ['gen_statem'] = 'statem' }
 
 function M.attach(data)
     local stats = { sites = 0, explicit = 0, by_message = 0, unknown_target = 0, reached = 0, candidates_only = 0,
-        none = 0, ambiguous = 0, edges = 0, unreached = {}, rows = {} }
+        none = 0, ambiguous = 0, edges = 0, unreached = {}, rows = {}, statem_sites = 0 }
     local root = data and data.root
     if not root or root:match('^%w+://') then return stats end
-    -- tree gen_servers: module -> { handle_call = { {first, src, line}… }, handle_cast = …, fn = { [name] = id } }
+    -- gen_statem's OWN callbacks of arity 3 (terminate/3, …) are not state functions: read from the runtime profile
+    local statem_cb = {}
+    do
+        local ok, prof = pcall(require, 'cartograph.spec.profile')
+        local a = ok and prof.load and prof.load('otp-api')
+        local b = a and a.behaviours and a.behaviours.gen_statem
+        for _, cb in ipairs(b and b.callbacks or {}) do statem_cb[cb.name .. '/' .. cb.arity] = true end
+    end
+    -- servers: module -> { file, kind = 'server'|'statem', mode, receivers = { call = {R…}, cast = {R…} } }
+    --   R = { fn = 'name/arity', clauses = { { pat = content pattern, etype = event-type pattern | nil, line }… } }
     local servers, trees = {}, {}
     local fnid = {}
     for _, n in ipairs(data.nodes or {}) do
@@ -104,6 +128,7 @@ function M.attach(data)
             if a then fnid[n.file .. '\0' .. a] = n.id end
         end
     end
+    local T = vim.treesitter.get_node_text
     for _, n in ipairs(data.nodes or {}) do
         if n.kind == 'module' and n.file and n.file:match('%.erl$') then
             local src = read(root .. '/' .. n.file)
@@ -112,17 +137,55 @@ function M.attach(data)
             local r = ok and p and p:parse()[1]:root()
             if r then
                 trees[n.file] = { root = r, src = src }
-                if src:match('\n%-behaviou?r%(%s*gen_server%s*%)') then
+                local kind = (src:match('\n%-behaviou?r%(%s*gen_server%s*%)') and 'server')
+                    or (src:match('\n%-behaviou?r%(%s*gen_statem%s*%)') and 'statem') or nil
+                if kind then
                     local mod = n.file:match('([^/]+)%.erl$')
-                    local sv = { file = n.file, handle_call = {}, handle_cast = {} }
+                    local byfn = {} -- 'name/arity' -> clauses (args lists), in source order
+                    local order = {}
                     for form in r:iter_children() do
                         if form:type() == 'fun_decl' then
                             for _, cl in ipairs(named(form)) do
                                 local nm = cl:field('name')[1]
-                                local name = nm and vim.treesitter.get_node_text(nm, src)
-                                if name and sv[name] then
-                                    local first = named(cl:field('args')[1])[1]
-                                    if first then table.insert(sv[name], { first = first, line = (cl:start()) + 1 }) end
+                                local args = named(cl:field('args')[1])
+                                if nm then
+                                    local key = T(nm, src) .. '/' .. #args
+                                    if not byfn[key] then byfn[key] = {}; order[#order + 1] = key end
+                                    table.insert(byfn[key], { args = args, line = (cl:start()) + 1, body = cl:field('body')[1] })
+                                end
+                            end
+                        end
+                    end
+                    local sv = { file = n.file, kind = kind, receivers = { call = {}, cast = {} } }
+                    local function receiver(key, pat_i, etype_i)
+                        local R = { fn = key, clauses = {} }
+                        for _, c in ipairs(byfn[key] or {}) do
+                            if c.args[pat_i] then
+                                R.clauses[#R.clauses + 1] = { pat = c.args[pat_i], etype = etype_i and c.args[etype_i] or nil, line = c.line }
+                            end
+                        end
+                        return R
+                    end
+                    if kind == 'server' then
+                        sv.receivers.call[1] = receiver('handle_call/3', 1)
+                        sv.receivers.cast[1] = receiver('handle_cast/2', 1)
+                    else
+                        -- the callback mode, read from callback_mode()'s body: handle_event_function | state_functions
+                        local mode = 'state_functions'
+                        for _, c in ipairs(byfn['callback_mode/0'] or {}) do
+                            if c.body and T(c.body, src):find('handle_event_function', 1, true) then mode = 'handle_event_function' end
+                        end
+                        sv.mode = mode
+                        if mode == 'handle_event_function' then
+                            local R = receiver('handle_event/4', 2, 1)
+                            sv.receivers.call[1], sv.receivers.cast[1] = R, R
+                        else
+                            -- every arity-3 function that is not one of gen_statem's own callbacks is a state function
+                            for _, key in ipairs(order) do
+                                if key:match('/3$') and not statem_cb[key] then
+                                    local R = receiver(key, 2, 1)
+                                    sv.receivers.call[#sv.receivers.call + 1] = R
+                                    sv.receivers.cast[#sv.receivers.cast + 1] = R
                                 end
                             end
                         end
@@ -132,13 +195,13 @@ function M.attach(data)
             end
         end
     end
-    -- the clauses of module `mod` a message reaches (first match): selected (yes) and candidates (unknown before a yes)
-    local function reach(sv, handler, msg, msrc, specific_only)
+    -- one receiver's clauses a message reaches (first match): selected (yes) and candidates (unknown before a yes)
+    local function reach(R, sv, verb, msg, msrc, specific_only)
         local sel, cand = nil, {}
-        for _, cl in ipairs(sv[handler]) do
-            local is_var = cl.first:type() == 'var'
-            if not (specific_only and is_var) then
-                local r = M.unify(cl.first, trees[sv.file].src, msg, msrc)
+        local psrc = trees[sv.file].src
+        for _, cl in ipairs(R.clauses) do
+            if not (cl.etype and not admits(cl.etype, psrc, verb)) and not (specific_only and cl.pat:type() == 'var') then
+                local r = M.unify(cl.pat, psrc, msg, msrc)
                 if r == 'yes' then sel = cl; break end
                 if r == 'unknown' then cand[#cand + 1] = cl end
             end
@@ -237,9 +300,10 @@ function M.attach(data)
         if at then e.at[#e.at + 1] = at end
     end
     for _, c in ipairs(data.calls or {}) do
-        local verb = c.full and c.full:match('^gen_server%.(%a+)/%d$')
-        local handler = verb and VERB[verb]
-        local t = handler and trees[c.file]
+        local beh, verb = (c.full or ''):match('^([%w_]+)%.(%a+)/%d$')
+        local kind = beh and SITES[beh]
+        if kind and verb ~= 'call' and verb ~= 'cast' then kind = nil end
+        local t = kind and trees[c.file]
         if t and c.at and c.fn then
             local node = t.root:named_descendant_for_range(c.at.start.line, c.at.start.char, c.at['end'].line, c.at['end'].char)
             while node and node:type() ~= 'call' do node = node:parent() end
@@ -247,38 +311,47 @@ function M.attach(data)
             local s, msg = args and args[1], args and args[2]
             if s and msg then
                 stats.sites = stats.sites + 1
-                local T = vim.treesitter.get_node_text
+                if kind == 'statem' then stats.statem_sites = stats.statem_sites + 1 end
                 local own = c.file:match('([^/]+)%.erl$')
                 local target = server_of(s, t, node, own)
-                local row = { file = c.file, line = c.line and c.line + 1, verb = verb }
-                if target and servers[target] then
+                local row = { file = c.file, line = c.line and c.line + 1, verb = verb, kind = kind }
+                local tag = kind == 'statem' and ('statem_' .. verb) or verb
+                if target and servers[target] and servers[target].kind == kind then
                     stats.explicit = stats.explicit + 1
-                    local sel, cand = reach(servers[target], handler, msg, t.src, false)
-                    local lines = {}
-                    if sel then lines[1] = sel.line; stats.reached = stats.reached + 1
-                    elseif #cand > 0 then stats.candidates_only = stats.candidates_only + 1 else stats.none = stats.none + 1 end
-                    for _, cl in ipairs(cand) do if not sel or cl.line < sel.line then lines[#lines + 1] = cl.line end end
-                    for _, l in ipairs(lines) do reached_clause[target .. ':' .. l] = true end
-                    if #lines > 0 then
-                        edge(c.fn, fnid[servers[target].file .. '\0' .. handler .. '/' .. (handler == 'handle_call' and 3 or 2)],
-                            verb, lines, false, c.at)
+                    local sv, any, anycand = servers[target], false, false
+                    for _, R in ipairs(sv.receivers[verb]) do
+                        local sel, cand = reach(R, sv, verb, msg, t.src, false)
+                        local lines = {}
+                        if sel then lines[1] = sel.line; any = true end
+                        for _, cl in ipairs(cand) do if not sel or cl.line < sel.line then lines[#lines + 1] = cl.line; anycand = true end end
+                        for _, l in ipairs(lines) do reached_clause[target .. ':' .. l] = true end
+                        if #lines > 0 then edge(c.fn, fnid[sv.file .. '\0' .. R.fn], tag, lines, false, c.at) end
                     end
-                    row.target, row.clauses = target, lines
+                    if any then stats.reached = stats.reached + 1
+                    elseif anycand then stats.candidates_only = stats.candidates_only + 1 else stats.none = stats.none + 1 end
+                    row.target = target
                 else
                     stats.by_message = stats.by_message + 1
                     local hits = {}
                     for mod, sv in pairs(servers) do
-                        local sel = reach(sv, handler, msg, t.src, true)
-                        if sel then hits[#hits + 1] = { mod = mod, line = sel.line } end
+                        if sv.kind == kind then
+                            for _, R in ipairs(sv.receivers[verb]) do
+                                local sel = reach(R, sv, verb, msg, t.src, true)
+                                if sel then hits[#hits + 1] = { mod = mod, fn = R.fn, line = sel.line } end
+                            end
+                        end
                     end
+                    local mods = {}
+                    for _, h in ipairs(hits) do mods[h.mod] = true end
+                    local nmods = 0
+                    for _ in pairs(mods) do nmods = nmods + 1 end
                     if #hits == 0 then stats.unknown_target = stats.unknown_target + 1
                     else
                         stats.reached = stats.reached + 1
-                        if #hits > 1 then stats.ambiguous = stats.ambiguous + 1 end
+                        if nmods > 1 then stats.ambiguous = stats.ambiguous + 1 end
                         for _, h in ipairs(hits) do
                             reached_clause[h.mod .. ':' .. h.line] = true
-                            edge(c.fn, fnid[servers[h.mod].file .. '\0' .. handler .. '/' .. (handler == 'handle_call' and 3 or 2)],
-                                verb, { h.line }, #hits > 1, c.at)
+                            edge(c.fn, fnid[servers[h.mod].file .. '\0' .. h.fn], tag, { h.line }, nmods > 1, c.at)
                         end
                     end
                     row.targets = hits
@@ -289,11 +362,20 @@ function M.attach(data)
     end
     -- the reverse: specific clauses no send site in the tree reaches (a hedge)
     for mod, sv in pairs(servers) do
-        for _, h in ipairs({ 'handle_call', 'handle_cast' }) do
-            for _, cl in ipairs(sv[h]) do
-                if cl.first:type() ~= 'var' and not reached_clause[mod .. ':' .. cl.line] then
-                    stats.unreached[#stats.unreached + 1] = { module = mod, handler = h, line = cl.line,
-                        pattern = vim.treesitter.get_node_text(cl.first, trees[sv.file].src):gsub('%s+', ' '):sub(1, 80) }
+        local seenR = {}
+        for _, verb in ipairs({ 'call', 'cast' }) do
+            for _, R in ipairs(sv.receivers[verb]) do
+                if not seenR[R] then
+                    seenR[R] = true
+                    for _, cl in ipairs(R.clauses) do
+                        -- a gen_statem clause for another event source (info, a timeout, enter) is no call/cast's to reach
+                        local src_ = trees[sv.file].src
+                        local callable = not cl.etype or admits(cl.etype, src_, 'call') or admits(cl.etype, src_, 'cast')
+                        if callable and cl.pat:type() ~= 'var' and not reached_clause[mod .. ':' .. cl.line] then
+                            stats.unreached[#stats.unreached + 1] = { module = mod, handler = R.fn, line = cl.line,
+                                pattern = T(cl.pat, trees[sv.file].src):gsub('%s+', ' '):sub(1, 80) }
+                        end
+                    end
                 end
             end
         end
@@ -304,9 +386,9 @@ end
 
 function M.summary(s)
     if not s or s.sites == 0 then return nil end
-    return ('erlmsg: %d gen_server call/cast site(s) — %d to an explicit server, %d by message; %d reach a clause, %d only '
-        .. 'candidates; %d edge(s); %d specific clause(s) no site in the tree reaches'):format(s.sites, s.explicit,
-        s.by_message, s.reached, s.candidates_only, s.edges, #s.unreached)
+    return ('erlmsg: %d gen_server/gen_statem call/cast site(s) (%d gen_statem) — %d to an explicit server, %d by message; '
+        .. '%d reach a clause, %d only candidates; %d edge(s); %d specific clause(s) no site in the tree reaches'):format(
+        s.sites, s.statem_sites, s.explicit, s.by_message, s.reached, s.candidates_only, s.edges, #s.unreached)
 end
 
 return M
