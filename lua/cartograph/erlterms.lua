@@ -324,7 +324,7 @@ end
 -- that arm ended the first match and every later arm was lost (match_tag with unknown arguments answered `true`).
 local function own(h, mine)
     if not mine then return true end
-    return mine[h] == true
+    return mine[h] == true or mine[h] == 'constrained'
 end
 
 function M.match(pat, subj, mine)
@@ -361,6 +361,10 @@ function M.match(pat, subj, mine)
     end
     local vals = {}
     for h, t in pairs(U.left) do vals[h] = as_records(subst(t, back), arity) end
+    -- a constrained hole (a pattern we cannot read) never makes the match certain
+    if verdict == 'yes' and mine then
+        for h in pairs(U.left) do if mine[h] == 'constrained' then verdict = 'maybe'; break end end
+    end
     return verdict, vals
 end
 
@@ -511,6 +515,11 @@ function M.pattern(x, env, S)
     local src, ctx = env.src, env.ctx
     local mine = {}        -- the holes this pattern mints: its own variables and wildcards
     local function pfresh(why) local h = fresh(S, why, 'p'); mine[h.h] = true; return h end
+    -- ★ A PATTERN WE CANNOT READ IS NOT A WILDCARD: a binary pattern (<<"!", Rest/binary>>), a map pattern, a record
+    -- with no declaration in scope STILL REJECTS what does not fit. Its hole is the pattern's own but CONSTRAINED:
+    -- a match through it is at most maybe (mine[h] = 'constrained'), or first-match would stop at it and every
+    -- later clause would read unreachable (CART-1110: parse_single_what, route_probe_reply).
+    local function cfresh(why) local h = fresh(S, why, 'p'); mine[h.h] = M.OFF.constrained and true or 'constrained'; return h end
     local binds = {}
     -- only `_` is a wildcard: `_X` is a variable like any other (it merely silences the unused warning)
     local function real(n) local nm = n and T.var[n:type()] and txt(n, src); return nm and nm ~= '_' and nm or nil end
@@ -541,7 +550,7 @@ function M.pattern(x, env, S)
         if T.record[t] then
             local rec = rec_name(n, src)
             local names = rec and ctx.record_fields and ctx.record_fields(rec)
-            if not names then return pfresh('a record pattern with no declaration in scope') end
+            if not names then return cfresh('a record pattern with no declaration in scope') end
             local set = {}
             for _, rf in ipairs(n:field('fields')) do
                 local fname = rf:field('name')[1]
@@ -579,12 +588,22 @@ function M.pattern(x, env, S)
             for _, c in ipairs(n:field('expr')) do items[#items + 1] = conv(c) end
             return A().node('tuple', unpack(items, 1, #items))
         end
+        if T.binary[t] then
+            -- a binary PATTERN binds its segments (<<Prefix:3/binary, Rest/binary>>): only an all-string one is a
+            -- constant; evaluating the segments would look up the very variables this pattern binds (a loop)
+            for _, e in ipairs(n:field('elements')) do
+                local el = e:field('element')[1]
+                if not el or not T.string[el:type()] or e:field('size')[1] or e:field('types')[1] then
+                    return cfresh('a binary pattern')
+                end
+            end
+        end
         if T.atom[t] or T.integer[t] or T.string[t] or T.char[t] or T.float[t] or T.macro[t] or T.binary[t] then
             local v = M.eval(n, env, S)
             if v.k == 'lit' then return v end
-            return pfresh('a pattern constant we cannot read')
+            return cfresh('a pattern constant we cannot read')
         end
-        return pfresh('a ' .. t .. ' pattern')
+        return cfresh('a ' .. t .. ' pattern')
     end
     return conv(x), binds, mine
 end
@@ -693,6 +712,14 @@ local function matched(x, var, name, at, env, S)
 end
 
 local function lookup(var, env, S)
+    -- a runaway chain of lookups (a binding that reaches itself through arms and matches) ends as a hole
+    S.lookups = (S.lookups or 0) + 1
+    if S.lookups > 200 then S.lookups = S.lookups - 1; return fresh(S, 'a binding chain too long to follow') end
+    local r = M._lookup(var, env, S)
+    S.lookups = S.lookups - 1
+    return r
+end
+function M._lookup(var, env, S)
     local src = env.src
     -- a BYTE offset: node:start() returns row, col, byte, and a row alone hides a match on the use's own line
     local name, at = txt(var, src), select(3, var:start())
