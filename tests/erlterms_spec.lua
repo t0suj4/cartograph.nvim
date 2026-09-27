@@ -258,11 +258,23 @@ test('erlterms: simple recursion is a LOOP — the state and the value iterated 
     local a, ah, S = at('a/1')
     -- features is the accumulator: a list whose length the loop does not know
     ok(a:find('^%(rec:disco_info "n" %(list%) %(list %?%S+%.%.%.%) %(list%)%)$'), 'the base clause under the loop state: ' .. a)
-    -- features is what the accumulator became: [] on the first pass, a loop variable after — the join of the two
-    local found = false
-    for _, w in pairs(S.reasons) do if w:find('loop variable of loops:build/2', 1, true) then found = true end end
-    ok(found, 'the accumulator is a loop variable: ' .. a .. ' ' .. table.concat(reasons(ah), '|'))
-    ok(S.stats.loops >= 1 and S.stats.iterations >= 2, 'the loop is counted')
+    -- features is the ACCUMULATOR, and the control flow says so without iterating: build/2 is a tail loop whose
+    -- positions are dec (the list, unknown here) and prepend (Acc), so it runs ONE pass under its closed-form state
+    ok(table.concat(reasons(ah), '|'):find('an accumulator of loops:build/2', 1, true), table.concat(reasons(ah), '|'))
+    eq(1, S.stats.onepass, 'one pass')
+    eq(1, S.stats.iterations, 'no iteration')
+    -- the narrowing observes: without it the same term costs a fixpoint
+    ET.OFF = { onepass = true, narrow = true }
+    local a3, _, S4 = at('a/1')
+    ET.OFF = {}
+    ok(a3:find('^%(rec:disco_info "n" %(list%) %(list %?%S+%.%.%.%) %(list%)%)$'), 'the same shape by iteration: ' .. a3)
+    ok(S4.stats.iterations >= 2, 'iterated: ' .. S4.stats.iterations)
+    -- the carried classes, read off the clauses once
+    local lm = P:module('loops')
+    local C = ET.carried(lm, 'build/2', lm.fns['build/2'])
+    eq({ 'dec', 'prepend' }, C.class)
+    eq(true, C.tail)
+    eq(false, ET.carried(lm, 'ids/1', lm.fns['ids/1']).tail, 'a list builder is body recursion')
     eq('(rec:disco_info "done" (list) (list) (list))', (at('b/0')))
     -- a list builder over an UNKNOWN list: a sequence of unknown length, and the claim about its elements
     local c, _, S3 = at('c/1')
@@ -409,4 +421,48 @@ test('erlterms: a list pattern binds its tail as a SEQUENCE; two hedges in one l
         A.node('list', A.hole('s1', true), A.lit('m'), A.hole('s2', true)))
     eq('maybe', v, 'a refusal reads as maybe')
     local _ = S
+end)
+
+test('erlterms: the carried classes say WHY a loop iterates — an other position does, a closed form does not', function ()
+    need()
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    local P = program {
+        nf = table.concat({
+            '-module(nf).',
+            'inc(N) -> {s, N}.',
+            -- Tag is invariant, the list is traversed, Acc is prepended to, St goes through a call ("other")
+            'walk(_Tag, [], Acc, St) -> #disco_info{node = _Tag, features = Acc, xdata = [St]};',
+            'walk(Tag, [H | T], Acc, St) -> walk(Tag, T, [H | Acc], inc(St)).',
+            -- the last value seen: an element of the traversed list (xmpp's decode_*_attrs)
+            'attrs([{n, V} | T], _N) -> attrs(T, V);',
+            'attrs([], N) -> #disco_info{node = N}.', '' }, '\n'),
+        user = '-module(user).\nr(L) -> nf:walk(<<"tag">>, L, [], zero).\nq(L) -> nf:attrs(L, undefined).\n',
+    }
+    local m = P:module('user')
+    local function at(off)
+        ET.OFF = off or {}
+        local cl = m.fns['r/1'][1]
+        local last
+        for c in cl:field('body')[1]:iter_children() do if c:named() then last = c end end
+        local t, _, S = ET.term(last, m.src, m.ctx)
+        ET.OFF = {}
+        return A.show(t), S
+    end
+    local C = ET.carried(P:module('nf'), 'walk/4', P:module('nf').fns['walk/4'])
+    eq({ 'inv', 'dec', 'prepend', 'other' }, C.class)
+    local t, S = at()
+    -- the invariant Tag stays "tag", exactly; the accumulator is a sequence; the other position is unknown
+    ok(t:find('^%(rec:disco_info "tag" %(list%) %(list %?%S+%.%.%.%) %(list %?%S+%)%)$'), t)
+    -- an element of the traversed list is a closed form: one pass, and the hole says what it is
+    local qm = m.fns['q/1'][1]
+    local ql
+    for c in qm:field('body')[1]:iter_children() do if c:named() then ql = c end end
+    local qt, qh, QS = ET.term(ql, m.src, m.ctx)
+    eq({ 'dec', 'elem' }, ET.carried(P:module('nf'), 'attrs/2', P:module('nf').fns['attrs/2']).class)
+    eq(1, QS.stats.onepass)
+    ok(table.concat(reasons(qh), '|'):find('an element of what it traverses', 1, true), A.show(qt) .. ' ' .. table.concat(reasons(qh), '|'))
+    -- an 'other' position is why this loop still iterates, and the breakdown says so
+    eq(1, S.stats.loop_kinds['tail, an other position'])
+    ok(S.stats.iterations >= 2, 'iterated')
 end)

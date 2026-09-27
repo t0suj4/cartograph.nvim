@@ -104,7 +104,7 @@ end
 -- ── the session: hole names, their reasons, the summary memo and counters ────────────────────────────────────────
 function M.session()
     return { n = 0, reasons = {}, domains = {}, kinds = {}, hedges = {}, elems = {}, memo = {}, stack = {}, depth = 0, evals = 0, top = {},
-        funs = {}, nfun = 0, loops = {}, stats = { applies = 0, stubs = 0, unfolded = 0, refused = 0, recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
+        funs = {}, nfun = 0, loops = {}, stats = { applies = 0, stubs = 0, unfolded = 0, refused = 0, onepass = 0, recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
             iterations = 0, unconverged = 0 } }
 end
 
@@ -713,12 +713,193 @@ local function widen(S, t)
     return changed and A().rebuild(t, kids) or t
 end
 
+-- ★★ THE NARROWED FIXPOINT (CART-1037: "do we need to evaluate recursion if we can analyze the control flow?"). Each
+-- argument position of a self-recursive function is classified ONCE, from its clauses, across every self-call (the
+-- carried-argument census: 61% of hand-written ejabberd's positions are invariant or decreasing):
+--   inv      passed through unchanged (the head's variable at that position): its state is the initial argument
+--   dec      a proper part of the head's pattern there (T of [H|T]) or a counter N - K: the traversal
+--   prepend  [E | X] with X the head's variable there: the accumulator's closed form is a sequence of the E's
+--   other    anything else — a call (State2 = handle(State)), a case/receive-bound value, a rebuilt term
+--   elem     a part of ANOTHER argument's pattern (an element of what is traversed); const a literal; counter N + K
+-- and whether every self-call is in TAIL position. A TAIL loop with no 'other' position and an unknown traversal is
+-- then its CLOSED FORM, evaluated in ONE pass (below): no iteration. Everything else iterates as before.
+-- ⚠ MEASURED 2026-09-27 on ejabberd's 184 send sites (2043 entries into a recursive function): closed form 86, a
+-- known traversal (folded exactly) 601, body recursion 216, an 'other' position 1140 — dominated by OTP's lists:sort
+-- internals (mergel/umergel/split_*), then re-dispatches (gen_mod:get_module_opt(global, …) ->
+-- get_module_opt(get_myname(), …)). Per-position narrowing INSIDE the iteration (never joining an inv position,
+-- skipping a tail self-call's value, the prepend closed form) changed 0 terms and 0 rounds — the rounds are bounded
+-- by the state's convergence, not the value's — and was removed. The one-pass closed form stays.
+function M.carried(m, key, clauses)
+    m.carried = m.carried or {}
+    if m.carried[key] then return m.carried[key] end
+    local src = m.src
+    local name, ar = key:match('^(.+)/(%d+)$')
+    ar = tonumber(ar)
+    local class, tail, rec = {}, true, false
+    local RANK = { inv = 1, dec = 2, const = 3, counter = 3, elem = 3, prepend = 3, other = 4 }
+    local function worst(a, b) if not a or RANK[b] > RANK[a] then return b end return a end
+    for _, cl in ipairs(clauses) do
+        local heads = named(cl:field('args')[1])
+        local whole, part = {}, {}
+        for i, p in ipairs(heads) do
+            local function scan(n, depth)
+                local t = n:type()
+                if T.var[t] then
+                    local v = txt(n, src)
+                    if v ~= '_' then if depth == 0 then whole[v] = i elseif not whole[v] then part[v] = part[v] or i end end
+                    return
+                end
+                if T.match[t] then scan(n:field('lhs')[1], depth); scan(n:field('rhs')[1], depth); return end
+                for c in n:iter_children() do if c:named() then scan(c, depth + 1) end end
+            end
+            scan(p, 0)
+        end
+        local body = cl:field('body')[1]
+        local exprs = body and body:field('exprs') or {}
+        local last = exprs[#exprs]
+        local function tailpos(n)
+            local x = n
+            while true do
+                if x == last then return true end
+                local pp = x:parent()
+                if not pp or pp:type() ~= 'clause_body' then return false end
+                local ex = pp:field('exprs')
+                if ex[#ex] ~= x then return false end
+                local arm = pp:parent()
+                if not arm or not (T.arm[arm:type()] or arm:type() == 'if_clause') then return false end
+                x = arm:parent()
+                if not (T.case[x:type()] or T.ifx[x:type()]) then return false end
+            end
+        end
+        local function classify(a, i)
+            local t = a:type()
+            if T.paren[t] then return classify(a:named_child(0), i) end
+            if T.var[t] then
+                local v = txt(a, src)
+                if whole[v] == i then return 'inv' end
+                if part[v] == i then return 'dec' end
+                -- a part of ANOTHER argument's pattern: an element of what is traversed (decode_*_attrs' _val)
+                if part[v] then return 'elem' end
+                return 'other'
+            end
+            if T.atom[t] or T.integer[t] or T.string[t] or T.binary[t] then return 'const' end
+            if t == 'binary_op_expr' then
+                local op = a:child(1) and txt(a:child(1), src)
+                local l, r = a:field('lhs')[1], a:field('rhs')[1]
+                if l and T.var[l:type()] and whole[txt(l, src)] == i and r and T.integer[r:type()] then
+                    if op == '-' then return 'dec' end
+                    if op == '+' then return 'counter' end
+                end
+                return 'other'
+            end
+            if T.list[t] then
+                for _, c in ipairs(a:field('exprs')) do
+                    if T.pipe[c:type()] then
+                        local rr = c:field('rhs')[1]
+                        if rr and T.var[rr:type()] and whole[txt(rr, src)] == i then return 'prepend' end
+                    end
+                end
+            end
+            return 'other'
+        end
+        local function walk(x)
+            for c in x:iter_children() do
+                if T.call[c:type()] and not T.remote[c:parent():type()] then
+                    local e = c:field('expr')[1]
+                    local cargs = named(c:field('args')[1])
+                    if e and T.atom[e:type()] and txt(e, src) == name and #cargs == ar then
+                        rec = true
+                        if not tailpos(c) then tail = false end
+                        for i, an in ipairs(cargs) do class[i] = worst(class[i], classify(an, i)) end
+                    end
+                end
+                if not T.fn[c:type()] then walk(c) end
+            end
+        end
+        walk(cl)
+    end
+    for i = 1, ar do class[i] = class[i] or 'inv' end
+    m.carried[key] = { class = class, tail = rec and tail, rec = rec }
+    return m.carried[key]
+end
+
 local function loop(m, id, clauses, args, S)
     local a = A()
     local state, value = a.node('tuple', unpack(args, 1, #args)), RAISE
+    local C = not M.OFF.narrow and M.carried(m, id:match(':(.+)$'), clauses) or nil
     local L = { value = value }
     S.loops[id] = L
     S.stats.loops = S.stats.loops + 1
+    -- ★ ONE PASS WHEN THE CONTROL FLOW SAYS IT ALL: a TAIL loop with no 'other' position, whose traversed (dec)
+    -- arguments are already unknown (a known spine is folded exactly instead, above). Its final state is then its
+    -- closed form — inv and dec positions stay the entry arguments, a prepend accumulator is a sequence — and its value
+    -- is the join of the exits under that state: nothing to iterate. The prepended elements are read off this very
+    -- pass's self-calls and added to the sequence's element claim.
+    if C and C.rec then
+        -- why this loop iterates (or not): the report's breakdown
+        local k = not C.tail and 'body recursion' or nil
+        if not k then
+            for j = 1, #args do
+                if C.class[j] == 'other' then
+                    k = 'tail, an other position'
+                    S.stats.other_ids = S.stats.other_ids or {}
+                    S.stats.other_ids[id .. '#' .. j] = (S.stats.other_ids[id .. '#' .. j] or 0) + 1
+                end
+            end
+        end
+        if not k then
+            for j = 1, #args do if C.class[j] == 'dec' and args[j].k ~= 'hole' then k = 'tail, a known traversal' end end
+        end
+        k = k or 'tail, closed form'
+        S.stats.loop_kinds = S.stats.loop_kinds or {}
+        S.stats.loop_kinds[k] = (S.stats.loop_kinds[k] or 0) + 1
+    end
+    if C and C.tail and not M.OFF.onepass then
+        local closed, acc = true, {}
+        for j = 1, #args do
+            local cls = C.class[j]
+            if cls == 'other' then closed = false
+            elseif cls == 'dec' and args[j].k ~= 'hole' then closed = false
+            elseif cls == 'prepend' then acc[#acc + 1] = j end
+        end
+        if closed then
+            local kids = {}
+            for j = 1, #args do
+                local cls = C.class[j]
+                if cls == 'elem' or cls == 'counter' or cls == 'const' then
+                    -- what the loop puts there differs from the entry value (an element, a count, a reset): unknown
+                    kids[j] = fresh(S, ('a loop variable of %s (%s)'):format(id,
+                        cls == 'elem' and 'an element of what it traverses' or cls == 'counter' and 'a counter' or 'reset to a constant'))
+                else kids[j] = args[j] end
+            end
+            local seqs = {}
+            for _, j in ipairs(acc) do
+                local h = hfresh(S, ('an accumulator of %s (a list the loop prepends to)'):format(id))
+                local els = {}
+                for _, x in ipairs(args[j].k == 'list' and args[j].kids or {}) do
+                    if x.k == 'hole' and x.rep then for _, y in ipairs(S.elems[x.h] or {}) do els[#els + 1] = y end
+                    else els[#els + 1] = x end
+                end
+                S.elems[h.h] = els
+                seqs[j] = h
+                kids[j] = a.node('list', h)
+            end
+            L.args, L.next = kids, nil
+            local vals = run_clauses(m, id, clauses, kids, S)
+            S.stats.iterations = S.stats.iterations + 1
+            S.stats.onepass = S.stats.onepass + 1
+            -- what this pass prepended joins the accumulator's element claim
+            for j, h in pairs(seqs) do
+                local nx = L.next and L.next.kids and L.next.kids[j]
+                for _, x in ipairs(nx and nx.k == 'list' and nx.kids or {}) do
+                    if not (x.k == 'hole' and x.rep) then table.insert(S.elems[h.h], x) end
+                end
+            end
+            S.loops[id] = nil
+            if not L.next then S.stats.loops = S.stats.loops - 1 end
+            return join_all(S, vals, ('%s: no clause admits the arguments'):format(id))
+        end
+    end
     for i = 1, M.MAX_ITER do
         L.value, L.next, L.args = value, nil, state.kids
         local vals = run_clauses(m, id, clauses, state.kids, S)

@@ -154,6 +154,16 @@ if want_sends then
     io.write(('  encoded to a record term %d, of which the codec spec puts on the wire %d; one of several records %d '
         .. '(every member on the wire: %d)\n'):format(recs, onwire, oneof, oneof_wire))
     io.write(('  holes by reason: %s\n'):format(top(why, 12)))
+    -- WHY THE LOOPS ITERATE: each entry into a recursive function, by its carried-argument classes (erlterms.carried)
+    do
+        local oi = {}
+        for k, v in pairs(sst.other_ids or {}) do oi[#oi + 1] = { k, v } end
+        table.sort(oi, function (a, b) return a[2] > b[2] end)
+        local topo = {}
+        for i2 = 1, math.min(5, #oi) do topo[i2] = oi[i2][1] .. '=' .. oi[i2][2] end
+        io.write(('  recursive entries: %s; an "other" position most often at %s\n'):format(top(sst.loop_kinds or {}, 6),
+            table.concat(topo, ' ')))
+    end
     -- THE SEQUENCES: a list of unknown length in a send term, and what its elements are (erlterms.elements)
     do
         local ET = require 'cartograph.erlterms'
