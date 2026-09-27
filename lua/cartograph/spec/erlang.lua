@@ -250,6 +250,11 @@ return {
     -- and NS_X, a read of something nothing defines, and in a pattern (`#iq{xmlns = ?NS_X}`) a BINDING of NS_X. The
     -- self-gate could not see it: du and the IR made the same mistake. A macro's ARGUMENTS stay expressions.
     name_skip = { macro_call_expr = 'name' },
+    -- WHAT A TYPE-TEST GUARD ADMITS, in the grammar's literal node kinds (CART-1125: a derived generator evaluates an
+    -- interpreter clause's `when is_integer(Seq)` against a site). A LANGUAGE FACT, deliberately tiny: a value of a
+    -- listed kind is `yes`, a literal of another kind `no`, anything else (a var, a macro, a call) `unknown`.
+    guard_kinds = { is_integer = { 'integer' }, is_atom = { 'atom' }, is_float = { 'float' },
+        is_binary = { 'binary' }, is_list = { 'list', 'string' }, is_tuple = { 'tuple' }, is_map = { 'map_expr' } },
     preloop = { anonymous_fun = true },
     pattern = {
         -- the field of each node type that IS a pattern (every name under it binds, at any depth)

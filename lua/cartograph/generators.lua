@@ -19,15 +19,22 @@
 --   reason 'hole'    a form fits the shape and one of its holes refuses (`match`'s own words: erlreg's
 --                    "not a value" — a `var` where a registration supplies a macro — is exactly this)
 --   reason 'context' the generator needs an enclosing context (a class, a module) and there is none
+--   reason 'guard'   a form fits and its guard cannot be decided for this site
 --
 -- A DECLARATION: { name, lang, wrap?, source = 'spec'|'derived'|'profile', why,
 --   select(node, src) -> bool   OPTIONAL: by default DERIVED from the forms — a node is a site when its type is a
 --                               form's root type and it carries that form's LITERAL leaves at the same positions
 --                               (`attr_accessor` as kid 1, or kid 2 after a receiver; `iq_handler` first in a tuple),
 --                               so a site whose arguments refuse is still in the population and refuses by name,
+--   site_ok(node, src) -> bool  OPTIONAL: a selected node that is not a site at all (a PATTERN or a TYPE with the
+--                               site's shape — erlang's interpreter heads, `-type` declarations) is counted as a
+--                               NON-SITE and says nothing, rather than refusing
 --   context(node, src, file) -> { name = text… } | nil, why      values a site gets from where it sits
 --   project = { [kind] = fn(text) -> text }                        how a leaf reads as a name (`:foo` -> `foo`)
---   forms = { { name, site = <SOURCE SNIPPET>, holes = { h = { kind… } }, out = { <OUTPUT>… } }… } }
+--   forms = { { name, site = <SOURCE SNIPPET>, holes = { h = { kind… } }, guard?, out = { <OUTPUT>… } }… } }
+--     `guard(V) -> 'yes'|'no'|'unknown', why` is THREE-VALUED (an erlang clause guard): `no` tries the next form,
+--     `unknown` STOPS the search and refuses — falling through on an undecidable guard would bind a site to the
+--     wrong clause (two `hook` 5-tuples differ only by which position `is_integer` holds).
 --
 -- ★★ A FORM IS WRITTEN AS SOURCE (CART-1125, the lever the third reader named): `has_many __assoc, __rest__` is
 -- parsed with the language's own grammar and read by the same converter as a real site, with each PLACEHOLDER leaf
@@ -177,7 +184,7 @@ local function compile(A, gen)
             end
             out[#out + 1] = { T = A.template(body), each = o.each, as = o.as, only = o.only, ok = o.ok, check = o.check }
         end
-        fs[#fs + 1] = { name = f.name or f.site, T = T, out = out }
+        fs[#fs + 1] = { name = f.name or f.site, T = T, out = out, guard = f.guard }
     end
     return fs
 end
@@ -224,15 +231,18 @@ local function top_rep(T)
     return false
 end
 
---- read one generator over one tree. Returns facts, refusals ({ site, reason, why, file }), selected (count).
+--- read one generator over one tree. Returns facts, refusals ({ site, reason, why, file }), selected (count), and
+--- nonsites ({ site, file }: selected by shape, rejected by `site_ok`).
 function M.read(gen, troot, src, file)
     local A, err = algebra()
     if not A then return nil, err end
     gen._forms = gen._forms or compile(A, gen)
     gen._select = gen._select or gen.select or derived_select(gen._forms)
-    local facts, refusals, selected = {}, {}, 0
+    local facts, refusals, selected, nonsites = {}, {}, 0, {}
     local function visit(node)
-        if gen._select(node, src) then
+        if gen._select(node, src) and gen.site_ok and not gen.site_ok(node, src) then
+            nonsites[#nonsites + 1] = { site = { node:range() }, file = file }
+        elseif gen._select(node, src) then
             selected = selected + 1
             local I = M.term(A, node, src)
             local site = I.at
@@ -241,12 +251,18 @@ function M.read(gen, troot, src, file)
             if gen.context and not ctx then
                 refusals[#refusals + 1] = { site = site, reason = 'context', why = cwhy, file = file }
             else
-                local hit, fitwhy, depth
+                local hit, fitwhy, depth, stuck
                 for _, f in ipairs(gen._forms) do
                     local fits = top_rep(f.T) or #(I.kids or {}) == #(f.T.body.kids or {})
                     if fits then
                         local m = A.match(f.T, I)
-                        if m.ok then hit = { form = f, V = m.values }; break end
+                        local g, gwhy = 'yes', nil
+                        if m.ok and f.guard then g, gwhy = f.guard(m.values) end
+                        if m.ok and g == 'yes' then hit = { form = f, V = m.values }; break end
+                        if m.ok and g == 'unknown' then stuck = gwhy or 'guard undecidable'; break end
+                        if m.ok then -- the guard said no: the next form, and a reason if none fits
+                            fitwhy = fitwhy or ('guard false: ' .. tostring(gwhy)); depth = depth or {}
+                        else
                         -- the refusal worth reporting is the one from the form that matched FURTHEST (the longest
                         -- refusal path): `attr_accessor period` should say its argument refused, not that it is
                         -- not the verb `attr`
@@ -261,9 +277,12 @@ function M.read(gen, troot, src, file)
                             end
                         end
                         if further then depth, fitwhy = d, (m.refusal and m.refusal.why or 'no match') end
+                        end
                     end
                 end
-                if not hit then
+                if stuck then
+                    refusals[#refusals + 1] = { site = site, reason = 'guard', why = stuck, file = file }
+                elseif not hit then
                     refusals[#refusals + 1] = { site = site, reason = fitwhy and 'hole' or 'shape',
                         why = fitwhy or ('no form of ' .. #(I.kids or {}) .. ' kid(s)'), file = file }
                 else
@@ -308,7 +327,7 @@ function M.read(gen, troot, src, file)
         for c in node:iter_children() do if c:named() then visit(c) end end
     end
     visit(troot)
-    return facts, refusals, selected
+    return facts, refusals, selected, nonsites
 end
 
 --- the erlreg carriers (erlreg.CARRIERS: a tag and a position map per arity) as generator declarations — the SAME

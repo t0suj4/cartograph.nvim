@@ -293,6 +293,9 @@ M.SLOTS = {
     -- erlang's `?MODULE` is (macro_call_expr name: (var)), the same node type as a variable; flow's du, its
     -- pattern_parts and the expression IR all read this one declaration, so they cannot draw it differently.
     name_skip = 'ANALYSIS',
+    -- TYPE-TEST GUARDS (CART-1125): <guard BIF> -> the literal node kinds it admits. A derived generator reads an
+    -- interpreter clause's guard three-valued against a site (yes / no / unknown).
+    guard_kinds = 'ANALYSIS',
     -- PATTERN BINDING (CART-0957): { fields = <node type -> the field that IS a pattern>, params = <the
     -- fn head is a pattern>, single_assignment = <a bound name in a pattern is a match, a use> }. A
     -- pattern binds every name under it at any depth, which binder_fields (per node TYPE) cannot say when

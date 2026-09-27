@@ -115,3 +115,83 @@ test("generators.snippet: a source snippet is a template in the grammar's own sh
     -- no wrap needed where the top level admits the shape: the same template either way
     eq(A.show(T.body), A.show(G.snippet(A, 'erlang', '{tag, __a, __rest__}', { a = { 'atom' } }).body))
 end)
+
+-- ── DERIVED from the interpreter (CART-1125, erlderive) ─────────────────────────────────────────────────────────
+local GEN_MOD = table.concat({
+    '-module(gen).',
+    '-type reg() :: {iq_handler, atom(), binary(), atom()} | {hook, atom(), atom(), integer()}.',  -- a TYPE: non-site
+    'start_module(Host, Module, Opts) ->',
+    '    case Module:start(Host, Opts) of',
+    '        {ok, Registrations} -> add_registrations(Host, Module, Registrations);',
+    '        _ -> ok',
+    '    end.',
+    'add_registrations(Host, Module, Registrations) ->',
+    '    lists:foreach(',
+    '      fun({hook, Hook, Function, Seq}) -> hooks:add(Hook, Host, Module, Function, Seq);',
+    '         ({hook, Hook, Function, Seq, Host1}) when is_integer(Seq) -> hooks:add(Hook, Host1, Module, Function, Seq);',
+    '         ({hook, Hook, Module1, Function, Seq}) when is_integer(Seq) -> hooks:add(Hook, Host, Module1, Function, Seq);',
+    '         ({iq_handler, Component, NS, Function}) -> gen_iq_handler:add_iq_handler(Component, Host, NS, Module, Function)',
+    '      end, Registrations).',
+}, '\n') .. '\n'
+local MOD_A = table.concat({
+    '-module(mod_a).',
+    'start(_Host, _Opts) ->',
+    '    {ok, [{iq_handler, ejabberd_local, ?NS_A, process_iq},',
+    '          {hook, h1, f1, 50},',
+    '          {hook, h2, f2, 60, global},',          -- 5-tuple, an integer in position 4: the Host1 clause
+    '          {hook, h3, mod_b, f3, 70},',           -- 5-tuple, an integer in position 5: the Module1 clause
+    '          {hook, h4, f4, ?PRIO, global}]}.',     -- the guard cannot be decided on a macro: REFUSED, no fall-through
+    'helper() -> {hook, not_a, registration, 1}.',     -- a value, but not inside the callback: a non-site
+}, '\n') .. '\n'
+
+local function derive(files_src)
+    local D = require 'cartograph.erlderive'
+    local files = {}
+    for rel, src in pairs(files_src) do files[#files + 1] = { rel = rel, src = src } end
+    table.sort(files, function (a, b) return a.rel < b.rel end)
+    local it
+    for _, f in ipairs(files) do for _, x in ipairs(D.find(f.src, f.rel)) do it = it or x end end
+    local chain = D.context_chain(it, files)
+    return D.generator(it, chain, require('cartograph.providers.treesitter').spec.erlang), it, chain, files
+end
+
+test('erlderive: the interpreter IS the declaration — heads, guards, effects and the callback module, derived', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local gen, it, chain = derive({ ['src/gen.erl'] = GEN_MOD, ['src/mod_a.erl'] = MOD_A })
+    eq('add_registrations', it.fn.name); eq(4, #it.clauses)
+    ok(chain[2] and chain[2].callback.fn == 'start' and chain[2].callback.arity == 2, 'Module is bound through Module:start/2')
+    local facts, refusals, selected = G.read(gen, tree(MOD_A, 'erlang'), MOD_A, 'src/mod_a.erl')
+    local rows = {}
+    for _, f in ipairs(facts) do rows[#rows + 1] = table.concat(f.parts, ' ') end
+    table.sort(rows)
+    eq({ 'gen_iq_handler.add_iq_handler ejabberd_local ?Host NS_A mod_a process_iq',
+         'hooks.add h1 ?Host mod_a f1 50',
+         'hooks.add h2 global mod_a f2 60',      -- Host1 = global
+         'hooks.add h3 ?Host mod_b f3 70' }, rows) -- Module1 = mod_b
+    eq(5, selected)
+    eq(1, #refusals); eq('guard', refusals[1].reason)
+end)
+
+test('erlderive: types, the interpreter heads and a value outside the callback are NON-SITES, silent', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local gen = derive({ ['src/gen.erl'] = GEN_MOD, ['src/mod_a.erl'] = MOD_A })
+    local _, r1, s1, non1 = G.read(gen, tree(GEN_MOD, 'erlang'), GEN_MOD, 'src/gen.erl')
+    eq(0, s1); eq(0, #r1)
+    eq(6, #non1, 'the two tuples of the -type and the four interpreter heads')
+    local _, _, _, non2 = G.read(gen, tree(MOD_A, 'erlang'), MOD_A, 'src/mod_a.erl')
+    eq(1, #non2, 'helper/0 builds a hook tuple outside start/2')
+end)
+
+test('erlderive: with no caller binding the list, the module stays an explicit unresolved marker', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local no_chain = GEN_MOD:gsub('start_module%(.-end%.\n', '')
+    local gen, _, chain = derive({ ['src/gen.erl'] = no_chain, ['src/mod_a.erl'] = MOD_A })
+    eq(nil, next(chain))
+    local facts = G.read(gen, tree(MOD_A, 'erlang'), MOD_A, 'src/mod_a.erl')
+    local iq
+    for _, f in ipairs(facts) do if f.parts[1]:match('add_iq_handler') then iq = f end end
+    eq('?Module', iq.parts[5], 'not the file name: the hand rule does not come back')
+    -- and with no callback to restrict the population, the POSITION rules alone keep types and heads out
+    local _, _, s1, non1 = G.read(gen, tree(no_chain, 'erlang'), no_chain, 'src/gen.erl')
+    eq(0, s1); eq(6, #non1, 'the -type tuples (a type context) and the interpreter heads (patterns)')
+end)
