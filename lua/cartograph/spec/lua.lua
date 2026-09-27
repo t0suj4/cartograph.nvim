@@ -176,7 +176,7 @@ local function assigned(vl, el, name, src)
     end
     return nil
 end
-local function string_local(id, src, depth, seen)
+local function local_all(id, src, depth, seen, pred, tag)
     local name = node_text(id, src)
     local n = id
     while n do
@@ -234,21 +234,21 @@ local function string_local(id, src, depth, seen)
                     if e == false then return false end
                     if e then
                         -- the declaration; now every assignment to the name in the declaring scope
-                        local key = c:id()
+                        local key = tag .. ':' .. c:id()
                         if seen[key] ~= nil then return seen[key] end
                         seen[key] = false -- a cycle (s = s .. x) is decided by the other expressions
-                        if not stringish(e, src, depth + 1, seen) then return false end
+                        if not pred(e, src, depth + 1, seen) then return false end
                         local ok = true
                         local function scan(x)
                             if not ok then return end
                             if x:type() == 'assignment_statement' and x:parent():type() ~= 'variable_declaration' then
                                 local r = assigned(x:named_child(0), x:named_child(1), name, src)
-                                if r == false or (r and not stringish(r, src, depth + 1, seen)) then ok = false end
+                                if r == false or (r and not pred(r, src, depth + 1, seen)) then ok = false end
                             elseif x:type() == 'variable_declaration' and x:id() ~= c:id() then
                                 local a2 = x:named_child(0)
                                 local r = a2 and a2:type() == 'assignment_statement'
                                     and assigned(a2:named_child(0), a2:named_child(1), name, src)
-                                if r == false or (r and not stringish(r, src, depth + 1, seen)) then ok = false end
+                                if r == false or (r and not pred(r, src, depth + 1, seen)) then ok = false end
                             end
                             for y in x:iter_children() do scan(y) end
                         end
@@ -264,6 +264,38 @@ local function string_local(id, src, depth, seen)
         n = p
     end
     return false
+end
+
+-- ★ BUILT-IN RECORDS (CART-1150, record types): the Lua builtins whose result is a TABLE of known shape, and the
+-- fields of it that are strings — the reference manual's own statement, declared here. `debug.getinfo(1, 'S').source`
+-- is the tools' bootstrap idiom: 179 of the remaining `:sub` receivers on this repo. A PROJECT record's fields need
+-- the whole-program value inference this file does not do (their writes flow through locals, params and returns).
+local RECORD_FIELDS = {
+    ['debug.getinfo'] = { source = 'string', short_src = 'string', what = 'string', name = 'string',
+        namewhat = 'string', currentline = 'number', linedefined = 'number', lastlinedefined = 'number' },
+    ['io.open'] = {}, ['io.popen'] = {}, ['io.tmpfile'] = {},
+}
+-- and the METHODS of a built-in record that return a string: a file handle's `read` (string, or nil at EOF — a nil
+-- receiver only raises, it never reaches a project function)
+local RECORD_METHODS = {
+    ['io.open'] = { read = 'string' }, ['io.popen'] = { read = 'string' }, ['io.tmpfile'] = { read = 'string' },
+}
+-- which built-in record an expression is: a call to one, or a local only ever assigned such a call
+local function record_of(e, src, depth, seen)
+    while e and e:type() == 'parenthesized_expression' do e = e:named_child(0) end
+    if not e then return nil end
+    if e:type() == 'function_call' then
+        local f = e:field('name')[1]
+        local fname = f and node_text(f, src)
+        return fname and RECORD_FIELDS[fname] and fname or nil
+    end
+    if e:type() == 'identifier' then
+        for rname in pairs(RECORD_FIELDS) do
+            local is_it = function (x) return record_of(x, src, depth + 1, seen) == rname end
+            if local_all(e, src, depth, seen, is_it, 'rec:' .. rname) then return rname end
+        end
+    end
+    return nil
 end
 
 stringish = function (e, src, depth, seen)
@@ -288,12 +320,37 @@ stringish = function (e, src, depth, seen)
         if not f then return false end
         if f:type() == 'method_index_expression' then
             local m = f:field('method')[1]
-            return m ~= nil and STRING_METHODS[node_text(m, src)] == true
-                and stringish(f:named_child(0), src, depth + 1, seen)
+            local mname = m and node_text(m, src)
+            if mname and STRING_METHODS[mname] and stringish(f:named_child(0), src, depth + 1, seen) then return true end
+            -- a built-in record's string-returning method: `fd:read('a')` on `fd = io.open(…)`
+            local rec = mname and record_of(f:named_child(0), src, depth + 1, seen)
+            return rec ~= nil and RECORD_METHODS[rec] ~= nil and RECORD_METHODS[rec][mname] == 'string'
         end
-        return STRING_RETURNS[node_text(f, src)] == true
+        local fname = node_text(f, src)
+        if STRING_RETURNS[fname] then return true end
+        -- ★ THE ENVIRONMENT'S DECLARED RETURN (CART-1150): the active profile's signature for this callee, when its
+        -- first return is a string (`string?` / `string|nil` too: nil only raises). `vim.fn.system`, `vim.api.
+        -- nvim_buf_get_name`, `vim.treesitter.get_node_text` — the Neovim runtime's own annotations, distilled.
+        local prof = seen.profile
+        local owner, member = fname:match('^([%w_%.]+)%.([%w_]+)$')
+        local sig = prof and prof.sigs and owner and prof.sigs[owner .. '#' .. member]
+        local r1 = sig and sig.returns and sig.returns[1]
+        local ty = r1 and r1.type
+        if ty then
+            for part in (ty .. '|'):gmatch('([^|]*)|') do
+                part = vim.trim(part):gsub('%?$', '')
+                if part ~= 'string' and part ~= 'nil' then return false end
+            end
+            return ty:find('string', 1, true) ~= nil
+        end
+        return false
     end
-    if t == 'identifier' then return string_local(e, src, depth, seen) end
+    if t == 'identifier' then return local_all(e, src, depth, seen, stringish, 'str') end
+    if t == 'dot_index_expression' then
+        local fld = e:field('field')[1]
+        local rec = record_of(e:field('table')[1], src, depth + 1, seen)
+        return rec ~= nil and fld ~= nil and RECORD_FIELDS[rec][node_text(fld, src)] == 'string'
+    end
     return false
 end
 
@@ -1129,7 +1186,7 @@ return {
     -- A LANGUAGE FACT, declared here: which expressions are strings (a literal, a `..` concatenation, and the
     -- builtins below that return one).
     -- …and (CART-1150) a LOCAL that is only ever assigned string expressions, or a string method called on one
-    string_receiver = function (namen, src, mem)
+    string_receiver = function (namen, src, mem, profile)
         if not namen then return false end
         -- a method no string has: only a LITERAL-shaped receiver is worth a look (it is then a runtime error, but a
         -- string one: `('x'):foo()` still reaches no project def) — and for a NAME receiver, nothing at all
@@ -1149,7 +1206,9 @@ return {
             return false
         end
         -- one verdict per DECLARATION per file: a big scope is scanned once, not once per method call in it
-        if STRING_CACHE.src ~= src then STRING_CACHE.src, STRING_CACHE.seen = src, {} end
+        if STRING_CACHE.src ~= src or STRING_CACHE.seen.profile ~= profile then
+            STRING_CACHE.src, STRING_CACHE.seen = src, { profile = profile }
+        end
         return stringish(r, src, 0, STRING_CACHE.seen) == true
     end,
     -- THE REBIND AND THE EXPORT a move writes when a LOCAL it takes is still called by name in its old file

@@ -74,3 +74,62 @@ test('stringrecv (CART-1150): a declaration LATER on the same line is not the bi
     }
     eq({ 'U.a' }, callers(st, 'hz.lua', 'M.gsub'), 'the parameter s is untyped; the later local s does not reach back')
 end)
+
+test('stringrecv (CART-1150): a BUILT-IN record field is typed — debug.getinfo(…).source is a string; its number fields and a project table are not', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local st = ingest {
+        ['hz.lua'] = 'local M = {}\nfunction M.sub(self, i) return i end\nreturn M\n',
+        ['use.lua'] = table.concat({
+            'local U = {}',
+            "function U.direct() return debug.getinfo(1, 'S').source:sub(2) end",
+            "function U.via() local info = debug.getinfo(1, 'S'); return info.source:sub(2) end",
+            "function U.num() local info = debug.getinfo(1, 'l'); return info.currentline:sub(1) end",
+            "function U.proj(t) local r = { source = t }; return r.source:sub(1) end",
+            'return U', '' }, '\n'),
+    }
+    eq({ 'U.num', 'U.proj' }, callers(st, 'hz.lua', 'M.sub'), 'the string fields leave; a number field and a project record stay')
+end)
+
+test('stringrecv (CART-1150): a file handle is a built-in record — fd:read() is a string, fd:close() is not', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local st = ingest {
+        ['hz.lua'] = 'local M = {}\nfunction M.gsub(self, p) return p end\nfunction M.close(self) end\nreturn M\n',
+        ['use.lua'] = table.concat({
+            'local U = {}',
+            "function U.r(p) local fd = io.open(p); local s = fd:read('a'); fd:close(); return s:gsub('x', '') end",
+            "function U.other(t) local s = t:read('a'); return s:gsub('x', '') end",
+            'return U', '' }, '\n'),
+    }
+    eq({ 'U.other' }, callers(st, 'hz.lua', 'M.gsub'), 'a read from io.open is a string; a read from anything else is not known')
+end)
+
+-- an nvim-plugin layout (plugin/ + lua/) activates the `nvim` profile: the runtime's own declared returns
+local function ingest_tree(files)
+    local root = vim.fn.tempname()
+    for rel, text in pairs(files) do
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$')
+        vim.fn.mkdir(dir, 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
+    end
+    store.ingest(ts.extract(root))
+    return store
+end
+
+test('stringrecv (CART-1150): the NVIM profile types a runtime call\'s declared string return — only where the plugin shape activates it', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    if not require('cartograph.spec.profile').load('nvim') then skip 'no nvim profile distilled' end
+    local hz = 'local M = {}\nfunction M.gsub(self, p) return p end\nreturn M\n'
+    local use = table.concat({
+        'local U = {}',
+        "function U.tx(n, src) local text = vim.treesitter.get_node_text(n, src); return text:gsub('x', '') end",
+        "function U.sys() local out = vim.fn.system({ 'ls' }); return out:gsub('x', '') end",
+        "function U.pos() local p = vim.fn.getpos('.'); return p:gsub('x', '') end",
+        -- a union that only CONTAINS string (`integer|string`) is not a string
+        "function U.chr() local c = vim.fn.getchar(); return c:gsub('x', '') end",
+        'return U', '' }, '\n')
+    local st = ingest_tree { ['plugin/p.lua'] = '-- entry\n', ['lua/p/hz.lua'] = hz, ['lua/p/use.lua'] = use }
+    eq('nvim', st.data.profile, 'the plugin shape activated the profile')
+    eq({ 'U.chr', 'U.pos' }, callers(st, 'lua/p/hz.lua', 'M.gsub'), 'declared string returns leave; getpos (a tuple) and getchar (integer|string) stay')
+    st = ingest_tree { ['lua/p/hz.lua'] = hz, ['lua/p/use.lua'] = use }
+    eq({ 'U.chr', 'U.pos', 'U.sys', 'U.tx' }, callers(st, 'lua/p/hz.lua', 'M.gsub'), 'no plugin shape, no environment: nothing typed')
+end)

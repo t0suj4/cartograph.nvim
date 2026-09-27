@@ -108,8 +108,6 @@ local version = (type(jit) == 'table' and jit.version) or _VERSION or 'lua'
 -- ── THE DECLARED HALF: signatures out of lua-language-server's @meta ──────────
 
 package.path = REPO .. '/lua/?.lua;' .. REPO .. '/lua/?/init.lua;' .. package.path
-local annot = require 'cartograph.annot'
-local TAG = '^%s*%-%-%-@([%a_]+)%s*(.*)$'   -- spec/lua.lua's annot_tag, verbatim
 
 -- THE PREPROCESSOR IS EVALUATED, NOT PATTERN-MATCHED. The meta guards divergent
 -- definitions of one function with `---#if VERSION >= 5.3 or JIT then … #else … #end`,
@@ -137,64 +135,9 @@ local dups, disabled_files = {}, {}
 local n_sig, n_amb, n_unparsed, n_disabled, n_dup = 0, 0, 0, 0, 0
 local meta_names = {}       -- owner -> member -> true, as DECLARED
 
--- A TYPE THAT SPANS LINES IS NOT A TYPE THIS READER HAS. `unpack`'s param is declared
--- as a table literal type opened on the `@param` line and closed several lines later:
---   ---@param list {
---   ---  [1]?: T1, …
---   ---}
--- annot.lua reads ONE line by design, so it hands back `{`. Emitting that would put a
--- string that is not a type into a signature — the fabrication this whole artifact is
--- supposed to avoid — so an unbalanced type is recorded as UNKNOWN with a flag, and
--- counted. Refusing beats truncating: `any` is honest, `{` is a lie with a shape.
-local n_multiline = 0
-local function usable_type(t)
-    if not t then return nil end
-    local depth = 0
-    for ch in t:gmatch('[{}%(%)<>%[%]]') do
-        if ch == '{' or ch == '(' or ch == '<' or ch == '[' then depth = depth + 1
-        else depth = depth - 1 end
-    end
-    if depth ~= 0 then
-        n_multiline = n_multiline + 1
-        return nil, true
-    end
-    return t
-end
-
---- the signature TEXT plus the machine-readable halves. `returns` is the point of
---- the whole exercise (a return-type source); `sig` is what hover shows.
-local function sig_of(rows, decl_params)
-    local ps, rs = {}, {}
-    for _, r in ipairs(rows) do
-        local ty, over = usable_type(r.type)
-        if r.kind == 'param' and r.name then
-            ps[#ps + 1] = { name = r.name, type = ty, opt = r.opt or nil,
-                multiline = over }
-        elseif r.kind == 'vararg' then
-            ps[#ps + 1] = { name = '...', type = ty, multiline = over }
-        elseif r.kind == 'return' then
-            rs[#rs + 1] = { name = r.name, type = ty, opt = r.opt or nil,
-                multiline = over }
-        end
-    end
-    local pt = {}
-    for _, p in ipairs(ps) do
-        pt[#pt + 1] = ('%s%s: %s'):format(p.name, p.opt and '?' or '',
-            p.type or (p.multiline and 'any (multi-line type, unread)') or 'any')
-    end
-    local rt = {}
-    for _, r in ipairs(rs) do
-        rt[#rt + 1] = (r.type or 'any') .. (r.opt and '?' or '')
-    end
-    return {
-        sig = ('(%s)%s'):format(table.concat(pt, ', '),
-            #rt > 0 and (' -> ' .. table.concat(rt, ', ')) or ''),
-        params = ps, returns = rs,
-        -- THE DECLARED ARITY, kept beside the annotated one so a consumer can see
-        -- them disagree rather than trusting whichever it read first
-        arity = decl_params and #decl_params or nil,
-    }
-end
+-- the block reader, the multi-line type refusal and the signature shape live in cartograph.metaread (shared with
+-- tools/nvimdistill.lua since 2026-09-27, so both distillers read an annotation block the same way)
+local R = require('cartograph.metaread').new()
 
 local meta_files = {}
 if META ~= '' and vim.fn.isdirectory(META) == 1 then
@@ -205,9 +148,8 @@ for _, path in ipairs(meta_files) do
     local lines = vim.fn.readfile(path)
     local rel = vim.fn.fnamemodify(path, ':t')
     -- the #if stack: each entry is `true` (emitting) or `false` (skipping)
-    local stack, live, disabled = {}, true, false
-    local blk, blk_first = {}, nil
-    for i, l in ipairs(lines) do
+    local stack, disabled = {}, false
+    local function live(_, l)
         local cond = l:match('^%-%-%-#if%s+(.-)%s+then')
         if cond then
             local v = cond_true(cond)
@@ -223,51 +165,34 @@ for _, path in ipairs(meta_files) do
         elseif l:match('^%-%-%-#end') then
             stack[#stack] = nil
         end
-        live = true
-        for _, s in ipairs(stack) do if not s then live = false end end
-
-        if l:match('^%s*%-%-%-') then
-            if not blk_first then blk_first = i - 1 end
-            blk[#blk + 1] = l
-        else
-            local owner, sep, member, params = l:match(
-                '^function%s+([%w_]+)([%.:])([%w_]+)%s*%(([^)]*)%)')
-            local bare = (not owner) and l:match('^function%s+([%w_]+)%s*%(')
-            if (owner or bare) and live and not disabled then
-                local rows = annot.read_block(blk, blk_first or 0, TAG)
-                local dp = {}
-                for p in (params or ''):gmatch('[%w_%.]+') do dp[#dp + 1] = p end
-                -- the KEY IS `Owner#member`, which is what lsp.lua's hover already
-                -- looks up (`<runtime>::Owner#member` → path); a free function is
-                -- keyed bare, its own owner
-                local key = owner and (owner .. '#' .. member) or bare
-                local s = sig_of(rows, dp)
-                s.file, s.line = rel, (blk_first or (i - 1))
-                if sigs[key] then
-                    -- TWO SURVIVING DEFINITIONS of one name — measured: `unpack`, which
-                    -- basic.lua declares twice as genuine OVERLOADS (list,i,j and list),
-                    -- not as a preprocessor arm. So the first is kept and the sig CARRIES
-                    -- the count: a consumer reading one signature must be able to see
-                    -- that it is one of several, which is the difference between a
-                    -- narrowed answer and a silently-lost one.
-                    n_dup = n_dup + 1
-                    dups[#dups + 1] = key .. ' (' .. rel .. ')'
-                    sigs[key].overloads = (sigs[key].overloads or 1) + 1
-                else
-                    sigs[key] = s
-                    n_sig = n_sig + 1
-                end
-                if owner then
-                    meta_names[owner] = meta_names[owner] or {}
-                    meta_names[owner][member] = true
-                    owners_of[member] = owners_of[member] or {}
-                    owners_of[member][owner] = true
-                    if sep == ':' then s.method = true end
-                end
-            end
-            if l:match('%S') then blk, blk_first = {}, nil end
-        end
+        for _, st in ipairs(stack) do if not st then return false end end
+        return not disabled
     end
+    -- a DOTTED owner (`jit.opt.start`) was never read by this distiller's one-level pattern; the shared reader
+    -- admits them, so they are dropped here to keep this artifact exactly what it was
+    local function owner_of(o) if o:find('.', 1, true) then return nil end return o end
+    R:each_function(lines, { live = live, owner_of = owner_of }, function (f)
+        local key, s = f.key, f.sig
+        s.file, s.line = rel, f.line
+        if sigs[key] then
+            -- TWO SURVIVING DEFINITIONS of one name — measured: `unpack`, which basic.lua declares twice as
+            -- genuine OVERLOADS (list,i,j and list), not as a preprocessor arm. So the first is kept and the sig
+            -- CARRIES the count: a consumer reading one signature must be able to see that it is one of several.
+            n_dup = n_dup + 1
+            dups[#dups + 1] = key .. ' (' .. rel .. ')'
+            sigs[key].overloads = (sigs[key].overloads or 1) + 1
+        else
+            sigs[key] = s
+            n_sig = n_sig + 1
+        end
+        if f.owner then
+            meta_names[f.owner] = meta_names[f.owner] or {}
+            meta_names[f.owner][f.member] = true
+            owners_of[f.member] = owners_of[f.member] or {}
+            owners_of[f.member][f.owner] = true
+            if f.sep == ':' then s.method = true end
+        end
+    end)
     if disabled then
         n_disabled = n_disabled + 1
         disabled_files[#disabled_files + 1] = rel
@@ -390,7 +315,7 @@ local prof = {
     schema = 1, runtime = 'luajit', lang = 'lua',
     version = version,
     stamp = ('introspected from %s; nvim additions (%s) excluded')
-        :format(version, table.concat(vim.tbl_keys(DENY), ' ')),
+        :format(version, (function () local k = vim.tbl_keys(DENY); table.sort(k); return table.concat(k, ' ') end)()),
     free = free, namespaces = namespaces, nsset = nsset, types = types,
     vocab = vocab,
     -- the DECLARED half (CART-0266). `sig_kind` is the tier and it is not
@@ -426,6 +351,7 @@ print(('  members          %d'):format(n_members))
 print(('  vocab (total)    %d'):format(nvocab))
 print('  ── signatures (CART-0266): a CLAIM beside a measurement ──')
 print(('  sig source       %s'):format(prof.sig_source))
+local n_multiline = R.multiline
 if n_multiline > 0 then
     print(('  multi-line types %d declared type(s) span lines and are recorded as'
         .. ' UNKNOWN — this reader is one line deep, and `{` is not a type'):format(

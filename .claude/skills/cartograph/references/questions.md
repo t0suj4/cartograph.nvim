@@ -59,7 +59,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | Question | Instrument |
 |---|---|
 | What does a vendored artifact reach for, and does anything supply it? | `tools/surface.lua` |
-| Distil a surface into an L2 environment profile | `tools/nodedistill.lua`, `tools/npmdistill.lua <corpus|dir>`, `tools/domdistill.lua`, `tools/erldistill.lua` (now also OTP behaviour callbacks), `tools/hrldistill.lua --from <dir-or-.hrl>`, `tools/dtsread.lua` |
+| Distil a surface into an L2 environment profile | `tools/nodedistill.lua`, `tools/npmdistill.lua <corpus|dir>`, `tools/domdistill.lua`, `tools/erldistill.lua` (now also OTP behaviour callbacks), `tools/hrldistill.lua --from <dir-or-.hrl>`, `tools/dtsread.lua`, `tools/nvimdistill.lua [--show]` (the `nvim` profile from the running Neovim runtime's own LuaLS annotations — declared returns, e.g. `vim.fn.system` -> string; activated by the nvim-plugin / nvim-config shapes; shares `cartograph.metaread` with luadistill) |
 | The Maven build layer, and the java import resolver against package declarations | `tools/pomtree.lua <repo>…`, `tools/javaimports.lua <repo>…` (⚠ `tools/mavenpoms.lua` DOWNLOADS from Maven Central — network) |
 | Does the stage partition carry the JS runner globals? | `tools/stagefit.lua <corpus|dir> [--decl <key>]` |
 | A fact the tree lacks: who CONSUMES it (other repos' manifests), where the dependencies it selects are on disk, who produces the callbacks its -behaviour lines owe — each cited by the selecting line | `tools/producers.lua <root> [--search DIR]... [--lib DIR]...` (CART-1118; finds, attaches nothing) |

@@ -132,7 +132,8 @@ M.registry = {
                 return 'plugin/ + lua/ directories'
             end
         end,
-        config = { entrypoints = { '^plugin/[%w_%-]+%.lua$' } },
+        -- the Neovim runtime's Lua API, distilled from its own annotations (tools/nvimdistill.lua, CART-1150)
+        config = { entrypoints = { '^plugin/[%w_%-]+%.lua$' }, profile = 'nvim' },
     },
     {
         name = 'nvim-config',
@@ -143,7 +144,7 @@ M.registry = {
                 return 'init.lua + lua/ directory'
             end
         end,
-        config = { entrypoints = { '^init%.lua$' } },
+        config = { entrypoints = { '^init%.lua$' }, profile = 'nvim' },
     },
     {
         name = 'wordpress',

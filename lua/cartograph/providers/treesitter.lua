@@ -7606,7 +7606,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if method and spec.string_receiver then
                         local mem = rawfull:match(':([%w_]+)$')
                         -- the method name is already TEXT here: the hook needs no tree call to reject a non-string one
-                        if mem and spec.string_receiver(namen, src, mem) then full = 'string.' .. mem end
+                        if mem and spec.string_receiver(namen, src, mem, spec._profile) then full = 'string.' .. mem end
                     end
                     -- ★ AND A PACKAGE-BOUND RECEIVER BECOMES ITS PACKAGE. `_.map()`
                     -- keys `lodash.map`, which is what the L2 profile's namespace
