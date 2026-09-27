@@ -7624,6 +7624,12 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- callee keeps its sigil: `→ $op` says what it is
                     local dynamic = spec.dynamic_callee_types
                         and spec.dynamic_callee_types[namen:type()] or nil
+                    -- ★ A CALL WHOSE TARGET IS COMPUTED ELSEWHERE THAN ITS NAME NODE (CART-1129): erlang's
+                    -- `Mod:start(Host)` captures the atom `start` as @name — its type says nothing — and the
+                    -- COMPUTED part is the module, on the parent `remote`. Left undeclared, the bare name went to
+                    -- the name resolver: 270 of 519 such calls on ejabberd "resolved", each to a wrong same-named
+                    -- function (ejabberd_auth:183 `M:start(Host)` -> ejabberd_auth:start/2, its own enclosing fn).
+                    if not dynamic and spec.dynamic_call and spec.dynamic_call(calln, src) then dynamic = true end
                     -- A LITERAL KEY TAKES IT BACK TO STATIC (CART-0345):
                     -- `handlers['init']()` names its member in the source, so
                     -- claiming the graph cannot see it would be a false negative

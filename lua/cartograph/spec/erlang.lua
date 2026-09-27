@@ -326,6 +326,19 @@ return {
     -- before a DOT (`prof_ext`). The source text is unchanged; only the
     -- RESOLUTION KEY is normalised, exactly as php rewrites `$this->m` to
     -- `Class::m`.
+    -- ★ A VARIABLE MODULE IS DYNAMIC DISPATCH (CART-1129). `Mod:start(Host)` names no module, and qualify_call below
+    -- rightly declines to guess one — but declining to name the KEY left the CALL with its bare name, which the
+    -- generic resolver then matched: 270 of 519 such calls on ejabberd resolved to a wrong same-named function. The
+    -- call is DYNAMIC: a frontier until a population is known (CART-1130: the behaviour's implementers, …).
+    dynamic_call = function (calln)
+        local par = calln:parent()
+        if not (par and par:type() == 'remote') then return false end
+        local f = par:field('fun')[1]
+        if not (f and f:id() == calln:id()) then return false end
+        local m = par:field('module')[1]
+        local ma = m and m:named_child(0)
+        return ma ~= nil and ma:type() ~= 'atom'
+    end,
     qualify_call = function (calln, name, src)
         if calln:type() ~= 'call' then return nil end
         local e = calln:field('expr')[1]

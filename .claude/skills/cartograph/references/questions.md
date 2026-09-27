@@ -138,6 +138,8 @@ write it again from scratch.
 
 | Question | What was found | Ticket |
 |---|---|---|
+| Where does erlang dispatch dynamically, and what does the graph do with it? (2026-09-27, tree walk + census.disp at the callee site) | 519 `Mod:f` on a variable module (431 are tree -callbacks), 255 hook runs, 170 process messages, 128 fun values, 25 apply; 270 of the 519 FABRICATED by name match | CART-1129, CART-1130 |
+| Which dead-function findings are hook handlers? Which hooks are run but registered nowhere? (2026-09-27, erlderive facts × lint × ejabberd_hooks:run argv) | 203 of 1850 findings are derived hook handlers; 255 run sites / 183 hook names; 55 run and registered nowhere in the tree | CART-1128 |
 
 Closed 2026-09-26 (promoted to a tool): behaviour callbacks read as dead → the `behaviour-callback` alibi (CART-1117); the send-site term census → `tools/xmppserver.lua --sends` (holes by step);
 producer discovery → `tools/producers.lua`; nodes gained/lost by kind → `tools/gate.lua --kinds`; the df distribution

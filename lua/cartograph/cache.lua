@@ -409,7 +409,11 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 207 -- v207: A MACRO NAME IS NOT A VARIABLE (CART-1121, spec.name_skip): erlang's `?MODULE` no longer records a
+M.VERSION = 208 -- v208: AN ERLANG CALL ON A VARIABLE MODULE IS DYNAMIC (CART-1129, spec.dynamic_call): `Mod:f()` no longer
+--- goes to the name resolver, which matched 270 of 519 on ejabberd to ONE same-named function (the dispatcher's own, or
+--- an arbitrary implementer: a definite single edge where the truth is a set). dead-function 1850 -> 1858: eight backend
+--- functions were alive only through such an edge, and the population step (CART-1130) is what restores them.
+--- Prior: v207: A MACRO NAME IS NOT A VARIABLE (CART-1121, spec.name_skip): erlang's `?MODULE` no longer records a
 --- use (or, in a pattern, a binding) of MODULE; and an IMPORT EDGE CARRIES ITS SITE (CART-1122): `at` = the path.
 --- Prior: v206: AN ERLANG `fun` IS A SCOPE OF ITS OWN (CART-1106): its clauses are rows (arms under a pre-condition
 --- loop head) instead of being folded into the row carrying it, its head names shadow, nothing it binds is visible
