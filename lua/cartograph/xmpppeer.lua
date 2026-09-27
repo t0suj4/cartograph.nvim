@@ -149,11 +149,15 @@ function M.model(root, opts)
                             req = build(pat, nil, nil, true)
                             args = {}
                             for i = 1, arity do args[i] = i == ai and req or a.hole('Arg' .. i) end
-                            local vs = ET.clause_verdicts(P, e.mod, e.fn, args, S) or {}
+                            local vs, runs = ET.clause_verdicts(P, e.mod, e.fn, args, S)
+                            vs, runs = vs or {}, runs or {}
                             reach = vs[k] == 'no' and 'shadowed' or (vs[k] == 'maybe' and 'maybe' or 'reachable')
                             for j = 1, k - 1 do
-                                if vs[j] == 'yes' then reach = 'shadowed'; break end
-                                if vs[j] == 'maybe' and reach == 'reachable' then reach = 'maybe' end
+                                -- first match is within ONE definition (-ifdef variants are separate)
+                                if runs[j] == runs[k] then
+                                    if vs[j] == 'yes' then reach = 'shadowed'; break end
+                                    if vs[j] == 'maybe' and reach == 'reachable' then reach = 'maybe' end
+                                end
                             end
                         end
                         contract()

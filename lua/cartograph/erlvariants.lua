@@ -40,6 +40,8 @@ local function exclusive(a, b)
     return nil
 end
 
+M.path_at, M.exclusive = path_at, exclusive
+
 function M.attach(data)
     local stats = { refusals = 0, variants = 0, edges = 0, rows = {} }
     local root = data and data.root

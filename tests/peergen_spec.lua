@@ -81,8 +81,12 @@ test('xmpppeer: a server\'s clauses become operations — envelope to the transp
         '-record(iq, {id = <<>>, type, lang = <<>>, from, to, sub_els = [], meta = #{}}).',
         '-record(disco_info, {node = <<>>, identities = [], features = [], xdata = []}).',
         'start(Host) -> gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_DISCO_INFO, ?MODULE, process_iq),',
-        '    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_VERSION, ?MODULE, any_iq).',
+        '    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_VERSION, ?MODULE, any_iq),',
+        '    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_PING, ?MODULE, ping_iq).',
         'any_iq(IQ) -> IQ#iq{type = result}.',
+        -- two -ifdef variants of one handler: the second definition's clause is NOT shadowed by the first's
+        '-ifdef(OLD).', 'ping_iq(#iq{type = get} = IQ) -> IQ#iq{type = result};', 'ping_iq(IQ) -> IQ.',
+        '-else.', 'ping_iq(#iq{type = get} = IQ) -> IQ#iq{type = error}.', '-endif.',
         'process_iq(#iq{type = set} = IQ) -> IQ#iq{type = error};',
         'process_iq(#iq{type = get, sub_els = [#disco_info{node = <<"">>}]} = IQ) -> IQ#iq{type = result, sub_els = [top]};',
         'process_iq(#iq{type = get, sub_els = [#disco_info{}]} = IQ) -> IQ#iq{type = result, sub_els = [node]}.', '' }, '\n'))
@@ -90,9 +94,13 @@ test('xmpppeer: a server\'s clauses become operations — envelope to the transp
     local XP = require 'cartograph.xmpppeer'
     local PG = require 'cartograph.peergen'
     local model, st, index, P = XP.model(root, {})
-    eq(4, st.clauses)
+    eq(7, st.clauses)
+    -- the -else definition's get clause is reachable in ITS build (first match is within a definition)
+    local ping_cands = 0
+    for _, cands in pairs(index) do for _, c in ipairs(cands) do if c.fn == 'ping_iq' then ping_cands = ping_cands + 1 end end end
+    eq(3, ping_cands, 'both definitions\' clauses are candidates')
     -- a head that takes ANY iq is the generic request: type, destination and payload the caller's
-    eq(1, st.generic or 0)
+    eq(2, st.generic or 0)
     eq(0, st.shadowed, 'nothing unreachable left')
     eq(1, st.widened or 0, '#3 is reachable only with a node that is not ""')
     local by = {}
@@ -109,7 +117,7 @@ test('xmpppeer: a server\'s clauses become operations — envelope to the transp
     eq({ 'Node', 'To' }, widened.params)
     -- the client, in process: the handler answers, the node picks the clause
     local C = sandboxed(PG.generate(model))
-    eq(4, vim.tbl_count(C.operations))
+    eq(6, vim.tbl_count(C.operations))
     local ET = require 'cartograph.erlterms'
     local A = require('cartograph.algebra').load()
     local client = C.new({ exchange = function (req, op)
@@ -121,7 +129,9 @@ test('xmpppeer: a server\'s clauses become operations — envelope to the transp
     eq('result', case)
     ok(A.show(rep):find('(list "node")', 1, true), 'the node picked clause #3: ' .. A.show(rep))
     local other
-    for name, op in pairs(C.operations) do if name ~= widened.name and op.request.kids[2].v == 'get' then other = name end end
+    for name, op in pairs(C.operations) do
+        if name ~= widened.name and name:match('^disco_info_get') and op.request.kids[2].v == 'get' then other = name end
+    end
     local _, _, rep2 = client[other]({ To = jid })
     ok(A.show(rep2):find('(list "top")', 1, true), 'the empty node is clause #2: ' .. A.show(rep2))
 end)

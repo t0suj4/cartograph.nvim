@@ -557,3 +557,40 @@ test('erlterms: a NIF stub with a documented meaning answers for known arguments
     ET.OFF = {}
     ok(off:find('^%?'), 'the stub meaning observes: ' .. off)
 end)
+
+test('erlterms: -ifdef variants are SEPARATE definitions — joined across builds, or the one a vantage picks', function ()
+    need()
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local fd = assert(io.open(dir .. '/v.erl', 'w'))
+    fd:write(table.concat({ '-module(v).',
+        '-ifdef(OLD).', 'f(x) -> old_x;', 'f(_) -> old.', '-else.', 'f(_) -> new.', '-endif.',
+        'g() -> f(x).', '' }, '\n'))
+    fd:close()
+    local function value(defines)
+        local P = ET.program { dirs = { dir }, defines = defines }
+        local S = ET.session()
+        local t = ET.call(P, 'v', 'g', {}, S)
+        local alts = t.k == 'hole' and S.alts[t.h] or nil
+        local shown = {}
+        for _, x in ipairs(alts or { t }) do shown[#shown + 1] = A.show(x) end
+        table.sort(shown)
+        return shown, P
+    end
+    -- no vantage: both builds, first match WITHIN each (f(x) is old_x under OLD, new otherwise)
+    eq({ '"new"', '"old_x"' }, (value(nil)))
+    eq({ '"old_x"' }, (value({ OLD = true })))
+    eq({ '"new"' }, (value({ OLD = false })))
+    -- the verdicts say which definition each clause is in
+    local _, P = value(nil)
+    local vs, runs = ET.clause_verdicts(P, 'v', 'f', { A.lit('x') })
+    eq({ 'yes', 'yes', 'yes' }, vs)
+    eq({ 1, 1, 2 }, runs)
+    -- the guard observes: merged into one list, the first branch always wins
+    ET.OFF = { variants = true }
+    local merged = value(nil)
+    ET.OFF = {}
+    eq({ '"old_x"' }, merged)
+end)

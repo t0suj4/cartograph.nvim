@@ -90,11 +90,22 @@ function M.census(dir, opts)
                                 local S = ET.session()
                                 local args = {}
                                 for i, an in ipairs(argn) do args[i] = (ET.term(an, m.src, ctx, S)) end
-                                local vs = ET.clause_verdicts(P, callee_mod, fn, args, S) or {}
+                                local vs, runs = ET.clause_verdicts(P, callee_mod, fn, args, S)
+                                vs, runs = vs or {}, runs or {}
+                                -- first match within each definition; several definitions (-ifdef variants) make
+                                -- a certain clause in one only a possible one overall
                                 local kind, clause, possible = 'none', nil, {}
+                                local stopped, nruns = {}, 0
+                                for _, r in pairs(runs) do if r > nruns then nruns = r end end
                                 for k, v in ipairs(vs) do
-                                    if v == 'yes' then clause = k; break end
-                                    if v == 'maybe' then possible[#possible + 1] = k end
+                                    local r = runs[k] or 1
+                                    if not stopped[r] then
+                                        if v == 'yes' then
+                                            stopped[r] = true
+                                            if nruns <= 1 then clause = k else possible[#possible + 1] = k end
+                                        elseif v == 'maybe' then possible[#possible + 1] = k end
+                                    end
+                                    if clause then break end
                                 end
                                 if clause and #possible == 0 then kind = 'exact'
                                 elseif clause or #possible > 0 then

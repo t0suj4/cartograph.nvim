@@ -797,18 +797,58 @@ local function run_clauses(m, id, clauses, args, S)
     return vals
 end
 
+--- THE DEFINITIONS a call may run: one normally; for -ifdef variants every one, or the one a VANTAGE decides
+--- (P.defines = { MACRO = true | false }: each definition's condition path, read from the file's -ifdef regions, must
+--- agree with it). -> { run… } (a run = the definition's clauses, in order)
+function M.variants(P, m, key)
+    local runs = (m.defs and m.defs[key]) or { m.fns[key] }
+    if #runs < 2 or M.OFF.variants then
+        if #runs >= 2 then
+            local flat = {}
+            for _, r in ipairs(runs) do for _, c in ipairs(r) do flat[#flat + 1] = c end end
+            return { flat }
+        end
+        return runs
+    end
+    if P and P.defines then
+        local V = require 'cartograph.erlvariants'
+        m.regions = m.regions or require('cartograph.erlfeatures').regions(m.path)
+        local agree = {}
+        for _, run in ipairs(runs) do
+            local path = V.path_at(m.regions, run[1]:start() + 1)
+            local ok, decided = true, false
+            for macro, pol in pairs(path) do
+                local d = P.defines[macro]
+                if d ~= nil then
+                    decided = true
+                    if d ~= pol then ok = false end
+                end
+            end
+            if ok and decided then agree[#agree + 1] = run end
+        end
+        if #agree == 1 then return agree end
+    end
+    return runs
+end
+
 --- WHICH CLAUSE a call selects, without evaluating a body: each clause's verdict ('yes' | 'maybe' | 'no') for the
 --- argument terms — its head patterns and its guard, first match. The generated peer's contract check (peergen,
 --- CART-1138): the request built for clause k must leave every earlier clause at 'no'.
---- -> { verdict… } in clause order | nil, why
+--- -> { verdict… } in clause order, { definition index… } per clause (first match is within one) | nil, why
 function M.clause_verdicts(P, mod, fn, args, S)
     S = S or M.session()
     local m = P:module(mod)
     if not m then return nil, 'no source for ' .. tostring(mod) end
     local clauses = m.fns[fn .. '/' .. #args]
     if not clauses then return nil, ('%s:%s/%d not defined'):format(mod, fn, #args) end
-    local out = {}
-    for _, cl in ipairs(clauses) do
+    -- which definition each clause belongs to (first match is WITHIN a definition: -ifdef variants are separate)
+    local run_of = {}
+    for ri, run in ipairs((m.defs and m.defs[fn .. '/' .. #args]) or { clauses }) do
+        for _, c in ipairs(run) do run_of[c] = ri end
+    end
+    local out, runs = {}, {}
+    for ci, cl in ipairs(clauses) do
+        runs[ci] = run_of[cl] or 1
         local cenv = { src = m.src, ctx = m.ctx, vars = {}, args = args, fname = mod .. ':' .. fn }
         local verdict = 'yes'
         for i, p in ipairs(named(cl:field('args')[1])) do
@@ -823,7 +863,7 @@ function M.clause_verdicts(P, mod, fn, args, S)
         end
         out[#out + 1] = verdict
     end
-    return out
+    return out, runs
 end
 
 local function iso(x, y)
@@ -1010,7 +1050,7 @@ local function loop(m, id, clauses, args, S)
     local a = A()
     local state, value = a.node('tuple', unpack(args, 1, #args)), RAISE
     local C = not M.OFF.narrow and M.carried(m, id:match(':(.+)$'), clauses) or nil
-    local L = { value = value }
+    local L = { value = value, clauses = clauses }
     S.loops[id] = L
     S.stats.loops = S.stats.loops + 1
     -- ★ ONE PASS WHEN THE CONTROL FLOW SAYS IT ALL: a TAIL loop with no 'other' position, whose traversed (dec)
@@ -1169,7 +1209,7 @@ local function summary(P, mod, fn, args, S)
             local saved = L.args
             L.args, L.spine = args, (L.spine or 0) + 1
             S.stats.unfolded = S.stats.unfolded + 1
-            local r = join_all(S, run_clauses(m, id, clauses, args, S), ('%s: no clause admits the arguments'):format(id))
+            local r = join_all(S, run_clauses(m, id, L.clauses or clauses, args, S), ('%s: no clause admits the arguments'):format(id))
             L.args, L.spine = saved, L.spine - 1
             return r
         end
@@ -1195,12 +1235,20 @@ local function summary(P, mod, fn, args, S)
     S.depth = S.depth + 1
     local prev = S.cur
     S.cur = id
-    local r
-    if M.OFF.loops then
-        r = join_all(S, run_clauses(m, id, clauses, args, S), ('%s: no clause admits the arguments'):format(id))
-    else
-        r = loop(m, id, clauses, args, S)
+    -- ★ PREPROCESSOR VARIANTS ARE SEPARATE DEFINITIONS (CART-1139): each -ifdef branch's definition is evaluated on
+    -- its own, first match within it, and their values JOINED — the set over the builds, as erlvariants gives the
+    -- call graph. A VANTAGE (the program's `defines`, e.g. { OTP_BELOW_26 = false }) that decides the branch keeps
+    -- that definition alone.
+    local runs = M.variants(P, m, key)
+    local vals = {}
+    for _, run in ipairs(runs) do
+        if M.OFF.loops then
+            vals[#vals + 1] = join_all(S, run_clauses(m, id, run, args, S), ('%s: no clause admits the arguments'):format(id))
+        else
+            vals[#vals + 1] = loop(m, id, run, args, S)
+        end
     end
+    local r = #vals == 1 and vals[1] or join_all(S, vals, ('%s: no definition returns'):format(id))
     S.cur = prev
     S.depth = S.depth - 1
     S.stack[id] = S.stack[id] > 1 and S.stack[id] - 1 or nil
@@ -1743,9 +1791,10 @@ end
 --- opts = { dirs = { dir | { dir, E }, … } searched in order for <module>.erl (the tree first, then each dependency's
 ---          src — the caller supplies where a dependency lives, the tree only names the module; a dependency's own
 ---          record env resolves ITS includes), E = erlrecords env (for plain dirs),
----          ctx_of = fn(src, path, P) -> ctx (optional: records from elsewhere than an include graph) }
+---          ctx_of = fn(src, path, P) -> ctx (optional: records from elsewhere than an include graph),
+---          defines = { MACRO = true | false } (a VANTAGE: the build's defines pick one -ifdef variant; none -> all) }
 function M.program(opts)
-    local P = { dirs = opts.dirs or {}, E = opts.E, ctx_of = opts.ctx_of, mods = {} }
+    local P = { dirs = opts.dirs or {}, E = opts.E, ctx_of = opts.ctx_of, defines = opts.defines, mods = {} }
     function P:module(name)
         if not name then return nil end
         local m = self.mods[name]
@@ -1776,7 +1825,21 @@ function M.program(opts)
                 end
             end
         end
-        m = { path = path, src = src, root = root, fns = fns,
+        -- ★ DEFINITIONS, NOT JUST CLAUSES (CART-1139): the grammar gives each clause its own fun_decl, so two -ifdef
+        -- branches' definitions of one name/arity arrive as ONE list, and first-match would always take the file's
+        -- first branch. A definition ends at the clause whose text ends with `.`: defs[key] = { run, run… }.
+        local defs = {}
+        for key, cls in pairs(fns) do
+            local runs, cur = {}, {}
+            for _, cl in ipairs(cls) do
+                cur[#cur + 1] = cl
+                local dt = cl:parent() and vim.trim(txt(cl:parent(), src)) or ''
+                if dt:sub(-1) == '.' then runs[#runs + 1] = cur; cur = {} end
+            end
+            if #cur > 0 then runs[#runs + 1] = cur end
+            defs[key] = runs
+        end
+        m = { path = path, src = src, root = root, fns = fns, defs = defs,
             ctx = self.ctx_of and self.ctx_of(src, path, self) or M.file_ctx(src, path, E, self) }
         self.mods[name] = m
         return m
