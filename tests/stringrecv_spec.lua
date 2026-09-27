@@ -42,3 +42,35 @@ test('stringrecv: a string-literal, concatenation or tostring() receiver never r
     eq({ 'U.name' }, callers(st, 'fmt.lua', 'M.format'), 'only the untyped receiver still name-matches')
     eq({}, callers(st, 'fmt.lua', 'M.rep'), 'a concatenation is a string')
 end)
+
+test('stringrecv (CART-1150): a LOCAL only ever assigned strings is typed — and a reassigned one, a hazard object and a parameter are NOT', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local st = ingest {
+        ['hz.lua'] = 'local M = {}\nfunction M.gsub(self, p) return p end\nfunction M.sub(self, i) return i end\nfunction M.new() return setmetatable({}, { __index = M }) end\nreturn M\n',
+        ['use.lua'] = table.concat({
+            "local hz = require 'hz'",
+            'local U = {}',
+            "function U.a() local s = ('%s'):format(1); return s:gsub('x', '') end",
+            "function U.b() local s = ('x'):sub(1); local t = s:sub(2); return t:sub(1) end",
+            "function U.c() local s, n = ('x'):gsub('a', 'b'); return s:sub(1), n end",
+            "function U.re() local s = 'a'; s = {}; return s:gsub('x', '') end",
+            'function U.obj() local h = hz.new(); return h:gsub(1) end',
+            "function U.par(p) return p:sub(1) end",
+            -- a string METHOD on a non-string receiver does not make its result a string
+            'function U.via() local h = hz.new(); local x = h:gsub(1); return x:sub(1) end',
+            -- only the FIRST result of gsub is a string: the second variable is not typed by position
+            "function U.pos() local s, n = ('x'):gsub('a', 'b'); return n:sub(1) end",
+            'return U', '' }, '\n'),
+    }
+    eq({ 'U.obj', 'U.re', 'U.via' }, callers(st, 'hz.lua', 'M.gsub'), 'typed locals leave; a reassigned one and a hazard object stay')
+    eq({ 'U.par', 'U.pos', 'U.via' }, callers(st, 'hz.lua', 'M.sub'), 'a chain of string locals leaves; a parameter, a hazard method result and a second result stay')
+end)
+
+test('stringrecv (CART-1150): a declaration LATER on the same line is not the binding', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local st = ingest {
+        ['hz.lua'] = 'local M = {}\nfunction M.gsub(self, p) return p end\nreturn M\n',
+        ['use.lua'] = "local U = {}\nfunction U.a(s) local r = s:gsub('x', ''); local s = 'y'; return r end\nreturn U\n",
+    }
+    eq({ 'U.a' }, callers(st, 'hz.lua', 'M.gsub'), 'the parameter s is untyped; the later local s does not reach back')
+end)

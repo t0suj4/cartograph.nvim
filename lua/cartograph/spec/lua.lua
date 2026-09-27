@@ -141,6 +141,162 @@ local STRING_RETURNS = {
 --- "do not write" — the strictness fails toward doing nothing.
 --- Shared by module_table (the write side, CART-0542) and alt_keys (the read side,
 --- CART-0612) so the two cannot drift: an export is an export by ONE definition.
+-- the methods whose result is a string when their receiver is one (`s:sub(1)`; `s:match(p)` may be nil, which can only
+-- raise — it never reaches a project function)
+local STRING_METHODS = { sub = true, gsub = true, format = true, lower = true, upper = true, rep = true,
+    reverse = true, match = true }
+
+-- the string library's members: the only methods a string receiver has (Lua 5.1-5.4 / LuaJIT)
+local STRING_LIB = { byte = true, char = true, dump = true, find = true, format = true, gmatch = true, gsub = true,
+    len = true, lower = true, match = true, rep = true, reverse = true, sub = true, upper = true, pack = true,
+    unpack = true, packsize = true }
+
+local stringish -- forward: an identifier is typed by the expressions assigned to it
+local STRING_CACHE = { src = nil, seen = {} } -- the last file's verdicts, keyed by declaration node id
+
+-- ★ A LOCAL THAT IS ONLY EVER A STRING (CART-1150). The receiver `s` of `s:gsub(…)` is typed when its nearest
+-- declaration AND every assignment to that name anywhere in the declaring scope are string expressions — a
+-- flow-INSENSITIVE superset of the reaching definitions, so it can only be more conservative than they are (a
+-- shadowing `local s` in a nested block counts against it too). Parameters and loop variables are never typed here:
+-- what a caller passes is a claim about the whole program (CART-1150's next step, gated on the caller set).
+local function assigned(vl, el, name, src)
+    -- the expression a `name` in variable list `vl` receives from expression list `el` (by position), or false
+    local i = 0
+    for v in vl:iter_children() do
+        if v:named() then
+            i = i + 1
+            if v:type() == 'identifier' and node_text(v, src) == name then
+                local ei, e = 0, nil
+                for x in el:iter_children() do
+                    if x:named() then ei = ei + 1; if ei == i then e = x end end
+                end
+                return e or false
+            end
+        end
+    end
+    return nil
+end
+local function string_local(id, src, depth, seen)
+    local name = node_text(id, src)
+    local n = id
+    while n do
+        local p = n:parent()
+        if not p then return false end
+        local t = p:type()
+        if t == 'function_declaration' or t == 'function_definition' or t == 'for_generic_clause'
+            or t == 'for_numeric_clause' then
+            -- a parameter or a loop variable of this name shadows anything further out: not typed here
+            for c in p:iter_children() do
+                if c:type() == 'parameters' or c:type() == 'variable_list' then
+                    for v in c:iter_children() do
+                        if v:named() and node_text(v, src) == name then return false end
+                    end
+                end
+            end
+        end
+        -- the declarations among p's children, indexed ONCE per block by the names they bind (the linear rescan of
+        -- every preceding statement made a big top-level chunk quadratic); the nearest one BEFORE n is the binding
+        local idx = seen.decls and seen.decls[p:id()]
+        if not idx then
+            idx = {}
+            for c in p:iter_children() do
+                if c:type() == 'variable_declaration' then
+                    local a = c:named_child(0)
+                    local vl = a and (a:type() == 'assignment_statement' and a:named_child(0) or a)
+                    for v in (vl and vl:type() == 'variable_list' and vl:iter_children() or function () end) do
+                        if v:named() and v:type() == 'identifier' then
+                            local nm = node_text(v, src)
+                            idx[nm] = idx[nm] or {}
+                            table.insert(idx[nm], c)
+                        end
+                    end
+                    if vl and vl:type() == 'identifier' then
+                        local nm = node_text(vl, src)
+                        idx[nm] = idx[nm] or {}
+                        table.insert(idx[nm], c)
+                    end
+                end
+            end
+            seen.decls = seen.decls or {}
+            seen.decls[p:id()] = idx
+        end
+        -- BYTE offsets: a row compares two statements on one line as equal (`local s = …; s:gsub()`)
+        local nbyte = select(3, n:start())
+        local nearest
+        for _, c in ipairs(idx[name] or {}) do
+            if select(3, c:end_()) <= nbyte and c:id() ~= n:id() then nearest = c end
+        end
+        for _, c in ipairs(nearest and { nearest } or {}) do
+            if c:type() == 'variable_declaration' then
+                local a = c:named_child(0)
+                if a and a:type() == 'assignment_statement' then
+                    local e = assigned(a:named_child(0), a:named_child(1), name, src)
+                    if e == false then return false end
+                    if e then
+                        -- the declaration; now every assignment to the name in the declaring scope
+                        local key = c:id()
+                        if seen[key] ~= nil then return seen[key] end
+                        seen[key] = false -- a cycle (s = s .. x) is decided by the other expressions
+                        if not stringish(e, src, depth + 1, seen) then return false end
+                        local ok = true
+                        local function scan(x)
+                            if not ok then return end
+                            if x:type() == 'assignment_statement' and x:parent():type() ~= 'variable_declaration' then
+                                local r = assigned(x:named_child(0), x:named_child(1), name, src)
+                                if r == false or (r and not stringish(r, src, depth + 1, seen)) then ok = false end
+                            elseif x:type() == 'variable_declaration' and x:id() ~= c:id() then
+                                local a2 = x:named_child(0)
+                                local r = a2 and a2:type() == 'assignment_statement'
+                                    and assigned(a2:named_child(0), a2:named_child(1), name, src)
+                                if r == false or (r and not stringish(r, src, depth + 1, seen)) then ok = false end
+                            end
+                            for y in x:iter_children() do scan(y) end
+                        end
+                        scan(p)
+                        seen[key] = ok
+                        return ok
+                    end
+                elseif a and node_text(a, src):match('^%s*' .. name:gsub('%p', '%%%0') .. '%s*$') then
+                    return false -- `local s` with no value: nil until assigned
+                end
+            end
+        end
+        n = p
+    end
+    return false
+end
+
+stringish = function (e, src, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+    if depth > 6 or not e then return false end
+    while e and e:type() == 'parenthesized_expression' do e = e:named_child(0) end
+    if not e then return false end
+    local t = e:type()
+    if t == 'string' then return true end
+    if t == 'binary_expression' then
+        local op
+        for c in e:iter_children() do if not c:named() then op = node_text(c, src) end end
+        if op == '..' then return true end
+        if op == 'or' then
+            return stringish(e:named_child(0), src, depth + 1, seen) and stringish(e:named_child(1), src, depth + 1, seen)
+        end
+        return false
+    end
+    if t == 'function_call' then
+        local f = e:field('name')[1]
+        if not f then return false end
+        if f:type() == 'method_index_expression' then
+            local m = f:field('method')[1]
+            return m ~= nil and STRING_METHODS[node_text(m, src)] == true
+                and stringish(f:named_child(0), src, depth + 1, seen)
+        end
+        return STRING_RETURNS[node_text(f, src)] == true
+    end
+    if t == 'identifier' then return string_local(e, src, depth, seen) end
+    return false
+end
+
 local function module_table_name(lines)
     local last
     for i = #lines, 1, -1 do
@@ -972,24 +1128,29 @@ return {
     -- resolved into a project def (terraform's FUNCS.format, hazard.lua's string-API delegates, algebra's M.rep).
     -- A LANGUAGE FACT, declared here: which expressions are strings (a literal, a `..` concatenation, and the
     -- builtins below that return one).
-    string_receiver = function (namen, src)
-        if not namen or namen:type() ~= 'method_index_expression' then return false end
+    -- …and (CART-1150) a LOCAL that is only ever assigned string expressions, or a string method called on one
+    string_receiver = function (namen, src, mem)
+        if not namen then return false end
+        -- a method no string has: only a LITERAL-shaped receiver is worth a look (it is then a runtime error, but a
+        -- string one: `('x'):foo()` still reaches no project def) — and for a NAME receiver, nothing at all
+        if mem and not STRING_LIB[mem] then
+            local r0 = namen:named_child(0)
+            local t0 = r0 and r0:type()
+            if t0 ~= 'string' and t0 ~= 'parenthesized_expression' then return false end
+        end
+        if namen:type() ~= 'method_index_expression' then return false end
         local r = namen:named_child(0)
-        while r and r:type() == 'parenthesized_expression' do r = r:named_child(0) end
-        if not r then return false end
-        local t = r:type()
-        if t == 'string' then return true end
-        if t == 'binary_expression' then
-            for c in r:iter_children() do
-                if not c:named() and vim.treesitter.get_node_text(c, src) == '..' then return true end
-            end
+        -- ★ ONLY A STRING-LIBRARY METHOD CAN BE A STRING'S: `frame:SetPoint()` is never string.SetPoint, so its receiver
+        -- is not worth typing. Without this guard the declaration search ran for every method call on a name, and
+        -- WoW's huge top-level chunks made it quadratic: extraction +32% there (131.6 -> 173.9 s) for +137 calls.
+        local m = namen:field('method')[1]
+        if r and r:type() ~= 'string' and r:type() ~= 'parenthesized_expression' and r:type() ~= 'function_call'
+            and not (m and STRING_LIB[node_text(m, src)]) then
             return false
         end
-        if t == 'function_call' then
-            local f = r:field('name')[1]
-            return f ~= nil and STRING_RETURNS[vim.treesitter.get_node_text(f, src)] == true
-        end
-        return false
+        -- one verdict per DECLARATION per file: a big scope is scanned once, not once per method call in it
+        if STRING_CACHE.src ~= src then STRING_CACHE.src, STRING_CACHE.seen = src, {} end
+        return stringish(r, src, 0, STRING_CACHE.seen) == true
     end,
     -- THE REBIND AND THE EXPORT a move writes when a LOCAL it takes is still called by name in its old file
     -- (CART-1146): the new home exports it, the old one binds the name again where the definition was
