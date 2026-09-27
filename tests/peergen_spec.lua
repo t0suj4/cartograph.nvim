@@ -125,3 +125,52 @@ test('xmpppeer: a server\'s clauses become operations — envelope to the transp
     local _, _, rep2 = client[other]({ To = jid })
     ok(A.show(rep2):find('(list "top")', 1, true), 'the empty node is clause #2: ' .. A.show(rep2))
 end)
+
+test('peergen: the core refuses two operations under one name (one would silently overwrite the other)', function ()
+    local PG = require 'cartograph.peergen'
+    local op = { name = 'x', params = {}, request = { k = 'lit', v = 'a' }, replies = {} }
+    ok(not pcall(PG.generate, { name = 'dup', operations = { op, op } }))
+end)
+
+test('grpcpeer: the SECOND instance — .proto rpcs become operations through the same core; copies merge, drift is kept', function ()
+    local GP = require 'cartograph.grpcpeer'
+    local PG = require 'cartograph.peergen'
+    local root = vim.fn.tempname()
+    local base = table.concat({
+        'syntax = "proto3";', 'package shop;',
+        'service Cart {', '  rpc Add(AddReq) returns (Empty) {}', '  rpc Watch(WatchReq) returns (stream Item) {}', '}',
+        'message Item { string id = 1; int32 qty = 2; }',
+        'message AddReq { string user = 1; Item item = 2; repeated string tags = 3; }',
+        'message WatchReq { string user = 1; }', 'message Empty {}', '' }, '\n')
+    for _, d in ipairs { 'a', 'b', 'c' } do vim.fn.mkdir(root .. '/' .. d, 'p') end
+    local function write(path, text) local fd = assert(io.open(path, 'w')); fd:write(text); fd:close() end
+    write(root .. '/a/shop.proto', base)
+    write(root .. '/b/shop.proto', base)                                              -- an identical vendored copy
+    write(root .. '/c/shop.proto', (base:gsub('repeated string tags = 3;', 'repeated string tags = 3; bool gift = 4;')))  -- drifted
+    local model, st = GP.model(root)
+    eq(3, st.files)
+    eq(1, st.drift, 'the copy with an extra field is kept apart')
+    local by = {}
+    for _, op in ipairs(model.operations) do by[op.name] = op end
+    ok(by.Cart_Add and by.Cart_Add_v2 and by.Cart_Watch, vim.inspect(vim.tbl_keys(by)))
+    eq({ 'user', 'item', 'tags' }, by.Cart_Add.params)
+    eq({ 'user', 'item', 'tags', 'gift' }, by.Cart_Add_v2.params)
+    -- a server stream replies with a sequence
+    eq('list', by.Cart_Watch.replies[1].term.k)
+    -- the same core, standalone, at the simulated fidelity: a canned reply of the response shape is ok, a status error
+    local src = PG.generate(model)
+    ok(not src:find('require', 1, true))
+    local chunk = assert(loadstring(src))
+    setfenv(chunk, { ipairs = ipairs, pairs = pairs, table = table, string = string, tostring = tostring,
+        tonumber = tonumber, error = error, type = type, select = select, next = next })
+    local C = chunk()
+    local canned = C.new({ exchange = function () return { k = 'rec:Empty', kids = {} } end })
+    local args = { user = C.term.lit('u', 'bin'), item = C.term.lit('i', 'bin'), tags = C.term.node('list') }
+    eq('ok', (canned.Cart_Add(args)))
+    local failing = C.new({ exchange = function ()
+        return C.term.node('tuple', C.term.lit('error', 'atom'), C.term.lit('5', 'int'), C.term.lit('not found', 'bin'))
+    end })
+    local case, env = failing.Cart_Add(args)
+    eq('error', case)
+    eq('not found', env.message.v)
+end)

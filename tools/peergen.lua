@@ -4,6 +4,7 @@
 --
 --   nvim --headless -u NONE -l tools/peergen.lua [--server DIR] [--spec FILE] [--otp DIR] [--out FILE] [--rows]
 --        [--merge [--client DIR]] [--twice]
+--   nvim --headless -u NONE -l tools/peergen.lua --grpc ROOT [--client DIR] [--out FILE]   (the gRPC instance)
 --
 -- ACCEPTANCE, every number printed:
 --   CONTRACT   per operation candidate, the template against every earlier clause: reachable / maybe / shadowed
@@ -41,6 +42,75 @@ if not o.otp then
     if cand and vim.fn.isdirectory(cand) == 1 then o.otp = cand end
 end
 local function print(line) io.write(line, '\n') end
+
+-- ── THE SECOND INSTANCE: gRPC from a tree's .proto contracts (--grpc ROOT [--client DIR]) ─────────────────────────
+-- the core is the same file; only the adapter differs. SIMULATED fidelity: canned replies built from the response
+-- shapes (the contract has no server behaviour to run); coverage against the rpc methods a real client calls.
+if o.grpc then
+    local PG = require 'cartograph.peergen'
+    local GP = require 'cartograph.grpcpeer'
+    local t0 = vim.uv.hrtime()
+    local model, st = GP.model(o.grpc)
+    local src = PG.generate(model)
+    print(('peergen --grpc  %s  (%.0f ms)'):format(o.grpc, (vim.uv.hrtime() - t0) / 1e6))
+    print(('  .proto files %d, services %d, rpcs %d (streaming %d; types not found %d), messages %d, refused %d'):format(
+        st.files, st.services, st.rpcs, st.streams, st.unknown_types, st.messages, st.refused))
+    print(('  operations %d (vendored copies merged %d, copies that DRIFT %d); %d bytes of Lua'):format(st.ops, st.copies,
+        st.drift, #src))
+    if o.out then local fd = assert(io.open(o.out, 'w')); fd:write(src); fd:close(); print('  written ' .. o.out) end
+    local chunk = assert(loadstring(src, '=generated'))
+    setfenv(chunk, { ipairs = ipairs, pairs = pairs, table = table, string = string, tostring = tostring,
+        tonumber = tonumber, error = error, type = type, select = select, next = next })
+    local okload, C = pcall(chunk)
+    print(('  STANDALONE: loads without require: %s'):format(okload and 'yes' or ('NO — ' .. tostring(C))))
+    if okload then
+        local byname = {}
+        for _, op in ipairs(model.operations) do byname[op.name] = op end
+        local function lookup(pkg) return function (t)
+            for _, op in ipairs(model.operations) do
+                for _, m in ipairs { op.rpc.req, op.rpc.resp } do
+                    if m.name == t or (pkg and pkg .. '.' .. m.name == t) then return m end
+                end
+            end
+            return nil
+        end end
+        local okc, errc = 0, 0
+        local fail = {}
+        for _, name in ipairs(vim.tbl_keys(byname)) do
+            local op = byname[name]
+            local resp = GP.sample(op.rpc.resp, lookup(op.rpc.package))
+            local canned = op.request.k == 'list' and resp or resp
+            local client = C.new({ exchange = function () return canned end })
+            local args = {}
+            for _, p in ipairs(C.operations[name].params) do args[p] = C.term.lit('x', 'bin') end
+            local case = client[name](args)
+            if case == 'ok' then okc = okc + 1 else fail[#fail + 1] = name end
+            local failing = C.new({ exchange = function ()
+                return C.term.node('tuple', C.term.lit('error', 'atom'), C.term.lit('14', 'int'), C.term.lit('unavailable', 'bin'))
+            end })
+            if failing[name](args) == 'error' then errc = errc + 1 end
+        end
+        print(('  SIMULATED: %d operation(s) read a canned reply of their response shape as ok, %d an error status as error%s'):format(
+            okc, errc, #fail > 0 and ('; NOT: ' .. table.concat(fail, ', ')) or ''))
+    end
+    if o.client then
+        -- the rpc methods a real client calls (by name, from its extraction) must be operations
+        local ts = require 'cartograph.providers.treesitter'
+        local data = ts.extract(o.client)
+        local methods = {}
+        for _, op in ipairs(model.operations) do methods[op.rpc.method] = op.name end
+        local called, seen = {}, {}
+        for _, c in ipairs(data.calls or {}) do
+            if c.callee and methods[c.callee] and not seen[c.callee] then seen[c.callee] = true; called[#called + 1] = c.callee end
+        end
+        table.sort(called)
+        print(('  CLIENT: %d rpc method(s) the client at %s calls, every one an operation: %s'):format(#called, o.client,
+            table.concat(called, ', ')))
+    end
+    local core = io.open(here .. '/lua/cartograph/peergen.lua'):read('a')
+    print(('  CORE: peergen.lua mentions no protocol: %s'):format((core:gsub('%-%-[^\n]*', ''):find('xmpp', 1, true) or core:find('grpc', 1, true)) and 'NO' or 'yes'))
+    os.exit(0)
+end
 
 local A = require('cartograph.algebra').load()
 local PG = require 'cartograph.peergen'

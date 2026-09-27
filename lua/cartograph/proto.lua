@@ -221,8 +221,9 @@ function M.parse(src)
         out.services[#out.services + 1] = svc
     end
 
-    -- a message/enum body, recursed only to collect QUALIFIED nested names —
-    -- fields are deliberately not read (descendable-data is a separate arc)
+    -- a message/enum body: QUALIFIED nested names, and a message's FIELDS (CART-1138: the peer generator's request
+    -- and reply shapes) — `[repeated|optional] Type name = N [opts];`, `map<K, V> name = N;`, the fields of a
+    -- `oneof` (each optional). An enum's values are not fields. Anything else in a body is skipped, never guessed.
     local function typedecl(kw, prefix)
         p = p + 1
         local nm = peek()
@@ -230,17 +231,52 @@ function M.parse(src)
         p = p + 1
         local q = prefix and (prefix .. '.' .. nm.v) or nm.v
         local bucket = kw == 'enum' and out.enums or out.messages
-        bucket[#bucket + 1] = { name = q, line = nm.line }
+        local entry = { name = q, line = nm.line, fields = kw == 'message' and {} or nil }
+        bucket[#bucket + 1] = entry
         if tv() == ';' then p = p + 1; return end -- a forward declaration
         if tv() ~= '{' then refuse(nm); return end
         p = p + 1
-        local depth = 1
+        local depth, oneof_depth = 1, nil
+        -- one field at p: returns true when it read one
+        local function field()
+            local label
+            if tv() == 'repeated' or tv() == 'optional' or tv() == 'required' then label = tv(); p = p + 1 end
+            local ty, key, val
+            if tv() == 'map' and tv(1) == '<' then
+                key, val = tv(2), tv(4)
+                if tv(3) ~= ',' or tv(5) ~= '>' then return false end
+                p = p + 6
+                ty = 'map'
+            else
+                local t = peek()
+                if not t or t.k ~= 'id' then return false end
+                ty = t.v
+                p = p + 1
+            end
+            local fname = peek()
+            if not fname or fname.k ~= 'id' or tv(1) ~= '=' then return false end
+            local num = tv(2)
+            p = p + 3
+            if not skip_to_semi() then return false end
+            entry.fields[#entry.fields + 1] = { name = fname.v, type = ty, number = tonumber(num), label = label,
+                key = key, value = val, oneof = oneof_depth and true or nil }
+            return true
+        end
         while p <= N and depth > 0 do
             local v = tv()
             if v == 'message' or v == 'enum' then
                 typedecl(v, q)
+            elseif kw == 'message' and v == 'oneof' and tv(2) == '{' then
+                p = p + 3; depth = depth + 1; oneof_depth = depth
+            elseif kw == 'message' and (v == 'option' or v == 'reserved' or v == 'extensions') then
+                if not skip_to_semi() then break end
             elseif v == '{' then depth = depth + 1; p = p + 1
-            elseif v == '}' then depth = depth - 1; p = p + 1
+            elseif v == '}' then
+                if oneof_depth == depth then oneof_depth = nil end
+                depth = depth - 1; p = p + 1
+            elseif kw == 'message' and (depth == 1 or depth == oneof_depth) and v ~= ';' then
+                local save = p
+                if not field() then p = save + 1 end
             else p = p + 1 end
         end
     end

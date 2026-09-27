@@ -431,3 +431,27 @@ test('k8s: attach is idempotent and mints no node kind the schema lacks', functi
         ok(validate.NODE_KINDS[n.kind], n.kind .. ' is not a declared node kind')
     end
 end)
+
+test('proto: a message\'s FIELDS — labels, maps, oneof members; options and reserved skipped, enum values not fields', function ()
+    local P = require 'cartograph.proto'
+    local r = assert(P.parse(table.concat({
+        'syntax = "proto3";',
+        'message M {',
+        '  option deprecated = true;',
+        '  reserved 9, 10;',
+        '  string id = 1;',
+        '  repeated int32 xs = 2 [packed = true];',
+        '  map<string, Item> by = 3;',
+        '  oneof pick { string a = 4; int64 b = 5; }',
+        '  enum Kind { K0 = 0; K1 = 1; }',
+        '  Kind kind = 6;',
+        '}', '' }, '\n')))
+    local m = r.messages[1]
+    local got = {}
+    for _, f in ipairs(m.fields) do
+        got[#got + 1] = ('%s%s %s=%d%s'):format(f.label and (f.label .. ' ') or '', f.type == 'map' and ('map<' .. f.key .. ',' .. f.value .. '>') or f.type,
+            f.name, f.number, f.oneof and ' (oneof)' or '')
+    end
+    eq({ 'string id=1', 'repeated int32 xs=2', 'map<string,Item> by=3', 'string a=4 (oneof)', 'int64 b=5 (oneof)', 'Kind kind=6' }, got)
+    eq(0, r.refused)
+end)
