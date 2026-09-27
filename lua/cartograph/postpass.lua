@@ -136,6 +136,11 @@ M.PASSES = {
     { name = 'erlhooks',
         run = function (data) return require('cartograph.erlhooks').attach(data) end,
         say = function (s) return require('cartograph.erlhooks').summary(s), INFO end },
+    -- WHAT A MESSAGE REACHES (CART-1130): a gen_server call/cast site reaches the handle_call/handle_cast clause its
+    -- message unifies with (first match), the server explicit or chosen by the message
+    { name = 'erlmsg',
+        run = function (data) return require('cartograph.erlmsg').attach(data) end,
+        say = function (s) return require('cartograph.erlmsg').summary(s), INFO end },
     -- ONE CALL, TWO DEFINITIONS, ONE PER BUILD (CART-1133): a same-file refusal whose candidates sit in mutually
     -- exclusive -ifdef/-ifndef/-else branches reaches the SET, each member under one configuration
     { name = 'erlvariants',
