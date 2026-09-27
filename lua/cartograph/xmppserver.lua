@@ -27,7 +27,7 @@ local argv = require 'cartograph.argv'
 local xlang = require 'cartograph.xlang'
 
 local VERB = 'add_iq_handler'
-local SLOT = { key = 3, mod = 4, fn = 5 }
+local SLOT = { component = 1, key = 3, mod = 4, fn = 5 }
 
 local function atom(a)
     if not a then return nil end
@@ -46,7 +46,8 @@ function M.endpoints(data)
             local k, m, f = argv.at(c, SLOT.key), argv.at(c, SLOT.mod), argv.at(c, SLOT.fn)
             local row = { carrier = 'call', file = c.file, line = c.line,
                 uri = k and k.k == 'macro' and k.v or (k and k.k == 'lit' and k.v) or nil,
-                key = k and k.k == 'macro' and k.name or nil, mod = atom(m), fn = atom(f) }
+                key = k and k.k == 'macro' and k.name or nil, mod = atom(m), fn = atom(f),
+                component = atom(argv.at(c, SLOT.component)) }
             if not (row.mod and row.fn) then
                 -- a registration HELPER's own call (`add_iq_handler(Component, Host, NS, Module, Function)` inside
                 -- gen_iq_handler / gen_mod): its slots are its parameters, not an endpoint
@@ -63,7 +64,7 @@ function M.endpoints(data)
     local ers = data.erlreg or require('cartograph.erlreg').attach(data)
     for _, r in ipairs(ers.rows or {}) do
         local row = { carrier = 'tuple', file = r.file, line = r.line, uri = r.uri, key = r.key,
-            mod = r.mod, fn = r.fn, handler = r.handler }
+            mod = r.mod, fn = r.fn, handler = r.handler, component = r.component }
         if not row.uri then row.why = 'no uri'; stats.no_uri = stats.no_uri + 1
         elseif not row.handler then row.why = 'handler unresolved'; stats.unresolved = stats.unresolved + 1 end
         stats.tuple = stats.tuple + 1

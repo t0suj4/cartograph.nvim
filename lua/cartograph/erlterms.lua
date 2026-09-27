@@ -770,6 +770,35 @@ local function run_clauses(m, id, clauses, args, S)
     return vals
 end
 
+--- WHICH CLAUSE a call selects, without evaluating a body: each clause's verdict ('yes' | 'maybe' | 'no') for the
+--- argument terms — its head patterns and its guard, first match. The generated peer's contract check (peergen,
+--- CART-1138): the request built for clause k must leave every earlier clause at 'no'.
+--- -> { verdict… } in clause order | nil, why
+function M.clause_verdicts(P, mod, fn, args, S)
+    S = S or M.session()
+    local m = P:module(mod)
+    if not m then return nil, 'no source for ' .. tostring(mod) end
+    local clauses = m.fns[fn .. '/' .. #args]
+    if not clauses then return nil, ('%s:%s/%d not defined'):format(mod, fn, #args) end
+    local out = {}
+    for _, cl in ipairs(clauses) do
+        local cenv = { src = m.src, ctx = m.ctx, vars = {}, args = args, fname = mod .. ':' .. fn }
+        local verdict = 'yes'
+        for i, p in ipairs(named(cl:field('args')[1])) do
+            local v, bv = bind(p, args[i], cenv, S)
+            if v == 'no' then verdict = 'no'; break end
+            if v == 'maybe' then verdict = 'maybe' end
+            for nm, t in pairs(bv) do cenv.vars[nm] = t end
+        end
+        if verdict ~= 'no' then
+            local gv = M.guard(cl, cenv, S)
+            if gv == 'no' then verdict = 'no' elseif gv == 'maybe' then verdict = 'maybe' end
+        end
+        out[#out + 1] = verdict
+    end
+    return out
+end
+
 local function iso(x, y)
     if x == RAISE or y == RAISE then return x == y end
     local a = A()
@@ -1644,6 +1673,9 @@ function M.call(P, mod, fn, args, S)
     walk(tm)
     return tm, holes
 end
+
+--- a declared record default's TEXT as a term (`<<>>` -> "", `[]` -> list(), none -> undefined), or a hole
+function M.default_term(text, S) return default_term(text, S or M.session()) end
 
 --- a term's completeness: 'complete' (no holes), 'partial', or 'opaque' (the term IS a hole)
 function M.status(term)

@@ -278,10 +278,15 @@ function M.attach(data)
                                 if uri then
                                     stats.by_ns[uri] = (stats.by_ns[uri] or 0) + 1
                                 end
+                                -- the COMPONENT the handler serves (ejabberd_local / ejabberd_sm): the tuple's
+                                -- second element when it is an atom — the address picks it, not the namespace
+                                local cname, ctype
+                                if els[2] then cname, ctype = element(els[2], src) end
                                 stats.rows[#stats.rows + 1] = {
                                     tag = carrier.tag, arity = #els,
                                     key = kname, uri = uri, fn = fname, mod = mname,
                                     file = n.file, line = line + 1, handler = h,
+                                    component = ctype == 'atom' and cname or nil,
                                 }
                                 ::continue::
                             end
