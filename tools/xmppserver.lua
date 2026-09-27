@@ -144,8 +144,9 @@ if want_sends then
     io.write(('  encoded to a record term %d, of which the codec spec puts on the wire %d; one of several records %d '
         .. '(every member on the wire: %d)\n'):format(recs, onwire, oneof, oneof_wire))
     io.write(('  holes by reason: %s\n'):format(top(why, 12)))
-    io.write(('  summaries %d evaluated, %d memo hits; cut: %d recursive, %d at depth, %d by budget; %.0f ms\n'):format(
-        sst.summaries, sst.memo_hits, sst.recursive, sst.depth, sst.budget, ms))
+    io.write(('  summaries %d evaluated, %d memo hits; %d loop(s) in %d iteration(s), %d unconverged; cut: %d mutual '
+        .. 'recursion, %d at depth, %d by budget; %.0f ms\n'):format(sst.summaries, sst.memo_hits, sst.loops,
+        sst.iterations, sst.unconverged, sst.recursive, sst.depth, sst.budget, ms))
     if want_rows then
         local A = require('cartograph.algebra').load()
         for _, r in ipairs(srows) do

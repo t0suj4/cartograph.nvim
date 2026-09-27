@@ -140,14 +140,16 @@ test('erlterms: a call is its callee\'s clauses against the argument terms — r
             'result(_) -> erlang:error(badarg).',
             'codec() -> lib_codec.',
             'dyn(X) -> Mod = codec(), Mod:build(X).',
-            'loop(N) -> loop(N).', '' }, '\n'),
+            'loop(N) -> loop(N).',
+            'ping(X) -> pong(X).', 'pong(X) -> ping(X).', '' }, '\n'),
         lib_codec = '-module(lib_codec).\nbuild(Id) -> {iq, Id, set, <<>>, undefined, undefined, [], #{}}.\n',
         user = table.concat({
             '-module(user).',
             'a(#iq{type = get} = Q) -> lib:result(Q).',
             'b(Q) -> lib:result(Q).',
             'c() -> lib:dyn(<<"x">>).',
-            'd() -> lib:loop(1).', '' }, '\n'),
+            'd() -> lib:loop(1).',
+            'e() -> lib:ping(1).', '' }, '\n'),
     }
     local m = P:module('user')
     local A = require('cartograph.algebra').load()
@@ -175,10 +177,14 @@ test('erlterms: a call is its callee\'s clauses against the argument terms — r
     ok(c_tuple:find('^%(tuple "iq"'), 'the record-tuple identity observes: ' .. c_tuple)
     local _, _, _, c_dyn = at('c/0', { dynmod = true })
     ok(c_dyn:find('^%?'), 'the module evaluation observes: ' .. c_dyn)
-    -- recursion is cut, not iterated, and the cut says so
-    local d, dh, S = at('d/0')
+    -- a loop no clause ever leaves never returns
+    local d, dh = at('d/0')
     ok(d:find('^%?'), d)
-    ok(table.concat(reasons(dh), '|'):find('recursive call to lib:loop/1', 1, true), table.concat(reasons(dh), '|'))
+    ok(table.concat(reasons(dh), '|'):find('never returns', 1, true), table.concat(reasons(dh), '|'))
+    -- MUTUAL recursion is not a loop: it stays a cut, and the cut is counted
+    local e, eh, S = at('e/0')
+    ok(e:find('^%?'), e)
+    ok(table.concat(reasons(eh), '|'):find('recursive call to lib:ping/1', 1, true), table.concat(reasons(eh), '|'))
     ok(S.stats.recursive >= 1, 'the cut is counted')
 end)
 
@@ -215,4 +221,70 @@ test('erlterms: a record matches a tuple pattern; a join keeps a shared hole\'s 
     end
     walk(root)
     eq('(rec:disco_info "f" (nil) (nil) (nil))', A.show((ET.term(use, src, CTX))))
+end)
+
+test('erlterms: simple recursion is a LOOP — the state and the value iterated to a fixpoint', function ()
+    need()
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    local P = program {
+        loops = table.concat({
+            '-module(loops).',
+            -- an accumulator loop: the value is the base clause under the loop state
+            'build(L) -> build(L, []).',
+            'build([], Acc) -> #disco_info{node = <<"n">>, features = Acc};',
+            'build([H | T], Acc) -> build(T, [H | Acc]).',
+            -- a counter, the self-call as a case arm's value
+            'wait(N) -> case N of 0 -> #disco_info{node = <<"done">>}; _ -> wait(N - 1) end.',
+            -- a list builder (a map)
+            'ids([]) -> [];',
+            'ids([H | T]) -> [#disco_info{node = H} | ids(T)].', '' }, '\n'),
+        user = table.concat({
+            '-module(user).',
+            'a() -> loops:build([<<"urn:a">>]).',
+            'b() -> loops:wait(3).',
+            'c() -> loops:ids([<<"x">>, <<"y">>]).', '' }, '\n'),
+    }
+    local m = P:module('user')
+    local function at(fn)
+        local cl = m.fns[fn][1]
+        local last
+        for c in cl:field('body')[1]:iter_children() do if c:named() then last = c end end
+        local t, holes, S = ET.term(last, m.src, m.ctx)
+        return A.show(t), holes, S
+    end
+    local a, ah, S = at('a/0')
+    ok(a:find('^%(rec:disco_info "n" %(nil%) %?%S+ %(nil%)%)$'), 'the base clause under the loop state: ' .. a)
+    ok(table.concat(reasons(ah), '|'):find('loop variable of loops:build/2', 1, true), 'features is the loop variable')
+    ok(S.stats.loops >= 1 and S.stats.iterations >= 2, 'the loop is counted')
+    eq('(rec:disco_info "done" (nil) (nil) (nil))', (at('b/0')))
+    local c, ch, S3 = at('c/0')
+    ok(c:find('^%?'), 'a list builder joins nil and cons: ' .. c)
+    ok(table.concat(reasons(ch), '|'):find('one of cons | nil', 1, true), table.concat(reasons(ch), '|'))
+    eq(0, S3.stats.unconverged)
+    -- the guard observes: without the loop the self-call is a cut and nothing comes back
+    ET.OFF = { loops = true }
+    local a2 = at('a/0')
+    local b2 = at('b/0')
+    ET.OFF = {}
+    ok(a2:find('^%?'), 'no loop model: ' .. a2)
+    ok(b2:find('^%?'), 'no loop model: ' .. b2)
+end)
+
+test('erlterms: yes means CERTAIN — a bound variable or a repeated one in a pattern only makes it maybe', function ()
+    need()
+    local ET = require 'cartograph.erlterms'
+    -- T is already bound (a parameter): `X` matching `T` is an equality nobody knows, not a definite match
+    local src = 'f(T, X) -> case X of T -> #disco_info{node = <<"a">>}; _ -> #disco_info{node = <<"b">>} end.\n'
+    local shown = last_term(src)
+    ok(shown:find('^%(rec:disco_info %?'), 'both arms may run: ' .. shown)
+    -- a repeated variable identifies two unknowns: also only maybe
+    local rep = last_term('f(X, Y) -> case {X, Y} of {Z, Z} -> #disco_info{node = <<"a">>}; _ -> #disco_info{node = <<"b">>} end.\n')
+    ok(rep:find('^%(rec:disco_info %?'), 'both arms may run: ' .. rep)
+    ET.OFF = { own = true }
+    local s2 = last_term(src)
+    local rep2 = last_term('f(X, Y) -> case {X, Y} of {Z, Z} -> #disco_info{node = <<"a">>}; _ -> #disco_info{node = <<"b">>} end.\n')
+    ET.OFF = {}
+    eq('(rec:disco_info "a" (nil) (nil) (nil))', s2, 'the guard observes (bound variable)')
+    eq('(rec:disco_info "a" (nil) (nil) (nil))', rep2, 'the guard observes (repeated variable)')
 end)

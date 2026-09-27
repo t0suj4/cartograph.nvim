@@ -19,9 +19,10 @@
 -- A pattern variable's value is what unify bound it to: the subject's part at that position.
 --
 -- ★★ A CALL IS ITS CALLEE'S CLAUSES, EVALUATED ON DEMAND with the argument terms (a function of this module, or of a
--- module of the tree or of a dependency's source — `program`), memoized on (callee, argument terms). There is NO
--- FIXPOINT: a recursive call and a call deeper than MAX_DEPTH are holes with their own reasons, and the recursion
--- cut is counted, so the need for CART-1037's shared solver is MEASURED on this population, not assumed.
+-- module of the tree or of a dependency's source — `program`), memoized on (callee, argument terms). A function
+-- that calls ITSELF is a LOOP (see `loop` below: its state and value iterated to a fixpoint over the join lattice);
+-- MUTUAL recursion and a call deeper than MAX_DEPTH are holes with their own reasons, counted — no shared solver
+-- (CART-1037), and its need is MEASURED on the population, not assumed.
 -- Arms that never return (error/exit/throw — the spec's `raises`, a language fact — or a callee every clause of
 -- which raises) are dropped from a join rather than generalizing it to a bare hole.
 --
@@ -98,7 +99,8 @@ end
 -- ── the session: hole names, their reasons, the summary memo and counters ────────────────────────────────────────
 function M.session()
     return { n = 0, reasons = {}, domains = {}, kinds = {}, memo = {}, stack = {}, depth = 0, evals = 0, top = {},
-        stats = { recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0 } }
+        loops = {}, stats = { recursive = 0, depth = 0, budget = 0, summaries = 0, memo_hits = 0, loops = 0,
+            iterations = 0, unconverged = 0 } }
 end
 
 local function fresh(S, why, prefix)
@@ -155,7 +157,17 @@ local function as_records(t, arity)
 end
 
 --- 'no' | 'yes' | 'maybe', and the pattern holes' values (terms over the subject's holes)
-function M.match(pat, subj)
+-- ★★ YES MEANS THE SUBJECT CERTAINLY MATCHES. Unify treats every hole as a variable, but only the pattern's OWN
+-- holes (the fresh variables and wildcards it minted: the set `mine`) are free to bind. A subject hole bound to
+-- anything but one of them — structure, another subject hole, or a hole the pattern took from an already-bound
+-- variable (`case get_name(El) of TagName -> …` with TagName a parameter) — is an ASSUMPTION: maybe. Taken as yes,
+-- that arm ended the first match and every later arm was lost (match_tag with unknown arguments answered `true`).
+local function own(h, mine)
+    if not mine then return true end
+    return mine[h] == true
+end
+
+function M.match(pat, subj, mine)
     local a = A()
     local arity = {}
     pat, subj = as_tuples(pat, arity), as_tuples(subj, arity)
@@ -165,10 +177,19 @@ function M.match(pat, subj)
     local verdict, back = 'yes', {}
     for g, t in pairs(U.right) do
         if t.k == 'hole' then
-            if t.h ~= g then back[t.h] = a.hole(g) end
+            if t.h ~= g then
+                -- two subject holes meeting in one pattern variable ({Z, Z} against {X, Y}) is an equality nobody knows
+                if back[t.h] and not M.OFF.own then verdict = 'maybe' end
+                back[t.h] = a.hole(g)
+                if not own(t.h, mine) and not M.OFF.own then verdict = 'maybe' end
+            end
         else
             verdict = 'maybe'
         end
+    end
+    -- a hole the pattern did not create (a bound variable's value) must stay itself
+    for h, t in pairs(U.left) do
+        if not own(h, mine) and not M.OFF.own and not (t.k == 'hole' and (t.h == h or back[t.h])) then verdict = 'maybe' end
     end
     local vals = {}
     for h, t in pairs(U.left) do vals[h] = as_records(subst(t, back), arity) end
@@ -176,7 +197,7 @@ function M.match(pat, subj)
 end
 
 -- ── the join of several arm values, reasons carried through ─────────────────────────────────────────────────────
-local function join_all(S, vals, why_empty)
+local function join_all(S, vals, why_empty, why_diff)
     local a = A()
     local live = {}
     for _, v in ipairs(vals) do if v ~= RAISE then live[#live + 1] = v end end
@@ -190,7 +211,7 @@ local function join_all(S, vals, why_empty)
         for n, f in pairs(J.frags or {}) do
             local kept = f.left and f.left.k == 'hole' and f.left.h == n and f.right and f.right.k == 'hole' and f.right.h == n
             if not kept then
-                ren[n] = fresh(S, 'the arms differ here (a join)')
+                ren[n] = fresh(S, why_diff or 'the arms differ here (a join)')
                 -- the join's DOMAIN for the hole: which values or kinds the arms put there (A.join's summary)
                 local d = J.template.holes[n] and J.template.holes[n].domain
                 if d then S.domains[ren[n].h] = d end
@@ -238,10 +259,55 @@ local function rec_name(x, src)
     return rn and txt(rn, src)
 end
 
+-- is `nm` (the variable at `n`, inside a pattern) bound BEFORE that pattern: in an enclosing head, an enclosing
+-- arm's pattern, or a `Pat = Expr` match earlier in the clause body — erlang's "a bound name in a pattern is a test"
+local function bound_before(n, nm, src)
+    local function has(x)
+        if T.var[x:type()] and txt(x, src) == nm then return true end
+        for c in x:iter_children() do if c:named() and has(c) then return true end end
+        return false
+    end
+    local function within(a, b)
+        local sr, sc, er, ec = a:range()
+        local osr, osc, oer, oec = b:range()
+        return (sr > osr or (sr == osr and sc >= osc)) and (er < oer or (er == oer and ec <= oec))
+    end
+    local at = select(3, n:start())
+    local x = n:parent()
+    while x do
+        local t = x:type()
+        if T.clause[t] or T.funclause[t] then
+            local args = x:field('args')[1]
+            if args and not within(n, args) and has(args) then return true end
+            local found = false
+            local function walk(y)
+                for c in y:iter_children() do
+                    if found or select(3, c:start()) >= at then return end
+                    if T.match[c:type()] then
+                        local l = c:field('lhs')[1]
+                        if l and not within(n, l) and has(l) then found = true; return end
+                    end
+                    if not T.fn[c:type()] then walk(c) end
+                end
+            end
+            walk(x:field('body')[1] or x)
+            if found then return true end
+            if T.clause[t] then return false end
+        elseif T.arm[t] then
+            local pat = x:field('pat')[1]
+            if pat and not within(n, pat) and has(pat) then return true end
+        end
+        x = x:parent()
+    end
+    return false
+end
+
 -- ── PATTERNS: a term whose variables are holes; `binds` maps each variable to its term ───────────────────────────
 -- a variable env.vars already binds is a CONSTRAINT (erlang: a bound name in a pattern is a match test)
 function M.pattern(x, env, S)
     local src, ctx = env.src, env.ctx
+    local mine = {}        -- the holes this pattern mints: its own variables and wildcards
+    local function pfresh(why) local h = fresh(S, why, 'p'); mine[h.h] = true; return h end
     local binds = {}
     -- only `_` is a wildcard: `_X` is a variable like any other (it merely silences the unused warning)
     local function real(n) local nm = n and T.var[n:type()] and txt(n, src); return nm and nm ~= '_' and nm or nil end
@@ -261,15 +327,18 @@ function M.pattern(x, env, S)
         end
         if T.var[t] then
             local nm = real(n)
-            if not nm then return fresh(S, 'a wildcard', 'p') end
+            if not nm then return pfresh('a wildcard') end
             if env.vars[nm] then return env.vars[nm] end
-            if not binds[nm] then binds[nm] = fresh(S, 'pattern variable ' .. nm, 'p') end
+            -- already bound where the function's arguments are unknown (a head variable, an earlier match): a
+            -- CONSTRAINT, its value the variable's, never a fresh binder
+            if not binds[nm] and not M.OFF.own and bound_before(n, nm, src) then return M.eval(n, env, S) end
+            if not binds[nm] then binds[nm] = pfresh('pattern variable ' .. nm) end
             return binds[nm]
         end
         if T.record[t] then
             local rec = rec_name(n, src)
             local names = rec and ctx.record_fields and ctx.record_fields(rec)
-            if not names then return fresh(S, 'a record pattern with no declaration in scope', 'p') end
+            if not names then return pfresh('a record pattern with no declaration in scope') end
             local set = {}
             for _, rf in ipairs(n:field('fields')) do
                 local fname = rf:field('name')[1]
@@ -280,7 +349,7 @@ function M.pattern(x, env, S)
             local kids = {}
             for i, f in ipairs(names) do
                 kids[i] = set[f] or (M.OFF.wildcards and default_term((ctx.defaults and ctx.defaults(rec) or {})[f], S))
-                    or fresh(S, 'a field the pattern does not mention', 'p')
+                    or pfresh('a field the pattern does not mention')
             end
             return A().node('rec:' .. rec, unpack(kids, 1, #names))
         end
@@ -302,17 +371,17 @@ function M.pattern(x, env, S)
         if T.atom[t] or T.integer[t] or T.string[t] or T.char[t] or T.float[t] or T.macro[t] or T.binary[t] then
             local v = M.eval(n, env, S)
             if v.k == 'lit' then return v end
-            return fresh(S, 'a pattern constant we cannot read', 'p')
+            return pfresh('a pattern constant we cannot read')
         end
-        return fresh(S, 'a ' .. t .. ' pattern', 'p')
+        return pfresh('a ' .. t .. ' pattern')
     end
-    return conv(x), binds
+    return conv(x), binds, mine
 end
 
 -- bind a pattern against a subject: the verdict and the variables' values
 local function bind(patnode, subj, env, S)
-    local p, binds = M.pattern(patnode, env, S)
-    local verdict, vals = M.match(p, subj)
+    local p, binds, mine = M.pattern(patnode, env, S)
+    local verdict, vals = M.match(p, subj, mine)
     if verdict == 'no' then return 'no' end
     local out = {}
     for nm, t in pairs(binds) do
@@ -459,30 +528,8 @@ local function lookup(var, env, S)
 end
 
 -- ── CALLS: the callee's clauses against the argument terms ──────────────────────────────────────────────────────
-local function summary(P, mod, fn, args, S)
-    local m = P:module(mod)
-    if not m then return fresh(S, ('a call into %s (no source)'):format(mod)) end
-    local key = fn .. '/' .. #args
-    local clauses = m.fns[key]
-    if not clauses then return fresh(S, ('%s:%s (not defined there)'):format(mod, key)) end
-    local a = A()
-    local shown = {}
-    for i, t in ipairs(args) do shown[i] = a.show(t) end
-    local id = mod .. ':' .. key
-    local mkey = id .. '(' .. table.concat(shown, ', ') .. ')'
-    if S.memo[mkey] then S.stats.memo_hits = S.stats.memo_hits + 1; return S.memo[mkey] end
-    if (S.stack[id] or 0) >= M.UNROLL then
-        S.stats.recursive = S.stats.recursive + 1
-        S.stats.cut_ids = S.stats.cut_ids or {}
-        S.stats.cut_ids[id] = (S.stats.cut_ids[id] or 0) + 1
-        return fresh(S, ('a recursive call to %s (no fixpoint: CART-1037)'):format(id))
-    end
-    if S.depth >= M.MAX_DEPTH then S.stats.depth = S.stats.depth + 1; return fresh(S, 'call depth ' .. M.MAX_DEPTH) end
-    if S.evals >= M.BUDGET then S.stats.budget = S.stats.budget + 1; return fresh(S, 'evaluation budget') end
-    S.evals = S.evals + 1
-    S.stats.summaries = S.stats.summaries + 1
-    S.stack[id] = (S.stack[id] or 0) + 1
-    S.depth = S.depth + 1
+-- the clauses of `id` against `args`, first match: the value of each clause that may run
+local function run_clauses(m, id, clauses, args, S)
     local vals = {}
     for _, cl in ipairs(clauses) do
         local cenv = { src = m.src, ctx = m.ctx, vars = {}, args = args, fname = id }
@@ -500,9 +547,106 @@ local function summary(P, mod, fn, args, S)
             if verdict == 'yes' then break end
         end
     end
+    return vals
+end
+
+local function iso(x, y)
+    if x == RAISE or y == RAISE then return x == y end
+    local a = A()
+    return a.iso(a.template(x), a.template(y))
+end
+
+-- ★★ SIMPLE RECURSION IS A LOOP (USER 2026-09-27: "support simple recursion if it can be modelled as a loop").
+-- A function calling ITSELF is a loop whose STATE is its argument tuple and whose value is what the clauses return.
+-- Both are iterated from the call's own arguments and from BOTTOM (no value yet: an arm whose value needs it is
+-- dropped, as a raise is):
+--   state_{i+1} = join(state_i, the argument tuples of every self-call made in iteration i)
+--   value_{i+1} = join of the clauses evaluated under state_i, each self-call returning value_i
+-- until neither changes (A.iso). A strict generalization step replaces a subterm by a hole, so a chain is bounded by
+-- the size of the first state: MAX_ITER is a safety net, and hitting it is a counted hole. A loop that no clause
+-- ever leaves (no base case) never returns. Only DIRECT self-recursion is a loop; a call back into a function
+-- deeper on the stack (mutual recursion) stays a counted cut.
+M.MAX_ITER = 8
+
+local function loop(m, id, clauses, args, S)
+    local a = A()
+    local state, value = a.node('tuple', unpack(args, 1, #args)), RAISE
+    local L = { value = value }
+    S.loops[id] = L
+    S.stats.loops = S.stats.loops + 1
+    for i = 1, M.MAX_ITER do
+        L.value, L.next = value, nil
+        local vals = run_clauses(m, id, clauses, state.kids, S)
+        local nvalue = join_all(S, vals, ('%s: no clause admits the arguments'):format(id))
+        -- no self-call was made: not a loop, the one pass is the value
+        if i == 1 and not L.next then S.loops[id] = nil; S.stats.loops = S.stats.loops - 1; return nvalue end
+        -- ascending: the value only ever generalizes
+        if value ~= RAISE and nvalue ~= RAISE then
+            local up = join_all(S, { value, nvalue }, 'nothing', ('the value of the loop %s (it changes across iterations)'):format(id))
+            -- already as general as the join: keep it, and the reasons its own holes carry
+            if not iso(up, nvalue) then nvalue = up end
+        elseif nvalue == RAISE then nvalue = value end
+        local nstate = state
+        if L.next then
+            nstate = join_all(S, { state, L.next }, 'nothing', ('a loop variable of %s (it changes across iterations)'):format(id))
+        end
+        S.stats.iterations = S.stats.iterations + 1
+        if iso(nvalue, value) and iso(nstate, state) then S.loops[id] = nil; return value end
+        if nstate.k ~= 'tuple' then
+            -- the whole state generalized to one hole: rebuild the tuple of per-argument holes
+            local kids = {}
+            for j = 1, #args do kids[j] = fresh(S, ('a loop variable of %s (it changes across iterations)'):format(id)) end
+            nstate = a.node('tuple', unpack(kids, 1, #kids))
+        end
+        state, value = nstate, nvalue
+        if i == M.MAX_ITER then S.stats.unconverged = S.stats.unconverged + 1 end
+    end
+    S.loops[id] = nil
+    return fresh(S, ('a loop of %s that did not converge in %d iterations'):format(id, M.MAX_ITER))
+end
+
+local function summary(P, mod, fn, args, S)
+    local m = P:module(mod)
+    if not m then return fresh(S, ('a call into %s (no source)'):format(mod)) end
+    local key = fn .. '/' .. #args
+    local clauses = m.fns[key]
+    if not clauses then return fresh(S, ('%s:%s (not defined there)'):format(mod, key)) end
+    local a = A()
+    local id = mod .. ':' .. key
+    -- a self-call inside its own loop: record the next state, answer with the current approximation
+    local L = S.loops[id]
+    if L and S.cur == id and not M.OFF.loops then
+        local st = a.node('tuple', unpack(args, 1, #args))
+        L.next = L.next and join_all(S, { L.next, st }, 'nothing', ('a loop variable of %s (it changes across iterations)'):format(id)) or st
+        return L.value
+    end
+    local shown = {}
+    for i, t in ipairs(args) do shown[i] = a.show(t) end
+    local mkey = id .. '(' .. table.concat(shown, ', ') .. ')'
+    if S.memo[mkey] then S.stats.memo_hits = S.stats.memo_hits + 1; return S.memo[mkey] end
+    if (S.stack[id] or 0) >= M.UNROLL then
+        S.stats.recursive = S.stats.recursive + 1
+        S.stats.cut_ids = S.stats.cut_ids or {}
+        S.stats.cut_ids[id] = (S.stats.cut_ids[id] or 0) + 1
+        return fresh(S, ('a recursive call to %s (mutual recursion: no fixpoint, CART-1037)'):format(id))
+    end
+    if S.depth >= M.MAX_DEPTH then S.stats.depth = S.stats.depth + 1; return fresh(S, 'call depth ' .. M.MAX_DEPTH) end
+    if S.evals >= M.BUDGET then S.stats.budget = S.stats.budget + 1; return fresh(S, 'evaluation budget') end
+    S.evals = S.evals + 1
+    S.stats.summaries = S.stats.summaries + 1
+    S.stack[id] = (S.stack[id] or 0) + 1
+    S.depth = S.depth + 1
+    local prev = S.cur
+    S.cur = id
+    local r
+    if M.OFF.loops then
+        r = join_all(S, run_clauses(m, id, clauses, args, S), ('%s: no clause admits the arguments'):format(id))
+    else
+        r = loop(m, id, clauses, args, S)
+    end
+    S.cur = prev
     S.depth = S.depth - 1
     S.stack[id] = S.stack[id] > 1 and S.stack[id] - 1 or nil
-    local r = join_all(S, vals, ('%s: no clause admits the arguments'):format(id))
     S.memo[mkey] = r
     return r
 end
