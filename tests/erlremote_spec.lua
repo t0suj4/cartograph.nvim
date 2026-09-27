@@ -78,3 +78,23 @@ test('erlang: `fun f/N` is a hedged reference to f/N of the same module (by arit
     table.sort(refs)
     eq({ 'm.erl::h@2 -> m.erl::j@4 ~', 'm.erl::h@2 -> m.erl::k@3 ~' }, refs, 'j/2 (not j/1), k/1; loop names itself: no edge')
 end)
+
+-- CART-1133: a call inside a -define body happens wherever the macro is USED. The body is not code, so no call was
+-- recorded, and functions only macros call read as dead (tr/2 behind ?INFO_IDENTITY, security_headers behind ?HTTP_OK).
+test('erlang: each use of a macro references the same-file functions its body calls (transitively, by macro arity)', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, s) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(s); fd:close() end
+    put('m.erl', '-module(m).\n-define(A(X), [tr(X)]).\n-define(B, ?A(1) ++ h()).\n-define(H(T), x:y(T)).\n'
+        .. '-define(H(A, B), g(A) ++ B).\nf() -> ?B.\nk() -> ?H(1, 2).\ntr(X) -> X.\nh() -> [].\ng(A) -> A.\nu() -> ?H(1).\n'
+        .. 'y(T) -> T.\n') -- a LOCAL y/1: the remote `x:y(T)` in ?H/1 must not reach it
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local refs = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' or e.kind == 'reg' then refs[#refs + 1] = e.kind .. ' ' .. (e.from:match('::(%w+)') or e.from) .. '->' .. e.to:match('::(%w+)') end
+    end
+    table.sort(refs)
+    eq({ 'ref f->h', 'ref f->tr', 'ref k->g' }, refs,
+        '?B reaches h and, through ?A, tr; ?H/2 reaches g; ?H/1 is a remote call; a use inside a -define is not a use site')
+end)

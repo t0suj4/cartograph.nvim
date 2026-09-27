@@ -131,6 +131,11 @@ M.PASSES = {
     { name = 'erldispatch',
         run = function (data) return require('cartograph.erldispatch').attach(data) end,
         say = function (s) return require('cartograph.erldispatch').summary(s), INFO end },
+    -- ONE CALL, TWO DEFINITIONS, ONE PER BUILD (CART-1133): a same-file refusal whose candidates sit in mutually
+    -- exclusive -ifdef/-ifndef/-else branches reaches the SET, each member under one configuration
+    { name = 'erlvariants',
+        run = function (data) return require('cartograph.erlvariants').attach(data) end,
+        say = function (s) return require('cartograph.erlvariants').summary(s), INFO end },
     -- a configured database: its tables join the graph and the code's SQL entities link to them (session pass)
     { name = 'dblink',
         run = function (data) return require('cartograph.dblink').attach(data) end,

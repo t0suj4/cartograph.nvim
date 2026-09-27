@@ -409,7 +409,9 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 210 -- v210: AN ERLANG `fun f/N` IS A REFERENCE (CART-1132, spec.fun_refs): the named function of the same module
+M.VERSION = 211 -- v211: A CALL IN AN ERLANG MACRO BODY IS ATTRIBUTED AT EACH USE OF THE MACRO (CART-1133, spec.fun_refs):
+--- `?INFO_IDENTITY(...)` in a function references the same-file functions the -define body calls (to a fixpoint).
+--- Prior: v210: AN ERLANG `fun f/N` IS A REFERENCE (CART-1132, spec.fun_refs): the named function of the same module
 --- gets the callback convention's hedged ref from the enclosing function (47 of 76 dead-function findings on ejabberd).
 --- Prior: v209: ERLANG FUNCTIONS CARRY THEIR EXPORT VERDICT (CART-1131, spec.exported_def from -export / export_all):
 --- the dead-function rule reported exported functions as dead (1216 of 1770 on ejabberd, +472 in export_all modules).

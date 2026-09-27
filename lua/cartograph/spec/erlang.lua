@@ -368,19 +368,87 @@ return {
     -- ★ `fun f/N` NAMES A FUNCTION OF THIS MODULE AS A VALUE (CART-1132): passed to lists:map, stored in a list of
     -- handlers, returned. The key is its name/arity alt key; the provider mints the reference. `fun m:f/N` (an
     -- external_fun) is cross-module and not read here yet; a macro or variable arity names nothing.
+    -- ★ AND A CALL INSIDE A MACRO BODY HAPPENS WHERE THE MACRO IS USED (CART-1133). `-define(INFO_IDENTITY(C, T, N,
+    -- L), [#identity{…, name = tr(L, N)}])` is not code: skip_call rightly records no call in it, so tr/2 had no
+    -- caller although every `?INFO_IDENTITY(...)` in a function calls it. Each USE of a macro in code therefore
+    -- yields the same-file functions its body calls — through the macros the body itself uses, to a fixpoint — at
+    -- the use site. Macros key by name AND argument count (`?HTTP_OK(Text)` and `?HTTP_OK(Headers, Text)` are two);
+    -- a remote call in a body is cross-module and not read here, like `fun m:f/N`.
     fun_refs = function (tsroot, src)
         local out = {}
-        local function walk(n)
-            if n:type() == 'internal_fun' then
+        local T = function (n) return vim.treesitter.get_node_text(n, src) end
+        local function argc(n, f)
+            local a = n:field(f)[1]
+            if not a then return -1 end
+            local k = 0
+            for c in a:iter_children() do if c:named() then k = k + 1 end end
+            return k
+        end
+        -- the local calls and macro uses in each -define body
+        local macros = {}
+        for form in tsroot:iter_children() do
+            if form:type() == 'pp_define' then
+                local lhs, body = form:field('lhs')[1], form:field('replacement')[1]
+                local nm = lhs and lhs:field('name')[1]
+                if nm and body then
+                    local m = { calls = {}, uses = {} }
+                    local function scan(n)
+                        local t = n:type()
+                        if t == 'call' then
+                            local e, par = n:field('expr')[1], n:parent()
+                            local remote = par and par:type() == 'remote'
+                            if e and e:type() == 'atom' and not remote then m.calls[#m.calls + 1] = T(e) .. '/' .. argc(n, 'args') end
+                        elseif t == 'macro_call_expr' then
+                            local mn = n:field('name')[1]
+                            if mn then m.uses[#m.uses + 1] = { T(mn), argc(n, 'args') } end
+                        end
+                        for c in n:iter_children() do if c:named() then scan(c) end end
+                    end
+                    scan(body)
+                    macros[T(nm) .. '/' .. argc(lhs, 'args')] = m
+                end
+            end
+        end
+        -- a use `?M(args)` names M at that argument count; a use with no match there reaches every M of that name
+        local function defs_of(name, n)
+            if macros[name .. '/' .. n] then return { name .. '/' .. n } end
+            local all = {}
+            for k in pairs(macros) do if k:match('^(.*)/%-?%d+$') == name then all[#all + 1] = k end end
+            return all
+        end
+        local memo = {}
+        local function expand(k, seen)
+            if memo[k] then return memo[k] end
+            if seen[k] then return {} end
+            seen[k] = true
+            local set, m = {}, macros[k]
+            for _, c in ipairs(m.calls) do set[c] = true end
+            for _, u in ipairs(m.uses) do
+                for _, dk in ipairs(defs_of(u[1], u[2])) do for c in pairs(expand(dk, seen)) do set[c] = true end end
+            end
+            memo[k] = set
+            return set
+        end
+        local function walk(n, in_define)
+            local t = n:type()
+            if t == 'pp_define' then in_define = true end
+            if t == 'internal_fun' then
                 local f, a = n:field('fun')[1], n:field('arity')[1]
                 local v = a and (a:field('value')[1] or a)
                 if f and f:type() == 'atom' and v and v:type() == 'integer' then
-                    out[#out + 1] = { key = vim.treesitter.get_node_text(f, src) .. '/' .. vim.treesitter.get_node_text(v, src), node = n }
+                    out[#out + 1] = { key = T(f) .. '/' .. T(v), node = n }
+                end
+            elseif t == 'macro_call_expr' and not in_define then
+                local mn = n:field('name')[1]
+                if mn then
+                    for _, dk in ipairs(defs_of(T(mn), argc(n, 'args'))) do
+                        for c in pairs(expand(dk, {})) do out[#out + 1] = { key = c, node = n } end
+                    end
                 end
             end
-            for c in n:iter_children() do if c:named() then walk(c) end end
+            for c in n:iter_children() do if c:named() then walk(c, in_define) end end
         end
-        walk(tsroot)
+        walk(tsroot, false)
         return out
     end,
     -- ★ A VARIABLE MODULE IS DYNAMIC DISPATCH (CART-1129). `Mod:start(Host)` names no module, and qualify_call below
