@@ -477,3 +477,63 @@ test('xmppspec: lift is ORDER-INDEPENDENT over a list collecting scalar and reco
     eq('<iq xmlns="jabber:client|jabber:server|jabber:component:accept"><query xmlns="http://jabber.org/protocol/'
         .. 'disco#info"/></iq>', X.render(L.args[1]))
 end)
+
+-- ── THE ENCODE DIRECTION: fxml_gen's rules read off the -xml forms (accepted against xmpp's own generated encoder
+-- by tools/xmppencode.lua: 498 of 498 sample terms agree) ──────────────────────────────────────────────────────────
+local ENC = [=[
+-xml(q,
+     #elem{name = <<"q">>,
+           xmlns = <<"urn:q">>,
+           module = t,
+           result = {q, '$node', '$kind', '$flag', '$items', '$one', '$req', '$_els'},
+           attrs = [#attr{name = <<"node">>},
+                    #attr{name = <<"kind">>, required = true},
+                    #attr{name = <<"flag">>, default = none, always_encode = true}],
+           refs = [#ref{name = qi, label = '$items'},
+                   #ref{name = qone, label = '$one', min = 0, max = 1, default = <<"">>},
+                   #ref{name = qreq, label = '$req', min = 1, max = 1}]}).
+
+-xml(qi, #elem{name = <<"i">>, xmlns = <<"urn:q">>, module = t, result = '$cdata'}).
+-xml(qone, #elem{name = <<"one">>, xmlns = <<"urn:q">>, module = t, result = '$cdata'}).
+-xml(qreq, #elem{name = <<"req">>, xmlns = <<"urn:q">>, module = t, result = '$cdata'}).
+
+-xml(dyn,
+     #elem{name = <<"dyn">>,
+           xmlns = [<<"urn:a">>, <<"urn:b">>],
+           module = t,
+           result = {dyn, '$xmlns', '$id'},
+           attrs = [#attr{name = <<"xmlns">>}, #attr{name = <<"id">>}]}).
+]=]
+
+test('xmppspec.encode: attributes by the absent-value rule, required and always_encode written, children in spec order', function ()
+    if not have_erlang() then skip 'no erlang parser' end
+    local A = require('cartograph.algebra').load()
+    local s = X.parse_source(ENC, 'enc.spec')
+    local function L(v) return A.lit(v) end
+    -- node absent (""), kind required, flag at its default but always_encode; two items, `one` at its default
+    -- <<"">> (left out), `req` required (written even undefined)
+    local t = A.node('rec:q', L(''), L('k'), L('none'), A.node('list', L('a'), L('b')), L(''), L('undefined'), A.node('list'))
+    eq('(tuple "xmlel" "q" (list (tuple "flag" "none") (tuple "kind" "k") (tuple "xmlns" "urn:q")) '
+        .. '(list (tuple "xmlel" "i" (list) (list (tuple "xmlcdata" "a"))) (tuple "xmlel" "i" (list) (list (tuple "xmlcdata" "b"))) '
+        .. '(tuple "xmlel" "req" (list) (list (tuple "xmlcdata" "undefined")))))', A.show((X.encode(s, t, ''))))
+    -- a node that is set is written; `one` off its default is a child
+    local t2 = A.node('rec:q', L('n'), L('k'), L('none'), A.node('list'), L('o'), L('undefined'), A.node('list'))
+    local shown = A.show((X.encode(s, t2, '')))
+    ok(shown:find('(tuple "node" "n")', 1, true), shown)
+    ok(shown:find('(tuple "xmlel" "one" (list) (list (tuple "xmlcdata" "o")))', 1, true), shown)
+    -- inside a parent of the same namespace there is no xmlns attribute
+    ok(not A.show((X.encode(s, t, 'urn:q'))):find('"xmlns"', 1, true))
+end)
+
+test('xmppspec.encode: an xmlns attribute that is a FIELD sets the namespace; several namespaces keep the parent\'s', function ()
+    if not have_erlang() then skip 'no erlang parser' end
+    local A = require('cartograph.algebra').load()
+    local s = X.parse_source(ENC, 'enc.spec')
+    local function L(v) return A.lit(v) end
+    -- the field says urn:b: that is the element's namespace, written once
+    eq('(tuple "xmlel" "dyn" (list (tuple "id" "1") (tuple "xmlns" "urn:b")) (list))',
+        A.show((X.encode(s, A.node('rec:dyn', L('urn:b'), L('1')), ''))))
+    -- the field empty: the parent's namespace when it is one of the element's (no attribute), else the first
+    eq('(tuple "xmlel" "dyn" (list) (list))', A.show((X.encode(s, A.node('rec:dyn', L(''), L('')), 'urn:b'))))
+    eq('(tuple "xmlel" "dyn" (list (tuple "xmlns" "urn:a")) (list))', A.show((X.encode(s, A.node('rec:dyn', L(''), L('')), 'urn:x'))))
+end)

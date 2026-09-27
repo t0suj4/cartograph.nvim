@@ -47,26 +47,8 @@ end
 -- a decoder that changes the value's representation (a jid string -> #jid{}) makes a client literal incomparable
 -- with a server pattern over the decoded value: such a literal becomes a hole. Enumerations and the lang check keep
 -- the text.
--- ★ AN ABSENT ATTRIBUTE IS NOT "ABSENT" ON THE SERVER: the generated decoder fills it in. fxml_gen's rule, read off
--- the generated source (xmpp/src/*.erl, `decode_<xml>_attr_<name>(__TopXMLNS, undefined) -> V`): an explicit
--- default wins; else a REQUIRED one is a decode error (the request is invalid: 'absent', which only a variable
--- accepts); else one with a converting decoder -> `undefined`; else `<<>>`. The same for cdata; a single ref ->
--- `undefined`. ACCEPTED BY AN ORACLE: tools/xmppmerge.lua --check-absent compares this rule with every generated
--- clause (408 on xmpp 02893ce).
-local function absent_value(src)
-    local a = A()
-    if src.default ~= nil and src.default ~= '$unset' then
-        local d = tostring(src.default)
-        d = d:match('^<<"(.*)">>$') or (d == '<<>>' and '') or d:gsub("^'(.*)'$", '%1')
-        return a.lit(d)
-    end
-    if src.required == true or src.required == 'true' then return a.node('absent') end
-    -- a CHECKER keeps the binary (xmpp_lang validates, it does not convert): absent stays <<>>. Found by the oracle
-    -- (tools/xmppmerge.lua --check-absent): the first cut said `undefined` and the generated code disagreed on 15
-    -- xml:lang / hreflang attributes out of 408.
-    if src.dec and src.dec ~= '' and not src.dec:find('xmpp_lang', 1, true) then return a.lit('undefined') end
-    return a.lit('')
-end
+-- the absent value (fxml_gen's rule, and its oracle) lives with the spec now: the encoder's omission is its inverse
+local absent_value = XS.absent_value
 M.absent_value = absent_value
 
 local function opaque_decoder(dec)

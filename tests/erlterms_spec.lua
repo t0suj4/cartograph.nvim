@@ -486,3 +486,74 @@ test('erlterms: the carried classes say WHY a loop iterates — an other positio
     eq(1, S.stats.loop_kinds['tail, an other position'])
     ok(S.stats.iterations >= 2, 'iterated')
 end)
+
+test('erlterms: binaries built from known parts, the conversion BIFs, comprehensions, a ground re-dispatch', function ()
+    need()
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    -- a binary of known segments; a /binary segment of an unknown is a hole
+    eq('"u@s"', (last_term('f() -> N = <<"u">>, S = <<"s">>, <<N/binary, "@", S/binary>>.\n')))
+    ok((last_term('f(N) -> <<N/binary, "@">>.\n')):find('^%?'), 'an unknown segment')
+    -- the conversions xmpp's encoders call
+    eq('"get"', (last_term('f() -> atom_to_binary(get, utf8).\n')))
+    eq('"7"', (last_term('f() -> integer_to_binary(7).\n')))
+    eq('"ab"', (last_term('f() -> iolist_to_binary([<<"a">>, <<"b">>]).\n')))
+    ok((last_term('f(X) -> integer_to_binary(X).\n')):find('^%?'), 'of an unknown: a hole')
+    -- a comprehension over a known list; a filter nobody can decide makes the length unknown
+    eq('(list (tuple "a") (tuple "c"))', (last_term('f() -> [{X} || X <- [a, b, c], X /= b].\n')))
+    ok((last_term('f(Q) -> [{X} || X <- [a, b], X /= Q].\n')):find('^%(list %?%S+%.%.%.%)$'), 'an undecidable filter')
+    ET.OFF = { lc = true }
+    local nolc = last_term('f() -> [{X} || X <- [a, b, c], X /= b].\n')
+    ET.OFF = {}
+    ok(nolc:find('^%?'), 'the comprehension observes: ' .. nolc)
+    -- a self-call with known arguments runs exactly (jid:to_string(#jid{…}) -> to_string({U, S, R}))
+    local P = program {
+        j = table.concat({
+            '-module(j).',
+            'to_s(#iq{id = I, type = T}) -> to_s({I, T});',
+            'to_s({I, T}) -> <<I/binary, "/", T/binary>>.', '' }, '\n'),
+        user = '-module(user).\nr() -> j:to_s(#iq{id = <<"a">>, type = <<"b">>}).\n',
+    }
+    local m = P:module('user')
+    local function at(fn)
+        local cl = m.fns[fn][1]
+        local last
+        for c in cl:field('body')[1]:iter_children() do if c:named() then last = c end end
+        return A.show((ET.term(last, m.src, m.ctx)))
+    end
+    eq('"a/b"', at('r/0'))
+    ET.OFF = { ground = true }
+    local ng = at('r/0')
+    ET.OFF = {}
+    ok(ng:find('^%?'), 'the ground rule observes: joined into a loop the value is unknown: ' .. ng)
+end)
+
+test('erlterms: a NIF stub with a documented meaning answers for known arguments (lists:member, reverse/2, keyfind)', function ()
+    need()
+    local ET = require 'cartograph.erlterms'
+    local A = require('cartograph.algebra').load()
+    local P = program {
+        -- OTP's own shape: the NIF's Erlang body is a stub
+        lists = table.concat({ '-module(lists).', 'member(_, _) -> erlang:nif_error(undef).',
+            'reverse(_, _) -> erlang:nif_error(undef).', 'keyfind(_, _, _) -> erlang:nif_error(undef).', '' }, '\n'),
+        user = table.concat({ '-module(user).',
+            'a() -> lists:member(b, [a, b]).', 'b() -> lists:member(c, [a, b]).', 'c() -> lists:reverse([1, 2], [3]).',
+            'd() -> lists:keyfind(k, 1, [{j, 1}, {k, 2}]).', 'e(X) -> lists:member(X, [a]).', '' }, '\n'),
+    }
+    local m = P:module('user')
+    local function at(fn)
+        local cl = m.fns[fn][1]
+        local last
+        for c in cl:field('body')[1]:iter_children() do if c:named() then last = c end end
+        return A.show((ET.term(last, m.src, m.ctx)))
+    end
+    eq('"true"', at('a/0'))
+    eq('"false"', at('b/0'))
+    eq('(list "2" "1" "3")', at('c/0'))
+    eq('(tuple "k" "2")', at('d/0'))
+    ok(at('e/1'):find('^%?'), 'an unknown argument keeps the stub a hole')
+    ET.OFF = { bifs = true }
+    local off = at('a/0')
+    ET.OFF = {}
+    ok(off:find('^%?'), 'the stub meaning observes: ' .. off)
+end)

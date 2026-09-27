@@ -64,11 +64,82 @@ local T = {
     call = { call = true }, remote = { remote = true }, case = { case_expr = true }, ifx = { if_expr = true },
     clause = { function_clause = true }, arm = { cr_clause = true }, fn = { anonymous_fun = true },
     funclause = { fun_clause = true }, macro = { macro_call_expr = true }, map = { map_expr = true },
-    binop = { binary_op_expr = true }, unop = { unary_op_expr = true },
+    binop = { binary_op_expr = true }, unop = { unary_op_expr = true }, lc = { list_comprehension = true },
+    generator = { generator = true },
     decl = { fun_decl = true }, funref = { internal_fun = true, external_fun = true }, extfun = { external_fun = true },
 }
 local RAISES = require('cartograph.spec.erlang').raises or {}
 local STUB = require('cartograph.spec.erlang').bif_stub or {}
+-- a term with no hole anywhere
+local function ground_term(t)
+    if t.k == 'hole' or t.k == 'raise' then return false end
+    for _, c in ipairs(t.kids or {}) do if not ground_term(c) then return false end end
+    return true
+end
+
+-- the conversion BIFs: a result when every argument is a known literal, nil otherwise
+local function textof(t)
+    if t.k == 'lit' and (t.lk == 'bin' or t.lk == 'str' or t.lk == nil) then return tostring(t.v) end
+    if t.k == 'list' then
+        local out = {}
+        for _, c in ipairs(t.kids or {}) do
+            local s = textof(c)
+            if not s then return nil end
+            out[#out + 1] = s
+        end
+        return table.concat(out)
+    end
+    return nil
+end
+local function binlit(v) local l = A().lit(v); l.lk = 'bin'; return l end
+local CONVERT = {
+    atom_to_binary = function (a) local t = a[1]; return t.k == 'lit' and t.lk == 'atom' and binlit(t.v) or nil end,
+    atom_to_list = function (a) local t = a[1]; if t.k == 'lit' and t.lk == 'atom' then local l = A().lit(t.v); l.lk = 'str'; return l end end,
+    integer_to_binary = function (a) local t = a[1]; return #a == 1 and t.k == 'lit' and t.lk == 'int' and binlit(t.v) or nil end,
+    iolist_to_binary = function (a) local s = textof(a[1]); return s and binlit(s) or nil end,
+    list_to_binary = function (a) local s = textof(a[1]); return s and binlit(s) or nil end,
+    byte_size = function (a)
+        local t = a[1]
+        if t.k == 'lit' and (t.lk == 'bin' or t.lk == nil) then local l = A().lit(tostring(#tostring(t.v))); l.lk = 'int'; return l end
+    end,
+}
+-- THE NIFs' MEANING, for the few stubs xmpp's codecs call (a stub body is erlang:nif_error: the C implementation's
+-- documented behaviour is all there is). Known arguments only; anything else stays the stub's hole.
+local function flat_known(t)
+    if t.k ~= 'list' then return nil end
+    for _, c in ipairs(t.kids or {}) do if c.k == 'hole' then return nil end end
+    return t.kids or {}
+end
+local STUB_EVAL = {
+    ['lists:member/2'] = function (a)
+        local xs = flat_known(a[2])
+        if not xs or not ground_term(a[1]) then return nil end
+        for _, y in ipairs(xs) do
+            if ground_term(y) and A().eq(a[1], y) and (a[1].lk == nil or y.lk == nil or a[1].lk == y.lk) then return A().lit('true') end
+        end
+        for _, y in ipairs(xs) do if not ground_term(y) then return nil end end
+        local f = A().lit('false'); f.lk = 'atom'; return f
+    end,
+    ['lists:reverse/2'] = function (a)
+        local xs = flat_known(a[1])
+        if not xs or a[2].k ~= 'list' then return nil end
+        local out = {}
+        for i = #xs, 1, -1 do out[#out + 1] = xs[i] end
+        for _, y in ipairs(a[2].kids or {}) do out[#out + 1] = y end
+        return A().node('list', unpack(out, 1, #out))
+    end,
+    ['lists:keyfind/3'] = function (a)
+        local n = a[2].k == 'lit' and a[2].lk == 'int' and tonumber(a[2].v)
+        local xs = flat_known(a[3])
+        if not (n and xs and ground_term(a[1])) then return nil end
+        for _, y in ipairs(xs) do
+            local k = (y.k == 'tuple' or y.k:match('^rec:')) and (y.k == 'tuple' and y.kids[n] or (n == 1 and A().lit(y.k:sub(5)) or y.kids[n - 1]))
+            if not k or not ground_term(k) then return nil end
+            if A().eq(k, a[1]) then return y end
+        end
+        local f = A().lit('false'); f.lk = 'atom'; return f
+    end,
+}
 -- the type-test guard BIFs and the literal node kinds each admits (the spec's guard_kinds, a language fact)
 local GUARD_KINDS = require('cartograph.spec.erlang').guard_kinds or {}
 
@@ -88,6 +159,7 @@ local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
 local function lit(v, lk) local l = A().lit(v); l.lk = lk; return l end
 local RAISE = { k = 'raise' }   -- the value of an expression that never returns; never leaves this module
 local binop                     -- the operators (defined beside M.eval)
+local comprehension             -- list comprehensions (defined beside M.eval)
 
 local function named(x)
     local out = {}
@@ -1014,6 +1086,10 @@ local function summary(P, mod, fn, args, S)
         m.stub[key] = all
     end
     if m.stub[key] and not M.OFF.stubs then
+        -- a stub with a known meaning (the NIF's documented behaviour) answers for known arguments
+        local ev = not M.OFF.bifs and STUB_EVAL[id]
+        local r = ev and ev(args)
+        if r then return r end
         S.stats.stubs = S.stats.stubs + 1
         return fresh(S, ('%s: a BIF (its source is a nif_error stub)'):format(id))
     end
@@ -1024,7 +1100,16 @@ local function summary(P, mod, fn, args, S)
         -- argument of the self-call is a PROPER SUBTERM of the same argument now (the Tail of a known [H | Tail]),
         -- the recursion is structural and terminates: evaluate it as it runs, one level deeper, instead of joining it
         -- into the loop. lists:map(F, [A, B]) is then [F(A), F(B)], not "one of cons | nil".
-        if not M.OFF.spine and L.args and (L.spine or 0) < M.MAX_SPINE and decreasing(args, L.args) then
+        -- ★ AND A GROUND RE-DISPATCH IS EVALUATED EXACTLY TOO (CART-1136 lever 2): jid:to_string(#jid{…}) calls
+        -- to_string({U, S, R}) — not a smaller term, but a KNOWN one; joining it into a loop made jid:encode of a known
+        -- jid unknown. A self-call whose arguments hold no hole is a pure computation on known values: run it, one
+        -- level deeper, under the same MAX_SPINE budget (past it the loop takes over, so a runaway still ends).
+        local exact = decreasing(args, L.args)
+        if not exact and not M.OFF.ground then
+            exact = true
+            for _, t in ipairs(args) do if not ground_term(t) then exact = false; break end end
+        end
+        if not M.OFF.spine and L.args and (L.spine or 0) < M.MAX_SPINE and exact then
             local saved = L.args
             L.args, L.spine = args, (L.spine or 0) + 1
             S.stats.unfolded = S.stats.unfolded + 1
@@ -1158,6 +1243,15 @@ local function call_value(x, env, S)
     local here = P and mod == ctx.module and P:module(mod)
     local local_def = here and here.fns[fn .. '/' .. #args]
     if not M.OFF.raises and RAISES[fn] and (mod == 'erlang' or (x == c and not local_def)) then return RAISE end
+    -- THE LANGUAGE'S OWN CONVERSIONS (auto-imported BIFs; their meaning is the reference manual's, like the operators):
+    -- a known argument gives a known result, anything else a hole. What xmpp's encoders call: enc_enum ->
+    -- atom_to_binary, enc_int -> integer_to_binary, jid:encode -> iolist_to_binary.
+    local conv = not M.OFF.bifs and (mod == 'erlang' or (x == c and not local_def)) and CONVERT[fn]
+    if conv then
+        local r = conv(args)
+        if r then return r end
+        return fresh(S, ('%s/%d of an unknown'):format(fn, #args))
+    end
     -- a TYPE TEST (is_binary/1 …, the spec's guard_kinds): yes when the term is of an admitted kind, no when it is
     -- known to be of another, a hole when it is unknown
     if GUARD_KINDS[fn] and #args == 1 and not M.OFF.typetests and (mod == 'erlang' or (x == c and not local_def)) then
@@ -1261,6 +1355,56 @@ function binop(x, env, S)
     return fresh(S, 'a ' .. tostring(op) .. ' value')
 end
 
+-- ── LIST COMPREHENSIONS: [E || P <- L, Filter, …] over a KNOWN list is the list of E for every element the
+-- qualifiers admit; an element a pattern or a filter only MAYBE admits makes the length unknown (a sequence, with
+-- what E would be as its element claim); an unknown generator list is a sequence of E over an unknown element.
+function comprehension(x, env, S)
+    local a = A()
+    local body = x:field('exprs')[1]
+    local lce = x:field('lc_exprs')[1]
+    local quals = {}
+    for _, q in ipairs(lce and lce:field('exprs') or {}) do quals[#quals + 1] = q:named_child(0) end
+    local out, uncertain, claim = {}, false, {}
+    local function run(i, e)
+        if i > #quals then
+            local v = M.eval(body, e, S)
+            if v ~= RAISE then out[#out + 1] = v; claim[#claim + 1] = v end
+            return
+        end
+        local q = quals[i]
+        if q and T.generator[q:type()] then
+            local lt = M.eval(q:field('rhs')[1], e, S)
+            if lt == RAISE then return end
+            local xs = flat_known(lt)
+            if not xs then
+                -- an unknown list: E over an unknown element, a sequence of unknown length
+                uncertain = true
+                local _, vars = bind(q:field('lhs')[1], fresh(S, 'an element of an unknown list'), e, S)
+                run(i + 1, with_vars(e, vars or {}))
+                return
+            end
+            for _, el in ipairs(xs) do
+                local verdict, vars = bind(q:field('lhs')[1], el, e, S)
+                if verdict ~= 'no' then
+                    if verdict == 'maybe' then uncertain = true end
+                    run(i + 1, with_vars(e, vars))
+                end
+            end
+            return
+        end
+        if not q then return end
+        local b = truth(M.eval(q, e, S))
+        if b == false then return end
+        if b == nil then uncertain = true end
+        run(i + 1, e)
+    end
+    run(1, env)
+    if not uncertain then return a.node('list', unpack(out, 1, #out)) end
+    local h = hfresh(S, 'a comprehension of unknown length')
+    S.elems[h.h] = claim
+    return a.node('list', h)
+end
+
 -- ── VALUES ──────────────────────────────────────────────────────────────────────────────────────────────────────
 function M.eval(x, env, S)
     local a = A()
@@ -1348,13 +1492,24 @@ function M.eval(x, env, S)
     if T.float[t] then return lit(txt(x, src), 'float') end
     if T.string[t] then return lit((txt(x, src):gsub('^"(.*)"$', '%1')), 'str') end
     if T.binary[t] then
+        -- a binary BUILT from parts: a string segment is its text, a `/binary` segment (or an untyped one holding a
+        -- known binary) the text of its value; a size, a numeric or a utf8 segment is not text we can read
         local parts = {}
         for _, e in ipairs(x:field('elements')) do
             local el = e:field('element')[1]
-            if not el or not T.string[el:type()] or e:field('size')[1] or e:field('types')[1] then
-                return fresh(S, 'a binary built at runtime')
-            end
-            parts[#parts + 1] = txt(el, src):sub(2, -2)
+            local ty = e:field('types')[1]
+            -- the type list's text includes its slash: `/binary`
+            local tyt = ty and (vim.trim(txt(ty, src)):gsub('^/', '')) or nil
+            if not el or e:field('size')[1] then return fresh(S, 'a binary built at runtime') end
+            if T.string[el:type()] and not ty then parts[#parts + 1] = txt(el, src):sub(2, -2)
+            elseif not M.OFF.binaries and (tyt == 'binary' or tyt == nil) then
+                local v = M.eval(el, env, S)
+                if v == RAISE then return RAISE end
+                if not (v.k == 'lit' and (v.lk == 'bin' or v.lk == 'str' or v.lk == nil)) then
+                    return fresh(S, 'a binary built at runtime')
+                end
+                parts[#parts + 1] = tostring(v.v)
+            else return fresh(S, 'a binary built at runtime') end
         end
         return lit(table.concat(parts), 'bin')
     end
@@ -1411,6 +1566,7 @@ function M.eval(x, env, S)
         return join_all(S, vals, 'an if with no arm')
     end
     if T.call[t] or T.remote[t] then return call_value(x, env, S) end
+    if T.lc[t] and not M.OFF.lc then return comprehension(x, env, S) end
     if T.binop[t] and not M.OFF.ops then return binop(x, env, S) end
     if T.unop[t] and not M.OFF.ops then
         local op = x:child(0) and txt(x:child(0), src)

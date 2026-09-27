@@ -863,4 +863,181 @@ end
 ---   IQ=<iq xmlns="jabber:client|…" type="get"><query xmlns="http://jabber.org/protocol/disco#info" node="?Node"/></iq>
 function M.render(V) return render_value(V) end
 
+-- ── THE ENCODE DIRECTION (CART-1138): a decoded term -> the #xmlel term fxml's generated encoder builds for it ──────
+local function A() return assert(require('cartograph.algebra').load()) end
+local unpack = table.unpack or unpack
+
+-- ★ AN ABSENT ATTRIBUTE IS NOT "ABSENT" ON THE SERVER: the generated decoder fills it in. fxml_gen's rule, read off
+-- the generated source (xmpp/src/*.erl, `decode_<xml>_attr_<name>(__TopXMLNS, undefined) -> V`): an explicit
+-- default wins; else a REQUIRED one is a decode error (the request is invalid: 'absent', which only a variable
+-- accepts); else one with a converting decoder -> `undefined`; else `<<>>`. The same for cdata; a single ref ->
+-- `undefined`. ACCEPTED BY AN ORACLE: tools/xmppmerge.lua --check-absent compares this rule with every generated
+-- clause (408 on xmpp 02893ce). THE ENCODER's omission rule is its inverse: a value equal to it is not written.
+function M.absent_value(src)
+    local a = A()
+    if src.default ~= nil and src.default ~= '$unset' then
+        local d = tostring(src.default)
+        d = d:match('^<<"(.*)">>$') or (d == '<<>>' and '') or d:gsub("^'(.*)'$", '%1')
+        return a.lit(d)
+    end
+    if src.required == true or src.required == 'true' then return a.node('absent') end
+    -- a CHECKER keeps the binary (xmpp_lang validates, it does not convert): absent stays <<>>. Found by the oracle
+    -- (tools/xmppmerge.lua --check-absent): the first cut said `undefined` and the generated code disagreed on 15
+    -- xml:lang / hreflang attributes out of 408.
+    if src.dec and src.dec ~= '' and not src.dec:find('xmpp_lang', 1, true) then return a.lit('undefined') end
+    return a.lit('')
+end
+
+--- xmpp_codec:choose_top_xmlns: an element with ONE namespace uses it; one with several keeps its parent's when that is
+--- among them, else takes the first
+local function choose_top(E, top)
+    if type(E.xmlns) == 'table' then
+        for _, x in ipairs(E.xmlns) do if x == top then return top end end
+        return E.xmlns[1] or top
+    end
+    if E.xmlns == nil or E.xmlns == '' then return top end
+    return E.xmlns
+end
+M.choose_top = choose_top
+
+--- THE ENCODER, read off the same -xml forms the decoder reads, by fxml_gen's rules (derived from its generated code,
+--- xmpp/src/*.erl, and accepted against it by tools/xmppencode.lua):
+---   element   {xmlel, Name, Attrs, Children}; an xmlns attribute when the element's namespace differs from the parent's
+---   attrs     each #attr, in REVERSE spec order (the generator prepends), then the xmlns one: a REQUIRED or
+---             `always_encode` attr always, another only when its value is not the absent value (the decoder's
+---             inverse); `enc` applied
+---   children  cdata first ({xmlcdata, Text}, omitted when absent), then each #ref's elements in spec order (a list
+---             field: every item, a single one: omitted when undefined; refs sharing a label: the ref whose element
+---             decodes to the item's record), then sub_els (each by its own record's -xml)
+--- A hole stays a hole where it sits (an attribute of unknown value, a child of unknown shape).
+--- opts = { enc = fn(enc_text, value, entry) -> term (the encoded binary, a lit or a hole) — required when an attr
+---          declares `enc` (tools/xmppencode.lua evaluates the library's own function) }
+--- -> xmlel term | nil, why
+function M.encode(spec, term, top, opts)
+    opts = opts or {}
+    local a = A()
+    local function lit(v) return a.lit(v) end
+    local function same(x, y) return x and y and x.k == y.k and x.k == 'lit' and tostring(x.v) == tostring(y.v) end
+    local enc_entry
+    -- the -xml a term encodes by: a record's first entry (spec order); a tuple / label / const value needs its ref's
+    local function by_term(t)
+        local r = t.k and t.k:match('^rec:(.+)$')
+        local names = r and spec.by_record[r]
+        return names and spec.entries[names[1]] or nil
+    end
+    local function encode_value(src, v, E)
+        if v.k == 'hole' then return v end
+        if src.enc and src.enc ~= '' then
+            if not opts.enc then return a.hole('enc:' .. src.enc) end
+            return opts.enc(src.enc, v, E)
+        end
+        if v.k == 'lit' then return lit(tostring(v.v)) end
+        return a.hole('unencodable ' .. tostring(v.k))
+    end
+    function enc_entry(E, v, parent_top)
+        local R = E.result or {}
+        -- the value a label names, read off v by the result's shape
+        local function value_of(label)
+            if R.kind == 'record' or R.kind == 'tuple' then
+                for i, f in ipairs(R.fields or {}) do if f == label then return v.kids and v.kids[i] end end
+                return nil
+            end
+            if R.kind == 'label' and R.label == label then return v end
+            return nil
+        end
+        -- the element's namespace: a declared #attr named xmlns is a record field (choose_top_xmlns(Xmlns, NSList,
+        -- Top) in the generated code); the namespace rule below writes it, so it is not an ordinary attribute
+        local nsattr
+        for _, at in ipairs(E.attrs or {}) do if at.name == 'xmlns' then nsattr = at end end
+        local newtop = choose_top(E, parent_top)
+        if nsattr then
+            local nv = value_of(nsattr.label)
+            if nv and nv.k == 'lit' and tostring(nv.v) ~= '' then newtop = tostring(nv.v) end
+        end
+        -- attributes: the xmlns one first in the accumulator, then each #attr prepended (so reverse spec order)
+        local acc = {}
+        if newtop ~= parent_top then acc[1] = a.node('tuple', lit('xmlns'), lit(newtop)) end
+        for _, at in ipairs(E.attrs or {}) do
+            local val = at ~= nsattr and value_of(at.label) or nil
+            if val ~= nil then
+                -- `always_encode = true` (roster_item's subscription): written even at its default
+                local required = at.required == true or at.required == 'true'
+                local always = at.always_encode == true or at.always_encode == 'true'
+                local skip = not required and not always and val.k ~= 'hole' and same(val, M.absent_value(at))
+                if not skip then table.insert(acc, 1, a.node('tuple', lit(at.name), encode_value(at, val, E))) end
+            end
+        end
+        -- children: cdata, the refs in spec order (by label group), then sub_els
+        local kids = {}
+        local cd = E.cdata or { label = '$cdata' }
+        local cv = value_of(cd.label)
+        if cv ~= nil and cv.k == 'hole' then kids[#kids + 1] = a.node('tuple', lit('xmlcdata'), cv)
+        elseif cv ~= nil and not same(cv, M.absent_value(cd)) then
+            kids[#kids + 1] = a.node('tuple', lit('xmlcdata'), encode_value(cd, cv, E))
+        end
+        local seen_label = {}
+        for _, rf in ipairs(E.refs or {}) do
+            if not seen_label[rf.label] then
+                seen_label[rf.label] = true
+                local rv = value_of(rf.label)
+                local group = {}
+                for _, r2 in ipairs(E.refs) do if r2.label == rf.label then group[#group + 1] = r2 end end
+                local function ref_for(item)
+                    if #group == 1 then return spec.entries[group[1].name] end
+                    local rec = item.k and item.k:match('^rec:(.+)$')
+                    for _, r2 in ipairs(group) do
+                        local RE = spec.entries[r2.name]
+                        if RE and RE.result and RE.result.record == rec then return RE end
+                    end
+                    return nil
+                end
+                local items = {}
+                if rv == nil then
+                elseif rf.max == 1 or rf.max == '1' then
+                    -- a single child is left out at its absent value: the ref's declared default (bind's resource,
+                    -- `default = <<"">>`), else undefined
+                    local absent = (rf.default ~= nil and rf.default ~= '$unset') and M.absent_value({ default = rf.default })
+                        or a.lit('undefined')
+                    -- a REQUIRED child (min = 1: xdata's option value, http upload's get/put) is always written
+                    local required = tonumber(rf.min) == 1
+                    if required or not same(rv, absent) then items[1] = rv end
+                elseif rv.k == 'list' then
+                    for _, x in ipairs(rv.kids or {}) do items[#items + 1] = x end
+                else items[1] = rv end
+                for _, item in ipairs(items) do
+                    if item.k == 'hole' then kids[#kids + 1] = item
+                    else
+                        local RE = ref_for(item)
+                        kids[#kids + 1] = RE and enc_entry(RE, item, newtop) or a.hole('no -xml for ' .. tostring(item.k))
+                    end
+                end
+            end
+        end
+        local sv = value_of('$_els')
+        if sv and sv.k == 'list' then
+            for _, x in ipairs(sv.kids or {}) do
+                if x.k == 'hole' then kids[#kids + 1] = x
+                else
+                    local SE = by_term(x)
+                    kids[#kids + 1] = SE and enc_entry(SE, x, newtop) or a.hole('no -xml for ' .. tostring(x.k))
+                end
+            end
+        elseif sv and sv.k == 'hole' then kids[#kids + 1] = sv end
+        return a.node('tuple', lit('xmlel'), lit(E.element), a.node('list', unpack(acc, 1, #acc)),
+            a.node('list', unpack(kids, 1, #kids)))
+    end
+    if opts.entry then return enc_entry(opts.entry, term, top or '') end
+    local E = by_term(term)
+    if not E then return nil, 'no -xml produces ' .. tostring(term.k) end
+    return enc_entry(E, term, top or '')
+end
+
+--- one -xml entry's encoding of a value (a record, a tuple, or the scalar of a label/const result)
+function M.encode_entry(spec, E, value, top, opts)
+    local o = {}
+    for k, v in pairs(opts or {}) do o[k] = v end
+    o.entry = E
+    return M.encode(spec, value, top, o)
+end
+
 return M
