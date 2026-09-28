@@ -441,7 +441,10 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
     'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_plan_replace', 'txn_plan_propagate',
-    'txn_plan_invert', 'txn_plan_transplant', 'txn_preview',
+    'txn_plan_invert', 'txn_plan_transplant',
+    -- THE TOOLBELT (named tactics, lua/cartograph/tactics/): discoveries re-measure, write tactics preview first
+    'toolbelt_list', 'toolbelt_run',
+    'txn_preview',
     -- the handoff: plan on a read-only host, apply on an armed one
     'txn_save', 'txn_load',
     'journal_list', 'journal_get',
@@ -2474,6 +2477,60 @@ local function v_txn_plan_transplant(store, args)
     }
 end
 
+-- ── the TOOLBELT: named tactics (lua/cartograph/tactics/) ────────────────────
+--
+-- ★ AN AGENT CAN NOW USE WHAT A SESSION RECORDED. A discovery re-measures the CURRENT graph and says whether its
+-- finding still holds; a write tactic PREVIEWS by default (a dry run: up to the first write, the rest named as
+-- underivable) and writes only with `apply = true` on a host started writable — refused by name otherwise.
+local function v_toolbelt_list(store)
+    local entries, broken = require('cartograph.toolbelt').list()
+    local rows = {}
+    for _, e in ipairs(entries) do
+        local ps, ex = {}, {}
+        for k, ty in pairs(e.params or {}) do ps[#ps + 1] = k .. ':' .. tostring(ty) end
+        table.sort(ps)
+        for _, x in ipairs(e.examples) do ex[#ex + 1] = x.name end
+        rows[#rows + 1] = { name = e.name, kind = e.kind, summary = e.summary, measures = nn(e.measures),
+            params = table.concat(ps, ' '), examples = ex }
+    end
+    local notes = {}
+    for name, why in pairs(broken) do
+        notes[#notes + 1] = { kind = 'broken-entry', premise = 'a tactic file that does not load', why = ('%s: %s'):format(name, why), evidence = NUL }
+    end
+    if #rows == 0 then
+        return { result = {}, absence = 'absent', absence_why = { premise = 'no-entries',
+            why = 'lua/cartograph/tactics/ holds no loadable entry', evidence = NUL }, notes = notes }
+    end
+    return { result = rows, notes = notes }
+end
+
+local function v_toolbelt_run(store, args)
+    local tb = require 'cartograph.toolbelt'
+    local e, why = tb.load(args.name)
+    if not e then return refuse('unknown-tactic', tostring(why), 'toolbelt_list names every entry, with its params and examples') end
+    if args.apply and e.kind == 'write' and not M.WRITABLE then
+        return refuse('read-only-host', ('%s would write, and this host was started read-only'):format(e.name),
+            'run it without `apply` to preview, or on a writable host')
+    end
+    local res, rwhy, rclass = tb.run(store, e.name, args.params, { apply = args.apply and e.kind == 'write' })
+    if not res then
+        return refuse('cannot-run', ('%s: %s'):format(e.name, tostring(rwhy)),
+            'the reason names the param or the premise that failed', { class = nn(rclass) })
+    end
+    if e.kind == 'discovery' then
+        return { subject = { tactic = e.name, kind = e.kind, measures = nn(e.measures) },
+            result = { { holds = res.holds, why = nn(res.why), value = res.value } } }
+    end
+    local residue = {}
+    for _, h in ipairs(res.residue or {}) do residue[#residue + 1] = { text = h.text, kind = h.kind, class = h.class } end
+    local options = {}
+    for _, o in ipairs(res.options or {}) do options[#options + 1] = { text = o.text, kind = o.kind } end
+    return { subject = { tactic = e.name, kind = e.kind, applied = args.apply and true or false },
+        result = { { status = res.status, class = nn(res.class), why = nn(res.why), where = nn(res.where),
+            completed = res.applied, resumable = res.resumable, residue = residue, options = options,
+            work_orders = res.work_orders } } }
+end
+
 -- ── propagate: an edit on ONE clone, carried to its family (CART-1152) ─────────
 --
 -- ★ THE SCOPE IS THE OPERATOR'S, and the envelope says so twice: without `scope` the plan is the origin only, and a
@@ -3561,6 +3618,26 @@ M.VERBS = {
                 desc = 'the exemplar AFTER: the same definition once the edit was made' },
         },
         run = v_txn_plan_transplant,
+    },
+    toolbelt_list = {
+        summary = 'the NAMED TACTICS in the toolbelt: each entry\'s kind (write | discovery), params, the ticket a discovery measures, and its EXAMPLES — the usage, which the toolbelt fence also runs as tests',
+        subject = 'graph',
+        tier_basis = 'observation',
+        absences = { 'absent' },
+        args = {},
+        run = v_toolbelt_list,
+    },
+    toolbelt_run = {
+        summary = 'run a named tactic: a DISCOVERY re-measures this graph and says whether its finding still holds; a WRITE tactic PREVIEWS (dry, up to the first write) unless `apply` is set on a writable host. Params are coerced by the entry: a ref may be `file::name`, a string `@path`',
+        subject = 'graph',
+        tier_basis = 'observation',
+        absences = {},
+        args = {
+            { name = 'name', type = 'string', required = true, desc = 'the entry, as toolbelt_list names it' },
+            { name = 'params', type = 'object', desc = 'the entry\'s params, by its declaration (toolbelt_list shows them)' },
+            { name = 'apply', type = 'boolean', desc = 'a write tactic writes (a writable host only); default: preview' },
+        },
+        run = v_toolbelt_run,
     },
     txn_plan_propagate = {
         summary = 'PROPOSE carrying an edit made to ONE member of a near-clone family to the others. Give the member and its NEW text; the edit is classified (value / template / mixed; a straddle or unsupported shape refuses) and each member it reaches is re-rendered from its OWN text and verified by reparse against its predicted values. The SCOPE is yours: without `scope` the plan is the member alone, with a `propagate-scope` decision naming the wider scopes',

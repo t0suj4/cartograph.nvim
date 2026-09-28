@@ -43,3 +43,98 @@ test('toolbelt: a malformed entry is refused BY NAME, and a failing example is r
     eq(false, okx, 'an example whose expectation is false FAILS')
     ok(tostring(why):find('expected the claim to hold', 1, true), tostring(why))
 end)
+
+-- ── the shared fixture: a near-clone family of three ─────────────────────────────────────────────────────────────
+local store = require 'cartograph.store'
+local tactic = require 'cartograph.tactic'
+local function member(n, mul, tail)
+    return ('function M.g%d(t)\n    local acc = 0\n    local seen = {}\n    for i = 1, #t do acc = acc + t[i] * %d end\n'
+        .. '    local s = tostring(acc)\n    local u = string.upper(s)\n    seen[u] = true\n    local pad = string.rep("-", #u)\n'
+        .. '    local out = pad .. u\n    return out .. "%s"\nend\n'):format(n, mul, tail)
+end
+local FAMILY = 'local M = {}\n' .. member(1, 1, 1) .. member(2, 2, 2) .. member(3, 3, 3) .. 'return M\n'
+local root
+local function project(files)
+    root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for rel, text in pairs(files) do local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close() end
+    store.ingest(require('cartograph.providers.treesitter').extract(root))
+end
+local function disk() local fd = assert(io.open(root .. '/fe.lua')); local s = fd:read('a'); fd:close(); return s end
+
+test('toolbelt: params are COERCED by their declaration — a ref from file::name, text from @path, and a miss says did-you-mean', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['fe.lua'] = FAMILY }
+    local e = assert(tb.load('align-family'))
+    local tf = vim.fn.tempname(); vim.fn.writefile(vim.split(member(1, 9, 1), '\n', { plain = true }), tf)
+    local p, why = tb.coerce(store, e, { ref = 'fe.lua::M.g1', text = '@' .. tf, scope = 'all' })
+    ok(p, tostring(why))
+    eq('M.g1', p.ref.name, 'the ref resolved from file::name'); ok(p.text:find('* 9', 1, true), 'the text read from @path')
+    local _, miss = tb.coerce(store, e, { ref = 'fe.lua::M.g4', text = 'x' })
+    ok(miss and miss:find('did you mean', 1, true) and miss:find('M.g1', 1, true), tostring(miss))
+    local _, extra, cls = tb.coerce(store, e, { ref = 'fe.lua::M.g1', text = 'x', colour = 'red' })
+    eq('ill-posed', cls); ok(extra:find('takes no param `colour`', 1, true), extra)
+    local _, need = tb.coerce(store, e, { text = 'x' })
+    ok(need and need:find('needs param `ref`', 1, true), tostring(need))
+    local fp = assert(tb.load('family-premise'))
+    eq({ 'a.lua', 'b.lua' }, (tb.coerce(store, fp, { files = 'a.lua,b.lua' })).files, 'a list from a,b')
+end)
+
+test('toolbelt: T.use composes a NAMED tactic — a discovery gates the step after it, and a failed premise stops by name', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['fe.lua'] = FAMILY }
+    local T = tactic.T
+    local text = member(1, 9, 1):gsub('\n$', '')
+    local term = T.seq(T.use('family-premise', { files = { 'fe.lua' } }),
+        T.use('align-family', { ref = 'fe.lua::M.g1', text = text, scope = 'all' }))
+    local r = tactic.run(store, term, { apply = true })
+    eq('done', r.status, tostring(r.why)); eq(1, r.applied)
+    ok(disk():find('* 9', 1, true), 'the used write tactic wrote')
+    local premise
+    for _, h in ipairs(r.residue) do if h.kind == 'premise' then premise = h end end
+    ok(premise and premise.text:find('family-premise', 1, true), 'the gate left its reason as residue')
+    -- a premise that FAILS: no family in a file set that has none
+    project { ['fe.lua'] = FAMILY, ['x.lua'] = 'local X = {}\nfunction X.f(a) return a end\nreturn X\n' }
+    local before = disk()
+    local g = tactic.run(store, T.seq(T.use('family-premise', { files = { 'x.lua' } }),
+        T.use('align-family', { ref = 'fe.lua::M.g1', text = text, scope = 'all' })), { apply = true })
+    eq('failed', g.status); eq('ill-posed', g.class); ok(g.why:find('does not hold', 1, true), g.why)
+    eq(before, disk(), 'the step after a failed premise never ran')
+end)
+
+test('toolbelt: a cycle of uses refuses by name, and an unknown entry or a bad param fails at its own step', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['fe.lua'] = FAMILY }
+    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
+    local fd = assert(io.open(d .. '/loop.lua', 'w'))
+    fd:write("local T = require('cartograph.tactic').T\nreturn { name = 'loop', kind = 'write', summary = 's', params = {}, "
+        .. "examples = { { name = 'x' } }, build = function () return T.use('loop') end }\n"); fd:close()
+    local c = tactic.run(store, tactic.T.use('loop'), { apply = true, toolbelt_dir = d })
+    eq('failed', c.status); ok(c.why:find('uses itself', 1, true), c.why)
+    local u = tactic.run(store, tactic.T.use('no-such-tactic'), { apply = true })
+    eq('ill-posed', u.class); ok(u.why:find('no tactic', 1, true), u.why)
+    local b = tactic.run(store, tactic.T.use('align-family', { ref = 'fe.lua::M.g9', text = 'x' }), { apply = true })
+    eq('ill-posed', b.class); ok(b.why:find('did you mean', 1, true), b.why)
+end)
+
+test('toolbelt: over MCP — the catalogue lists every entry; a discovery re-measures; a write PREVIEWS, and apply needs a writable host', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['fe.lua'] = FAMILY }
+    local agent = require 'cartograph.agent'
+    agent.set_writable(false)
+    local l = agent.answer(store, 'toolbelt_list', {})
+    local names = {}
+    for _, r in ipairs(l.result) do names[r.name] = r end
+    ok(names['align-family'] and names['witness-shape-collision'], 'listed from the directory')
+    ok(#names['align-family'].examples >= 2, 'each row carries its examples: the usage')
+    local d = agent.answer(store, 'toolbelt_run', { name = 'family-premise', params = { files = { 'fe.lua' } } })
+    eq(true, d.result[1].holds, vim.inspect(d.result))
+    local text = member(1, 9, 1):gsub('\n$', '')
+    local pv = agent.answer(store, 'toolbelt_run', { name = 'align-family', params = { ref = 'fe.lua::M.g1', text = text, scope = 'all' } })
+    eq('previewed', pv.result[1].status, vim.inspect(pv.result)); eq(FAMILY, disk(), 'a preview writes nothing')
+    local ro = agent.answer(store, 'toolbelt_run', { name = 'align-family', apply = true, params = { ref = 'fe.lua::M.g1', text = text, scope = 'all' } })
+    eq('read-only-host', ro.refusal and ro.refusal.rule)
+    agent.set_writable(true)
+    local w = agent.answer(store, 'toolbelt_run', { name = 'align-family', apply = true, params = { ref = 'fe.lua::M.g1', text = text, scope = 'all' } })
+    agent.set_writable(false)
+    eq('done', w.result[1].status, vim.inspect(w.result)); ok(disk():find('* 9', 1, true))
+end)

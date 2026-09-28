@@ -154,6 +154,9 @@ function M.T.first(...) return { op = 'first', ... } end
 function M.T.try(t) return { op = 'try', t } end
 function M.T.rep(t, limit) return { op = 'repeat', t, limit = limit } end
 function M.T.each(items, body) return { op = 'each', items = items, body = body } end
+--- a NAMED toolbelt entry as a step (cartograph.toolbelt): a write entry runs its own term, a discovery is a PREMISE
+--- gate — it passes when its claim holds and fails ill-posed, by name, when it does not
+function M.T.use(name, params) return { op = 'use', name = name, params = params or {} } end
 M.T['then'], M.T['repeat'] = M.T.seq, M.T.rep
 
 -- ── the runner ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -436,8 +439,44 @@ function eval(store, t, opts, where)
         return adopt(out, { class = 'ill-posed', where = where,
             why = ('repeat did not converge within %d iterations — each made a change, none ran out of work'):format(limit) })
     end
+    if op == 'use' then
+        -- ★ TACTICS COMPOSE BY NAME: the toolbelt is a library, not a flat list. Params are coerced by the entry's
+        -- own declaration (the same function the CLI and the MCP verb use), and a cycle of uses refuses.
+        local tb = require 'cartograph.toolbelt'
+        local here = ('%s.use(%s)'):format(where, tostring(t.name))
+        opts.using = opts.using or {}
+        if opts.using[t.name] then
+            return adopt(outcome(), { class = 'ill-posed', where = here,
+                why = ('toolbelt tactic `%s` uses itself — a cycle of uses never terminates'):format(tostring(t.name)) })
+        end
+        local e, lwhy = tb.load(t.name, opts.toolbelt_dir)
+        if not e then return adopt(outcome(), { class = 'ill-posed', where = here, why = lwhy }) end
+        local p, pwhy, pclass = tb.coerce(store, e, t.params)
+        if not p then return adopt(outcome(), { class = pclass or 'ill-posed', where = here, why = pwhy }) end
+        if e.kind == 'discovery' then
+            local okm, value = pcall(e.measure, store, p)
+            if not okm then return adopt(outcome(), { class = 'unbuilt', where = here, why = 'the measurement raised: ' .. tostring(value) }) end
+            local holds, cwhy = e.claim(value)
+            local o = outcome()
+            o.trace[1] = { where = here, verb = 'use:' .. t.name, ok = holds and true or false, why = cwhy }
+            if not holds then
+                return adopt(o, { class = 'ill-posed', where = here,
+                    why = ('the premise `%s` does not hold: %s'):format(t.name, tostring(cwhy)) })
+            end
+            o.residue[1] = { kind = 'premise', class = 'informational', where = here, text = ('premise `%s` holds: %s'):format(t.name, tostring(cwhy)) }
+            return o
+        end
+        opts.using[t.name] = true
+        local o = eval(store, e.build(p), opts, here)
+        opts.using[t.name] = nil
+        if o.ok and opts.apply and e.oracle then
+            local ook, owhy = e.oracle(store, o, p)
+            if not ook then adopt(o, { class = 'unbuilt', where = here, why = ('%s\'s oracle rejected it: %s'):format(t.name, tostring(owhy)) }) end
+        end
+        return o
+    end
     return adopt(outcome(), { class = 'ill-posed', where = where,
-        why = ('no tactical `%s` (then|first|try|repeat|each|step)'):format(tostring(op)) })
+        why = ('no tactical `%s` (then|first|try|repeat|each|step|use)'):format(tostring(op)) })
 end
 
 --- Run a tactic. opts: { apply = bool (default false: preview up to the first write), verbs (default compose.VERBS),
@@ -448,7 +487,8 @@ end
 ---      rolled_back, rollback_refused?, rollback_failed?, trace }
 function M.run(store, term, opts)
     opts = opts or {}
-    local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct }
+    local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct,
+        toolbelt_dir = opts.toolbelt_dir }
     local o = eval(store, term, eopts, 'root')
     local res = { residue = o.residue, trace = o.trace, rolled_back = eopts.undone or 0,
         options = o.options, fixes = o.fixes }

@@ -71,6 +71,78 @@ function M.list(d)
     return entries, broken
 end
 
+--- ★ PARAMETERS, COERCED BY THEIR DECLARED TYPE — one function for every caller (the CLI's strings, an MCP client's
+--- JSON, a `T.use` in a term), so a param means the same thing however it arrives. `params = { name = 'type' }`, a
+--- trailing `?` marks it optional:
+---   ref     a durable ref table, or `file::name` — resolved against the graph; a miss says DID YOU MEAN, with the
+---           near names in that file (cartograph.near), never a guess applied
+---   string  as given; `@path` reads the file (a tactic's `text` is usually a whole definition)
+---   list    a table, or `a,b,c`
+--- An undeclared param, and a missing required one, refuse as ill-posed BY NAME.
+--- -> params | nil, why, class
+function M.coerce(store, e, raw)
+    raw = raw or {}
+    local decl = e.params or {}
+    local out = {}
+    for k in pairs(raw) do
+        if decl[k] == nil then
+            local names = {}
+            for n in pairs(decl) do names[#names + 1] = n end
+            table.sort(names)
+            return nil, ('%s takes no param `%s` (it takes: %s)'):format(e.name, tostring(k),
+                #names > 0 and table.concat(names, ', ') or 'none'), 'ill-posed'
+        end
+    end
+    for k, ty in pairs(decl) do
+        local base, optional = tostring(ty):gsub('%?$', '')
+        optional = optional > 0
+        local v = raw[k]
+        if v == nil then
+            if not optional then return nil, ('%s needs param `%s` (%s)'):format(e.name, k, base), 'ill-posed' end
+        elseif base == 'ref' then
+            if type(v) == 'string' then
+                local file, name = v:match('^(.-)::(.+)$')
+                if not file then return nil, ('param `%s`: a ref is `file::name`, got %q'):format(k, v), 'ill-posed' end
+                local hit, names = nil, {}
+                for _, n in ipairs((store.data and store.data.nodes) or {}) do
+                    if n.file == file and (n.kind == 'function' or n.kind == 'method') then
+                        names[#names + 1] = n.name
+                        if n.name == name then hit = n end
+                    end
+                end
+                if not hit then
+                    local near = {}
+                    for _, c in ipairs(require('cartograph.near').within(name, names)) do near[#near + 1] = file .. '::' .. c.value end
+                    return nil, ('param `%s`: no function %s in %s%s'):format(k, name, file,
+                        #near > 0 and (' — did you mean ' .. table.concat(near, ' or ') .. '?') or ''), 'ill-posed'
+                end
+                v = store.ref_of(hit.id)
+            elseif type(v) ~= 'table' then
+                return nil, ('param `%s` must be a ref (a table or file::name)'):format(k), 'ill-posed'
+            end
+        elseif base == 'string' then
+            if type(v) ~= 'string' then return nil, ('param `%s` must be a string'):format(k), 'ill-posed' end
+            local path = v:match('^@(.+)$')
+            if path then
+                local fd = io.open(path)
+                if not fd then return nil, ('param `%s`: cannot read %s'):format(k, path), 'ill-posed' end
+                v = fd:read('a'); fd:close()
+                v = v:gsub('\n$', '')
+            end
+        elseif base == 'list' then
+            if type(v) == 'string' then
+                local l = {}
+                for item in v:gmatch('[^,]+') do l[#l + 1] = item end
+                v = l
+            elseif type(v) ~= 'table' then
+                return nil, ('param `%s` must be a list (a table or a,b,c)'):format(k), 'ill-posed'
+            end
+        end
+        out[k] = v
+    end
+    return out
+end
+
 --- run an entry against the current graph.
 --- write:     -> tactic.run's result (opts: apply, on_stop, correct), with the entry's oracle as the kernel
 --- discovery: -> { value, holds, why }
@@ -78,6 +150,9 @@ function M.run(store, name, params, opts)
     opts = opts or {}
     local e, why = M.load(name, opts.dir)
     if not e then return nil, why end
+    local cls
+    params, why, cls = M.coerce(store, e, params)
+    if not params then return nil, why, cls end
     if e.kind == 'discovery' then
         local okm, value = pcall(e.measure, store, params or {})
         if not okm then return nil, ('%s: the measurement raised: %s'):format(name, tostring(value)) end

@@ -347,6 +347,9 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
             text = 'function M.caller() return 0 end' } },
         -- ⚠ ABSENCE: this fixture's function joins no near-clone family, a fact about the CODE (as extract_family)
         txn_plan_propagate = { args = { node = idof('M.caller'), text = 'function M.caller() return 0 end' } },
+        -- the toolbelt: the catalogue, and a DISCOVERY re-measured on this read-only fixture (no families: it fails)
+        toolbelt_list = {},
+        toolbelt_run = { args = { name = 'family-premise' } },
         -- naming no container and no payload: a refusal reachable without
         -- touching a byte, and the one this verb gives most often in the wild —
         -- 70.6% of containers with two or more members share no shape at all
