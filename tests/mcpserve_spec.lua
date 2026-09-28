@@ -350,6 +350,9 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- the toolbelt: the catalogue, and a DISCOVERY re-measured on this read-only fixture (no families: it fails)
         toolbelt_list = {},
         toolbelt_run = { args = { name = 'family-premise' } },
+        -- the federation wire: this fixture's graph minted (or had no profile), so it serves NO ports — an absence
+        -- that names the host flag that would change it
+        ports = {},
         -- naming no container and no payload: a refusal reachable without
         -- touching a byte, and the one this verb gives most often in the wild —
         -- 70.6% of containers with two or more members share no shape at all

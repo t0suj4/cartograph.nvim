@@ -437,6 +437,8 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- guess at), then the READ diff, then the CALL diff it must not be mistaken
     -- for.
     'portability_targets', 'portability_move', 'portability_move_calls',
+    -- FEDERATION (CART-1160 step 9): this graph's PORTS, for a client that mounts this host as a band — a READ
+    'ports',
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
@@ -2482,6 +2484,35 @@ end
 -- ★ AN AGENT CAN NOW USE WHAT A SESSION RECORDED. A discovery re-measures the CURRENT graph and says whether its
 -- finding still holds; a write tactic PREVIEWS by default (a dry run that plans each step in the overlay world the
 -- last would produce, returned as a diff per file) and writes only with `apply = true` on a host started writable — refused by name otherwise.
+-- ── PORTS: the federation wire (CART-1160 step 9b) ─────────────────────────────
+-- ★ ONLY PORTS CROSS: the calls a band left unresolved that a profile disposed, with exactly the fields the port rule
+-- reads (treesitter.profile_port: callee, full, the disposition) and what a linkage row needs (fn, line). The linkage
+-- is derived on the CLIENT, over its own namespace (cartograph.federation) — this host answers a question, it does
+-- not ship its graph.
+function M._v_ports(store)
+    local data = store.data or {}
+    local cv = require('cartograph.callview').of(data)
+    local rows = {}
+    for i = 1, cv.n do
+        if not cv.get(i, 'to') and type(cv.get(i, 'ext')) == 'table' then
+            local e = cv.get(i, 'ext')
+            rows[#rows + 1] = { fn = nn(cv.get(i, 'fn')), callee = nn(cv.get(i, 'callee')), full = nn(cv.get(i, 'full')),
+                ext = { why = nn(e.why), inferred = nn(e.inferred) }, line = nn(cv.get(i, 'line')), file = nn(cv.get(i, 'file')) }
+        end
+    end
+    local keys = {}
+    for f, s in pairs(data.stamps or {}) do keys[#keys + 1] = f .. '=' .. tostring(s) end
+    table.sort(keys)
+    local subject = { root = nn(data.root), profile = nn(data.profile), minted = data.profile_mint ~= false,
+        stamp = 'sha256:' .. vim.fn.sha256(table.concat(keys, '\n')) }
+    if #rows == 0 then
+        return { subject = subject, result = {}, absence = 'absent', absence_why = { premise = 'no-ports',
+            why = data.profile_mint ~= false and 'this host MINTED its profile calls in-graph, so none is left as a port — start it with --no-profile-mint (and --profile <runtime>)'
+                or 'no call in this graph was left unresolved with a profile disposition', evidence = NUL } }
+    end
+    return { subject = subject, result = rows }
+end
+
 local function v_toolbelt_list(store)
     local entries, broken, promoted, overridden = require('cartograph.toolbelt').list(nil, (store.data or {}).root)
     local rows = {}
@@ -3637,6 +3668,14 @@ M.VERBS = {
                 desc = 'the exemplar AFTER: the same definition once the edit was made' },
         },
         run = v_txn_plan_transplant,
+    },
+    ports = {
+        summary = 'this graph\'s PORTS: every call its band honestly left unresolved that a profile DISPOSED (callee, full, the disposition, the enclosing fn, line), plus the band identity (root, profile, a stamp of its file stamps). A client mounts this host as a band and derives the cross-band linkage itself; only ports cross the wire, never bodies',
+        subject = 'graph',
+        tier_basis = 'observation',
+        absences = { 'absent' },
+        args = {},
+        run = function (store) return M._v_ports(store) end,
     },
     toolbelt_list = {
         summary = 'the NAMED TACTICS in the toolbelt: each entry\'s kind (write | discovery), params, the ticket a discovery measures, and its EXAMPLES — the usage, which the toolbelt fence also runs as tests',

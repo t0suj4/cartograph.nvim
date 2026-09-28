@@ -2651,15 +2651,18 @@ M.mint_std_nodes = mint_std_nodes
 -- profile (`profile.mint`) so a disposition-only profile (lua-factorio) stays gate-
 -- neutral. The disposition already language-scoped the calls (prof_ext fires only
 -- for profile.lang files) and left c.to nil, so this never shadows a project def.
-local function mint_profile_nodes(data, node_index, profile)
+--- ★ THE PROFILE PORT RULE, ONE COPY (CART-1160 step 9): which canonical profile symbol a disposed call names. The
+--- in-graph mint below and the FEDERATED linkage (cartograph.federation, a profile mounted as its own band) both ask
+--- this function — two copies of the port semantics would be the drift CART-1153 removed.
+--- -> fn(cget, i) -> path, ret | nil
+local function profile_port(profile)
     local canon = profile.canon or {}
     -- a profile MAY supply its own receiver-aware mapper (factorio: a
     -- `<global>.<method>` call → the documented `Class::method`, read from c.full);
     -- when present it OWNS the mint decision. Otherwise the default member-canon
     -- path applies (ruby: dispatch-by-member-name → canonical `Owner#member`).
     local mint_path = profile.mint_path
-    return mint_nodes(data, node_index, profile.runtime .. '::', profile.runtime,
-        function (cget, i)
+    return function (cget, i)
             local e = cget(i, 'ext')
             if type(e) ~= 'table' then return nil end
             local callee = cget(i, 'callee')
@@ -2678,7 +2681,12 @@ local function mint_profile_nodes(data, node_index, profile)
             -- curated profile method stays unminted, not over-claimed at the tier.
             if e.why == 'vocab' and canon[callee] then return canon[callee] end
             return nil
-        end)
+        end
+end
+M.profile_port = profile_port
+
+local function mint_profile_nodes(data, node_index, profile)
+    return mint_nodes(data, node_index, profile.runtime .. '::', profile.runtime, profile_port(profile))
 end
 M.mint_profile_nodes = mint_profile_nodes
 
@@ -6413,6 +6421,9 @@ function M.extract(root, opts)
     -- case, so relink/refresh and the cache identity see what was actually used.
     local active_profile = active_profile_for(root, opts and opts.profile)
     if active_profile then data.profile = active_profile.runtime end
+    -- a FEDERATED extraction keeps the profile's disposed calls as PORTS (no mint): recorded on the graph so relink
+    -- keeps honouring it (CART-1160 step 9)
+    if opts and opts.profile_mint == false then data.profile_mint = false end
     local eff_spec = spec_overlay(active_packs, active_profile)
 
     -- per-name def indexes for the resolution pass
@@ -9075,7 +9086,9 @@ local MATCH_OPTS = { match_limit = 65536 }
         if data.stdaliases then mint_std_nodes(data, node_index) end
         -- profile resolution face: mint <runtime>::<method> nodes for a minting
         -- profile's disposed framework calls (ruby-rails). Same inline-vs-relink split.
-        if active_profile and active_profile.mint then
+        -- (a FEDERATED extraction — opts.profile_mint = false — leaves the disposed calls as PORTS: the profile is
+        -- mounted as its own band and the linkage is derived over the namespace, cartograph.federation)
+        if active_profile and active_profile.mint and data.profile_mint ~= false then
             mint_profile_nodes(data, node_index, active_profile)
         end
     else
@@ -9741,7 +9754,7 @@ function M.relink(data, touched)
     if data.stdaliases then mint_std_nodes(data, node_index) end
     -- profile resolution face: covers the parallel parent (relink recomputes
     -- active_profile; data.profile isn't restamped here). Idempotent like above.
-    if active_profile and active_profile.mint then
+    if active_profile and active_profile.mint and data.profile_mint ~= false then
         mint_profile_nodes(data, node_index, active_profile)
     end
     -- federated_resolve: cbarg marks the pre-scan added went to the light STUBS

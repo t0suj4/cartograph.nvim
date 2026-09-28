@@ -52,13 +52,23 @@ package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.pa
 -- at once is CART-0821, and later CART-0026's federated accessor. Read this as
 -- the second and you will be wrong.
 local roots, index_only, writable = {}, nil, nil
-for i = 1, #arg do
-    if arg[i] == '--index-only' then index_only = true
-    elseif arg[i] == '--write' then writable = true
-    else roots[#roots + 1] = arg[i] end
+-- ★ FEDERATION (CART-1160 step 9b): `--profile <runtime>` forces the L2 profile, `--no-profile-mint` keeps its disposed
+-- calls as PORTS (no in-graph mint) so the `ports` verb serves them to a client that mounts this host as a band and
+-- derives the linkage itself. A ported graph is extracted COLD: the cache holds minted graphs.
+local profile, profile_mint = nil, nil
+do
+    local i = 1
+    while i <= #arg do
+        if arg[i] == '--index-only' then index_only = true
+        elseif arg[i] == '--write' then writable = true
+        elseif arg[i] == '--profile' then profile = arg[i + 1]; i = i + 1
+        elseif arg[i] == '--no-profile-mint' then profile_mint = false
+        else roots[#roots + 1] = arg[i] end
+        i = i + 1
+    end
 end
 if #roots == 0 then
-    io.stderr:write('usage: mcpserve <root>... [--index-only] [--write]\n')
+    io.stderr:write('usage: mcpserve <root>... [--index-only] [--write] [--profile <runtime>] [--no-profile-mint]\n')
     os.exit(2)
 end
 -- ⚠ ONE BAND PER ROOT, ENFORCED HERE BECAUSE NOTHING ELSE ENFORCES IT
@@ -143,16 +153,20 @@ for _, r in ipairs(roots) do
     -- one. Asking the wrong one is a silent wrong answer, not a slow one.
     local cachem = require 'cartograph.cache'
     local data, note
-    if index_only then data, note = cachem.open_index_only(r)
+    local federated = profile ~= nil or profile_mint == false
+    if federated then data = nil -- a forced profile / ported graph is not what the cache holds: extract cold
+    elseif index_only then data, note = cachem.open_index_only(r)
     else data, note = cachem.open(r) end
     if note then io.stderr:write(('cartograph mcpserve: %s\n'):format(tostring(note))) end
     local ok = true
     if not data then
-        ok, data = pcall(index_only and ts.index_only or ts.extract, r)
+        ok, data = pcall(index_only and ts.index_only or ts.extract, r,
+            federated and { profile = profile, profile_mint = profile_mint } or nil)
         -- ⚠ SYNCHRONOUS, not save_bg: this process serves and then exits, and a
         -- background save that never finishes would leave the next start cold
         -- again -- the same defect one level down.
-        if ok then pcall(cachem.save, data) end
+        -- (a federated graph is never saved: it would poison the cache for a normal open)
+        if ok and not federated then pcall(cachem.save, data) end
     end
     if not ok then
         io.stderr:write(('extract failed (%s): %s\n'):format(r, tostring(data)))
