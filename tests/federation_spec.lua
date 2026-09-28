@@ -142,3 +142,52 @@ test('federation over the WIRE: a host that dies is UNAVAILABLE — a band-level
     local never = F.remote_band { cmd = { '/nonexistent/cartograph-host' }, timeout = 2000 }
     ok(never.unavailable and never.unavailable:find('did not start', 1, true), tostring(never.unavailable))
 end)
+
+-- ── 9c: PEER PROJECTS — an engine band EXPORTS its registrations, a mods band's unresolved calls are its PORTS ───────
+test('federation 9c: a C++ engine band\'s API_FCT registrations link a Lua band\'s calls — equal to the MERGED graph\'s xlang edges', function ()
+    local function has(l) return pcall(vim.treesitter.get_string_parser, '', l) end
+    if not (has('cpp') and has('lua')) then skip 'no cpp/lua parser' end
+    local X = require 'cartograph.xlang'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/engine', 'p'); vim.fn.mkdir(root .. '/mods', 'p')
+    local function put(rel, s) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(s); fd:close() end
+    put('engine/l_env.cpp', table.concat({
+        '#define API_FCT(name) registerFunction(L, #name, l_##name, top)',
+        'int ModApiEnv::l_set_node(lua_State *L) { return 0; }',
+        'int ModApiEnv::l_get_node(lua_State *L) { return 0; }',
+        'int ModApiEnv::l_line_of_sight(lua_State *L) { return 0; }',
+        'void ModApiEnv::Initialize(lua_State *L, int top) {',
+        '  API_FCT(set_node);',
+        '  API_FCT(get_node);',
+        '  API_FCT(line_of_sight);',
+        '}', '' }, '\n'))
+    -- a SAME-NAMED C++ function elsewhere: the identifier argument resolves to it — the key is still the name as written
+    put('engine/env.cpp', 'bool ServerEnvironment::line_of_sight(int a) { return true; }\n')
+    put('mods/init.lua', table.concat({
+        'local function place(p) core.set_node(p, "stone") end',
+        'local function look(p) return core.get_node(p), core.line_of_sight(p, p) end',
+        'local function mine(p) return core.not_an_api(p) end',
+        'return { place = place, look = look, mine = mine }', '' }, '\n'))
+    local B = { { export = { verb = 'API_FCT', name = 1, handler = 'l_%s', ident = true }, import = { any_call = true } } }
+    -- the ORACLE: one merged graph, linked in-graph
+    local merged = ts.extract(root, { profile = false })
+    local st = X.link(merged, B)
+    eq(3, st.exports, 'all three registrations, line_of_sight included (its arg resolves to env.cpp and is still the key)')
+    local oracle = {}
+    for _, e in ipairs(merged.edges) do
+        if e.kind == 'ref' and e.xlang and e.from:match('^mods/') and e.to:match('^engine/') then oracle[#oracle + 1] = e.from .. ' -> ' .. e.to end
+    end
+    table.sort(oracle)
+    eq(3, #oracle, vim.inspect(oracle))
+    -- FEDERATED: two bands, the linkage derived over the namespace
+    local E = ts.extract(root .. '/engine', { profile = false })
+    local I = ts.extract(root .. '/mods', { profile = false })
+    local L = F.linkage(NS.mount(NS.mount(NS.empty(), E.root, E, { bindings = B }), I.root, I, { share = { E.root } }))
+    local fed = {}
+    for _, r in ipairs(L.rows) do fed[#fed + 1] = 'mods/' .. r.from .. ' -> engine/' .. r.to end
+    table.sort(fed)
+    eq(oracle, fed, 'row for row')
+    -- no sharing named: nothing links; and the engine band's mounted value was not mutated by the export scan
+    local closed = F.linkage(NS.mount(NS.mount(NS.empty(), E.root, E, { bindings = B }), I.root, I))
+    eq(0, #closed.rows)
+    for _, e in ipairs(E.edges) do ok(not e.xlang, 'the exporter band itself gained no xlang edge') end
+end)

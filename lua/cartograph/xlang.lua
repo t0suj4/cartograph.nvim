@@ -175,9 +175,20 @@ end
 
 local argv = require 'cartograph.argv'
 
-local function logical_arg(c, i)
+local function logical_arg(c, i, ident)
     local j = i + (callrec.method(c) and 1 or 0)
-    return j <= argv.n(c) and argv.str(c, j) or nil
+    if j > argv.n(c) then return nil end
+    -- `ident`: the key is an IDENTIFIER's own text — a stringifying macro (`#name` in `API_FCT(name)`) turns the
+    -- identifier into the key string, so the name as written IS the key
+    if ident then
+        local a = argv.at(c, j)
+        -- ⚠ `func` TOO: the macro stringifies the identifier AS WRITTEN, whatever it resolves to. MEASURED on the whole
+        -- luanti tree: 6 of 154 `API_FCT(name)` keys (line_of_sight, compress, gettext, …) resolved to a same-named C++
+        -- function elsewhere, so the arg read as `func`, the key was lost — on BOTH sides of peergate (they share this
+        -- scan), so the gate still matched 284/284. Only the registration count dropping (154 -> 148) showed it.
+        if a and (a.k == 'local' or a.k == 'callable' or a.k == 'func') and a.name then return a.name end
+    end
+    return argv.str(c, j)
 end
 
 --- The call's own source text, bounded by its paren balance — scanning
@@ -227,7 +238,9 @@ function M.def_index(data)
     for tail, list in pairs(tails) do
         if #list == 1 and not exact[tail] then exact[tail] = list end
     end
-    return exact
+    -- the AMBIGUOUS tails too, as a second value: a handler derived by PATTERN (`l_%s`) is disambiguated by the
+    -- registering call's own file (handler_by_module), which needs every candidate, not only a unique one
+    return exact, tails
 end
 
 --- ★★ THE HANDLER RESOLUTION, EXPORTED BECAUSE A SECOND CARRIER NEEDS IT
@@ -269,7 +282,20 @@ end
 --- Resolve the handler of an export call: a resolved function argv first,
 --- then a textual scan of the call's source for a qualified/plain function
 --- name (the &Class::Method inside base::BindRepeating spans lines).
-local function find_handler(c, root, exact, export)
+local function find_handler(c, root, exact, export, tails)
+    -- ★ A HANDLER DERIVED FROM THE KEY BY PATTERN (plan step 7, 9c): luanti registers its Lua API with a MACRO,
+    -- `#define API_FCT(name) registerFunction(L, #name, l_##name, top)` — the key is the stringified identifier and
+    -- the handler the token-pasted `l_<name>`. `export.handler = 'l_%s'` names that rule; the handler is the
+    -- definition of that name (exact, else among the ambiguous tails) IN THE REGISTERING CALL'S OWN FILE when several
+    -- classes define it — it disambiguates, it never widens (handler_by_module's rule).
+    if export.handler then
+        local key = export.name and logical_arg(c, export.name, export.ident)
+        if not key or key == '' then return nil end
+        local name = export.handler:format(key)
+        local pool = { [name] = exact[name] or (tails and tails[name]) }
+        local mod = (callrec.file(c) or ''):match('([^/]+)%.[%w]+$')
+        return M.handler_by_module(pool, name, mod)
+    end
     if export.fn then
         local off = callrec.method(c) and 1 or 0
         local a = argv.at(c, export.fn + off)
@@ -407,7 +433,8 @@ function M.link(data, bindings)
     bindings = bindings or require('cartograph.config').bindings
         or M.default_bindings
     local coop = require 'cartograph.coop' -- tick() yields under coop.run; else no-op
-    local exact = M.def_index(data)    local refEdge = {}
+    local exact, tails = M.def_index(data)
+    local refEdge = {}
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
     end
@@ -586,10 +613,10 @@ function M.link(data, bindings)
                 -- ⚠ A KEY IS REQUIRED TO LINK AND NOT TO REGISTER. A hook idiom
                 -- (`script.on_init(handler)`) names no key at all, and demanding
                 -- one dropped the whole class before it reached find_handler.
-                local key = b.export.name and logical_arg(c, b.export.name) or nil
+                local key = b.export.name and logical_arg(c, b.export.name, b.export.ident) or nil
                 if key == '' then key = nil end
                 if key or not b.export.name then
-                    local h = find_handler(c, data.root, exact, b.export)
+                    local h = find_handler(c, data.root, exact, b.export, tails)
                     if h then
                         if key then
                             exports[key] = exports[key] or {}
@@ -620,6 +647,10 @@ function M.link(data, bindings)
             end
         end
         end -- the declared-export branch
+        -- the KEYS this band registers, for a caller linking ACROSS bands (federation, CART-1160 step 9c): the
+        -- exporting band's own registrations are its ports' partners
+        stats.keys = stats.keys or {}
+        for k, hs in pairs(exports) do stats.keys[k] = hs end
         if b.import and (b.import.verb or b.import.any_call) then
         if next(exports) then
             -- the import side is either a named verb (index by that) or

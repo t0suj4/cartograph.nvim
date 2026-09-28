@@ -56,6 +56,28 @@ local function measure(_, p)
         before, after = 'return ' .. before, 'return ' .. after
     end
     local store = require 'cartograph.store'
+    -- ★ GROUND mode (ground = 1): the mutation is EXACTLY the text given, applied once at its one site by the edit
+    -- verb's classification — no rule is learned. MEASURED why it is needed: an edit inside an `or` chain was learned
+    -- as FOUR independent rules applied at 10 sites (a multi-region diff does not compose to the intended mutant), so
+    -- "SURVIVED" described a different mutant than the one written.
+    if p.ground == '1' or p.ground == true then
+        local E = require 'cartograph.edit'
+        local path = root .. '/' .. p.file
+        local fd = io.open(path, 'rb'); local text = fd and fd:read('a'); if fd then fd:close() end
+        local state, why = E.classify(text, p.before, p.after)
+        if state ~= 'pending' then v.error = 'the mutation did not APPLY: ' .. tostring(why or state); return done() end
+        local new = E.apply_to(text, p.before, p.after)
+        local parses = require('cartograph.planguards').GUARDS.parses(nil, nil, { [p.file] = text }, { [p.file] = new })
+        for _, row in ipairs(parses or {}) do
+            if row.verdict == require('cartograph.planguards').FAIL then v.error = 'the mutated file breaks a guard: ' .. tostring(row.why); return done() end
+        end
+        local wf = assert(io.open(path, 'wb')); wf:write(new); wf:close()
+        v.sites, v.rules = 1, { ('`%s` -> `%s` (ground)'):format(p.before, p.after) }
+        local mut, mwhy = SF.run(root, p.spec)
+        if not mut then v.error = 'mutated run: ' .. tostring(mwhy); return done() end
+        v.mutated, v.caught = mut, mut.failed > 0
+        return done()
+    end
     local txn = require 'cartograph.txn'
     local ok, applied, awhy = pcall(store.scoped, { root = root, nodes = {}, edges = {}, calls = {} }, function ()
         local plan, pwhy, pclass = require('cartograph.byexample').plan(store, { before = before, after = after, scope = p.file })
@@ -84,7 +106,7 @@ local E = {
     kind = 'discovery',
     measures = 'CART-1174',
     summary = 'does SPEC catch a mutation? file = the file to mutate, before/after = the mutation as an example (a chunk or an EXPRESSION), spec = the spec file name (e.g. tactic_spec); runs in a scratch COPY of repo (default: this cartograph), baseline first; keep = 1 keeps the copy',
-    params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?' },
+    params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?', ground = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
@@ -130,6 +152,24 @@ E.examples = {
     {
         name = 'a mutation that matches NOTHING is refused by name — never read as caught or survived',
         files = FX, params = params('guard_spec', 'if x > 99 then return true end', 'if x >= 99 then return true end'),
+        expect = { holds = false, check = function (v) return v.error and v.error:find('did not APPLY', 1, true) ~= nil, tostring(v.error) end },
+    },
+    {
+        -- the SAME text as the `#` example, GROUND: exactly the written mutant at its one site (`x > 0` untouched) — the
+        -- learned rule's two sites vs this one is the difference the mode exists for
+        name = 'GROUND mode applies exactly the written text at its one site — no rule is learned, and it is CAUGHT',
+        files = FX, params = function (store)
+            local p = params('guard_spec', '#t > 0', '#t >= 0')(store); p.ground = '1'; return p
+        end,
+        expect = { holds = true, check = function (v) return v.sites == 1 and (v.rules[1] or ''):find('(ground)', 1, true) ~= nil,
+            'sites ' .. tostring(v.sites) .. ' ' .. tostring(v.error) end },
+    },
+    {
+        name = 'a GROUND mutation whose result already occurs elsewhere is refused (drifted) — never applied at a guess',
+        files = FX, params = function (store)
+            -- `x > 0` -> `#t > 0`: the result already occurs (M.nonempty), and neither text contains the other
+            local p = params('guard_spec', 'x > 0', '#t > 0')(store); p.ground = '1'; return p
+        end,
         expect = { holds = false, check = function (v) return v.error and v.error:find('did not APPLY', 1, true) ~= nil, tostring(v.error) end },
     },
     {

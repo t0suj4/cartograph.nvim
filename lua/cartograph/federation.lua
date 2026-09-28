@@ -105,6 +105,21 @@ function M.linkage(ns)
                 port = ts.profile_port(require('cartograph.spec.profile').load(b.graph.profile)) }
         end
     end
+    -- ★ PEER-PROJECT EXPORTS (9c): a band mounted with `bindings` EXPORTS the keys its registrations name (xlang's own
+    -- export scan — luanti's `API_FCT(name)` -> the C++ handler `l_name`), computed on a COPY of its records so the
+    -- mounted value is never mutated. Several handlers for one key inside ONE band are that band's own fan-out (as the
+    -- merged graph links them); a tie is only ever ACROSS bands.
+    local exporters = {}
+    for _, b in ipairs(bands) do
+        if b.opts.bindings and not b.graph.unavailable then
+            local copy = { root = b.graph.root, nodes = b.graph.nodes, edges = {}, calls = {} }
+            for i, c in ipairs(b.graph.calls or {}) do local r = {}; for k, v in pairs(c) do r[k] = v end; copy.calls[i] = r end
+            local st = require('cartograph.xlang').link(copy, b.opts.bindings)
+            local any_call = false
+            for _, bd in ipairs(b.opts.bindings) do if bd.import and bd.import.any_call then any_call = true end end
+            exporters[#exporters + 1] = { band = b, keys = st.keys or {}, any_call = any_call }
+        end
+    end
     local rows, byk, misses = {}, {}, {}
     for _, b in ipairs(bands) do
         if b.graph.unavailable then
@@ -116,6 +131,33 @@ function M.linkage(ns)
             for _, r in ipairs(b.opts.share or {}) do want[r] = true end
             local shares = {}
             for _, P in ipairs(profiles) do if want[P.runtime] or want[P.band.point] then shares[#shares + 1] = P end end
+            -- the PEER exporters this band's mount names: an unresolved call whose callee is a registered key is a port
+            -- they answer (any_call: the exported key IS the callable name, as xlang's own import rule reads it)
+            local peers = {}
+            for _, X in ipairs(exporters) do if X.band ~= b and want[X.band.point] and X.any_call then peers[#peers + 1] = X end end
+            if #peers > 0 then
+                local cv = require('cartograph.callview').of(b.graph)
+                for i = 1, cv.n do
+                    local callee, fn = cv.get(i, 'callee'), cv.get(i, 'fn')
+                    if not cv.get(i, 'to') and callee and fn then
+                        local hits = {}
+                        for _, X in ipairs(peers) do if X.keys[callee] then hits[#hits + 1] = X end end
+                        if #hits == 1 then
+                            for _, h in ipairs(hits[1].keys[callee]) do
+                                local k = b.point .. '\31' .. fn .. '\31' .. h
+                                local row = byk[k]
+                                if not row then
+                                    row = { from = fn, to = h, key = callee, band = b.point, peer = hits[1].band.point, tier = 'xlang', at = {} }
+                                    byk[k] = row; rows[#rows + 1] = row
+                                end
+                                row.at[#row.at + 1] = { line = cv.get(i, 'line') }
+                            end
+                        elseif #hits > 1 then
+                            misses[#misses + 1] = { band = b.point, fn = fn, callee = callee, why = 'ambiguous', candidates = #hits }
+                        end
+                    end
+                end
+            end
             if #shares > 0 then
                 local cv = require('cartograph.callview').of(b.graph)
                 for i = 1, cv.n do
