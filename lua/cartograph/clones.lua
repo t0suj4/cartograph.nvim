@@ -5635,6 +5635,9 @@ function M.family_propagate(fam, i, text, store, opts)
     -- answer we want and the one it is contracted to give.
     local P = A.propagate(fam.template, C, Vs, i)
     if not P then return nil, 'propagate returned nothing' end
+    -- the template the edit IMPLIES (widened domains for a value edit, the new fixed part for a template one) and
+    -- the parsed edit itself: what a renderer needs to turn a commit back into TEXT (txn_plan_propagate)
+    out.new_template, out.edited = C.template, I2
 
     -- the VALUE part: per changed hole, who already holds the old value (the
     -- class) and who holds something else, grouped by what they hold.
@@ -5671,6 +5674,145 @@ function M.family_propagate(fam, i, text, store, opts)
         out.commit.template = P.template.commit
     end
     return out
+end
+
+-- ── a propagated edit, rendered back to TEXT one member at a time (CART-1152 txn_plan_propagate) ──
+--
+-- ★ THE DONOR IS THE MEMBER'S OWN TEXT WHENEVER IT CAN BE. The renderer takes everything OUTSIDE the holes from its
+-- donor, so rendering a sibling from the EDITED text would give every member the origin's comments, formatting and
+-- whatever the IR erased inside spans — a silent surprise across the whole family. So:
+--   a VALUE change      member j's own source, only the committed holes substituted (the new value's text is read
+--                       off the edited text at that hole's span)
+--   a TEMPLATE change   the edited text MUST be the donor (no member's own text has the new fixed part), so j is
+--                       admitted only if its surface outside the holes equals the ORIGIN's: an identity render of j
+--                       from i's ORIGINAL text, with j's own hole texts, must reproduce j byte for byte
+-- ★★ AND EVERY RENDER IS CHECKED AGAINST WHAT IT CLAIMS: reparsed, it must equal instantiate(new template, j's
+-- predicted values) — a value written into the wrong hole makes the terms differ, and the bracket class does not
+-- reparse. `render` itself runs unverified here because its own verify is the element-template matcher.
+
+--- member j's OWN text for each hole (the first occurrence's span), its template record, and its source lines
+local function own_hole_texts(fam, store, j)
+    local tmpl, why = M.family_template(fam, store, { donor = j })
+    if not tmpl then return nil, why end
+    if (tmpl.unkeyed or 0) > 0 then
+        return nil, ('%d hole(s) have no source span in %s'):format(tmpl.unkeyed, tostring(tmpl.donor.name))
+    end
+    local nd = store.node(tmpl.donor.id)
+    local src = nd and store.content and store.content(nd)
+    if not src then return nil, 'the member source is not available' end
+    local lines = as_lines(src)
+    local own = {}
+    for h, keys in pairs(tmpl.by_hole) do
+        if keys[1] then own[h] = slice(lines, tmpl.varying[keys[1]].at) end
+    end
+    return own, tmpl, src, lines
+end
+
+--- rename a rendered function's HEADER from `from` to `to`: the name is outside every hole (the body is what the
+--- family abstracts), so a text rendered from ANOTHER member's donor carries that member's name. Only the first
+--- line is touched, and only a plain occurrence of the old name. -> text | nil, why
+local function rename_header(text, from, to)
+    if from == to then return text end
+    local nl = text:find('\n', 1, true)
+    local head, rest = nl and text:sub(1, nl - 1) or text, nl and text:sub(nl) or ''
+    local a, b = head:find(from, 1, true)
+    if not a then return nil, ('cannot locate the function name %s on its first line'):format(from) end
+    return head:sub(1, a - 1) .. to .. head:sub(b + 1) .. rest
+end
+
+--- Render member j's NEW source text for a propagated edit.
+---@param fam table     the family record
+---@param P table       a `family_propagate` result (carries new_template and the parsed edit)
+---@param i number      the member the edit was made to
+---@param text string   member i's edited text
+---@param j number      the member to render
+---@param change table  { holes = { [h] = true } (holes j takes from the edit), template = bool, values = V (j's
+---                     predicted values under the new template) }
+---@return table|nil { text, at, file, id } | nil, why
+function M.family_member_text(fam, P, i, text, j, store, change)
+    local A = require('cartograph.algebra').load()
+    if not A then return nil, 'algebra unavailable' end
+    local own, tmpl_j, src_j, lines_j = own_hole_texts(fam, store, j)
+    if not own then return nil, tmpl_j end
+    local body = (P.new_template and P.new_template.body) or fam.template.body
+    -- the new value texts, read off the EDITED text at each hole's span
+    local etext = as_lines(text)
+    local esites, ewhy = hole_sites(body, P.edited)
+    if not esites then return nil, 'the edit does not walk against the template: ' .. tostring(ewhy) end
+    local edited = {}
+    for h, occs in pairs(esites) do
+        local ext = occs[1] and M.term_extent(occs[1])
+        edited[h] = ext and slice(etext, ext) or nil
+    end
+    local out
+    if not change.template then
+        local subs = {}
+        for key, v in pairs(tmpl_j.varying) do
+            if change.holes[v.hole] then
+                if not edited[v.hole] then return nil, ('the edit gives hole %s no source text'):format(v.hole) end
+                subs[key] = edited[v.hole]
+            else
+                subs[key] = slice(lines_j, v.at)
+            end
+        end
+        local r, rwhy = M.render(tmpl_j, subs, src_j, { unverified = true })
+        if not r then return nil, rwhy end
+        out = r
+    else
+        -- the surface check: j rendered from i's ORIGINAL text with j's own hole texts must BE j
+        local _, tmpl_i, src_i = own_hole_texts(fam, store, i)
+        if not tmpl_i then return nil, 'the origin has no renderable template' end
+        if j ~= i then
+            local isubs = {}
+            for key, v in pairs(tmpl_i.varying) do
+                if own[v.hole] == nil then return nil, ('member has no text for hole %s'):format(v.hole) end
+                isubs[key] = own[v.hole]
+            end
+            local ident = M.render(tmpl_i, isubs, src_i, { unverified = true })
+            ident = ident and rename_header(ident, tmpl_i.donor.name, tmpl_j.donor.name)
+            local mine = slice(lines_j, tmpl_j.donor.at)
+            if ident ~= mine then
+                return nil, 'its text outside the holes differs from the origin\'s (comments, layout or erased surface) — '
+                    .. 'rendering it from the edited text would overwrite that'
+            end
+        end
+        -- the edited text as the donor: its holes' spans, in its own coordinates
+        local varying, n = {}, #etext
+        for h, occs in pairs(esites) do
+            for _, o in ipairs(occs) do
+                local ext = M.term_extent(o)
+                if not ext then return nil, ('hole %s has no span in the edited text'):format(h) end
+                local key = span_key(ext)
+                if not varying[key] then varying[key] = { at = ext, kind = o.k or 'value', hole = h } end
+            end
+        end
+        local tmpl_e = { alignable = true, unkeyed = 0, varying = varying,
+            donor = { at = { start = { line = 0, char = 0 }, ['end'] = { line = n - 1, char = #(etext[n] or '') } } } }
+        local subs = {}
+        for key, v in pairs(varying) do
+            if change.holes[v.hole] then subs[key] = slice(etext, v.at)
+            elseif own[v.hole] ~= nil then subs[key] = own[v.hole]
+            else return nil, ('member has no text for hole %s'):format(v.hole) end
+        end
+        local r, rwhy = M.render(tmpl_e, subs, text, { unverified = true })
+        if not r then return nil, rwhy end
+        -- the edited text is the ORIGIN's: its header names the origin
+        local rn, nwhy = rename_header(r, tmpl_i.donor.name, tmpl_j.donor.name)
+        if not rn then return nil, nwhy end
+        out = rn
+    end
+    -- the check: reparsed, the render must be EXACTLY the predicted instance
+    local nd = store.node(tmpl_j.donor.id)
+    local lang = expr.lang_of(nd.file)
+    local eo, pwhy = expr.of_text(out, lang, { method = nd.kind == 'method' or nil })
+    if not eo then return nil, 'the rendered member does not reparse: ' .. tostring(pwhy) end
+    local _, _, _, exprs, locals = fn_row_keys(eo)
+    local got = require('cartograph.algebra').fn_term { exprs = exprs, locals = locals }
+    local want = change.values and A.instantiate(P.new_template or fam.template, change.values).term
+    if not (got and want and A.eq(got, want)) then
+        return nil, 'the rendered member reparsed to something other than its predicted values'
+    end
+    return { text = out, at = tmpl_j.donor.at, file = nd.file, id = nd.id, name = nd.name }
 end
 
 -- ── the VIRTUAL-STEP LADDER: a SEQUENCE of edits, none of them written ──────

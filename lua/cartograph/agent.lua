@@ -440,7 +440,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
-    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_plan_replace',
+    'txn_plan_annotate', 'txn_plan_extract_family', 'txn_plan_clonemerge', 'txn_plan_replace', 'txn_plan_propagate',
     'txn_plan_invert', 'txn_plan_transplant', 'txn_preview',
     -- the handoff: plan on a read-only host, apply on an armed one
     'txn_save', 'txn_load',
@@ -1878,6 +1878,7 @@ local VERB_OF_FAMILY = {
     ['clone-merge'] = 'txn_plan_clonemerge',
     ['inline-helper'] = 'txn_plan_invert',
     replace = 'txn_plan_replace',
+    propagate = 'txn_plan_propagate',
 }
 
 --- ★ EXPORTED FOR THE APPLYABILITY SWEEP (CART-0982). The fence that catches a planner
@@ -2470,6 +2471,42 @@ local function v_txn_plan_transplant(store, args)
         -- the hazards as their SENTENCES: a hazard row encodes as `[]` (hazard.plain)
         notes = { plan.preserves_why, (unpack or table.unpack)(vim.tbl_map(function (r) return r.text end,
             require('cartograph.hazard').plain(plan.hazards))) },
+    }
+end
+
+-- ── propagate: an edit on ONE clone, carried to its family (CART-1152) ─────────
+--
+-- ★ THE SCOPE IS THE OPERATOR'S, and the envelope says so twice: without `scope` the plan is the origin only, and a
+-- `propagate-scope` DECISION hazard (in the ledger note, with a fix per wider scope) names who else could take it.
+-- A member with no family is an ABSENCE — a fact about the code, as `txn_plan_extract_family` answers it.
+local function v_txn_plan_propagate(store, args)
+    local n, bad = write_subject(store, args)
+    if not n then return bad end
+    local node_row = noderow(store, n.id)
+    if not require('cartograph.clones').family_of(store, n.id) then
+        return { subject = { plan = NUL, node = node_row, verb = 'propagate' }, result = {}, absence = 'absent',
+            absence_why = { premise = 'no-family',
+                why = ('%s joins no near-clone family, so an edit to it has nowhere to propagate — an edit to one function is txn_plan_replace'):format(tostring(n.name)),
+                evidence = { node = n.id } } }
+    end
+    local scope = args.scope
+    if type(scope) == 'string' and scope == '' then scope = nil end
+    local plan, why, class = require('cartograph.propagate').plan(store, { node = n.id, text = args.text, scope = scope })
+    if not plan then
+        return refuse('cannot-plan',
+            ('an edit to %s cannot be propagated: %s'):format(tostring(n.name), tostring(why)),
+            'the reason names the premise — a straddle or an unsupported shape is the ABSTRACTION needing to move first; a parse failure is the text',
+            { node = n.id, class = nn(class) })
+    end
+    local pid = stash_plan(store, plan, 'propagate', { verb = VERB_OF_FAMILY['propagate'], args = args })
+    local rows = {}
+    for _, name in ipairs(plan.members) do rows[#rows + 1] = { name = name, role = 'rewritten' } end
+    return {
+        subject = { plan = pid, verb = plan.verb, node = node_row, kind = plan.kind,
+            scope = type(plan.scope) == 'table' and 'list' or plan.scope,
+            touched = plan.touched, generation = plan.generation, previewed = false },
+        result = rows,
+        notes = ledger_notes(plan),
     }
 end
 
@@ -3524,6 +3561,23 @@ M.VERBS = {
                 desc = 'the exemplar AFTER: the same definition once the edit was made' },
         },
         run = v_txn_plan_transplant,
+    },
+    txn_plan_propagate = {
+        summary = 'PROPOSE carrying an edit made to ONE member of a near-clone family to the others. Give the member and its NEW text; the edit is classified (value / template / mixed; a straddle or unsupported shape refuses) and each member it reaches is re-rendered from its OWN text and verified by reparse against its predicted values. The SCOPE is yours: without `scope` the plan is the member alone, with a `propagate-scope` decision naming the wider scopes',
+        subject = 'node',
+        tier_basis = 'observation',
+        absences = { 'absent' },
+        args = (function ()
+            local a = {
+                { name = 'text', type = 'string', required = true,
+                    desc = 'the member\'s NEW source, exactly as it should read' },
+                { name = 'scope', type = 'string',
+                    desc = 'who takes the edit: member (default) | class (members holding the old value) | all | clean (every member a template change migrates to)' },
+            }
+            for _, x in ipairs(ADDRESS) do a[#a + 1] = x end
+            return a
+        end)(),
+        run = v_txn_plan_propagate,
     },
     txn_plan_replace = {
         summary = 'PROPOSE swapping a definition\'s text for text YOU supply — the destination for a rendered edit (transplant). ⚠ ITS GUARANTEE IS THE WEAKEST OF THE WRITE VERBS: the text is not derived from this graph, so the plan checks only that the result PARSES and that the file has not moved. It does NOT check that the replacement defines the same name, keeps its arity, or relates to what it replaces',

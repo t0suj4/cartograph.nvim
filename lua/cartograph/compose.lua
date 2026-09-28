@@ -141,6 +141,19 @@ M.VERBS.clonemerge = {
     correct = { ref = 'ref' },
 }
 
+-- an edit on ONE clone carried to its family (cartograph.propagate). ★ RE-RUN IS EMPTY: once the origin holds the
+-- edit it classifies as `none` — which is also why the SCOPE must be decided before the first write
+M.VERBS.propagate = {
+    plan = function (store, args)
+        local id, why, class = one_ref(store, args)
+        if not id then return nil, why, class or 'ill-posed' end
+        return require('cartograph.propagate').plan(store, { node = id, text = args.text, scope = args.scope })
+    end,
+    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    effect = 'journaled', rerun = 'empty',
+    correct = { ref = 'ref' },
+}
+
 local function step_error(i, verb, why)
     return { i = i, verb = verb, ok = false, why = why }
 end

@@ -316,6 +316,12 @@ local IDEM = {
     replace = { { ['r.lua'] = R_LUA }, function () return { ref = fn_ref('M.dbl', 'r.lua'), text = 'function M.dbl(x) return x + x end' } end },
     annotate = { { ['r.lua'] = '-- style\n' .. R_LUA }, function () return { ref = fn_ref('M.dbl', 'r.lua'), text = 'doubles a number' } end },
     clonemerge = { { ['m.lua'] = SM, ['n.lua'] = SN }, function () return { ref = fn_ref('M.norm', 'm.lua') } end },
+    propagate = { { ['fe.lua'] = (function ()
+            local function b(n, mul) return ('function M.g%d(t)\n    local acc = 0\n    local seen = {}\n    for i = 1, #t do acc = acc + t[i] * %d end\n    local s = tostring(acc)\n    local u = string.upper(s)\n    seen[u] = true\n    local pad = string.rep("-", #u)\n    local out = pad .. u\n    return out .. "%d"\nend\n'):format(n, mul, n) end
+            return 'local M = {}\n' .. b(1, 1) .. b(2, 2) .. b(3, 3) .. 'return M\n'
+        end)() }, function ()
+            return { ref = fn_ref('M.g1', 'fe.lua'), scope = 'all', text = 'function M.g1(t)\n    local acc = 0\n    local seen = {}\n    for i = 1, #t do acc = acc + t[i] * 9 end\n    local s = tostring(acc)\n    local u = string.upper(s)\n    seen[u] = true\n    local pad = string.rep("-", #u)\n    local out = pad .. u\n    return out .. "1"\nend' }
+        end },
 }
 local function snap(root)
     local out = {}

@@ -1318,6 +1318,14 @@ local SWEEP_N = {
 -- is TOTAL BY CONSTRUCTION. A hand-kept list would be one more copy of the same
 -- relation, and a copy that drifts is exactly the defect this sweep exists to catch —
 -- the first draft covered 4 of 7 families and read as though it covered all of them.
+local function PROP_BODY(n, mul)
+    return table.concat({ ('function M.g%d(t)'):format(n), '    local acc = 0', '    local seen = {}',
+        ('    for i = 1, #t do acc = acc + t[i] * %d end'):format(mul), '    local s = tostring(acc)',
+        '    local u = string.upper(s)', '    seen[u] = true', '    local pad = string.rep("-", #u)',
+        '    local out = pad .. u', ('    return out .. "%d"'):format(n), 'end' }, '\n')
+end
+local PROP_FILE = 'local M = {}\n' .. PROP_BODY(1, 1) .. '\n' .. PROP_BODY(2, 2) .. '\n' .. PROP_BODY(3, 3) .. '\nreturn M\n'
+
 local SWEEP_CASES = {
     move = { files = function () return { ['src.lua'] = SRC_LUA, ['use.lua'] = USE_LUA } end,
         args = function () return { seed = { idof('M.dbl') }, dest = 'lib/math.lua' } end },
@@ -1336,6 +1344,9 @@ local SWEEP_CASES = {
     ['clone-merge'] = { files = function ()
             return { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N } end,
         args = function () return { node = idof('M.norm') } end },
+    -- an edit on ONE clone carried to its family (CART-1152): the scope is given, so the plan writes all three
+    propagate = { files = function () return { ['fe.lua'] = vim.split(PROP_FILE, '\n', { plain = true }) } end,
+        args = function () return { node = idof('M.g1'), text = PROP_BODY(1, 9), scope = 'all' } end },
     replace = { files = function ()
             return { ['m.lua'] = SWEEP_M, ['n.lua'] = SWEEP_N } end,
         args = function () return { node = idof('M.g'),
