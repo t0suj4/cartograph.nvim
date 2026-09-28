@@ -79,3 +79,76 @@ test('provenance: the ledger only TIGHTENS — a note claiming a decision accept
     local r = tactic.run(store, T.step('ask', { line = '-- q' }), { verbs = VERBS, apply = true })
     eq('stopped', r.status, 'the decision is still ASKED: a note is data, never an answer')
 end)
+
+-- ★ AN ENTRY EXPLAINS ONLY THE COMMIT ITS CHANGE LANDED IN (CART-1195): measured, 22 of 135 entries over 8 notes were
+-- credited to SEVERAL commits
+local function commit_at(msg, t)
+    return vim.system({ 'git', '-C', root, 'commit', '-qam', msg }, { text = true,
+        env = { GIT_COMMITTER_DATE = '@' .. t .. ' +0000', GIT_AUTHOR_DATE = '@' .. t .. ' +0000' } }):wait()
+end
+
+test('provenance: a line a LATER commit adds BY HAND is hand, even when an older entry once added the same line', function ()
+    if not ready() then skip 'no lua parser' end
+    repo()
+    tactic.run(store, T.step('ask', { line = '-- shared line' }, { 'choose' }), { verbs = VERBS, apply = true })
+    sh('commit', '-qam', 'journaled')
+    eq(1, #assert(P.ledger_row(root, vim.trim(sh('rev-parse', 'HEAD').stdout))).entries, 'the premise: the entry explains ITS commit')
+    local fd = assert(io.open(root .. '/m.lua', 'a')); fd:write('-- shared line\n'); fd:close()
+    sh('commit', '-qam', 'hand repeat')
+    local row = assert(P.ledger_row(root, vim.trim(sh('rev-parse', 'HEAD').stdout)))
+    eq(0, #row.entries, 'the old entry already landed: it explains nothing here'); eq(0, row.explained); ok(row.hand > 0)
+end)
+
+test('provenance: an entry made BEFORE a commit that left it out is credited to the commit that includes it', function ()
+    if not ready() then skip 'no lua parser' end
+    repo()
+    tactic.run(store, T.step('ask', { line = '-- deferred' }, { 'choose' }), { verbs = VERBS, apply = true })
+    -- a commit of ANOTHER file, later than the entry: m.lua's edit stays uncommitted across it
+    local fd = assert(io.open(root .. '/n.lua', 'w')); fd:write('return 2\n'); fd:close()
+    sh('add', 'n.lua')
+    vim.system({ 'git', '-C', root, 'commit', '-qm', 'other', '--', 'n.lua' }, { env = { GIT_COMMITTER_DATE = '@' .. (os.time() + 100) .. ' +0000' } }):wait()
+    commit_at('deferred', os.time() + 200)
+    local row = assert(P.ledger_row(root, vim.trim(sh('rev-parse', 'HEAD').stdout)))
+    eq(1, #row.entries, 'older than the parent, and none of it in the parent: it belongs here'); ok(row.explained > 0 and row.hand == 0, vim.inspect(row))
+end)
+
+test('provenance: ADDING a missing final newline is a change — the entry that made it explains its commit', function ()
+    if not ready() then skip 'no lua parser' end
+    repo()
+    local fd = assert(io.open(root .. '/z.lua', 'w')); fd:write('return 1'); fd:close()
+    sh('add', 'z.lua'); sh('commit', '-qm', 'no newline')
+    store.ingest(ts.extract(root))
+    eq('done', tactic.run(store, T.step('edit', { file = 'z.lua', before = 'return 1', after = 'return 1\n' }), { apply = true }).status)
+    sh('commit', '-qam', 'newline')
+    local row = assert(P.ledger_row(root, vim.trim(sh('rev-parse', 'HEAD').stdout)))
+    eq(1, #row.entries, 'the same text with a newline is not the text without one'); eq(0, row.hand)
+end)
+
+test('provenance: an OLDER entry part of whose change landed is not re-credited when a line it added is edited away and re-added by hand', function ()
+    if not ready() then skip 'no lua parser' end
+    repo()
+    local t0 = os.time()
+    tactic.run(store, T.step('ask', { line = '-- line A\n-- line B' }, { 'choose' }), { verbs = VERBS, apply = true })
+    commit_at('journaled A+B', t0 + 100)
+    -- A is edited away by hand (the parent of the next commit no longer holds all of the entry's lines) ...
+    local txt = io.open(root .. '/m.lua'):read('a'):gsub('%-%- line A\n', '')
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(txt); fd:close()
+    commit_at('drop A', t0 + 200)
+    -- ... and re-added by hand: the old entry's B is still in the parent, so its change landed long ago
+    fd = assert(io.open(root .. '/m.lua', 'a')); fd:write('-- line A\n'); fd:close()
+    commit_at('hand A', t0 + 300)
+    local row = assert(P.ledger_row(root, vim.trim(sh('rev-parse', 'HEAD').stdout)))
+    eq(0, #row.entries, vim.inspect(row.entries)); ok(row.hand > 0)
+end)
+
+test('provenance: an entry made AFTER a commit never explains it', function ()
+    if not ready() then skip 'no lua parser' end
+    repo()
+    local fd = assert(io.open(root .. '/m.lua', 'a')); fd:write('-- later\n'); fd:close()
+    commit_at('hand', os.time() - 100)
+    local sha = vim.trim(sh('rev-parse', 'HEAD').stdout)
+    -- the SAME line, added again through the journal after the commit (uncommitted)
+    tactic.run(store, T.step('edit', { file = 'm.lua', before = 'return M\n', after = '-- later\nreturn M\n' }), { apply = true })
+    local row = assert(P.ledger_row(root, sha))
+    eq(0, #row.entries, 'the commit is older than the edit'); ok(row.hand > 0)
+end)

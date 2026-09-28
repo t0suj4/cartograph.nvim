@@ -51,17 +51,34 @@ function M.entries(repo)
     return { entries = out, journals = nj }
 end
 
+--- a text's line counts for the LANDING check — a final line WITHOUT a newline is a different line from the same text
+--- with one (MEASURED: adding a missing final newline re-adds the same text, and plain counts called it landed already)
+local function line_counts(text)
+    local counts, ls = {}, lines_of(text)
+    if type(text) == 'string' and text ~= '' and text:sub(-1) ~= '\n' then ls[#ls] = ls[#ls] .. '\0no-newline' end
+    for _, l in ipairs(ls) do counts[l] = (counts[l] or 0) + 1 end
+    return counts
+end
+
 --- attribute a commit range -> { commits = { { sha, subject, explained, hand, entries = { id -> bytes } } }, explained, hand, journals, entries_used } | nil, why, class
+--- ★ AN ENTRY EXPLAINS ONLY THE COMMIT ITS CHANGE LANDED IN (CART-1195). Line-multiset matching alone credited ONE entry
+--- to SEVERAL commits (22 of 135 over 8 notes: an entry hours older than the work "explained" identical lines of a later
+--- commit). Two DERIVED bounds, per commit C and per file:
+---   TIME     the entry was made no later than C (its ts <= C's committer time) — a commit cannot hold a later edit
+---   LANDING  the entry's change was not already in C's PARENT: it LANDED before C when, for every line it added, the
+---            parent's file holds at least as many copies as the entry's after-image does
 function M.attribute(repo, range)
     local E = M.entries(repo)
-    local pool = {} -- repo-relative file -> line -> { entry ids (a stack) }
+    -- per repo-relative file: the entries that touched it, each with its added lines and its after-image line counts
+    local by_file = {}
     for _, e in ipairs(E.entries) do
         for rel, f in pairs(e.files or {}) do
             local key = e._prefix .. rel
-            pool[key] = pool[key] or {}
-            for _, l in ipairs(added(f.before, f.after)) do
-                pool[key][l] = pool[key][l] or {}
-                table.insert(pool[key][l], e.id)
+            local add = added(f.before, f.after)
+            if #add > 0 then
+                local counts = line_counts(f.after)
+                by_file[key] = by_file[key] or {}
+                table.insert(by_file[key], { id = e.id, ts = e.ts or 0, added = add, after_counts = counts })
             end
         end
     end
@@ -69,8 +86,42 @@ function M.attribute(repo, range)
     if not revs then return nil, ('git rev-list %s: %s'):format(range, tostring(why)), 'environment' end
     local v = { commits = {}, explained = 0, hand = 0, journals = E.journals, entries_used = #E.entries }
     for sha in revs:gmatch('%S+') do
-        local diff = git(repo, { 'show', '--format=%s', '-U0', '--no-color', sha }) or ''
-        local c = { sha = sha, subject = diff:match('^([^\n]*)'), explained = 0, hand = 0, entries = {} }
+        local diff = git(repo, { 'show', '--format=%s%n%ct', '-U0', '--no-color', sha }) or ''
+        local subject, ct = diff:match('^([^\n]*)\n(%d+)')
+        ct = tonumber(ct) or math.huge
+        -- the parent's commit time (a root commit has none: every entry is younger than it)
+        local pt = tonumber(((git(repo, { 'log', '-1', '--format=%ct', sha .. '^' }) or ''):match('%d+'))) or -math.huge
+        local c = { sha = sha, subject = subject, explained = 0, hand = 0, entries = {} }
+        -- the pool for THIS commit, file by file: only entries within the time bound whose change had not landed yet
+        local pools = {}
+        local function pool_of(file)
+            if pools[file] then return pools[file] end
+            local parent = git(repo, { 'show', sha .. '^:' .. file })
+            local pc = line_counts(parent)
+            local pool = {}
+            for _, en in ipairs(by_file[file] or {}) do
+                local landed, any_landed = parent ~= nil, false
+                if landed then
+                    for _, l in ipairs(en.added) do
+                        if (pc[l] or 0) < (en.after_counts[l] or 0) then landed = false
+                        else any_landed = true end
+                    end
+                end
+                -- ★ AN ENTRY OLDER THAN THE PARENT COMMIT belongs here only if NONE of its change is in the parent (an
+                -- edit made before the parent was committed and left out of it). MEASURED: with the landing bound alone,
+                -- 5 older entries still claimed a few bytes — lines they added were edited again later, so the parent
+                -- no longer held them all and they read as "not landed"
+                local eligible = en.ts <= ct and not landed and not (en.ts < pt and any_landed)
+                if eligible then
+                    for _, l in ipairs(en.added) do
+                        pool[l] = pool[l] or {}
+                        table.insert(pool[l], en.id)
+                    end
+                end
+            end
+            pools[file] = pool
+            return pool
+        end
         local file
         for line in diff:gmatch('[^\n]*') do
             local f = line:match('^%+%+%+ b/(.*)$')
@@ -78,7 +129,7 @@ function M.attribute(repo, range)
             elseif line:match('^%+%+%+ ') then file = nil
             elseif file and line:sub(1, 1) == '+' then
                 local l = line:sub(2)
-                local stack = pool[file] and pool[file][l]
+                local stack = pool_of(file)[l]
                 if stack and #stack > 0 then
                     local id = table.remove(stack)
                     c.explained = c.explained + #l + 1
