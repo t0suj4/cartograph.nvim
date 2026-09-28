@@ -94,3 +94,33 @@ test('retained: ★ the ORACLE — what a flagged grower retains after a full co
     end
     _G.seen_all = nil
 end)
+
+--- run `f` with `cartograph.spec.lua` replaced by a module that RAISES on load, restoring the real one after
+local function with_broken_lua_spec(f, msg)
+    local was = package.loaded['cartograph.spec.lua']
+    package.loaded['cartograph.spec.lua'] = nil
+    package.preload['cartograph.spec.lua'] = function () error(msg or 'a broken spec', 0) end
+    local okf, err = pcall(f)
+    package.preload['cartograph.spec.lua'] = nil
+    package.loaded['cartograph.spec.lua'] = was
+    return okf, err
+end
+
+test('retained (CART-1152): a spec that RAISES on load stops the analysis by name — never read as "no spec"', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local data = ts.extract(FIX) -- extracted BEFORE the spec breaks: only the analyzer's own spec lookup may fail
+    store.ingest(data)
+    local okf, err = with_broken_lua_spec(function () return retained.analyze(store, data) end)
+    eq(false, okf, 'the analysis did not run blind')
+    ok(tostring(err):find('a broken spec', 1, true), tostring(err))
+end)
+
+test('retained (CART-1152): a spec that fails because IT requires a missing module is broken too — only its OWN absence is "no spec"', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local data = ts.extract(FIX)
+    store.ingest(data)
+    local okf, err = with_broken_lua_spec(function () return retained.analyze(store, data) end,
+        "module 'cartograph.spec.lua_helpers' not found: no field package.preload")
+    eq(false, okf, 'a missing DEPENDENCY of the spec is not the spec being absent')
+    ok(tostring(err):find('lua_helpers', 1, true), tostring(err))
+end)

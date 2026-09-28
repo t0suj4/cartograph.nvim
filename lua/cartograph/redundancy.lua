@@ -478,7 +478,11 @@ function M.analyze_one(store, data, entry, prelude, units, glob)
         local lang = expr.lang_of(file)
         if not lang then return nil end
         if spec_of[lang] == nil then
-            local ok, sp = pcall(require, 'cartograph.spec.' .. lang)
+            local mod = 'cartograph.spec.' .. lang
+            local ok, sp = pcall(require, mod)
+            -- ⚠ A SPEC THAT RAISED IS BROKEN, NOT ABSENT: only "this module is not there" means no spec. Caching
+            -- any error as `false` made a broken spec read as a language without one, and the analysis went on blind.
+            if not ok and not tostring(sp):find(("module '%s' not found"):format(mod), 1, true) then error(sp, 0) end
             spec_of[lang] = ok and type(sp) == 'table' and sp or false
         end
         return spec_of[lang] or nil
