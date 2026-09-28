@@ -138,3 +138,15 @@ test('toolbelt: over MCP — the catalogue lists every entry; a discovery re-mea
     agent.set_writable(false)
     eq('done', w.result[1].status, vim.inspect(w.result)); ok(disk():find('* 9', 1, true))
 end)
+
+test('toolbelt: running an example from a LIVE session leaves that session\'s graph exactly as it was (CART-1160)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['fe.lua'] = '\n\n\n' .. FAMILY }
+    local at = require 'cartograph.at'
+    local function g1_line() for _, n in ipairs(store.data.nodes) do if n.name == 'M.g1' then return at.sl(n.range) end end end
+    local before_root, before_gen, before_line = store.data.root, store.generation, g1_line()
+    local e = assert(tb.load('witness-shape-collision'))
+    ok((tb.example(e, e.examples[1])), 'the example ran')
+    eq(before_root, store.data.root); eq(before_gen, store.generation)
+    eq(before_line, g1_line(), 'a folded range still reads through the caller\'s own columns')
+end)

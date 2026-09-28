@@ -41,6 +41,14 @@ function M.oneline(r)
     return r.start.line == r['end'].line
 end
 
+--- ★ RE-POINT the live columns at `data`'s (CART-1159). The columns are the GRAPH's (`data._atcol`); `C` is only a
+--- pointer to the active graph's, and a LENS CHANGE (store.restore: a band switch, a scoped lens closing) must move it.
+--- It did not: a switch back to band A read A's folded ranges through the last-ingested band's columns (wrong lines,
+--- silently plausible). A graph with no folded columns leaves C cleared — its ranges are raw tables.
+function M.repoint(data)
+    C = data and data._atcol or nil
+end
+
 -- ── the fold: nested range tables → four coordinate columns ──────────────
 function M.fold(data)
     if data._atcol then

@@ -229,26 +229,21 @@ function M.learned_source(opts)
     return src
 end
 
---- ★ BORN WITH ITS OWN TEST: load an entry SOURCE from a scratch directory and run every one of its examples — in a
---- SEPARATE headless nvim. ⚠ NOT IN PROCESS: an example re-ingests the store, and the store is a singleton, so running
---- them here replaced the caller's graph — MEASURED: the learn plan was then built against the example's temp root and
---- its file was written into a directory that no longer existed, while the run reported `done`.
+--- ★ BORN WITH ITS OWN TEST: load an entry SOURCE from a scratch directory and run every one of its examples. In
+--- process: each example runs in a SCOPED LENS (M.example), so the caller's graph is untouched. (This ran in a
+--- separate nvim for a while: an in-process example used to re-ingest the singleton store, and the learn plan was then
+--- built against the example's temp root — the learned file landed in a vanished directory while the run said done.)
 --- -> true | false, why
 function M.validate_source(name, src)
     local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
     local fd = assert(io.open(d .. '/' .. name .. '.lua', 'w')); fd:write(src); fd:close()
     local e, why = M.load(name, d)
     if not e then vim.fn.delete(d, 'rf'); return false, 'it does not load: ' .. tostring(why) end
-    local repo = dir():gsub('/lua/cartograph/tactics$', '')
-    local out = vim.fn.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', repo .. '/tools/toolbelt.lua',
-        'examples', name, '--dir', d })
-    local code = vim.v.shell_error
-    vim.fn.delete(d, 'rf')
-    if code ~= 0 then
-        local fails = {}
-        for l in out:gmatch('[^\n]+') do if l:find('FAIL', 1, true) or l:match('^%s+%S') then fails[#fails + 1] = l:gsub('^%s+', '') end end
-        return false, ('it fails its own examples: %s'):format(#fails > 0 and table.concat(fails, ' | ') or out:sub(1, 300))
+    for _, ex in ipairs(e.examples) do
+        local ok, xwhy = M.example(e, ex)
+        if not ok then vim.fn.delete(d, 'rf'); return false, ('it fails its own examples (%s): %s'):format(ex.name, tostring(xwhy)) end
     end
+    vim.fn.delete(d, 'rf')
     return true
 end
 
@@ -334,37 +329,41 @@ function M.run(store, name, params, opts)
 end
 
 --- run ONE example of an entry on a fresh temp root: -> ok, why, result
+--- ★ IN A SCOPED LENS (store.scoped, CART-1160): the example's scratch graph is active only while it runs, and the
+--- CALLER's graph comes back afterwards — so any caller may run an example, a live session included. Before, an
+--- example re-ingested the singleton store and replaced whatever the caller had loaded.
 function M.example(e, ex)
     local store = require 'cartograph.store'
     local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
     for rel, text in pairs(ex.files or {}) do
         local d = (root .. '/' .. rel):match('^(.*)/[^/]*$')
         vim.fn.mkdir(d, 'p')
         local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
     end
-    vim.fn.mkdir(root, 'p')
-    store.ingest(require('cartograph.providers.treesitter').extract(root))
-    local params = type(ex.params) == 'function' and ex.params(store) or (ex.params or {})
-    local res, why = M.run(store, e.name, params, { apply = e.kind == 'write', on_stop = ex.on_stop,
-        dir = e.path and vim.fn.fnamemodify(e.path, ':h') })
-    if not res then return false, why end
-    local want = ex.expect or {}
-    if e.kind == 'discovery' then
-        if want.holds ~= nil and res.holds ~= want.holds then
-            return false, ('expected the claim to %s, it %s: %s'):format(want.holds and 'hold' or 'fail',
-                res.holds and 'held' or 'failed', tostring(res.why)), res
+    return store.scoped(require('cartograph.providers.treesitter').extract(root), function ()
+        local params = type(ex.params) == 'function' and ex.params(store) or (ex.params or {})
+        local res, why = M.run(store, e.name, params, { apply = e.kind == 'write', on_stop = ex.on_stop,
+            dir = e.path and vim.fn.fnamemodify(e.path, ':h') })
+        if not res then return false, why end
+        local want = ex.expect or {}
+        if e.kind == 'discovery' then
+            if want.holds ~= nil and res.holds ~= want.holds then
+                return false, ('expected the claim to %s, it %s: %s'):format(want.holds and 'hold' or 'fail',
+                    res.holds and 'held' or 'failed', tostring(res.why)), res
+            end
+            if want.check then local okc, cw = want.check(res.value); if not okc then return false, cw, res end end
+        else
+            if want.status and res.status ~= want.status then
+                return false, ('expected status %s, got %s (%s)'):format(want.status, tostring(res.status), tostring(res.why)), res
+            end
+            if want.applied and res.applied ~= want.applied then
+                return false, ('expected %d applied, got %d'):format(want.applied, res.applied), res
+            end
+            if want.check then local okc, cw = want.check(root, res); if not okc then return false, cw, res end end
         end
-        if want.check then local okc, cw = want.check(res.value); if not okc then return false, cw, res end end
-    else
-        if want.status and res.status ~= want.status then
-            return false, ('expected status %s, got %s (%s)'):format(want.status, tostring(res.status), tostring(res.why)), res
-        end
-        if want.applied and res.applied ~= want.applied then
-            return false, ('expected %d applied, got %d'):format(want.applied, res.applied), res
-        end
-        if want.check then local okc, cw = want.check(root, res); if not okc then return false, cw, res end end
-    end
-    return true, nil, res
+        return true, nil, res
+    end)
 end
 
 return M

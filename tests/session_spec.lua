@@ -363,3 +363,47 @@ test('bands: no module outside store.lua keys a MODULE-LEVEL cache on store.gene
     ok(declared > 20, 'file-scope locals to check against: ' .. declared)
     eq({}, bad, 'module-level generation caches (put them on the store instead)')
 end)
+
+-- ── CART-1159 / CART-1160 steps 1-2: every graph-derived pointer follows the lens ─────────────────────────────────
+local ts = require 'cartograph.providers.treesitter'
+local at = require 'cartograph.at'
+local function mkdir_with(files)
+    local r = vim.fn.tempname(); vim.fn.mkdir(r, 'p')
+    for rel, t in pairs(files) do local fd = assert(io.open(r .. '/' .. rel, 'w')); fd:write(t); fd:close() end
+    return r
+end
+local function line_of(name)
+    for _, n in ipairs(store.data.nodes) do if n.name == name then return at.sl(n.range), type(n.range) end end
+end
+local DEEP = { ['a.lua'] = '\n\n\n\n\nlocal function deep() return 1 end\nreturn deep\n' } -- 0-based line 5
+local TOP = { ['b.lua'] = 'local function top() return 2 end\nreturn top\n' }                   -- 0-based line 0
+
+test('session (CART-1159): a band switch re-points the RANGE columns — the restored band reads its own coordinates', function ()
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    session.reset()
+    local A, B = mkdir_with(DEEP), mkdir_with(TOP)
+    session.begin(A); store.ingest(ts.extract(A))
+    local la, kind = line_of('deep')
+    eq(5, la); eq('number', kind, 'the range is FOLDED (an index into the columns) — the case the bug lived in')
+    session.begin(B); store.ingest(ts.extract(B))
+    eq(0, (line_of('top')))
+    session.switch(session.by_root(A))
+    eq(5, (line_of('deep')), 'band A reads its own columns again, not the last-ingested band\'s')
+    session.reset()
+end)
+
+test('store.scoped (CART-1160): fn runs against a SCRATCH graph and the caller\'s graph comes back — ranges, root, generation', function ()
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    session.reset()
+    local A, B = mkdir_with(DEEP), mkdir_with(TOP)
+    store.ingest(ts.extract(A))
+    local root, gen = store.data.root, store.generation
+    local seen = store.scoped(ts.extract(B), function () return store.data.root, (line_of('top')) end)
+    eq(B, seen, 'inside, the scratch graph is the lens')
+    eq(root, store.data.root); eq(gen, store.generation)
+    eq(5, (line_of('deep')), 'and the caller\'s ranges read through its own columns')
+    -- a raise inside the scope still returns the caller's graph, and the raise reaches the caller
+    local okr, err = pcall(store.scoped, ts.extract(B), function () error('inside', 0) end)
+    eq(false, okr); eq('inside', err)
+    eq(root, store.data.root); eq(5, (line_of('deep')))
+end)

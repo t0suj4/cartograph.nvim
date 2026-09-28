@@ -2243,7 +2243,16 @@ M.SESSION_GLOBAL = { _subs = true, _redraw_subs = true, _hl_subs = true,
     -- _label_subs belongs here for the same reason as its siblings: a pane's
     -- subscription is SESSION wiring, not graph content, and leaving it out meant a
     -- re-ingest silently unwired the name pick (found by its own spec).
-    _label_subs = true }
+    _label_subs = true,
+    -- the lens hooks are session wiring too: a restore that wiped them would stop re-pointing on the next one
+    LENS_HOOKS = true }
+
+--- ★ LENS HOOKS (CART-1159, CART-1160 step 1): state DERIVED from a graph but held OUTSIDE the store's own fields — a
+--- module-level pointer into the active graph — must follow every lens change, or it keeps answering for the graph
+--- that was active before. `at`'s coordinate columns were the one such pointer (CART-0822 re-homed six module caches
+--- into BAND_TRANSIENT; the columns were missed because they are REPRESENTATION, not cache). Each hook is
+--- `fn(data)`, called with the newly active graph after every restore.
+M.LENS_HOOKS = { function (data) require('cartograph.at').repoint(data) end }
 -- ⚠ EVERY GENERATION-KEYED DERIVED CACHE BELONGS HERE, wherever it is COMPUTED.
 -- DROPPED on swap rather than snapshotted, deliberately and uniformly: all of
 -- these are derived and rebuildable, and RAM is the admission control on a
@@ -2296,6 +2305,22 @@ function M.restore(rec)
     end
     for _, k in ipairs(kill) do M[k] = nil end
     for k, v in pairs(rec) do M[k] = v end
+    for _, hook in ipairs(M.LENS_HOOKS) do hook(M.data) end
+end
+
+--- ★ A SCOPED LENS (CART-1160 step 2 — the first value-typed step toward mounts: capture is the caller's namespace as a
+--- value, restore returns to it). Run `fn` against a SCRATCH graph ingested from `data` (an extraction), then make the
+--- caller's graph active again — whether fn returned or raised. Nothing of the caller's graph is re-extracted: it was
+--- never destroyed, only set aside. -> fn's results (a raise is re-raised after the restore)
+function M.scoped(data, fn)
+    local rec = M.capture()
+    local okr, res = pcall(function ()
+        M.ingest(data)
+        return { fn() }
+    end)
+    M.restore(rec)
+    if not okr then error(res, 0) end
+    return unpack(res)
 end
 
 return M
