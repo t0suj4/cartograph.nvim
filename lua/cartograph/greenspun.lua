@@ -106,27 +106,8 @@ local function fn_names(data)
     return names
 end
 
--- bounded Damerau-Levenshtein: transposition counts 1 — 'on_tikc' is one
--- slip from 'on_tick', and that slip is THE registry typo
-local function editdist(a, b, cap)
-    if math.abs(#a - #b) > cap then return cap + 1 end
-    local prev2, prev = nil, {}
-    for j = 0, #b do prev[j] = j end
-    for i = 1, #a do
-        local cur = { [0] = i }
-        for j = 1, #b do
-            local cost = a:sub(i, i) == b:sub(j, j) and 0 or 1
-            cur[j] = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-            if prev2 and i > 1 and j > 1
-                and a:sub(i, i) == b:sub(j - 1, j - 1)
-                and a:sub(i - 1, i - 1) == b:sub(j, j) then
-                cur[j] = math.min(cur[j], prev2[j - 2] + 1)
-            end
-        end
-        prev2, prev = prev, cur
-    end
-    return prev[#b]
-end
+-- the bounded edit distance lives in cartograph.near (one copy for every did-you-mean)
+local editdist = require('cartograph.near').dist
 
 local function nearest(key, set)
     local cap = #key >= 5 and 2 or 1

@@ -177,6 +177,9 @@ end
 
 local EFFECTS = { journaled = true, compensable = true, irreversible = true }
 
+--- a symbol's address, as the provenance map keys it
+local function key(file, name) return tostring(file) .. '::' .. tostring(name) end
+
 local eval
 
 local function eval_step(store, t, opts, where)
@@ -199,12 +202,26 @@ local function eval_step(store, t, opts, where)
         return out
     end
     local r = M.step(store, t, { verbs = opts.verbs, apply = opts.apply, decide = true, replan = true })
+    local corrected
+    if not r.ok and (r.class == 'ill-posed' or r.class == 'stale') and r.phase == 'plan' and spec.correct
+        and opts.correct ~= 'off' then
+        r, corrected = M.correct(store, t, spec, r, opts)
+    end
     local out = outcome()
+    if corrected then
+        out.residue[1] = { kind = 'corrected', class = 'informational', where = where, verb = t.verb,
+            text = ('corrected `%s`: %s'):format(corrected.arg, corrected.why), change = corrected }
+    end
     local row = { where = where, verb = t.verb, ok = r.ok, class = r.class, why = r.why, phase = r.phase }
     out.trace[1] = row
     if not r.ok then
         out.options, out.fixes = r.options, r.fixes
         return adopt(out, { class = r.class, why = r.why, where = where, options = r.options, fixes = r.fixes })
+    end
+    -- ★ PROVENANCE: what this step made true (it applied, or its goal check found it done), for a later correction
+    if spec.provides and (r.entry or r.empty) then
+        opts.moved = opts.moved or {}
+        for _, p in ipairs(spec.provides(t.args or {})) do opts.moved[key(p.from.file, p.from.name)] = p.to end
     end
     if r.empty then row.empty = true; return out end
     if r.staged and r.staged.failed and not opts.apply then
@@ -228,6 +245,83 @@ local function eval_step(store, t, opts, where)
         out.residue[#out.residue + 1] = h
     end
     return out
+end
+
+--- ★ DID YOU MEAN (CART-1152). A step refused at PLAN time as ill-posed, or stale after its re-plan: ask
+--- cartograph.correct for single-argument corrections, and keep those the VERB accepts, meaning a dry step plans and
+--- stages with no failing guard. The corrector proposes and the verb decides whether the call is well-formed; neither
+--- knows what the caller MEANT. USER (2026-09-28): "I wonder if the corrections can be surprising". MEASURED yes: a
+--- hand-typed M.get was applied to M.set, one edit away with the opposite meaning, and a deleted a.lua::M.setup was
+--- "moved" onto an unrelated b.lua::M.setup, reusing the caller's `accept` for a function they never saw. So:
+---   AUTOMATIC only on PROVENANCE: the candidate is where THIS run's own completed step put the symbol (`provides`).
+---     That is known, not inferred, it is the same symbol, and the step's `accept` rightly carries over.
+---   a WITNESSED ref whose symbol is GONE -> a stale failure that says so; near names are information, not the answer
+---   anything else inferred (edit distance, shape, the same name elsewhere) -> a DECISION whose options carry the
+---     corrected args. Which symbol a name means, on inferred evidence, is a genuine decision.
+---   none survive -> the original refusal, saying how many candidates were tried
+--- opts.correct = 'ask' makes even a provenance correction a decision; 'off' disables correction.
+--- -> r (the step result to use), corrected (the change applied, or nil)
+function M.correct(store, t, spec, r, opts)
+    local C = require 'cartograph.correct'
+    local cands = C.suggest(store, spec, t.args or {})
+    if #cands == 0 then return r end
+    local moved = opts.moved or {}
+    local function proven(c)
+        local was, now = c.was, c.now
+        if type(was) ~= 'table' or type(now) ~= 'table' then return false end
+        local to = moved[key(was.file, was.name)]
+        return to ~= nil and to.file == now.file and to.name == now.name
+    end
+    local live = {}
+    for _, c in ipairs(cands) do
+        local d = M.step(store, { verb = t.verb, args = c.args, accept = t.accept }, { verbs = opts.verbs, apply = false })
+        if d.ok and not d.empty and d.staged and not d.staged.failed then c.proven = proven(c); live[#live + 1] = c end
+    end
+    local proofs = {}
+    for _, c in ipairs(live) do if c.proven then proofs[#proofs + 1] = c end end
+    if #proofs == 1 and opts.correct ~= 'ask' then
+        local c = proofs[1]
+        local again = M.step(store, { verb = t.verb, args = c.args, accept = t.accept },
+            { verbs = opts.verbs, apply = opts.apply, decide = true, replan = true })
+        c.why = ('%s — this run moved it there'):format(c.why)
+        return again, c
+    end
+    -- the symbol a WITNESSED ref names is gone: say so; near names are information, never the answer
+    local gone
+    for arg, kind in pairs(spec.correct or {}) do
+        local v = (t.args or {})[arg]
+        local refs = kind == 'refs' and (v or {}) or { v }
+        for _, ref in ipairs(refs) do
+            if C.gone(store, ref) then gone = ref; break end
+        end
+    end
+    if gone and #proofs == 0 then
+        local names = {}
+        for _, c in ipairs(live) do
+            local now = c.now
+            names[#names + 1] = type(now) == 'table' and (tostring(now.file) .. '::' .. tostring(now.name)) or tostring(now)
+        end
+        r.class = 'stale'
+        r.why = ('%s::%s is GONE (no function of that name in its file, none of its shape elsewhere) — nothing was corrected%s')
+            :format(tostring(gone.file), tostring(gone.name), #names > 0 and ('; near names, for information: ' .. table.concat(names, ', ')) or '')
+        return r
+    end
+    if #live == 0 then
+        r.why = ('%s (no correction survived: %d candidate(s) tried)'):format(tostring(r.why), #cands)
+        return r
+    end
+    local options, texts = {}, {}
+    for _, c in ipairs(live) do
+        local now = c.now
+        local to = type(now) == 'table' and (tostring(now.file) .. '::' .. tostring(now.name)) or tostring(now)
+        options[#options + 1] = { kind = 'correction', class = 'decision', arg = c.arg, args = c.args, source = c.source,
+            proven = c.proven or nil,
+            text = ('did you mean %s = %s? (%s%s)'):format(c.arg, to, c.why,
+                c.contradicts and '; its shape CONTRADICTS the ref\'s witness' or '') }
+        texts[#texts + 1] = options[#options].text
+    end
+    return { ok = false, class = 'decision', phase = 'correct', options = options,
+        why = ('%s — %s'):format(tostring(r.why), table.concat(texts, ' | ')) }
 end
 
 local KNOWN = hazard.CLASSES
@@ -354,7 +448,7 @@ end
 ---      rolled_back, rollback_refused?, rollback_failed?, trace }
 function M.run(store, term, opts)
     opts = opts or {}
-    local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0 }
+    local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct }
     local o = eval(store, term, eopts, 'root')
     local res = { residue = o.residue, trace = o.trace, rolled_back = eopts.undone or 0,
         options = o.options, fixes = o.fixes }
@@ -386,6 +480,9 @@ function M.run(store, term, opts)
         if rec.rerun ~= 'empty' then res.resumable = false end
     end
     res.applied = #res.completed
+    -- every correction the run applied, at the top of the result: a correction is never only a residue line
+    res.corrections = {}
+    for _, h in ipairs(res.residue) do if h.kind == 'corrected' then res.corrections[#res.corrections + 1] = h end end
     -- the work orders: every UNBUILT stop — the failure itself, a failed alternative, residue a verb left undone
     res.work_orders = {}
     local function order(where, verb, why) res.work_orders[#res.work_orders + 1] = { where = where, verb = verb, why = why } end

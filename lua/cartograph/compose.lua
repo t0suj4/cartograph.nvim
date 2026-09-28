@@ -73,6 +73,20 @@ M.VERBS = {
         -- ★ WHAT A TACTIC MAY ASSUME (tactic.lua): the write is journaled (undoable), and re-running the SAME
         -- invocation after it applied is `empty` (the goal check above) — measured by tactic_spec's idempotence fence
         effect = 'journaled', rerun = 'empty',
+        -- the arguments a did-you-mean may correct, and their kind (cartograph.correct)
+        correct = { seed_refs = 'refs' },
+        -- ★ PROVENANCE: what this invocation, once it has applied (or its goal check found it done), makes TRUE: each
+        -- seed now lives at `dest` under its own name. The tactic runner records it, and a later step's stale ref to a
+        -- seed's OLD address is corrected by it with CERTAINTY, not by inference (CART-1152).
+        provides = function (args)
+            local out = {}
+            for _, ref in ipairs(args.seed_refs or {}) do
+                if type(ref) == 'table' and ref.file and ref.name and args.dest then
+                    out[#out + 1] = { from = { file = ref.file, name = ref.name }, to = { file = args.dest, name = ref.name } }
+                end
+            end
+            return out
+        end,
     },
 }
 
@@ -104,6 +118,7 @@ M.VERBS.replace = {
     end,
     apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
     effect = 'journaled', rerun = 'empty',
+    correct = { ref = 'ref' },
 }
 M.VERBS.annotate = {
     plan = function (store, args)
@@ -113,6 +128,7 @@ M.VERBS.annotate = {
     end,
     apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
     effect = 'journaled', rerun = 'empty',
+    correct = { ref = 'ref' },
 }
 M.VERBS.clonemerge = {
     plan = function (store, args)
@@ -122,6 +138,7 @@ M.VERBS.clonemerge = {
     end,
     apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
     effect = 'journaled', rerun = 'empty',
+    correct = { ref = 'ref' },
 }
 
 local function step_error(i, verb, why)

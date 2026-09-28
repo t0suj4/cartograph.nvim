@@ -342,3 +342,124 @@ test('tactic: IDEMPOTENCE — every compose verb re-run with the same invocation
         eq(s1, snap(root), verb .. ': and writes nothing')
     end
 end)
+
+-- ── DID YOU MEAN (CART-1152): a refused step's arguments corrected, when the VERB accepts the correction ─────────
+local function replace_step(ref, text) return T.step('replace', { ref = ref, text = text or 'function M.dbl(x) return x + x end' }, { 'supplied-text' }) end
+local function corrected_of(r) for _, h in ipairs(r.residue or {}) do if h.kind == 'corrected' then return h end end end
+
+test('near: every candidate within the slip budget, a transposition is one slip, and a tie is kept', function ()
+    local near = require 'cartograph.near'
+    eq(1, near.dist('on_tikc', 'on_tick', 2), 'a transposition is ONE slip')
+    local w = near.within('M.dbb', { 'M.dba', 'M.dbc', 'M.keep', 'M.dbb' })
+    eq({ 'M.dba', 'M.dbc' }, vim.tbl_map(function (c) return c.value end, w), 'both, nearest first — the key itself excluded')
+end)
+
+test('did-you-mean: an INFERRED correction (a slipped name) is a DECISION with the candidate — never applied behind the caller', function ()
+    -- USER: "I wonder if the corrections can be surprising" — MEASURED yes: a hand-typed M.get was applied to M.set
+    if not ready() then skip 'no lua parser' end
+    local SRC = 'local M = {}\nfunction M.set(k, v) M[k] = v end\nreturn M\n'
+    local root = mkroot { ['a.lua'] = SRC }
+    local r = tactic.run(store, replace_step({ file = 'a.lua', name = 'M.get', kind = 'function' }, 'function M.get(k) return M[k] end'), { apply = true })
+    eq('stopped', r.status); eq('decision', r.class)
+    ok(r.options and r.options[1] and r.options[1].args and r.options[1].text:find('M.set', 1, true), vim.inspect(r.options))
+    eq(SRC, read(root, 'a.lua'), 'M.set untouched: the accepted supplied-text decision was for M.get, not for it')
+    eq(0, #r.corrections)
+end)
+
+test('did-you-mean: a stale ref to a symbol THIS RUN moved is corrected by PROVENANCE — also on the resume, where the move is empty', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = mkroot { ['r.lua'] = R_LUA }
+    local old = fn_ref('M.dbl', 'r.lua')
+    local acc = {}
+    -- the replace holds the OLD address, captured before the move: only the run's own move can vouch for the new one
+    local term = T.seq(T.step('moveset', { seed_refs = { old }, dest = 'lib/new.lua' }, { 'surface' }),
+        T.step('replace', { ref = old, text = 'function M.dbl(x) return x + x end' }, acc))
+    local r = tactic.run(store, term, { apply = true })
+    eq('stopped', r.status, 'corrected, then stopped at replace\'s own decision: ' .. tostring(r.why))
+    eq('supplied-text', r.options and r.options[1] and r.options[1].kind)
+    acc[1] = 'supplied-text'
+    local done = tactic.run(store, term, { apply = true })
+    eq('done', done.status, tostring(done.why))
+    eq(1, #done.corrections, 'the correction is surfaced at the top of the result')
+    ok(done.corrections[1].text:find('this run moved it there', 1, true), done.corrections[1].text)
+    ok(read(root, 'lib/new.lua'):find('x + x', 1, true), 'the replacement landed at the new home')
+    ok(not read(root, 'r.lua'):find('x + x', 1, true), 'and NOT on the neighbour')
+end)
+
+test('did-you-mean: a move nobody in this run made is INFERRED — a decision, even with the same name and shape', function ()
+    -- MEASURED: a deleted a.lua::M.setup was "moved" onto an unrelated b.lua::M.setup of the same trivial shape
+    if not ready() then skip 'no lua parser' end
+    local root = mkroot { ['r.lua'] = R_LUA }
+    local old = fn_ref('M.dbl', 'r.lua')
+    ok(tactic.step(store, { verb = 'moveset', args = { seed_refs = { old }, dest = 'lib/new.lua' } }, { apply = true }).entry)
+    local before = read(root, 'lib/new.lua')
+    local r = tactic.run(store, replace_step(old), { apply = true })
+    eq('stopped', r.status); eq('moved', r.options and r.options[1] and r.options[1].source)
+    eq(before, read(root, 'lib/new.lua'), 'nothing applied on inference')
+end)
+
+test('did-you-mean: a WITNESSED ref whose symbol is GONE says so — near names are information, not the answer', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = mkroot { ['a.lua'] = 'local M = {}\nfunction M.get(k) return M[k] end\nfunction M.set(k, v) M[k] = v end\nreturn M\n' }
+    local old = fn_ref('M.get', 'a.lua')
+    local AFTER = 'local M = {}\nfunction M.set(k, v) M[k] = v end\nreturn M\n'
+    local fd = assert(io.open(root .. '/a.lua', 'w')); fd:write(AFTER); fd:close()
+    store.ingest(ts.extract(root))
+    local r = tactic.run(store, replace_step(old, 'function M.get(k) return nil end'), { apply = true })
+    eq('failed', r.status); eq('stale', r.class)
+    ok(r.why:find('GONE', 1, true) and r.why:find('for information', 1, true), r.why)
+    eq(AFTER, read(root, 'a.lua'))
+end)
+
+test('did-you-mean: two equally near names are a DECISION with both as options; nothing is written', function ()
+    if not ready() then skip 'no lua parser' end
+    local src = 'local M = {}\nfunction M.dba(x) return x end\nfunction M.dbc(x) return x end\nreturn M\n'
+    local root = mkroot { ['r.lua'] = src }
+    local r = tactic.run(store, replace_step({ file = 'r.lua', name = 'M.dbb', kind = 'function' }, 'function M.dba(x) return 1 end'), { apply = true })
+    eq('stopped', r.status); eq('decision', r.class)
+    eq(2, r.options and #r.options, vim.inspect(r.options))
+    ok(r.options[1].args and r.options[1].args.ref, 'each option carries the corrected invocation')
+    eq(src, read(root, 'r.lua'))
+end)
+
+test('did-you-mean: a contradicting witness is flagged on its option', function ()
+    if not ready() then skip 'no lua parser' end
+    local SRC = 'local M = {}\nfunction M.two(x)\n  local y = x + 1\n  return y\nend\nfunction M.keep(x) return x + 1 end\nreturn M\n'
+    local root = mkroot { ['r.lua'] = SRC }
+    local wrong = fn_ref('M.two', 'r.lua')
+    ok(wrong.witness and wrong.witness ~= fn_ref('M.keep', 'r.lua').witness, 'the premise: two DIFFERENT shapes')
+    wrong.name = 'M.kep'
+    local r = tactic.run(store, replace_step(wrong, 'function M.keep(x) return 0 end'), { apply = true })
+    eq('stopped', r.status)
+    local keep, renamed
+    for _, o in ipairs(r.options or {}) do
+        if o.text:find('M.keep', 1, true) and o.text:find('CONTRADICTS', 1, true) then keep = o end
+        if o.source == 'renamed' and o.text:find('M.two', 1, true) then renamed = o end
+    end
+    ok(keep, 'the near name is offered, flagged as contradicting the witness: ' .. vim.inspect(r.options))
+    ok(renamed, 'and the function that still has the ref\'s shape is offered as a possible RENAME')
+    eq(SRC, read(root, 'r.lua'))
+end)
+
+test('did-you-mean: a candidate the VERB refuses does not survive; no candidate at all is the original refusal', function ()
+    if not ready() then skip 'no lua parser' end
+    mkroot { ['r.lua'] = R_LUA }
+    -- M.keep has no clone: clonemerge answers `empty` for it, so the correction is dropped
+    local r = tactic.run(store, T.step('clonemerge', { ref = { file = 'r.lua', name = 'M.kep', kind = 'function' } }), { apply = true })
+    eq('failed', r.status); ok(r.why:find('no correction survived: 1 candidate', 1, true), r.why)
+    local n = tactic.run(store, replace_step({ file = 'r.lua', name = 'M.zzzzzz', kind = 'function' }), { apply = true })
+    eq('failed', n.status); ok(n.why:find('does not resolve', 1, true) and not n.why:find('survived', 1, true), n.why)
+end)
+
+test('did-you-mean: correct = ask makes even a PROVENANCE correction a decision; off disables it', function ()
+    if not ready() then skip 'no lua parser' end
+    local function scenario()
+        mkroot { ['r.lua'] = R_LUA }
+        local old = fn_ref('M.dbl', 'r.lua')
+        return T.seq(T.step('moveset', { seed_refs = { old }, dest = 'lib/new.lua' }, { 'surface' }),
+            T.step('replace', { ref = old, text = 'function M.dbl(x) return x + x end' }, { 'supplied-text' }))
+    end
+    local a = tactic.run(store, scenario(), { apply = true, correct = 'ask' })
+    eq('stopped', a.status); eq(true, a.options and a.options[1] and a.options[1].proven, vim.inspect(a.options))
+    eq('failed', tactic.run(store, scenario(), { apply = true, correct = 'off' }).status)
+end)
