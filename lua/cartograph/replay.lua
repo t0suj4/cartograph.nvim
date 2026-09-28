@@ -31,7 +31,9 @@ function M.from_notes(repo, range)
         -- ⚠ ONE ENTRY, ONE STEP: the line-level attribution can credit an entry to SEVERAL commits (MEASURED: 22 of 135
         -- entries over the last 8 notes of this repo — an old entry "explains" identical lines of a later commit), so
         -- an entry is replayed once, at the FIRST commit of the range that names it
-        for _, e in ipairs(row and row.entries or {}) do
+        -- the note's REPLAY list (every applied step of the commit's window, superseded ones included) when it has one;
+        -- an older note has only the entries that explain the commit's lines
+        for _, e in ipairs(row and (row.replay or row.entries) or {}) do
             if not seen[e.id] then seen[e.id] = true; entries[#entries + 1] = e end
         end
         table.sort(entries, function (a, b) return tostring(a.id) < tostring(b.id) end)
@@ -72,56 +74,78 @@ function M.localize(args, root)
     return out
 end
 
---- replay `items` (from_notes rows, or { { invocation = { verb, args } } }) on the loaded world.
---- opts: { apply = bool, verbs?, approvals?, ns? } -> { status = 'done' | 'conflict' | 'frontier' | 'stopped' | 'failed'
----   | 'previewed', steps = { { id, verb, outcome = 'done'|'applied'|'conflict'|'frontier'|<class>|'not reached', why } },
----   applied, done, why? }
+--- replay `items` (from_notes rows, or { { invocation = { verb, args, touched? } } }) on the loaded world.
+--- opts: { apply = bool, verbs?, approvals?, ns?, stop_at_first = bool } -> { status = 'done' | 'conflict' | 'frontier' |
+---   'stopped' | 'failed' | 'previewed', steps = { { id, verb, outcome = 'done'|'applied'|'conflict'|'frontier'|<class>|
+---   'not reached', why } }, applied, done, stops = { ids }, why?, at? }
+--- ★ PAST A STOP (CART-1191 leaf 3): a later step runs when it shares NO touched file with any stopped step — MEASURED on
+--- this repo's history, 6 of 105 step pairs were dependent (5.7%), a conflict left 92.3% of the later steps independent,
+--- and touched-file overlap missed none of the 6. A step whose files are UNKNOWN (an old entry, a sensitive or
+--- cross-world one) is assumed to touch everything — it neither runs past a stop nor lets one pass it; a step held back
+--- blocks its own files in turn (a later step may depend on it). `stop_at_first` restores stopping at the first stop.
 function M.run(store, items, opts)
     opts = opts or {}
     local tactic = require 'cartograph.tactic'
     local root = store.data and store.data.root
-    local report = { steps = {}, applied = 0, done = 0 }
-    local stopped
+    local report = { steps = {}, applied = 0, done = 0, stops = {} }
+    local first
+    local blocked, blocked_all = {}, false
+    local function touched_of(inv) return type(inv) == 'table' and type(inv.touched) == 'table' and inv.touched or nil end
+    local function hold(t) if not t then blocked_all = true else for _, f in ipairs(t) do blocked[f] = true end end end
+    local function stop(row, t)
+        first = first or row
+        report.stops[#report.stops + 1] = row.id
+        hold(t)
+    end
     for _, it in ipairs(items or {}) do
         local inv = it.invocation
+        local t = touched_of(inv)
         local row = { id = it.id, commit = it.commit, verb = inv and inv.verb or it.verb }
         report.steps[#report.steps + 1] = row
-        if stopped then
-            row.outcome, row.why = 'not reached', 'an earlier step stopped the replay'
+        local shares
+        if first then
+            if opts.stop_at_first or blocked_all or not t then shares = true
+            else for _, f in ipairs(t) do if blocked[f] then shares = f; break end end end
+        end
+        if shares then
+            row.outcome = 'not reached'
+            row.why = type(shares) == 'string' and ('it touches %s, which a stopped step touched'):format(shares)
+                or 'an earlier step stopped the replay, and nothing shows this one is independent of it'
+            hold(t)
         elseif type(inv) ~= 'table' then
             -- an entry made by a DIRECT apply (no tactic step) has no invocation: nothing records what was asked
             row.outcome, row.why = 'frontier', 'the entry recorded no invocation (a direct apply): it can only be merged as bytes'
-            stopped = row
+            stop(row, nil)
         else
             local args, why = M.localize(inv.args, root)
             if not args then
                 row.outcome, row.why = 'frontier', why
-                stopped = row
+                stop(row, t)
             else
                 local r = tactic.run(store, tactic.T.step(inv.verb, args), { apply = opts.apply, verbs = opts.verbs,
                     approvals = opts.approvals, ns = opts.ns })
-                local t = r.trace and r.trace[1] or {}
+                local tr = r.trace and r.trace[1] or {}
                 if r.status == 'done' or r.status == 'previewed' then
-                    if t.empty then row.outcome = 'done'; report.done = report.done + 1
+                    if tr.empty then row.outcome = 'done'; report.done = report.done + 1
                     else row.outcome = 'applied'; report.applied = report.applied + 1 end
-                elseif t.class == 'stale' and t.phase == 'plan' then
+                elseif tr.class == 'stale' and tr.phase == 'plan' then
                     row.outcome, row.why, row.class = 'conflict', r.why, 'decision'
                     row.options = { { kind = 'keep-mine', text = 'keep this world\'s version of the site; drop the step' },
                         { kind = 'take-theirs', text = 'take the step: re-plan it against this world by hand, or answer the verb\'s own decision' } }
-                    stopped = row
+                    stop(row, t)
                 else
                     row.outcome, row.why, row.class, row.options = r.class or r.status, r.why, r.class, r.options
-                    stopped = row
+                    stop(row, t)
                 end
             end
         end
     end
-    if not stopped then
+    if not first then
         report.status = opts.apply and 'done' or 'previewed'
     else
-        report.status = stopped.outcome == 'conflict' and 'conflict' or stopped.outcome == 'frontier' and 'frontier'
-            or (stopped.class == 'decision' and 'stopped' or 'failed')
-        report.why, report.at = stopped.why, stopped.id
+        report.status = first.outcome == 'conflict' and 'conflict' or first.outcome == 'frontier' and 'frontier'
+            or (first.class == 'decision' and 'stopped' or 'failed')
+        report.why, report.at = first.why, first.id
     end
     return report
 end

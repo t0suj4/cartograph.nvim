@@ -185,7 +185,10 @@ function M.step(store, st, opts)
                 -- ★ THE INVOCATION (CART-1191 leaf 1): what was ASKED, so the step can be replayed on another world — the
                 -- args as given (as plain data). The journal is LOCAL; a travelling record carries it only through
                 -- cartograph.sensitive (CART-1193: an invocation touching an untracked file travels as a hash)
-                plan.invocation = { verb = verb, args = plain(st.args or {}), where = opts.where }
+                -- + the files it TOUCHED in its own world (CART-1191 leaf 3: a replay continues past a conflict with the
+                -- steps that share no file with it); a cross-world step's files are another world's — left unknown
+                plan.invocation = { verb = verb, args = plain(st.args or {}), where = opts.where,
+                    touched = not plan.target and plain(plan.touched or {}) or nil }
                 local okc, entry, ewhy, eclass = pcall(spec.apply or txn.apply, store, plan, { ns = ns })
                 if not okc then entry, ewhy, eclass = nil, tostring(entry), 'environment' end
                 if entry then

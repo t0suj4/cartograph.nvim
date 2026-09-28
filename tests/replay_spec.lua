@@ -75,19 +75,56 @@ test('replay: IDENTICAL steps are DONE — the same change on both sides replays
     eq('done', replay_into(b2, a2).steps[1].outcome, 'replaying again is empty: the intent is already here')
 end)
 
-test('replay: a CONFLICT stops exactly at its step, as a decision — this world is untouched there, and nothing after it is attempted', function ()
+test('replay: a CONFLICT stops exactly at its step, as a decision — mine is untouched, a step that DEPENDS on it is not reached, an INDEPENDENT one still applies', function ()
     if not ready() then skip 'no lua parser / git' end
     local a, b = pair()
     work(a, { { file = 'm.lua', before = 'local M = {}\n', after = 'local M = { a = 1 }\n' },
-        { file = 'n.lua', before = 'return N\n', after = 'N.later = 1\nreturn N\n' } })
+        { file = 'n.lua', before = 'return N\n', after = 'N.later = 1\nreturn N\n' },
+        { file = 'm.lua', before = 'local M = { a = 1 }\n', after = 'local M = { a = 1, c = 3 }\n' } })
     work(b, { { file = 'm.lua', before = 'local M = {}\n', after = 'local M = { b = 2 }\n' } })
     local r = replay_into(b, a)
     eq('conflict', r.status, vim.inspect(r))
     eq('conflict', r.steps[1].outcome); eq('decision', r.steps[1].class)
     ok(r.steps[1].options and #r.steps[1].options == 2, 'keep-mine / take-theirs')
-    eq('not reached', r.steps[2].outcome, 'a later step may depend on the conflicting one')
+    eq('applied', r.steps[2].outcome, 'n.lua shares no file with the conflict: it goes on (92% of later steps, measured)')
+    eq('not reached', r.steps[3].outcome, 'the follow-up edit on m.lua may depend on the conflicting step')
+    ok(r.steps[3].why:find('m.lua', 1, true), r.steps[3].why)
     eq('local M = { b = 2 }\nreturn M\n', read(b, 'm.lua'), 'mine is untouched')
-    eq('local N = {}\nreturn N\n', read(b, 'n.lua'), 'and the later step did not run')
+    eq('local N = {}\nN.later = 1\nreturn N\n', read(b, 'n.lua'), 'the independent step ran')
+    eq({ r.steps[1].id }, r.stops)
+    -- stop_at_first: the old contract, on request
+    local a2, b2 = pair()
+    work(a2, { { file = 'm.lua', before = 'local M = {}\n', after = 'local M = { a = 1 }\n' },
+        { file = 'n.lua', before = 'return N\n', after = 'N.later = 1\nreturn N\n' } })
+    work(b2, { { file = 'm.lua', before = 'local M = {}\n', after = 'local M = { b = 2 }\n' } })
+    store.ingest(ts.extract(b2))
+    local r2 = R.run(store, R.from_notes(a2, 'HEAD~1..HEAD'), { apply = true, stop_at_first = true })
+    eq('not reached', r2.steps[2].outcome)
+end)
+
+test('replay: a SUPERSEDED step (its lines overwritten before the commit) is still replayed — the follow-up was planned against it', function ()
+    if not ready() then skip 'no lua parser / git' end
+    local a, b = pair()
+    work(a, { { file = 'm.lua', before = 'local M = {}\n', after = 'local M = { a = 1 }\n' },
+        { file = 'm.lua', before = 'local M = { a = 1 }\n', after = 'local M = { a = 1, c = 3 }\n' } })
+    local r = replay_into(b, a)
+    eq('done', r.status, vim.inspect(r)); eq(2, #r.steps, 'both steps travel, though only the second explains a line')
+    eq(read(a, 'm.lua'), read(b, 'm.lua'), 'the clean parent reaches the commit, byte for byte')
+end)
+
+test('replay: a step whose files are UNKNOWN never runs past a stop, and does not let one pass it', function ()
+    if not ready() then skip 'no lua parser / git' end
+    local a, b = pair()
+    work(b, { { file = 'm.lua', before = 'local M = {}\n', after = 'local M = { b = 2 }\n' } })
+    store.ingest(ts.extract(b))
+    local conflict = { verb = 'edit', args = { file = 'm.lua', before = 'local M = {}\n', after = 'local M = { a = 1 }\n' }, touched = { 'm.lua' } }
+    local indep = { verb = 'edit', args = { file = 'n.lua', before = 'return N\n', after = 'N.x = 1\nreturn N\n' }, touched = { 'n.lua' } }
+    local unknown = { verb = 'edit', args = { file = 'n.lua', before = 'local N = {}\n', after = 'local N = { u = 1 }\n' } }
+    local r = R.run(store, { { id = '1', invocation = conflict }, { id = '2', invocation = unknown }, { id = '3', invocation = indep } }, { apply = true })
+    eq('conflict', r.steps[1].outcome)
+    eq('not reached', r.steps[2].outcome, 'no touched set: assumed to touch everything')
+    eq('not reached', r.steps[3].outcome, 'and once an unknown step is held back, it may be what step 3 depends on')
+    eq('local N = {}\nreturn N\n', read(b, 'n.lua'))
 end)
 
 test('replay: what did not travel is a FRONTIER — a sensitive step\'s hash, another world\'s paths, a direct apply', function ()

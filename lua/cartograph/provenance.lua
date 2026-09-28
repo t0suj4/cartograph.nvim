@@ -177,7 +177,7 @@ local function travelling_invocation(repo, e)
         end
         return v
     end
-    return { verb = e.invocation.verb, args = rw(e.invocation.args), where = e.invocation.where }, sens
+    return { verb = e.invocation.verb, args = rw(e.invocation.args), where = e.invocation.where, touched = e.invocation.touched }, sens
 end
 
 --- the row and, beside it, the IMAGES of every sensitive file its entries touched (the egress check's probes)
@@ -189,8 +189,8 @@ local function build(repo, sha)
     local byid = {}
     for _, e in ipairs(M.entries(repo).entries) do byid[e.id] = e end
     local rows, images = {}, {}
-    for id, bytes in pairs(c.entries) do
-        local e = byid[id] or {}
+    -- an entry's travelling invocation, feeding the egress check the images of every sensitive file it touched
+    local function travel(e)
         local inv, sens = travelling_invocation(repo, e)
         for rel in pairs(sens or {}) do
             local img = images[rel] or {}
@@ -200,13 +200,56 @@ local function build(repo, sha)
             if fd then img[#img + 1] = fd:read('a'); fd:close() end
             images[rel] = img
         end
+        return inv
+    end
+    for id, bytes in pairs(c.entries) do
+        local e = byid[id] or {}
         rows[#rows + 1] = { id = id, verb = e.verb, bytes = bytes, decided_by = e.decided_by or 'unrecorded',
-            decisions = e.decisions or {}, invocation = inv }
+            decisions = e.decisions or {}, invocation = travel(e) }
     end
     table.sort(rows, function (a, b) return a.id < b.id end)
+    -- ★ THE REPLAY LIST (CART-1191): every APPLIED entry of this commit's window that touched a file the commit changed,
+    -- in order — not only the entries that EXPLAIN its lines. A step whose lines a later step overwrote before the commit
+    -- explains nothing, yet the later step was planned against it (MEASURED by replay_spec: without it, the follow-up
+    -- replayed as a conflict against a clean parent). Plus the explaining entries (an older one left out of the parent).
+    local changed = {}
+    for f in (git(repo, { 'show', '--format=', '--name-only', sha }) or ''):gmatch('[^\n]+') do changed[f] = true end
+    local ct = tonumber(((git(repo, { 'log', '-1', '--format=%ct', sha }) or ''):match('%d+'))) or math.huge
+    local pt = tonumber(((git(repo, { 'log', '-1', '--format=%ct', sha .. '^' }) or ''):match('%d+'))) or -math.huge
+    local want = {}
+    for _, r in ipairs(rows) do want[r.id] = true end
+    -- the lower bound is the parent's commit time AND "not already in the parent" (an entry of the parent's own second
+    -- — MEASURED: a test commits and edits within one second — is told apart by the landing test the attribution uses)
+    local parent_counts = {}
+    local function landed_in_parent(key, f)
+        if parent_counts[key] == nil then
+            local txt = git(repo, { 'show', sha .. '^:' .. key })
+            parent_counts[key] = txt and line_counts(txt) or false
+        end
+        local pc = parent_counts[key]
+        if not pc then return false end
+        local ac = line_counts(f.after)
+        for _, l in ipairs(added(f.before, f.after)) do if (pc[l] or 0) < (ac[l] or 0) then return false end end
+        return true
+    end
+    for id, e in pairs(byid) do
+        if e.status == 'applied' and (e.ts or 0) >= pt and (e.ts or 0) <= ct then
+            for rel, f in pairs(e.files or {}) do
+                local key = (e._prefix or '') .. rel
+                if changed[key] and not landed_in_parent(key, f) then want[id] = true; break end
+            end
+        end
+    end
+    local replay = {}
+    for id in pairs(want) do replay[#replay + 1] = id end
+    table.sort(replay)
+    for i, id in ipairs(replay) do
+        local e = byid[id] or {}
+        replay[i] = { id = id, verb = e.verb, invocation = travel(e) }
+    end
     local intents = {}
     for _, r in ipairs(require('cartograph.intents').open_intents(repo)) do intents[#intents + 1] = r end
-    return { version = 1, commit = sha, explained = c.explained, hand = c.hand, entries = rows, open_intents = intents }, images
+    return { version = 1, commit = sha, explained = c.explained, hand = c.hand, entries = rows, replay = replay, open_intents = intents }, images
 end
 
 --- the LEDGER row for one commit: attribution + the decisions and (travelling) invocations of the entries behind it
