@@ -1209,6 +1209,36 @@ test('agentwrite: replace declares `parses` and nothing it cannot honour', funct
         'saying the payload was not derived: ' .. plan.hazards[1])
 end)
 
+test('agentwrite (CART-1152): a hazard reaches the WIRE with its sentence and class, and a refusal with its class', function ()
+    -- ⚠ A HAZARD ROW ENCODES AS `[]`: its __len reads as an array. Every hazard the agent sent used to arrive EMPTY, and
+    -- no test read the wire form, so this goes through JSON as a client would.
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    -- a file holding NO line comment: annotate borrows the style from another, and discloses that as a hazard
+    local bare = mkroot { ['b.lua'] = { 'local M = {}', 'function M.dbl(x) return x * 2 end', 'return M', '' },
+        ['o.lua'] = { '-- style lives here', 'local function o() return 2 end', 'return o', '' } }
+    ingest(bare)
+    local r = call('txn_plan_annotate', { node = idof('M.dbl'), text = 'doubles a number' })
+    eq(true, r.ok, 'the annotation plans: ' .. vim.inspect(r.refusal))
+    local wire = vim.json.decode(vim.json.encode(r))
+    local hz
+    for _, n in ipairs(wire.notes or {}) do
+        if n.kind == 'hazards' then hz = n.evidence.hazards end
+    end
+    ok(hz and hz[1], 'the ledger carries the hazards: ' .. vim.inspect(hz))
+    ok(type(hz[1].text) == 'string' and hz[1].text:find('line comment', 1, true),
+        'the sentence survives the wire: ' .. vim.inspect(hz[1]))
+    eq('frontier', hz[1].class, 'and so does the class a tactic dispatches on')
+    local root = mkroot { ['r.lua'] = REPL }
+    ingest(root)
+    -- a refusal THROUGH the plan builder (the file went away after ingest), not one the subject check makes first
+    os.remove(root .. '/r.lua')
+    local rf = call('txn_plan_replace', { node = idof('M.dbl'), text = 'function M.dbl(x) return x end' })
+    ok(rf.refusal, 'refused: ' .. vim.inspect(rf))
+    eq('stale', vim.json.decode(vim.json.encode(rf)).refusal.class, 'the builder\'s class rides on the envelope: '
+        .. tostring(rf.refusal and rf.refusal.reason))
+end)
+
 test('agentwrite: empty text and a missing subject REFUSE, by name', function ()
     if not ready() then skip('no treesitter') end
     permit(false)

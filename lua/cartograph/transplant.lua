@@ -95,18 +95,18 @@ end
 --- hide an edit the caller asked for.
 function M.apply(a_src, b_src, c_src, lang)
     lang = lang or 'lua'  -- @langs-ok the same default, checked by M.available below
-    local ok, why = M.available(lang)
-    if not ok then return nil, why end
+    local ok, why, why_class = M.available(lang)
+    if not ok then return nil, why, why_class or 'unbuilt' end
     local A = require('cartograph.algebra').load()
     local reader = require 'cartograph.algebraread'
     local terms = {}
     for name, src in pairs { a = a_src, b = b_src, c = c_src } do
         local t, rwhy = reader.read(src, lang)
-        if not t then return nil, ('could not read `%s`: %s'):format(name, tostring(rwhy)) end
+        if not t then return nil, ('could not read `%s`: %s'):format(name, tostring(rwhy)), 'unbuilt' end
         terms[name] = t
     end
     local r, twhy = A.transplant(terms.a, terms.b, terms.c)
-    if not r then return nil, ('transplant refused: %s'):format(tostring(twhy)) end
+    if not r then return nil, ('transplant refused: %s'):format(tostring(twhy)), 'decision' end
     local out = A.cst_print(r.result)
     -- ⚠⚠ THE DEGENERATE, AND IT IS DANGEROUS IF IT REACHES A CALLER. The
     -- operator's context is TOTAL STRUCTURAL AGREEMENT between the exemplar and
@@ -141,7 +141,7 @@ function M.apply(a_src, b_src, c_src, lang)
         return nil, ('transplant derived nothing usable (classify: %s): the exemplar'
             .. ' and the target do not agree structurally, so the edit has no context'
             .. ' to land in. The result would carry the exemplar\'s own names into the'
-            .. ' target rather than editing it.'):format(tostring(r.kind))
+            .. ' target rather than editing it.'):format(tostring(r.kind)), 'ill-posed'
     end
     return out, {
         kind = r.kind, route = r.route,
@@ -170,19 +170,19 @@ function M.plan(store, opts)
     local src, node = {}, {}
     for _, which in ipairs({ 'a', 'b', 'c' }) do
         local id = opts[which]
-        if not id then return nil, ('transplant needs `%s` (a definition id)'):format(which) end
+        if not id then return nil, ('transplant needs `%s` (a definition id)'):format(which), 'ill-posed' end
         local n = store.node(id)
-        if not n then return nil, ('no definition %s for `%s`'):format(tostring(id), which) end
+        if not n then return nil, ('no definition %s for `%s`'):format(tostring(id), which), 'ill-posed' end
         if not (n.file and n.range) then
-            return nil, ('`%s` (%s) carries no file range to read'):format(which, tostring(n.name))
+            return nil, ('`%s` (%s) carries no file range to read'):format(which, tostring(n.name)), 'ill-posed'
         end
         local text = txn.read_file(store.data.root, n.file)
-        if not text then return nil, ('cannot read %s'):format(n.file) end
+        if not text then return nil, ('cannot read %s'):format(n.file), 'stale' end
         local lines = vim.split(text, '\n', { plain = true })
         local lo, hi = atr.sl(n.range), atr.el(n.range)
         if not lines[hi + 1] then
             return nil, ('`%s` (%s) spans lines %d..%d but %s has %d -- the graph is stale')
-                :format(which, tostring(n.name), lo + 1, hi + 1, n.file, #lines)
+                :format(which, tostring(n.name), lo + 1, hi + 1, n.file, #lines), 'stale'
         end
         local got = {}
         for i = lo, hi do got[#got + 1] = lines[i + 1] end
@@ -193,23 +193,23 @@ function M.plan(store, opts)
     local ext = (node.c.file:match('%.(%w+)$') or ''):lower()
     local lang = opts.lang or ({ lua = 'lua', js = 'javascript', jsx = 'javascript',
         cjs = 'javascript', mjs = 'javascript' })[ext] or ext
-    local out, info = M.apply(src.a, src.b, src.c, lang)
-    if not out then return nil, tostring(info) end
+    local out, info, info_class = M.apply(src.a, src.b, src.c, lang)
+    if not out then return nil, tostring(info), info_class or 'unbuilt' end
     -- A NO-OP IS A REFUSAL, NOT A PLAN. `M.apply` kills the degenerate cases by name; this
     -- catches the remaining one, an edit that lands on `c` and changes nothing. Staging it
     -- would spend a review on a diff with no content.
     if out == src.c then
         return nil, ('the derived edit leaves `%s` unchanged -- the exemplar difference'
-            .. ' does not reach it'):format(tostring(node.c.name))
+            .. ' does not reach it'):format(tostring(node.c.name)), 'empty'
     end
 
-    local plan, why = require('cartograph.replace').plan(store, {
+    local plan, why, why_class = require('cartograph.replace').plan(store, {
         node = opts.c, text = out, origin = 'derived', derived_by = 'transplant',
         derived_why = ('%s -> %s applied to %s, kind %s route %s'):format(
             tostring(node.a.name), tostring(node.b.name), tostring(node.c.name),
             tostring((info or {}).kind), tostring((info or {}).route)),
     })
-    if not plan then return nil, why end
+    if not plan then return nil, why, why_class or 'ill-posed' end
     -- the operator's own account rides along, so a reviewer sees WHAT it did and not only
     -- that something did
     plan.transplant = { a = opts.a, b = opts.b, c = opts.c, info = info }

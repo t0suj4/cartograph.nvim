@@ -30,9 +30,9 @@ local M = {}
 --- The model for one fn: { stmts, deps, conflicts, free, opaque }.
 function M.analyze(store, fn_id)
     local node = store.node(fn_id)
-    if not node then return nil, 'no such node' end
+    if not node then return nil, 'no such node', 'ill-posed' end
     local sts = dfa.stmts(node)
-    if #sts == 0 then return nil, 'no statement-level dataflow' end
+    if #sts == 0 then return nil, 'no statement-level dataflow', 'frontier' end
 
     -- module-state vocabulary: name -> var id (~: name-matched, as the
     -- use edges themselves are)
@@ -232,11 +232,11 @@ local at = require 'cartograph.at'
 -- are line-ordered and index-contiguous, so [rows[p].l .. end0(r)] holds exactly the block.
 -- end0(i) = the line before the next statement (or before the fn's `end`).
 local function block_span(rows, node, p, r)
-    if p > 1 and rows[p - 1].l == rows[p].l then return nil, 'the block start shares a line with the previous statement' end
-    if r < #rows and rows[r + 1].l == rows[r].l then return nil, 'the block end shares a line with the next statement' end
+    if p > 1 and rows[p - 1].l == rows[p].l then return nil, 'the block start shares a line with the previous statement', 'unbuilt' end
+    if r < #rows and rows[r + 1].l == rows[r].l then return nil, 'the block end shares a line with the next statement', 'unbuilt' end
     local start0 = rows[p].l - 1
     local end0 = rows[r + 1] and (rows[r + 1].l - 2) or (at.el(node.range) - 1)
-    if end0 < start0 then return nil, 'empty statement span' end
+    if end0 < start0 then return nil, 'empty statement span', 'ill-posed' end
     return start0, end0
 end
 
@@ -250,8 +250,8 @@ end
 --- statement commutes with EVERY crossed statement and nothing opaque is crossed or in the
 --- block. Each block statement must be single-line (multi-line refused; same first-cut limit).
 function M.plan_move(store, fn_id, from_line, to_line, through_line)
-    local m, why = M.analyze(store, fn_id)
-    if not m then return nil, why end
+    local m, why, why_class = M.analyze(store, fn_id)
+    if not m then return nil, why, why_class or 'ill-posed' end
     local rows = m.stmts
     through_line = through_line or from_line
     local p, r, q
@@ -260,20 +260,20 @@ function M.plan_move(store, fn_id, from_line, to_line, through_line)
         if row.l == through_line then r = i end
         if row.l == to_line then q = i end
     end
-    if not p then return nil, 'no statement starts at line ' .. from_line end
-    if not r then return nil, 'no statement starts at line ' .. through_line end
-    if r < p then return nil, 'the block end is before its start' end
+    if not p then return nil, 'no statement starts at line ' .. from_line, 'ill-posed' end
+    if not r then return nil, 'no statement starts at line ' .. through_line, 'ill-posed' end
+    if r < p then return nil, 'the block end is before its start', 'ill-posed' end
     if not q then
-        if to_line > rows[#rows].l then q = #rows + 1 else return nil, 'no statement at line ' .. to_line end
+        if to_line > rows[#rows].l then q = #rows + 1 else return nil, 'no statement at line ' .. to_line, 'ill-posed' end
     end
-    if q >= p and q <= r + 1 then return nil, 'that is already the block\'s position' end
+    if q >= p and q <= r + 1 then return nil, 'that is already the block\'s position', 'empty' end
 
     local inblock = {}
     for i = p, r do inblock[i] = true end
     local opaque = {}
     for _, i in ipairs(m.opaque) do opaque[i] = true end
     for i = p, r do
-        if opaque[i] then return nil, ('#%d has unresolved effects (opaque) — cannot certify the move'):format(i) end
+        if opaque[i] then return nil, ('#%d has unresolved effects (opaque) — cannot certify the move'):format(i), 'frontier' end
     end
 
     -- the crossed set: statements strictly between the block and the new position
@@ -290,21 +290,23 @@ function M.plan_move(store, fn_id, from_line, to_line, through_line)
     for _, d in ipairs(m.deps) do note(d[1], d[2], ('a dataflow dep (%s)'):format(d[3])) end
     for _, c in ipairs(m.conflicts) do note(c[1], c[2], ('a %s conflict (%s)'):format(c[3], c[4])) end
     for _, t in ipairs(passed) do
-        if opaque[t] then return nil, ('the move would cross #%d, whose effects are opaque'):format(t) end
-        if rel[t] then return nil, ('the move would cross #%d, which has %s with a block statement'):format(t, rel[t]) end
+        if opaque[t] then return nil, ('the move would cross #%d, whose effects are opaque'):format(t), 'frontier' end
+        if rel[t] then return nil, ('the move would cross #%d, which has %s with a block statement'):format(t, rel[t]), 'ill-posed' end
     end
 
     -- the block's source span (multi-line statements + control `end` handled)
-    local src_s0, src_e0, sw = block_span(rows, m.node, p, r)
-    if not src_s0 then return nil, sw end
+    -- ⚠ block_span refuses as (nil, why, class): the reason is the SECOND value. This read the third, so every
+    -- block_span refusal left plan_move as `nil, nil` — a stop with no reason (found by the CART-1152 slot-3 audit)
+    local src_s0, src_e0, sw_class = block_span(rows, m.node, p, r)
+    if not src_s0 then return nil, src_e0, sw_class or 'unbuilt' end
     local dst_line1 = (q <= #rows) and rows[q].l or (at.el(m.node.range)) -- fn `end` line
     local dst0 = dst_line1 - 1
-    if dst0 >= src_s0 and dst0 <= src_e0 + 1 then return nil, 'the block cannot move into itself' end
+    if dst0 >= src_s0 and dst0 <= src_e0 + 1 then return nil, 'the block cannot move into itself', 'ill-posed' end
 
     local root = store.data.root
     local rel_file = m.node.file
     local text = require('cartograph.txn').read_file(root, rel_file)
-    if not text then return nil, 'cannot read ' .. rel_file end
+    if not text then return nil, 'cannot read ' .. rel_file, 'stale' end
     local flines = vim.split(text, '\n', { plain = true })
     local src_lines = {}
     for i = src_s0, src_e0 do src_lines[#src_lines + 1] = flines[i + 1] end

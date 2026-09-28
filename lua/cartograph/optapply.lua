@@ -46,6 +46,9 @@ local builtins = require 'cartograph.builtins'
 
 local M = {}
 
+--- the stop class of each refusal code: one shared table (hazard.CODE_CLASS, CART-1152)
+M.CODE_CLASS = require('cartograph.hazard').CODE_CLASS
+
 --- THE JOURNAL DESCRIPTION, ON THE PLAN (CART-0982) — the verb plus any WAIVED
 --- premises, which are the recorded provenance of an override.
 local function stamp_desc(plan)
@@ -619,7 +622,7 @@ end
 --- @return string? why  (set when plan is nil)
 function M.plan_at(store, file, line, opts)
     local fid = M.at(store, file, line)
-    if not fid then return nil, ('no function at %s:%d'):format(file, line) end
+    if not fid then return nil, ('no function at %s:%d'):format(file, line), 'no-function' end
     return M.plan_cse(store, fid, opts)
 end
 

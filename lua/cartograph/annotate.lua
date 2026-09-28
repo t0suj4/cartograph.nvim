@@ -133,18 +133,18 @@ end
 function M.plan(store, opts)
     opts = opts or {}
     local n = opts.node and store.node(opts.node)
-    if not n then return nil, 'no symbol to annotate' end
-    if not n.file then return nil, n.name .. ' has no file' end
+    if not n then return nil, 'no symbol to annotate', 'ill-posed' end
+    if not n.file then return nil, n.name .. ' has no file', 'ill-posed' end
     local prose = opts.text
     if type(prose) ~= 'string' or prose:gsub('%s', '') == '' then
-        return nil, 'no prose to attach'
+        return nil, 'no prose to attach', 'ill-posed'
     end
     local ts = require 'cartograph.providers.treesitter'
     local lang = ts.parse_lang(n.file)
-    if not lang then return nil, 'no parser for ' .. n.file end
+    if not lang then return nil, 'no parser for ' .. n.file, 'frontier' end
     local root = store.data.root
     local text = txn.read_file(root, n.file)
-    if not text then return nil, 'cannot read ' .. n.file end
+    if not text then return nil, 'cannot read ' .. n.file, 'stale' end
     local lines = vim.split(text, '\n', { plain = true })
 
 
@@ -189,7 +189,7 @@ function M.plan(store, opts)
     end
     if not out then
         return nil, ('no comment style in this tree turns that prose into an inert '
-            .. 'comment for %s — every candidate prefix changed the code'):format(n.file)
+            .. 'comment for %s — every candidate prefix changed the code'):format(n.file), 'unbuilt'
     end
 
     local plan = {
@@ -210,8 +210,8 @@ function M.plan(store, opts)
         ins = { { after = s - 1, lines = out } },
     }
     if donor ~= n.file then
-        plan.hazards[#plan.hazards + 1] = ('%s holds no line comment, so the prose '
-            .. 'style was taken from %s'):format(n.file, donor)
+        plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('comment-style', ('%s holds no line comment, so the prose '
+            .. 'style was taken from %s'):format(n.file, donor), nil, nil, 'frontier')
     end
     plan.refspecs = { { id = plan.target.id, name = plan.target.name,
         ref = plan.target.ref, what = 'symbol' } }

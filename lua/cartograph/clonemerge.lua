@@ -131,7 +131,7 @@ end
 --- twins. Everything the apply needs to verify rides along.
 function M.plan(store, id)
     local survivor = store.node(id)
-    if not survivor then return nil, 'no function under focus' end
+    if not survivor then return nil, 'no function under focus', 'ill-posed' end
     local twins, why, rejected = M.twins(store, id)
     if #twins == 0 then
         -- ⚠ NAME WHICH GATE REFUSED. "no twin" and "a twin the kind check threw
@@ -143,10 +143,11 @@ function M.plan(store, id)
             return nil, ('%d candidate(s) matched the data-flow witness of %s but'
                 .. ' differ in STATEMENT KINDS (an `if` and a `while` over the same'
                 .. ' body have the same witness) — refused rather than merged')
-                :format(rejected, survivor.name)
+                :format(rejected, survivor.name), 'empty'
         end
+        -- a stated why is a premise the witness lacked; none is an honest absence
         return nil, why or ('no clones of %s found (witness has no twin)')
-            :format(survivor.name)
+            :format(survivor.name), why and 'frontier' or 'empty'
     end
     local root = store.data.root
     local plan = {
@@ -240,13 +241,13 @@ function M.plan(store, id)
                     .. ' twin, because a partial merge rewrites the callers of a'
                     .. ' twin that still exists')
                     :format(t.name, t.file,
-                        encl and (', because it sits inside ' .. encl) or '')
+                        encl and (', because it sits inside ' .. encl) or ''), 'unbuilt'
             end
         end
         if header then
-            plan.hazards[#plan.hazards + 1] = ('the comment block above %s'
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('header-comment', ('the comment block above %s'
                 .. ' touches the top of %s (file header) — left behind')
-                :format(t.name, t.file)
+                :format(t.name, t.file), nil, nil, 'decision')
         end
         plan.removed[#plan.removed + 1] = {
             id = t.id, name = t.name, file = t.file,
@@ -267,9 +268,9 @@ function M.plan(store, id)
         -- the `reg` edge IS "referenced from data" (see moveapply: n.cbarg
         -- conflated this with table-field defs and callback args)
         if store.topo():n_registrants(t.id) > 0 then
-            plan.hazards[#plan.hazards + 1] = ('%s is referenced from data'
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('registry', ('%s is referenced from data'
                 .. ' (dispatch table / registry) — those references are NOT'
-                .. ' rewritten'):format(t.name)
+                .. ' rewritten'):format(t.name), nil, nil, 'unbuilt')
         end
         -- call sites into this twin: rewrite the callee token when it is
         -- exactly the twin's name; anything else is a hazard, not a write
@@ -284,9 +285,9 @@ function M.plan(store, id)
                     at = at, from = t.name, to = survivor.name }
                 touched[callrec.file(c)] = true
             else
-                plan.hazards[#plan.hazards + 1] = ('%s:%d calls %s in a form'
+                plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('call-form', ('%s:%d calls %s in a form'
                     .. " that isn't its bare name (%s) — rewrite it yourself")
-                    :format(callrec.file(c), callrec.line(c) + 1, t.name, tostring(token or callrec.callee(c)))
+                    :format(callrec.file(c), callrec.line(c) + 1, t.name, tostring(token or callrec.callee(c))), nil, nil, 'unbuilt')
             end
         end
         -- non-call references (the id pass's dispatch-table finds): they
@@ -301,9 +302,9 @@ function M.plan(store, id)
             if occs > calls then nonrefs = nonrefs + (occs - calls) end
         end
         if nonrefs > 0 then
-            plan.hazards[#plan.hazards + 1] = ('%d non-call reference(s) to'
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('non-call-refs', ('%d non-call reference(s) to'
                 .. ' %s (identifier mentions) keep the old name')
-                :format(nonrefs, t.name)
+                :format(nonrefs, t.name), nil, nil, 'unbuilt')
         end
     end
     -- rewritten call sites OUTSIDE the survivor's file will reference it
@@ -313,9 +314,9 @@ function M.plan(store, id)
     for _, r in ipairs(plan.rewrites) do
         if r.file ~= survivor.file and not foreign[r.file] then
             foreign[r.file] = true
-            plan.hazards[#plan.hazards + 1] = ('callers in %s will reference'
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('caller-imports', ('callers in %s will reference'
                 .. ' %s by name — verify it is visible there (imports)')
-                :format(r.file, survivor.name)
+                :format(r.file, survivor.name), nil, nil, 'unbuilt')
         end
     end
     for f in pairs(touched) do

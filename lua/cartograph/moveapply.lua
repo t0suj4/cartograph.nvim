@@ -159,11 +159,11 @@ local function module_scaffold(plan, dest, ts, file_lines)
     plan.hazards = kept
     if #order > 0 then
         table.sort(order)
-        plan.hazards[#plan.hazards + 1] = ('%s is created FRESH in %s (its'
+        plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('scaffold-residual', ('%s is created FRESH in %s (its'
             .. ' `local %s = {}` and `return %s` are written) — but the moved'
             .. ' code still reaches %s, which the new table does not hold:'
             .. ' wire those by hand'):format(name, dest, name, name,
-            table.concat(order, ', '))
+            table.concat(order, ', ')), nil, nil, 'unbuilt')
     end
 end
 
@@ -257,14 +257,14 @@ local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts, in
         end
         plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new(
             'surface', reason, fix,
-            { file = rel, table = e.table, names = e.names, blind = e.blind })
+            { file = rel, table = e.table, names = e.names, blind = e.blind }, 'decision')
         if opts and opts.reexport then
             local ls = file_lines(rel) or {}
             local line, alias = ts.import_line(rel, dest,
                 ts.import_ctx(store.data.root, store.files))
             if not (line and alias) then
                 return nil, ('cannot wire a re-export in %s: no import idiom for'
-                    .. ' %s in this language'):format(rel, dest)
+                    .. ' %s in this language'):format(rel, dest), 'unbuilt'
             end
             -- ★ ONE BLOCK, IMMEDIATELY BEFORE `return M`, AND THE REQUIRE GOES
             -- IN IT. A require at the top would read more idiomatically, but the
@@ -283,7 +283,7 @@ local function surface_loss(store, plan, dest, ts, file_lines, in_move, opts, in
             end
             if not at then
                 return nil, ('cannot wire a re-export in %s: no `return %s` line'
-                    .. ' to insert before'):format(rel, e.table)
+                    .. ' to insert before'):format(rel, e.table), 'unbuilt'
             end
             local block = { '', ('-- re-exported from %s so %s keeps its surface'):format(dest, e.table) }
             -- a rebind above already required the new home under this alias (CART-1146): one require, not two
@@ -321,18 +321,18 @@ local function collect(store, ids, dest, plan, opts)
     local touched = { [dest] = true }
     for _, id in ipairs(ids) do
         local n = store.node(id)
-        if not n then return nil, 'staged symbol vanished: ' .. tostring(id) end
+        if not n then return nil, 'staged symbol vanished: ' .. tostring(id), 'stale' end
         if n.kind == 'var' then
             -- module-level constants move (full-declaration range, incl multi-
             -- line tables); function-local vars do not. References ride the
             -- ImpactEngine like any symbol (disclosed, not silently rewritten).
             if not module_level(store, n) then
                 return nil, ('%s is a function-local variable — only module-'
-                    .. 'level constants move'):format(n.name)
+                    .. 'level constants move'):format(n.name), 'ill-posed'
             end
         elseif n.kind ~= 'function' and n.kind ~= 'method' then
             return nil, ('%s is a %s — only functions, methods, and module-'
-                .. 'level variables move'):format(n.name, n.kind)
+                .. 'level variables move'):format(n.name, n.kind), 'ill-posed'
         else
             -- ★★ THE SAME RULE AS THE `var` BRANCH ABOVE, WHICH IS WHY IT SITS
             -- BESIDE IT (CART-0770). The text is lifted and appended at the
@@ -350,11 +350,11 @@ local function collect(store, ids, dest, plan, opts)
                     .. 'move lifts only the definition, not its container. The '
                     .. 'container would have to move with it, or %s has to become '
                     .. 'a top-level definition first')
-                    :format(n.name, encl, n.name)
+                    :format(n.name, encl, n.name), 'decision'
             end
         end
         if n.file == dest then
-            return nil, n.name .. ' already lives in ' .. dest
+            return nil, n.name .. ' already lives in ' .. dest, 'empty'
         end
         -- comment adhesion: the doc lines directly above travel too —
         -- unless the block touches the top of the file (a license /
@@ -371,18 +371,18 @@ local function collect(store, ids, dest, plan, opts)
             mode = (plan.copy and plan.copy[id]) and 'copy' or 'move' }
         touched[n.file] = true
         if header then
-            plan.hazards[#plan.hazards + 1] = ('the comment block above %s'
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('header-comment', ('the comment block above %s'
                 .. ' touches the top of %s (file header) — left behind')
-                :format(n.name, n.file)
+                :format(n.name, n.file), nil, nil, 'decision')
         end
         -- "referenced from data" is the `reg` EDGE's claim, so ask the edge.
         -- This used to read n.cbarg, which conflates three classes — a
         -- table-field def and a callback argument are neither of them a
         -- registry reference, so the hazard fired on defs it did not describe.
         if store.topo():n_registrants(id) > 0 then
-            plan.hazards[#plan.hazards + 1] = ('%s is referenced from data'
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('registry', ('%s is referenced from data'
                 .. ' (dispatch table / registry) — those references are NOT'
-                .. ' rewritten'):format(n.name)
+                .. ' rewritten'):format(n.name), nil, nil, 'unbuilt')
         end
     end
     -- ORDERED review + valid dest layout: lay the move-set out in SOURCE order
@@ -396,9 +396,9 @@ local function collect(store, ids, dest, plan, opts)
     -- disclose it (the two copies drift independently).
     for _, m in ipairs(plan.moves) do
         if m.mode == 'copy' then
-            plan.hazards[#plan.hazards + 1] = ('%s is COPIED (the original stays'
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('copy', ('%s is COPIED (the original stays'
                 .. ' in %s) — the two copies must be kept in sync by hand')
-                :format(m.name, m.file)
+                :format(m.name, m.file), nil, nil, 'informational')
         end
     end
 
@@ -425,7 +425,7 @@ local function collect(store, ids, dest, plan, opts)
         if h.kind ~= 'noop' then
             plan.hazards[#plan.hazards + 1] = hz.new(h.kind,
                 h.kind .. ': ' .. h.msg, nil,
-                { level = h.level, capture = h.capture })
+                { level = h.level, capture = h.capture }, h.class)
         end
     end
     plan.rewrites, plan.imports_add = {}, {}
@@ -561,15 +561,15 @@ local function collect(store, ids, dest, plan, opts)
         table.sort(out)
         return out
     end)()) do
-        plan.hazards[#plan.hazards + 1] = ('%d call site(s) in %s still'
+        plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('call-sites', ('%d call site(s) in %s still'
             .. ' reference the old home — requalify them yourself')
-            :format(rw_left[F], F)
+            :format(rw_left[F], F), nil, nil, 'unbuilt')
     end
     local wired = {} -- files the plan gives an import of dest: added, or put in place of a dead one
     for F, imp2 in pairs(imports) do if imp2 then wired[F] = true end end
     for _, d in ipairs(plan.dead_imports) do if d.to then wired[d.file] = true end end
     for _, f in ipairs(imp.dest_requires) do
-        plan.hazards[#plan.hazards + 1] = dest .. ' should import ' .. f
+        plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('import', dest .. ' should import ' .. f, nil, nil, 'unbuilt')
     end
     -- a file being CREATED may need the language's module scaffold to LOAD;
     -- a MOVE into an existing file inherits that file's own (CART-0542)
@@ -608,7 +608,7 @@ local function collect(store, ids, dest, plan, opts)
                     return nil, ('%s is file-local and still called by name %d time(s) in %s, which it leaves: %s. Move'
                         .. ' those callers with it, or keep %s where it is'):format(m.name, calls, m.file,
                         not exp and ('%s has no module table to export it through'):format(dest)
-                        or ('%s cannot bind the name again from %s'):format(m.file, dest), m.name)
+                        or ('%s cannot bind the name again from %s'):format(m.file, dest), m.name), 'unbuilt'
                 end
                 plan.exports[#plan.exports + 1] = exp
                 local lines = {}
@@ -621,14 +621,14 @@ local function collect(store, ids, dest, plan, opts)
         end
     end
     if okp then
-        local okl, whyl = surface_loss(store, plan, dest, ts, file_lines, in_move, opts, introduced)
-        if not okl then return nil, whyl end
+        local okl, whyl, whyl_class = surface_loss(store, plan, dest, ts, file_lines, in_move, opts, introduced)
+        if not okl then return nil, whyl, whyl_class or 'unbuilt' end
     end
     for f in pairs(introduced) do wired[f] = true end
     for _, r in ipairs(plan.reexports or {}) do wired[r.file] = true end
     for _, f in ipairs(imp.requires_add) do
         if not wired[f] then
-            plan.hazards[#plan.hazards + 1] = f .. ' should import ' .. dest
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('import', f .. ' should import ' .. dest, nil, nil, 'unbuilt')
         end
     end
     for f in pairs(touched) do
@@ -722,10 +722,10 @@ end
 function M.plan(store)
     local ids = store.staged_ids()
     if #ids == 0 then
-        return nil, 'nothing staged — dd cuts a function into the move-set'
+        return nil, 'nothing staged — dd cuts a function into the move-set', 'ill-posed'
     end
     if not store.dest then
-        return nil, 'no destination — p on a file row sets it'
+        return nil, 'no destination — p on a file row sets it', 'ill-posed'
     end
     return M.plan_ids(store, ids, store.dest)
 end
@@ -738,17 +738,17 @@ end
 --- @param ids string[]  the move-set, explicitly
 --- @param dest string   an EXISTING file (that is what makes it a move)
 function M.plan_ids(store, ids, dest)
-    if not ids or #ids == 0 then return nil, 'no functions to move' end
+    if not ids or #ids == 0 then return nil, 'no functions to move', 'ill-posed' end
     local txn = require 'cartograph.txn'
     -- ★ THE CHECK THIS BRANCH NEVER HAD (CART-0577). plan_extract_ids has always
     -- refused an escaping path; MOVE did not, so a dest of `../x.lua` planned and
     -- applied outside the project. Interactively `dest` came from pressing `p` on a
     -- FILE ROW and could only be inside the tree — the guarantee was the UI's, and
     -- making the verb agent-drivable removed it without replacing it.
-    local okc, whyc = txn.contained(dest)
-    if not okc then return nil, whyc end
+    local okc, whyc, whyc_class = txn.contained(dest)
+    if not okc then return nil, whyc, whyc_class or 'ill-posed' end
     local dtext = txn.read_file(store.data.root, dest)
-    if not dtext then return nil, 'cannot read ' .. dest end
+    if not dtext then return nil, 'cannot read ' .. dest, 'ill-posed' end
     local plan = {
         verb = 'move', generation = store.generation, dest = dest,
         guards = { 'parses' }, -- CART-0769: every text-editing verb owes rung 0
@@ -764,7 +764,7 @@ end
 function M.plan_extract(store, relpath, opts)
     local ids = store.staged_ids()
     if #ids == 0 then
-        return nil, 'nothing staged — dd cuts a function into the move-set'
+        return nil, 'nothing staged — dd cuts a function into the move-set', 'ill-posed'
     end
     return M.plan_extract_ids(store, ids, relpath, opts)
 end
@@ -821,10 +821,10 @@ end
 function M.plan_moveset(store, seed, dest, opts)
     dest = (dest or ''):gsub('^%s+', ''):gsub('%s+$', '')
     if dest == '' then
-        return nil, 'no destination — plan_moveset(store, seed_ids, dest)'
+        return nil, 'no destination — plan_moveset(store, seed_ids, dest)', 'ill-posed'
     end
     if not seed or #seed == 0 then
-        return nil, 'no seed symbols — plan_moveset(store, seed_ids, dest)'
+        return nil, 'no seed symbols — plan_moveset(store, seed_ids, dest)', 'ill-posed'
     end
     -- ★ CONTAINMENT FIRST, ahead of disk_stamp and ahead of clear_stage. Ahead of
     -- disk_stamp because that composes root .. '/' .. dest and its answer ROUTES us
@@ -832,15 +832,15 @@ function M.plan_moveset(store, seed, dest, opts)
     -- caller their staged set. This is the agent-facing entry point, so `dest` is an
     -- arbitrary string here where the cockpit could only ever supply a file row.
     do
-        local ok, why = require('cartograph.txn').contained(dest)
-        if not ok then return nil, why end
+        local ok, why, why_class = require('cartograph.txn').contained(dest)
+        if not ok then return nil, why, why_class or 'ill-posed' end
     end
     local exists = require('cartograph.txn').disk_stamp(store.data.root, dest)
     -- `copy` is an extract-module option (M.plan builds no copy set): say so
     -- rather than accept it and silently move what the caller asked to duplicate
     if exists and opts and opts.copy and next(opts.copy) then
         return nil, ('copy is an extract-module option, and %s already exists'
-            .. ' — that destination is a MOVE'):format(dest)
+            .. ' — that destination is a MOVE'):format(dest), 'ill-posed'
     end
     local set = M.close_moveset(store, seed, dest)
 
@@ -892,24 +892,24 @@ end
 --- inter-untangle handoff uses to plan a function CLUSTER into a new module
 --- without touching the live staging. Read-only (builds a plan; apply mutates).
 function M.plan_extract_ids(store, ids, relpath, opts)
-    if not ids or #ids == 0 then return nil, 'no functions to extract' end
+    if not ids or #ids == 0 then return nil, 'no functions to extract', 'ill-posed' end
     relpath = (relpath or ''):gsub('^%s+', ''):gsub('%s+$', '')
     if relpath == '' then
-        return nil, 'usage: :CartographExtractModule <new-file-path>'
+        return nil, 'usage: :CartographExtractModule <new-file-path>', 'ill-posed'
     end
     local txn = require 'cartograph.txn'
     -- was an inline `^/` / `%.%.` test here; it is txn.contained now so both entry
     -- points share ONE rule. The old spelling rejected the SUBSTRING `..`, which
     -- also refused a legal filename like `a..b.lua` — a refusal with no premise.
-    local okc, whyc = txn.contained(relpath)
-    if not okc then return nil, whyc end
+    local okc, whyc, whyc_class = txn.contained(relpath)
+    if not okc then return nil, whyc, whyc_class or 'ill-posed' end
     if txn.disk_stamp(store.data.root, relpath) then
-        return nil, relpath .. ' already exists — that is a MOVE (:CartographMove)'
+        return nil, relpath .. ' already exists — that is a MOVE (:CartographMove)', 'ill-posed'
     end
     local okp, ts = pcall(require, 'cartograph.providers.treesitter')
     if okp and not ts.lang_of(relpath) then
         return nil, ('no language spec for %s — the graph could never'
-            .. ' see the new file'):format(relpath)
+            .. ' see the new file'):format(relpath), 'unbuilt'
     end
     local plan = {
         verb = 'extract-module', generation = store.generation,
@@ -920,8 +920,8 @@ function M.plan_extract_ids(store, ids, relpath, opts)
         copy = (opts and opts.copy) or {}, -- id set: leave the original, don't rewrite
     }
     if okp and ts.lang_of(relpath) == 'go' then
-        plan.hazards[#plan.hazards + 1] = relpath
-            .. ' will need its package clause — cartograph wrote none'
+        plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('package-clause', relpath
+            .. ' will need its package clause — cartograph wrote none', nil, nil, 'unbuilt')
     end
     return collect(store, ids, relpath, plan, opts)
 end
@@ -992,13 +992,13 @@ end
 --- @return boolean|nil ok, string|nil why
 function M.arm(store, plan)
     if type(plan) ~= 'table' or type(plan.moves) ~= 'table' then
-        return nil, 'not a move-set plan'
+        return nil, 'not a move-set plan', 'ill-posed'
     end
     local gen = store.generation or 0
     if plan.generation and plan.generation ~= gen then
         return nil, ('this plan was built against graph generation %s and the'
             .. ' store is on %s — every id in it may name a different symbol;'
-            .. ' re-plan'):format(tostring(plan.generation), tostring(gen))
+            .. ' re-plan'):format(tostring(plan.generation), tostring(gen)), 'stale'
     end
     -- ★ A VANISHED NODE IS A DIFFERENT REFUSAL FROM A BUMPED GENERATION, because
     -- only one of them says WHICH symbol went. A generation can hold while an
@@ -1009,7 +1009,7 @@ function M.arm(store, plan)
     end
     if #gone > 0 then
         return nil, ('%d symbol(s) in this plan are no longer in the graph (%s)'
-            .. ' — re-plan'):format(#gone, some(gone))
+            .. ' — re-plan'):format(#gone, some(gone)), 'stale'
     end
     store.clear_stage()
     for _, m in ipairs(plan.moves) do store.stage(m.id) end

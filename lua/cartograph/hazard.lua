@@ -54,14 +54,50 @@ end
 mt.__len = function (self) return #self.reason end
 mt.__eq = function (a, b) return tostring(a) == tostring(b) end
 
+-- ★★★ EVERY STOP SAYS WHAT KIND OF STOP IT IS (CART-1152). A TACTIC may stop only on a genuine DECISION; everything
+-- else is something the runner handles without a person — so a hazard (residue) and a write verb's refusal (a
+-- `return nil, why, class`) both name their class from this CLOSED vocabulary. The static census of 212 stops found
+-- 12 decisions; nothing on a stop said which, so no runner could act on the difference.
+M.CLASSES = {
+    decision      = 'intent the code does not state — STOP and present the options',
+    unbuilt       = 'the verb could do this and does not yet — FAIL and file the ticket',
+    frontier      = 'a fact is missing — ask an ORACLE, then retry',
+    ['ill-posed'] = 'the request is invalid — did you mean the nearest valid call?',
+    stale         = 'the tree moved since planning — RE-PLAN',
+    empty         = 'nothing to do — a valid EMPTY answer, success for try/repeat',
+    informational = 'a consequence of a choice already made — CONTINUE',
+    environment   = 'the machine refused (an OS write) — fail, retry outside',
+}
+
+--- a class from the vocabulary, or an error naming the typo (a class nobody can route is not a class)
+--- THE STOP CLASS OF A REFUSAL CODE. Four builders (optapply, hoistsetup, idxrewrite, patrewrite) already return a
+--- machine-readable CODE in the third slot, and the agent branches on it; the code stays, and this says what a tactic
+--- does on meeting it. One table, so a new code is classified once.
+M.CODE_CLASS = {
+    ['no-node'] = 'ill-posed',              -- the caller named nothing
+    ['no-function'] = 'ill-posed',          -- the location holds no function
+    ['unsupported-language'] = 'unbuilt',   -- no spec for this language yet
+    ['no-candidates'] = 'empty',            -- the analysis ran; the code offers nothing
+    ['unparsable'] = 'frontier',            -- the source does not parse: nothing to reason over
+    ['all-declined'] = 'unbuilt',           -- every step was a shape this version declines
+    ['no-anchor'] = 'ill-posed',            -- the named prelude has nowhere to set up
+    ['unreadable'] = 'stale',               -- a graph file no longer reads
+}
+
+function M.class(c)
+    if c ~= nil and not M.CLASSES[c] then error(('hazard: no class %q (see hazard.CLASSES)'):format(tostring(c)), 2) end
+    return c
+end
+
 --- @param kind string   a stable slug: 'capture' | 'surface' | 'scaffold' | …
 --- @param reason string the sentence, unchanged from what it was
 --- @param fix table|nil { verb = string, args = table, why = string }
 --- @param evidence table|nil machine-readable specifics
+--- @param class string|nil one of M.CLASSES (CART-1152) — what a tactic runner does with this stop
 --- @return table hazard
-function M.new(kind, reason, fix, evidence)
+function M.new(kind, reason, fix, evidence, class)
     return setmetatable({ kind = kind, reason = reason, fix = fix,
-        evidence = evidence }, mt)
+        evidence = evidence, class = M.class(class) }, mt)
 end
 
 --- is this value one of our rows (as opposed to a bare string a producer has not
@@ -86,6 +122,19 @@ function M.text(list, sep)
     local out = {}
     for i, h in ipairs(list or {}) do out[i] = tostring(h) end
     return table.concat(out, sep or ' | ')
+end
+
+--- ⚠ A ROW DOES NOT SURVIVE JSON: its `__len` (the sentence's length) makes the encoder read it as an ARRAY, and with
+--- no integer keys it encodes as `[]` — every hazard the agent handed over the wire arrived EMPTY (CART-1152). This is
+--- the wire form: plain tables, the sentence as `text`, and the class a caller dispatches on.
+--- @return table rows { { text, kind, class } }
+function M.plain(list)
+    local out = {}
+    for i, h in ipairs(list or {}) do
+        local r = M.row(h)
+        out[i] = { text = tostring(r.reason), kind = r.kind, class = r.class }
+    end
+    return out
 end
 
 --- every fix a plan's hazards propose, in order, deduplicated by (verb, hazard

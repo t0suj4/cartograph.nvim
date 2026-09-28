@@ -92,7 +92,7 @@ local function recognize(n, src)
     if #stmts ~= 1 or stmts[1]:type() ~= 'if_statement' then return nil end
     local ifn = stmts[1]
     for c in ifn:iter_children() do
-        if c:type() == 'elseif_statement' or c:type() == 'else_statement' then return nil, 'the if has an else branch' end
+        if c:type() == 'elseif_statement' or c:type() == 'else_statement' then return nil, 'the if has an else branch', 'unbuilt' end
     end
     local cond = ifn:field('condition')[1]
     local ct = cond and text(src, cond) or ''
@@ -100,22 +100,22 @@ local function recognize(n, src)
     local F, K = ct:match('^' .. pv .. '%.([%a_][%w_]*)%s*==%s*(.-)%s*$')
     if not F then K, F = ct:match('^(.-)%s*==%s*' .. pv .. '%.([%a_][%w_]*)%s*$') end
     if not F then return nil end
-    if K:find('%f[%w_]' .. pv .. '%f[^%w_]') then return nil, 'the key reads the element' end
-    if not literal_or_chain(K) then return nil, ('the key `%s` is not a plain name, field or literal'):format(K) end
-    if K == 'nil' then return nil, 'the key is nil (a bucket can never serve it)' end
-    if not pure(e) then return nil, ('the list `%s` is not a plain name or field (it would be evaluated twice)'):format(e) end
+    if K:find('%f[%w_]' .. pv .. '%f[^%w_]') then return nil, 'the key reads the element', 'empty' end
+    if not literal_or_chain(K) then return nil, ('the key `%s` is not a plain name, field or literal'):format(K), 'unbuilt' end
+    if K == 'nil' then return nil, 'the key is nil (a bucket can never serve it)', 'empty' end
+    if not pure(e) then return nil, ('the list `%s` is not a plain name or field (it would be evaluated twice)'):format(e), 'unbuilt' end
     local btext = text(src, body)
     if iv ~= '_' and btext:find('%f[%w_]' .. iv:gsub('%p', '%%%0') .. '%f[^%w_]') then
-        return nil, ('the loop index `%s` is used in the body (bucket positions are not list positions)'):format(iv)
+        return nil, ('the loop index `%s` is used in the body (bucket positions are not list positions)'):format(iv), 'unbuilt'
     end
     local base = e:match('^%(?%s*([%a_][%w_]*)') or e
     local pb = base:gsub('%p', '%%%0')
     if btext:find('table%.remove%(%s*' .. pb) or btext:find('table%.insert%(%s*' .. pb)
         or btext:find('%f[%w_]' .. pb .. '%s*%[[^%]]*%]%s*=[^=]') then
-        return nil, ('the body writes the list `%s`'):format(base)
+        return nil, ('the body writes the list `%s`'):format(base), 'empty'
     end
     if btext:find('%f[%w_]' .. pv .. '%.' .. F .. '%s*=[^=]') then
-        return nil, ('the body reassigns `%s.%s`'):format(v, F)
+        return nil, ('the body reassigns `%s.%s`'):format(v, F), 'empty'
     end
     local sr, sc, er, ec = clause:range()
     return { v = v, F = F, K = K, E = e, base = base, line = n:range() + 1,
@@ -151,13 +151,13 @@ function M.sites(src)
     local sites, declined = {}, {}
     local function visit(n)
         if n:type() == 'for_statement' then
-            local s, why = recognize(n, src)
+            local s, why, why_class = recognize(n, src)
             if s then
                 local g = file_guards(s, src)
                 if g then declined[#declined + 1] = { line = s.line, reason = g }
                 else sites[#sites + 1] = s end
             elseif why then
-                declined[#declined + 1] = { line = n:range() + 1, reason = why }
+                declined[#declined + 1] = { line = n:range() + 1, reason = why, class = why_class }
             end
         end
         for c in n:iter_children() do if c:named() then visit(c) end end

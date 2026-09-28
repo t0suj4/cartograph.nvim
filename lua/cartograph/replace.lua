@@ -41,22 +41,22 @@ local txn = require 'cartograph.txn'
 function M.plan(store, opts)
     opts = opts or {}
     local n = opts.node and store.node(opts.node)
-    if not n then return nil, 'no definition to replace' end
-    if not n.file then return nil, tostring(n.name) .. ' has no file' end
-    if not n.range then return nil, tostring(n.name) .. ' carries no range to replace' end
+    if not n then return nil, 'no definition to replace', 'ill-posed' end
+    if not n.file then return nil, tostring(n.name) .. ' has no file', 'ill-posed' end
+    if not n.range then return nil, tostring(n.name) .. ' carries no range to replace', 'frontier' end
     local text = opts.text
     if type(text) ~= 'string' or text:gsub('%s', '') == '' then
-        return nil, 'no replacement text'
+        return nil, 'no replacement text', 'ill-posed'
     end
     local root = store.data.root
     local before = txn.read_file(root, n.file)
-    if not before then return nil, 'cannot read ' .. n.file end
+    if not before then return nil, 'cannot read ' .. n.file, 'stale' end
 
     local s, e = atr.sl(n.range), atr.el(n.range)
     local lines = vim.split(before, '\n', { plain = true })
     if not lines[e + 1] then
         return nil, ('%s spans lines %d..%d but %s has %d — the graph is stale, re-open it')
-            :format(tostring(n.name), s + 1, e + 1, n.file, #lines)
+            :format(tostring(n.name), s + 1, e + 1, n.file, #lines), 'stale'
     end
     -- ★ THE OLD TEXT RIDES ON THE PLAN so a reader can see what is being swapped, and
     -- so a preview's diff is about the definition rather than about the file.
@@ -94,26 +94,26 @@ function M.plan(store, opts)
     -- could weaken the verb.
     local origin = opts.origin or 'supplied'
     if origin ~= 'supplied' and origin ~= 'derived' then
-        return nil, ('origin `%s` is not one of supplied|derived'):format(tostring(origin))
+        return nil, ('origin `%s` is not one of supplied|derived'):format(tostring(origin)), 'ill-posed'
     end
     if origin == 'derived' and (type(opts.derived_by) ~= 'string' or opts.derived_by == '') then
-        return nil, 'a derived replacement must name what derived it (`derived_by`)'
+        return nil, 'a derived replacement must name what derived it (`derived_by`)', 'ill-posed'
     end
     plan.origin = origin
     plan.derived_by = opts.derived_by
     if origin == 'supplied' then
         -- THE STANDING DECLARATION (see the header). Unconditional for supplied text.
-        plan.hazards[#plan.hazards + 1] = ('the replacement text was supplied, not derived:'
+        plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('supplied-text', ('the replacement text was supplied, not derived:'
             .. ' this plan verifies that %s still PARSES and that the file has not moved'
             .. ' since planning, and NOTHING about whether the new text defines `%s`, keeps'
-            .. ' its arity, or relates to what it replaces'):format(n.file, tostring(n.name))
+            .. ' its arity, or relates to what it replaces'):format(n.file, tostring(n.name)), nil, nil, 'decision')
     else
-        plan.hazards[#plan.hazards + 1] = ('the replacement text was DERIVED by `%s`%s --'
+        plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('derived-text', ('the replacement text was DERIVED by `%s`%s --'
             .. ' this plan still verifies only that %s PARSES and that the file has not'
             .. ' moved since planning. What `%s` established is ITS claim to make, and this'
             .. ' verb neither re-checks nor inherits it'):format(tostring(opts.derived_by),
             opts.derived_why and (' (' .. tostring(opts.derived_why) .. ')') or '',
-            n.file, tostring(opts.derived_by))
+            n.file, tostring(opts.derived_by)), nil, nil, 'decision')
     end
     plan.refspecs = { { id = plan.target.id, name = plan.target.name,
         ref = plan.target.ref, what = 'definition' } }

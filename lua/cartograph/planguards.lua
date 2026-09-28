@@ -412,19 +412,19 @@ local function absolute_origins(plan, rel, pre, post)
     for g, entry in ipairs(fo) do
         local op = ops[entry.op]
         if not op then
-            return nil, ('the plan declares origins for op %s, which it does not have'):format(tostring(entry.op))
+            return nil, ('the plan declares origins for op %s, which it does not have'):format(tostring(entry.op)), 'unbuilt'
         end
         local shift = 0
         for _, o in ipairs(ops) do
             if o.from0b < op.from0b then shift = shift + #o.new - (o.to0b - o.from0b + 1) end
         end
         local base = st[op.from0b + shift]
-        if not base then return nil, ('op %d lands past the end of the result'):format(entry.op) end
+        if not base then return nil, ('op %d lands past the end of the result'):format(entry.op), 'unbuilt' end
         for _, sg in ipairs(entry.segs or {}) do
             local a = { off = base + sg.off, len = sg.len, from = sg.from, group = g }
             if post:sub(a.off + 1, a.off + a.len) ~= pre:sub(sg.from + 1, sg.from + sg.len) then
                 return nil, ('the result does not hold the text the plan says op %d copied from byte %d'
-                    .. ' — a synthesis bug, not your code'):format(entry.op, sg.from)
+                    .. ' — a synthesis bug, not your code'):format(entry.op, sg.from), 'unbuilt'
             end
             out[#out + 1] = a
         end

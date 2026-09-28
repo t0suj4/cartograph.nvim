@@ -276,7 +276,7 @@ function M.plan(opts)
         call = { call },
         replace = { first = sel.first, last = sel.last },
         insert_before = opts.fn_start,
-        hazards = { 'non-local state (tables/globals) and side-effect ordering are not analyzed — verify by eye' },
+        hazards = { require('cartograph.hazard').new('effects', 'non-local state (tables/globals) and side-effect ordering are not analyzed — verify by eye', nil, nil, 'frontier') },
     }
 end
 

@@ -80,7 +80,7 @@ end
 -- refuses an unsure one) instead of emitting split-variable code.
 local function frame(store, node)
     local all = store.content(node)
-    if not all then return nil, 'cannot read ' .. node.file end
+    if not all then return nil, 'cannot read ' .. node.file, 'stale' end
     local flow = require 'cartograph.flow'
     local fl = flow.present(node) and flow.record(node)
     local rows, reaching
@@ -105,9 +105,9 @@ end
 -- a function/method node, or nil + why
 local function fnode(store, fn_id)
     local node = store.node and store.node(fn_id)
-    if not node then return nil, 'no such node' end
+    if not node then return nil, 'no such node', 'ill-posed' end
     if node.kind ~= 'function' and node.kind ~= 'method' then
-        return nil, 'not a function'
+        return nil, 'not a function', 'ill-posed'
     end
     return node
 end
@@ -118,19 +118,19 @@ end
 --- reason (the selection cuts a control-structure body, contains a control
 --- escape, splits a shadowed variable).
 function M.plan(store, fn_id, sel, name)
-    local node, why = fnode(store, fn_id)
-    if not node then return nil, why end
+    local node, why, why_class = fnode(store, fn_id)
+    if not node then return nil, why, why_class or 'ill-posed' end
     if not (name and name:match('^[%a_][%w_]*$')) then
-        return nil, 'a helper name is required (an identifier)'
+        return nil, 'a helper name is required (an identifier)', 'ill-posed'
     end
-    local fr, ferr = frame(store, node)
-    if not fr then return nil, ferr end
+    local fr, ferr, ferr_class = frame(store, node)
+    if not fr then return nil, ferr, ferr_class or 'stale' end
     local exp = require('cartograph.extract').plan {
         df = require('cartograph.df').get(node), sel = sel,
         fn_start = fr.fn_start, body_end = fr.body_end, file_lines = fr.lines,
         name = name, reaching = fr.reaching, flow_rows = fr.rows,
         fn_params = fr.params }
-    if not exp.ok then return nil, exp.reason end
+    if not exp.ok then return nil, exp.reason, exp.class or 'unbuilt' end
     return stage(store, node, exp,
         ('L%d-%d of %s'):format(sel.first, sel.last, node.name or '?'))
 end
@@ -142,34 +142,34 @@ end
 --- concern the report calls independent can still be refused here, and that
 --- refusal is the honest answer, not a bug ([[cartograph-untangle-pdg]]).
 function M.plan_concern(store, fn_id, c, name)
-    local node, why = fnode(store, fn_id)
-    if not node then return nil, why end
+    local node, why, why_class = fnode(store, fn_id)
+    if not node then return nil, why, why_class or 'ill-posed' end
     local un = require 'cartograph.untangle'
     local flow = require 'cartograph.flow'
     local fl = flow.record(node)
     if not (fl and fl.stmts and #fl.stmts > 0) then
         return nil, ('%s has no fine flow (not an imperative body?)')
-            :format(node.name or fn_id)
+            :format(node.name or fn_id), 'frontier'
     end
     local comp = M.comp_of(c)
-    if not comp then return nil, 'concern must be a letter (A/B/C…) or a comp id' end
+    if not comp then return nil, 'concern must be a letter (A/B/C…) or a comp id', 'ill-posed' end
     local edges, opaque = un.effect_edges(store, fn_id, fl)
     local res = un.analyze_flow(fl, edges, opaque)
     if comp >= res.ncomp then
         return nil, ('%s has %d concern(s) — no %s'):format(node.name or fn_id,
-            res.ncomp, M.letter(comp))
+            res.ncomp, M.letter(comp)), 'ill-posed'
     end
     local exp = un.extract_plan(store, fn_id, res, comp, name)
-    if not exp.ok then return nil, exp.reason end
+    if not exp.ok then return nil, exp.reason, exp.class or 'unbuilt' end
     -- the concern's own hedge is a DISCLOSURE, not a refusal: the mechanics are
     -- clean, but an unresolved effect could couple it to another concern. Rides
     -- the plan as a hazard so the plan bar and the diff both carry it.
     local plan = stage(store, node, exp,
         ('concern %s of %s'):format(M.letter(comp), node.name or '?'))
     if not res.certified or res.hedged[comp] then
-        table.insert(plan.hazards, 1, ('concern %s is ~ NOT certified — an unresolved'
+        table.insert(plan.hazards, 1, require('cartograph.hazard').new('uncertified', ('concern %s is ~ NOT certified — an unresolved'
             .. ' effect could couple it to another concern (:CartographUntangle names'
-            .. ' the blocking statements)'):format(M.letter(comp)))
+            .. ' the blocking statements)'):format(M.letter(comp)), nil, nil, 'frontier'))
     end
     return plan
 end

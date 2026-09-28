@@ -84,9 +84,9 @@ end
 
 local function parse_root(text, lang)
     local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(text, lang), lang)
-    if not okp or not parser then return nil, 'cannot parse ' .. tostring(lang) end
+    if not okp or not parser then return nil, 'cannot parse ' .. tostring(lang), 'frontier' end
     local okt, tree = pcall(function () return parser:parse()[1] end)
-    if not okt or not tree then return nil, 'cannot parse ' .. tostring(lang) end
+    if not okt or not tree then return nil, 'cannot parse ' .. tostring(lang), 'frontier' end
     return tree:root()
 end
 
@@ -108,10 +108,10 @@ end
 --- the durable half of a span across this edit.
 ---@return table|nil ir, string|nil why
 local function container_at(text, lang, sl, sc)
-    local root, why = parse_root(text, lang)
-    if not root then return nil, why end
+    local root, why, why_class = parse_root(text, lang)
+    if not root then return nil, why, why_class or 'frontier' end
     local okd, d = pcall(root.named_descendant_for_range, root, sl, sc, sl, sc)
-    if not okd or not d then return nil, 'nothing at that position' end
+    if not okd or not d then return nil, 'nothing at that position', 'ill-posed' end
     -- walk UP while the start still matches, taking the outermost node at that
     -- exact position which the IR reads as a container
     local best
@@ -122,7 +122,7 @@ local function container_at(text, lang, sl, sc)
         if ok and ir and ir.k == 'table' then best = ir end
         d = d:parent()
     end
-    if not best then return nil, 'no container literal starts at that position' end
+    if not best then return nil, 'no container literal starts at that position', 'ill-posed' end
     return best, nil
 end
 
@@ -140,8 +140,8 @@ end
 --- one was chosen and a nested one must not be able to answer instead.
 ---@return table|nil ir, string|nil why
 function M.container_of(text, lang, range)
-    local root, why = parse_root(text, lang)
-    if not root then return nil, why end
+    local root, why, why_class = parse_root(text, lang)
+    if not root then return nil, why, why_class or 'frontier' end
     local found
     local function walk(nd)
         if found then return end
@@ -152,7 +152,7 @@ function M.container_of(text, lang, range)
         for c in nd:iter_children() do if c:named() then walk(c) end end
     end
     walk(root)
-    if not found then return nil, 'no container literal found in that range' end
+    if not found then return nil, 'no container literal found in that range', 'ill-posed' end
     return found, nil
 end
 
@@ -207,18 +207,18 @@ end
 function M.plan(store, opts)
     opts = opts or {}
     local n = opts.node and store.node(opts.node)
-    if not n then return nil, 'no declared symbol to add to' end
-    if not n.file then return nil, n.name .. ' has no file' end
+    if not n then return nil, 'no declared symbol to add to', 'ill-posed' end
+    if not n.file then return nil, n.name .. ' has no file', 'ill-posed' end
     local ts = require 'cartograph.providers.treesitter'
     local lang = ts.parse_lang(n.file)
-    if not lang then return nil, 'no parser for ' .. n.file end
+    if not lang then return nil, 'no parser for ' .. n.file, 'frontier' end
     local root = store.data.root
     local text = txn.read_file(root, n.file)
-    if not text then return nil, 'cannot read ' .. n.file end
+    if not text then return nil, 'cannot read ' .. n.file, 'stale' end
     local lines = vim.split(text, '\n', { plain = true })
 
     local ir, why = M.container_of(text, lang, n.range)
-    if not ir then return nil, ('%s: %s'):format(n.name, why) end
+    if not ir then return nil, ('%s: %s'):format(n.name, why), 'ill-posed' end
     local ms = ir.kids or {}
     local t = clones.element_template(ir)
 
@@ -231,45 +231,45 @@ function M.plan(store, opts)
     if not t.alignable then
         return nil, ('%s\'s members do not share a shape (%d members), so there '
             .. 'is no template to check a new one against — supply the member '
-            .. 'text and edit the file directly'):format(n.name, t.n or 0)
+            .. 'text and edit the file directly'):format(n.name, t.n or 0), 'decision'
     end
     if (t.n or 0) < 2 then
         -- one member is a shape, not a template, AND there is no second member to
         -- read a separator from — both halves of this verb need the pair
         return nil, ('%s has %d member(s): a single member is a shape, not a '
             .. 'template, and there is no gap between two members to take the '
-            .. 'separator from'):format(n.name, t.n or 0)
+            .. 'separator from'):format(n.name, t.n or 0), 'unbuilt'
     end
 
     local gap = gap_of(lines, ms)
-    if not gap then return nil, 'cannot read the separator between two members' end
+    if not gap then return nil, 'cannot read the separator between two members', 'unbuilt' end
 
     -- CONSTRUCT: textual (you wrote it) or structural (rendered from the donor)
     local member = opts.member
     if not member then
         if not opts.subs then
-            return nil, 'supply `member` (the text) or `subs` (the template holes)'
+            return nil, 'supply `member` (the text) or `subs` (the template holes)', 'ill-posed'
         end
         local out, rwhy = clones.render(t, opts.subs, text, { unverified = true })
-        if not out then return nil, 'render: ' .. tostring(rwhy) end
+        if not out then return nil, 'render: ' .. tostring(rwhy), 'ill-posed' end
         member = out
     end
     member = (member:gsub('^%s+', ''):gsub('%s+$', ''))
-    if member == '' then return nil, 'the member is empty' end
+    if member == '' then return nil, 'the member is empty', 'ill-posed' end
 
     -- PLACE: after the LAST member, so the closing delimiter is untouched. (The
     -- delete side had the opposite problem — CART-0773's witness is a last member
     -- that OWNS the closing brace — but an insertion writes BEFORE that brace and
     -- never disturbs it.)
     local last = ms[#ms]
-    if not last.at then return nil, 'the last member has no source span' end
+    if not last.at then return nil, 'the last member has no source span', 'unbuilt' end
     if atr.el(last.at) ~= atr.sl(last.at) then
         -- ⚠ REFUSED BY NAME, v1: `txn.edit_file` applies a replacement's END
         -- COLUMN to its START LINE, so a multi-line rep is silently corrupted
         -- (CART-0767). This verb declines rather than inheriting that.
         return nil, ('%s\'s last member spans several lines, and a multi-line '
             .. 'replacement is not safe through this transaction layer yet '
-            .. '(CART-0767)'):format(n.name)
+            .. '(CART-0767)'):format(n.name), 'unbuilt'
     end
     local ins_at = { start = { line = atr.el(last.at), char = atr.ec(last.at) },
         ['end'] = { line = atr.el(last.at), char = atr.ec(last.at) } }
@@ -286,7 +286,7 @@ function M.plan(store, opts)
     local simulated = table.concat(edited, '\n')
     local ok, vwhy = M.verify(simulated, lang, atr.sl(ir.at), atr.sc(ir.at))
     if not ok then
-        return nil, ('%s: %s'):format(n.name, vwhy)
+        return nil, ('%s: %s'):format(n.name, vwhy), 'ill-posed'
     end
 
     local plan = {

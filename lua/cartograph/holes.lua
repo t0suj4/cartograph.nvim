@@ -80,11 +80,11 @@ function M.of(store, node, ctx)
     -- source that knows about LOOP VARIABLES.
     local eo = expr.of(store, node.id)
     local fl = eo and eo.fl
-    if not fl then return nil, 'no expression rows' end
+    if not fl then return nil, 'no expression rows', 'frontier' end
     local params = fl.params
     -- TRI-STATE: nil means NOT ASKED, and treating it as {} is the bug CART-0125 was
     -- about. A fn we cannot get a param list for is UNMEASURABLE, not param-free.
-    if params == nil then return nil, 'no param list (not asked)' end
+    if params == nil then return nil, 'no param list (not asked)', 'ill-posed' end
 
     local H = {}
     local bound = {}

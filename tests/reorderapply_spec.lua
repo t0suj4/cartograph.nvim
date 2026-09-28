@@ -175,3 +175,13 @@ test('reorder-apply: the captured source lines are checked, and the guard REACHE
         'naming the guard and the drift: ' .. tostring(bad))
     vim.fn.delete(root, 'rf')
 end)
+
+test('reorder-apply (CART-1152): a block sharing its line with the next statement refuses WITH its reason', function ()
+    -- ⚠ plan_move read block_span's reason from the THIRD slot while block_span puts it in the second: every such
+    -- refusal came back as `nil, nil`, a stop with no reason
+    proj('local function f(x)\n  local a = x + 1\n  local b = 2; local c = 3\n  return a, b, c\nend\nreturn f\n')
+    local plan, why, class = ro.plan_move(store, fn_id('f'), 3, 2)
+    eq(nil, plan)
+    ok(type(why) == 'string' and why:find('shares a line', 1, true), 'the reason survives: ' .. tostring(why))
+    eq('unbuilt', class)
+end)

@@ -257,7 +257,7 @@ local function reconstruct(node, lines)
     if before:match('%S') or after:match('%S') then
         return nil, ('the declaration shares its line with other code (`%s` before it,'
             .. ' `%s` after), so extracting whole lines would carry that code along')
-            :format(oneline_trim(before), oneline_trim(after))
+            :format(oneline_trim(before), oneline_trim(after)), 'unbuilt'
     end
     local text = table.concat(lines, '\n', sl, el)
     local head = text:gsub('^%s+', '')
@@ -269,14 +269,14 @@ local function reconstruct(node, lines)
     else
         return nil, ('the declaration does not begin with a shape that BINDS `%s`'
             .. ' (starts `%s`) — compiling it would prove syntax and bind something else')
-            :format(name, oneline_trim(head:sub(1, 40)))
+            :format(name, oneline_trim(head:sub(1, 40))), 'unbuilt'
     end
     local ld = loadstring or load
     local chunk, err = ld(('%s\nreturn %s'):format(WRAP(text, name, wrap), name),
         'reconstruct')
     if not chunk then
         return nil, ('the declaration at %s:%d does not compile on its own (%s)')
-            :format(node.file, sl, tostring(err))
+            :format(node.file, sl, tostring(err)), 'unbuilt'
     end
     -- THE ANCHOR IS THE DECLARATION'S OWN FIRST LINE, not its line NUMBER: the spec
     -- re-reads the file when it runs (never a snapshot — an embedded copy would pass
@@ -291,7 +291,7 @@ local function reconstruct(node, lines)
     if hits ~= 1 then
         return nil, ('the declaration\'s signature `%s` is not unique in %s (%d'
             .. ' occurrences), so a spec re-reading the file could not tell which one is'
-            .. ' the subject'):format(oneline_trim(anchor), node.file, hits)
+            .. ' the subject'):format(oneline_trim(anchor), node.file, hits), 'unbuilt'
     end
     return { anchor = anchor, lines = el - sl + 1, wrap = wrap }
 end
@@ -577,7 +577,7 @@ local function load_premise(store, node, lines)
             .. ' that dofiles it would die inside its own preamble with "module not'
             .. ' found", so the LOAD is the hole'):format(node.file,
             table.concat(missing, ', ', 1, math.min(3, #missing))
-                .. (#missing > 3 and (' (+' .. (#missing - 3) .. ')') or ''))
+                .. (#missing > 3 and (' (+' .. (#missing - 3) .. ')') or '')), 'frontier'
     end
     local out, seen = {}, {}
     for pre in pairs(roots) do
@@ -1147,13 +1147,13 @@ end
 function M.plan(store, fn_id, opts)
     opts = opts or {}
     local node = fn_id and store.node(fn_id)
-    if not node then return nil, 'no such function' end
+    if not node then return nil, 'no such function', 'ill-posed' end
     if node.kind ~= 'function' and node.kind ~= 'method' then
         return nil, ('%s is a %s, not a function'):format(tostring(node.name),
-            tostring(node.kind))
+            tostring(node.kind)), 'ill-posed'
     end
     local lines = store.content(node)
-    if not lines then return nil, 'no source for ' .. tostring(node.file) end
+    if not lines then return nil, 'no source for ' .. tostring(node.file), 'frontier' end
     local ts = require 'cartograph.providers.treesitter'
     -- THE LANGUAGE GATE (CART-0304), and it refuses rather than degrading. Everything
     -- below assumes lua: the emitted spec is lua source, the subject is compiled with
@@ -1165,13 +1165,13 @@ function M.plan(store, fn_id, opts)
     if flang ~= 'lua' then
         return nil, ('characterization emits a runnable LUA spec and reads lua\'s'
             .. ' stdlib profile; %s is %s'):format(tostring(node.file),
-            flang and ('written in ' .. flang) or 'in no language this graph names')
+            flang and ('written in ' .. flang) or 'in no language this graph names'), 'unbuilt'
     end
     local ctx = holes.ctx_for(store, node, lines,
         ts.annot_tag and ts.annot_tag(node.file),
         ts.attach_pats and ts.attach_pats(node.file))
-    local H, why = holes.of(store, node, ctx)
-    if not H then return nil, why or 'no holes computed' end
+    local H, why, why_class = holes.of(store, node, ctx)
+    if not H then return nil, why or 'no holes computed', why_class or 'frontier' end
 
     -- REACH IS A HOLE ROW LIKE ANY OTHER, and it must be, because it is the one hole
     -- that makes every other one moot: a spec that cannot call its subject is not a
@@ -1303,7 +1303,7 @@ function M.plan(store, fn_id, opts)
     if path:match('^tests/') or path:match('_spec%.lua$') then
         return nil, ('%s is inside the push fence (tests/*_spec.lua) — a'
             .. ' characterization spec must not gate a commit; it is a tool you invoke')
-            :format(path)
+            :format(path), 'ill-posed'
     end
     local plan = {
         verb = 'characterize', generation = store.generation,
@@ -1444,27 +1444,27 @@ function M.weakest(...)
 end
 
 function M.fill(plan, fills)
-    if not (plan and type(fills) == 'table') then return nil, 'no fills' end
+    if not (plan and type(fills) == 'table') then return nil, 'no fills', 'ill-posed' end
     local byid = {}
     for _, h in ipairs(plan.holes or {}) do byid[h.id] = h end
     local n = 0
     for id, f in pairs(fills) do
         local h = byid[id]
         if not h then
-            return nil, ('no hole %q in this plan (ids are <kind>:<name>)'):format(id)
+            return nil, ('no hole %q in this plan (ids are <kind>:<name>)'):format(id), 'ill-posed'
         end
         if type(f) ~= 'table' or f.value == nil then
-            return nil, ('fill for %s carries no value'):format(id)
+            return nil, ('fill for %s carries no value'):format(id), 'ill-posed'
         end
         if type(f.basis) ~= 'string' or f.basis == '' then
             return nil, ('fill for %s carries no BASIS — a value with no stated basis'
                 .. ' is a guess wearing an answer\'s clothes, and a spec cannot tell'
-                .. ' the two apart afterwards'):format(id)
+                .. ' the two apart afterwards'):format(id), 'ill-posed'
         end
         local by = f.by or 'agent'
         if not M.BY_TIER[by] then
             return nil, ('fill for %s names an unknown channel %q (run|spec|agent)')
-                :format(id, tostring(by))
+                :format(id, tostring(by)), 'ill-posed'
         end
         -- THE EFFECTS HOLE IS AN OBSERVATION TOO, and takes the same channel rule as the
         -- oracle: a PREDICTED call log makes a spec that passes because the prediction
@@ -1473,11 +1473,11 @@ function M.fill(plan, fills)
             return nil, ('the ORACLE hole %s may be filled by RUNNING (by=\'run\') or'
                 .. ' by a SPEC (by=\'spec\'), never by prediction: a predicted expected'
                 .. ' value makes a test that passes because the prediction matched the'
-                .. ' prediction'):format(id)
+                .. ' prediction'):format(id), 'ill-posed'
         end
         if h.filled_tier == 'measured' and h.by == 'observed' then
             return nil, ('%s is already MEASURED (the code demonstrates this input) —'
-                .. ' refusing to overwrite evidence with a supplied value'):format(id)
+                .. ' refusing to overwrite evidence with a supplied value'):format(id), 'ill-posed'
         end
         h.basis, h.by = f.basis, by
         -- an explicit tier WEAKENS (never strengthens): a caller may say "this run went
@@ -1594,7 +1594,7 @@ local function satisfy(cond, leaf, want)
     end
     if cond.k ~= 'bin' then
         return nil, ('the condition is not a comparison this version can invert (%s)')
-            :format(cond.k)
+            :format(cond.k), 'unbuilt'
     end
     -- normalise so the leaf is on the left
     local op, l, r = cond.op, cond.l, cond.r
@@ -1604,7 +1604,7 @@ local function satisfy(cond, leaf, want)
     end
     if not isleaf(l) then
         return nil, ('the condition does not compare `%s` directly (it may be a field or a'
-            .. ' call, which this version does not invert)'):format(leaf)
+            .. ' call, which this version does not invert)'):format(leaf), 'unbuilt'
     end
     local rl = lit(r)
     if op == '==' or op == '~=' or op == '!=' then
@@ -1617,7 +1617,7 @@ local function satisfy(cond, leaf, want)
                 ('%s %s nil'):format(leaf, eq and 'is' or 'is not')
         end
         if not rl then
-            return nil, 'the compared value is not a literal, so nothing can be derived'
+            return nil, 'the compared value is not a literal, so nothing can be derived', 'unbuilt'
         end
         -- A LITERAL'S `v` IS ALREADY LUA SOURCE, quotes and all (measured: a str lit's v is
         -- `"fast"`, seven characters). So %q on it produces `"\"fast\""` — a DIFFERENT string
@@ -1632,12 +1632,12 @@ local function satisfy(cond, leaf, want)
             local raw = v:match('^"(.*)"$') or v:match("^'(.*)'$") or v
             return ('%q'):format(raw .. '~'), ('%s differs from %s'):format(leaf, v)
         end
-        return nil, 'cannot construct a value DIFFERENT from ' .. v
+        return nil, 'cannot construct a value DIFFERENT from ' .. v, 'unbuilt'
     end
     local n = rl and rl.ty == 'num' and tonumber(rl.v)
     if not n then
         return nil, ('`%s` is compared with something that is not a number literal, so no'
-            .. ' value can be derived'):format(leaf)
+            .. ' value can be derived'):format(leaf), 'unbuilt'
     end
     local pick = ({
         ['>'] = want and (n + 1) or n,
@@ -1646,7 +1646,7 @@ local function satisfy(cond, leaf, want)
         ['<='] = want and n or (n + 1),
     })[op]
     if not pick then
-        return nil, ('the operator `%s` is not one this version inverts'):format(tostring(op))
+        return nil, ('the operator `%s` is not one this version inverts'):format(tostring(op)), 'unbuilt'
     end
     return tostring(pick), ('%s %s %s holds'):format(leaf, op, tostring(n))
 end
@@ -1673,19 +1673,19 @@ function M.assert_condition(store, plan, cond_id, want)
         local ids = {}
         for _, r in ipairs(rows) do ids[#ids + 1] = r.id end
         return nil, ('no forkable condition %q in %s (have: %s)'):format(cond_id, plan.fn,
-            #ids > 0 and table.concat(ids, ', ') or 'none — nothing here hinges on a parameter')
+            #ids > 0 and table.concat(ids, ', ') or 'none — nothing here hinges on a parameter'), 'ill-posed'
     end
-    local value, why = satisfy(row.cond, row.leaf, want and true or false)
+    local value, why, why_class = satisfy(row.cond, row.leaf, want and true or false)
     if not value then
         return nil, ('cannot derive a value making `%s` %s: %s'):format(row.text,
-            tostring(want), why)
+            tostring(want), why), why_class or 'unbuilt'
     end
-    local n, ferr = M.fill(plan, { [row.leaf_hole] = {
+    local n, ferr, ferr_class = M.fill(plan, { [row.leaf_hole] = {
         value = value, by = 'asserted',
         basis = ('ASSERTED `%s` is %s (%s), so %s = %s. The premise is yours; the value is'
             .. ' derived from it'):format(row.text, tostring(want), why, row.leaf, value),
     } })
-    if not n then return nil, ferr end
+    if not n then return nil, ferr, ferr_class or 'ill-posed' end
     plan.asserted = plan.asserted or {}
     plan.asserted[#plan.asserted + 1] = { id = row.id, line = row.line, text = row.text,
         want = want and true or false, leaf = row.leaf, value = value,
@@ -2169,7 +2169,7 @@ function M.apply(store, plan)
     local text = table.concat(M.emit(plan), '\n') .. '\n'
     local chunk, lerr = loadstring(text, plan.path)
     if not chunk then
-        return nil, ('the emitted spec does not parse — refusing: ' .. tostring(lerr))
+        return nil, ('the emitted spec does not parse — refusing: ' .. tostring(lerr)), 'unbuilt'
     end
     -- IDEMPOTENCE (CART-0263). The spec is a pure function of the subject and the filled
     -- holes, so re-characterizing writes identical bytes — and a journal entry per

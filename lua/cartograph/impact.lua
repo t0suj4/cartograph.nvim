@@ -114,13 +114,15 @@ function M.compute(store, moveset, dest)
 
     -- hazards
     local hazards = {}
-    local function warn(kind, msg) hazards[#hazards + 1] = { level = 'warn', kind = kind, msg = msg } end
-    local function info(kind, msg) hazards[#hazards + 1] = { level = 'info', kind = kind, msg = msg } end
+    -- every row names its STOP CLASS (hazard.CLASSES, CART-1152): what a tactic does on meeting it
+    local HZ = require 'cartograph.hazard'
+    local function warn(kind, msg, class) hazards[#hazards + 1] = { level = 'warn', kind = kind, msg = msg, class = HZ.class(class) } end
+    local function info(kind, msg, class) hazards[#hazards + 1] = { level = 'info', kind = kind, msg = msg, class = HZ.class(class) } end
 
     if dest and #moves > 0 then
         local all_home = true
         for _, m in ipairs(moves) do if m.from ~= dest then all_home = false end end
-        if all_home then info('noop', 'all staged symbols already live in ' .. dest) end
+        if all_home then info('noop', 'all staged symbols already live in ' .. dest, 'empty') end
 
         -- load-order: a side-effecting module on either end makes ordering matter
         local seen_lo = {}
@@ -128,7 +130,7 @@ function M.compute(store, moveset, dest)
             local mod = store.node(file)
             if mod and mod.effects and not seen_lo[file] then
                 seen_lo[file] = true
-                warn('load-order', file .. ' runs code at load time — moving across it may change ordering')
+                warn('load-order', file .. ' runs code at load time — moving across it may change ordering', 'frontier')
             end
         end
         load_order(dest)
@@ -137,7 +139,7 @@ function M.compute(store, moveset, dest)
         -- cycle risk: dest would need to require a module that already requires dest
         for _, dfile in ipairs(dest_requires) do
             if imports_already(band, dfile, dest) then
-                warn('cycle', 'require cycle: ' .. dest .. ' <-> ' .. dfile)
+                warn('cycle', 'require cycle: ' .. dest .. ' <-> ' .. dfile, 'decision')
             end
         end
     end
@@ -331,7 +333,7 @@ function M.compute(store, moveset, dest)
                 .. ' stays behind — add it to the move-set'):format(c.name, c.file)
             or ('%s (file-local in %s, shared with staying code) is referenced'
                 .. ' — require it, or copy it into the extracted module')
-                :format(c.name, c.file))
+                :format(c.name, c.file), textual[depid] and 'frontier' or 'decision')
     end
 
     -- what the capture rungs found, WITH what looked

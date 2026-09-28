@@ -2018,7 +2018,7 @@ local function ledger_notes(plan)
                 or ('%d hazard(s) — what this plan does NOT rewrite and a human must handle%s'):format(
                     #plan.hazards,
                     #fixes > 0 and ('; %d of them name a verb that would discharge them'):format(#fixes) or ''),
-            evidence = { hazards = plan.hazards, fixes = #fixes > 0 and fixes or nil } }
+            evidence = { hazards = hz.plain(plan.hazards), fixes = #fixes > 0 and fixes or nil } }
     end
     return out
 end
@@ -2098,12 +2098,12 @@ local function v_txn_plan_moveset(store, args)
     -- user their staged set — a verb the operator started read-only should not be
     -- reaching into session state at all. Unarmed plans still preview, because
     -- txn.dryrun reads the plan and never the staged set.
-    local plan, why = moveapply.plan_moveset(store, ids, args.dest,
+    local plan, why, class = moveapply.plan_moveset(store, ids, args.dest,
         { arm = M.WRITABLE, reexport = args.reexport and true or nil })
     if not plan then
         return refuse('cannot-plan',
             ('no move-set plan could be built for %s: %s'):format(tostring(args.dest), tostring(why)),
-            'the reason above is the verb\'s own; fix the premise it names and plan again')
+            'the reason above is the verb\'s own; fix the premise it names and plan again', { class = nn(class) })
     end
     local rows = {}
     for _, m in ipairs(plan.moves) do
@@ -2203,7 +2203,7 @@ local function v_txn_plan_extract_family(store, args)
     -- ⚠ OPTIONAL, AND IT MUST STAY SO: a same-file family needs no destination and
     -- must not start demanding one. Validation is `plan_family`'s (escaping path,
     -- existing file), passed through exactly as `txn_plan_moveset` passes its own.
-    local plan, why = cx.plan_family(store, fam,
+    local plan, why, class = cx.plan_family(store, fam,
         { partial = args.partial and true or nil,
           -- CART-0878: opt in to turning a nested member's captured enclosing
           -- locals into helper parameters. Opt-IN because it changes the helper's
@@ -2227,7 +2227,7 @@ local function v_txn_plan_extract_family(store, args)
             'the per-member verdict says which copies are extractable and why the others are not; `partial = true` extracts the admissible subset when at least two are. A family spanning MORE THAN ONE FILE additionally needs `dest`, the project-relative path of the new module the shared helper will live in',
             { node = n.id, members = members,
               liftable = (v and v.n_liftable or 0),
-              lifts = (v and v.lifts and table.concat(v.lifts, ', ')) or NUL })
+              lifts = (v and v.lifts and table.concat(v.lifts, ', ')) or NUL, class = nn(class) })
     end
 
     local rows = {}
@@ -2284,7 +2284,7 @@ local function v_txn_plan_clonemerge(store, args)
     if not n then return bad end
     local cm = require 'cartograph.clonemerge'
     local node_row = noderow(store, n.id)
-    local plan, why = cm.plan(store, n.id)
+    local plan, why, class = cm.plan(store, n.id)
     if not plan then
         local reason = tostring(why or 'no plan')
         -- the KIND gate fired: candidates existed and a soundness check declined them
@@ -2292,7 +2292,7 @@ local function v_txn_plan_clonemerge(store, args)
             return refuse('cannot-plan',
                 ('%s has no mergeable clone: %s'):format(tostring(n.name), reason),
                 'the data-flow witness is coarser than the statement kinds — the twin is real duplication but not the same control flow, so merging it would change behaviour. Nothing here can relax that; the witness is what would have to improve',
-                { node = n.id })
+                { node = n.id, class = nn(class) })
         end
         -- no candidate at all: a property of the CODE, not of a gate
         return { subject = { plan = NUL, node = node_row, verb = 'clone-merge' },
@@ -2316,8 +2316,7 @@ local function v_txn_plan_clonemerge(store, args)
     -- states where it declines to write one.
     local notes = {}
     if #(plan.hazards or {}) > 0 then
-        local hz = {}
-        for _, h in ipairs(plan.hazards) do hz[#hz + 1] = tostring(h) end
+        local hz = require('cartograph.hazard').plain(plan.hazards)
         notes[#notes + 1] = { kind = 'hazard', premise = 'not mechanical here',
             why = ('%d hazard(s) the merge will NOT resolve — read them before applying'):format(#hz),
             evidence = { hazards = hz } }
@@ -2373,7 +2372,7 @@ local function v_txn_plan_invert(store, args)
         end
     end
 
-    local plan, why = require('cartograph.invert').of(store, target)
+    local plan, why, class = require('cartograph.invert').of(store, target)
     if not plan then
         -- ⚠ EVERY ONE OF THESE IS A NAMED PRECONDITION, not a generic failure: the forward
         -- verb's refusals read backwards. Reporting them as `absent` would say the tree has
@@ -2382,7 +2381,7 @@ local function v_txn_plan_invert(store, args)
             ('%s cannot be inverted: %s'):format(tostring(target.id), tostring(why)),
             'read the reason — it names what changed since the fold, or which shape of'
                 .. ' extraction this verb does not reverse',
-            { entry = target.id })
+            { entry = target.id, class = nn(class) })
     end
     local rows = {}
     for _, r in ipairs(plan.refspecs or {}) do
@@ -2452,12 +2451,12 @@ local function v_txn_plan_transplant(store, args)
     end
     local n, bad = write_subject(store, args)
     if not n then return bad end
-    local plan, why = tp.plan(store, { a = args.a, b = args.b, c = n.id })
+    local plan, why, class = tp.plan(store, { a = args.a, b = args.b, c = n.id })
     if not plan then
         return refuse('cannot-derive',
             ('no derived edit for this triple: %s'):format(tostring(why)),
             'the operator refuses by name -- a, b and c must agree structurally, and the'
-                .. ' exemplar must demonstrate a difference that reaches the target')
+                .. ' exemplar must demonstrate a difference that reaches the target', { class = nn(class) })
     end
     local rows = { { name = nn(plan.target.name), file = nn(plan.target.file),
         ref = nn(plan.target.ref), role = 'rewritten from the exemplar difference' } }
@@ -2468,8 +2467,9 @@ local function v_txn_plan_transplant(store, args)
             derived_by = plan.derived_by, preserves = plan.preserves,
             touched = plan.touched, generation = plan.generation, previewed = false },
         result = rows,
-        notes = { plan.preserves_why, unpack and unpack(plan.hazards or {})
-            or table.unpack(plan.hazards or {}) },
+        -- the hazards as their SENTENCES: a hazard row encodes as `[]` (hazard.plain)
+        notes = { plan.preserves_why, (unpack or table.unpack)(vim.tbl_map(function (r) return r.text end,
+            require('cartograph.hazard').plain(plan.hazards))) },
     }
 end
 
@@ -2477,12 +2477,12 @@ local function v_txn_plan_replace(store, args)
     local n, bad = write_subject(store, args)
     if not n then return bad end
     local rp = require 'cartograph.replace'
-    local plan, why = rp.plan(store, { node = n.id, text = args.text })
+    local plan, why, class = rp.plan(store, { node = n.id, text = args.text })
     if not plan then
         return refuse('cannot-plan',
             ('%s cannot be replaced: %s'):format(tostring(n.name), tostring(why)),
             'the reason above is the verb\'s own; fix the premise it names and plan again',
-            { node = n.id })
+            { node = n.id, class = nn(class) })
     end
     local pid = stash_plan(store, plan, 'replace', { verb = VERB_OF_FAMILY['replace'], args = args })
     -- THE STANDING DECLARATION RIDES AS A NOTE TOO, not only inside plan.hazards: a
@@ -2526,7 +2526,7 @@ local function v_txn_plan_optimize(store, args)
         return refuse('cannot-plan',
             ('%s cannot be planned for %s: %s'):format(args.kind, tostring(n.name), tostring(why)),
             'this is a property of the INSTRUMENT, not of the code — the reason names which premise (an unknown node, a language with no spec, a source that would not parse)',
-            { code = nn(code), node = n.id })
+            { code = nn(code), class = nn(optapply.CODE_CLASS[code]), node = n.id })
     end
     local notes = ledger_notes(plan)
     if #(plan.moves or {}) == 0 then
@@ -2582,7 +2582,7 @@ local function v_txn_plan_declare(store, args)
             'pass `member` with the source text you want inserted, or `subs` mapping the template\'s hole keys to their text — `node_declared` shows a container\'s holes')
     end
     local node_row = noderow(store, n.id)
-    local plan, why = declare.plan(store, { node = n.id, member = member, subs = subs })
+    local plan, why, class = declare.plan(store, { node = n.id, member = member, subs = subs })
     if not plan then
         -- ⚠ A REFUSAL HERE IS USUALLY THE MOST INFORMATIVE ANSWER THE VERB GIVES,
         -- and it is not an ABSENCE: the container exists and was read. It says
@@ -2592,7 +2592,7 @@ local function v_txn_plan_declare(store, args)
         return refuse('does-not-fit',
             ('cannot add to %s: %s'):format(tostring(n.name), tostring(why)),
             'the reason describes the CONTAINER, not your syntax — read what its members have in common and supply one of that shape, or edit the file directly if it has no shape to match',
-            { node = n.id, name = n.name })
+            { node = n.id, name = n.name, class = nn(class) })
     end
     local pid = stash_plan(store, plan, 'declare', { verb = VERB_OF_FAMILY['declare'], args = args })
     return {
@@ -2628,12 +2628,12 @@ local function v_txn_plan_annotate(store, args)
     -- documents a disposition callers will never see.
     local text = (args.text ~= NUL) and args.text or nil
     local node_row = noderow(store, n.id)
-    local plan, why = require('cartograph.annotate').plan(store, { node = n.id, text = text })
+    local plan, why, class = require('cartograph.annotate').plan(store, { node = n.id, text = text })
     if not plan then
         return refuse('cannot-annotate',
             ('cannot attach prose to %s: %s'):format(tostring(n.name), tostring(why)),
             'the reason describes the FILE\'s comment style or the definition\'s position, not your prose — a tree with no line comment anywhere cannot have one sliced from it',
-            { node = n.id, name = n.name })
+            { node = n.id, name = n.name, class = nn(class) })
     end
     local pid = stash_plan(store, plan, 'annotate', { verb = VERB_OF_FAMILY['annotate'], args = args })
     local notes = ledger_notes(plan)

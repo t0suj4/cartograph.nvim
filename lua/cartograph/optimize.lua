@@ -543,7 +543,7 @@ function M.hoist_plan(store, fn_id)
                     if outside then
                         hazards[#hazards + 1] = { line = rows[r].l, var = v, reason =
                             ('`%s` also occurs at L%d outside the loop — hoisting could capture/collide')
-                            :format(v, outside) }
+                            :format(v, outside) , class = 'frontier' }
                     end
                 end
                 moves[#moves + 1] = { line = rows[r].l,

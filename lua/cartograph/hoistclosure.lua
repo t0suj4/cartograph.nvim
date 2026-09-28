@@ -101,8 +101,8 @@ end
 --- @return string|nil why
 function M.captures(store, closure_id)
     local node = store.node and store.node(closure_id)
-    if not node then return nil, 'no such function' end
-    if node.kind ~= 'function' and node.kind ~= 'method' then return nil, 'not a function' end
+    if not node then return nil, 'no such function', 'ill-posed' end
+    if node.kind ~= 'function' and node.kind ~= 'method' then return nil, 'not a function', 'ill-posed' end
     -- enclosing functions (same file, strictly containing the closure)
     local encl = {}
     for _, n in ipairs(store.data.nodes) do
@@ -111,14 +111,14 @@ function M.captures(store, closure_id)
             encl[#encl + 1] = n
         end
     end
-    if #encl == 0 then return nil, 'already at module scope (not a nested closure)' end
+    if #encl == 0 then return nil, 'already at module scope (not a nested closure)', 'empty' end
     -- the outermost enclosing fn = the hoist anchor (insert before it)
     local anchor = encl[1]
     for _, n in ipairs(encl) do if at.sl(n.range) < at.sl(anchor.range) then anchor = n end end
 
     local short = (node.name or ''):match('[%w_]+$') or node.name
     local self = body_facts(store, closure_id)
-    if not self then return nil, 'no analyzable body' end
+    if not self then return nil, 'no analyzable body', 'frontier' end
 
     -- CAPTURE gate: no free read may be a local/param of ANY enclosing function
     local encl_locals = {}
@@ -215,20 +215,20 @@ end
 --- Plan to hoist the nested closure `closure_id` to module scope, or (nil, reason).
 function M.plan(store, closure_id)
     local node = store.node and store.node(closure_id)
-    if not node then return nil, 'no such function' end
-    if node.kind ~= 'function' and node.kind ~= 'method' then return nil, 'not a function' end
-    if not node.file:match('%.lua$') then return nil, 'only Lua is supported for now' end
+    if not node then return nil, 'no such function', 'ill-posed' end
+    if node.kind ~= 'function' and node.kind ~= 'method' then return nil, 'not a function', 'ill-posed' end
+    if not node.file:match('%.lua$') then return nil, 'only Lua is supported for now', 'unbuilt' end
     -- ⚠ THE ANALYSIS IS `M.captures`, AND THE REFUSALS BELOW ARE THIS VERB'S. Each
     -- message is unchanged, because 17 specs assert them and a refactoring that moves a
     -- sentence is a refactoring nobody can review.
-    local c, cwhy = M.captures(store, closure_id)
-    if not c then return nil, cwhy end
+    local c, cwhy, cwhy_class = M.captures(store, closure_id)
+    if not c then return nil, cwhy, cwhy_class or 'ill-posed' end
     local encl, anchor, short, self, captured = c.encl, c.anchor, c.short, c.self, c.captured
-    if c.vararg then return nil, 'the closure uses vararg `...` from its enclosing scope' end
+    if c.vararg then return nil, 'the closure uses vararg `...` from its enclosing scope', 'unbuilt' end
     if c.writes then
         return nil, ('assigns enclosing local `%s` (or shadows it) — hoisting'
             .. ' would write a different variable'):format(c.writes),
-            { writes = c.writes }
+            { writes = c.writes, class = 'unbuilt' }
     end
     -- ⚠ THE NAME RIDES AS STRUCTURE, NOT ONLY IN THE MESSAGE. A caller that needs to know
     -- WHICH local is captured — `clones`, deciding whether a family's members all capture
@@ -236,7 +236,7 @@ function M.plan(store, closure_id)
     -- pattern CART-0746 cost a day to. Extra returns are ignored by every existing caller.
     if captured[1] then
         return nil, ('captures enclosing local `%s` — parameterize it first (extract-helper)'):format(captured[1]),
-            { captures = captured[1], captured = captured }
+            { captures = captured[1], captured = captured, class = 'decision' }
     end
 
     -- COLLISION: a module-level def already named `short` (not inside any function)
@@ -249,7 +249,7 @@ function M.plan(store, closure_id)
                 if (e.kind == 'function' or e.kind == 'method') and e.id ~= n.id
                     and e.file == n.file and contains(e.range, n.range) then nested = true; break end
             end
-            if not nested then return nil, ('a module-level `%s` already exists'):format(short) end
+            if not nested then return nil, ('a module-level `%s` already exists'):format(short), 'decision' end
         end
     end
 
@@ -257,12 +257,12 @@ function M.plan(store, closure_id)
     local s0, e0 = at.sl(node.range), at.el(node.range)
     local root = store.data.root
     local text = txn.read_file(root, node.file)
-    if not text then return nil, 'cannot read ' .. node.file end
+    if not text then return nil, 'cannot read ' .. node.file, 'stale' end
     local flines = vim.split(text, '\n', { plain = true })
     local first = flines[s0 + 1] or ''
     -- the closure must start the line (only leading whitespace before it)
     if not first:match('^%s*local%s+function') and not first:match('^%s*function') then
-        return nil, 'the closure does not start its own line (shared with other code)'
+        return nil, 'the closure does not start its own line (shared with other code)', 'unbuilt'
     end
     local base_indent = first:match('^%s*') or ''
     local src_lines = {}

@@ -122,10 +122,10 @@ function M.register(H)
         -- mechanics moveapply just checked; an uncertified scope rides as a
         -- hazard rather than blocking, because the mechanics are still sound
         if not un.module_safe(res, c) then
-            table.insert(plan.hazards, 1, ('cluster %s is ~ NOT certified — an unmodeled'
+            table.insert(plan.hazards, 1, require('cartograph.hazard').new('uncertified', ('cluster %s is ~ NOT certified — an unmodeled'
                 .. ' coupling could connect it to another cluster'
                 .. ' (:CartographUntangleModule names the blocking statements)')
-                :format(ea.letter(c)))
+                :format(ea.letter(c)), nil, nil, 'frontier'))
         end
         st.set_txn(plan)
         vim.notify(('cartograph: extract-cluster %s staged — %d symbol(s) → NEW %s,'

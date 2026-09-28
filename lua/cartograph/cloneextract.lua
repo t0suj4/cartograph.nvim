@@ -152,7 +152,7 @@ local function stmt_line(lines, lang, syn, line0)
         if parents[parent:type()] then return (node:range()) end
         node = parent
     end
-    return nil, 'no statement context encloses it'
+    return nil, 'no statement context encloses it', 'unbuilt'
 end
 
 --- the file-scope locals of `file`, name -> the 0-based line that binds it
@@ -349,7 +349,7 @@ local MAX_FN_ARITY = 1
 local function fn_params_of(analysis)
     if (analysis.insdel or 0) > 0 then
         return nil, ('%d row(s) exist on one side only — no single helper covers a body'
-            .. ' the other one does not have'):format(analysis.insdel)
+            .. ' the other one does not have'):format(analysis.insdel), 'unbuilt'
     end
     -- ⚠ EVERY struct hole must be covered, not merely some. `extract_verdict`'s
     -- `covered` state counts sites against `a.struct`, and it counts sites of
@@ -359,7 +359,7 @@ local function fn_params_of(analysis)
     for _, h in ipairs(analysis.structs or {}) do
         if not h.fparam then
             return nil, 'a shape divergence with no located pair on both sides — there'
-                .. ' is nothing to pass'
+                .. ' is nothing to pass', 'unbuilt'
         end
     end
     local fps = {}
@@ -369,26 +369,26 @@ local function fn_params_of(analysis)
             -- a divergence depending on no local is a VALUE, and the value pass is
             -- where it belongs; passing `function () return X end` would hide that.
             return nil, ('divergence %d depends on no local on one side — it is a value,'
-                .. ' not a function, and the value pass did not lift it'):format(i)
+                .. ' not a function, and the value pass did not lift it'):format(i), 'unbuilt'
         end
         if na ~= nb then
             return nil, ('divergence %d takes %d local(s) on one side and %d on the'
-                .. ' other — the two closures would not have one arity'):format(i, na, nb)
+                .. ' other — the two closures would not have one arity'):format(i, na, nb), 'unbuilt'
         end
         if na > MAX_FN_ARITY then
             return nil, ('divergence %d is a function of %d locals; %d is the most this'
-                .. ' verb will synthesize today'):format(i, na, MAX_FN_ARITY)
+                .. ' verb will synthesize today'):format(i, na, MAX_FN_ARITY), 'unbuilt'
         end
         local nsites = #(f.sites or {})
         if nsites == 0 or #(f.ranges_a or {}) ~= nsites or #(f.ranges_b or {}) ~= nsites then
             return nil, ('divergence %d has %d site(s) but %d/%d located span(s) — a site'
                 .. ' with no span cannot be substituted'):format(i, nsites,
-                #(f.ranges_a or {}), #(f.ranges_b or {}))
+                #(f.ranges_a or {}), #(f.ranges_b or {})), 'frontier'
         end
         for k, s in ipairs(f.sites) do
             if #s.a ~= na or #s.b ~= nb then
                 return nil, ('divergence %d takes a different number of locals at site %d'
-                    .. ' than at site 1 — one parameter cannot have two arities'):format(i, k)
+                    .. ' than at site 1 — one parameter cannot have two arities'):format(i, k), 'unbuilt'
             end
             -- ★★★ THE CLOSURE MUST CAPTURE NOTHING, AND IT DOES NOT — the dependency
             -- becomes the closure's own PARAMETER, so the body has no free name at all.
@@ -421,7 +421,7 @@ local function fn_params_of(analysis)
         fps[#fps + 1] = f
     end
     if #fps == 0 then
-        return nil, 'no shape divergence carries a dependency — nothing to pass as a function'
+        return nil, 'no shape divergence carries a dependency — nothing to pass as a function', 'unbuilt'
     end
     return fps
 end
@@ -447,7 +447,7 @@ local function agrees_with_hoau(store, pair, fps)
     local t, why = ho.of_pair(store, pair)
     if not t then
         return nil, ('the higher-order reading refuses this pair (%s), so the two'
-            .. ' analyses cannot be reconciled'):format(tostring(why))
+            .. ' analyses cannot be reconciled'):format(tostring(why)), 'unbuilt'
     end
     local want = {}
     for _, f in ipairs(fps) do
@@ -459,14 +459,14 @@ local function agrees_with_hoau(store, pair, fps)
                 if y:match('^_[pd]%d') then
                     return nil, ('a dependency crosses a padded position (`%s`) — the two'
                         .. ' copies differ in arity there, so it names a position rather'
-                        .. ' than a variable'):format(y)
+                        .. ' than a variable'):format(y), 'unbuilt'
                 end
             end
             local k = table.concat(h.ys, ',')
             if not want[k] or want[k] == 0 then
                 return nil, ('the two readings of this pair disagree: the higher-order one'
                     .. ' finds a parameter over (%s) that the merged struct holes do not')
-                    :format(k)
+                    :format(k), 'unbuilt'
             end
             want[k] = want[k] - 1
         end
@@ -474,19 +474,19 @@ local function agrees_with_hoau(store, pair, fps)
     for k, n in pairs(want) do
         if n > 0 then
             return nil, ('the two readings of this pair disagree: the struct holes find %d'
-                .. ' parameter(s) over (%s) that the higher-order one does not'):format(n, k)
+                .. ' parameter(s) over (%s) that the higher-order one does not'):format(n, k), 'unbuilt'
         end
     end
     return true
 end
 
 function M.plan(store, pair, opts)
-    if not (pair and pair.a and pair.b) then return nil, 'no near-clone pair' end
+    if not (pair and pair.a and pair.b) then return nil, 'no near-clone pair', 'ill-posed' end
     local a, b = pair.a, pair.b
     local xfile = a.file ~= b.file
     local lang = lang_of(a.file)
     if not (lang and lang == lang_of(b.file)) then
-        return nil, 'both functions must be in one supported language (Lua, JavaScript)'
+        return nil, 'both functions must be in one supported language (Lua, JavaScript)', 'unbuilt'
     end
     local syn = EXTRACT[lang]
     -- ⚠ THE STORE IS NOT OPTIONAL HERE (CART-0989). `move_purity` needs it, and without
@@ -511,7 +511,7 @@ function M.plan(store, pair, opts)
         -- caller anything they could act on. CART-0984's `fieldbase` is the first cause
         -- specific enough to be worth saying out loud, and saying it is what keeps a
         -- SOUND refusal from reading like an uninteresting one.
-        return nil, ('not value-parameterizable (%s) — nothing to lift cleanly'):format(analysis.kind)
+        return nil, ('not value-parameterizable (%s) — nothing to lift cleanly'):format(analysis.kind), 'unbuilt'
     end
     -- ★★★ A HOLE THE CALL SITE CANNOT WRITE DOWN (CART-0984). A `field` hole does not
     -- lift the field NAME, it lifts THE WHOLE ACCESS — `A.unify` and `A.join` share a
@@ -528,7 +528,7 @@ function M.plan(store, pair, opts)
         if h.unnameable then
             return nil, ('the copies differ in a field NAME, but folding them passes the'
                 .. ' whole access, and its base `%s` is a local of the body — not'
-                .. ' something the call site can name'):format(tostring(h.unnameable))
+                .. ' something the call site can name'):format(tostring(h.unnameable)), 'unbuilt'
         end
     end
     -- ★★★ A WRITE TARGET IS NOT A VALUE (CART-0941). Every hole below becomes an
@@ -554,15 +554,15 @@ function M.plan(store, pair, opts)
         if h.target then
             return nil, ('hole %d is the assignment TARGET (a %s hole on a %s'
                 .. ' destination) — substituting it would delete the write')
-                :format(i, tostring(h.kind), tostring(h.dest))
+                :format(i, tostring(h.kind), tostring(h.dest)), 'unbuilt'
         end
     end
     local va = un.body_extractable(store, a.id)
-    if not va.ok then return nil, ('%s body not liftable: %s'):format(a.name, va.reason) end
+    if not va.ok then return nil, ('%s body not liftable: %s'):format(a.name, va.reason), 'unbuilt' end
     local vb = un.body_extractable(store, b.id)
-    if not vb.ok then return nil, ('%s body not liftable: %s'):format(b.name, vb.reason) end
+    if not vb.ok then return nil, ('%s body not liftable: %s'):format(b.name, vb.reason), 'unbuilt' end
     if #va.params ~= #vb.params then
-        return nil, 'the two functions take a different number of parameters'
+        return nil, 'the two functions take a different number of parameters', 'unbuilt'
     end
     -- ── the FUNCTION-PARAMETER admission (CART-0878) ────────────────────────────
     local fps
@@ -573,10 +573,10 @@ function M.plan(store, pair, opts)
             -- ⚠ THE OLD SENTENCE IS KEPT AS THE PREFIX, because every caller and every
             -- census built on it reads "not value-parameterizable"; what changes is that
             -- it no longer ENDS the conversation — the specific cause follows it.
-            return nil, ('not value-parameterizable (structural): %s'):format(why)
+            return nil, ('not value-parameterizable (structural): %s'):format(why), 'unbuilt'
         end
         local okh, hwhy = agrees_with_hoau(store, pair, fps)
-        if not okh then return nil, ('not value-parameterizable (structural): %s'):format(hwhy) end
+        if not okh then return nil, ('not value-parameterizable (structural): %s'):format(hwhy), 'unbuilt' end
     end
 
     local root = store.data.root
@@ -584,23 +584,23 @@ function M.plan(store, pair, opts)
     local hazards = {}
     if xfile then
         if not syn.module then
-            return nil, ('cross-file extraction is not supported for %s yet (no module wiring)'):format(lang)
+            return nil, ('cross-file extraction is not supported for %s yet (no module wiring)'):format(lang), 'unbuilt'
         end
         dest = opts and opts.dest
         if not dest then
-            return nil, 'cross-file: pass a destination module path (:CartographExtractHelperApply <dir/name.lua>)'
+            return nil, 'cross-file: pass a destination module path (:CartographExtractHelperApply <dir/name.lua>)', 'ill-posed'
         end
         if dest:sub(1, 1) == '/' or dest:find('%.%.') then
-            return nil, 'the destination must be a plain path inside the project'
+            return nil, 'the destination must be a plain path inside the project', 'ill-posed'
         end
-        if txn.read_file(root, dest) then return nil, dest .. ' already exists — pick a new module path' end
+        if txn.read_file(root, dest) then return nil, dest .. ' already exists — pick a new module path', 'ill-posed' end
         -- FREE-READ gate: a moved body must read only globals, not source-file locals
         for _, side in ipairs({ { v = va, f = a.file, n = a.name }, { v = vb, f = b.file, n = b.name } }) do
             local loc = file_locals(store, side.f)
             for r in pairs(side.v.reads or {}) do
                 if loc[r] then
                     return nil, ('%s reads file-local `%s` — cannot move it to another module')
-                        :format(side.n, r)
+                        :format(side.n, r), 'unbuilt'
                 end
             end
         end
@@ -623,7 +623,7 @@ function M.plan(store, pair, opts)
                     if pg and not (nph == 1 and dest_ph[pg]) then
                         return nil, ('%s reads phase-bound global `%s` (%s phase), but the'
                             .. ' shared module would load across phases {%s} — not phase-safe')
-                            :format(side.n, r, pg, table.concat(phlist, ', '))
+                            :format(side.n, r, pg, table.concat(phlist, ', ')), 'ill-posed'
                     end
                 end
             end
@@ -631,17 +631,17 @@ function M.plan(store, pair, opts)
         local tsp0 = require 'cartograph.providers.treesitter'
         require_line, alias = tsp0.import_line(a.file, dest,
             tsp0.import_ctx(store.data.root, store.files))
-        if not require_line then return nil, 'cannot form a require line for this language' end
-        hazards[#hazards + 1] = ('verify the require path in `%s` resolves to %s'):format(require_line, dest)
+        if not require_line then return nil, 'cannot form a require line for this language', 'unbuilt' end
+        hazards[#hazards + 1] = require('cartograph.hazard').new('require-path', ('verify the require path in `%s` resolves to %s'):format(require_line, dest), nil, nil, 'frontier')
     end
 
     local lines_a = vim.split(txn.read_file(root, a.file) or '', '\n', { plain = true })
     local lines_b = xfile and vim.split(txn.read_file(root, b.file) or '', '\n', { plain = true }) or lines_a
     local a_sig, a_open, a_close = body_span(store, a.id, a.lines)
     local b_sig, b_open, b_close = body_span(store, b.id, b.lines)
-    if not (a_sig and b_sig) then return nil, 'a body is not a clean multi-line block' end
+    if not (a_sig and b_sig) then return nil, 'a body is not a clean multi-line block', 'unbuilt' end
     if not xfile and not (a_close < b_sig or b_close < a_sig) then
-        return nil, 'the two functions overlap (nested?) — cannot extract'
+        return nil, 'the two functions overlap (nested?) — cannot extract', 'decision'
     end
 
     -- hole PARAMETERS + validation (single-line, inside each body)
@@ -711,18 +711,18 @@ function M.plan(store, pair, opts)
             local cand = (i == 1) and base or (base .. i)
             if not taken_here[cand] then minted[cand] = true; return cand end
         end
-        return nil, ('no free name from `%s` within 64 tries'):format(base)
+        return nil, ('no free name from `%s` within 64 tries'):format(base), 'unbuilt'
     end
     local hp = {}
     for i = 1, #analysis.holes do
-        local nm, why = mint('hp' .. i)
-        if not nm then return nil, why end
+        local nm, why, why_class = mint('hp' .. i)
+        if not nm then return nil, why, why_class or 'unbuilt' end
         hp[i] = nm
     end
     local fpn = {}
     for i = 1, #(fps or {}) do
-        local nm, why = mint('fp' .. i)
-        if not nm then return nil, why end
+        local nm, why, why_class = mint('fp' .. i)
+        if not nm then return nil, why, why_class or 'unbuilt' end
         fpn[i] = nm
     end
     for i, p in ipairs(analysis.holes) do
@@ -738,14 +738,14 @@ function M.plan(store, pair, opts)
         -- `call_line` actually uses, and a sparse list makes the two disagree.
         if not (p.sites_a and p.sites_a[1] and p.sites_b and p.sites_b[1]) then
             return nil, ('hole %d has no located site on one side — there is no'
-                .. ' argument to pass at that call'):format(i)
+                .. ' argument to pass at that call'):format(i), 'frontier'
         end
         for _, side in ipairs({ { s = p.sites_a, open = a_open, close = a_close },
             { s = p.sites_b, open = b_open, close = b_close } }) do
             for _, r in ipairs(side.s) do
-                if at.sl(r) ~= at.el(r) then return nil, ('hole %d spans multiple lines'):format(i) end
+                if at.sl(r) ~= at.el(r) then return nil, ('hole %d spans multiple lines'):format(i), 'unbuilt' end
                 if at.sl(r) < side.open or at.sl(r) > side.close then
-                    return nil, ('hole %d is outside a body'):format(i)
+                    return nil, ('hole %d is outside a body'):format(i), 'unbuilt'
                 end
             end
         end
@@ -762,10 +762,10 @@ function M.plan(store, pair, opts)
             for _, r in ipairs(side.rs) do
                 if at.sl(r) ~= at.el(r) then
                     return nil, ('divergence %d spans multiple lines — a closure body'
-                        .. ' must fit one argument slot'):format(i)
+                        .. ' must fit one argument slot'):format(i), 'unbuilt'
                 end
                 if at.sl(r) < side.open or at.sl(r) > side.close then
-                    return nil, ('divergence %d is outside a body'):format(i)
+                    return nil, ('divergence %d is outside a body'):format(i), 'unbuilt'
                 end
             end
         end
@@ -845,7 +845,7 @@ function M.plan(store, pair, opts)
         if not ins0 then
             return nil, ('the copies are not defined at a statement position (%s), and the'
                 .. ' helper is a statement — there is nowhere in this file to put it')
-                :format(tostring(swhy))
+                :format(tostring(swhy)), 'unbuilt'
         end
         local below = reads_below(store, { a.id, b.id }, a.file, ins0,
             { [a.name] = true, [b.name] = true })
@@ -858,7 +858,7 @@ function M.plan(store, pair, opts)
             -- members at statement level and nothing to hoist out of.
             return nil, ('the helper must be inserted above `%s`, which it reads, so'
                 .. ' `%s` would not yet be defined where the helper lands')
-                :format(below, below)
+                :format(below, below), 'unbuilt'
         end
         local sig_indent = indent_of(lines_a[ins0 + 1])
         local helper = syn.local_helper(hname, table.concat(hparams, ', '), body, sig_indent)
@@ -1033,13 +1033,13 @@ function M.plan_family(store, fam, opts)
     opts = opts or {}
     local clones = require 'cartograph.clones'
     if type(fam) ~= 'table' or type(fam.members) ~= 'table' or #fam.members < 2 then
-        return nil, 'not a family of two or more'
+        return nil, 'not a family of two or more', 'empty'
     end
 
-    local v, vwhy = clones.family_admissibility(fam, store)
-    if not v then return nil, vwhy end
+    local v, vwhy, vwhy_class = clones.family_admissibility(fam, store)
+    if not v then return nil, vwhy, vwhy_class or 'unbuilt' end
     if not v.body then
-        return nil, 'no helper body: ' .. tostring(v.body_why)
+        return nil, 'no helper body: ' .. tostring(v.body_why), 'unbuilt'
     end
 
     -- ★ THE REPARSE ORACLE GATES THE PLAN, not just the display. A rendered
@@ -1056,9 +1056,9 @@ function M.plan_family(store, fam, opts)
         if vdet and vdet.verifiable == false then
             return nil, ('the helper body cannot be VERIFIED (%s) — refusing rather'
                 .. ' than writing text nothing checked'):format(tostring(verr)
-                :gsub('^not verifiable: ', ''))
+                :gsub('^not verifiable: ', '')), 'frontier'
         end
-        return nil, 'the helper body does not verify: ' .. tostring(verr)
+        return nil, 'the helper body does not verify: ' .. tostring(verr), 'unbuilt'
     end
 
     -- which members are we actually rewriting?
@@ -1095,13 +1095,13 @@ function M.plan_family(store, fam, opts)
             return nil, ('%d member(s) need their captures lifted (%s): pass `lift`'
                 .. ' to make them parameters of the helper, which each call site then'
                 .. ' passes'):format(v.n_liftable,
-                v.lifts and table.concat(v.lifts, ', ') or 'unknown')
+                v.lifts and table.concat(v.lifts, ', ') or 'unknown'), 'decision'
         end
         if v.lift_why then
-            return nil, ('the captures cannot be lifted: %s'):format(v.lift_why)
+            return nil, ('the captures cannot be lifted: %s'):format(v.lift_why), 'unbuilt'
         end
         return nil, ('only %d member(s) are extractable; a helper needs two')
-            :format(#take)
+            :format(#take), 'unbuilt'
     end
     if #take < v.n and not opts.partial then
         local names = {}
@@ -1110,7 +1110,7 @@ function M.plan_family(store, fam, opts)
         end
         return nil, ('%d of %d members are not extractable: %s — pass opts.partial'
             .. ' to extract the rest'):format(v.n - #take, v.n,
-            table.concat(names, '; '):sub(1, 200))
+            table.concat(names, '; '):sub(1, 200)), 'decision'
     end
 
     -- ⚠ ONE FILE OR MANY, and with N members a file may hold SEVERAL of them —
@@ -1126,18 +1126,18 @@ function M.plan_family(store, fam, opts)
     local xfile = #files > 1
     lang = lang_of(file)
     if not (lang and EXTRACT[lang]) then
-        return nil, ('no synthesis syntax for %s'):format(tostring(lang))
+        return nil, ('no synthesis syntax for %s'):format(tostring(lang)), 'unbuilt'
     end
     for _, f in ipairs(files) do
         if lang_of(f) ~= lang then
             return nil, ('the family spans two languages (%s and %s)')
-                :format(lang, tostring(lang_of(f)))
+                :format(lang, tostring(lang_of(f))), 'unbuilt'
         end
     end
     local syn = EXTRACT[lang]
     if xfile and not syn.module then
         return nil, ('cross-file extraction is not supported for %s yet (no module'
-            .. ' wiring)'):format(lang)
+            .. ' wiring)'):format(lang), 'unbuilt'
     end
 
     -- ── THE CROSS-FILE GATES, N-WAY ────────────────────────────────────────
@@ -1147,13 +1147,13 @@ function M.plan_family(store, fam, opts)
         dest = opts.dest
         if not dest then
             return nil, ('the family spans %d files — pass a destination module'
-                .. ' path for the shared helper'):format(#files)
+                .. ' path for the shared helper'):format(#files), 'ill-posed'
         end
         if dest:sub(1, 1) == '/' or dest:find('%.%.') then
-            return nil, 'the destination must be a plain path inside the project'
+            return nil, 'the destination must be a plain path inside the project', 'ill-posed'
         end
         if txn.read_file(store.data.root, dest) then
-            return nil, dest .. ' already exists — pick a new module path'
+            return nil, dest .. ' already exists — pick a new module path', 'ill-posed'
         end
 
         -- ★ THE FREE-READ GATE, ONCE PER MEMBER. A moved body may read only
@@ -1192,7 +1192,7 @@ function M.plan_family(store, fam, opts)
             for r in pairs(reads or {}) do
                 if loc[r] then
                     return nil, ('%s reads file-local `%s` — it cannot move to a'
-                        .. ' shared module'):format(m.name or '?', r)
+                        .. ' shared module'):format(m.name or '?', r), 'unbuilt'
                 end
             end
         end
@@ -1223,7 +1223,7 @@ function M.plan_family(store, fam, opts)
                         return nil, ('%s reads phase-bound global `%s` (%s phase), but'
                             .. ' the shared module would load across phases {%s} —'
                             .. ' not phase-safe'):format(m.name or '?', r, pg,
-                            table.concat(phlist, ', '))
+                            table.concat(phlist, ', ')), 'ill-posed'
                     end
                 end
             end
@@ -1233,16 +1233,16 @@ function M.plan_family(store, fam, opts)
         require_line, alias = tsp1.import_line(files[1], dest,
             tsp1.import_ctx(store.data.root, store.files))
         if not require_line then
-            return nil, 'cannot form a require line for this language'
+            return nil, 'cannot form a require line for this language', 'unbuilt'
         end
-        hazards[#hazards + 1] = ('verify the require path in `%s` resolves to %s')
-            :format(require_line, dest)
+        hazards[#hazards + 1] = require('cartograph.hazard').new('require-path', ('verify the require path in `%s` resolves to %s')
+            :format(require_line, dest), nil, nil, 'frontier')
     end
 
     -- the donor is the FIRST ADMISSIBLE member, because the body text is its own
     local donor_i = take[1]
-    local tmpl, twhy = clones.family_template(fam, store, { donor = donor_i })
-    if not tmpl then return nil, twhy end
+    local tmpl, twhy, twhy_class = clones.family_template(fam, store, { donor = donor_i })
+    if not tmpl then return nil, twhy, twhy_class or 'unbuilt' end
 
     local root = store.data.root
     -- ⚠ ONE LINE ARRAY PER FILE. A member's filling is read from ITS OWN source,
@@ -1260,7 +1260,7 @@ function M.plan_family(store, fam, opts)
         local m = fam.members[i]
         local sig, open, close = body_span(store, m.id, m.lines or {})
         if not sig then
-            return nil, ('%s is not a clean multi-line block'):format(m.name or '?')
+            return nil, ('%s is not a clean multi-line block'):format(m.name or '?'), 'unbuilt'
         end
         spans[i] = { sig = sig, open = open, close = close, file = m.file }
         if earliest[m.file] == nil or sig < earliest[m.file] then earliest[m.file] = sig end
@@ -1273,7 +1273,7 @@ function M.plan_family(store, fam, opts)
             if i ~= j and spans[i].file == spans[j].file
                 and not (spans[i].close < spans[j].sig or spans[j].close < spans[i].sig) then
                 return nil, ('%s and %s overlap (nested?) — cannot extract')
-                    :format(fam.members[i].name or '?', fam.members[j].name or '?')
+                    :format(fam.members[i].name or '?', fam.members[j].name or '?'), 'decision'
             end
         end
     end
@@ -1357,7 +1357,7 @@ function M.plan_family(store, fam, opts)
         if not ins0 then
             return nil, ('the copies are not defined at a statement position (%s), and the'
                 .. ' helper is a statement — there is nowhere in this file to put it')
-                :format(tostring(swhy))
+                :format(tostring(swhy)), 'unbuilt'
         end
         local mnames = {}
         for _, m in ipairs(plan.members) do if m.name then mnames[m.name] = true end end
@@ -1371,7 +1371,7 @@ function M.plan_family(store, fam, opts)
             -- members at statement level and nothing to hoist out of.
             return nil, ('the helper must be inserted above `%s`, which it reads, so'
                 .. ' `%s` would not yet be defined where the helper lands')
-                :format(below, below)
+                :format(below, below), 'unbuilt'
         end
         local sig_indent = indent_of(linesof[file][ins0 + 1])
         table.insert(perfile[file], { from0b = ins0, to0b = ins0 - 1,
@@ -1385,7 +1385,7 @@ function M.plan_family(store, fam, opts)
         for _, f in ipairs(files) do
             local rl = tsp.import_line(f, dest, ictx)
             if not rl then
-                return nil, ('cannot form a require line for %s'):format(f)
+                return nil, ('cannot form a require line for %s'):format(f), 'unbuilt'
             end
             local ip = import_point(linesof[f], tsp.import_pats(f))
             table.insert(perfile[f], { from0b = ip, to0b = ip - 1, new = { rl } })
@@ -1412,7 +1412,7 @@ function M.plan_family(store, fam, opts)
             local val = (fam.values[i] or {})[h]
             local ext = clones.term_extent(val)
             if not ext then
-                return nil, ('%s has no located value for %s'):format(m.name or '?', tmpl.params[h])
+                return nil, ('%s has no located value for %s'):format(m.name or '?', tmpl.params[h]), 'frontier'
             end
             args[#args + 1] = span_text(linesof[m.file], ext)
         end

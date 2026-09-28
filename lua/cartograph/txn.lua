@@ -252,7 +252,7 @@ local function resolve_edit(plan, edit_of)
     edit_of = edit_of or plan.edit_of
     if type(edit_of) ~= 'function' then
         return nil, ('the plan carries no edit_of (verb %s) — this verb has not joined the '
-            .. 'plan protocol'):format(tostring(plan.verb))
+            .. 'plan protocol'):format(tostring(plan.verb)), 'unbuilt'
     end
     return edit_of
 end
@@ -305,8 +305,10 @@ function M.dryrun(store, plan, edit_of, opts)
     edit_of, nope = resolve_edit(plan, edit_of)
     if not edit_of then return nil, nil, nope end
     local root = store.data.root
+    -- ⚠ dryrun answers (before, after, why): the reason is the THIRD value. This line returned `nil, cwhy`, which
+    -- handed the containment refusal back as `after` — a string where a file table belongs, and no reason
     local cok, cwhy = M.contain_plan(plan)
-    if not cok then return nil, cwhy end
+    if not cok then return nil, nil, cwhy end
     local supplied = opts and opts.before or nil
     local before, virtual = {}, nil
     for _, rel in ipairs(plan.touched) do
@@ -375,19 +377,19 @@ end
 ---@param store table
 ---@param plan table
 function M.delta(store, plan)
-    local edit_of, nope = resolve_edit(plan, nil)
-    if not edit_of then return nil, nope or 'no edit_of' end
+    local edit_of, nope, nope_class = resolve_edit(plan, nil)
+    if not edit_of then return nil, nope or 'no edit_of', nope_class or 'unbuilt' end
     -- dryrun reads DISK NOW, so a stale plan would score fresh text against stale offsets and
     -- report a confident number for an edit that can no longer be applied.
     if plan.generation and store.generation ~= plan.generation then
         return nil, ('the plan is stale (gen %d -> %d) — re-plan')
-            :format(plan.generation, store.generation)
+            :format(plan.generation, store.generation), 'stale'
     end
     local ok, before, after, derr = pcall(M.dryrun, store, plan, edit_of)
     if not ok then
-        return nil, 'the edit callback RAISED: ' .. tostring(before):gsub('^.*/', '')
+        return nil, 'the edit callback RAISED: ' .. tostring(before):gsub('^.*/', ''), 'unbuilt'
     end
-    if not before or not after then return nil, derr or 'the dry run produced nothing' end
+    if not before or not after then return nil, derr or 'the dry run produced nothing', 'unbuilt' end
     local added, removed = 0, 0
     for _, rel in ipairs(plan.touched) do
         local b, a = before[rel], after[rel]
@@ -511,13 +513,13 @@ end
 --- plan is known to be applicable would leave the caller with neither.
 --- @return table|nil entry, string|nil why
 function M.apply(store, plan)
-    if type(plan) ~= 'table' then return nil, 'not a plan' end
+    if type(plan) ~= 'table' then return nil, 'not a plan', 'ill-posed' end
     if plan.precheck then
         local why = plan.precheck(store, plan)
-        if why then return nil, why end
+        if why then return nil, why, 'stale' end
     end
     local bad = M.verify(store, plan)
-    if bad then return nil, bad end
+    if bad then return nil, bad, 'stale' end
     if plan.consume then plan.consume(store, plan) end
     return M.execute(store, plan, plan.desc)
 end
@@ -528,9 +530,9 @@ end
 --- touched files back through refresh — the same machinery every save
 --- uses. Returns the journal entry, or nil + why.
 function M.execute(store, plan, desc, edit_of)
-    local nope
-    edit_of, nope = resolve_edit(plan, edit_of)
-    if not edit_of then return nil, nope end
+    local nope, nope_class
+    edit_of, nope, nope_class = resolve_edit(plan, edit_of)
+    if not edit_of then return nil, nope, nope_class or 'unbuilt' end
     -- ⚠ A WRITE WITH NO DESCRIPTION REFUSES BY NAME, the same rule `guards`,
     -- `refspecs` and `edit_of` already live under. MEASURED (CART-0982): deleting a
     -- builder's `plan.desc` broke NOTHING — the journal recorded a nil description and
@@ -541,7 +543,7 @@ function M.execute(store, plan, desc, edit_of)
     desc = desc == nil and plan.desc or desc
     if desc == nil then
         return nil, ('the plan for `%s` carries no description — a write verb must say '
-            .. 'what the journal should record (`plan.desc = ...`)'):format(tostring(plan.verb))
+            .. 'what the journal should record (`plan.desc = ...`)'):format(tostring(plan.verb)), 'unbuilt'
     end
     local root = store.data.root
     -- ★ THE BACKSTOP, AND IT MUST PRECEDE journal.begin: refusing after the journal
@@ -550,8 +552,8 @@ function M.execute(store, plan, desc, edit_of)
     -- writes and one escaping member is enough (CART-0577).
     -- M.dryrun carries the same block on purpose: a preview that accepts what apply
     -- refuses is worse than either refusing, because it is discovered later.
-    local cok, cwhy = M.contain_plan(plan)
-    if not cok then return nil, cwhy end
+    local cok, cwhy, cwhy_class = M.contain_plan(plan)
+    if not cok then return nil, cwhy, cwhy_class or 'ill-posed' end
     -- ⚠ AFTER THE CONTAINMENT BACKSTOP, NOT BEFORE IT. Placed earlier, this refusal
     -- PREEMPTED the "refusing to write outside the project" one — caught by CART-0577's
     -- own test, which builds an escaping plan and got told about a missing field
@@ -591,11 +593,11 @@ function M.execute(store, plan, desc, edit_of)
     if plan.preserves == nil then
         return nil, ('the plan for `%s` declares no behavioural claim — a write verb '
             .. 'must say what it preserves (`plan.preserves = \'all\'|\'none\'|'
-            .. '\'unreviewed\'`)'):format(tostring(plan.verb))
+            .. '\'unreviewed\'`)'):format(tostring(plan.verb)), 'unbuilt'
     end
     if not PRESERVES[plan.preserves] then
         return nil, ('the plan for `%s` claims `%s`, which is not one of all|none|'
-            .. 'unreviewed'):format(tostring(plan.verb), tostring(plan.preserves))
+            .. 'unreviewed'):format(tostring(plan.verb), tostring(plan.preserves)), 'ill-posed'
     end
     local before = {}
     for _, rel in ipairs(plan.touched) do
@@ -604,7 +606,7 @@ function M.execute(store, plan, desc, edit_of)
             -- a file the plan CREATES has no before; anything else
             -- unreadable refuses (the stamp rung caught most of these)
             if not (plan.creates and plan.creates[rel]) then
-                return nil, 'cannot read ' .. rel
+                return nil, 'cannot read ' .. rel, 'stale'
             end
             t = false
         end
@@ -627,7 +629,7 @@ function M.execute(store, plan, desc, edit_of)
         return nil, ('the plan for `%s` declares no guards — a write verb must '
             .. 'name the obligations it accepts (`plan.guards = { \'parses\' }`), '
             .. 'or say `{}` to declare that it accepts none')
-            :format(tostring(plan.verb))
+            :format(tostring(plan.verb)), 'unbuilt'
     end
     local after = {}
     for _, rel in ipairs(plan.touched) do
@@ -636,7 +638,7 @@ function M.execute(store, plan, desc, edit_of)
         -- thrown past the caller (CART-0767)
         local ok, out = pcall(edit_of, rel, before[rel], before)
         if not ok then
-            return nil, ('the edit for %s could not be built: %s'):format(rel, tostring(out))
+            return nil, ('the edit for %s could not be built: %s'):format(rel, tostring(out)), 'unbuilt'
         end
         after[rel] = out
     end
@@ -652,26 +654,26 @@ function M.execute(store, plan, desc, edit_of)
     end
     if not touches then
         return nil, ('the plan for `%s` would change nothing — every file it touches'
-            .. ' comes out byte-identical'):format(tostring(plan.verb))
+            .. ' comes out byte-identical'):format(tostring(plan.verb)), 'empty'
     end
     local verdicts, failed = require('cartograph.planguards').run(store, plan, before, after)
     plan.guard_verdicts = verdicts
     if failed then
-        return nil, require('cartograph.planguards').refusal(failed)
+        return nil, require('cartograph.planguards').refusal(failed), 'unbuilt'
     end
 
     local journal = require 'cartograph.journal'
     -- CART-1004: the verb's own undo declaration rides into the entry beside the
     -- description, so the ADDRESS survives with the bytes `before` already keeps.
-    local entry, jerr = journal.begin(root, plan.verb, desc, before, plan.undo)
-    if not entry then return nil, jerr end
+    local entry, jerr, jerr_class = journal.begin(root, plan.verb, desc, before, plan.undo)
+    if not entry then return nil, jerr, jerr_class or 'environment' end
     for _, rel in ipairs(plan.touched) do
         local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$')
         if dir then vim.fn.mkdir(dir, 'p') end
         local fd = io.open(root .. '/' .. rel, 'w')
         if not fd then
             journal.abort(root, entry, 'cannot write ' .. rel)
-            return nil, 'cannot write ' .. rel .. ' (journal has before-content)'
+            return nil, 'cannot write ' .. rel .. ' (journal has before-content)', 'environment'
         end
         fd:write(after[rel])
         fd:close()

@@ -76,13 +76,13 @@ end
 local function shape_of(store, node)
     local ok, eo = pcall(expr.of, store, node.id)
     if not ok or not (eo and eo.fl) then
-        return nil, ('`%s` has no analyzable body'):format(tostring(node.name))
+        return nil, ('`%s` has no analyzable body'):format(tostring(node.name)), 'frontier'
     end
     local lines = {}
     for _, s in ipairs(eo.fl.stmts or {}) do lines[#lines + 1] = s.l end
     local sig, open, close = require('cartograph.cloneextract').body_span(store, node.id, lines)
     if not sig then
-        return nil, ('`%s` is not a clean multi-line block'):format(tostring(node.name))
+        return nil, ('`%s` is not a clean multi-line block'):format(tostring(node.name)), 'unbuilt'
     end
     return { params = eo.fl.params or {}, sig = sig, open = open, close = close }
 end
@@ -121,24 +121,24 @@ end
 --- @return table|nil plan
 --- @return string|nil why
 function M.of(store, entry)
-    if type(entry) ~= 'table' then return nil, 'not a journal entry' end
+    if type(entry) ~= 'table' then return nil, 'not a journal entry', 'ill-posed' end
     local rec = entry.undo
     if not rec then
         return nil, ('entry %s carries no undo record — it was written before the verb'
-            .. ' declared one, or the verb declares none'):format(tostring(entry.id))
+            .. ' declared one, or the verb declares none'):format(tostring(entry.id)), 'empty'
     end
     if rec.kind ~= 'relation' then
         return nil, ('this undo record is a `%s`, not a relation — a destructive verb\'s'
             .. ' inverse is `journal.recover`, which resolves spans against the before-text')
-            :format(tostring(rec.kind))
+            :format(tostring(rec.kind)), 'ill-posed'
     end
     if entry.status ~= 'applied' then
         return nil, ('entry %s is `%s`, not applied — there is no extraction in the tree to'
-            .. ' invert'):format(tostring(entry.id), tostring(entry.status))
+            .. ' invert'):format(tostring(entry.id), tostring(entry.status)), 'ill-posed'
     end
     if not rec.file or not rec.params or not rec.sites then
         return nil, ('this record predates the full correspondence (CART-1005): it names no'
-            .. ' helper file, so the inverse would have to re-derive it from the plan')
+            .. ' helper file, so the inverse would have to re-derive it from the plan'), 'unbuilt'
     end
 
     local root = store.data.root
@@ -153,23 +153,23 @@ function M.of(store, entry)
                 .. ' cross-file extraction must also remove the import and re-check that the'
                 .. ' body\'s free names resolve in the destination, which this verb does not'
                 .. ' do'):format(tostring(rec.helper), tostring(rec.file),
-                tostring(s.name), tostring(s.file))
+                tostring(s.name), tostring(s.file)), 'unbuilt'
         end
     end
     if (rec.nfparams or 0) > 0 then
         return nil, ('`%s` takes %d function parameter(s); inverting one is a'
             .. ' beta-reduction — the lambda\'s body must be substituted for its'
             .. ' applications with the dependencies remapped, not spliced at a name')
-            :format(tostring(rec.helper), rec.nfparams)
+            :format(tostring(rec.helper), rec.nfparams), 'unbuilt'
     end
 
     local hnode = find_def(store, rec.file, rec.helper)
     if not hnode then
         return nil, ('`%s` is no longer defined in %s — it was renamed, moved, or already'
-            .. ' inlined'):format(tostring(rec.helper), tostring(rec.file))
+            .. ' inlined'):format(tostring(rec.helper), tostring(rec.file)), 'stale'
     end
-    local hs, hwhy = shape_of(store, hnode)
-    if not hs then return nil, hwhy end
+    local hs, hwhy, hwhy_class = shape_of(store, hnode)
+    if not hs then return nil, hwhy, hwhy_class or 'unbuilt' end
     -- ★ THE ARITY IS THE CORRESPONDENCE'S OWN INVARIANT, and it is also what refuses a
     -- record written before the forwarded half was recorded: those describe strictly fewer
     -- parameters than the helper has, so they land here with a sentence that says so.
@@ -177,22 +177,22 @@ function M.of(store, entry)
         return nil, ('`%s` takes %d parameter(s) and the record describes %d — either the'
             .. ' signature changed since, or the record predates the full correspondence'
             .. ' (CART-1005), and either way the positional match is not established')
-            :format(tostring(rec.helper), #hs.params, #rec.params)
+            :format(tostring(rec.helper), #hs.params, #rec.params), 'stale'
     end
 
     local src = txn.read_file(root, rec.file)
-    if not src then return nil, ('cannot read %s'):format(rec.file) end
+    if not src then return nil, ('cannot read %s'):format(rec.file), 'stale' end
     local lines = vim.split(src, '\n', { plain = true })
     local offs = line_offsets(src)
 
     local h, bwhy = ba.of(src, rec.file)
     if not h then
         return nil, ('no scope graph for %s (%s) — a substitution without one would be a'
-            .. ' text replacement, and `x` occurs inside `max`'):format(rec.file, tostring(bwhy))
+            .. ' text replacement, and `x` occurs inside `max`'):format(rec.file, tostring(bwhy)), 'frontier'
     end
     local hpath = ba.fn_path(h, hs.sig)
     if not hpath then
-        return nil, ('cannot locate `%s` in the scope graph of %s'):format(rec.helper, rec.file)
+        return nil, ('cannot locate `%s` in the scope graph of %s'):format(rec.helper, rec.file), 'frontier'
     end
 
     -- ── the helper's BODY BINDERS: what a substituted argument may not name ──
@@ -226,7 +226,7 @@ function M.of(store, entry)
             return nil, ('`%s` is rebound as a %s inside `%s` — after that line the name'
                 .. ' does not mean the parameter, so substituting the argument at every'
                 .. ' occurrence would rewrite the wrong one')
-                :format(p, tostring(rebound[p]), tostring(rec.helper))
+                :format(p, tostring(rebound[p]), tostring(rec.helper)), 'unbuilt'
         end
     end
 
@@ -257,13 +257,13 @@ function M.of(store, entry)
         local snode = (s.id and store.node(s.id)) or find_def(store, s.file, s.name)
         if not snode then
             return nil, ('the site `%s` is no longer defined in %s'):format(
-                tostring(s.name), tostring(s.file))
+                tostring(s.name), tostring(s.file)), 'stale'
         end
-        local ss, swhy = shape_of(store, snode)
-        if not ss then return nil, swhy end
+        local ss, swhy, swhy_class = shape_of(store, snode)
+        if not ss then return nil, swhy, swhy_class or 'unbuilt' end
         if #s.args ~= #rec.params then
             return nil, ('the site `%s` records %d argument(s) for %d parameter(s)')
-                :format(tostring(s.name), #s.args, #rec.params)
+                :format(tostring(s.name), #s.args, #rec.params), 'stale'
         end
         -- ★★★ THE RECORDED ARGUMENTS ARE A WITNESS, AND THIS IS WHERE THEY EARN IT. The
         -- delegating call is REGENERATED from the record and compared to what is on disk.
@@ -277,14 +277,14 @@ function M.of(store, entry)
         if not (ss.close == ss.open and trimmed:find(want, 1, true)) then
             return nil, ('`%s` no longer delegates to `%s` — its body is not the single call'
                 .. ' the record describes (`%s`), so the recorded arguments no longer'
-                .. ' witness what is there'):format(tostring(s.name), tostring(rec.helper), want)
+                .. ' witness what is there'):format(tostring(s.name), tostring(rec.helper), want), 'stale'
         end
         -- ── capture: a free name of an argument that the helper's body binds ──
         for i, a in ipairs(s.args) do
             local fr = free_names(a)
             if not fr then
                 return nil, ('cannot read the recorded argument `%s` of `%s` as an'
-                    .. ' expression'):format(tostring(a), tostring(s.name))
+                    .. ' expression'):format(tostring(a), tostring(s.name)), 'frontier'
             end
             for n in pairs(fr) do
                 if binders[n] then
@@ -292,7 +292,7 @@ function M.of(store, entry)
                         .. ' and `%s` declares a %s of that name — after the splice the'
                         .. ' argument would read the helper\'s own binding')
                         :format(tostring(s.name), tostring(a), n, tostring(rec.helper),
-                        tostring(binders[n]))
+                        tostring(binders[n])), 'unbuilt'
                 end
             end
             local _ = i
@@ -447,7 +447,7 @@ function M.of_last(store)
         local e = entries[i]
         if e.undo and e.undo.kind == 'relation' then return M.of(store, e) end
     end
-    return nil, 'no entry in this project\'s journal declares a relation to invert'
+    return nil, 'no entry in this project\'s journal declares a relation to invert', 'empty'
 end
 
 return M

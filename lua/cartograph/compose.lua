@@ -39,11 +39,11 @@ M.VERBS = {
                 local id, why = store.resolve_ref(ref)
                 if not id then
                     return nil, ('seed_refs[%d] (%s in %s) does not resolve: %s')
-                        :format(i, tostring(ref.name), tostring(ref.file), tostring(why))
+                        :format(i, tostring(ref.name), tostring(ref.file), tostring(why)), 'stale'
                 end
                 ids[#ids + 1] = id
             end
-            if #ids == 0 then return nil, 'no seed_refs resolved' end
+            if #ids == 0 then return nil, 'no seed_refs resolved', 'ill-posed' end
             return require('cartograph.moveapply').plan_moveset(store, ids, args.dest,
                 { arm = false, reexport = args.reexport })
         end,
@@ -73,11 +73,11 @@ function M.run(store, recipe, opts)
 
     local steps = recipe
     if type(recipe) == 'table' and recipe.steps ~= nil then
-        local okv, vwhy = schema.replayable('recipe', recipe.version)
-        if not okv then return nil, vwhy end
+        local okv, vwhy, vwhy_class = schema.replayable('recipe', recipe.version)
+        if not okv then return nil, vwhy, vwhy_class or 'stale' end
         steps = recipe.steps
     end
-    if type(steps) ~= 'table' or #steps == 0 then return nil, 'an empty recipe' end
+    if type(steps) ~= 'table' or #steps == 0 then return nil, 'an empty recipe', 'ill-posed' end
 
     local rows, applied, derailed = {}, {}, false
     for i, st in ipairs(steps) do
