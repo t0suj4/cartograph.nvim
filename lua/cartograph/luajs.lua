@@ -168,11 +168,10 @@ function M.emit(src, file, opts)
             c = ('$m(%s, %s%s)'):format(expr(obj, sc), js_str(text(m)), a ~= '' and (', ' .. a) or '')
         else
             local f = expr(name, sc)
-            -- a LOCAL is called directly; anything else (a global, a field) through $call, so a missing library
-            -- function fails as Lua's `attempt to call a nil value`, not a JS TypeError (measured: 36 module loads
-            -- reported `$G.setmetatable is not a function` as a JS error)
-            if name:type() == 'identifier' and lookup(sc, text(name)) then c = ('%s(%s)'):format(f, a)
-            else c = ('$call(%s%s)'):format(f, a ~= '' and (', ' .. a) or '') end
+            -- EVERY call goes through $call: a missing function fails as Lua's `attempt to call a nil value` (not a JS
+            -- TypeError — measured: 36 module loads), and a TABLE with __call is callable. A direct call for locals was an
+            -- unfaithful shortcut — it assumed a local holds a function, and the metatables differential caught it
+            c = ('$call(%s%s)'):format(f, a ~= '' and (', ' .. a) or '')
         end
         return raw and c or ('$1(%s)'):format(c)
     end
@@ -211,8 +210,9 @@ function M.emit(src, file, opts)
             local l, r = field_of(n, 'left'), field_of(n, 'right')
             if op == 'and' then return ('$and(%s, () => %s)'):format(expr(l, sc), expr(r, sc)) end
             if op == 'or' then return ('$or(%s, () => %s)'):format(expr(l, sc), expr(r, sc)) end
-            if op == '==' then return ('(%s === %s)'):format(expr(l, sc), expr(r, sc)) end
-            if op == '~=' then return ('(%s !== %s)'):format(expr(l, sc), expr(r, sc)) end
+            -- equality honours __eq (5.1: both operands tables sharing one __eq); $eq's first test is ===
+            if op == '==' then return ('$eq(%s, %s)'):format(expr(l, sc), expr(r, sc)) end
+            if op == '~=' then return ('!$eq(%s, %s)'):format(expr(l, sc), expr(r, sc)) end
             local f = BIN[op]
             if not f then return refuse(n, 'operator', 'no template for the binary operator ' .. op) end
             return ('%s(%s, %s)'):format(f, expr(l, sc), expr(r, sc))
@@ -414,7 +414,7 @@ function M.emit(src, file, opts)
     local top = scope(nil)
     local body = block(root, top, nil)
     local pack = opts.pack or './$pack.js'
-    local names = '$t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $add, $sub, $mul, $div, $mod, $pow, $neg, $cat, $lt, $le, $gt, $ge, $abort, $G'
+    local names = '$t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $add, $sub, $mul, $div, $mod, $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $abort, $G'
     local js = ("'use strict';\n// transliterated from %s by cartograph.luajs — do not edit\nconst { %s } = require(%s);\nmodule.exports = $1((function (...$va) {\n%s})());\n")
         :format(tostring(file), names, js_str(pack), body)
     return js, refusals, stats

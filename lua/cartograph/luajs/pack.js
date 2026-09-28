@@ -14,6 +14,12 @@
 //                MAP     a JS Map: every other key type (numbers, booleans, tables, functions)
 //              A key a shape cannot hold (a string on an ARRAY, a number on a RECORD) ABORTS by name.
 //   function   a JS function; multiple returns are an MV (`$mv`), unwrapped by `$1` / spread by `$all`
+//   metatable  held in a WeakMap keyed by the table's identity (META), so a table's own representation is untouched.
+//              Honoured as Lua 5.1 / LuaJIT does: __index / __newindex on a RAW miss, __call, __tostring, __concat,
+//              arithmetic (__add … __unm), __eq (only when BOTH operands are tables sharing the same __eq), __lt / __le,
+//              __metatable. __len does NOT fire on a table (5.1 — measured in-tree under LuaJIT), so it is ignored.
+//              __mode is held STRONGLY: GC-driven removal is not deterministically observable, so never removing is a
+//              faithful subset of what Lua may do.
 'use strict';
 
 class LuaError extends Error { constructor(value) { super(typeof value === 'string' ? value : 'error object'); this.value = value; } }
@@ -45,7 +51,27 @@ const key = k => {
   if (typeof k === 'number' && Number.isNaN(k)) throw new LuaError('table index is NaN');
   return k;
 };
+const META = new WeakMap();
+const mt_of = v => (v !== null && typeof v === 'object' || typeof v === 'function' ? META.get(v) : (typeof v === 'string' ? STRING_MT : undefined));
+const meta = (v, name) => { const mt = mt_of(v); return mt === undefined ? undefined : rawget(mt, name); };
+function rawget(t, k) {
+  if (t instanceof Map) return t.get(k);
+  if (Array.isArray(t)) return typeof k === 'number' && Number.isInteger(k) && k >= 1 ? t[k] : undefined;
+  if (isRec(t)) return typeof k === 'string' ? t[k] : undefined;
+  throw new LuaError("bad argument #1 to 'rawget' (table expected, got " + $type(t) + ')');
+}
 function $idx(t, k) {
+  // a table: its raw value, else its __index (a function is called, a table is indexed — the chain may continue)
+  if (isTable(t)) {
+    const v = rawget(t, k);
+    if (v !== undefined) return v;
+    const h = meta(t, '__index');
+    if (h === undefined) return undefined;
+    return typeof h === 'function' ? $1(h(t, k)) : $idx(h, k);
+  }
+  return idx_raw(t, k);
+}
+function idx_raw(t, k) {
   if (t instanceof Map) return t.get(k);
   if (Array.isArray(t)) {
     if (typeof k === 'number') return Number.isInteger(k) && k >= 1 ? t[k] : undefined;
@@ -58,6 +84,14 @@ function $idx(t, k) {
   throw new LuaError('attempt to index a ' + $type(t) + " value (reading '" + String(k) + "')");
 }
 function $set(t, k, v) {
+  // __newindex fires only when the key is ABSENT (a raw nil)
+  if (isTable(t) && rawget(t, k) === undefined) {
+    const h = meta(t, '__newindex');
+    if (h !== undefined) { if (typeof h === 'function') h(t, k, v); else $set(h, k, v); return; }
+  }
+  rawset(t, k, v);
+}
+function rawset(t, k, v) {
   key(k);
   if (t instanceof Map) { if (v === undefined) t.delete(k); else t.set(k, v); return; }
   if (Array.isArray(t)) {
@@ -80,12 +114,14 @@ function $len(x) {
 /** a method call obj:m(...): a string's methods are the string library; a table's are its fields */
 function $m(obj, name, ...args) {
   const f = typeof obj === 'string' ? STRING[name] : $idx(obj, name);
-  if (typeof f !== 'function') throw new LuaError("attempt to call method '" + name + "' (a " + $type(f) + ' value)');
-  return f(obj, ...args);
+  if (typeof f !== 'function' && meta(f, '__call') === undefined) throw new LuaError("attempt to call method '" + name + "' (a " + $type(f) + ' value)');
+  return $call(f, obj, ...args);
 }
 function $call(f, ...args) {
-  if (typeof f !== 'function') throw new LuaError('attempt to call a ' + $type(f) + ' value');
-  return f(...args);
+  if (typeof f === 'function') return f(...args);
+  const h = meta(f, '__call');
+  if (h !== undefined) return $call(h, f, ...args);
+  throw new LuaError('attempt to call a ' + $type(f) + ' value');
 }
 
 // ── arithmetic and strings ───────────────────────────────────────────────────────────────────────────────────────
@@ -94,13 +130,21 @@ const num = (x, op) => {
   if (typeof x === 'string') { const n = $tonumber(x); if (n !== undefined) return n; }
   throw new LuaError('attempt to perform arithmetic on a ' + $type(x) + ' value');
 };
-const $add = (a, b) => num(a) + num(b);
-const $sub = (a, b) => num(a) - num(b);
-const $mul = (a, b) => num(a) * num(b);
-const $div = (a, b) => num(a) / num(b);
-const $mod = (a, b) => { a = num(a); b = num(b); return a - Math.floor(a / b) * b; };
-const $pow = (a, b) => Math.pow(num(a), num(b));
-const $neg = a => -num(a);
+const numish = x => typeof x === 'number' || (typeof x === 'string' && $tonumber(x) !== undefined);
+/** an arithmetic operator: numbers (and numeric strings) directly, else the first operand's metamethod, then the second's */
+const arith = (event, f) => (a, b) => {
+  if (numish(a) && numish(b)) return f(num(a), num(b));
+  const h = meta(a, event) !== undefined ? meta(a, event) : meta(b, event);
+  if (h !== undefined) return $1($call(h, a, b));
+  return f(num(a), num(b)); // raises Lua's arithmetic error
+};
+const $add = arith('__add', (a, b) => a + b);
+const $sub = arith('__sub', (a, b) => a - b);
+const $mul = arith('__mul', (a, b) => a * b);
+const $div = arith('__div', (a, b) => a / b);
+const $mod = arith('__mod', (a, b) => a - Math.floor(a / b) * b);
+const $pow = arith('__pow', (a, b) => Math.pow(a, b));
+const $neg = a => { if (numish(a)) return -num(a); const h = meta(a, '__unm'); if (h !== undefined) return $1($call(h, a, a)); return -num(a); };
 function $numstr(n) {
   if (Number.isInteger(n) && Math.abs(n) < 1e15) return String(n);
   if (n === Infinity) return 'inf';
@@ -123,12 +167,44 @@ const cstr = x => {
   if (typeof x === 'number') return $numstr(x);
   throw new LuaError('attempt to concatenate a ' + $type(x) + ' value');
 };
-const $cat = (a, b) => cstr(a) + cstr(b);
-const $lt = (a, b) => { cmpok(a, b); return a < b; };
-const $le = (a, b) => { cmpok(a, b); return a <= b; };
+const catable = x => typeof x === 'string' || typeof x === 'number';
+const $cat = (a, b) => {
+  if (catable(a) && catable(b)) return cstr(a) + cstr(b);
+  const h = meta(a, '__concat') !== undefined ? meta(a, '__concat') : meta(b, '__concat');
+  if (h !== undefined) return $1($call(h, a, b));
+  return cstr(a) + cstr(b); // raises Lua's concatenation error
+};
+/** 5.1: __eq fires only when BOTH are tables (or both userdata) and share the SAME __eq */
+const $eq = (a, b) => {
+  if (a === b) return true;
+  if (!isTable(a) || !isTable(b)) return false;
+  const ha = meta(a, '__eq');
+  if (ha === undefined || ha !== meta(b, '__eq')) return false;
+  return $t($1($call(ha, a, b)));
+};
+/** 5.1: __lt / __le fire only when both operands are the same non-number, non-string type with the same handler */
+const cmpmeta = (event, a, b) => {
+  if ($type(a) !== $type(b)) return undefined;
+  const h = meta(a, event);
+  return h !== undefined && h === meta(b, event) ? h : undefined;
+};
+const $lt = (a, b) => {
+  if (typeof a === typeof b && (typeof a === 'number' || typeof a === 'string')) return a < b;
+  const h = cmpmeta('__lt', a, b);
+  if (h !== undefined) return $t($1($call(h, a, b)));
+  cmpok(a, b); return a < b;
+};
+const $le = (a, b) => {
+  if (typeof a === typeof b && (typeof a === 'number' || typeof a === 'string')) return a <= b;
+  const h = cmpmeta('__le', a, b);
+  if (h !== undefined) return $t($1($call(h, a, b)));
+  const hl = cmpmeta('__lt', a, b); // 5.1: a <= b is not (b < a) when only __lt exists
+  if (hl !== undefined) return !$t($1($call(hl, b, a)));
+  cmpok(a, b); return a <= b;
+};
 // a > b and a >= b keep Lua's LEFT-TO-RIGHT evaluation (rewriting them as b < a would evaluate b first)
-const $gt = (a, b) => { cmpok(a, b); return a > b; };
-const $ge = (a, b) => { cmpok(a, b); return a >= b; };
+const $gt = (a, b) => { const x = a, y = b; return $lt(y, x); };
+const $ge = (a, b) => { const x = a, y = b; return $le(y, x); };
 const cmpok = (a, b) => { if (!((typeof a === 'number' && typeof b === 'number') || (typeof a === 'string' && typeof b === 'string'))) throw new LuaError('attempt to compare ' + $type(a) + ' with ' + $type(b)); };
 
 // ── the base library ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -149,6 +225,8 @@ function $tostring(v) {
   if (t === 'boolean') return v ? 'true' : 'false';
   if (t === 'number') return $numstr(v);
   if (t === 'string') return v;
+  const h = meta(v, '__tostring');
+  if (h !== undefined) { const s = $1($call(h, v)); if (typeof s !== 'string') throw new LuaError("'__tostring' must return a string"); return s; }
   return t + ': ' + addr(v);
 }
 function $tonumber(v, base) {
@@ -177,7 +255,8 @@ const pairs_iter = t => {
 };
 const G = Object.create(null);
 G.pairs = t => $mv(pairs_iter(t), t, undefined);
-G.ipairs = t => { if (!isTable(t) && typeof t !== 'string') throw new LuaError("bad argument #1 to 'ipairs' (table expected, got " + $type(t) + ')'); return $mv((s, i) => { i = i + 1; const v = $idx(s, i); return v === undefined ? undefined : $mv(i, v); }, t, 0); };
+// 5.1: ipairs, unpack and the table library read and write RAW (lua_rawgeti) — metamethods do not fire
+G.ipairs = t => { if (!isTable(t) && typeof t !== 'string') throw new LuaError("bad argument #1 to 'ipairs' (table expected, got " + $type(t) + ')'); return $mv((s, i) => { i = i + 1; const v = rawget(s, i); return v === undefined ? undefined : $mv(i, v); }, t, 0); };
 G.next = (t, k) => {
   if (k !== undefined) $abort('next(t, k) with a control key');
   const r = pairs_iter(t)();
@@ -187,18 +266,29 @@ G.type = v => $type(v);
 G.tostring = v => $tostring(v);
 G.tonumber = (v, b) => $tonumber(v, b);
 G.select = (n, ...a) => (n === '#' ? a.length : $mv(...a.slice(n < 0 ? a.length + n : n - 1)));
-G.unpack = (t, i, j) => { i = i === undefined ? 1 : i; j = j === undefined ? $len(t) : j; const o = []; for (let k = i; k <= j; k++) o.push($idx(t, k)); return $mv(...o); };
+G.unpack = (t, i, j) => { i = i === undefined ? 1 : i; j = j === undefined ? $len(t) : j; const o = []; for (let k = i; k <= j; k++) o.push(rawget(t, k)); return $mv(...o); };
 G.error = (v, level) => { throw new LuaError(v); };
 G.assert = (v, msg, ...rest) => { if (!$t(v)) throw new LuaError(msg === undefined ? 'assertion failed!' : msg); return $mv(v, msg, ...rest); };
 G.pcall = (f, ...a) => { try { return $mv(true, ...$all($call(f, ...a))); } catch (e) { return $mv(false, e instanceof LuaError ? e.value : (e instanceof LuaBreak ? e : String(e && e.message || e))); } };
 G.rawequal = (a, b) => a === b;
+G.rawget = (t, k) => rawget(t, k);
+G.rawset = (t, k, v) => { if (!isTable(t)) throw new LuaError("bad argument #1 to 'rawset' (table expected, got " + $type(t) + ')'); rawset(t, k, v); return t; };
+G.setmetatable = (t, mt) => {
+  if (!isTable(t)) throw new LuaError("bad argument #1 to 'setmetatable' (table expected, got " + $type(t) + ')');
+  if (mt !== undefined && !isTable(mt)) throw new LuaError("bad argument #2 to 'setmetatable' (nil or table expected)");
+  const old = META.get(t);
+  if (old !== undefined && rawget(old, '__metatable') !== undefined) throw new LuaError('cannot change a protected metatable');
+  if (mt === undefined) META.delete(t); else META.set(t, mt);
+  return t;
+};
+G.getmetatable = v => { const mt = mt_of(v); if (mt === undefined) return undefined; const p = rawget(mt, '__metatable'); return p !== undefined ? p : mt; };
 G.print = (...a) => { process.stdout.write(Buffer.from(a.map($tostring).join('\t') + '\n', 'latin1')); };
 G.require = name => $require(name);
 G.table = $rec(
-  'insert', (t, a, b) => { if (b === undefined) $set(t, $len(t) + 1, a); else { const n = $len(t); for (let k = n; k >= a; k--) $set(t, k + 1, $idx(t, k)); $set(t, a, b); } },
-  'remove', (t, pos) => { const n = $len(t); if (pos === undefined) pos = n; if (n === 0) return undefined; const v = $idx(t, pos); for (let k = pos; k < n; k++) $set(t, k, $idx(t, k + 1)); $set(t, n, undefined); return v; },
-  'concat', (t, sep, i, j) => { sep = sep === undefined ? '' : sep; i = i === undefined ? 1 : i; j = j === undefined ? $len(t) : j; const o = []; for (let k = i; k <= j; k++) { const v = $idx(t, k); if (typeof v !== 'string' && typeof v !== 'number') throw new LuaError("invalid value (at index " + k + ") in table for 'concat'"); o.push(cstr(v)); } return o.join(cstr(sep)); },
-  'sort', (t, cmp) => { const n = $len(t); const a = []; for (let k = 1; k <= n; k++) a.push($idx(t, k)); a.sort((x, y) => (cmp ? ($t(cmp(x, y)) ? -1 : ($t(cmp(y, x)) ? 1 : 0)) : ($lt(x, y) ? -1 : ($lt(y, x) ? 1 : 0)))); for (let k = 1; k <= n; k++) $set(t, k, a[k - 1]); },
+  'insert', (t, a, b) => { if (b === undefined) rawset(t, $len(t) + 1, a); else { const n = $len(t); for (let k = n; k >= a; k--) rawset(t, k + 1, rawget(t, k)); rawset(t, a, b); } },
+  'remove', (t, pos) => { const n = $len(t); if (pos === undefined) pos = n; if (n === 0) return undefined; const v = rawget(t, pos); for (let k = pos; k < n; k++) rawset(t, k, rawget(t, k + 1)); rawset(t, n, undefined); return v; },
+  'concat', (t, sep, i, j) => { sep = sep === undefined ? '' : sep; i = i === undefined ? 1 : i; j = j === undefined ? $len(t) : j; const o = []; for (let k = i; k <= j; k++) { const v = rawget(t, k); if (typeof v !== 'string' && typeof v !== 'number') throw new LuaError("invalid value (at index " + k + ") in table for 'concat'"); o.push(cstr(v)); } return o.join(cstr(sep)); },
+  'sort', (t, cmp) => { const n = $len(t); const a = []; for (let k = 1; k <= n; k++) a.push(rawget(t, k)); a.sort((x, y) => (cmp ? ($t(cmp(x, y)) ? -1 : ($t(cmp(y, x)) ? 1 : 0)) : ($lt(x, y) ? -1 : ($lt(y, x) ? 1 : 0)))); for (let k = 1; k <= n; k++) rawset(t, k, a[k - 1]); },
   'unpack', (...a) => G.unpack(...a));
 G.math = $rec('floor', Math.floor, 'ceil', Math.ceil, 'abs', Math.abs, 'sqrt', Math.sqrt, 'max', (...a) => Math.max(...a.map(x => num(x))), 'min', (...a) => Math.min(...a.map(x => num(x))),
   'huge', Infinity, 'pi', Math.PI, 'exp', Math.exp, 'log', (x, b) => (b === undefined ? Math.log(x) : Math.log(x) / Math.log(b)), 'fmod', (a, b) => a % b, 'modf', x => $mv(Math.trunc(x), x - Math.trunc(x)),
@@ -243,6 +333,8 @@ STRING.format = (fmt, ...args) => {
   });
 };
 G.string = Object.assign(Object.create(null), STRING);
+// getmetatable('') is { __index = string }, as in Lua
+const STRING_MT = $rec('__index', G.string);
 
 // ── modules ──────────────────────────────────────────────────────────────────────────────────────────────────────
 // `require 'a.b'` loads <root>/a/b.js (or <root>/a/b/init.js), root = LUAJS_ROOT or this pack's directory; a module
@@ -263,4 +355,4 @@ function $require(name) {
 }
 
 module.exports = { $t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $add, $sub, $mul, $div, $mod,
-  $pow, $neg, $cat, $lt, $le, $gt, $ge, $type, $tostring, $tonumber, $abort, $require, $G: G, MV, LuaError, LuaBreak, $numstr };
+  $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $type, $tostring, $tonumber, $abort, $require, $G: G, MV, LuaError, LuaBreak, $numstr };

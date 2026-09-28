@@ -97,7 +97,49 @@ print(fact(10))
 local obj = { v = 10 }
 function obj:get(d) return self.v + d end
 print(obj:get(5), obj.get(obj, 1))]],
+    metatables = [[
+local Class = {}
+Class.__index = Class
+function Class.new(v) return setmetatable({ v = v }, Class) end
+function Class:get() return self.v end
+local o = Class.new(4)
+print(o:get(), o.missing, getmetatable(o) == Class, rawget(o, 'get'))
+local chain = setmetatable({}, { __index = setmetatable({ a = 1 }, { __index = function (t, k) return k .. '!' end }) })
+print(chain.a, chain.zz)
+local log = {}
+local w = setmetatable({ present = 1 }, { __newindex = function (t, k, v) log[#log + 1] = k; rawset(t, k, v * 10) end })
+w.present = 2; w.fresh = 3
+print(w.present, w.fresh, table.concat(log, ','))
+local store = {}
+local via = setmetatable({}, { __newindex = store })
+via.x = 5
+print(rawget(via, 'x'), store.x)
+local callable = setmetatable({}, { __call = function (self, a, b) return a + b, 'two' end })
+print(callable(2, 3))
+local named = setmetatable({}, { __tostring = function () return 'I am named' end })
+print(tostring(named), named)
+local cc = setmetatable({}, { __concat = function (a, b) return 'cat' end })
+print(cc .. 'x', 'x' .. cc)
+local eqf = function (a, b) return true end
+local e1, e2, e3 = setmetatable({}, { __eq = eqf }), setmetatable({}, { __eq = eqf }), setmetatable({}, { __eq = function () return true end })
+print(e1 == e2, e1 == e3, e1 ~= e2, e1 == 1)
+local ltmt = { __lt = function (a, b) return a.n < b.n end }
+local x1, x2 = setmetatable({ n = 1 }, ltmt), setmetatable({ n = 2 }, ltmt)
+print(x1 < x2, x2 < x1, x1 <= x2, x2 >= x1)
+local V = { __add = function (a, b) return 'add' end, __unm = function (a) return 'neg' end }
+local v = setmetatable({}, V)
+print(v + 1, 1 + v, -v)
+local lenmt = setmetatable({ 1, 2, 3 }, { __len = function () return 99 end })
+print(#lenmt)
+local prot = setmetatable({}, { __metatable = 'locked' })
+print(getmetatable(prot), pcall(setmetatable, prot, {}))
+print(getmetatable('').__index == string, ('x'):rep(2))
+local raw = setmetatable({ 'a', 'b' }, { __index = function (t, i) return 'X' end })
+local n = 0
+for _ in ipairs(raw) do n = n + 1 end
+print(n, raw[3], table.concat(raw, '+'), rawequal(raw, raw))]],
     errors = [[
+
 local ok, err = pcall(function () error({ code = 7 }) end)
 print(ok, type(err), err.code)
 print(pcall(function () return 1, 2 end))
