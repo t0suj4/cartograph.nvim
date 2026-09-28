@@ -60,7 +60,9 @@ local function decisions(plan, accept)
 end
 
 --- Run ONE invocation `st = { verb, args, accept? }` through `verbs[verb]` ({ plan, arm?, apply }).
---- opts: { verbs, apply = bool, decide = bool (gate on decision hazards), replan = bool (re-plan once on stale) }
+--- opts: { verbs, apply = bool, decide = bool (gate on decision hazards), replan = bool (re-plan once on stale),
+---         ns = the namespace the step writes with (a cross-world plan needs its target mounted rw; an ACCEPTED decision
+---         naming the target grants it — txn.grant) }
 --- -> { ok = true, plan, staged, entry?, empty?, accepted = {rows} }
 ---  | { ok = false, class, why, phase = 'verb'|'plan'|'decision'|'arm'|'stage'|'guard'|'apply', options? }
 function M.step(store, st, opts)
@@ -82,6 +84,8 @@ function M.step(store, st, opts)
             last = fail(class, why, 'plan')
         else
             local accepted = {}
+            local acc = {}
+            for _, k in ipairs(st.accept or {}) do acc[k] = true end
             if opts.decide then
                 local open, taken = decisions(plan, st.accept)
                 if #open > 0 then
@@ -92,7 +96,9 @@ function M.step(store, st, opts)
                 end
                 accepted = taken
             end
-            local staged, swhy, sclass = txn.stage(store, plan)
+            -- ★ the namespace this step writes with: a cross-world target is mounted rw only by an ACCEPTED decision
+            local ns = txn.grant(opts.ns, plan, acc)
+            local staged, swhy, sclass = txn.stage(store, plan, nil, { ns = ns })
             if not staged then
                 if sclass == 'empty' then return { ok = true, empty = true, why = swhy, plan = plan } end
                 last = fail(sclass, swhy, 'stage')
@@ -105,7 +111,7 @@ function M.step(store, st, opts)
                     local aok, awhy, aclass = spec.arm(store, plan)
                     if not aok then return fail(aclass or 'stale', awhy, 'arm', { plan = plan, staged = staged }) end
                 end
-                local entry, ewhy, eclass = (spec.apply or txn.apply)(store, plan)
+                local entry, ewhy, eclass = (spec.apply or txn.apply)(store, plan, { ns = ns })
                 if entry then return { ok = true, plan = plan, staged = staged, entry = entry, accepted = accepted } end
                 last = fail(eclass, ewhy, 'apply', { plan = plan, staged = staged })
             end
@@ -123,10 +129,11 @@ end
 --- restored bytes and never refreshed the graph). -> undone, why (nil when all were undone)
 function M.rollback(store, entries)
     local journal = require 'cartograph.journal'
-    local root = store.data.root
     local undone = 0
     for i = #entries, 1, -1 do
         local want = entries[i]
+        -- a cross-world write lives in ITS world's journal (txn.execute journals the target root)
+        local root = want.root or store.data.root
         local last = journal.last(root)
         if not last or last.id ~= want.id then
             return undone, ('the newest journal entry is %s, not this run\'s %s — refusing to undo a write this run did not make')
@@ -138,9 +145,12 @@ function M.rollback(store, entries)
         local touched = {}
         for rel in pairs(e.files or {}) do touched[#touched + 1] = rel end
         table.sort(touched)
-        local okr, rok, rwhy = pcall(require('cartograph.refresh').files, touched)
-        if not okr or not rok then
-            return undone, ('restored on disk, but the graph refresh refused: %s'):format(tostring(okr and rwhy or rok))
+        -- restored in ANOTHER world: this graph holds none of those files
+        if root == store.data.root then
+            local okr, rok, rwhy = pcall(require('cartograph.refresh').files, touched)
+            if not okr or not rok then
+                return undone, ('restored on disk, but the graph refresh refused: %s'):format(tostring(okr and rwhy or rok))
+            end
         end
     end
     return undone
@@ -191,6 +201,9 @@ local eval
 --- whole effect. A compensable or irreversible step does something the text does not show, and a world that omitted
 --- it would be a preview of something else. -> overlay data | nil, why, class
 function M.next_world(store, effect, r)
+    if r.plan and require('cartograph.txn').cross_world(store, r.plan) then
+        return nil, ('it writes ANOTHER world (%s), not the one this preview derives'):format(tostring(r.plan.target.root)), 'frontier'
+    end
     if effect ~= 'journaled' then return nil, ('its effect is %s, which an overlay of the staged text does not capture'):format(tostring(effect)), 'frontier' end
     local edits, n = {}, 0
     for rel, text in pairs(r.staged.after or {}) do
@@ -220,7 +233,7 @@ local function eval_step(store, t, opts, where)
             why = ('cannot be derived until %s is applied — its inputs do not exist yet'):format(opts.previewing_blocked) }
         return out
     end
-    local r = M.step(store, t, { verbs = opts.verbs, apply = opts.apply, decide = true, replan = true })
+    local r = M.step(store, t, { verbs = opts.verbs, apply = opts.apply, decide = true, replan = true, ns = opts.ns })
     local corrected
     if not r.ok and (r.class == 'ill-posed' or r.class == 'stale') and r.phase == 'plan' and spec.correct
         and opts.correct ~= 'off' then
@@ -539,7 +552,7 @@ end
 function M.run(store, term, opts)
     opts = opts or {}
     local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct,
-        toolbelt_dir = opts.toolbelt_dir }
+        toolbelt_dir = opts.toolbelt_dir, ns = opts.ns }
     -- ★ A DRY RUN CHAINS OVERLAY WORLDS (CART-1160 step 3) and the caller's graph comes back afterwards, raise or not
     local rec = not eopts.apply and store.capture()
     local okr, o = pcall(eval, store, term, eopts, 'root')

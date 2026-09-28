@@ -79,6 +79,66 @@ function M.disk_stamp(root, rel)
     return transport.stamp(root .. '/' .. rel)
 end
 
+-- ── the TARGET world (CART-1160 step 5) ────────────────────────────────────────
+-- A plan is derived from one world (the graph it was planned against) and WRITES one world: by default the same, and
+-- with `plan.target = { root, why }` another one — promotion writes the built-in toolbelt while the graph is the
+-- project. ★ A CROSS-WORLD WRITE NEEDS THAT WORLD MOUNTED WRITABLE in the namespace the caller runs with (`opts.ns`, a
+-- cartograph.namespace value whose entry covering the target carries `rw = true`). Nothing grants it implicitly: the
+-- plan carries a DECISION naming the target, and the tactic runner mounts the target rw only when that decision is
+-- accepted — Linux's `remount,rw` behind a question. Containment is then checked against the TARGET root, the journal
+-- entry lives in the TARGET world's journal (the world written owns its history), and the graph is not refreshed
+-- (the files written are not its files).
+
+--- the root a plan WRITES: its target world, else the graph's own
+function M.target_root(store, plan)
+    local t = type(plan) == 'table' and plan.target
+    return (type(t) == 'table' and t.root) or (store.data and store.data.root)
+end
+
+--- does the plan write a world other than the graph's?
+function M.cross_world(store, plan)
+    return M.target_root(store, plan) ~= (store.data and store.data.root)
+end
+
+--- the writable mount covering `root` in `ns` -> entry | nil
+function M.writable(ns, root)
+    local hit = ns and require('cartograph.namespace').resolve(ns, root)
+    for _, e in ipairs(hit and hit.layers or {}) do
+        if type(e.opts) == 'table' and e.opts.rw then return e end
+    end
+end
+
+--- ★ MAKE A PLAN WRITE ANOTHER WORLD: sets `plan.target` and guarantees a DECISION hazard that names the target (its
+--- evidence carries `target = root`). A builder whose own decision already names the target (promotion's `promote`)
+--- keeps it as the one question; otherwise a generic `target-write` decision is added. -> plan
+function M.target(plan, root, why)
+    plan.target = { root = root, why = why }
+    plan.hazards = plan.hazards or {}
+    for _, h in ipairs(plan.hazards) do
+        if type(h) == 'table' and h.class == 'decision' and type(h.evidence) == 'table' and h.evidence.target == root then
+            return plan
+        end
+    end
+    plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('target-write',
+        ('this plan writes into ANOTHER world (%s), not the graph it was planned against: %s'):format(root, tostring(why)),
+        nil, { target = root }, 'decision')
+    return plan
+end
+
+--- the namespace a step writes with, once its decisions are answered: `ns` plus a writable mount of the plan's target
+--- for every ACCEPTED decision that names it. -> ns (unchanged when nothing is granted)
+function M.grant(ns, plan, accepted)
+    local root = type(plan) == 'table' and type(plan.target) == 'table' and plan.target.root
+    if not root then return ns end
+    local namespace = require 'cartograph.namespace'
+    for _, h in ipairs(plan.hazards or {}) do
+        if type(h) == 'table' and accepted[h.kind] and type(h.evidence) == 'table' and h.evidence.target == root then
+            return namespace.mount(ns or namespace.empty(), root, 'decision:' .. h.kind, { rw = true, granted_by = h.kind })
+        end
+    end
+    return ns
+end
+
 
 --- ★★ IS THIS DEFINITION AT MODULE LEVEL? The shared predicate behind two write
 --- verbs' soundness (CART-0770 for the LIFT, CART-0773 for the DELETE), and it
@@ -318,7 +378,7 @@ end
 --- so it reads the disk itself.
 function M.stage(store, plan, edit_of, opts)
     opts = opts or {}
-    local root = store.data.root
+    local root = M.target_root(store, plan)
     -- ★ THE BACKSTOP, AND IT MUST PRECEDE journal.begin: refusing after the journal
     -- opens would leave an entry for a write we never meant to make. Every path the
     -- plan touches or creates is checked, not just its dest — a plan is a SET of
@@ -328,6 +388,19 @@ function M.stage(store, plan, edit_of, opts)
     -- copies this replaced HAD drifted (dryrun's handed its reason back as `after`).
     local cok, cwhy, cwhy_class = M.contain_plan(plan)
     if not cok then return nil, cwhy, cwhy_class or 'ill-posed' end
+    -- ★ A CROSS-WORLD WRITE IS REFUSED UNLESS THAT WORLD IS MOUNTED WRITABLE (step 5) — beside the containment backstop,
+    -- for the same reason: it is about what the plan would DO, and it precedes every protocol-completeness refusal
+    if M.cross_world(store, plan) and not M.writable(opts.ns, root) then
+        local names = {}
+        for _, h in ipairs(plan.hazards or {}) do
+            if type(h) == 'table' and h.class == 'decision' and type(h.evidence) == 'table' and h.evidence.target == root then
+                names[#names + 1] = '`' .. tostring(h.kind) .. '`'
+            end
+        end
+        return nil, ('the plan for `%s` writes into ANOTHER world (%s), which is not mounted writable — %s')
+            :format(tostring(plan.verb), root, #names > 0 and ('accept its %s decision'):format(table.concat(names, ' / '))
+                or 'pass a namespace that mounts it rw'), 'decision'
+    end
     -- the protocol-completeness refusals (edit_of, desc) speak AFTER the security backstop — the rule
     -- the behavioural-claim check below states; both used to precede it
     local nope, nope_class
@@ -585,7 +658,7 @@ function M.verify(store, plan, refspecs)
                 note or 'no longer resolves')
         end
     end
-    local root = store.data.root
+    local root = M.target_root(store, plan)
     -- ⚠ A PLAN WITH NO `stamps` IS AN INCOMPLETE PLAN, NOT A PASSING ONE. Indexing a
     -- nil here RAISED, which reaches a caller as an "analysis" error and reads like a
     -- bug in the tree rather than in the plan (CART-0878: plan_family never set them,
@@ -638,7 +711,8 @@ end
 --- move-set splice must not see a frozen graph, and spending host state before the
 --- plan is known to be applicable would leave the caller with neither.
 --- @return table|nil entry, string|nil why
-function M.apply(store, plan)
+--- opts: { ns } — the namespace a cross-world plan is written with (see M.target)
+function M.apply(store, plan, opts)
     if type(plan) ~= 'table' then return nil, 'not a plan', 'ill-posed' end
     -- ★ A VIRTUAL GRAPH IS NEVER APPLIED (CART-1160 — the TARGET rule): a plan made against an overlay world read texts
     -- that exist only in memory, and writing its edits to the disk would commit a world nobody has. Commit belongs to
@@ -654,7 +728,7 @@ function M.apply(store, plan)
     local bad = M.verify(store, plan)
     if bad then return nil, bad, 'stale' end
     if plan.consume then plan.consume(store, plan) end
-    return M.execute(store, plan, plan.desc)
+    return M.execute(store, plan, plan.desc, nil, opts)
 end
 
 --- Journal-first commit: read every touched file's before-content,
@@ -662,13 +736,14 @@ end
 --- file, write, journal.commit, clear the staged txn and splice the
 --- touched files back through refresh — the same machinery every save
 --- uses. Returns the journal entry, or nil + why.
-function M.execute(store, plan, desc, edit_of)
-    local s, why, class = M.stage(store, plan, edit_of, { desc = desc })
+function M.execute(store, plan, desc, edit_of, opts)
+    local s, why, class = M.stage(store, plan, edit_of, { desc = desc, ns = opts and opts.ns })
     if not s then return nil, why, class or 'unbuilt' end
     if s.failed then
         return nil, require('cartograph.planguards').refusal(s.failed), 'unbuilt'
     end
-    local root = store.data.root
+    local root = M.target_root(store, plan)
+    local cross = M.cross_world(store, plan)
     local before, after
     before, after, desc = s.before, s.after, s.desc
     local journal = require 'cartograph.journal'
@@ -689,6 +764,8 @@ function M.execute(store, plan, desc, edit_of)
     end
     journal.commit(root, entry, after)
     store.set_txn(nil)
+    -- a cross-world write touched ANOTHER world's files: this graph has none of them to refresh
+    if cross then vim.cmd('silent! checktime'); return entry end
     local ok, why = require('cartograph.refresh').files(plan.touched)
     if not ok then
         -- the writes are committed (journal has them); only the graph is stale

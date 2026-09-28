@@ -69,7 +69,7 @@ M.VERBS = {
         -- ★ THE GENERIC DRIVER (CART-0982). `plan` and `arm` stay per-verb — planning
         -- IS the verb, and `arm` runs at plan time — but APPLY is no longer something
         -- a recipe step has to know how to do. A verb added here declares no apply.
-        apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+        apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
         -- ★ WHAT A TACTIC MAY ASSUME (tactic.lua): the write is journaled (undoable), and re-running the SAME
         -- invocation after it applied is `empty` (the goal check above) — measured by tactic_spec's idempotence fence
         effect = 'journaled', rerun = 'empty',
@@ -116,7 +116,7 @@ M.VERBS.replace = {
         if not id then return nil, why, class or 'ill-posed' end
         return require('cartograph.replace').plan(store, { node = id, text = args.text })
     end,
-    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
     correct = { ref = 'ref' },
 }
@@ -126,7 +126,7 @@ M.VERBS.annotate = {
         if not id then return nil, why, class or 'ill-posed' end
         return require('cartograph.annotate').plan(store, { node = id, text = args.text })
     end,
-    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
     correct = { ref = 'ref' },
 }
@@ -136,7 +136,7 @@ M.VERBS.clonemerge = {
         if not id then return nil, why, class or 'ill-posed' end
         return require('cartograph.clonemerge').plan(store, id)
     end,
-    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
     correct = { ref = 'ref' },
 }
@@ -149,7 +149,7 @@ M.VERBS.propagate = {
         if not id then return nil, why, class or 'ill-posed' end
         return require('cartograph.propagate').plan(store, { node = id, text = args.text, scope = args.scope })
     end,
-    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
     correct = { ref = 'ref' },
 }
@@ -158,7 +158,7 @@ M.VERBS.propagate = {
 -- learned rule never matches its own output (learn refuses one that does), so once applied nothing matches
 M.VERBS['rewrite-by-example'] = {
     plan = function (store, args) return require('cartograph.byexample').plan(store, args) end,
-    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
 
@@ -167,12 +167,12 @@ M.VERBS['rewrite-by-example'] = {
 -- ★ RE-RUN IS EMPTY for both: an identical file is the goal met.
 M.VERBS['learn-tactic'] = {
     plan = function (store, args) return require('cartograph.toolbelt').plan_learn(store, args) end,
-    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
 M.VERBS['promote-tactic'] = {
     plan = function (store, args) return require('cartograph.toolbelt').plan_promote(store, args) end,
-    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
 

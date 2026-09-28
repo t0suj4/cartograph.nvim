@@ -293,10 +293,10 @@ function M.validate_source(name, src)
 end
 
 --- a plan CREATING one file `rel` under the graph root with `src` (the learn-tactic and promote-tactic verbs)
-local function create_plan(store, verb, rel, src, desc, hazards)
+local function create_plan(store, verb, rel, src, desc, hazards, root)
     local txn = require 'cartograph.txn'
     return txn.protocol({ verb = verb, guards = { 'parses' }, generation = store.generation,
-        touched = { rel }, creates = { [rel] = true }, stamps = { [rel] = txn.disk_stamp(store.data.root, rel) },
+        touched = { rel }, creates = { [rel] = true }, stamps = { [rel] = txn.disk_stamp(root or store.data.root, rel) },
         refspecs = {}, hazards = hazards or {}, src = src, rel = rel,
         -- a NEW file: no existing symbol's behaviour changes
         preserves = 'all', preserves_why = 'it creates a new tactic file and edits nothing that exists',
@@ -335,20 +335,24 @@ function M.plan_promote(store, args)
     local src = slurp(src_path)
     if not src then return nil, ('no project tactic %s'):format(src_path), 'ill-posed' end
     local root = store.data.root
-    local into = args.into or dir()
-    if into:sub(1, #root + 1) ~= root .. '/' then
-        return nil, ('promotion writes into the toolbelt at %s, which is outside this graph (%s) — run it with that repository as the graph')
-            :format(into, root), 'ill-posed'
-    end
-    local rel = into:sub(#root + 2) .. '/' .. name .. '.lua'
-    local existing = txn.read_file(root, rel)
+    local into = (args.into or dir()):gsub('/+$', '')
+    -- ★ INSIDE this graph's world, a plain write; OUTSIDE it, a CROSS-WORLD write into the toolbelt's own world
+    -- (CART-1160 step 5) — it used to refuse with "run it with that repository as the graph"
+    local inside = into:sub(1, #root + 1) == root .. '/'
+    local wroot = inside and root or into
+    local rel = inside and (into:sub(#root + 2) .. '/' .. name .. '.lua') or (name .. '.lua')
+    local existing = txn.read_file(wroot, rel)
     if existing == src then return nil, ('`%s` is already promoted'):format(name), 'empty' end
     if existing then return nil, ('a built-in `%s` exists and differs — promotion never overwrites one'):format(name), 'ill-posed' end
     local ok, vwhy = M.validate_source(name, src)
     if not ok then return nil, ('`%s` was not promoted: %s'):format(name, vwhy), 'unbuilt' end
-    local hz = require('cartograph.hazard').new('promote', ('promoting `%s` puts it in EVERY session\'s toolbelt — read %s and its examples first')
-        :format(name, src_path), nil, { from = src_path }, 'decision')
-    return create_plan(store, 'promote-tactic', rel, src, ('promote tactic %s into the built-in toolbelt'):format(name), { hz })
+    -- the ONE question: promoting reaches every session, and (outside this world) it is also the grant to write there
+    local hz = require('cartograph.hazard').new('promote', ('promoting `%s` puts it in EVERY session\'s toolbelt — read %s and its examples first%s')
+        :format(name, src_path, inside and '' or (' (it writes %s, another world)'):format(into)),
+        nil, { from = src_path, target = (not inside) and into or nil }, 'decision')
+    local plan = create_plan(store, 'promote-tactic', rel, src, ('promote tactic %s into the built-in toolbelt'):format(name), { hz }, wroot)
+    if plan and not inside then txn.target(plan, into, 'promotion writes the built-in toolbelt') end
+    return plan
 end
 
 --- run an entry against the current graph.

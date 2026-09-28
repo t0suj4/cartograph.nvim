@@ -1,5 +1,6 @@
--- PROMOTE-TACTIC (write): copy a PROJECT tactic into the BUILT-IN toolbelt, so every session has it. The graph must be
--- the repository holding the built-in directory (the write is journaled against it). ★ ALWAYS A DECISION: a promoted
+-- PROMOTE-TACTIC (write): copy a PROJECT tactic into the BUILT-IN toolbelt, so every session has it. The graph is the
+-- PROJECT; when the built-in directory lies outside it, the write is CROSS-WORLD (CART-1160 step 5): journaled in the
+-- toolbelt's own world, and the `promote` decision is also the grant to write there. ★ ALWAYS A DECISION: a promoted
 -- tactic is in every session's toolbelt, so the run STOPS on `promote` until confirm = yes. It is checked first: the
 -- entry must pass its own examples, and an existing built-in with that name is never overwritten.
 local T = require('cartograph.tactic').T
