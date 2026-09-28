@@ -21,7 +21,10 @@ end
 
 local reg = {}
 
-function _G.test(name, fn) reg[#reg + 1] = { name = name, fn = fn } end
+-- the spec file each test came from (TIMES groups by it)
+local current_spec
+local load_ms = {}
+function _G.test(name, fn) reg[#reg + 1] = { name = name, fn = fn, spec = current_spec } end
 
 local function fmt(v) return type(v) == 'table' and vim.inspect(v) or tostring(v) end
 
@@ -123,12 +126,16 @@ for _, f in ipairs(vim.fn.glob('tests/*_spec.lua', false, true)) do
         -- also bought a wrong diagnosis — the suite was read as "slow" for 500s when it
         -- had in fact already died. A hang is the worst shape a gate can fail in, because
         -- it is indistinguishable from slow work.
+        current_spec = f:match('([^/]+)%.lua$')
         local chunk, lerr = loadfile(f)
         if not chunk then
             print(('\nLOAD ERROR — cannot compile %s:\n  %s'):format(f, tostring(lerr)))
             vim.cmd('cquit 1')
         end
+        local l0 = vim.uv.hrtime()
         local okc, cerr = pcall(chunk)
+        -- a spec's LOAD time (top-level fixture work) is time too: TIMES reports it as the spec's `(load)` row
+        load_ms[current_spec] = (vim.uv.hrtime() - l0) / 1e6
         if not okc then
             print(('\nLOAD ERROR — %s raised while loading:\n  %s')
                 :format(f, tostring(cerr):gsub('\n', '\n  ')))
@@ -158,10 +165,20 @@ if vim.env.COVER and vim.env.COVER ~= '' then
     end, 'l')
 end
 
+-- ── OPT-IN TIMINGS ──────────────────────────────────────────────────────────
+-- `TIMES=<file>` records each test's wall time as `ms<TAB>spec<TAB>status<TAB>name` there (TIMES_QUIET=1: no printed summary) and prints the slowest specs and
+-- tests at the end. Opt-in like COVER: the default output is what the fences and hooks read.
+local times = vim.env.TIMES and vim.env.TIMES ~= '' and {} or nil
+
 local pass, fail, skipped, pending = 0, 0, 0, 0
 print('')
 for _, t in ipairs(reg) do
+    local t0 = times and vim.uv.hrtime()
     local good, err = pcall(t.fn)
+    if times then
+        times[#times + 1] = { ms = (vim.uv.hrtime() - t0) / 1e6, spec = t.spec or '?', name = t.name,
+            status = good and 'ok' or type(err) == 'table' and (err.__pending and 'pend' or err.__skip and 'skip') or 'FAIL' }
+    end
     if good then
         pass = pass + 1
         print('  ok    ' .. t.name)
@@ -188,6 +205,28 @@ if cover then
     local fd = io.open(vim.env.COVER, 'w')
     if fd then fd:write(table.concat(out, '\n')); fd:close() end
     print(('coverage: %d executed line(s) under lua/cartograph/'):format(#out))
+end
+
+if times then
+    local lines, by_spec, total = {}, {}, 0
+    for s, ms in pairs(load_ms) do if ms >= 1 then times[#times + 1] = { ms = ms, spec = s, name = '(load)' } end end
+    for _, r in ipairs(times) do
+        lines[#lines + 1] = ('%.1f\t%s\t%s\t%s'):format(r.ms, r.spec, r.status or 'load', r.name)
+        by_spec[r.spec] = (by_spec[r.spec] or 0) + r.ms
+        total = total + r.ms
+    end
+    local fd = io.open(vim.env.TIMES, 'w')
+    if fd then fd:write(table.concat(lines, '\n'), '\n'); fd:close() end
+    local specs = {}
+    for s, ms in pairs(by_spec) do specs[#specs + 1] = { s = s, ms = ms } end
+    table.sort(specs, function (a, b) return a.ms > b.ms end)
+    table.sort(times, function (a, b) return a.ms > b.ms end)
+    if vim.env.TIMES_QUIET == '1' then goto quiet end
+    io.write(('\ntimings: %d test(s), %.0f s in tests (written to %s)\n  slowest specs:\n'):format(#times, total / 1e3, vim.env.TIMES))
+    for i = 1, math.min(10, #specs) do io.write(('    %7.1f s  %5.1f%%  %s\n'):format(specs[i].ms / 1e3, 100 * specs[i].ms / total, specs[i].s)) end
+    io.write('  slowest tests:\n')
+    for i = 1, math.min(10, #times) do io.write(('    %7.1f s  %s: %s\n'):format(times[i].ms / 1e3, times[i].spec, times[i].name:sub(1, 90))) end
+    ::quiet::
 end
 
 print(('\n%d passed, %d failed, %d skipped%s\n'):format(pass, fail, skipped,

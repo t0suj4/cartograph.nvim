@@ -25,6 +25,13 @@ export XDG_STATE_HOME
 # has to survive the trap
 trap 'rm -rf "$XDG_STATE_HOME"' EXIT
 
-nvim --headless -u NONE --noplugin \
-    -c "set rtp+=$PWD" \
-    -c "luafile tests/run.lua"
+# JOBS=N: the spec files split across N worker processes (tests/prun.lua — each worker its own throwaway state home, balanced by the measured time of the last parallel run, the summary line unchanged)
+# The DEFAULT is parallel (JOBS unset = derived: min(cores, total / slowest spec)); JOBS=1 is the serial runner, and so
+# is a SPEC= run that names no JOBS (one or two specs gain nothing from workers)
+if [ "${JOBS:-}" != 1 ] && { [ -z "${SPEC:-}" ] || [ -n "${JOBS:-}" ]; }; then
+    nvim --headless -u NONE --noplugin -l tests/prun.lua
+else
+    nvim --headless -u NONE --noplugin \
+        -c "set rtp+=$PWD" \
+        -c "luafile tests/run.lua"
+fi
