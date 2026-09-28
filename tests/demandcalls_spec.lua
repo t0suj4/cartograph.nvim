@@ -92,10 +92,11 @@ end)
 test('demand calls: the file\'s DATAFLOW is materialized too (resolution reads it)', function ()
     if not ready('lua') then skip 'no lua parser' end
     store.ingest(ts.index_only(corpus()))
-    -- before: the thin index carries no df/flow
+    -- before: the thin index carries no df/flow. ★ RAW reads: the question is what the RECORD holds, and on a
+    -- skeleton graph `n.df` is an adapter trigger that would fill it (CART-1160 step 8) — asking would change the answer
     local function has_df()
         for _, n in ipairs(store.data.nodes or {}) do
-            if n.file == 'caller.lua' and (n.df or n._df or n.flow or n._flow) then
+            if n.file == 'caller.lua' and (rawget(n, 'df') or rawget(n, '_df') or rawget(n, 'flow') or rawget(n, '_flow')) then
                 return true
             end
         end

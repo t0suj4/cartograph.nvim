@@ -370,6 +370,9 @@ function M.ingest(data, opts)
     -- on graph identity and on NOT being a partial graph, so it never captures the
     -- unsound answer or another corpus's.
     M.capture_selft()
+    -- ★ A SKELETON GRAPH GETS ITS ADAPTERS (CART-1160 step 8): reading a detail field of an index-only node fills that
+    -- node's file on demand, instead of answering an unbuilt field with nil
+    if M.data.index_only then require('cartograph.adapters').install(M) end
     return M.data
 end
 
@@ -446,7 +449,8 @@ function M.materialize_file_dataflow(rel)
     -- already present (full graph, or a prior fold)? then nothing to do
     for _, rn in ipairs(M.data.nodes or {}) do
         if rn.file == rel and (rn.kind == 'function' or rn.kind == 'method') then
-            if rn.df or rn._df or rn.flow or rn._flow then M._df_materialized[rel] = true; return false end
+            -- RAW reads: on a skeleton graph these fields are adapter triggers, and this IS the producer
+            if rawget(rn, 'df') or rawget(rn, '_df') or rawget(rn, 'flow') or rawget(rn, '_flow') then M._df_materialized[rel] = true; return false end
             break
         end
     end
