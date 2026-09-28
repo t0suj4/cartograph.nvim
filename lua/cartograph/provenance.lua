@@ -278,9 +278,10 @@ function M.write_note(repo, sha)
     return row
 end
 
---- read the ledger note of `sha` -> row | nil (no note)
-function M.read_note(repo, sha)
-    local txt = git(repo, { 'notes', '--ref', M.NOTES_REF, 'show', sha })
+--- read the ledger note of `sha` -> row | nil (no note). `ref` = another notes ref (a teammate's, fetched into
+--- cartograph.replay's mirror); default this repo's own
+function M.read_note(repo, sha, ref)
+    local txt = git(repo, { 'notes', '--ref', ref or M.NOTES_REF, 'show', sha })
     if not txt then return nil end
     local ok, row = pcall(vim.json.decode, txt)
     return ok and row or nil

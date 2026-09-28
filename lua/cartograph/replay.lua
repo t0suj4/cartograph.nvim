@@ -21,12 +21,33 @@ local function git(repo, args)
     return r.code == 0 and r.stdout or nil
 end
 
---- the invocations the ledger notes of `range` (in `repo`) carry, in replay order -> { { commit, id, invocation } }
-function M.from_notes(repo, range)
+-- ── TRANSPORT (CART-1191 leaf 4): a GIT store ─────────────────────────────────────────────────────────────────────
+-- A teammate's work travels as their branch AND their ledger notes, both pushed to a shared remote. `fetch` brings both
+-- here: the branches as usual (refs/remotes/<remote>/…), the notes into a MIRROR ref of their own —
+-- refs/notes/cartograph-remotes/<remote> — force-updated to theirs and NEVER merged into this repo's notes (this repo's
+-- ledger records what happened HERE; theirs is evidence of what they asked, read only to replay it).
+-- The store's capabilities, as CART-1183 derives them for a git remote: read by key (a note per commit), conditional
+-- write (a push is refused when the remote moved — the CAS), and no change feed (fetch is a POLL).
+M.MIRROR = 'refs/notes/cartograph-remotes/'
+
+--- fetch `remote`'s branches and its ledger notes into the mirror -> the mirror ref | nil, why
+function M.fetch(repo, remote)
+    if type(remote) ~= 'string' or not remote:match('^[%w._-]+$') then return nil, 'a remote NAME (as `git remote` lists it)' end
+    local ref = M.MIRROR .. remote
+    local ok = git(repo, { 'fetch', '-q', remote })
+    if not ok then return nil, ('git fetch %s failed'):format(remote) end
+    -- a remote with no notes yet is not an error: nothing to replay from it
+    git(repo, { 'fetch', '-q', remote, '+' .. require('cartograph.provenance').NOTES_REF .. ':' .. ref })
+    return ref
+end
+
+--- the invocations the ledger notes of `range` (in `repo`; `ref` = a notes ref, default this repo's) carry, in replay
+--- order -> { { commit, id, invocation } }
+function M.from_notes(repo, range, ref)
     local P = require 'cartograph.provenance'
     local out, seen = {}, {}
     for sha in (git(repo, { 'rev-list', '--reverse', range }) or ''):gmatch('%x+') do
-        local row = P.read_note(repo, sha)
+        local row = P.read_note(repo, sha, ref)
         local entries = {}
         -- ⚠ ONE ENTRY, ONE STEP: the line-level attribution can credit an entry to SEVERAL commits (MEASURED: 22 of 135
         -- entries over the last 8 notes of this repo — an old entry "explains" identical lines of a later commit), so

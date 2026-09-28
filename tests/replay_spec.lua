@@ -112,6 +112,32 @@ test('replay: a SUPERSEDED step (its lines overwritten before the commit) is sti
     eq(read(a, 'm.lua'), read(b, 'm.lua'), 'the clean parent reaches the commit, byte for byte')
 end)
 
+test('replay over a SHARED REMOTE: A pushes its branch and notes; B fetches them into a MIRROR and replays — B\'s own notes untouched, no git merge', function ()
+    if not ready() then skip 'no lua parser / git' end
+    local hub = vim.fn.tempname()
+    vim.system({ 'git', 'init', '-q', '--bare', hub }):wait()
+    local a = vim.fn.tempname()
+    vim.fn.mkdir(a, 'p')
+    local fd = assert(io.open(a .. '/m.lua', 'w')); fd:write('local M = {}\nreturn M\n'); fd:close()
+    sh(a, 'init', '-q'); ident(a); sh(a, 'add', '.'); sh(a, 'commit', '-qm', 'base')
+    sh(a, 'remote', 'add', 'origin', hub)
+    local branch = vim.trim(sh(a, 'rev-parse', '--abbrev-ref', 'HEAD').stdout)
+    sh(a, 'push', '-q', 'origin', branch)
+    local b = vim.fn.tempname()
+    vim.system({ 'git', 'clone', '-q', hub, b }):wait(); ident(b)
+    local b_head = vim.trim(sh(b, 'rev-parse', 'HEAD').stdout)
+    work(a, { { file = 'm.lua', before = 'return M\n', after = 'M.shared = 1\nreturn M\n' } })
+    sh(a, 'push', '-q', 'origin', branch, 'refs/notes/cartograph')
+    local r = vim.system({ 'nvim', '--headless', '-u', 'NONE', '-l', vim.fn.getcwd() .. '/tools/replay.lua', b, '--remote', 'origin',
+        'HEAD..origin/' .. branch, 'apply=1' }, { text = true }):wait(120000)
+    local text = (r.stdout or '') .. (r.stderr or '')
+    eq(0, r.code, text); ok(text:find('1 applied', 1, true), text)
+    eq('local M = {}\nM.shared = 1\nreturn M\n', read(b, 'm.lua'), 'A\'s intent, replayed in B\'s working tree')
+    eq(b_head, vim.trim(sh(b, 'rev-parse', 'HEAD').stdout), 'no merge: B\'s history did not move')
+    ok(sh(b, 'rev-parse', '-q', '--verify', 'refs/notes/cartograph-remotes/origin').code == 0, 'the mirror holds A\'s notes')
+    ok(sh(b, 'rev-parse', '-q', '--verify', 'refs/notes/cartograph').code ~= 0, 'B\'s OWN notes were never written by the fetch')
+end)
+
 test('replay: a step whose files are UNKNOWN never runs past a stop, and does not let one pass it', function ()
     if not ready() then skip 'no lua parser / git' end
     local a, b = pair()
