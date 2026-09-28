@@ -2837,15 +2837,15 @@ local function v_txn_preview(store, args)
     local e, bad = held_plan(store, args.plan)
     if not e then return bad end
     local txn = require 'cartograph.txn'
-    local before, after, err = txn.dryrun(store, e.plan)
-    if not before then
-        -- txn.dryrun reports its reason in the 2nd slot for a containment refusal
-        -- and in the 3rd for the others; both are prose, carried verbatim
-        local reason = err or (type(after) == 'string' and after) or 'the dry run produced nothing'
+    -- ONE staging for preview and apply (txn.stage): a preview refuses exactly what the apply would
+    local staged, err, class = txn.stage(store, e.plan)
+    if not staged then
         return refuse('preview-refused',
-            ('plan %s could not be dry-run: %s'):format(e.id, tostring(reason)),
-            'the reason is the transaction layer\'s own; re-plan once its premise holds')
+            ('plan %s could not be dry-run: %s'):format(e.id, tostring(err or 'the dry run produced nothing')),
+            'the reason is the transaction layer\'s own; re-plan once its premise holds',
+            { class = nn(class) })
     end
+    local before, after = staged.before, staged.after
     e.previewed = true
     -- ★★★ WHAT WAS REVIEWED, AS A DIGEST. A recipe re-derives the plan on load,
     -- and re-derivation against a moved tree can hand the armed session an edit

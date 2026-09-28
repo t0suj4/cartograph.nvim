@@ -345,7 +345,13 @@ function M.plan(store, rel, opts)
     return txn.protocol({ verb = 'index-a-scan', guards = { 'parses', 'spans-unchanged' }, refspecs = {},
         touched = { rel }, generation = store.generation,
         stamps = { [rel] = txn.disk_stamp(store.data.root, rel) }, rel = rel,
-        reps = reps, ins = ins, moves = moves, declined = declined },
+        reps = reps, ins = ins, moves = moves, declined = declined,
+        -- ⚠ THESE TWO WERE MISSING, SO THIS VERB COULD PLAN AND PREVIEW AND NEVER APPLY: execute refused "carries no
+        -- description" while the old dryrun copy accepted the plan (surfaced by CART-1153's one staging)
+        desc = ('index-a-scan: %d loop(s) in %s'):format(#moves, rel),
+        -- UNREVIEWED, not 'all': the bucket answers like the scan only under the guards' premises, and the
+        -- CPU-for-memory trade is priced separately (tools/idxprofile.lua)
+        preserves = 'unreviewed' },
         function(p)
             return function(r, before)
                 if r ~= p.rel then return before end

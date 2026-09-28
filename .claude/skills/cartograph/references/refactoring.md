@@ -156,6 +156,8 @@ table address — it is loose. The real contracts:
 | `cloneextract` | `before, after [, why]` — same |
 | `optapply` | `difftext_lines, before, after` — **lines FIRST**, and on failure a *truthy* one-element table `{ 'optapply: …' }`, never `nil` |
 
+Every bare-`txn.dryrun` preview is `txn.stage` projected (CART-1153): it refuses **exactly what apply would** before the write (no guards / desc / behavioural claim, a no-op, an escaping path). For the reason's CLASS or the guard verdicts in one value, call `txn.stage(store, plan)` → `{ before, after, virtual, verdicts, failed }` or `nil, why, class`.
+
 `apply()` return shapes differ too — three of them:
 
 | verb | `apply(store, plan)` returns |

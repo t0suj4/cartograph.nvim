@@ -265,7 +265,11 @@ function M.plan(store, rel)
     local plan = txn.protocol({ verb = 'pattern-rewrite', guards = { 'parses', 'spans-unchanged' }, refspecs = {},
         touched = { rel }, generation = store.generation,
         stamps = { [rel] = txn.disk_stamp(store.data.root, rel) }, rel = rel,
-        reps = reps, ins = {}, moves = moves, declined = declined },
+        reps = reps, ins = {}, moves = moves, declined = declined,
+        -- ⚠ THESE TWO WERE MISSING, SO THIS VERB COULD PLAN AND PREVIEW AND NEVER APPLY (CART-1153's one staging)
+        desc = ('pattern-rewrite: %d site(s) in %s'):format(#moves, rel),
+        -- UNREVIEWED: each catalog rule holds under its stated premise (`moves[i].premise`), which nothing re-checks
+        preserves = 'unreviewed' },
         function(p)
             return function(r, before)
                 if r ~= p.rel then return before end

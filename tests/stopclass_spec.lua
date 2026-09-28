@@ -82,8 +82,8 @@ local function unclassed_refusals(src)
             and el:named_child_count() >= 2) then return end
         local second = el:named_child(1):type()
         if second == 'true' or second == 'false' then return end -- a value tuple, not a stop
-        -- `nil, nil, why`: a (before, after, why) contract (txn.dryrun) — the reason is the third value and there is no
-        -- class slot; its consumers classify (txn.delta defaults it). A KNOWN HOLE, CART-1152
+        -- `nil, nil, why, nil, class`: txn.dryrun's (before, after, why, virtual) projection of txn.stage, which names
+        -- the class (CART-1153) — the stop itself is fenced where stage returns it
         if second == 'nil' then return end
         seen = seen + 1
         local third = el:named_child(2)

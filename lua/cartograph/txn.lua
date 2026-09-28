@@ -270,9 +270,17 @@ function M.protocol(plan, edits_for)
     return plan
 end
 
---- Dry-run a plan: the same before-content read and edit callback the
---- apply uses, but nothing written. Returns (before_map, after_map).
---- `edit_of` is optional — the plan's own is used when it is omitted.
+--- ★★★ STAGE A PLAN: EVERYTHING AN APPLY DOES EXCEPT THE WRITE (CART-1153). The one
+--- implementation under preview (`dryrun`), scoring (`delta`), composition (compose) and the
+--- write itself (`execute` = stage, refuse on a failed guard, journal, write). Before this,
+--- `execute` re-implemented dryrun's body, and the copies drifted: dryrun handed its
+--- containment reason back as `after`, and ACCEPTED a plan declaring no guards and a plan
+--- that changes nothing — both of which execute refused, so a preview (or a compose chain)
+--- could succeed on a plan apply would refuse.
+---
+--- Returns { before, after, virtual, verdicts, failed, desc }, or nil, why, class (the stop
+--- vocabulary, hazard.CLASSES). `edit_of` is optional — the plan's own is used when omitted.
+--- `opts.desc` overrides `plan.desc` (execute's argument); `opts.before` supplies before-images:
 ---
 --- ★★★ `opts.before` IS WHAT MAKES AN INTERMEDIARY EFFECT PREVIEWABLE (CART-0920).
 --- A composition applies step 1 to nothing, step 2 to the result of step 1, and
@@ -290,26 +298,90 @@ end
 --- GATE. `txn_apply` refuses a plan that "has never been diffed"; that gate exists
 --- so nobody writes bytes no caller has seen. A diff taken against content that is
 --- not on disk has not shown anyone what the write would do. The rels whose
---- content was SUPPLIED come back as the fourth return value for exactly that
+--- content was SUPPLIED come back as `virtual` (dryrun's fourth value) for exactly that
 --- reason — a caller that gates on having previewed must check it, and the agent's
 --- `txn_preview` passes no opts at all.
 ---
 --- ⚠ THE STAMP GUARANTEE DOES NOT MOVE WITH IT. `plan.stamps` pins each touched
 --- file's disk stamp so `execute` can refuse on drift; a supplied before-image has
 --- no stamp and cannot acquire one. Composed work must verify the ORIGINAL inputs'
---- stamps once, at the end — which `execute` still does, because it reads the disk
---- itself and never sees these opts.
---- @return table|nil before, table|nil after, string|nil why, table|nil virtual
-function M.dryrun(store, plan, edit_of, opts)
-    local nope
-    edit_of, nope = resolve_edit(plan, edit_of)
-    if not edit_of then return nil, nil, nope end
+--- stamps once, at the end — which `execute` still does: it stages with no `opts.before`,
+--- so it reads the disk itself.
+function M.stage(store, plan, edit_of, opts)
+    opts = opts or {}
     local root = store.data.root
-    -- ⚠ dryrun answers (before, after, why): the reason is the THIRD value. This line returned `nil, cwhy`, which
-    -- handed the containment refusal back as `after` — a string where a file table belongs, and no reason
-    local cok, cwhy = M.contain_plan(plan)
-    if not cok then return nil, nil, cwhy end
-    local supplied = opts and opts.before or nil
+    -- ★ THE BACKSTOP, AND IT MUST PRECEDE journal.begin: refusing after the journal
+    -- opens would leave an entry for a write we never meant to make. Every path the
+    -- plan touches or creates is checked, not just its dest — a plan is a SET of
+    -- writes and one escaping member is enough (CART-0577).
+    -- ONE COPY, for preview and apply alike (CART-1153): a preview that accepts what apply
+    -- refuses is worse than either refusing, because it is discovered later — and the two
+    -- copies this replaced HAD drifted (dryrun's handed its reason back as `after`).
+    local cok, cwhy, cwhy_class = M.contain_plan(plan)
+    if not cok then return nil, cwhy, cwhy_class or 'ill-posed' end
+    -- the protocol-completeness refusals (edit_of, desc) speak AFTER the security backstop — the rule
+    -- the behavioural-claim check below states; both used to precede it
+    local nope, nope_class
+    edit_of, nope, nope_class = resolve_edit(plan, edit_of)
+    if not edit_of then return nil, nope, nope_class or 'unbuilt' end
+    -- ⚠ A WRITE WITH NO DESCRIPTION REFUSES BY NAME, the same rule `guards`,
+    -- `refspecs` and `edit_of` already live under. MEASURED (CART-0982): deleting a
+    -- builder's `plan.desc` broke NOTHING — the journal recorded a nil description and
+    -- the whole suite stayed green, so the one field of the protocol nobody checked
+    -- was the one recording WHY a write happened. The journal is the only thing
+    -- between a bad edit and a lost file; an entry that cannot say what it was for is
+    -- a worse recovery story than no entry, because it looks like a record.
+    local desc = opts.desc == nil and plan.desc or opts.desc
+    if desc == nil then
+        return nil, ('the plan for `%s` carries no description — a write verb must say '
+            .. 'what the journal should record (`plan.desc = ...`)'):format(tostring(plan.verb)), 'unbuilt'
+    end
+    -- ⚠ AFTER THE CONTAINMENT BACKSTOP, NOT BEFORE IT. Placed earlier, this refusal
+    -- PREEMPTED the "refusing to write outside the project" one — caught by CART-0577's
+    -- own test, which builds an escaping plan and got told about a missing field
+    -- instead. A SECURITY refusal must speak before a protocol-completeness one: the
+    -- first is about what the plan would DO, the second about how it was written.
+    -- ★★★ WHAT THIS PLAN CLAIMS ABOUT BEHAVIOUR (CART-0989). USER: "we could use the
+    -- scope work to declare where we permit changed behavior and what requires a review."
+    --
+    -- `contain_plan` above already does this for the FILESYSTEM: every path a plan
+    -- touches must be inside the project, and one escaping member refuses (CART-0577).
+    -- This is the same rule one tier up. Until now NOT ONE WRITE VERB DECLARED A
+    -- BEHAVIOURAL CLAIM — the five shipped guards are all textual, and `certificate`/
+    -- `neutrality`, which RUN the code and compare, are off the ladder entirely. So
+    -- `certificate.check`'s `changed` set had nothing to be compared against: a list of
+    -- facts with no claim to falsify.
+    --
+    -- A CLOSED VOCABULARY, because an open one drifts into prose:
+    --   'all'         every existing symbol's observable behaviour is unchanged
+    --   'none'        NO claim — the payload was supplied, not derived (`replace`)
+    --   'unreviewed'  this plan's claim has not been established. NOT a pass: it is
+    --                 the REVIEW bucket, and it is what the user asked for by name.
+    -- `plan.may_change` is the INTENDED delta — `declare` adds a member, so the
+    -- container's contents change ON PURPOSE. Permitted change, stated rather than
+    -- smuggled in under 'all'.
+    --
+    -- ⚠ IT REFUSES WHEN ABSENT, like `guards`/`refspecs`/`desc`. Silence here would
+    -- mean "unknown", and rendering unknown as fine is the defect this whole arc is
+    -- about. ⚠ AND NOTHING CHECKS THE CLAIM YET (CART-0374's rung): a declaration is
+    -- reviewable by READING before it is checkable by running, and the checker arrives
+    -- to something already written down.
+    local PRESERVES = { all = true, none = true, unreviewed = true }
+    -- ⚠ THE nil CHECK IS REDUNDANT FOR CATCHING AND KEPT FOR THE MESSAGE. `PRESERVES[nil]`
+    -- is falsy, so the vocabulary check below would refuse an absent claim too — with
+    -- "claims `nil`, which is not one of all|none|unreviewed", which describes the value
+    -- rather than telling a builder what to write. Measured by revert: disabling this
+    -- one leaves the plan refused, by the wrong sentence. Do not delete it as duplication.
+    if plan.preserves == nil then
+        return nil, ('the plan for `%s` declares no behavioural claim — a write verb '
+            .. 'must say what it preserves (`plan.preserves = \'all\'|\'none\'|'
+            .. '\'unreviewed\'`)'):format(tostring(plan.verb)), 'unbuilt'
+    end
+    if not PRESERVES[plan.preserves] then
+        return nil, ('the plan for `%s` claims `%s`, which is not one of all|none|'
+            .. 'unreviewed'):format(tostring(plan.verb), tostring(plan.preserves)), 'ill-posed'
+    end
+    local supplied = opts.before
     local before, virtual = {}, nil
     for _, rel in ipairs(plan.touched) do
         local t
@@ -323,8 +395,10 @@ function M.dryrun(store, plan, edit_of, opts)
         else
             t = M.read_file(root, rel)
             if not t then
+                -- a file the plan CREATES has no before; anything else
+                -- unreadable refuses (the stamp rung caught most of these)
                 if not (plan.creates and plan.creates[rel]) then
-                    return nil, nil, 'cannot read ' .. rel
+                    return nil, 'cannot read ' .. rel, 'stale'
                 end
                 t = false
             end
@@ -332,32 +406,74 @@ function M.dryrun(store, plan, edit_of, opts)
         before[rel] = t
     end
     if virtual then table.sort(virtual) end
-    -- ★ AN EDIT CALLBACK THAT RAISES IS A REFUSAL, NOT A CRASH (CART-0767, and
-    -- CART-0372 is proof at least one verb's callback raises on real input). The
-    -- scorer already pcall'd for this reason; the two paths that actually build
-    -- the text did not, so a raise escaped `dryrun` and `execute` to whatever
-    -- called them — an ex-command, or an agent verb that would report it as an
-    -- internal error rather than as this plan being unbuildable.
+    -- ★★ THE GUARD RUNG, AND IT MUST PRECEDE journal.begin FOR THE SAME REASON
+    -- THE CONTAINMENT BACKSTOP DOES (CART-0769). That is also why the whole
+    -- `after` map is computed here rather than inside the write loop: you cannot
+    -- refuse a plan you have not finished computing, and refusing after the
+    -- journal opens leaves an entry for a write nobody meant to make.
+    --
+    -- ⚠ A PLAN DECLARING NO GUARDS REFUSES BY NAME. That is not strictness for
+    -- its own sake: `resolve_edit` above already refuses a plan carrying no
+    -- `edit_of` with "this verb has not joined the plan protocol", and the guard
+    -- half is the same protocol. The alternative — treating silence as "no
+    -- obligations" — is exactly how moveapply and clonemerge came to write
+    -- unparseable files while five sibling verbs checked (CART-0770/0773): a
+    -- missing guard looked identical to a guard that passed.
+    if not plan.guards then
+        return nil, ('the plan for `%s` declares no guards — a write verb must '
+            .. 'name the obligations it accepts (`plan.guards = { \'parses\' }`), '
+            .. 'or say `{}` to declare that it accepts none')
+            :format(tostring(plan.verb)), 'unbuilt'
+    end
     local after = {}
     for _, rel in ipairs(plan.touched) do
+        -- ★ AN EDIT CALLBACK THAT RAISES IS A REFUSAL, NOT A CRASH (CART-0767, and
+        -- CART-0372 is proof at least one verb's callback raises on real input): it is
+        -- this plan refusing to be built, and it must be named rather than thrown past
+        -- the caller — an ex-command, or an agent verb reporting an internal error
         local ok, out = pcall(edit_of, rel, before[rel], before)
         if not ok then
-            return nil, nil, ('the edit for %s could not be built: %s')
-                :format(rel, tostring(out))
+            return nil, ('the edit for %s could not be built: %s'):format(rel, tostring(out)), 'unbuilt'
         end
         after[rel] = out
     end
-    -- ★ THE PREVIEW COMPUTES THE GUARDS AND DOES NOT REFUSE ON THEM (CART-0769).
-    -- A preview of a FAILING plan plus its verdict is more useful than no
-    -- preview — seeing the broken text is how you find out why — and `execute`
-    -- is where the write happens and where the refusal belongs. Both call
-    -- `planguards.run`, so what the preview checked and what the write checks
-    -- cannot drift.
-    -- ★ THE GUARDS SEE THE HYPOTHETICAL, WHICH IS RIGHT. `planguards.run` works
-    -- from the (before, after) TEXT and reads no files, so a virtual step's
-    -- guards judge the state that step would produce rather than the one on disk.
-    plan.guard_verdicts = require('cartograph.planguards').run(store, plan, before, after)
-    return before, after, nil, virtual
+    -- ★★ A PLAN THAT CHANGES NOTHING IS REFUSED, AND THE CHECK IS GENERIC (CART-0982).
+    -- `optapply` used to answer this per-verb, by counting its own `reps`/`dels`/`ins`
+    -- — which is why the same sentence ("nothing applicable") came out of the ROUTER
+    -- when an unrelated family reached it by accident and it found none of its fields.
+    -- Comparing before to after asks the real question and asks it the same way for
+    -- every verb, so no plan shape can answer it by being unrecognised.
+    local touches = false
+    for _, rel in ipairs(plan.touched) do
+        if after[rel] ~= before[rel] then touches = true; break end
+    end
+    if not touches then
+        return nil, ('the plan for `%s` would change nothing — every file it touches'
+            .. ' comes out byte-identical'):format(tostring(plan.verb)), 'empty'
+    end
+    -- ★ STAGING COMPUTES THE GUARDS AND DOES NOT REFUSE ON THEM (CART-0769). A preview of
+    -- a FAILING plan plus its verdict is more useful than no preview — seeing the broken
+    -- text is how you find out why — and `execute` is where the write happens and where
+    -- the refusal belongs. One call, so what the preview checked and what the write
+    -- checks cannot drift.
+    -- ★ THE GUARDS SEE THE HYPOTHETICAL, WHICH IS RIGHT. `planguards.run` works from the
+    -- (before, after) TEXT and reads no files, so a virtual step's guards judge the state
+    -- that step would produce rather than the one on disk.
+    local verdicts, failed = require('cartograph.planguards').run(store, plan, before, after)
+    plan.guard_verdicts = verdicts
+    return { before = before, after = after, virtual = virtual, verdicts = verdicts,
+        failed = failed, desc = desc }
+end
+
+--- Dry-run a plan: stage it and project (before_map, after_map, nil, virtual) — the shape
+--- the verbs' `preview` wrappers and their callers read. A refusal is (nil, nil, why, nil,
+--- class): the reason in the third slot, as it always was, and the class fifth. A caller that
+--- wants the class or the verdicts in one value calls `stage`.
+--- @return table|nil before, table|nil after, string|nil why, table|nil virtual, string|nil class
+function M.dryrun(store, plan, edit_of, opts)
+    local s, why, class = M.stage(store, plan, edit_of, opts)
+    if not s then return nil, nil, why, nil, class end
+    return s.before, s.after, nil, s.virtual
 end
 
 --- ★ THE PLAN PROTOCOL'S SCORING HALF (CART-0375): what this plan would do to the line count,
@@ -377,19 +493,20 @@ end
 ---@param store table
 ---@param plan table
 function M.delta(store, plan)
-    local edit_of, nope, nope_class = resolve_edit(plan, nil)
-    if not edit_of then return nil, nope or 'no edit_of', nope_class or 'unbuilt' end
-    -- dryrun reads DISK NOW, so a stale plan would score fresh text against stale offsets and
+    -- staging reads DISK NOW, so a stale plan would score fresh text against stale offsets and
     -- report a confident number for an edit that can no longer be applied.
     if plan.generation and store.generation ~= plan.generation then
         return nil, ('the plan is stale (gen %d -> %d) — re-plan')
             :format(plan.generation, store.generation), 'stale'
     end
-    local ok, before, after, derr = pcall(M.dryrun, store, plan, edit_of)
+    -- the pcall stays: stage names a raising edit callback, but a raise ANYWHERE under a scorer
+    -- (a guard, a reader) must be a refusal row, not a dead queue
+    local ok, s, swhy, sclass = pcall(M.stage, store, plan)
     if not ok then
-        return nil, 'the edit callback RAISED: ' .. tostring(before):gsub('^.*/', ''), 'unbuilt'
+        return nil, 'the staging RAISED: ' .. tostring(s):gsub('^.*/', ''), 'unbuilt'
     end
-    if not before or not after then return nil, derr or 'the dry run produced nothing', 'unbuilt' end
+    if not s then return nil, swhy or 'the dry run produced nothing', sclass or 'unbuilt' end
+    local before, after = s.before, s.after
     local added, removed = 0, 0
     for _, rel in ipairs(plan.touched) do
         local b, a = before[rel], after[rel]
@@ -530,138 +647,14 @@ end
 --- touched files back through refresh — the same machinery every save
 --- uses. Returns the journal entry, or nil + why.
 function M.execute(store, plan, desc, edit_of)
-    local nope, nope_class
-    edit_of, nope, nope_class = resolve_edit(plan, edit_of)
-    if not edit_of then return nil, nope, nope_class or 'unbuilt' end
-    -- ⚠ A WRITE WITH NO DESCRIPTION REFUSES BY NAME, the same rule `guards`,
-    -- `refspecs` and `edit_of` already live under. MEASURED (CART-0982): deleting a
-    -- builder's `plan.desc` broke NOTHING — the journal recorded a nil description and
-    -- the whole suite stayed green, so the one field of the protocol nobody checked
-    -- was the one recording WHY a write happened. The journal is the only thing
-    -- between a bad edit and a lost file; an entry that cannot say what it was for is
-    -- a worse recovery story than no entry, because it looks like a record.
-    desc = desc == nil and plan.desc or desc
-    if desc == nil then
-        return nil, ('the plan for `%s` carries no description — a write verb must say '
-            .. 'what the journal should record (`plan.desc = ...`)'):format(tostring(plan.verb)), 'unbuilt'
+    local s, why, class = M.stage(store, plan, edit_of, { desc = desc })
+    if not s then return nil, why, class or 'unbuilt' end
+    if s.failed then
+        return nil, require('cartograph.planguards').refusal(s.failed), 'unbuilt'
     end
     local root = store.data.root
-    -- ★ THE BACKSTOP, AND IT MUST PRECEDE journal.begin: refusing after the journal
-    -- opens would leave an entry for a write we never meant to make. Every path the
-    -- plan touches or creates is checked, not just its dest — a plan is a SET of
-    -- writes and one escaping member is enough (CART-0577).
-    -- M.dryrun carries the same block on purpose: a preview that accepts what apply
-    -- refuses is worse than either refusing, because it is discovered later.
-    local cok, cwhy, cwhy_class = M.contain_plan(plan)
-    if not cok then return nil, cwhy, cwhy_class or 'ill-posed' end
-    -- ⚠ AFTER THE CONTAINMENT BACKSTOP, NOT BEFORE IT. Placed earlier, this refusal
-    -- PREEMPTED the "refusing to write outside the project" one — caught by CART-0577's
-    -- own test, which builds an escaping plan and got told about a missing field
-    -- instead. A SECURITY refusal must speak before a protocol-completeness one: the
-    -- first is about what the plan would DO, the second about how it was written.
-    -- ★★★ WHAT THIS PLAN CLAIMS ABOUT BEHAVIOUR (CART-0989). USER: "we could use the
-    -- scope work to declare where we permit changed behavior and what requires a review."
-    --
-    -- `contain_plan` above already does this for the FILESYSTEM: every path a plan
-    -- touches must be inside the project, and one escaping member refuses (CART-0577).
-    -- This is the same rule one tier up. Until now NOT ONE WRITE VERB DECLARED A
-    -- BEHAVIOURAL CLAIM — the five shipped guards are all textual, and `certificate`/
-    -- `neutrality`, which RUN the code and compare, are off the ladder entirely. So
-    -- `certificate.check`'s `changed` set had nothing to be compared against: a list of
-    -- facts with no claim to falsify.
-    --
-    -- A CLOSED VOCABULARY, because an open one drifts into prose:
-    --   'all'         every existing symbol's observable behaviour is unchanged
-    --   'none'        NO claim — the payload was supplied, not derived (`replace`)
-    --   'unreviewed'  this plan's claim has not been established. NOT a pass: it is
-    --                 the REVIEW bucket, and it is what the user asked for by name.
-    -- `plan.may_change` is the INTENDED delta — `declare` adds a member, so the
-    -- container's contents change ON PURPOSE. Permitted change, stated rather than
-    -- smuggled in under 'all'.
-    --
-    -- ⚠ IT REFUSES WHEN ABSENT, like `guards`/`refspecs`/`desc`. Silence here would
-    -- mean "unknown", and rendering unknown as fine is the defect this whole arc is
-    -- about. ⚠ AND NOTHING CHECKS THE CLAIM YET (CART-0374's rung): a declaration is
-    -- reviewable by READING before it is checkable by running, and the checker arrives
-    -- to something already written down.
-    local PRESERVES = { all = true, none = true, unreviewed = true }
-    -- ⚠ THE nil CHECK IS REDUNDANT FOR CATCHING AND KEPT FOR THE MESSAGE. `PRESERVES[nil]`
-    -- is falsy, so the vocabulary check below would refuse an absent claim too — with
-    -- "claims `nil`, which is not one of all|none|unreviewed", which describes the value
-    -- rather than telling a builder what to write. Measured by revert: disabling this
-    -- one leaves the plan refused, by the wrong sentence. Do not delete it as duplication.
-    if plan.preserves == nil then
-        return nil, ('the plan for `%s` declares no behavioural claim — a write verb '
-            .. 'must say what it preserves (`plan.preserves = \'all\'|\'none\'|'
-            .. '\'unreviewed\'`)'):format(tostring(plan.verb)), 'unbuilt'
-    end
-    if not PRESERVES[plan.preserves] then
-        return nil, ('the plan for `%s` claims `%s`, which is not one of all|none|'
-            .. 'unreviewed'):format(tostring(plan.verb), tostring(plan.preserves)), 'ill-posed'
-    end
-    local before = {}
-    for _, rel in ipairs(plan.touched) do
-        local t = M.read_file(root, rel)
-        if not t then
-            -- a file the plan CREATES has no before; anything else
-            -- unreadable refuses (the stamp rung caught most of these)
-            if not (plan.creates and plan.creates[rel]) then
-                return nil, 'cannot read ' .. rel, 'stale'
-            end
-            t = false
-        end
-        before[rel] = t
-    end
-    -- ★★ THE GUARD RUNG, AND IT MUST PRECEDE journal.begin FOR THE SAME REASON
-    -- THE CONTAINMENT BACKSTOP DOES (CART-0769). That is also why the whole
-    -- `after` map is computed here rather than inside the write loop: you cannot
-    -- refuse a plan you have not finished computing, and refusing after the
-    -- journal opens leaves an entry for a write nobody meant to make.
-    --
-    -- ⚠ A PLAN DECLARING NO GUARDS REFUSES BY NAME. That is not strictness for
-    -- its own sake: `resolve_edit` above already refuses a plan carrying no
-    -- `edit_of` with "this verb has not joined the plan protocol", and the guard
-    -- half is the same protocol. The alternative — treating silence as "no
-    -- obligations" — is exactly how moveapply and clonemerge came to write
-    -- unparseable files while five sibling verbs checked (CART-0770/0773): a
-    -- missing guard looked identical to a guard that passed.
-    if not plan.guards then
-        return nil, ('the plan for `%s` declares no guards — a write verb must '
-            .. 'name the obligations it accepts (`plan.guards = { \'parses\' }`), '
-            .. 'or say `{}` to declare that it accepts none')
-            :format(tostring(plan.verb)), 'unbuilt'
-    end
-    local after = {}
-    for _, rel in ipairs(plan.touched) do
-        -- the same pcall dryrun runs, and for the same reason: a raise here is
-        -- this plan refusing to be built, and it must be named rather than
-        -- thrown past the caller (CART-0767)
-        local ok, out = pcall(edit_of, rel, before[rel], before)
-        if not ok then
-            return nil, ('the edit for %s could not be built: %s'):format(rel, tostring(out)), 'unbuilt'
-        end
-        after[rel] = out
-    end
-    -- ★★ A PLAN THAT CHANGES NOTHING IS REFUSED, AND THE CHECK IS GENERIC (CART-0982).
-    -- `optapply` used to answer this per-verb, by counting its own `reps`/`dels`/`ins`
-    -- — which is why the same sentence ("nothing applicable") came out of the ROUTER
-    -- when an unrelated family reached it by accident and it found none of its fields.
-    -- Comparing before to after asks the real question and asks it the same way for
-    -- every verb, so no plan shape can answer it by being unrecognised.
-    local touches = false
-    for _, rel in ipairs(plan.touched) do
-        if after[rel] ~= before[rel] then touches = true; break end
-    end
-    if not touches then
-        return nil, ('the plan for `%s` would change nothing — every file it touches'
-            .. ' comes out byte-identical'):format(tostring(plan.verb)), 'empty'
-    end
-    local verdicts, failed = require('cartograph.planguards').run(store, plan, before, after)
-    plan.guard_verdicts = verdicts
-    if failed then
-        return nil, require('cartograph.planguards').refusal(failed), 'unbuilt'
-    end
-
+    local before, after
+    before, after, desc = s.before, s.after, s.desc
     local journal = require 'cartograph.journal'
     -- CART-1004: the verb's own undo declaration rides into the entry beside the
     -- description, so the ADDRESS survives with the bytes `before` already keeps.

@@ -45,10 +45,49 @@ test('txnedit: dryrun turns a raising edit callback into a NAMED refusal', funct
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write('local x = 1\n'); fd:close()
     local store = { data = { root = root }, generation = 1 }
-    local plan = { verb = 'test', touched = { 'm.lua' }, guards = {},
+    -- a protocol-COMPLETE plan: a preview refuses exactly what an apply would (txn.stage), so an incomplete one
+    -- would be refused for its missing fields before the callback ever ran
+    local plan = { verb = 'test', touched = { 'm.lua' }, guards = {}, desc = 'test', preserves = 'none',
         edit_of = function () error('deliberate', 0) end }
     local before, after, why = txn.dryrun(store, plan)
     eq(nil, before)
     ok(why and why:find('could not be built'), tostring(why))
     ok(why:find('m.lua'), 'and names the file: ' .. tostring(why))
+end)
+
+-- ★★★ ONE STAGING (CART-1153): `execute` used to re-implement dryrun's body, and the copies drifted — the preview
+-- ACCEPTED a plan declaring no guards and a plan that changes nothing, both of which the apply refused, so a preview
+-- (or a compose chain) could succeed on a plan the write would refuse. Every refusal before the write is now one
+-- function's, so preview and apply refuse the same plans with the same words and class.
+test('txnedit: preview and apply refuse the SAME plans, by the same reason and class', function ()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write('local x = 1\n'); fd:close()
+    local store = { data = { root = root }, generation = 1 }
+    local function complete()
+        return { verb = 'test', touched = { 'm.lua' }, guards = {}, desc = 'test', preserves = 'none',
+            edit_of = function (_, b) return b .. '-- edited\n' end }
+    end
+    local cases = {
+        { 'no guards', function (p) p.guards = nil end, 'declares no guards', 'unbuilt' },
+        { 'no desc', function (p) p.desc = nil end, 'carries no description', 'unbuilt' },
+        { 'no claim', function (p) p.preserves = nil end, 'declares no behavioural claim', 'unbuilt' },
+        { 'a no-op', function (p) p.edit_of = function (_, b) return b end end, 'would change nothing', 'empty' },
+        { 'an escape', function (p) p.touched = { '../escape.lua' } end, 'outside the project', 'ill-posed' },
+    }
+    for _, c in ipairs(cases) do
+        local p = complete(); c[2](p)
+        local s, swhy, sclass = txn.stage(store, p)
+        eq(nil, s, c[1] .. ': the preview refuses')
+        ok(tostring(swhy):find(c[3], 1, true), c[1] .. ': by name: ' .. tostring(swhy))
+        eq(c[4], sclass, c[1] .. ': and class')
+        local e, ewhy, eclass = txn.execute(store, p)
+        eq(nil, e, c[1] .. ': the apply refuses too')
+        eq(swhy, ewhy, c[1] .. ': with the same words')
+        eq(sclass, eclass, c[1] .. ': and the same class')
+    end
+    -- and the complete plan stages, with its verdicts
+    local s = txn.stage(store, complete())
+    ok(s and s.after['m.lua']:find('edited', 1, true), 'a complete plan stages')
+    local fd2 = assert(io.open(root .. '/m.lua')); eq('local x = 1\n', fd2:read('a')); fd2:close()
+    vim.fn.delete(root, 'rf')
 end)

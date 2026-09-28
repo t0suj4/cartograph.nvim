@@ -128,3 +128,17 @@ test('idxrewrite: ★ PROFILE-GUIDED — the measured CPU-for-memory trade decid
     ok(why[24] and why[24]:find('^profile:'), tostring(why[24]))
     rawset(_G, '__cg_idx_profile', nil)
 end)
+
+test('idxrewrite (CART-1153): the staged plan APPLIES — it used to preview and never apply (no desc, no claim)', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
+    vim.fn.writefile(vim.fn.readfile(FIX .. '/scans.lua'), dir .. '/scans.lua')
+    store.ingest(ts.extract(dir))
+    local plan = assert(I.plan(store, 'scans.lua'))
+    local _, after = txn.dryrun(store, plan)
+    local entry, why = txn.apply(store, plan)
+    ok(entry, 'applied: ' .. tostring(why))
+    local fd = assert(io.open(dir .. '/scans.lua')); local disk = fd:read('a'); fd:close()
+    eq(after['scans.lua'], disk, 'the disk holds exactly what the preview showed')
+    vim.fn.delete(dir, 'rf')
+end)

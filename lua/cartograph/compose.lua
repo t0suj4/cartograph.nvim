@@ -107,8 +107,9 @@ function M.run(store, recipe, opts)
                 rows[#rows + 1] = step_error(i, verb, why)
                 derailed = true
             else
-                local before, after, dwhy = txn.dryrun(store, plan)
-                if not before then
+                local staged, dwhy = txn.stage(store, plan)
+                local before, after = staged and staged.before, staged and staged.after
+                if not staged then
                     rows[#rows + 1] = step_error(i, verb,
                         ('the plan could not be previewed: %s'):format(tostring(dwhy)))
                     derailed = true

@@ -86,3 +86,17 @@ test('patrewrite: ★ END TO END — the rewritten FILE behaves like the origina
     local n_old = select(2, after['trims.lua']:gsub('%^%%s%*%(%.%-%)%%s%*%$', ''))
     eq(3, n_old, 'three declined sites keep the idiom')
 end)
+
+test('patrewrite (CART-1153): the staged plan APPLIES — it used to preview and never apply (no desc, no claim)', function ()
+    if not has_lua() then skip 'no lua parser' end
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
+    vim.fn.writefile(vim.fn.readfile(FIX), dir .. '/trims.lua')
+    store.ingest(ts.extract(dir))
+    local plan = assert(P.plan(store, 'trims.lua'))
+    local _, after = txn.dryrun(store, plan)
+    local entry, why = txn.apply(store, plan)
+    ok(entry, 'applied: ' .. tostring(why))
+    local fd = assert(io.open(dir .. '/trims.lua')); local disk = fd:read('a'); fd:close()
+    eq(after['trims.lua'], disk, 'the disk holds exactly what the preview showed')
+    vim.fn.delete(dir, 'rf')
+end)
