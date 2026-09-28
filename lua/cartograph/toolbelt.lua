@@ -372,7 +372,8 @@ function M.run(store, name, params, opts)
         return { value = value, holds = holds and true or false, why = cwhy }
     end
     local term = e.build(params or {})
-    local ropts = { apply = opts.apply, on_stop = opts.on_stop, correct = opts.correct, verbs = opts.verbs }
+    local ropts = { apply = opts.apply, on_stop = opts.on_stop, correct = opts.correct, verbs = opts.verbs,
+        approvals = opts.approvals }
     if e.oracle then ropts.oracle = function (st, res) return e.oracle(st, res, params or {}) end end
     return require('cartograph.tactic').run(store, term, ropts)
 end

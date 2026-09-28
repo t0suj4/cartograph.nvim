@@ -52,6 +52,9 @@ local function canon(v)
     else return ty .. ':' .. tostring(v) end
 end
 
+-- exported: the SIGNED bytes of an approval token are this canonical text (cartograph.approvals)
+M.canon = canon
+
 --- the absolute files a plan's decision is ABOUT: every touched file, in the world it writes
 function M.subjects(store, plan)
     local root = require('cartograph.txn').target_root(store, plan)

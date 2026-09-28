@@ -48,19 +48,21 @@ elseif cmd == 'examples' then
 elseif cmd == 'run' then
     local name, dir = arg[2], arg[3]
     if not (name and dir) then io.stderr:write('usage: run <name> <dir> [key=value ...]\n'); os.exit(2) end
-    local params, apply, on_stop = {}, false, nil
+    local params, apply, on_stop, approvals = {}, false, nil, nil
     for i = 4, #arg do
         local k, v = arg[i]:match('^([%w_]+)=(.*)$')
         -- rollback=1: a run that does not finish is UNDONE (journaled writes by the journal, compensable ones by their
         -- compensation — CART-1186); without it a stopped run keeps what it completed (forward recovery)
-        if k == 'apply' then apply = v == '1' elseif k == 'rollback' then on_stop = v == '1' and 'rollback' or nil elseif k then params[k] = v end
+        -- approvals=<dir>: a directory of SIGNED approval tokens (tools/approvals.lua) that may answer the run's decisions
+        if k == 'apply' then apply = v == '1' elseif k == 'rollback' then on_stop = v == '1' and 'rollback' or nil
+        elseif k == 'approvals' then approvals = v elseif k then params[k] = v end
     end
     local store = require 'cartograph.store'
     -- `-` = no graph: a discovery that measures something else (mutation-check, spec-fails) need not extract a tree
     -- `stub`: there is no graph behind this world, so a write has nothing to refresh (txn.execute skips it)
     if dir == '-' then store.ingest({ root = vim.fn.getcwd(), nodes = {}, edges = {}, calls = {}, stub = true })
     else store.ingest(require('cartograph.providers.treesitter').extract((vim.fn.fnamemodify(dir, ':p'):gsub('/$', '')))) end
-    local res, why = tb.run(store, name, params, { apply = apply, on_stop = on_stop })
+    local res, why = tb.run(store, name, params, { apply = apply, on_stop = on_stop, approvals = approvals })
     if not res then io.write('refused: ', tostring(why), '\n'); os.exit(1) end
     io.write(vim.inspect(res.value and { holds = res.holds, why = res.why, value = res.value }
         or { status = res.status, class = res.class, why = res.why, applied = res.applied, residue = res.residue,

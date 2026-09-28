@@ -50,8 +50,13 @@ end
 --- its identity `key` (cartograph.decisions.key) — what the user remembers to answer THIS question on later runs. An
 --- open decision a REMEMBERED answer covers is taken, and says so (`remembered` = the provenance) — unless
 --- `remembered == false` (opts.remembered), which asks every question again.
-local function decisions(store, plan, accept, remembered)
+local function decisions(store, plan, accept, remembered, approvals)
     local D = require 'cartograph.decisions'
+    -- ★ SIGNED APPROVALS (CART-1183): a teammate's token answers a question when its signature verifies against the
+    -- USER's roster and the deciders policy routes that kind, for every subject, to its principal. Every decision row
+    -- carries its PORTABLE key — what a teammate signs from their own checkout
+    local A = require 'cartograph.approvals'
+    local tokens = approvals and A.gather(approvals) or nil
     local open, taken = {}, {}
     local acc = {}
     for _, k in ipairs(accept or {}) do acc[k] = true end
@@ -65,7 +70,19 @@ local function decisions(store, plan, accept, remembered)
                 subjects = subjects or D.subjects(store, plan)
                 local e, why = nil, nil
                 if remembered ~= false then e, why = D.lookup(row.key, row.kind, subjects) end
+                local pk, pwhy = A.portable_key(store, plan, hazard.row(raw[i]))
+                row.portable_key, row.portable_why = pk, pwhy
                 if e then row.remembered, row.decision_id = why, e.id; taken[#taken + 1] = row
+                elseif tokens and pk then
+                    local t, refused = A.lookup(tokens, pk, row.kind, subjects)
+                    if t then
+                        row.signed = { principal = t.payload.principal, token = A.id(t), at = t.payload.at, why = t.payload.why }
+                        taken[#taken + 1] = row
+                    else
+                        -- ★ a token that was FOUND and did not answer says why, by name — never a plain stop
+                        if #refused > 0 then row.refused_approvals = refused end
+                        open[#open + 1] = row
+                    end
                 else open[#open + 1] = row end
             end
         end
@@ -109,7 +126,7 @@ function M.step(store, st, opts)
             local acc = {}
             for _, k in ipairs(st.accept or {}) do acc[k] = true end
             if opts.decide then
-                local open, taken = decisions(store, plan, st.accept, opts.remembered)
+                local open, taken = decisions(store, plan, st.accept, opts.remembered, opts.approvals)
                 if #open > 0 then
                     local texts = {}
                     for _, r in ipairs(open) do texts[#texts + 1] = r.text end
@@ -148,7 +165,8 @@ function M.step(store, st, opts)
                 plan.decided_by, plan.decisions = 'tactic', {}
                 for _, a in ipairs(accepted) do
                     plan.decisions[#plan.decisions + 1] = { kind = a.kind, key = a.key,
-                        by = a.remembered and 'remembered' or 'accept-list', decision_id = a.decision_id }
+                        by = a.remembered and 'remembered' or a.signed and 'signed' or 'accept-list', decision_id = a.decision_id,
+                        principal = a.signed and a.signed.principal or nil, token = a.signed and a.signed.token or nil }
                 end
                 local okc, entry, ewhy, eclass = pcall(spec.apply or txn.apply, store, plan, { ns = ns })
                 if not okc then entry, ewhy, eclass = nil, tostring(entry), 'environment' end
@@ -283,7 +301,7 @@ local function eval_step(store, t, opts, where)
         return out
     end
     local r = M.step(store, t, { verbs = opts.verbs, apply = opts.apply, decide = true, replan = true, ns = opts.ns,
-        remembered = opts.remembered })
+        remembered = opts.remembered, approvals = opts.approvals })
     local corrected
     if not r.ok and (r.class == 'ill-posed' or r.class == 'stale') and r.phase == 'plan' and spec.correct
         and opts.correct ~= 'off' then
@@ -346,6 +364,10 @@ local function eval_step(store, t, opts, where)
             if accepted[h.kind].remembered then
                 h.remembered, h.decision_id = accepted[h.kind].remembered, accepted[h.kind].decision_id
                 h.text = ('%s — answered: %s'):format(h.text, h.remembered)
+            elseif accepted[h.kind].signed then
+                local sg = accepted[h.kind].signed
+                h.signed = sg
+                h.text = ('%s — approved by %s (signed %s, token %s)'):format(h.text, sg.principal, tostring(sg.at), sg.token)
             end
         end
         h.where, h.verb = where, t.verb
@@ -687,7 +709,9 @@ end
 function M.run(store, term, opts)
     opts = opts or {}
     local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct,
-        toolbelt_dir = opts.toolbelt_dir, ns = opts.ns, remembered = opts.remembered }
+        toolbelt_dir = opts.toolbelt_dir, ns = opts.ns, remembered = opts.remembered,
+        -- signed approvals (CART-1183): a directory store, a list of tokens, or a list of directories
+        approvals = opts.approvals }
     -- ★ the static check first: a malformed term is refused before ANYTHING runs, dry or not (CART-1187)
     local nr = M.no_return_check(term, opts.verbs, opts.oracle ~= nil)
     if nr then
