@@ -1,0 +1,143 @@
+-- THE LUA -> JS EMITTER (cartograph.luajs, CART-1197) under a DIFFERENTIAL oracle: each snippet runs as Lua (with the
+-- STANDARD print — tab-joined tostring, not nvim's) and as the emitted JavaScript under node, and the outputs must be
+-- byte-identical. Two implementations of one program; the emitter never sees the Lua result.
+-- Pinned both ways: a construct with no faithful form is REFUSED by name (and the module still parses), a pack gap is
+-- a LOUD LuaBreak at run time (never a quiet approximation), and the representations follow the shape evidence.
+local L = require 'cartograph.luajs'
+local REPO = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
+
+local function ready() return pcall(vim.treesitter.get_string_parser, '', 'lua') and vim.fn.executable('node') == 1 end
+
+--- the snippet as Lua, with the standard print
+local function lua_out(src)
+    local out = {}
+    local env = setmetatable({ print = function (...)
+        local t = {}
+        for i = 1, select('#', ...) do t[i] = tostring((select(i, ...))) end
+        out[#out + 1] = table.concat(t, '\t')
+    end }, { __index = _G })
+    local f = assert(loadstring(src))
+    setfenv(f, env)
+    local ok, err = pcall(f)
+    if not ok then out[#out + 1] = 'ERROR ' .. tostring(err) end
+    return table.concat(out, '\n') .. (#out > 0 and '\n' or '')
+end
+
+--- the snippet emitted and run under node -> stdout, the emitted js, refusals
+local function js_out(src)
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
+    vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js', 'b'), dir .. '/$pack.js', 'b')
+    local js, refusals = L.emit(src, 'snippet.lua', { pack = './$pack.js' })
+    local fd = assert(io.open(dir .. '/snippet.js', 'wb')); fd:write(js); fd:close()
+    local r = vim.system({ 'node', dir .. '/snippet.js' }, { text = true }):wait(30000)
+    return (r.stdout or '') .. (r.stderr or ''), js, refusals, r.code
+end
+
+local CASES = {
+    numbers = [[print(1/3, 2^53, 1e15, 1e16, 0.1, -0.0 == 0, 10 % -3, -7 % 3, 7 % 0 ~= 7 % 0, math.floor(-2.5), 3 == 3.0)]],
+    truthiness = [[print(0 and 'zero', '' and 'empty', nil or 'dflt', false or nil, not 0, not nil, 1 and nil)]],
+    multi = [[
+local function f(...) return select('#', ...), ... end
+local n, a, b = f('x', nil)
+print(n, a, b, (f(1, 2)))
+local function g() return 1, 2, 3 end
+local t = { g() }
+print(#t, g(), (g()))
+print(select(2, 'a', 'b', 'c'))
+local u = { 10, 20, 30 }
+print(unpack(u))]],
+    tables = [[
+local t = {}
+for i = 1, 5 do t[#t + 1] = i * 1.5 end
+print(#t, table.concat(t, ','))
+table.insert(t, 1, 'first'); print(t[1], #t, table.remove(t), #t)
+local r = { name = 'n' }
+r.age = 3
+local acc = {}
+for k, v in pairs(r) do acc[#acc + 1] = k .. '=' .. tostring(v) end
+table.sort(acc)
+print(table.concat(acc, ' '))
+local seen = {}
+for _, w in ipairs({ 'a', 'b', 'a' }) do seen[w] = (seen[w] or 0) + 1 end
+print(seen.a, seen.b, seen.c)
+local s = { 3, 1, 2 }
+table.sort(s, function (x, y) return x > y end)
+print(s[1], s[2], s[3])]],
+    strings = [[
+local s = 'h\195\169llo'
+print(#s, s:sub(2, 3):byte(1, 2), s:upper(), s:sub(-3), s:sub(0), s:sub(10))
+print(('%5.2f|%-4s|%d|%x|%s'):format(3.14159, 'ab', 42, 255, nil), ('ab'):rep(3, '-'))
+print(('hello world'):find('o w', 1, true), ('abc'):find('z', 1, true), string.char(72, 105))
+print('a' < 'b', 'Z' < 'a', 'abc' .. 1 .. 2.5, tostring(nil), tostring(true), tonumber('0x10'), tonumber(' 12 '), tonumber('z'))]],
+    control = [[
+for i = 1, 4 do
+  if i % 2 == 0 then goto continue end
+  print('odd', i)
+  ::continue::
+end
+for i = 10, 1, -3 do io = nil; print('down', i) end
+local j = 0
+repeat local k = j; j = j + 1 until k >= 2
+print('repeat', j)
+local w = 0
+while true do w = w + 1; if w > 3 then break end end
+print('while', w)]],
+    scope = [[
+local x = 1
+do local x = x + 1; print('inner', x) end
+print('outer', x)
+local p, q = 1, 2
+p, q = q, p
+print(p, q)
+local fs = {}
+for i = 1, 3 do fs[i] = function () return i end end
+print(fs[1](), fs[2](), fs[3]())
+local function fact(n) if n <= 1 then return 1 end return n * fact(n - 1) end
+print(fact(10))
+local obj = { v = 10 }
+function obj:get(d) return self.v + d end
+print(obj:get(5), obj.get(obj, 1))]],
+    errors = [[
+local ok, err = pcall(function () error({ code = 7 }) end)
+print(ok, type(err), err.code)
+print(pcall(function () return 1, 2 end))
+print(select('#', pcall(error)))]],
+}
+
+for name, src in pairs(CASES) do
+    test('luajs differential: ' .. name .. ' — the emitted JS under node prints exactly what Lua prints', function ()
+        if not ready() then skip 'no lua parser / node' end
+        local want = lua_out(src)
+        local got, js, refusals = js_out(src)
+        eq(0, #refusals, vim.inspect(refusals))
+        ok(want ~= '' and not want:find('^ERROR'), 'the premise: the Lua side ran: ' .. want)
+        eq(want, got, js)
+    end)
+end
+
+test('luajs: a construct with no faithful form is REFUSED by name, the module still parses, and a pack gap BREAKS loudly at run time', function ()
+    if not ready() then skip 'no lua parser / node' end
+    local out, js, refusals = js_out('print(1)\ngoto skip\nprint(2)\n::skip::\nprint(3)\n')
+    ok(#refusals >= 1 and refusals[1].kind == 'goto', vim.inspect(refusals))
+    ok(js:find('$abort("goto', 1, true), 'the refusal sits at its place')
+    ok(out:find('LuaBreak', 1, true) or out:find('no faithful JS form', 1, true), 'running it reaches the refusal loudly: ' .. out)
+    local out2 = js_out("print(('a,b'):gsub(',', ';'))\n")
+    ok(out2:find('no faithful JS form: string.gsub', 1, true), 'a Lua pattern is a named break, never an approximation: ' .. out2)
+    eq('1\t2\n', (js_out('print(1, 2)\n')), 'and the translatable side runs')
+end)
+
+test('luajs: each table constructor takes its SHAPE\'s representation — ARRAY, RECORD, or MAP for a dictionary', function ()
+    if not ready() then skip 'no lua parser / node' end
+    local _, js = js_out([[
+local a = {}
+a[#a + 1] = 1
+local r = { name = 'x' }
+print(r.name)
+local d = {}
+local k = 'q'
+d[k] = 1
+print(a[1], d.q)]])
+    ok(js:find('let a = $arr()', 1, true), js)
+    ok(js:find('let r = $rec("name", "x")', 1, true), js)
+    ok(js:find('let d = $map()', 1, true), js)
+end)
