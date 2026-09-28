@@ -4,6 +4,8 @@
 --   nvim --headless -u NONE -l tools/toolbelt.lua run <name> <dir> [key=value ...]   (a discovery re-measures <dir>;
 --                                                                                   a write tactic PREVIEWS, add apply=1)
 --   nvim --headless -u NONE -l tools/toolbelt.lua examples [name]                    (run the examples: usage AND test)
+--   nvim --headless -u NONE -l tools/toolbelt.lua run mutation-check - file=<f> before='<expr>' after='<expr>' spec=<x>_spec
+--                                                   (`-` = no graph: does the spec CATCH the mutation? in a scratch copy)
 --   a tactic FROM AN EXAMPLE is itself a tactic — learn into a project, then promote:
 --     run learn-from-example <project> name=<n> before=@<file> after=@<file> apply=1
 --     run promote-tactic <cartograph-repo> name=<n> from=<project> apply=1   (stops on the `promote` decision)
@@ -52,7 +54,9 @@ elseif cmd == 'run' then
         if k == 'apply' then apply = v == '1' elseif k then params[k] = v end
     end
     local store = require 'cartograph.store'
-    store.ingest(require('cartograph.providers.treesitter').extract((vim.fn.fnamemodify(dir, ':p'):gsub('/$', ''))))
+    -- `-` = no graph: a discovery that measures something else (mutation-check, spec-fails) need not extract a tree
+    if dir == '-' then store.ingest({ root = vim.fn.getcwd(), nodes = {}, edges = {}, calls = {} })
+    else store.ingest(require('cartograph.providers.treesitter').extract((vim.fn.fnamemodify(dir, ':p'):gsub('/$', '')))) end
     local res, why = tb.run(store, name, params, { apply = apply })
     if not res then io.write('refused: ', tostring(why), '\n'); os.exit(1) end
     io.write(vim.inspect(res.value and { holds = res.holds, why = res.why, value = res.value }
