@@ -109,6 +109,47 @@ test('the toolbelt spans TWO roots: a project tactic named like a built-in one i
     ok(#entries >= 4)
 end)
 
+test('toolbelt: OVERRIDING a built-in tactic is the user\'s explicit choice, pinned by content hash in THEIR scoped config', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['m.lua'] = 'local M = {}\nreturn M\n' }
+    local config = require 'cartograph.config'
+    local saved = config.scoped
+    vim.fn.mkdir(root .. '/.cartograph/tactics', 'p')
+    local builtin = tb.files()['family-premise']
+    local fd = assert(io.open(builtin)); local same = fd:read('a'); fd:close()
+    local mine = root .. '/.cartograph/tactics/family-premise.lua'
+    local function put(text) local w = assert(io.open(mine, 'w')); w:write(text); w:close() end
+    local function sha(text) return 'sha256:' .. vim.fn.sha256(text) end
+    put(same .. '\n-- my variant\n')
+    -- unchosen: a DECISION, and the refusal hands over the exact entry for THIS pair — nothing writes it
+    local e, why, class = tb.load('family-premise', nil, root)
+    eq(nil, e); eq('decision', class)
+    ok(why:find(sha(same .. '\n-- my variant\n'), 1, true) and why:find(sha(same), 1, true), 'both hashes in the offered entry: ' .. why)
+    ok(why:find('tactic_overrides', 1, true), why)
+    local ok_run = pcall(function ()
+        -- chosen, for this root: the project file runs, and says what it replaced
+        config.scoped = { [root] = { tactic_overrides = { ['family-premise'] = { use = sha(same .. '\n-- my variant\n'), over = sha(same) } } } }
+        local got = assert(tb.load('family-premise', nil, root))
+        eq(mine, got.path); eq(builtin, got.overrides); eq('project', got.scope)
+        local _, broken, _, overridden = tb.list(nil, root)
+        eq(nil, broken['family-premise']); eq(mine, overridden['family-premise'].path)
+        -- the project file changes: the choice was about the OLD text, so it lapses and says which side moved
+        put(same .. '\n-- my variant, edited\n')
+        local _, why2, class2 = tb.load('family-premise', nil, root)
+        eq('decision', class2); ok(why2:find('no longer holds', 1, true) and why2:find('the project file', 1, true), why2)
+        -- a pin whose BUILT-IN side is stale lapses too
+        put(same .. '\n-- my variant\n')
+        config.scoped = { [root] = { tactic_overrides = { ['family-premise'] = { use = sha(same .. '\n-- my variant\n'), over = sha('an older built-in') } } } }
+        local _, why3 = tb.load('family-premise', nil, root)
+        ok(why3:find('the built-in it overrides', 1, true), why3)
+        -- a choice made for ANOTHER root does not reach this one
+        config.scoped = { ['/somewhere/else'] = { tactic_overrides = { ['family-premise'] = { use = sha(same .. '\n-- my variant\n'), over = sha(same) } } } }
+        eq(nil, (tb.load('family-premise', nil, root)))
+    end)
+    config.scoped = saved
+    ok(ok_run)
+end)
+
 test('byexample: a CONSTANT the example keeps stays part of the pattern, and overlapping matches rewrite once', function ()
     if not ready() then skip 'no lua parser or algebra' end
     local rules = assert(BX.learn('if x == 0 then return end', 'if x <= 0 then return end'))

@@ -82,6 +82,9 @@ M.pins = nil
 --   behaviour_suppliers  'derived' (default: every supplier the runtime proves — OTP's own applications and
 --                        libraries installed into it, each named in the alibi) | 'otp' (only applications the OTP
 --                        installer shipped, per the runtime's releases/<rel>/installed_application_versions)
+--   tactic_overrides     { ['<tactic>'] = { use = 'sha256:<project file>', over = 'sha256:<built-in>' } }: run the
+--                        project's .cartograph/tactics/<tactic>.lua INSTEAD of the built-in one. Your explicit choice,
+--                        for that exact pair of texts — either side changing voids it (the refusal prints the entry)
 M.scoped = nil
 
 -- registry auto-discovery (Greenspun detection): verbs that register

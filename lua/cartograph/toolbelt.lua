@@ -53,11 +53,35 @@ end
 
 --- every entry file, by name -> path. No central list: the mounted directories ARE the list, read in the union's
 --- precedence order (the first layer holding a name provides it).
---- ⚠ A NAME IN TWO LAYERS: byte-identical is a PROMOTED copy (the earlier layer wins, noted); different is REFUSED by
---- name — a project tactic never silently shadows a built-in one.
---- -> files, conflicts { name -> why }, promoted { name -> later layer's path }
+--- ⚠ A NAME IN TWO LAYERS: byte-identical is a PROMOTED copy (the earlier layer wins, noted); different is a DECISION
+--- — a project tactic never silently shadows a built-in one. ★ OVERRIDING IS AN EXPLICIT USER CHOICE, CONTENT-HASHED
+--- (USER 2026-09-28): the choice lives in the user's SCOPED config, never in the analysed tree (the tree may select,
+--- never supply — a project file cannot grant itself precedence), and it pins BOTH texts:
+---   setup{ scoped = { ['<root>'] = { tactic_overrides = { ['<name>'] = { use = 'sha256:<project file>', over = 'sha256:<built-in>' } } } } }
+--- Either side changing voids it: the choice was made about THAT pair, and a built-in that moved on may carry a fix the
+--- override would now hide. The refusal prints the exact entry for the current pair; nothing writes it for the user.
+--- -> files, conflicts { name -> why }, promoted { name -> later layer's path }, overridden { name -> { path, over, use } }
+local function hash(path) local t = slurp(path); return t and ('sha256:' .. vim.fn.sha256(t)) or nil end
+
+local function override_of(root, name, path, over)
+    local use, was = hash(path), hash(over)
+    local entry = ("setup{ scoped = { [%q] = { tactic_overrides = { [%q] = { use = %q, over = %q } } } } }")
+        :format(tostring(root), name, tostring(use), tostring(was))
+    local pins = root and require('cartograph.config').for_root(root, 'tactic_overrides')
+    local pin = type(pins) == 'table' and pins[name] or nil
+    if type(pin) == 'table' and pin.use == use and pin.over == was then return { path = path, over = over, use = use } end
+    if type(pin) == 'table' then
+        local moved = {}
+        if pin.use ~= use then moved[#moved + 1] = ('the project file (%s) changed since you chose it'):format(path) end
+        if pin.over ~= was then moved[#moved + 1] = ('the built-in it overrides (%s) changed since you chose it'):format(over) end
+        return nil, ('your override of `%s` no longer holds: %s — re-choose it with %s, or drop it'):format(name,
+            table.concat(moved, '; '), entry), 'decision'
+    end
+    return nil, entry, 'decision'
+end
+
 function M.files(d, root)
-    local out, conflicts, promoted, owner = {}, {}, {}, {}
+    local out, conflicts, promoted, owner, overridden = {}, {}, {}, {}, {}
     local hit = require('cartograph.namespace').resolve(M.namespace(d, root), 'tactics')
     for _, layer in ipairs(hit and hit.layers or {}) do
         for _, path in ipairs(vim.fn.globpath(layer.target.dir, '*.lua', false, true)) do
@@ -65,18 +89,27 @@ function M.files(d, root)
             if not out[name] then out[name], owner[name] = path, layer.target.scope
             elseif slurp(path) == slurp(out[name]) then promoted[name] = path
             else
-                conflicts[name] = ('the %s tactic %s has the name of a %s one and differs from it — rename it, or promote it')
-                    :format(layer.target.scope, path, owner[name]:upper())
+                local ov, why = override_of(root, name, path, out[name])
+                if ov then
+                    overridden[name] = ov
+                    out[name], owner[name] = path, layer.target.scope
+                elseif why:find('no longer holds', 1, true) then
+                    conflicts[name] = why
+                else
+                    conflicts[name] = ('the %s tactic %s has the name of a %s one and differs from it — rename it, promote it, or override it by your own choice: %s')
+                        :format(layer.target.scope, path, owner[name]:upper(), why)
+                end
             end
         end
     end
-    return out, conflicts, promoted
+    return out, conflicts, promoted, overridden
 end
 
 --- a loaded entry, or nil, why — the SHAPE is checked here, by name, not trusted
 function M.load(name, d, root)
-    local files, conflicts = M.files(d, root)
-    if conflicts[name] then return nil, conflicts[name], 'ill-posed' end
+    local files, conflicts, _, overridden = M.files(d, root)
+    -- which of two tactics a name means is the USER's decision: never taken here, by precedence or by guess
+    if conflicts[name] then return nil, conflicts[name], 'decision' end
     local path = files[name]
     if not path then return nil, ('no tactic `%s` in the toolbelt (%s%s)'):format(tostring(name), d or dir(),
         (not d and root) and (' + ' .. M.project_dir(root)) or ''), 'ill-posed' end
@@ -95,22 +128,24 @@ function M.load(name, d, root)
     if #e.examples == 0 then return nil, path .. ': at least one example — it is the usage AND the test', 'unbuilt' end
     e.path = path
     e.scope = (path:sub(1, #dir()) == dir()) and 'built-in' or 'project'
+    -- an override says so on the entry: what it replaced, and the hash the user chose
+    if overridden[name] then e.overrides, e.override_hash = overridden[name].over, overridden[name].use end
     return e
 end
 
---- every entry, loaded: { entries }, { broken = { name -> why } }, { promoted = { name -> path } }
+--- every entry, loaded: { entries }, { broken = { name -> why } }, { promoted = { name -> path } }, { overridden }
 function M.list(d, root)
     local entries, broken = {}, {}
-    local files, conflicts, promoted = M.files(d, root)
+    local files, conflicts, promoted, overridden = M.files(d, root)
     local names = {}
     for name in pairs(files) do names[#names + 1] = name end
-    for name in pairs(conflicts) do names[#names + 1] = name end
+    for name in pairs(conflicts) do if not files[name] then names[#names + 1] = name end end
     table.sort(names)
     for _, name in ipairs(names) do
         local e, why = M.load(name, d, root)
         if e then entries[#entries + 1] = e else broken[name] = why end
     end
-    return entries, broken, promoted
+    return entries, broken, promoted, overridden
 end
 
 --- ★ PARAMETERS, COERCED BY THEIR DECLARED TYPE — one function for every caller (the CLI's strings, an MCP client's

@@ -2483,7 +2483,7 @@ end
 -- finding still holds; a write tactic PREVIEWS by default (a dry run that plans each step in the overlay world the
 -- last would produce, returned as a diff per file) and writes only with `apply = true` on a host started writable — refused by name otherwise.
 local function v_toolbelt_list(store)
-    local entries, broken, promoted = require('cartograph.toolbelt').list(nil, (store.data or {}).root)
+    local entries, broken, promoted, overridden = require('cartograph.toolbelt').list(nil, (store.data or {}).root)
     local rows = {}
     for _, e in ipairs(entries) do
         local ps, ex = {}, {}
@@ -2491,9 +2491,13 @@ local function v_toolbelt_list(store)
         table.sort(ps)
         for _, x in ipairs(e.examples) do ex[#ex + 1] = x.name end
         rows[#rows + 1] = { name = e.name, kind = e.kind, scope = e.scope, summary = e.summary, measures = nn(e.measures),
-            params = table.concat(ps, ' '), examples = ex }
+            params = table.concat(ps, ' '), examples = ex, overrides = nn(e.overrides) }
     end
     local notes = {}
+    for name, ov in pairs(overridden or {}) do
+        notes[#notes + 1] = { kind = 'overridden-built-in', premise = 'the user chose, by content hash, to run a project tactic over a built-in one',
+            why = ('%s runs instead of the built-in `%s` (%s) — pinned %s in your scoped config'):format(ov.path, name, ov.over, ov.use), evidence = NUL }
+    end
     for name, path in pairs(promoted) do
         notes[#notes + 1] = { kind = 'promoted-copy', premise = 'a project tactic identical to a built-in one',
             why = ('%s is a promoted copy of the built-in `%s` — the built-in is the one that runs'):format(path, name), evidence = NUL }
