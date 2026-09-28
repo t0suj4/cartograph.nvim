@@ -251,6 +251,37 @@ M.disk = disk
 M.kinds = {
     disk = function () return disk end,
 
+    --- ★ AN OVERLAY: texts that exist only in memory, claimed by ABSOLUTE path — the upper layer of an overlay WORLD
+    --- (CART-1160 step 3; overlayfs's upper dir, Glean's stacked layer). `{ kind = 'overlay', files = { [abs] = text } }`
+    --- is plain data, so it ships in a jobfile like every other spec. It claims only the paths it holds; everything
+    --- else falls through to the layers below it. Its stamp is a CONTENT hash, so a virtual file never passes for the
+    --- disk file it replaces.
+    overlay = function (e)
+        local files = e.files or {}
+        local function slice(text, off, len)
+            local from = (off and off < 0) and math.max(0, #text + off) or (off or 0)
+            return len and text:sub(from + 1, from + len) or text:sub(from + 1)
+        end
+        return {
+            name = 'overlay',
+            claims = function (path) return files[path] ~= nil end,
+            read = function (path) return files[path] end,
+            read_range = function (path, off, len)
+                if len ~= nil and len <= 0 then return '' end
+                return slice(files[path], off, len)
+            end,
+            reader = function (path)
+                local text = files[path]
+                return { read_range = function (off, len)
+                    if len ~= nil and len <= 0 then return '' end
+                    return slice(text, off, len)
+                end, close = function () end }
+            end,
+            stamp = function (path) return 'overlay:' .. vim.fn.sha256(files[path]) end,
+            size = function (path) return #files[path] end,
+        }
+    end,
+
     --- A ZIP ARCHIVE as a substrate. Claims the composite keys transport.join
     --- produces for a CONTAINER root value (`<archive>::<entry>`), which is why
     --- that form never appears in n.file: it exists only between abs() and here.

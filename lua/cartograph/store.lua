@@ -671,7 +671,7 @@ function M.materialize_file_idpass(rel)
     local ts = require 'cartograph.providers.treesitter'
     local L = ts.lookups(M.data.nodes, M.data.root) -- COMPLETE: uniqueness is global
     L.fn_ranges = { [rel] = ranges }
-    ts.merge_idpass(M.data, ts.id_pass(M.data.root, { rel }, L, M.data.abs), nil)
+    ts.merge_idpass(M.data, ts.id_pass(M.data.root, { rel }, L, M.data.abs, require('cartograph.source').transport(M.data)), nil)
     -- the marks this just minted are RESOLUTION INPUT, so anything already resolved was
     -- resolved without them (see resolve_resident). No-op when no calls are resident.
     M.resolve_resident()

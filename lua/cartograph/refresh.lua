@@ -360,7 +360,10 @@ function M.splice(data, rels, deleted)
     if can_idpass and #idfiles > 0 then
         local L = ts.lookups(data.nodes, data.root)
         L.fn_ranges = franges
-        ts.merge_idpass(data, ts.id_pass(data.root, idfiles, L), dirty)
+        -- ★ THROUGH THE GRAPH'S TRANSPORT (CART-1160): without it the id pass re-read the files from DISK, so an overlay
+        -- world's `use` edges were derived from the OLD text against the NEW nodes (B.f moved to line 5, its use edge
+        -- matched nothing) — and an archive-backed graph would read a path that is not on disk at all
+        ts.merge_idpass(data, ts.id_pass(data.root, idfiles, L, data.abs, require('cartograph.source').transport(data)), dirty)
     end
     stats.reconciled = vim.tbl_count(candidates)
     stats.dirty = {}
@@ -396,14 +399,7 @@ function M.files(rels)
     if not stats then return nil, why end
     local removed, remap = stats.removed_ids, stats.remap
 
-    -- post-passes (all idempotent over existing edges)
-    local xl = require 'cartograph.xlang'
-    xl.link(data, xl.effective_bindings(data))
-    require('cartograph.sql').attach(data)
-    require('cartograph.dblink').attach(data) -- session-cached db schema
-    require('cartograph.django').attach(data)  -- routes/templates re-derive
-    require('cartograph.symfony').attach(data)  -- yaml routes + twig re-derive
-    require('cartograph.ansible').attach(data)  -- notify/handler + includes
+    M.relink(data)
 
     -- carry navigation across the re-ingest: history entries remap like
     -- everything else; an entry whose node is gone and unmappable is
@@ -442,6 +438,18 @@ function M.files(rels)
         pcall(store.loc_provider.set, loc)
     end
     return stats
+end
+
+--- The post-splice passes (all idempotent over existing edges): what a spliced graph needs re-derived before it is
+--- read. ONE copy — refresh.files and an overlay world (world.edit) both run it (CART-1160).
+function M.relink(data)
+    local xl = require 'cartograph.xlang'
+    xl.link(data, xl.effective_bindings(data))
+    require('cartograph.sql').attach(data)
+    require('cartograph.dblink').attach(data) -- session-cached db schema
+    require('cartograph.django').attach(data)  -- routes/templates re-derive
+    require('cartograph.symfony').attach(data)  -- yaml routes + twig re-derive
+    require('cartograph.ansible').attach(data)  -- notify/handler + includes
 end
 
 --- Full refresh: re-extract the whole root (small projects; the manual

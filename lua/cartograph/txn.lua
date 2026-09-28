@@ -59,6 +59,15 @@ function M.contain_plan(plan)
 end
 
 function M.read_file(root, rel)
+    -- ★ THROUGH THE ACTIVE GRAPH'S TRANSPORT when it is this root's (CART-1160): a planner working against an OVERLAY
+    -- world must see the overlay's text, not the disk's. For every ordinary graph the stack is disk, and this is the
+    -- same io.open it always was.
+    local store = package.loaded['cartograph.store']
+    local data = store and store.data
+    if data and data.root == root and data.transport then
+        local text = require('cartograph.source').transport(data).read(root .. '/' .. rel)
+        return text
+    end
     local fd = io.open(root .. '/' .. rel, 'r')
     if not fd then return nil end
     local text = fd:read('a')
@@ -631,6 +640,13 @@ end
 --- @return table|nil entry, string|nil why
 function M.apply(store, plan)
     if type(plan) ~= 'table' then return nil, 'not a plan', 'ill-posed' end
+    -- ★ A VIRTUAL GRAPH IS NEVER APPLIED (CART-1160 — the TARGET rule): a plan made against an overlay world read texts
+    -- that exist only in memory, and writing its edits to the disk would commit a world nobody has. Commit belongs to
+    -- the world's own source.
+    if store.data and store.data.virtual then
+        return nil, ('this graph is VIRTUAL (an overlay world of %s): its plans preview, they never write the disk')
+            :format(tostring(store.data.root)), 'ill-posed'
+    end
     if plan.precheck then
         local why = plan.precheck(store, plan)
         if why then return nil, why, 'stale' end
