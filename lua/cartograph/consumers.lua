@@ -85,6 +85,8 @@ function Scan.new(src, file, spec)
                                      -- the bare-name over-approximation (`.calls`
                                      -- on an unrelated counter record)
         bless = spec.bless or {},    -- accessor names: passing there = SEAMED
+        accessors = spec.accessors or {}, -- 'binding.export' -> field: a read THROUGH an accessor (M.accessor_fields)
+        iters = spec.iters or {},         -- 'binding.export' -> list field: an iterator whose loop var is an element
         frames = {},                 -- lexical scope stack: {name -> taint|false}
         seeds = 0,
         derefs = {},                 -- { line, col, path, via }
@@ -245,6 +247,25 @@ function Scan:use(node, taint, via)
     if pt == 'arguments' then
         local callee = callee_name(p:parent(), src) or '?'
         if callee == 'ipairs' or callee == 'pairs' then return end -- loop seed, handled at the clause
+        -- ★ A READ THROUGH AN ACCESSOR IS A READ (CART-1165): `callrec.file(c)` reads field `file` of c exactly as
+        -- `c.file` does. MEASURED: without this the call record reads as barely used (235 raw derefs) while 401 reads go
+        -- through callrec — the better a field is seamed, the emptier the census. Only the record as argument 1 of a
+        -- PLAIN field accessor counts (M.accessor_fields: `function M.f(c) return c.field end`, derived by parsing).
+        if not esc and next(self.accessors) then
+            local nm = p:parent():field('name')[1] or p:parent():named_child(0)
+            local full = nm and node_text(nm, src)
+            local field = full and self.accessors[full]
+            local first = p:named_child(0)
+            if field and first and first:id() == cur:id() then
+                local seenkey = l .. ':' .. c
+                if not self.deref_seen[seenkey] then
+                    self.deref_seen[seenkey] = true
+                    self.derefs[#self.derefs + 1] = { line = l, col = c, path = pre and (pre .. '.' .. field) or field,
+                        via = via, accessor = full }
+                end
+                return
+            end
+        end
         if self.bless[callee] then
             self.seamed[#self.seamed + 1] = { line = l, col = c,
                 via = via, detail = callee .. '()' }
@@ -340,6 +361,13 @@ function Scan:clause_bindings(clause)
     local it = exprs:named_child(0)
     if it and it:type() == 'function_call' then
         local cn = callee_name(it, self.src)
+        -- a derived ITERATOR over the producer's list (`callrec.each(data)`, CART-1165): var 2 is an element
+        local nm = it:field('name')[1] or it:named_child(0)
+        if nm and self.iters and self.iters[node_text(nm, self.src)] then
+            local second = vars:named_child(1)
+            if second then out[node_text(second, self.src)] = 'elem' end
+            return out
+        end
         if cn == 'ipairs' or cn == 'pairs' then
             local arg = it:field('arguments')[1]
             local t = kindof(self:taintof(arg and arg:named_child(0)))
@@ -528,6 +556,22 @@ function M.scan(src, file, spec)
         escapes = s.escapes, seamed = s.seamed }
 end
 
+--- The PLAIN FIELD ACCESSORS an accessor module exports, DERIVED by parsing it (never listed): every
+--- `function M.<export>(<p>) return <p>.<field> end`. -> { ['<binding>.<export>'] = field }, n
+--- A non-plain export (a setter, an iterator, a record builder) is not a field read and is not in the map.
+--- Also the ITERATORS it exports — `function M.<export>(<p>) return ipairs(<p>.<list> …` — whose loop variable is an
+--- element of that list (`for _, c in callrec.each(data)`): -> third value { ['<binding>.<export>'] = list field }
+function M.accessor_fields(src, binding)
+    local out, n, iters = {}, 0, {}
+    for export, param, obj, field in src:gmatch('function%s+M%.([%w_]+)%(%s*([%w_]+)%s*%)%s*return%s+([%w_]+)%.([%w_]+)%s+end') do
+        if obj == param then out[binding .. '.' .. export] = field; n = n + 1 end
+    end
+    for export, param, obj, field in src:gmatch('function%s+M%.([%w_]+)%(%s*([%w_]+)%s*%)%s*return%s+ipairs%(%s*([%w_]+)%.([%w_]+)') do
+        if obj == param then iters[binding .. '.' .. export] = field end
+    end
+    return out, n, iters
+end
+
 --- Roster over files (rel paths under root). Aggregates a per-path census
 --- plus the full frontier list — the Encapsulate Field checklist.
 function M.roster(root, files, spec)
@@ -542,7 +586,7 @@ function M.roster(root, files, spec)
                 for _, d in ipairs(r.derefs) do
                     by_path[d.path] = (by_path[d.path] or 0) + 1
                     sites[#sites + 1] = { file = f, line = d.line, col = d.col,
-                        path = d.path, via = d.via,
+                        path = d.path, via = d.via, accessor = d.accessor,
                         ext = d.ext, stem1 = d.stem1, stem2 = d.stem2, pre = d.pre }
                 end
                 for _, e in ipairs(r.escapes) do

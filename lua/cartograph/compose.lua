@@ -165,6 +165,13 @@ M.VERBS['rewrite-by-example'] = {
 -- the toolbelt's own growth, as verbs: LEARN a tactic into the project (a journaled create, planned only once the
 -- rendered entry passes its own examples) and PROMOTE one into the built-in toolbelt (always a `promote` decision).
 -- ★ RE-RUN IS EMPTY for both: an identical file is the goal met.
+-- ★ THE GROUND EDIT (CART-1182): supplied text at one site, exact-once anchored, idempotent by classifying the
+-- current state against both images (cartograph.edit). The floor every other write rests on.
+M.VERBS.edit = {
+    plan = function (store, args) return require('cartograph.edit').plan(store, args) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
+    effect = 'journaled', rerun = 'empty',
+}
 M.VERBS['learn-tactic'] = {
     plan = function (store, args) return require('cartograph.toolbelt').plan_learn(store, args) end,
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,

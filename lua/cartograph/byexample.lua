@@ -87,6 +87,37 @@ function M.learn(before, after, lang)
             for i, c in ipairs(t.kids) do kids[i] = holed(c) end
             return a.rebuild(t, kids)
         end
+        -- ★ EVERY HOLE THE RIGHT SIDE USES MUST BE BOUND BY THE LEFT (CART-1173). MEASURED: inserting `a = a + 1`
+        -- between `local a = 1` and `return a` picked the two statements AND the identifier `a`; the left side's
+        -- statement holes swallowed every `a`, so the right side's `a` hole was bound by nothing, instantiation failed
+        -- at every site, and the rule "matched nothing" on an identical body. So a larger pick that CONTAINS a pick the
+        -- right side still needs unbound is dropped, until every right-side hole is bound: the rule becomes
+        -- `local ?1 = 1; return ?1` -> `local ?1 = 1; ?1 = ?1 + 1; return ?1`.
+        local function holes_of(t, out)
+            out = out or {}
+            if t.k == 'hole' and t.h then out[t.h] = true end -- algebra/core: { k = 'hole', h = <name> }
+            for _, c in ipairs(t.kids or {}) do holes_of(c, out) end
+            return out
+        end
+        local function contains(big, small)
+            if a.eq(big, small) then return true end
+            for _, c in ipairs(big.kids or {}) do if contains(c, small) then return true end end
+            return false
+        end
+        for _ = 1, #picks do
+            local hb, ha = holes_of(holed(Lb)), holes_of(holed(La))
+            local unbound = {}
+            for k, p in ipairs(picks) do if ha['h' .. k] and not hb['h' .. k] then unbound[#unbound + 1] = p end end
+            if #unbound == 0 then break end
+            local keep = {}
+            for _, p in ipairs(picks) do
+                local swallows = false
+                for _, u in ipairs(unbound) do if p ~= u and contains(p, u) then swallows = true; break end end
+                if not swallows then keep[#keep + 1] = p end
+            end
+            if #keep == #picks then break end
+            picks = keep
+        end
         local lhs, rhs = a.template(holed(Lb)), a.template(holed(La))
         -- ★ A RULE THAT MATCHES ITS OWN OUTPUT NEVER RUNS OUT OF WORK (and could not be re-run as `empty`)
         if a.match(lhs, La).ok then
@@ -150,6 +181,47 @@ function M.plan(store, opts)
     local rules, why, class = M.learn(opts.before or '', opts.after or '', opts.lang)
     if not rules then return nil, why, class or 'ill-posed' end
     local root = store.data.root
+    -- ★ WITHIN ONE FUNCTION (CART-1176, edit-in): `within` = a durable ref (or a node id). The rule rewrites only that
+    -- node's own source slice — read as a chunk, or as `return <expr>` when it is an expression (a function value in a
+    -- table) — and the slice is spliced back; nothing outside the function can match. Terms carry no spans, so the
+    -- scope is the TEXT the graph's range names, not a position filter.
+    if opts.within ~= nil then
+        local id = type(opts.within) == 'table' and store.resolve_ref(opts.within) or opts.within
+        local n = id and store.node(id)
+        if not n then return nil, ('the function to edit within does not resolve (%s)'):format(vim.inspect(opts.within)), 'stale' end
+        local atr = require 'cartograph.at'
+        local text = txn.read_file(root, n.file)
+        if not text then return nil, ('cannot read %s'):format(n.file), 'stale' end
+        local lines = vim.split(text, '\n', { plain = true })
+        local sl, sc, el, ec = atr.sl(n.range), atr.sc(n.range), atr.el(n.range), atr.ec(n.range)
+        local function offset(l, c) local o = 0; for i = 1, l do o = o + #lines[i] + 1 end; return o + c end
+        local s0, e0 = offset(sl, sc), offset(el, ec)
+        local slice = text:sub(s0 + 1, e0)
+        local new, n_sites = M.rewrite(rules, slice, opts.lang)
+        local wrapped = false
+        if not new then
+            new, n_sites = M.rewrite(rules, 'return ' .. slice, opts.lang)
+            if new then new, wrapped = new:gsub('^return ', '', 1), true end
+        end
+        local rule_text = {}
+        for _, r in ipairs(rules) do rule_text[#rule_text + 1] = ('`%s` -> `%s`'):format(r.lhs_text, r.rhs_text) end
+        if not new then return nil, ('%s does not read losslessly on its own: %s'):format(tostring(n.name), tostring(n_sites)), 'frontier' end
+        if n_sites == 0 then
+            return nil, ('the rule %s matches nothing inside %s'):format(table.concat(rule_text, ', '), tostring(n.name)), 'empty'
+        end
+        local plan = {
+            verb = 'rewrite-by-example', guards = { 'parses' }, generation = store.generation,
+            touched = { n.file }, stamps = { [n.file] = txn.disk_stamp(root, n.file) },
+            refspecs = { { id = n.id, name = n.name, ref = store.ref_of(n.id), what = 'symbol' } },
+            edits = { [n.file] = text:sub(1, s0) .. new .. text:sub(e0 + 1) }, rules = rule_text, sites = n_sites,
+            within = n.name, wrapped = wrapped or nil,
+            preserves = 'none',
+            preserves_why = 'the rewrite applies what ONE example demonstrated; nothing checks that it preserves behaviour',
+            hazards = {},
+            desc = ('rewrite by example within %s: %s, %d site(s)'):format(tostring(n.name), table.concat(rule_text, ', '), n_sites),
+        }
+        return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
+    end
     local scan = files_in(store, opts.scope or 'all')
     local edits, touched, stamps, per, total, unread = {}, {}, {}, {}, 0, {}
     for _, rel in ipairs(scan) do

@@ -751,6 +751,8 @@ function M.execute(store, plan, desc, edit_of, opts)
     -- description, so the ADDRESS survives with the bytes `before` already keeps.
     local entry, jerr, jerr_class = journal.begin(root, plan.verb, desc, before, plan.undo)
     if not entry then return nil, jerr, jerr_class or 'environment' end
+    -- WHO DECIDED (CART-1179): a tactic run's decisions, or `direct` — a plan applied without one says so, not nothing
+    entry.decided_by, entry.decisions = plan.decided_by or 'direct', plan.decisions or {}
     for _, rel in ipairs(plan.touched) do
         local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$')
         if dir then vim.fn.mkdir(dir, 'p') end
@@ -764,8 +766,9 @@ function M.execute(store, plan, desc, edit_of, opts)
     end
     journal.commit(root, entry, after)
     store.set_txn(nil)
-    -- a cross-world write touched ANOTHER world's files: this graph has none of them to refresh
-    if cross then vim.cmd('silent! checktime'); return entry end
+    -- a cross-world write touched ANOTHER world's files: this graph has none of them to refresh; nor does a STUB
+    -- world (no graph behind it: tools/toolbelt.lua `run <entry> -`), where a refresh would only warn misleadingly
+    if cross or (store.data and store.data.stub) then vim.cmd('silent! checktime'); return entry end
     local ok, why = require('cartograph.refresh').files(plan.touched)
     if not ok then
         -- the writes are committed (journal has them); only the graph is stale

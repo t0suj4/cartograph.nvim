@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# cartograph post-commit: write the PROVENANCE LEDGER note for the new commit (CART-1180) — which journal entries
+# explain it, under which decisions, and the open intents. It NEVER fails a commit: a note that cannot be written is
+# a missing note the audit reports, not a blocked commit. Push notes with `git push origin refs/notes/cartograph`.
+cd "$(git rev-parse --show-toplevel)" || exit 0
+NVIM="${NVIM:-nvim}"
+command -v "$NVIM" >/dev/null 2>&1 || exit 0
+"$NVIM" --headless -u NONE -l tools/provledger.lua write HEAD >/dev/null 2>&1 || true
+exit 0

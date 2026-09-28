@@ -94,7 +94,15 @@ function M.step(store, st, opts)
     for _ = 1, tries do
         local plan, why, class = spec.plan(store, st.args or {})
         if not plan then
-            if class == 'empty' then return { ok = true, empty = true, why = why } end
+            if class == 'empty' then
+                -- ★ RECONCILE (CART-1185): an OPEN intent for this very invocation whose goal check now says "already
+                -- there" took effect after all — close it as such
+                local I = require 'cartograph.intents'
+                local root = store.data and store.data.root
+                local open = root and I.get(root, I.identity(verb, st.args))
+                if open then I.close(root, open.id, 'reconciled-done') end
+                return { ok = true, empty = true, why = why, reconciled = open and 'done' or nil }
+            end
             last = fail(class, why, 'plan')
         else
             local accepted = {}
@@ -127,8 +135,33 @@ function M.step(store, st, opts)
                     local aok, awhy, aclass = spec.arm(store, plan)
                     if not aok then return fail(aclass or 'stale', awhy, 'arm', { plan = plan, staged = staged }) end
                 end
-                local entry, ewhy, eclass = (spec.apply or txn.apply)(store, plan, { ns = ns })
-                if entry then return { ok = true, plan = plan, staged = staged, entry = entry, accepted = accepted } end
+                -- ★ AN EFFECT THE JOURNAL CANNOT HOLD records its INTENT first (CART-1185): if the apply raises or the
+                -- world cannot say whether it took effect (environment), the outcome is INDETERMINATE — never "failed"
+                -- (a retry might then duplicate it) and never "done" (it might not have happened). The intent stays
+                -- open, and re-running the step reconciles it through the verb's own goal check.
+                local I = require 'cartograph.intents'
+                local root = store.data and store.data.root
+                local journaled = spec.effect == 'journaled'
+                local intent = (not journaled and root) and I.open(root, verb, st.args, opts.where) or nil
+                -- ★ WHO DECIDED (CART-1179): the plan carries the decisions this step was applied under into its journal
+                -- entry — each accepted question, and whether the term's accept list or a REMEMBERED decision answered it
+                plan.decided_by, plan.decisions = 'tactic', {}
+                for _, a in ipairs(accepted) do
+                    plan.decisions[#plan.decisions + 1] = { kind = a.kind, key = a.key,
+                        by = a.remembered and 'remembered' or 'accept-list', decision_id = a.decision_id }
+                end
+                local okc, entry, ewhy, eclass = pcall(spec.apply or txn.apply, store, plan, { ns = ns })
+                if not okc then entry, ewhy, eclass = nil, tostring(entry), 'environment' end
+                if entry then
+                    if intent then I.close(root, intent.id, 'applied') end
+                    return { ok = true, plan = plan, staged = staged, entry = entry, accepted = accepted }
+                end
+                if intent and eclass == 'environment' then
+                    I.unknown(root, intent.id, ewhy)
+                    return fail('frontier', ('the outcome of `%s` is UNKNOWN (%s) — it may have taken effect. Re-running reconciles it: the step is goal-checked, so "already there" is empty and "not there" is retried under the same edit identity')
+                        :format(tostring(verb), tostring(ewhy)), 'apply', { plan = plan, staged = staged, indeterminate = intent.id })
+                end
+                if intent then I.close(root, intent.id, 'refused') end
                 last = fail(eclass, ewhy, 'apply', { plan = plan, staged = staged })
             end
         end
@@ -261,10 +294,13 @@ local function eval_step(store, t, opts, where)
         out.residue[1] = { kind = 'corrected', class = 'informational', where = where, verb = t.verb,
             text = ('corrected `%s`: %s'):format(corrected.arg, corrected.why), change = corrected }
     end
-    local row = { where = where, verb = t.verb, ok = r.ok, class = r.class, why = r.why, phase = r.phase }
+    local row = { where = where, verb = t.verb, ok = r.ok, class = r.class, why = r.why, phase = r.phase,
+        indeterminate = r.indeterminate }
     out.trace[1] = row
     if not r.ok then
         out.options, out.fixes = r.options, r.fixes
+        -- ★ an INDETERMINATE effect may have happened: no enclosing first/try/repeat may move on over it (CART-1185)
+        if r.indeterminate then out.unrecoverable = true end
         return adopt(out, { class = r.class, why = r.why, where = where, options = r.options, fixes = r.fixes })
     end
     -- ★ PROVENANCE: what this step made true (it applied, or its goal check found it done), for a later correction
@@ -552,6 +588,54 @@ function eval(store, t, opts, where)
         why = ('no tactical `%s` (then|first|try|repeat|each|step|use)'):format(tostring(op)) })
 end
 
+--- ★ NO POINT OF NO RETURN BEFORE A CHECK (CART-1187): walk the term in EXECUTION ORDER before anything runs. Each
+--- step can STOP the run (a refusal, a decision) before its effect happens, and an IRREVERSIBLE step's effect cannot be
+--- undone by anything; so an irreversible step followed by anything that can still stop the run — a later step, a
+--- premise, `first`, `repeat`, the tactic's own oracle — would leave the world past a point of no return with the plan
+--- refused. Only `try` cannot stop the run (it turns a failure into no change), so it may follow.
+--- The effect is the verb's declared one, undeclared = irreversible (the runner's own rule). `use` expands at run time:
+--- it counts as a step that can stop, and its INSIDE is checked when it runs (the same walk, on the built term).
+--- -> nil | { irreversible = where, gate = where, why }
+function M.no_return_check(term, verbs, has_oracle)
+    verbs = verbs or require('cartograph.compose').VERBS
+    local events = {}
+    local function walk(t, where, safe)
+        local op = t and t.op
+        if op == 'step' then
+            local spec = verbs[t.verb] or {}
+            local eff = EFFECTS[spec.effect] and spec.effect or 'irreversible'
+            if not safe then events[#events + 1] = { kind = 'stop', where = where, what = 'step `' .. tostring(t.verb) .. '`' } end
+            if eff == 'irreversible' then events[#events + 1] = { kind = 'irreversible', where = where, verb = t.verb } end
+        elseif op == 'then' then
+            for i, k in ipairs(t) do walk(k, where .. '.' .. i, safe) end
+        elseif op == 'each' then
+            for i, item in ipairs(t.items or {}) do
+                local ok, k = pcall(t.body, item, i)
+                if ok then walk(k, where .. '.' .. i, safe) end
+            end
+        elseif op == 'try' then
+            walk(t[1], where .. '.1', true)
+        elseif op == 'first' or op == 'repeat' then
+            -- an irreversible step inside is refused by the runner itself; the tactical as a whole can stop the run
+            if not safe then events[#events + 1] = { kind = 'stop', where = where, what = '`' .. op .. '`' } end
+        elseif op == 'use' then
+            if not safe then events[#events + 1] = { kind = 'stop', where = where, what = 'use `' .. tostring(t.name) .. '`' } end
+        end
+    end
+    walk(term, 'root', false)
+    if has_oracle then events[#events + 1] = { kind = 'stop', where = 'oracle', what = 'the oracle' } end
+    local irr
+    for _, e in ipairs(events) do
+        if e.kind == 'irreversible' and not irr then irr = e
+        elseif e.kind == 'stop' and irr then
+            return { irreversible = irr.where, gate = e.where,
+                why = ('the irreversible step `%s` at %s is followed by %s at %s, which can still stop the run — past a point of no return, and nothing can undo it. Move the check BEFORE the irreversible step, or wrap what follows in `try`')
+                    :format(tostring(irr.verb), irr.where, e.what, e.where) }
+        end
+    end
+    return nil
+end
+
 --- the files an overlay world holds that differ from its base: { [rel] = text }
 function M.preview_of(data)
     local out
@@ -577,6 +661,12 @@ function M.run(store, term, opts)
     opts = opts or {}
     local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct,
         toolbelt_dir = opts.toolbelt_dir, ns = opts.ns, remembered = opts.remembered }
+    -- ★ the static check first: a malformed term is refused before ANYTHING runs, dry or not (CART-1187)
+    local nr = M.no_return_check(term, opts.verbs, opts.oracle ~= nil)
+    if nr then
+        return { status = 'failed', class = 'ill-posed', why = nr.why, where = nr.gate, residue = {}, trace = {},
+            completed = {}, resumable = true, applied = 0, rolled_back = 0, corrections = {}, work_orders = {}, worlds = 0 }
+    end
     -- ★ A DRY RUN CHAINS OVERLAY WORLDS (CART-1160 step 3) and the caller's graph comes back afterwards, raise or not
     local rec = not eopts.apply and store.capture()
     local okr, o = pcall(eval, store, term, eopts, 'root')
@@ -616,6 +706,13 @@ function M.run(store, term, opts)
         if rec.rerun ~= 'empty' then res.resumable = false end
     end
     res.applied = #res.completed
+    -- ★ WHAT MAY BE IN FLIGHT (CART-1185): this run's indeterminate steps, and every intent still OPEN for this world —
+    -- including a previous run's that crashed. Re-running the term reconciles each.
+    res.indeterminate = {}
+    for _, t in ipairs(res.trace or {}) do
+        if t.indeterminate then res.indeterminate[#res.indeterminate + 1] = { where = t.where, verb = t.verb, intent = t.indeterminate, why = t.why } end
+    end
+    res.open_intents = (store.data and store.data.root) and require('cartograph.intents').open_intents(store.data.root) or {}
     -- a dry run's result: every file the chain would write, at its final text, and how many worlds it stacked
     res.preview, res.worlds = preview, eopts.worlds or 0
     -- every correction the run applied, at the top of the result: a correction is never only a residue line

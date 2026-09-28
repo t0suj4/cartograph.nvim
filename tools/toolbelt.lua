@@ -55,7 +55,8 @@ elseif cmd == 'run' then
     end
     local store = require 'cartograph.store'
     -- `-` = no graph: a discovery that measures something else (mutation-check, spec-fails) need not extract a tree
-    if dir == '-' then store.ingest({ root = vim.fn.getcwd(), nodes = {}, edges = {}, calls = {} })
+    -- `stub`: there is no graph behind this world, so a write has nothing to refresh (txn.execute skips it)
+    if dir == '-' then store.ingest({ root = vim.fn.getcwd(), nodes = {}, edges = {}, calls = {}, stub = true })
     else store.ingest(require('cartograph.providers.treesitter').extract((vim.fn.fnamemodify(dir, ':p'):gsub('/$', '')))) end
     local res, why = tb.run(store, name, params, { apply = apply })
     if not res then io.write('refused: ', tostring(why), '\n'); os.exit(1) end

@@ -68,6 +68,9 @@ local VERBS = {
         if have >= a.n then return nil, 'already ' .. a.n, 'empty' end
         return write_plan(a.file, '-- mark')
     end },
+    -- a COMPENSABLE external effect: applied outside the journal, undoable only by its world's own inverse
+    comp = { effect = 'compensable', plan = function (_, a) return write_plan(a.file, '-- compensable') end,
+        apply = function () shipped = shipped + 1; return { id = 'comp-' .. shipped } end },
     -- an EXTERNAL effect: staged like any plan, applied outside the journal (a deploy, a message)
     ship = { effect = 'irreversible', plan = function (_, a) return write_plan(a.file, '-- shipped') end,
         apply = function () shipped = shipped + 1; return { id = 'ext-' .. shipped } end },
@@ -106,13 +109,25 @@ test('tactic: on_stop = rollback undoes a stopped run — journaled writes only'
     local root = mkroot(ORIG)
     local r = run(T.seq(W('a.lua'), W('b.lua'), R('unbuilt')), { on_stop = 'rollback' })
     eq('failed', r.status); eq(2, r.rolled_back); eq(0, #r.completed); unchanged(root)
-    -- an irreversible completed step: the policy REFUSES by name, and says what stands
+    -- a COMPENSABLE completed step: the journal cannot undo it, so the policy REFUSES by name and says what stands
+    -- (compensation itself is CART-1186)
     shipped = 0
-    local x = run(T.seq(T.step('ship', { file = 'a.lua' }), R('unbuilt')), { on_stop = 'rollback' })
+    local x = run(T.seq(T.step('comp', { file = 'a.lua' }), R('unbuilt')), { on_stop = 'rollback' })
     eq('failed', x.status); eq(1, shipped)
-    ok(x.rollback_refused and x.rollback_refused:find('irreversible', 1, true), tostring(x.rollback_refused))
-    eq('irreversible', x.completed[1] and x.completed[1].effect)
-    eq(false, x.resumable, 'an irreversible step that declares no goal check cannot be re-run safely')
+    ok(x.rollback_refused and x.rollback_refused:find('compensable', 1, true), tostring(x.rollback_refused))
+    eq('compensable', x.completed[1] and x.completed[1].effect)
+    -- ★ an IRREVERSIBLE step before something that can still stop the run is refused BEFORE ANYTHING RUNS (CART-1187):
+    -- the case the rollback policy could only ever refuse after the fact
+    shipped = 0
+    local y = run(T.seq(T.step('ship', { file = 'a.lua' }), R('unbuilt')), { on_stop = 'rollback' })
+    eq('failed', y.status); eq('ill-posed', y.class); eq(0, shipped, 'nothing ran'); unchanged(root)
+    ok(y.why:find('point of no return', 1, true) and y.why:find('root.1', 1, true) and y.why:find('root.2', 1, true), y.why)
+    -- the accepted reorderings: the check BEFORE the irreversible step, or what follows wrapped in `try`
+    eq('done', run(T.seq(W('b.lua'), T.step('ship', { file = 'a.lua' }))).status)
+    eq('done', run(T.seq(T.step('ship', { file = 'a.lua' }), T.try(R('unbuilt')))).status)
+    -- and the tactic's ORACLE is a gate too: an irreversible step with an oracle after it is refused
+    local z = run(T.step('ship', { file = 'a.lua' }), { oracle = function () return true end })
+    eq('ill-posed', z.class); ok(z.why:find('the oracle', 1, true), z.why)
 end)
 
 test('tactic: an unaccepted DECISION hazard STOPS the run with its options; answering it and re-running finishes', function ()
@@ -225,9 +240,9 @@ test('tactic: a NON-JOURNALED previewed step does not chain — its effect is mo
     if not ready() then skip 'no lua parser' end
     local root = mkroot(ORIG)
     shipped = 0
-    local r = run(T.seq(T.step('ship', { file = 'a.lua' }), W('b.lua')), { apply = false })
-    eq('previewed', r.status); eq(0, shipped, 'a dry run ships nothing'); eq(0, r.worlds); unchanged(root)
-    ok(tostring(r.trace[1].why):find('irreversible', 1, true), tostring(r.trace[1].why))
+    local r = run(T.seq(T.step('comp', { file = 'a.lua' }), W('b.lua')), { apply = false })
+    eq('previewed', r.status, tostring(r.why)); eq(0, shipped, 'a dry run ships nothing'); eq(0, r.worlds); unchanged(root)
+    ok(tostring(r.trace[1].why):find('compensable', 1, true), tostring(r.trace[1].why))
     eq(true, r.trace[2] and r.trace[2].underivable, 'so the next step waits on it')
 end)
 
@@ -355,6 +370,7 @@ local IDEM = {
         function () return { name = 'nil-check', before = 'if x == nil then return 0 end', after = 'if not x then return 0 end' } end },
     ['promote-tactic'] = { { ['.cartograph/tactics/count-functions.lua'] = 'return { name = \'count-functions\', kind = \'discovery\', summary = \'s\', params = {}, measure = function (store) local n = 0; for _, x in ipairs(store.data.nodes or {}) do if x.kind == \'function\' then n = n + 1 end end; return n end, claim = function (n) return n > 0, n .. \' function(s)\' end, examples = { { name = \'one\', files = { [\'a.lua\'] = \'local function f() end\\nreturn f\\n\' }, expect = { holds = true } } } }\n' },
         function () return { name = 'count-functions', from = store.data.root, into = store.data.root .. '/builtin' } end },
+    edit = { { ['e.lua'] = 'local E = {}\nE.v = 1\nreturn E\n' }, function () return { file = 'e.lua', before = 'E.v = 1\n', after = 'E.v = 1\nE.w = 2\n' } end },
     ['rewrite-by-example'] = { { ['q.lua'] = 'local Q = {}\nfunction Q.h(q)\n  if q == nil then return 3 end\n  return q\nend\nreturn Q\n' },
         function () return { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'all' } end },
     propagate = { { ['fe.lua'] = (function ()

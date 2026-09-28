@@ -150,6 +150,19 @@ test('toolbelt: OVERRIDING a built-in tactic is the user\'s explicit choice, pin
     ok(ok_run)
 end)
 
+test('byexample: a STATEMENT INSERTION applies — every hole the right side uses is bound by the left (CART-1173)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    -- MEASURED before the fix: learned with 4 holes, then 0 sites on an IDENTICAL body — the statement holes on the left
+    -- swallowed the identifier the inserted line needs, so instantiation failed at every site, silently
+    local rules = assert(BX.learn('local function f()\n  local a = 1\n  return a\nend',
+        'local function f()\n  local a = 1\n  a = a + 1\n  return a\nend'))
+    eq(1, #rules); eq(1, rules[1].holes, 'one hole: the identifier the insertion reuses')
+    local same, n1 = BX.rewrite(rules, 'local function g()\n  local a = 1\n  return a\nend\n')
+    eq(1, n1); eq('local function g()\n  local a = 1\n  a = a + 1\n  return a\nend\n', same)
+    local renamed, n2 = BX.rewrite(rules, 'local function h()\n  local q = 1\n  return q\nend\n')
+    eq(1, n2); eq('local function h()\n  local q = 1\n  q = q + 1\n  return q\nend\n', renamed, 'the inserted line uses the TARGET\'s name')
+end)
+
 test('byexample: a CONSTANT the example keeps stays part of the pattern, and overlapping matches rewrite once', function ()
     if not ready() then skip 'no lua parser or algebra' end
     local rules = assert(BX.learn('if x == 0 then return end', 'if x <= 0 then return end'))

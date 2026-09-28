@@ -206,3 +206,39 @@ end
     eq(2, #r.seamed, 'sl()/ec() reads count as migration progress')
     eq('sl()', r.seamed[1].detail)
 end)
+
+test('consumers: a read THROUGH a plain accessor counts as a read of its field, and an ITERATOR seeds its loop var (CART-1165)', function ()
+    local C = require 'cartograph.consumers'
+    local ACC = table.concat({
+        'local M = {}',
+        'function M.file(c) return c.file end',
+        'function M.callee(c) return c.callee end',
+        'function M.set(c, field, v) c[field] = v end',          -- not a field read
+        'function M.each(data) return ipairs(data.calls or {}) end',
+        'return M', '' }, '\n')
+    local map, n, iters = C.accessor_fields(ACC, 'rec')
+    eq(2, n); eq('file', map['rec.file']); eq('callee', map['rec.callee']); eq(nil, map['rec.set'], 'a setter is not a field read')
+    eq('calls', iters['rec.each'])
+    local src = table.concat({
+        'local rec = require "rec"',
+        'local function f(data)',
+        '  for _, c in ipairs(data.calls) do',
+        '    local a = c.file',            -- a raw deref
+        '    local b = rec.file(c)',       -- through the accessor
+        '    rec.set(c, "x", 1)',          -- an escape, not a read
+        '  end',
+        '  for _, c in rec.each(data) do',
+        '    local d = rec.callee(c)',     -- a loop var seeded by the ITERATOR
+        '  end',
+        'end', '' }, '\n')
+    local r = C.scan(src, 'x.lua', { rooted = { ['data.calls'] = 'list' }, accessors = map, iters = iters })
+    local paths = {}
+    for _, d in ipairs(r.derefs) do paths[#paths + 1] = d.path .. (d.accessor and ('@' .. d.accessor) or '') end
+    table.sort(paths)
+    eq({ 'callee@rec.callee', 'file', 'file@rec.file' }, paths)
+    -- both sides pinned: WITHOUT the accessor map, the accessor call is not a read (an escape), and the iterator seeds nothing
+    local bare = C.scan(src, 'x.lua', { rooted = { ['data.calls'] = 'list' } })
+    local only = {}
+    for _, d in ipairs(bare.derefs) do only[#only + 1] = d.path end
+    eq({ 'file' }, only)
+end)

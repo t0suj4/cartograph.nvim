@@ -60,6 +60,21 @@ while i <= #_G.arg do
     elseif a == '--rwmod' then
         i = i + 1
         rwmod, rwbind = _G.arg[i]:match('^([%w_.%-]+):([%w_]+)$')
+    elseif a == '--accessors' then
+        -- `module:binding` (cartograph.callrec:callrec): count reads THROUGH that module's plain field accessors,
+        -- derived by parsing its exports (CART-1165) — without it a seamed field reads as barely used
+        i = i + 1
+        local mod, bind = _G.arg[i]:match('^([%w_.%-]+):([%w_]+)$')
+        -- through the RUNTIMEPATH, where require finds it (package.path does not hold ./lua)
+        local path = mod and vim.api.nvim_get_runtime_file('lua/' .. mod:gsub('%.', '/') .. '.lua', false)[1]
+        local fd = path and io.open(path)
+        if not fd then io.stderr:write('consumers: cannot find accessor module ' .. tostring(_G.arg[i]) .. '\n'); os.exit(2) end
+        local src = fd:read('a'); fd:close()
+        local map, n, iters = consumers.accessor_fields(src, bind)
+        spec.accessors, spec.iters = spec.accessors or {}, spec.iters or {}
+        for k, v in pairs(map) do spec.accessors[k] = v end
+        for k, v in pairs(iters) do spec.iters[k] = v end
+        io.stderr:write(('consumers: %d plain accessor(s), %d iterator(s) from %s\n'):format(n, vim.tbl_count(iters), mod))
     elseif a == '--apply' then apply = true
     elseif a == '--full' then full = true
     else root = a end
