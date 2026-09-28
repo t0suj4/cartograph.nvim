@@ -157,6 +157,54 @@ for name, src in pairs(CASES) do
     end)
 end
 
+test('luajs differential: the HOST pack — debug.getinfo(1, "S") names the Lua source; io files, os dates, errors as Lua\'s triples', function ()
+    if not ready() then skip 'no lua parser / node' end
+    local src = [[
+local d = os.getenv('LUAJS_T')
+print(debug.getinfo(1, 'S').source == '@' .. d .. '/snip.lua', #debug.getinfo(1, 'S').short_src, debug.getinfo(1, 'S').short_src)
+local p = d .. '/f.txt'
+local f = assert(io.open(p, 'w'))
+f:write('line one\n', 'l2 ', 42, '\n', '3.5 rest\n')
+print(f:close(), io.type(f), tostring(f))
+local r = assert(io.open(p, 'r'))
+print(r:read('l'), r:read('L') == 'l2 42\n', r:read('n'), r:read('a'), r:read('a'), r:read('l'))
+print(r:seek('set', 5), r:read(3), r:seek('cur'), r:seek('end'))
+r:close()
+local n = 0
+for _ in io.lines(p) do n = n + 1 end
+print('lines', n)
+local a = io.open(p, 'a'); a:write('appended\n'); a:close()
+print(#io.open(p):read('a'))
+print(io.open(d .. '/missing.txt'))
+print(os.remove(d .. '/missing.txt'))
+print(os.rename(p, d .. '/g.txt'), io.open(p) == nil)
+print(os.remove(d .. '/g.txt'))
+print(os.date('!%Y-%m-%dT%H:%M:%SZ', 0), os.date('!%c', 86400 * 40), os.date('!%x %X %p %a %b %j %A %B', 86400 * 40))
+local t = os.date('!*t', 1e9)
+print(t.year, t.month, t.day, t.hour, t.min, t.sec, t.wday, t.yday)
+print(os.time({ year = 2020, month = 1, day = 1, hour = 0 }) == os.time({ year = 2020, month = 1, day = 1, hour = 0, min = 0 }))
+print(type(os.time()), type(os.clock()), os.getenv('LUAJS_NOPE'), os.execute('exit 3'))
+io.write('io.write ', 1, ' ', 2.5, '\n')
+local dirf = io.open(d)
+print(dirf ~= nil, dirf and select(2, dirf:read('a')))
+]]
+    -- a directory LONG enough that short_src is truncated to Lua's 60-byte chunk id ('...' + the tail)
+    local dir = vim.fn.tempname() .. '/' .. ('d'):rep(48); vim.fn.mkdir(dir, 'p')
+    local fd = assert(io.open(dir .. '/snip.lua', 'w')); fd:write(src); fd:close()
+    -- the Lua side: the FILE (so its source is '@<path>'), with the standard print, output to stdout
+    local ref = vim.system({ 'nvim', '--headless', '-u', 'NONE', '-l', REPO .. '/tests/fixtures/luaref.lua', dir .. '/snip.lua' },
+        { text = true, env = { LUAJS_T = dir } }):wait(60000)
+    -- the JS side: emitted beside the pack, LUAJS_SRC_ROOT naming the Lua tree it came from
+    local out = vim.fn.tempname(); vim.fn.mkdir(out, 'p')
+    vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js', 'b'), out .. '/$pack.js', 'b')
+    local js, refusals = L.emit(src, 'snip.lua', { pack = './$pack.js' })
+    eq(0, #refusals, vim.inspect(refusals))
+    local w = assert(io.open(out .. '/snip.js', 'wb')); w:write(js); w:close()
+    local run = vim.system({ 'node', out .. '/snip.js' }, { text = true, env = { LUAJS_T = dir, LUAJS_ROOT = out, LUAJS_SRC_ROOT = dir } }):wait(60000)
+    ok((ref.stdout or ''):find('^true'), 'the premise: the Lua side ran and its source matched: ' .. tostring(ref.stdout) .. tostring(ref.stderr))
+    eq(ref.stdout, (run.stdout or '') .. (run.stderr or ''))
+end)
+
 test('luajs: a construct with no faithful form is REFUSED by name, the module still parses, and a pack gap BREAKS loudly at run time', function ()
     if not ready() then skip 'no lua parser / node' end
     local out, js, refusals = js_out('print(1)\ngoto skip\nprint(2)\n::skip::\nprint(3)\n')

@@ -21,6 +21,10 @@
 //              __mode is held STRONGLY: GC-driven removal is not deterministically observable, so never removing is a
 //              faithful subset of what Lua may do.
 'use strict';
+const path = require('path');
+const fs = require('fs');
+const nodeos = require('os');
+const child = require('child_process');
 
 class LuaError extends Error { constructor(value) { super(typeof value === 'string' ? value : 'error object'); this.value = value; } }
 class LuaBreak extends Error { constructor(what) { super('[luajs] no faithful JS form: ' + what); this.what = what; } }
@@ -68,6 +72,11 @@ function $idx(t, k) {
     const h = meta(t, '__index');
     if (h === undefined) return undefined;
     return typeof h === 'function' ? $1(h(t, k)) : $idx(h, k);
+  }
+  if (typeof t === 'object' && t !== null && META.has(t)) {
+    // USERDATA (a host object: a file handle) is indexed only through its metatable's __index
+    const h = meta(t, '__index');
+    if (h !== undefined) return typeof h === 'function' ? $1(h(t, k)) : $idx(h, k);
   }
   return idx_raw(t, k);
 }
@@ -282,7 +291,7 @@ G.setmetatable = (t, mt) => {
   return t;
 };
 G.getmetatable = v => { const mt = mt_of(v); if (mt === undefined) return undefined; const p = rawget(mt, '__metatable'); return p !== undefined ? p : mt; };
-G.print = (...a) => { process.stdout.write(Buffer.from(a.map($tostring).join('\t') + '\n', 'latin1')); };
+G.print = (...a) => { fs.writeSync(1, Buffer.from(a.map($tostring).join('\t') + '\n', 'latin1')); };
 G.require = name => $require(name);
 G.table = $rec(
   'insert', (t, a, b) => { if (b === undefined) rawset(t, $len(t) + 1, a); else { const n = $len(t); for (let k = n; k >= a; k--) rawset(t, k + 1, rawget(t, k)); rawset(t, a, b); } },
@@ -336,11 +345,230 @@ G.string = Object.assign(Object.create(null), STRING);
 // getmetatable('') is { __index = string }, as in Lua
 const STRING_MT = $rec('__index', G.string);
 
+// ── HOST: the operating system, as LuaJIT's io / os / debug libraries see it ─────────────────────────────────────
+// A byte string crosses to the OS as the same BYTES (Buffer.from(s, 'latin1')); what the OS hands back (a file, an
+// environment value) comes in as bytes. Errors are Lua's triple: nil, "<path>: <strerror>", errno.
+const bytes = s => Buffer.from(cstr(s), 'latin1');
+const frombytes = b => b.toString('latin1');
+const utf8bytes = s => Buffer.from(String(s), 'utf8').toString('latin1'); // a JS (UTF-16) host string -> a byte string
+const STRERROR = $rec('ENOENT', 'No such file or directory', 'EACCES', 'Permission denied', 'EISDIR', 'Is a directory',
+  'ENOTDIR', 'Not a directory', 'EEXIST', 'File exists', 'ENOTEMPTY', 'Directory not empty', 'EBADF', 'Bad file descriptor',
+  'EPERM', 'Operation not permitted', 'EXDEV', 'Invalid cross-device link');
+const errno = e => (e && e.code && nodeos.constants.errno[e.code]) || 0;
+const oserr = (e, p) => {
+  const msg = STRERROR[e && e.code] || (e && e.code) || String(e);
+  return $mv(undefined, p === undefined ? msg : cstr(p) + ': ' + msg, errno(e));
+};
+
+// file handles: USERDATA with a metatable, as in Lua (type() is 'userdata', io.type() is 'file')
+class LuaFile { constructor(fd, name) { this.fd = fd; this.name = name; this.pos = 0; this.closed = false; this.std = false; } }
+const FILE = Object.create(null);
+const FILE_MT = $rec('__index', FILE, '__tostring', f => (f.closed ? 'file (closed)' : 'file (' + addr(f) + ')'));
+const mkfile = (fd, name) => { const f = new LuaFile(fd, name); META.set(f, FILE_MT); return f; };
+const openfile = f => { if (!(f instanceof LuaFile)) throw new LuaError('bad argument #1 (FILE* expected, got ' + $type(f) + ')'); if (f.closed) throw new LuaError('attempt to use a closed file'); return f; };
+function readn(f, n) {
+  const buf = Buffer.alloc(n);
+  let got;
+  try { got = fs.readSync(f.fd, buf, 0, n, f.std ? null : f.pos); } catch (e) { return { err: e }; }
+  if (!f.std) f.pos += got;
+  return { s: frombytes(buf.subarray(0, got)), n: got };
+}
+function readall(f) {
+  const parts = [];
+  for (;;) { const r = readn(f, 65536); if (r.err) return r; if (r.n === 0) break; parts.push(r.s); }
+  return { s: parts.join('') };
+}
+function readline(f, keep) {
+  const parts = [];
+  for (;;) {
+    const r = readn(f, 1);
+    if (r.err) return r;
+    if (r.n === 0) return parts.length ? { s: parts.join('') } : { s: undefined };
+    if (r.s === '\n') { if (keep) parts.push('\n'); return { s: parts.join('') }; }
+    parts.push(r.s);
+  }
+}
+function read1(f, fmt) {
+  if (typeof fmt === 'number') { if (fmt === 0) { const r = readn(f, 1); if (r.err) return r; if (r.n === 0) return { s: undefined }; f.pos -= 1; return { s: '' }; } const r = readn(f, fmt); return r.err ? r : { s: r.n === 0 ? undefined : r.s }; }
+  const k = String(fmt).replace(/^\*/, '')[0];
+  if (k === 'a') return readall(f);
+  if (k === 'l') return readline(f, false);
+  if (k === 'L') return readline(f, true);
+  if (k === 'n') { const r = readall(f); if (r.err) return r; const m = /^\s*([+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?|[+-]?0[xX][0-9a-fA-F]+)/.exec(r.s); if (!m) { f.pos -= r.s.length; return { s: undefined }; } f.pos -= r.s.length - m[0].length; return { s: $tonumber(m[1]) }; }
+  $abort("file:read format '" + String(fmt) + "'");
+}
+FILE.read = (f, ...fmts) => {
+  openfile(f);
+  if (fmts.length === 0) fmts = ['l'];
+  const out = [];
+  for (const fmt of fmts) {
+    const r = read1(f, fmt);
+    if (r.err) return oserr(r.err);
+    out.push(r.s);
+    if (r.s === undefined) break;
+  }
+  return $mv(...out);
+};
+FILE.lines = (f, fmt) => { openfile(f); return () => $1(FILE.read(f, fmt === undefined ? 'l' : fmt)); };
+FILE.write = (f, ...a) => {
+  openfile(f);
+  for (const x of a) {
+    const b = bytes(x);
+    try { const n = fs.writeSync(f.fd, b, 0, b.length, f.std || f.append ? null : f.pos); if (!f.std) f.pos += n; } catch (e) { return oserr(e); }
+  }
+  return f;
+};
+FILE.seek = (f, whence, offset) => {
+  openfile(f);
+  whence = whence === undefined ? 'cur' : whence; offset = offset === undefined ? 0 : offset;
+  let base = 0;
+  if (whence === 'cur') base = f.pos;
+  else if (whence === 'end') { try { base = fs.fstatSync(f.fd).size; } catch (e) { return oserr(e); } }
+  else if (whence !== 'set') throw new LuaError("bad argument #1 to 'seek' (invalid option '" + whence + "')");
+  f.pos = base + offset;
+  return f.pos;
+};
+FILE.flush = f => { openfile(f); return f; };
+FILE.close = f => { openfile(f); if (f.std) return $mv(undefined, 'cannot close standard file'); try { fs.closeSync(f.fd); } catch (e) { return oserr(e); } f.closed = true; return true; };
+FILE.setvbuf = f => true;
+const MODES = $rec('r', 'r', 'w', 'w', 'a', 'a', 'r+', 'r+', 'w+', 'w+', 'a+', 'a+');
+const stdio = (fd, name) => { const f = mkfile(fd, name); f.std = true; return f; };
+const STDIN = stdio(0, 'stdin'), STDOUT = stdio(1, 'stdout'), STDERR = stdio(2, 'stderr');
+G.io = $rec(
+  'open', (p, mode) => {
+    mode = mode === undefined ? 'r' : cstr(mode);
+    const m = MODES[mode.replace('b', '')];
+    if (m === undefined) throw new LuaError("bad argument #2 to 'open' (invalid mode '" + mode + "')");
+    let fd;
+    try { fd = fs.openSync(bytes(p), m); } catch (e) { return oserr(e, p); }
+    const f = mkfile(fd, p);
+    f.append = m[0] === 'a';
+    return f;
+  },
+  'write', (...a) => FILE.write(STDOUT, ...a),
+  'read', (...fmts) => FILE.read(STDIN, ...fmts),
+  'lines', (p, fmt) => {
+    if (p === undefined) return FILE.lines(STDIN, fmt);
+    const f = $1(G.io.open(p, 'r'));
+    if (f === undefined) throw new LuaError(cstr(p) + ': No such file or directory');
+    return () => { const v = $1(FILE.read(f, fmt === undefined ? 'l' : fmt)); if (v === undefined) FILE.close(f); return v; };
+  },
+  'type', f => (f instanceof LuaFile ? (f.closed ? 'closed file' : 'file') : undefined),
+  'popen', () => $abort('io.popen (a subprocess with a Lua file interface)'),
+  'tmpfile', () => $abort('io.tmpfile'),
+  'stdin', STDIN, 'stdout', STDOUT, 'stderr', STDERR);
+
+// strftime, the C locale (the codes LuaJIT's os.date passes to the C library; an unknown one aborts by name)
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const p2 = n => String(n).padStart(2, '0');
+function parts(d, utc) {
+  const g = k => d[(utc ? 'getUTC' : 'get') + k]();
+  const year = g('FullYear'), month = g('Month'), day = g('Date');
+  const start = utc ? Date.UTC(year, 0, 1) : new Date(year, 0, 1).getTime();
+  const now = utc ? Date.UTC(year, month, day) : new Date(year, month, day).getTime();
+  return { year, month, day, hour: g('Hours'), min: g('Minutes'), sec: g('Seconds'), wday: g('Day'), yday: Math.round((now - start) / 864e5) + 1 };
+}
+function strftime(fmt, d, utc) {
+  const t = parts(d, utc);
+  return fmt.replace(/%(.)/g, (all, c) => {
+    switch (c) {
+      case 'Y': return String(t.year);
+      case 'y': return p2(t.year % 100);
+      case 'm': return p2(t.month + 1);
+      case 'd': return p2(t.day);
+      case 'e': return String(t.day).padStart(2, ' ');
+      case 'H': return p2(t.hour);
+      case 'I': return p2(((t.hour + 11) % 12) + 1);
+      case 'M': return p2(t.min);
+      case 'S': return p2(t.sec);
+      case 'p': return t.hour < 12 ? 'AM' : 'PM';
+      case 'a': return DAYS[t.wday].slice(0, 3);
+      case 'A': return DAYS[t.wday];
+      case 'b': case 'h': return MONTHS[t.month].slice(0, 3);
+      case 'B': return MONTHS[t.month];
+      case 'j': return String(t.yday).padStart(3, '0');
+      case 'w': return String(t.wday);
+      case 'x': return p2(t.month + 1) + '/' + p2(t.day) + '/' + p2(t.year % 100);
+      case 'X': return p2(t.hour) + ':' + p2(t.min) + ':' + p2(t.sec);
+      case 'c': return DAYS[t.wday].slice(0, 3) + ' ' + MONTHS[t.month].slice(0, 3) + ' ' + String(t.day).padStart(2, ' ') + ' ' + p2(t.hour) + ':' + p2(t.min) + ':' + p2(t.sec) + ' ' + t.year;
+      case 'F': return t.year + '-' + p2(t.month + 1) + '-' + p2(t.day);
+      case 'T': return p2(t.hour) + ':' + p2(t.min) + ':' + p2(t.sec);
+      case 's': return String(Math.floor(d.getTime() / 1000));
+      case 'z': { if (utc) return '+0000'; const o = -d.getTimezoneOffset(); return (o < 0 ? '-' : '+') + p2(Math.floor(Math.abs(o) / 60)) + p2(Math.abs(o) % 60); }
+      case '%': return '%';
+      default: $abort('os.date %' + c);
+    }
+  });
+}
+G.os = $rec(
+  'time', t => {
+    if (t === undefined) return Math.floor(Date.now() / 1000);
+    const f = k => { const v = $idx(t, k); return v === undefined ? undefined : num(v); };
+    const year = f('year'), month = f('month'), day = f('day');
+    if (year === undefined || month === undefined || day === undefined) throw new LuaError("field 'day' missing in date table");
+    const hour = f('hour'), min = f('min'), sec = f('sec');
+    return Math.floor(new Date(year, month - 1, day, hour === undefined ? 12 : hour, min || 0, sec || 0).getTime() / 1000);
+  },
+  'date', (fmt, t) => {
+    fmt = fmt === undefined ? '%c' : cstr(fmt);
+    const d = new Date((t === undefined ? Math.floor(Date.now() / 1000) : num(t)) * 1000);
+    let utc = false;
+    if (fmt[0] === '!') { utc = true; fmt = fmt.slice(1); }
+    if (fmt.startsWith('*t')) {
+      const x = parts(d, utc);
+      return $rec('year', x.year, 'month', x.month + 1, 'day', x.day, 'hour', x.hour, 'min', x.min, 'sec', x.sec, 'wday', x.wday + 1, 'yday', x.yday, 'isdst', false);
+    }
+    return strftime(fmt, d, utc);
+  },
+  'clock', () => { const u = process.cpuUsage(); return (u.user + u.system) / 1e6; },
+  'getenv', k => { const v = process.env[frombytes(bytes(k))]; return v === undefined ? undefined : utf8bytes(v); },
+  'exit', code => process.exit(code === undefined || code === true ? 0 : (code === false ? 1 : num(code))),
+  'remove', p => {
+    try { const st = fs.lstatSync(bytes(p)); if (st.isDirectory()) fs.rmdirSync(bytes(p)); else fs.unlinkSync(bytes(p)); return true; } catch (e) { return oserr(e, p); }
+  },
+  'rename', (a, b) => { try { fs.renameSync(bytes(a), bytes(b)); return true; } catch (e) { return oserr(e, a); } },
+  'tmpname', () => utf8bytes(path.join(nodeos.tmpdir(), 'lua_' + process.pid + '_' + (nextId++).toString(36))),
+  'execute', cmd => {
+    if (cmd === undefined) return 1;
+    const r = child.spawnSync('/bin/sh', ['-c', frombytes(bytes(cmd))], { stdio: 'inherit' });
+    return r.status === null ? 1 : r.status * 256; // 5.1: the raw wait status, as C system() returns it
+  });
+
+// debug: the SOURCE of the running Lua module (`debug.getinfo(1, 'S')`, the idiom cartograph uses to find its own
+// files) — the emitted module's JS path mapped back to the Lua file it was transliterated from (LUAJS_SRC_ROOT); a
+// deeper level, another field set, or a function argument has no faithful form here and aborts by name
+const chunkid = src => (src.length <= 59 ? src : '...' + src.slice(src.length - 56));
+function source_of_caller() {
+  const files = [];
+  for (const l of String(new Error().stack).split('\n').slice(1)) {
+    const m = /\(?((?:\/|[A-Za-z]:\\)[^():]+\.js):\d+:\d+\)?\s*$/.exec(l);
+    if (m && m[1] !== __filename) files.push(m[1]);
+  }
+  const js = files[0];
+  if (js === undefined) return undefined;
+  const root = process.env.LUAJS_ROOT || __dirname;
+  const rel = path.relative(root, js).replace(/\.js$/, '.lua');
+  const src = process.env.LUAJS_SRC_ROOT ? path.join(process.env.LUAJS_SRC_ROOT, rel) : js.replace(/\.js$/, '.lua');
+  return utf8bytes(src);
+}
+G.debug = $rec(
+  'getinfo', (what_level, what) => {
+    if (what_level !== 1) $abort('debug.getinfo at level/function ' + $tostring(what_level) + ' (only level 1 has a faithful form)');
+    what = what === undefined ? 'flnSu' : cstr(what);
+    if (/[^S]/.test(what)) $abort("debug.getinfo field set '" + what + "' (only 'S')");
+    const file = source_of_caller();
+    if (file === undefined) $abort('debug.getinfo: no caller frame');
+    return $rec('source', '@' + file, 'short_src', chunkid(file), 'what', 'Lua', 'linedefined', -1, 'lastlinedefined', -1);
+  },
+  'traceback', (msg) => (msg === undefined ? 'stack traceback:\n\t[transliterated: no Lua traceback]' : $tostring(msg) + '\nstack traceback:\n\t[transliterated: no Lua traceback]'),
+  'sethook', () => $abort('debug.sethook'),
+  'getupvalue', () => $abort('debug.getupvalue'),
+  'getlocal', () => $abort('debug.getlocal'));
+
 // ── modules ──────────────────────────────────────────────────────────────────────────────────────────────────────
 // `require 'a.b'` loads <root>/a/b.js (or <root>/a/b/init.js), root = LUAJS_ROOT or this pack's directory; a module
 // that is not there is a HOST gap, and says so
-const path = require('path');
-const fs = require('fs');
 const loaded = Object.create(null);
 function $require(name) {
   if (name in loaded) return loaded[name];

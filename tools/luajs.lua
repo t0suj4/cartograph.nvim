@@ -81,7 +81,7 @@ catch (e) {
 }
 ]]
     for _, e in ipairs(emitted) do
-        local r = vim.system({ 'node', '-e', probe, e.dest }, { text = true, env = { LUAJS_ROOT = out_dir }, timeout = 20000 }):wait()
+        local r = vim.system({ 'node', '-e', probe, e.dest }, { text = true, env = { LUAJS_ROOT = out_dir, LUAJS_SRC_ROOT = src_dir }, timeout = 20000 }):wait()
         local line = vim.trim((r.stdout or ''):match('[^\n]*$') ~= '' and (r.stdout or ''):match('([^\n]*)\n?$') or (r.stdout or ''))
         local cls, detail = line:match('^(%u+)\t?(.*)$')
         cls = cls or ('NO OUTCOME (exit ' .. tostring(r.code) .. ')')
