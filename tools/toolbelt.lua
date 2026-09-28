@@ -56,7 +56,9 @@ elseif cmd == 'run' then
     local res, why = tb.run(store, name, params, { apply = apply })
     if not res then io.write('refused: ', tostring(why), '\n'); os.exit(1) end
     io.write(vim.inspect(res.value and { holds = res.holds, why = res.why, value = res.value }
-        or { status = res.status, class = res.class, why = res.why, applied = res.applied, residue = res.residue }), '\n')
+        or { status = res.status, class = res.class, why = res.why, applied = res.applied, residue = res.residue,
+            -- a stop's options carry each question's `key`: tools/decisions.lua remember key=<key> kind=<kind> answers it for good
+            options = res.options }), '\n')
 else
     io.stderr:write('toolbelt: unknown command ' .. cmd .. '\n'); os.exit(2)
 end

@@ -46,14 +46,28 @@ local function fail(class, why, phase, extra)
     return r
 end
 
---- the decision hazards on `plan` the step did not accept: { plain rows }, and the accepted ones
-local function decisions(plan, accept)
+--- the decision hazards on `plan` the step did not accept: { plain rows }, and the accepted ones. Every row carries
+--- its identity `key` (cartograph.decisions.key) — what the user remembers to answer THIS question on later runs. An
+--- open decision a REMEMBERED answer covers is taken, and says so (`remembered` = the provenance) — unless
+--- `remembered == false` (opts.remembered), which asks every question again.
+local function decisions(store, plan, accept, remembered)
+    local D = require 'cartograph.decisions'
     local open, taken = {}, {}
     local acc = {}
     for _, k in ipairs(accept or {}) do acc[k] = true end
-    for _, row in ipairs(hazard.plain(plan.hazards)) do
+    local raw = plan.hazards or {}
+    local subjects
+    for i, row in ipairs(hazard.plain(raw)) do
         if row.class == 'decision' then
-            if acc[row.kind] then taken[#taken + 1] = row else open[#open + 1] = row end
+            row.key = D.key(store, plan, hazard.row(raw[i]))
+            if acc[row.kind] then taken[#taken + 1] = row
+            else
+                subjects = subjects or D.subjects(store, plan)
+                local e, why = nil, nil
+                if remembered ~= false then e, why = D.lookup(row.key, row.kind, subjects) end
+                if e then row.remembered, row.decision_id = why, e.id; taken[#taken + 1] = row
+                else open[#open + 1] = row end
+            end
         end
     end
     return open, taken
@@ -87,7 +101,7 @@ function M.step(store, st, opts)
             local acc = {}
             for _, k in ipairs(st.accept or {}) do acc[k] = true end
             if opts.decide then
-                local open, taken = decisions(plan, st.accept)
+                local open, taken = decisions(store, plan, st.accept, opts.remembered)
                 if #open > 0 then
                     local texts = {}
                     for _, r in ipairs(open) do texts[#texts + 1] = r.text end
@@ -95,6 +109,8 @@ function M.step(store, st, opts)
                         { options = open, fixes = hazard.fixes(plan), plan = plan })
                 end
                 accepted = taken
+                -- a REMEMBERED answer is an accepted one for everything downstream (the grant of a target mount included)
+                for _, r in ipairs(taken) do acc[r.kind] = true end
             end
             -- ★ the namespace this step writes with: a cross-world target is mounted rw only by an ACCEPTED decision
             local ns = txn.grant(opts.ns, plan, acc)
@@ -233,7 +249,8 @@ local function eval_step(store, t, opts, where)
             why = ('cannot be derived until %s is applied — its inputs do not exist yet'):format(opts.previewing_blocked) }
         return out
     end
-    local r = M.step(store, t, { verbs = opts.verbs, apply = opts.apply, decide = true, replan = true, ns = opts.ns })
+    local r = M.step(store, t, { verbs = opts.verbs, apply = opts.apply, decide = true, replan = true, ns = opts.ns,
+        remembered = opts.remembered })
     local corrected
     if not r.ok and (r.class == 'ill-posed' or r.class == 'stale') and r.phase == 'plan' and spec.correct
         and opts.correct ~= 'off' then
@@ -283,9 +300,16 @@ local function eval_step(store, t, opts, where)
     -- the residue: every hazard the step leaves, with accepted decisions demoted to informational (an answered
     -- question is a consequence of a choice already made)
     local accepted = {}
-    for _, a in ipairs(r.accepted or {}) do accepted[a.kind] = true end
+    for _, a in ipairs(r.accepted or {}) do accepted[a.kind] = a end
     for _, h in ipairs(hazard.plain(r.plan.hazards)) do
-        if h.class == 'decision' and accepted[h.kind] then h.class = 'informational'; h.accepted = true end
+        if h.class == 'decision' and accepted[h.kind] then
+            h.class = 'informational'; h.accepted = true
+            -- ★ never silent: WHO answered it — the term's accept list, or a remembered decision (which one, when)
+            if accepted[h.kind].remembered then
+                h.remembered, h.decision_id = accepted[h.kind].remembered, accepted[h.kind].decision_id
+                h.text = ('%s — answered: %s'):format(h.text, h.remembered)
+            end
+        end
         h.where, h.verb = where, t.verb
         out.residue[#out.residue + 1] = h
     end
@@ -552,7 +576,7 @@ end
 function M.run(store, term, opts)
     opts = opts or {}
     local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct,
-        toolbelt_dir = opts.toolbelt_dir, ns = opts.ns }
+        toolbelt_dir = opts.toolbelt_dir, ns = opts.ns, remembered = opts.remembered }
     -- ★ A DRY RUN CHAINS OVERLAY WORLDS (CART-1160 step 3) and the caller's graph comes back afterwards, raise or not
     local rec = not eopts.apply and store.capture()
     local okr, o = pcall(eval, store, term, eopts, 'root')

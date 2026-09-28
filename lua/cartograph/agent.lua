@@ -2532,7 +2532,8 @@ local function v_toolbelt_run(store, args)
     local residue = {}
     for _, h in ipairs(res.residue or {}) do residue[#residue + 1] = { text = h.text, kind = h.kind, class = h.class } end
     local options = {}
-    for _, o in ipairs(res.options or {}) do options[#options + 1] = { text = o.text, kind = o.kind } end
+    -- each question's identity `key`: the USER may remember the answer with tools/decisions.lua (no verb here writes it)
+    for _, o in ipairs(res.options or {}) do options[#options + 1] = { text = o.text, kind = o.kind, key = nn(o.key) } end
     -- ★ a dry run's CHAINED preview (CART-1160 step 3): every file the whole tactic would write, as a diff against the
     -- world the caller has loaded — not only the first step's
     local preview = {}
