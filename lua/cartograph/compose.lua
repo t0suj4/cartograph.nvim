@@ -172,6 +172,13 @@ M.VERBS.edit = {
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
+-- ★ RENAME A RECORD FIELD (CART-1175): reads by the base's spelling, keys in the define files, an occupied target a
+-- DECISION (the occupant goes to a placeholder), text mentions a counted frontier (cartograph.renamefield)
+M.VERBS['rename-field'] = {
+    plan = function (store, args) return require('cartograph.renamefield').plan(store, args) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
+    effect = 'journaled', rerun = 'empty',
+}
 M.VERBS['learn-tactic'] = {
     plan = function (store, args) return require('cartograph.toolbelt').plan_learn(store, args) end,
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,

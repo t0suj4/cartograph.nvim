@@ -371,6 +371,8 @@ local IDEM = {
     ['promote-tactic'] = { { ['.cartograph/tactics/count-functions.lua'] = 'return { name = \'count-functions\', kind = \'discovery\', summary = \'s\', params = {}, measure = function (store) local n = 0; for _, x in ipairs(store.data.nodes or {}) do if x.kind == \'function\' then n = n + 1 end end; return n end, claim = function (n) return n > 0, n .. \' function(s)\' end, examples = { { name = \'one\', files = { [\'a.lua\'] = \'local function f() end\\nreturn f\\n\' }, expect = { holds = true } } } }\n' },
         function () return { name = 'count-functions', from = store.data.root, into = store.data.root .. '/builtin' } end },
     edit = { { ['e.lua'] = 'local E = {}\nE.v = 1\nreturn E\n' }, function () return { file = 'e.lua', before = 'E.v = 1\n', after = 'E.v = 1\nE.w = 2\n' } end },
+    ['rename-field'] = { { ['s.lua'] = 'return { scopes = 1 }\n', ['r.lua'] = 'local M = {}\nfunction M.f(spec) return spec.scopes end\nreturn M\n' },
+        function () return { base = 'spec', field = 'scopes', to = 'lexical', define = { 's.lua' } } end },
     ['rewrite-by-example'] = { { ['q.lua'] = 'local Q = {}\nfunction Q.h(q)\n  if q == nil then return 3 end\n  return q\nend\nreturn Q\n' },
         function () return { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'all' } end },
     propagate = { { ['fe.lua'] = (function ()
