@@ -154,6 +154,28 @@ M.VERBS.propagate = {
     correct = { ref = 'ref' },
 }
 
+-- a rewrite rule LEARNED from one example (cartograph.byexample), applied wherever it matches. ★ RE-RUN IS EMPTY: a
+-- learned rule never matches its own output (learn refuses one that does), so once applied nothing matches
+M.VERBS['rewrite-by-example'] = {
+    plan = function (store, args) return require('cartograph.byexample').plan(store, args) end,
+    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    effect = 'journaled', rerun = 'empty',
+}
+
+-- the toolbelt's own growth, as verbs: LEARN a tactic into the project (a journaled create, planned only once the
+-- rendered entry passes its own examples) and PROMOTE one into the built-in toolbelt (always a `promote` decision).
+-- ★ RE-RUN IS EMPTY for both: an identical file is the goal met.
+M.VERBS['learn-tactic'] = {
+    plan = function (store, args) return require('cartograph.toolbelt').plan_learn(store, args) end,
+    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    effect = 'journaled', rerun = 'empty',
+}
+M.VERBS['promote-tactic'] = {
+    plan = function (store, args) return require('cartograph.toolbelt').plan_promote(store, args) end,
+    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    effect = 'journaled', rerun = 'empty',
+}
+
 local function step_error(i, verb, why)
     return { i = i, verb = verb, ok = false, why = why }
 end

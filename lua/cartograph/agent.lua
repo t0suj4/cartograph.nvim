@@ -2483,17 +2483,21 @@ end
 -- finding still holds; a write tactic PREVIEWS by default (a dry run: up to the first write, the rest named as
 -- underivable) and writes only with `apply = true` on a host started writable — refused by name otherwise.
 local function v_toolbelt_list(store)
-    local entries, broken = require('cartograph.toolbelt').list()
+    local entries, broken, promoted = require('cartograph.toolbelt').list(nil, (store.data or {}).root)
     local rows = {}
     for _, e in ipairs(entries) do
         local ps, ex = {}, {}
         for k, ty in pairs(e.params or {}) do ps[#ps + 1] = k .. ':' .. tostring(ty) end
         table.sort(ps)
         for _, x in ipairs(e.examples) do ex[#ex + 1] = x.name end
-        rows[#rows + 1] = { name = e.name, kind = e.kind, summary = e.summary, measures = nn(e.measures),
+        rows[#rows + 1] = { name = e.name, kind = e.kind, scope = e.scope, summary = e.summary, measures = nn(e.measures),
             params = table.concat(ps, ' '), examples = ex }
     end
     local notes = {}
+    for name, path in pairs(promoted) do
+        notes[#notes + 1] = { kind = 'promoted-copy', premise = 'a project tactic identical to a built-in one',
+            why = ('%s is a promoted copy of the built-in `%s` — the built-in is the one that runs'):format(path, name), evidence = NUL }
+    end
     for name, why in pairs(broken) do
         notes[#notes + 1] = { kind = 'broken-entry', premise = 'a tactic file that does not load', why = ('%s: %s'):format(name, why), evidence = NUL }
     end
@@ -2506,7 +2510,7 @@ end
 
 local function v_toolbelt_run(store, args)
     local tb = require 'cartograph.toolbelt'
-    local e, why = tb.load(args.name)
+    local e, why = tb.load(args.name, nil, (store.data or {}).root)
     if not e then return refuse('unknown-tactic', tostring(why), 'toolbelt_list names every entry, with its params and examples') end
     if args.apply and e.kind == 'write' and not M.WRITABLE then
         return refuse('read-only-host', ('%s would write, and this host was started read-only'):format(e.name),

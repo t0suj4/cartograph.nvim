@@ -316,6 +316,12 @@ local IDEM = {
     replace = { { ['r.lua'] = R_LUA }, function () return { ref = fn_ref('M.dbl', 'r.lua'), text = 'function M.dbl(x) return x + x end' } end },
     annotate = { { ['r.lua'] = '-- style\n' .. R_LUA }, function () return { ref = fn_ref('M.dbl', 'r.lua'), text = 'doubles a number' } end },
     clonemerge = { { ['m.lua'] = SM, ['n.lua'] = SN }, function () return { ref = fn_ref('M.norm', 'm.lua') } end },
+    ['learn-tactic'] = { { ['m.lua'] = 'local M = {}\nreturn M\n' },
+        function () return { name = 'nil-check', before = 'if x == nil then return 0 end', after = 'if not x then return 0 end' } end },
+    ['promote-tactic'] = { { ['.cartograph/tactics/count-functions.lua'] = 'return { name = \'count-functions\', kind = \'discovery\', summary = \'s\', params = {}, measure = function (store) local n = 0; for _, x in ipairs(store.data.nodes or {}) do if x.kind == \'function\' then n = n + 1 end end; return n end, claim = function (n) return n > 0, n .. \' function(s)\' end, examples = { { name = \'one\', files = { [\'a.lua\'] = \'local function f() end\\nreturn f\\n\' }, expect = { holds = true } } } }\n' },
+        function () return { name = 'count-functions', from = store.data.root, into = store.data.root .. '/builtin' } end },
+    ['rewrite-by-example'] = { { ['q.lua'] = 'local Q = {}\nfunction Q.h(q)\n  if q == nil then return 3 end\n  return q\nend\nreturn Q\n' },
+        function () return { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'all' } end },
     propagate = { { ['fe.lua'] = (function ()
             local function b(n, mul) return ('function M.g%d(t)\n    local acc = 0\n    local seen = {}\n    for i = 1, #t do acc = acc + t[i] * %d end\n    local s = tostring(acc)\n    local u = string.upper(s)\n    seen[u] = true\n    local pad = string.rep("-", #u)\n    local out = pad .. u\n    return out .. "%d"\nend\n'):format(n, mul, n) end
             return 'local M = {}\n' .. b(1, 1) .. b(2, 2) .. b(3, 3) .. 'return M\n'
@@ -323,9 +329,13 @@ local IDEM = {
             return { ref = fn_ref('M.g1', 'fe.lua'), scope = 'all', text = 'function M.g1(t)\n    local acc = 0\n    local seen = {}\n    for i = 1, #t do acc = acc + t[i] * 9 end\n    local s = tostring(acc)\n    local u = string.upper(s)\n    seen[u] = true\n    local pad = string.rep("-", #u)\n    local out = pad .. u\n    return out .. "1"\nend' }
         end },
 }
+-- ⚠ EVERY file, hidden directories included: globpath's `**` skips them, and a verb that creates
+-- `.cartograph/tactics/x.lua` would have read as "wrote nothing" (it did: learn-tactic's first run)
 local function snap(root)
     local out = {}
-    for _, p in ipairs(vim.fn.globpath(root, '**/*.lua', false, true)) do out[p:sub(#root + 2)] = read(root, p:sub(#root + 2)) end
+    for name, ty in vim.fs.dir(root, { depth = 20 }) do
+        if ty == 'file' then out[name] = read(root, name) end
+    end
     return vim.inspect(out)
 end
 

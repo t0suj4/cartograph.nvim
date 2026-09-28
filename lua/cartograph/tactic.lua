@@ -449,7 +449,7 @@ function eval(store, t, opts, where)
             return adopt(outcome(), { class = 'ill-posed', where = here,
                 why = ('toolbelt tactic `%s` uses itself — a cycle of uses never terminates'):format(tostring(t.name)) })
         end
-        local e, lwhy = tb.load(t.name, opts.toolbelt_dir)
+        local e, lwhy = tb.load(t.name, opts.toolbelt_dir, store.data and store.data.root)
         if not e then return adopt(outcome(), { class = 'ill-posed', where = here, why = lwhy }) end
         local p, pwhy, pclass = tb.coerce(store, e, t.params)
         if not p then return adopt(outcome(), { class = pclass or 'ill-posed', where = here, why = pwhy }) end
