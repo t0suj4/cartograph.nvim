@@ -96,31 +96,89 @@ function M.attribute(repo, range)
     return v
 end
 
---- the LEDGER row for one commit: attribution + the decisions of the entries behind it + the open intents
-function M.ledger_row(repo, sha)
+--- an entry's invocation as it may TRAVEL (CART-1193): an entry that touched a SENSITIVE file (untracked, or marked by
+--- user config — cartograph.sensitive) carries only a REFERENCE to its args; any other carries the args, with paths
+--- under its world's root named by the world's portable identity (an absolute path would carry this machine's layout
+--- into a pushed note). -> invocation | nil, and the sensitive rels
+local function travelling_invocation(repo, e)
+    local S = require 'cartograph.sensitive'
+    local root = e.root or repo
+    local rels = {}
+    for rel in pairs(e.files or {}) do rels[#rels + 1] = rel end
+    table.sort(rels)
+    local sens = S.classify(root, rels)
+    if type(e.invocation) ~= 'table' then return nil, sens end
+    if next(sens) then
+        local n = 0
+        for _ in pairs(sens) do n = n + 1 end
+        return { verb = e.invocation.verb, args = S.reference(e.invocation.args), sensitive_files = n }, sens
+    end
+    local name = '@' .. (require('cartograph.approvals').world_id(root) or 'root')
+    local function rw(v)
+        if type(v) == 'string' then
+            if v == root then return name end
+            if v:sub(1, #root + 1) == root .. '/' then return name .. '/' .. v:sub(#root + 2) end
+            return v
+        elseif type(v) == 'table' then
+            local o = {}
+            for k, x in pairs(v) do o[k] = rw(x) end
+            return o
+        end
+        return v
+    end
+    return { verb = e.invocation.verb, args = rw(e.invocation.args), where = e.invocation.where }, sens
+end
+
+--- the row and, beside it, the IMAGES of every sensitive file its entries touched (the egress check's probes)
+local function build(repo, sha)
     local v, why, class = M.attribute(repo, sha .. '^!')
     if not v then return nil, why, class end
     local c = v.commits[1]
     if not c then return nil, 'no such commit ' .. tostring(sha), 'ill-posed' end
     local byid = {}
     for _, e in ipairs(M.entries(repo).entries) do byid[e.id] = e end
-    local rows = {}
+    local rows, images = {}, {}
     for id, bytes in pairs(c.entries) do
         local e = byid[id] or {}
+        local inv, sens = travelling_invocation(repo, e)
+        for rel in pairs(sens or {}) do
+            local img = images[rel] or {}
+            local f = (e.files or {})[rel] or {}
+            img[#img + 1] = f.before; img[#img + 1] = f.after
+            local fd = io.open((e.root or repo) .. '/' .. rel)
+            if fd then img[#img + 1] = fd:read('a'); fd:close() end
+            images[rel] = img
+        end
         rows[#rows + 1] = { id = id, verb = e.verb, bytes = bytes, decided_by = e.decided_by or 'unrecorded',
-            decisions = e.decisions or {} }
+            decisions = e.decisions or {}, invocation = inv }
     end
     table.sort(rows, function (a, b) return a.id < b.id end)
     local intents = {}
     for _, r in ipairs(require('cartograph.intents').open_intents(repo)) do intents[#intents + 1] = r end
-    return { version = 1, commit = sha, explained = c.explained, hand = c.hand, entries = rows, open_intents = intents }
+    return { version = 1, commit = sha, explained = c.explained, hand = c.hand, entries = rows, open_intents = intents }, images
 end
 
---- write the ledger note for `sha` (default HEAD) -> row | nil, why
+--- the LEDGER row for one commit: attribution + the decisions and (travelling) invocations of the entries behind it
+--- + the open intents
+function M.ledger_row(repo, sha)
+    local row, why, class = build(repo, sha)
+    if not row then return nil, why, class end
+    return row
+end
+
+--- write the ledger note for `sha` (default HEAD) -> row | nil, why, class
 function M.write_note(repo, sha)
     sha = sha or (git(repo, { 'rev-parse', 'HEAD' }) or ''):gsub('%s+$', '')
-    local row, why, class = M.ledger_row(repo, sha)
-    if not row then return nil, why, class end
+    local row, images, class = build(repo, sha)
+    if not row then return nil, images, class end
+    -- ★ THE EGRESS CHECK (CART-1193), INDEPENDENT of the redaction: no line of a sensitive file the row's entries
+    -- touched may occur anywhere in the note. Refused by NAME (the file, never its bytes), and nothing is written.
+    local hits = require('cartograph.sensitive').leaks(row, images)
+    if #hits > 0 then
+        local names = {}
+        for _, h in ipairs(hits) do names[#names + 1] = h.file end
+        return nil, ('the ledger note would carry bytes of a sensitive file (%s): nothing written'):format(table.concat(names, ', ')), 'decision'
+    end
     local ok, nwhy = git(repo, { 'notes', '--ref', M.NOTES_REF, 'add', '-f', '-F', '-', sha }, vim.json.encode(row))
     if not ok then return nil, 'git notes: ' .. tostring(nwhy), 'environment' end
     return row

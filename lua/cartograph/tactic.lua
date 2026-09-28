@@ -90,6 +90,20 @@ local function decisions(store, plan, accept, remembered, approvals)
     return open, taken
 end
 
+--- a value as plain data (functions, userdata and cycles dropped): what an invocation record may hold
+local function plain(v, seen)
+    if type(v) ~= 'table' then
+        return (type(v) == 'function' or type(v) == 'userdata' or type(v) == 'thread') and nil or v
+    end
+    seen = seen or {}
+    if seen[v] then return nil end
+    seen[v] = true
+    local o = {}
+    for k, x in pairs(v) do if type(k) == 'string' or type(k) == 'number' then o[k] = plain(x, seen) end end
+    seen[v] = nil
+    return o
+end
+
 --- Run ONE invocation `st = { verb, args, accept? }` through `verbs[verb]` ({ plan, arm?, apply }).
 --- opts: { verbs, apply = bool, decide = bool (gate on decision hazards), replan = bool (re-plan once on stale),
 ---         ns = the namespace the step writes with (a cross-world plan needs its target mounted rw; an ACCEPTED decision
@@ -168,6 +182,10 @@ function M.step(store, st, opts)
                         by = a.remembered and 'remembered' or a.signed and 'signed' or 'accept-list', decision_id = a.decision_id,
                         principal = a.signed and a.signed.principal or nil, token = a.signed and a.signed.token or nil }
                 end
+                -- ★ THE INVOCATION (CART-1191 leaf 1): what was ASKED, so the step can be replayed on another world — the
+                -- args as given (as plain data). The journal is LOCAL; a travelling record carries it only through
+                -- cartograph.sensitive (CART-1193: an invocation touching an untracked file travels as a hash)
+                plan.invocation = { verb = verb, args = plain(st.args or {}), where = opts.where }
                 local okc, entry, ewhy, eclass = pcall(spec.apply or txn.apply, store, plan, { ns = ns })
                 if not okc then entry, ewhy, eclass = nil, tostring(entry), 'environment' end
                 if entry then

@@ -203,8 +203,10 @@ function M.coerce(store, e, raw)
             if path then
                 local fd = io.open(path)
                 if not fd then return nil, ('param `%s`: cannot read %s'):format(k, path), 'ill-posed' end
+                -- ★ THE FILE'S BYTES, EXACTLY: stripping a final newline here (for a definition written by writefile) made
+                -- every file CREATED through the edit verb lose its own (19 files, 2026-09-28) — a caller that wants a
+                -- trimmed text trims it
                 v = fd:read('a'); fd:close()
-                v = v:gsub('\n$', '')
             end
         elseif base == 'list' then
             if type(v) == 'string' then

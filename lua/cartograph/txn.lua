@@ -753,6 +753,8 @@ function M.execute(store, plan, desc, edit_of, opts)
     if not entry then return nil, jerr, jerr_class or 'environment' end
     -- WHO DECIDED (CART-1179): a tactic run's decisions, or `direct` — a plan applied without one says so, not nothing
     entry.decided_by, entry.decisions = plan.decided_by or 'direct', plan.decisions or {}
+    -- WHAT WAS ASKED (CART-1191 leaf 1): the invocation, when a tactic step applied it (a direct apply has none)
+    entry.invocation = plan.invocation
     for _, rel in ipairs(plan.touched) do
         local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$')
         if dir then vim.fn.mkdir(dir, 'p') end

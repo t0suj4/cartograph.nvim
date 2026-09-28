@@ -69,6 +69,12 @@ test('toolbelt: params are COERCED by their declaration — a ref from file::nam
     local p, why = tb.coerce(store, e, { ref = 'fe.lua::M.g1', text = '@' .. tf, scope = 'all' })
     ok(p, tostring(why))
     eq('M.g1', p.ref.name, 'the ref resolved from file::name'); ok(p.text:find('* 9', 1, true), 'the text read from @path')
+    -- the file's bytes EXACTLY: writefile ends the file with a newline, and it survives (stripping it made every file
+    -- created through the edit verb lose its final newline)
+    local exact = vim.fn.tempname()
+    local wf = assert(io.open(exact, 'wb')); wf:write('return 1\n'); wf:close()
+    eq('return 1\n', (tb.coerce(store, e, { ref = 'fe.lua::M.g1', text = '@' .. exact })).text,
+        'the final newline of the @path file is kept, byte for byte')
     local _, miss = tb.coerce(store, e, { ref = 'fe.lua::M.g4', text = 'x' })
     ok(miss and miss:find('did you mean', 1, true) and miss:find('M.g1', 1, true), tostring(miss))
     local _, extra, cls = tb.coerce(store, e, { ref = 'fe.lua::M.g1', text = 'x', colour = 'red' })
