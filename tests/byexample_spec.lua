@@ -150,6 +150,18 @@ test('toolbelt: OVERRIDING a built-in tactic is the user\'s explicit choice, pin
     ok(ok_run)
 end)
 
+test('byexample: BEYOND LUA — a rule learned and applied in javascript and python through the audited lossless reader', function ()
+    local function has(l) return pcall(vim.treesitter.get_string_parser, '', l) end
+    if not (has('javascript') and has('python') and require('cartograph.algebra').available()) then skip 'no javascript/python parser or algebra' end
+    local js = assert(BX.learn('if (x == null) { return 0; }', 'if (x === null) { return 0; }', 'javascript'))
+    eq('x == null', js[1].lhs_text); eq(1, js[1].holes)
+    local out, n = BX.rewrite(js, 'function f(a) {\n  if (a == null) { return 1; }\n  return a == 2;\n}\n', 'javascript')
+    eq(1, n); eq('function f(a) {\n  if (a === null) { return 1; }\n  return a == 2;\n}\n', out, 'the constant `null` is the pattern; `a == 2` is not it')
+    local py = assert(BX.learn('if x == None:\n    return 0\n', 'if x is None:\n    return 0\n', 'python'))
+    local pout, pn = BX.rewrite(py, 'def f(y):\n    if y == None:\n        return 0\n    return y\n', 'python')
+    eq(1, pn); eq('def f(y):\n    if y is None:\n        return 0\n    return y\n', pout)
+end)
+
 test('byexample: a STATEMENT INSERTION applies — every hole the right side uses is bound by the left (CART-1173)', function ()
     if not ready() then skip 'no lua parser or algebra' end
     -- MEASURED before the fix: learned with 4 holes, then 0 sites on an IDENTICAL body — the statement holes on the left

@@ -162,10 +162,13 @@ function M.rewrite(rules, src, lang)
     return a.cst_print(t), sites
 end
 
-local function files_in(store, scope)
+local function files_in(store, scope, lang)
     local out = {}
     if scope == 'all' then
-        for _, f in ipairs(store.files or {}) do if f:match('%.lua$') then out[#out + 1] = f end end
+        -- the files OF THE RULE'S LANGUAGE, by the graph's own path -> parser rule (not an extension typed here)
+        local ts = require 'cartograph.providers.treesitter'
+        lang = lang or 'lua' -- @langs-ok the reader's audited roster decides (the declaration in algebraread's header)
+        for _, f in ipairs(store.files or {}) do if ts.parse_lang(f) == lang then out[#out + 1] = f end end
     else
         for f in tostring(scope):gmatch('[^,]+') do out[#out + 1] = (f:gsub('^%s+', ''):gsub('%s+$', '')) end
     end
@@ -222,7 +225,7 @@ function M.plan(store, opts)
         }
         return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
     end
-    local scan = files_in(store, opts.scope or 'all')
+    local scan = files_in(store, opts.scope or 'all', opts.lang)
     local edits, touched, stamps, per, total, unread = {}, {}, {}, {}, 0, {}
     for _, rel in ipairs(scan) do
         local text = txn.read_file(root, rel)

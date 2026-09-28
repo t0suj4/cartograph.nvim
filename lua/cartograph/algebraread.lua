@@ -1,10 +1,13 @@
 -- cartograph.algebraread — THE LOSSLESS READER: source text → algebra term (CART-0961).
 --
--- @langs lua
--- ONE GRAMMAR IS AUDITED AND THAT IS THE CLAIM. The reader is lossless only where
--- a round-trip has been proven (`A.cst_print(read(src)) == src`, byte for byte),
--- and that proof exists for lua. A second grammar is not a wider `@langs` line,
--- it is a second audit — see the RESERVED note below.
+-- @langs lua javascript typescript python ruby java go bash c cpp
+-- EACH DECLARED GRAMMAR IS AUDITED, AND THAT IS THE CLAIM. The reader is lossless only where a round-trip has been
+-- proven (`A.cst_print(read(src)) == src`, byte for byte). Lua's proof is the spec's (every file under lua/); the
+-- others' is `tools/identity.lua <dir> <lang>` over real trees — MEASURED 2026-09-28, ZERO print mismatches:
+-- javascript 1384/1384 + typescript 143/143 (ghost core), python 823/823 (django-oscar), ruby 1190/1190 (discourse
+-- app), java 555/555 (big-app.spring), go 184/184 (amass); bash 385/419, c 41/192, cpp 239/325 — the rest REFUSED
+-- by name (tree-sitter reports an error node: macro-heavy C, bash it cannot parse), never mis-read. A grammar is
+-- added to this line by that audit passing, not by editing the line.
 --
 -- ★★★ THIS IS THE ONE UNPORTED PIECE, AND IT GATES THE WHOLE EDIT SIDE. The
 -- 2026-09-19 re-vendor brought 90 new algebra exports and `origin.unported`
@@ -87,6 +90,35 @@ M.RESERVED = { hole = true, seq = true, lit = true, name = true, pair = true,
 --- @param src string source text
 --- @param lang string tree-sitter language
 --- @return table|nil term, string|nil why
+--- ★ THE ESCAPE, DERIVED PER GRAMMAR (CART-1160 plan step 6). MEASURED 2026-09-28 from each grammar's own symbol
+--- table (vim.treesitter.language.inspect): lua 0 collisions; javascript, typescript, python, json, ruby collide on
+--- exactly one kind, `pair`; go, java, bash, c on none. A colliding NAMED type is not refused any more: it gets a kind
+--- DERIVED from the grammar — `<type>_`, lengthened until it is neither reserved nor a symbol of that grammar — so the
+--- term cannot be mistaken for the algebra's own node, and printing (which reads only the kids) stays byte-identical.
+--- The map is per grammar and deterministic; `M.escapes(lang)` exposes it for a caller matching kinds by name.
+local escape_cache = {}
+function M.escapes(lang)
+    -- keyed by the RESERVED set too: the collision guard's own spec widens it at run time, and a cache built before
+    -- (or during) that must not answer for the other set
+    local rk = {}
+    for k in pairs(M.RESERVED) do rk[#rk + 1] = k end
+    table.sort(rk)
+    local key = lang .. '\31' .. table.concat(rk, ',')
+    if escape_cache[key] then return escape_cache[key] end
+    local out = {}
+    local ok, info = pcall(vim.treesitter.language.inspect, lang)
+    local syms = ok and info and info.symbols or {}
+    for name, named in pairs(syms) do
+        if named and M.RESERVED[name] then
+            local esc = name .. '_'
+            while M.RESERVED[esc] or syms[esc] ~= nil do esc = esc .. '_' end
+            out[name] = esc
+        end
+    end
+    escape_cache[key] = out
+    return out
+end
+
 local function read(A, src, lang)
     local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
     if not okp or not parser then
@@ -100,8 +132,12 @@ local function read(A, src, lang)
     if root:has_error() then
         return nil, ('does not parse as `%s` (tree-sitter reports an error node)'):format(lang)
     end
+    local ESC = M.escapes(lang)
     local function term(node)
         local ty = node:type()
+        -- a NAMED type the grammar shares with the algebra takes its derived escape; anything else still colliding
+        -- (an escape map that could not be derived — no symbol table) refuses by name, as before
+        if node:named() and ESC[ty] then ty = ESC[ty] end
         if M.RESERVED[ty] then
             error(('tree-sitter type collides with an algebra kind: `%s`'):format(ty), 0)
         end
@@ -176,10 +212,21 @@ end
 --- rather than a script. Counted as what it is, not as part of the read surface.
 --- @param dir string
 --- @return table { files, ok, bad = { {file, why} }, bytes }
-function M.identity(dir)
+function M.identity(dir, lang)
+    lang = lang or 'lua'
     local A, why = require('cartograph.algebra').load()
     if not A then return { files = 0, ok = 0, bad = { { dir, why } }, bytes = 0 } end
-    local files = vim.fn.globpath(dir, '**/*.lua', false, true)
+    -- the files OF THIS LANGUAGE, by the graph's own path -> parser rule (treesitter.parse_lang), never an extension
+    -- list typed here; lua keeps its glob (the spec's corpus, and the cheap path)
+    local files
+    if lang == 'lua' then files = vim.fn.globpath(dir, '**/*.lua', false, true)
+    else
+        local ts = require 'cartograph.providers.treesitter'
+        files = {}
+        for _, f in ipairs(vim.fn.globpath(dir, '**/*', false, true)) do
+            if vim.fn.isdirectory(f) == 0 and not f:find('/node_modules/', 1, true) and ts.parse_lang(f) == lang then files[#files + 1] = f end
+        end
+    end
     table.sort(files)
     local out = { files = #files, ok = 0, bad = {}, bytes = 0 }
     for _, f in ipairs(files) do
@@ -188,7 +235,7 @@ function M.identity(dir)
             local src = fd:read('*a')
             fd:close()
             out.bytes = out.bytes + #src
-            local t, err = read(A, src, 'lua')
+            local t, err = read(A, src, lang)
             if not t then
                 out.bad[#out.bad + 1] = { f, err }
             elseif A.cst_print(t) ~= src then
