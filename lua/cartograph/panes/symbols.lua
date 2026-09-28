@@ -64,6 +64,7 @@ local SIGN = {
     orphan     = { text = '○ ', hl = 'DiagnosticWarn' }, -- nothing loads it, NOT an entry point
     deadimport = { text = '⚠ ', hl = 'DiagnosticWarn' },
     sideeffect = { text = '↻ ', hl = 'Comment' },
+    ambiguous  = { text = '? ', hl = 'DiagnosticInfo' }, -- two scoped settings disagree about whether it is an entry point
     -- 'value' and 'used' are genuinely used → no marker (keeps the list quiet)
 }
 

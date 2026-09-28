@@ -4701,7 +4701,10 @@ local function list_files(root, subdirs, tp)
                 if t == 'directory' then
                     local ex = EXCLUDE_DIRS[name:lower()]
                     if not ex then
-                        for _, x in ipairs(require('cartograph.config').exclude or {}) do
+                        -- the names to exclude HERE: a scoped setting for the subtree this directory lies in, else the
+                        -- global one (config.at, CART-1120). ⚠ AMBIGUOUS scopes exclude nothing extra: the walk then
+                        -- extracts MORE, which hides nothing — the safe side of the failure asymmetry
+                        for _, x in ipairs(require('cartograph.config').at(root .. '/' .. r, 'exclude') or {}) do
                             if name == x then ex = true break end
                         end
                     end

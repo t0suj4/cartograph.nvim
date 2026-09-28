@@ -960,11 +960,25 @@ end
 ---   'entry'      nothing imports it, but it matches a configured entry-point
 ---                pattern — a root the runtime loads directly, not dead
 ---   'orphan'     nothing imports or references it, and it is NOT an entry point
+--- -> true | false | 'ambiguous' (two scoped settings that cover this file disagree ABOUT IT)
 function M.is_entrypoint(file)
-    for _, pat in ipairs(require('cartograph.config').entrypoints) do
-        if file:match(pat) then return true end
+    local function matches(pats)
+        for _, pat in ipairs(pats or {}) do if file:match(pat) then return true end end
+        return false
     end
-    return false
+    -- the entry-point patterns for THIS file: a scoped setting covering it, else the global list (config.at, CART-1120)
+    local pats, prov = require('cartograph.config').at(M.abs(file), 'entrypoints')
+    if prov and prov.source == 'ambiguous' then
+        -- ★ the LISTS disagree; the question is whether the ANSWERS do. Agreement for this file is an answer; a real
+        -- disagreement is reported as such — never an `orphan` claim built on a configuration conflict
+        local first
+        for _, e in ipairs(prov.entries) do
+            local m = matches(e.value)
+            if first == nil then first = m elseif first ~= m then return 'ambiguous' end
+        end
+        return first or false
+    end
+    return matches(pats)
 end
 
 function M.classify(file)
@@ -980,7 +994,11 @@ function M.classify(file)
     -- runtime-loaded root, and that's its salient fact even when its globals
     -- are also referenced cross-file (control.lua defines AND exports).
     local ins = M.imports_in[file]
-    if (not ins or #ins == 0) and M.is_entrypoint(file) then return 'entry' end
+    if not ins or #ins == 0 then
+        local ep = M.is_entrypoint(file)
+        if ep == 'ambiguous' then return 'ambiguous' end
+        if ep then return 'entry' end
+    end
     -- 'used' = a symbol referenced from ANOTHER file (the no-require global
     -- access pattern). Intra-file calls say nothing about how the project
     -- loads this file, so they don't count.

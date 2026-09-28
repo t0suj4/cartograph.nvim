@@ -75,13 +75,17 @@ M.pins = nil
 -- SCOPED SETTINGS: a deliberate exception to what cartograph derives, for one part of the world. User rule
 -- (2026-09-26): "I'll choose derivation over a hand-maintained list almost every time. The only exceptions to the
 -- rule is when I want it there, expressed through scoped configuration." So a derived answer is the default
--- everywhere, and an override is keyed by the path prefix it applies to (the longest matching prefix wins; a
--- key no scope sets falls back to the global setting of that name). Read through M.for_root(root, key).
+-- everywhere, and an override is keyed by the SCOPE it applies to — a dir, a file, or a QUERY — looked up by the
+-- subject that needs it: M.at(subject, key) (the most specific containing scope wins; two that disagree are
+-- AMBIGUOUS; a key no scope sets falls back to the global setting of that name). See "POLICY OVER VIEWS" below.
 --   setup{ scoped = { ['/home/me/work/brotardcast/ejabberd'] = { behaviour_suppliers = 'otp' } } }
 -- Keys read today:
 --   behaviour_suppliers  'derived' (default: every supplier the runtime proves — OTP's own applications and
 --                        libraries installed into it, each named in the alibi) | 'otp' (only applications the OTP
 --                        installer shipped, per the runtime's releases/<rel>/installed_application_versions)
+--   exclude              directory NAMES excluded under that scope (read per directory the walk enters)
+--   entrypoints          entry-point patterns for files under that scope (store.classify; a real disagreement
+--                        between two covering scopes classifies the file `ambiguous`, never `orphan`)
 --   tactic_overrides     { ['<tactic>'] = { use = 'sha256:<project file>', over = 'sha256:<built-in>' } }: run the
 --                        project's .cartograph/tactics/<tactic>.lua INSTEAD of the built-in one. Your explicit choice,
 --                        for that exact pair of texts — either side changing voids it (the refusal prints the entry)
@@ -331,22 +335,127 @@ function M.apply(opts)
     end
 end
 
---- the value of `key` for a tree at `root`: the longest `scoped` prefix that contains `root` and sets `key`,
---- else the global setting of that name (nil when neither)
-function M.for_root(root, key)
-    if type(M.scoped) == 'table' and root then
-        local r = (vim.fn.fnamemodify(root, ':p'):gsub('/+$', ''))
-        local best, blen
-        for prefix, t in pairs(M.scoped) do
-            local p = (vim.fn.fnamemodify(vim.fn.expand(prefix), ':p'):gsub('/+$', ''))
-            if type(t) == 'table' and t[key] ~= nil and (r == p or r:sub(1, #p + 1) == p .. '/')
-                    and (not blen or #p > blen) then
-                best, blen = t[key], #p
+-- ── POLICY OVER VIEWS (CART-1120, CART-1160 step 6) ─────────────────────────────
+-- A scoped entry is (scope, key, value). `scoped` holds two forms, both user-side (setup{}; the tree never supplies):
+--   scoped = {
+--       ['/abs/dir'] = { key = value, ... },                          a DIR anchor (a path to a FILE is a FILE anchor)
+--       { query = function (path) return ... end, name = 'hrl', values = { key = value } },   a QUERY: re-derived on
+--       { dir = '/abs/dir', values = { ... } }, { file = '/abs/f', values = { ... } },          every read
+--   }
+-- The lookup is by the SUBJECT that needs the answer (a file, a directory, a tree root), not by the analysis root.
+-- ★ PRECEDENCE BY CONTAINMENT: among the entries whose scope contains the subject and set the key, a SUBSET beats
+-- its superset (longest-prefix is the special case of nested dirs). Containment of a QUERY is EXTENSIONAL: over the
+-- files of the loaded graph, Q ⊆ S when every file Q selects lies in S — derived, never declared; with no graph it is
+-- unknown. ★ When the most specific entries DISAGREE (neither contains the other), the answer is AMBIGUOUS: both are
+-- reported, none is picked (pairs() order used to pick silently).
+-- ★ PROVENANCE: every answer says which entry decided it — `scoped:<scope>`, `global`, or AMBIGUOUS with the entries.
+
+local function abs(p) return (vim.fn.fnamemodify(vim.fn.expand(p), ':p'):gsub('/+$', '')) end
+
+--- the scoped entries, normalized: { { kind = 'dir'|'file'|'query', at?, query?, name, values } }
+function M.scoped_entries()
+    local out = {}
+    if type(M.scoped) ~= 'table' then return out end
+    for k, t in pairs(M.scoped) do
+        if type(k) == 'string' and type(t) == 'table' then
+            local a = abs(k)
+            local kind = (vim.fn.isdirectory(a) == 0 and vim.fn.filereadable(a) == 1) and 'file' or 'dir'
+            out[#out + 1] = { kind = kind, at = a, name = kind .. ':' .. a, values = t }
+        end
+    end
+    for _, e in ipairs(M.scoped) do
+        if type(e) == 'table' and type(e.values) == 'table' then
+            if type(e.query) == 'function' then
+                out[#out + 1] = { kind = 'query', query = e.query, name = 'query:' .. tostring(e.name or '?'), values = e.values }
+            elseif e.dir or e.file then
+                local a = abs(e.dir or e.file)
+                out[#out + 1] = { kind = e.dir and 'dir' or 'file', at = a, name = (e.dir and 'dir:' or 'file:') .. a, values = e.values }
             end
         end
-        if blen then return best end
     end
-    return M[key]
+    table.sort(out, function (a, b) return a.name < b.name end)
+    return out
+end
+
+--- does scope `e` hold the path `p`?
+local function holds(e, p)
+    if e.kind == 'query' then local ok, r = pcall(e.query, p); return ok and r and true or false end
+    if e.kind == 'file' then return p == e.at end
+    return p == e.at or p:sub(1, #e.at + 1) == e.at .. '/'
+end
+
+--- the files of the loaded graph, absolute — the universe a QUERY's containment is measured over (nil: no graph)
+local function universe()
+    local store = package.loaded['cartograph.store']
+    local data = store and store.data
+    -- the file roster is the STORE's (store.files, built at ingest), not a field of the extraction
+    if not (data and data.root and type(store.files) == 'table') then return nil end
+    local out = {}
+    for _, f in ipairs(store.files) do out[#out + 1] = data.root .. '/' .. f end
+    return out
+end
+
+--- is scope `a` a subset of scope `b`? true | false | nil (unknown)
+local function subset(a, b, U)
+    if a.kind ~= 'query' and b.kind ~= 'query' then
+        if a.kind == 'dir' and b.kind == 'file' then return false end
+        return holds(b, a.at)
+    end
+    if not U then return nil end
+    for _, f in ipairs(U) do if holds(a, f) and not holds(b, f) then return false end end
+    return true
+end
+
+--- the value of `key` for `subject` (an absolute path: a file, a directory, a tree root), with its provenance.
+--- -> value, { source = 'scoped' | 'global', scope?, entries? } — or nil, { source = 'ambiguous', entries = { { scope, value } } }
+function M.at(subject, key)
+    if type(M.scoped) ~= 'table' then return M[key], { source = 'global' } end -- the common case: nothing scoped
+    local p = subject and abs(subject)
+    local cands = {}
+    if p then
+        for _, e in ipairs(M.scoped_entries()) do
+            if e.values[key] ~= nil and holds(e, p) then cands[#cands + 1] = e end
+        end
+    end
+    if #cands == 0 then return M[key], { source = 'global' } end
+    local U = (function () for _, e in ipairs(cands) do if e.kind == 'query' then return universe() end end end)()
+    -- the MOST SPECIFIC candidates: those no other candidate is a strict subset of
+    local minimal = {}
+    for _, a in ipairs(cands) do
+        local dominated = false
+        for _, b in ipairs(cands) do
+            if a ~= b and subset(b, a, U) == true and subset(a, b, U) ~= true then dominated = true; break end
+        end
+        if not dominated then minimal[#minimal + 1] = a end
+    end
+    local first = minimal[1]
+    for _, e in ipairs(minimal) do
+        if not vim.deep_equal(e.values[key], first.values[key]) then
+            local rows = {}
+            for _, m in ipairs(minimal) do rows[#rows + 1] = { scope = m.name, value = m.values[key] } end
+            return nil, { source = 'ambiguous', entries = rows }
+        end
+    end
+    local names = {}
+    for _, e in ipairs(minimal) do names[#names + 1] = e.name end
+    return first.values[key], { source = 'scoped', scope = table.concat(names, ' + ') }
+end
+
+--- every scoped key's effective value for `subject`: { [key] = { value, provenance } } — the effective-configuration view
+function M.explain(subject)
+    local keys, out = {}, {}
+    for _, e in ipairs(M.scoped_entries()) do for k in pairs(e.values) do keys[k] = true end end
+    for k in pairs(keys) do
+        local v, prov = M.at(subject, k)
+        out[k] = { value = v, provenance = prov }
+    end
+    return out
+end
+
+--- the value of `key` for a tree at `root` — the dir-anchor case of M.at (kept for its callers; ambiguous -> nil)
+function M.for_root(root, key)
+    if not root then return M[key] end
+    return (M.at(root, key))
 end
 
 return M
