@@ -312,14 +312,131 @@ STRING.rep = (s, n, sep) => { s = cstr(s); if (n <= 0) return ''; return sep ===
 STRING.lower = s => cstr(s).replace(/[A-Z]/g, c => c.toLowerCase());
 STRING.upper = s => cstr(s).replace(/[a-z]/g, c => c.toUpperCase());
 STRING.reverse = s => cstr(s).split('').reverse().join('');
-const MAGIC = /[\^$*+?.()[\]%-]/;
-STRING.find = (s, p, init, plain) => {
-  s = cstr(s); p = cstr(p); init = init === undefined ? 1 : bpos(s, init);
-  if (!$t(plain) && MAGIC.test(p)) $abort('string.find with a Lua pattern');
-  const at = s.indexOf(p, init - 1);
-  return at < 0 ? undefined : $mv(at + 1, at + p.length);
+// ── Lua patterns: LuaJIT's OWN matcher, TRANSLITERATED from src/lib_string.c by cartograph.cjs ($lstrmatch.js,
+// generated — its header names the source and the commit). What follows is only the ADAPTER at the Lua C-API seam,
+// written line for line from str_find_aux / lj_cf_string_gmatch_aux / lj_cf_string_gsub / add_s / add_value: the
+// matcher sees one byte HEAP (its tables, then the subject + NUL, then the pattern + NUL), a pointer is an offset.
+const LM = require('./$lstrmatch.js');
+const IMG = LM.image();
+const MAXCAP = LM.STRUCTS.MatchState.capture;
+let HEAP = null;
+const use = h => { HEAP = h; LM.setheap(h); };
+const hstr = (h, at, n) => frombytes(Buffer.from(h.buffer, h.byteOffset + at, n));
+LM.bind({
+  $cerr: msg => { throw new LuaError(msg); },
+  $memcmp: (a, b, n) => { for (let i = 0; i < n; i++) { const d = HEAP[a + i] - HEAP[b + i]; if (d) return d; } return 0; },
+  $push: (L, v) => { L.push(v); },
+  $str: (at, n) => hstr(HEAP, at, n),
+});
+function prepare(s, p) {
+  const s0 = LM.IMAGE_END, p0 = s0 + s.length + 1;
+  const h = new Uint8Array(p0 + p.length + 1);
+  h.set(IMG, 0);
+  for (let i = 0; i < s.length; i++) h[s0 + i] = s.charCodeAt(i);
+  for (let i = 0; i < p.length; i++) h[p0 + i] = p.charCodeAt(i);
+  return { h, s0, p0 };
+}
+const mstate = (s0, n) => ({ src_init: s0, src_end: s0 + n, L: [], level: 0, depth: 0,
+  capture: Array.from({ length: MAXCAP }, () => ({ init: 0, len: 0 })) });
+// lj_str_haspattern: any of ^$*+?.([%- (lj_char_ispunct excludes the NUL strchr would also find)
+const haspattern = p => /[\^$*+?.(\[%-]/.test(p);
+const optint = (v, d) => (v === undefined ? d : Math.trunc(num(v)));
+function find_aux(find, s, p, init, plain) {
+  s = cstr(s); p = cstr(p);
+  let start = optint(init, 1);
+  if (start < 0) start += s.length; else start--;
+  if (start < 0) start = 0;
+  let st = start;
+  if (st > s.length) st = s.length; // !LJ_52
+  if (find && ($t(plain) || !haspattern(p))) { // search for a fixed string
+    const q = s.indexOf(p, st);
+    return q < 0 ? undefined : $mv(q + 1, q + p.length);
+  }
+  const { h, s0, p0 } = prepare(s, p);
+  let pstr = p0, sstr = s0 + st, anchor = 0;
+  if (h[pstr] === 94) { pstr++; anchor = 1; }
+  const ms = mstate(s0, s.length);
+  do {
+    ms.level = ms.depth = 0;
+    use(h);
+    const q = LM.match(ms, sstr, pstr);
+    if (q !== null) {
+      ms.L = [];
+      if (find) { const a = sstr - (s0 - 1), b = q - s0; LM.push_captures(ms, null, null); return $mv(a, b, ...ms.L); }
+      LM.push_captures(ms, sstr, q);
+      return $mv(...ms.L);
+    }
+  } while (sstr++ < ms.src_end && !anchor);
+  return undefined;
+}
+STRING.find = (s, p, init, plain) => find_aux(true, s, p, init, plain);
+STRING.match = (s, p, init) => find_aux(false, s, p, init);
+STRING.gmatch = (s, p) => {
+  s = cstr(s); p = cstr(p);
+  const { h, s0, p0 } = prepare(s, p);
+  const ms = mstate(s0, s.length);
+  let pos = 0;
+  return () => {
+    for (let src = s0 + pos; src <= ms.src_end; src++) {
+      ms.level = ms.depth = 0;
+      use(h);
+      const e = LM.match(ms, src, p0);
+      if (e !== null) {
+        let np = e - s0;
+        if (e === src) np++; // ensure progress for an empty match
+        pos = np;
+        ms.L = [];
+        LM.push_captures(ms, src, e);
+        return $mv(...ms.L);
+      }
+    }
+    return undefined;
+  };
 };
-for (const name of ['match', 'gmatch', 'gsub']) STRING[name] = () => $abort('string.' + name + ' (Lua patterns)');
+function add_s(ms, h, b, s, e, news) {
+  for (let i = 0; i < news.length; i++) {
+    if (news.charCodeAt(i) !== 37) { b.push(news[i]); continue; }
+    i++; // skip ESC
+    const d = i < news.length ? news.charCodeAt(i) : 0; // C reads the terminating NUL
+    if (!(d >= 48 && d <= 57)) b.push(String.fromCharCode(d));
+    else if (d === 48) b.push(hstr(h, s, e - s));
+    else { ms.L = []; use(h); LM.push_onecapture(ms, d - 49, s, e); b.push(cstr(ms.L[0])); }
+  }
+}
+function add_value(ms, h, b, s, e, repl, tr) {
+  if (tr === 'number' || tr === 'string') { add_s(ms, h, b, s, e, cstr(repl)); return; }
+  let v;
+  ms.L = []; use(h);
+  if (tr === 'function') { LM.push_captures(ms, s, e); v = $1($call(repl, ...ms.L)); }
+  else { LM.push_onecapture(ms, 0, s, e); v = $idx(repl, ms.L[0]); }
+  if (!$t(v)) b.push(hstr(h, s, e - s)); // nil or false: keep the original text
+  else if (typeof v === 'string' || typeof v === 'number') b.push(cstr(v));
+  else throw new LuaError('invalid replacement value (a ' + $type(v) + ')');
+}
+STRING.gsub = (s, p, repl, max_s) => {
+  s = cstr(s); p = cstr(p);
+  const tr = $type(repl);
+  if (!(tr === 'number' || tr === 'string' || tr === 'function' || tr === 'table')) throw new LuaError("bad argument #3 to 'gsub' (string/function/table expected)");
+  const max = optint(max_s, s.length + 1);
+  const { h, s0, p0 } = prepare(s, p);
+  let pp = p0, anchor = 0;
+  if (h[pp] === 94) { pp++; anchor = 1; }
+  const ms = mstate(s0, s.length);
+  let src = s0, n = 0;
+  const b = [];
+  while (n < max) {
+    ms.level = ms.depth = 0;
+    use(h);
+    const e = LM.match(ms, src, pp);
+    if (e !== null) { n++; add_value(ms, h, b, src, e, repl, tr); }
+    if (e !== null && e > src) src = e; // a non-empty match: skip it
+    else if (src < ms.src_end) b.push(String.fromCharCode(h[src++]));
+    else break;
+    if (anchor) break;
+  }
+  b.push(hstr(h, src, ms.src_end - src));
+  return $mv(b.join(''), n);
+};
 STRING.format = (fmt, ...args) => {
   let i = 0;
   return cstr(fmt).replace(/%([-+ #0]*)(\d*)(?:\.(\d+))?([sdiqfgxXcoeE%])/g, (all, flags, width, prec, conv) => {

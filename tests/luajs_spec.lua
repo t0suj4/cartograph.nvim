@@ -27,6 +27,7 @@ end
 local function js_out(src)
     local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
     vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js', 'b'), dir .. '/$pack.js', 'b')
+    vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/lstrmatch.js', 'b'), dir .. '/$lstrmatch.js', 'b')
     local js, refusals = L.emit(src, 'snippet.lua', { pack = './$pack.js' })
     local fd = assert(io.open(dir .. '/snippet.js', 'wb')); fd:write(js); fd:close()
     local r = vim.system({ 'node', dir .. '/snippet.js' }, { text = true }):wait(30000)
@@ -197,6 +198,7 @@ print(dirf ~= nil, dirf and select(2, dirf:read('a')))
     -- the JS side: emitted beside the pack, LUAJS_SRC_ROOT naming the Lua tree it came from
     local out = vim.fn.tempname(); vim.fn.mkdir(out, 'p')
     vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js', 'b'), out .. '/$pack.js', 'b')
+    vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/lstrmatch.js', 'b'), out .. '/$lstrmatch.js', 'b')
     local js, refusals = L.emit(src, 'snip.lua', { pack = './$pack.js' })
     eq(0, #refusals, vim.inspect(refusals))
     local w = assert(io.open(out .. '/snip.js', 'wb')); w:write(js); w:close()
@@ -205,14 +207,116 @@ print(dirf ~= nil, dirf and select(2, dirf:read('a')))
     eq(ref.stdout, (run.stdout or '') .. (run.stderr or ''))
 end)
 
+--- every DISTINCT LITERAL pattern the repository's own Lua passes to find / match / gmatch / gsub (derived from lua/)
+local function real_patterns()
+    local Q = vim.treesitter.query.parse('lua', [[
+      (function_call name: (method_index_expression method: (identifier) @m) arguments: (arguments) @a)
+      (function_call name: (dot_index_expression table: (identifier) @lib field: (identifier) @m) arguments: (arguments) @a)
+    ]])
+    local WANT = { find = true, match = true, gmatch = true, gsub = true }
+    local seen, out = {}, {}
+    for _, path in ipairs(vim.fs.find(function (n) return n:match('%.lua$') end, { path = REPO .. '/lua', type = 'file', limit = math.huge })) do
+        local fd = io.open(path); local src = fd:read('a'); fd:close()
+        local root = vim.treesitter.get_string_parser(src, 'lua'):parse()[1]:root()
+        for _, m in Q:iter_matches(root, src, 0, -1, { all = true }) do
+            local name, args, lib
+            for id, nodes in pairs(m) do
+                local cap, n = Q.captures[id], nodes[1]
+                if cap == 'm' then name = vim.treesitter.get_node_text(n, src) elseif cap == 'a' then args = n elseif cap == 'lib' then lib = vim.treesitter.get_node_text(n, src) end
+            end
+            if name and WANT[name] and args and (lib == nil or lib == 'string') then
+                local kids = {}
+                for c in args:iter_children() do if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = c end end
+                local pn = lib and kids[2] or kids[1]
+                if pn and pn:type() == 'string' then
+                    local okp, p = pcall(load('return ' .. vim.treesitter.get_node_text(pn, src)))
+                    if okp and type(p) == 'string' and not seen[p] then seen[p] = true; out[#out + 1] = p end
+                end
+            end
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+test('luajs differential: EVERY real Lua pattern of this repository (find, match, gsub, gmatch over real and edge subjects) — LuaJIT\'s matcher transliterated from C, byte-identical to LuaJIT', function ()
+    if not ready() then skip 'no lua parser / node' end
+    local pats = real_patterns()
+    ok(#pats > 500, 'the premise: the census found the real patterns (' .. #pats .. ')')
+    -- SUBJECTS: edges (empty, NUL, high bytes, balanced and unbalanced brackets, whitespace) + real lines of this repo
+    local subjects = { '', 'a', ' \t\n x ', 'hello world', 'k=v, x=y', 'f(a(b)c)d', '[[x]]', '%d+', 'x\0y', 'h\195\169llo',
+        '/usr/local/lib/lua/5.1/x.lua', 'CamelCase_snake-kebab 42 3.5e-2 0x1F', '"quoted" and \'single\'', '-- comment',
+        'a.b.c:d(e, f)', '  \r\n', ('ab'):rep(20) }
+    local fd = io.open(REPO .. '/lua/cartograph/luajs.lua'); local own = fd:read('a'); fd:close()
+    local k = 0
+    for line in own:gmatch('[^\n]+') do k = k + 1; if k % 7 == 0 and #subjects < 60 then subjects[#subjects + 1] = line end end
+    local parts = { 'local P = {' }
+    for _, p in ipairs(pats) do parts[#parts + 1] = ('%q,'):format(p):gsub('\\\n', '\\n') end
+    parts[#parts + 1] = '}\nlocal S = {'
+    for _, s in ipairs(subjects) do parts[#parts + 1] = ('%q,'):format(s):gsub('\\\n', '\\n') end
+    parts[#parts + 1] = [[}
+local function show(ok, ...)
+  if not ok then return 'ERR ' .. tostring((...)) end
+  local t = {}
+  for i = 1, select('#', ...) do t[i] = tostring((select(i, ...))) end
+  return table.concat(t, ',')
+end
+for pi = 1, #P do
+  local p = P[pi]
+  local row = {}
+  for si = 1, #S do
+    local s = S[si]
+    row[#row + 1] = show(pcall(string.find, s, p))
+    row[#row + 1] = show(pcall(string.match, s, p))
+    row[#row + 1] = show(pcall(string.gsub, s, p, '<%0>'))
+    row[#row + 1] = show(pcall(string.find, s, p, 3)) .. '/' .. show(pcall(string.match, s, p, -3)) .. '/' .. show(pcall(string.find, s, p, 99))
+    -- the iterator is stepped through pcall (a C caller): a builtin raised from a LUA caller carries that caller's
+    -- position in LuaJIT (`chunk:line: msg`), a gap of the pack recorded apart — this test checks the MATCHER
+    local it, c, err = string.gmatch(s, p), 0, nil
+    while c <= 1000 do
+      local okg, v = pcall(it)
+      if not okg then err = v; break end
+      if v == nil then break end
+      c = c + 1
+    end
+    row[#row + 1] = err and ('ERR ' .. tostring(err)) or tostring(c)
+  end
+  -- one LINE per pattern: a newline inside a result is escaped
+  print(pi, (table.concat(row, '|'):gsub('\\', '\\\\'):gsub('\n', '\\n')))
+end]]
+    local prog = table.concat(parts, '\n')
+    local want = lua_out(prog)
+    local got, _, refusals = js_out(prog)
+    eq(0, #refusals, vim.inspect(refusals))
+    if want ~= got then
+        -- name the FIRST disagreeing pattern, not a megabyte diff
+        local wl, gl = vim.split(want, '\n'), vim.split(got, '\n')
+        for i = 1, math.max(#wl, #gl) do
+            if wl[i] ~= gl[i] then
+                local pi = tonumber((wl[i] or gl[i] or ''):match('^(%d+)')) or i
+                -- the FIRST disagreeing CELL: its subject and which call
+                local wc, gc = vim.split(wl[i] or '', '|', { plain = true }), vim.split(gl[i] or '', '|', { plain = true })
+                for c = 1, math.max(#wc, #gc) do
+                    if wc[c] ~= gc[c] then
+                        local si, call = math.floor((c - 1) / 5) + 1, ({ 'find', 'match', 'gsub', 'find/match with init', 'gmatch count' })[(c - 1) % 5 + 1]
+                        error(('pattern #%d %q, subject %q, %s:\n  lua: %s\n  js:  %s'):format(pi, tostring(pats[pi]), tostring(subjects[si]), call, tostring(wc[c]), tostring(gc[c])), 0)
+                    end
+                end
+                error(('pattern #%d %q disagrees (line %d)'):format(pi, tostring(pats[pi]), i), 0)
+            end
+        end
+    end
+    eq(#pats, select(2, want:gsub('\n', '')), 'one line per pattern')
+end)
+
 test('luajs: a construct with no faithful form is REFUSED by name, the module still parses, and a pack gap BREAKS loudly at run time', function ()
     if not ready() then skip 'no lua parser / node' end
     local out, js, refusals = js_out('print(1)\ngoto skip\nprint(2)\n::skip::\nprint(3)\n')
     ok(#refusals >= 1 and refusals[1].kind == 'goto', vim.inspect(refusals))
     ok(js:find('$abort("goto', 1, true), 'the refusal sits at its place')
     ok(out:find('LuaBreak', 1, true) or out:find('no faithful JS form', 1, true), 'running it reaches the refusal loudly: ' .. out)
-    local out2 = js_out("print(('a,b'):gsub(',', ';'))\n")
-    ok(out2:find('no faithful JS form: string.gsub', 1, true), 'a Lua pattern is a named break, never an approximation: ' .. out2)
+    local out2 = js_out("print(('%q'):format('x'))\n")
+    ok(out2:find('no faithful JS form: string.format %q', 1, true), 'a pack gap is a named break, never an approximation: ' .. out2)
     eq('1\t2\n', (js_out('print(1, 2)\n')), 'and the translatable side runs')
 end)
 

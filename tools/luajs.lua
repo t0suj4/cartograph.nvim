@@ -22,6 +22,8 @@ for i = 3, #arg do if arg[i] == '--run' then run = true end end
 local L = require 'cartograph.luajs'
 vim.fn.mkdir(out_dir, 'p')
 vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js', 'b'), out_dir .. '/$pack.js', 'b')
+-- the pack's pattern matcher: LuaJIT's, transliterated from C (tools/cjs.lua lstrmatch)
+vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/lstrmatch.js', 'b'), out_dir .. '/$lstrmatch.js', 'b')
 
 local files = vim.fs.find(function (n) return n:match('%.lua$') end, { path = src_dir, type = 'file', limit = math.huge })
 table.sort(files)
