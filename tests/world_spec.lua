@@ -104,3 +104,25 @@ test('a VIRTUAL graph is never applied: a plan made against an overlay refuses t
     eq(nil, r); eq('ill-posed', class); ok(tostring(why):find('VIRTUAL', 1, true), tostring(why))
     eq(B0, disk(root, 'b.lua'), 'the disk is untouched')
 end)
+
+test('store.content reads THROUGH the world: an overlay\'s edited file is its text, the base\'s is the disk\'s, neither is stale', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = tree { ['a.lua'] = A, ['b.lua'] = B0 }
+    store.ingest(ts.extract(root))
+    local base = store.data
+    local over = assert(world.edit(base, { ['b.lua'] = EDITS.add }))
+    local function content_of(name)
+        for _, n in ipairs(store.data.nodes) do if n.name == name then return store.content(n), store.stale(n.file) end end
+    end
+    local lines, stale = store.scoped(over, function () return content_of('B.h') end)
+    eq(vim.split(EDITS.add, '\n', { plain = true, trimempty = false }), vim.list_extend(vim.deepcopy(lines), { '' }),
+        'the overlay\'s lines, with readfile\'s semantics (no empty line after the final newline)')
+    eq(false, stale, 'an overlay file is judged against its own text, not the disk\'s')
+    -- and back in the base world, the SAME file is the disk's again (the cache is keyed by the serving layer's stamp)
+    local blines, bstale = content_of('B.f')
+    eq(vim.fn.readfile(root .. '/b.lua'), blines); eq(false, bstale)
+    -- the two substrates agree line for line on the same text
+    local same = assert(world.edit(base, { ['b.lua'] = B0 }))
+    local olines = store.scoped(same, function () return content_of('B.f') end)
+    eq(vim.fn.readfile(root .. '/b.lua'), olines, 'an overlay holding the disk\'s text reads exactly as readfile does')
+end)

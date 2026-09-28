@@ -1050,11 +1050,13 @@ end
 local function frontier_text(file)
     local path = M.abs(file)
     local e = M._frontier_cache[file]
-    local stamp = transport.stamp(path) or 'gone'
+    -- through the graph's own transport: an overlay world's text, not the disk's (CART-1160 step 3)
+    local T = require('cartograph.source').transport(M.data)
+    local stamp = T.stamp(path) or 'gone'
     if e and e.stamp == stamp then return e.text end
     -- SOURCE text (CART-0238): this feeds parsing/serving and is hashed for the
     -- landing cache, so it must be the same string every other analysis reader sees
-    local text = transport.read_source(path) or false
+    local text = T.read_source(path) or false
     local hash = text and djb2(text) or nil
     if e then
         if e.hash == hash then
@@ -1895,10 +1897,27 @@ function M.content(node)
     if not (node and node.file) then return nil end
     local file = node.file
     local path = M.abs(file)
-    local stamp = transport.stamp(path) or 'gone'
+    -- ★ THROUGH THE GRAPH'S OWN TRANSPORT (CART-1160 step 3): an OVERLAY world serves its edited files from memory,
+    -- and every on-demand analysis (expr.of, narrow, optimize, trace, a planner's content read) must see THAT text,
+    -- not the disk's — a tactic's chained preview plans step 2 against what step 1 would write. The stamp comes from
+    -- the layer that serves the path, so an overlay's content hash never passes for the disk file it replaces.
+    local T = require('cartograph.source').transport(M.data)
+    local served = T.for_path and T.for_path(path)
+    local stamp = (served and served.stamp and served.stamp(path)) or 'gone'
     local e = M._content_cache[file]
     if e and e.stamp == stamp then return e.lines or nil end
     local lines = false
+    if stamp ~= 'gone' and served and served.name ~= 'disk' then
+        -- a non-disk layer: its text, split with readfile's semantics (a CR of a CRLF pair dropped, no empty line
+        -- after a final newline) so both substrates hand the same lines to the same consumer
+        local text = T.read_source(path)
+        if text then
+            lines = vim.split(text, '\n', { plain = true })
+            if lines[#lines] == '' then lines[#lines] = nil end
+        end
+        M._content_cache[file] = { stamp = stamp, lines = lines }
+        return lines or nil
+    end
     -- the READ deliberately stays vim.fn.readfile rather than transport.read:
     -- readfile drops a trailing empty line where splitting on '\n' keeps it, and
     -- these lines feed DISPLAY. Routing the stamp is what this seam needed; the
@@ -2201,7 +2220,8 @@ function M.stale(file)
     -- non-filesystem substrates (mcp://…) validate through their own
     -- transport at open time; a stat against their keys means nothing
     if (M.data.root or ''):match('^%w+://') then return nil end
-    local now = transport.stamp(M.abs(file)) or 'gone'
+    -- the layer that serves the file stamps it: an overlay world's file is judged against its own text
+    local now = require('cartograph.source').transport(M.data).stamp(M.abs(file)) or 'gone'
     return now ~= s
 end
 

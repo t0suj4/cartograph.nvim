@@ -185,6 +185,22 @@ local function key(file, name) return tostring(file) .. '::' .. tostring(name) e
 
 local eval
 
+--- ★ A PREVIEWED STEP'S WORLD (CART-1160 step 3): the overlay world its staged edit would produce, so the NEXT step
+--- plans against the text this one would write instead of refusing as underivable. Only a JOURNALED step chains:
+--- `journaled` means the journal can undo the write by restoring the touched files' bytes, so the staged texts ARE the
+--- whole effect. A compensable or irreversible step does something the text does not show, and a world that omitted
+--- it would be a preview of something else. -> overlay data | nil, why, class
+function M.next_world(store, effect, r)
+    if effect ~= 'journaled' then return nil, ('its effect is %s, which an overlay of the staged text does not capture'):format(tostring(effect)), 'frontier' end
+    local edits, n = {}, 0
+    for rel, text in pairs(r.staged.after or {}) do
+        if type(text) ~= 'string' then return nil, ('it removes %s, and an overlay world has no removals yet'):format(rel), 'unbuilt' end
+        if text ~= r.staged.before[rel] then edits[rel] = text; n = n + 1 end
+    end
+    if n == 0 then return nil, 'its staged edit changes no file', 'empty' end
+    return require('cartograph.world').edit(store.data, edits)
+end
+
 local function eval_step(store, t, opts, where)
     local spec = (opts.verbs or require('cartograph.compose').VERBS)[t.verb] or {}
     local effect = EFFECTS[spec.effect] and spec.effect or 'irreversible'
@@ -237,7 +253,20 @@ local function eval_step(store, t, opts, where)
     if r.entry then
         out.entries[1] = { entry = r.entry, effect = effect, rerun = spec.rerun, where = where, verb = t.verb }
     end
-    if not opts.apply then row.previewed = true; opts.previewing_blocked = where end
+    if not opts.apply then
+        row.previewed = true
+        opts.previewed = true
+        -- the rest of the run plans against the world this step would produce; without one, it is underivable
+        local over, wwhy = M.next_world(store, effect, r)
+        if over then
+            store.ingest(over)
+            opts.worlds = (opts.worlds or 0) + 1
+            row.world = opts.worlds
+        else
+            opts.previewing_blocked = where
+            row.why = ('the preview stops here: %s'):format(tostring(wwhy))
+        end
+    end
     -- the residue: every hazard the step leaves, with accepted decisions demoted to informational (an answered
     -- question is a consequence of a choice already made)
     local accepted = {}
@@ -354,9 +383,15 @@ end
 --- run a sub-term as an ATTEMPT (an alternative / an iteration): on failure its writes are undone when they can be;
 --- when they cannot, the failure is UNRECOVERABLE and the enclosing tactical must not move on over it
 local function attempt(store, t, opts, where)
+    -- a DRY attempt's undo: the world it previewed into is dropped, and the lens returns to the world before it
+    local world = not opts.apply and { rec = store.capture(), blocked = opts.previewing_blocked, n = opts.worlds }
     opts.depth = opts.depth + 1
     local o = eval(store, t, opts, where)
     opts.depth = opts.depth - 1
+    if world and not o.ok then
+        if opts.worlds ~= world.n then store.restore(world.rec) end
+        opts.previewing_blocked, opts.worlds = world.blocked, world.n
+    end
     if not o.ok and #o.entries > 0 then
         local undone, why = undo(store, o.entries)
         opts.undone = (opts.undone or 0) + undone
@@ -434,7 +469,8 @@ function eval(store, t, opts, where)
             merge(out, o)
             if o.empty then return out end
             out.empty = false
-            if not opts.apply then return out end -- a dry repeat cannot see its own effect
+            -- a dry repeat sees its own effect through the world its iteration previewed; without one it cannot
+            if not opts.apply and opts.previewing_blocked then return out end
         end
         return adopt(out, { class = 'ill-posed', where = where,
             why = ('repeat did not converge within %d iterations — each made a change, none ran out of work'):format(limit) })
@@ -479,6 +515,21 @@ function eval(store, t, opts, where)
         why = ('no tactical `%s` (then|first|try|repeat|each|step|use)'):format(tostring(op)) })
 end
 
+--- the files an overlay world holds that differ from its base: { [rel] = text }
+function M.preview_of(data)
+    local out
+    for _, layer in ipairs((data and data.transport) or {}) do
+        if layer.kind == 'overlay' then
+            local root = data.base_root or data.root
+            for abs, text in pairs(layer.files or {}) do
+                out = out or {}
+                out[abs:sub(1, #root + 1) == root .. '/' and abs:sub(#root + 2) or abs] = text
+            end
+        end
+    end
+    return out
+end
+
 --- Run a tactic. opts: { apply = bool (default false: preview up to the first write), verbs (default compose.VERBS),
 --- oracle = fn(store, result) -> ok, why (the kernel: runs after a finished APPLY run),
 --- on_stop = 'keep' (default: forward recovery) | 'rollback' (undo a run that does not finish — journaled writes only) }
@@ -489,7 +540,15 @@ function M.run(store, term, opts)
     opts = opts or {}
     local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct,
         toolbelt_dir = opts.toolbelt_dir }
-    local o = eval(store, term, eopts, 'root')
+    -- ★ A DRY RUN CHAINS OVERLAY WORLDS (CART-1160 step 3) and the caller's graph comes back afterwards, raise or not
+    local rec = not eopts.apply and store.capture()
+    local okr, o = pcall(eval, store, term, eopts, 'root')
+    local preview
+    if rec then
+        preview = eopts.worlds and M.preview_of(store.data) or nil
+        store.restore(rec)
+    end
+    if not okr then error(o, 0) end
     local res = { residue = o.residue, trace = o.trace, rolled_back = eopts.undone or 0,
         options = o.options, fixes = o.fixes }
     if o.ok and opts.apply and opts.oracle then
@@ -500,7 +559,7 @@ function M.run(store, term, opts)
     end
     local kept = o.entries
     if o.ok then
-        res.status = (not opts.apply and eopts.previewing_blocked) and 'previewed' or 'done'
+        res.status = (not opts.apply and eopts.previewed) and 'previewed' or 'done'
     else
         res.status = o.class == 'decision' and 'stopped' or 'failed'
         res.class, res.why, res.where = o.class, o.why, o.where
@@ -520,6 +579,8 @@ function M.run(store, term, opts)
         if rec.rerun ~= 'empty' then res.resumable = false end
     end
     res.applied = #res.completed
+    -- a dry run's result: every file the chain would write, at its final text, and how many worlds it stacked
+    res.preview, res.worlds = preview, eopts.worlds or 0
     -- every correction the run applied, at the top of the result: a correction is never only a residue line
     res.corrections = {}
     for _, h in ipairs(res.residue) do if h.kind == 'corrected' then res.corrections[#res.corrections + 1] = h end end

@@ -18,13 +18,13 @@
 -- a durable identity was needed for things that outlive a splice.
 --
 -- ⚠⚠ AND THE DRY RUN CAN ONLY SEE AS FAR AS IT CAN DERIVE. Step k+1 is planned
--- against the tree step k produced, and until step k is APPLIED that tree does
--- not exist -- `apply` is what splices it into the graph. `txn.dryrun`'s
--- `opts.before` makes a step's TEXT effect previewable against supplied content,
--- but the next step needs NODES: ranges, names, call edges. So a dry run previews
--- what it can derive and reports the rest as `underivable`, naming the step it
--- waits on. Reporting them as "no change" would be an absence rendered as a
--- plausible positive.
+-- against the tree step k produced. The next step needs NODES (ranges, names,
+-- call edges), not only text, so this used to stop at step 1 and report the rest
+-- as `underivable`. ★ Now step k's staged texts become an OVERLAY WORLD
+-- (world.edit, CART-1160 step 3) — a graph derived from them, never written — and
+-- step k+1 plans in it. Only a JOURNALED step chains (tactic.next_world); after
+-- any other, the rest is still `underivable`, naming the step it waits on and why.
+-- Reporting them as "no change" would be an absence rendered as a plausible positive.
 
 local M = {}
 
@@ -186,8 +186,20 @@ end
 --- @param recipe table { version, steps = { { verb, args } } } or a bare step list
 --- @param opts table|nil { apply = false, rollback = true }
 --- @return table|nil rows, string|nil why
+local run_recipe
+
 function M.run(store, recipe, opts)
     opts = opts or {}
+    if opts.apply then return run_recipe(store, recipe, opts) end
+    -- a dry run may stack overlay worlds: the caller's graph comes back afterwards, raise or not
+    local rec = store.capture()
+    local res = { pcall(run_recipe, store, recipe, opts) }
+    store.restore(rec)
+    if not res[1] then error(res[2], 0) end
+    return unpack(res, 2, table.maxn(res))
+end
+
+function run_recipe(store, recipe, opts)
     local schema = require 'cartograph.schema'
     local hz = require 'cartograph.hazard'
 
@@ -271,17 +283,26 @@ function M.run(store, recipe, opts)
                             --   k+1 re-derives against what step k actually did.
                         end
                     else
-                        -- not applying: everything after this is underivable,
-                        -- and saying which step it waits on is the useful half
-                        for j = i + 1, #steps do
-                            rows[#rows + 1] = { i = j, verb = steps[j].verb,
-                                ok = false, underivable = true,
-                                why = ('cannot be derived until step %d is applied'
-                                    .. ' — its inputs do not exist yet'):format(i) }
+                        -- ★ not applying: the next step plans against the OVERLAY world this one would produce
+                        -- (CART-1160 step 3; tactic.next_world, the runner's own rule). M.run brings the caller's
+                        -- graph back afterwards.
+                        local over, wwhy = require('cartograph.tactic').next_world(store, spec.effect, r)
+                        if over then
+                            store.ingest(over)
+                            row.world = i
+                        else
+                            -- no world: everything after this is underivable, and saying which step it waits on
+                            -- is the useful half
+                            for j = i + 1, #steps do
+                                rows[#rows + 1] = { i = j, verb = steps[j].verb,
+                                    ok = false, underivable = true,
+                                    why = ('cannot be derived until step %d is applied'
+                                        .. ' — its inputs do not exist yet (%s)'):format(i, tostring(wwhy)) }
+                            end
+                            rows[#rows + 1] = row
+                            table.sort(rows, function (a, b) return a.i < b.i end)
+                            return rows
                         end
-                        rows[#rows + 1] = row
-                        table.sort(rows, function (a, b) return a.i < b.i end)
-                        return rows
                     end
                     rows[#rows + 1] = row
                 end

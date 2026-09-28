@@ -2480,8 +2480,8 @@ end
 -- ── the TOOLBELT: named tactics (lua/cartograph/tactics/) ────────────────────
 --
 -- ★ AN AGENT CAN NOW USE WHAT A SESSION RECORDED. A discovery re-measures the CURRENT graph and says whether its
--- finding still holds; a write tactic PREVIEWS by default (a dry run: up to the first write, the rest named as
--- underivable) and writes only with `apply = true` on a host started writable — refused by name otherwise.
+-- finding still holds; a write tactic PREVIEWS by default (a dry run that plans each step in the overlay world the
+-- last would produce, returned as a diff per file) and writes only with `apply = true` on a host started writable — refused by name otherwise.
 local function v_toolbelt_list(store)
     local entries, broken, promoted = require('cartograph.toolbelt').list(nil, (store.data or {}).root)
     local rows = {}
@@ -2529,10 +2529,20 @@ local function v_toolbelt_run(store, args)
     for _, h in ipairs(res.residue or {}) do residue[#residue + 1] = { text = h.text, kind = h.kind, class = h.class } end
     local options = {}
     for _, o in ipairs(res.options or {}) do options[#options + 1] = { text = o.text, kind = o.kind } end
+    -- ★ a dry run's CHAINED preview (CART-1160 step 3): every file the whole tactic would write, as a diff against the
+    -- world the caller has loaded — not only the first step's
+    local preview = {}
+    local root = (store.data or {}).root
+    local rels = vim.tbl_keys(res.preview or {})
+    table.sort(rels)
+    for _, rel in ipairs(rels) do
+        local before = require('cartograph.txn').read_file(root, rel) or ''
+        preview[#preview + 1] = { file = rel, diff = vim.diff(before, res.preview[rel], { ctxlen = 2 }) }
+    end
     return { subject = { tactic = e.name, kind = e.kind, applied = args.apply and true or false },
         result = { { status = res.status, class = nn(res.class), why = nn(res.why), where = nn(res.where),
             completed = res.applied, resumable = res.resumable, residue = residue, options = options,
-            work_orders = res.work_orders } } }
+            work_orders = res.work_orders, worlds = res.worlds or 0, preview = preview } } }
 end
 
 -- ── propagate: an edit on ONE clone, carried to its family (CART-1152) ─────────

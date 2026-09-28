@@ -44,7 +44,9 @@ local VERBS = {
     -- GOAL-CHECKED: a file already holding the line is `empty`, so re-running it is safe
     write = { effect = 'journaled', rerun = 'empty', plan = function (_, a)
         local line = a.line or '-- x'
-        if (read(store.data.root, a.file) or ''):find(line, 1, true) then return nil, 'already there', 'empty' end
+        -- the goal check reads THROUGH the graph's transport (txn.read_file), as a planner does: in a dry run's
+        -- overlay world it sees what the previewed steps would have written
+        if (txn.read_file(store.data.root, a.file) or ''):find(line, 1, true) then return nil, 'already there', 'empty' end
         local hz = {}
         if a.decision then hz[1] = hazard.new(a.decision, 'a choice: ' .. a.decision, nil, nil, 'decision') end
         if a.residue then hz[#hz + 1] = hazard.new('left', 'left undone: ' .. a.residue, nil, nil, a.residue) end
@@ -62,7 +64,7 @@ local VERBS = {
     end },
     -- writes until the file holds `n` marker lines, then has nothing to do (empty)
     upto = { effect = 'journaled', rerun = 'empty', plan = function (_, a)
-        local _, have = read(store.data.root, a.file):gsub('%-%- mark', '')
+        local _, have = txn.read_file(store.data.root, a.file):gsub('%-%- mark', '')
         if have >= a.n then return nil, 'already ' .. a.n, 'empty' end
         return write_plan(a.file, '-- mark')
     end },
@@ -186,14 +188,47 @@ test('tactic: a STALE step is re-planned once; an unknown class fails as `unclas
     eq('unclassified', u.class); ok(u.why:find('root', 1, true) and u.why:find('no known class', 1, true), u.why)
 end)
 
-test('tactic: a DRY run previews up to the first write and names what it cannot derive; a failing guard fails it', function ()
+test('tactic: a DRY run CHAINS overlay worlds — step 2 plans against what step 1 would write; a failing guard fails it', function ()
     if not ready() then skip 'no lua parser' end
     local root = mkroot(ORIG)
-    local r = run(T.seq(W('a.lua'), W('b.lua')), { apply = false })
-    eq('previewed', r.status); eq(0, r.applied); unchanged(root)
-    eq(true, r.trace[2] and r.trace[2].underivable, 'step 2 waits on step 1')
+    local caller = store.data
+    local term = T.seq(W('a.lua', { line = '-- one' }), W('a.lua', { line = '-- two' }), W('b.lua'))
+    local r = run(term, { apply = false })
+    eq('previewed', r.status, tostring(r.why)); eq(0, r.applied); unchanged(root)
+    eq(3, r.worlds, 'one overlay world per previewed step')
+    for i = 1, 3 do ok(r.trace[i] and r.trace[i].previewed and not r.trace[i].underivable, 'step ' .. i .. ' previewed') end
+    eq(ORIG['a.lua'] .. '-- one\n-- two\n', r.preview and r.preview['a.lua'], 'the same file edited twice: both edits, in order')
+    eq(ORIG['b.lua'] .. '-- x\n', r.preview['b.lua'])
+    eq(caller, store.data, 'and the caller\'s graph is the lens again')
+    -- ★ THE ORACLE: the preview EQUALS what the apply writes
+    local done = run(term)
+    eq('done', done.status, tostring(done.why))
+    for rel, text in pairs(r.preview) do eq(text, read(root, rel), rel .. ': the preview is the apply') end
     local g = run(W('a.lua', { line = 'local = (', guards = { 'parses' } }), { apply = false })
     eq('failed', g.status); eq('unbuilt', g.class, 'a verb breaking its own guard is a bug')
+end)
+
+test('tactic: a DRY repeat sees its own effect and converges; a failed dry alternative leaves no world behind', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = mkroot(ORIG)
+    local r = run(T.rep(T.step('upto', { file = 'a.lua', n = 3 })), { apply = false })
+    eq('previewed', r.status, tostring(r.why)); eq(3, r.worlds, 'three marks, then the fourth iteration is empty')
+    local _, marks = r.preview['a.lua']:gsub('%-%- mark', '')
+    eq(3, marks); unchanged(root)
+    -- first: alternative 1 previews a.lua and then fails; alternative 2 must plan against the world BEFORE it
+    local f = run(T.first(T.seq(W('a.lua', { line = '-- abandoned' }), R('ill-posed', 'no')), W('b.lua')), { apply = false })
+    eq('previewed', f.status, tostring(f.why)); eq(1, f.worlds)
+    eq(nil, f.preview['a.lua'], 'the failed alternative\'s edit is not in the preview'); ok(f.preview['b.lua'])
+end)
+
+test('tactic: a NON-JOURNALED previewed step does not chain — its effect is more than the staged text', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = mkroot(ORIG)
+    shipped = 0
+    local r = run(T.seq(T.step('ship', { file = 'a.lua' }), W('b.lua')), { apply = false })
+    eq('previewed', r.status); eq(0, shipped, 'a dry run ships nothing'); eq(0, r.worlds); unchanged(root)
+    ok(tostring(r.trace[1].why):find('irreversible', 1, true), tostring(r.trace[1].why))
+    eq(true, r.trace[2] and r.trace[2].underivable, 'so the next step waits on it')
 end)
 
 test('tactic: the ORACLE is the kernel — a rejection fails the run (kept, or undone under the rollback policy)', function ()

@@ -4,7 +4,8 @@
 -- generation, after which every id in a held plan may name a different symbol —
 -- measured, the node stops resolving at all. An INVOCATION survives that; a PLAN
 -- does not. Everything below follows from it, including why a step addresses
--- symbols by durable ref and why a dry run can only see one step ahead.
+-- symbols by durable ref. (A dry run once saw only one step ahead; it now
+-- plans each step in the OVERLAY world the previous one would produce.)
 
 local compose = require 'cartograph.compose'
 local schema = require 'cartograph.schema'
@@ -35,24 +36,36 @@ local function refof(name)
     end
 end
 
-test('compose: a dry run previews the FIRST step and names what it cannot derive', function ()
+test('compose: a dry run previews EVERY step — step 2 plans against the overlay world step 1 would produce', function ()
     if not ready() then skip('no lua parser') end
-    mk()
-    local rows = assert(compose.run(store, compose.recipe {
+    local root = mk()
+    local caller = store.data
+    local recipe = compose.recipe {
         { verb = 'moveset', args = { seed_refs = { refof('M.f') }, dest = 'sub/f.lua' } },
         { verb = 'moveset', args = { seed_refs = { refof('M.g') }, dest = 'sub/g.lua' } },
-    }))
+    }
+    local rows = assert(compose.run(store, recipe))
     eq(2, #rows)
     eq(true, rows[1].ok, 'step 1 planned and previewed: ' .. tostring(rows[1].why))
     ok(rows[1].after['sub/f.lua'], 'and its effect is real text')
-
-    -- ⚠ STEP 2 IS `underivable`, NOT "no change". Step k+1 is planned against the
-    -- tree step k produced, and without applying step k that tree does not exist
-    -- as a GRAPH — `opts.before` makes text previewable, not nodes. Reporting it
-    -- as a no-op would be an absence rendered as a plausible positive.
-    eq(true, rows[2].underivable)
-    ok(tostring(rows[2].why):find('until step 1 is applied', 1, true), tostring(rows[2].why))
+    -- ★ STEP 2 USED TO BE `underivable`: without applying step 1 its tree did not exist as a GRAPH. It does now — an
+    -- overlay world (CART-1160 step 3) — so step 2 plans against the m.lua step 1 would leave
+    eq(true, rows[2].ok, 'step 2 planned in the overlay world: ' .. tostring(rows[2].why))
+    eq(nil, rows[2].underivable)
+    eq(rows[1].after['m.lua'], rows[2].before['m.lua'], 'step 2 read the m.lua step 1 would write, not the disk\'s')
     eq(nil, rows[1].applied, 'and a dry run wrote nothing')
+    eq(SRC, table.concat(vim.fn.readfile(root .. '/m.lua'), '\n'))
+    eq(0, vim.fn.isdirectory(root .. '/sub'))
+    eq(caller, store.data, 'the caller\'s graph is the lens again')
+    -- ★ THE ORACLE: the dry run's final texts EQUAL what the apply writes
+    local final = {}
+    for _, r in ipairs(rows) do for rel, text in pairs(r.after) do final[rel] = text end end
+    local done = assert(compose.run(store, recipe, { apply = true }))
+    eq(true, done[2].applied, tostring(done[2].why))
+    for rel, text in pairs(final) do
+        local fd = assert(io.open(root .. '/' .. rel)); local got = fd:read('a'); fd:close()
+        eq(text, got, rel .. ': the preview is the apply')
+    end
 end)
 
 test('compose: applying re-derives each step against the tree the last one made', function ()
