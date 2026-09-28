@@ -36,27 +36,37 @@ function M.project_dir(root) return root and (root .. '/.cartograph/tactics') or
 
 local function slurp(path) local fd = io.open(path); if not fd then return nil end; local x = fd:read('a'); fd:close(); return x end
 
---- every entry file, by name -> path. No central list: the directories ARE the list. `d` confines it to one directory;
---- otherwise the built-in directory and, given a project `root`, its `.cartograph/tactics/`.
---- ⚠ A NAME IN BOTH: byte-identical is a PROMOTED copy (the built-in wins, noted); different is REFUSED by name — a
---- project tactic never silently shadows a built-in one.
---- -> files, conflicts { name -> why }, promoted { name -> project path }
-function M.files(d, root)
-    local out, conflicts, promoted = {}, {}, {}
-    local function scan(dirpath)
-        local found = {}
-        for _, path in ipairs(vim.fn.globpath(dirpath, '*.lua', false, true)) do found[vim.fn.fnamemodify(path, ':t:r')] = path end
-        return found
-    end
-    if d then return scan(d), conflicts, promoted end
-    out = scan(dir())
+--- ★ WHERE TACTICS COME FROM, AS A NAMESPACE (CART-1160 step 4): the built-in directory mounted at `tactics`, and a
+--- project's `.cartograph/tactics/` UNIONED after it — two mounts and a precedence, not two hard-wired scans. `d`
+--- confines it to one directory (a single mount). -> namespace value; each target is { dir, scope }
+function M.namespace(d, root)
+    local namespace = require 'cartograph.namespace'
+    local ns = namespace.empty()
+    if d then return (namespace.mount(ns, 'tactics', { dir = d, scope = 'given' })) end
+    ns = namespace.mount(ns, 'tactics', { dir = dir(), scope = 'built-in' })
     local pd = M.project_dir(root)
     if pd and vim.fn.isdirectory(pd) == 1 then
-        for name, path in pairs(scan(pd)) do
-            if not out[name] then out[name] = path
+        ns = namespace.mount(ns, 'tactics', { dir = pd, scope = 'project' }, { union = 'after' })
+    end
+    return ns
+end
+
+--- every entry file, by name -> path. No central list: the mounted directories ARE the list, read in the union's
+--- precedence order (the first layer holding a name provides it).
+--- ⚠ A NAME IN TWO LAYERS: byte-identical is a PROMOTED copy (the earlier layer wins, noted); different is REFUSED by
+--- name — a project tactic never silently shadows a built-in one.
+--- -> files, conflicts { name -> why }, promoted { name -> later layer's path }
+function M.files(d, root)
+    local out, conflicts, promoted, owner = {}, {}, {}, {}
+    local hit = require('cartograph.namespace').resolve(M.namespace(d, root), 'tactics')
+    for _, layer in ipairs(hit and hit.layers or {}) do
+        for _, path in ipairs(vim.fn.globpath(layer.target.dir, '*.lua', false, true)) do
+            local name = vim.fn.fnamemodify(path, ':t:r')
+            if not out[name] then out[name], owner[name] = path, layer.target.scope
             elseif slurp(path) == slurp(out[name]) then promoted[name] = path
             else
-                conflicts[name] = ('the project tactic %s has the name of a BUILT-IN one and differs from it — rename it, or promote it'):format(path)
+                conflicts[name] = ('the %s tactic %s has the name of a %s one and differs from it — rename it, or promote it')
+                    :format(layer.target.scope, path, owner[name]:upper())
             end
         end
     end

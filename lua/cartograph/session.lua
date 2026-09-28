@@ -12,9 +12,15 @@
 -- Multi-band-native consumers (the LSP handlers, the future federated accessor)
 -- take an explicit band; the lens is for the legacy single-band readers.
 
-local store = require 'cartograph.store'
+--
+-- ★ ADDRESSING IS A NAMESPACE VALUE (CART-1160 step 4): each band is MOUNTED at its root (`M.ns`, target = the band
+-- name), and "which band owns this file" is namespace.resolve — the longest root containing it. The band RECORDS (their
+-- stashed lens state) stay in M.bands; the namespace is what a caller can hold, compare, and unshare.
 
-local M = { bands = {}, active = nil }
+local store = require 'cartograph.store'
+local namespace = require 'cartograph.namespace'
+
+local M = { bands = {}, active = nil, ns = namespace.empty() }
 
 -- CROSS-BAND TRAIL (S2): the session's own back-stack of band-boundary crossings
 -- ({ band, id, loc } = where we were when we left a band). Per-band jumplists
@@ -50,6 +56,9 @@ function M.begin(root, kind)
     if M.active and M.bands[M.active] then M.bands[M.active].state = store.capture() end
     local name = name_for(root)
     M.bands[name] = { name = name, kind = kind or 'project', root = root }
+    -- a re-opened root REPLACES its mount (name_for reuses the name of a registered root)
+    -- (a band with no root owns no file: it is never mounted, so it never matches every address)
+    if root then M.ns = namespace.mount(namespace.umount(M.ns, root), root, name) end
     M.active = name
     return name
 end
@@ -81,6 +90,7 @@ function M.close(name)
     local b = M.bands[name]
     if not b then return M.active end
     M.bands[name] = nil
+    if b.root then M.ns = namespace.umount(M.ns, b.root, name) end
     if M.active ~= name then return M.active end
     -- was active: pick any survivor, else empty the lens
     local nextname = next(M.bands)
@@ -94,14 +104,10 @@ end
 --- bands are non-routable (S3); until then, every band is routable.
 function M.owning(file)
     if not file then return M.active end
-    local best
-    for name, b in pairs(M.bands) do
-        local r = b.root
-        if r and file:sub(1, #r + 1) == r .. '/' then
-            if not best or #b.root > #M.bands[best].root then best = name end -- innermost root wins
-        end
-    end
-    return best or M.active
+    -- the innermost root wins: namespace.resolve's longest match
+    local hit = namespace.resolve(M.ns, file)
+    local name = hit and hit.layers[1] and hit.layers[1].target
+    return (name and M.bands[name]) and name or M.active
 end
 
 --- The registry as rows for :CartographBands: { {name, kind, root, active} }.
@@ -115,6 +121,6 @@ function M.list()
 end
 
 --- Reset the whole session (tests, a clean :Cartograph on nothing).
-function M.reset() M.bands, M.active, M.crossings = {}, nil, {} end
+function M.reset() M.bands, M.active, M.crossings, M.ns = {}, nil, {}, namespace.empty() end
 
 return M
