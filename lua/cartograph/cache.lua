@@ -727,11 +727,11 @@ M.VERSION = 211 -- v211: A CALL IN AN ERLANG MACRO BODY IS ATTRIBUTED AT EACH US
                -- them. Distance, never list order — `cands` order is node-emission order
                -- and nothing promises it.
                -- POPULATIONS: 215 same-file var links in libs, 14113 in wow, 0 in
-               -- django-oscar (no same-file homonyms, and no `spec.scopes` either).
+               -- django-oscar (no same-file homonyms, and no `spec.lexical_scopes` either).
                -- Roster: libs +55/-46 · wow +2916/-1446 · go +40/-40 (pure repointing) ·
                -- python and php identical. refs/nodes unchanged everywhere.
                -- ★ AND THE FIX I FIRST REACHED FOR WAS A NO-GO, measured (CART-0535): java
-               -- declares spec.scopes, so gating the var branch on MF_BOUND looked like a
+               -- declares spec.lexical_scopes, so gating the var branch on MF_BOUND looked like a
                -- one-liner — but 6252 of libs' 6626 same-file var links are BOUND (94%),
                -- and 408187 of wow's 419948 (97%), because THE BINDER IS USUALLY THE VAR'S
                -- OWN DECLARATION. "Bound" means a binder is in scope, not that the name is

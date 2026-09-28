@@ -382,8 +382,8 @@ local jvt_sm, jvt_root = nil, nil
 local function tree_model(tsroot, src, spec)
     if jvt_root ~= tsroot then
         jvt_root = tsroot
-        jvt_sm = spec.scopes
-            and require('cartograph.scope').model(src, spec.scopes) or nil
+        jvt_sm = spec.lexical_scopes
+            and require('cartograph.scope').model(src, spec.lexical_scopes) or nil
     end
     return jvt_sm
 end
@@ -4898,7 +4898,7 @@ end
 -- is grammar and lives in spec.escape_nonvalue. Its own walk was +14% of the
 -- whole extract, and it asked a tree this one is already holding.
 local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
-    local scopes = spec.scopes
+    local lexscopes = spec.lexical_scopes
     local wrapctx -- statement wrapper node id -> the body context its children belong to (see stmtctx)
     local idt = spec.mention_types or MENTION_ID
     local wgate, is_write, guards = spec.write_gate, spec.is_write, spec.guards
@@ -4935,7 +4935,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local idxpos = spec.index_positions -- the BRACKET forms (CART-0533)
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
-    local scoped = scopes and MF_SCOPED or 0
+    local scoped = lexscopes and MF_SCOPED or 0
     local active = {} -- name -> stack of visibility rows (false = scope-wide)
     local ctxs, nctx = {}, 0 -- open df contexts (dfrec only), innermost last
     local fnstack, fdepth = {}, 0 -- enclosing fn NODES, for pw attribution
@@ -4953,7 +4953,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local function walk(n, defpos, dfon)
         local nt = n:type()
         local pushed
-        local entry = scopes and scopes[nt]
+        local entry = lexscopes and lexscopes[nt]
         if entry then
             local t = {}
             entry.harvest(n, src, t)

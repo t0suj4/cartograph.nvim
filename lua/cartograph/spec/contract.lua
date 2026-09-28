@@ -52,7 +52,13 @@ M.SLOTS = {
     src_repair = 'CORE',
 
     -- SCOPE&KEY: how names scope, qualify, key; the stdlib tail gate (until L2)
-    scope = 'SCOPE&KEY', scopes = 'SCOPE&KEY',
+    -- ★ `lexical_scopes` WAS `scopes` (CART-1160 step 7): one letter from `scope` and an unrelated meaning — `scope`
+    -- is a file's resolution boundary, `lexical_scopes` the node types that open a LEXICAL scope and how to harvest
+    -- what they bind. An old spec still saying `scopes` is an unknown field of this closed contract, flagged by name.
+    -- ⚠ NOT `binders`, which the design note proposed: that name was ALREADY a slot (ANALYSIS, below — the binder
+    -- node list expr.bound_names reads), and the rename collided with it silently: lua's table constructor kept the
+    -- later key and 19 tests failed. A rename meant to END a collision has to check its target is free.
+    scope = 'SCOPE&KEY', lexical_scopes = 'SCOPE&KEY',
     qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY',
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing

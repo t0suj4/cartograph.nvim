@@ -655,7 +655,7 @@ local function java_scan_fields(tsroot, src)
     end
     return rows
 end
-local JAVA_SCOPES = {
+local JAVA_LEXICAL_SCOPES = {
     enhanced_for_statement  = { kind = 'param', harvest = jvt_binders },
     catch_clause            = { kind = 'param', harvest = jvt_binders },
     try_with_resources_statement = { kind = 'param', harvest = jvt_binders },
@@ -845,7 +845,7 @@ return {
     -- x.m()/this.f.m() on x's/the field's DECLARED type. Rewriting to
     -- Class::m turns the largest refusal bucket (getters/setters shared
     -- across many model classes) into exact or inheritance-walked links.
-    scopes = JAVA_SCOPES, -- lexical-first id pass (scope-model step 3)
+    lexical_scopes = JAVA_LEXICAL_SCOPES, -- lexical-first id pass (scope-model step 3); was `scopes` (CART-1160 step 7)
     -- declared return type = the per-method SUMMARY (graph-VM MVP). Second
     -- return = retclass: the 1-based value-parameter position of a
     -- `Class<T>` argument that BINDS the return type variable T. A generic

@@ -3,17 +3,18 @@
 --
 -- ★★ WHY IT IS NOT CALLED `scope`, AND THE NAME COST ME A SHIPPED MODULE.
 -- `cartograph.scope` is ALREADY TAKEN by the per-file LEXICAL scope model
--- (`spec.scopes`: which node types open a scope, binders, shadow chains) -- and I
+-- (`spec.lexical_scopes`, then named `spec.scopes`: which node types open a scope, binders, shadow chains) -- and I
 -- wrote this file over it. The collision is the exact one recorded that morning in
 -- [[cartograph-scope-model]]: `spec.scopes` (plural, lexical binders) and
--- `spec.scope` (singular, a file's resolution boundary) differ by one letter and
--- mean unrelated things, "expect to be asked about one and reach for the other".
+-- `spec.scope` (singular, a file's resolution boundary) differed by one letter and
+-- meant unrelated things, "expect to be asked about one and reach for the other".
+-- (Renamed 2026-09-28, CART-1160 step 7: the plural is now `spec.lexical_scopes`.)
 -- Reaching for the other is what happened. So the third thing gets a third name: a
 -- CUT is neither of those two -- it is what an ENTRY POINT supplies to an
 -- ANALYSIS, and the verb is what an entry point does to the graph.
 --
 -- THE CLAIM THIS FILE TESTS. cartograph has ~10 scope-shaped mechanisms
--- (spec.scope, spec.scopes, the working set, bands, the corpus root, narrow,
+-- (spec.scope, spec.lexical_scopes, the working set, bands, the corpus root, narrow,
 -- apertures, repo shapes, index_only, the move-set's `travels`) that differ only
 -- in ORIGIN and each hand-roll their own boundary behaviour. The design says scope
 -- is not a new axis but a PIPELINE STAGE THAT ALREADY EXISTS —

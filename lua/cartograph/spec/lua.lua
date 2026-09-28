@@ -1,5 +1,5 @@
 -- The LUA language spec + its base helpers, extracted via the move-set flow
--- ([[cartograph-spec-layering]]). Contains the scope harvesters + LUA_SCOPES
+-- ([[cartograph-spec-layering]]). Contains the scope harvesters + LUA_LEXICAL_SCOPES
 -- (scope-model step 3), lua_is_write, LUA_GUARDS, and the three per-root
 -- ECOSYSTEM detectors (factorio_mods / nvim_lua_root / toc_scope) that were
 -- deliberately embedded inline beside the spec — they are lua-import-resolution
@@ -94,7 +94,7 @@ local function lua_forvars(node, src, out)
         end
     end
 end
-local LUA_SCOPES = {
+local LUA_LEXICAL_SCOPES = {
     chunk                = { kind = 'module', harvest = lua_locals },
     block                = { kind = 'local', harvest = lua_locals },
     function_declaration = { kind = 'param', harvest = lua_params },
@@ -755,7 +755,7 @@ return {
     -- torned to protect just 2 genuinely-in-error. Same rationale as bash.
     torn_by_node = true,
     guards = LUA_GUARDS,
-    scopes = LUA_SCOPES, -- lexical-first id pass (scope-model step 3)
+    lexical_scopes = LUA_LEXICAL_SCOPES, -- lexical-first id pass (scope-model step 3); was `scopes` (CART-1160 step 7)
     functions = [[
         (function_declaration name: (_) @name) @def
         (assignment_statement
