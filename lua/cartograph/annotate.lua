@@ -191,6 +191,18 @@ function M.plan(store, opts)
         return nil, ('no comment style in this tree turns that prose into an inert '
             .. 'comment for %s — every candidate prefix changed the code'):format(n.file), 'unbuilt'
     end
+    -- ★ THE GOAL CHECK (CART-1152): prose ALREADY in the block adhered to the definition is a goal met, not a second
+    -- write. MEASURED: re-running the same annotate prepended the comment twice. `empty` makes a re-run safe, which is
+    -- what lets a stopped tactic resume by running again.
+    for at = s + 1, first - #out + 1 do
+        local same = true
+        for k = 1, #out do
+            if lines[at + k - 1] ~= out[k] then same = false; break end
+        end
+        if same then
+            return nil, ('%s already carries this prose (lines %d..%d)'):format(n.name, at, at + #out - 1), 'empty'
+        end
+    end
 
     local plan = {
         verb = 'annotate',

@@ -34,11 +34,29 @@ M.VERBS = {
     moveset = {
         --- @return table|nil plan, string|nil why
         plan = function (store, args)
+            -- ★ THE GOAL CHECK (CART-1152): every seed already living at `dest` — the same name, the same body witness,
+            -- resolving there WITHOUT a caveat — is the move DONE, so a re-run is `empty`, not a refusal. MEASURED:
+            -- re-running a move refused as stale (its seed ref now pointed at a caveated neighbour).
+            local seeds, home = args.seed_refs or {}, 0
+            for _, ref in ipairs(seeds) do
+                local id, note = store.resolve_ref({ file = args.dest, name = ref.name, kind = ref.kind, witness = ref.witness })
+                if id and not note then home = home + 1 end
+            end
+            if #seeds > 0 and home == #seeds then
+                return nil, ('all %d seed(s) already live in %s'):format(#seeds, tostring(args.dest)), 'empty'
+            end
             local ids = {}
-            for i, ref in ipairs(args.seed_refs or {}) do
+            for i, ref in ipairs(seeds) do
                 local id, why = store.resolve_ref(ref)
                 if not id then
                     return nil, ('seed_refs[%d] (%s in %s) does not resolve: %s')
+                        :format(i, tostring(ref.name), tostring(ref.file), tostring(why)), 'stale'
+                end
+                -- ⚠ A CAVEAT REFUSES ON THE WRITE SIDE (the agent's resolve_write_ref rule). MEASURED: after a move, the
+                -- SAME ref to M.dbl resolved to M.keep ("renamed? now 'M.keep'"), and a replayed recipe MOVED M.keep —
+                -- txn.verify cannot catch it, the plan is M.keep's own
+                if why then
+                    return nil, ('seed_refs[%d] (%s in %s) resolved only WITH A CAVEAT — %s — and a write is not planned on a merely probable handle')
                         :format(i, tostring(ref.name), tostring(ref.file), tostring(why)), 'stale'
                 end
                 ids[#ids + 1] = id
@@ -52,7 +70,58 @@ M.VERBS = {
         -- IS the verb, and `arm` runs at plan time — but APPLY is no longer something
         -- a recipe step has to know how to do. A verb added here declares no apply.
         apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+        -- ★ WHAT A TACTIC MAY ASSUME (tactic.lua): the write is journaled (undoable), and re-running the SAME
+        -- invocation after it applied is `empty` (the goal check above) — measured by tactic_spec's idempotence fence
+        effect = 'journaled', rerun = 'empty',
     },
+}
+
+--- a step's `ref` (durable) -> a node id, or nil, why, class
+local function one_ref(store, args)
+    if args.seed ~= nil or args.node ~= nil then
+        return nil, 'a step addresses its symbol by `ref` (durable), never by a session id: an id dies at the first apply', 'ill-posed'
+    end
+    if type(args.ref) ~= 'table' then return nil, 'the step names no `ref`', 'ill-posed' end
+    local id, why = store.resolve_ref(args.ref)
+    if not id then
+        return nil, ('ref %s in %s does not resolve: %s'):format(tostring(args.ref.name), tostring(args.ref.file),
+            tostring(why)), 'stale'
+    end
+    -- ⚠ and a caveat refuses (the moveset adapter's note above; the agent's resolve_write_ref rule)
+    if why then
+        return nil, ('ref %s in %s resolved only WITH A CAVEAT — %s — and a write is not planned on a merely probable handle')
+            :format(tostring(args.ref.name), tostring(args.ref.file), tostring(why)), 'stale'
+    end
+    return id
+end
+
+-- the single-subject verbs, addressed by ONE durable `ref` (tactics compose these; a recipe may too)
+M.VERBS.replace = {
+    plan = function (store, args)
+        local id, why, class = one_ref(store, args)
+        if not id then return nil, why, class or 'ill-posed' end
+        return require('cartograph.replace').plan(store, { node = id, text = args.text })
+    end,
+    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    effect = 'journaled', rerun = 'empty',
+}
+M.VERBS.annotate = {
+    plan = function (store, args)
+        local id, why, class = one_ref(store, args)
+        if not id then return nil, why, class or 'ill-posed' end
+        return require('cartograph.annotate').plan(store, { node = id, text = args.text })
+    end,
+    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    effect = 'journaled', rerun = 'empty',
+}
+M.VERBS.clonemerge = {
+    plan = function (store, args)
+        local id, why, class = one_ref(store, args)
+        if not id then return nil, why, class or 'ill-posed' end
+        return require('cartograph.clonemerge').plan(store, id)
+    end,
+    apply = function (store, plan) return require('cartograph.txn').apply(store, plan) end,
+    effect = 'journaled', rerun = 'empty',
 }
 
 local function step_error(i, verb, why)
@@ -69,7 +138,6 @@ function M.run(store, recipe, opts)
     opts = opts or {}
     local schema = require 'cartograph.schema'
     local hz = require 'cartograph.hazard'
-    local txn = require 'cartograph.txn'
 
     local steps = recipe
     if type(recipe) == 'table' and recipe.steps ~= nil then
@@ -102,18 +170,21 @@ function M.run(store, recipe, opts)
                 .. ' by `seed` (session ids): an id dies at the first apply')
             derailed = true
         else
-            local plan, why = spec.plan(store, st.args or {})
-            if not plan then
-                rows[#rows + 1] = step_error(i, verb, why)
+            -- ★ ONE STEP EXECUTOR (tactic.step): plan -> stage -> arm -> apply, shared with the tactic runner so the two
+            -- cannot drift. A recipe keeps its own reading: an EMPTY step derails it, as a refusal always did.
+            local r = require('cartograph.tactic').step(store, st, { verbs = M.VERBS, apply = opts.apply })
+            local plan, staged = r.plan, r.staged
+            -- an arm or apply failure keeps the full row (plan, before/after): the preview was taken, the write refused
+            if not r.ok and r.phase ~= 'apply' and r.phase ~= 'arm' or r.empty then
+                local why = r.why
+                if r.phase == 'stage' then why = ('the plan could not be previewed: %s'):format(tostring(why)) end
+                local row = step_error(i, verb, why)
+                row.class = r.class
+                rows[#rows + 1] = row
                 derailed = true
             else
-                local staged, dwhy = txn.stage(store, plan)
-                local before, after = staged and staged.before, staged and staged.after
-                if not staged then
-                    rows[#rows + 1] = step_error(i, verb,
-                        ('the plan could not be previewed: %s'):format(tostring(dwhy)))
-                    derailed = true
-                else
+                local before, after = staged.before, staged.after
+                do
                     -- ★ THE RECEIPT RIDES WITH EVERY STEP, INCLUDING THE SMOOTH
                     -- ONES (CART-0912). A step with no hazards used to report
                     -- nothing at all, which is the same rendering as a step
@@ -127,15 +198,13 @@ function M.run(store, recipe, opts)
                         receipt = plan.receipt,
                         unwarranted = plan.receipt and rcm.unwarranted(plan.receipt) or nil }
                     if opts.apply then
-                        local aok, awhy = spec.arm(store, plan)
-                        local entry
-                        if aok then entry, awhy = spec.apply(store, plan) end
+                        local entry = r.entry
                         if not entry then
-                            row.ok, row.why = false, tostring(awhy)
+                            row.ok, row.why, row.class = false, tostring(r.why), r.class
                             derailed = true
                         else
                             row.applied, row.journal = true, entry.id or entry
-                            applied[#applied + 1] = row.journal
+                            applied[#applied + 1] = entry
                             -- ★★★ AND NOTHING RE-INGESTS HERE, WHICH I GOT WRONG
                             -- FIRST. I built a `reingest` hook and wrote that the
                             -- next step's refs would otherwise resolve against a
@@ -172,14 +241,10 @@ function M.run(store, recipe, opts)
     -- is worse than one that refuses: the tree is then in a state no step
     -- described. `rollback` restores BYTES from the journal, which is why it works
     -- across a generation bump when nothing else does.
+    -- (tactic.rollback: identity-checked per entry, and the graph is RE-READ after each undo — this loop used to
+    -- restore bytes and leave the graph describing the undone tree)
     if derailed and #applied > 0 and opts.rollback ~= false then
-        local journal = require 'cartograph.journal'
-        local root = store.data.root
-        local undone, failed = 0, nil
-        for _ = 1, #applied do
-            local ok, why = journal.rollback(root)
-            if ok then undone = undone + 1 else failed = why; break end
-        end
+        local undone, failed = require('cartograph.tactic').rollback(store, applied)
         rows.rolled_back = undone
         rows.rollback_failed = failed
     end
