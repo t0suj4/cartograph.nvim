@@ -184,6 +184,25 @@ M.VERBS['learn-tactic'] = {
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
+-- ★ A LOCAL DEPLOYMENT WORLD (CART-0154, cartograph.deploy): `release` writes an immutable content-addressed value into
+-- the target (cross-world, journaled THERE); `switch` moves CURRENT — COMPENSABLE, its inverse the switch back, gated by
+-- the `approve-deploy` decision; `undeploy` is the inverse of a first deploy
+M.VERBS.release = {
+    plan = function (store, args) return require('cartograph.deploy').plan_release(store, args) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
+    effect = 'journaled', rerun = 'empty',
+}
+M.VERBS.switch = {
+    plan = function (store, args) return require('cartograph.deploy').plan_switch(store, args) end,
+    apply = function (store, plan) return require('cartograph.deploy').apply_switch(store, plan) end,
+    compensate = function (args, entry) return require('cartograph.deploy').compensate_switch(args, entry) end,
+    effect = 'compensable', rerun = 'empty',
+}
+M.VERBS.undeploy = {
+    plan = function (store, args) return require('cartograph.deploy').plan_undeploy(store, args) end,
+    apply = function (store, plan) return require('cartograph.deploy').apply_undeploy(store, plan) end,
+    effect = 'compensable', rerun = 'empty',
+}
 M.VERBS['promote-tactic'] = {
     plan = function (store, args) return require('cartograph.toolbelt').plan_promote(store, args) end,
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,

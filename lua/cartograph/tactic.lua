@@ -317,7 +317,9 @@ local function eval_step(store, t, opts, where)
     end
     out.empty = false
     if r.entry then
-        out.entries[1] = { entry = r.entry, effect = effect, rerun = spec.rerun, where = where, verb = t.verb }
+        out.entries[1] = { entry = r.entry, effect = effect, rerun = spec.rerun, where = where, verb = t.verb,
+            -- a COMPENSABLE step's inverse, as an invocation the verb derives from its args and the entry (CART-1186)
+            compensation = effect == 'compensable' and spec.compensate and spec.compensate(t.args or {}, r.entry) or nil }
     end
     if not opts.apply then
         row.previewed = true
@@ -441,16 +443,41 @@ local function classed(o)
 end
 
 --- undo journaled records (newest first) — or say why not: only a JOURNALED write can be undone here
-local function undo(store, records)
+local function undo(store, records, verbs)
+    -- ★ COMPENSATION (CART-1186): a COMPENSABLE step recorded its inverse as an INVOCATION { verb, args } (derived by
+    -- its verb, `spec.compensate(args, entry)`); rollback runs it through the SAME step executor as any step, so a
+    -- compensation is planned, staged, guarded, journaled and traced like everything else — never a closure hidden in
+    -- an entry. All-or-nothing PRECHECK first: an irreversible record, or a compensable one with no compensation,
+    -- refuses the whole rollback by name before anything is undone.
     for _, rec in ipairs(records) do
-        if rec.effect ~= 'journaled' then
+        if rec.effect == 'irreversible' or (rec.effect == 'compensable' and not rec.compensation) then
+            return 0, ('%s at %s made a %s write%s, which nothing can undo'):format(tostring(rec.verb), tostring(rec.where),
+                rec.effect, rec.effect == 'compensable' and ' and declared no compensation' or ''), 'refused'
+        elseif rec.effect ~= 'journaled' and rec.effect ~= 'compensable' then
             return 0, ('%s at %s made a %s write, which the journal cannot undo'):format(tostring(rec.verb),
-                tostring(rec.where), rec.effect)
+                tostring(rec.where), tostring(rec.effect)), 'refused'
         end
     end
-    local entries = {}
-    for i, rec in ipairs(records) do entries[i] = rec.entry end
-    return M.rollback(store, entries)
+    -- newest first, each kind by its own inverse: a journal entry by the journal (identity-checked), a compensation by
+    -- running it
+    local undone = 0
+    for i = #records, 1, -1 do
+        local rec = records[i]
+        if rec.effect == 'journaled' then
+            local n, why = M.rollback(store, { rec.entry })
+            undone = undone + (n or 0)
+            if why then return undone, why, 'failed' end
+        else
+            local r = M.step(store, rec.compensation, { verbs = verbs, apply = true })
+            if not r.ok then
+                -- an ATTEMPTED undo that did not succeed — `failed`, never `refused` (nothing was attempted there)
+                return undone, ('the compensation of %s at %s (%s) failed: %s'):format(tostring(rec.verb), tostring(rec.where),
+                    tostring(rec.compensation.verb), tostring(r.why)), 'failed'
+            end
+            undone = undone + 1
+        end
+    end
+    return undone
 end
 
 --- run a sub-term as an ATTEMPT (an alternative / an iteration): on failure its writes are undone when they can be;
@@ -466,7 +493,7 @@ local function attempt(store, t, opts, where)
         opts.previewing_blocked, opts.worlds = world.blocked, world.n
     end
     if not o.ok and #o.entries > 0 then
-        local undone, why = undo(store, o.entries)
+        local undone, why = undo(store, o.entries, opts.verbs)
         opts.undone = (opts.undone or 0) + undone
         if why then
             o.unrecoverable = true
@@ -691,9 +718,10 @@ function M.run(store, term, opts)
         res.status = o.class == 'decision' and 'stopped' or 'failed'
         res.class, res.why, res.where = o.class, o.why, o.where
         if opts.on_stop == 'rollback' and #kept > 0 then
-            local undone, why = undo(store, kept)
+            local undone, why, kind = undo(store, kept, eopts.verbs)
             res.rolled_back = res.rolled_back + undone
-            if why and undone == 0 then res.rollback_refused = why
+            -- REFUSED = the precheck declined before undoing anything; FAILED = an undo was attempted and did not succeed
+            if why and kind == 'refused' then res.rollback_refused = why
             elseif why then res.rollback_failed = why end
             if undone == #kept then kept = {} end
         end

@@ -371,6 +371,17 @@ local IDEM = {
     ['promote-tactic'] = { { ['.cartograph/tactics/count-functions.lua'] = 'return { name = \'count-functions\', kind = \'discovery\', summary = \'s\', params = {}, measure = function (store) local n = 0; for _, x in ipairs(store.data.nodes or {}) do if x.kind == \'function\' then n = n + 1 end end; return n end, claim = function (n) return n > 0, n .. \' function(s)\' end, examples = { { name = \'one\', files = { [\'a.lua\'] = \'local function f() end\\nreturn f\\n\' }, expect = { holds = true } } } }\n' },
         function () return { name = 'count-functions', from = store.data.root, into = store.data.root .. '/builtin' } end },
     edit = { { ['e.lua'] = 'local E = {}\nE.v = 1\nreturn E\n' }, function () return { file = 'e.lua', before = 'E.v = 1\n', after = 'E.v = 1\nE.w = 2\n' } end },
+    release = { { ['app/x.txt'] = 'x\n' }, function () return { from = 'app', target = vim.fn.tempname() .. '-dw' } end,
+        { 'target-write' }, function (a) vim.fn.mkdir(a.target, 'p'); return a.target end },
+    switch = { { ['a.lua'] = 'return 1\n' }, function ()
+            local t = vim.fn.tempname() .. '-dw'; vim.fn.mkdir(t .. '/releases/r1', 'p')
+            return { target = t, release = 'r1' }
+        end, { 'target-write', 'approve-deploy' }, function (a) return a.target end },
+    undeploy = { { ['a.lua'] = 'return 1\n' }, function ()
+            local t = vim.fn.tempname() .. '-dw'; vim.fn.mkdir(t, 'p')
+            local fd = io.open(t .. '/CURRENT', 'w'); fd:write('r1\n'); fd:close()
+            return { target = t }
+        end, { 'target-write' }, function (a) return a.target end },
     ['rename-field'] = { { ['s.lua'] = 'return { scopes = 1 }\n', ['r.lua'] = 'local M = {}\nfunction M.f(spec) return spec.scopes end\nreturn M\n' },
         function () return { base = 'spec', field = 'scopes', to = 'lexical', define = { 's.lua' } } end },
     ['rewrite-by-example'] = { { ['q.lua'] = 'local Q = {}\nfunction Q.h(q)\n  if q == nil then return 3 end\n  return q\nend\nreturn Q\n' },
@@ -399,16 +410,21 @@ test('tactic: IDEMPOTENCE — every compose verb re-run with the same invocation
         local c = IDEM[verb]
         ok(c, verb .. ' has an idempotence case (a verb without one is not assumed safe)')
         eq('empty', spec.rerun, verb .. ' declares its re-run')
-        eq('journaled', spec.effect, verb .. ' declares its effect')
+        -- a DECLARED, known effect: journaled, or compensable with its inverse (CART-1186) — never undeclared (= irreversible)
+        ok(spec.effect == 'journaled' or (spec.effect == 'compensable'), verb .. ' declares its effect: ' .. tostring(spec.effect))
         local root = mkroot(c[1])
-        local st = { verb = verb, args = c[2]() }
-        local s0 = snap(root)
+        -- c[3] = the accept list (a cross-world verb's grant, a gate), c[4] = the OTHER world it writes (snapshotted too)
+        local args = c[2]()
+        local st = { verb = verb, args = args, accept = c[3] }
+        local other = c[4] and c[4](args)
+        local function snapall() return snap(root) .. (other and snap(other) or '') end
+        local s0 = snapall()
         local r1 = tactic.step(store, st, { apply = true })
-        local s1 = snap(root)
+        local s1 = snapall()
         ok(r1.entry and s1 ~= s0, verb .. ': the FIRST run writes (else the second proves nothing): ' .. tostring(r1.why))
         local r2 = tactic.step(store, st, { apply = true })
         eq(true, r2.ok and r2.empty, verb .. ': the second run is empty: ' .. tostring(r2.why))
-        eq(s1, snap(root), verb .. ': and writes nothing')
+        eq(s1, snapall(), verb .. ': and writes nothing')
     end
 end)
 
