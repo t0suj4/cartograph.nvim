@@ -23,14 +23,25 @@ local function lua_out(src)
     return table.concat(out, '\n') .. (#out > 0 and '\n' or '')
 end
 
+--- nvim's pure-Lua runtime (vim.split / inspect / fs / uri), transliterated ONCE per run into a cache directory
+local VIMRT
+local function vimrt()
+    if not VIMRT then
+        VIMRT = vim.fn.tempname(); vim.fn.mkdir(VIMRT, 'p')
+        L.vim_runtime(VIMRT, table.concat(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js'), '\n'))
+    end
+    return VIMRT
+end
+
 --- the snippet emitted and run under node -> stdout, the emitted js, refusals
-local function js_out(src)
+local function js_out(src, with_vim)
     local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
+    if with_vim then vim.system({ 'cp', '-r', vimrt() .. '/vim', dir .. '/vim' }):wait() end
     vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js', 'b'), dir .. '/$pack.js', 'b')
     vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/lstrmatch.js', 'b'), dir .. '/$lstrmatch.js', 'b')
     local js, refusals = L.emit(src, 'snippet.lua', { pack = './$pack.js' })
     local fd = assert(io.open(dir .. '/snippet.js', 'wb')); fd:write(js); fd:close()
-    local r = vim.system({ 'node', dir .. '/snippet.js' }, { text = true }):wait(30000)
+    local r = vim.system({ 'node', dir .. '/snippet.js' }, { text = true, env = { LUAJS_ROOT = dir } }):wait(60000)
     return (r.stdout or '') .. (r.stderr or ''), js, refusals, r.code
 end
 
@@ -307,6 +318,59 @@ end]]
         end
     end
     eq(#pats, select(2, want:gsub('\n', '')), 'one line per pattern')
+end)
+
+test('luajs differential: the VIM host pack — nvim\'s own runtime transliterated, the C-backed members declared — prints what the REAL vim API prints', function ()
+    if not ready() then skip 'no lua parser / node' end
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir .. '/sub', 'p')
+    for _, f in ipairs { 'b', 'a' } do local fd = assert(io.open(dir .. '/' .. f, 'w')); fd:write(f); fd:close() end
+    vim.env.LUAJS_SCAN = dir
+    local src = [==[
+print(vim.inspect(vim.split('a,b,,c', ',')), vim.inspect(vim.split('a b  c', ' ', { trimempty = true })), vim.inspect(vim.split('x.y', '.', { plain = true })))
+print(vim.trim('  hi \n'), vim.startswith('foobar', 'foo'), vim.endswith('foobar', 'bar'), vim.pesc('a.b*c'))
+local t = vim.list_extend({ 1, 2 }, { 3, 4 }, 2, 2)
+print(#t, t[3], vim.tbl_count({ a = 1, b = 2 }), vim.tbl_contains({ 'x', 'y' }, 'y'), vim.tbl_isempty({}), vim.islist({ 1, 2 }), vim.islist({ a = 1 }))
+local keys = vim.tbl_keys({ b = 1, a = 2, c = 3 }); table.sort(keys); print(table.concat(keys, ','))
+print(vim.inspect(vim.tbl_map(function (v) return v * 2 end, { 1, 2, 3 })), vim.inspect(vim.tbl_filter(function (v) return v > 1 end, { 1, 2, 3 })))
+print(vim.inspect(vim.tbl_extend('force', { a = 1, b = 2 }, { b = 3 })), vim.inspect(vim.tbl_deep_extend('force', { a = { x = 1 } }, { a = { y = 2 } })))
+local orig = { a = { 1, { 2 } } }; local cp = vim.deepcopy(orig); print(cp ~= orig, cp.a ~= orig.a, cp.a[2][1], vim.deep_equal(cp, orig))
+local parts = {}; for p in vim.gsplit('a:b:c', ':') do parts[#parts + 1] = p end; print(table.concat(parts, '|'))
+print(vim.inspect({ 1, 'two', { three = 3 }, [10] = 'ten', f = true }))
+print(vim.uri_from_fname('/tmp/a b.txt'), vim.uri_to_fname('file:///tmp/a%20b.txt'))
+print(vim.fs.joinpath('a', 'b', 'c.lua'), vim.fs.basename('/a/b/c.lua'), vim.fs.dirname('/a/b/c.lua'), vim.fs.normalize('/a//b/../c'))
+local P = '/a/b/c.tar.gz'
+print(vim.fn.fnamemodify(P, ':t'), vim.fn.fnamemodify(P, ':h'), vim.fn.fnamemodify(P, ':r'), vim.fn.fnamemodify(P, ':e'), vim.fn.fnamemodify(P, ':t:r'), vim.fn.fnamemodify('/a/b/', ':h'), vim.fn.fnamemodify('/a', ':h'), vim.fn.fnamemodify('x', ':h'), vim.fn.fnamemodify('.bashrc', ':r'), vim.fn.fnamemodify('.bashrc', ':e'), vim.fn.fnamemodify('rel', ':p') == vim.fn.getcwd() .. '/rel')
+print(vim.fn.sha256('abc'), vim.fn.isdirectory('/tmp'), vim.fn.isdirectory('/nonexistent'), vim.fn.executable('sh'), vim.fn.executable('no-such-binary-x'), vim.fn.has('nvim'), vim.fn.has('nonsense-feature'))
+local d = vim.json.decode('{"a":[1,null,{"b":true}],"c":"x\\u00e9"}')
+print(type(d.a), #d.a, d.a[2] == vim.NIL, d.a[3].b, d.c, #d.c, vim.json.encode({ 1, 2, 'a/b' }), vim.json.encode({}), vim.json.encode(vim.empty_dict()), vim.json.encode('\t"é"'))
+local function hex(s) return (s:gsub('.', function (c) return ('%02x'):format(c:byte()) end)) end
+print(hex(vim.mpack.encode({ 1, -1, 1.5, 2^40, 'x', true, vim.NIL })), hex(vim.mpack.encode({})))
+local md = vim.mpack.decode(vim.mpack.encode({ a = { 1, vim.NIL, 'z' }, b = 2.5 }))
+print(md.a[3], md.a[2] == vim.NIL, md.b, tostring(vim.NIL), type(vim.NIL), pcall(vim.mpack.decode, '\x92\x01'))
+local st = vim.uv.fs_stat('/tmp'); print(st.type, type(st.size), type(st.mtime.sec), vim.uv.fs_stat('/nonexistent'))
+print(type(vim.uv.hrtime()), vim.uv.os_uname().sysname)
+local h = vim.uv.fs_scandir(os.getenv('LUAJS_SCAN'))
+local ents = {}
+while true do local n, ty = vim.uv.fs_scandir_next(h); if not n then break end; ents[#ents + 1] = n .. ':' .. ty end
+print(table.concat(ents, ' '))
+local r = vim.system({ 'sh', '-c', 'printf out; printf err >&2; exit 3' }, { text = true }):wait()
+print(r.code, r.stdout, r.stderr)
+vim.env.LUAJS_VIMTEST = 'set'; print(vim.env.LUAJS_VIMTEST, vim.env.LUAJS_NOPE_X, vim.log.levels.WARN)
+]==]
+    local want = lua_out(src)
+    local got, _, refusals = js_out(src, true)
+    eq(0, #refusals, vim.inspect(refusals))
+    ok(want ~= '' and not want:find('ERROR'), 'the premise: the real vim side ran: ' .. want)
+    if want ~= got then
+        local wf, gf = vim.fn.tempname(), vim.fn.tempname()
+        vim.fn.writefile(vim.split(want, '\n'), wf); vim.fn.writefile(vim.split(got, '\n'), gf)
+        error('the vim host pack disagrees with the real vim API:\n' .. vim.system({ 'diff', wf, gf }, { text = true }):wait().stdout, 0)
+    end
+    -- and an EDITOR member aborts BY NAME at the read — never a quiet nil
+    local ed = js_out('print(pcall(function () return vim.api.nvim_get_current_buf() end))\n', true)
+    ok(ed:find('vim.api.nvim_get_current_buf (the editor)', 1, true), ed)
+    -- and pcall does NOT swallow it: a break is not a Lua error (a quiet `false, <message>` would hide it)
+    ok(not ed:find('^false') and ed:find('LuaBreak', 1, true), 'the break escapes pcall: ' .. ed)
 end)
 
 test('luajs: a construct with no faithful form is REFUSED by name, the module still parses, and a pack gap BREAKS loudly at run time', function ()

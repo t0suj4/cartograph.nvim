@@ -12,7 +12,11 @@
 //                ARRAY   a JS array, 1-BASED (slot 0 unused): #t = length - 1, holes allowed, trailing nils trimmed
 //                RECORD  Object.create(null): STRING keys only (no prototype, so `__proto__` is data)
 //                MAP     a JS Map: every other key type (numbers, booleans, tables, functions)
-//              A key a shape cannot hold (a string on an ARRAY, a number on a RECORD) ABORTS by name.
+//              ★ A SHAPE IS AN OPTIMIZATION, NEVER A CORRECTNESS BET: a key the shape cannot hold (a string on an
+//              ARRAY, a number on a RECORD) goes to the table's SIDE Map (a hidden property), and every accessor —
+//              rawget, rawset, #, pairs, next — reads both. MEASURED why: an UNBOUND constructor is judged by its entries
+//              alone and escapes by definition (inspect.lua's `return { n = 0 }` is then written `buf[buf.n] = s`), so
+//              any shape evidence can be incomplete; a wrong guess now costs speed, not a wrong answer.
 //   function   a JS function; multiple returns are an MV (`$mv`), unwrapped by `$1` / spread by `$all`
 //   metatable  held in a WeakMap keyed by the table's identity (META), so a table's own representation is untouched.
 //              Honoured as Lua 5.1 / LuaJIT does: __index / __newindex on a RAW miss, __call, __tostring, __concat,
@@ -44,6 +48,9 @@ const $all = x => (x instanceof MV ? x.v : [x]);
 const $adj = (n, vals) => { const o = vals.slice(0, n); while (o.length < n) o.push(undefined); return o; };
 
 // ── tables ───────────────────────────────────────────────────────────────────────────────────────────────────────
+const SIDE = Symbol('lua.side'); // the keys a table's SHAPE cannot hold, in a Map
+const side = t => t[SIDE];
+const side_of = t => { let m = t[SIDE]; if (m === undefined) { m = new Map(); Object.defineProperty(t, SIDE, { value: m, enumerable: false }); } return m; };
 const trim = a => { while (a.length > 1 && a[a.length - 1] === undefined) a.length--; return a; };
 const $arr = (...items) => trim([undefined, ...items]);
 const $rec = (...pairs) => { const o = Object.create(null); for (let i = 0; i < pairs.length; i += 2) if (pairs[i + 1] !== undefined) o[pairs[i]] = pairs[i + 1]; return o; };
@@ -60,8 +67,8 @@ const mt_of = v => (v !== null && typeof v === 'object' || typeof v === 'functio
 const meta = (v, name) => { const mt = mt_of(v); return mt === undefined ? undefined : rawget(mt, name); };
 function rawget(t, k) {
   if (t instanceof Map) return t.get(k);
-  if (Array.isArray(t)) return typeof k === 'number' && Number.isInteger(k) && k >= 1 ? t[k] : undefined;
-  if (isRec(t)) return typeof k === 'string' ? t[k] : undefined;
+  if (Array.isArray(t)) { if (typeof k === 'number' && Number.isInteger(k) && k >= 1) return t[k]; const m = side(t); return m === undefined ? undefined : m.get(k); }
+  if (isRec(t)) { if (typeof k === 'string') return t[k]; const m = side(t); return m === undefined ? undefined : m.get(k); }
   throw new LuaError("bad argument #1 to 'rawget' (table expected, got " + $type(t) + ')');
 }
 function $idx(t, k) {
@@ -81,13 +88,7 @@ function $idx(t, k) {
   return idx_raw(t, k);
 }
 function idx_raw(t, k) {
-  if (t instanceof Map) return t.get(k);
-  if (Array.isArray(t)) {
-    if (typeof k === 'number') return Number.isInteger(k) && k >= 1 ? t[k] : undefined;
-    if (typeof k === 'string') return undefined; // an array holds no string keys: a read is nil (a WRITE aborts)
-    return undefined;
-  }
-  if (isRec(t)) return typeof k === 'string' ? t[k] : undefined;
+  if (isTable(t)) return rawget(t, k);
   if (typeof t === 'string') return STRING[k];
   // the KEY is named, as Lua names the field (a nil `vim` read as vim.fn says "reading 'fn'")
   throw new LuaError('attempt to index a ' + $type(t) + " value (reading '" + String(k) + "')");
@@ -105,11 +106,13 @@ function rawset(t, k, v) {
   if (t instanceof Map) { if (v === undefined) t.delete(k); else t.set(k, v); return; }
   if (Array.isArray(t)) {
     if (typeof k === 'number' && Number.isInteger(k) && k >= 1) { t[k] = v; if (v === undefined) trim(t); return; }
-    $abort('a ' + typeof k + ' key on an ARRAY-shaped table (' + String(k) + ')');
+    if (v === undefined) { const m = side(t); if (m !== undefined) m.delete(k); } else side_of(t).set(k, v);
+    return;
   }
   if (isRec(t)) {
     if (typeof k === 'string') { if (v === undefined) delete t[k]; else t[k] = v; return; }
-    $abort('a ' + typeof k + ' key on a RECORD-shaped table (' + String(k) + ')');
+    if (v === undefined) { const m = side(t); if (m !== undefined) m.delete(k); } else side_of(t).set(k, v);
+    return;
   }
   throw new LuaError('attempt to index a ' + $type(t) + ' value');
 }
@@ -117,7 +120,7 @@ function $len(x) {
   if (typeof x === 'string') return x.length;
   if (Array.isArray(x)) return x.length - 1;
   if (x instanceof Map) { let n = 0; while (x.get(n + 1) !== undefined) n++; return n; }
-  if (isRec(x)) return 0;
+  if (isRec(x)) { const m = side(x); if (m === undefined) return 0; let n = 0; while (m.get(n + 1) !== undefined) n++; return n; }
   throw new LuaError('attempt to get length of a ' + $type(x) + ' value');
 }
 /** a method call obj:m(...): a string's methods are the string library; a table's are its fields */
@@ -258,18 +261,34 @@ function $tonumber(v, base) {
 }
 const pairs_iter = t => {
   if (t instanceof Map) { const it = t.entries(); return () => { for (;;) { const r = it.next(); if (r.done) return undefined; const [k, v] = r.value; if (t.has(k) && t.get(k) !== undefined) return $mv(k, v); } }; }
-  if (Array.isArray(t)) { let i = 0; return () => { while (++i < t.length) if (t[i] !== undefined) return $mv(i, t[i]); return undefined; }; }
-  if (isRec(t)) { const ks = Object.keys(t); let i = 0; return () => { while (i < ks.length) { const k = ks[i++]; if (t[k] !== undefined) return $mv(k, t[k]); } return undefined; }; }
+  const side_iter = m => { if (m === undefined) return () => undefined; const it = m.entries(); return () => { for (;;) { const r = it.next(); if (r.done) return undefined; const [k, v] = r.value; if (m.has(k) && m.get(k) !== undefined) return $mv(k, v); } }; };
+  if (Array.isArray(t)) { let i = 0, rest; return () => { while (++i < t.length) if (t[i] !== undefined) return $mv(i, t[i]); rest = rest || side_iter(side(t)); return rest(); }; }
+  if (isRec(t)) { const ks = Object.keys(t); let i = 0, rest; return () => { while (i < ks.length) { const k = ks[i++]; if (t[k] !== undefined) return $mv(k, t[k]); } rest = rest || side_iter(side(t)); return rest(); }; }
   throw new LuaError("bad argument #1 to 'pairs' (table expected, got " + $type(t) + ')');
 };
 const G = Object.create(null);
 G.pairs = t => $mv(pairs_iter(t), t, undefined);
 // 5.1: ipairs, unpack and the table library read and write RAW (lua_rawgeti) — metamethods do not fire
 G.ipairs = t => { if (!isTable(t) && typeof t !== 'string') throw new LuaError("bad argument #1 to 'ipairs' (table expected, got " + $type(t) + ')'); return $mv((s, i) => { i = i + 1; const v = rawget(s, i); return v === undefined ? undefined : $mv(i, v); }, t, 0); };
+// next(t, k): the entry AFTER k in the same traversal order pairs uses (arrays by index, records by key order, maps
+// by insertion); a nil value is skipped as a missing key. ⚠ O(n) per step (it finds k first) — faithful, not fast.
 G.next = (t, k) => {
-  if (k !== undefined) $abort('next(t, k) with a control key');
-  const r = pairs_iter(t)();
-  return r === undefined ? undefined : r;
+  if (k === undefined) { const r = pairs_iter(t)(); return r === undefined ? undefined : r; }
+  if (t instanceof Map) {
+    let seen = false;
+    for (const [kk, v] of t) { if (seen) { if (v !== undefined) return $mv(kk, v); } else if (kk === k) seen = true; }
+    if (!seen) throw new LuaError("invalid key to 'next'");
+    return undefined;
+  }
+  if (Array.isArray(t) || isRec(t)) {
+    // the same order pairs walks — the shaped part, then the side Map — found by walking it
+    const it = pairs_iter(t);
+    for (let r = it(); r !== undefined; r = it()) {
+      if ($all(r)[0] === k) { const n = it(); return n === undefined ? undefined : n; }
+    }
+    throw new LuaError("invalid key to 'next'");
+  }
+  throw new LuaError("bad argument #1 to 'next' (table expected, got " + $type(t) + ')');
 };
 G.type = v => $type(v);
 G.tostring = v => $tostring(v);
@@ -278,8 +297,9 @@ G.select = (n, ...a) => (n === '#' ? a.length : $mv(...a.slice(n < 0 ? a.length 
 G.unpack = (t, i, j) => { i = i === undefined ? 1 : i; j = j === undefined ? $len(t) : j; const o = []; for (let k = i; k <= j; k++) o.push(rawget(t, k)); return $mv(...o); };
 G.error = (v, level) => { throw new LuaError(v); };
 G.assert = (v, msg, ...rest) => { if (!$t(v)) throw new LuaError(msg === undefined ? 'assertion failed!' : msg); return $mv(v, msg, ...rest); };
-G.pcall = (f, ...a) => { try { return $mv(true, ...$all($call(f, ...a))); } catch (e) { return $mv(false, e instanceof LuaError ? e.value : (e instanceof LuaBreak ? e : String(e && e.message || e))); } };
-G.rawequal = (a, b) => a === b;
+// a LuaBreak is NOT a Lua error — it is a construct with no faithful form, reached: pcall must not swallow it (a break
+// inside pcall would otherwise turn into a quiet `false, <object>`)
+G.pcall = (f, ...a) => { try { return $mv(true, ...$all($call(f, ...a))); } catch (e) { if (e instanceof LuaBreak) throw e; return $mv(false, e instanceof LuaError ? e.value : String(e && e.message || e)); } };G.rawequal = (a, b) => a === b;
 G.rawget = (t, k) => rawget(t, k);
 G.rawset = (t, k, v) => { if (!isTable(t)) throw new LuaError("bad argument #1 to 'rawset' (table expected, got " + $type(t) + ')'); rawset(t, k, v); return t; };
 G.setmetatable = (t, mt) => {
@@ -293,6 +313,14 @@ G.setmetatable = (t, mt) => {
 G.getmetatable = v => { const mt = mt_of(v); if (mt === undefined) return undefined; const p = rawget(mt, '__metatable'); return p !== undefined ? p : mt; };
 G.print = (...a) => { fs.writeSync(1, Buffer.from(a.map($tostring).join('\t') + '\n', 'latin1')); };
 G.require = name => $require(name);
+G.package = $rec('loaded', $rec(), 'path', '', 'cpath', '');
+G._G = G;
+// evaluating Lua SOURCE at run time has no faithful form here (the emitter runs in nvim, not in this pack)
+G.load = () => $abort('load (evaluating Lua source at run time)');
+G.loadstring = () => $abort('loadstring (evaluating Lua source at run time)');
+G.dofile = () => $abort('dofile (evaluating Lua source at run time)');
+G.loadfile = () => $abort('loadfile (evaluating Lua source at run time)');
+G._VERSION = 'Lua 5.1';
 G.table = $rec(
   'insert', (t, a, b) => { if (b === undefined) rawset(t, $len(t) + 1, a); else { const n = $len(t); for (let k = n; k >= a; k--) rawset(t, k + 1, rawget(t, k)); rawset(t, a, b); } },
   'remove', (t, pos) => { const n = $len(t); if (pos === undefined) pos = n; if (n === 0) return undefined; const v = rawget(t, pos); for (let k = pos; k < n; k++) rawset(t, k, rawget(t, k + 1)); rawset(t, n, undefined); return v; },
@@ -683,12 +711,374 @@ G.debug = $rec(
   'getupvalue', () => $abort('debug.getupvalue'),
   'getlocal', () => $abort('debug.getlocal'));
 
+// ── HOST: vim — nvim's API, as far as it has a meaning outside the editor ────────────────────────────────────────
+// THREE KINDS OF MEMBER, and the kind decides the form:
+//   PURE LUA in nvim's own runtime (vim.split / tbl_* / list_extend / deepcopy / inspect / uri_* / fs): TRANSLITERATED
+//     from $VIMRUNTIME/lua by the same emitter (tools/luajs.lua emits them beside the modules) and loaded LAZILY on the
+//     first miss, as nvim itself defers them — never re-authored here.
+//   C / libuv-BACKED (vim.uv, vim.fn, vim.json, vim.system, vim.env, vim.NIL, vim.log, vim.notify): a declared template
+//     per member, matched to nvim's behaviour PROBED first; a member not declared ABORTS BY NAME.
+//   THE EDITOR (vim.api, keymap, bo, wo, cmd, opt, lsp, diagnostic, treesitter, schedule, …): no meaning outside nvim —
+//     an access aborts by name, at the read.
+const refuse_table = (name, why) => { const t = $rec(); META.set(t, $rec('__index', (_, k) => $abort(name + '.' + $tostring(k) + ' (' + why + ')'))); return t; };
+const with_refusal = (t, name, why) => { META.set(t, $rec('__index', (_, k) => $abort(name + '.' + $tostring(k) + ' (' + why + ')'))); return t; };
+const NIL = new (class LuaNIL {})();
+META.set(NIL, $rec('__tostring', () => 'vim.NIL'));
+const EMPTY_DICT_MT = $rec();
+const vim = $rec();
+G.vim = vim;
+rawset(vim, 'NIL', NIL);
+rawset(vim, 'empty_dict', () => { const t = $map(); META.set(t, EMPTY_DICT_MT); return t; });
+// nvim defines this in C; shared.lua's vim.empty_dict / tbl_isempty / json read it
+rawset(vim, '_empty_dict_mt', EMPTY_DICT_MT);
+rawset(vim, 'log', $rec('levels', $rec('TRACE', 0, 'DEBUG', 1, 'INFO', 2, 'WARN', 3, 'ERROR', 4, 'OFF', 5)));
+rawset(vim, 'notify', (msg) => { fs.writeSync(2, bytes(cstr(msg === undefined ? 'nil' : $tostring(msg)) + '\n')); });
+// vim.env: the process environment, read and written by name
+const ENV = $rec();
+META.set(ENV, $rec('__index', (_, k) => { const v = process.env[frombytes(bytes(k))]; return v === undefined ? undefined : utf8bytes(v); },
+  '__newindex', (_, k, v) => { if (v === undefined) delete process.env[frombytes(bytes(k))]; else process.env[frombytes(bytes(k))] = Buffer.from(cstr(v), 'latin1').toString('utf8'); }));
+rawset(vim, 'env', ENV);
+
+// vim.json — decode: objects are MAPs (the general table), arrays 1-based ARRAYs, null vim.NIL, strings UTF-8 bytes;
+// encode: an empty table is `[]` (vim.empty_dict() is `{}`), a 1..n table an array, '/' unescaped, bytes raw, numbers
+// %.14g. ⚠ An object's KEY ORDER follows the table's iteration order — unspecified in Lua, and LuaJIT's hash order is
+// not reproducible here: compare decoded values, not encoded text, across the two.
+const from_json = v => {
+  if (v === null) return NIL;
+  if (Array.isArray(v)) return $arr(...v.map(from_json));
+  if (typeof v === 'object') { const m = $map(); for (const k of Object.keys(v)) rawset(m, utf8bytes(k), from_json(v[k])); return m; }
+  if (typeof v === 'string') return utf8bytes(v);
+  return v;
+};
+const json_str = s => {
+  let o = '"';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 34) o += '\\"'; else if (c === 92) o += '\\\\';
+    else if (c === 8) o += '\\b'; else if (c === 12) o += '\\f'; else if (c === 10) o += '\\n'; else if (c === 13) o += '\\r'; else if (c === 9) o += '\\t';
+    else if (c < 32 || c === 127) o += '\\u' + c.toString(16).padStart(4, '0');
+    else o += s[i];
+  }
+  return o + '"';
+};
+function to_json(v, depth) {
+  if (depth > 1000) throw new LuaError('Cannot serialise, excessive nesting (1001)');
+  if (v === undefined || v === NIL) return 'null';
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (typeof v === 'number') { if (!Number.isFinite(v)) throw new LuaError('Cannot serialise number: must not be NaN or Inf'); return $numstr(v); }
+  if (typeof v === 'string') return json_str(v);
+  if (isTable(v)) {
+    const keys = [];
+    const it = pairs_iter(v);
+    for (let r = it(); r !== undefined; r = it()) keys.push($all(r)[0]);
+    if (keys.length === 0) return META.get(v) === EMPTY_DICT_MT ? '{}' : '[]';
+    const ints = keys.every(k => typeof k === 'number' && Number.isInteger(k) && k >= 1);
+    if (ints) {
+      const max = Math.max(...keys);
+      if (max > keys.length * 2 && max > 10) throw new LuaError('Cannot serialise table: excessively sparse array');
+      const o = [];
+      for (let k = 1; k <= max; k++) o.push(to_json(rawget(v, k), depth + 1));
+      return '[' + o.join(',') + ']';
+    }
+    return '{' + keys.map(k => {
+      if (typeof k !== 'string' && typeof k !== 'number') throw new LuaError('Cannot serialise ' + $type(k) + ': table key must be a number or string');
+      return json_str(cstr(k)) + ':' + to_json(rawget(v, k), depth + 1);
+    }).join(',') + '}';
+  }
+  throw new LuaError('Cannot serialise ' + $type(v) + ': type not supported');
+}
+rawset(vim, 'json', $rec(
+  'decode', (s, opts) => {
+    let v;
+    try { v = JSON.parse(Buffer.from(cstr(s), 'latin1').toString('utf8')); } catch (e) { throw new LuaError('Expected value but found invalid token at character 1'); }
+    if (opts !== undefined) $abort('vim.json.decode with options');
+    return from_json(v);
+  },
+  'encode', (v, opts) => { if (opts !== undefined) $abort('vim.json.encode with options'); return to_json(v, 0); }));
+
+// vim.uv — the libuv calls that have a synchronous meaning; errors are libuv's triple: nil, "<CODE>: <msg>: <path>", CODE
+const uverr = (e, p) => $mv(undefined, (e.code || 'EIO') + ': ' + (STRERROR[e.code] || e.message || '').toLowerCase() + (p === undefined ? '' : ': ' + cstr(p)), e.code || 'EIO');
+const tstamp = ms => $rec('sec', Math.floor(ms / 1000), 'nsec', Math.round((ms % 1000) * 1e6));
+const kind_of = st => (st.isFile() ? 'file' : st.isDirectory() ? 'directory' : st.isSymbolicLink() ? 'link' : st.isFIFO() ? 'fifo' : st.isSocket() ? 'socket' : st.isCharacterDevice() ? 'char' : st.isBlockDevice() ? 'block' : 'unknown');
+const stat_rec = st => $rec('type', kind_of(st), 'size', st.size, 'mode', st.mode, 'ino', st.ino, 'dev', st.dev, 'nlink', st.nlink,
+  'uid', st.uid, 'gid', st.gid, 'mtime', tstamp(st.mtimeMs), 'atime', tstamp(st.atimeMs), 'ctime', tstamp(st.ctimeMs), 'birthtime', tstamp(st.birthtimeMs), 'blksize', st.blksize, 'blocks', st.blocks);
+const sync_only = (name, cb) => { if (cb !== undefined) $abort('vim.uv.' + name + ' with a callback (the event loop)'); };
+class ScanDir { constructor(names, types) { this.names = names; this.types = types; this.i = 0; } }
+const t0 = process.hrtime.bigint();
+const uv = with_refusal($rec(
+  'hrtime', () => Number(process.hrtime.bigint()),
+  'now', () => Math.floor(Number(process.hrtime.bigint() - t0) / 1e6),
+  'cwd', () => utf8bytes(process.cwd()),
+  'available_parallelism', () => (nodeos.availableParallelism ? nodeos.availableParallelism() : nodeos.cpus().length),
+  'gettimeofday', () => { const ms = Date.now(); return $mv(Math.floor(ms / 1000), (ms % 1000) * 1000); },
+  'os_homedir', () => utf8bytes(nodeos.homedir()),
+  'os_getenv', k => { const v = process.env[frombytes(bytes(k))]; return v === undefined ? undefined : utf8bytes(v); },
+  'os_uname', () => $rec('sysname', utf8bytes(nodeos.type()), 'release', utf8bytes(nodeos.release()), 'version', utf8bytes(nodeos.version ? nodeos.version() : ''), 'machine', utf8bytes(nodeos.machine ? nodeos.machine() : process.arch)),
+  'fs_stat', (p, cb) => { sync_only('fs_stat', cb); try { return stat_rec(fs.statSync(bytes(p))); } catch (e) { return uverr(e, p); } },
+  'fs_lstat', (p, cb) => { sync_only('fs_lstat', cb); try { return stat_rec(fs.lstatSync(bytes(p))); } catch (e) { return uverr(e, p); } },
+  'fs_realpath', (p, cb) => { sync_only('fs_realpath', cb); try { return frombytes(fs.realpathSync(bytes(p), { encoding: 'buffer' })); } catch (e) { return uverr(e, p); } },
+  'fs_rename', (a, b, cb) => { sync_only('fs_rename', cb); try { fs.renameSync(bytes(a), bytes(b)); return true; } catch (e) { return uverr(e, a); } },
+  'fs_unlink', (p, cb) => { sync_only('fs_unlink', cb); try { fs.unlinkSync(bytes(p)); return true; } catch (e) { return uverr(e, p); } },
+  'fs_mkdir', (p, mode, cb) => { sync_only('fs_mkdir', cb); try { fs.mkdirSync(bytes(p), { mode }); return true; } catch (e) { return uverr(e, p); } },
+  'fs_rmdir', (p, cb) => { sync_only('fs_rmdir', cb); try { fs.rmdirSync(bytes(p)); return true; } catch (e) { return uverr(e, p); } },
+  // libuv's scandir SORTS (scandir(3) with its own comparator: byte order)
+  'fs_scandir', (p, cb) => {
+    sync_only('fs_scandir', cb);
+    let ents;
+    try { ents = fs.readdirSync(bytes(p), { withFileTypes: true, encoding: 'buffer' }); } catch (e) { return uverr(e, p); }
+    const rows = ents.map(d => ({ n: frombytes(d.name), t: d.isFile() ? 'file' : d.isDirectory() ? 'directory' : d.isSymbolicLink() ? 'link' : d.isFIFO() ? 'fifo' : d.isSocket() ? 'socket' : d.isCharacterDevice() ? 'char' : d.isBlockDevice() ? 'block' : 'unknown' }));
+    rows.sort((a, b) => (a.n < b.n ? -1 : a.n > b.n ? 1 : 0));
+    const h = new ScanDir(rows.map(r => r.n), rows.map(r => r.t));
+    META.set(h, $rec('__tostring', () => 'uv_fs_t: ' + addr(h)));
+    return h;
+  },
+  'fs_scandir_next', h => { if (!(h instanceof ScanDir)) throw new LuaError("bad argument #1 to 'fs_scandir_next' (uv_fs_t expected)"); if (h.i >= h.names.length) return undefined; const i = h.i++; return $mv(h.names[i], h.types[i]); }),
+  'vim.uv', 'no synchronous form outside the editor');
+rawset(vim, 'uv', uv);
+rawset(vim, 'loop', uv);
+
+// vim.system — run to completion at the call (the editor runs it concurrently; the RESULT is the same, the ordering of
+// side effects against later code is not); :wait() returns { code, signal, stdout, stderr }
+class SysObj { constructor(r) { this.r = r; } }
+const SYS_MT = $rec('__index', $rec(
+  'wait', self => self.r,
+  'kill', () => undefined,
+  'is_closing', () => true));
+rawset(vim, 'system', (cmd, opts, on_exit) => {
+  if (on_exit !== undefined) $abort('vim.system with an on_exit callback (the event loop)');
+  const argv = [];
+  for (let i = 1; rawget(cmd, i) !== undefined; i++) argv.push(frombytes(bytes(rawget(cmd, i))));
+  const o = opts === undefined ? $rec() : opts;
+  const env = Object.assign({}, $t(rawget(o, 'clear_env')) ? {} : process.env);
+  const e = rawget(o, 'env');
+  if (e !== undefined) { const it = pairs_iter(e); for (let r = it(); r !== undefined; r = it()) { const [k, v] = $all(r); env[Buffer.from(cstr(k), 'latin1').toString('utf8')] = Buffer.from(cstr(v), 'latin1').toString('utf8'); } }
+  const stdin = rawget(o, 'stdin');
+  const timeout = rawget(o, 'timeout');
+  const cwd = rawget(o, 'cwd');
+  const r = child.spawnSync(argv[0], argv.slice(1), { env, cwd: cwd === undefined ? undefined : Buffer.from(cstr(cwd), 'latin1').toString('utf8'),
+    input: typeof stdin === 'string' ? bytes(stdin) : undefined, timeout: timeout === undefined ? undefined : num(timeout), maxBuffer: 1 << 30 });
+  if (r.error && r.error.code === 'ENOENT') throw new LuaError('ENOENT: no such file or directory');
+  const out = r.stdout ? frombytes(r.stdout) : undefined, err = r.stderr ? frombytes(r.stderr) : undefined;
+  const timedout = r.error && r.error.code === 'ETIMEDOUT';
+  const res = $rec('code', timedout ? 124 : (r.status === null ? 1 : r.status), 'signal', r.signal ? (nodeos.constants.signals[r.signal] || 0) : 0,
+    'stdout', out === undefined ? undefined : out, 'stderr', err === undefined ? undefined : err);
+  const so = new SysObj(res);
+  so.pid = r.pid;
+  META.set(so, SYS_MT);
+  return so;
+});
+
+// vim.fn — Vimscript functions, the ones with a meaning outside the editor
+const fn_bool = b => (b ? 1 : 0);
+const isdir = p => { try { return fs.statSync(bytes(p)).isDirectory(); } catch (e) { return false; } };
+function fnamemodify(f, mods) {
+  f = cstr(f); mods = cstr(mods);
+  const home = utf8bytes(nodeos.homedir());
+  const cwd = utf8bytes(process.cwd());
+  const tail = x => x.slice(x.lastIndexOf('/') + 1);
+  const head = x => { const i = x.lastIndexOf('/'); if (i < 0) return '.'; if (i === 0) return '/'; return x.slice(0, i); };
+  let i = 0;
+  while (i < mods.length) {
+    if (mods[i] !== ':') $abort("vim.fn.fnamemodify modifier '" + mods.slice(i) + "'");
+    const m = mods[i + 1];
+    if (m === 'p') { if (f[0] === '~') f = home + f.slice(1); if (f[0] !== '/') f = cwd + '/' + f; f = path.posix.normalize(f); if (isdir(f) && !f.endsWith('/')) f += '/'; }
+    else if (m === 'h') { f = f.endsWith('/') && f.length > 1 ? f.slice(0, -1) : head(f); }
+    else if (m === 't') f = tail(f);
+    else if (m === 'r') { const t = tail(f); const d = t.lastIndexOf('.'); if (d > 0) f = f.slice(0, f.length - t.length + d); }
+    else if (m === 'e') { const t = tail(f); const d = t.lastIndexOf('.'); f = d > 0 ? t.slice(d + 1) : ''; }
+    else if (m === '~') { if (f === home || f.startsWith(home + '/')) f = '~' + f.slice(home.length); }
+    else if (m === '.') { if (f.startsWith(cwd + '/')) f = f.slice(cwd.length + 1); }
+    else $abort("vim.fn.fnamemodify modifier ':" + m + "'");
+    i += 2;
+  }
+  return f;
+}
+function expand(s) {
+  s = cstr(s);
+  if (/[*?[\]{}]/.test(s) || /^[%#<]/.test(s)) $abort("vim.fn.expand of '" + s + "' (wildcards / editor names)");
+  if (s[0] === '~') s = utf8bytes(nodeos.homedir()) + s.slice(1);
+  return s.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (all, k) => (process.env[k] === undefined ? all : utf8bytes(process.env[k])));
+}
+let tmpdir, tmpn = 0;
+const utf8_units = s => Buffer.from(cstr(s), 'latin1').toString('utf8');
+const fnt = with_refusal($rec(
+  'fnamemodify', fnamemodify,
+  'expand', expand,
+  'getcwd', () => utf8bytes(process.cwd()),
+  'isdirectory', p => fn_bool(isdir(p)),
+  'filereadable', p => { try { fs.accessSync(bytes(p), fs.constants.R_OK); return fn_bool(!isdir(p)); } catch (e) { return 0; } },
+  'executable', name => {
+    name = frombytes(bytes(name));
+    const ok = p => { try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch (e) { return false; } };
+    if (name.includes('/')) return fn_bool(ok(name));
+    return fn_bool((process.env.PATH || '').split(':').some(d => d !== '' && ok(path.join(d, name))));
+  },
+  'mkdir', (d, flags) => { try { fs.mkdirSync(bytes(d), { recursive: $t(flags) && cstr(flags).includes('p') }); return 1; } catch (e) { if (e.code === 'EEXIST' && $t(flags) && cstr(flags).includes('p')) return 1; return 0; } },
+  'delete', (p, flags) => {
+    const f = flags === undefined ? '' : cstr(flags);
+    try { if (f.includes('rf')) fs.rmSync(bytes(p), { recursive: true, force: true }); else if (f.includes('d')) fs.rmdirSync(bytes(p)); else fs.unlinkSync(bytes(p)); return 0; } catch (e) { return -1; }
+  },
+  'sha256', s => require('crypto').createHash('sha256').update(bytes(s)).digest('hex'),
+  'tempname', () => {
+    if (!tmpdir) tmpdir = fs.mkdtempSync(path.join(nodeos.tmpdir(), 'nvim.luajs.'));
+    return utf8bytes(path.join(tmpdir, String(tmpn++)));
+  },
+  'stdpath', what => {
+    const w = cstr(what);
+    const env = (k, d) => (process.env[k] ? process.env[k] : path.join(nodeos.homedir(), d));
+    const m = { config: env('XDG_CONFIG_HOME', '.config'), data: env('XDG_DATA_HOME', '.local/share'), state: env('XDG_STATE_HOME', '.local/state'), cache: env('XDG_CACHE_HOME', '.cache') }[w];
+    if (m === undefined) $abort("vim.fn.stdpath('" + w + "')");
+    return utf8bytes(path.join(m, 'nvim'));
+  },
+  'readfile', (p, flags, max) => {
+    let t;
+    try { t = frombytes(fs.readFileSync(bytes(p))); } catch (e) { throw new LuaError("Vim:E484: Can't open file " + cstr(p)); }
+    const binary = flags !== undefined && cstr(flags).includes('b');
+    let lines = t.split('\n');
+    if (lines[lines.length - 1] === '' && !binary) lines.pop(); // the final newline ends the last line
+    if (max !== undefined) { const n = num(max); lines = n >= 0 ? lines.slice(0, n) : lines.slice(n); }
+    return $arr(...lines);
+  },
+  'writefile', (list, p, flags) => {
+    const f = flags === undefined ? '' : cstr(flags);
+    const lines = [];
+    if (typeof list === 'string') lines.push(list); else for (let i = 1; rawget(list, i) !== undefined; i++) lines.push(cstr(rawget(list, i)));
+    const body = f.includes('b') ? lines.join('\n') : lines.map(l => l + '\n').join('');
+    try { (f.includes('a') ? fs.appendFileSync : fs.writeFileSync)(bytes(p), bytes(body)); return 0; } catch (e) { return -1; }
+  },
+  'readdir', p => { let ns; try { ns = fs.readdirSync(bytes(p), { encoding: 'buffer' }).map(frombytes); } catch (e) { return $arr(); } ns.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)); return $arr(...ns); },
+  'has', feat => { const f = cstr(feat); return fn_bool({ nvim: 1, unix: process.platform !== 'win32', linux: process.platform === 'linux', mac: process.platform === 'darwin', macunix: process.platform === 'darwin', win32: process.platform === 'win32', win64: process.platform === 'win32', wsl: !!process.env.WSL_DISTRO_NAME }[f]); },
+  'strchars', s => [...utf8_units(s)].length,
+  'strcharpart', (s, start, len) => { const cs = [...utf8_units(s)]; const st = Math.max(0, num(start)); const e = len === undefined ? cs.length : Math.max(0, num(start) + num(len)); return utf8bytes(cs.slice(st, e).join('')); },
+  'strdisplaywidth', s => { s = cstr(s); if (/[^\x20-\x7e]/.test(s)) $abort('vim.fn.strdisplaywidth of a non-ASCII or control string (the editor\'s cell widths)'); return s.length; },
+  'fnameescape', s => cstr(s).replace(/[ \t\n*?[{`$\\%#'"|!<]/g, c => '\\' + c).replace(/^[+>-]/, c => '\\' + c),
+  'system', cmd => {
+    const r = child.spawnSync('/bin/sh', ['-c', frombytes(typeof cmd === 'string' ? bytes(cmd) : bytes(cstr(cmd)))], { maxBuffer: 1 << 30 });
+    VVARS.shell_error = r.status === null ? -1 : r.status;
+    return frombytes(Buffer.concat([r.stdout || Buffer.alloc(0), r.stderr || Buffer.alloc(0)]));
+  },
+  'systemlist', cmd => { const out = fnt_system(cmd); const ls = out.split('\n'); if (ls[ls.length - 1] === '') ls.pop(); return $arr(...ls); }),
+  'vim.fn', 'an editor function');
+const fnt_system = cmd => $idx(fnt, 'system')(cmd);
+rawset(vim, 'fn', fnt);
+const VVARS = { shell_error: 0 };
+rawset(vim, 'v', (() => { const t = $rec(); META.set(t, $rec('__index', (_, k) => { if (k === 'shell_error') return VVARS.shell_error; return $abort('vim.v.' + $tostring(k) + ' (an editor variable)'); })); return t; })());
+// vim.mpack — MessagePack, as nvim maps it (probed): nil decodes to vim.NIL, arrays and maps to tables (ARRAY / MAP),
+// str and bin to byte strings; encode: {} is an empty ARRAY, a 1..n table an array, a float as float32 when lossless
+// (else float64), integers in the smallest form (negative fixint, uint8…uint64, int8…int64); errors are nvim's own two
+function mp_decode(s) {
+  const b = bytes(s);
+  let i = 0;
+  const need = n => { if (i + n > b.length) throw new LuaError('incomplete msgpack string'); };
+  const str = n => { need(n); const v = frombytes(b.subarray(i, i + n)); i += n; return v; };
+  const arr = n => { const items = []; for (let k = 0; k < n; k++) items.push(one()); return $arr(...items); };
+  const map = n => { const m = $map(); for (let k = 0; k < n; k++) { const key = one(); const v = one(); if (key !== NIL) rawset(m, key, v); } return m; };
+  function one() {
+    need(1);
+    const c = b[i++];
+    if (c <= 0x7f) return c;
+    if (c >= 0xe0) return c - 256;
+    if ((c & 0xf0) === 0x80) return map(c & 0x0f);
+    if ((c & 0xf0) === 0x90) return arr(c & 0x0f);
+    if ((c & 0xe0) === 0xa0) return str(c & 0x1f);
+    switch (c) {
+      case 0xc0: return NIL;
+      case 0xc2: return false;
+      case 0xc3: return true;
+      case 0xc4: need(1); return str(b[i++]);
+      case 0xc5: need(2); { const n = b.readUInt16BE(i); i += 2; return str(n); }
+      case 0xc6: need(4); { const n = b.readUInt32BE(i); i += 4; return str(n); }
+      case 0xca: need(4); { const v = b.readFloatBE(i); i += 4; return v; }
+      case 0xcb: need(8); { const v = b.readDoubleBE(i); i += 8; return v; }
+      case 0xcc: need(1); return b[i++];
+      case 0xcd: need(2); { const v = b.readUInt16BE(i); i += 2; return v; }
+      case 0xce: need(4); { const v = b.readUInt32BE(i); i += 4; return v; }
+      case 0xcf: need(8); { const v = Number(b.readBigUInt64BE(i)); i += 8; return v; }
+      case 0xd0: need(1); { const v = b.readInt8(i); i += 1; return v; }
+      case 0xd1: need(2); { const v = b.readInt16BE(i); i += 2; return v; }
+      case 0xd2: need(4); { const v = b.readInt32BE(i); i += 4; return v; }
+      case 0xd3: need(8); { const v = Number(b.readBigInt64BE(i)); i += 8; return v; }
+      case 0xd9: need(1); return str(b[i++]);
+      case 0xda: need(2); { const n = b.readUInt16BE(i); i += 2; return str(n); }
+      case 0xdb: need(4); { const n = b.readUInt32BE(i); i += 4; return str(n); }
+      case 0xdc: need(2); { const n = b.readUInt16BE(i); i += 2; return arr(n); }
+      case 0xdd: need(4); { const n = b.readUInt32BE(i); i += 4; return arr(n); }
+      case 0xde: need(2); { const n = b.readUInt16BE(i); i += 2; return map(n); }
+      case 0xdf: need(4); { const n = b.readUInt32BE(i); i += 4; return map(n); }
+      default: $abort('vim.mpack.decode of type byte 0x' + c.toString(16) + ' (ext / reserved)');
+    }
+  }
+  if (b.length === 0) throw new LuaError('incomplete msgpack string');
+  const v = one();
+  return v;
+}
+function mp_encode(v) {
+  const out = [];
+  const u8 = (...x) => out.push(Buffer.from(x));
+  const put = (tag, n, w) => { const buf = Buffer.alloc(1 + w); buf[0] = tag; if (w === 1) buf.writeUInt8(n, 1); else if (w === 2) buf.writeUInt16BE(n, 1); else if (w === 4) buf.writeUInt32BE(n, 1); out.push(buf); };
+  const len = (fix, fixmax, t16, t32, n, t8) => { if (n <= fixmax) u8(fix | n); else if (t8 !== undefined && n <= 0xff) put(t8, n, 1); else if (n <= 0xffff) put(t16, n, 2); else put(t32, n, 4); };
+  function one(x) {
+    if (x === undefined || x === NIL) return u8(0xc0);
+    if (x === false) return u8(0xc2);
+    if (x === true) return u8(0xc3);
+    if (typeof x === 'number') {
+      if (Number.isInteger(x) && Math.abs(x) <= Number.MAX_SAFE_INTEGER) {
+        if (x >= 0) { if (x <= 0x7f) return u8(x); if (x <= 0xff) return put(0xcc, x, 1); if (x <= 0xffff) return put(0xcd, x, 2); if (x <= 0xffffffff) return put(0xce, x, 4); const b8 = Buffer.alloc(9); b8[0] = 0xcf; b8.writeBigUInt64BE(BigInt(x), 1); return out.push(b8); }
+        if (x >= -32) return u8(x + 256);
+        if (x >= -128) { const b2 = Buffer.alloc(2); b2[0] = 0xd0; b2.writeInt8(x, 1); return out.push(b2); }
+        if (x >= -32768) { const b3 = Buffer.alloc(3); b3[0] = 0xd1; b3.writeInt16BE(x, 1); return out.push(b3); }
+        if (x >= -2147483648) { const b5 = Buffer.alloc(5); b5[0] = 0xd2; b5.writeInt32BE(x, 1); return out.push(b5); }
+        const b9 = Buffer.alloc(9); b9[0] = 0xd3; b9.writeBigInt64BE(BigInt(x), 1); return out.push(b9);
+      }
+      if (Math.fround(x) === x || Number.isNaN(x)) { const b5 = Buffer.alloc(5); b5[0] = 0xca; b5.writeFloatBE(x, 1); return out.push(b5); }
+      const b9 = Buffer.alloc(9); b9[0] = 0xcb; b9.writeDoubleBE(x, 1); return out.push(b9);
+    }
+    if (typeof x === 'string') { len(0xa0, 31, 0xda, 0xdb, x.length, 0xd9); return out.push(bytes(x)); }
+    if (isTable(x)) {
+      const keys = [];
+      const it = pairs_iter(x);
+      for (let r = it(); r !== undefined; r = it()) keys.push($all(r)[0]);
+      const seq = keys.every(k => typeof k === 'number' && Number.isInteger(k) && k >= 1) && keys.length === Math.max(0, ...keys);
+      if (seq) { len(0x90, 15, 0xdc, 0xdd, keys.length); for (let k = 1; k <= keys.length; k++) one(rawget(x, k)); return; }
+      len(0x80, 15, 0xde, 0xdf, keys.length);
+      for (const k of keys) { one(k); one(rawget(x, k)); }
+      return;
+    }
+    throw new LuaError('can not serialize object of type ' + $type(x));
+  }
+  one(v);
+  return frombytes(Buffer.concat(out));
+}
+rawset(vim, 'mpack', $rec('decode', mp_decode, 'encode', mp_encode));
+for (const ed of ['api', 'keymap', 'bo', 'wo', 'o', 'go', 'g', 'b', 'w', 't', 'opt', 'opt_local', 'opt_global', 'lsp', 'diagnostic', 'treesitter', 'health', 'ui', 'filetype', 'snippet', 'hl', 'highlight', 'keycode'])
+  rawset(vim, ed, refuse_table('vim.' + ed, 'the editor'));
+
+// the PURE-LUA half, loaded on the first miss exactly as nvim defers it (shared first; then the lazy modules)
+let shared_loaded = false;
+const LAZY = $rec('inspect', () => $require('vim.inspect'), 'fs', () => $require('vim.fs'),
+  'uri_from_fname', () => $idx($require('vim.uri'), 'uri_from_fname'), 'uri_to_fname', () => $idx($require('vim.uri'), 'uri_to_fname'),
+  'uri_from_bufnr', () => $idx($require('vim.uri'), 'uri_from_bufnr'), 'uri_to_bufnr', () => $idx($require('vim.uri'), 'uri_to_bufnr'));
+META.set(vim, $rec('__index', (t, k) => {
+  if (!shared_loaded) { shared_loaded = true; $require('vim._core.shared'); const v = rawget(t, k); if (v !== undefined) return v; }
+  const lz = typeof k === 'string' ? LAZY[k] : undefined;
+  if (lz !== undefined) { const v = lz(); rawset(t, k, v); return v; }
+  return $abort('vim.' + $tostring(k) + ' (not in the host pack)');
+}));
+
 // ── modules ──────────────────────────────────────────────────────────────────────────────────────────────────────
 // `require 'a.b'` loads <root>/a/b.js (or <root>/a/b/init.js), root = LUAJS_ROOT or this pack's directory; a module
 // that is not there is a HOST gap, and says so
 const loaded = Object.create(null);
+const tobit = x => num(x) | 0;
+const BUILTIN = $rec('bit', () => $rec('tobit', tobit, 'bnot', x => ~tobit(x), 'band', (...a) => a.reduce((x, y) => tobit(x) & tobit(y)),
+  'bor', (...a) => a.reduce((x, y) => tobit(x) | tobit(y)), 'bxor', (...a) => a.reduce((x, y) => tobit(x) ^ tobit(y)),
+  'lshift', (x, n) => tobit(x) << (tobit(n) & 31), 'rshift', (x, n) => tobit(x) >>> (tobit(n) & 31) | 0, 'arshift', (x, n) => tobit(x) >> (tobit(n) & 31),
+  'rol', (x, n) => { x = tobit(x); n = tobit(n) & 31; return (x << n | x >>> (32 - n)) | 0; }, 'ror', (x, n) => { x = tobit(x); n = tobit(n) & 31; return (x >>> n | x << (32 - n)) | 0; },
+  'bswap', x => { x = tobit(x); return ((x & 0xff) << 24 | (x & 0xff00) << 8 | (x >>> 8) & 0xff00 | x >>> 24) | 0; },
+  'tohex', (x, n) => { x = tobit(x); n = n === undefined ? 8 : tobit(n); const up = n < 0; n = Math.min(Math.abs(n), 8); let h = (x >>> 0).toString(16).padStart(8, '0').slice(8 - n); return up ? h.toUpperCase() : h; }));
 function $require(name) {
   if (name in loaded) return loaded[name];
+  if (typeof name === 'string' && BUILTIN[name] !== undefined) { loaded[name] = BUILTIN[name](); return loaded[name]; }
   const root = process.env.LUAJS_ROOT || __dirname;
   const base = path.join(root, ...String(name).split('.'));
   const file = fs.existsSync(base + '.js') ? base + '.js' : (fs.existsSync(path.join(base, 'init.js')) ? path.join(base, 'init.js') : null);

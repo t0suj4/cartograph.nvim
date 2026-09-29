@@ -420,4 +420,32 @@ function M.emit(src, file, opts)
     return js, refusals, stats
 end
 
+--- ★ NVIM'S OWN PURE-LUA RUNTIME, transliterated into `out_dir` (the pack loads vim.split / inspect / fs / uri from it
+--- lazily). The modules are DERIVED: the pack's own `$require('vim.…')` names, then every `require('vim.…')` literal
+--- inside an emitted runtime module, while its file exists under `vimrt` (default: this nvim's $VIMRUNTIME/lua).
+--- -> { { rel, dest, refusals } }
+function M.vim_runtime(out_dir, pack_text, vimrt)
+    vimrt = vimrt or (vim.env.VIMRUNTIME .. '/lua')
+    local queue, queued, out = {}, {}, {}
+    local function enqueue(mod) if not queued[mod] then queued[mod] = true; queue[#queue + 1] = mod end end
+    for mod in pack_text:gmatch("%$require%('(vim%.[%w_.]+)'%)") do enqueue(mod) end
+    while #queue > 0 do
+        local mod = table.remove(queue, 1)
+        local rel = mod:gsub('%.', '/') .. '.lua'
+        local fd = io.open(vimrt .. '/' .. rel)
+        if fd then
+            local src = fd:read('a'); fd:close()
+            for dep in src:gmatch("require%s*%(?%s*['\"](vim%.[%w_.]+)['\"]") do enqueue(dep) end
+            local depth = select(2, rel:gsub('/', ''))
+            local js, refusals = M.emit(src, rel, { pack = ('../'):rep(depth) .. '$pack.js' })
+            local dest = out_dir .. '/' .. rel:gsub('%.lua$', '.js')
+            vim.fn.mkdir(vim.fn.fnamemodify(dest, ':h'), 'p')
+            local w = assert(io.open(dest, 'wb')); w:write(js); w:close()
+            out[#out + 1] = { rel = rel, dest = dest, refusals = refusals }
+        end
+    end
+    return out
+end
+
 return M
+

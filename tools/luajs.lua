@@ -51,7 +51,19 @@ for _, path in ipairs(files) do
         end
     end
 end
+-- ★ NVIM'S OWN PURE-LUA RUNTIME, transliterated beside the modules (cartograph.luajs.vim_runtime: the modules DERIVED
+-- from the pack's `$require('vim.…')` names and their own requires)
+local vim_emitted = L.vim_runtime(out_dir, table.concat(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js'), '\n'))
+local vim_refusals, vim_names = 0, {}
+for _, e in ipairs(vim_emitted) do
+    vim_names[#vim_names + 1] = e.rel
+    vim_refusals = vim_refusals + #e.refusals
+    for _, r in ipairs(e.refusals) do by_kind['vim runtime ' .. r.kind .. ': ' .. r.why] = (by_kind['vim runtime ' .. r.kind .. ': ' .. r.why] or 0) + 1 end
+end
+io.write(('VIM RUNTIME (%s/lua): %d module(s) transliterated (%s), %d refusal(s)\n'):format(vim.env.VIMRUNTIME, #vim_emitted, table.concat(vim_names, ' '), vim_refusals))
+for _, e in ipairs(vim_emitted) do emitted[#emitted + 1] = e end
 local emit_s = (vim.uv.hrtime() - t0) / 1e9
+
 local function dump(t)
     local rows = {}
     for k, n in pairs(t) do rows[#rows + 1] = { k = k, n = n } end
