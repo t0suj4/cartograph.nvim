@@ -318,17 +318,33 @@ local function pack_closure(static, text)
     return texts, seen
 end
 
---- the implementation kind of a pack closure: transliterated (reaches a GENERATED module binding) · host (reaches a
---- host module or process/Buffer) · refused ($abort) · hand-written
-local function kind_of(static, seen, texts)
+--- the implementation kind of a pack closure, as the PACK side sees it: transliterated (its OWN text names a GENERATED
+--- module binding — not merely its closure: since tonumber and tostring are generated, nearly every closure reaches one
+--- through argument coercion or an error text, and REACH read 42 of 74 as transliterated, CART-1235) · refused
+--- ($abort) · host (reaches a host module or process/Buffer) · hand-written. A registered function's kind is then
+--- DERIVED ON THE C SIDE (cartograph.luajs.boundary.classify: which of its C cores a generated module emits); this one
+--- stands for a pack export with no single C function, and for the pack-side facts (refused, host) that override it
+local function kind_of(static, seen, texts, own)
     local all = table.concat(texts, '\n')
     local names = vim.tbl_keys(seen)
     table.sort(names) -- (the FIRST binding named is reported: a pairs() walk made it differ run to run)
-    for _, name in ipairs(names) do if static.generated[name] then return 'transliterated', static.generated[name] end end
+    for _, name in ipairs(names) do
+        if static.generated[name] and (own or ''):find('%f[%w_$]' .. vim.pesc(name) .. '%f[^%w_$]') then return 'transliterated', static.generated[name] end
+    end
     if all:find('$abort(', 1, true) and #texts <= 3 then return 'refused' end
     for _, name in ipairs(names) do if static.host[name] then return 'host', static.host[name] end end
     if all:match('[^%w_]process%.') or all:find('Buffer.', 1, true) then return 'host', 'process/Buffer' end
     return 'hand-written'
+end
+
+M.kind_of = kind_of
+
+--- a REGISTERED function's kind: the pack-side facts win — absent from the pack (nil: nothing to classify; measured,
+--- 70 absent rows once read as "transliterated"), a refused stub, a host binding, a plain value — else the C side's
+function M.row_kind(present, pack_kind, c_kind)
+    if not present then return pack_kind end
+    if pack_kind == 'refused' or pack_kind == 'host' or pack_kind == 'value' then return pack_kind end
+    return c_kind
 end
 
 --- the string literals of a JavaScript text (tree-sitter javascript's string_fragment nodes). A text that is no
@@ -519,7 +535,7 @@ function M.build(opts)
                     pack = e ~= nil }
                 if e and e.text then
                     local texts, seen = pack_closure(static, e.text)
-                    row.pack_kind, row.pack_via = kind_of(static, seen, texts)
+                    row.pack_kind, row.pack_via = kind_of(static, seen, texts, e.text)
                     local cm, ev = matches(e.text, texts)
                     row.evidence = { mm = sorted(ev.mm), msg = sorted(ev.msg), cite = sorted(ev.cite) }
                     row.c_matches = cm
@@ -540,7 +556,7 @@ function M.build(opts)
         local own = (static.defs[name] or '') .. '\n' .. text
         local texts, seen = pack_closure(static, own)
         local cm, ev, evall = matches(own, texts)
-        local kind, via = kind_of(static, seen, texts)
+        local kind, via = kind_of(static, seen, texts, own)
         -- the primitive's C side: the closure of its DIRECT matches the VM calls (the interpreter's own handlers)
         local seeds = {}
         for f, why in pairs(cm) do
@@ -643,6 +659,66 @@ function M.build(opts)
             end
         end
     end
+    -- THE BOUNDARY (leaf 4, cartograph.luajs.boundary): every registered function's C and the interpreter's externs
+    -- through one exact-heap cjs probe, the VM's GC objects opaque — each C function is clean / boundary / a cjs gap,
+    -- and a row's KIND is derived from which of its clean cores a generated module emits
+    local boundary
+    if opts.boundary then
+        local B = require 'cartograph.luajs.boundary'
+        local bsrc, bskipped = B.preprocess(opts.src, opts.cflags)
+        local gc, hfields = B.gc_types(bsrc, opts.src)
+        if gc then
+            local heap, unlaid = B.layouts(bsrc, opts.src, opts.cflags, gc)
+            local roots, rset = {}, {}
+            for _, r in ipairs(rows) do if r.cfn and not rset[r.cfn] then rset[r.cfn] = true; roots[#roots + 1] = r.cfn end end
+            for f in pairs(vm_extern) do if not rset[f] then rset[f] = true; roots[#roots + 1] = f end end
+            table.sort(roots)
+            local P = B.probe({ sources = bsrc, roots = roots, gc = gc, heap_types = heap, sizes = B.sizes(bsrc, opts.src, opts.cflags),
+                templates = vim.tbl_extend('force', {}, require('cartograph.cjs').BUILTINS, B.VM_ASM) })
+            local files = {}
+            for _, mod in pairs(static.generated) do files[mod] = opts.pack_dir .. '/$' .. mod .. '.js' end
+            local gen = B.generated(files)
+            -- a primitive's COMPUTATION stops at the functions that never return (the VM's error raisers, derived
+            -- from its noreturn markers): the raise path is reached by nearly every function, and a row whose only
+            -- generated code was the error message's formatting read as "transliterated" (assert, via strfmt)
+            local noret = B.noreturn(opts.src)
+            local ubiq = {}
+            for _, r in ipairs(rows) do
+                if r.cfn and P.functions[r.cfn] then
+                    r.boundary = B.classify(P, r.cfn, gen, ubiq, noret)
+                    -- the pack-side facts win (a refused stub, a host binding, a plain value, ABSENT); else the C decides
+                    local k = M.row_kind(r.pack, r.pack_kind, r.boundary.kind)
+                    if k == r.boundary.kind and k ~= r.pack_kind then
+                        r.pack_kind = k
+                        local mods = {}
+                        for _, f in ipairs(r.boundary.covered) do mods[gen[f]] = true end
+                        r.pack_via = #r.boundary.covered > 0 and table.concat(sorted(mods), '+') or nil
+                    end
+                end
+            end
+            -- the pack's own PRIMITIVES ($forprep, $lt, …): their C is the interpreter's handlers (the seeds above)
+            for _, p in ipairs(prims) do
+                for _, h in ipairs(p.handlers or {}) do
+                    if P.functions[h] then p.boundary = p.boundary or {}; p.boundary[h] = B.classify(P, h, gen, ubiq, noret) end
+                end
+            end
+            local own = { clean = 0, boundary = 0, gap = 0 }
+            local gapwhy, gcuse = {}, {}
+            for name, f in pairs(P.functions) do
+                own[f.own] = own[f.own] + 1
+                if f.own == 'gap' then for _, w in ipairs(f.why) do gapwhy[w] = gapwhy[w] or {}; gapwhy[w][#gapwhy[w] + 1] = name end end
+                if f.own == 'boundary' then for _, w in ipairs(f.why) do local t = w:match('VM object `([%w_]+)`'); if t then gcuse[t] = (gcuse[t] or 0) + 1 end end end
+            end
+            for _, fs in pairs(gapwhy) do table.sort(fs) end
+            local clean_closure = 0
+            for _, f in pairs(P.functions) do if not f.dirty then clean_closure = clean_closure + 1 end end
+            boundary = { gc_types = sorted(gc), gcheader = hfields, heap_types = sorted(heap), unlaid = unlaid, skipped = bskipped,
+                functions = #P.order, own = own, clean_closure = clean_closure, generated = sorted(gen), noreturn = sorted(noret),
+                gaps = gapwhy, gc_uses = gcuse, status = P.functions }
+        else
+            boundary = { error = hfields }
+        end
+    end
     local summary = { lj = 0, oracle = 0, pack = 0, missing = {}, extra = 0, by_kind = {}, lj_kinds = {} }
     for _, r in ipairs(rows) do
         summary.lj = summary.lj + 1
@@ -661,7 +737,7 @@ function M.build(opts)
     for _, r in ipairs(rows) do if not r.oracle then not_in_oracle[#not_in_oracle + 1] = r.qname end end
     table.sort(summary.missing)
     return { rows = rows, prims = prims, summary = summary, frontiers = frontiers, oracle_only = oracle_only,
-        not_in_oracle = not_in_oracle, missing_modules = pack.missing_modules, drift = sorted(drift), aligned = aligned, ubiquitous = sorted(ubiquitous),
+        not_in_oracle = not_in_oracle, missing_modules = pack.missing_modules, drift = sorted(drift), aligned = aligned, ubiquitous = sorted(ubiquitous), boundary = boundary,
         meta = { rev = opts.rev, config = opts.config, c_functions = vim.tbl_count(byname), modules = where,
             pp_failed = pp_failed, cflags = opts.cflags } }
 end

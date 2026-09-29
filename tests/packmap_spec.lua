@@ -68,7 +68,19 @@ test('packmap message join: a LuaJIT message ASSEMBLES from a pack unit\'s liter
     ok(not PM.assembles('attempt to compare %s with %s', { 'attempt to ' }, fillers))
 end)
 
-test('packmap: a pack unit\'s string literals are read by javascript\'s grammar — an apostrophe in a comment does not shift them', function ()
+test('packmap kinds (CART-1235): a pack entry is transliterated only when its OWN text names a generated binding — reaching one through a shared helper is not; and a registered function absent from the pack takes no C-side kind', function ()
+    local static = { generated = { SCAN = 'strscan' }, host = {} }
+    local seen = { SCAN = true, coerce = true }
+    local texts = { 'function coerce(v) { return SCAN.tonum(v); }' }
+    eq('hand-written', (PM.kind_of(static, seen, texts, '(a, b) => coerce(a) & coerce(b)')), 'bit.band reaches the scanner only through its argument coercion')
+    eq({ 'transliterated', 'strscan' }, { PM.kind_of(static, seen, texts, '(v) => SCAN.tonum(v)') })
+    eq(nil, PM.row_kind(false, nil, 'transliterated'), 'absent from the pack: no kind')
+    eq('host', PM.row_kind(true, 'host', 'partial'))
+    eq('refused', PM.row_kind(true, 'refused', 'transliterated'))
+    eq('partial', PM.row_kind(true, 'hand-written', 'partial'), 'present and hand-written by the pack\'s reading: the C side decides')
+end)
+
+test('packmap: a pack unitt\'s string literals are read by javascript\'s grammar — an apostrophe in a comment does not shift them', function ()
     local s = PM.js_strings("const f = x => { // LuaJIT's rule\n  throw new LuaError('attempt to concatenate a ' + t + ' value'); };")
     eq({ 'attempt to concatenate a ', ' value' }, s)
     -- a bare arrow function (a function's toString) is read as an expression

@@ -3555,7 +3555,10 @@ nvim --headless -u NONE -l tools/cjs.lua libmpow <AOR math dir> <out.js>
 # tree, the pack enumerated under node; joins by name, metamethod, assembled message, citation:
 nvim --headless -u NONE -l tools/packmap.lua ~/.local/share/pkgit/luajit/HEAD [--json out.json]
 #   the oracle's LuaJIT (fbb36bb6): 162 library functions, the pack implements 74 (+11 refused stubs); 62 in method
-#   tables are a frontier.
+#   tables are a frontier. Its BOUNDARY section: every function's C through one cjs probe with the VM's GC objects
+#   opaque (derived from GCHeader) — 644 functions: 126 clean, 376 at the boundary, 142 cjs gaps; each registered
+#   function's kind is decided on the C side (7 transliterated, 29 partial, 25 hand-written), and a WORK ORDER ranks
+#   the clean code left (lj_strfmt_parse first).
 # ... or C that works on STRUCTS and UNIONS through pointers (EXACT HEAP mode: a byte heap at the compiler's own
 # layout). LuaJIT's number scanner, from packmap's tree, replaces the pack's hand-written tonumber:
 nvim --headless -u NONE -l tools/cjs.lua strscan <BUILT luajit src dir> <out.js>

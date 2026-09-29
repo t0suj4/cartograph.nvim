@@ -60,7 +60,7 @@ for line in mkn:gmatch('[^\n]+') do
         for flag in line:gmatch('%S+') do if flag:match('^%-[DUI]') then cflags[#cflags + 1] = flag end end
     end
 end
-local res = assert(PM.build({ src = src, pack_dir = pack_dir, pack_path = pack_path, work = work, config = config, rev = rev, cflags = cflags }))
+local res = assert(PM.build({ src = src, pack_dir = pack_dir, pack_path = pack_path, work = work, config = config, rev = rev, cflags = cflags, boundary = not opt['no-boundary'] }))
 local S = res.summary
 io.write(('LUAJIT %s (the oracle %s), config %s — %d C functions extracted, %.1f s\n'):format(rev, jit.version,
     vim.inspect(config, { newline = '', indent = '' }), res.meta.c_functions, (vim.uv.hrtime() - t0) / 1e9))
@@ -72,7 +72,7 @@ if #res.oracle_only > 0 then io.write('  in the oracle, NO registration: ', tabl
 local refused_n = S.by_kind.refused or 0
 io.write(('PACK: %d of %d present — %d IMPLEMENTED + %d refused stubs — %s\n'):format(S.pack, S.lj, S.pack - refused_n, refused_n,
     vim.inspect(S.by_kind, { newline = '', indent = '' })))
-for _, k in ipairs { 'refused', 'host', 'transliterated' } do
+for _, k in ipairs { 'refused', 'host', 'transliterated', 'partial' } do
     local names = {}
     for _, r in ipairs(res.rows) do if r.pack_kind == k then names[#names + 1] = r.qname .. (r.pack_via and ('(' .. r.pack_via .. ')') or '') end end
     table.sort(names)
@@ -122,6 +122,55 @@ for _, h in ipairs(al) do
     end
 end
 io.write(('  (%d strict of %d ranked)\n'):format(strict, #al))
+local Bd = res.boundary
+if Bd and Bd.error then io.write('BOUNDARY: not derived — ', Bd.error, '\n')
+elseif Bd then
+    -- (cartograph.luajs.boundary, CART-1211 leaf 4) the VM objects the pack holds as JS values, derived: the structs
+    -- carrying GCHeader's own fields, and those holding one by value
+    io.write(('BOUNDARY: the VM objects (structs with GCHeader\'s %s, and those holding one): %s\n'):format(table.concat(Bd.gcheader, '/'), table.concat(Bd.gc_types, ' ')))
+    io.write(('  %d C functions probed (cjs exact heap mode, %d heap layouts from the compiler): %d clean, %d at the BOUNDARY, %d with a cjs GAP; %d closure-clean; %d emitted by a generated module\n')
+        :format(Bd.functions, #Bd.heap_types, Bd.own.clean, Bd.own.boundary, Bd.own.gap, Bd.clean_closure, #Bd.generated))
+    local kinds = {}
+    for _, r in ipairs(res.rows) do if r.boundary then kinds[r.boundary.kind] = (kinds[r.boundary.kind] or 0) + 1 end end
+    io.write('  registered functions by what their C holds below the boundary: ', vim.inspect(kinds, { newline = '', indent = '' }), '\n')
+    -- THE WORK ORDER: the clean cores no generated module emits yet, by the rows (registered functions) reaching them
+    -- ranked by the code a core holds (its clean closure's source lines), then by the functions reaching it: a
+    -- two-line accessor reached by 100 functions is not work
+    local reach, weight = {}, {}
+    for _, r in ipairs(res.rows) do
+        if r.boundary then
+            for _, c in ipairs(r.boundary.cores) do reach[c] = reach[c] or {}; table.insert(reach[c], r.qname); weight[c] = r.boundary.weight[c] end
+        end
+    end
+    local cs = vim.tbl_keys(reach)
+    table.sort(cs, function (a, b)
+        if weight[a] ~= weight[b] then return weight[a] > weight[b] end
+        if #reach[a] ~= #reach[b] then return #reach[a] > #reach[b] end
+        return a < b
+    end)
+    io.write(('  WORK ORDER — %d clean cores not yet transliterated, by the registered functions reaching them (a closure stops at the %d functions that never return: %s):\n')
+        :format(#cs, #Bd.noreturn, table.concat(vim.list_slice(Bd.noreturn, 1, 6), ' ') .. (#Bd.noreturn > 6 and ' …' or '')))
+    for i = 1, math.min(15, #cs) do
+        local q = reach[cs[i]]
+        io.write(('    %-26s %4d lines  %3d  %s%s\n'):format(cs[i], weight[cs[i]], #q, table.concat(vim.list_slice(q, 1, 5), ' '), #q > 5 and ' …' or ''))
+    end
+    io.write('  THE PACK\'S PRIMITIVES — their interpreter handlers against the boundary (own status; the first non-clean function reached; cores left):\n')
+    for _, p in ipairs(res.prims) do
+        for _, h in ipairs(p.handlers or {}) do
+            local b = (p.boundary or {})[h]
+            if b then io.write(('    %-10s %-22s %-9s via %-26s %s\n'):format(p.name, h, b.own, tostring(b.via), #b.cores > 0 and table.concat(b.cores, ' ') or '-')) end
+        end
+    end
+    local gw = vim.tbl_keys(Bd.gaps)
+    table.sort(gw, function (a, b) if #Bd.gaps[a] ~= #Bd.gaps[b] then return #Bd.gaps[a] > #Bd.gaps[b] end return a < b end)
+    io.write('  cjs GAPS (a construct cjs does not carry — not the VM), by the functions refusing it:\n')
+    for i = 1, math.min(10, #gw) do io.write(('    %4d  %s  (%s%s)\n'):format(#Bd.gaps[gw[i]], gw[i], table.concat(vim.list_slice(Bd.gaps[gw[i]], 1, 3), ' '), #Bd.gaps[gw[i]] > 3 and ' …' or '')) end
+    local gu = vim.tbl_keys(Bd.gc_uses)
+    table.sort(gu, function (a, b) if Bd.gc_uses[a] ~= Bd.gc_uses[b] then return Bd.gc_uses[a] > Bd.gc_uses[b] end return a < b end)
+    io.write('  the VM objects boundary functions touch: ')
+    for _, t in ipairs(gu) do io.write(t, ' ', Bd.gc_uses[t], '  ') end
+    io.write('\n')
+end
 if #res.drift > 0 then
     io.write(('MESSAGE DRIFT: %d pack message(s) that assemble no LuaJIT message (literals joined by …):\n'):format(#res.drift))
     for _, s in ipairs(res.drift) do io.write('  "', s, '"\n') end

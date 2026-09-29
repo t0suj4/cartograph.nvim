@@ -55,8 +55,9 @@ function M.emit(sources, opts)
     local refusals = {}
     local cur_src
     local function text(n) return vim.treesitter.get_node_text(n, cur_src) end
+    local cur_fn -- the function being emitted: every refusal names it (a boundary probe attributes refusals by function)
     local function refuse(n, kind, why)
-        refusals[#refusals + 1] = { kind = kind, why = why, line = n and (n:start() + 1) or 0 }
+        refusals[#refusals + 1] = { kind = kind, why = why, line = n and (n:start() + 1) or 0, fn = cur_fn }
         return ('$crefuse(%q)'):format(kind .. ': ' .. why)
     end
 
@@ -252,9 +253,16 @@ function M.emit(sources, opts)
     local function struct_of(ty)
         if ty and ty.k == 'struct' then return ty.fields or structs[ty.name] end
     end
+    --- opts.opaque = { [struct tag] = true }: types the emitted code may hold only as ADDRESSES — a boundary probe names
+    --- the VM's own objects here (a field read, a cast to one, arithmetic over one, a value of one is REFUSED as kind
+    --- 'boundary', naming the type) -> the opaque type's name | nil
+    local function opaq(ty)
+        while ty and (ty.k == 'ptr' or ty.k == 'array') do ty = ty.to or ty.of end
+        return ty and ty.k == 'struct' and opts.opaque and opts.opaque[ty.name] and ty.name or nil
+    end
 
     -- ── reachability from the roots: only what the roots call is emitted ─────────────────────────────────────────
-    local want, order = {}, {}
+    local want, order, calls = {}, {}, {} -- (calls: each emitted function's callee NAMES, in source order — info.calls)
     local function visit(name)
         -- a TEMPLATED name is not emitted even when C defines it (asuint64's union body: the template IS its meaning)
         if want[name] or not funcs[name] or (opts.templates or {})[name] then return end
@@ -266,6 +274,7 @@ function M.emit(sources, opts)
         -- math_err.c's definitions were visited — a single-source recipe never shows it)
         local callees = {}
         for _, c in q:iter_captures(funcs[name].node, cur_src, 0, -1) do callees[#callees + 1] = text(c) end
+        calls[name] = callees
         for _, c in ipairs(callees) do visit(c) end
         order[#order + 1] = name
     end
@@ -337,6 +346,9 @@ function M.emit(sources, opts)
     end
     --- the byte width of a WIDE heap element (> 1 byte: bytes keep their H[...] forms) | nil
     local function wide(el) local w = X and opts.heap and CW[elcls(el) or ''] return w and w > 1 and w or nil end
+    --- the STEP of pointer arithmetic over `el` in exact heap mode: a wide scalar's width, or a heap-laid struct's size
+    --- (the compiler's sizeof) | nil
+    local function step(el) local hl = X and opts.heap and heap_layout(el) return (hl and hl.size) or wide(el) end
     --- an element INDEX as a JS number, its value kept (a 64-bit one Number()'d; a uint32 above 2^31 must not wrap
     --- negative, as a conversion to int would)
     local function index(ijs, ity) return is64(ity) and ('Number(' .. ijs .. ')') or ('(' .. ijs .. ')') end
@@ -423,6 +435,7 @@ function M.emit(sources, opts)
     local function deref(ptrjs, ty, n)
         local el = ty and (ty.k == 'ptr' and ty.to or ty.k == 'array' and ty.of) or nil
         if not el then return refuse(n, 'deref', 'a dereference of a non-pointer'), { k = 'int' } end
+        if opaq(el) then return refuse(n, 'boundary', ('a dereference of the VM object `%s`'):format(opaq(el))), { k = 'int' } end
         if wide(el) then return hderef('(' .. ptrjs .. ')', el) end
         if el.k == 'char' then return ('(H[' .. ptrjs .. '] << 24 >> 24)'), { k = 'int' } end
         if el.k == 'uchar' then return ('H[' .. ptrjs .. ']'), { k = 'int' } end
@@ -532,6 +545,8 @@ function M.emit(sources, opts)
             local ajs, aty = expr(field_of(n, 'argument'))
             local ijs, ity = expr(field_of(n, 'index'))
             local el = aty and (aty.k == 'ptr' and aty.to or aty.k == 'array' and aty.of) or nil
+            -- exact heap mode: an element of a heap-laid struct array IS its address (field reads go through it)
+            if X and opts.heap and heap_layout(el) then return ('(%s + %s * %d)'):format(ajs, index(ijs, ity), step(el)), el end
             if el and el.k == 'struct' then return ('%s[%s]'):format(ajs, ijs), el end
             -- exact mode: an array of scalars (a struct global's field) is a JS array; the index a JS number
             if X and el and aty.k == 'array' and not aty.heap and (isD(el) or (el.k == 'int' and el.w)) then
@@ -545,6 +560,7 @@ function M.emit(sources, opts)
             local op = text(field_of(n, 'operator'))
             local fname = text(field_of(n, 'field'))
             local sty = op == '->' and aty and aty.k == 'ptr' and aty.to or aty
+            if opaq(sty) then return refuse(n, 'boundary', ('a field (%s) of the VM object `%s`'):format(fname, opaq(sty))), I32 end
             -- exact mode: a HEAP struct/union — `p->f` (p an address) and `x.f` (a heap local IS its address) alike
             local hl = heap_layout(sty)
             if hl then return heap_field(ajs, hl, fname, n, sty.hpath) end
@@ -592,14 +608,15 @@ function M.emit(sources, opts)
             if op == '<' or op == '>' or op == '<=' or op == '>=' then return ('+(%s %s %s)'):format(ljs, op, rjs), { k = 'int' } end
             if op == '+' or op == '-' then
                 if lp and rp and op == '-' then
-                    local w = wide(lty.k == 'ptr' and lty.to or lty.of)
+                    local w = step(lty.k == 'ptr' and lty.to or lty.of)
                     if w then return ('((%s - %s) / %d)'):format(ljs, rjs, w), I32 end
                     return ('(%s - %s)'):format(ljs, rjs), { k = 'int' }
                 end
                 local pty = lp and lty or rp and rty
                 if pty then
                     local el = pty.k == 'ptr' and pty.to or pty.of
-                    local w = wide(el)
+                    if opaq(el) then return refuse(n, 'boundary', ('arithmetic over the VM object `%s`'):format(opaq(el))), pty end
+                    local w = step(el)
                     if w then
                         -- exact heap mode: p + i is the address i ELEMENTS on (`i + p` too; `p - i` back)
                         local pjs, ijs, ity = lp and ljs or rjs, lp and rjs or ljs, lp and rty or lty
@@ -640,9 +657,9 @@ function M.emit(sources, opts)
             local a = field_of(n, 'argument')
             local js, ty = expr(a)
             local prefix = n:child(0):type() == op
-            if ty and ty.k == 'ptr' and wide(ty.to) then
+            if ty and ty.k == 'ptr' and step(ty.to) then
                 -- exact heap mode: one ELEMENT on; a postfix form's value is the old address
-                local w, o = wide(ty.to), op == '++' and '+' or '-'
+                local w, o = step(ty.to), op == '++' and '+' or '-'
                 if prefix then return ('(%s %s= %d)'):format(js, o, w), ty end
                 return ('((%s %s= %d) %s %d)'):format(js, o, w, o == '+' and '-' or '+', w), ty
             end
@@ -653,9 +670,9 @@ function M.emit(sources, opts)
             local l = field_of(n, 'left')
             local ljs, lty = expr(l)
             local rjs, rty = expr(field_of(n, 'right'))
-            if (op == '+=' or op == '-=') and lty and lty.k == 'ptr' and wide(lty.to) then
+            if (op == '+=' or op == '-=') and lty and lty.k == 'ptr' and step(lty.to) then
                 -- exact heap mode: `p += i` moves i ELEMENTS
-                return ('%s %s %s * %d'):format(ljs, op, index(rjs, rty), wide(lty.to)), lty
+                return ('%s %s %s * %d'):format(ljs, op, index(rjs, rty), step(lty.to)), lty
             end
             if X and lty and lty.hstore then
                 -- a HEAP field: a typed store (`a op= b` is `a = (T)(a op b)`, the load read once more)
@@ -708,6 +725,7 @@ function M.emit(sources, opts)
             local bt = base_type(field_of(td, 'type'))
             local _, ty = declarator(field_of(td, 'declarator'), bt)
             local vjs, vty = expr(field_of(n, 'value'))
+            if opaq(ty) then return refuse(n, 'boundary', ('a cast to the VM object `%s`'):format(opaq(ty))), ty end
             if X and (isD(ty) or (ty.k == 'int' and ty.w)) and vty and (isD(vty) or vty.k == 'int') then return conv(vjs, vty, ty), ty end
             if X and ty.k == 'void' then return 'void (' .. vjs .. ')', ty end
             if ty.k == 'ptr' and ty.to.k == 'void' and vjs == '0' then return 'null', ty end
@@ -900,6 +918,7 @@ function M.emit(sources, opts)
                         end
                         goto next_declarator
                     end
+                    if ty.k == 'struct' and opaq(ty) then return refuse(n, 'boundary', ('a local VM object `%s` (a value, not an address)'):format(opaq(ty))), nil end
                     if ty.k == 'struct' then return refuse(n, 'local-struct', 'a struct value as a local'), nil end
                     local v = c:type() == 'init_declarator' and field_of(c, 'value')
                     -- the name is in scope from the end of its declarator, its initializer included (C's own rule)
@@ -1233,6 +1252,7 @@ function M.emit(sources, opts)
     end
     local fns = {}
     for _, name in ipairs(order) do
+        cur_fn = name
         local f = funcs[name]
         cur_src = f.src
         scope = {}
@@ -1335,7 +1355,9 @@ function M.emit(sources, opts)
         for key in pairs(sites) do if not contract_seen[key] then unresolved[#unresolved + 1] = key end end
     end
     table.sort(unresolved)
-    return js, refusals, { functions = order, globals = gnames, messages = errmsg, unresolved_sites = unresolved }
+    local lines = {} -- each emitted function's source line count (a probe weighs code by it)
+    for _, name in ipairs(order) do local r0, _, r1 = funcs[name].node:range(); lines[name] = r1 - r0 + 1 end
+    return js, refusals, { functions = order, globals = gnames, messages = errmsg, unresolved_sites = unresolved, calls = calls, lines = lines }
 end
 
 -- ── the HOST COMPILER's answers about C layout (exact heap mode never re-derives C's layout rules) ──────────────
@@ -1429,21 +1451,45 @@ function M.compiler_layout(opts)
     return layout, desc
 end
 
---- every `sizeof(<type>)` in `opts.src`, answered by the compiler -> { [type text] = bytes } | nil, why
+--- every `sizeof(<type>)` in `opts.src` (or the type texts `opts.types`), answered by the compiler -> { [type text] =
+--- bytes } | nil, why. With `opts.types`, a type the header does not define is SKIPPED (each type then asked alone),
+--- not a failure of all — a probe over many units asks for types only some of them define
 function M.compiler_sizes(opts)
-    local tree = vim.treesitter.get_string_parser(opts.src, 'c'):parse()[1]
-    local q = vim.treesitter.query.parse('c', '(sizeof_expression type: (type_descriptor) @t)')
     local types = {}
-    for _, node in q:iter_captures(tree:root(), opts.src, 0, -1) do types[vim.trim(vim.treesitter.get_node_text(node, opts.src))] = true end
+    if opts.types then
+        for _, ty in ipairs(opts.types) do types[ty] = true end
+    else
+        local tree = vim.treesitter.get_string_parser(opts.src, 'c'):parse()[1]
+        local q = vim.treesitter.query.parse('c', '(sizeof_expression type: (type_descriptor) @t)')
+        for _, node in q:iter_captures(tree:root(), opts.src, 0, -1) do types[vim.trim(vim.treesitter.get_node_text(node, opts.src))] = true end
+    end
     local sp = {}
     for ty in pairs(types) do sp[#sp + 1] = ('  printf("%%zu %s\\n", sizeof(%s));\n'):format(ty, ty) end
     table.sort(sp)
     if #sp == 0 then return {} end
     local out, why = crun(opts, 'sizes', table.concat(sp))
+    if not out and opts.types then
+        local parts = {}
+        for _, line in ipairs(sp) do parts[#parts + 1] = crun(opts, 'size1', line) end
+        out = table.concat(parts)
+    end
     if not out then return nil, why end
     local sizes = {}
     for line in out:gmatch('[^\n]+') do local v, ty = line:match('^(%d+) (.+)$'); if v then sizes[ty] = tonumber(v) end end
     return sizes
 end
+
+--- the COMPILER BUILTINS and libc leaves exact-mode recipes share, as templates (one line each: the hardware's or
+--- the compiler's meaning, which has no C body). Each names the runtime it needs: $clz64 / $ldexp from
+--- lua/cartograph/luajs/fpu.js (each with its own C oracle in tests/luajs_spec.lua), $memcmp from the recipe's prelude
+--- (over its heap). A boundary probe (cartograph.luajs.boundary) uses the same set, so a builtin is never a "gap".
+M.BUILTINS = {
+    __builtin_expect = { js = '$1', ret = 'arg1' },
+    __builtin_clz = { js = 'Math.clz32($1)', ret = 'i32' },                 -- (undefined for 0 in C)
+    __builtin_ctz = { js = '(31 - Math.clz32(($1) & -($1)))', ret = 'i32' },
+    __builtin_clzll = { js = '$clz64($1)', ret = 'i32' },
+    ldexp = '$ldexp($1, $2)',                                                  -- one rounding (fpu.js)
+    memcmp = { js = '$memcmp($1, $2, $3)', ret = 'i32' },
+}
 
 return M

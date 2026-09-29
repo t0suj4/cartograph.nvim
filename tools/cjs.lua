@@ -115,14 +115,11 @@ elseif recipe == 'strfmt' then
         roots = { 'cjs_numstr' },
         heap = { types = { TValue = B.layout }, stack = 65536 },
         sizes = B.sizes,
-        templates = {
-            __builtin_expect = { js = '$1', ret = 'arg1' },
-            __builtin_clz = { js = 'Math.clz32($1)', ret = 'i32' },            -- (C: undefined for 0; lj_fls never asks)
-            __builtin_ctz = { js = '(31 - Math.clz32(($1) & -($1)))', ret = 'i32' },
-            memcmp = { js = '$memcmp($1, $2, $3)', ret = 'i32' },               -- over the heap (below)
-            -- the adapter always passes a buffer: wfnum's "grow the SBuf" branch is unreachable, and breaks by name
+        -- the shared compiler builtins (cartograph.cjs.BUILTINS; memcmp over the heap, below), and this recipe's SEAM:
+        -- the adapter always passes a buffer, so wfnum's "grow the SBuf" branch is unreachable, and breaks by name
+        templates = vim.tbl_extend('force', {}, C.BUILTINS, {
             lj_buf_more = { js = '$crefuse("lj_buf_more: the adapter always passes a buffer")', ret = 'u32' },
-        },
+        }),
         prelude = 'const $memcmp = (a, b, n) => { for (let i = 0; i < n; i++) { const d = H[a + i] - H[b + i]; if (d) return d; } return 0; };',
         epilogue = table.concat({
             '/** a number -> its Lua string (tostring / concatenation): LuaJIT\'s %.14g, into a ' .. maxbuf .. '-byte heap buffer',
@@ -171,12 +168,9 @@ elseif recipe == 'strscan' then
         roots = { 'cjs_tonum' },
         heap = { types = { TValue = layout }, stack = 65536 },
         sizes = sizes,
-        templates = {
-            ldexp = '$ldexp($1, $2)',                                     -- one rounding (fpu.js; its own C oracle)
-            __builtin_clzll = { js = '$clz64($1)', ret = 'i32' },
-            lj_vm_num2int_check = '$num2int_check($1)',                   -- VM ASSEMBLY, read (fpu.js)
-            __builtin_expect = { js = '$1', ret = 'arg1' },
-        },
+        -- the shared compiler builtins (cartograph.cjs.BUILTINS: ldexp and clzll from fpu.js), and the VM ASSEMBLY
+        -- this scanner calls, read from vm_x64.dasc (fpu.js)
+        templates = vim.tbl_extend('force', {}, C.BUILTINS, { lj_vm_num2int_check = '$num2int_check($1)' }),
         prelude = "const { $ldexp, $clz64, $num2int_check } = require('./$fpu.js');",
         epilogue = table.concat({
             '/** a Lua string (a JS string of bytes) -> its number, or undefined when LuaJIT reads none: the bytes and a',
