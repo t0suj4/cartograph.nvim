@@ -142,10 +142,7 @@ function M.run(opts)
     local dead = F.dead()
     if #dead > 0 then return nil, 'the fragment selects kinds with no derived production: ' .. table.concat(dead, ' ') end
     local dir, repo = opts.dir, opts.repo
-    vim.fn.mkdir(dir, 'p')
-    for _, f in ipairs { 'pack.js', 'lstrmatch.js' } do
-        vim.fn.writefile(vim.fn.readfile(repo .. '/lua/cartograph/luajs/' .. f, 'b'), dir .. '/$' .. f, 'b')
-    end
+    L.install_pack(dir)
     local env = L.run_env(dir, repo .. '/lua')
     local luaref = repo .. '/tests/fixtures/luaref.lua'
     local prelude_lines = select(2, M.PRELUDE:gsub('\n', ''))

@@ -519,6 +519,35 @@ function M.bridge(ts_src)
 end
 
 --- the environment a transliterated module runs in: its root, the bridge, the runtime path parsers are found on
+local LUAJS_DIR = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h') .. '/luajs'
+
+--- the pack's COMPANION files, DERIVED: every `require('./$X.js')` of pack.js and, transitively, of each companion
+--- (the matcher, libm's pow, the FPU primitives it needs) -> { { published = '$X.js', source = <lua/cartograph/luajs/X.js> } }
+--- — never a hand list: four callers kept one, and a third generated file would have had to be added to each
+function M.companions()
+    local out, seen, queue = {}, {}, { LUAJS_DIR .. '/pack.js' }
+    while #queue > 0 do
+        local fd = io.open(table.remove(queue, 1))
+        local s = fd and fd:read('a') or ''
+        if fd then fd:close() end
+        for name in s:gmatch("require%('%./%$([%w_]+)%.js'%)") do
+            if not seen[name] then
+                seen[name] = true
+                out[#out + 1] = { published = '$' .. name .. '.js', source = LUAJS_DIR .. '/' .. name .. '.js' }
+                queue[#queue + 1] = LUAJS_DIR .. '/' .. name .. '.js'
+            end
+        end
+    end
+    return out
+end
+
+--- install the template pack (as `$pack.js`) and every companion beside it in `dir`
+function M.install_pack(dir)
+    vim.fn.mkdir(dir, 'p')
+    vim.fn.writefile(vim.fn.readfile(LUAJS_DIR .. '/pack.js', 'b'), dir .. '/$pack.js', 'b')
+    for _, c in ipairs(M.companions()) do vim.fn.writefile(vim.fn.readfile(c.source, 'b'), dir .. '/' .. c.published, 'b') end
+end
+
 function M.run_env(out_dir, src_root)
     local env = { LUAJS_ROOT = out_dir, LUAJS_SRC_ROOT = src_root }
     env.LUAJS_TS_BRIDGE = M.bridge()

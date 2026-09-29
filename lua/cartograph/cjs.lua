@@ -32,6 +32,15 @@ for w in ('abstract arguments await boolean byte class delete eval export extend
 local TYPEDEF_INT = { size_t = true, ptrdiff_t = true, int32_t = true, uint32_t = true, MSize = true, int64_t = true,
     uint64_t = true, intptr_t = true, uintptr_t = true, lua_Integer = true, BCPos = true }
 local TYPEDEF_UCHAR = { uint8_t = true }
+-- ★ EXACT MODE (opts.exact, CART-1211: a libm function): C's arithmetic as C states it, LP64. A type is
+-- { k = 'double' } or { k = 'int', w = 32 | 64, u = true|nil }; a 64-bit value is a BigInt wrapped to 64 bits after
+-- every operation, a uint32_t a JS number wrapped by `>>> 0`, a signed 32-bit int a plain JS number (its overflow is
+-- undefined behaviour in C, so exact arithmetic within range is the whole contract). Off by default: the lstrmatch
+-- recipe's output is byte-identical with it off.
+local EXACT_NAMED = {
+    uint64_t = { k = 'int', w = 64, u = true }, int64_t = { k = 'int', w = 64 }, uint32_t = { k = 'int', w = 32, u = true },
+    int32_t = { k = 'int', w = 32 }, int = { k = 'int', w = 32 }, double = { k = 'double' }, double_t = { k = 'double' },
+}
 
 local function field_of(n, name) for c, f in n:iter_children() do if f == name then return c end end end
 local function named_kids(n)
@@ -42,6 +51,7 @@ end
 
 function M.emit(sources, opts)
     opts = opts or {}
+    local X = opts.exact
     local refusals = {}
     local cur_src
     local function text(n) return vim.treesitter.get_node_text(n, cur_src) end
@@ -52,17 +62,30 @@ function M.emit(sources, opts)
 
     -- ── the declarations of every source: typedef'd structs, functions, global arrays, enum-carried messages ──────
     local structs, funcs, globals, errmsg = {}, {}, {}, {}
+    -- exact mode: typedefs of non-struct types, struct TAGS (`struct pow_log_data {…}`), prototypes (a template's
+    -- types), struct-valued globals (a JS object each)
+    local typedefs, tags, protos, sglobals = {}, {}, {}, {}
     local trees = {}
     for _, s in ipairs(sources) do
         local tree = vim.treesitter.get_string_parser(s.text, 'c'):parse()[1]
         trees[#trees + 1] = { root = tree:root(), src = s.text, name = s.name }
     end
 
+    local struct_fields -- (defined below; base_type reads a struct's fields in exact mode)
+    local params_of -- (defined below, once declarator exists)
     --- a C type from a `type` node (+ qualifiers) -> { k = 'int' | 'char' | 'uchar' | 'struct' | 'void' | 'opaque', name? }
     local function base_type(tn)
         if not tn then return { k = 'int' } end
         local t = tn:type()
         local tx = text(tn)
+        if X and (t == 'primitive_type' or t == 'type_identifier') and (EXACT_NAMED[tx] or typedefs[tx]) then
+            return EXACT_NAMED[tx] or typedefs[tx]
+        end
+        if X and t == 'sized_type_specifier' and not tx:find('char') then
+            -- `unsigned long int`, `long long`, `unsigned`: LP64 — a `long` is 64 bits
+            return { k = 'int', w = tx:find('long') and 64 or 32, u = tx:find('unsigned') and true or nil }
+        end
+        if X and t == 'primitive_type' and tx == 'float' then return { k = 'float' } end
         if t == 'primitive_type' then
             -- tree-sitter C parses the stdint names (uint8_t, size_t, …) as PRIMITIVE types
             if TYPEDEF_UCHAR[tx] then return { k = 'uchar' } end
@@ -79,7 +102,16 @@ function M.emit(sources, opts)
             return { k = 'opaque', name = tx }
         elseif t == 'struct_specifier' then
             local nm = field_of(tn, 'name')
-            return { k = 'struct', name = nm and text(nm) or ('anon@' .. tn:start()), node = tn }
+            local ty = { k = 'struct', name = nm and text(nm) or ('anon@' .. tn:start()), node = tn }
+            if X then
+                -- a struct with a BODY defines its tag (`extern const struct pow_log_data {…} __pow_log_data`); a bare
+                -- `struct pow_log_data` reads it back
+                if field_of(tn, 'body') then
+                    ty.fields = struct_fields(tn)
+                    if nm then tags[text(nm)] = ty.fields end
+                elseif nm then ty.fields = tags[text(nm)] end
+            end
+            return ty
         end
         return { k = 'opaque', name = tx }
     end
@@ -100,9 +132,23 @@ function M.emit(sources, opts)
         end
         return nil, ty
     end
-    local function struct_fields(sn)
+    --- exact mode: a function's parameter types in order — read in ITS source's text (a prototype from a header)
+    function params_of(fdecl)
+        local out, saved = {}, cur_src
+        cur_src = fdecl.src or cur_src
+        for _, pd in ipairs(fdecl.type.params and named_kids(fdecl.type.params) or {}) do
+            if pd:type() == 'parameter_declaration' then
+                local _, ty = declarator(field_of(pd, 'declarator'), base_type(field_of(pd, 'type')))
+                out[#out + 1] = ty
+            end
+        end
+        cur_src = saved
+        return out
+    end
+    function struct_fields(sn)
         local body = field_of(sn, 'body')
         local fields = {}
+        local order = X and {} or nil -- exact mode: declaration order, for a POSITIONAL initializer
         for _, fd in ipairs(body and named_kids(body) or {}) do
             if fd:type() == 'field_declaration' then
                 local bt = base_type(field_of(fd, 'type'))
@@ -110,11 +156,12 @@ function M.emit(sources, opts)
                 for c, f in fd:iter_children() do
                     if f == 'declarator' then
                         local nm, ty = declarator(c, bt)
-                        if nm then fields[nm] = ty end
+                        if nm then fields[nm] = ty; if order then order[#order + 1] = nm end end
                     end
                 end
             end
         end
+        if order then fields.__order = order end
         return fields
     end
     for _, tr in ipairs(trees) do
@@ -123,10 +170,13 @@ function M.emit(sources, opts)
             local t = n:type()
             if t == 'type_definition' then
                 local ty, nm = field_of(n, 'type'), field_of(n, 'declarator')
-                if ty and ty:type() == 'struct_specifier' and nm then structs[text(nm)] = struct_fields(ty) end
+                if ty and ty:type() == 'struct_specifier' and nm then structs[text(nm)] = struct_fields(ty)
+                elseif X and ty and nm and nm:type() == 'type_identifier' then typedefs[text(nm)] = base_type(ty) end
+            elseif X and t == 'struct_specifier' then
+                base_type(n) -- `struct tab { … };` alone: it defines the tag (base_type registers a body's fields)
             elseif t == 'function_definition' then
                 local nm, fty = declarator(field_of(n, 'declarator'), base_type(field_of(n, 'type')))
-                if nm then funcs[nm] = { node = n, type = fty, src = tr.src } end
+                if nm then funcs[nm] = { node = n, type = fty, src = tr.src, sname = tr.name } end
             elseif t == 'declaration' then
                 local bt = base_type(field_of(n, 'type'))
                 for c, f in n:iter_children() do
@@ -135,7 +185,12 @@ function M.emit(sources, opts)
                         local val = field_of(c, 'value')
                         if nm and ty.k == 'array' and val and val:type() == 'initializer_list' then
                             globals[nm] = { type = ty, init = val, src = tr.src }
+                        elseif X and nm and ty.k == 'struct' and val and val:type() == 'initializer_list' then
+                            sglobals[nm] = { type = ty, init = val, src = tr.src }
                         end
+                    elseif X and f == 'declarator' and c:type() == 'function_declarator' then
+                        local nm, ty = declarator(c, bt) -- a prototype: the types a template's call converts to
+                        if nm then protos[nm] = { type = ty, src = tr.src } end
                     end
                 end
             elseif t == 'enum_specifier' or (t == 'declaration' and false) then
@@ -163,11 +218,17 @@ function M.emit(sources, opts)
     -- ── reachability from the roots: only what the roots call is emitted ─────────────────────────────────────────
     local want, order = {}, {}
     local function visit(name)
-        if want[name] or not funcs[name] then return end
+        -- a TEMPLATED name is not emitted even when C defines it (asuint64's union body: the template IS its meaning)
+        if want[name] or not funcs[name] or (opts.templates or {})[name] then return end
         want[name] = true
         cur_src = funcs[name].src
         local q = vim.treesitter.query.parse('c', '(call_expression function: (identifier) @f)')
-        for _, c in q:iter_captures(funcs[name].node, cur_src, 0, -1) do visit(text(c)) end
+        -- the callee NAMES first, then the recursion: a callee in another source switches cur_src, and reading the
+        -- rest of this body's names through that text read garbage (measured: pow's callees in pow.c were lost once
+        -- math_err.c's definitions were visited — a single-source recipe never shows it)
+        local callees = {}
+        for _, c in q:iter_captures(funcs[name].node, cur_src, 0, -1) do callees[#callees + 1] = text(c) end
+        for _, c in ipairs(callees) do visit(c) end
         order[#order + 1] = name
     end
     for _, r in ipairs(opts.roots or {}) do visit(r) end
@@ -188,8 +249,78 @@ function M.emit(sources, opts)
     table.sort(gnames)
 
     local scope -- name -> { js, type }
+    local fused, muldef, mtemps = {}, {}, {} -- exact mode: the compiler's contractions in the current function (below)
+    local contract_seen = {} -- every site that resolved (a fused addition, or an explicit fma) — the rest are reported
     local expr, stmt
-    local function T(js) return '$T(' .. js .. ')' end
+    local I32 = { k = 'int', w = 32 }
+    local function is64(t) return t and t.k == 'int' and t.w == 64 end
+    local function isD(t) return t and t.k == 'double' end
+    --- C truthiness; exact mode reads the TYPE (a BigInt 0n is truthy to JS's `!== 0`)
+    local function T(js, ty)
+        if X and is64(ty) then return '(' .. js .. ' !== 0n)' end
+        if X and isD(ty) then return '(' .. js .. ' !== 0)' end
+        return '$T(' .. js .. ')'
+    end
+    --- exact mode: the value `js` of C type `from` converted to C type `to` (assignment, argument, cast, operand)
+    local function conv(js, from, to)
+        if not X or not from or not to then return js end
+        if to.k == 'double' then return is64(from) and ('Number(' .. js .. ')') or js end
+        if to.k ~= 'int' then return js end
+        if to.w == 64 then
+            local fn = to.u and 'asUintN' or 'asIntN'
+            if is64(from) then return (not from.u) == (not to.u) and js or ('BigInt.%s(64, %s)'):format(fn, js) end
+            if isD(from) then return ('BigInt.%s(64, BigInt(Math.trunc(%s)))'):format(fn, js) end
+            return to.u and ('BigInt.asUintN(64, BigInt(%s))'):format(js) or ('BigInt(%s)'):format(js)
+        end
+        if is64(from) then return ('Number(BigInt.%s(32, %s))'):format(to.u and 'asUintN' or 'asIntN', js) end
+        if isD(from) then return to.u and ('(Math.trunc(%s) >>> 0)'):format(js) or ('(Math.trunc(%s) | 0)'):format(js) end
+        if to.u and not from.u then return '((' .. js .. ') >>> 0)' end
+        if not to.u and from.u then return '((' .. js .. ') | 0)' end
+        return js
+    end
+    --- exact mode: the usual arithmetic conversions -> the common type
+    local function common(a, b)
+        if isD(a) or isD(b) then return { k = 'double' } end
+        local a64, b64 = is64(a), is64(b)
+        if a64 and b64 then return { k = 'int', w = 64, u = (a.u or b.u) or nil } end
+        if a64 then return a end -- a signed 64-bit type holds every 32-bit value, signed or not
+        if b64 then return b end
+        return { k = 'int', w = 32, u = (a and a.u or b and b.u) or nil }
+    end
+    --- exact mode: `op` over typed operands -> js, type | nil (not an arithmetic case)
+    local function arith(op, ljs, lty, rjs, rty)
+        if op == '<<' or op == '>>' then
+            local ty = is64(lty) and lty or { k = 'int', w = 32, u = lty and lty.u or nil } -- the PROMOTED LEFT type
+            if is64(ty) then
+                local r = conv(rjs, rty or I32, { k = 'int', w = 64 })
+                if op == '<<' then return ('BigInt.%s(64, %s << %s)'):format(ty.u and 'asUintN' or 'asIntN', ljs, r), ty end
+                return ('(%s >> %s)'):format(ljs, r), ty -- a u64 is non-negative: BigInt >> is the logical shift
+            end
+            if ty.u then return op == '<<' and ('((%s << %s) >>> 0)'):format(ljs, rjs) or ('(%s >>> %s)'):format(ljs, rjs), ty end
+            return ('(%s %s %s)'):format(ljs, op, rjs), ty
+        end
+        local ct = common(lty, rty)
+        local a, b = conv(ljs, lty, ct), conv(rjs, rty, ct)
+        local CMP = { ['=='] = '===', ['!='] = '!==', ['<'] = '<', ['>'] = '>', ['<='] = '<=', ['>='] = '>=' }
+        if CMP[op] then return ('+(%s %s %s)'):format(a, CMP[op], b), I32 end
+        if isD(ct) then
+            if op == '+' or op == '-' or op == '*' or op == '/' then return ('(%s %s %s)'):format(a, op, b), ct end
+            return nil
+        end
+        if is64(ct) then
+            if op == '/' or op == '%' then return ('(%s %s %s)'):format(a, op, b), ct end -- BigInt truncates, as C
+            return ('BigInt.%s(64, %s %s %s)'):format(ct.u and 'asUintN' or 'asIntN', a, op, b), ct
+        end
+        if ct.u then
+            if op == '*' then return ('(Math.imul(%s, %s) >>> 0)'):format(a, b), ct end
+            if op == '/' then return ('Math.trunc(%s / %s)'):format(a, b), ct end
+            if op == '%' then return ('(%s %% %s)'):format(a, b), ct end
+            return ('((%s %s %s) >>> 0)'):format(a, op, b), ct
+        end
+        -- signed 32: overflow is undefined behaviour, so exact JS arithmetic within range is C's; `/` truncates
+        if op == '/' then return ('Math.trunc(%s / %s)'):format(a, b), ct end
+        return ('(%s %s %s)'):format(a, op, b), ct
+    end
 
     -- ── expressions: -> js, type ──────────────────────────────────────────────────────────────────────────────────
     local function deref(ptrjs, ty, n)
@@ -220,6 +351,7 @@ function M.emit(sources, opts)
             local v = scope[nm]
             if v then return v.js, v.type end
             if gbase[nm] then return tostring(gbase[nm]), { k = 'ptr', to = globals[nm].type.of } end
+            if sglobals[nm] then return nm, sglobals[nm].type end
             if funcs[nm] then return nm, funcs[nm].type end
             if nm:match('^LJ_ERR_') then return ('%q'):format(errmsg[nm] or nm), { k = 'errcode' } end
             return refuse(n, 'identifier', 'no declaration for `' .. nm .. '`'), { k = 'int' }
@@ -229,6 +361,47 @@ function M.emit(sources, opts)
             local q = vim.treesitter.query.parse('c', '(string_literal) @s')
             for _, lit in q:iter_captures(n, cur_src, 0, -1) do parts[#parts + 1] = text(lit):sub(2, -2) end
             return '"' .. table.concat(parts) .. '"', { k = 'ptr', to = { k = 'char' } }
+        elseif t == 'number_literal' and X then
+            -- exact mode: a literal's TYPE is C11's (6.4.4.1, LP64); a floating literal (hex included) is its value, read
+            -- by LuaJIT's own reader and printed with 17 digits — an exact round trip
+            -- tree-sitter's C grammar takes a leading SIGN into the literal in an initializer (`-0x1p-1`, `-2`): split it
+            -- off — the type is the magnitude's, the sign a negation (measured: `-0x1p-1` classed as an integer)
+            local sign, raw = text(n):match('^([+-]?)(.*)$')
+            local neg = sign == '-'
+            local body = raw:gsub('[uUlL]+$', '')
+            local suffix = raw:sub(#body + 1):lower()
+            local hex = body:match('^0[xX]') ~= nil
+            if (hex and body:find('[pP.]')) or (not hex and body:find('[.eE]')) then
+                local v = tonumber((body:gsub('[fF]$', '')))
+                if not v then return refuse(n, 'literal', 'a floating literal Lua cannot read: ' .. raw), { k = 'double' } end
+                return ('%.17g'):format(neg and -v or v), { k = 'double' }
+            end
+            local octal = not hex and body:match('^0%d')
+            local bits
+            if hex then
+                local d = body:sub(3):gsub('^0+', '')
+                -- the leading digit's bit length (1 -> 1, 2..3 -> 2, 4..7 -> 3, 8..f -> 4) + 4 per further digit
+                bits = #d == 0 and 0 or ((#d - 1) * 4 + ({ 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4 })[tonumber(d:sub(1, 1), 16)])
+            else
+                local v = tonumber(octal and body:sub(2) or body, octal and 8 or 10) or 0
+                bits = v == 0 and 0 or math.floor(math.log(v, 2)) + 1
+            end
+            local u, w
+            if suffix:find('u') then u = true; w = (suffix:find('l') or bits > 32) and 64 or 32
+            elseif suffix:find('l') then w = 64; u = (hex or octal) and bits > 63 or nil
+            elseif bits <= 31 then w = 32
+            elseif (hex or octal) and bits <= 32 then w = 32; u = true
+            elseif bits <= 63 then w = 64
+            else w = 64; u = true end
+            local js = octal and tostring(tonumber(body:sub(2), 8)) or body
+            if w == 64 then js = js .. 'n' end
+            local ty = { k = 'int', w = w, u = u }
+            if neg then
+                -- the negation of the magnitude, in its type (an unsigned one wraps)
+                if w == 64 then return ('BigInt.%s(64, -%s)'):format(u and 'asUintN' or 'asIntN', js), ty end
+                return u and ('((-%s) >>> 0)'):format(js) or ('(-' .. js .. ')'), ty
+            end
+            return js, ty
         elseif t == 'number_literal' then
             local v = text(n):gsub('[uUlL]+$', '')
             return v, { k = 'int' }
@@ -241,7 +414,13 @@ function M.emit(sources, opts)
             local a = field_of(n, 'argument')
             if op == '*' then
                 local js, ty = expr(a)
+                -- exact mode: a pointer to a SCALAR is a one-cell box (an out-parameter: `double_t *tail`)
+                if X and ty and ty.k == 'ptr' and (isD(ty.to) or (ty.to.k == 'int' and ty.to.w)) then return js .. '[0]', ty.to end
                 return deref(js, ty, n)
+            end
+            if X and a:type() == 'identifier' and scope[text(a)] and scope[text(a)].box then
+                local v = scope[text(a)]
+                return v.box, { k = 'ptr', to = v.type }
             end
             return refuse(n, 'address-of', 'taking an address (`&`)'), { k = 'int' }
         elseif t == 'subscript_expression' then
@@ -249,6 +428,11 @@ function M.emit(sources, opts)
             local ijs = expr(field_of(n, 'index'))
             local el = aty and (aty.k == 'ptr' and aty.to or aty.k == 'array' and aty.of) or nil
             if el and el.k == 'struct' then return ('%s[%s]'):format(ajs, ijs), el end
+            -- exact mode: an array of scalars (a struct global's field) is a JS array; the index a JS number
+            if X and el and aty.k == 'array' and (isD(el) or (el.k == 'int' and el.w)) then
+                local _, ity = expr(field_of(n, 'index'))
+                return ('%s[%s]'):format(ajs, conv(ijs, ity, I32)), el
+            end
             return deref(('%s + %s'):format(ajs, ijs), aty, n)
         elseif t == 'field_expression' then
             local ajs, aty = expr(field_of(n, 'argument'))
@@ -258,13 +442,43 @@ function M.emit(sources, opts)
             local fields = struct_of(sty)
             if not fields or not fields[fname] then return refuse(n, 'field', 'no struct field `' .. fname .. '`'), { k = 'int' } end
             return ('%s.%s'):format(ajs, fname), fields[fname]
+        elseif t == 'binary_expression' and X and (fused[n:id()] or muldef[n:id()]) then
+            -- a multiply-add the host compiler FUSED: one rounding ($fma), exactly what its FMA instruction computes
+            local D = { k = 'double' }
+            local md = muldef[n:id()]
+            if md then
+                -- a product fused into an addition in a LATER statement: its operands kept for it
+                local ajs, aty = expr(field_of(n, 'left'))
+                local bjs, bty = expr(field_of(n, 'right'))
+                return ('(%sa = %s, %sb = %s, %sa * %sb)'):format(md, conv(ajs, aty, D), md, conv(bjs, bty, D), md, md), D
+            end
+            local f = fused[n:id()]
+            local A, B
+            if f.var then A, B = f.var .. 'a', f.var .. 'b'
+            else
+                local ajs, aty = expr(field_of(f.mul, 'left'))
+                local bjs, bty = expr(field_of(f.mul, 'right'))
+                A, B = conv(ajs, aty, D), conv(bjs, bty, D)
+            end
+            local cjs_, cty = expr(f.addend)
+            local C = conv(cjs_, cty, D)
+            if f.sub then
+                if f.mul_left then return ('$fma(%s, %s, -(%s))'):format(A, B, C), D end -- a*b - c
+                return ('$fma(-(%s), %s, %s)'):format(A, B, C), D                        -- c - a*b
+            end
+            return ('$fma(%s, %s, %s)'):format(A, B, C), D
         elseif t == 'binary_expression' then
             local op = text(field_of(n, 'operator'))
             local ljs, lty = expr(field_of(n, 'left'))
             local rjs, rty = expr(field_of(n, 'right'))
             local lp = lty and (lty.k == 'ptr' or lty.k == 'array')
             local rp = rty and (rty.k == 'ptr' or rty.k == 'array')
-            if op == '&&' or op == '||' then return ('+(%s %s %s)'):format(T(ljs), op, T(rjs)), { k = 'int' } end
+            if op == '&&' or op == '||' then return ('+(%s %s %s)'):format(T(ljs, lty), op, T(rjs, rty)), X and I32 or { k = 'int' } end
+            if X and not lp and not rp then
+                local js, ty = arith(op, ljs, lty, rjs, rty)
+                if js then return js, ty end
+                return refuse(n, 'operator', ('the operator %s on %s'):format(op, lty and lty.k or '?')), I32
+            end
             if op == '==' or op == '!=' then return ('+(%s %s %s)'):format(ljs, op == '==' and '===' or '!==', rjs), { k = 'int' } end
             if op == '<' or op == '>' or op == '<=' or op == '>=' then return ('+(%s %s %s)'):format(ljs, op, rjs), { k = 'int' } end
             if op == '+' or op == '-' then
@@ -283,7 +497,22 @@ function M.emit(sources, opts)
             return refuse(n, 'operator', 'the binary operator ' .. op), { k = 'int' }
         elseif t == 'unary_expression' then
             local op = text(field_of(n, 'operator'))
-            local js = expr(field_of(n, 'argument'))
+            local js, aty = expr(field_of(n, 'argument'))
+            if X then
+                -- exact mode: the operand's (promoted) type; a 64-bit / unsigned result wraps
+                if op == '!' then return ('+!%s'):format(T(js, aty)), I32 end
+                if op == '+' then return js, aty end
+                if isD(aty) then
+                    if op == '-' then return '(-' .. js .. ')', aty end
+                elseif is64(aty) then
+                    return ('BigInt.%s(64, %s%s)'):format(aty.u and 'asUintN' or 'asIntN', op, js), aty
+                elseif aty and aty.u then
+                    return ('((%s%s) >>> 0)'):format(op, js), aty
+                elseif op == '-' or op == '~' then
+                    return '(' .. op .. js .. ')', I32
+                end
+                return refuse(n, 'operator', 'the unary operator ' .. op .. ' here'), I32
+            end
             if op == '!' then return ('+!%s'):format(T(js)), { k = 'int' } end
             if op == '-' or op == '~' or op == '+' then return op .. js, { k = 'int' } end
             return refuse(n, 'operator', 'the unary operator ' .. op), { k = 'int' }
@@ -298,19 +527,32 @@ function M.emit(sources, opts)
             local op = text(field_of(n, 'operator'))
             local l = field_of(n, 'left')
             local ljs, lty = expr(l)
-            local rjs = expr(field_of(n, 'right'))
+            local rjs, rty = expr(field_of(n, 'right'))
             if ljs:match('^%(H%[') or ljs:match('^H%[') then return refuse(n, 'store', 'a store through a pointer'), lty end
+            if X then
+                -- exact mode: the value converted to the target's type; `a op= b` is `a = (T)(a op b)`
+                if op == '=' then return ('%s = %s'):format(ljs, conv(rjs, rty, lty)), lty end
+                local js, ty = arith(op:sub(1, -2), ljs, lty, rjs, rty)
+                if not js then return refuse(n, 'operator', 'the compound operator ' .. op), lty end
+                return ('%s = %s'):format(ljs, conv(js, ty, lty)), lty
+            end
             return ('%s %s %s'):format(ljs, op, rjs), lty
         elseif t == 'conditional_expression' then
-            local c = expr(field_of(n, 'condition'))
+            local c, cty = expr(field_of(n, 'condition'))
             local a, aty = expr(field_of(n, 'consequence'))
-            local b = expr(field_of(n, 'alternative'))
-            return ('(%s ? %s : %s)'):format(T(c), a, b), aty
+            local b, bty = expr(field_of(n, 'alternative'))
+            if X and aty and bty and (aty.k == 'int' or isD(aty)) and (bty.k == 'int' or isD(bty)) then
+                local ct = common(aty, bty) -- both arms in their common type, as C converts them
+                return ('(%s ? %s : %s)'):format(T(c, cty), conv(a, aty, ct), conv(b, bty, ct)), ct
+            end
+            return ('(%s ? %s : %s)'):format(T(c, cty), a, b), aty
         elseif t == 'cast_expression' then
             local td = field_of(n, 'type')
             local bt = base_type(field_of(td, 'type'))
             local _, ty = declarator(field_of(td, 'declarator'), bt)
             local vjs, vty = expr(field_of(n, 'value'))
+            if X and (isD(ty) or (ty.k == 'int' and ty.w)) and vty and (isD(vty) or vty.k == 'int') then return conv(vjs, vty, ty), ty end
+            if X and ty.k == 'void' then return 'void (' .. vjs .. ')', ty end
             if ty.k == 'ptr' and ty.to.k == 'void' and vjs == '0' then return 'null', ty end
             if ty.k == 'uchar' then return ('((%s) & 255)'):format(vjs), { k = 'int' } end
             if ty.k == 'char' then return ('((%s) << 24 >> 24)'):format(vjs), { k = 'int' } end
@@ -319,11 +561,27 @@ function M.emit(sources, opts)
             return refuse(n, 'cast', 'a cast to ' .. text(td)), ty
         elseif t == 'call_expression' then
             local fn = text(field_of(n, 'function'))
-            local args = {}
-            for _, a in ipairs(named_kids(field_of(n, 'arguments'))) do args[#args + 1] = (expr(a)) end
+            local args, atys = {}, {}
+            for _, a in ipairs(named_kids(field_of(n, 'arguments'))) do
+                local js, ty = expr(a)
+                args[#args + 1], atys[#atys + 1] = js, ty
+            end
             local tpl = (opts.templates or {})[fn]
+            -- exact mode: every argument converted to its PARAMETER's type (the definition's, else the prototype's)
+            local fdecl = X and (funcs[fn] or protos[fn]) or nil
+            local fty = fdecl and fdecl.type
+            if fty then
+                local ptys = params_of(fdecl)
+                for i = 1, #args do if ptys[i] then args[i] = conv(args[i], atys[i], ptys[i]) end end
+            end
             if tpl then
-                local js = tpl:gsub('%$(%d)', function (i) return args[tonumber(i)] or 'undefined' end)
+                local js = (type(tpl) == 'table' and tpl.js or tpl):gsub('%$(%d)', function (i) return args[tonumber(i)] or 'undefined' end)
+                if X then
+                    -- its type: declared with the template, else the C function's own, else its first argument's
+                    local R = { double = { k = 'double' }, u64 = { k = 'int', w = 64, u = true }, i32 = I32, u32 = { k = 'int', w = 32, u = true } }
+                    local rt = type(tpl) == 'table' and tpl.ret
+                    return js, (rt == 'arg1' and atys[1]) or R[rt] or (fty and fty.ret) or atys[1] or I32
+                end
                 return js, { k = 'int' }
             end
             if funcs[fn] and want[fn] then return ('%s(%s)'):format(fn, table.concat(args, ', ')), funcs[fn].type.ret end
@@ -347,6 +605,75 @@ function M.emit(sources, opts)
         for _, k in ipairs(named_kids(n)) do out[#out + 1] = stmt(k, ctx) end
         return table.concat(out, '\n')
     end
+    local boxed, cur_ret = {}, nil -- exact mode: the current function's locals whose address is taken; its return type
+    -- exact mode, CONTRACTION (opts.contract = { [source name] = { ['line:col'] = true } }): the multiply-adds the HOST
+    -- COMPILER fused (read from its own GIMPLE dump by the recipe — never re-derived by rule here). `fused[id]` marks an
+    -- addition: { mul = the `*` node | nil, var = its temps when the product was computed in another statement,
+    -- addend = the other operand, sub = '-' , mul_left }; `muldef[id]` marks such a product's own `*` node
+    local function strip(nd) while nd and nd:type() == 'parenthesized_expression' do nd = named_kids(nd)[1] end return nd end
+    local function is_mul(nd) nd = strip(nd); return nd and nd:type() == 'binary_expression' and text(field_of(nd, 'operator')) == '*' and nd or nil end
+    local function contract_prepass(fnode, sites)
+        fused, muldef, mtemps = {}, {}, {}
+        if not sites then return end
+        local r0, _, r1 = fnode:range()
+        -- SORTED: the temporaries' numbering follows this order, and a pairs() walk made it hash order
+        local keys = vim.tbl_keys(sites)
+        table.sort(keys, function (a, b)
+            local la, ca = a:match('^(%d+):(%d+)$')
+            local lb, cb = b:match('^(%d+):(%d+)$')
+            if tonumber(la) ~= tonumber(lb) then return tonumber(la) < tonumber(lb) end
+            return tonumber(ca) < tonumber(cb)
+        end)
+        for _, key in ipairs(keys) do
+            local line, col = key:match('^(%d+):(%d+)$')
+            local row, c = tonumber(line) - 1, tonumber(col) - 1
+            if row >= r0 and row <= r1 then
+                local tok = fnode:descendant_for_range(row, c, row, c)
+                local add
+                if tok and (tok:type() == '+' or tok:type() == '-') then add = tok:parent()
+                elseif tok and tok:type() == '=' then
+                    local p = tok:parent()
+                    add = strip(p:type() == 'assignment_expression' and field_of(p, 'right') or field_of(p, 'value'))
+                elseif tok and tok:type() == 'identifier' and tok:parent():type() == 'call_expression' then
+                    -- an inlined call whose argument is the addition — or an EXPLICIT fma(), which is already one
+                    if text(tok) ~= 'fma' then add = strip(named_kids(field_of(tok:parent(), 'arguments'))[1]) end
+                end
+                if add and add:type() == 'binary_expression' and (text(field_of(add, 'operator')) == '+' or text(field_of(add, 'operator')) == '-') then
+                    local L, R = field_of(add, 'left'), field_of(add, 'right')
+                    local ml, mr = is_mul(L), is_mul(R)
+                    local rec = { sub = text(field_of(add, 'operator')) == '-' }
+                    if ml and mr then refuse(add, 'contract', 'both operands of a fused addition are products (line ' .. line .. ')')
+                    elseif ml or mr then rec.mul, rec.addend, rec.mul_left = ml or mr, ml and R or L, ml ~= nil
+                    else
+                        -- the product was computed in ANOTHER statement: `p = ar3 * (…)` … `lo = … + p`
+                        for side, opnd in pairs { left = L, right = R } do
+                            local o = strip(opnd)
+                            if not rec.var and o:type() == 'identifier' then
+                                local v, def = text(o), nil
+                                local aq = vim.treesitter.query.parse('c', '(assignment_expression left: (identifier) @l right: (_) @r)')
+                                for id, cap in aq:iter_captures(fnode, cur_src, 0, -1) do
+                                    if aq.captures[id] == 'r' and text(field_of(cap:parent(), 'left')) == v and cap:start() < add:start() then def = cap end
+                                end
+                                local dm = def and is_mul(def)
+                                if dm then
+                                    mtemps[#mtemps + 1] = '$m' .. #mtemps + 1
+                                    local tn = mtemps[#mtemps]
+                                    muldef[dm:id()] = tn
+                                    rec.var, rec.addend, rec.mul_left = tn, side == 'left' and R or L, side == 'left'
+                                end
+                            end
+                        end
+                        if not rec.var then refuse(add, 'contract', 'a fused addition with no product operand (line ' .. line .. ')') end
+                    end
+                    if rec.mul or rec.var then fused[add:id()] = rec; contract_seen[key] = true end
+                elseif tok and tok:type() == 'identifier' and text(tok) == 'fma' then
+                    contract_seen[key] = true -- an explicit fma(): already one
+                else
+                    refuse(fnode, 'contract', 'a compiler FMA site that names no addition (line ' .. line .. ':' .. col .. ')')
+                end
+            end
+        end
+    end
     local function declaration(n)
         local bt = base_type(field_of(n, 'type'))
         local parts = {}
@@ -356,9 +683,18 @@ function M.emit(sources, opts)
                 if nm then
                     if ty.k == 'struct' then return refuse(n, 'local-struct', 'a struct value as a local'), nil end
                     local js = JS_RESERVED[nm] and (nm .. '$') or nm
-                    scope[nm] = { js = js, type = ty }
                     local v = c:type() == 'init_declarator' and field_of(c, 'value')
-                    parts[#parts + 1] = v and (js .. ' = ' .. (expr(v))) or js
+                    -- the name is in scope from the end of its declarator, its initializer included (C's own rule)
+                    local box = X and boxed[nm]
+                    scope[nm] = box and { js = js .. '[0]', type = ty, box = js } or { js = js, type = ty }
+                    local vjs, vty
+                    if v then vjs, vty = expr(v) end
+                    if box then
+                        -- an out-parameter's target: a one-cell box, read and written as box[0]
+                        parts[#parts + 1] = js .. ' = [' .. (v and conv(vjs, vty, ty) or '0') .. ']'
+                    else
+                        parts[#parts + 1] = v and (js .. ' = ' .. (X and conv(vjs, vty, ty) or vjs)) or js
+                    end
                 end
             end
         end
@@ -373,10 +709,14 @@ function M.emit(sources, opts)
             return e and (expr(e) .. ';') or ';'
         elseif t == 'return_statement' then
             local e = named_kids(n)[1]
+            if e and X then
+                local js, ty = expr(e)
+                return 'return ' .. conv(js, ty, cur_ret) .. ';'
+            end
             return e and ('return ' .. expr(e) .. ';') or 'return;'
         elseif t == 'if_statement' then
-            local c = expr(field_of(n, 'condition'))
-            local out = 'if (' .. T(c) .. ') ' .. stmt(field_of(n, 'consequence'), ctx)
+            local c, cty = expr(field_of(n, 'condition'))
+            local out = 'if (' .. T(c, cty) .. ') ' .. stmt(field_of(n, 'consequence'), ctx)
             local alt = field_of(n, 'alternative')
             if alt then
                 local a = alt:type() == 'else_clause' and named_kids(alt)[1] or alt
@@ -467,6 +807,56 @@ function M.emit(sources, opts)
         image_js[#image_js + 1] = ('  // %s[%d] at %d\n  [%d, [%s]],'):format(g, gl.type.size or #vals, base, base, table.concat(vals, ', '))
         base = base + (gl.type.size or #vals)
     end
+    -- exact mode: every STRUCT global a wanted function reads, as a JS object literal (designated and positional
+    -- initializers, each value converted to its field's type)
+    local sg_js = {}
+    if X then
+        local used = {}
+        for _, name in ipairs(order) do
+            cur_src = funcs[name].src
+            for _, c in gq:iter_captures(funcs[name].node, cur_src, 0, -1) do if sglobals[text(c)] then used[text(c)] = true end end
+        end
+        local function zero(ty)
+            if is64(ty) then return '0n' end
+            if ty and ty.k == 'array' then return '[]' end
+            return '0'
+        end
+        local init_js
+        function init_js(v, ty)
+            if ty and ty.k == 'struct' then
+                local fields = ty.fields or struct_of(ty) or {}
+                local ord = fields.__order or {}
+                local vals, pos = {}, 1
+                for _, item in ipairs(named_kids(v)) do
+                    if item:type() == 'initializer_pair' then
+                        local fname = text(field_of(item, 'designator')):gsub('^%.', '')
+                        vals[fname] = init_js(field_of(item, 'value'), fields[fname])
+                        for i, fnm in ipairs(ord) do if fnm == fname then pos = i + 1 end end
+                    else
+                        local fname = ord[pos]
+                        pos = pos + 1
+                        if fname then vals[fname] = init_js(item, fields[fname]) end
+                    end
+                end
+                local parts = {}
+                for _, fnm in ipairs(ord) do parts[#parts + 1] = fnm .. ': ' .. (vals[fnm] or zero(fields[fnm])) end
+                return '{ ' .. table.concat(parts, ', ') .. ' }'
+            elseif ty and ty.k == 'array' then
+                local parts = {}
+                for _, item in ipairs(named_kids(v)) do parts[#parts + 1] = init_js(item, ty.of) end
+                return '[' .. table.concat(parts, ', ') .. ']'
+            end
+            local js, vty = expr(v)
+            return conv(js, vty, ty)
+        end
+        local names = vim.tbl_keys(used)
+        table.sort(names)
+        for _, g in ipairs(names) do
+            cur_src = sglobals[g].src
+            scope = {}
+            sg_js[#sg_js + 1] = ('const %s = %s;'):format(g, init_js(sglobals[g].init, sglobals[g].type))
+        end
+    end
     local fns = {}
     for _, name in ipairs(order) do
         local f = funcs[name]
@@ -484,7 +874,21 @@ function M.emit(sources, opts)
                 end
             end
         end
-        fns[#fns + 1] = ('function %s(%s) %s'):format(name, table.concat(params, ', '), stmt(field_of(f.node, 'body'), { gotos = {} }))
+        if X then
+            -- the locals whose address the body takes (`&lo`): boxed; and the type every `return` converts to
+            boxed = {}
+            local aq = vim.treesitter.query.parse('c', '(pointer_expression operator: "&" argument: (identifier) @x)')
+            for _, c in aq:iter_captures(f.node, cur_src, 0, -1) do boxed[text(c)] = true end
+            cur_ret = f.type.ret
+            contract_prepass(f.node, (opts.contract or {})[f.sname])
+        end
+        local body = stmt(field_of(f.node, 'body'), { gotos = {} })
+        if X and #mtemps > 0 then
+            local d = {}
+            for _, tn in ipairs(mtemps) do d[#d + 1] = tn .. 'a, ' .. tn .. 'b' end
+            body = body:gsub('^{\n', '{\nlet ' .. table.concat(d, ', ') .. ';\n', 1)
+        end
+        fns[#fns + 1] = ('function %s(%s) %s'):format(name, table.concat(params, ', '), body)
     end
     local exports = {}
     for _, name in ipairs(order) do exports[#exports + 1] = name end
@@ -500,18 +904,34 @@ function M.emit(sources, opts)
         ('const IMAGE_END = %d;'):format(base),
         'function image() { const h = new Uint8Array(IMAGE_END); for (const [at, vals] of IMAGE) h.set(vals, at); return h; }',
         opts.prelude or '',
-        table.concat(fns, '\n\n'),
+        -- (the struct globals, exact mode only — '' otherwise, so a legacy recipe's output is unchanged)
+        table.concat(sg_js, '\n') .. (#sg_js > 0 and '\n' or '') .. table.concat(fns, '\n\n'),
         ('module.exports = { setheap: h => { H = h; }, image, IMAGE_END, STRUCTS: %s, %s };')
-            :format(vim.json.encode((function ()
-                local o = {}
-                for sname, fields in pairs(structs) do
-                    o[sname] = {}
-                    for fname, ty in pairs(fields) do if ty.k == 'array' then o[sname][fname] = ty.size end end
+            :format((function ()
+                -- keys SORTED: a Lua table's pairs order is its hash order, so vim.json.encode made the generated file
+                -- differ run to run (measured on lstrmatch.js: same keys, a new order each regeneration)
+                local snames = vim.tbl_keys(structs)
+                table.sort(snames)
+                local out = {}
+                for _, sname in ipairs(snames) do
+                    local fnames = {}
+                    for fname, ty in pairs(structs[sname]) do if type(ty) == 'table' and ty.k == 'array' and ty.size then fnames[#fnames + 1] = fname end end
+                    table.sort(fnames)
+                    local fs = {}
+                    for _, fname in ipairs(fnames) do fs[#fs + 1] = vim.json.encode(fname) .. ':' .. vim.json.encode(structs[sname][fname].size) end
+                    out[#out + 1] = vim.json.encode(sname) .. ':' .. (#fs > 0 and ('{' .. table.concat(fs, ',') .. '}') or '[]')
                 end
-                return o
-            end)()), table.concat(exports, ', ')),
+                return '{' .. table.concat(out, ',') .. '}'
+            end)(), table.concat(exports, ', ')),
     }, '\n') .. '\n'
-    return js, refusals, { functions = order, globals = gnames, messages = errmsg }
+    -- the contraction sites that resolved to NOTHING in an emitted function (outside every wanted function, or no
+    -- addition there): the caller must fail on them — a lost contraction is a silent last-bit difference
+    local unresolved = {}
+    for _, sites in pairs(opts.contract or {}) do
+        for key in pairs(sites) do if not contract_seen[key] then unresolved[#unresolved + 1] = key end end
+    end
+    table.sort(unresolved)
+    return js, refusals, { functions = order, globals = gnames, messages = errmsg, unresolved_sites = unresolved }
 end
 
 return M

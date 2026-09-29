@@ -3546,6 +3546,10 @@ nvim --headless -u NONE -l tools/luajsgen.lua control 8      # or: values, coerc
 #   probing the gaps it exposed found 2 more (exact-tie rounding in %.14g, a zero for-step's direction).
 # TRANSLITERATE a closed region of C instead of re-authoring it (LuaJIT's pattern matcher -> lstrmatch.js):
 nvim --headless -u NONE -l tools/cjs.lua lstrmatch <luajit src dir> <out.js>
+# ... or a C LIBRARY FUNCTION bit-exactly (EXACT mode: C's 64-bit and unsigned arithmetic; the multiply-adds the host
+# compiler FUSES, read from its own GIMPLE dump). libm pow as LuaJIT gets it -> libmpow.js, 0 of 4,000,784 inputs
+# differ from glibc (V8's Math.pow: 268,366):
+nvim --headless -u NONE -l tools/cjs.lua libmpow <AOR math dir> <out.js>
 
 # JOIN A READER AGAINST AN INDEPENDENT ORACLE, per file — the acceptance test every data
 # reader gets (CART-1044). Six outcomes, none dropped: agree, disagree, refused by us,

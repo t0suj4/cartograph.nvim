@@ -37,8 +37,7 @@ end
 local function js_out(src, with_vim)
     local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
     if with_vim then vim.system({ 'cp', '-r', vimrt() .. '/vim', dir .. '/vim' }):wait() end
-    vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js', 'b'), dir .. '/$pack.js', 'b')
-    vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/lstrmatch.js', 'b'), dir .. '/$lstrmatch.js', 'b')
+    L.install_pack(dir)
     local js, refusals = L.emit(src, 'snippet.lua', { pack = './$pack.js' })
     local fd = assert(io.open(dir .. '/snippet.js', 'wb')); fd:write(js); fd:close()
     local r = vim.system({ 'node', dir .. '/snippet.js' }, { text = true, env = L.run_env(dir) }):wait(120000)
@@ -232,6 +231,47 @@ m(function () return {} <= {} end)
 m(function () return 'a' < 1 end)
 local function run(a, b, s) local got, n = {}, 0; for i = a, b, s do n = n + 1; got[#got + 1] = i; if n > 3 then break end end return table.concat(got, ',') end
 print(run(1, 2, 0), run(2, 1, 0), run(3, 1, -1), run(1, 2, 0.5), run(1, 1, 0), run(1, 0, -0.0), run(0, 1, -0.0), run(3, 1, -0.5))]],
+    -- x ^ y and math.pow are the C LIBRARY's pow, bit for bit (CART-1211): vectors where V8's Math.pow is off by an ulp
+    -- (compared EXACTLY against 17-digit literals — print's %.14g would hide it), and the IEEE special cases
+    pow = [==[
+local V = {
+  { 3.7158770758111563, -12.817241509175016, 4.9361249678675062e-8 },
+  { 2.0150589074958414, 4.5291983309496189, 23.887987016839414 },
+  { 0.92711983685862254, -984.85405458428068, 2.3247073967810972e+32 },
+  { 3.1158283960569411, 7.5789225832107547, 5504.9779031645839 },
+  { 2.1763869008465719, -9.1227362619445884, 0.00082970289075380446 },
+  { 3.3971779689567354, -19.495381775346843, 4.4222775230809010e-11 },
+  { 1.6085746213026608, 8.4291556908315428, 54.969922054670768 },
+  { -5.4230256616543002, 20.000000000000000, 483986435788476.44 },
+  { 2.4852395651967223, 14.083091962637816, 369834.60959044396 },
+  { 0.93159995840221121, -2283.8200580798084, 1.8809418757691356e+70 },
+  { 3.4121533751760613, -8.0607634754391313, 0.000050510652466665842 },
+  { 1.0706751140874640, 6412.7113921151395, 1.5357641436901719e+190 },
+  { 3.2278340950557145, -14.129319664554782, 6.4480872971426888e-8 },
+  { 2.5213102375230525, 6.1492454179288067, 294.91618444168665 },
+  { -1.1244135363634689, 34.000000000000000, 53.887274559877675 },
+  { 1.0335513431076342, 9749.0411321849824, 5.2942004196974853e+139 },
+  { 2.4868240460162112, 8.6941529895353469, 2752.9521599593786 },
+  { -7.4539645123837595, 26.000000000000000, 4.8091723388265955e+22 },
+  { 0.028610320208341644, -14.621241132218463, 3.6944816616612521e+22 },
+  { 0.96676384046807462, -6921.9489955696890, 4.0874685480939058e+101 },
+  { -7.8878999382836410, 23.000000000000000, -4.2668957578930979e+20 },
+  { 3.2486885119600752, 7.9396178003162632, 11554.908809733510 },
+  { 3.6027360653561269, -17.412918831557040, 2.0295716124318213e-10 },
+  { 1.0997654988342476, -5389.6760350228678, 2.5461766740790623e-223 },
+}
+local bad = 0
+for i, v in ipairs(V) do
+  if v[1] ^ v[2] ~= v[3] or math.pow(v[1], v[2]) ~= v[3] then bad = bad + 1; print('differs', i) end
+end
+print(#V, 'vectors', bad, 'differ')
+local inf, nan = 1 / 0, 0 / 0
+local E = { 0 ^ -1, (-0.0) ^ -1, (-0.0) ^ -2, (-8) ^ (1 / 3), (-2) ^ 3, (-2) ^ 2, inf ^ 0, nan ^ 0, 1 ^ nan, 1 ^ inf, (-1) ^ inf,
+  0.5 ^ inf, 2 ^ inf, 2 ^ -inf, 2 ^ 1024, 2 ^ -1075, 2 ^ -1074, 0.5 ^ 0.5, (-inf) ^ 3, (-inf) ^ 2, (-inf) ^ -3, 10 ^ 308, 10 ^ 309,
+  1e-310 ^ 0.5, 2.5 ^ 2.5 == 9.8821176880261863 }
+local out = {}
+for i = 1, #E do out[i] = tostring(E[i]) end
+print(table.concat(out, ' '))]==],
     -- a number prints as C's %.14g: exponential when the ROUNDED exponent is < -4 or >= 14 (integers of 15+ digits
     -- included), an exact tie to EVEN, -0 as "-0" (CART-1206's generator found the first two)
     numstr = [[
@@ -328,8 +368,7 @@ print(dirf ~= nil, dirf and select(2, dirf:read('a')))
         { text = true, env = { LUAJS_T = dir } }):wait(60000)
     -- the JS side: emitted beside the pack, LUAJS_SRC_ROOT naming the Lua tree it came from
     local out = vim.fn.tempname(); vim.fn.mkdir(out, 'p')
-    vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/pack.js', 'b'), out .. '/$pack.js', 'b')
-    vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/lstrmatch.js', 'b'), out .. '/$lstrmatch.js', 'b')
+    L.install_pack(out)
     local js, refusals = L.emit(src, 'snip.lua', { pack = './$pack.js' })
     eq(0, #refusals, vim.inspect(refusals))
     local w = assert(io.open(out .. '/snip.js', 'wb')); w:write(js); w:close()
@@ -593,6 +632,62 @@ test('luajs: the LOCAL half is DECLARED RULES — every rule compiles and FIRES 
     ok(not okc and tostring(why):find('hole b is dropped', 1, true), tostring(why))
     local _, refusals = L.emit('local x = \n', 'bad.lua')
     ok(#refusals == 1 and refusals[1].kind == 'read', vim.inspect(refusals))
+end)
+
+test('luajs pack: pow is the HOST C LIBRARY\'s bit for bit, and $fma is C\'s fma — against libm itself (a C oracle compiled here)', function ()
+    if vim.fn.executable('gcc') ~= 1 or vim.fn.executable('node') ~= 1 then skip 'no gcc / node' end
+    -- the TARGET is glibc's FMA build (its ifunc picks it on an FMA CPU); without FMA the host runs the non-FMA pow,
+    -- which differs on ~0.04% of inputs — a different function, so the comparison would be meaningless
+    local cpu = io.open('/proc/cpuinfo')
+    local flags = cpu and cpu:read('a') or ''
+    if cpu then cpu:close() end
+    if not flags:find('%sfma%s') then skip 'the host CPU has no FMA: its glibc pow is the non-FMA build, not the one transliterated' end
+    local dir = vim.fn.tempname()
+    L.install_pack(dir)
+    local C = [[
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+static uint64_t s = 0x2545F4914F6CDD1Dull;
+static uint64_t rnd(void) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; return s; }
+static double dbl(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
+static double unif(double a, double b) { return a + (b - a) * ((rnd() >> 11) * 0x1p-53); }
+int main(void) {
+  FILE *p = fopen("pow.bin", "wb"), *f = fopen("fma.bin", "wb");
+  for (long i = 0; i < 100000; i++) {
+    double x, y;
+    switch (i % 4) { case 0: x = dbl(rnd()); y = dbl(rnd()); break; case 1: x = unif(0, 4); y = unif(-20, 20); break;
+      case 2: x = unif(0.9, 1.1); y = unif(-1e4, 1e4); break; default: x = -unif(0, 8); y = (double)(long)unif(-40, 40); }
+    double r[3] = { x, y, pow(x, y) }; fwrite(r, 8, 3, p);
+    double a = unif(-4, 4), b = unif(-4, 4), c = (i % 2) ? -a * b : dbl(rnd());
+    /* every 10th triple an EXACT TIE: odd a times 2^52 + odd b is 54 bits ending in 1, and a small c keeps it one */
+    if (i % 10 == 0) { a = 3 + 2 * (i % 97); b = 0x1p52 + (double)(2 * (i % 1013) + 1); c = 2 * (double)(i % 7) + 2; }
+    double q[4] = { a, b, c, fma(a, b, c) }; fwrite(q, 8, 4, f);
+  }
+  fclose(p); fclose(f); return 0;
+}]]
+    local fd = assert(io.open(dir .. '/gen.c', 'w')); fd:write(C); fd:close()
+    local cc = vim.system({ 'gcc', '-O2', '-fno-builtin', 'gen.c', '-lm', '-o', 'gen' }, { cwd = dir }):wait()
+    eq(0, cc.code, cc.stderr)
+    eq(0, vim.system({ './gen' }, { cwd = dir }):wait().code)
+    local JS = [[
+const { pow } = require('./$libmpow.js'); const { $fma } = require('./$fpu.js');
+const F = new Float64Array(2), U = new BigUint64Array(F.buffer);
+const same = (a, b) => { F[0] = a; F[1] = b; return (Number.isNaN(a) && Number.isNaN(b)) || U[0] === U[1]; };
+const rd = n => { const b = require('fs').readFileSync(n); return new Float64Array(b.buffer, b.byteOffset, b.length / 8); };
+let p = 0, pv8 = 0, f = 0, fnaive = 0; const P = rd('pow.bin'), Q = rd('fma.bin');
+for (let i = 0; i < P.length; i += 3) { if (!same(pow(P[i], P[i + 1]), P[i + 2])) p++; if (!same(Math.pow(P[i], P[i + 1]), P[i + 2])) pv8++; }
+for (let i = 0; i < Q.length; i += 4) { if (!same($fma(Q[i], Q[i + 1], Q[i + 2]), Q[i + 3])) f++; if (!same(Q[i] * Q[i + 1] + Q[i + 2], Q[i + 3])) fnaive++; }
+console.log(JSON.stringify({ n: P.length / 3, pow: p, v8: pv8, fma: f, naive: fnaive }));]]
+    fd = assert(io.open(dir .. '/check.js', 'w')); fd:write(JS); fd:close()
+    local r = vim.system({ 'node', 'check.js' }, { cwd = dir, text = true }):wait(300000)
+    eq(0, r.code, r.stderr)
+    local res = vim.json.decode(r.stdout)
+    eq(0, res.pow, 'libm pow, bit for bit (lua/cartograph/luajs/libmpow.js is glibc 2.39 FMA-build pow as gcc 13.3 fuses it — a glibc or compiler change is regenerated with tools/cjs.lua libmpow, CART-1211): ' .. r.stdout)
+    eq(0, res.fma, 'C fma, bit for bit: ' .. r.stdout)
+    -- the POSITIVE CONTROLS: the sample distinguishes (V8's pow and a naive a*b+c both differ from the library somewhere)
+    ok(res.v8 > 0 and res.naive > 0, 'the premise: the inputs separate a wrong implementation from a right one: ' .. r.stdout)
 end)
 
 test('luajs: each table constructor takes its SHAPE\'s representation — ARRAY, RECORD, or MAP for a dictionary', function ()

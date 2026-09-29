@@ -163,7 +163,11 @@ const $sub = arith('__sub', (a, b) => a - b);
 const $mul = arith('__mul', (a, b) => a * b);
 const $div = arith('__div', (a, b) => a / b);
 const $mod = arith('__mod', (a, b) => a - Math.floor(a / b) * b);
-const $pow = arith('__pow', (a, b) => Math.pow(a, b));
+// pow is the C LIBRARY's, as LuaJIT's is (lj_vmmath.c calls libm pow — glibc here): Arm's optimized-routines pow in
+// glibc's FMA build, TRANSLITERATED from C with the compiler's own contractions ($libmpow.js, tools/cjs.lua libmpow).
+// V8's Math.pow differs from it in the last ulp on 268,366 of 4,000,784 measured inputs; this one on 0 (CART-1211)
+const LIBM = require('./$libmpow.js');
+const $pow = arith('__pow', (a, b) => LIBM.pow(a, b));
 const $neg = a => { if (numish(a)) return -num(a); const h = meta(a, '__unm'); if (h !== undefined) return $1($call(h, a, a)); return -num(a); };
 /** Lua's number to string: C's `%.14g`. The exponent X is read AFTER rounding to 14 significant digits
  *  (toExponential(13)); C prints exponential when X < -4 or X >= 14 — NOT JS toPrecision's rule (X < -6 or X >= p),
@@ -369,7 +373,7 @@ G.table = $rec(
   'concat', (t, sep, i, j) => { sep = sep === undefined ? '' : sep; i = i === undefined ? 1 : i; j = j === undefined ? $len(t) : j; const o = []; for (let k = i; k <= j; k++) { const v = rawget(t, k); if (typeof v !== 'string' && typeof v !== 'number') throw new LuaError("invalid value (at index " + k + ") in table for 'concat'"); o.push(cstr(v)); } return o.join(cstr(sep)); },
   'sort', (t, cmp) => { const n = $len(t); const a = []; for (let k = 1; k <= n; k++) a.push(rawget(t, k)); a.sort((x, y) => (cmp ? ($t($1($call(cmp, x, y))) ? -1 : ($t($1($call(cmp, y, x))) ? 1 : 0)) : ($lt(x, y) ? -1 : ($lt(y, x) ? 1 : 0)))); for (let k = 1; k <= n; k++) rawset(t, k, a[k - 1]); },
   'unpack', (...a) => G.unpack(...a));
-G.math = $rec('floor', Math.floor, 'ceil', Math.ceil, 'abs', Math.abs, 'sqrt', Math.sqrt, 'max', (...a) => Math.max(...a.map(x => num(x))), 'min', (...a) => Math.min(...a.map(x => num(x))),
+G.math = $rec('floor', Math.floor, 'ceil', Math.ceil, 'abs', Math.abs, 'sqrt', Math.sqrt, 'pow', (a, b) => LIBM.pow(num(a), num(b)), 'max', (...a) => Math.max(...a.map(x => num(x))), 'min', (...a) => Math.min(...a.map(x => num(x))),
   'huge', Infinity, 'pi', Math.PI, 'exp', Math.exp, 'log', (x, b) => (b === undefined ? Math.log(x) : Math.log(x) / Math.log(b)), 'fmod', (a, b) => a % b, 'modf', x => $mv(Math.trunc(x), x - Math.trunc(x)),
   'random', () => $abort('math.random (a different generator)'), 'randomseed', () => $abort('math.randomseed'));
 const STRING = Object.create(null);
