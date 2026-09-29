@@ -147,15 +147,19 @@ function M.emit(src, file, opts)
             return ('$rec(%s)'):format(table.concat(parts, ', '))
         end
         stats.map = stats.map + 1
-        local parts = {}
+        local parts, spread = {}, nil
         for i, p in ipairs(pos) do
             if p.last and multi(p.node) then
-                return refuse(p.node, 'map-constructor', 'a multi-valued last positional entry in a Map-shaped constructor')
+                -- a multi-valued LAST positional entry: its values land at positions i, i+1, … ($mappos)
+                spread = { at = i, js = p.node:type() == 'vararg_expression' and '...$va' or ('...$all(%s)'):format(expr(p.node, sc, true)) }
+            else
+                parts[#parts + 1] = i .. ', ' .. expr(p.node, sc)
             end
-            parts[#parts + 1] = i .. ', ' .. expr(p.node, sc)
         end
         for _, e in ipairs(named) do parts[#parts + 1] = e.key .. ', ' .. expr(e.val, sc) end
-        return ('$map(%s)'):format(table.concat(parts, ', '))
+        local m = ('$map(%s)'):format(table.concat(parts, ', '))
+        if spread then return ('$mappos(%s, %d, %s)'):format(m, spread.at, spread.js) end
+        return m
     end
 
     --- a function call: raw (may be an MV) when `raw`, else truncated to one value
@@ -337,11 +341,11 @@ function M.emit(src, file, opts)
         elseif t == 'while_statement' then
             local lbl = fresh('L')
             return ('%s: while ($t(%s)) {\n%s}'):format(lbl, expr(field_of(n, 'condition'), sc),
-                block(field_of(n, 'body'), scope(sc), { loop_label = lbl, loop_kind = 'while', fresh_loop = true, outer = ctx }))
+                block(field_of(n, 'body'), scope(sc), { loop_label = lbl, labels = ctx and ctx.labels }))
         elseif t == 'repeat_statement' then
             local lbl = fresh('L')
             local rsc = scope(sc)
-            local body = block(field_of(n, 'body'), rsc, { loop_label = lbl, loop_kind = 'repeat', fresh_loop = true, outer = ctx })
+            local body = block(field_of(n, 'body'), rsc, { loop_label = lbl, labels = ctx and ctx.labels })
             -- the condition sees the body's locals: it is evaluated INSIDE the body's block
             return ('%s: do {\n%sif ($t(%s)) break;\n} while (true);'):format(lbl, body, expr(field_of(n, 'condition'), rsc))
         elseif t == 'for_statement' then
@@ -354,7 +358,7 @@ function M.emit(src, file, opts)
                 local stop = expr(field_of(clause, 'end'), sc)
                 local step = field_of(clause, 'step') and expr(field_of(clause, 'step'), sc) or '1'
                 local var = declare(fsc, text(field_of(clause, 'name')))
-                local body = block(field_of(n, 'body'), fsc, { loop_label = lbl, loop_kind = 'for', fresh_loop = true, outer = ctx })
+                local body = block(field_of(n, 'body'), fsc, { loop_label = lbl, labels = ctx and ctx.labels })
                 return ('{ const %s = +(%s), %s = +(%s), %s = +(%s);\n%s: for (let %s = %s; %s > 0 ? %s <= %s : %s >= %s; %s += %s) { let %s = %s;\n%s} }')
                     :format(a, start, b, stop, c, step, lbl, i, a, c, i, b, i, b, i, c, var, i, body)
             end
@@ -366,47 +370,100 @@ function M.emit(src, file, opts)
             local init = ('$adj(3, [%s])'):format(explist_js(named_kids(el), sc))
             local vars = {}
             for _, v in ipairs(named_kids(vl)) do vars[#vars + 1] = declare(fsc, text(v)) end
-            local body = block(field_of(n, 'body'), fsc, { loop_label = lbl, loop_kind = 'for', fresh_loop = true, outer = ctx })
+            local body = block(field_of(n, 'body'), fsc, { loop_label = lbl, labels = ctx and ctx.labels })
             return ('{ let [%s, %s, %s] = %s;\n%s: for (;;) { let [%s] = $adj(%d, $all(%s(%s, %s))); if (%s === undefined) break; %s = %s;\n%s} }')
                 :format(f, s, ctl, init, lbl, table.concat(vars, ', '), #vars, f, s, ctl, vars[1], ctl, vars[1], body)
         elseif t == 'do_statement' then
             local body = field_of(n, 'body')
             return ('{\n%s}'):format(body and block(body, scope(sc), ctx) or '')
-        elseif t == 'break_statement' then return 'break;'
+        elseif t == 'break_statement' then
+            -- Lua's break names ITS loop: a synthetic goto loop (below) between it and the loop must not catch it
+            return (ctx and ctx.loop_label) and ('break ' .. ctx.loop_label .. ';') or 'break;'
         elseif t == 'goto_statement' then
             local label = text(named_kids(n)[1])
-            -- the innermost enclosing loop whose body ENDS with this label: a labeled JS continue reaches it from any depth
-            local l = ctx
-            while l do
-                if l.continue_label == label then
-                    if l.loop_kind == 'repeat' then return refuse(n, 'goto', 'the continue idiom inside repeat-until (a JS continue would skip the until test)') .. ';' end
-                    return ('continue %s;'):format(l.loop_label)
-                end
-                l = l.outer
-            end
-            return refuse(n, 'goto', 'a general goto (no JS form)') .. ';'
+            local act = ctx and ctx.labels and ctx.labels[label]
+            if act then return act .. ';' end
+            return refuse(n, 'goto', 'a goto whose label is not visible, or in a shape that crosses another label\'s region') .. ';'
         elseif t == 'label_statement' then
-            if ctx and ctx.continue_label == text(named_kids(n)[1]) then return '' end
-            return refuse(n, 'label', 'a label that is not the loop-end continue target') .. ';'
+            return '' -- structured by its block
         end
         return refuse(n, t, 'no template for this statement kind') .. ';'
     end
 
-    --- a block's statements. A LOOP BODY (ctx.fresh_loop) opens a loop context chained to the enclosing one; its last
-    --- statement being a label makes that label its `continue` target. Other blocks pass the context through unchanged.
+    -- the gotos inside `node` that name `label`, not crossing a function boundary (a label is invisible in nested functions)
+    local GQ = vim.treesitter.query.parse('lua', '(goto_statement (identifier) @g)')
+    local function jumps_to(node, label)
+        for _, g in GQ:iter_captures(node, src, 0, -1) do
+            if text(g) == label then
+                local p, crossed = g:parent(), false
+                while p and not p:equal(node) do
+                    local pt = p:type()
+                    if pt == 'function_definition' or pt == 'function_declaration' then crossed = true; break end
+                    p = p:parent()
+                end
+                if not crossed then return true end
+            end
+        end
+        return false
+    end
+
+    --- a block's statements, with its LABELS structured (every Lua goto has a JS form, by Lua's own scoping rules —
+    --- a goto reaches only a label visible in an enclosing block):
+    ---   FORWARD   gotos before the label: the statements from the first such goto's statement up to the label become a
+    ---             labeled block, `goto L` = `break <block>` (a local declared inside that region cannot be used after the
+    ---             label — Lua forbids jumping into its scope — so the region's scope is the right one)
+    ---   BACKWARD  gotos after the label: the statements after it to the block's end become a labeled `for (;;)`, `goto L`
+    ---             = `continue <loop>` (its `break;` at the end falls out once)
+    --- The loop-end `continue` idiom is the forward case (the region ends at the body's end, and a repeat's `until` test
+    --- follows the region — so it is no longer a special case). Regions that CROSS without nesting are refused by name.
     function block(n, sc, ctx)
         if not n then return '' end
         local kids = named_kids(n)
-        local c = ctx
-        if ctx and ctx.fresh_loop then
-            c = { loop_label = ctx.loop_label, loop_kind = ctx.loop_kind, outer = ctx.outer }
-            local last = kids[#kids]
-            if last and last:type() == 'label_statement' then c.continue_label = text(named_kids(last)[1]) end
+        local regions = {} -- { from, to, open, close }
+        local fwd_act, bwd_act = {}, {} -- label -> js action, by the side of the label the goto is on
+        local label_at = {}
+        for k, kid in ipairs(kids) do
+            if kid:type() == 'label_statement' then
+                local name = text(named_kids(kid)[1])
+                label_at[name] = k
+                local first
+                for i = 1, k - 1 do if jumps_to(kids[i], name) then first = i; break end end
+                if first then
+                    local jl = fresh('Gf')
+                    regions[#regions + 1] = { from = first, to = k - 1, open = jl .. ': {', close = '}' }
+                    fwd_act[name] = 'break ' .. jl
+                end
+                local back = false
+                for i = k + 1, #kids do if jumps_to(kids[i], name) then back = true; break end end
+                if back then
+                    local jl = fresh('Gb')
+                    regions[#regions + 1] = { from = k + 1, to = #kids, open = jl .. ': for (;;) {', close = 'break;\n}' }
+                    bwd_act[name] = 'continue ' .. jl
+                end
+            end
         end
+        for i = 1, #regions do
+            for j = i + 1, #regions do
+                local a, b = regions[i], regions[j]
+                local nested = (a.from <= b.from and b.to <= a.to) or (b.from <= a.from and a.to <= b.to)
+                local apart = a.to < b.from or b.to < a.from
+                if not nested and not apart then return refuse(n, 'goto', 'two labels whose goto regions cross') .. ';\n' end
+            end
+        end
+        -- open outer regions first, close inner first
+        table.sort(regions, function (a, b) if a.from ~= b.from then return a.from < b.from end return a.to > b.to end)
         local out = {}
-        for _, k in ipairs(kids) do
-            local s = stmt(k, sc, c)
+        for i, kid in ipairs(kids) do
+            for _, r in ipairs(regions) do if r.from == i then out[#out + 1] = r.open .. '\n' end end
+            -- the labels this statement sees: a goto BEFORE its label jumps forward, AFTER it backward
+            local labels = setmetatable({}, { __index = ctx and ctx.labels })
+            for name, k in pairs(label_at) do
+                if i < k and fwd_act[name] then labels[name] = fwd_act[name]
+                elseif i > k and bwd_act[name] then labels[name] = bwd_act[name] end
+            end
+            local s = stmt(kid, sc, { loop_label = ctx and ctx.loop_label, labels = labels })
             if s ~= '' then out[#out + 1] = s .. '\n' end
+            for j = #regions, 1, -1 do if regions[j].to == i then out[#out + 1] = regions[j].close .. '\n' end end
         end
         return table.concat(out)
     end
@@ -414,10 +471,45 @@ function M.emit(src, file, opts)
     local top = scope(nil)
     local body = block(root, top, nil)
     local pack = opts.pack or './$pack.js'
-    local names = '$t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $add, $sub, $mul, $div, $mod, $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $abort, $G'
-    local js = ("'use strict';\n// transliterated from %s by cartograph.luajs — do not edit\nconst { %s } = require(%s);\nmodule.exports = $1((function (...$va) {\n%s})());\n")
+    local names = '$t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $mappos, $add, $sub, $mul, $div, $mod, $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $abort, $G'
+    -- the CHUNK is a function of its varargs, as a Lua chunk is: require passes the module name (nvim's own modules
+    -- read it — `{ _fold = ..., … }` in vim/treesitter.lua), a script run directly gets its arguments
+    local js = ("'use strict';\n// transliterated from %s by cartograph.luajs — do not edit\nconst { %s } = require(%s);\n"
+        .. "const $chunk = function (...$va) {\n%s};\nmodule.exports = { $chunk };\n"
+        .. "if (require.main === module) $chunk(...process.argv.slice(2));\n")
         :format(tostring(file), names, js_str(pack), body)
     return js, refusals, stats
+end
+
+--- ★ THE TREE-SITTER BRIDGE for the transliterated vim.treesitter (lua/cartograph/luajs/tsbridge.c): built by the HOST
+--- COMPILER against tree-sitter's own source (`ts_src` = its lib/ dir; default LUAJS_TS_SRC, else the highest pkgit
+--- tree-sitter), cached by the hash of both sources. -> the executable | nil, why
+function M.bridge(ts_src)
+    ts_src = ts_src or vim.env.LUAJS_TS_SRC
+    if not ts_src then
+        local found = vim.fn.glob(vim.fn.expand('~/.local/share/pkgit/tree-sitter/*/lib/src/lib.c'), false, true)
+        table.sort(found, function (a, b) return vim.version.lt(vim.version.parse(a:match('/v?([%d.]+)/lib/')) or { 0 }, vim.version.parse(b:match('/v?([%d.]+)/lib/')) or { 0 }) end)
+        ts_src = found[#found] and found[#found]:gsub('/src/lib%.c$', '')
+    end
+    if not ts_src or vim.fn.filereadable(ts_src .. '/src/lib.c') ~= 1 then return nil, 'no tree-sitter source (set LUAJS_TS_SRC to its lib/ directory)' end
+    local here = debug.getinfo(1, 'S').source:sub(2):gsub('[^/]+$', '')
+    local csrc = here .. 'luajs/tsbridge.c'
+    local key = vim.fn.sha256(table.concat(vim.fn.readfile(csrc, 'b'), '\n') .. ts_src):sub(1, 16)
+    local dir = vim.fn.stdpath('cache') .. '/cartograph'
+    local exe = dir .. '/tsbridge-' .. key
+    if vim.fn.executable(exe) == 1 then return exe end
+    vim.fn.mkdir(dir, 'p')
+    local r = vim.system({ 'gcc', '-O2', '-std=gnu11', '-w', '-I' .. ts_src .. '/include', '-I' .. ts_src .. '/src', ts_src .. '/src/lib.c', csrc, '-ldl', '-o', exe }, { text = true }):wait()
+    if r.code ~= 0 then return nil, 'building the tree-sitter bridge failed: ' .. (r.stderr or '') end
+    return exe
+end
+
+--- the environment a transliterated module runs in: its root, the bridge, the runtime path parsers are found on
+function M.run_env(out_dir, src_root)
+    local env = { LUAJS_ROOT = out_dir, LUAJS_SRC_ROOT = src_root }
+    env.LUAJS_TS_BRIDGE = M.bridge()
+    env.LUAJS_RTP = table.concat(vim.api.nvim_list_runtime_paths(), ':')
+    return env
 end
 
 --- ★ NVIM'S OWN PURE-LUA RUNTIME, transliterated into `out_dir` (the pack loads vim.split / inspect / fs / uri from it
@@ -429,6 +521,21 @@ function M.vim_runtime(out_dir, pack_text, vimrt)
     local queue, queued, out = {}, {}, {}
     local function enqueue(mod) if not queued[mod] then queued[mod] = true; queue[#queue + 1] = mod end end
     for mod in pack_text:gmatch("%$require%('(vim%.[%w_.]+)'%)") do enqueue(mod) end
+    -- + nvim's OWN lazy submodule list (vim/_init_packages.lua's `vim._submodules = {…}` and vim/_core/editor.lua's
+    -- `for k, v in pairs({…}) do vim._submodules[k] = v`), minus the names the PACK declares as editor surfaces (its
+    -- `for (const ed of [...])` refusal list); written as vim/$submodules.json, which the pack's vim miss handler reads
+    local function rd(p) local f = io.open(vimrt .. '/' .. p); if not f then return '' end; local s = f:read('a'); f:close(); return s end
+    local editor = {}
+    local edlist = pack_text:match('for %(const ed of %[(.-)%]%)') or ''
+    for nm in edlist:gmatch("'([%w_]+)'") do editor[nm] = true end
+    local subs, subset = {}, {}
+    local function add_keys(tbl) for key in tbl:gmatch('([%a_][%w_]*)%s*=%s*true') do if not subset[key] and not editor[key] then subset[key] = true; subs[#subs + 1] = key end end end
+    add_keys(rd('vim/_init_packages.lua'):match('vim%._submodules%s*=%s*(%b{})') or '')
+    add_keys(rd('vim/_core/editor.lua'):match('for k, v in pairs%((%b{})%) do%s*vim%._submodules') or '')
+    table.sort(subs)
+    for _, key in ipairs(subs) do enqueue('vim.' .. key) end
+    vim.fn.mkdir(out_dir .. '/vim', 'p')
+    local sj = assert(io.open(out_dir .. '/vim/$submodules.json', 'w')); sj:write(vim.json.encode(subs)); sj:close()
     while #queue > 0 do
         local mod = table.remove(queue, 1)
         local rel = mod:gsub('%.', '/') .. '.lua'
@@ -436,6 +543,10 @@ function M.vim_runtime(out_dir, pack_text, vimrt)
         if fd then
             local src = fd:read('a'); fd:close()
             for dep in src:gmatch("require%s*%(?%s*['\"](vim%.[%w_.]+)['\"]") do enqueue(dep) end
+            -- `vim._defer_require('vim.x', { a = …, b = … })` names its submodules only at run time: root .. '.' .. key
+            for root, keys in src:gmatch("_defer_require%(%s*['\"](vim[%w_.]*)['\"]%s*,%s*(%b{})") do
+                for key in keys:gmatch('([%a_][%w_]*)%s*=') do enqueue(root .. '.' .. key) end
+            end
             local depth = select(2, rel:gsub('/', ''))
             local js, refusals = M.emit(src, rel, { pack = ('../'):rep(depth) .. '$pack.js' })
             local dest = out_dir .. '/' .. rel:gsub('%.lua$', '.js')

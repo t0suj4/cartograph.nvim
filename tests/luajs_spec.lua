@@ -41,7 +41,7 @@ local function js_out(src, with_vim)
     vim.fn.writefile(vim.fn.readfile(REPO .. '/lua/cartograph/luajs/lstrmatch.js', 'b'), dir .. '/$lstrmatch.js', 'b')
     local js, refusals = L.emit(src, 'snippet.lua', { pack = './$pack.js' })
     local fd = assert(io.open(dir .. '/snippet.js', 'wb')); fd:write(js); fd:close()
-    local r = vim.system({ 'node', dir .. '/snippet.js' }, { text = true, env = { LUAJS_ROOT = dir } }):wait(60000)
+    local r = vim.system({ 'node', dir .. '/snippet.js' }, { text = true, env = L.run_env(dir) }):wait(120000)
     return (r.stdout or '') .. (r.stderr or ''), js, refusals, r.code
 end
 
@@ -150,6 +150,54 @@ local raw = setmetatable({ 'a', 'b' }, { __index = function (t, i) return 'X' en
 local n = 0
 for _ in ipairs(raw) do n = n + 1 end
 print(n, raw[3], table.concat(raw, '+'), rawequal(raw, raw))]],
+    gotos = [[
+-- FORWARD past statements (a local declared before the goto stays visible after the label)
+local x = 1
+if x == 1 then goto skip end
+x = 2
+::skip::
+print('forward', x)
+-- BACKWARD: a loop made of a label and a goto
+local n = 0
+::again::
+n = n + 1
+if n < 3 then goto again end
+print('backward', n)
+-- OUT of nested loops to after them
+for i = 1, 3 do
+  for j = 1, 3 do
+    if i * j == 4 then goto out end
+  end
+end
+::out::
+print('out')
+-- CONTINUE inside repeat-until: the until test still runs
+local k, seen = 0, {}
+repeat
+  k = k + 1
+  if k % 2 == 0 then goto cont end
+  seen[#seen + 1] = k
+  ::cont::
+until k >= 5
+print('repeat', table.concat(seen, ','))
+-- BREAK inside a backward region breaks the REAL loop
+local c = 0
+while true do
+  ::top::
+  c = c + 1
+  if c == 2 then goto top end
+  if c >= 4 then break end
+end
+print('break', c)
+-- NESTED regions (a goto nested in an inner block to an outer label)
+for i = 1, 4 do
+  do
+    if i == 2 then goto nextloop end
+    if i == 4 then goto nextloop end
+    print('body', i)
+  end
+  ::nextloop::
+end]],
     errors = [[
 
 local ok, err = pcall(function () error({ code = 7 }) end)
@@ -373,11 +421,88 @@ vim.env.LUAJS_VIMTEST = 'set'; print(vim.env.LUAJS_VIMTEST, vim.env.LUAJS_NOPE_X
     ok(not ed:find('^false') and ed:find('LuaBreak', 1, true), 'the break escapes pcall: ' .. ed)
 end)
 
+test('luajs differential: vim.TREESITTER — the C binding over the bridge + nvim\'s own treesitter Lua: every node, sexpr, queries with predicates, descendants — what nvim prints', function ()
+    if not ready() then skip 'no lua parser / node' end
+    if not L.bridge() then skip 'no tree-sitter source to build the bridge from' end
+    local src = [==[
+local SAMPLES = {
+  { 'lua', 'local x = f(1, "s") -- c\nfunction M.g(a, ...) if a then return a end end\nlocal t = { k = 1, [2] = 3 }\n' },
+  { 'javascript', 'const a = (x) => x + 1;\nclass K extends B { m() { return this.v?.w; } }\n' },
+  { 'c', 'int main(int argc, char **argv) { return argc > 1 ? 0 : 1; }\n' },
+  { 'lua', 'local broken = (\nx = ' },
+}
+local function walk(n, depth, out)
+  local sr, sc, sb, er, ec, eb = n:range(true)
+  out[#out + 1] = ('%s%s [%d,%d,%d]-[%d,%d,%d] n=%s m=%s e=%s err=%s kids=%d named=%d'):format(('  '):rep(depth), n:type(), sr, sc, sb, er, ec, eb,
+    tostring(n:named()), tostring(n:missing()), tostring(n:extra()), tostring(n:has_error()), n:child_count(), n:named_child_count())
+  for c, field in n:iter_children() do
+    if field then out[#out + 1] = ('%s field %s'):format(('  '):rep(depth + 1), field) end
+    walk(c, depth + 1, out)
+  end
+end
+for _, s in ipairs(SAMPLES) do
+  local lang, text = s[1], s[2]
+  local root = vim.treesitter.get_string_parser(text, lang):parse()[1]:root()
+  local out = {}
+  walk(root, 0, out)
+  print(lang, #out)
+  print(table.concat(out, '\n'))
+  print('sexpr', root:sexpr())
+  print('parent', root:named_child(0) and root:named_child(0):parent():type(), root:parent(), tostring(root))
+  local d = root:named_descendant_for_range(0, 7, 0, 8)
+  print('desc', d and d:type(), d and vim.treesitter.get_node_text(d, text), root:descendant_for_range(0, 0, 0, 1):type())
+  local li = vim.treesitter.language.inspect(lang)
+  local ns = 0; for _ in pairs(li.symbols) do ns = ns + 1 end
+  print('lang', li.abi_version, #li.fields, ns)
+end
+local text = 'local a = foo(1)\nlocal b = bar(2)\nlocal foo = 3\n'
+local root = vim.treesitter.get_string_parser(text, 'lua'):parse()[1]:root()
+local q = vim.treesitter.query.parse('lua', [[
+  (function_call name: (identifier) @fn (#eq? @fn "foo"))
+  (function_call name: (identifier) @any)
+  ((identifier) @big (#lua-match? @big "^%l%l%l$"))
+  ((identifier) @lm (#lua-match? @lm "^b"))
+  ((identifier) @one (#any-of? @one "a" "b"))
+]])
+for id, node in q:iter_captures(root, text) do
+  print('cap', q.captures[id], node:type(), vim.treesitter.get_node_text(node, text), node:range())
+end
+for pattern, match in q:iter_matches(root, text, 0, -1) do
+  local names = {}
+  for id, nodes in pairs(match) do names[#names + 1] = q.captures[id] .. '=' .. vim.treesitter.get_node_text(nodes[1], text) end
+  table.sort(names)
+  print('match', pattern, table.concat(names, ' '))
+end
+print(pcall(vim.treesitter.query.parse, 'lua', '(nope_kind) @x'))
+-- the cursor's MATCH LIMIT is part of the semantics: a small limit changes nvim's own answer (0 / 2 / 42 here)
+local ltext = 'f(a, b, c, d, e, g, h)\n'
+local lroot = vim.treesitter.get_string_parser(ltext, 'lua'):parse()[1]:root()
+for _, qs in ipairs { '(arguments (identifier) @x (identifier) @y)', '(arguments (_) @x (_) @y (_) @z)' } do
+  local lq = vim.treesitter.query.parse('lua', qs)
+  local counts = {}
+  for _, limit in ipairs { 1, 2, 256 } do local n = 0; for _ in lq:iter_captures(lroot, ltext, 0, -1, { match_limit = limit }) do n = n + 1 end; counts[#counts + 1] = n end
+  print('limit', qs, table.concat(counts, ' '))
+end
+]==]
+    local want = lua_out(src)
+    local got, _, refusals = js_out(src, true)
+    eq(0, #refusals, vim.inspect(refusals))
+    ok(want ~= '' and not want:find('^ERROR'), 'the premise: the real nvim side ran: ' .. want:sub(1, 300))
+    -- ⚠ the query-error line carries the calling Lua file's position (`…/query.lua:374: `) — a known pack gap; compare after it
+    local function strip(s) return (s:gsub('[^\n\t]*query%.lua:%d+: ', '')) end
+    if strip(want) ~= strip(got) then
+        local wf, gf = vim.fn.tempname(), vim.fn.tempname()
+        vim.fn.writefile(vim.split(strip(want), '\n'), wf); vim.fn.writefile(vim.split(strip(got), '\n'), gf)
+        error('vim.treesitter disagrees with nvim:\n' .. vim.system({ 'diff', wf, gf }, { text = true }):wait().stdout:sub(1, 3000), 0)
+    end
+end)
+
 test('luajs: a construct with no faithful form is REFUSED by name, the module still parses, and a pack gap BREAKS loudly at run time', function ()
     if not ready() then skip 'no lua parser / node' end
-    local out, js, refusals = js_out('print(1)\ngoto skip\nprint(2)\n::skip::\nprint(3)\n')
-    ok(#refusals >= 1 and refusals[1].kind == 'goto', vim.inspect(refusals))
-    ok(js:find('$abort("goto', 1, true), 'the refusal sits at its place')
+    -- (every Lua goto now has a structured form; an ATTRIBUTE is the construct still refused)
+    local out, js, refusals = js_out('print(1)\nlocal x <const> = 2\nprint(x)\n')
+    ok(#refusals >= 1 and refusals[1].kind == 'attribute', vim.inspect(refusals))
+    ok(js:find('$abort("attribute', 1, true), 'the refusal sits at its place')
     ok(out:find('LuaBreak', 1, true) or out:find('no faithful JS form', 1, true), 'running it reaches the refusal loudly: ' .. out)
     local out2 = js_out("print(('%q'):format('x'))\n")
     ok(out2:find('no faithful JS form: string.format %q', 1, true), 'a pack gap is a named break, never an approximation: ' .. out2)

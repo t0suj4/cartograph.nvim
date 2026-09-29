@@ -86,7 +86,8 @@ if run then
     local outcomes, examples = {}, {}
     local probe = [[
 const f = process.argv[1];
-try { require(f); console.log('OK'); }
+// a module is LOADED as require would load it: its chunk run with its module name as `...`
+try { const m = require(f); if (m && m.$chunk) m.$chunk(process.argv[2]); console.log('OK'); }
 catch (e) {
   const n = e && e.constructor && e.constructor.name;
   if (n === 'LuaBreak') console.log('BREAK\t' + e.what);
@@ -95,7 +96,8 @@ catch (e) {
 }
 ]]
     for _, e in ipairs(emitted) do
-        local r = vim.system({ 'node', '-e', probe, e.dest }, { text = true, env = { LUAJS_ROOT = out_dir, LUAJS_SRC_ROOT = src_dir }, timeout = 20000 }):wait()
+        local modname = e.rel:gsub('%.lua$', ''):gsub('/init$', ''):gsub('/', '.')
+        local r = vim.system({ 'node', '-e', probe, e.dest, modname }, { text = true, env = L.run_env(out_dir, src_dir), timeout = 20000 }):wait()
         local line = vim.trim((r.stdout or ''):match('[^\n]*$') ~= '' and (r.stdout or ''):match('([^\n]*)\n?$') or (r.stdout or ''))
         local cls, detail = line:match('^(%u+)\t?(.*)$')
         cls = cls or ('NO OUTCOME (exit ' .. tostring(r.code) .. ')')

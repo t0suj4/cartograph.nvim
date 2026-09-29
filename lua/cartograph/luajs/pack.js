@@ -55,6 +55,8 @@ const trim = a => { while (a.length > 1 && a[a.length - 1] === undefined) a.leng
 const $arr = (...items) => trim([undefined, ...items]);
 const $rec = (...pairs) => { const o = Object.create(null); for (let i = 0; i < pairs.length; i += 2) if (pairs[i + 1] !== undefined) o[pairs[i]] = pairs[i + 1]; return o; };
 const $map = (...pairs) => { const m = new Map(); for (let i = 0; i < pairs.length; i += 2) if (pairs[i + 1] !== undefined) m.set(key(pairs[i]), pairs[i + 1]); return m; };
+/** a Map constructor's multi-valued last positional entry: values from position `at` on (a nil stops nothing — it is a hole) */
+const $mappos = (m, at, ...vals) => { vals.forEach((v, i) => { if (v !== undefined) m.set(at + i, v); }); return m; };
 const isRec = t => t !== null && typeof t === 'object' && !Array.isArray(t) && !(t instanceof Map) && !(t instanceof MV) && Object.getPrototypeOf(t) === null;
 const isTable = t => Array.isArray(t) || t instanceof Map || isRec(t);
 const key = k => {
@@ -189,7 +191,8 @@ const $cat = (a, b) => {
 /** 5.1: __eq fires only when BOTH are tables (or both userdata) and share the SAME __eq */
 const $eq = (a, b) => {
   if (a === b) return true;
-  if (!isTable(a) || !isTable(b)) return false;
+  const obj = x => isTable(x) || (x !== null && typeof x === 'object' && META.has(x)); // tables, and userdata (a TSNode)
+  if (!obj(a) || !obj(b)) return false;
   const ha = meta(a, '__eq');
   if (ha === undefined || ha !== meta(b, '__eq')) return false;
   return $t($1($call(ha, a, b)));
@@ -591,6 +594,7 @@ G.io = $rec(
     return f;
   },
   'write', (...a) => FILE.write(STDOUT, ...a),
+  'close', f => (f === undefined ? FILE.close(STDOUT) : FILE.close(f)),
   'read', (...fmts) => FILE.read(STDIN, ...fmts),
   'lines', (p, fmt) => {
     if (p === undefined) return FILE.lines(STDIN, fmt);
@@ -899,6 +903,37 @@ function expand(s) {
   if (s[0] === '~') s = utf8bytes(nodeos.homedir()) + s.slice(1);
   return s.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (all, k) => (process.env[k] === undefined ? all : utf8bytes(process.env[k])));
 }
+// Vim's glob over the filesystem (probed): `*` `?` `[…]` inside one component, `**` across ZERO or more directories;
+// results SORTED; a pattern with no magic returns the path when it exists
+const glob_re = pat => new RegExp('^' + pat.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+function vglob(pattern) {
+  const p = expand_plain(cstr(pattern));
+  const parts = p.split('/');
+  let paths = [parts[0] === '' ? '/' : '.'];
+  const start = parts[0] === '' ? 1 : 0;
+  const has_magic = s => /[*?[]/.test(s);
+  const join = (a, b) => (a === '/' ? '/' + b : a === '.' ? b : a + '/' + b);
+  for (let i = start; i < parts.length; i++) {
+    const comp = parts[i];
+    const next = [];
+    if (comp === '**') {
+      const walk = d => { next.push(d); let ents; try { ents = fs.readdirSync(Buffer.from(d, 'latin1'), { withFileTypes: true, encoding: 'buffer' }); } catch (e) { return; } for (const e of ents) if (e.isDirectory()) walk(join(d, frombytes(e.name))); };
+      for (const d of paths) walk(d);
+    } else if (!has_magic(comp)) {
+      for (const d of paths) { const q = join(d, comp); try { fs.lstatSync(Buffer.from(q, 'latin1')); next.push(q); } catch (e) {} }
+    } else {
+      const re = glob_re(comp);
+      for (const d of paths) {
+        let ents;
+        try { ents = fs.readdirSync(Buffer.from(d, 'latin1'), { encoding: 'buffer' }).map(frombytes); } catch (e) { continue; }
+        for (const e of ents) if ((e[0] !== '.' || comp[0] === '.') && re.test(e)) next.push(join(d, e));
+      }
+    }
+    paths = [...new Set(next)];
+  }
+  return paths.filter(x => x !== '.' && x !== '/').sort();
+}
+const expand_plain = s => { if (s[0] === '~') s = utf8bytes(nodeos.homedir()) + s.slice(1); return s.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (all, k) => (process.env[k] === undefined ? all : utf8bytes(process.env[k]))); };
 let tmpdir, tmpn = 0;
 const utf8_units = s => Buffer.from(cstr(s), 'latin1').toString('utf8');
 const fnt = with_refusal($rec(
@@ -946,6 +981,8 @@ const fnt = with_refusal($rec(
     const body = f.includes('b') ? lines.join('\n') : lines.map(l => l + '\n').join('');
     try { (f.includes('a') ? fs.appendFileSync : fs.writeFileSync)(bytes(p), bytes(body)); return 0; } catch (e) { return -1; }
   },
+  'glob', (pat, nosuf, list) => { const r = vglob(pat); return $t(list) ? $arr(...r) : r.join('\n'); },
+  'globpath', (dirs, pat, nosuf, list) => { const r = []; for (const d of cstr(dirs).split(',')) if (d !== '') r.push(...vglob(d + '/' + cstr(pat))); return $t(list) ? $arr(...r) : r.join('\n'); },
   'readdir', p => { let ns; try { ns = fs.readdirSync(bytes(p), { encoding: 'buffer' }).map(frombytes); } catch (e) { return $arr(); } ns.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)); return $arr(...ns); },
   'has', feat => { const f = cstr(feat); return fn_bool({ nvim: 1, unix: process.platform !== 'win32', linux: process.platform === 'linux', mac: process.platform === 'darwin', macunix: process.platform === 'darwin', win32: process.platform === 'win32', win64: process.platform === 'win32', wsl: !!process.env.WSL_DISTRO_NAME }[f]); },
   'strchars', s => [...utf8_units(s)].length,
@@ -1050,18 +1087,334 @@ function mp_encode(v) {
   return frombytes(Buffer.concat(out));
 }
 rawset(vim, 'mpack', $rec('decode', mp_decode, 'encode', mp_encode));
-for (const ed of ['api', 'keymap', 'bo', 'wo', 'o', 'go', 'g', 'b', 'w', 't', 'opt', 'opt_local', 'opt_global', 'lsp', 'diagnostic', 'treesitter', 'health', 'ui', 'filetype', 'snippet', 'hl', 'highlight', 'keycode'])
+// vim.g: the global variables — with no editor it is simply an empty, writable namespace (reads nil, writes store)
+rawset(vim, 'g', $map());
+for (const ed of ['keymap', 'bo', 'wo', 'o', 'go', 'b', 'w', 't', 'opt', 'opt_local', 'opt_global', 'lsp', 'diagnostic', 'health', 'ui', 'filetype', 'snippet', 'hl', 'highlight', 'keycode'])
   rawset(vim, ed, refuse_table('vim.' + ed, 'the editor'));
+
+// ── vim.treesitter's C BINDING (nvim's treesitter.c surface: _meta/tsnode.lua, tstree.lua, tsquery.lua, misc.lua) ──
+// over TSBRIDGE (lua/cartograph/luajs/tsbridge.c): the SAME grammar .so nvim loads, the tree-sitter runtime built from
+// its own source. NAVIGATION runs on the serialized tree here (a node's identity = its PREORDER index — tree-sitter is
+// deterministic, so the bridge re-parsing the same source numbers the same nodes); QUERIES, sexpr and
+// descendant_for_range run IN the bridge (libtree-sitter itself). The cursor's match LIMIT is honoured — nvim's default
+// 256 drops matches on large files, and a faithful binding reproduces the cap rather than fixing it.
+// nvim's pure-Lua vim.treesitter.* (query predicates, LanguageTree, language.add) is TRANSLITERATED beside the modules.
+function tsrun(header, ...payloads) {
+  const bridge = process.env.LUAJS_TS_BRIDGE;
+  if (!bridge) $abort('vim.treesitter: no tree-sitter bridge (LUAJS_TS_BRIDGE is unset)');
+  const input = Buffer.concat([Buffer.from(header + '\n', 'latin1'), ...payloads.map(bytes)]);
+  const r = child.spawnSync(bridge, [], { input, maxBuffer: 1 << 30 });
+  const out = frombytes(r.stdout || Buffer.alloc(0));
+  if (out.startsWith('ERR ')) throw new LuaError(out.slice(4).trim());
+  return out;
+}
+const TSLANG = Object.create(null);
+const U32 = 4294967295;
+function tslang(lang) { const l = TSLANG[lang]; if (!l) throw new LuaError('no such language: ' + cstr(lang)); return l; }
+function tsinfo(lang) {
+  const l = tslang(lang);
+  if (l.info) return l;
+  const out = tsrun('inspect ' + l.so + ' ' + l.sym);
+  l.syms = []; l.symtype = []; l.fields = [undefined]; l.supers = [];
+  for (const line of out.split('\n')) {
+    let m;
+    if ((m = /^S (\d+) (\d+) (\d+):/.exec(line))) { l.syms[+m[1]] = line.slice(m[0].length, m[0].length + +m[3]); l.symtype[+m[1]] = +m[2]; }
+    else if ((m = /^F (\d+) (\d+):/.exec(line))) l.fields[+m[1]] = line.slice(m[0].length, m[0].length + +m[2]);
+    else if (line.startsWith('ABI ')) l.abi = +line.slice(4);
+    else if (line.startsWith('STATES ')) l.states = +line.slice(7);
+    else if (line.startsWith('META ')) l.meta = line.slice(5).split(' ').map(Number);
+    else if (line.startsWith('SUPER ')) { const v = line.slice(6).split(' ').map(Number); l.supers.push([v[0], v.slice(2)]); }
+  }
+  l.info = true;
+  return l;
+}
+rawset(vim, '_ts_get_language_version', () => 15);
+rawset(vim, '_ts_get_minimum_language_version', () => 13);
+rawset(vim, '_ts_has_language', lang => TSLANG[cstr(lang)] !== undefined);
+rawset(vim, '_ts_add_language_from_object', (p, lang, symbol) => {
+  lang = cstr(lang);
+  TSLANG[lang] = { so: frombytes(bytes(p)), sym: symbol === undefined ? lang : cstr(symbol) };
+  try { tsinfo(lang); } catch (e) { delete TSLANG[lang]; throw new LuaError('Failed to load parser for language \'' + lang + '\': ' + (e.value || e.message)); }
+  return true;
+});
+rawset(vim, '_ts_inspect_language', lang => {
+  const l = tsinfo(cstr(lang));
+  const symbols = $map();
+  l.syms.forEach((name, i) => { const ty = l.symtype[i]; if (ty === 3) return; const nm = ty !== 1; rawset(symbols, nm ? name : '"' + name + '"', nm); });
+  const supertypes = $map();
+  for (const [st, subs] of l.supers) rawset(supertypes, l.syms[st], $arr(...subs.map(x => l.syms[x])));
+  const info = $rec('abi_version', l.abi, 'state_count', l.states, 'fields', $arr(...l.fields.slice(1)), 'symbols', symbols, 'supertypes', supertypes, '_wasm', false);
+  if (l.meta) rawset(info, 'metadata', $rec('major_version', l.meta[0], 'minor_version', l.meta[1], 'patch_version', l.meta[2]));
+  return info;
+});
+
+// the TREE: flat arrays by preorder id
+let tsTreeSeq = 0;
+class TSTreeObj {}
+class TSNodeObj {}
+const TSTREE_MT = $rec(), TSNODE_MT = $rec();
+function mktree(lang, src) {
+  const l = tslang(lang);
+  const out = tsrun('parse ' + l.so + ' ' + l.sym + ' ' + src.length, src);
+  const t = new TSTreeObj();
+  t.lang = lang; t.src = src; t.seq = ++tsTreeSeq; t.nodes = [];
+  const rows = [];
+  for (const line of out.split('\n')) if (line.charCodeAt(0) === 78) rows.push(line); // 'N'
+  const n = rows.length;
+  t.n = n;
+  t.parent = new Int32Array(n); t.field = new Uint16Array(n); t.sym = new Uint16Array(n); t.flags = new Uint8Array(n);
+  t.sb = new Uint32Array(n); t.eb = new Uint32Array(n); t.sr = new Uint32Array(n); t.sc = new Uint32Array(n); t.er = new Uint32Array(n); t.ec = new Uint32Array(n);
+  t.kids = Array.from({ length: n }, () => []);
+  for (const line of rows) {
+    const v = line.split(' ');
+    const i = +v[1];
+    t.parent[i] = +v[2]; t.field[i] = +v[3]; t.sym[i] = +v[4];
+    t.flags[i] = (+v[5]) | (+v[6] << 1) | (+v[7] << 2) | (+v[8] << 3); // named, missing, extra, has_error
+    t.sb[i] = +v[9]; t.eb[i] = +v[10]; t.sr[i] = +v[11]; t.sc[i] = +v[12]; t.er[i] = +v[13]; t.ec[i] = +v[14];
+    if (t.parent[i] >= 0) t.kids[t.parent[i]].push(i);
+  }
+  META.set(t, TSTREE_MT);
+  return t;
+}
+function node(t, i) {
+  if (i === undefined || i < 0 || i >= t.n) return undefined;
+  let x = t.nodes[i];
+  if (!x) { x = new TSNodeObj(); x.t = t; x.i = i; META.set(x, TSNODE_MT); t.nodes[i] = x; }
+  return x;
+}
+const isnode = x => x instanceof TSNodeObj;
+const N = x => { if (!isnode(x)) throw new LuaError('TSNode expected, got ' + $type(x)); return x; };
+const named = (t, i) => (t.flags[i] & 1) !== 0;
+const sibling = (x, step, want_named) => {
+  const t = x.t, p = t.parent[x.i];
+  if (p < 0) return undefined;
+  const ks = t.kids[p];
+  for (let k = ks.indexOf(x.i) + step; k >= 0 && k < ks.length; k += step) if (!want_named || named(t, ks[k])) return node(t, ks[k]);
+  return undefined;
+};
+const NODE = Object.create(null);
+// tree-sitter's BUILTIN error symbols lie outside the language's symbol table (ts_builtin_sym_error = 65535)
+const BUILTIN_SYM = { 65535: 'ERROR', 65534: '_ERROR' };
+NODE.type = x => { N(x); const s = x.t.sym[x.i]; return BUILTIN_SYM[s] !== undefined ? BUILTIN_SYM[s] : tsinfo(x.t.lang).syms[s]; };
+NODE.symbol = x => N(x).t.sym[x.i];
+NODE.range = (x, bytes_too) => { const t = N(x).t, i = x.i; return $t(bytes_too) ? $mv(t.sr[i], t.sc[i], t.sb[i], t.er[i], t.ec[i], t.eb[i]) : $mv(t.sr[i], t.sc[i], t.er[i], t.ec[i]); };
+NODE.start = x => { const t = N(x).t, i = x.i; return $mv(t.sr[i], t.sc[i], t.sb[i]); };
+NODE.end_ = x => { const t = N(x).t, i = x.i; return $mv(t.er[i], t.ec[i], t.eb[i]); };
+NODE.byte_length = x => { const t = N(x).t; return t.eb[x.i] - t.sb[x.i]; };
+NODE.child_count = x => N(x).t.kids[x.i].length;
+NODE.child = (x, k) => { const ks = N(x).t.kids[x.i]; return node(x.t, ks[num(k)]); };
+NODE.named_child_count = x => { const t = N(x).t; return t.kids[x.i].filter(k => named(t, k)).length; };
+NODE.named_child = (x, k) => { const t = N(x).t; return node(t, t.kids[x.i].filter(c => named(t, c))[num(k)]); };
+NODE.named_children = x => { const t = N(x).t; return $arr(...t.kids[x.i].filter(c => named(t, c)).map(c => node(t, c))); };
+NODE.iter_children = x => { const t = N(x).t, ks = t.kids[x.i]; let k = 0; return () => { if (k >= ks.length) return undefined; const c = ks[k++]; const f = t.field[c]; return $mv(node(t, c), f ? tsinfo(t.lang).fields[f] : undefined); }; };
+NODE.field = (x, name) => { const t = N(x).t, fs = tsinfo(t.lang).fields; name = cstr(name); return $arr(...t.kids[x.i].filter(c => t.field[c] && fs[t.field[c]] === name).map(c => node(t, c))); };
+NODE.parent = x => { const t = N(x).t; return node(t, t.parent[x.i]); };
+NODE.next_sibling = x => sibling(N(x), 1, false);
+NODE.prev_sibling = x => sibling(N(x), -1, false);
+NODE.next_named_sibling = x => sibling(N(x), 1, true);
+NODE.prev_named_sibling = x => sibling(N(x), -1, true);
+NODE.named = x => named(N(x).t, x.i);
+NODE.missing = x => (N(x).t.flags[x.i] & 2) !== 0;
+NODE.extra = x => (N(x).t.flags[x.i] & 4) !== 0;
+NODE.has_error = x => (N(x).t.flags[x.i] & 8) !== 0;
+NODE.has_changes = x => { N(x); return false; };
+NODE.id = x => N(x).t.seq + ':' + x.i;
+NODE.equal = (x, y) => isnode(y) && N(x).t === y.t && x.i === y.i;
+NODE.tree = x => N(x).t;
+NODE.child_with_descendant = (x, d) => { N(x); N(d); let c = d.i; while (c >= 0 && x.t.parent[c] !== x.i) c = x.t.parent[c]; return c >= 0 && d.t === x.t ? node(x.t, c) : undefined; };
+NODE.__has_ancestor = (x, types) => { const t = N(x).t, want = new Set(); for (let k = 1; rawget(types, k) !== undefined; k++) want.add(rawget(types, k)); for (let p = t.parent[x.i]; p >= 0; p = t.parent[p]) if (want.has(tsinfo(t.lang).syms[t.sym[p]])) return true; return false; };
+NODE.sexpr = x => { const t = N(x).t, l = tslang(t.lang); return tsrun('sexpr ' + l.so + ' ' + l.sym + ' ' + t.src.length + ' ' + x.i, t.src); };
+const desc = named_only => (x, sr, sc, er, ec) => {
+  const t = N(x).t, l = tslang(t.lang);
+  const out = tsrun(['desc', l.so, l.sym, t.src.length, x.i, num(sr), num(sc), num(er), num(ec), named_only ? 1 : 0].join(' '), t.src);
+  const m = /^D (\d+)/.exec(out);
+  return m ? node(t, +m[1]) : undefined;
+};
+NODE.descendant_for_range = desc(false);
+NODE.named_descendant_for_range = desc(true);
+TSNODE_MT.__index = NODE;
+TSNODE_MT.__tostring = x => '<node ' + NODE.type(x) + '>';
+TSNODE_MT.__eq = (x, y) => NODE.equal(x, y);
+const TREE = Object.create(null);
+TREE.root = t => node(t, 0);
+TREE.copy = t => t;
+TREE.edit = () => $abort('TSTree:edit (incremental re-parsing)');
+TREE.included_ranges = (t, bytes_too) => ($t(bytes_too) ? $arr($arr(0, 0, 0, U32, U32, U32)) : $arr($arr(0, 0, U32, U32)));
+TSTREE_MT.__index = TREE;
+TSTREE_MT.__tostring = () => '<tree>';
+
+// the PARSER
+class TSParserObj {}
+const PARSER_MT = $rec();
+const PARSER = Object.create(null);
+PARSER.parse = (p, old, source, bytes_too) => {
+  if (typeof source !== 'string') $abort('TSParser:parse of a buffer (the editor)');
+  if (p.ranges !== undefined) $abort('TSParser:parse with included ranges (injections)');
+  const t = mktree(p.lang, source);
+  return $mv(t, $arr($t(bytes_too) ? $arr(0, 0, 0, U32, U32, U32) : $arr(0, 0, U32, U32)));
+};
+PARSER.reset = () => undefined;
+PARSER.included_ranges = (p, bytes_too) => ($t(bytes_too) ? $arr($arr(0, 0, 0, U32, U32, U32)) : $arr($arr(0, 0, U32, U32)));
+PARSER.set_included_ranges = (p, ranges) => { p.ranges = ranges !== undefined && rawget(ranges, 1) !== undefined ? ranges : undefined; };
+PARSER._set_logger = () => undefined;
+PARSER._logger = () => undefined;
+PARSER_MT.__index = PARSER;
+PARSER_MT.__tostring = () => '<parser>';
+rawset(vim, '_create_ts_parser', lang => { lang = cstr(lang); tslang(lang); const p = new TSParserObj(); p.lang = lang; META.set(p, PARSER_MT); return p; });
+
+// the QUERY
+class TSQueryObj {}
+const QUERY_MT = $rec();
+const QERR = [null, 'Invalid syntax:\n', 'Invalid node type ', 'Invalid field name ', 'Invalid capture name ', 'Impossible pattern:\n', 'Invalid language:\n'];
+function query_err(src, off, ty) {
+  // nvim's query_err_string: the row/column of the offset, the kind, the name for the kinds that report one, the line
+  let line_start = 0, row = 0, line = null;
+  for (;;) {
+    const nl = src.indexOf('\n', line_start);
+    const end = nl < 0 ? src.length : nl;
+    if (end > off) { line = src.slice(line_start, end); break; }
+    if (nl < 0) break;
+    line_start = nl + 1; row++;
+  }
+  const col = off - line_start;
+  let msg = 'Query error at ' + (row + 1) + ':' + (col + 1) + '. ' + (QERR[ty] || 'Unknown error ');
+  if (ty === 2 || ty === 3 || ty === 4) {
+    const anon = ty === 2 && src[off - 1] === '"';
+    let k = off;
+    if (anon) { let bs = 0; while (k < src.length && (src[k] !== '"' || bs % 2 !== 0)) { bs = src[k] === '\\' ? bs + 1 : 0; k++; } }
+    else while (k < src.length && /[A-Za-z0-9_.\-]/.test(src[k])) k++;
+    msg += '"' + src.slice(off, k) + '":\n';
+  }
+  if (line === null) return msg + 'Unexpected EOF\n';
+  return msg + line + '\n' + ' '.repeat(col) + '^\n';
+}
+rawset(vim, '_ts_parse_query', (lang, q) => {
+  lang = cstr(lang); q = cstr(q);
+  const l = tslang(lang);
+  const out = tsrun('qinfo ' + l.so + ' ' + l.sym + ' ' + q.length, q);
+  if (out.startsWith('QERR ')) { const [, off, ty] = out.trim().split(' ').map(Number); throw new LuaError(query_err(q, off, ty)); }
+  const query = new TSQueryObj();
+  query.lang = lang; query.src = q; query.captures = []; query.patterns = [];
+  for (const line of out.split('\n')) {
+    let m;
+    if ((m = /^C (\d+) (\d+):/.exec(line))) query.captures[+m[1]] = line.slice(m[0].length, m[0].length + +m[2]);
+    else if ((m = /^P (\d+) (\d+)/.exec(line))) {
+      // steps: cN (a capture), sLEN:text (a string), . (done) — split into predicates, capture ids 1-based
+      const preds = [];
+      let cur = [], rest = line.slice(m[0].length);
+      while (rest.length) {
+        rest = rest.replace(/^ /, '');
+        if (rest[0] === 'c') { const mm = /^c(\d+)/.exec(rest); cur.push(+mm[1] + 1); rest = rest.slice(mm[0].length); }
+        else if (rest[0] === 's') { const mm = /^s(\d+):/.exec(rest); cur.push(rest.slice(mm[0].length, mm[0].length + +mm[1])); rest = rest.slice(mm[0].length + +mm[1]); }
+        else if (rest[0] === '.') { preds.push(cur); cur = []; rest = rest.slice(1); }
+        else break;
+      }
+      query.patterns[+m[1]] = preds;
+    }
+  }
+  META.set(query, QUERY_MT);
+  return query;
+});
+const QUERY = Object.create(null);
+QUERY.inspect = q => {
+  const patterns = $map();
+  q.patterns.forEach((preds, i) => { if (preds.length) rawset(patterns, i + 1, $arr(...preds.map(pr => $arr(...pr)))); });
+  return $rec('captures', $arr(...q.captures), 'patterns', patterns);
+};
+QUERY.disable_capture = () => $abort('TSQuery:disable_capture');
+QUERY.disable_pattern = () => $abort('TSQuery:disable_pattern');
+QUERY_MT.__index = QUERY;
+QUERY_MT.__tostring = () => '<query>';
+
+// the CURSOR: one bridge run yields both streams; next_capture / next_match consume them; remove_match filters
+class TSMatchObj {}
+const MATCH_MT = $rec('__index', $rec(
+  'info', m => $mv(m.id, m.pattern + 1),
+  'captures', m => { const out = $map(); for (const [ci, ni] of m.caps) { const k = ci + 1; let l = rawget(out, k); if (l === undefined) { l = $arr(); rawset(out, k, l); } rawset(l, $len(l) + 1, node(m.t, ni)); } return out; }));
+const mkmatch = (t, id, pattern, caps) => { const m = new TSMatchObj(); m.t = t; m.id = id; m.pattern = pattern; m.caps = caps; META.set(m, MATCH_MT); return m; };
+class TSCursorObj {}
+const CURSOR_MT = $rec('__index', $rec(
+  'next_capture', c => {
+    while (c.ki < c.K.length) {
+      const k = c.K[c.ki++];
+      if (c.removed.has(k.id)) continue;
+      return $mv(k.cap + 1, node(c.t, k.node), mkmatch(c.t, k.id, k.pattern, k.caps));
+    }
+    return undefined;
+  },
+  'next_match', c => {
+    while (c.mi < c.M.length) { const m = c.M[c.mi++]; if (!c.removed.has(m.id)) return mkmatch(c.t, m.id, m.pattern, m.caps); }
+    return undefined;
+  },
+  'remove_match', (c, id) => { c.removed.add(num(id)); }));
+rawset(vim, '_create_ts_querycursor', (nd, q, opts) => {
+  N(nd);
+  const t = nd.t, l = tslang(t.lang);
+  const o = opts === undefined ? $rec() : opts;
+  const g = (k, d) => { const v = rawget(o, k); return v === undefined ? d : num(v); };
+  const sr = g('start_row', 0), sc = g('start_col', 0), er = g('end_row', U32), ec = g('end_col', 0);
+  const depth = g('max_start_depth', U32), limit = g('match_limit', U32);
+  const out = tsrun(['query', l.so, l.sym, t.src.length, q.src.length, nd.i, sr, sc, er, er === U32 ? U32 : ec, depth, limit].join(' '), t.src, q.src);
+  if (out.startsWith('QERR ')) throw new LuaError('the query does not compile in the bridge');
+  const c = new TSCursorObj();
+  c.t = t; c.K = []; c.M = []; c.ki = 0; c.mi = 0; c.removed = new Set();
+  for (const line of out.split('\n')) {
+    const v = line.split(' ');
+    if (v[0] === 'K') {
+      const caps = [];
+      for (let k = 6; k + 1 < v.length; k += 2) caps.push([+v[k], +v[k + 1]]);
+      c.K.push({ id: +v[1], pattern: +v[2], cap: +v[3], node: +v[4], caps });
+    } else if (v[0] === 'M') {
+      const caps = [];
+      for (let k = 4; k + 1 < v.length; k += 2) caps.push([+v[k], +v[k + 1]]);
+      c.M.push({ id: +v[1], pattern: +v[2], caps });
+    }
+  }
+  META.set(c, CURSOR_MT);
+  return c;
+});
+// the runtime path search language.add uses to find a parser (LUAJS_RTP: the runtime directories, ':'-separated)
+const rtp_glob = (name, all) => {
+  const out = [];
+  const dirs = (process.env.LUAJS_RTP || '').split(':').filter(Boolean);
+  const i = name.lastIndexOf('/');
+  const dirpart = i < 0 ? '' : name.slice(0, i), pat = i < 0 ? name : name.slice(i + 1);
+  const re = new RegExp('^' + pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
+  for (const d of dirs) {
+    let ents;
+    try { ents = fs.readdirSync(path.join(d, dirpart)).sort(); } catch (e) { continue; }
+    for (const e of ents) if (re.test(e)) { out.push(utf8bytes(path.join(d, dirpart, e))); if (!all) return out; }
+  }
+  return out;
+};
+// vim.api: the editor — except the runtime-path search, which has a meaning given a runtime path
+const API = refuse_table('vim.api', 'the editor');
+rawset(API, 'nvim_get_runtime_file', (name, all) => $arr(...rtp_glob(cstr(name), $t(all))));
+// autocmds: a registration is faithful — outside the editor no event ever fires, so the callback correctly never runs
+let AUTOCMD = 0;
+rawset(API, 'nvim_create_autocmd', () => ++AUTOCMD);
+rawset(API, 'nvim_create_augroup', () => ++AUTOCMD);
+rawset(API, 'nvim_del_autocmd', () => undefined);
+rawset(API, 'nvim_clear_autocmds', () => undefined);
+rawset(vim, 'api', API);
 
 // the PURE-LUA half, loaded on the first miss exactly as nvim defers it (shared first; then the lazy modules)
 let shared_loaded = false;
-const LAZY = $rec('inspect', () => $require('vim.inspect'), 'fs', () => $require('vim.fs'),
+let SUBMODS;
+const LAZY = $rec('inspect', () => $require('vim.inspect'), 'fs', () => $require('vim.fs'), 'treesitter', () => $require('vim.treesitter'),
   'uri_from_fname', () => $idx($require('vim.uri'), 'uri_from_fname'), 'uri_to_fname', () => $idx($require('vim.uri'), 'uri_to_fname'),
   'uri_from_bufnr', () => $idx($require('vim.uri'), 'uri_from_bufnr'), 'uri_to_bufnr', () => $idx($require('vim.uri'), 'uri_to_bufnr'));
 META.set(vim, $rec('__index', (t, k) => {
   if (!shared_loaded) { shared_loaded = true; $require('vim._core.shared'); const v = rawget(t, k); if (v !== undefined) return v; }
   const lz = typeof k === 'string' ? LAZY[k] : undefined;
   if (lz !== undefined) { const v = lz(); rawset(t, k, v); return v; }
+  // nvim's own LAZY SUBMODULE list, as transliterated beside the modules (vim/$submodules.json, derived at emit time)
+  if (typeof k === 'string') {
+    if (SUBMODS === undefined) { try { SUBMODS = new Set(JSON.parse(fs.readFileSync(path.join(process.env.LUAJS_ROOT || __dirname, 'vim', '$submodules.json'), 'utf8'))); } catch (e) { SUBMODS = new Set(); } }
+    if (SUBMODS.has(k)) { const v = $require('vim.' + k); rawset(t, k, v); return v; }
+  }
+  // FEATURE PROBES that read nil in nvim too (a build without wasm): nil, not an abort
+  if (k === '_ts_add_language_from_wasm') return undefined;
   return $abort('vim.' + $tostring(k) + ' (not in the host pack)');
 }));
 
@@ -1084,10 +1437,11 @@ function $require(name) {
   const file = fs.existsSync(base + '.js') ? base + '.js' : (fs.existsSync(path.join(base, 'init.js')) ? path.join(base, 'init.js') : null);
   if (!file) throw new LuaError("module '" + name + "' not found (no transliteration of it)");
   loaded[name] = true; // a require cycle sees `true`, as Lua's does
-  const v = require(file);
+  const m = require(file);
+  const v = m && typeof m.$chunk === 'function' ? $1(m.$chunk(name)) : m; // the chunk runs with the module name as `...`
   loaded[name] = v === undefined ? true : v;
   return loaded[name];
 }
 
-module.exports = { $t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $add, $sub, $mul, $div, $mod,
+module.exports = { $mappos, $t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $add, $sub, $mul, $div, $mod,
   $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $type, $tostring, $tonumber, $abort, $require, $G: G, MV, LuaError, LuaBreak, $numstr };
