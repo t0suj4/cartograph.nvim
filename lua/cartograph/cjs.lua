@@ -65,6 +65,13 @@ function M.emit(sources, opts)
     -- exact mode: typedefs of non-struct types, struct TAGS (`struct pow_log_data {…}`), prototypes (a template's
     -- types), struct-valued globals (a JS object each)
     local typedefs, tags, protos, sglobals = {}, {}, {}, {}
+    -- exact mode, HEAP LAYOUTS (opts.heap.types = { [type name] = { size, fields = { [f] = { off, cls } } } }): a struct
+    -- or union named there lives in the BYTE HEAP — its layout the HOST COMPILER's (sizeof/offsetof printed by a C
+    -- program the recipe builds with the build's flags), never re-derived here; a field is a typed load/store at
+    -- base + off (cls: f64 u64 i64 u32 i32 u16 i16 u8 i8), so a union's punning is exact by construction
+    local HEAP = X and opts.heap and opts.heap.types or {}
+    -- exact mode: every enumerator's VALUE (explicit, or the previous + 1 — C's own rule)
+    local enums = {}
     local trees = {}
     for _, s in ipairs(sources) do
         local tree = vim.treesitter.get_string_parser(s.text, 'c'):parse()[1]
@@ -83,9 +90,33 @@ function M.emit(sources, opts)
         end
         if X and t == 'sized_type_specifier' and not tx:find('char') then
             -- `unsigned long int`, `long long`, `unsigned`: LP64 — a `long` is 64 bits
+            -- a SHORT is 16 bits of storage (`sw`) whose value promotes to a signed int: its unsignedness is the
+            -- storage's (`su`: the load zero-extends, a store masks), never the arithmetic's
+            if tx:find('short') then return { k = 'int', w = 32, sw = 16, su = tx:find('unsigned') and true or nil } end
             return { k = 'int', w = tx:find('long') and 64 or 32, u = tx:find('unsigned') and true or nil }
         end
         if X and t == 'primitive_type' and tx == 'float' then return { k = 'float' } end
+        if X and t == 'enum_specifier' then
+            -- an enum is an int; its body's enumerators get their values (C's rule: explicit, else previous + 1)
+            -- a value that is not a plain literal (`A = 1 << 3`, `B = A + 1`) is NOT guessed: it and the implicit ones
+            -- after it stay unknown, so a use refuses by name instead of reading a wrong number
+            local body, nextv = field_of(tn, 'body'), 0
+            for _, en in ipairs(body and named_kids(body) or {}) do
+                if en:type() == 'enumerator' then
+                    local v = field_of(en, 'value')
+                    if v then nextv = tonumber((text(v):gsub('[uUlL]+$', ''))) end -- (one value: gsub's count is no base)
+                    if nextv then enums[text(field_of(en, 'name'))] = nextv; nextv = nextv + 1 end
+                end
+            end
+            return { k = 'int', w = 32 }
+        end
+        if X and t == 'union_specifier' then
+            local nm = field_of(tn, 'name')
+            local ty = { k = 'struct', name = nm and text(nm) or ('anon@' .. tn:start()), union = true, node = tn }
+            if field_of(tn, 'body') then ty.fields = struct_fields(tn); if nm then tags[text(nm)] = ty.fields end
+            elseif nm then ty.fields = tags[text(nm)] end
+            return ty
+        end
         if t == 'primitive_type' then
             -- tree-sitter C parses the stdint names (uint8_t, size_t, …) as PRIMITIVE types
             if TYPEDEF_UCHAR[tx] then return { k = 'uchar' } end
@@ -123,7 +154,7 @@ function M.emit(sources, opts)
             elseif t == 'pointer_declarator' or t == 'abstract_pointer_declarator' then ty = { k = 'ptr', to = ty }; d = field_of(d, 'declarator')
             elseif t == 'array_declarator' then
                 local sz = field_of(d, 'size')
-                ty = { k = 'array', of = ty, size = sz and tonumber(text(sz)) }
+                ty = { k = 'array', of = ty, size = sz and tonumber(text(sz)), size_node = sz }
                 d = field_of(d, 'declarator')
             elseif t == 'init_declarator' then d = field_of(d, 'declarator')
             elseif t == 'function_declarator' then ty = { k = 'func', ret = ty, params = field_of(d, 'parameters') }; d = field_of(d, 'declarator')
@@ -171,9 +202,16 @@ function M.emit(sources, opts)
             if t == 'type_definition' then
                 local ty, nm = field_of(n, 'type'), field_of(n, 'declarator')
                 if ty and ty:type() == 'struct_specifier' and nm then structs[text(nm)] = struct_fields(ty)
-                elseif X and ty and nm and nm:type() == 'type_identifier' then typedefs[text(nm)] = base_type(ty) end
-            elseif X and t == 'struct_specifier' then
-                base_type(n) -- `struct tab { … };` alone: it defines the tag (base_type registers a body's fields)
+                elseif X and ty and ty:type() == 'union_specifier' and nm and nm:type() == 'type_identifier' then
+                    -- `typedef union TValue {…} TValue;` — a union is a struct whose fields share offset 0 (its heap layout
+                    -- says where each one really is)
+                    structs[text(nm)] = struct_fields(ty)
+                    base_type(ty)
+                -- (the stdint names parse as PRIMITIVE types, declarator included: `typedef __int16_t int16_t;` —
+                -- recorded too, so an int16_t is the 16-bit type the source says, not a plain int)
+                elseif X and ty and nm and (nm:type() == 'type_identifier' or nm:type() == 'primitive_type') then typedefs[text(nm)] = base_type(ty) end
+            elseif X and (t == 'struct_specifier' or t == 'union_specifier' or t == 'enum_specifier') then
+                base_type(n) -- `struct tab { … };` / `enum { A, B };` alone: a tag, or enumerator values
             elseif t == 'function_definition' then
                 local nm, fty = declarator(field_of(n, 'declarator'), base_type(field_of(n, 'type')))
                 if nm then funcs[nm] = { node = n, type = fty, src = tr.src, sname = tr.name } end
@@ -243,7 +281,7 @@ function M.emit(sources, opts)
             if globals[g] then used_globals[g] = true end
         end
     end
-    local base, image_js, gbase = 1, {}, {}
+    local base, image_js, gbase, wide_image = 1, {}, {}, false
     local gnames = {}
     for g in pairs(used_globals) do gnames[#gnames + 1] = g end
     table.sort(gnames)
@@ -253,8 +291,62 @@ function M.emit(sources, opts)
     local contract_seen = {} -- every site that resolved (a fused addition, or an explicit fma) — the rest are reported
     local expr, stmt
     local I32 = { k = 'int', w = 32 }
+    -- exact mode, HEAP fields: the layout of a heap-resident struct/union type, and a field's typed load / store
+    local HCLS = {
+        f64 = { get = 'getFloat64', set = 'setFloat64', ty = { k = 'double' } },
+        u64 = { get = 'getBigUint64', set = 'setBigUint64', ty = { k = 'int', w = 64, u = true } },
+        i64 = { get = 'getBigInt64', set = 'setBigInt64', ty = { k = 'int', w = 64 } },
+        u32 = { get = 'getUint32', set = 'setUint32', ty = { k = 'int', w = 32, u = true } },
+        i32 = { get = 'getInt32', set = 'setInt32', ty = { k = 'int', w = 32 } },
+        u16 = { get = 'getUint16', set = 'setUint16', ty = { k = 'int', w = 32 } },
+        i16 = { get = 'getInt16', set = 'setInt16', ty = { k = 'int', w = 32 } },
+        u8 = { get = 'getUint8', set = 'setUint8', ty = { k = 'int', w = 32 } },
+        i8 = { get = 'getInt8', set = 'setInt8', ty = { k = 'int', w = 32 } },
+    }
+    local function heap_layout(ty) return X and ty and ty.k == 'struct' and (ty.hlayout or HEAP[ty.name]) or nil end
+    --- a heap field at address js `addr` -> load js, its type (carrying `hstore`: the store of a value js). `prefix`:
+    --- the member path so far (`u32.` of `t.u32.hi`) — the layout's offsets are from the TYPE's start, so the address
+    --- stays the outer one and only the path grows
+    local function heap_field(addr, layout, fname, n, prefix)
+        local key = (prefix or '') .. fname
+        local f = layout.fields[key]
+        local c = f and HCLS[f.cls]
+        if not c then
+            -- a NAMED nested struct/union member: not a value, a path into the same object
+            for k in pairs(layout.fields) do
+                if k:sub(1, #key + 1) == key .. '.' then return addr, { k = 'struct', hlayout = layout, hpath = key .. '.' } end
+            end
+            return refuse(n, 'field', 'no scalar heap field `' .. key .. '` in the layout'), I32
+        end
+        local a = ('(%s + %d)'):format(addr, f.off)
+        local ty = vim.deepcopy(c.ty)
+        ty.hstore = function (v) return ('DV.%s(%s, %s, true)'):format(c.set, a, v) end
+        return ('DV.%s(%s, true)'):format(c.get, a), ty
+    end
     local function is64(t) return t and t.k == 'int' and t.w == 64 end
     local function isD(t) return t and t.k == 'double' end
+    -- exact heap mode, a SCALAR in the heap: its class (HCLS) by storage width (`sw`: a short is 16 bits, stored; its
+    -- value is promoted to int) and its byte width
+    local CW = { f64 = 8, u64 = 8, i64 = 8, u32 = 4, i32 = 4, u16 = 2, i16 = 2, u8 = 1, i8 = 1 }
+    local function elcls(el)
+        if not el then return nil end
+        if isD(el) then return 'f64' end
+        if el.k == 'char' then return 'i8' end
+        if el.k == 'uchar' then return 'u8' end
+        if el.k == 'int' and el.w then return ((el.u or el.su) and 'u' or 'i') .. (el.sw or el.w) end
+    end
+    --- the byte width of a WIDE heap element (> 1 byte: bytes keep their H[...] forms) | nil
+    local function wide(el) local w = X and opts.heap and CW[elcls(el) or ''] return w and w > 1 and w or nil end
+    --- an element INDEX as a JS number, its value kept (a 64-bit one Number()'d; a uint32 above 2^31 must not wrap
+    --- negative, as a conversion to int would)
+    local function index(ijs, ity) return is64(ity) and ('Number(' .. ijs .. ')') or ('(' .. ijs .. ')') end
+    --- a typed load of the heap scalar at address js `addr` (its type carries `hstore`, as a heap field's does)
+    local function hderef(addr, el)
+        local c = HCLS[elcls(el)]
+        local ty = vim.deepcopy(c.ty)
+        ty.hstore = function (v) return ('DV.%s(%s, %s, true)'):format(c.set, addr, v) end
+        return ('DV.%s(%s, true)'):format(c.get, addr), ty
+    end
     --- C truthiness; exact mode reads the TYPE (a BigInt 0n is truthy to JS's `!== 0`)
     local function T(js, ty)
         if X and is64(ty) then return '(' .. js .. ' !== 0n)' end
@@ -266,6 +358,11 @@ function M.emit(sources, opts)
         if not X or not from or not to then return js end
         if to.k == 'double' then return is64(from) and ('Number(' .. js .. ')') or js end
         if to.k ~= 'int' then return js end
+        if to.sw == 16 then
+            -- a short: the value as an int, then wrapped to 16 bits (zero- or sign-extended back, as C's conversion)
+            local j = conv(js, from, I32)
+            return to.su and ('((%s) & 65535)'):format(j) or ('((%s) << 16 >> 16)'):format(j)
+        end
         if to.w == 64 then
             local fn = to.u and 'asUintN' or 'asIntN'
             if is64(from) then return (not from.u) == (not to.u) and js or ('BigInt.%s(64, %s)'):format(fn, js) end
@@ -326,6 +423,7 @@ function M.emit(sources, opts)
     local function deref(ptrjs, ty, n)
         local el = ty and (ty.k == 'ptr' and ty.to or ty.k == 'array' and ty.of) or nil
         if not el then return refuse(n, 'deref', 'a dereference of a non-pointer'), { k = 'int' } end
+        if wide(el) then return hderef('(' .. ptrjs .. ')', el) end
         if el.k == 'char' then return ('(H[' .. ptrjs .. '] << 24 >> 24)'), { k = 'int' } end
         if el.k == 'uchar' then return ('H[' .. ptrjs .. ']'), { k = 'int' } end
         return refuse(n, 'deref', 'a dereference of a pointer to ' .. el.k), { k = 'int' }
@@ -352,6 +450,7 @@ function M.emit(sources, opts)
             if v then return v.js, v.type end
             if gbase[nm] then return tostring(gbase[nm]), { k = 'ptr', to = globals[nm].type.of } end
             if sglobals[nm] then return nm, sglobals[nm].type end
+            if X and enums[nm] then return tostring(enums[nm]), I32 end -- an enumerator: its value
             if funcs[nm] then return nm, funcs[nm].type end
             if nm:match('^LJ_ERR_') then return ('%q'):format(errmsg[nm] or nm), { k = 'errcode' } end
             return refuse(n, 'identifier', 'no declaration for `' .. nm .. '`'), { k = 'int' }
@@ -414,31 +513,41 @@ function M.emit(sources, opts)
             local a = field_of(n, 'argument')
             if op == '*' then
                 local js, ty = expr(a)
-                -- exact mode: a pointer to a SCALAR is a one-cell box (an out-parameter: `double_t *tail`)
-                if X and ty and ty.k == 'ptr' and (isD(ty.to) or (ty.to.k == 'int' and ty.to.w)) then return js .. '[0]', ty.to end
+                -- exact mode: a pointer to a SCALAR is a one-cell box (an out-parameter: `double_t *tail`); in HEAP mode
+                -- only a pointer known to be one (`&local`) — every other scalar pointer is a heap address
+                if X and ty and ty.k == 'ptr' and (isD(ty.to) or (ty.to.k == 'int' and ty.to.w)) and (not opts.heap or ty.box) then return js .. '[0]', ty.to end
                 return deref(js, ty, n)
             end
             if X and a:type() == 'identifier' and scope[text(a)] and scope[text(a)].box then
                 local v = scope[text(a)]
-                return v.box, { k = 'ptr', to = v.type }
+                return v.box, { k = 'ptr', to = v.type, box = true }
+            end
+            -- a HEAP local (a struct/union or an array placed on the heap stack): its js IS its address
+            if X and a:type() == 'identifier' and scope[text(a)] and scope[text(a)].heap then
+                local v = scope[text(a)]
+                return v.js, { k = 'ptr', to = v.type.k == 'array' and v.type.of or v.type }
             end
             return refuse(n, 'address-of', 'taking an address (`&`)'), { k = 'int' }
         elseif t == 'subscript_expression' then
             local ajs, aty = expr(field_of(n, 'argument'))
-            local ijs = expr(field_of(n, 'index'))
+            local ijs, ity = expr(field_of(n, 'index'))
             local el = aty and (aty.k == 'ptr' and aty.to or aty.k == 'array' and aty.of) or nil
             if el and el.k == 'struct' then return ('%s[%s]'):format(ajs, ijs), el end
             -- exact mode: an array of scalars (a struct global's field) is a JS array; the index a JS number
-            if X and el and aty.k == 'array' and (isD(el) or (el.k == 'int' and el.w)) then
-                local _, ity = expr(field_of(n, 'index'))
+            if X and el and aty.k == 'array' and not aty.heap and (isD(el) or (el.k == 'int' and el.w)) then
                 return ('%s[%s]'):format(ajs, conv(ijs, ity, I32)), el
             end
+            -- exact heap mode: a wide element's address is base + index * its width
+            if wide(el) then return deref(('%s + %s * %d'):format(ajs, index(ijs, ity), wide(el)), aty, n) end
             return deref(('%s + %s'):format(ajs, ijs), aty, n)
         elseif t == 'field_expression' then
             local ajs, aty = expr(field_of(n, 'argument'))
             local op = text(field_of(n, 'operator'))
             local fname = text(field_of(n, 'field'))
             local sty = op == '->' and aty and aty.k == 'ptr' and aty.to or aty
+            -- exact mode: a HEAP struct/union — `p->f` (p an address) and `x.f` (a heap local IS its address) alike
+            local hl = heap_layout(sty)
+            if hl then return heap_field(ajs, hl, fname, n, sty.hpath) end
             local fields = struct_of(sty)
             if not fields or not fields[fname] then return refuse(n, 'field', 'no struct field `' .. fname .. '`'), { k = 'int' } end
             return ('%s.%s'):format(ajs, fname), fields[fname]
@@ -482,10 +591,20 @@ function M.emit(sources, opts)
             if op == '==' or op == '!=' then return ('+(%s %s %s)'):format(ljs, op == '==' and '===' or '!==', rjs), { k = 'int' } end
             if op == '<' or op == '>' or op == '<=' or op == '>=' then return ('+(%s %s %s)'):format(ljs, op, rjs), { k = 'int' } end
             if op == '+' or op == '-' then
-                if lp and rp and op == '-' then return ('(%s - %s)'):format(ljs, rjs), { k = 'int' } end
+                if lp and rp and op == '-' then
+                    local w = wide(lty.k == 'ptr' and lty.to or lty.of)
+                    if w then return ('((%s - %s) / %d)'):format(ljs, rjs, w), I32 end
+                    return ('(%s - %s)'):format(ljs, rjs), { k = 'int' }
+                end
                 local pty = lp and lty or rp and rty
                 if pty then
                     local el = pty.k == 'ptr' and pty.to or pty.of
+                    local w = wide(el)
+                    if w then
+                        -- exact heap mode: p + i is the address i ELEMENTS on (`i + p` too; `p - i` back)
+                        local pjs, ijs, ity = lp and ljs or rjs, lp and rjs or ljs, lp and rty or lty
+                        return ('(%s %s %s * %d)'):format(pjs, op, index(ijs, ity), w), { k = 'ptr', to = el }
+                    end
                     if el.k ~= 'char' and el.k ~= 'uchar' then return refuse(n, 'pointer-arith', 'arithmetic on a pointer to ' .. el.k), pty end
                     return ('(%s %s %s)'):format(ljs, op, rjs), { k = 'ptr', to = el }
                 end
@@ -520,14 +639,39 @@ function M.emit(sources, opts)
             local op = text(field_of(n, 'operator'))
             local a = field_of(n, 'argument')
             local js, ty = expr(a)
-            if ty and ty.k == 'ptr' and ty.to.k ~= 'char' and ty.to.k ~= 'uchar' then return refuse(n, 'pointer-arith', '++/-- on a pointer to ' .. ty.to.k), ty end
             local prefix = n:child(0):type() == op
+            if ty and ty.k == 'ptr' and wide(ty.to) then
+                -- exact heap mode: one ELEMENT on; a postfix form's value is the old address
+                local w, o = wide(ty.to), op == '++' and '+' or '-'
+                if prefix then return ('(%s %s= %d)'):format(js, o, w), ty end
+                return ('((%s %s= %d) %s %d)'):format(js, o, w, o == '+' and '-' or '+', w), ty
+            end
+            if ty and ty.k == 'ptr' and ty.to.k ~= 'char' and ty.to.k ~= 'uchar' then return refuse(n, 'pointer-arith', '++/-- on a pointer to ' .. ty.to.k), ty end
             return prefix and (op .. js) or (js .. op), ty
         elseif t == 'assignment_expression' then
             local op = text(field_of(n, 'operator'))
             local l = field_of(n, 'left')
             local ljs, lty = expr(l)
             local rjs, rty = expr(field_of(n, 'right'))
+            if (op == '+=' or op == '-=') and lty and lty.k == 'ptr' and wide(lty.to) then
+                -- exact heap mode: `p += i` moves i ELEMENTS
+                return ('%s %s %s * %d'):format(ljs, op, index(rjs, rty), wide(lty.to)), lty
+            end
+            if X and lty and lty.hstore then
+                -- a HEAP field: a typed store (`a op= b` is `a = (T)(a op b)`, the load read once more)
+                if op == '=' then return lty.hstore(conv(rjs, rty, lty)), lty end
+                local js, ty = arith(op:sub(1, -2), ljs, lty, rjs, rty)
+                if not js then return refuse(n, 'operator', 'the compound operator ' .. op), lty end
+                return lty.hstore(conv(js, ty, lty)), lty
+            end
+            if X and opts.heap and (ljs:match('^%(H%[') or ljs:match('^H%[')) then
+                -- exact heap mode: a byte store through a pointer (the Uint8Array truncates mod 256, as C's conversion
+                -- to an unsigned char does); a signed char's sign-extending read form is not a place, so its H[...] is
+                local place = ljs:match('^%(H%[(.*)%] << 24 >> 24%)$') or ljs:match('^H%[(.*)%]$')
+                if not place then return refuse(n, 'store', 'a store through a pointer of this shape'), lty end
+                local v = op == '=' and conv(rjs, rty, I32) or (select(1, arith(op:sub(1, -2), ljs, I32, rjs, rty)))
+                return ('H[%s] = %s'):format(place, v), I32
+            end
             if ljs:match('^%(H%[') or ljs:match('^H%[') then return refuse(n, 'store', 'a store through a pointer'), lty end
             if X then
                 -- exact mode: the value converted to the target's type; `a op= b` is `a = (T)(a op b)`
@@ -537,6 +681,19 @@ function M.emit(sources, opts)
                 return ('%s = %s'):format(ljs, conv(js, ty, lty)), lty
             end
             return ('%s %s %s'):format(ljs, op, rjs), lty
+        elseif X and t == 'comma_expression' then
+            -- C's comma operator IS JavaScript's: the left for its effects, the value and type the right's
+            local ljs = expr(field_of(n, 'left'))
+            local rjs, rty = expr(field_of(n, 'right'))
+            return ('(%s, %s)'):format(ljs, rjs), rty
+        elseif X and t == 'sizeof_expression' then
+            -- sizeof(<type>): the COMPILER's answer (opts.sizes, printed by a program the recipe builds) — a size_t,
+            -- unsigned 64-bit on LP64; anything the table lacks is refused, never guessed
+            local td = field_of(n, 'type')
+            local key = td and vim.trim(text(td))
+            local v = key and (opts.sizes or {})[key]
+            if not v then return refuse(n, 'sizeof', 'no compiler size for `' .. tostring(key or text(n)) .. '`'), I32 end
+            return tostring(v) .. 'n', { k = 'int', w = 64, u = true }
         elseif t == 'conditional_expression' then
             local c, cty = expr(field_of(n, 'condition'))
             local a, aty = expr(field_of(n, 'consequence'))
@@ -558,12 +715,31 @@ function M.emit(sources, opts)
             if ty.k == 'char' then return ('((%s) << 24 >> 24)'):format(vjs), { k = 'int' } end
             if ty.k == 'int' then return vjs, { k = 'int' } end
             if ty.k == 'ptr' and vty and vty.k == 'ptr' then return vjs, ty end
+            -- exact heap mode: a heap array's value IS its address — reinterpreting it is an address kept (the loads
+            -- through the new pointer read the element width they name)
+            if X and opts.heap and ty.k == 'ptr' and vty and vty.k == 'array' and vty.heap then return vjs, ty end
             return refuse(n, 'cast', 'a cast to ' .. text(td)), ty
         elseif t == 'call_expression' then
+            -- `(T)(x)` with T a TYPEDEF is a CAST the grammar cannot see (it does not know typedef names, so it reads a
+            -- call of a parenthesized identifier — TSGAP): a known type name in the callee's parentheses decides it
+            local callee = field_of(n, 'function')
+            if X and callee:type() == 'parenthesized_expression' and callee:named_child_count() == 1
+                and callee:named_child(0):type() == 'identifier' then
+                local tn = text(callee:named_child(0))
+                local cty = EXACT_NAMED[tn] or typedefs[tn]
+                local cargs = named_kids(field_of(n, 'arguments'))
+                if cty and #cargs == 1 then
+                    local vjs, vty = expr(cargs[1])
+                    if (isD(cty) or (cty.k == 'int' and cty.w)) and vty and (isD(vty) or vty.k == 'int') then return conv(vjs, vty, cty), cty end
+                    return refuse(n, 'cast', 'a cast to the typedef ' .. tn .. ' of this operand'), cty
+                end
+            end
             local fn = text(field_of(n, 'function'))
             local args, atys = {}, {}
             for _, a in ipairs(named_kids(field_of(n, 'arguments'))) do
                 local js, ty = expr(a)
+                -- heap mode: the callee reads a scalar pointer as a HEAP address — a box passed there would read address 0
+                if X and opts.heap and ty and ty.box then return refuse(a, 'address-of', 'a boxed local passed as a pointer in heap mode'), I32 end
                 args[#args + 1], atys[#atys + 1] = js, ty
             end
             local tpl = (opts.templates or {})[fn]
@@ -606,6 +782,21 @@ function M.emit(sources, opts)
         return table.concat(out, '\n')
     end
     local boxed, cur_ret = {}, nil -- exact mode: the current function's locals whose address is taken; its return type
+    local allocas = false -- exact heap mode: the current function places a local on the heap stack
+    --- the byte size of a heap-stack local: a heap struct/union (its layout's size), or an array of scalars — bytes
+    --- (char / uint8_t), else a heap-layout scalar class by width (1, 4, 8) -> js size expression | nil
+    local function heap_local_size(ty)
+        local hl = heap_layout(ty)
+        if hl then return tostring(hl.size) end
+        if ty and ty.k == 'array' and ty.size_node then
+            local el = ty.of
+            local w = (el.k == 'uchar' or el.k == 'char') and 1 or (isD(el) and 8) or (el.k == 'int' and el.w and (el.sw or el.w) / 8) or nil
+            if not w then return nil end
+            local sjs = expr(ty.size_node)
+            return ('(Math.trunc(%s) * %d)'):format(sjs, w)
+        end
+        return nil
+    end
     -- exact mode, CONTRACTION (opts.contract = { [source name] = { ['line:col'] = true } }): the multiply-adds the HOST
     -- COMPILER fused (read from its own GIMPLE dump by the recipe — never re-derived by rule here). `fused[id]` marks an
     -- addition: { mul = the `*` node | nil, var = its temps when the product was computed in another statement,
@@ -674,15 +865,42 @@ function M.emit(sources, opts)
             end
         end
     end
-    local function declaration(n)
+    --- a declaration -> `let …;`. With `hoist` (the goto-lowered form, below): every name is added to hoist.names
+    --- (declared once at the function's top), a heap-stack local's $alloca to hoist.entry (made once, at entry — a
+    --- re-entered block must not allocate again), and only the INITIALIZATIONS are returned, as assignments in place
+    local function declaration(n, hoist)
         local bt = base_type(field_of(n, 'type'))
         local parts = {}
         for c, f in n:iter_children() do
             if f == 'declarator' then
                 local nm, ty = declarator(c, bt)
                 if nm then
-                    if ty.k == 'struct' then return refuse(n, 'local-struct', 'a struct value as a local'), nil end
                     local js = JS_RESERVED[nm] and (nm .. '$') or nm
+                    -- hoisted, a name declared again (a sibling or inner block's own) gets its own variable: `d$2`
+                    -- (the dispatch form restores the scope at each block's end, so the outer name comes back)
+                    if hoist and hoist.seen[js] then
+                        local k = 2
+                        while hoist.seen[js .. '$' .. k] do k = k + 1 end
+                        js = js .. '$' .. k
+                    end
+                    local hsize = X and opts.heap and (ty.k == 'struct' or ty.k == 'array') and heap_local_size(ty) or nil
+                    if hsize then
+                        -- a HEAP-STACK local: its js is its address (freed when the function returns)
+                        allocas = true
+                        scope[nm] = { js = js, type = vim.tbl_extend('force', {}, ty, { heap = true }), heap = true }
+                        if hoist then
+                            if not (hsize:match('^%d+$') or hsize:match('^%(Math%.trunc%([%d.]+%) %* %d+%)$')) then
+                                return refuse(n, 'goto-lowering', 'a heap local of run-time size in a goto-lowered function')
+                            end
+                            hoist.seen[js] = true
+                            hoist.names[#hoist.names + 1] = js
+                            hoist.entry[#hoist.entry + 1] = ('%s = $alloca(%s);'):format(js, hsize)
+                        else
+                            parts[#parts + 1] = ('%s = $alloca(%s)'):format(js, hsize)
+                        end
+                        goto next_declarator
+                    end
+                    if ty.k == 'struct' then return refuse(n, 'local-struct', 'a struct value as a local'), nil end
                     local v = c:type() == 'init_declarator' and field_of(c, 'value')
                     -- the name is in scope from the end of its declarator, its initializer included (C's own rule)
                     local box = X and boxed[nm]
@@ -695,8 +913,17 @@ function M.emit(sources, opts)
                     else
                         parts[#parts + 1] = v and (js .. ' = ' .. (X and conv(vjs, vty, ty) or vjs)) or js
                     end
+                    if hoist then
+                        hoist.seen[js] = true
+                        hoist.names[#hoist.names + 1] = js
+                    end
                 end
             end
+            ::next_declarator::
+        end
+        if hoist then
+            local inits = vim.tbl_filter(function (p) return p:find(' = ', 1, true) ~= nil end, parts)
+            return #inits > 0 and (table.concat(inits, '; ') .. ';') or ''
         end
         return 'let ' .. table.concat(parts, ', ') .. ';'
     end
@@ -791,9 +1018,141 @@ function M.emit(sources, opts)
             local inner
             for c in hoist.node:iter_children() do if c:named() and c:type() ~= 'statement_identifier' then inner = c end end
             local hb = '$blk' .. swcount
-            return ('{ let %s = false;\n%s\nif (%s) %s: {\n%s\n} }'):format(flag, sjs, flag, hb, stmt(inner, { gotos = g, brk = hb }))
+            -- the hoisted body is the labeled statement AND every statement after it in its case: a C label names ONE
+            -- statement, the rest of the case are its siblings (measured: `default: plainnumber: if (…) break; n = …;
+            -- o->n = n; return fmt;` hoisted only the `if`, and every number took the slow path)
+            local parts = { stmt(inner, { gotos = g, brk = hb }) }
+            local after = false
+            for _, k in ipairs(named_kids(hoist.case)) do
+                if after then parts[#parts + 1] = stmt(k, { gotos = g, brk = hb }) end
+                if k == hoist.node then after = true end
+            end
+            return ('{ let %s = false;\n%s\nif (%s) %s: {\n%s\n} }'):format(flag, sjs, flag, hb, table.concat(parts, '\n'))
         end
         return refuse(n, t, 'no form for this C statement kind') .. ';'
+    end
+
+    --- THE GOTO FALLBACK: a function body whose gotos the structured forms above cannot express (into a sibling block,
+    --- backward into an earlier one, out of an if-chain to a shared tail) lowered to a LABEL-DISPATCH loop — every
+    --- statement flattened into numbered blocks of `$d: for (;;) switch ($L)`, each C transfer of control (a goto, an
+    --- if's branches, a loop's test and back edge, break, continue, a switch's cases) a `{ $L = n; continue $d; }`.
+    --- No JS loop or switch survives inside it, so no JS break/continue can mean the wrong construct. Locals are hoisted
+    --- to the function's top (declaration's hoist mode), heap-stack locals allocated once at entry.
+    local function dispatch(body)
+        local out, nlab = {}, 0
+        local hoist = { names = {}, seen = {}, entry = {} }
+        local user = {}
+        local function newlab() nlab = nlab + 1; return nlab end
+        local function jump(l) return ('{ $L = %d; continue $d; }'):format(l) end
+        local function emit(s) out[#out + 1] = s end
+        local function place(l) emit(('case %d:'):format(l)) end
+        local lq = vim.treesitter.query.parse('c', '(labeled_statement label: (statement_identifier) @l)')
+        for _, c in lq:iter_captures(body, cur_src, 0, -1) do user[text(c)] = newlab() end
+        local lower
+        -- C's BLOCK SCOPE: a block's declarations end with it (the flat scope map is saved and restored around it)
+        local function scoped(f)
+            local saved = {}
+            for k, v in pairs(scope) do saved[k] = v end
+            f()
+            scope = saved
+        end
+        local function cjump(cond_node, negate, l)
+            local c, cty = expr(cond_node)
+            emit(('if (%s%s) %s'):format(negate and '!' or '', T(c, cty), jump(l)))
+        end
+        function lower(n, cx)
+            local t = n:type()
+            if t == 'compound_statement' then
+                scoped(function () for _, k in ipairs(named_kids(n)) do lower(k, cx) end end)
+            elseif (t == 'for_statement' or t == 'switch_statement') and cx.scoped ~= n then
+                -- (a for's own declaration, a switch body's, end with the statement)
+                scoped(function () lower(n, vim.tbl_extend('force', cx, { scoped = n })) end)
+            elseif t == 'declaration' then
+                local js = declaration(n, hoist)
+                if js ~= '' then emit(js) end
+            elseif t == 'expression_statement' or t == 'return_statement' then
+                emit(stmt(n, {}))
+            elseif t == 'if_statement' then
+                local lelse, lend = newlab(), newlab()
+                cjump(field_of(n, 'condition'), true, lelse)
+                lower(field_of(n, 'consequence'), cx)
+                local alt = field_of(n, 'alternative')
+                if alt then emit(jump(lend)) end
+                place(lelse)
+                if alt then lower(alt:type() == 'else_clause' and named_kids(alt)[1] or alt, cx) end
+                place(lend)
+            elseif t == 'while_statement' then
+                local top, lend = newlab(), newlab()
+                place(top)
+                cjump(field_of(n, 'condition'), true, lend)
+                lower(field_of(n, 'body'), { brk = lend, cont = top })
+                emit(jump(top))
+                place(lend)
+            elseif t == 'do_statement' then
+                local top, lc, lend = newlab(), newlab(), newlab()
+                place(top)
+                lower(field_of(n, 'body'), { brk = lend, cont = lc })
+                place(lc)
+                cjump(field_of(n, 'condition'), false, top)
+                place(lend)
+            elseif t == 'for_statement' then
+                local init, cond, upd = field_of(n, 'initializer'), field_of(n, 'condition'), field_of(n, 'update')
+                if init then
+                    if init:type() == 'declaration' then local js = declaration(init, hoist); if js ~= '' then emit(js) end
+                    else emit(expr(init) .. ';') end
+                end
+                local top, lc, lend = newlab(), newlab(), newlab()
+                place(top)
+                if cond then cjump(cond, true, lend) end
+                lower(field_of(n, 'body'), { brk = lend, cont = lc })
+                place(lc)
+                if upd then emit(expr(upd) .. ';') end
+                emit(jump(top))
+                place(lend)
+            elseif t == 'break_statement' then
+                emit(cx.brk and jump(cx.brk) or (refuse(n, 'goto-lowering', 'a break outside a loop or switch') .. ';'))
+            elseif t == 'continue_statement' then
+                emit(cx.cont and jump(cx.cont) or (refuse(n, 'goto-lowering', 'a continue outside a loop') .. ';'))
+            elseif t == 'goto_statement' then
+                local label = text(field_of(n, 'label'))
+                emit(user[label] and jump(user[label]) or (refuse(n, 'goto', 'a goto to no label of this function (`' .. label .. '`)') .. ';'))
+            elseif t == 'labeled_statement' then
+                place(user[text(field_of(n, 'label'))])
+                for c in n:iter_children() do if c:named() and c:type() ~= 'statement_identifier' then lower(c, cx) end end
+            elseif t == 'switch_statement' then
+                local sv = '$s' .. newlab()
+                hoist.names[#hoist.names + 1] = sv
+                local cjs, cty = expr(field_of(n, 'condition'))
+                emit(('%s = %s;'):format(sv, cjs))
+                local lend, deflab, cases = newlab(), nil, {}
+                for _, cs in ipairs(named_kids(field_of(n, 'body'))) do
+                    if cs:type() == 'case_statement' then
+                        local l, v = newlab(), field_of(cs, 'value')
+                        cases[#cases + 1] = { l = l, node = cs, v = v }
+                        if v then
+                            local vjs, vty = expr(v)
+                            emit(('if (%s === %s) %s'):format(sv, conv(vjs, vty, cty), jump(l)))
+                        else deflab = l end
+                    end
+                end
+                emit(jump(deflab or lend))
+                for _, c in ipairs(cases) do
+                    place(c.l)
+                    for _, k in ipairs(named_kids(c.node)) do if k ~= c.v then lower(k, { brk = lend, cont = cx.cont }) end end
+                end
+                place(lend)
+            else
+                emit(refuse(n, t, 'no form for this C statement kind in a goto-lowered function') .. ';')
+            end
+        end
+        lower(body, {})
+        local head = { '{' }
+        if #hoist.names > 0 then head[#head + 1] = 'let ' .. table.concat(hoist.names, ', ') .. ';' end
+        vim.list_extend(head, hoist.entry)
+        vim.list_extend(head, { 'let $L = 0;', '$d: for (;;) switch ($L) {', 'case 0:' })
+        vim.list_extend(head, out)
+        vim.list_extend(head, { 'return;', '}', '}' })
+        return table.concat(head, '\n')
     end
 
     -- ── emit: the heap image, then every reachable function ──────────────────────────────────────────────────────
@@ -803,9 +1162,24 @@ function M.emit(sources, opts)
         scope = {}
         gbase[g] = base
         local vals = {}
-        for _, v in ipairs(named_kids(gl.init)) do vals[#vals + 1] = (expr(v)) end
-        image_js[#image_js + 1] = ('  // %s[%d] at %d\n  [%d, [%s]],'):format(g, gl.type.size or #vals, base, base, table.concat(vals, ', '))
-        base = base + (gl.type.size or #vals)
+        local el = gl.type.of
+        local w = wide(el)
+        if w then
+            -- exact heap mode: a WIDE element array — each value converted to the element's type, stored by the
+            -- DataView at its class (the third field), the array 8-aligned
+            base = math.ceil(base / 8) * 8
+            gbase[g] = base
+            local c = HCLS[elcls(el)]
+            for _, v in ipairs(named_kids(gl.init)) do local vjs, vty = expr(v); vals[#vals + 1] = conv(vjs, vty, c.ty) end
+            local count = gl.type.size or #vals
+            image_js[#image_js + 1] = ('  // %s[%d] at %d\n  [%d, [%s], %q],'):format(g, count, base, base, table.concat(vals, ', '), c.set)
+            base = base + count * w
+            wide_image = true
+        else
+            for _, v in ipairs(named_kids(gl.init)) do vals[#vals + 1] = (expr(v)) end
+            image_js[#image_js + 1] = ('  // %s[%d] at %d\n  [%d, [%s]],'):format(g, gl.type.size or #vals, base, base, table.concat(vals, ', '))
+            base = base + (gl.type.size or #vals)
+        end
     end
     -- exact mode: every STRUCT global a wanted function reads, as a JS object literal (designated and positional
     -- initializers, each value converted to its field's type)
@@ -882,7 +1256,23 @@ function M.emit(sources, opts)
             cur_ret = f.type.ret
             contract_prepass(f.node, (opts.contract or {})[f.sname])
         end
+        allocas = false
+        local nref = #refusals
         local body = stmt(field_of(f.node, 'body'), { gotos = {} })
+        -- a goto the structured forms refused: the WHOLE function takes the dispatch form instead (only then — every
+        -- function they express keeps its output)
+        local refused_goto = false
+        for i = nref + 1, #refusals do if refusals[i].kind == 'goto' then refused_goto = true end end
+        if refused_goto then
+            for i = #refusals, nref + 1, -1 do refusals[i] = nil end
+            if X then contract_prepass(f.node, (opts.contract or {})[f.sname]) end
+            allocas = false
+            body = dispatch(field_of(f.node, 'body'))
+        end
+        if allocas then
+            -- the heap stack is restored on EVERY exit (each return, and a throw)
+            body = '{\nconst $sp = SP;\ntry ' .. body .. ' finally { SP = $sp; }\n}'
+        end
         if X and #mtemps > 0 then
             local d = {}
             for _, tn in ipairs(mtemps) do d[#d + 1] = tn .. 'a, ' .. tn .. 'b' end
@@ -892,6 +1282,7 @@ function M.emit(sources, opts)
     end
     local exports = {}
     for _, name in ipairs(order) do exports[#exports + 1] = name end
+    for _, name in ipairs(opts.exports or {}) do exports[#exports + 1] = name end -- the recipe's adapter
     local js = table.concat({
         opts.header or '// GENERATED by cartograph.cjs — do not edit',
         "'use strict';",
@@ -902,10 +1293,23 @@ function M.emit(sources, opts)
         '// the heap image: every static array the code reads, at its fixed offset (offset 0 reserved)',
         'const IMAGE = [\n' .. table.concat(image_js, '\n') .. '\n];',
         ('const IMAGE_END = %d;'):format(base),
-        'function image() { const h = new Uint8Array(IMAGE_END); for (const [at, vals] of IMAGE) h.set(vals, at); return h; }',
-        opts.prelude or '',
+        -- (a WIDE array's entry names its DataView setter; without one the line is the byte form, unchanged)
+        wide_image and ('function image() { const h = new Uint8Array(IMAGE_END), dv = new DataView(h.buffer);\n'
+            .. '  const W = { setFloat64: 8, setBigUint64: 8, setBigInt64: 8, setUint32: 4, setInt32: 4, setUint16: 2, setInt16: 2 };\n'
+            .. '  for (const [at, vals, set] of IMAGE) { if (!set) h.set(vals, at); else vals.forEach((v, i) => dv[set](at + i * W[set], v, true)); }\n'
+            .. '  return h; }')
+            or 'function image() { const h = new Uint8Array(IMAGE_END); for (const [at, vals] of IMAGE) h.set(vals, at); return h; }',
+        -- exact HEAP mode: the module OWNS its heap — the image, then a stack region growing down (8-aligned); folded
+        -- into the prelude's entry, so a legacy recipe's output gains no line
+        ((X and opts.heap) and (table.concat({
+            ('const $STACK = %d;'):format(opts.heap.stack or 65536),
+            'H = new Uint8Array(IMAGE_END + $STACK); H.set(image());',
+            'const DV = new DataView(H.buffer);',
+            'let SP = H.length;',
+            'const $alloca = n => { SP = (SP - n) & ~7; if (SP < IMAGE_END) throw new Error("[cjs] heap stack overflow"); return SP; };',
+        }, '\n') .. '\n') or '') .. (opts.prelude or ''),
         -- (the struct globals, exact mode only — '' otherwise, so a legacy recipe's output is unchanged)
-        table.concat(sg_js, '\n') .. (#sg_js > 0 and '\n' or '') .. table.concat(fns, '\n\n'),
+        table.concat(sg_js, '\n') .. (#sg_js > 0 and '\n' or '') .. table.concat(fns, '\n\n') .. (opts.epilogue and ('\n\n' .. opts.epilogue) or ''),
         ('module.exports = { setheap: h => { H = h; }, image, IMAGE_END, STRUCTS: %s, %s };')
             :format((function ()
                 -- keys SORTED: a Lua table's pairs order is its hash order, so vim.json.encode made the generated file
@@ -932,6 +1336,114 @@ function M.emit(sources, opts)
     end
     table.sort(unresolved)
     return js, refusals, { functions = order, globals = gnames, messages = errmsg, unresolved_sites = unresolved }
+end
+
+-- ── the HOST COMPILER's answers about C layout (exact heap mode never re-derives C's layout rules) ──────────────
+--- build and run a C program `body` (inside main) with `opts.cflags`, `-I opts.include`, including opts.header ->
+--- stdout | nil, why
+local function crun(opts, name, body)
+    local tmp = vim.fn.tempname()
+    vim.fn.mkdir(tmp, 'p')
+    local c = tmp .. '/' .. name .. '.c'
+    local f = assert(io.open(c, 'w'))
+    f:write('#include <stdio.h>\n#include <stddef.h>\n', opts.header and ('#include "' .. opts.header .. '"\n') or '', opts.prelude or '',
+        'int main(void) {\n', body, '  return 0;\n}\n')
+    f:close()
+    local cmd = { 'gcc', '-w', '-o', tmp .. '/' .. name }
+    vim.list_extend(cmd, opts.cflags or {})
+    if opts.include then cmd[#cmd + 1] = '-I' .. opts.include end
+    cmd[#cmd + 1] = c
+    local r = vim.system(cmd, { text = true }):wait()
+    if r.code ~= 0 then vim.fn.delete(tmp, 'rf'); return nil, 'the layout program failed: ' .. (r.stderr or '') end
+    local out = vim.system({ tmp .. '/' .. name }, { text = true }):wait().stdout
+    vim.fn.delete(tmp, 'rf')
+    return out
+end
+
+--- a struct/union typedef's LAYOUT, as the compiler lays it out: the fields read from the type's own definition in
+--- `opts.src` (preprocessed text; a member of an ANONYMOUS struct/union is the type's own, a member of a NAMED one is
+--- not), then every scalar field's offset / size / class (__builtin_classify_type: 1 integer, 8 real) and signedness.
+--- opts: { src, type, header, include, cflags, prelude? } -> { size, fields = { [f] = { off, cls } } }, { 'f@off:cls' … }
+--- | nil, why
+function M.compiler_layout(opts)
+    local tree = vim.treesitter.get_string_parser(opts.src, 'c'):parse()[1]
+    local q = vim.treesitter.query.parse('c', '(type_definition type: [(union_specifier) (struct_specifier)] @u declarator: (type_identifier) @n)')
+    local spec
+    for id, node in q:iter_captures(tree:root(), opts.src, 0, -1) do
+        if q.captures[id] == 'n' and vim.treesitter.get_node_text(node, opts.src) == opts.type then spec = node:parent():field('type')[1] end
+    end
+    if not spec then return nil, 'no typedef of `' .. opts.type .. '` in the source' end
+    local fields = {}
+    -- a member of a NAMED inline struct/union is a PATH (`u32.hi`: offsetof takes it, from the outer type's start)
+    local function walk(s, prefix)
+        local body = s:field('body')[1]
+        for fd in (body and body:iter_children() or function () end) do
+            if fd:type() == 'field_declaration' then
+                local decls = fd:field('declarator')
+                local inner = fd:field('type')[1]
+                local agg = inner and (inner:type() == 'struct_specifier' or inner:type() == 'union_specifier') and inner:field('body')[1]
+                if #decls == 0 then
+                    if agg then walk(inner, prefix) end
+                else
+                    for _, d in ipairs(decls) do
+                        if agg and d:type() == 'field_identifier' then
+                            walk(inner, prefix .. vim.treesitter.get_node_text(d, opts.src) .. '.')
+                        else
+                            while d:type() == 'array_declarator' or d:type() == 'pointer_declarator' do d = d:field('declarator')[1] end
+                            if d:type() == 'field_identifier' then fields[#fields + 1] = prefix .. vim.treesitter.get_node_text(d, opts.src) end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    walk(spec, '')
+    local T = opts.type
+    local p1 = { ('  printf("size %%zu\\n", sizeof(%s));\n'):format(T) }
+    for _, f in ipairs(fields) do
+        p1[#p1 + 1] = ('  printf("%s %%zu %%zu %%d\\n", offsetof(%s, %s), sizeof(((%s *)0)->%s), __builtin_classify_type(((%s *)0)->%s));\n')
+            :format(f, T, f, T, f, T, f)
+    end
+    local out1, why = crun(opts, 'layout1', table.concat(p1))
+    if not out1 then return nil, why end
+    local layout, scalars = { fields = {} }, {}
+    for line in out1:gmatch('[^\n]+') do
+        local sz = line:match('^size (%d+)$')
+        if sz then layout.size = tonumber(sz)
+        else
+            local f, off, size, cls = line:match('^(%S+) (%d+) (%d+) (%d+)$')
+            if f and (cls == '1' or cls == '8') then scalars[#scalars + 1] = { f = f, off = tonumber(off), size = tonumber(size), real = cls == '8' } end
+        end
+    end
+    local p2 = {}
+    for _, s in ipairs(scalars) do p2[#p2 + 1] = ('  printf("%s %%d\\n", (int)((__typeof__(((%s *)0)->%s))-1 < 0));\n'):format(s.f, T, s.f) end
+    local out2, why2 = crun(opts, 'layout2', table.concat(p2))
+    if not out2 then return nil, why2 end
+    local signed = {}
+    for line in out2:gmatch('[^\n]+') do local f, sg = line:match('^(%S+) (%d)$'); if f then signed[f] = sg == '1' end end
+    local desc = {}
+    for _, s in ipairs(scalars) do
+        local cls = s.real and (s.size == 8 and 'f64' or nil) or ((signed[s.f] and 'i' or 'u') .. (s.size * 8))
+        if cls then layout.fields[s.f] = { off = s.off, cls = cls }; desc[#desc + 1] = ('%s@%d:%s'):format(s.f, s.off, cls) end
+    end
+    return layout, desc
+end
+
+--- every `sizeof(<type>)` in `opts.src`, answered by the compiler -> { [type text] = bytes } | nil, why
+function M.compiler_sizes(opts)
+    local tree = vim.treesitter.get_string_parser(opts.src, 'c'):parse()[1]
+    local q = vim.treesitter.query.parse('c', '(sizeof_expression type: (type_descriptor) @t)')
+    local types = {}
+    for _, node in q:iter_captures(tree:root(), opts.src, 0, -1) do types[vim.trim(vim.treesitter.get_node_text(node, opts.src))] = true end
+    local sp = {}
+    for ty in pairs(types) do sp[#sp + 1] = ('  printf("%%zu %s\\n", sizeof(%s));\n'):format(ty, ty) end
+    table.sort(sp)
+    if #sp == 0 then return {} end
+    local out, why = crun(opts, 'sizes', table.concat(sp))
+    if not out then return nil, why end
+    local sizes = {}
+    for line in out:gmatch('[^\n]+') do local v, ty = line:match('^(%d+) (.+)$'); if v then sizes[ty] = tonumber(v) end end
+    return sizes
 end
 
 return M

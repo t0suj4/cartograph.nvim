@@ -690,7 +690,84 @@ console.log(JSON.stringify({ n: P.length / 3, pow: p, v8: pv8, fma: f, naive: fn
     ok(res.v8 > 0 and res.naive > 0, 'the premise: the inputs separate a wrong implementation from a right one: ' .. r.stdout)
 end)
 
-test('luajs: each table constructor takes its SHAPE\'s representation — ARRAY, RECORD, or MAP for a dictionary', function ()
+test('luajs pack: $ldexp rounds ONCE and $clz64 is __builtin_clzll — against the C library and gcc (a C oracle compiled here)', function ()
+    if vim.fn.executable('gcc') ~= 1 or vim.fn.executable('node') ~= 1 then skip 'no gcc / node' end
+    local dir = vim.fn.tempname()
+    L.install_pack(dir)
+    local C = [[
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+static uint64_t s = 0x9E3779B97F4A7C15ull;
+static uint64_t rnd(void) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; return s; }
+static double dbl(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
+int main(void) {
+  FILE *l = fopen("ldexp.bin", "wb"), *z = fopen("clz.bin", "wb");
+  for (long i = 0; i < 100000; i++) {
+    /* half the exponents land the result SUBNORMAL (below 2^-1022), where scaling in steps rounds twice */
+    double x = (i % 3) ? 1 + (rnd() >> 12) * 0x1p-52 : dbl(rnd());
+    int n = (i % 2) ? -1022 - (int)(rnd() % 60) : (int)(rnd() % 2200) - 1100;
+    double r[3] = { x, (double)n, ldexp(x, n) }; fwrite(r, 8, 3, l);
+    uint64_t u = rnd() >> (rnd() % 64); if (!u) u = 1;
+    uint64_t q[2] = { u, (uint64_t)__builtin_clzll(u) }; fwrite(q, 8, 2, z);
+  }
+  fclose(l); fclose(z); return 0;
+}]]
+    local fd = assert(io.open(dir .. '/gen.c', 'w')); fd:write(C); fd:close()
+    local cc = vim.system({ 'gcc', '-O2', '-fno-builtin', 'gen.c', '-lm', '-o', 'gen' }, { cwd = dir }):wait()
+    eq(0, cc.code, cc.stderr)
+    eq(0, vim.system({ './gen' }, { cwd = dir }):wait().code)
+    local JS = [[
+const { $ldexp, $clz64 } = require('./$fpu.js');
+const F = new Float64Array(2), U = new BigUint64Array(F.buffer);
+const same = (a, b) => { F[0] = a; F[1] = b; return (Number.isNaN(a) && Number.isNaN(b)) || U[0] === U[1]; };
+const b = n => require('fs').readFileSync(n);
+const Lb = b('ldexp.bin'), Zb = b('clz.bin');
+const Ld = new Float64Array(Lb.buffer, Lb.byteOffset, Lb.length / 8), Z = new BigUint64Array(Zb.buffer, Zb.byteOffset, Zb.length / 8);
+let l = 0, steps = 0, z = 0;
+for (let i = 0; i < Ld.length; i += 3) {
+  if (!same($ldexp(Ld[i], Ld[i + 1]), Ld[i + 2])) l++;
+  if (!same(Ld[i] * 2 ** (Ld[i + 1] + 600) * 2 ** -600, Ld[i + 2])) steps++;
+}
+for (let i = 0; i < Z.length; i += 2) if (BigInt($clz64(Z[i])) !== Z[i + 1]) z++;
+console.log(JSON.stringify({ n: Ld.length / 3, ldexp: l, steps, clz: z }));]]
+    fd = assert(io.open(dir .. '/check.js', 'w')); fd:write(JS); fd:close()
+    local r = vim.system({ 'node', 'check.js' }, { cwd = dir, text = true }):wait(300000)
+    eq(0, r.code, r.stderr)
+    local res = vim.json.decode(r.stdout)
+    eq(0, res.ldexp, 'C ldexp, bit for bit: ' .. r.stdout)
+    eq(0, res.clz, '__builtin_clzll: ' .. r.stdout)
+    -- the POSITIVE CONTROL: scaling in two steps (two roundings) differs from the library somewhere in the sample
+    ok(res.steps > 0, 'the premise: the inputs separate a twice-rounding ldexp from the library\'s: ' .. r.stdout)
+end)
+
+test('luajs pack: tonumber IS LuaJIT\'s lj_strscan (transliterated, lua/cartograph/luajs/strscan.js) — 20,000 generated strings, every result bit-identical to the oracle\'s; a naive Number() differs', function ()
+    if vim.fn.executable('node') ~= 1 then skip 'no node' end
+    local D = require 'cartograph.luajs.libdiff'
+    local dir = vim.fn.tempname()
+    L.install_pack(dir)
+    local res = assert(D.run({ fn = 'tonumber', n = 20000, dir = dir }))
+    eq(20000, res.n)
+    eq(0, res.differ, 'the pack against the oracle: ' .. vim.inspect(res.examples))
+    -- the POSITIVE CONTROL: the family separates a plausible wrong tonumber from LuaJIT's
+    local naive = assert(D.run({ fn = 'tonumber', n = 20000, dir = dir, js_fn = '(s => { const v = Number(s); return Number.isNaN(v) ? undefined : v; })' }))
+    ok(naive.differ > 0, 'the premise: a naive tonumber differs somewhere (' .. naive.differ .. ')')
+end)
+
+test('luajs pack: tostring of a number IS LuaJIT\'s lj_strfmt_num (transliterated, lua/cartograph/luajs/strfmt.js) — 20,000 generated doubles (exact ties, the %e/%f switch points, subnormals, powers of ten +- ulps), every string the oracle\'s; toPrecision(14) differs', function ()
+    if vim.fn.executable('node') ~= 1 then skip 'no node' end
+    local D = require 'cartograph.luajs.libdiff'
+    local dir = vim.fn.tempname()
+    L.install_pack(dir)
+    local res = assert(D.run({ fn = 'tostring', n = 20000, dir = dir }))
+    eq(20000, res.n)
+    eq(0, res.differ, 'the pack against the oracle: ' .. vim.inspect(res.examples))
+    local naive = assert(D.run({ fn = 'tostring', n = 20000, dir = dir, js_fn = '(x => x.toPrecision(14))' }))
+    ok(naive.differ > 0, 'the premise: a naive %.14g differs somewhere (' .. naive.differ .. ')')
+end)
+
+test('luajs: each table constructor takes its SHAPEE\'s representation — ARRAY, RECORD, or MAP for a dictionary', function ()
     if not ready() then skip 'no lua parser / node' end
     local _, js = js_out([[
 local a = {}

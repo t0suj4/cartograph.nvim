@@ -6,4 +6,16 @@ cd "$(git rev-parse --show-toplevel)" || exit 0
 NVIM="${NVIM:-nvim}"
 command -v "$NVIM" >/dev/null 2>&1 || exit 0
 "$NVIM" --headless -u NONE -l tools/provledger.lua write HEAD >/dev/null 2>&1 || true
+# the HAND SHARE of this commit, read from the note just written — a WARNING, never a failure (2026-09-30 audit: four
+# commits carried 26–72% of their added bytes by hand; a hand edit is not in the journal and cannot be replayed)
+git notes --ref=cartograph show HEAD 2>/dev/null | python3 -c '
+import json, sys
+try:
+    n = json.load(sys.stdin)
+    h, e = int(n.get("hand") or 0), int(n.get("explained") or 0)
+    if h > 0:
+        sys.stderr.write("[post-commit] ⚠ %d of %d added bytes (%d%%) arrived BY HAND, not through the edit verb: not journaled, not replayable\n" % (h, h + e, 100 * h // max(1, h + e)))
+except Exception:
+    pass
+' 2>&1 || true
 exit 0

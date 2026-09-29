@@ -3541,8 +3541,8 @@ nvim --headless -u NONE -l tools/luajs.lua lua <out dir> [--run]
 # under real Lua and under node. Prints the count, the FUNNEL (generated -> parses -> loads -> terminates ->
 # emitted -> compared -> diverged), a token census, UNREACHED tokens, divergences by class, and the labelled claim:
 nvim --headless -u NONE -l tools/luajsgen.lua control 8      # or: values, coercion
-#   size 8: control 114,838 compared / 0 diverged; values 53,815 / 0 (72 message-only); coercion 352,161 / 20
-#   (all a non-integer pow, V8 vs glibc). On its first day it found 5 real bugs the hand-written cases missed, and
+#   size 8: control 114,838 compared / 0 diverged; values 53,815 / 0 (72 message-only); coercion 352,161 / 0 (20 until
+#   pow was transliterated: a non-integer pow, V8 vs glibc). On its first day it found 5 real bugs the hand-written cases missed, and
 #   probing the gaps it exposed found 2 more (exact-tie rounding in %.14g, a zero for-step's direction).
 # TRANSLITERATE a closed region of C instead of re-authoring it (LuaJIT's pattern matcher -> lstrmatch.js):
 nvim --headless -u NONE -l tools/cjs.lua lstrmatch <luajit src dir> <out.js>
@@ -3556,6 +3556,16 @@ nvim --headless -u NONE -l tools/cjs.lua libmpow <AOR math dir> <out.js>
 nvim --headless -u NONE -l tools/packmap.lua ~/.local/share/pkgit/luajit/HEAD [--json out.json]
 #   the oracle's LuaJIT (fbb36bb6): 162 library functions, the pack implements 74 (+11 refused stubs); 62 in method
 #   tables are a frontier.
+# ... or C that works on STRUCTS and UNIONS through pointers (EXACT HEAP mode: a byte heap at the compiler's own
+# layout). LuaJIT's number scanner, from packmap's tree, replaces the pack's hand-written tonumber:
+nvim --headless -u NONE -l tools/cjs.lua strscan <BUILT luajit src dir> <out.js>
+# A LIBRARY FUNCTION against the oracle's over generated inputs, compared by bits (--js tests a candidate):
+nvim --headless -u NONE -l tools/libdiff.lua tonumber [--n 200000]
+#   strscan.js: 0 of 200,000 differ; the hand-written version it replaced: 17,886 (inf/nan in any case among them).
+# ... and C whose GOTOS no structured form expresses (a whole-function label-dispatch lowering). LuaJIT's number
+# formatter replaces the pack's hand-written tostring; 0 of 200,000 generated doubles differ:
+nvim --headless -u NONE -l tools/cjs.lua strfmt <BUILT luajit src dir> <out.js>
+nvim --headless -u NONE -l tools/libdiff.lua tostring
 
 # JOIN A READER AGAINST AN INDEPENDENT ORACLE, per file — the acceptance test every data
 # reader gets (CART-1044). Six outcomes, none dropped: agree, disagree, refused by us,

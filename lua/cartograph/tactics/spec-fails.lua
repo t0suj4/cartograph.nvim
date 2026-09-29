@@ -14,11 +14,23 @@ local M = {}
 
 --- run the spec in `root` -> { passed, failed, skipped, ran, summary, code } | nil, why
 function M.run(root, spec, timeout)
+    -- the runner in its OWN process group (setsid): a spec that HANGS (a mutation that makes a loop infinite) is
+    -- killed WITH its children on the timeout — killing only bash left each hung `node` spinning at 100% CPU
+    -- (measured: three orphans, 20-60 min each, one per re-run of one mutation)
+    local proc
     local ok, obj = pcall(function ()
-        return vim.system({ 'bash', 'tests/run.sh' }, { cwd = root, text = true,
-            env = { SPEC = spec, CARTOGRAPH_NVIM = vim.v.progpath } }):wait(timeout or 600000)
+        proc = vim.system({ 'setsid', 'bash', 'tests/run.sh' }, { cwd = root, text = true,
+            env = { SPEC = spec, CARTOGRAPH_NVIM = vim.v.progpath } })
+        return proc:wait(timeout or 600000)
     end)
     if not ok then return nil, 'the runner did not start: ' .. tostring(obj) end
+    if not obj or obj.signal == 15 or obj.signal == 9 then
+        -- TIMED OUT (wait returns no result, or the killed one): a hang is a spec that did NOT pass — a failure, named
+        if proc and proc.pid then vim.system({ 'kill', '-9', '--', '-' .. proc.pid }):wait() end
+        local secs = math.floor((timeout or 600000) / 1000)
+        return { passed = 0, failed = 1, skipped = 0, ran = 1, code = 124, timed_out = true,
+            summary = ('TIMED OUT after %d s (a hang: the spec did not pass; its process group killed)'):format(secs) }
+    end
     local out = (obj.stdout or '') .. '\n' .. (obj.stderr or '')
     local p, f, s
     for a, b, c in out:gmatch('(%d+) passed, (%d+) failed, (%d+) skipped') do p, f, s = tonumber(a), tonumber(b), tonumber(c) end

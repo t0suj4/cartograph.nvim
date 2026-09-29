@@ -34,6 +34,8 @@ vim.fn.mkdir(work, 'p')
 local ar = vim.system({ 'sh', '-c', ('git -C %q archive %q src dynasm | tar -x -C %q'):format(lj, rev, work) }):wait()
 if ar.code ~= 0 then io.stderr:write('git archive failed\n'); os.exit(1) end
 local src = work .. '/src'
+-- an archived tree has no .git: its REVISION is written beside it, for what is later generated from it (cjs recipes)
+do local fd = assert(io.open(work .. '/REV', 'w')); fd:write(rev, '\n'); fd:close() end
 -- the headers LuaJIT's BUILD generates (buildvm: lj_ffdef.h, lj_libdef.h, …) — a source tree has none, and without
 -- them 31 of its .c files do not preprocess; LuaJIT's own make builds them with the host compiler
 local mk = vim.system({ 'make', 'lj_bcdef.h', 'lj_ffdef.h', 'lj_libdef.h', 'lj_recdef.h', 'lj_folddef.h' }, { cwd = src, text = true }):wait()

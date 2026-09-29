@@ -41,10 +41,15 @@ function $fma(a, b, c) {
   const E = Math.min(ep, ec);
   const S = ma * mb * (1n << BigInt(ep - E)) + mc * (1n << BigInt(ec - E));
   if (S === 0n) return 0; // an exact zero sum of nonzero terms is +0 in round-to-nearest
+  return round(S, E);
+}
+
+/** the EXACT value S * 2^E (S a BigInt integer) rounded to nearest-even ONCE — the one rounding both $fma and $ldexp
+ *  need (53 significant bits, fewer where the result is subnormal: its grid is 2^-1074) */
+function round(S, E) {
   const neg = S < 0n;
   let M = neg ? -S : S;
   const L = bitlen(M);
-  // keep 53 significant bits, or fewer where the result is subnormal (its grid is 2^-1074)
   let shift = Math.max(L - 53, -1074 - E);
   let e = E;
   if (shift > 0) {
@@ -61,4 +66,23 @@ function $fma(a, b, c) {
   return neg ? -r : r;
 }
 
-module.exports = { $fma, $asu64, $asd };
+/** C's ldexp(x, n): x * 2^n rounded ONCE (a subnormal result rounds at 2^-1074 — scaling in steps would round twice) */
+function $ldexp(x, n) {
+  if (!Number.isFinite(x) || x === 0) return x;
+  const [m, e] = decompose(x);
+  return round(m, e + n);
+}
+
+/** __builtin_clzll(x): leading zero bits of a 64-bit value (undefined for 0 in C; 64 here) */
+const $clz64 = x => { x = BigInt.asUintN(64, x); return x === 0n ? 64 : 64 - x.toString(2).length; };
+
+/** lj_vm_num2int_check(x) — VM ASSEMBLY (vm_x64.dasc ->vm_num2int_check), read, not transliterated: cvttsd2si eax,
+ *  back with cvtsi2sd, ucomisd; equal and ordered -> rax = the 32-bit result ZERO-extended (so >= 0 even for a negative
+ *  int), else 0x8000000080000000 (negative). -0 converts to 0 and compares equal (the caller checks -0 itself). */
+const $num2int_check = x => {
+  const t = Math.trunc(x);
+  if (Number.isNaN(x) || t < -2147483648 || t > 2147483647 || t !== x) return BigInt.asIntN(64, 0x8000000080000000n);
+  return BigInt(t >>> 0);
+};
+
+module.exports = { $fma, $ldexp, $clz64, $num2int_check, $asu64, $asd };

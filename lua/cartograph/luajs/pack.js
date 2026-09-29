@@ -169,32 +169,13 @@ const $mod = arith('__mod', (a, b) => a - Math.floor(a / b) * b);
 const LIBM = require('./$libmpow.js');
 const $pow = arith('__pow', (a, b) => LIBM.pow(a, b));
 const $neg = a => { if (numish(a)) return -num(a); const h = meta(a, '__unm'); if (h !== undefined) return $1($call(h, a, a)); return -num(a); };
-/** Lua's number to string: C's `%.14g`. The exponent X is read AFTER rounding to 14 significant digits
- *  (toExponential(13)); C prints exponential when X < -4 or X >= 14 — NOT JS toPrecision's rule (X < -6 or X >= p),
- *  and an integer of 15+ digits is exponential too (found by CART-1206's generator: `2.5 / 2.5 ^ "0x10"` printed
- *  0.000001073741824 for Lua's 1.073741824e-06, and 6.25e+14 printed as 625000000000000). -0 prints "-0". */
-function $numstr(n) {
-  if (Number.isInteger(n) && Math.abs(n) < 1e14) return Object.is(n, -0) ? '-0' : String(n);
-  if (n === Infinity) return 'inf';
-  if (n === -Infinity) return '-inf';
-  if (Number.isNaN(n)) return 'nan';
-  // the 14 significant digits and the exponent. An EXACT tie rounds to EVEN in C (on the binary value) but half UP in
-  // JS (measured: 123456789012345 is 1.2345678901234e+14 in LuaJIT); the exact digits decide (toExponential(100))
-  let ex = Math.abs(n).toExponential(13);
-  const full = Math.abs(n).toExponential(100);
-  const fd = full.slice(0, full.indexOf('e')).replace('.', '');
-  if (fd[14] === '5' && /^0*$/.test(fd.slice(15)) && (fd.charCodeAt(13) - 48) % 2 === 0) ex = fd[0] + '.' + fd.slice(1, 14) + full.slice(full.indexOf('e'));
-  const d = ex.slice(0, ex.indexOf('e')).replace('.', '');
-  const X = parseInt(ex.slice(ex.indexOf('e') + 1), 10);
-  const sign = n < 0 ? '-' : '';
-  const trim = s => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
-  if (X < -4 || X >= 14) {
-    const a = Math.abs(X);
-    return sign + trim(d[0] + '.' + d.slice(1)) + 'e' + (X < 0 ? '-' : '+') + (a < 10 ? '0' + a : String(a));
-  }
-  if (X < 0) return sign + trim('0.' + '0'.repeat(-X - 1) + d);
-  return sign + trim(d.slice(0, X + 1) + '.' + d.slice(X + 1));
-}
+/** Lua's number to string IS LuaJIT's lj_strfmt_num — `%.14g` by LuaJIT's OWN formatter (lj_strfmt_wfnum, which
+ *  x64 LuaJIT runs for every number: no integer fast path without DUALNUM), TRANSLITERATED from C ($strfmt.js,
+ *  tools/cjs.lua strfmt, CART-1211). Checked by tools/libdiff.lua tostring: 0 of 200,000 generated doubles differ
+ *  (exact decimal ties, the %e/%f switch points, subnormals, every power of ten +- ulps). */
+const STRFMT = require('./$strfmt.js');
+function $numstr(n) { return STRFMT.numstr(n); }
+
 const cstr = x => {
   if (typeof x === 'string') return x;
   if (typeof x === 'number') return $numstr(x);
@@ -279,6 +260,7 @@ function $forprep(a, b, s) {
   v.push(v[2] > 0 || Object.is(v[2], 0));
   return v;
 }
+const SCAN = require('./$strscan.js');
 function $tonumber(v, base) {
   if (base !== undefined && base !== 10) {
     if (typeof v !== 'string' && typeof v !== 'number') return undefined;
@@ -291,19 +273,10 @@ function $tonumber(v, base) {
   }
   if (typeof v === 'number') return v;
   if (typeof v !== 'string') return undefined;
-  const s = v.trim();
-  // a HEX number is LuaJIT's (lj_strscan): hex digits, an optional `.` fraction, an optional `p` binary exponent, a
-  // sign either way (found by CART-1206's generator: `-("0x10" .. 2.5)` is -258.3125 in LuaJIT — "0x102.5" is a number)
-  const hx = /^([+-]?)0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?\d+))?$/.exec(s);
-  if (hx && (hx[2] + (hx[3] || '')).length > 0) {
-    let m = 0;
-    for (const c of hx[2] + (hx[3] || '')) m = m * 16 + parseInt(c, 16);
-    const n = m * Math.pow(2, (hx[4] ? parseInt(hx[4], 10) : 0) - 4 * (hx[3] || '').length);
-    return hx[1] === '-' ? -n : n;
-  }
-  if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return Number(s);
-  if (/^[+-]?(inf|nan)/i.test(s)) return undefined;
-  return undefined;
+  // a STRING is read by LuaJIT's OWN scanner, transliterated from C (lj_strscan.c at the oracle's revision —
+  // $strscan.js, tools/cjs.lua strscan): hex floats, inf/nan, every C whitespace byte, correctly rounded decimals. The
+  // hand-written regexes it replaces differed from LuaJIT on 17,886 of 200,000 generated strings; it on 0 (CART-1211)
+  return SCAN.tonum(v);
 }
 const pairs_iter = t => {
   if (t instanceof Map) { const it = t.entries(); return () => { for (;;) { const r = it.next(); if (r.done) return undefined; const [k, v] = r.value; if (t.has(k) && t.get(k) !== undefined) return $mv(k, v); } }; }

@@ -548,3 +548,24 @@ test('did-you-mean: correct = ask makes even a PROVENANCE correction a decision;
     eq('stopped', a.status); eq(true, a.options and a.options[1] and a.options[1].proven, vim.inspect(a.options))
     eq('failed', tactic.run(store, scenario(), { apply = true, correct = 'off' }).status)
 end)
+
+test('spec-fails (the mutation oracle): the SUMMARY LINE decides; a spec that HANGS is a FAILURE named as a timeout, and its whole process group dies with it', function ()
+    local SF = require 'cartograph.tactics.spec-fails'
+    local function root(script)
+        local r = vim.fn.tempname()
+        vim.fn.mkdir(r .. '/tests', 'p')
+        local fd = assert(io.open(r .. '/tests/run.sh', 'w')); fd:write(script); fd:close()
+        return r
+    end
+    local v = assert(SF.run(root('echo "3 passed, 1 failed, 0 skipped"\n'), 'x_spec', 20000))
+    eq({ 3, 1, false }, { v.passed, v.failed, v.timed_out == true })
+    -- a hang (measured: a mutation that made a transliterated loop infinite): bounded, a failure, its child killed
+    local mark = vim.fn.tempname()
+    local t0 = vim.uv.hrtime()
+    local h = assert(SF.run(root(('sleep 300 & echo $! > %s\nwait\n'):format(mark)), 'x_spec', 1500))
+    ok(h.timed_out and h.failed == 1 and h.summary:find('TIMED OUT', 1, true), vim.inspect(h))
+    ok((vim.uv.hrtime() - t0) / 1e9 < 30, 'the timeout bounds the run')
+    local fd = assert(io.open(mark)); local pid = vim.trim(fd:read('a')); fd:close()
+    local gone = vim.wait(3000, function () return vim.system({ 'kill', '-0', pid }):wait().code ~= 0 end, 50)
+    ok(gone, 'the hung child ' .. pid .. ' was killed with its process group')
+end)
