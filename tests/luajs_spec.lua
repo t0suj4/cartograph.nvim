@@ -74,7 +74,15 @@ for _, w in ipairs({ 'a', 'b', 'a' }) do seen[w] = (seen[w] or 0) + 1 end
 print(seen.a, seen.b, seen.c)
 local s = { 3, 1, 2 }
 table.sort(s, function (x, y) return x > y end)
-print(s[1], s[2], s[3])]],
+print(s[1], s[2], s[3])
+-- appends through a PARAMETER into a dictionary-shaped table (a Map): # is a cached border (was O(n) per append)
+local function put(t, v) t[#t + 1] = v end
+local d = {}
+d.kind = 'bytes'
+for i = 1, 20000 do put(d, i % 7) end
+print(#d, d[1], d[20000], d.kind)
+d[#d] = nil; d[#d] = nil
+print(#d, d[19998])]],
     strings = [[
 local s = 'h\195\169llo'
 print(#s, s:sub(2, 3):byte(1, 2), s:upper(), s:sub(-3), s:sub(0), s:sub(10))

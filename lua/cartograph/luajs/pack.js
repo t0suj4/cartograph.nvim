@@ -105,24 +105,30 @@ function $set(t, k, v) {
 }
 function rawset(t, k, v) {
   key(k);
-  if (t instanceof Map) { if (v === undefined) t.delete(k); else t.set(k, v); return; }
+  if (t instanceof Map) { if (v === undefined) mdel(t, k); else t.set(k, v); return; }
   if (Array.isArray(t)) {
     if (typeof k === 'number' && Number.isInteger(k) && k >= 1) { t[k] = v; if (v === undefined) trim(t); return; }
-    if (v === undefined) { const m = side(t); if (m !== undefined) m.delete(k); } else side_of(t).set(k, v);
+    if (v === undefined) { const m = side(t); if (m !== undefined) mdel(m, k); } else side_of(t).set(k, v);
     return;
   }
   if (isRec(t)) {
     if (typeof k === 'string') { if (v === undefined) delete t[k]; else t[k] = v; return; }
-    if (v === undefined) { const m = side(t); if (m !== undefined) m.delete(k); } else side_of(t).set(k, v);
+    if (v === undefined) { const m = side(t); if (m !== undefined) mdel(m, k); } else side_of(t).set(k, v);
     return;
   }
   throw new LuaError('attempt to index a ' + $type(t) + ' value');
 }
+// ★ A CACHED BORDER per Map (BORDER: every key 1..b is present): `#` extends from it, a delete at k <= b lowers it to
+// k-1 (the invariant holds). MEASURED 2026-09-29: the from-1 border search was 43.7% of an extraction under node —
+// `parts[#parts + 1] = …` appends were O(n) each (the shape census had flagged exactly this hazard)
+const BORDER = new WeakMap();
+const mborder = m => { let b = BORDER.get(m) || 0; while (m.get(b + 1) !== undefined) b++; BORDER.set(m, b); return b; };
+const mdel = (m, k) => { m.delete(k); if (typeof k === 'number') { const b = BORDER.get(m); if (b !== undefined && k <= b) BORDER.set(m, k - 1); } };
 function $len(x) {
   if (typeof x === 'string') return x.length;
   if (Array.isArray(x)) return x.length - 1;
-  if (x instanceof Map) { let n = 0; while (x.get(n + 1) !== undefined) n++; return n; }
-  if (isRec(x)) { const m = side(x); if (m === undefined) return 0; let n = 0; while (m.get(n + 1) !== undefined) n++; return n; }
+  if (x instanceof Map) return mborder(x);
+  if (isRec(x)) { const m = side(x); return m === undefined ? 0 : mborder(m); }
   throw new LuaError('attempt to get length of a ' + $type(x) + ' value');
 }
 /** a method call obj:m(...): a string's methods are the string library; a table's are its fields */
@@ -1099,14 +1105,40 @@ for (const ed of ['keymap', 'bo', 'wo', 'o', 'go', 'b', 'w', 't', 'opt', 'opt_lo
 // descendant_for_range run IN the bridge (libtree-sitter itself). The cursor's match LIMIT is honoured — nvim's default
 // 256 drops matches on large files, and a faithful binding reproduces the cap rather than fixing it.
 // nvim's pure-Lua vim.treesitter.* (query predicates, LanguageTree, language.add) is TRANSLITERATED beside the modules.
-function tsrun(header, ...payloads) {
+// ★ A PERSISTENT BRIDGE: the server keeps languages,
+// compiled queries and parsed trees by id. Node has no synchronous child stdio, so the transport is two FIFOs opened
+// read-write (so no open blocks) — fs.writeSync / fs.readSync on them ARE synchronous. Responses are framed
+// `<length>\n<body>`. The server reads EOF and exits when this process does.
+let TS = null;
+function ts_open() {
+  if (TS) return TS;
   const bridge = process.env.LUAJS_TS_BRIDGE;
   if (!bridge) $abort('vim.treesitter: no tree-sitter bridge (LUAJS_TS_BRIDGE is unset)');
-  const input = Buffer.concat([Buffer.from(header + '\n', 'latin1'), ...payloads.map(bytes)]);
-  const r = child.spawnSync(bridge, [], { input, maxBuffer: 1 << 30 });
-  const out = frombytes(r.stdout || Buffer.alloc(0));
-  if (out.startsWith('ERR ')) throw new LuaError(out.slice(4).trim());
-  return out;
+  const dir = fs.mkdtempSync(path.join(nodeos.tmpdir(), 'tsbridge.'));
+  const fin = path.join(dir, 'req'), fout = path.join(dir, 'res');
+  child.execFileSync('mkfifo', [fin, fout]);
+  const wfd = fs.openSync(fin, 'r+'), rfd = fs.openSync(fout, 'r+');
+  const proc = child.spawn(bridge, ['serve', fin, fout], { stdio: ['ignore', 'ignore', 'inherit'] });
+  proc.unref();
+  TS = { wfd, rfd, dir, buf: Buffer.alloc(0), chunk: Buffer.alloc(1 << 16) };
+  process.on('exit', () => { try { fs.closeSync(wfd); fs.closeSync(rfd); fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} });
+  return TS;
+}
+function ts_fill(T) { const n = fs.readSync(T.rfd, T.chunk, 0, T.chunk.length, null); if (n === 0) throw new LuaError('the tree-sitter bridge closed'); T.buf = Buffer.concat([T.buf, T.chunk.subarray(0, n)]); }
+function tsrun(header, ...payloads) {
+  const T = ts_open();
+  const req = Buffer.concat([Buffer.from(header + '\n', 'latin1'), ...payloads.map(bytes)]);
+  let off = 0;
+  while (off < req.length) off += fs.writeSync(T.wfd, req, off, req.length - off, null);
+  let nl;
+  while ((nl = T.buf.indexOf(10)) < 0) ts_fill(T);
+  const n = +T.buf.subarray(0, nl).toString('latin1');
+  T.buf = T.buf.subarray(nl + 1);
+  while (T.buf.length < n) ts_fill(T);
+  const body = frombytes(T.buf.subarray(0, n));
+  T.buf = T.buf.subarray(n);
+  if (body.startsWith('ERR ')) throw new LuaError(body.slice(4).trim());
+  return body;
 }
 const TSLANG = Object.create(null);
 const U32 = 4294967295;
@@ -1114,7 +1146,7 @@ function tslang(lang) { const l = TSLANG[lang]; if (!l) throw new LuaError('no s
 function tsinfo(lang) {
   const l = tslang(lang);
   if (l.info) return l;
-  const out = tsrun('inspect ' + l.so + ' ' + l.sym);
+  const out = tsrun('inspect ' + l.id);
   l.syms = []; l.symtype = []; l.fields = [undefined]; l.supers = [];
   for (const line of out.split('\n')) {
     let m;
@@ -1133,8 +1165,13 @@ rawset(vim, '_ts_get_minimum_language_version', () => 13);
 rawset(vim, '_ts_has_language', lang => TSLANG[cstr(lang)] !== undefined);
 rawset(vim, '_ts_add_language_from_object', (p, lang, symbol) => {
   lang = cstr(lang);
-  TSLANG[lang] = { so: frombytes(bytes(p)), sym: symbol === undefined ? lang : cstr(symbol) };
-  try { tsinfo(lang); } catch (e) { delete TSLANG[lang]; throw new LuaError('Failed to load parser for language \'' + lang + '\': ' + (e.value || e.message)); }
+  const l = { so: frombytes(bytes(p)), sym: symbol === undefined ? lang : cstr(symbol) };
+  try {
+    const out = tsrun('lang ' + l.so + ' ' + l.sym);
+    l.id = +/^L (\d+)/.exec(out)[1];
+    TSLANG[lang] = l;
+    tsinfo(lang);
+  } catch (e) { delete TSLANG[lang]; throw new LuaError('Failed to load parser for language \'' + lang + '\': ' + (e.value || e.message)); }
   return true;
 });
 rawset(vim, '_ts_inspect_language', lang => {
@@ -1155,9 +1192,10 @@ class TSNodeObj {}
 const TSTREE_MT = $rec(), TSNODE_MT = $rec();
 function mktree(lang, src) {
   const l = tslang(lang);
-  const out = tsrun('parse ' + l.so + ' ' + l.sym + ' ' + src.length, src);
+  const out = tsrun('parse ' + l.id + ' ' + src.length, src);
   const t = new TSTreeObj();
   t.lang = lang; t.src = src; t.seq = ++tsTreeSeq; t.nodes = [];
+  t.tid = +/^T (\d+)/.exec(out)[1];
   const rows = [];
   for (const line of out.split('\n')) if (line.charCodeAt(0) === 78) rows.push(line); // 'N'
   const n = rows.length;
@@ -1183,6 +1221,17 @@ function node(t, i) {
   return x;
 }
 const isnode = x => x instanceof TSNodeObj;
+// a request about a tree the bridge holds by id; an evicted tree (MISS) is re-parsed — the same source numbers the same
+// nodes, so every node object this side holds stays valid — and the request retried
+function ts_tree(t, req) {
+  let out = tsrun(req(t.tid));
+  if (out.startsWith('MISS')) {
+    const r = tsrun('parse ' + tslang(t.lang).id + ' ' + t.src.length, t.src);
+    t.tid = +/^T (\d+)/.exec(r)[1];
+    out = tsrun(req(t.tid));
+  }
+  return out;
+}
 const N = x => { if (!isnode(x)) throw new LuaError('TSNode expected, got ' + $type(x)); return x; };
 const named = (t, i) => (t.flags[i] & 1) !== 0;
 const sibling = (x, step, want_named) => {
@@ -1223,10 +1272,10 @@ NODE.equal = (x, y) => isnode(y) && N(x).t === y.t && x.i === y.i;
 NODE.tree = x => N(x).t;
 NODE.child_with_descendant = (x, d) => { N(x); N(d); let c = d.i; while (c >= 0 && x.t.parent[c] !== x.i) c = x.t.parent[c]; return c >= 0 && d.t === x.t ? node(x.t, c) : undefined; };
 NODE.__has_ancestor = (x, types) => { const t = N(x).t, want = new Set(); for (let k = 1; rawget(types, k) !== undefined; k++) want.add(rawget(types, k)); for (let p = t.parent[x.i]; p >= 0; p = t.parent[p]) if (want.has(tsinfo(t.lang).syms[t.sym[p]])) return true; return false; };
-NODE.sexpr = x => { const t = N(x).t, l = tslang(t.lang); return tsrun('sexpr ' + l.so + ' ' + l.sym + ' ' + t.src.length + ' ' + x.i, t.src); };
+NODE.sexpr = x => { const t = N(x).t; return ts_tree(t, tid => 'sexpr ' + tid + ' ' + x.i).slice(2); };
 const desc = named_only => (x, sr, sc, er, ec) => {
-  const t = N(x).t, l = tslang(t.lang);
-  const out = tsrun(['desc', l.so, l.sym, t.src.length, x.i, num(sr), num(sc), num(er), num(ec), named_only ? 1 : 0].join(' '), t.src);
+  const t = N(x).t;
+  const out = ts_tree(t, tid => ['desc', tid, x.i, num(sr), num(sc), num(er), num(ec), named_only ? 1 : 0].join(' '));
   const m = /^D (\d+)/.exec(out);
   return m ? node(t, +m[1]) : undefined;
 };
@@ -1291,10 +1340,11 @@ function query_err(src, off, ty) {
 rawset(vim, '_ts_parse_query', (lang, q) => {
   lang = cstr(lang); q = cstr(q);
   const l = tslang(lang);
-  const out = tsrun('qinfo ' + l.so + ' ' + l.sym + ' ' + q.length, q);
+  const out = tsrun('qcompile ' + l.id + ' ' + q.length, q);
   if (out.startsWith('QERR ')) { const [, off, ty] = out.trim().split(' ').map(Number); throw new LuaError(query_err(q, off, ty)); }
   const query = new TSQueryObj();
   query.lang = lang; query.src = q; query.captures = []; query.patterns = [];
+  query.qid = +/^Q (\d+)/.exec(out)[1];
   for (const line of out.split('\n')) {
     let m;
     if ((m = /^C (\d+) (\d+):/.exec(line))) query.captures[+m[1]] = line.slice(m[0].length, m[0].length + +m[2]);
@@ -1349,13 +1399,12 @@ const CURSOR_MT = $rec('__index', $rec(
   'remove_match', (c, id) => { c.removed.add(num(id)); }));
 rawset(vim, '_create_ts_querycursor', (nd, q, opts) => {
   N(nd);
-  const t = nd.t, l = tslang(t.lang);
+  const t = nd.t;
   const o = opts === undefined ? $rec() : opts;
   const g = (k, d) => { const v = rawget(o, k); return v === undefined ? d : num(v); };
   const sr = g('start_row', 0), sc = g('start_col', 0), er = g('end_row', U32), ec = g('end_col', 0);
   const depth = g('max_start_depth', U32), limit = g('match_limit', U32);
-  const out = tsrun(['query', l.so, l.sym, t.src.length, q.src.length, nd.i, sr, sc, er, er === U32 ? U32 : ec, depth, limit].join(' '), t.src, q.src);
-  if (out.startsWith('QERR ')) throw new LuaError('the query does not compile in the bridge');
+  const out = ts_tree(t, tid => ['query', tid, q.qid, nd.i, sr, sc, er, er === U32 ? U32 : ec, depth, limit].join(' '));
   const c = new TSCursorObj();
   c.t = t; c.K = []; c.M = []; c.ki = 0; c.mi = 0; c.removed = new Set();
   for (const line of out.split('\n')) {
