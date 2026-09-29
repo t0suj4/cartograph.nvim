@@ -70,6 +70,17 @@ function M.emit(src, file, opts)
     local tmp = 0
     local function fresh(base) tmp = tmp + 1; return ('$%s%d'):format(base, tmp) end
 
+    -- ★ THE LOCAL HALF IS DECLARED RULES (cartograph.luajs.rules, CART-1199): every node's lossless term, modulo
+    -- layout, read over THIS tree — `pterm` finds a node's term, `pnode` the node a rule's hole bound
+    local Rules = require 'cartograph.luajs.rules'
+    local pterm, pnode, memo = {}, {}, {}
+    local read, unread = require('cartograph.algebraread').read_tree(src, 'lua', tree, function (node, t)
+        local p = Rules.project(t, memo)
+        pterm[node:id()] = p
+        pnode[p] = node
+    end)
+    if read then unread = nil end
+
     -- ── scopes ───────────────────────────────────────────────────────────────────────────────────────────────────
     local function scope(parent) return { vars = {}, parent = parent, used = parent and parent.used or {} } end
     local function lookup(sc, name)
@@ -88,6 +99,30 @@ function M.emit(src, file, opts)
     end
 
     local expr, stmt, block, args_js, explist_js, fn_js
+
+    --- a node by the declared rule its term matches -> its JS | nil. The holes are emitted in SOURCE order (a hole's
+    --- emission can mint fresh names, so the order is part of the output)
+    local function by_rule(n, sc, ctx)
+        local p = pterm[n:id()]
+        if not p then return nil end
+        local c, vals = Rules.match(p)
+        if not c then return nil end
+        local order = {}
+        for h, v in pairs(vals) do
+            local node = pnode[v]
+            if not node then error(('luajs rule `%s`: hole %s bound a term with no node'):format(c.lua, h), 0) end
+            order[#order + 1] = { h = h, node = node, at = select(3, node:start()) }
+        end
+        table.sort(order, function (x, y) return x.at < y.at end)
+        local js = {}
+        for _, o in ipairs(order) do
+            local mode = c.as[o.h] or 'expr'
+            if mode == 'name' then js[o.h] = js_str(text(o.node))
+            elseif mode == 'block' then js[o.h] = block(o.node, scope(sc), ctx)
+            else js[o.h] = expr(o.node, sc, mode == 'raw') end
+        end
+        return Rules.render(c, js)
+    end
 
     --- is this expression multi-valued in a list tail (a call, or `...`)?
     local function multi(n) return n:type() == 'function_call' or n:type() == 'vararg_expression' end
@@ -111,8 +146,6 @@ function M.emit(src, file, opts)
         return explist_js(kids, sc)
     end
 
-    local BIN = { ['+'] = '$add', ['-'] = '$sub', ['*'] = '$mul', ['/'] = '$div', ['%'] = '$mod', ['^'] = '$pow',
-        ['..'] = '$cat', ['<'] = '$lt', ['<='] = '$le', ['>'] = '$gt', ['>='] = '$ge' }
 
     --- a table constructor in its SHAPE's representation
     local function table_js(n, sc)
@@ -182,6 +215,8 @@ function M.emit(src, file, opts)
 
     function expr(n, sc, raw)
         stats.nodes = stats.nodes + 1
+        local r = by_rule(n, sc)
+        if r then return r end
         local t = n:type()
         if t == 'identifier' then
             local name = text(n)
@@ -195,38 +230,14 @@ function M.emit(src, file, opts)
             local ok, v = pcall(f or error)
             if not ok or type(v) ~= 'string' then return refuse(n, 'string', 'a literal Lua cannot read') end
             return js_str(v)
-        elseif t == 'nil' then return 'undefined'
-        elseif t == 'true' then return 'true'
-        elseif t == 'false' then return 'false'
-        elseif t == 'vararg_expression' then return '$va[0]'
         elseif t == 'function_definition' then return fn_js(n, sc, nil)
-        elseif t == 'parenthesized_expression' then
-            local inner = named_kids(n)[1]
-            return '(' .. expr(inner, sc) .. ')'
-        elseif t == 'dot_index_expression' then
-            return ('$idx(%s, %s)'):format(expr(field_of(n, 'table'), sc), js_str(text(field_of(n, 'field'))))
-        elseif t == 'bracket_index_expression' then
-            return ('$idx(%s, %s)'):format(expr(field_of(n, 'table'), sc), expr(field_of(n, 'field'), sc))
         elseif t == 'function_call' then return call_js(n, sc, raw)
         elseif t == 'table_constructor' then return table_js(n, sc)
+        -- an operator no declared rule covers (5.3's `//`, `&`, …)
         elseif t == 'binary_expression' then
-            local op = text(field_of(n, 'operator'))
-            local l, r = field_of(n, 'left'), field_of(n, 'right')
-            if op == 'and' then return ('$and(%s, () => %s)'):format(expr(l, sc), expr(r, sc)) end
-            if op == 'or' then return ('$or(%s, () => %s)'):format(expr(l, sc), expr(r, sc)) end
-            -- equality honours __eq (5.1: both operands tables sharing one __eq); $eq's first test is ===
-            if op == '==' then return ('$eq(%s, %s)'):format(expr(l, sc), expr(r, sc)) end
-            if op == '~=' then return ('!$eq(%s, %s)'):format(expr(l, sc), expr(r, sc)) end
-            local f = BIN[op]
-            if not f then return refuse(n, 'operator', 'no template for the binary operator ' .. op) end
-            return ('%s(%s, %s)'):format(f, expr(l, sc), expr(r, sc))
+            return refuse(n, 'operator', 'no template for the binary operator ' .. text(field_of(n, 'operator')))
         elseif t == 'unary_expression' then
-            local op = text(field_of(n, 'operator'))
-            local e = field_of(n, 'operand')
-            if op == 'not' then return ('!$t(%s)'):format(expr(e, sc)) end
-            if op == '-' then return ('$neg(%s)'):format(expr(e, sc)) end
-            if op == '#' then return ('$len(%s)'):format(expr(e, sc)) end
-            return refuse(n, 'operator', 'no template for the unary operator ' .. op)
+            return refuse(n, 'operator', 'no template for the unary operator ' .. text(field_of(n, 'operator')))
         end
         return refuse(n, t, 'no template for this expression kind')
     end
@@ -245,6 +256,10 @@ function M.emit(src, file, opts)
         if va then params[#params + 1] = '...$va' end
         local body = field_of(n, 'body')
         local inner = body and block(body, fsc, {}) or ''
+        -- falling off the end returns NO values (a JS function would return one undefined — one nil)
+        local kids = body and named_kids(body) or {}
+        local last = kids[#kids]
+        if not (last and last:type() == 'return_statement') then inner = inner .. 'return $mv();\n' end
         return ('function (%s) {\n%s}'):format(table.concat(params, ', '), inner)
     end
 
@@ -267,6 +282,8 @@ function M.emit(src, file, opts)
     function stmt(n, sc, ctx)
         local t = n:type()
         if t == 'comment' or t == 'empty_statement' then return '' end
+        local r = by_rule(n, sc, ctx)
+        if r then return r end
         if t == 'variable_declaration' then
             local asg = named_kids(n)[1]
             if asg and asg:type() == 'variable_list' then
@@ -323,11 +340,9 @@ function M.emit(src, file, opts)
             end
             return assign_to(name, fn_js(n, sc, nil), sc)
         elseif t == 'return_statement' then
+            -- no value and one value are declared rules; a LIST is a value-position case
             local el = named_kids(n)[1]
-            local vals = el and named_kids(el) or {}
-            if #vals == 0 then return 'return;' end
-            if #vals == 1 then return ('return %s;'):format(expr(vals[1], sc, true)) end
-            return ('return $mv(%s);'):format(explist_js(vals, sc))
+            return ('return $mv(%s);'):format(explist_js(el and named_kids(el) or {}, sc))
         elseif t == 'if_statement' then
             local out = { ('if ($t(%s)) {\n%s}'):format(expr(field_of(n, 'condition'), sc), block(field_of(n, 'consequence'), scope(sc), ctx)) }
             for _, alt in ipairs(fields_of(n, 'alternative')) do
@@ -373,9 +388,6 @@ function M.emit(src, file, opts)
             local body = block(field_of(n, 'body'), fsc, { loop_label = lbl, labels = ctx and ctx.labels })
             return ('{ let [%s, %s, %s] = %s;\n%s: for (;;) { let [%s] = $adj(%d, $all(%s(%s, %s))); if (%s === undefined) break; %s = %s;\n%s} }')
                 :format(f, s, ctl, init, lbl, table.concat(vars, ', '), #vars, f, s, ctl, vars[1], ctl, vars[1], body)
-        elseif t == 'do_statement' then
-            local body = field_of(n, 'body')
-            return ('{\n%s}'):format(body and block(body, scope(sc), ctx) or '')
         elseif t == 'break_statement' then
             -- Lua's break names ITS loop: a synthetic goto loop (below) between it and the loop must not catch it
             return (ctx and ctx.loop_label) and ('break ' .. ctx.loop_label .. ';') or 'break;'
@@ -469,7 +481,8 @@ function M.emit(src, file, opts)
     end
 
     local top = scope(nil)
-    local body = block(root, top, nil)
+    -- a source the lossless reader refuses (an error or MISSING node) has no terms to match: the chunk refuses by name
+    local body = unread and (refuse(root, 'read', tostring(unread)) .. ';\n') or block(root, top, nil)
     local pack = opts.pack or './$pack.js'
     local names = '$t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $mappos, $add, $sub, $mul, $div, $mod, $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $abort, $G'
     -- the CHUNK is a function of its varargs, as a Lua chunk is: require passes the module name (nvim's own modules

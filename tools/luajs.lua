@@ -72,6 +72,19 @@ local function dump(t)
 end
 io.write(('EMIT: %d file(s) in %.1f s; %d emitted, %d with a refusal, %d refusal(s):\n'):format(#files, emit_s, #emitted, refused_files, total_refusals))
 dump(by_kind)
+-- the DECLARED RULES (cartograph.luajs.rules): how often each fired over this tree. A rule that never fires is dead
+-- on this corpus — it has no witness here, and a broken one would look exactly the same
+do
+    local Rules = require 'cartograph.luajs.rules'
+    local dead, fired = {}, 0
+    for i, c in ipairs(Rules.all()) do
+        local n = Rules.hits[i] or 0
+        fired = fired + n
+        if n == 0 then dead[#dead + 1] = c.lua end
+    end
+    io.write(('RULES: %d declared, %d match(es); %d never fired%s\n'):format(#Rules.all(), fired, #dead,
+        #dead > 0 and (': ' .. table.concat(dead, ' · ')) or ''))
+end
 
 -- PARSE: node's own parser
 local bad = {}

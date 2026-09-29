@@ -212,6 +212,35 @@ local ok, err = pcall(function () error({ code = 7 }) end)
 print(ok, type(err), err.code)
 print(pcall(function () return 1, 2 end))
 print(select('#', pcall(error)))]],
+    -- the DECLARED RULES match MODULO LAYOUT (no gaps, comments inside an operator), and the forms the repository
+    -- itself never writes (`...` as one value, `do end`, `return;`) still have a witness
+    rules = [==[
+local a, b = 3, 4
+print(a+b, a --[[c]] + b, a
+  -- a comment inside the operator's layout
+  * b, a..b, -a, not a, #'xyz')
+local t = { f = 1 }
+print(t . f, t [ 'f' ], ( a ), t--[[x]].f)
+print(a == 3 and -- r
+  b or 0, a~=b, a<=b)
+local function v(...) local x = ... return x end
+print(v(5, 6))
+local function r0() return; end
+local function r1() return a; end
+local function r2() if a then return end return 1 end
+local function r3() end
+do end
+print(r0(), r1(), r2())
+print(select('#', r2()), select('#', r3()), r3())
+-- a CALLBACK the pack calls that falls off its end returns no values: nil to the pack, never a truthy empty list
+local fell = setmetatable({}, { __index = function () end })
+print(fell.x, fell.x and 1 or 2)
+print(('abc'):gsub('b', function () end))
+local E = { __eq = function () end }
+print(setmetatable({}, E) == setmetatable({}, E))
+local s = { 3, 1, 2 }
+table.sort(s, function (x, y) if x < y then return true end end)
+print(table.concat(s, ','))]==],
 }
 
 for name, src in pairs(CASES) do
@@ -515,6 +544,20 @@ test('luajs: a construct with no faithful form is REFUSED by name, the module st
     local out2 = js_out("print(('%q'):format('x'))\n")
     ok(out2:find('no faithful JS form: string.format %q', 1, true), 'a pack gap is a named break, never an approximation: ' .. out2)
     eq('1\t2\n', (js_out('print(1, 2)\n')), 'and the translatable side runs')
+end)
+
+test('luajs: the LOCAL half is DECLARED RULES — every rule compiles and FIRES on this spec\'s differential sources; a rule that drops a hole does not compile; a source the reader refuses refuses by name', function ()
+    if not ready() then skip 'no lua parser / node' end
+    local Rules = require 'cartograph.luajs.rules'
+    for k in pairs(Rules.hits) do Rules.hits[k] = nil end
+    for _, src in pairs(CASES) do L.emit(src, 'case.lua') end
+    local dead = {}
+    for i, c in ipairs(Rules.all()) do if (Rules.hits[i] or 0) == 0 then dead[#dead + 1] = c.lua end end
+    eq({}, dead, 'a rule no differential source reaches has no witness')
+    local okc, why = pcall(Rules.compile, { lua = 'a + b', js = '$add(a)' })
+    ok(not okc and tostring(why):find('hole b is dropped', 1, true), tostring(why))
+    local _, refusals = L.emit('local x = \n', 'bad.lua')
+    ok(#refusals == 1 and refusals[1].kind == 'read', vim.inspect(refusals))
 end)
 
 test('luajs: each table constructor takes its SHAPE\'s representation — ARRAY, RECORD, or MAP for a dictionary', function ()

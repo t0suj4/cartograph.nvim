@@ -119,14 +119,19 @@ function M.escapes(lang)
     return out
 end
 
-local function read(A, src, lang)
-    local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
-    if not okp or not parser then
-        return nil, ('no tree-sitter parser for `%s`'):format(lang)
-    end
-    local oktree, tree = pcall(function() return parser:parse()[1] end)
-    if not oktree or not tree then
-        return nil, ('tree-sitter could not parse the source as `%s`'):format(lang)
+--- `given` (read_tree): a tree the caller already parsed over `src`, and `visit(node, term)` called on every node's term
+local function read(A, src, lang, given, visit)
+    local tree = given
+    if not tree then
+        local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
+        if not okp or not parser then
+            return nil, ('no tree-sitter parser for `%s`'):format(lang)
+        end
+        local oktree
+        oktree, tree = pcall(function() return parser:parse()[1] end)
+        if not oktree or not tree then
+            return nil, ('tree-sitter could not parse the source as `%s`'):format(lang)
+        end
     end
     local root = tree:root()
     if root:has_error() then
@@ -149,7 +154,11 @@ local function read(A, src, lang)
                 error(('the tree is missing a `%s` the grammar requires'):format(ty), 0)
             end
             local text = src:sub(sb + 1, eb)
-            if node:named() then return A.node(ty, A.lit(text)) end
+            if node:named() then
+                local t = A.node(ty, A.lit(text))
+                if visit then visit(node, t) end
+                return t
+            end
             return A.lit(text)
         end
         local kids, cursor = {}, sb
@@ -161,7 +170,9 @@ local function read(A, src, lang)
             cursor = ce
         end
         if eb > cursor then kids[#kids + 1] = A.lit(src:sub(cursor + 1, eb)) end
-        return A.node(ty, unpack(kids))
+        local t = A.node(ty, unpack(kids))
+        if visit then visit(node, t) end
+        return t
     end
     local ok, t = pcall(term, root)
     if not ok then return nil, tostring(t) end
@@ -198,6 +209,15 @@ function M.read(src, lang)
     local A, why = require('cartograph.algebra').load()
     if not A then return nil, why end
     return read(A, src, lang or 'lua')
+end
+
+--- read over a tree the CALLER parsed (`src` must be the text it parsed), calling `visit(node, term)` on every node's
+--- term as it is built — the one term shape, for a consumer that walks tree-sitter nodes and needs each node's term
+--- (cartograph.luajs matches its declared rules on them). -> term | nil, why
+function M.read_tree(src, lang, tree, visit)
+    local A, why = require('cartograph.algebra').load()
+    if not A then return nil, why end
+    return read(A, src, lang, tree, visit)
 end
 
 --- the identity law over a directory tree: `cst_print(read(f)) == contents(f)`.
