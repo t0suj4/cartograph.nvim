@@ -22,6 +22,18 @@ return {
             end },
         },
         {
+            -- (pinned because a probe with a NON-empty `before` on a missing file was read as "the verb cannot create":
+            -- CART-1203, filed on that misreading and closed invalid)
+            name = 'before = \'\' CREATES a file that does not exist, under the same parse guard; the re-run is empty',
+            files = { ['m.lua'] = 'return 1\n' },
+            params = { file = 'new/n.lua', before = '', after = 'local N = {}\nreturn N\n' },
+            expect = { status = 'done', applied = 1, check = function (root)
+                local fd = io.open(root .. '/new/n.lua')
+                local s = fd and fd:read('a')
+                return s == 'local N = {}\nreturn N\n', tostring(s)
+            end },
+        },
+        {
             name = 'a markdown file: no parser, so the guard makes NO CLAIM — and the edit still applies',
             files = { ['notes.md'] = '# Notes\n\n- one\n' },
             params = { file = 'notes.md', before = '- one\n', after = '- one\n- two\n' },

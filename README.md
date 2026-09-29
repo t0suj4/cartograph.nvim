@@ -3550,6 +3550,12 @@ nvim --headless -u NONE -l tools/cjs.lua lstrmatch <luajit src dir> <out.js>
 # compiler FUSES, read from its own GIMPLE dump). libm pow as LuaJIT gets it -> libmpow.js, 0 of 4,000,784 inputs
 # differ from glibc (V8's Math.pow: 268,366):
 nvim --headless -u NONE -l tools/cjs.lua libmpow <AOR math dir> <out.js>
+# WHICH C FUNCTION does each pack primitive re-implement, and what does the pack lack? Derived from both sides: LuaJIT's
+# registrations (as its buildvm reads them) joined with the oracle's live library, C bodies from the preprocessed
+# tree, the pack enumerated under node; joins by name, metamethod, assembled message, citation:
+nvim --headless -u NONE -l tools/packmap.lua ~/.local/share/pkgit/luajit/HEAD [--json out.json]
+#   the oracle's LuaJIT (fbb36bb6): 162 library functions, the pack implements 74 (+11 refused stubs); 62 in method
+#   tables are a frontier.
 
 # JOIN A READER AGAINST AN INDEPENDENT ORACLE, per file — the acceptance test every data
 # reader gets (CART-1044). Six outcomes, none dropped: agree, disagree, refused by us,
