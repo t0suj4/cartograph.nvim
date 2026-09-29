@@ -3528,6 +3528,25 @@ ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograp
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# LUA -> JAVASCRIPT (CART-1197, CART-1199, CART-1206). The CENSUS before the emitter: every site that breaks, by
+# class (template / partial / refused), and every table's judged SHAPE (array / record / map):
+nvim --headless -u NONE -l tools/jsbreaks.lua lua [--show CLASS]
+nvim --headless -u NONE -l tools/jsshape.lua lua [--show CLASS]
+# TRANSLITERATE a tree and see what breaks, in three layers: EMIT refusals by name, PARSE by node's own parser
+# (must be 0), RUN each module loaded under node, by outcome. Also: how often each DECLARED RULE fired
+# (lua/cartograph/luajs/rules.lua — a rule that never fires has no witness on that tree):
+nvim --headless -u NONE -l tools/luajs.lua lua <out dir> [--run]
+#   lua/: 360 emitted, 0 refusals, 0 parse failures, 339 load (the rest are named: loadstring, the editor, ...)
+# EVERY PROGRAM UP TO A SIZE, not a sample: a grammar derived from the corpus (cartograph.grammargen), each program
+# under real Lua and under node. Prints the count, the FUNNEL (generated -> parses -> loads -> terminates ->
+# emitted -> compared -> diverged), a token census, UNREACHED tokens, divergences by class, and the labelled claim:
+nvim --headless -u NONE -l tools/luajsgen.lua control 8      # or: values, coercion
+#   size 8: control 114,838 compared / 0 diverged; values 53,815 / 0 (72 message-only); coercion 352,161 / 20
+#   (all a non-integer pow, V8 vs glibc). On its first day it found 5 real bugs the hand-written cases missed, and
+#   probing the gaps it exposed found 2 more (exact-tie rounding in %.14g, a zero for-step's direction).
+# TRANSLITERATE a closed region of C instead of re-authoring it (LuaJIT's pattern matcher -> lstrmatch.js):
+nvim --headless -u NONE -l tools/cjs.lua lstrmatch <luajit src dir> <out.js>
+
 # JOIN A READER AGAINST AN INDEPENDENT ORACLE, per file — the acceptance test every data
 # reader gets (CART-1044). Six outcomes, none dropped: agree, disagree, refused by us,
 # rejected by the oracle, both refused, unopenable; disagreements GROUPED BY CAUSE (the first

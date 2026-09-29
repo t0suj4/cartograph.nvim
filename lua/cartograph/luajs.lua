@@ -368,14 +368,15 @@ function M.emit(src, file, opts)
             local lbl = fresh('L')
             local fsc = scope(sc)
             if clause:type() == 'for_numeric_clause' then
-                local i, a, b, c = fresh('i'), fresh('a'), fresh('b'), fresh('s')
+                local i, a, b, c, up = fresh('i'), fresh('a'), fresh('b'), fresh('s'), fresh('u')
                 local start = expr(field_of(clause, 'start'), sc)
                 local stop = expr(field_of(clause, 'end'), sc)
                 local step = field_of(clause, 'step') and expr(field_of(clause, 'step'), sc) or '1'
                 local var = declare(fsc, text(field_of(clause, 'name')))
                 local body = block(field_of(n, 'body'), fsc, { loop_label = lbl, labels = ctx and ctx.labels })
-                return ('{ const %s = +(%s), %s = +(%s), %s = +(%s);\n%s: for (let %s = %s; %s > 0 ? %s <= %s : %s >= %s; %s += %s) { let %s = %s;\n%s} }')
-                    :format(a, start, b, stop, c, step, lbl, i, a, c, i, b, i, b, i, c, var, i, body)
+                -- the three values are checked AFTER all are evaluated, as Lua does ($forprep: a number or a numeric string)
+                return ('{ const [%s, %s, %s, %s] = $forprep(%s, %s, %s);\n%s: for (let %s = %s; %s ? %s <= %s : %s >= %s; %s += %s) { let %s = %s;\n%s} }')
+                    :format(a, b, c, up, start, stop, step, lbl, i, a, up, i, b, i, b, i, c, var, i, body)
             end
             local vl, el
             for cc in clause:iter_children() do
@@ -484,7 +485,7 @@ function M.emit(src, file, opts)
     -- a source the lossless reader refuses (an error or MISSING node) has no terms to match: the chunk refuses by name
     local body = unread and (refuse(root, 'read', tostring(unread)) .. ';\n') or block(root, top, nil)
     local pack = opts.pack or './$pack.js'
-    local names = '$t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $mappos, $add, $sub, $mul, $div, $mod, $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $abort, $G'
+    local names = '$forprep, $t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $mappos, $add, $sub, $mul, $div, $mod, $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $abort, $G'
     -- the CHUNK is a function of its varargs, as a Lua chunk is: require passes the module name (nvim's own modules
     -- read it — `{ _fold = ..., … }` in vim/treesitter.lua), a script run directly gets its arguments
     local js = ("'use strict';\n// transliterated from %s by cartograph.luajs — do not edit\nconst { %s } = require(%s);\n"

@@ -61,6 +61,11 @@ M.RULES = {
     -- NO values is an EMPTY list, not one nil (`select('#', f())` is 0, and `print(f())` prints an empty line)
     { lua = 'return', js = 'return $mv();' },
     { lua = 'return;', js = 'return $mv();' },
+    -- `...` as the ONE returned value is ALL the varargs (the `...` rule above is its one-value reading; found by the
+    -- bounded-exhaustive generator, CART-1206: `return ...` with ('x', nil) returned 1 value, Lua 2). Before `return a`:
+    -- rules sharing a head are tried in order
+    { lua = 'return ...', js = 'return $mv(...$va);' },
+    { lua = 'return ...;', js = 'return $mv(...$va);' },
     { lua = 'return a', js = 'return a;', as = { a = 'raw' } },
     { lua = 'return a;', js = 'return a;', as = { a = 'raw' } },
 }

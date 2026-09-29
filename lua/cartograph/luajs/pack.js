@@ -165,22 +165,31 @@ const $div = arith('__div', (a, b) => a / b);
 const $mod = arith('__mod', (a, b) => a - Math.floor(a / b) * b);
 const $pow = arith('__pow', (a, b) => Math.pow(a, b));
 const $neg = a => { if (numish(a)) return -num(a); const h = meta(a, '__unm'); if (h !== undefined) return $1($call(h, a, a)); return -num(a); };
+/** Lua's number to string: C's `%.14g`. The exponent X is read AFTER rounding to 14 significant digits
+ *  (toExponential(13)); C prints exponential when X < -4 or X >= 14 — NOT JS toPrecision's rule (X < -6 or X >= p),
+ *  and an integer of 15+ digits is exponential too (found by CART-1206's generator: `2.5 / 2.5 ^ "0x10"` printed
+ *  0.000001073741824 for Lua's 1.073741824e-06, and 6.25e+14 printed as 625000000000000). -0 prints "-0". */
 function $numstr(n) {
-  if (Number.isInteger(n) && Math.abs(n) < 1e15) return String(n);
+  if (Number.isInteger(n) && Math.abs(n) < 1e14) return Object.is(n, -0) ? '-0' : String(n);
   if (n === Infinity) return 'inf';
   if (n === -Infinity) return '-inf';
   if (Number.isNaN(n)) return 'nan';
-  // %.14g
-  let s = n.toPrecision(14);
-  if (s.includes('e')) {
-    let [m, e] = s.split('e');
-    if (m.includes('.')) m = m.replace(/0+$/, '').replace(/\.$/, '');
-    const sign = e[0] === '-' ? '-' : '+';
-    e = e.replace(/^[+-]/, '');
-    return m + 'e' + sign + (e.length < 2 ? '0' + e : e);
+  // the 14 significant digits and the exponent. An EXACT tie rounds to EVEN in C (on the binary value) but half UP in
+  // JS (measured: 123456789012345 is 1.2345678901234e+14 in LuaJIT); the exact digits decide (toExponential(100))
+  let ex = Math.abs(n).toExponential(13);
+  const full = Math.abs(n).toExponential(100);
+  const fd = full.slice(0, full.indexOf('e')).replace('.', '');
+  if (fd[14] === '5' && /^0*$/.test(fd.slice(15)) && (fd.charCodeAt(13) - 48) % 2 === 0) ex = fd[0] + '.' + fd.slice(1, 14) + full.slice(full.indexOf('e'));
+  const d = ex.slice(0, ex.indexOf('e')).replace('.', '');
+  const X = parseInt(ex.slice(ex.indexOf('e') + 1), 10);
+  const sign = n < 0 ? '-' : '';
+  const trim = s => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
+  if (X < -4 || X >= 14) {
+    const a = Math.abs(X);
+    return sign + trim(d[0] + '.' + d.slice(1)) + 'e' + (X < 0 ? '-' : '+') + (a < 10 ? '0' + a : String(a));
   }
-  if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
-  return s;
+  if (X < 0) return sign + trim('0.' + '0'.repeat(-X - 1) + d);
+  return sign + trim(d.slice(0, X + 1) + '.' + d.slice(X + 1));
 }
 const cstr = x => {
   if (typeof x === 'string') return x;
@@ -226,7 +235,7 @@ const $le = (a, b) => {
 // a > b and a >= b keep Lua's LEFT-TO-RIGHT evaluation (rewriting them as b < a would evaluate b first)
 const $gt = (a, b) => { const x = a, y = b; return $lt(y, x); };
 const $ge = (a, b) => { const x = a, y = b; return $le(y, x); };
-const cmpok = (a, b) => { if (!((typeof a === 'number' && typeof b === 'number') || (typeof a === 'string' && typeof b === 'string'))) throw new LuaError('attempt to compare ' + $type(a) + ' with ' + $type(b)); };
+const cmpok = (a, b) => { if (!((typeof a === 'number' && typeof b === 'number') || (typeof a === 'string' && typeof b === 'string'))) { const ta = $type(a), tb = $type(b); throw new LuaError(ta === tb ? 'attempt to compare two ' + ta + ' values' : 'attempt to compare ' + ta + ' with ' + tb); } }; // LuaJIT lj_err_comp: BADCMPV when the type names match, else BADCMPT
 
 // ── the base library ─────────────────────────────────────────────────────────────────────────────────────────────
 const ids = new WeakMap(); let nextId = 1;
@@ -250,6 +259,22 @@ function $tostring(v) {
   if (h !== undefined) { const s = $1($call(h, v)); if (typeof s !== 'string') throw new LuaError("'__tostring' must return a string"); return s; }
   return t + ': ' + addr(v);
 }
+/** a numeric for's control values, checked AFTER all three are evaluated (the JS call evaluates its arguments first),
+ *  in LuaJIT's order: initial value, limit, step — each a number or a string Lua reads as one (lj_meta_for:
+ *  lj_strscan_numberobj; measured: `for i = "0x2", "3"` runs 2 3, `for i = 1, nil` is "'for' limit must be a number") */
+function $forprep(a, b, s) {
+  const n = (v, what) => {
+    if (typeof v === 'number') return v;
+    const x = typeof v === 'string' ? $tonumber(v) : undefined;
+    if (x === undefined) throw new LuaError("'for' " + what + ' must be a number');
+    return x;
+  };
+  const v = [n(a, 'initial value'), n(b, 'limit'), n(s, 'step')];
+  // the DIRECTION is the step's SIGN BIT, as LuaJIT's: a step of 0 counts UP (`for i = 1, 2, 0` loops, `2, 1, 0` does
+  // not), -0 counts DOWN — measured; a `s > 0` test had both backwards
+  v.push(v[2] > 0 || Object.is(v[2], 0));
+  return v;
+}
 function $tonumber(v, base) {
   if (base !== undefined && base !== 10) {
     if (typeof v !== 'string' && typeof v !== 'number') return undefined;
@@ -263,7 +288,15 @@ function $tonumber(v, base) {
   if (typeof v === 'number') return v;
   if (typeof v !== 'string') return undefined;
   const s = v.trim();
-  if (/^-?0[xX][0-9a-fA-F]+$/.test(s)) return (s[0] === '-' ? -1 : 1) * parseInt(s.replace(/^-/, ''), 16);
+  // a HEX number is LuaJIT's (lj_strscan): hex digits, an optional `.` fraction, an optional `p` binary exponent, a
+  // sign either way (found by CART-1206's generator: `-("0x10" .. 2.5)` is -258.3125 in LuaJIT — "0x102.5" is a number)
+  const hx = /^([+-]?)0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?\d+))?$/.exec(s);
+  if (hx && (hx[2] + (hx[3] || '')).length > 0) {
+    let m = 0;
+    for (const c of hx[2] + (hx[3] || '')) m = m * 16 + parseInt(c, 16);
+    const n = m * Math.pow(2, (hx[4] ? parseInt(hx[4], 10) : 0) - 4 * (hx[3] || '').length);
+    return hx[1] === '-' ? -n : n;
+  }
   if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return Number(s);
   if (/^[+-]?(inf|nan)/i.test(s)) return undefined;
   return undefined;
@@ -1492,5 +1525,5 @@ function $require(name) {
   return loaded[name];
 }
 
-module.exports = { $mappos, $t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $add, $sub, $mul, $div, $mod,
+module.exports = { $mappos, $forprep, $t, $and, $or, $mv, $1, $all, $adj, $arr, $rec, $map, $idx, $set, $len, $m, $call, $add, $sub, $mul, $div, $mod,
   $pow, $neg, $cat, $eq, $lt, $le, $gt, $ge, $type, $tostring, $tonumber, $abort, $require, $G: G, MV, LuaError, LuaBreak, $numstr };

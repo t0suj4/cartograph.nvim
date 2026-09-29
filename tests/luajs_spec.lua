@@ -212,6 +212,38 @@ local ok, err = pcall(function () error({ code = 7 }) end)
 print(ok, type(err), err.code)
 print(pcall(function () return 1, 2 end))
 print(select('#', pcall(error)))]],
+    -- a numeric for's values: all three EVALUATED, then checked in LuaJIT's order (a numeric string is a number); a
+    -- comparison error names two types, or "two X values" when they match (both found by CART-1206's generator)
+    fornum = [[
+local seen = {}
+local function m(f) seen = {}; local ok, e = pcall(f); print(table.concat(seen, ' '), ok, (tostring(e):gsub('^[^:]*:%d+: ', ''))) end
+local function p(k) seen[#seen + 1] = type(k); return k end
+local got = {}
+for i = "0x2", "3" do got[#got + 1] = i end
+for i = 1, 3, " 2 " do got[#got + 1] = i end
+print(table.concat(got, ' '), type(got[1]))
+m(function () for i = 1, nil do end end)
+m(function () for i = p(nil), p(2) do end end)
+m(function () for i = 1, 2, false do end end)
+m(function () for i = p('a'), p('b'), p({}) do end end)
+m(function () return 1 < true end)
+m(function () return true < false end)
+m(function () return {} <= {} end)
+m(function () return 'a' < 1 end)
+local function run(a, b, s) local got, n = {}, 0; for i = a, b, s do n = n + 1; got[#got + 1] = i; if n > 3 then break end end return table.concat(got, ',') end
+print(run(1, 2, 0), run(2, 1, 0), run(3, 1, -1), run(1, 2, 0.5), run(1, 1, 0), run(1, 0, -0.0), run(0, 1, -0.0), run(3, 1, -0.5))]],
+    -- a number prints as C's %.14g: exponential when the ROUNDED exponent is < -4 or >= 14 (integers of 15+ digits
+    -- included), an exact tie to EVEN, -0 as "-0" (CART-1206's generator found the first two)
+    numstr = [[
+local out = {}
+for _, v in ipairs { 1e14, 99999999999999, 123456789012345, 2^53, 1e15 - 1, 0.0001, 0.00001, 1.5e-5, -0.0, 1 / 3,
+    1e100, 123.456, 1e-310, 2^63, -1e14, 2.5 / 2.5 ^ 16, 10 ^ 16 / 16, 0.5, -2.5e-7, 1e15 + 0.5 } do
+  out[#out + 1] = tostring(v)
+end
+print(table.concat(out, ' '))
+print(1e14 .. '', -0.0 .. '|', 123456789012345 .. '')
+print(tonumber('0x102.5'), -('0x10' .. 2.5), tonumber('0x.8'), tonumber('0x1p4'), tonumber('0xA.8P-1'), tonumber('+0x10'),
+  tonumber(' 0x10 '), tonumber('0x'), tonumber('0x.'), tonumber('0x1p'))]],
     -- the DECLARED RULES match MODULO LAYOUT (no gaps, comments inside an operator), and the forms the repository
     -- itself never writes (`...` as one value, `do end`, `return;`) still have a witness
     rules = [==[
@@ -225,6 +257,9 @@ print(a == 3 and -- r
   b or 0, a~=b, a<=b)
 local function v(...) local x = ... return x end
 print(v(5, 6))
+local function va(...) return ... end
+local function vb(...) return ...; end
+print(select('#', va('x', nil)), va(1, 2), select('#', vb()), vb(3, nil, 4))
 local function r0() return; end
 local function r1() return a; end
 local function r2() if a then return end return 1 end
