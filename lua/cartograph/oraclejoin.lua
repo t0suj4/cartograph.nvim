@@ -108,7 +108,9 @@ M._cause_key = cause_key
 ---   eq      = function(a, b) -> bool,                   -- default: kv_ser equality — ⚠ which
 ---             IGNORES KEY ORDER (kv_ser sorts keys): "agree" means equal AS UNORDERED MAPS
 ---   ordered = true                                      -- key order counts too (first_difference)
----   examples = n (per group, default 3) }
+---   examples = n (per group, default 3),
+---   cause = function(diff, input, ours, theirs) -> group key | nil  -- a join's OWN cause class (default: kind + path +
+---             a textual detail, which merges 'number vs string' with 'table vs function': a typed join names its pair) }
 --- @return table report { counts, groups (sorted by size), refusals, rejections, vacuous }
 function M.run(spec)
     local counts = { total = 0, agree = 0, disagree = 0, refused = 0, rejected = 0, both = 0, unopenable = 0 }
@@ -147,7 +149,7 @@ function M.run(spec)
         else
             counts.disagree = counts.disagree + 1
             local d = M.first_difference(ours, theirs) or { path = '$', kind = 'unequal', detail = 'eq() says unequal, no structural difference' }
-            local key = cause_key(d)
+            local key = spec.cause and spec.cause(d, input, ours, theirs) or cause_key(d)
             local g = groups[key]
             if not g then g = { cause = key, n = 0, examples = {} }; groups[key] = g; order[#order + 1] = key end
             g.n = g.n + 1
