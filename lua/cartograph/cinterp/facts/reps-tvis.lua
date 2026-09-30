@@ -6,6 +6,7 @@ return {
     summary = 'each tag\'s representative and the predicate matrix, from an LJ_T* family and its tvis* predicates',
     derive = function (_, got)
         local F = require 'cartograph.cinterp.facts'
+        if not got.layout.header then return nil, 'the slot layout names no header (a scalar slot)' end
         local h = F.readfile(got.layout.header) or ''
         if not h:find('#define%s+LJ_T%u+%s+%(~%d+u%)') then return nil, 'no `#define LJ_T<NAME> (~Nu)` tag family in ' .. vim.fn.fnamemodify(got.layout.header, ':t') end
         return require('cartograph.luajs.cpath').reps(got.layout.include, got.layout.cflags, got.layout.header)

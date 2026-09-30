@@ -32,7 +32,39 @@ local FILES = {
         '#define is_list(x) (((x) & _TAG_PRIMARY_MASK) == TAG_PRIMARY_LIST)',
         '#define is_not_list(x) (!is_list((x)))',
         '#define list_val(x) ((Eterm*) ((x) - TAG_PRIMARY_LIST))',
-        '#define CAR(x) ((x)[0])',
+        '#define CAR(x) ((x)[0])', '#define CDR(x) ((x)[1])',
+        '#define make_boxed(x) ((Uint)(x) + TAG_PRIMARY_BOXED)',
+        '#define is_boxed(x) (((x) & _TAG_PRIMARY_MASK) == TAG_PRIMARY_BOXED)',
+        '#define boxed_val(x) ((Eterm*) ((x) - TAG_PRIMARY_BOXED))',
+        '#define _TAG_HEADER_MASK 0x3F', '#define _TAG_HEADER_ARITYVAL (0x0 << 2)', '#define _TAG_HEADER_FLOAT (0x6 << 2)', '#define _HEADER_ARITY_OFFS 6',
+        '#define make_arityval(sz) (((sz) << _HEADER_ARITY_OFFS) + _TAG_HEADER_ARITYVAL)',
+        '#define is_arity_value(x) (((x) & _TAG_HEADER_MASK) == _TAG_HEADER_ARITYVAL)',
+        '#define arityval(x) ((x) >> _HEADER_ARITY_OFFS)',
+        '#define make_tuple(x) make_boxed((x))',
+        '#define is_tuple(x) (is_boxed((x)) && is_arity_value(*boxed_val((x))))',
+        '#define is_not_tuple(x) (!is_tuple((x)))', '#define tuple_val(x) boxed_val(x)',
+        '#define TUPLE2(t,e1,e2) ((t)[0] = make_arityval(2), (t)[1] = (e1), (t)[2] = (e2), make_tuple(t))',
+        '#define HEADER_FLONUM ((1 << _HEADER_ARITY_OFFS) + _TAG_HEADER_FLOAT)',
+        'typedef union float_def { double fd; Uint fdw; } FloatDef;',
+        '#define PUT_DOUBLE(f, x) *(x) = HEADER_FLONUM, *((x)+1) = (f).fdw',
+        '#define make_float(x) make_boxed((x))',
+        '#define is_float(x) (is_boxed((x)) && *boxed_val((x)) == HEADER_FLONUM)',
+        '#define _make_header(sz,tag) ((Uint)(((Uint)(sz) << _HEADER_ARITY_OFFS) + (tag)))',
+        '#define _TAG_HEADER_HEAP_BIN (0x9 << 2)', '#define _TAG_HEADER_MAP (0xF << 2)', '#define _TAG_HEADER_MATCHSTATE (0x8 << 2)',
+        '#define _TAG_HEADER_SUB_BIN (0xA << 2)',
+        'typedef struct { Eterm thing_word; Uint size; Uint offs; Uint bitsize; Eterm orig; } ErlSubBin;',
+        '#define HEADER_SUB_BIN _make_header(sizeof(ErlSubBin)/sizeof(Eterm)-2, _TAG_HEADER_SUB_BIN)',
+        '#define is_binary(x) (is_boxed((x)) && (((*boxed_val((x))) & _TAG_HEADER_MASK) == _TAG_HEADER_HEAP_BIN || ((*boxed_val((x))) & _TAG_HEADER_MASK) == _TAG_HEADER_SUB_BIN))',
+        'typedef struct { Eterm thing_word; Uint size; Eterm data[1]; } ErlHeapBin;',
+        '#define binary_bitsize(b) ((*boxed_val(b) == HEADER_SUB_BIN) ? ((ErlSubBin *) boxed_val(b))->bitsize : 0)',
+        '#define is_map(x) (is_boxed((x)) && ((*boxed_val((x))) & _TAG_HEADER_MASK) == _TAG_HEADER_MAP)',
+        '#define _TAG_IMMED1_PID ((0x0 << _TAG_PRIMARY_SIZE) | TAG_PRIMARY_IMMED1)',
+        '#define is_pid(x) (((x) & _TAG_IMMED1_MASK) == _TAG_IMMED1_PID)',
+        '#define _TAG_HEADER_FUN (0x5 << 2)',
+        'typedef struct { Eterm thing_word; void *fe; Uint arity; Uint nfree; } ErlFunThing;',
+        '#define ERL_FUN_SIZE ((sizeof(ErlFunThing)/sizeof(Eterm)))',
+        '#define HEADER_FUN _make_header(ERL_FUN_SIZE-2,_TAG_HEADER_FUN)',
+        '#define is_any_fun(x) (is_boxed((x)) && *boxed_val((x)) == HEADER_FUN)',
         '#define THE_NON_VALUE (TAG_PRIMARY_HEADER)',
     }, '\n') .. '\n',
     ['error.h'] = '#define EXC_ERROR 3\n#define EXC_BADARG ((3 << 8) | EXC_ERROR)\n#define BADARG EXC_BADARG\n#define TRAP (1 << 8)\n#define EXC_CASE_CLAUSE ((4 << 8) | EXC_ERROR)\n',
@@ -53,20 +85,22 @@ local FILES = {
         '#define am_false make_atom(0)', '#define am_true make_atom(1)', '#define am_erlang make_atom(2)', '#define am_lists make_atom(3)',
         '#define am_hd make_atom(4)', '#define am_is_atom make_atom(5)', '#define am_is_integer make_atom(6)', '#define am_is_list make_atom(7)',
         '#define am_member make_atom(8)', '#define am_id make_atom(9)', '#define am_later make_atom(10)', '#define am_undefined make_atom(11)',
-        '#define am_bool make_atom(12)', '#define am_is_boolean make_atom(13)', '#define am_len make_atom(14)', '#define am_flaky make_atom(15)', '#define am_alloc make_atom(16)', '#define am_undef make_atom(17)', '#define am_fill make_atom(18)',
+        '#define am_bool make_atom(12)', '#define am_is_boolean make_atom(13)', '#define am_len make_atom(14)', '#define am_flaky make_atom(15)', '#define am_alloc make_atom(16)', '#define am_undef make_atom(17)', '#define am_fill make_atom(18)', '#define am_is_tuple make_atom(19)', '#define am_is_float make_atom(20)', '#define am_tuple_size make_atom(21)', '#define am_proper make_atom(22)', '#define am_is_binary make_atom(23)', '#define am_is_map make_atom(24)', '#define am_is_pid make_atom(25)', '#define am_byte_size make_atom(26)', '#define am_is_function make_atom(27)', '#define am_is_bitstring make_atom(28)', '#define am_bin_to_list make_atom(29)', '#define am_hbfirst make_atom(30)',
     }, '\n') .. '\n',
-    ['erl_atom_table.c'] = 'char* erl_atom_names[] = {\n  "false", "true", "erlang", "lists", "hd", "is_atom", "is_integer", "is_list", "member", "id", "later", "undefined", "bool", "is_boolean", "len", "flaky", "alloc", "undef", "fill",\n};\n',
+    ['erl_atom_table.c'] = 'char* erl_atom_names[] = {\n  "false", "true", "erlang", "lists", "hd", "is_atom", "is_integer", "is_list", "member", "id", "later", "undefined", "bool", "is_boolean", "len", "flaky", "alloc", "undef", "fill", "is_tuple", "is_float", "tuple_size", "proper", "is_binary", "is_map", "is_pid", "byte_size", "is_function", "is_bitstring", "bin_to_list", "hbfirst",\n};\n',
     ['erl_bif_table.c'] = table.concat({
         '#include "bif.h"', '#include "erl_atom_table.h"',
         'typedef struct { Eterm module; Eterm name; int arity; void *f; void *g; int kind; } BifEntry;',
         'Eterm hd_1(BIF_ALIST_1); Eterm is_atom_1(BIF_ALIST_1); Eterm is_integer_1(BIF_ALIST_1); Eterm is_list_1(BIF_ALIST_1);',
-        'Eterm is_boolean_1(BIF_ALIST_1); Eterm lists_member_2(BIF_ALIST_2); Eterm id_1(BIF_ALIST_1); Eterm later_1(BIF_ALIST_1); Eterm bool_1(BIF_ALIST_1); Eterm len_1(BIF_ALIST_1); Eterm flaky_1(BIF_ALIST_1); Eterm alloc_1(BIF_ALIST_1); Eterm undef_1(BIF_ALIST_1); Eterm fill_1(BIF_ALIST_1);',
+        'Eterm is_boolean_1(BIF_ALIST_1); Eterm lists_member_2(BIF_ALIST_2); Eterm id_1(BIF_ALIST_1); Eterm later_1(BIF_ALIST_1); Eterm bool_1(BIF_ALIST_1); Eterm len_1(BIF_ALIST_1); Eterm flaky_1(BIF_ALIST_1); Eterm alloc_1(BIF_ALIST_1); Eterm undef_1(BIF_ALIST_1); Eterm fill_1(BIF_ALIST_1); Eterm is_tuple_1(BIF_ALIST_1); Eterm is_float_1(BIF_ALIST_1); Eterm tuple_size_1(BIF_ALIST_1); Eterm proper_1(BIF_ALIST_1); Eterm is_binary_1(BIF_ALIST_1); Eterm is_map_1(BIF_ALIST_1); Eterm is_pid_1(BIF_ALIST_1); Eterm byte_size_1(BIF_ALIST_1); Eterm is_function_1(BIF_ALIST_1); Eterm is_bitstring_1(BIF_ALIST_1); Eterm bin_to_list_1(BIF_ALIST_1); Eterm hbfirst_1(BIF_ALIST_1);',
         'BifEntry bif_table[] = {',
         '  {am_erlang, am_hd, 1, hd_1, hd_1, 0},', '  {am_erlang, am_is_atom, 1, is_atom_1, is_atom_1, 0},',
         '  {am_erlang, am_is_integer, 1, is_integer_1, is_integer_1, 0},', '  {am_erlang, am_is_list, 1, is_list_1, is_list_1, 0},',
         '  {am_erlang, am_is_boolean, 1, is_boolean_1, is_boolean_1, 0},',
         '  {am_lists, am_member, 2, lists_member_2, lists_member_2, 0},', '  {am_erlang, am_id, 1, id_1, id_1, 0},',
-        '  {am_erlang, am_later, 1, later_1, later_1, 0},', '  {am_erlang, am_bool, 1, bool_1, bool_1, 0},', '  {am_erlang, am_len, 1, len_1, len_1, 0},', '  {am_erlang, am_flaky, 1, flaky_1, flaky_1, 0},', '  {am_erlang, am_alloc, 1, alloc_1, alloc_1, 0},', '  {am_erlang, am_undef, 1, undef_1, undef_1, 0},', '  {am_erlang, am_fill, 1, fill_1, fill_1, 0},',
+        '  {am_erlang, am_later, 1, later_1, later_1, 0},', '  {am_erlang, am_bool, 1, bool_1, bool_1, 0},', '  {am_erlang, am_len, 1, len_1, len_1, 0},', '  {am_erlang, am_flaky, 1, flaky_1, flaky_1, 0},', '  {am_erlang, am_alloc, 1, alloc_1, alloc_1, 0},', '  {am_erlang, am_undef, 1, undef_1, undef_1, 0},', '  {am_erlang, am_fill, 1, fill_1, fill_1, 0},', '  {am_erlang, am_is_tuple, 1, is_tuple_1, is_tuple_1, 0},', '  {am_erlang, am_is_float, 1, is_float_1, is_float_1, 0},',
+        '  {am_erlang, am_tuple_size, 1, tuple_size_1, tuple_size_1, 0},', '  {am_erlang, am_proper, 1, proper_1, proper_1, 0},', '  {am_erlang, am_is_binary, 1, is_binary_1, is_binary_1, 0},', '  {am_erlang, am_is_map, 1, is_map_1, is_map_1, 0},',
+        '  {am_erlang, am_is_pid, 1, is_pid_1, is_pid_1, 0},', '  {am_erlang, am_byte_size, 1, byte_size_1, byte_size_1, 0},', '  {am_erlang, am_is_function, 1, is_function_1, is_function_1, 0},', '  {am_erlang, am_is_bitstring, 1, is_bitstring_1, is_bitstring_1, 0},', '  {am_erlang, am_bin_to_list, 1, bin_to_list_1, bin_to_list_1, 0},', '  {am_erlang, am_hbfirst, 1, hbfirst_1, hbfirst_1, 0},',
         '};',
     }, '\n') .. '\n',
     ['bifs.c'] = table.concat({
@@ -77,8 +111,8 @@ local FILES = {
         'BIF_RETTYPE is_list_1(BIF_ALIST_1) { if (is_list(BIF_ARG_1) || is_nil(BIF_ARG_1)) BIF_RET(am_true); BIF_RET(am_false); }',
         'BIF_RETTYPE is_boolean_1(BIF_ALIST_1) { if (BIF_ARG_1 == am_true || BIF_ARG_1 == am_false) BIF_RET(am_true); BIF_RET(am_false); }',
         'BIF_RETTYPE lists_member_2(BIF_ALIST_2) { if (is_nil(BIF_ARG_2)) BIF_RET(am_false); if (is_not_list(BIF_ARG_2)) BIF_ERROR(BIF_P, BADARG); BIF_RET(am_true); }',
-        'static Eterm check_atom(Process *p, Eterm a) { if (!is_atom(a)) BIF_ERROR(p, BADARG); return a; }',
-        'BIF_RETTYPE id_1(BIF_ALIST_1) { return check_atom(BIF_P, BIF_ARG_1); }',
+        'static Eterm atom_sizeof(Process *p, Eterm a) { if (!is_atom(a)) BIF_ERROR(p, BADARG); return a; }',
+        'BIF_RETTYPE id_1(BIF_ALIST_1) { return atom_sizeof(BIF_P, BIF_ARG_1); }',
         'BIF_RETTYPE later_1(BIF_ALIST_1) { if (is_small(BIF_ARG_1)) BIF_TRAP1(BIF_P, BIF_ARG_1); BIF_RET(BIF_ARG_1); }',
         'BIF_RETTYPE bool_1(BIF_ALIST_1) { switch (BIF_ARG_1) { case am_true: BIF_RET(am_false); case am_false: BIF_RET(am_true); } BIF_ERROR(BIF_P, BADARG); }',
         'static Eterm len_helper(Process *p, Eterm *args) { if (!is_list(args[0]) && !is_nil(args[0])) BIF_ERROR(p, BADARG); return args[1]; }',
@@ -87,6 +121,18 @@ local FILES = {
         'static Eterm flaky2(Process *p, Eterm a, Eterm *x) { return flaky(p, a, x); }',
         'BIF_RETTYPE flaky_1(BIF_ALIST_1) { return flaky2(BIF_P, BIF_ARG_1, (Eterm *) A__I); }',
         'static void filler(Eterm *a, Eterm *x) { a[0] = x[7]; }',
+        'BIF_RETTYPE is_tuple_1(BIF_ALIST_1) { if (is_tuple(BIF_ARG_1)) BIF_RET(am_true); BIF_RET(am_false); }',
+        'BIF_RETTYPE is_float_1(BIF_ALIST_1) { if (is_float(BIF_ARG_1)) BIF_RET(am_true); BIF_RET(am_false); }',
+        'BIF_RETTYPE tuple_size_1(BIF_ALIST_1) { if (is_not_tuple(BIF_ARG_1)) BIF_ERROR(BIF_P, BADARG); BIF_RET(make_small(arityval(*tuple_val(BIF_ARG_1)))); }',
+        'BIF_RETTYPE is_binary_1(BIF_ALIST_1) { if (is_binary(BIF_ARG_1) && binary_bitsize(BIF_ARG_1) == 0) BIF_RET(am_true); BIF_RET(am_false); }',
+        'BIF_RETTYPE is_bitstring_1(BIF_ALIST_1) { if (is_binary(BIF_ARG_1)) BIF_RET(am_true); BIF_RET(am_false); }',
+        'BIF_RETTYPE hbfirst_1(BIF_ALIST_1) { ErlHeapBin *hb; if (!is_binary(BIF_ARG_1)) BIF_ERROR(BIF_P, BADARG); hb = (ErlHeapBin *) boxed_val(BIF_ARG_1); if (hb->data[0] != 0) BIF_ERROR(BIF_P, BADARG); BIF_RET(NIL); }',
+        'BIF_RETTYPE bin_to_list_1(BIF_ALIST_1) { if (!is_binary(BIF_ARG_1) || binary_bitsize(BIF_ARG_1) != 0) BIF_ERROR(BIF_P, BADARG); BIF_RET(NIL); }',
+        'BIF_RETTYPE is_map_1(BIF_ALIST_1) { if (is_map(BIF_ARG_1)) BIF_RET(am_true); BIF_RET(am_false); }',
+        'BIF_RETTYPE is_pid_1(BIF_ALIST_1) { if (is_pid(BIF_ARG_1)) BIF_RET(am_true); BIF_RET(am_false); }',
+        'BIF_RETTYPE is_function_1(BIF_ALIST_1) { if (is_any_fun(BIF_ARG_1)) BIF_RET(am_true); BIF_RET(am_false); }',
+        'BIF_RETTYPE byte_size_1(BIF_ALIST_1) { if (!is_binary(BIF_ARG_1)) BIF_ERROR(BIF_P, BADARG); BIF_RET(make_small(0)); }',
+        'BIF_RETTYPE proper_1(BIF_ALIST_1) { Eterm l = BIF_ARG_1; while (is_list(l)) l = CDR(list_val(l)); if (is_nil(l)) BIF_RET(am_true); BIF_ERROR(BIF_P, BADARG); }',
         'BIF_RETTYPE fill_1(BIF_ALIST_1) { Eterm a[1]; a[0] = BIF_ARG_1; filler(a, (Eterm *) A__I); if (is_atom(a[0])) BIF_RET(am_true); BIF_ERROR(BIF_P, BADARG); }',
         'BIF_RETTYPE undef_1(BIF_ALIST_1) { if (BIF_ARG_1 == am_undefined) BIF_RET(am_true); BIF_ERROR(BIF_P, BADARG); }',
         'BIF_RETTYPE alloc_1(BIF_ALIST_1) { if (!is_atom(BIF_ARG_1)) BIF_ERROR(BIF_P, BADARG); if (((Eterm *) A__I)[3]) erts_exit(1, "oom"); BIF_RET(BIF_ARG_1); }',
@@ -99,7 +145,7 @@ local function setup()
     local dir = vim.fn.tempname()
     vim.fn.mkdir(dir, 'p')
     for name, text in pairs(FILES) do local fd = assert(io.open(dir .. '/' .. name, 'w')); fd:write(text); fd:close() end
-    local rows, ctx = E.measure({ src = dir, bifs = { 'erlang:hd/1', 'erlang:is_atom/1', 'lists:member/2', 'erlang:id/1', 'erlang:later/1', 'erlang:bool/1', 'erlang:len/1', 'erlang:flaky/1', 'erlang:alloc/1', 'erlang:undef/1', 'erlang:fill/1' } })
+    local rows, ctx = E.measure({ src = dir, bifs = { 'erlang:hd/1', 'erlang:is_atom/1', 'lists:member/2', 'erlang:id/1', 'erlang:later/1', 'erlang:bool/1', 'erlang:len/1', 'erlang:flaky/1', 'erlang:alloc/1', 'erlang:undef/1', 'erlang:fill/1', 'erlang:tuple_size/1', 'erlang:proper/1', 'erlang:byte_size/1', 'erlang:bin_to_list/1', 'erlang:hbfirst/1' } })
     cached = { dir = dir, rows = rows, ctx = ctx }
     return cached
 end
@@ -168,6 +214,54 @@ test('erlbif reading: a local array handed to a callee is the CALLEE\'s to write
     if not ready() then skip 'no C parser / gcc' end
     local f = setup().rows['erlang:fill/1'].pos[1]
     eq(true, f.untyped, 'the helper overwrote a[0]: reading the pre-call copy would type it: ' .. vim.inspect(f.by))
+end)
+
+test('erlbif heap: a TUPLE and a FLOAT built with the tree\'s own heap constructors — their header words are MEMORY the checks read through', function ()
+    if not ready() then skip 'no C parser / gcc' end
+    local c = setup()
+    eq({ 'tuple', 'float', 'list', 'list', 'list' }, { c.ctx.typenames.TUPLE, c.ctx.typenames.FLOAT, c.ctx.typenames.LIST1, c.ctx.typenames.IMPROPER, c.ctx.typenames.CONS })
+    local t = c.rows['erlang:tuple_size/1'].pos[1]
+    eq({ 'always', 'never', 'never', 'content' }, { t.by.tuple, t.by.float, t.by.list, t.by.boxed })
+end)
+
+test('erlbif heap: a list WALKED through its cells — [1] ends in [], [1|2] does not; an unknown cons stays content', function ()
+    if not ready() then skip 'no C parser / gcc' end
+    local c = setup()
+    local CI = require 'cartograph.cinterp'
+    local acc = E.acceptance(CI.analyzer(c.ctx), c.ctx, c.ctx.defs.proper_1, 1, 1)
+    eq({ 'always', 'never', 'content', 'always', 'never' }, { acc.LIST1, acc.IMPROPER, acc.CONS, acc.NIL, acc.TUPLE })
+end)
+
+test('erlbif families: a minimal object of EVERY header kind and a word of every immediate kind the tree names — the guards say which are values', function ()
+    if not ready() then skip 'no C parser / gcc' end
+    local c = setup()
+    local tn = c.ctx.typenames
+    eq({ 'binary', 'map', 'pid', '-' }, { tn['HDR:HEAP_BIN'], tn['HDR:MAP'], tn['IMMED1:PID'], tn['HDR:MATCHSTATE'] }, 'a match state is no value: no guard claims it')
+    local b = c.rows['erlang:byte_size/1'].pos[1]
+    eq({ 'always', 'never', 'never', 'never' }, { b.by.binary, b.by.map, b.by.pid, b.by.tuple })
+    ok(b.by['-'] == nil, 'a non-value is no element of a reading')
+end)
+
+test('erlbif families: a header defined through sizeof(struct) — the compiler sizes it; the tree\'s OWN HEADER_FUN makes a fun a function', function ()
+    if not ready() then skip 'no C parser / gcc' end
+    local c = setup()
+    eq({ 'function', '-' }, { c.ctx.typenames['HEAD:HEADER_FUN'], c.ctx.typenames['HDR:FUN'] }, 'an arity-0 fun header is no fun: HEADER_FUN is exact')
+    ok(vim.tbl_contains(c.ctx.typenames.subtypes.boolean or {}, 'atom'), 'boolean is under atom, from the same guard answers: ' .. vim.inspect(c.ctx.typenames.subtypes))
+    eq(4, c.ctx.facts.rows.sizes.value['bifs.c'] and c.ctx.facts.rows.sizes.value['bifs.c']['ErlFunThing'] and c.ctx.facts.rows.sizes.value['bifs.c']['ErlFunThing'] / 8)
+end)
+
+test('erlbif layouts: a FIELD behind an address — ((ErlSubBin *) p)->bitsize — where the compiler lays it; a header-only stand-in keeps every bitsize', function ()
+    if not ready() then skip 'no C parser / gcc' end
+    local c = setup()
+    local fl = c.ctx.layout_of('bifs.c', 'ErlSubBin', 'bitsize')
+    eq({ 24, 'i', 64, true }, { fl and fl.off, fl and fl.to.k, fl and fl.to.w, fl and fl.to.u })
+    eq(nil, c.ctx.layout_of('bifs.c', 'ErlSubBin', 'nosuchfield'), 'a field the compiler refuses is none')
+    eq({ 'binary', 'bitstring' }, { c.ctx.typenames['HEAD:HEADER_SUB_BIN'], c.ctx.typenames['HEAD?:HEADER_SUB_BIN'] }, 'the zero-filled sub-binary is byte-aligned; the header-only one may not be')
+    local b = c.rows['erlang:bin_to_list/1'].pos[1]
+    eq({ 'always', 'content', 'never' }, { b.by.binary, b.by.bitstring, b.by.tuple })
+    local a = c.ctx.layout_of('bifs.c', 'ErlHeapBin', 'data')
+    eq({ true, 16, 'i' }, { a and a.array, a and a.off, a and a.elem and a.elem.k }, 'an ARRAY field: its storage and its element')
+    eq('always', c.rows['erlang:hbfirst/1'].pos[1].by.binary, 'hb->data[0] reads the zero word behind the array field, not a pointer stored there')
 end)
 
 test('erlbif reading: the arity is fixed — lists:member/2 checks its SECOND argument, the first takes anything', function ()

@@ -13,8 +13,8 @@
 -- break, continue and a switch's fall-through are edges. The STACK is a value of the path: L->top / L->base move
 -- (lua_settop's fill loop), and a reallocated stack keeps its indices (the origin is wherever L->stack points).
 -- ⚠ LIMITS, reported and never silent: the per-run step budget (`over`); an FFI conversion is content-dependent; a
--- recursive call is OPTIMISTIC (every element returns, the stack where it was — CART-1243); a char* step counts
--- TValues, not bytes (CART-1244).
+-- recursive call is OPTIMISTIC (every element returns, the stack where it was — CART-1243). A char* view of the frame
+-- counts bytes (the slot's compiler size — CART-1244, fixed).
 local M = {}
 
 local function readfile(p) local fd = io.open(p, 'rb'); if not fd then return nil end local s = fd:read('a'); fd:close(); return s end

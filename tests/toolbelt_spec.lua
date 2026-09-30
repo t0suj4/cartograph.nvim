@@ -28,6 +28,35 @@ test('toolbelt: every entry loads, and every example of every entry holds', func
     eq({}, bad, 'each example is the usage AND the test')
 end)
 
+test('toolbelt THROWAWAY: an entry from a source anywhere — no file, no examples, no params declared, no claim — runs by the same machinery', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local d = tb.throwaway('return { measure = function (store, p) return { x = p.x } end }', 'probe')
+    eq({ 'discovery', 'throwaway:probe', true }, { d.kind, d.name, d.throwaway })
+    local okd, why, res = tb.example(d, { name = 'value', files = { ['a.lua'] = 'return 1\n' }, params = { x = 'anything' },
+        expect = { check = function (v) return v.x == 'anything', vim.inspect(v) end } })
+    ok(okd, tostring(why))
+    eq(nil, res.holds, 'no claim: the value alone')
+    local c = tb.throwaway('return { measure = function () return 3 end, claim = function (v) return v > 2, "three" end }', 'c')
+    local okc, cwhy, cres = tb.example(c, { name = 'claim', files = { ['a.lua'] = 'return 1\n' }, expect = { holds = true } })
+    ok(okc, tostring(cwhy))
+    eq('three', cres.why)
+    -- a WRITE throwaway goes through tactic.run: the edit verb, the journal, a real write under apply
+    local w = tb.throwaway([[
+        local T = require('cartograph.tactic').T
+        return { build = function (p) return T.step('edit', { file = 'm.lua', before = 'M.x = 1', after = 'M.x = ' .. p.v }) end }
+    ]], 'w')
+    local okw, wwhy = tb.example(w, { name = 'write', files = { ['m.lua'] = 'local M = {}\nM.x = 1\nreturn M\n' }, params = { v = '7' },
+        expect = { status = 'done', applied = 1, check = function (root)
+            local s = io.open(root .. '/m.lua'):read('a'); return s:find('M.x = 7', 1, true) ~= nil, s end } })
+    ok(okw, tostring(wwhy))
+    -- declaring params is still honoured; a source that is no entry is refused by name
+    local p = tb.throwaway('return { params = { x = "string" }, measure = function (s, q) return q.x end }', 'p')
+    local okp, pwhy = tb.example(p, { name = 'undeclared', files = { ['a.lua'] = 'return 1\n' }, params = { y = '1' }, expect = {} })
+    ok(not okp and tostring(pwhy):find('takes no param `y`', 1, true), tostring(pwhy))
+    local _, bwhy = tb.throwaway('return { 1 }', 'bad')
+    ok(tostring(bwhy):find('build(params)', 1, true), tostring(bwhy))
+end)
+
 test('toolbelt: a malformed entry is refused BY NAME, and a failing example is reported, not passed', function ()
     if not ready() then skip 'no lua parser or algebra' end
     local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')

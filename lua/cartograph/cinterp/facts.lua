@@ -115,6 +115,9 @@ function M.ctx(got)
     for k, v in pairs(got.units) do ctx[k] = v end
     ctx.noret, ctx.frame, ctx.layout, ctx.reps, ctx.sentinels, ctx.builtins = got.noret, got.frame, got.layout.layout, got.reps, got.sentinels, got.builtins
     ctx.sources = got.sources and got.sources.units
+    ctx.memory = got.reps.memory -- (the heap words the representatives own, if any)
+    ctx.sizes = got.sizes -- (every sizeof operand, the compiler's, if derived)
+    ctx.layout_of = got.layouts and got.layouts.lookup -- (a field of an aggregate, asked of the compiler)
     return ctx
 end
 

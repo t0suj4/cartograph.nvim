@@ -79,6 +79,7 @@ local FILES = {
         'int lj_cf_x_ab(lua_State *L) { int a = x_isnum(L, 1); if (!x_isnum(L, 2)) lj_err_argt(L, 2, LUA_TNUMBER); return a; }',
         'int lj_cf_x_wait(lua_State *L) { while (tvisnil(L->base + 1)) { } x_checknum(L, 1); return 1; }',
         'int lj_cf_x_late(lua_State *L) { if (tvisstr(L->base)) goto ok; return 0; ok: return 7; }',
+        'int lj_cf_x_nargs(lua_State *L) { int n = (int)((char *)L->top - (char *)L->base); if (n != 2*sizeof(TValue)) lj_err_argt(L, 1, LUA_TNUMBER); return 1; }',
         -- (the stack MOVES: lua_settop's fill loop steps L->top; a reallocation rebases every stack pointer)
         'static void x_settop(lua_State *L, int n) { TValue *t = L->base + n; while (L->top < t) setpriV(L->top++, LJ_TNIL); L->top = t; }',
         'int lj_cf_x_pad(lua_State *L) { x_settop(L, 2); if (!tvisnil(L->base + 1)) x_checknum(L, 2); return 1; }',
@@ -288,6 +289,12 @@ test('cpath frame: the SAME tree with its frame RENAMED reads the same at every 
         if not r1.untyped then typed = typed + 1 end
     end
     ok(typed >= 12, 'the comparison is not between two blind readings: ' .. typed .. ' typed')
+end)
+
+test('cpath: a BYTE view of the frame — (char *)L->top - (char *)L->base — counts bytes, the compiler\'s slot size: exactly two arguments pass', function ()
+    if not ready() then skip 'no C parser / gcc' end
+    local _, a = read('lj_cf_x_nargs', { L, n = 1 }, 2)
+    eq({ 'never', 'content' }, { a.ABSENT, a.STR }, 'one argument is 8 bytes, not 16; two are (and three are not)')
 end)
 
 test('cpath compare: nil is optionality\'s, `any` every first-class type; a difference is NAMED (finer / narrower / optional)', function ()

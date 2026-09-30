@@ -4,7 +4,7 @@
 -- `boolean`, other atoms `atom`); ties by name; none (a boxed kind, unknown) is `?`.
 return {
     fact = 'typenames',
-    needs = { 'reps', 'registrations', 'units', 'noret', 'frame', 'layout', 'sentinels', 'builtins' },
+    needs = { 'reps', 'registrations', 'units', 'noret', 'frame', 'layout', 'sentinels', 'builtins', 'sizes' },
     summary = 'each representative\'s type, by running the erlang:is_<t>/1 guard BIFs over it',
     derive = function (_, got)
         local ffi = require 'ffi'
@@ -44,13 +44,27 @@ return {
             end
         end
         if not next(holds) then return nil, 'no erlang:is_<t>/1 guard BIF is defined in the tree' end
-        local out = {}
+        -- (the SUBTYPES, from the same answers: T is under U when every representative T holds for, U holds for too —
+        -- boolean under atom; carried beside the map, not in it: `typenames.subtypes[T] = { U, … }`)
+        local sub = {}
+        for g, hs in pairs(holds) do
+            for u, hu in pairs(holds) do
+                if u ~= g and size[g] > 0 and size[g] < size[u] then
+                    local all = true
+                    for name in pairs(hs) do if not hu[name] then all = false; break end end
+                    if all then sub[g] = sub[g] or {}; table.insert(sub[g], u) end
+                end
+            end
+        end
+        local out = setmetatable({}, { __index = { subtypes = sub } })
         for _, name in ipairs(R.order) do
             local best
             for g, hs in pairs(holds) do
                 if hs[name] and (not best or size[g] < size[best] or (size[g] == size[best] and g < best)) then best = g end
             end
-            out[name] = best or name:lower() -- (no guard answers for it: a boxed kind is named for itself)
+            -- (no guard answers for it: a stand-in of UNKNOWN word is named for itself; a concrete one no guard calls a
+            -- value — a match state, a catch — is not a value: '-')
+            if best then out[name] = best elseif R.tag[name] and R.tag[name].u64 then out[name] = '-' else out[name] = name:lower() end
         end
         return out
     end,

@@ -17,6 +17,7 @@ local M = {}
 -- short circuit, so `false && ?` is false.
 local ffi = require 'ffi'
 local I64 = ffi.typeof('int64_t')
+local SLOT_BYTES -- (set by M.analyzer: the slot type's size, for a byte view's arithmetic)
 local U64 = ffi.typeof('uint64_t')
 
 local function wrap(v, w, u)
@@ -46,6 +47,7 @@ local function truth(a)
     if a.k == 'i' then return a.v ~= 0 end
     if a.k == 'd' then return a.v ~= 0 end
     if a.k == 'slot' or a.k == 'sym' or a.k == 'thread' or a.k == 'obj' or a.k == 'str' then return true end
+    if a.k == 'addr' then return a.v ~= 0 end
     if a.k == 'null' then return false end
     return nil
 end
@@ -57,6 +59,23 @@ local function binop(op, a, b)
     if a == nil or b == nil then return nil end
     if op == '@index' then if a.k == 'slot' and b.k == 'i' then return { k = 'slotv', i = a.i + tonumber(b.v) } end return nil end
     -- pointers: slot indices compare and step; sentinels are distinct memory (equal only to themselves)
+    -- (an ADDRESS — an integer made a pointer — steps by its pointee's size and compares by its value)
+    if a.k == 'addr' or b.k == 'addr' then
+        local function size(t) if not t then return nil end if t.k == 'i' then return t.w / 8 end if t.k == 'd' or t.k == 'p' then return 8 end return nil end
+        if a.k == 'addr' and b.k == 'i' and (op == '+' or op == '-') then
+            local sz = size(a.to)
+            if not sz then return nil end
+            return { k = 'addr', v = a.v + (op == '+' and 1 or -1) * b.v * sz, to = a.to }
+        end
+        local x = a.k == 'addr' and a.v or (a.k == 'null' and I64(0)) or nil
+        local y = b.k == 'addr' and b.v or (b.k == 'null' and I64(0)) or nil
+        if x and y then
+            if op == '==' then return boolv(x == y) elseif op == '!=' then return boolv(x ~= y)
+            elseif op == '<' then return boolv(x < y) elseif op == '<=' then return boolv(x <= y) elseif op == '>' then return boolv(x > y) elseif op == '>=' then return boolv(x >= y) end
+            if op == '-' and a.k == 'addr' and b.k == 'addr' then local sz = size(a.to); if sz then return int((x - y) / sz, 64, false) end end
+        end
+        return nil
+    end
     local pa, pb = a.k == 'slot' or a.k == 'sym' or a.k == 'null' or a.k == 'org', b.k == 'slot' or b.k == 'sym' or b.k == 'null' or b.k == 'org'
     if pa or pb then
         -- (two images of the stack's origin: no distance apart, so a pointer rebased by their difference keeps its index)
@@ -64,10 +83,23 @@ local function binop(op, a, b)
             if op == '-' then return int(0, 64, false) elseif op == '==' then return boolv(true) elseif op == '!=' then return boolv(false) end
             return nil
         end
-        if a.k == 'slot' and b.k == 'i' and (op == '+' or op == '-') then return { k = 'slot', i = a.i + (op == '+' and 1 or -1) * asnum(b) } end
+        -- (a BYTE view of a slot — `(char *)L->top` — steps and subtracts in BYTES: a slot is SLOT_BYTES of them,
+        -- the compiler's own layout size; a byte offset that is no whole slot leaves the frame's indices, unknown)
+        if a.k == 'slot' and b.k == 'i' and (op == '+' or op == '-') then
+            if a.view == 'byte' then
+                local n = asnum(b)
+                if not SLOT_BYTES or n % SLOT_BYTES ~= 0 then return nil end
+                return { k = 'slot', i = a.i + (op == '+' and 1 or -1) * (n / SLOT_BYTES), view = 'byte' }
+            end
+            return { k = 'slot', i = a.i + (op == '+' and 1 or -1) * asnum(b) }
+        end
         if a.k == 'slot' and b.k == 'slot' then
             local x, y = a.i, b.i
-            if op == '-' then return int(x - y, 64, false) end
+            if op == '-' then
+                if (a.view == 'byte') ~= (b.view == 'byte') then return nil end
+                if a.view == 'byte' then if not SLOT_BYTES then return nil end return int((x - y) * SLOT_BYTES, 64, false) end
+                return int(x - y, 64, false)
+            end
             if op == '<' then return boolv(x < y) elseif op == '<=' then return boolv(x <= y) elseif op == '>' then return boolv(x > y)
             elseif op == '>=' then return boolv(x >= y) elseif op == '==' then return boolv(x == y) elseif op == '!=' then return boolv(x ~= y) end
         end
@@ -127,7 +159,15 @@ M.INT = INT -- (C's own integer types under LP64: the language, not a library)
 function M.ctype(text, typedefs, depth)
     depth = depth or 0
     text = vim.trim((text or ''):gsub('%f[%w_]const%f[^%w_]', ''):gsub('%f[%w_]volatile%f[^%w_]', ''):gsub('%s+', ' '))
-    if text:find('%*') then return { k = 'p' } end
+    if text:find('%*') then
+        -- (what it points to: one * less — gsub's count must not become the typedefs argument)
+        local inner = vim.trim((text:gsub('%*%s*$', '')))
+        local to = depth < 12 and M.ctype(inner, typedefs, depth + 1) or nil
+        -- (a pointee no scalar type resolves — `ErlSubBin`, `struct erl_sub_bin` — is an AGGREGATE named by its text: its
+        -- fields are the compiler's, asked through ctx.layout_of)
+        if not to and inner ~= '' and inner ~= 'void' and not inner:find('%*') then to = { k = 's', text = inner } end
+        return { k = 'p', to = to }
+    end
     if text == 'double' or text == 'float' then return { k = 'd' } end
     local i = INT[text]
     if i then return { k = 'i', w = i[1], u = i[2] } end
@@ -149,9 +189,10 @@ local function veq(a, b)
     if a.k ~= b.k then return false end
     if a.k == 'i' then return a.v == b.v and a.w == b.w and a.u == b.u end
     if a.k == 'd' then return a.v == b.v or (a.v ~= a.v and b.v ~= b.v) end
-    if a.k == 'slot' then return a.i == b.i end
+    if a.k == 'slot' then return a.i == b.i and a.view == b.view end
     if a.k == 'sym' then return a.s == b.s end
     if a.k == 'obj' then return a.id == b.id end
+    if a.k == 'addr' then return a.v == b.v end
     if a.k == 'arr' then
         if a.id ~= b.id or a.n ~= b.n then return false end
         for i = 1, a.n do if not veq(a.vals[i], b.vals[i]) then return false end end
@@ -192,9 +233,10 @@ end
 local function key_of(v)
     if v == nil then return '?' end
     if v.k == 'i' then return 'i' .. tostring(v.v) .. ':' .. v.w .. (v.u and 'u' or 's') end
-    if v.k == 'slot' then return 's' .. v.i end
+    if v.k == 'slot' then return 's' .. v.i .. (v.view == 'byte' and 'b' or '') end
     if v.k == 'sym' then return 'y' .. v.s end
     if v.k == 'obj' then return 'o' .. v.id end
+    if v.k == 'addr' then return 'p' .. tostring(v.v) end
     if v.k == 'arr' then
         local l = {}
         for i = 1, v.n do l[i] = key_of(v.vals[i]) end
@@ -290,6 +332,7 @@ local function convert(ty, a)
     if not ty or a == nil then return nil end
     if ty.k == 'i' then
         if a.k == 'i' then return int(a.v, ty.w, ty.u) end
+        if a.k == 'addr' then return int(a.v, ty.w, ty.u) end
         if a.k == 'd' then if a.v ~= a.v or a.v == math.huge or a.v == -math.huge then return nil end return int(I64(a.v >= 0 and math.floor(a.v) or -math.floor(-a.v)), ty.w, ty.u) end
         return nil
     elseif ty.k == 'd' then
@@ -297,8 +340,15 @@ local function convert(ty, a)
         if a.k == 'd' then return a end
         return nil
     end
-    if a.k == 'slot' or a.k == 'sym' or a.k == 'null' or a.k == 'str' or a.k == 'org' then return a end
+    -- (a slot seen through a char / void pointer is its BYTE view; through any other pointer its slot view)
+    if a.k == 'slot' then
+        local to = ty.to
+        if ty.k == 'p' and (to == nil or (to.k == 'i' and to.w == 8)) then return { k = 'slot', i = a.i, view = 'byte' } end
+        return { k = 'slot', i = a.i }
+    end
+    if a.k == 'sym' or a.k == 'null' or a.k == 'str' or a.k == 'org' then return a end
     if a.k == 'i' and a.v == 0 then return { k = 'null' } end
+    if ty.k == 'p' and (a.k == 'i' or a.k == 'addr') then return { k = 'addr', v = I64(a.v), to = ty.to } end
     return nil
 end
 
@@ -325,9 +375,27 @@ end
 
 --- the analyzer over a tree (see M.context)
 function M.analyzer(ctx)
+    SLOT_BYTES = ctx.layout and ctx.layout.size or nil -- (a slot's size in bytes, for byte views: the compiler's)
     local A = { memo = {}, active = {}, steps = 0, budget = ctx.budget or 400000,
     }
     local layout, reps = ctx.layout, ctx.reps
+    local memory = ctx.memory or {}
+    local mbits = ffi.new('uint64_t[1]')
+    local mdbl = ffi.cast('double *', mbits)
+    local function readmem(p)
+        if not (p and p.k == 'addr' and p.to) then return nil end
+        local base = bit.band(p.v, bit.bnot(I64(7)))
+        local h = memory[tostring(base)]
+        if not h then return nil end
+        local u = U64(tonumber(h:sub(1, 8), 16)) * U64(2 ^ 32) + U64(tonumber(h:sub(9), 16))
+        local t = p.to
+        if t.k == 'd' then if p.v ~= base then return nil end mbits[0] = u; return { k = 'd', v = mdbl[0] } end
+        if t.k == 'p' then if p.v ~= base then return nil end return { k = 'addr', v = I64(u), to = nil } end
+        if t.k ~= 'i' then return nil end
+        local off = tonumber(p.v - base)
+        if off + t.w / 8 > 8 then return nil end
+        return int(I64(bit.rshift(u, off * 8)), t.w, t.u)
+    end
     local fr = ctx.frame or {}
     local fbits = ffi.new('uint64_t[1]')
     local fdbl = ffi.cast('double *', fbits)
@@ -468,7 +536,7 @@ function M.analyzer(ctx)
         local sum = A.memo[key]
         if not sum then
             if A.active[key] then
-                -- (recursion: OPTIMISTIC — every element returns, and leaves the stack where it found it)
+                -- (recursion: OPTIMISTIC — every element returns, and leaves the stack where it found it — CART-1243)
                 sum = { ret = setof(fset), rej = {}, vals = {}, slots = st.slots, top = {}, base = {} }
                 for t in pairs(fset) do sum.top[t] = at(ltop, t) or false; sum.base[t] = at(lbase, t) or false end
             else
@@ -601,6 +669,18 @@ function M.analyzer(ctx)
                 if op == '-' then return int(-px.v, px.w, px.u) elseif op == '~' then return int(bit.bnot(px.v), px.w, px.u) elseif op == '+' then return px end
                 return nil
             end, a, st)
+        elseif t == 'sizeof_expression' then
+            -- (a SIZE is the compiler's: the sizes fact holds every operand of the unit; a plain integer / pointer type
+            -- is its own width)
+            local c = n:field('type')[1] or n:field('value')[1]
+            local o = c and vim.trim(tx(c, src):gsub('%s+', ' ')) or ''
+            while o:match('^%b()$') do o = vim.trim(o:sub(2, -2)) end
+            local s = ctx.sizes and (ctx.sizes[st.unit] or {})[o]
+            if s then return int(s, 64, true) end
+            local ty = M.ctype(o, ctx.typedefs)
+            if ty and ty.k == 'i' then return int(ty.w / 8, 64, true) end
+            if ty and ty.k == 'p' then return int(8, 64, true) end
+            return nil
         elseif t == 'cast_expression' then
             local ty = M.ctype(tx(n:field('type')[1], src), ctx.typedefs)
             local a = rv(eval(n:field('value')[1], st, cx), st)
@@ -628,6 +708,24 @@ function M.analyzer(ctx)
             local base = eval(n:field('argument')[1], st, cx)
             local op = tx(n:field('operator')[1], src)
             local f = tx(n:field('field')[1], src)
+            -- (a field of an AGGREGATE behind an ADDRESS — `((ErlSubBin *) p)->bitsize`: where the compiler lays it; a
+            -- nested aggregate is a handle for the next `.f`)
+            local anyaddr = base and base.k == 'addr'
+            if base and base.k == 'vec' then for _, x in pairs(base.by) do if x and x.k == 'addr' then anyaddr = true end end end
+            if ctx.layout_of and anyaddr then
+                return vmap(st.fset, function (t)
+                    local b = at(base, t)
+                    if not (b and b.k == 'addr') then return M._field(b, op, f, st, layout, read_field) end
+                    if not (b.to and b.to.k == 's') then return nil end
+                    local path = (b.to.prefix or '') .. f
+                    local fl = ctx.layout_of(st.unit, b.to.text, path)
+                    if not fl then return nil end
+                    if fl.array then return { k = 'addr', v = b.v + fl.off, to = fl.elem } end -- (an array field: its storage)
+                    local p = { k = 'addr', v = b.v + fl.off, to = fl.to }
+                    if fl.to and fl.to.k == 's' then p.to = { k = 's', text = b.to.text, prefix = path .. '.' }; return p end
+                    return readmem(p)
+                end)
+            end
             -- THE FRAME: its top / base are VALUES of the path (they move: lua_settop's `L->top++`, a finalizer's
             -- restore); its ORIGIN is one value however a reallocation moves it (slots are indices into it)
             if base and base.k == 'thread' and op == '->' then
@@ -656,12 +754,23 @@ function M.analyzer(ctx)
                 return { k = 'sym', s = text, tag = tail and ctx.sentinels[tail] or nil }
             end
             local v = eval(arg, st, cx)
-            return lift1(function (x) if x and x.k == 'slot' then return { k = 'slotv', i = x.i } end return nil end, v, st)
+            return lift1(function (x)
+                if x and x.k == 'slot' then return { k = 'slotv', i = x.i } end
+                if x and x.k == 'addr' then if x.to and x.to.k == 's' then return x end return readmem(x) end
+                return nil
+            end, v, st)
         elseif t == 'subscript_expression' then
             local b = eval(n:field('argument')[1], st, cx)
             local i = rv(eval(n:field('index')[1], st, cx), st)
             -- (a LOCAL ARRAY: its elements are values of the path — `args[0] = BIF_ARG_1` — read by index)
             if b and b.k == 'arr' then return i and i.k == 'i' and b.vals[asnum(i) + 1] or nil end
+            if (b and (b.k == 'addr' or b.k == 'vec')) then
+                return vmap(st.fset, function (t)
+                    local x, j = at(b, t), at(i, t)
+                    if x and x.k == 'addr' and j and j.k == 'i' then return readmem(binop('+', x, j)) end
+                    return binop('@index', x, j)
+                end)
+            end
             return lift2('@index', b, i, st)
         elseif t == 'call_expression' then
             local fnode = n:field('function')[1]
@@ -1037,7 +1146,11 @@ function M.units(sources)
     local fq = vim.treesitter.query.parse('c', '(function_definition) @f')
     local tq = vim.treesitter.query.parse('c', '(type_definition type: (_) @t declarator: (_) @n)')
     local eq = vim.treesitter.query.parse('c', '(enumerator_list) @e')
-    for _, s in ipairs(sources) do
+    for _, s0 in ipairs(sources) do
+        -- (every `sizeof(…)` PARENTHESIZED before parsing: a parser that does not know `Eterm` is a type reads
+        -- `sizeof(Eterm)-2` as `sizeof((Eterm)-2)`, a cast of -2 — restructuring the enclosing expression; after
+        -- `(sizeof(Eterm))` a `-2` can only be the binary minus it is)
+        local s = { name = s0.name, text = (s0.text:gsub('%f[%w_]sizeof%s*(%b())', '(sizeof%1)')) }
         local root = vim.treesitter.get_string_parser(s.text, 'c'):parse()[1]:root()
         local ud = {}
         ctx.unitdefs[s.name] = ud

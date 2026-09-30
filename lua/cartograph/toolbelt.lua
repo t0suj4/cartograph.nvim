@@ -360,18 +360,46 @@ end
 --- run an entry against the current graph.
 --- write:     -> tactic.run's result (opts: apply, on_stop, correct), with the entry's oracle as the kernel
 --- discovery: -> { value, holds, why }
+--- a THROWAWAY tactic: an entry from a source ANYWHERE — a scratch file, stdin — run by the SAME machinery (a write's
+--- term through tactic.run: the journal, `apply`, the decisions; a discovery's measure and claim), with none of an
+--- entry's commitments: no file in tactics/, no name (it is `throwaway:<label>`), no examples, no declared params
+--- (every param passes as given), no claim (a discovery then returns its value alone). Kept, it becomes an entry by the
+--- usual road — a file in .cartograph/tactics WITH its examples, then promote-tactic; the commitment is at promotion.
+--- src (Lua source returning the entry table) -> entry | nil, why, class
+function M.throwaway(src, label)
+    local chunk, err = load(src, '=' .. (label or 'throwaway'))
+    if not chunk then return nil, 'the throwaway does not load: ' .. tostring(err), 'unbuilt' end
+    local okl, e = pcall(chunk)
+    if not okl then return nil, 'the throwaway raised: ' .. tostring(e), 'unbuilt' end
+    if type(e) ~= 'table' then return nil, 'a throwaway returns an entry table ({ build = … } or { measure = … })', 'unbuilt' end
+    e.kind = e.kind or (type(e.build) == 'function' and 'write') or (type(e.measure) == 'function' and 'discovery') or nil
+    if not KINDS[e.kind] then return nil, 'a throwaway needs build(params) (a write) or measure(store, params) (a discovery)', 'unbuilt' end
+    if e.kind == 'write' and type(e.build) ~= 'function' then return nil, 'a write throwaway needs build(params)', 'unbuilt' end
+    if e.kind == 'discovery' and type(e.measure) ~= 'function' then return nil, 'a discovery throwaway needs measure(store, params)', 'unbuilt' end
+    e.name = e.name or ('throwaway:' .. (label or '?'))
+    e.examples = e.examples or {}
+    e.throwaway, e.scope = true, 'throwaway'
+    return e
+end
+
+--- run an entry by name — or opts.entry, an entry already in hand (a throwaway) -> result | nil, why, class
 function M.run(store, name, params, opts)
     opts = opts or {}
-    local e, why, why_class = M.load(name, opts.dir, store.data and store.data.root)
+    local e, why, why_class = opts.entry, nil, nil
+    if not e then e, why, why_class = M.load(name, opts.dir, store.data and store.data.root) end
     if not e then return nil, why, why_class or 'ill-posed' end
+    name = e.name
     local cls
-    params, why, cls = M.coerce(store, e, params)
+    -- (a throwaway that declares no params takes them as given)
+    if e.throwaway and not e.params then params = params or {}
+    else params, why, cls = M.coerce(store, e, params) end
     if not params then return nil, why, cls or 'ill-posed' end
     if e.kind == 'discovery' then
         local okm, value = pcall(e.measure, store, params or {})
         if not okm then return nil, ('%s: the measurement raised: %s'):format(name, tostring(value)), 'unbuilt' end
+        if not e.claim then return { value = value, throwaway = e.throwaway or nil } end -- (a throwaway may claim nothing)
         local holds, cwhy = e.claim(value)
-        return { value = value, holds = holds and true or false, why = cwhy }
+        return { value = value, holds = holds and true or false, why = cwhy, throwaway = e.throwaway or nil }
     end
     local term = e.build(params or {})
     local ropts = { apply = opts.apply, on_stop = opts.on_stop, correct = opts.correct, verbs = opts.verbs,
@@ -401,7 +429,7 @@ function M.example(e, ex)
     end
     return store.scoped(require('cartograph.providers.treesitter').extract(root), function ()
         local params = type(ex.params) == 'function' and ex.params(store) or (ex.params or {})
-        local res, why = M.run(store, e.name, params, { apply = e.kind == 'write', on_stop = ex.on_stop,
+        local res, why = M.run(store, e.name, params, { apply = e.kind == 'write', on_stop = ex.on_stop, entry = e.throwaway and e or nil,
             dir = e.path and vim.fn.fnamemodify(e.path, ':h') })
         if not res then return false, why end
         local want = ex.expect or {}

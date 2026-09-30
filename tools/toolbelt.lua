@@ -47,7 +47,7 @@ elseif cmd == 'examples' then
     os.exit(bad == 0 and 0 or 1)
 elseif cmd == 'run' then
     local name, dir = arg[2], arg[3]
-    if not (name and dir) then io.stderr:write('usage: run <name> <dir> [key=value ...]\n'); os.exit(2) end
+    if not (name and dir) then io.stderr:write('usage: run <name> | @<file> | @- <dir> [key=value ...]   (@: a THROWAWAY — any source, nothing registered)\n'); os.exit(2) end
     local params, apply, on_stop, approvals = {}, false, nil, nil
     for i = 4, #arg do
         local k, v = arg[i]:match('^([%w_]+)=(.*)$')
@@ -62,9 +62,21 @@ elseif cmd == 'run' then
     -- `stub`: there is no graph behind this world, so a write has nothing to refresh (txn.execute skips it)
     if dir == '-' then store.ingest({ root = vim.fn.getcwd(), nodes = {}, edges = {}, calls = {}, stub = true })
     else store.ingest(require('cartograph.providers.treesitter').extract((vim.fn.fnamemodify(dir, ':p'):gsub('/$', '')))) end
-    local res, why = tb.run(store, name, params, { apply = apply, on_stop = on_stop, approvals = approvals })
+    -- `@<file>` / `@-` (stdin): a THROWAWAY — an entry from a source anywhere, run by the same machinery, committed to
+    -- nothing (toolbelt.throwaway)
+    local entry
+    if name:sub(1, 1) == '@' then
+        local path = name:sub(2)
+        local src
+        if path == '-' then src = io.read('a') else local fd = io.open(path); src = fd and fd:read('a'); if fd then fd:close() end end
+        if not src then io.write('refused: no throwaway source at ', path, '\n'); os.exit(1) end
+        local e, ewhy = tb.throwaway(src, path == '-' and 'stdin' or vim.fn.fnamemodify(path, ':t:r'))
+        if not e then io.write('refused: ', tostring(ewhy), '\n'); os.exit(1) end
+        entry, name = e, e.name
+    end
+    local res, why = tb.run(store, name, params, { apply = apply, on_stop = on_stop, approvals = approvals, entry = entry })
     if not res then io.write('refused: ', tostring(why), '\n'); os.exit(1) end
-    io.write(vim.inspect(res.value and { holds = res.holds, why = res.why, value = res.value }
+    io.write(vim.inspect(res.value ~= nil and { holds = res.holds, why = res.why, value = res.value, throwaway = res.throwaway }
         or { status = res.status, class = res.class, why = res.why, applied = res.applied, residue = res.residue,
             -- a stop's options carry each question's `key`: tools/decisions.lua remember key=<key> kind=<kind> answers it for good
             options = res.options }), '\n')

@@ -59,7 +59,8 @@ function M.acceptance(A, ctx, d, n, k)
         return A.run(d, args, slots, k, set, false), set
     end
     local base = {}
-    for _, name in ipairs(R.order) do if not name:match('^ATOM:') then base[#base + 1] = name end end
+    -- (every representative a guard calls a value — '-' is none — the atoms found by a first run)
+    for _, name in ipairs(R.order) do if not name:match('^ATOM:') and ctx.typenames[name] ~= '-' then base[#base + 1] = name end end
     local sum = run(base)
     -- the atoms the paths compared against (a comparison's constant IS an atom's word)
     local want = {}

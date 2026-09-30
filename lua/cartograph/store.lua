@@ -2358,11 +2358,12 @@ function M.scoped(data, fn)
     local rec = M.capture()
     local okr, res = pcall(function ()
         M.ingest(data)
-        return { fn() }
+        -- (packed WITH its count: a nil among the returns — ok, nil, result — must not drop the ones after it)
+        return (function (...) return { n = select('#', ...), ... } end)(fn()) -- (LuaJIT has no table.pack)
     end)
     M.restore(rec)
     if not okr then error(res, 0) end
-    return unpack(res)
+    return unpack(res, 1, res.n)
 end
 
 return M
