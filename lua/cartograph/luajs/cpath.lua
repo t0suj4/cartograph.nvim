@@ -64,6 +64,7 @@ end
 
 -- ── THE INTERPRETER is cartograph.cinterp (general C); this module is its LuaJIT ADAPTER ────────────────────────────
 local CI = require 'cartograph.cinterp'
+local AD = require 'cartograph.cinterp.adapter'
 local ffi = require 'ffi'
 local int, asnum, literal, elem, at, tx, kids = CI._int, CI.asnum, CI._literal, CI.elem, CI.at, CI.tx, CI.kids
 M._int, M._truth, M._binop, M.INT, M.ctype, M._literal, M._field, M.analyzer = CI._int, CI._truth, CI._binop, CI.INT, CI.ctype, CI._literal, CI._field, CI.analyzer
@@ -148,59 +149,19 @@ function M.frame(ctx)
     return fr
 end
 
---- a function's ACCEPTANCE at one slot: every first-class tag (the number at several values) in ONE run per argument
---- count, ABSENT in one more -> { [tag] = 'always' | 'content' | 'never' }, over, the return values seen
+--- a function's ACCEPTANCE at one slot — the TEMPLATE's: every first-class tag (the number at several values) at every
+--- argument count in ONE run, ABSENT at every count below -> { [tag] = 'always' | 'content' | 'never' }, over, the
+--- return values seen
 function M.acceptance(A, ctx, d, args, pos, maxcount)
-    local tags = {}
-    for _, t in ipairs(ctx.reps.order) do
-        if ctx.firstclass[t] then
-            if t == ctx.numtag then for _, v in ipairs(ctx.numvars) do tags[v] = true end else tags[t] = true end
-        end
-    end
-    -- ONE run: every (tag, count) with the slot present, and ABSENT at every count below it
-    local set = {}
-    for count = pos, maxcount do for t in pairs(tags) do set[t .. '@' .. count] = true end end
-    for count = 0, pos - 1 do set['ABSENT@' .. count] = true end
-    local slots = {}
-    for i = 1, maxcount do if i ~= pos then slots[i] = '?' end end
-    A.steps = 0 -- (the budget is PER RUN)
-    local sum = A.run(d, args, slots, pos, set, false)
-    local ret, rej, rets = {}, {}, {}
-    for e in pairs(set) do
-        local t = elem(e)
-        if sum.ret[e] then ret[t] = true end
-        if sum.rej[e] or not sum.ret[e] then rej[t] = true end
-    end
-    for _, r in ipairs(sum.returns or {}) do for e in pairs(r.fset) do rets[#rets + 1] = at(r.v, e) or false end end
-    local over = sum.over
-    -- (the number's VALUES join back into one tag: some accepted and some rejected is content-dependent)
-    local out = {}
-    for t in pairs(tags) do
-        local base = ctx.numof[t] or t
-        local r0 = out[base] or { ret = false, rej = false }
-        r0.ret, r0.rej = r0.ret or (ret[t] or false), r0.rej or (rej[t] or false)
-        out[base] = r0
-    end
-    out.ABSENT = { ret = ret.ABSENT or false, rej = rej.ABSENT or false }
-    for t, b in pairs(out) do out[t] = b.ret and (b.rej and 'content' or 'always') or 'never' end
-    return out, over, rets
+    local out, over, info = AD.acceptance(A, ctx, d, pos, maxcount, args)
+    return out, over, info.rets
 end
 
---- THE CONTEXT: every fact DERIVED from the tree (cartograph.cinterp.facts — each by the evidence it finds, none by
---- a runtime's name) -> the interpreter's ctx plus this adapter's facts (numbers, first-class tags, type names, the
---- result rule) and ctx.facts, the whole table. A fact that does not derive raises, naming its gap.
+--- THE CONTEXT: every fact DERIVED from the tree — the TEMPLATE's (cartograph.cinterp.adapter) -> the interpreter's
+--- ctx plus this adapter's facts (numbers, first-class tags, type names, the result rule) and ctx.facts, the whole table.
+--- A fact that does not derive raises, naming its gap.
 function M.context(src)
-    local FT = require 'cartograph.cinterp.facts'
-    local T = FT.derive({ src = src })
-    local got, miss = T.got, {}
-    for _, f in ipairs({ 'units', 'noret', 'frame', 'layout', 'reps', 'sentinels', 'builtins', 'numbers', 'firstclass', 'typenames', 'result' }) do
-        if got[f] == nil then miss[#miss + 1] = f .. ' (' .. tostring(T.rows[f] and T.rows[f].gap) .. ')' end
-    end
-    if #miss > 0 then error('cpath: facts not derived: ' .. table.concat(miss, '; ')) end
-    local ctx = FT.ctx(got)
-    ctx.numtag, ctx.numvars, ctx.numof = got.numbers.numtag, got.numbers.numvars, got.numbers.numof
-    ctx.firstclass, ctx.typenames, ctx.result, ctx.facts = got.firstclass, got.typenames, got.result, T
-    return ctx
+    return AD.context(src, { 'units', 'noret', 'frame', 'layout', 'reps', 'sentinels', 'builtins', 'numbers', 'firstclass', 'typenames', 'result' }, 'cpath')
 end
 
 -- ── THE MEASUREMENT ────────────────────────────────────────────────────────────────────────────────────────────────

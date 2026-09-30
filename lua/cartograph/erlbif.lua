@@ -9,114 +9,24 @@
 -- they do not.
 local ffi = require 'ffi'
 local CI = require 'cartograph.cinterp'
-local FT = require 'cartograph.cinterp.facts'
+local AD = require 'cartograph.cinterp.adapter'
 local M = {}
 
-local U64 = ffi.typeof('uint64_t')
-local function hexword(h)
-    if not h then return nil end
-    h = ('%016s'):format(h):gsub(' ', '0')
-    return U64(tonumber(h:sub(1, 8), 16)) * U64(2 ^ 32) + U64(tonumber(h:sub(9), 16))
-end
-local function same(v, h)
-    if not (v and v.k == 'i') or not h then return nil end
-    return ffi.cast('uint64_t', v.v) == hexword(h)
-end
-
---- THE CONTEXT: the facts table of the tree (a gap raises, naming it) -> the interpreter's ctx + result / registrations
---- / typenames / facts
+--- THE CONTEXT: the facts table of the tree (a gap raises, naming it) — the TEMPLATE's (cartograph.cinterp.adapter),
+--- over an argument array and a status convention -> the interpreter's ctx + result / registrations / typenames / facts
 function M.context(src)
-    local T = FT.derive({ src = src })
-    local got, miss = T.got, {}
-    for _, f in ipairs({ 'units', 'noret', 'frame', 'layout', 'reps', 'sentinels', 'builtins', 'result', 'registrations', 'typenames' }) do
-        if got[f] == nil then miss[#miss + 1] = f .. ' (' .. tostring(T.rows[f] and T.rows[f].gap) .. ')' end
-    end
-    if #miss > 0 then error('erlbif: facts not derived: ' .. table.concat(miss, '; ')) end
-    if got.frame.kind ~= 'array' then error('erlbif: the frame is not an argument array') end
-    if got.result.kind ~= 'status' then error('erlbif: the result is not a status convention') end
-    local ctx = FT.ctx(got)
-    ctx.result, ctx.registrations, ctx.typenames, ctx.facts = got.result, got.registrations, got.typenames, T
+    local ctx = AD.context(src, { 'units', 'noret', 'frame', 'layout', 'reps', 'sentinels', 'builtins', 'result', 'registrations', 'typenames' }, 'erlbif')
+    if AD.frame_kind(ctx.frame) ~= 'array' then error('erlbif: the frame is not an argument array') end
+    if ctx.result.kind ~= 'status' then error('erlbif: the result is not a status convention') end
     return ctx
 end
 
---- a BIF's ACCEPTANCE at argument k of arity n: every representative in ONE run — first without atoms, then with the
---- atoms its paths compared against — -> { [element] = outcome }, over, the atoms found. An element's outcome is
---- 'always' (every path accepts), 'never' (every path rejects), 'content' (both, or a status the path cannot tell),
---- or the name of another outcome its every path takes ('trap').
+--- a BIF's ACCEPTANCE at argument k of arity n — the TEMPLATE's: every value representative in one run, the atoms its
+--- paths compared against in a second, each return's outcome by the status convention -> { [element] = outcome },
+--- over, the atoms found. An element's outcome is 'always' / 'never' / 'content' / another outcome ('trap').
 function M.acceptance(A, ctx, d, n, k)
-    local R, res = ctx.reps, ctx.result
-    local function run(elements)
-        local set = {}
-        for _, e in ipairs(elements) do set[e .. '@' .. n] = true end
-        local slots = {}
-        for i = 1, n do if i ~= k then slots[i] = '?' end end
-        local args = { n = #d.params }
-        for i, p in ipairs(d.params) do
-            if p.name == ctx.frame.array then args[i] = { k = 'slot', i = 1 }
-            elseif p.type and p.type.k == 'p' then args[i] = CI.object(p.name, { [res.field] = CI.UNSET }) end
-        end
-        A.steps = 0
-        return A.run(d, args, slots, k, set, false), set
-    end
-    local base = {}
-    -- (every representative a guard calls a value — '-' is none — the atoms found by a first run)
-    for _, name in ipairs(R.order) do if not name:match('^ATOM:') and ctx.typenames[name] ~= '-' then base[#base + 1] = name end end
-    local sum = run(base)
-    -- the atoms the paths compared against (a comparison's constant IS an atom's word)
-    local want = {}
-    for _, c in pairs(sum.compared or {}) do want[CI.key_of(c)] = true end
-    local found = {}
-    for _, name in ipairs(R.order) do
-        if name:match('^ATOM:') then
-            local h = R.tag[name].u64
-            local w = CI._int(ffi.cast('int64_t', hexword(h)), 64, true)
-            if want[CI.key_of(w)] then found[#found + 1] = name end
-        end
-    end
-    local set
-    if #found > 0 then
-        local all = vim.list_extend(vim.list_slice(base), found)
-        sum, set = run(all)
-    else
-        local s = {}
-        for _, e in ipairs(base) do s[e .. '@' .. n] = true end
-        set = s
-    end
-    -- the OUTCOME of each return: the status its path left (a field of an object the BIF was handed)
-    local seen = {}
-    for e in pairs(set) do seen[e] = {} end
-    for _, r in ipairs(sum.returns or {}) do
-        -- (every object the BIF was handed carries the status field: the one a path WROTE decides — all still UNSET is
-        -- an accept, any unknown is unknown)
-        local skeys = {}
-        for key in pairs(r.env or {}) do if key:sub(1, 5) == '\0obj:' and key:sub(-(#res.field + 1)) == '.' .. res.field then skeys[#skeys + 1] = key end end
-        for e in pairs(r.fset) do
-            local o = #skeys == 0 and 'unknown' or 'accept'
-            for _, key in ipairs(skeys) do
-                local s = CI.at(r.env[key], e)
-                if s and s.k == 'unset' then -- (not written on this path)
-                elseif not (s and s.k == 'i') then o = 'unknown'
-                elseif o ~= 'unknown' then
-                    o = 'reject'
-                    for name, h in pairs(res.codes) do if same(s, h) then o = name:lower() end end
-                end
-            end
-            if seen[e] then seen[e][o] = true end
-        end
-    end
-    -- (a NO-RETURN call is a VM ABORT here — erts_exit, an allocation failure — not a type error: the status convention
-    -- decides rejection; an abort is an outcome only for an element with no other)
-    for e in pairs(sum.rej or {}) do if seen[e] then seen[e].abort = true end end
-    local out = {}
-    for e, os in pairs(seen) do
-        local t = CI.elem(e)
-        if os.abort and next(os, nil) ~= nil and vim.tbl_count(os) > 1 then os.abort = nil end
-        local l = vim.tbl_keys(os)
-        if #l == 0 then out[t] = 'never'
-        elseif #l == 1 then out[t] = ({ accept = 'always', reject = 'never', unknown = 'content' })[l[1]] or l[1]
-        else out[t] = 'content' end
-    end
-    return out, sum.over, found
+    local out, over, info = AD.acceptance(A, ctx, d, k, n)
+    return out, over, info.found
 end
 
 --- a position's reading by TYPE (ctx.typenames: the most specific guard that holds): a type is 'always' / 'never' /

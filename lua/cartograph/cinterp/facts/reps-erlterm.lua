@@ -70,7 +70,7 @@ return {
         L[#L + 1] = '  return 0; }'
         local out, why = F.run_c(table.concat(L, '\n') .. '\n', unit)
         if not out then return nil, why end
-        local R = { order = {}, tag = {}, kind = 'erlterm', atoms = {}, memory = {} }
+        local R = { order = {}, tag = {}, kind = 'erlterm', atoms = {}, memory = {}, ondemand = {} }
         local ffi = require 'ffi'
         local function i64(h)
             h = ('%016s'):format(h):gsub(' ', '0')
@@ -83,8 +83,9 @@ return {
             R.order[#R.order + 1] = f[1]
             R.tag[f[1]] = { u64 = hex }
             do
+                -- (the atoms are an ON-DEMAND family: an element only where a comparison on the paths names its word)
                 local c = f[1]:match('^ATOM:(.+)$')
-                if c then R.atoms[c] = f[1] end
+                if c then R.atoms[c] = f[1]; R.ondemand[f[1]] = true end
             end
             ::next::
         end
