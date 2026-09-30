@@ -47,6 +47,8 @@ local FILES = {
     }, '\n') .. '\n',
     ['lib_x.c'] = table.concat({
         '#include "lj_obj.h"',
+        'int lua_gettop(lua_State *L) { return (int)(L->top - L->base); }',
+        'int lua_type(lua_State *L, int idx) { TValue *o = L->base + idx - 1; if (o >= L->top) return LUA_TNONE; if (tvisnil(o)) return LUA_TNIL; return LUA_TBOOLEAN; }',
         'double x_checknum(lua_State *L, int narg)',
         '{',
         '  TValue *o = L->base + narg-1;',
@@ -108,25 +110,33 @@ local FILES = {
     }, '\n') .. '\n',
 }
 
-local cached
-local function setup()
-    if cached then return cached end
+-- THE SAME TREE WITH ITS FRAME RENAMED: another thread type, other field names — a second consumer in miniature (the
+-- interpreter names none of them; the adapter derives them from lua_gettop and the rebase)
+local function renamed(text)
+    return (text:gsub('lua_State', 'vm_T'):gsub('TValue %*base, %*top; MRef stack;', 'TValue *bp, *sp; MRef stk;')
+        :gsub('%->top%f[^%w_]', '->sp'):gsub('%->base%f[^%w_]', '->bp'):gsub('%->stack%f[^%w_]', '->stk'))
+end
+local cached = {}
+local function setup(variant)
+    variant = variant or 'plain'
+    if cached[variant] then return cached[variant] end
     local dir = vim.fn.tempname()
     vim.fn.mkdir(dir, 'p')
-    for name, text in pairs(FILES) do local fd = assert(io.open(dir .. '/' .. name, 'w')); fd:write(text); fd:close() end
-    local ctx = P.context(dir, {})
-    local tn = P.typenames(dir, ctx.reps)
-    for name, n in pairs(ctx.numof) do tn[name] = tn[n] end
-    cached = { dir = dir, ctx = ctx, tn = tn }
-    return cached
+    for name, text in pairs(FILES) do
+        local fd = assert(io.open(dir .. '/' .. name, 'w')); fd:write(variant == 'renamed' and renamed(text) or text); fd:close()
+    end
+    local ctx = P.context(dir)
+    local tn = ctx.typenames
+    cached[variant] = { dir = dir, ctx = ctx, tn = tn }
+    return cached[variant]
 end
-local function read(fn, args, pos)
-    local c = setup()
+local function read(fn, args, pos, variant)
+    local c = setup(variant)
     local A = P.analyzer(c.ctx)
     local acc, _, rets = P.acceptance(A, c.ctx, c.ctx.defs[fn], args, pos, pos + 2)
     return P.reading(acc, c.tn), acc, rets
 end
-local L = { k = 'L' }
+local L = P.thread()
 
 test('cpath premises: the representatives are the compiler\'s, built with the tree\'s own setters; its predicates over them are exact', function ()
     if not ready() then skip 'no C parser / gcc' end
@@ -166,7 +176,7 @@ test('cpath: the argument COUNT is concrete — a count-dispatched check binds o
     eq({ { 'number' }, 'never' }, { r.accepted, s.STR })
     ok(s.ABSENT ~= 'never', 'a missing third argument is not an error: ' .. tostring(s.ABSENT))
     ok(#rets > 0 and rets[1].v == 1, 'its result count: the literal return')
-    eq({ offset = 1, retry = 0 }, P.result_rule(setup().dir), 'FFH_RES / FFH_RETRY from lj_lib.h')
+    eq({ 1, 0 }, { setup().ctx.result.offset, setup().ctx.result.retry }, 'FFH_RES / FFH_RETRY from lj_lib.h')
 end)
 
 test('cpath: a callee\'s summary is keyed by its ARGUMENTS — isnum(L, 1) and isnum(L, 2) on the same path (a predicate: it narrows nothing) are two facts', function ()
@@ -252,6 +262,32 @@ test('cpath: an UNKNOWN L->top stays unknown in a callee — it is not re-derive
     if not ready() then skip 'no C parser / gcc' end
     local _, g = read('lj_cf_x_lose', { L, n = 1 }, 1)
     ok(g.ABSENT ~= 'never', 'a missing argument under an unknown top: ' .. tostring(g.ABSENT))
+end)
+
+test('cpath frame: derived from the tree — lua_gettop names the thread type and top / base, the stack\'s rebase names its origin', function ()
+    if not ready() then skip 'no C parser / gcc' end
+    eq({ thread = 'lua_State', top = 'top', base = 'base', origin = 'stack', origin_in = 'x_grow' }, setup().ctx.frame)
+    eq({ thread = 'vm_T', top = 'sp', base = 'bp', origin = 'stk', origin_in = 'x_grow' }, setup('renamed').ctx.frame)
+end)
+
+test('cpath frame: the SAME tree with its frame RENAMED reads the same at every position — the interpreter names no field', function ()
+    if not ready() then skip 'no C parser / gcc' end
+    local cases = {
+        { 'x_checknum', { L, P._int(1), n = 2 }, 1 }, { 'x_opt', { L, P._int(1), P._int(-1), n = 3 }, 1 }, { 'x_opt', { L, P._int(1), P._int(1), n = 3 }, 1 },
+        { 'lj_cf_x_istable', { L, n = 1 }, 1 }, { 'lj_cf_x_disp', { L, n = 1 }, 2 }, { 'lj_cf_x_sum', { L, n = 1 }, 3 },
+        { 'lj_cf_x_ab', { L, n = 1 }, 2 }, { 'lj_cf_x_wait', { L, n = 1 }, 1 }, { 'lj_cf_x_write', { L, n = 1 }, 1 },
+        { 'lj_cf_x_pad', { L, n = 1 }, 2 }, { 'lj_cf_x_grow', { L, n = 1 }, 1 }, { 'lj_cf_x_rec', { L, n = 1 }, 1 },
+        { 'lj_cf_x_fin', { L, n = 1 }, 1 }, { 'lj_cf_x_sw', { L, n = 1 }, 1 }, { 'lj_cf_x_spin', { L, n = 1 }, 1 },
+        { 'lj_cf_x_lose', { L, n = 1 }, 1 }, { 'lj_cf_x_sum2', { L, n = 1 }, 3 },
+    }
+    local typed = 0
+    for _, c in ipairs(cases) do
+        local r1, a1 = read(c[1], c[2], c[3])
+        local r2, a2 = read(c[1], c[2], c[3], 'renamed')
+        eq(a1, a2, c[1] .. ' #' .. c[3])
+        if not r1.untyped then typed = typed + 1 end
+    end
+    ok(typed >= 12, 'the comparison is not between two blind readings: ' .. typed .. ' typed')
 end)
 
 test('cpath compare: nil is optionality\'s, `any` every first-class type; a difference is NAMED (finer / narrower / optional)', function ()

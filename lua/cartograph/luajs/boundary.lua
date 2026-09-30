@@ -173,18 +173,20 @@ end
 --- read from the tree's headers and units -> { [name] = true }. A primitive's COMPUTATION is its closure short of
 --- these: the raise path (message formatting included) is the VM's, reached by nearly every function
 function M.noreturn(src)
-    local files = vim.fn.globpath(src, '*.h', false, true)
-    vim.list_extend(files, vim.fn.globpath(src, '*.c', false, true))
+    -- (`src` a directory — its *.h and *.c — or the list of files a build reads)
+    local files = type(src) == 'table' and src or vim.fn.globpath(src, '*.h', false, true)
+    if type(src) ~= 'table' then vim.list_extend(files, vim.fn.globpath(src, '*.c', false, true)) end
     local texts = {}
     for _, p in ipairs(files) do texts[#texts + 1] = readfile(p) or '' end
     local all = table.concat(texts, '\n')
     -- (declarations are read with every #define line removed: a definition itself is no declaration)
     local decls = ('\n' .. all):gsub('\n[ \t]*#[^\n]*', '\n')
+    decls = decls:gsub('/%*.-%*/', ' ') -- (nor is a comment: sys.h explains its own macros in prose)
     local macros, grew = {}, true
-    for m, def in all:gmatch('#define%s+([%w_]+)%s+([^\n]*)') do if def:find('noreturn', 1, true) then macros[m] = true end end
+    for m, def in all:gmatch('#%s*define%s+([%w_]+)%s+([^\n]*)') do if def:find('noreturn', 1, true) then macros[m] = true end end
     while grew do
         grew = false
-        for m, def in all:gmatch('#define%s+([%w_]+)%s+([^\n]*)') do
+        for m, def in all:gmatch('#%s*define%s+([%w_]+)%s+([^\n]*)') do
             if not macros[m] then
                 for id in def:gmatch('[%a_][%w_]*') do if macros[id] then macros[m] = true; grew = true; break end end
             end

@@ -30,9 +30,8 @@ for line in (vim.system({ 'make', '-n', 'lj_err.o' }, { cwd = src, text = true }
 end
 local config = { LJ_52 = table.pack ~= nil, LJ_HASJIT = jit.status ~= nil, LJ_HASFFI = (pcall(require, 'ffi')), LJ_HASBUFFER = (pcall(require, 'string.buffer')) }
 local t0 = vim.uv.hrtime()
-local ctx = P.context(src, cflags)
-local tn = P.typenames(src, ctx.reps)
-for name, n in pairs(ctx.numof) do tn[name] = tn[n] end
+local ctx = P.context(src)
+local tn = ctx.typenames
 -- PREMISES
 local R = ctx.reps
 local diag, bad = 0, {}
@@ -46,11 +45,11 @@ end
 local A0 = P.analyzer(ctx)
 local lt, lrow = ctx.defs.lua_type, {}
 for _, t in ipairs(R.order) do
-    local sum = lt and A0.run(lt, { { k = 'L' }, P._int(1), n = 2 }, {}, 1, { [t .. '@1'] = true }, false)
+    local sum = lt and A0.run(lt, { P.thread(), P._int(1), n = 2 }, {}, 1, { [t .. '@1'] = true }, false)
     local v = sum and sum.vals[t .. '@1'] or nil
     lrow[#lrow + 1] = ('%s=%s'):format(t, v and v.k == 'i' and tostring(tonumber(v.v)) or '?')
 end
-local sa = lt and A0.run(lt, { { k = 'L' }, P._int(1), n = 2 }, {}, 1, { ['ABSENT@0'] = true }, false)
+local sa = lt and A0.run(lt, { P.thread(), P._int(1), n = 2 }, {}, 1, { ['ABSENT@0'] = true }, false)
 local va = sa and sa.vals['ABSENT@0'] or nil
 local fc = {}
 for t, yes in pairs(ctx.firstclass) do if not yes then fc[#fc + 1] = t end end
@@ -59,6 +58,9 @@ io.write(('CPATH %s — the oracle %s; %d functions, %d tags (%d not first-class
     vim.tbl_count(ctx.defs), #R.order, #fc, table.concat(fc, ' '), (vim.uv.hrtime() - t0) / 1e9))
 io.write(('PREMISES: tvis* x representatives — %d predicates over %d tags from the compiler; lua_type %s absent=%s\n'):format(#R.tvis, #R.order,
     table.concat(lrow, ' '), va and va.k == 'i' and tostring(tonumber(va.v)) or '?'))
+local fr = ctx.frame
+io.write(('  FRAME (derived: lua_gettop\'s top - base, the rebase in %s): thread %s, top %s, base %s, origin %s\n'):format(
+    tostring(fr.origin_in), fr.thread, fr.top, fr.base, tostring(fr.origin)))
 -- THE GATE: leaf 1's checkers, read by path
 local L1 = CS.checkers(src, CS.vocabulary(src), B.noreturn(src))
 local names = vim.tbl_keys(L1); table.sort(names)
@@ -84,7 +86,7 @@ for _, n in ipairs(names) do
     end
     local hit, shown = false, {}
     for _, var in ipairs(variants) do
-        local args = { { k = 'L' }, P._int(1), n = #d.params }
+        local args = { P.thread(), P._int(1), n = #d.params }
         for i = 3, #d.params do args[i] = var[i] end
         local r = P.reading(P.acceptance(A, ctx, d, args, 1, 2), tn)
         -- leaf 1's optionality AT THIS BINDING (checkopt: its argument >= 0; luaL_checkoption: not NULL)

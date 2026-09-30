@@ -13,17 +13,18 @@ test('toolbelt: every entry loads, and every example of every entry holds', func
     local entries, broken = tb.list()
     eq({}, broken, 'no entry is malformed')
     ok(#entries >= 4, 'the toolbelt is discovered from its directory, not an empty glob: ' .. #entries)
-    local kinds, bad, n = {}, {}, 0
+    local kinds, bad, n, skipped = {}, {}, 0, {}
     for _, e in ipairs(entries) do
         kinds[e.kind] = true
         for _, ex in ipairs(e.examples) do
             n = n + 1
-            local okx, why = tb.example(e, ex)
-            if not okx then bad[#bad + 1] = ('%s — %s: %s'):format(e.name, ex.name, tostring(why)) end
+            local okx, why, res = tb.example(e, ex)
+            if not okx then bad[#bad + 1] = ('%s — %s: %s'):format(e.name, ex.name, tostring(why))
+            elseif res and res.skipped then skipped[#skipped + 1] = ('%s — %s: %s'):format(e.name, ex.name, res.skipped) end
         end
     end
     ok(kinds.write and kinds.discovery, 'both kinds are present')
-    io.write(('  [toolbelt] %d entries, %d examples\n'):format(#entries, n))
+    io.write(('  [toolbelt] %d entries, %d examples, %d skipped%s\n'):format(#entries, n, #skipped, #skipped > 0 and (' (' .. table.concat(skipped, '; ') .. ')') or ''))
     eq({}, bad, 'each example is the usage AND the test')
 end)
 

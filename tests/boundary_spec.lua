@@ -63,6 +63,20 @@ test('boundary: the GC types ARE the structs holding every GCHeader field (read 
     eq({ lj_err_x = true }, B.noreturn(dir), 'a #define of the macro is no declaration')
 end)
 
+test('boundary noreturn: a `#  define` indented after its `#` is a macro too (erts: sys.h), and a COMMENT naming the macro declares nothing (lj_err.c: "no LJ_NORET")', function ()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local fd = assert(io.open(dir .. '/sys.h', 'w'))
+    fd:write(table.concat({
+        '#if defined(__GNUC__)', '#  define __noreturn __attribute__((noreturn))', '#endif',
+        'void __noreturn erts_exit(int n, const char *fmt, ...);',
+        '/* Forwarders (no __noreturn). */', 'int lua_error_like(void *L);',
+    }, '\n') .. '\n')
+    fd:close()
+    eq({ erts_exit = true }, B.noreturn(dir))
+    eq({ erts_exit = true }, B.noreturn({ dir .. '/sys.h' }), 'a list of the files a build reads, the same answer')
+end)
+
 test('boundary probe: a GC field read is BOUNDARY (naming the type), a refused construct with no VM object is a cjs GAP, the rest CLEAN — and a clean function over a dirty callee names it', function ()
     if not ready() then skip 'no C parser / gcc' end
     local dir = tree()

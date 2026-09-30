@@ -384,7 +384,13 @@ end
 --- ★ IN A SCOPED LENS (store.scoped, CART-1160): the example's scratch graph is active only while it runs, and the
 --- CALLER's graph comes back afterwards — so any caller may run an example, a live session included. Before, an
 --- example re-ingested the singleton store and replaced whatever the caller had loaded.
+--- An example may declare `requires = function () -> ok, why end` (a compiler, a parser): unmet, it is SKIPPED —
+--- ok, nil, { skipped = why } — and a caller counts it as a skip, never as a pass.
 function M.example(e, ex)
+    if ex.requires then
+        local met, why = ex.requires()
+        if not met then return true, nil, { skipped = tostring(why) } end
+    end
     local store = require 'cartograph.store'
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
