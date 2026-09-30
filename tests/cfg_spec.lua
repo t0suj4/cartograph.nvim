@@ -342,3 +342,47 @@ test('cfg: climbing stops at the function boundary', function ()
     local sink = find(root, src, 'function_call_expression', 'sink(')
     eq(0, #guard_texts(sink, src), 'a guard around the fn definition does not dominate its body')
 end)
+
+test('cfg.graph (C): an EXECUTABLE graph — labeled edges, continue to the update, break past the loop, a switch that falls through, goto to its label, the loop heads', function ()
+    if not ready_lang('c') then skip 'no C parser' end
+    local src = table.concat({
+        'int f(int a) {',
+        '  int i;',
+        '  for (i = 0; i < a; i++) { if (i == 2) continue; if (i == 5) break; }',
+        '  switch (a) { case 1: a = 2; case 2: a = 3; break; default: goto out; }',
+        '  while (i) i--;',
+        '  return a;',
+        'out:',
+        '  return -1;',
+        '}',
+    }, '\n')
+    local root = vim.treesitter.get_string_parser(src, 'c'):parse()[1]:root()
+    local g = cfg.graph(root:named_child(0), src)
+    local function id(text) -- (the node whose AST text is exactly `text`)
+        for i, n in ipairs(g.nodes) do if vim.treesitter.get_node_text(n.ast, src) == text then return i end end
+        error('no node ' .. text)
+    end
+    local function to(from, on)
+        local out = {}
+        for _, e in ipairs(g.nodes[from].succ) do if not on or e.on == on then out[#out + 1] = e.to end end
+        return out
+    end
+    local heads = {}
+    for h in pairs(g.heads) do heads[#heads + 1] = vim.treesitter.get_node_text(g.nodes[h].ast, src) end
+    table.sort(heads)
+    eq({ '(i)', 'i < a' }, heads, 'the targets of back edges: the two loop conditions')
+    eq({ id('i++') }, to(id('continue;')), 'continue goes to the update, not the condition')
+    local brk = {}
+    for i, n in ipairs(g.nodes) do if vim.treesitter.get_node_text(n.ast, src) == 'break;' then brk[#brk + 1] = to(i)[1] end end
+    table.sort(brk)
+    eq({ id('(i)'), id('(a)') }, brk, 'each break lands after ITS statement: the switch\'s on the while, the loop\'s on the switch')
+    eq({ id('a = 3;') }, to(id('a = 2;')), 'case 1 falls through into case 2')
+    local cases = {}
+    for _, e in ipairs(g.nodes[id('(a)')].succ) do cases[#cases + 1] = e.on .. (e.val and ('=' .. vim.treesitter.get_node_text(e.val, src)) or '') end
+    eq({ 'case=1', 'case=2', 'default' }, cases)
+    eq({ id('out:\n  return -1;') }, to(id('goto out;')))
+    eq({ 'exit' }, to(id('return a;')))
+    eq({ id('(i == 2)') }, to(id('i < a'), 'T'))
+    eq({ id('return a;') }, to(id('(i)'), 'F'))
+    ok(g.rpo[g.entry] == 1 and g.rpo[id('i < a')] < g.rpo[id('(i == 2)')], 'reverse postorder: a condition before its body')
+end)

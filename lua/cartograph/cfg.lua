@@ -346,4 +346,127 @@ function M.guards_over(node, src)
     return out
 end
 
+-- ── the EXECUTABLE graph (CART-1240 leaf 3) ─────────────────────────────────────────────────────────────────────────
+--- A function body as an executable CONTROL-FLOW GRAPH: one node per simple statement / condition, each with its AST
+--- node, and LABELED edges — a condition's `T` and `F`, a switch's `case` (with the case's value node) and `default`,
+--- `always` otherwise. goto, break, continue, a switch's fall-through and a loop's back edge are plain edges; a label is
+--- a node a goto points at. (flow.successors is the NAME-dataflow CFG over flow's rows — unlabeled edges, no AST node,
+--- over-approximated cases; this one is for a consumer that EVALUATES conditions: cartograph.luajs.cpath.)
+--- @langs c
+--- -> { nodes = { [id] = { k = 'stmt'|'cond'|'switch'|'ret'|'nop', ast, succ = { { to, on, val } } } }, entry, exit = 'exit',
+---      heads = { [id] = true } (targets of a back edge: where a fixpoint widens) }
+function M.graph(fnnode, src)
+    local nodes, labels, gotos = {}, {}, {}
+    local function kids(n) local o = {} for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then o[#o + 1] = c end end return o end
+    local function new(k, ast) local id = #nodes + 1; nodes[id] = { k = k, ast = ast, succ = {} }; return id end
+    local function edge(a, b, on, val) table.insert(nodes[a].succ, { to = b, on = on or 'always', val = val }) end
+    local lower
+    local function seq(list, nxt, cx)
+        local cur = nxt
+        for i = #list, 1, -1 do cur = lower(list[i], cur, cx) end
+        return cur
+    end
+    function lower(n, nxt, cx)
+        local t = n:type()
+        if t == 'compound_statement' then return seq(kids(n), nxt, cx)
+        elseif t == 'if_statement' then
+            local c = new('cond', n:field('condition')[1])
+            local alt = n:field('alternative')[1]
+            if alt and alt:type() == 'else_clause' then alt = kids(alt)[1] end -- @langs-ok M.graph is C only (its @langs c)
+            edge(c, lower(n:field('consequence')[1], nxt, cx), 'T')
+            edge(c, alt and lower(alt, nxt, cx) or nxt, 'F')
+            return c
+        elseif t == 'while_statement' then
+            local c = new('cond', n:field('condition')[1])
+            edge(c, lower(n:field('body')[1], c, { brk = nxt, cont = c }), 'T')
+            edge(c, nxt, 'F')
+            return c
+        elseif t == 'do_statement' then
+            local c = new('cond', n:field('condition')[1])
+            local body = lower(n:field('body')[1], c, { brk = nxt, cont = c })
+            edge(c, body, 'T')
+            edge(c, nxt, 'F')
+            return body
+        elseif t == 'for_statement' then
+            local cond, upd, init = n:field('condition')[1], n:field('update')[1], n:field('initializer')[1]
+            local head = cond and new('cond', cond) or new('nop', n)
+            local un = upd and new('stmt', upd) or head
+            if upd then edge(un, head) end
+            local body = lower(n:field('body')[1], un, { brk = nxt, cont = un })
+            if cond then edge(head, body, 'T'); edge(head, nxt, 'F') else edge(head, body) end
+            if init then local i = new('stmt', init); edge(i, head); return i end
+            return head
+        elseif t == 'switch_statement' then
+            local sw = new('switch', n:field('condition')[1])
+            local cases = {}
+            for _, c in ipairs(kids(n:field('body')[1])) do if c:type() == 'case_statement' then cases[#cases + 1] = c end end -- @langs-ok M.graph is C only
+            local sub = { brk = nxt, cont = cx.cont }
+            local entry, after = {}, nxt
+            for i = #cases, 1, -1 do
+                local v = cases[i]:field('value')[1]
+                local stmts = {}
+                for _, s in ipairs(kids(cases[i])) do if not (v and s:equal(v)) then stmts[#stmts + 1] = s end end
+                entry[i] = seq(stmts, after, sub) -- (falling through into the next case's statements)
+                after = entry[i]
+            end
+            local hasdef = false
+            for i, c in ipairs(cases) do
+                local v = c:field('value')[1]
+                if v then edge(sw, entry[i], 'case', v) else edge(sw, entry[i], 'default'); hasdef = true end
+            end
+            if not hasdef then edge(sw, nxt, 'default') end
+            return sw
+        elseif t == 'return_statement' then
+            local r = new('ret', n)
+            edge(r, 'exit')
+            return r
+        elseif t == 'break_statement' then local j = new('nop', n); edge(j, cx.brk or nxt); return j
+        elseif t == 'continue_statement' then local j = new('nop', n); edge(j, cx.cont or nxt); return j
+        elseif t == 'goto_statement' then
+            local j = new('nop', n)
+            gotos[#gotos + 1] = { j, vim.treesitter.get_node_text(n:field('label')[1], src) }
+            return j
+        elseif t == 'labeled_statement' then
+            local inner
+            for c in n:iter_children() do if c:named() and c:type() ~= 'statement_identifier' then inner = c end end -- @langs-ok M.graph is C only
+            local l = new('nop', n)
+            edge(l, inner and lower(inner, nxt, cx) or nxt)
+            labels[vim.treesitter.get_node_text(n:field('label')[1], src)] = l
+            return l
+        elseif t == 'expression_statement' or t == 'declaration' then
+            local s = new('stmt', n)
+            edge(s, nxt)
+            return s
+        end
+        local s = new('nop', n) -- (anything else passes through: an empty statement, a type definition)
+        edge(s, nxt)
+        return s
+    end
+    local entry = lower(fnnode:field('body')[1], 'exit', {})
+    for _, g in ipairs(gotos) do edge(g[1], labels[g[2]] or 'exit') end
+    -- the LOOP HEADS: every target of a back edge (a depth-first walk from the entry)
+    local heads, state = {}, {}
+    local function dfs(id)
+        state[id] = 1
+        for _, e in ipairs(nodes[id].succ) do
+            if e.to ~= 'exit' then
+                if state[e.to] == 1 then heads[e.to] = true
+                elseif not state[e.to] then dfs(e.to) end
+            end
+        end
+        state[id] = 2
+    end
+    if entry ~= 'exit' then dfs(entry) end
+    -- REVERSE POSTORDER (a fixpoint visits a node after its forward predecessors: one pass for acyclic code)
+    local rpo, post, seen = {}, {}, {}
+    local function po(id)
+        seen[id] = true
+        for _, e in ipairs(nodes[id].succ) do if e.to ~= 'exit' and not seen[e.to] then po(e.to) end end
+        post[#post + 1] = id
+    end
+    if entry ~= 'exit' then po(entry) end
+    for i = #post, 1, -1 do rpo[post[i]] = #post - i + 1 end
+    return { nodes = nodes, entry = entry, exit = 'exit', heads = heads, rpo = rpo }
+end
+
 return M

@@ -150,6 +150,9 @@ function M.checkers(src, vocab, noret)
             -- a userdata NAMED by an argument (luaL_checkudata: its helper tests tvisudata — and the metatable's
             -- tag, which is not the argument's)
             if c.named and c.types.userdata then c.types = { userdata = true } end
+            -- a type taken from a call-site ARGUMENT (luaL_checktype's `tt`) has no coercions of its own: the tags its
+            -- helper tests are the argument's, not this checker's (found by the path reading, CART-1240 leaf 2)
+            if c.from_arg then c.coerces = {} end
             if not (c.types.number and vim.tbl_count(c.types) == 1) then c.integer = nil end
             for t in pairs(c.types) do c.coerces[t] = nil end
             c.types, c.coerces, c.delegates = sorted(c.types), sorted(c.coerces), sorted(c.delegates)

@@ -3564,6 +3564,11 @@ nvim --headless -u NONE -l tools/packmap.lua ~/.local/share/pkgit/luajit/HEAD [-
 nvim --headless -u NONE -l tools/csig.lua ~/.cache/nvim/cartograph/packmap/<rev>/src
 #   fbb36bb6: 29 checkers; 53 functions agree, 5 disagree (assert's value is required, pcall takes any value, …);
 #   121 probes confirm the C reading, 0 contradict it.
+# ... and with NO checker named: every C function's argument slots read through the paths reaching no raiser (one run
+# carries every tag and argument count; the tags are the compiler's own representatives):
+nvim --headless -u NONE -l tools/cpath.lua ~/.cache/nvim/cartograph/packmap/<rev>/src
+#   33 s over 125 functions, loops as fixpoints over each body's graph (none unrolled, none dropped); leaf 1's checker
+#   table reproduced (5 rows finer); 90 positions leaf 1 could not read, all confirmed by the running LuaJIT.
 # ... or C that works on STRUCTS and UNIONS through pointers (EXACT HEAP mode: a byte heap at the compiler's own
 # layout). LuaJIT's number scanner, from packmap's tree, replaces the pack's hand-written tonumber:
 nvim --headless -u NONE -l tools/cjs.lua strscan <BUILT luajit src dir> <out.js>
