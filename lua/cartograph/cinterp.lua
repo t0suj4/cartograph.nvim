@@ -45,7 +45,7 @@ local function truth(a)
     if a == nil then return nil end
     if a.k == 'i' then return a.v ~= 0 end
     if a.k == 'd' then return a.v ~= 0 end
-    if a.k == 'slot' or a.k == 'sym' or a.k == 'thread' or a.k == 'str' then return true end
+    if a.k == 'slot' or a.k == 'sym' or a.k == 'thread' or a.k == 'obj' or a.k == 'str' then return true end
     if a.k == 'null' then return false end
     return nil
 end
@@ -151,6 +151,12 @@ local function veq(a, b)
     if a.k == 'd' then return a.v == b.v or (a.v ~= a.v and b.v ~= b.v) end
     if a.k == 'slot' then return a.i == b.i end
     if a.k == 'sym' then return a.s == b.s end
+    if a.k == 'obj' then return a.id == b.id end
+    if a.k == 'arr' then
+        if a.id ~= b.id or a.n ~= b.n then return false end
+        for i = 1, a.n do if not veq(a.vals[i], b.vals[i]) then return false end end
+        return true
+    end
     if a.k == 'field' then return a.i == b.i and a.path == b.path end
     if a.k == 'vec' then
         for t, v in pairs(a.by) do if not veq(v or nil, b.by[t] or nil) then return false end end
@@ -188,6 +194,12 @@ local function key_of(v)
     if v.k == 'i' then return 'i' .. tostring(v.v) .. ':' .. v.w .. (v.u and 'u' or 's') end
     if v.k == 'slot' then return 's' .. v.i end
     if v.k == 'sym' then return 'y' .. v.s end
+    if v.k == 'obj' then return 'o' .. v.id end
+    if v.k == 'arr' then
+        local l = {}
+        for i = 1, v.n do l[i] = key_of(v.vals[i]) end
+        return 'a' .. v.id .. '[' .. table.concat(l, ',') .. ']'
+    end
     if v.k == 'vec' then
         local l = {}
         for t, x in pairs(v.by) do l[#l + 1] = t .. '=' .. key_of(x or nil) end
@@ -203,6 +215,10 @@ local function copy(st)
     return { env = e, slots = sl, types = st.types, src = st.src, unit = st.unit, fname = st.fname,
         fi = st.fi, fset = setof(st.fset), fwrite = st.fwrite, tok = st.tok }
 end
+-- an OBJECT FIELD's states beyond a value (see M.object): as the caller had it / never written / written, unknown
+local UNCH = { k = 'unch' }
+local UNSET = { k = 'unset' }
+local ANY = { k = 'any' }
 --- the JOIN of two states, EXACT per tag where their sets are disjoint (a partition's two branches meeting again)
 local function join(a, b)
     if not a then return b end
@@ -221,6 +237,8 @@ local function join(a, b)
                 if ia and not ib then return at(va, t) elseif ib and not ia then return at(vb, t) end
                 local x, y = at(va, t), at(vb, t)
                 if veq(x, y) then return x end
+                -- (an object field two paths leave differently was WRITTEN: unknown, never "as the caller had it")
+                if k:sub(1, 5) == '\0obj:' then return ANY end
                 return nil
             end)
         end
@@ -286,6 +304,11 @@ end
 
 --- THE THREAD whose frame is analyzed (a driver hands it as the first argument)
 function M.thread() return { k = 'thread' } end
+--- an OPAQUE OBJECT a driver hands in (erts' Process *): its fields are VALUES of the path (`p->freason = r`), recorded at
+--- every return and handed back from a callee — never read from memory. `init` = { [field] = value } at the run it is
+--- handed to (M.UNSET: no path has written it yet); an ABSENT field is UNKNOWN.
+function M.object(id, init) return { k = 'obj', id = id, init = init } end
+M.UNSET, M.ANY = UNSET, ANY
 --- a field of a scalar base (the per-element half of field_expression)
 function M._field(base, op, f, st, layout, read_field)
     if base == nil then return nil end
@@ -318,7 +341,7 @@ function M.analyzer(ctx)
         if c ~= nil then return c or nil end
         local f, rep = layout.fields[path], reps.tag[tag]
         local r
-        if f and rep then
+        if f and rep and rep.u64 then
             local u = U64(tonumber(rep.u64:sub(1, 8), 16)) * U64(2 ^ 32) + U64(tonumber(rep.u64:sub(9), 16))
             if f.cls == 'f64' then
                 -- ★ a NaN comes back CANONICAL: a GC tag's word IS a payload NaN, and an ffi load does not canonicalize
@@ -335,6 +358,8 @@ function M.analyzer(ctx)
     end
     --- a field REFERENCE made a value: the focus slot's per tag (unknown after a write to it), another slot's by its tag
     local function deref_field(v, st)
+        -- (a SCALAR slot — erts' Eterm — is read whole: its value IS the element's word)
+        if v and v.k == 'slotv' and layout.scalar then v = { k = 'field', i = v.i, path = '' } end
         if not (v and v.k == 'field') then return v end
         if v.i == st.fi then
             if st.fwrite then return nil end
@@ -345,7 +370,7 @@ function M.analyzer(ctx)
     local function rv(v, st)
         if v and v.k == 'vec' then
             -- (a vector of field refs: each read at its own tag)
-            return vmap(st.fset, function (t) local x = at(v, t); if x and x.k == 'field' then return x.i == st.fi and not st.fwrite and read_field(t, x.path) or (x.i ~= st.fi and read_field(st.slots[x.i], x.path)) or nil end return x end)
+            return vmap(st.fset, function (t) local x = at(v, t); if x and x.k == 'slotv' and layout.scalar then x = { k = 'field', i = x.i, path = '' } end; if x and x.k == 'field' then return x.i == st.fi and not st.fwrite and read_field(t, x.path) or (x.i ~= st.fi and read_field(st.slots[x.i], x.path)) or nil end return x end)
         end
         return deref_field(v, st)
     end
@@ -427,7 +452,9 @@ function M.analyzer(ctx)
         local ffree = true
         for i = 1, args.n do
             local a = args[i]
-            if a and (a.k == 'vec' or ((a.k == 'slot' or a.k == 'slotv') and a.i == st.fi) or (a.k == 'thread' and not sfree)) then ffree = false; break end
+            local perel = a and a.k == 'arr'
+            if perel then perel = false; for j = 1, a.n do local x = a.vals[j]; if x and x.k == 'vec' then perel = true end end end
+            if a and (a.k == 'vec' or perel or ((a.k == 'slot' or a.k == 'slotv') and a.i == st.fi) or (a.k == 'thread' and not sfree)) then ffree = false; break end
         end
         local reach = not sfree and not ffree
         local fset = ffree and { ['*'] = true } or st.fset
@@ -454,15 +481,17 @@ function M.analyzer(ctx)
         end
         if ffree then
             -- (the stand-in's answer, for every element of the path)
-            local one = { ret = {}, rej = {}, vals = {} }
+            local one = { ret = {}, rej = {}, vals = {}, objs = {} }
             for t in pairs(st.fset) do
                 if sum.ret['*'] then one.ret[t] = true end
                 if sum.rej['*'] then one.rej[t] = true end
                 one.vals[t] = sum.vals['*']
             end
+            for k, m in pairs(sum.objs or {}) do one.objs[k] = {}; for t in pairs(st.fset) do one.objs[k][t] = m['*'] end end
             sum = setmetatable(one, { __index = sum })
         end
         for t in pairs(sum.rej) do cx.rej[t] = true end
+        for k, v in pairs(sum.compared or {}) do cx.compared[k] = v end
         if sum.over then cx.over = true end
         local live = {}
         for t in pairs(st.fset) do if sum.ret[t] then live[t] = true end end
@@ -470,6 +499,14 @@ function M.analyzer(ctx)
         if empty(live) then return nil end
         for i, t in pairs(sum.slots or {}) do st.slots[i] = t end
         if sum.fwrite then st.fwrite = true end
+        for k, m in pairs(sum.objs or {}) do
+            local old = st.env[k]
+            st.env[k] = vmap(live, function (t)
+                local x = m[t]
+                if x == UNCH or x == nil then if old == nil then return UNCH end return at(old, t) end
+                return x or ANY
+            end)
+        end
         if reach then
             st.env['\0top'] = vmap(live, function (t) return sum.top[t] or nil end)
             st.env['\0base'] = vmap(live, function (t) return sum.base[t] or nil end)
@@ -547,6 +584,10 @@ function M.analyzer(ctx)
             end
             local a = rv(eval(n:field('left')[1], st, cx), st)
             local b = rv(eval(n:field('right')[1], st, cx), st)
+            -- (the CONSTANTS an equality compares against — which words the code names: erts' atoms)
+            if op == '==' or op == '!=' then
+                for _, c in ipairs({ a, b }) do if c and c.k == 'i' then cx.compared[key_of(c)] = c end end
+            end
             return lift2(op, a, b, st)
         elseif t == 'unary_expression' then
             local op = tx(n:field('operator')[1], src)
@@ -594,6 +635,10 @@ function M.analyzer(ctx)
                 if f == fr.origin then return { k = 'org' } end
                 return nil
             end
+            if base and base.k == 'obj' then
+                local v = st.env['\0obj:' .. base.id .. '.' .. f]
+                return vmap(st.fset, function (t) local x = at(v, t); if x and (x.k == 'unch' or x.k == 'unset' or x.k == 'any') then return nil end return x end)
+            end
             -- (a base that differs per element — index2adr's slot-or-sentinel — per element)
             if (base and base.k == 'vec') then
                 return vmap(st.fset, function (e) return M._field(at(base, e), op, f, st, layout, read_field) end)
@@ -615,9 +660,19 @@ function M.analyzer(ctx)
         elseif t == 'subscript_expression' then
             local b = eval(n:field('argument')[1], st, cx)
             local i = rv(eval(n:field('index')[1], st, cx), st)
+            -- (a LOCAL ARRAY: its elements are values of the path — `args[0] = BIF_ARG_1` — read by index)
+            if b and b.k == 'arr' then return i and i.k == 'i' and b.vals[asnum(i) + 1] or nil end
             return lift2('@index', b, i, st)
         elseif t == 'call_expression' then
             local fnode = n:field('function')[1]
+            -- (`(Eterm)(x)`: the parser reads a cast to a TYPEDEF NAME it does not know as a call of a parenthesized
+            -- identifier — a typedef of the tree makes it the cast it is)
+            local pn = fnode and fnode:type() == 'parenthesized_expression' and kids(fnode)[1]
+            if pn and pn:type() == 'identifier' and ctx.typedefs[tx(pn, src)] and #kids(n:field('arguments')[1]) == 1 then
+                local ty = M.ctype(tx(pn, src), ctx.typedefs)
+                local a = rv(eval(kids(n:field('arguments')[1])[1], st, cx), st)
+                return lift1(function (x) return convert(ty, x) end, a, st)
+            end
             -- (arguments by POSITION: an unknown one is a nil, and appending would shift the rest)
             local args = { n = 0 }
             for i, a in ipairs(kids(n:field('arguments')[1])) do
@@ -625,11 +680,24 @@ function M.analyzer(ctx)
                 args.n = i
                 if empty(st.fset) then return nil end
             end
+            -- (a LOCAL ARRAY handed to a call is the callee's to write: the callee reads the snapshot it was handed, the
+            -- caller's elements are unknown after the call)
+            local function spoil()
+                for _, a in ipairs(kids(n:field('arguments')[1])) do
+                    if a:type() == 'identifier' then
+                        local v = st.env[tx(a, src)]
+                        if v and v.k == 'arr' then st.env[tx(a, src)] = { k = 'arr', id = v.id, n = v.n, vals = {} } end
+                    end
+                end
+            end
             if fnode:type() ~= 'identifier' then
                 for i = 1, args.n do local a = args[i]; if a and a.k == 'slot' then write_slot(a.i, st) end end
+                spoil()
                 return nil
             end
-            return call(tx(fnode, src), args, st, cx)
+            local r = call(tx(fnode, src), args, st, cx)
+            spoil()
+            return r
         elseif t == 'assignment_expression' then
             local l, r = n:field('left')[1], n:field('right')[1]
             local op = tx(n:field('operator')[1], src)
@@ -643,11 +711,34 @@ function M.analyzer(ctx)
                 st.env[nm] = v
                 return v
             end
+            if l:type() == 'subscript_expression' and l:field('argument')[1]:type() == 'identifier' then
+                local nm = tx(l:field('argument')[1], src)
+                local a = st.env[nm]
+                if a and a.k == 'arr' then
+                    local i = rv(eval(l:field('index')[1], st, cx), st)
+                    local c = { k = 'arr', id = a.id, n = a.n, vals = {} }
+                    for j = 1, a.n do c.vals[j] = a.vals[j] end
+                    if i and i.k == 'i' and asnum(i) >= 0 then
+                        local j = asnum(i) + 1
+                        if op ~= '=' then v = lift2(op:sub(1, -2), a.vals[j], v, st) end
+                        c.vals[j] = v
+                        if j > c.n then c.n = j end
+                    else c.vals, c.n = {}, a.n end -- (an unknown index: every element unknown after it)
+                    st.env[nm] = c
+                    return v
+                end
+            end
             if l:type() == 'field_expression' then
                 local lb = eval(l:field('argument')[1], st, cx)
                 local lf = tx(l:field('field')[1], src)
                 if lb and lb.k == 'thread' and (lf == fr.top or lf == fr.base) then
                     local key = lf == fr.top and '\0top' or '\0base'
+                    if op ~= '=' then v = lift2(op:sub(1, -2), st.env[key], v, st) end
+                    st.env[key] = v
+                    return v
+                end
+                if lb and lb.k == 'obj' then
+                    local key = '\0obj:' .. lb.id .. '.' .. lf
                     if op ~= '=' then v = lift2(op:sub(1, -2), st.env[key], v, st) end
                     st.env[key] = v
                     return v
@@ -706,7 +797,16 @@ function M.analyzer(ctx)
                 local dd, val, isptr = d, nil, false
                 if d:type() == 'init_declarator' then dd = d:field('declarator')[1]; val = d:field('value')[1] end
                 while dd and dd:type() == 'pointer_declarator' do isptr = true; dd = dd:field('declarator')[1] end
-                if dd and dd:type() == 'identifier' then
+                if dd and dd:type() == 'array_declarator' and dd:field('declarator')[1] and dd:field('declarator')[1]:type() == 'identifier' then
+                    -- (a LOCAL ARRAY, passed on BY VALUE: a callee reads the elements it was handed; the caller's are
+                    -- unknown after the call — the callee may have written them)
+                    local name = tx(dd:field('declarator')[1], src)
+                    local a = { k = 'arr', id = name, n = 0, vals = {} }
+                    if val and val:type() == 'initializer_list' then
+                        for j, e in ipairs(kids(val)) do a.vals[j] = rv(eval(e, st, cx), st); a.n = j end
+                    end
+                    st.env[name] = a
+                elseif dd and dd:type() == 'identifier' then
                     local name = tx(dd, src)
                     local vty = isptr and { k = 'p' } or ty
                     st.types[name] = vty
@@ -740,13 +840,17 @@ function M.analyzer(ctx)
         for i, p in ipairs(d.params) do
             st.types[p.name] = p.type
             local v = args[i]
+            if v and v.k == 'obj' and v.init then
+                for f, val in pairs(v.init) do st.env['\0obj:' .. v.id .. '.' .. f] = val end
+                v = { k = 'obj', id = v.id }
+            end
             if p.type and p.type.k == 'i' then v = lift1(function (x) return x and x.k == 'i' and int(x.v, p.type.w, p.type.u) or x end, v, st) end
             -- (a parameter holds what its caller handed it: THE thread only when handed it — a finalizer runs on another)
             st.env[p.name] = v
         end
         d.graph = d.graph or require('cartograph.cfg').graph(d.node, d.src)
         local g = d.graph
-        local cx = { returns = {}, rej = {} }
+        local cx = { returns = {}, rej = {}, compared = {} }
         -- THE FIXPOINT over the graph, in reverse postorder. A node JOINS what reaches it (exact per tag), except a
         -- LOOP HEAD, which keeps up to CAP distinct states (a loop over the arguments stays exact: one state per
         -- iteration value) and past that JOINS them into one widened state — values only go to unknown, tags only
@@ -840,6 +944,7 @@ function M.analyzer(ctx)
                 for _, e in ipairs(node.succ) do
                     if e.on == 'case' then
                         local cv = rv(eval(e.val, copy(x), cx), x)
+                        if cv and cv.k == 'i' then cx.compared[key_of(cv)] = cv end
                         local set = {}
                         for el in pairs(x.fset) do
                             local r = binop('==', at(v, el), at(cv, el))
@@ -886,8 +991,11 @@ function M.analyzer(ctx)
                 end
             end
         end
-        local sum = { ret = {}, rej = cx.rej, vals = {}, over = cx.over, fwrite = false, top = {}, base = {} }
+        local sum = { ret = {}, rej = cx.rej, vals = {}, over = cx.over, fwrite = false, top = {}, base = {}, objs = {}, compared = cx.compared }
         local seen, sseen = {}, {}
+        local okeys = {}
+        for _, r in ipairs(cx.returns) do for k in pairs(r.env or {}) do if k:sub(1, 5) == '\0obj:' then okeys[k] = true end end end
+        for k in pairs(okeys) do sum.objs[k] = {} end
         for _, r in ipairs(cx.returns) do
             for tg in pairs(r.fset) do
                 -- (where this return leaves the stack, per element: the caller's L->top after the call)
@@ -896,6 +1004,14 @@ function M.analyzer(ctx)
                     local sk = key .. tg
                     if sseen[sk] then if not veq(sum[key][tg] or nil, sv) then sum[key][tg] = false end
                     else sum[key][tg] = sv or false; sseen[sk] = true end
+                end
+                for k in pairs(okeys) do
+                    local ov = r.env[k]
+                    local x = ov == nil and UNCH or at(ov, tg)
+                    if x == nil or x.k == 'any' then x = false elseif x.k == 'unch' then x = UNCH end
+                    local m = sum.objs[k]
+                    if m[tg] == nil then m[tg] = x
+                    elseif m[tg] ~= x and not (type(x) == 'table' and x ~= UNCH and m[tg] ~= UNCH and m[tg] and veq(m[tg], x)) then m[tg] = false end
                 end
                 sum.ret[tg] = true
                 local v = r.void and nil or at(r.v, tg)
@@ -977,5 +1093,5 @@ function M.units(sources)
 end
 
 -- (the helpers an adapter reads values with)
-M.asnum, M.elem, M.at, M.tx, M.kids = asnum, elem, at, tx, kids
+M.asnum, M.elem, M.at, M.tx, M.kids, M.key_of, M.veq = asnum, elem, at, tx, kids, key_of, veq
 return M

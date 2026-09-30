@@ -7,6 +7,7 @@ return {
     derive = function (_, got)
         local ffi = require 'ffi'
         local R = got.reps
+        if not R.matrix then return nil, 'the representatives carry no tvis* predicate matrix' end
         local numtag
         for name in pairs(R.tag) do if R.matrix.tvisnumber and R.matrix.tvisnumber[name] == 1 then numtag = name end end
         if not numtag then return nil, 'no tag tvisnumber holds for' end

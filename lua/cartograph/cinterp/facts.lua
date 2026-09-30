@@ -40,7 +40,7 @@ function M.derive(tree, opts)
         if not byfact[d.fact] then byfact[d.fact] = {}; facts[#facts + 1] = d.fact end
         table.insert(byfact[d.fact], d)
     end
-    local rows, got, order = {}, {}, {}
+    local rows, got, order, tried_of, pend_of = {}, {}, {}, {}, {}
     local function decided(f) return rows[f] ~= nil end
     local progress = true
     while progress do
@@ -58,24 +58,30 @@ function M.derive(tree, opts)
                     end
                     if ok_needs then ready[#ready + 1] = d end
                 end
-                if #ready > 0 then
-                    local tried = {}
-                    for _, d in ipairs(ready) do
+                -- (each derivation runs ONCE; the fact is decided when one holds, or when none is left waiting)
+                local tried = tried_of[f] or {}
+                tried_of[f] = tried
+                local fresh = {}
+                for _, d in ipairs(ready) do if tried[d.name] == nil then fresh[#fresh + 1] = d end end
+                if #fresh > 0 or (#ready > 0 and not waiting) then
+                    for _, d in ipairs(fresh) do
                         local t0 = vim.uv.hrtime()
                         local okd, v, why, kind = pcall(d.derive, tree, got)
                         local ms = (vim.uv.hrtime() - t0) / 1e6
                         if not okd then
                             tried[d.name] = 'raised: ' .. tostring(v)
-                            rows[f] = rows[f] or { gap = tried[d.name], kind = 'error', tried = tried }
+                            pend_of[f] = pend_of[f] or { gap = tried[d.name], kind = 'error', tried = tried }
                         elseif v ~= nil then
                             got[f] = v
                             rows[f] = { value = v, by = d.name, ms = ms, tried = tried }
                             break
                         else
                             tried[d.name] = tostring(why)
-                            if kind == 'engine' then rows[f] = { gap = tostring(why), kind = 'engine', by = d.name, tried = tried } end
+                            if kind == 'engine' then pend_of[f] = { gap = tostring(why), kind = 'engine', by = d.name, tried = tried } end
                         end
                     end
+                    if not rows[f] and waiting then progress = progress or #fresh > 0; goto continue end
+                    if not rows[f] and pend_of[f] then rows[f] = pend_of[f] end
                     if not rows[f] then
                         local l = {}
                         for n, w in pairs(tried) do l[#l + 1] = n .. ': ' .. w end
@@ -84,13 +90,14 @@ function M.derive(tree, opts)
                     end
                     order[#order + 1] = f
                     progress = true
-                elseif not waiting then
+                elseif not waiting and #ready == 0 then
                     local l = vim.tbl_keys(blockers); table.sort(l)
                     rows[f] = { gap = 'needs ' .. table.concat(l, ', '), kind = 'blocked', tried = {} }
                     order[#order + 1] = f
                     progress = true
                 end
             end
+            ::continue::
         end
     end
     local derived = 0
@@ -125,6 +132,24 @@ function M.files(got, ext)
     local out = {}
     for _, d in ipairs(dirs) do vim.list_extend(out, vim.fn.globpath(d, '*.' .. ext, false, true)) end
     return out
+end
+
+--- COMPILE AND RUN a small C program as `unit` is compiled (its -D / -U / -I / -include, its directory on the path, in
+--- the directory its build runs in) -> stdout | nil, why
+function M.run_c(text, unit)
+    local tmp = vim.fn.tempname()
+    vim.fn.mkdir(tmp, 'p')
+    local c = tmp .. '/probe.c'
+    local fd = assert(io.open(c, 'w')); fd:write(text); fd:close()
+    local cmd = { 'gcc', '-w', '-o', tmp .. '/probe' }
+    vim.list_extend(cmd, unit.flags or {})
+    vim.list_extend(cmd, { '-I' .. vim.fn.fnamemodify(unit.file, ':h'), c, '-lm' })
+    local r = vim.system(cmd, { text = true, cwd = unit.cwd }):wait()
+    if r.code ~= 0 then vim.fn.delete(tmp, 'rf'); return nil, 'the probe does not compile: ' .. (r.stderr or ''):sub(1, 400) end
+    local out = vim.system({ tmp .. '/probe' }, { text = true }):wait()
+    vim.fn.delete(tmp, 'rf')
+    if out.code ~= 0 then return nil, 'the probe exits ' .. out.code end
+    return out.stdout
 end
 
 --- the first file among `files` whose text matches `pat` -> path, text, the capture

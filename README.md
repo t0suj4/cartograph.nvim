@@ -3569,6 +3569,10 @@ nvim --headless -u NONE -l tools/csig.lua ~/.cache/nvim/cartograph/packmap/<rev>
 nvim --headless -u NONE -l tools/cpath.lua ~/.cache/nvim/cartograph/packmap/<rev>/src
 #   33 s over 125 functions, loops as fixpoints over each body's graph (none unrolled, none dropped); leaf 1's checker
 #   table reproduced (5 rows finer); 90 positions leaf 1 could not read, all confirmed by the running LuaJIT.
+# ... the same interpreter over ANOTHER runtime: erts' BIFs, every fact derived from a configured OTP tree (what the
+# tree gives and lacks: `toolbelt.lua run runtime-facts - src=<dir>`), joined with its -spec, witnessed by erl:
+nvim --headless -u NONE -l tools/erlbif.lua ~/.cache/nvim/cartograph/otp/<release>/src/erts/emulator
+#   the pilot, 6 BIFs: -spec 8 of 8 positions agree, 14 witness probes confirm, 0 contradict.
 # ... or C that works on STRUCTS and UNIONS through pointers (EXACT HEAP mode: a byte heap at the compiler's own
 # layout). LuaJIT's number scanner, from packmap's tree, replaces the pack's hand-written tonumber:
 nvim --headless -u NONE -l tools/cjs.lua strscan <BUILT luajit src dir> <out.js>

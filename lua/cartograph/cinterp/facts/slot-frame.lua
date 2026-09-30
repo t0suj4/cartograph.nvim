@@ -6,6 +6,7 @@ return {
     summary = 'the slot type: what the thread\'s top field points to',
     derive = function (_, got)
         local fr, td = got.frame, got.units.typedefs
+        if not fr.top then return nil, 'the frame has no top field' end
         local tags = { [fr.thread] = true }
         local t = td[fr.thread]
         if t then local s = t:match('struct%s+([%w_]+)'); if s then tags[s] = true end end
