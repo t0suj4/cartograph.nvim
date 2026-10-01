@@ -1,8 +1,11 @@
 // helmprov — render a chart through HELM'S OWN ENGINE with the provenance-recording copy of text/template (cartograph
 // CART-0870) and print one JSON document: every rendered file's text, the spans that attribute each output byte range
-// to the template node (file:line:col) that wrote it, and every .Values chain evaluated with its node.
+// to the template node (file:line:col) that wrote it, and every .Values chain evaluated with its node. -branches
+// (CART-0871) adds the arms the values did NOT take: a second render executes them (output discarded) and contributes
+// only what the first cannot see — their reads (untaken, with the guard), every control node's taken arm, and each
+// untaken arm's rendered text (a hole when it fails: its error and node). The files and spans are always the first, unexplored render's.
 //
-//	helmprov [-release NAME] [-namespace NS] [-f values.yaml]... [-set k=v]... <chart dir>
+//	helmprov [-release NAME] [-namespace NS] [-f values.yaml]... [-set k=v]... [-branches] <chart dir>
 package main
 
 import (
@@ -34,12 +37,13 @@ type fileOut struct {
 func main() {
 	release := flag.String("release", "release", "release name")
 	ns := flag.String("namespace", "default", "namespace")
+	branches := flag.Bool("branches", false, "also execute the untaken arms (reads, arms, holes)")
 	var files, sets multi
 	flag.Var(&files, "f", "values file (repeatable)")
 	flag.Var(&sets, "set", "k=v override (repeatable)")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: helmprov [-release N] [-namespace NS] [-f values.yaml]... [-set k=v]... <chart dir>")
+		fmt.Fprintln(os.Stderr, "usage: helmprov [-release N] [-namespace NS] [-f values.yaml]... [-set k=v]... [-branches] <chart dir>")
 		os.Exit(2)
 	}
 	fail := func(what string, err error) { fmt.Fprintf(os.Stderr, "helmprov: %s: %v\n", what, err); os.Exit(1) }
@@ -64,9 +68,33 @@ func main() {
 	res := struct {
 		Files map[string]fileOut `json:"files"`
 		Reads []template.Read    `json:"reads"`
+		Arms  []template.Arm     `json:"arms,omitempty"`
+		Explored []template.Explored `json:"explored,omitempty"`
 	}{Files: map[string]fileOut{}, Reads: template.Rec.Reads}
+	first := template.Rec
+	if *branches {
+		// the explored render: from it only what lies in untaken arms, plus the arms and holes
+		rv2, err := util.ToRenderValues(ch, vals, opts, common.DefaultCapabilities)
+		if err != nil {
+			fail("render values", err)
+		}
+		template.Rec = template.NewRecorder()
+		template.Rec.Branches = true
+		if _, err := engine.Render(ch, rv2); err != nil {
+			fail("explored render", err)
+		}
+		for _, r := range template.Rec.Reads {
+			if r.Untaken {
+				res.Reads = append(res.Reads, r)
+			}
+		}
+		res.Arms, res.Explored = template.Rec.Arms, template.Rec.Explored
+		if res.Arms == nil {
+			res.Arms = []template.Arm{}
+		}
+	}
 	for name, text := range out {
-		f := template.Rec.Files[name]
+		f := first.Files[name]
 		var spans []*template.Span
 		if f != nil {
 			spans = f.Spans

@@ -9,24 +9,40 @@ local M = {}
 local REPO = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h:h')
 local SRC = REPO .. '/tools/helmprov'
 
---- the helmprov binary, built (offline) when missing or older than its sources -> path | nil, why
+--- the helmprov binary, built (offline) when missing or built from other sources -> path | nil, why. Freshness is a
+--- CONTENT hash of tools/helmprov stamped beside the binary, never mtimes: a restore that keeps a file's old mtime
+--- (a mutation run's) would leave a binary built from the mutated source looking newer than its sources.
 function M.binary()
     local out = vim.fn.stdpath('cache') .. '/cartograph/helmprov/helmprov'
-    local newest = 0
-    for _, f in ipairs(vim.fn.globpath(SRC, '**/*', false, true)) do
-        if vim.fn.isdirectory(f) == 0 then newest = math.max(newest, vim.fn.getftime(f)) end
+    local parts = {}
+    local files = vim.fn.globpath(SRC, '**/*', false, true)
+    table.sort(files)
+    for _, f in ipairs(files) do
+        if vim.fn.isdirectory(f) == 0 then
+            local fd = io.open(f, 'rb')
+            if fd then parts[#parts + 1] = f:sub(#SRC + 2) .. '\0' .. fd:read('a'); fd:close() end
+        end
     end
-    if vim.fn.executable(out) == 1 and vim.fn.getftime(out) >= newest then return out end
+    local hash = vim.fn.sha256(table.concat(parts, '\0'))
+    local stamp = out .. '.src'
+    local fd = io.open(stamp)
+    local built = fd and fd:read('a'); if fd then fd:close() end
+    if vim.fn.executable(out) == 1 and built == hash then return out end
     if vim.fn.executable('go') == 0 then return nil, 'no go toolchain on PATH: helmprov is built from tools/helmprov' end
     local r = vim.system({ 'sh', SRC .. '/build.sh' }, { text = true, env = { OUT = out } }):wait(600000)
     if not r or r.code ~= 0 then
         return nil, 'helmprov did not build (offline: the helm checkout and its modules must be local): ' .. vim.trim(((r and r.stderr) or ''):sub(1, 300))
     end
+    fd = io.open(stamp, 'w')
+    if fd then fd:write(hash); fd:close() end
     return out
 end
 
 --- RENDER with provenance -> { files = { [name] = { content, spans = { { start, end, loc, kind, values } } } },
---- reads = { { path, loc } }, chart } | nil, why. opts: release, namespace, values = { file … }, set = { 'k=v' … }
+--- reads = { { path, loc, untaken?, guard? } }, chart } | nil, why. opts: release, namespace, values = { file … },
+--- set = { 'k=v' … }, branches (CART-0871: the arms the values did NOT take are executed too, in a second render whose
+--- output never reaches `files` — their reads come back `untaken` with the guard that skipped them, plus `arms` (every
+--- control node's execution: loc, kind, pipe, taken, else) and `explored` (each untaken arm's text; `err` = a HOLE))
 function M.render(chart, opts)
     opts = opts or {}
     local bin, why = M.binary()
@@ -35,6 +51,7 @@ function M.render(chart, opts)
     local cmd = { bin, '-release', opts.release or 'release', '-namespace', opts.namespace or 'default' }
     for _, f in ipairs(opts.values or {}) do cmd[#cmd + 1] = '-f'; cmd[#cmd + 1] = f end
     for _, s in ipairs(opts.set or {}) do cmd[#cmd + 1] = '-set'; cmd[#cmd + 1] = s end
+    if opts.branches then cmd[#cmd + 1] = '-branches' end
     cmd[#cmd + 1] = chart
     local r = vim.system(cmd, { text = true }):wait(opts.timeout or 120000)
     if not r or r.code ~= 0 then return nil, 'helmprov: ' .. vim.trim(((r and r.stderr) or 'did not finish'):gsub('\n.*', '')) end
@@ -52,17 +69,20 @@ function M.loc(l)
 end
 
 --- the USE SITES of a values path: every read of it, of a descendant, or of an ancestor (`toYaml .Values.x` reads all
---- of x) -> { { path, loc, file, line, col } } sorted by location
+--- of x) -> { { path, loc, file, line, col, untaken?, guard? } } sorted by location; a site read in a taken arm anywhere
+--- is taken (a range body runs some iterations through each arm)
 function M.uses(prov, path)
     local out, seen = {}, {}
-    for _, r in ipairs(prov.reads or {}) do
-        local p = r.path
-        if p == path or p:sub(1, #path + 1) == path .. '.' or path:sub(1, #p + 1) == p .. '.' then
-            local key = p .. '\0' .. r.loc
-            if not seen[key] then
-                seen[key] = true
-                local f, line, col = M.loc(r.loc)
-                out[#out + 1] = { path = p, loc = r.loc, file = f, line = line, col = col }
+    for pass = 1, 2 do
+        for _, r in ipairs(prov.reads or {}) do
+            local p = r.path
+            if (pass == 1) == not r.untaken and (p == path or p:sub(1, #path + 1) == path .. '.' or path:sub(1, #p + 1) == p .. '.') then
+                local key = p .. '\0' .. r.loc
+                if not seen[key] then
+                    seen[key] = true
+                    local f, line, col = M.loc(r.loc)
+                    out[#out + 1] = { path = p, loc = r.loc, file = f, line = line, col = col, untaken = r.untaken, guard = r.guard }
+                end
             end
         end
     end
@@ -116,6 +136,40 @@ function M.locate(prov, kind, name, text)
     return nil
 end
 
+--- the chart's CONTROL FLOW as HOLE DOMAINS (CART-0871), from a `branches` render -> { { loc, file, line, col, kind,
+--- pipe, domain, taken = { [arm] = executions }, untaken = { { arm, text, err?, at? } } } } by location. The domain is
+--- the algebra's: an `if` with no else = PRESENCE (an optional block, its guard named), `if`/`else` = ALT, `range` =
+--- REP, `with` = SCOPE. `taken` counts executions in arms the values took; `untaken` holds what the skipped arms render.
+function M.domains(prov)
+    local by, out = {}, {}
+    local DOMAIN = { range = 'rep', with = 'scope' }
+    for _, a in ipairs(prov.arms or {}) do
+        local d = by[a.loc]
+        if not d then
+            local f, line, col = M.loc(a.loc)
+            d = { loc = a.loc, file = f, line = line, col = col, kind = a.kind, pipe = a.pipe, taken = {}, untaken = {},
+                domain = DOMAIN[a.kind] or (a['else'] and 'alt' or 'presence') }
+            by[a.loc] = d
+            out[#out + 1] = d
+        end
+        if not a.untaken then d.taken[a.taken] = (d.taken[a.taken] or 0) + 1 end
+    end
+    for _, x in ipairs(prov.explored or {}) do
+        local d = by[x.guard:match('^(%S+)')]
+        if d then d.untaken[#d.untaken + 1] = { arm = x.guard:match('%((%a+)%)$'), text = x.text, err = x.err, at = x.loc } end
+    end
+    table.sort(out, function (a, b) return a.loc < b.loc end)
+    return out
+end
+
+--- the HOLES of a `branches` render: untaken arms that fail under these values (`{{ if .Values.a }}{{ .Values.a.b }}`
+--- with no a) -> { { guard, loc, err, text } } — not errors: what the chart would need to render that arm
+function M.holes(prov)
+    local out = {}
+    for _, x in ipairs(prov.explored or {}) do if x.err then out[#out + 1] = x end end
+    return out
+end
+
 --- the VALUES PATH of the key at a position of a YAML buffer (`images.tag` on the `tag:` line under `images:`) | nil — the
 --- block mapping pairs enclosing the cursor, outermost first; a list item adds no segment (`.Values` chains do not index)
 function M.path_at(buf, row, col)
@@ -146,15 +200,16 @@ function M.chart_of(file)
     return nil
 end
 
---- the USE SITES of a values path in a chart as quickfix items — rendered (helmprov: every evaluated read, helpers
---- included) when it builds, else the static reads of every template (helmlint: every branch, no helpers' indirection)
---- -> items, source ('rendered' | 'static')
+--- the USE SITES of a values path in a chart as quickfix items — rendered over ALL BRANCHES (helmprov: every read the
+--- executor evaluates, helpers included, an untaken arm's read marked with its guard) when it builds, else the static
+--- reads of every template (helmlint: every branch, no helpers' indirection) -> items, source ('rendered' | 'static')
 function M.use_items(chart, path)
     local items = {}
-    local prov = M.render(chart)
+    local prov = M.render(chart, { branches = true })
     if prov then
         for _, u in ipairs(M.uses(prov, path)) do
-            items[#items + 1] = { filename = chart .. '/' .. u.file, lnum = u.line, col = u.col + 1, text = 'reads .Values.' .. u.path }
+            items[#items + 1] = { filename = chart .. '/' .. u.file, lnum = u.line, col = u.col + 1,
+                text = 'reads .Values.' .. u.path .. (u.untaken and (' (untaken: ' .. u.guard .. ')') or '') }
         end
         return items, 'rendered'
     end

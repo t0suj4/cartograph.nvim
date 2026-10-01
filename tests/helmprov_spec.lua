@@ -130,3 +130,61 @@ test('helmprov: without a render the use sites fall back to the STATIC reads, sa
     eq('static', src)
     eq(1, #items); eq(12, items[1].lnum)
 end)
+
+-- ALL BRANCHES (CART-0871): the values take `none` of the extra arm, skip the sidecar arm (which cannot render without
+-- a sidecar: a hole) and range over an empty list
+local BR = vim.deepcopy(CHART)
+BR['templates/deployment.yaml'] = table.concat({
+    'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: {{ .Release.Name }}-shop', 'spec:',
+    '  template:', '    spec:', '      containers:', '      - name: shop', '        image: {{ include "shop.image" . }}',
+    '        ports:', '        - containerPort: {{ .Values.port }}',
+    '{{- if .Values.extra }}', '        args: [--extra={{ .Values.extraArg }}]', '{{- end }}',
+    '  minReadySeconds: {{ len .Values.image }}',
+    '{{- if .Values.sidecar }}', '  paused: {{ .Values.sidecar.paused }}', '{{- end }}',
+    '  # {{ range $t := .Values.tags }}{{ $t.name }}{{ end }}',
+    '  # {{ if .Values.port }}p{{ else }}{{ .Values.fallbackPort }}{{ end }}' }, '\n') .. '\n'
+BR['values.yaml'] = CHART['values.yaml'] .. 'tags: []\n'
+
+test('helmprov: BRANCHES — an untaken arm\'s reads come back marked with the guard that skipped them; the render is unchanged', function ()
+    ready()
+    local root = chart(BR)
+    local p0 = assert(P.render(root, { release = 'r1' }))
+    local p = assert(P.render(root, { release = 'r1', branches = true }))
+    eq(p0.files, p.files, 'files and spans are the unexplored render\'s')
+    eq({}, P.uses(p0, 'extraArg'), 'without branches the skipped arm\'s read is invisible')
+    local u = P.uses(p, 'extraArg')
+    eq(1, #u); eq(14, u[1].line); eq(true, u[1].untaken)
+    ok(u[1].guard:match('^shop/templates/deployment%.yaml:13:%d+ if %.Values%.extra %(then%)$'), u[1].guard)
+    local e = P.uses(p, 'extra')
+    eq(1, #e); eq(nil, e[1].untaken, 'the condition itself is evaluated: a taken read')
+end)
+
+test('helmprov: BRANCHES — control flow as HOLE DOMAINS (presence / rep), each skipped arm\'s text kept, a failing arm a HOLE', function ()
+    ready()
+    local p = assert(P.render(chart(BR), { release = 'r1', branches = true }))
+    local by = {}
+    for _, d in ipairs(P.domains(p)) do by[d.file .. ':' .. d.line] = d end
+    local x = by['templates/deployment.yaml:13']
+    eq('presence', x.domain); eq({ none = 1 }, x.taken)
+    eq(1, #x.untaken); eq('then', x.untaken[1].arm); eq('\n        args: [--extra=]', x.untaken[1].text); eq(nil, x.untaken[1].err)
+    local r = by['templates/deployment.yaml:20']
+    eq('rep', r.domain); eq({ empty = 1 }, r.taken); eq('body', r.untaken[1].arm)
+    eq('', r.untaken[1].text); eq(nil, r.untaken[1].err, 'a field of NO value is Go\'s zero, not an error: the body renders empty')
+    local a = by['templates/deployment.yaml:21']
+    eq('alt', a.domain); eq({ ['then'] = 1 }, a.taken); eq('else', a.untaken[1].arm)
+    eq({ { 'fallbackPort', 21, true } }, vim.tbl_map(function (u) return { u.path, u.line, u.untaken } end, P.uses(p, 'fallbackPort')),
+        'the ELSE the values skipped is explored too')
+    local h = P.holes(p)
+    eq(1, #h, 'the sidecar arm: a field of a nil INSIDE an interface fails')
+    ok(h[1].guard:match(':17:%d+ if %.Values%.sidecar %(then%)$'), h[1].guard)
+    ok(h[1].loc:match('templates/deployment%.yaml:18:'), h[1].loc); ok(h[1].err:match('nil pointer'), h[1].err)
+    eq('\n  paused: ', h[1].text, 'the hole keeps the text up to the failure')
+end)
+
+test('helmprov: a site read in a taken arm ANYWHERE is taken (a range body takes and skips the same arm across iterations)', function ()
+    local prov = { reads = {
+        { path = 'a', loc = 'c/templates/t.yaml:3:4', untaken = true, guard = 'c/templates/t.yaml:2:6 if .on (then)' },
+        { path = 'a', loc = 'c/templates/t.yaml:3:4' },
+        { path = 'a', loc = 'c/templates/t.yaml:5:4', untaken = true, guard = 'g' } } }
+    eq({ { 3, nil }, { 5, true } }, vim.tbl_map(function (u) return { u.line, u.untaken } end, P.uses(prov, 'a')))
+end)

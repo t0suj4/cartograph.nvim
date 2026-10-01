@@ -331,20 +331,38 @@ func (s *state) walk(dot reflect.Value, node parse.Node) {
 // walkIfOrWith walks an 'if' or 'with' node. The two control structures
 // are identical in behavior except that 'with' sets dot.
 func (s *state) walkIfOrWith(typ parse.NodeType, dot reflect.Value, pipe *parse.PipeNode, list, elseList *parse.ListNode) {
+	node := s.node // the if/with node (walk set it; evaluating the pipeline moves it)
 	defer s.pop(s.mark())
 	val := s.evalPipeline(dot, pipe)
 	truth, ok := isTrue(indirectInterface(val))
 	if !ok {
 		s.errorf("if/with can't use %v", val)
 	}
+	kind := "if"
+	if typ == parse.NodeWith {
+		kind = "with"
+	}
 	if truth {
+		s.arm(node, kind, pipe, "then", elseList != nil)
 		if typ == parse.NodeWith {
 			s.walk(val, list)
 		} else {
 			s.walk(dot, list)
 		}
-	} else if elseList != nil {
-		s.walk(dot, elseList)
+		s.explore(node, kind, pipe, "else", dot, elseList, nil)
+	} else {
+		if elseList != nil {
+			s.arm(node, kind, pipe, "else", true)
+			s.walk(dot, elseList)
+		} else {
+			s.arm(node, kind, pipe, "none", false)
+		}
+		// PROVENANCE (CART-0871): the then-arm the values skipped; a `with` body sees the (false) value it tested
+		if typ == parse.NodeWith {
+			s.explore(node, kind, pipe, "then", val, list, nil)
+		} else {
+			s.explore(node, kind, pipe, "then", dot, list, nil)
+		}
 	}
 }
 
@@ -383,7 +401,27 @@ func isTrue(val reflect.Value) (truth, ok bool) {
 	return truth, true
 }
 
+// walkRange runs the range, then (exploring, CART-0871) the arm it did not take: the else after any iteration, the
+// body over an empty collection (its variables bound to no value: what they reach is a hole).
 func (s *state) walkRange(dot reflect.Value, r *parse.RangeNode) {
+	iterated := s.walkRange1(dot, r)
+	if Rec == nil || !Rec.Branches {
+		return
+	}
+	if iterated {
+		s.arm(r, "range", r.Pipe, "body", r.ElseList != nil)
+		s.explore(r, "range", r.Pipe, "else", dot, r.ElseList, nil)
+		return
+	}
+	s.arm(r, "range", r.Pipe, "empty", r.ElseList != nil)
+	s.explore(r, "range", r.Pipe, "body", reflect.Value{}, r.List, func() {
+		for _, d := range r.Pipe.Decl {
+			s.push(d.Ident[0], reflect.Value{})
+		}
+	})
+}
+
+func (s *state) walkRange1(dot reflect.Value, r *parse.RangeNode) (iterated bool) {
 	s.at(r)
 	defer func() {
 		if r := recover(); r != nil && r != walkBreak {
@@ -395,6 +433,7 @@ func (s *state) walkRange(dot reflect.Value, r *parse.RangeNode) {
 	// mark top of stack before any variables in the body are pushed.
 	mark := s.mark()
 	oneIteration := func(index, elem reflect.Value) {
+		iterated = true
 		if len(r.Pipe.Decl) > 0 {
 			if r.Pipe.IsAssign {
 				// With two variables, index comes first.
@@ -527,6 +566,7 @@ func (s *state) walkRange(dot reflect.Value, r *parse.RangeNode) {
 	if r.ElseList != nil {
 		s.walk(dot, r.ElseList)
 	}
+	return
 }
 
 func (s *state) walkTemplate(dot reflect.Value, t *parse.TemplateNode) {
