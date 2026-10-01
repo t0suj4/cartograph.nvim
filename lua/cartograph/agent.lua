@@ -441,7 +441,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     'ports',
     -- INFRASTRUCTURE (CART-1048, CART-1297): Kubernetes manifests' soft edges, a Helm chart rendered and linted, a plain
     -- chart's stages — READS (a render goes to a temp directory)
-    'k8s_findings', 'helm_chart', 'helm_stages',
+    'k8s_findings', 'helm_chart', 'helm_stages', 'kustomize_overlays',
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
@@ -3383,6 +3383,24 @@ local function v_helm_chart(store, args)
     if #rows > 0 then return { result = rows, notes = notes } end
     return { result = {}, absence = 'absent', absence_why = { premise = 'clean', why = 'rendered and linted: no finding', evidence = { files = s.helm.files } }, notes = notes }
 end
+local function v_kustomize_overlays(store)
+    local root = store.data and store.data.root or vim.fn.getcwd()
+    local KZ = require 'cartograph.kustomize'
+    if not KZ.binary() then return refuse('no-kustomize', 'no kubectl or kustomize on PATH: an overlay is read through its builder', 'install kubectl (pkgit -i kubectl)') end
+    local files = {}
+    local r = vim.system({ 'git', '-C', root, 'ls-files', '-z' }, { text = true }):wait()
+    if r.code == 0 then for f in (r.stdout or ''):gmatch('([^%z]+)') do files[#files + 1] = f end end
+    local s = KZ.attach(root, files)
+    if s.kustomize.overlays == 0 then
+        return { result = {}, absence = 'absent', absence_why = { premise = 'no-overlays', why = 'no kustomization in this repo declares a Kustomization (components alone are not releases)', evidence = {} } }
+    end
+    local rows = k8s_rows(s, {})
+    local notes = k8s_notes(s)
+    for _, x in ipairs(s.kustomize.refused) do notes[#notes + 1] = { kind = 'refused-overlay', premise = 'kustomize', why = x } end
+    notes[#notes + 1] = { kind = 'rendered', premise = 'kustomize', why = ('%d overlay(s) built by kustomize, %d refused'):format(s.kustomize.rendered, #s.kustomize.refused) }
+    if #rows > 0 then return { result = rows, notes = notes } end
+    return { result = {}, absence = 'absent', absence_why = { premise = 'clean', why = 'every overlay built and read: no finding', evidence = { overlays = s.kustomize.rendered } }, notes = notes }
+end
 local function v_helm_stages(store, args)
     local root = store.data and store.data.root or vim.fn.getcwd()
     local files = {}
@@ -3421,6 +3439,13 @@ M.VERBS = {
             { name = 'set', type = 'array', items = 'string', desc = '--set k=v overrides' },
         },
         run = v_helm_chart,
+    },
+    kustomize_overlays = {
+        summary = 'every kustomize overlay BUILT by kustomize itself and read as a release — components resolved inside the overlays that compose them: dangling references, selectors matching nothing, the deletion frontier',
+        subject = 'graph',
+        tier_basis = 'observation', absences = { 'absent', 'refused' },
+        args = {},
+        run = v_kustomize_overlays,
     },
     helm_stages = {
         summary = 'a plain chart deployed per stage by the repo\'s own helm command lines: each stage\'s values chain, must-override placeholders left, no-op overrides, plaintext secret count, and the drift between stages',

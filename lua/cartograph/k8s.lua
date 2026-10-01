@@ -235,7 +235,10 @@ local function from_value(v, d)
         end
     end
 end
-function M.read(src)
+--- `opts.rendered`: the text is a RENDER (helm template, kubectl kustomize) — a `{{` inside it is LITERAL content (an
+--- otel collector's or alertmanager's own template syntax), never an unrendered chart, so nothing is refused for it
+function M.read(src, opts)
+    local rendered = opts and opts.rendered
     local docs, refused, why = {}, 0, {}
     local ok = parse_docs(src)
     if not ok then return docs, 1, { 'yaml parse failed' } end
@@ -244,7 +247,7 @@ function M.read(src)
         local body = chunk:gsub('#[^\n]*', ''):gsub('%-%-%-', '')
         if body:match('%S') then
             local d = { ports = {}, env = {}, source = chunk:match('#%s*Source:%s*([^\n%s]+)') }
-            if chunk:find('{{', 1, true) then
+            if not rendered and chunk:find('{{', 1, true) then
                 -- a helm/kustomize template: the values are not here
                 refused = refused + 1
                 if #why < 6 then why[#why + 1] = 'templated ({{ }})' end
@@ -348,7 +351,7 @@ function M.attach(data, opts)
         local src = fd and fd:read('a')
         if fd then fd:close() end
         if src then
-            local docs, refused, why = M.read(src)
+            local docs, refused, why = M.read(src, { rendered = opts and opts.rendered })
             stats.refused = stats.refused + refused
             for _, w in ipairs(why) do
                 if #stats.refusals < 10 then

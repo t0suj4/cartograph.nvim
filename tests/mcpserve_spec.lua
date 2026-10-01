@@ -358,6 +358,8 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         k8s_findings = {},
         helm_chart = { args = { chart = 'no-such-chart' }, expect = 'refusal' },
         helm_stages = {},
+        -- no kustomization in this fixture: an ABSENCE — or, on a host without kubectl, the named refusal
+        kustomize_overlays = { args = {}, expect = require('cartograph.kustomize').binary() and 'ok' or 'refusal' },
         -- naming no container and no payload: a refusal reachable without
         -- touching a byte, and the one this verb gives most often in the wild —
         -- 70.6% of containers with two or more members share no shape at all
