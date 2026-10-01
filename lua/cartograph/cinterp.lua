@@ -378,6 +378,8 @@ end
 
 --- THE THREAD whose frame is analyzed (a driver hands it as the first argument)
 function M.thread() return { k = 'thread' } end
+--- the ARGUMENT COUNT of an argument-array frame, as an argument: each element's own count (`TAG@count`)
+function M.count() return { k = 'count' } end
 --- an OPAQUE OBJECT a driver hands in (erts' Process *): its fields are VALUES of the path (`p->freason = r`), recorded at
 --- every return and handed back from a callee — never read from memory. `init` = { [field] = value } at the run it is
 --- handed to (M.UNSET: no path has written it yet); an ABSENT field is UNKNOWN.
@@ -400,7 +402,7 @@ end
 --- the analyzer over a tree (see M.context)
 function M.analyzer(ctx)
     SLOT_BYTES = ctx.layout and ctx.layout.size or nil -- (a slot's size in bytes, for byte views: the compiler's)
-    local A = { memo = {}, active = {}, steps = 0, budget = ctx.budget or 400000,
+    local A = { memo = {}, active = {}, toobig = {}, self = {}, cstack = {}, steps = 0, budget = ctx.budget or 400000,
     }
     local layout, reps = ctx.layout, ctx.reps
     local memory = ctx.memory or {}
@@ -527,19 +529,23 @@ function M.analyzer(ctx)
     -- unknown after it
     local function call(name, args, st, cx)
         if ctx.noret[name] then for t in pairs(st.fset) do cx.rej[t] = true end; st.fset = {}; return nil end
+        -- (a THROWER — every return of it the result sentinel, directly or through another thrower — IS the sentinel:
+        -- its body, which builds an error object, is never walked)
+        if ctx.throwers and ctx.throwers[name] ~= nil then return ctx.throwers[name] or nil end
         local d = (ctx.unitdefs[st.unit] or {})[name] or ctx.defs[name]
         local bi = ctx.builtins[name]
         if not d and bi then
             local k = ((type(bi) == 'table' and bi.js) or bi):match('^%$(%d)$')
             if k then return args[tonumber(k)] end
         end
-        if not d then
+        local function unknown_call()
             for i = 1, args.n do
                 local a = args[i]
                 if a and a.k == 'slot' then if a.i == st.fi then st.fwrite = true else st.slots[a.i] = '?' end end
             end
             return nil
         end
+        if not d or A.toobig[d.id] then return unknown_call() end
         -- a STACK-FREE callee (its closure never reads L->top / L->base) neither sees nor moves the stack: it is
         -- left out of the key, and the caller's stack passes through (summaries shared across argument counts)
         local sfree = A.stackfree(d)
@@ -570,8 +576,15 @@ function M.analyzer(ctx)
                 for t in pairs(fset) do sum.top[t] = at(ltop, t) or false; sum.base[t] = at(lbase, t) or false end
             else
                 A.active[key] = true
+                -- (each callee's OWN steps — its callees' left out — are kept in A.self: a run over budget names the
+                -- callee that spent them, and a driver may make it an UNKNOWN CALL (A.toobig) and run again)
+                local s0 = A.steps
+                A.cstack[#A.cstack + 1] = 0
                 -- (the stack handed on: false = out of reach, true = unknown)
                 sum = A.run(d, args, st.slots, st.fi, fset, st.fwrite, reach and (ltop or true), reach and (lbase or true))
+                local spent, children = A.steps - s0, table.remove(A.cstack)
+                A.self[d.id] = (A.self[d.id] or 0) + spent - children
+                if #A.cstack > 0 then A.cstack[#A.cstack] = A.cstack[#A.cstack] + spent end
                 A.active[key] = nil
                 if not sum.over then A.memo[key] = sum end
             end
@@ -1026,6 +1039,8 @@ function M.analyzer(ctx)
                 for f, val in pairs(v.init) do st.env['\0obj:' .. v.id .. '.' .. f] = val end
                 v = { k = 'obj', id = v.id }
             end
+            -- (the ARGUMENT COUNT of an argument-array frame is the element's own: `TAG@count`)
+            if v and v.k == 'count' then v = vmap(st.fset, function (e) local _, c = elem(e); return int(I64(c), 32) end) end
             if p.type and p.type.k == 'i' then v = lift1(function (x) return x and x.k == 'i' and int(x.v, p.type.w, p.type.u) or x end, v, st) end
             -- (a parameter holds what its caller handed it: THE thread only when handed it — a finalizer runs on another)
             st.env[p.name] = v
@@ -1209,6 +1224,16 @@ function M.analyzer(ctx)
         if cx.over then for tg in pairs(fset) do sum.ret[tg] = true; sum.rej[tg] = true end end
         return sum
     end
+    --- the value of ONE expression's text (a constant of the tree: a padding value, a sentinel), in this context's
+    --- types and enums -> value | nil
+    function A.expr(text)
+        local u = M.units({ { name = '\0expr', text = 'void __cart_expr(void) { return ' .. text .. '; }' } })
+        local d = u.defs.__cart_expr
+        if not d then return nil end
+        local s = A.run(d, { n = 0 }, {}, 1, { ['X@0'] = true }, false, true, true)
+        local r = s.returns and s.returns[1]
+        return r and at(r.v, 'X@0') or nil
+    end
     return A
 end
 
@@ -1288,12 +1313,13 @@ function M.units(sources)
                         local dn, isptr = pd:field('declarator')[1], false
                         while dn and (dn:type() == 'pointer_declarator' or dn:type() == 'abstract_pointer_declarator') do isptr = true; dn = dn:field('declarator')[1] end
                         local pname = dn and dn:type() == 'identifier' and tx(dn, s.text) or ('$' .. (#params + 1))
-                        params[#params + 1] = { name = pname, type = isptr and { k = 'p' } or M.ctype(pty, ctx.typedefs), pointee = isptr and pty:match('([%w_]+)%s*$') or nil }
+                        params[#params + 1] = { name = pname, type = isptr and { k = 'p' } or M.ctype(pty, ctx.typedefs), pointee = isptr and pty:match('([%w_]+)%s*$') or nil,
+                            text = (not isptr) and pty:match('([%w_]+)%s*$') or nil }
                     end
                 end
                 local rty = tx(f:field('type')[1], s.text)
                 local d = { id = s.name .. ':' .. tostring(name), name = name, src = s.text, unit = s.name, node = f, params = params,
-                    void = not ptrret and vim.trim(rty) == 'void' }
+                    void = not ptrret and vim.trim(rty) == 'void', ret = (not ptrret) and rty:match('([%w_]+)%s*$') or nil }
                 if name then ud[name] = ud[name] or d; ctx.defs[name] = ctx.defs[name] or d end
             end
         end
