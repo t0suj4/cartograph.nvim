@@ -59,3 +59,18 @@ test('helm: what cannot be rendered is REFUSED BY NAME — not a chart; an unven
     r, why = H.render(chart(bad))
     eq(nil, r); ok(why:find('helm template failed', 1, true), why)
 end)
+
+test('helm: the MCP verb `helm_chart` answers through agent.answer — findings as rows, the render and the soft edges as notes', function ()
+    if not ready() then skip 'no helm binary (or no yaml parser)' end
+    local agent = require 'cartograph.agent'
+    local d, status = agent.answer(require 'cartograph.store', 'helm_chart', { chart = chart(CHART), release = 'r3' })
+    eq('ok', status)
+    local found = {}
+    for _, row in ipairs(d.result) do found[row.finding] = (found[row.finding] or 0) + 1 end
+    eq(1, found['dangling-reference'], 'the Secret the chart never ships')
+    local kinds = {}
+    for _, n in ipairs(d.notes or {}) do kinds[n.kind] = true end
+    ok(kinds.rendered and kinds['soft-edges'], 'the render and the soft-edge counts ride as notes')
+    local _, st2 = agent.answer(require 'cartograph.store', 'helm_chart', { chart = vim.fn.tempname() })
+    eq('refusal', st2, 'a path that is no chart is refused by name')
+end)

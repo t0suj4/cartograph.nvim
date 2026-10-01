@@ -353,6 +353,11 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- the federation wire: this fixture's graph minted (or had no profile), so it serves NO ports — an absence
         -- that names the host flag that would change it
         ports = {},
+        -- INFRASTRUCTURE (CART-1048, CART-1297): this fixture holds no manifest and no helm command line — two
+        -- ABSENCES naming their premise — and a chart path that is no chart is a REFUSAL with or without a helm binary
+        k8s_findings = {},
+        helm_chart = { args = { chart = 'no-such-chart' }, expect = 'refusal' },
+        helm_stages = {},
         -- naming no container and no payload: a refusal reachable without
         -- touching a byte, and the one this verb gives most often in the wild —
         -- 70.6% of containers with two or more members share no shape at all

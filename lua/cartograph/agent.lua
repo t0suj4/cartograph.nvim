@@ -439,6 +439,9 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     'portability_targets', 'portability_move', 'portability_move_calls',
     -- FEDERATION (CART-1160 step 9): this graph's PORTS, for a client that mounts this host as a band — a READ
     'ports',
+    -- INFRASTRUCTURE (CART-1048, CART-1297): Kubernetes manifests' soft edges, a Helm chart rendered and linted, a plain
+    -- chart's stages — READS (a render goes to a temp directory)
+    'k8s_findings', 'helm_chart', 'helm_stages',
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
@@ -3326,7 +3329,105 @@ local ADDRESS = {
     { name = 'line', type = 'integer', desc = 'or address by position: 1-based line inside a function' },
 }
 
+-- ── KUBERNETES AND HELM (CART-1048, CART-1297): the k8s post-pass's findings, a chart rendered by Helm itself with its
+-- silent-success lints, and a plain chart's stages. Nothing is written: a render goes to a temp directory.
+local function k8s_rows(s, rows)
+    for _, d in ipairs(s.soft and s.soft.dangling or {}) do rows[#rows + 1] = { finding = 'dangling-reference', message = d } end
+    for _, d in ipairs(s.soft and s.soft.empty or {}) do rows[#rows + 1] = { finding = 'selector-matches-nothing', message = d } end
+    for _, d in ipairs(s.dangling or {}) do rows[#rows + 1] = { finding = 'one-sided-peer', message = d } end
+    return rows
+end
+local function k8s_notes(s)
+    local notes = {}
+    if s.soft then
+        notes[#notes + 1] = { kind = 'soft-edges', premise = 'derived-api', why = ('%d resolved, %d selector edges, %d cluster-provided, %d optional, %d implicit'):format(
+            s.soft.resolved, s.soft.selects, s.soft.cluster, s.soft.optional, s.soft.implicit), evidence = { table = nn(require('cartograph.k8s')._api and require('cartograph.k8s')._api.stamp) } }
+    end
+    for _, r in ipairs(s.refusals or {}) do notes[#notes + 1] = { kind = 'refused-document', premise = 'k8s-read', why = r } end
+    if #(s.chart_roots or {}) > 0 then notes[#notes + 1] = { kind = 'chart-root', premise = 'templated', why = 'chart roots ' .. table.concat(s.chart_roots, ', ') .. ': read them rendered with helm_chart' } end
+    return notes
+end
+local function v_k8s_findings(store)
+    local s = store.data and store.data.k8s
+    if not s or (s.files or 0) == 0 then
+        return { result = {}, absence = 'absent', absence_why = { premise = 'no-manifests',
+            why = s and ('no Kubernetes manifest read (%d document(s) refused)'):format(s.refused or 0) or 'the k8s post-pass found no manifest in this graph',
+            evidence = { refused = nn(s and s.refused) } } }
+    end
+    local rows = k8s_rows(s, {})
+    if #rows > 0 then return { result = rows, notes = k8s_notes(s) } end
+    return { result = {}, absence = 'absent', absence_why = { premise = 'clean', why = ('%d manifest(s), %d document(s): every reference resolved, every selector matched'):format(s.files, s.docs),
+        evidence = { files = s.files, docs = s.docs } }, notes = k8s_notes(s) }
+end
+local function chart_dir(store, rel)
+    local root = store.data and store.data.root or vim.fn.getcwd()
+    local dir = rel:sub(1, 1) == '/' and rel or (root .. '/' .. rel)
+    return dir:gsub('/Chart%.ya?ml$', ''):gsub('/$', '')
+end
+local function v_helm_chart(store, args)
+    local dir = chart_dir(store, args.chart)
+    local H = require 'cartograph.helm'
+    if not H.binary() then return refuse('no-helm', 'no helm binary on PATH: a chart is read through its renderer', 'install helm (pkgit -i helm)') end
+    local s, why = H.attach(dir, { release = args.release, values = args.values, set = args.set })
+    if not s then return refuse('unrenderable', tostring(why), 'vendor the chart dependencies, or pass the values the chart requires') end
+    local rows = k8s_rows(s, {})
+    local L = require 'cartograph.helmlint'
+    local lint = L.lint(dir, { render = true, release = args.release, values = args.values, set = args.set })
+    for _, f in ipairs(lint.findings) do rows[#rows + 1] = { finding = f.lint, file = nn(f.file), line = nn(f.line), message = f.msg } end
+    local notes = k8s_notes(s)
+    for _, f in ipairs(lint.frontier) do notes[#notes + 1] = { kind = 'frontier', premise = 'helmlint', why = f } end
+    notes[#notes + 1] = { kind = 'rendered', premise = 'helm', why = ('%s rendered by helm %s into %d file(s), release %s'):format(dir, tostring(s.helm.version), s.helm.files, s.helm.release) }
+    if #rows > 0 then return { result = rows, notes = notes } end
+    return { result = {}, absence = 'absent', absence_why = { premise = 'clean', why = 'rendered and linted: no finding', evidence = { files = s.helm.files } }, notes = notes }
+end
+local function v_helm_stages(store, args)
+    local root = store.data and store.data.root or vim.fn.getcwd()
+    local files = {}
+    local r = vim.system({ 'git', '-C', root, 'ls-files', '-z' }, { text = true }):wait()
+    if r.code == 0 then for f in (r.stdout or ''):gmatch('([^%z]+)') do if not f:match('%.lua$') and not f:match('%.go$') then files[#files + 1] = f end end end
+    local HS = require 'cartograph.helmstage'
+    local out = HS.run(root, files, { release = args.release })
+    local rows = {}
+    for _, st in ipairs(out.stages) do
+        rows[#rows + 1] = { finding = 'stage', chart = st.chart, stage = st.stage, values = st.values, rendered = st.render ~= nil, refused = nn(st.refused),
+            placeholders = st.eff.placeholders, noops = st.eff.noops, secrets = st.eff.secrets }
+    end
+    for _, d in ipairs(out.drift) do rows[#rows + 1] = { finding = 'stage-drift', message = d } end
+    local notes = {}
+    for _, x in ipairs(out.refusals) do notes[#notes + 1] = { kind = 'refused-command', premise = 'helmstage', why = x } end
+    if #rows > 0 then return { result = rows, notes = notes } end
+    return { result = {}, absence = 'absent', absence_why = { premise = 'no-stage-commands', why = 'no helm template|upgrade|install command line in this repo names a chart and its values', evidence = {} }, notes = notes }
+end
+
 M.VERBS = {
+    k8s_findings = {
+        summary = 'Kubernetes manifests in this graph: soft-edge references that dangle, selectors that match no pod, peers absent from their own release — the edges GC never walks, derived from the API types',
+        subject = 'graph',
+        tier_basis = 'observation', absences = { 'absent' },
+        args = {},
+        run = v_k8s_findings,
+    },
+    helm_chart = {
+        summary = 'a Helm chart RENDERED by Helm itself and read: dangling references, empty selectors, and the silent-success lints on its templates (dangling / orphan values, chomped separators, checksum coverage)',
+        subject = 'query',
+        tier_basis = 'observation', absences = { 'absent', 'refused', 'frontier' },
+        args = {
+            { name = 'chart', type = 'string', required = true, desc = 'the chart directory (or its Chart.yaml), relative to the graph root or absolute' },
+            { name = 'release', type = 'string', desc = 'release name (default "release")' },
+            { name = 'values', type = 'array', items = 'string', desc = 'values files, applied in order (absolute paths)' },
+            { name = 'set', type = 'array', items = 'string', desc = '--set k=v overrides' },
+        },
+        run = v_helm_chart,
+    },
+    helm_stages = {
+        summary = 'a plain chart deployed per stage by the repo\'s own helm command lines: each stage\'s values chain, must-override placeholders left, no-op overrides, plaintext secret count, and the drift between stages',
+        subject = 'graph',
+        tier_basis = 'observation', absences = { 'absent' },
+        args = {
+            { name = 'release', type = 'string', desc = 'release name for the renders (default: the chart directory name)' },
+        },
+        run = v_helm_stages,
+    },
     graph_info = {
         summary = 'this graph: provider, counts, capability per verb, and the frontier (what was NOT looked at)',
         subject = 'graph',
