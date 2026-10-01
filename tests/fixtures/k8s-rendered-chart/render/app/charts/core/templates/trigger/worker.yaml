@@ -1,0 +1,15 @@
+---
+# Source: app/charts/core/templates/trigger/worker.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-trigger-worker
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        image: registry.example.org/app/trigger-worker:1.0.0
+        env:
+          - name: TRIGGER_SERVICE_ADDR
+            value: "app-trigger:9088"

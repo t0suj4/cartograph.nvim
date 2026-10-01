@@ -68,45 +68,118 @@ local function parse_docs(src)
 end
 
 --- Read one manifest's text into a list of documents:
----   { kind, name, app, image, ports = {n}, env = { NAME = value }, sa }
---- ⚠ TEXTUAL, DELIBERATELY, AND BOUNDED TO WHAT A MANIFEST SPELLS FLATLY. The
---- yaml tree is available and is used to REFUSE (a document that does not parse
---- is counted), but the fields wanted here are scalar leaves under known keys,
---- and walking the tree for them buys nothing a keyed line read does not give.
---- What it must not do is guess: a value carrying `{{` is a TEMPLATE and the
---- document is refused whole.
+---   { kind, name, app, image, init_images, ports = {n}, env = { NAME = value }, envfrom = { configmap … },
+---     data = { KEY = value } (a ConfigMap), sa, source (its `# Source:` header), workload (a pod template),
+---     shell_urls, embedded }
+--- ★ AS A VALUE (yamlvalue), NOT A LINE MATCH (design helm-charts/02, 2026-10-01): two regexes missed
+--- `- containerPort: 8080` and a name-first `- name: http / port: 8082` item — a silent `{}` that looks like
+--- "declares no ports" — and the first `image:` anywhere named a Deployment by its INIT container. Walking
+--- the document reads `containers[*].ports[*].containerPort`, `spec.ports[*].port`, `containers[1].image`,
+--- and a commented-out env pair is no declaration. A document yamlvalue cannot read falls back to the
+--- textual reading below, bounded as before. A value carrying `{{` is still a TEMPLATE, refused whole;
+--- a document that is ONLY comments (Helm renders a disabled `if` as `# Source:` alone) is EMPTY, not
+--- refused — counting it inflated the refusal counter this file's honesty rests on.
+local Y = require 'cartograph.yamlvalue'
+local function get(v, ...)
+    for _, k in ipairs({ ... }) do
+        if type(v) ~= 'table' then return nil end
+        if type(k) == 'number' then v = v.a and v.a[k] else v = v.o and v.o[k] end
+    end
+    return v
+end
+local function list(v) return (type(v) == 'table' and v.a) or {} end
+local function str(v) return type(v) == 'string' and v or nil end
+local function textual(chunk, d)
+    d.kind = chunk:match('\nkind:%s*([%w]+)') or chunk:match('^kind:%s*([%w]+)')
+    -- metadata.name is the FIRST `name:` at two-space indent
+    d.name = chunk:match('\nmetadata:\n%s+name:%s*([%w%._%-]+)')
+    d.app = chunk:match('\n%s+app:%s*([%w%._%-]+)')
+    d.image = chunk:match('\n%s+image:%s*([%w%._%-/:]+)')
+    d.sa = chunk:match('\n%s+serviceAccountName:%s*([%w%._%-]+)')
+    for p in chunk:gmatch('\n[%s%-]+containerPort:%s*(%d+)') do d.ports[#d.ports + 1] = tonumber(p) end
+    for p in chunk:gmatch('\n%s+%- port:%s*(%d+)') do d.ports[#d.ports + 1] = tonumber(p) end
+    local pend
+    for line in chunk:gmatch('[^\n]+') do
+        local n = line:match('^%s*%-%s*name:%s*([%w_]+)%s*$')
+        local v = line:match('^%s*value:%s*"?([^"]*)"?%s*$')
+        if n then pend = n
+        elseif v and pend then d.env[pend] = v; pend = nil end
+    end
+    d.workload = d.kind == 'Deployment'
+end
+local function from_value(v, d)
+    d.kind = str(get(v, 'kind'))
+    d.name = str(get(v, 'metadata', 'name'))
+    d.app = str(get(v, 'metadata', 'labels', 'app')) or str(get(v, 'spec', 'template', 'metadata', 'labels', 'app'))
+    -- the POD TEMPLATE, wherever its kind keeps it: every workload kind has one
+    local pod
+    if d.kind == 'Pod' then pod = get(v, 'spec')
+    elseif d.kind == 'CronJob' then pod = get(v, 'spec', 'jobTemplate', 'spec', 'template', 'spec')
+    else pod = get(v, 'spec', 'template', 'spec') end
+    if type(pod) == 'table' and pod.o then
+        d.workload = true
+        d.sa = str(get(pod, 'serviceAccountName'))
+        local function shell(c)
+            for _, key in ipairs({ 'command', 'args' }) do
+                for _, x in ipairs(list(get(c, key))) do
+                    if type(x) == 'string' and x:find('%a[%w+.-]*://') then d.shell_urls = (d.shell_urls or 0) + 1 end
+                end
+            end
+        end
+        d.init_images = {}
+        for _, c in ipairs(list(get(pod, 'initContainers'))) do
+            d.init_images[#d.init_images + 1] = str(get(c, 'image'))
+            shell(c)
+        end
+        for i, c in ipairs(list(get(pod, 'containers'))) do
+            if i == 1 then d.image = str(get(c, 'image')) end
+            for _, p in ipairs(list(get(c, 'ports'))) do
+                local n = tonumber(str(get(p, 'containerPort')) or '')
+                if n then d.ports[#d.ports + 1] = n end
+            end
+            for _, e in ipairs(list(get(c, 'env'))) do
+                local n, val = str(get(e, 'name')), str(get(e, 'value'))
+                if n and val then d.env[n] = val end
+            end
+            for _, ef in ipairs(list(get(c, 'envFrom'))) do
+                local cm = str(get(ef, 'configMapRef', 'name'))
+                if cm then d.envfrom = d.envfrom or {}; d.envfrom[#d.envfrom + 1] = cm end
+            end
+            shell(c)
+        end
+    end
+    if d.kind == 'Service' then
+        for _, p in ipairs(list(get(v, 'spec', 'ports'))) do
+            local n = tonumber(str(get(p, 'port')) or '')
+            if n then d.ports[#d.ports + 1] = n end
+        end
+    end
+    if d.kind == 'ConfigMap' then
+        d.data = {}
+        local data = get(v, 'data')
+        for _, k in ipairs(type(data) == 'table' and data.keys or {}) do
+            local x = str(data.o[k])
+            -- (an EMBEDDED document — `application.yaml: |` — is a frontier: counted, not read)
+            if x and x:find('\n') then d.embedded = (d.embedded or 0) + 1 elseif x then d.data[k] = x end
+        end
+    end
+end
 function M.read(src)
     local docs, refused, why = {}, 0, {}
     local ok = parse_docs(src)
     if not ok then return docs, 1, { 'yaml parse failed' } end
     for chunk in (src .. '\n---\n'):gmatch('(.-)\n%-%-%-%s*\n') do
-        if chunk:match('%S') then
-            local d = { ports = {}, env = {} }
+        -- (only comments and `---`: an EMPTY document, not a refused one)
+        local body = chunk:gsub('#[^\n]*', ''):gsub('%-%-%-', '')
+        if body:match('%S') then
+            local d = { ports = {}, env = {}, source = chunk:match('#%s*Source:%s*([^\n%s]+)') }
             if chunk:find('{{', 1, true) then
                 -- a helm/kustomize template: the values are not here
                 refused = refused + 1
                 if #why < 6 then why[#why + 1] = 'templated ({{ }})' end
             else
-                d.kind = chunk:match('\nkind:%s*([%w]+)') or chunk:match('^kind:%s*([%w]+)')
-                -- metadata.name is the FIRST `name:` at two-space indent
-                d.name = chunk:match('\nmetadata:\n%s+name:%s*([%w%._%-]+)')
-                d.app = chunk:match('\n%s+app:%s*([%w%._%-]+)')
-                d.image = chunk:match('\n%s+image:%s*([%w%._%-/:]+)')
-                d.sa = chunk:match('\n%s+serviceAccountName:%s*([%w%._%-]+)')
-                for p in chunk:gmatch('\n%s+containerPort:%s*(%d+)') do
-                    d.ports[#d.ports + 1] = tonumber(p)
-                end
-                for p in chunk:gmatch('\n%s+%- port:%s*(%d+)') do
-                    d.ports[#d.ports + 1] = tonumber(p)
-                end
-                -- env is a LIST of {name, value} pairs, so the two lines pair up
-                local pend
-                for line in chunk:gmatch('[^\n]+') do
-                    local n = line:match('^%s*%-%s*name:%s*([%w_]+)%s*$')
-                    local v = line:match('^%s*value:%s*"?([^"]*)"?%s*$')
-                    if n then pend = n
-                    elseif v and pend then d.env[pend] = v; pend = nil end
-                end
+                local v = Y.read_one(chunk)
+                if type(v) == 'table' and v.o then from_value(v, d) else textual(chunk, d) end
                 if d.kind then docs[#docs + 1] = d
                 else
                     refused = refused + 1
@@ -176,6 +249,17 @@ function M.attach(data, opts)
     data.nodes = data.nodes or {}
     data.edges = data.edges or {}
     local img2dir = skaffold_map(data.root)
+    -- (the honesty of the INPUT, design helm-charts/02 §1: a chart root behind templated refusals is a chart that can
+    -- be RENDERED; a service declared only by files git does not track is no part of the repo's answer)
+    stats.chart_roots = {}
+    for _, rel in ipairs(files) do
+        if rel:match('^Chart%.ya?ml$') or rel:match('/Chart%.ya?ml$') then stats.chart_roots[#stats.chart_roots + 1] = rel:match('^(.*)/[^/]+$') or '.' end
+    end
+    local tracked
+    do
+        local r = vim.system({ 'git', '-C', data.root, 'ls-files', '-z' }, { text = true }):wait()
+        if r.code == 0 then tracked = {}; for f in (r.stdout or ''):gmatch('([^%z]+)') do tracked[f] = true end end
+    end
 
     -- ★★★ PASS 1, AND THE ROSTER IS KEYED BY DEPLOYMENT VARIANT. A repo routinely
     -- declares the SAME system several times over — microservices-demo carries
@@ -203,14 +287,34 @@ function M.attach(data, opts)
             if #docs > 0 then
                 stats.files = stats.files + 1
                 stats.docs = stats.docs + #docs
-                local variant = rel:match('^(.*)/[^/]+$') or '.'
-                stats.variants[variant] = (stats.variants[variant] or 0) + 1
+                local dirvariant = rel:match('^(.*)/[^/]+$') or '.'
+                local counted = {}
                 data.nodes[#data.nodes + 1] = { id = rel, name = rel,
                     kind = 'module', file = rel, range = R0, order = 0,
                     k8 = 'manifest' }
                 for _, d in ipairs(docs) do
+                    -- ★ THE RELEASE ROOT, WHEN THE DOCUMENT NAMES IT (design helm-charts/02 §3b). A
+                    -- `helm template --output-dir` render puts each service in its OWN directory, so a
+                    -- directory variant split one release eleven ways and every cross-service peer read
+                    -- as dangling. Every rendered document begins `# Source: <chart>/…`, and where the
+                    -- file's path ENDS with that source path the variant is the prefix plus the chart:
+                    -- the release. A document without the header keeps its directory (microservices-demo's
+                    -- alternative deployments stay apart).
+                    local variant = dirvariant
+                    if d.source and #rel >= #d.source and rel:sub(-#d.source) == d.source then
+                        variant = rel:sub(1, #rel - #d.source) .. (d.source:match('^([^/]+)') or '')
+                    end
+                    if not counted[variant] then counted[variant] = true; stats.variants[variant] = (stats.variants[variant] or 0) + 1 end
+                    stats.shell_urls = (stats.shell_urls or 0) + (d.shell_urls or 0)
+                    stats.embedded = (stats.embedded or 0) + (d.embedded or 0)
+                    if d.kind == 'ConfigMap' and d.name and d.data then
+                        stats.configmaps = stats.configmaps or {}
+                        stats.configmaps[variant .. '\31' .. d.name] = d.data
+                    end
                     local key = d.name or d.app
-                    if key and (d.kind == 'Deployment' or d.kind == 'Service') then
+                    -- (every POD-TEMPLATE kind is a workload — StatefulSet, DaemonSet, Job, CronJob — not
+                    -- only Deployment: design helm-charts/02 §2b)
+                    if key and (d.workload or d.kind == 'Service') then
                         local vk = variant .. '\31' .. key
                         local s = stats.services_map[vk]
                         if not s then
@@ -220,6 +324,7 @@ function M.attach(data, opts)
                             stats.services = stats.services + 1
                         end
                         s.files[#s.files + 1] = rel
+                        if tracked and not tracked[rel] then s.untracked = (s.untracked or 0) + 1 end
                         if d.image then
                             -- ⚠ THE BASENAME ON BOTH SIDES. A release bundle
                             -- pins the registry path
@@ -233,15 +338,48 @@ function M.attach(data, opts)
                             s.dir = img2dir[s.image]
                             if not s.dir then stats.unmapped[s.image] = true end
                         end
-                        for _, p in ipairs(d.ports) do s.ports[#s.ports + 1] = p end
-                        for k, v in pairs(d.env) do
-                            -- a declared peer address: `NAME_SERVICE_ADDR: host:port`
-                            local host = k:match('_SERVICE_ADDR$') and v:match('^([%w%._%-]+):')
-                            if host then s.addrs[host] = v end
-                        end
+                        -- (a Deployment and its Service both declare the port: one port, not two)
+                        s.portset = s.portset or {}
+                        for _, p in ipairs(d.ports) do if not s.portset[p] then s.portset[p] = true; s.ports[#s.ports + 1] = p end end
+                        s.env = s.env or {}
+                        for k, v in pairs(d.env) do s.env[k] = v end
+                        for _, cm in ipairs(d.envfrom or {}) do s.envfrom = s.envfrom or {}; s.envfrom[#s.envfrom + 1] = cm end
                     end
                 end
             end
+        end
+    end
+
+    -- pass 1b: the PEERS a workload declares, from its env and the ConfigMaps it takes as env
+    -- (`envFrom`) — design helm-charts/02 §3, tiers 1-2:
+    --   `NAME_SERVICE_ADDR: host:port`   the microservices-demo convention;
+    --   a URL `scheme://host[:port]`     the host, when it is UNDOTTED (a Service name) or an in-cluster
+    --                                    FQDN `<svc>.<ns>.svc[.cluster.local]` (reduced to <svc>);
+    -- a dotted external host is a counted FRONTIER, never dangling (it would flood every real repo); a bind
+    -- address (`0.0.0.0`, digits) or `localhost` is no peer; a scheme-less dotted `host:port` under any
+    -- other key is not read. Embedded documents and shell are counted, not scraped (tiers 3-4).
+    stats.external = stats.external or {}
+    local function peer_host(v)
+        local out = {}
+        for host in v:gmatch('%a[%w+.-]*://([%w%._%-]+)') do
+            local svc = host:match('^([%w_%-]+)%.[%w_%-]+%.svc$') or host:match('^([%w_%-]+)%.[%w_%-]+%.svc%.cluster%.local$')
+            if svc then out[#out + 1] = svc
+            elseif host == 'localhost' or host:match('^[%d%.]+$') then -- (a bind address, no peer)
+            elseif host:find('.', 1, true) then stats.external[host] = true
+            else out[#out + 1] = host end
+        end
+        return out
+    end
+    for _, s in pairs(stats.services_map) do
+        local env = {}
+        for k, v in pairs(s.env or {}) do env[k] = v end
+        for _, cm in ipairs(s.envfrom or {}) do
+            for k, v in pairs((stats.configmaps or {})[s.variant .. '\31' .. cm] or {}) do env[k] = env[k] or v end
+        end
+        for k, v in pairs(env) do
+            local host = k:match('_SERVICE_ADDR$') and v:match('^([%w%._%-]+):')
+            if host then s.addrs[host] = v end
+            for _, h in ipairs(peer_host(v)) do s.addrs[h] = s.addrs[h] or v end
         end
     end
 
@@ -276,6 +414,8 @@ function M.attach(data, opts)
             end
         end
     end
+
+    table.sort(stats.dangling) -- (an artifact field: order is output)
 
     -- ── ★★★ PASS 3: THE EDGE THAT FUSES THE LAYER TO THE CODE. Without it the
     -- deployment is an ISLAND — measured on microservices-demo, the composed
@@ -326,13 +466,38 @@ function M.dir_of(data, service)
     return nil
 end
 
+--- the lines that say what the INPUT was: a renderable chart, untracked declarations, what was counted not read
+local function honesty(s)
+    local l = {}
+    local templated = 0
+    for _, r in ipairs(s.refusals or {}) do if r:find('templated', 1, true) then templated = templated + 1 end end
+    if templated > 0 and #(s.chart_roots or {}) > 0 then
+        l[#l + 1] = ('templated documents under a chart root (%s): render with `helm template --output-dir` to read them')
+            :format(table.concat(s.chart_roots, ', '))
+    end
+    local only, total = {}, 0
+    for _, sv in pairs(s.services_map or {}) do
+        total = total + 1
+        if sv.untracked and sv.untracked == #sv.files then only[#only + 1] = sv.name end
+    end
+    table.sort(only)
+    if #only > 0 then l[#l + 1] = ('%d of %d service(s) declared ONLY by files git does not track: %s'):format(#only, total, table.concat(only, ' ')) end
+    local ext = vim.tbl_keys(s.external or {})
+    table.sort(ext)
+    if #ext > 0 then l[#l + 1] = ('%d external host(s) named by URL (a frontier, not a peer): %s'):format(#ext, table.concat(ext, ' ')) end
+    if (s.shell_urls or 0) > 0 then l[#l + 1] = ('%d URL(s) inside a command/args (shell is not read)'):format(s.shell_urls) end
+    if (s.embedded or 0) > 0 then l[#l + 1] = ('%d embedded document(s) in ConfigMap data (counted, not read)'):format(s.embedded) end
+    if #l == 0 then return '' end
+    return '\n  · ' .. table.concat(l, '\n  · ')
+end
+
 function M.summary(s)
     -- ⚠ A REFUSAL-ONLY RESULT IS STILL A RESULT (CART-1043): with no manifest read but documents
     -- refused, the old `files == 0 -> nil` made the refusal counter silent exactly when the whole
     -- layer was refused (113 of 113 helmfile/values documents on jenkins-infra).
     if s and s.files == 0 and (s.refused or 0) > 0 then
         return ('k8s: 0 manifests read, %d document(s) refused (%s)'):format(s.refused,
-            table.concat(s.refusals or {}, '; '):sub(1, 160))
+            table.concat(s.refusals or {}, '; '):sub(1, 160)) .. honesty(s)
     end
     if not s or s.files == 0 then return nil end
     local unm = {}
@@ -354,7 +519,7 @@ function M.summary(s)
                 :format(s.refused, table.concat(s.refusals, ' ')) or '')
         .. (#s.dangling > 0 and ('\n  ⚠ %d declared peer(s) absent from their own'
             .. ' deployment (one-sided edge, NOT automatically a bug): %s')
-            :format(#s.dangling, table.concat(s.dangling, ' · ')) or '')
+            :format(#s.dangling, table.concat(s.dangling, ' · ')) or '') .. honesty(s)
 end
 
 return M

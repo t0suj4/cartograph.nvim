@@ -1,0 +1,23 @@
+---
+# Source: app/charts/core/templates/gateway/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-gateway
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway
+        image: registry.example.org/app/gateway:1.0.0
+        ports:
+        - containerPort: 8080
+        env:
+          - name: API_URL
+            value: http://app-api:8080/api
+          - name: PROJECT_API_URL
+            value: http://app-project-api:8080/api/project
+          - name: HISTORY_URL
+            value: http://app-history:8080/api/history
+          # - name: LEGACY_URL
+          #   value: http://app-legacy:8080

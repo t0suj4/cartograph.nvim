@@ -1,0 +1,18 @@
+---
+# Source: app/charts/core/templates/tracing/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: app-tracing
+spec:
+  template:
+    spec:
+      containers:
+      - name: tracing
+        image: registry.example.org/app/tracing:1.0.0
+        ports:
+          - name: http
+            containerPort: 8080
+        env:
+          - name: REGISTRY_URL
+            value: http://app-registry:8081

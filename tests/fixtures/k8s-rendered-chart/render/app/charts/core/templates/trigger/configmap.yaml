@@ -1,0 +1,10 @@
+---
+# Source: app/charts/core/templates/trigger/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-trigger-config
+data:
+  REST_API_URL: 'http://app-api:8080/api'
+  REGISTRY_URL: 'http://app-registry:8081'
+  BROKER_BOOTSTRAP: 'broker.example.net:9092'

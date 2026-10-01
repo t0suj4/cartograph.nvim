@@ -1,0 +1,9 @@
+---
+# Source: app/charts/core/templates/trigger/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-trigger
+spec:
+  ports:
+  - port: 9088

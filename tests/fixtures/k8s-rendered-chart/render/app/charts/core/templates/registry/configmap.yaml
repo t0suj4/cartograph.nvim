@@ -1,0 +1,8 @@
+---
+# Source: app/charts/core/templates/registry/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-registry-config
+data:
+  REGISTRY_LISTENERS: "http://0.0.0.0:8081"

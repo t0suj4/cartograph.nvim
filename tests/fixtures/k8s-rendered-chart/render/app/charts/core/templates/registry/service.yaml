@@ -1,0 +1,11 @@
+---
+# Source: app/charts/core/templates/registry/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-registry
+spec:
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081

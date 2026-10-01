@@ -1,0 +1,9 @@
+---
+# Source: app/charts/core/templates/tracing/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-tracing
+spec:
+  ports:
+  - port: 8080

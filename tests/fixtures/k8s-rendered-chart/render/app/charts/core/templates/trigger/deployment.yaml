@@ -1,0 +1,25 @@
+---
+# Source: app/charts/core/templates/trigger/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-trigger
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: wait-for-registry
+        image: registry.example.org/tools/curl:8
+        command: ['sh', '-c', 'until curl -sf http://app-registry:8081/subjects; do sleep 2; done']
+      containers:
+      - name: trigger
+        image: registry.example.org/app/trigger:1.0.0
+        ports:
+          - name: http
+            containerPort: 9088
+        envFrom:
+          - configMapRef:
+              name: app-trigger-config
+        env:
+          - name: REGISTRY_UI_URL
+            value: http://app-registry-ui:8081

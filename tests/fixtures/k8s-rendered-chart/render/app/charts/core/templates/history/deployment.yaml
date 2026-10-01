@@ -1,0 +1,20 @@
+---
+# Source: app/charts/core/templates/history/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-history
+spec:
+  template:
+    spec:
+      containers:
+      - name: history
+        image: registry.example.org/app/history:1.0.0
+        ports:
+          - name: http
+            containerPort: 8080
+        env:
+          - name: REGISTRY_SERVICE_ADDR
+            value: "app-registry:8081"
+          - name: API_URL
+            value: http://app-api.default.svc.cluster.local:8080/api
