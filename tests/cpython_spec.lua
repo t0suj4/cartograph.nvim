@@ -38,6 +38,7 @@ end)
 
 test('compdb-make on a BUILT tree: what-if every source were new — never -B, which remakes a makefile even under -n', function ()
     if vim.fn.executable('make') ~= 1 or vim.fn.executable('gcc') ~= 1 then skip 'no make / gcc' end
+    if vim.system({ 'unshare', '--user', '--map-root-user', '--mount', 'true' }):wait().code ~= 0 then skip 'no unprivileged mount namespace' end
     local dir = vim.fn.tempname()
     vim.fn.mkdir(dir, 'p')
     local function w(name, text) local fd = assert(io.open(dir .. '/' .. name, 'w')); fd:write(text); fd:close() end

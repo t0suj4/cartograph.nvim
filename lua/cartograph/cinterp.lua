@@ -1421,7 +1421,9 @@ function M.units(sources)
                 local named = td and td:named_child_count() == 1 and td:named_child(0)
                 if named and named:type() == 'type_identifier' then
                     local nm = tx(named, s.text)
-                    if not ctx.typenames[nm] and not ctx.typedefs[nm] and not ctx.aggregates[nm] and not INT[nm] then
+                    -- (a RESERVED-looking name — `_Bool`, `__int128`, `_Float128` — is a type the parser may not know:
+                    -- left alone, the conservative side — an unrewritten misparse never loses a function)
+                    if not ctx.typenames[nm] and not ctx.typedefs[nm] and not ctx.aggregates[nm] and not INT[nm] and not nm:match('^__') and not nm:match('^_%u') then
                         local _, _, b0 = c:start()
                         local _, _, b1 = td:end_()
                         local close = s.text:find(')', b1 + 1, true)

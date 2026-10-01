@@ -3574,6 +3574,16 @@ nvim --headless -u NONE -l tools/cpath.lua ~/.cache/nvim/cartograph/packmap/<rev
 nvim --headless -u NONE -l tools/erlbif.lua ~/.cache/nvim/cartograph/otp/<release>/src/erts/emulator
 #   21 BIFs, every term kind the tree's tag families name, struct fields read where the compiler lays them: -spec 22
 #   of 24 positions agree (the 2 named: size/1 is finer than its spec), 268 witness probes confirm, 0 contradict.
+# ... a THIRD and FOURTH runtime from the same template: QuickJS' built-ins (a counted argv padded with undefined, a
+# 16-byte JSValue by value, JS_EXCEPTION and its throwers), joined with TypeScript's lib.es5/es20xx, witnessed by qjs:
+nvim --headless -u NONE -l tools/qjs.lua ~/.cache/nvim/cartograph/quickjs/src --all
+#   quickjs-ng 0.15.1: 93 static functions, 156 positions; TS 56 agree / 74 ts stricter / 2 wider / 8 narrower
+#   (Object.getPrototypeOf & co are declared `any` and reject null/undefined); 629 witness probes, 0 contradicted.
+# ... and CPython's builtins: the representatives REAL objects of a probe linked against the tree's libpython (and the
+# memory they reach), NULL the error, the arity joined with the runtime's own signatures, witnessed by ./python:
+nvim --headless -u NONE -l tools/cpython.lua ~/.cache/nvim/cartograph/cpython/3.12.3/src --all
+#   3.12.3: 40 builtins, 81 positions, 37 with a never type; arity 48 agree / 9 differ (all METH_KEYWORDS) / 24
+#   without a signature; 837 witness probes, 0 contradicted (~8 min, 6 GB).
 # ... or C that works on STRUCTS and UNIONS through pointers (EXACT HEAP mode: a byte heap at the compiler's own
 # layout). LuaJIT's number scanner, from packmap's tree, replaces the pack's hand-written tonumber:
 nvim --headless -u NONE -l tools/cjs.lua strscan <BUILT luajit src dir> <out.js>
