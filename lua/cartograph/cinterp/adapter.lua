@@ -180,4 +180,27 @@ function M.acceptance(A, ctx, d, k, n, args)
     return out, sum.over, { rets = rets, found = found }
 end
 
+--- a position's READING by TYPE (typenames: each representative's type — a variant's joined back already): a type is
+--- 'always' / 'never' / an outcome when EVERY representative of it agrees, else 'content'; ABSENT is the position's
+--- absence, not a type (CART-1257: the reading is the template's, not an adapter's) -> { by = { [type] = status },
+--- accepted (always or content), always, other ('type=outcome'), untyped (every type the same status), absent }
+function M.reading(acc, tn)
+    local by = {}
+    for e, st in pairs(acc) do
+        if e ~= 'ABSENT' then
+            local t = (tn and tn[e]) or e
+            if by[t] == nil then by[t] = st elseif by[t] ~= st then by[t] = 'content' end
+        end
+    end
+    local accepted, always, other, statuses = {}, {}, {}, {}
+    for t, st in pairs(by) do
+        statuses[st] = true
+        if st == 'always' or st == 'content' then accepted[#accepted + 1] = t end
+        if st == 'always' then always[#always + 1] = t end
+        if st ~= 'always' and st ~= 'content' and st ~= 'never' then other[#other + 1] = t .. '=' .. st end
+    end
+    table.sort(accepted); table.sort(always); table.sort(other)
+    return { by = by, accepted = accepted, always = always, other = other, untyped = vim.tbl_count(statuses) == 1, absent = acc.ABSENT }
+end
+
 return M

@@ -168,16 +168,8 @@ end
 --- a position's reading as type() names: accepted (always or content-dependent), always, the absent and nil status,
 --- and whether it is TAG-INDEPENDENT (every first-class tag the same status: an unread or `any` position)
 function M.reading(acc, tn)
-    local a, al, statuses = {}, {}, {}
-    for tag, st in pairs(acc) do
-        if tag ~= 'ABSENT' then
-            statuses[st] = true
-            if st ~= 'never' then a[tn[tag]] = true end
-            if st == 'always' then al[tn[tag]] = true end
-        end
-    end
-    local function l(set) local x = vim.tbl_keys(set); table.sort(x); return x end
-    return { accepted = l(a), always = l(al), absent = acc.ABSENT, nilst = acc.NIL, untyped = vim.tbl_count(statuses) == 1 }
+    -- (the TEMPLATE's reading, by type — cartograph.cinterp.adapter.reading)
+    return AD.reading(acc, tn)
 end
 
 --- the COMPARISON of a path reading with a checker's (leaf 1's) at one position, both as type() names: nil acceptance

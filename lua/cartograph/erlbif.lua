@@ -32,21 +32,9 @@ end
 --- a position's reading by TYPE (ctx.typenames: the most specific guard that holds): a type is 'always' / 'never' /
 --- an outcome when all its representatives agree, else 'content' -> { [type] = status }, accepted types, outcome types
 function M.reading(acc, tn)
-    local by = {}
-    for e, st in pairs(acc) do
-        local t = tn[e] or e
-        if by[t] == nil then by[t] = st elseif by[t] ~= st then by[t] = 'content' end
-    end
-    local accepted, other = {}, {}
-    for t, st in pairs(by) do
-        if st == 'always' or st == 'content' then accepted[#accepted + 1] = t
-        elseif st ~= 'never' then other[#other + 1] = t .. '=' .. st end
-    end
-    table.sort(accepted); table.sort(other)
-    -- (UNTYPED: every type the same — the position decides nothing by type, another argument's check does)
-    local statuses = {}
-    for _, st in pairs(by) do statuses[st] = true end
-    return by, accepted, other, vim.tbl_count(statuses) == 1
+    -- (the TEMPLATE's reading — cartograph.cinterp.adapter.reading — in this adapter's shape)
+    local r = AD.reading(acc, tn)
+    return r.by, r.accepted, r.other, r.untyped
 end
 
 --- READINGS for named BIFs: opts = { src, bifs = { 'module:name/arity', … } } -> { [bif] = { cfn, pos = { [k] = {
