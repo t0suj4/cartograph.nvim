@@ -104,3 +104,54 @@ int digits(unsigned long x) { int n = 0; while ((x)) { (x) >>= 4; ++(n); } retur
 ]])
     eq('i3LL:32s', ret('digits', { CI._int(0x100, 64, true), n = 1 }), '0x100: three hex digits — the loop ends')
 end)
+
+-- (CART-1285..1289, found by CART-1284's Datalog join and arbitrated by the C compiler where values differ)
+test('cinterp: C\'s integer types in ANY specifier order (cpp\'s own `long unsigned int` size_t) — CART-1285', function ()
+    eq({ k = 'i', w = 64, u = true }, CI.ctype('long unsigned int', {}), 'cpp spells size_t this way')
+    eq({ k = 'i', w = 16, u = true }, CI.ctype('short unsigned int', {}))
+    eq({ k = 'i', w = 64, u = false }, CI.ctype('int long', {}))
+    eq({ k = 'i', w = 64, u = true }, CI.ctype('long long unsigned int', {}))
+    eq(nil, CI.ctype('long double', {}), 'not every word is an integer specifier: no type')
+    eq(nil, CI.ctype('signed unsigned', {}), 'contradictory specifiers: no type')
+end)
+
+test('cinterp: integer constants EXACT past 2^53 (no double), C 6.4.4.1 types, a tree-sitter `-1` negated — CART-1286', function ()
+    eq('i-49064778989728563LL:64u', CI.key_of(CI._literal('0xFF51AFD7ED558CCDull')), 'the murmur constant: every bit')
+    eq('i-72057594037927936LL:64u', CI.key_of(CI._literal('0xff00000000000000ULL')))
+    eq('i9007199254740991LL:64u', CI.key_of(CI._literal('0x001fffffffffffffULL')), '2^53-1 was exact before too')
+    eq('i2147483648LL:32u', CI.key_of(CI._literal('0x80000000')), 'a hex constant past INT_MAX is unsigned int')
+    eq('i-1LL:32s', CI.key_of(CI._literal('-1')), 'tree-sitter reads -1 as one literal: the magnitude negated')
+    eq('i-2147483648LL:64s', CI.key_of(CI._literal('-2147483648')), '2147483648 does not fit int: long, then negated')
+end)
+
+test('cinterp: character constants with ESCAPES are values; a plain char is signed — CART-1287', function ()
+    eq('i10LL:32s', CI.key_of(CI._charlit([['\n']])))
+    eq('i0LL:32s', CI.key_of(CI._charlit([['\0']])))
+    eq('i92LL:32s', CI.key_of(CI._charlit([['\\']])))
+    eq('i65LL:32s', CI.key_of(CI._charlit([['\x41']])))
+    eq('i-1LL:32s', CI.key_of(CI._charlit([['\xff']])), 'plain char is signed here')
+    eq('?', CI.key_of(CI._charlit([['ab']])), 'a multi-character constant is not read')
+    if not ready() then skip 'no C parser' end
+    local _, ret = engine([[int nl(int c) { return c == '\n'; }]])
+    eq({ 'i1LL:32s', 'i0LL:32s' }, { ret('nl', { CI._int(10), n = 1 }), ret('nl', { CI._int(32), n = 1 }) }, 'the escape read by eval itself')
+end)
+
+test('cinterp: ?: takes the common type of both arms; return converts to the return type; x++ stays in x\'s type — CART-1288/1289', function ()
+    if not ready() then skip 'no C parser' end
+    local _, ret = engine([[
+typedef unsigned char u8;
+typedef unsigned long u64;
+int up(u8 c) { return (c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c; }
+u64 clamp(u64 r, u64 m) { return r > m ? 0 : r; }
+u8 narrow(int x) { return x; }
+int wrap8(int c) { u8 b = 255; b++; return b; }
+]])
+    eq('i66LL:32s', ret('up', { CI._int(66, 8, true), n = 1 }), 'the arm not taken still types the result: int, not u8')
+    eq('i0LL:64u', ret('clamp', { CI._int(9, 64, true), CI._int(3, 64, true), n = 2 }), 'the literal 0 arm is u64')
+    eq('i44LL:8u', ret('narrow', { CI._int(300), n = 1 }), '300 returned as u8 is 44')
+    eq('i0LL:32s', ret('wrap8', { CI._int(0), n = 1 }), 'u8 255 incremented wraps to 0 in u8')
+    -- (the case only ?: decides — the return conversion cannot mask it: an UNDECIDED condition over two arms equal in
+    -- value and different in type is that value, because both arms convert to the common type first)
+    local _, ret2 = engine([[int same(int b) { return b ? (unsigned char)5 : 5; }]])
+    eq('i5LL:32s', ret2('same', { nil, n = 1 }), 'b unknown: both arms are int 5')
+end)

@@ -171,6 +171,25 @@ function M.ctype(text, typedefs, depth)
     if text == 'double' or text == 'float' then return { k = 'd' } end
     local i = INT[text]
     if i then return { k = 'i', w = i[1], u = i[2] } end
+    -- (C makes specifier ORDER free — C11 6.7.2p2 — so `long unsigned int`, cpp's own size_t, is `unsigned long`: the
+    -- specifier MULTISET is the type, counted here when every word is an integer specifier — CART-1285)
+    if text:find(' ') then
+        local n = { long = 0 }
+        local ok = true
+        for w in text:gmatch('%S+') do
+            if w == 'long' then n.long = n.long + 1
+            elseif w == 'unsigned' or w == 'signed' or w == 'short' or w == 'char' or w == 'int' or w == '_Bool' then n[w] = (n[w] or 0) + 1
+            else ok = false end
+        end
+        if ok and not (n.unsigned and n.signed) and n.long <= 2 then
+            local u = n.unsigned ~= nil
+            if n._Bool then return { k = 'i', w = 8, u = true } end
+            if n.char then return { k = 'i', w = 8, u = u } end
+            if n.short then return { k = 'i', w = 16, u = u } end
+            if n.long > 0 then return { k = 'i', w = 64, u = u } end
+            return { k = 'i', w = 32, u = u }
+        end
+    end
     local td = typedefs[text]
     if td and depth < 12 then return M.ctype(td, typedefs, depth + 1) end
     return nil
@@ -341,15 +360,51 @@ local function literal(t)
     local u = low:find('u') ~= nil
     local long = select(2, low:gsub('l', '')) > 0
     local digits = low:gsub('[ul]+$', '')
-    local v
-    if digits:find('^0x') then v = tonumber(digits:sub(3), 16) elseif digits:find('^0%d') then v = tonumber(digits, 8) else v = tonumber(digits) end
-    if not v then return nil end
+    -- (the value EXACTLY, digit by digit in uint64: a constant >= 2^53 through a double loses bits, and >= 2^63 clamps
+    -- to INT64_MIN — 0xFF51AFD7ED558CCDull — CART-1286)
+    -- (tree-sitter reads `-1` as ONE literal; C has no negative constants: the magnitude is typed, then negated)
+    local neg = digits:sub(1, 1) == '-'
+    if neg then digits = vim.trim(digits:sub(2)) end
+    local base, body = 10, digits
+    if digits:find('^0x') then base, body = 16, digits:sub(3) elseif digits:find('^0b') then base, body = 2, digits:sub(3)
+    elseif digits:find('^0%d') then base, body = 8, digits:sub(2) end
+    if body == '' then return nil end
+    local v = U64(0)
+    for ch in body:gmatch('.') do
+        local dg = tonumber(ch, 16)
+        if not dg or dg >= base then return nil end
+        if v > (U64(-1) - dg) / base then return nil end
+        v = v * base + dg
+    end
     local w = long and 64 or 32
-    if not long and not u and v > 0x7fffffff then if v <= 0xffffffff and digits:find('^0x') then u = true else w = 64 end end
+    if not long and not u and v > 0x7fffffff then if v <= 0xffffffff and base ~= 10 then u = true else w = 64 end end
     if not long and u and v > 0xffffffff then w = 64 end
+    -- (C 6.4.4.1: a 64-bit constant past LONG_MAX is unsigned long — hex/octal by the list, decimal as gcc types it)
+    if w == 64 and v > U64(0x7fffffffffffffffULL) then u = true end
+    if neg then v = U64(0) - v end
     return int(v, w, u)
 end
 M._literal = literal
+
+--- a C character constant -> int value (C 6.4.4.4: a plain char, a simple escape, an octal or hex escape; a plain char is
+--- SIGNED here, so '\xff' is -1) | nil (a prefixed or multi-character constant — CART-1287)
+local ESC = { n = 10, t = 9, r = 13, ['\\'] = 92, ["'"] = 39, ['"'] = 34, a = 7, b = 8, f = 12, v = 11, ['?'] = 63 }
+local function charlit(t)
+    local b = t:match("^'(.*)'$")
+    if not b or b == '' then return nil end
+    local v
+    if b:sub(1, 1) ~= '\\' then if #b == 1 then v = b:byte() end
+    else
+        local r = b:sub(2)
+        if #r == 1 and ESC[r] then v = ESC[r]
+        elseif r:match('^[0-7][0-7]?[0-7]?$') then v = tonumber(r, 8)
+        elseif r:match('^x%x+$') then v = tonumber(r:sub(2), 16) end
+    end
+    if not v or v > 255 then return nil end
+    if v > 127 then v = v - 256 end
+    return int(v)
+end
+M._charlit = charlit
 
 --- C's conversion of a value to a type (nil: not decidable)
 local function convert(ty, a)
@@ -482,6 +537,52 @@ function M.analyzer(ctx)
     local function lift1(fn, a, st)
         if a and a.k == 'vec' then return vmap(st.fset, function (t) return fn(at(a, t)) end) end
         return fn(a)
+    end
+    --- an expression's STATIC integer type, C's own rules (6.3.1.1 promotion, 6.3.1.8 usual arithmetic conversions,
+    --- 6.4.4.1 literals) — { w, u } | nil when not an integer the declarations decide. Values carry their type only
+    --- when KNOWN, so a branch not taken (or an unknown) still has a type here (CART-1288)
+    local function ipromote(T) if T.w < 32 then return { w = 32, u = false } end return T end
+    local function icommon(A, B)
+        A, B = ipromote(A), ipromote(B)
+        if A.w == B.w then return { w = A.w, u = A.u or B.u } end
+        return A.w > B.w and A or B
+    end
+    local function ityp(ty) return ty and ty.k == 'i' and { w = ty.w, u = ty.u } or nil end
+    local function stype(n, st)
+        local t = n:type()
+        local src = st.src
+        if t == 'parenthesized_expression' then local c = kids(n)[1]; return c and stype(c, st)
+        elseif t == 'identifier' then
+            local nm = tx(n, src)
+            if st.types[nm] then return ityp(st.types[nm]) end
+            if ctx.enums[nm] then return { w = 32, u = false } end
+            return nil
+        elseif t == 'number_literal' then local v = literal(tx(n, src)); return v and v.k == 'i' and { w = v.w, u = v.u } or nil
+        elseif t == 'char_literal' then return { w = 32, u = false }
+        elseif t == 'cast_expression' then return ityp(M.ctype(tx(n:field('type')[1], src), ctx.typedefs))
+        elseif t == 'sizeof_expression' then return { w = 64, u = true }
+        elseif t == 'unary_expression' then
+            local op = tx(n:field('operator')[1], src)
+            if op == '!' then return { w = 32, u = false } end
+            local a = stype(n:field('argument')[1], st)
+            return a and ipromote(a)
+        elseif t == 'binary_expression' then
+            local op = tx(n:field('operator')[1], src)
+            if op == '&&' or op == '||' or op == '<' or op == '<=' or op == '>' or op == '>=' or op == '==' or op == '!=' then return { w = 32, u = false } end
+            local a = stype(n:field('left')[1], st)
+            if op == '<<' or op == '>>' then return a and ipromote(a) end
+            local b = stype(n:field('right')[1], st)
+            return a and b and icommon(a, b) or nil
+        elseif t == 'conditional_expression' then
+            local a, b = stype(n:field('consequence')[1], st), stype(n:field('alternative')[1], st)
+            return a and b and icommon(a, b) or nil
+        elseif t == 'assignment_expression' then return stype(n:field('left')[1], st)
+        elseif t == 'call_expression' then
+            local fnn = n:field('function')[1]
+            local d = fnn and fnn:type() == 'identifier' and ctx.defs[tx(fnn, src)]
+            return d and ityp(d.rtype) or nil
+        end
+        return nil
     end
     local eval, exec
     --- does d's call closure (the no-return raisers left out) ever read the stack — L->top / L->base, index2adr? derived
@@ -653,7 +754,7 @@ function M.analyzer(ctx)
         local t = n:type()
         local src = st.src
         if t == 'number_literal' then return literal(tx(n, src))
-        elseif t == 'char_literal' then local c = tx(n, src):match("^'(.)'$"); return c and int(c:byte()) or nil
+        elseif t == 'char_literal' then return charlit(tx(n, src))
         elseif t == 'string_literal' or t == 'concatenated_string' then return { k = 'str' }
         elseif t == 'true' then return int(1) elseif t == 'false' then return int(0)
         elseif t == 'null' then return { k = 'null' }
@@ -763,10 +864,14 @@ function M.analyzer(ctx)
             local r = join(sa, sb)
             if not r then st.fset = {}; return nil end
             st.env, st.slots, st.fset, st.fwrite = r.env, r.slots, r.fset, r.fwrite
+            -- (C 6.5.15p5: both arms convert to their usual-arithmetic-conversion type, whichever one ran)
+            local TA, TB = stype(n:field('consequence')[1], st), stype(n:field('alternative')[1], st)
+            local C = TA and TB and icommon(TA, TB)
+            local function cv(x) if C and x and x.k == 'i' then return int(x.v, C.w, C.u) end return x end
             return vmap(st.fset, function (tg)
                 local ina, inb = sa and sa.fset[tg], sb and sb.fset[tg]
-                if ina and not inb then return at(va, tg) elseif inb and not ina then return at(vb, tg) end
-                local x, y = at(va, tg), at(vb, tg)
+                if ina and not inb then return cv(at(va, tg)) elseif inb and not ina then return cv(at(vb, tg)) end
+                local x, y = cv(at(va, tg)), cv(at(vb, tg))
                 if veq(x, y) then return x end
                 return nil
             end)
@@ -1022,6 +1127,9 @@ function M.analyzer(ctx)
                 local old = st.env[nm]
                 local whole = tx(n, src)
                 local new = lift2(whole:find('%+%+') and '+' or '-', old, int(1), st)
+                -- (C 6.5.2.4: the result is stored back in the operand's own type, as an assignment is — CART-1289)
+                local ty = st.types[nm]
+                if ty and ty.k == 'i' then new = lift1(function (x) return x and x.k == 'i' and int(x.v, ty.w, ty.u) or x end, new, st) end
                 st.env[nm] = new
                 return (whole:sub(1, 2) == '++' or whole:sub(1, 2) == '--') and new or old
             end
@@ -1220,6 +1328,11 @@ function M.analyzer(ctx)
                 local ex = kids(node.ast)[1]
                 local v
                 if ex then v = rv(eval(ex, x, cx), x) end
+                -- (C 6.8.6.4p3: the value is converted to the function's return type — CART-1289)
+                if v ~= nil and d.rtype and d.rtype.k == 'i' then
+                    local ty = d.rtype
+                    v = lift1(function (y) return y and y.k == 'i' and int(y.v, ty.w, ty.u) or y end, v, x)
+                end
                 if not empty(x.fset) then cx.returns[#cx.returns + 1] = { v = v, fset = setof(x.fset), slots = x.slots, fwrite = x.fwrite, env = x.env } end
             end
         end
@@ -1463,6 +1576,7 @@ function M.units(sources)
                 local rty = tx(f:field('type')[1], s.text)
                 local d = { id = s.name .. ':' .. tostring(name), name = name, src = s.text, unit = s.name, node = f, params = params,
                     void = not ptrret and vim.trim(rty) == 'void', ret = (not ptrret) and rty:match('([%w_]+)%s*$') or nil,
+                    rtype = (not ptrret) and M.ctype(rty, ctx.typedefs) or nil,
                     ptrret = ptrret and rty:match('([%w_]+)%s*$') or nil }
                 if name then ud[name] = ud[name] or d; ctx.defs[name] = ctx.defs[name] or d end
             end
