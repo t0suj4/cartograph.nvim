@@ -16,6 +16,7 @@ return {
         local F = require 'cartograph.cinterp.facts'
         if not got.layout.layout.scalar then return nil, 'the slot is not a scalar word' end
         if got.frame.kind ~= 'array' then return nil, 'the frame is not an argument array' end
+        if not got.frame.argmacro then return nil, 'the frame names no argument macro (<P>ARG_1)' end
         local unit
         for _, u in ipairs(got.compdb.units) do if (F.readfile(u.file) or ''):find(got.frame.argmacro .. '1', 1, true) then unit = u; break end end
         if not unit then return nil, 'no unit uses ' .. got.frame.argmacro .. '1' end

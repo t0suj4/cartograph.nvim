@@ -43,7 +43,8 @@ end
 --- interpreter's ctx plus every derived fact the template reads (numbers, firstclass, typenames, result, registrations)
 --- and ctx.facts, the whole table
 function M.context(src, need, who)
-    local T = FT.derive({ src = src })
+    -- (`src` a directory, or a tree { src, scope }: the units a person chose — cartograph.cinterp.facts.scoped)
+    local T = FT.derive(type(src) == 'table' and src or { src = src })
     local got, miss = T.got, {}
     for _, f in ipairs(need) do
         if got[f] == nil then miss[#miss + 1] = f .. ' (' .. tostring(T.rows[f] and T.rows[f].gap) .. ')' end
@@ -132,9 +133,12 @@ function M.elements(ctx, tags, k, n, length)
     local set, slots = {}, {}
     local kind = M.frame_kind(ctx.frame)
     if kind == 'counted' then
-        -- (n: the largest count read; below the position the PAD up to the registered length, else ABSENT)
-        for count = k, n do for _, t in ipairs(tags) do set[t .. '@' .. count] = true end end
-        for count = 0, k - 1 do
+        -- (n: the largest count read; below the position the PAD up to the registered length, else ABSENT — unless
+        -- the length is EXACT (`{ exact = true }`: the call machinery checks the arity, CPython's METH_O): no absence)
+        local exact = type(length) == 'table' and length.exact
+        if type(length) == 'table' then length = length.length end
+        for count = exact and n or k, n do for _, t in ipairs(tags) do set[t .. '@' .. count] = true end end
+        for count = 0, exact and -1 or k - 1 do
             if ctx.padrep and length and k <= length then set[ctx.padrep .. '@' .. count] = true else set['ABSENT@' .. count] = true end
         end
     elseif kind == 'stack' then
@@ -206,10 +210,22 @@ function M.outcomes(ctx, sum, set)
             for e in pairs(r.fset) do
                 local v = CI.at(r.v, e)
                 local o = sv and 'reject' or 'unknown'
-                for _, path in ipairs(fs) do
-                    local a, s = field_at(ctx, v, e, path, 1), sv and sv.f and sv.f[path]
-                    if not (a and a.k == 'i' and s and s.k == 'i') then if o == 'reject' then o = 'unknown' end
-                    elseif a.v ~= s.v then o = 'accept' end
+                if sv and sv.k ~= 'agg' then
+                    -- (a SCALAR sentinel — NULL — is compared WHOLE: the value itself, the focus slot's word; any other
+                    -- known pointer accepts)
+                    local w = v
+                    if w and w.k == 'slotv' and w.i == 1 then w = M.repfield(ctx, CI.elem(e), '') end
+                    local zero = w and ((w.k == 'i' and w.v == 0) or w.k == 'null')
+                    if not w then o = 'unknown'
+                    elseif CI.veq(w, sv) or (sv.k == 'null' and zero) then o = 'reject'
+                    elseif w.k == 'addr' or w.k == 'str' or w.k == 'sym' or w.k == 'slot' or (w.k == 'i' and sv.k == 'null') then o = 'accept'
+                    else o = 'unknown' end
+                else
+                    for _, path in ipairs(fs) do
+                        local a, s = field_at(ctx, v, e, path, 1), sv and sv.f and sv.f[path]
+                        if not (a and a.k == 'i' and s and s.k == 'i') then if o == 'reject' then o = 'unknown' end
+                        elseif a.v ~= s.v then o = 'accept' end
+                    end
                 end
                 if seen[e] then seen[e][o] = true end
             end

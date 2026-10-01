@@ -6,6 +6,8 @@ return {
     derive = function (_, got)
         local fr = got.frame
         if fr.kind ~= 'array' then return nil, 'the frame is not an argument array' end
+        -- (a frame from a FUNCTION TYPE names its element itself: `PyObject *const *args` holds `PyObject *`)
+        if fr.slot then return { type = fr.slot } end
         for _, d in pairs(got.units.defs) do
             for _, p in ipairs(d.params) do if p.name == fr.array and p.pointee then return { type = p.pointee } end end
         end

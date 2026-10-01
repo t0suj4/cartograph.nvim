@@ -416,7 +416,7 @@ function M.analyzer(ctx)
         local u = U64(tonumber(h:sub(1, 8), 16)) * U64(2 ^ 32) + U64(tonumber(h:sub(9), 16))
         local t = p.to
         if t.k == 'd' then if p.v ~= base then return nil end mbits[0] = u; return { k = 'd', v = mdbl[0] } end
-        if t.k == 'p' then if p.v ~= base then return nil end return { k = 'addr', v = I64(u), to = nil } end
+        if t.k == 'p' then if p.v ~= base then return nil end return { k = 'addr', v = I64(u), to = t.to } end
         if t.k ~= 'i' then return nil end
         local off = tonumber(p.v - base)
         if off + t.w / 8 > 8 then return nil end
@@ -578,6 +578,9 @@ function M.analyzer(ctx)
                 A.active[key] = true
                 -- (each callee's OWN steps — its callees' left out — are kept in A.self: a run over budget names the
                 -- callee that spent them, and a driver may make it an UNKNOWN CALL (A.toobig) and run again)
+                -- (a CALL DEPTH bound: a recursion whose argument changes every level — a fresh key each time, so the
+                -- recursion guard never fires — is an unknown call past it, not a stack overflow: CPython's)
+                if #A.cstack >= (ctx.max_depth or 48) then A.active[key] = nil; return unknown_call() end
                 local s0 = A.steps
                 A.cstack[#A.cstack + 1] = 0
                 -- (the stack handed on: false = out of reach, true = unknown)
@@ -785,6 +788,12 @@ function M.analyzer(ctx)
                     if not fl then return nil end
                     if fl.array then return { k = 'addr', v = b.v + fl.off, to = fl.elem } end -- (an array field: its storage)
                     local p = { k = 'addr', v = b.v + fl.off, to = fl.to }
+                    -- (a POINTER field: what it points to is its DECLARED type — the compiler's layout says only
+                    -- "a pointer": `Py_TYPE(o)->tp_as_sequence` is a PySequenceMethods *, so `m->sq_length` is laid out)
+                    if fl.to and fl.to.k == 'p' and not fl.to.to then
+                        local pto = M.field_pointee(ctx, b.to.text, path)
+                        if pto then p.to = { k = 'p', to = pto } end
+                    end
                     if fl.to and fl.to.k == 's' then p.to = { k = 's', text = b.to.text, prefix = path .. '.' }; return p end
                     return readmem(p)
                 end)
@@ -822,6 +831,24 @@ function M.analyzer(ctx)
             local op = tx(n:field('operator')[1], src)
             local arg = n:field('argument')[1]
             if op == '&' then
+                -- (the ADDRESS of a global object the RUNNING runtime placed — `&PyLong_Type`: ctx.symaddr, from a
+                -- linked probe — is that address, of its declared type: compared with the type word an object holds)
+                if ctx.symaddr and arg:type() == 'identifier' then
+                    local s = ctx.symaddr[tx(arg, src)]
+                    if s then return { k = 'addr', v = s.v, to = s.type and { k = 's', text = s.type } or nil } end
+                end
+                -- (the address of a LOCAL — an OUT-PARAMETER, `_PyObject_LookupAttr(o, n, &result)` — is a CELL: an
+                -- object whose field `*` holds the local; a callee's `*p = v` writes it, and the caller's local is the
+                -- cell after the call)
+                if arg:type() == 'identifier' and st.types[tx(arg, src)] ~= nil then
+                    local nm = tx(arg, src)
+                    -- (the cell carries the local's value IN — a callee reading `*p` sees it — and that value is part
+                    -- of its identity, so a summary is never shared across two values)
+                    local cur = st.env[nm]
+                    local cell = { k = 'obj', id = '&' .. nm .. '@' .. tostring(st.fname) .. '=' .. key_of(cur), cell = nm, init = cur ~= nil and { ['*'] = cur } or nil }
+                    st.env['\0obj:' .. cell.id .. '.*'] = cur
+                    return cell
+                end
                 local v = eval(arg, st, cx)
                 if v and v.k == 'slotv' then return { k = 'slot', i = v.i } end
                 -- the ADDRESS of a field of VM state: a sentinel, compared by its text; its tag if its initializer says
@@ -830,6 +857,10 @@ function M.analyzer(ctx)
                 return { k = 'sym', s = text, tag = tail and ctx.sentinels[tail] or nil }
             end
             local v = eval(arg, st, cx)
+            if v and v.k == 'obj' then
+                local c = st.env['\0obj:' .. v.id .. '.*']
+                return vmap(st.fset, function (e) local x = at(c, e); if x and (x.k == 'unch' or x.k == 'unset' or x.k == 'any') then return nil end return x end)
+            end
             return lift1(function (x)
                 if x and x.k == 'slot' then return { k = 'slotv', i = x.i } end
                 if x and x.k == 'addr' then if x.to and x.to.k == 's' then return x end return readmem(x) end
@@ -882,9 +913,19 @@ function M.analyzer(ctx)
             end
             local r = call(tx(fnode, src), args, st, cx)
             spoil()
+            -- (an OUT-PARAMETER cell handed to the call: the caller's local is what the callee left in it)
+            for i = 1, args.n do
+                local a = args[i]
+                if a and a.k == 'obj' and a.cell and st.types[a.cell] ~= nil then
+                    local c = st.env['\0obj:' .. a.id .. '.*']
+                    st.env[a.cell] = vmap(st.fset, function (e) local x = at(c, e); if x and (x.k == 'unch' or x.k == 'unset' or x.k == 'any') then return nil end return x end)
+                end
+            end
             return r
         elseif t == 'assignment_expression' then
             local l, r = n:field('left')[1], n:field('right')[1]
+            -- (a PARENTHESIZED target is its inside: a macro's `(ival) >>= PyLong_SHIFT` assigns ival)
+            while l and l:type() == 'parenthesized_expression' and kids(l)[1] do l = kids(l)[1] end
             local op = tx(n:field('operator')[1], src)
             local v = rv(eval(r, st, cx), st)
             if empty(st.fset) then return nil end
@@ -948,10 +989,21 @@ function M.analyzer(ctx)
                     return v
                 end
             end
+            if l:type() == 'pointer_expression' and tx(l:field('operator')[1], src) == '*' then
+                local lb = eval(l:field('argument')[1], st, cx)
+                if lb and lb.k == 'obj' then
+                    local key = '\0obj:' .. lb.id .. '.*'
+                    if op ~= '=' then v = lift2(op:sub(1, -2), st.env[key], v, st) end
+                    st.env[key] = v
+                    if lb.cell and st.types[lb.cell] ~= nil then st.env[lb.cell] = v end
+                    return v
+                end
+            end
             write_slot(lvalue_slot(l, st, cx), st) -- a WRITE to a slot: its tag is unknown after it
             return v
         elseif t == 'update_expression' then
             local a = n:field('argument')[1]
+            while a and a:type() == 'parenthesized_expression' and kids(a)[1] do a = kids(a)[1] end
             if a:type() == 'field_expression' then
                 local lb = eval(a:field('argument')[1], st, cx)
                 local lf = tx(a:field('field')[1], src)
@@ -1039,9 +1091,14 @@ function M.analyzer(ctx)
                 for f, val in pairs(v.init) do st.env['\0obj:' .. v.id .. '.' .. f] = val end
                 v = { k = 'obj', id = v.id }
             end
+            -- (a SCALAR slot's value handed straight to a parameter — CPython's METH_O `obj` — is its word, per element)
+            if v and v.k == 'slotv' and layout.scalar then v = rv(v, st) end
             -- (the ARGUMENT COUNT of an argument-array frame is the element's own: `TAG@count`)
             if v and v.k == 'count' then v = vmap(st.fset, function (e) local _, c = elem(e); return int(I64(c), 32) end) end
             if p.type and p.type.k == 'i' then v = lift1(function (x) return x and x.k == 'i' and int(x.v, p.type.w, p.type.u) or x end, v, st) end
+            -- (a WORD handed to a pointer parameter — a scalar slot holding an object's address — is that address, of
+            -- the parameter's pointee type: `ob->ob_type` is then where the compiler lays it)
+            if p.ptr and p.ptr.to then v = lift1(function (x) return x and x.k == 'i' and convert(p.ptr, x) or x end, v, st) end
             -- (a parameter holds what its caller handed it: THE thread only when handed it — a finalizer runs on another)
             st.env[p.name] = v
         end
@@ -1237,13 +1294,66 @@ function M.analyzer(ctx)
     return A
 end
 
+--- what a POINTER member points to, by the aggregate's DECLARATION: T (a typedef name or `struct tag`), path ('a.b')
+--- -> ctype | nil
+function M.field_pointee(ctx, T, path)
+    local function agg(name)
+        name = vim.trim((name or ''):gsub('%f[%w_]const%f[^%w_]', ''))
+        return (ctx.aggregates or {})[name] or (ctx.tagof and ctx.tagof[name] and ctx.aggregates['struct ' .. ctx.tagof[name]]) or ctx.aggregates['struct ' .. name]
+    end
+    local a = agg(T)
+    local segs = vim.split(path, '.', { plain = true })
+    for i, seg in ipairs(segs) do
+        if not a then return nil end
+        local f
+        for _, x in ipairs(a.fields) do if x.name == seg then f = x; break end end
+        if not f then return nil end
+        if i == #segs then
+            if (f.depth or 0) < 1 then return nil end
+            if f.depth > 1 then return { k = 'p' } end
+            local ty = vim.trim((f.type:gsub('%f[%w_]const%f[^%w_]', '')))
+            return M.ctype(ty, ctx.typedefs or {}) or ((ty ~= 'void' and ty ~= '') and { k = 's', text = ty } or nil)
+        end
+        a = agg(f.type)
+    end
+    return nil
+end
+
 --- THE UNITS: every function (per unit — each carries its own copies of the static inlines; its parameters with the
 --- type a pointer points to), typedefs, enum constants, over preprocessed sources { { name, text } }
 function M.units(sources)
-    local ctx = { defs = {}, unitdefs = {}, typedefs = {}, enums = {}, aggregates = {} }
+    local ctx = { defs = {}, unitdefs = {}, typedefs = {}, enums = {}, aggregates = {}, tagof = {}, typenames = {} }
     local fq = vim.treesitter.query.parse('c', '(function_definition) @f')
+    local cq0 = vim.treesitter.query.parse('c', '(cast_expression) @c')
+    -- (a TAGGED struct body anywhere — `struct _typeobject { … };` — is an aggregate too, as `struct <tag>`)
+    local sq = vim.treesitter.query.parse('c', '([(struct_specifier name: (type_identifier) @n body: (field_declaration_list) @b) (union_specifier name: (type_identifier) @n body: (field_declaration_list) @b)])')
     local tq = vim.treesitter.query.parse('c', '(type_definition type: (_) @t declarator: (_) @n)')
     local eq = vim.treesitter.query.parse('c', '(enumerator_list) @e')
+    --- an aggregate body's members in DECLARATION order (anonymous members inlined): { name, type, depth }
+    local function fields_of(body0, text)
+        local fields = {}
+        local function walk(body)
+            for fd in body:iter_children() do
+                if fd:type() == 'field_declaration' then
+                    local decls = fd:field('declarator')
+                    local inner = fd:field('type')[1]
+                    if #decls == 0 and inner and inner:field('body')[1] then walk(inner:field('body')[1])
+                    else
+                        for _, dd in ipairs(decls) do
+                            local depth = 0
+                            while dd and (dd:type() == 'pointer_declarator' or dd:type() == 'array_declarator') do
+                                if dd:type() == 'pointer_declarator' then depth = depth + 1 end
+                                dd = dd:field('declarator')[1]
+                            end
+                            if dd then fields[#fields + 1] = { name = tx(dd, text), type = inner and tx(inner, text) or '', depth = depth } end
+                        end
+                    end
+                end
+            end
+        end
+        walk(body0)
+        return fields
+    end
     for _, s0 in ipairs(sources) do
         -- (every `sizeof(…)` PARENTHESIZED before parsing: a parser that does not know `Eterm` is a type reads
         -- `sizeof(Eterm)-2` as `sizeof((Eterm)-2)`, a cast of -2 — restructuring the enclosing expression; after
@@ -1256,34 +1366,35 @@ function M.units(sources)
         for id, node in tq:iter_captures(root, s.text, 0, -1) do
             if tq.captures[id] == 't' then cur = node
             else
+                -- (EVERY name a typedef declares — an enum's, a function type's too — is a TYPE NAME)
+                -- (a function-pointer typedef's name is inside its parentheses: `typedef int (*lua_CFunction)(…)`)
+                local tn = tx(node, s.text):gsub('^[%(%*%s]+', ''):match('^[%a_][%w_]*')
+                if tn then ctx.typenames[tn] = true end
                 local ty = cur:type()
                 -- (an AGGREGATE typedef: its members in DECLARATION order — anonymous members inlined — for a compound
                 -- literal's positional initializers)
                 if (ty == 'struct_specifier' or ty == 'union_specifier') and cur:field('body')[1] and node:type() == 'type_identifier' then
-                    local fields = {}
-                    local function walk(body)
-                        for fd in body:iter_children() do
-                            if fd:type() == 'field_declaration' then
-                                local decls = fd:field('declarator')
-                                local inner = fd:field('type')[1]
-                                if #decls == 0 and inner and inner:field('body')[1] then walk(inner:field('body')[1])
-                                else
-                                    for _, dd in ipairs(decls) do
-                                        while dd and (dd:type() == 'pointer_declarator' or dd:type() == 'array_declarator') do dd = dd:field('declarator')[1] end
-                                        if dd then fields[#fields + 1] = { name = tx(dd, s.text), type = inner and tx(inner, s.text) or '' } end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    walk(cur:field('body')[1])
+                    local fields = fields_of(cur:field('body')[1], s.text)
                     local nm = tx(node, s.text)
                     ctx.aggregates[nm] = ctx.aggregates[nm] or { kind = ty:match('^(%a+)'), fields = fields }
+                end
+                -- (a typedef of a TAGGED struct defined elsewhere — `typedef struct _typeobject PyTypeObject;` — names it)
+                if (ty == 'struct_specifier' or ty == 'union_specifier') and not cur:field('body')[1] and cur:field('name')[1] and node:type() == 'type_identifier' then
+                    ctx.tagof[tx(node, s.text)] = ctx.tagof[tx(node, s.text)] or tx(cur:field('name')[1], s.text)
                 end
                 if ty ~= 'struct_specifier' and ty ~= 'union_specifier' and ty ~= 'enum_specifier' then
                     local nm = tx(node, s.text):gsub('^%*+', '')
                     if node:type() == 'type_identifier' or node:type() == 'primitive_type' then ctx.typedefs[nm] = ctx.typedefs[nm] or tx(cur, s.text) end
                     if node:type() == 'pointer_declarator' then ctx.typedefs[(tx(node, s.text):gsub('^%*+%s*', ''))] = tx(cur, s.text) .. ' *' end
+                end
+            end
+        end
+        do
+            local nm
+            for id, node in sq:iter_captures(root, s.text, 0, -1) do
+                if sq.captures[id] == 'n' then nm = tx(node, s.text)
+                elseif nm and not ctx.aggregates['struct ' .. nm] then
+                    ctx.aggregates['struct ' .. nm] = { kind = node:parent():type():match('^(%a+)'), fields = fields_of(node, s.text) }
                 end
             end
         end
@@ -1299,6 +1410,33 @@ function M.units(sources)
                 end
             end
         end
+        -- (★ a CAST TO A NON-TYPE is a misparse: the parser, not knowing `nargs` is a variable, reads CPython's
+        -- `(nargs) && (x)` as a cast of `&&(x)` — GNU's label address — to a type `nargs`, and `(n) - 1`, `(n) * x` the
+        -- same way. Every such `(ident)` — no typedef, no aggregate of that name — is PARENTHESIZED again,
+        -- `((nargs))`, which can only be an expression, and the unit parsed again: only a unit that had one)
+        do
+            local edits = {}
+            for _, c in cq0:iter_captures(root, s.text, 0, -1) do
+                local td = c:field('type')[1]
+                local named = td and td:named_child_count() == 1 and td:named_child(0)
+                if named and named:type() == 'type_identifier' then
+                    local nm = tx(named, s.text)
+                    if not ctx.typenames[nm] and not ctx.typedefs[nm] and not ctx.aggregates[nm] and not INT[nm] then
+                        local _, _, b0 = c:start()
+                        local _, _, b1 = td:end_()
+                        local close = s.text:find(')', b1 + 1, true)
+                        if close and s.text:sub(b0 + 1, b0 + 1) == '(' then edits[#edits + 1] = { b0, close } end
+                    end
+                end
+            end
+            if #edits > 0 then
+                table.sort(edits, function (a, b) return a[1] > b[1] end)
+                local text = s.text
+                for _, e in ipairs(edits) do text = text:sub(1, e[1]) .. '(' .. text:sub(e[1] + 1, e[2]) .. ')' .. text:sub(e[2] + 1) end
+                s.text = text
+                root = vim.treesitter.get_string_parser(s.text, 'c'):parse()[1]:root()
+            end
+        end
         for _, f in fq:iter_captures(root, s.text, 0, -1) do
             local decl = f:field('declarator')[1]
             local ptrret = false
@@ -1310,16 +1448,20 @@ function M.units(sources)
                 for _, pd in ipairs(kids(decl:field('parameters')[1])) do
                     if pd:type() == 'parameter_declaration' then
                         local pty = tx(pd:field('type')[1], s.text)
-                        local dn, isptr = pd:field('declarator')[1], false
-                        while dn and (dn:type() == 'pointer_declarator' or dn:type() == 'abstract_pointer_declarator') do isptr = true; dn = dn:field('declarator')[1] end
+                        local dn, isptr, depth = pd:field('declarator')[1], false, 0
+                        while dn and (dn:type() == 'pointer_declarator' or dn:type() == 'abstract_pointer_declarator') do isptr = true; depth = depth + 1; dn = dn:field('declarator')[1] end
                         local pname = dn and dn:type() == 'identifier' and tx(dn, s.text) or ('$' .. (#params + 1))
+                        -- (a pointer parameter keeps its whole type in `ptr` — `PyObject *ob`: what a word handed to it
+                        -- points to — and its DEPTH: `PyObject *const *args` is an array of pointers)
                         params[#params + 1] = { name = pname, type = isptr and { k = 'p' } or M.ctype(pty, ctx.typedefs), pointee = isptr and pty:match('([%w_]+)%s*$') or nil,
-                            text = (not isptr) and pty:match('([%w_]+)%s*$') or nil }
+                            text = (not isptr) and pty:match('([%w_]+)%s*$') or nil, depth = depth,
+                            ptr = isptr and M.ctype(pty .. ' ' .. string.rep('*', depth), ctx.typedefs) or nil }
                     end
                 end
                 local rty = tx(f:field('type')[1], s.text)
                 local d = { id = s.name .. ':' .. tostring(name), name = name, src = s.text, unit = s.name, node = f, params = params,
-                    void = not ptrret and vim.trim(rty) == 'void', ret = (not ptrret) and rty:match('([%w_]+)%s*$') or nil }
+                    void = not ptrret and vim.trim(rty) == 'void', ret = (not ptrret) and rty:match('([%w_]+)%s*$') or nil,
+                    ptrret = ptrret and rty:match('([%w_]+)%s*$') or nil }
                 if name then ud[name] = ud[name] or d; ctx.defs[name] = ctx.defs[name] or d end
             end
         end

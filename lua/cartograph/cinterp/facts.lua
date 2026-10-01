@@ -72,6 +72,9 @@ function M.derive(tree, opts)
                             tried[d.name] = 'raised: ' .. tostring(v)
                             pend_of[f] = pend_of[f] or { gap = tried[d.name], kind = 'error', tried = tried }
                         elseif v ~= nil then
+                            -- (a SCOPE — the units a person chose: `tree.scope`, globs relative to src — narrows the
+                            -- build's units before anything reads them; the build's flags stay each unit's own)
+                            if f == 'compdb' and tree.scope and v.units then v = M.scoped(v, tree) end
                             got[f] = v
                             rows[f] = { value = v, by = d.name, ms = ms, tried = tried }
                             break
@@ -105,6 +108,23 @@ function M.derive(tree, opts)
     return { rows = rows, order = order, derived = derived, total = #facts, got = got, broken = broken }
 end
 
+--- a compdb narrowed to a SCOPE: `tree.scope` = { glob, … } relative to tree.src (`Objects/*.c`, `Python/bltinmodule.c`)
+--- -> the same compdb, only the units a glob matches (`scoped_out` = how many were left out)
+function M.scoped(db, tree)
+    local src = vim.fs.normalize(vim.fn.fnamemodify(tree.src, ':p')):gsub('/$', '')
+    local pats = {}
+    for _, g in ipairs(tree.scope) do pats[#pats + 1] = vim.glob.to_lpeg(g) end
+    local units = {}
+    for _, u in ipairs(db.units) do
+        local rel = u.file:sub(1, #src + 1) == src .. '/' and u.file:sub(#src + 2) or u.file
+        for _, p in ipairs(pats) do if p:match(rel) then units[#units + 1] = u; break end end
+    end
+    local out = {}
+    for k, v in pairs(db) do out[k] = v end
+    out.units, out.scoped_out = units, #db.units - #units
+    return out
+end
+
 --- the interpreter's ctx from derived facts (cartograph.cinterp's contract) -> ctx | nil, the missing facts
 function M.ctx(got)
     local need = { 'units', 'noret', 'frame', 'layout', 'reps', 'sentinels', 'builtins' }
@@ -116,6 +136,7 @@ function M.ctx(got)
     ctx.noret, ctx.frame, ctx.layout, ctx.reps, ctx.sentinels, ctx.builtins = got.noret, got.frame, got.layout.layout, got.reps, got.sentinels, got.builtins
     ctx.sources = got.sources and got.sources.units
     ctx.memory = got.reps.memory -- (the heap words the representatives own, if any)
+    ctx.symaddr = got.reps.symaddr -- (the addresses of global objects the running runtime placed, if a probe linked it)
     ctx.sizes = got.sizes -- (every sizeof operand, the compiler's, if derived)
     ctx.layout_of = got.layouts and got.layouts.lookup -- (a field of an aggregate, asked of the compiler)
     return ctx
@@ -139,17 +160,22 @@ end
 
 --- COMPILE AND RUN a small C program as `unit` is compiled (its -D / -U / -I / -include, its directory on the path, in
 --- the directory its build runs in) -> stdout | nil, why
-function M.run_c(text, unit)
+function M.run_c(text, unit, opts)
+    opts = opts or {}
     local tmp = vim.fn.tempname()
     vim.fn.mkdir(tmp, 'p')
     local c = tmp .. '/probe.c'
     local fd = assert(io.open(c, 'w')); fd:write(text); fd:close()
     local cmd = { 'gcc', '-w', '-o', tmp .. '/probe' }
     vim.list_extend(cmd, unit.flags or {})
-    vim.list_extend(cmd, { '-I' .. vim.fn.fnamemodify(unit.file, ':h'), c, '-lm' })
+    vim.list_extend(cmd, { '-I' .. vim.fn.fnamemodify(unit.file, ':h'), c })
+    -- (a probe LINKED against the tree's own library — `opts.link`, after the source — runs the real runtime)
+    vim.list_extend(cmd, opts.link or {})
+    cmd[#cmd + 1] = '-lm'
     local r = vim.system(cmd, { text = true, cwd = unit.cwd }):wait()
-    if r.code ~= 0 then vim.fn.delete(tmp, 'rf'); return nil, 'the probe does not compile: ' .. (r.stderr or ''):sub(1, 400) end
-    local out = vim.system({ tmp .. '/probe' }, { text = true }):wait()
+    if r.code ~= 0 then vim.fn.delete(tmp, 'rf'); return nil, 'the probe does not compile: ' .. (r.stderr or ''):sub(1, 400), r.stderr end
+    local out = vim.system({ tmp .. '/probe' }, { text = true, env = opts.env }):wait(opts.timeout or 120000)
+    if not out then vim.fn.delete(tmp, 'rf'); return nil, 'the probe did not finish' end
     vim.fn.delete(tmp, 'rf')
     if out.code ~= 0 then return nil, 'the probe exits ' .. out.code end
     return out.stdout

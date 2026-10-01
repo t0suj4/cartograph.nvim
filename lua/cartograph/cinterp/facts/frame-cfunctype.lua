@@ -50,7 +50,7 @@ return {
                                 local cb, cst, cn = param(ps[j] or '', tds)
                                 if cb and cst == 0 and integer(cb) then
                                     local key = i .. ':' .. j
-                                    local t = tally[key] or { arrayat = i, countat = j, array = nm, count = cn, types = {}, slot = ret, n = 0 }
+                                    local t = tally[key] or { arrayat = i, countat = j, array = nm, count = cn, types = {}, slot = ret .. (#rstars > 0 and (' ' .. rstars) or ''), n = 0 }
                                     t.n = t.n + 1
                                     t.types[#t.types + 1] = name
                                     t.array, t.count = t.array or nm, t.count or cn
