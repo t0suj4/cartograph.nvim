@@ -176,6 +176,17 @@ local function from_value(v, d)
         d.podlabels = labels(at_path(v, pp == 'spec' and 'metadata.labels' or (pp:gsub('%.spec$', '.metadata.labels')))[1])
     end
     d.refs = refs_of(v, d.kind)
+    -- (the PROBES: a call the kubelet makes into the container, at the paths and handler fields the API types give —
+    -- CART-0834. A gRPC probe calls the Health contract; an httpGet probe is a different boundary, recorded apart)
+    d.probes = {}
+    for _, path in ipairs(API and API.probes and API.probes[d.kind or ''] or {}) do
+        for _, pr in ipairs(at_path(v, path)) do
+            local g = API.probe_grpc and get(pr, API.probe_grpc)
+            local h = API.probe_http and get(pr, API.probe_http)
+            if type(g) == 'table' and g.o then d.probes[#d.probes + 1] = { kind = 'grpc', path = path, port = str(get(g, 'port')), service = str(get(g, 'service')) }
+            elseif type(h) == 'table' and h.o then d.probes[#d.probes + 1] = { kind = 'http', path = path, port = str(get(h, 'port')), route = str(get(h, 'path')) } end
+        end
+    end
     if type(pod) == 'table' and pod.o then
         d.workload = true
         d.sa = str(get(pod, 'serviceAccountName'))
@@ -370,6 +381,10 @@ function M.attach(data, opts)
                     if d.kind and d.name then
                         stats.objects = stats.objects or {}
                         stats.objects[variant .. '\31' .. d.kind .. '\31' .. d.name] = rel
+                    end
+                    for _, pr in ipairs(d.probes or {}) do
+                        stats.probes = stats.probes or {}
+                        stats.probes[#stats.probes + 1] = { rel = rel, variant = variant, name = d.name, kind = pr.kind, port = pr.port, service = pr.service, route = pr.route, path = pr.path }
                     end
                     if (d.refs and #d.refs > 0) or d.podlabels then
                         stats.docs_soft = stats.docs_soft or {}
@@ -623,6 +638,37 @@ function M.attach(data, opts)
     return stats
 end
 
+--- ★ THE PROBE IS A CALL SITE (CART-0834): the kubelet calls a gRPC probe's container on the gRPC HEALTH contract —
+--- `/grpc.health.v1.Health/Check` — every few seconds, so the manifest DECLARES a caller the source never contains (on
+--- microservices-demo, the most-called rpc of the running system). Runs AFTER the proto pass has minted the rpc nodes
+--- (the post-pass calls it from the proto step: k8s runs before proto so `deploys` exists while contracts bind): a
+--- `use` edge, k8 = 'probes', from the manifest to every rpc node whose WIRE path is the Health check (vendored copies
+--- of health.proto are one contract, joined by wire). No such node: the probe is counted as a frontier (the contract
+--- is not in this graph). An httpGet probe is a different boundary and is never minted as a gRPC call.
+M.HEALTH_WIRE = '/grpc.health.v1.Health/Check'
+function M.link_probes(data)
+    local s = data and data.k8s
+    if not s or not s.probes then return nil end
+    local targets = {}
+    for _, n in ipairs(data.nodes or {}) do if n.pb == 'rpc' and n.wire == M.HEALTH_WIRE then targets[#targets + 1] = n.id end end
+    local p = { grpc = 0, linked = 0, unlinked = 0, http = 0, edges = 0 }
+    for _, pr in ipairs(s.probes) do
+        if pr.kind == 'http' then p.http = p.http + 1
+        else
+            p.grpc = p.grpc + 1
+            if #targets > 0 then
+                p.linked = p.linked + 1
+                for _, t in ipairs(targets) do
+                    data.edges[#data.edges + 1] = { from = pr.rel, to = t, kind = 'use', k8 = 'probes', at = {} }
+                    p.edges = p.edges + 1
+                end
+            else p.unlinked = p.unlinked + 1 end
+        end
+    end
+    s.probe_links = p
+    return p
+end
+
 --- service name -> source directory, the join a runtime observation needs.
 --- `service.name` in an OTel span is declared in NEITHER the source NOR the
 --- manifests (CART-0829), so this is the only place the mapping can come from —
@@ -672,6 +718,11 @@ local function soft_lines(s)
     end
     if #f.dangling > 0 then l[#l + 1] = ('⚠ %d reference(s) to an object the release does not ship: %s'):format(#f.dangling, table.concat(f.dangling, ' · ')) end
     if #f.empty > 0 then l[#l + 1] = ('⚠ %d selector(s) match no pod template (exists, routes nowhere): %s'):format(#f.empty, table.concat(f.empty, ' · ')) end
+    local pl = s.probe_links
+    if pl and (pl.grpc + pl.http) > 0 then
+        l[#l + 1] = ('probes: %d gRPC (%d linked to the Health contract, %d with no Health rpc in this graph — a frontier), %d httpGet (a different boundary, not linked)')
+            :format(pl.grpc, pl.linked, pl.unlinked, pl.http)
+    end
     local o = s.orphans
     if o and (o.live + #o.candidates + #o.dark) > 0 then
         l[#l + 1] = ('deletion frontier: %d data object(s) live (referenced), %d `~` candidate(s), %d dark%s%s'):format(o.live, #o.candidates, #o.dark,

@@ -253,7 +253,7 @@ function M.derive(S, opts)
     opts = opts or {}
     local maxd = opts.depth or 10
     local R = ref_structs(S)
-    local pod, refs, seen = {}, {}, {}
+    local pod, refs, seen, probes = {}, {}, {}, {}
     local kl = vim.tbl_keys(S.kinds); table.sort(kl)
     for _, K in ipairs(kl) do
         local root = { pkg = S.kinds[K].pkg, name = K }
@@ -270,6 +270,11 @@ function M.derive(S, opts)
                 end
                 if f.type.name == 'PodSpec' and f.shape == 'one' and f.type.pkg == 'k8s.io/api/core/v1' then
                     pod[K] = pod[K] or {}; table.insert(pod[K], p)
+                end
+                -- (a PROBE — readiness / liveness / startup — is a CALL the kubelet makes into the container: every
+                -- field typed core Probe, CART-0834)
+                if f.type.name == 'Probe' and f.type.pkg == 'k8s.io/api/core/v1' then
+                    probes[K] = probes[K] or {}; table.insert(probes[K], p)
                 end
                 local isref = R[tkey] or (f.type.pkg == false and (f.type.name:find('Reference$') or f.type.name:find('Ref$')))
                 if isref then
@@ -310,14 +315,22 @@ function M.derive(S, opts)
         walk(root, '', 1, {})
     end
     for _, l in pairs(pod) do table.sort(l) end
+    for _, l in pairs(probes) do table.sort(l) end
     table.sort(refs, function (a, b) return a.kind .. a.path < b.kind .. b.path end)
-    return { pod = pod, refs = refs }
+    -- (the probe HANDLER's fields by their TYPE: which json name holds a gRPC action, which an HTTP GET)
+    local handler = {}
+    local core = S.pkgs['k8s.io/api/core/v1']
+    for _, f in ipairs(core and core.structs.ProbeHandler and core.structs.ProbeHandler.fields or {}) do
+        if f.type.name == 'GRPCAction' then handler.grpc = f.json elseif f.type.name == 'HTTPGetAction' then handler.http = f.json end
+    end
+    return { pod = pod, refs = refs, probes = probes, probe_handler = handler }
 end
 
 --- the TABLE k8s.lua reads (what is derived, nothing of the walk) -> { stamp, pod = { [Kind] = path }, refs, cluster =
 --- { [Kind] = true }, group = { [Kind] = group } }
 function M.table(S, D, stamp)
-    local t = { stamp = stamp, pod = {}, refs = {}, cluster = {}, group = {} }
+    local t = { stamp = stamp, pod = {}, refs = {}, cluster = {}, group = {}, probes = D.probes or {},
+        probe_grpc = D.probe_handler and D.probe_handler.grpc or false, probe_http = D.probe_handler and D.probe_handler.http or false }
     for k, paths in pairs(D.pod) do t.pod[k] = paths[1] end
     for _, r in ipairs(D.refs) do t.refs[#t.refs + 1] = { r.kind, r.path, r.target or false, r.how } end
     for k, info in pairs(S.kinds) do
@@ -339,6 +352,13 @@ function M.serialize(t, header)
     map('pod', t.pod, function (v) return ('%q'):format(v) end)
     map('cluster', t.cluster, function () return 'true' end)
     map('group', t.group, function (v) return ('%q'):format(v) end)
+    map('probes', t.probes or {}, function (v)
+        local q = {}
+        for _, p in ipairs(v) do q[#q + 1] = ('%q'):format(p) end
+        return '{ ' .. table.concat(q, ', ') .. ' }'
+    end)
+    o[#o + 1] = ('    probe_grpc = %s,'):format(t.probe_grpc and ('%q'):format(t.probe_grpc) or 'false')
+    o[#o + 1] = ('    probe_http = %s,'):format(t.probe_http and ('%q'):format(t.probe_http) or 'false')
     o[#o + 1] = '    refs = {'
     for _, r in ipairs(t.refs) do
         o[#o + 1] = ('        { %q, %q, %s, %q },'):format(r[1], r[2], r[3] and ('%q'):format(r[3]) or 'false', r[4])

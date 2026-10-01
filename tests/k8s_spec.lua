@@ -177,6 +177,25 @@ test('k8s: a KUSTOMIZE COMPONENT (`kind: Component`) is composed with a base —
     eq(1, s.soft.composed, 'the component\'s selector resolves in the base it composes with')
 end)
 
+test('k8s: a gRPC PROBE is a call into the Health contract — linked when the rpc is in the graph, a frontier when not; httpGet is not a gRPC call — CART-0834', function ()
+    if not ready() then skip 'no yaml parser' end
+    local root = tmproot({ ['k/d.yaml'] = table.concat({
+        'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: catalog', 'spec:', '  template:', '    spec:', '      containers:',
+        '      - name: c', '        image: catalog', '        readinessProbe:', '          grpc:', '            port: 3550',
+        '        livenessProbe:', '          httpGet:', '            path: /healthz', '            port: 8080' }, '\n') .. '\n' })
+    local health = { id = 'protos/health.proto::Health::Check@41', name = 'Health::Check', kind = 'method', pb = 'rpc', wire = K.HEALTH_WIRE }
+    local data = { root = root, nodes = { health }, edges = {} }
+    K.attach(data)
+    local p = K.link_probes(data)
+    eq({ grpc = 1, linked = 1, unlinked = 0, http = 1, edges = 1 }, p)
+    local e
+    for _, x in ipairs(data.edges) do if x.k8 == 'probes' then e = x end end
+    eq('protos/health.proto::Health::Check@41', e and e.to, 'manifest -> the Health rpc')
+    local data2 = { root = root, nodes = {}, edges = {} }
+    K.attach(data2)
+    eq({ grpc = 1, linked = 0, unlinked = 1, http = 1, edges = 0 }, K.link_probes(data2), 'no Health rpc in the graph: a frontier, no edge')
+end)
+
 test('k8s: the POD TEMPLATE is where the API types put it — CronJob spec.jobTemplate.spec.template.spec — CART-1267', function ()
     if not ready() then skip 'no yaml parser' end
     local s = K.attach({ root = soft_release(), nodes = {}, edges = {} })

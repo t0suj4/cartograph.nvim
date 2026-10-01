@@ -45,7 +45,21 @@ type EnvVarSource struct {
 type EnvVar struct {
 	ValueFrom *EnvVarSource `json:"valueFrom,omitempty"`
 }
+type GRPCAction struct {
+	Port int32 `json:"port"`
+}
+type HTTPGetAction struct {
+	Path string `json:"path,omitempty"`
+}
+type ProbeHandler struct {
+	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
+	GRPC *GRPCAction `json:"grpc,omitempty"`
+}
+type Probe struct {
+	ProbeHandler `json:",inline"`
+}
 type Container struct {
+	ReadinessProbe *Probe `json:"readinessProbe,omitempty"`
 	Env []EnvVar `json:"env,omitempty"`
 	EnvFrom []EnvFromSource `json:"envFrom,omitempty"`
 	Ports []ContainerPort `json:"ports,omitempty"`
@@ -166,6 +180,13 @@ test('k8sapi: REFERENCES and their targets read from the source\'s own words', f
     eq(nil, refs['Deployment spec.template.spec.containers[].ports[].name'], 'a port "referred to BY services" is not a reference it makes')
     eq(nil, refs['Deployment spec.template.spec.containers[].env[].valueFrom.fileKeyRef.volumeName'],
         'a stem that only ENDS a kind (volume) whose doc never names the kind in full is no edge')
+end)
+
+test('k8sapi: PROBES — every field typed Probe — and the handler\'s gRPC / HTTP fields by their TYPE (CART-0834)', function ()
+    if not ready() then skip 'no go parser' end
+    local _, D = derive()
+    eq({ 'spec.template.spec.containers[].readinessProbe' }, D.probes.Deployment)
+    eq({ grpc = 'grpc', http = 'httpGet' }, D.probe_handler)
 end)
 
 test('k8sapi: the table serializes DETERMINISTICALLY and round-trips', function ()

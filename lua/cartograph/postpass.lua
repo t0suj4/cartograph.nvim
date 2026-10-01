@@ -111,7 +111,12 @@ M.PASSES = {
     -- graph here (CART-0824). One rpc = one `method` node, SITE-ANCHORED — a vendored copy of a .proto is a
     -- second real declaration, and reunifying the copies by qualified name belongs to the cross-service join.
     { name = 'proto',
-        run = function (data) return require('cartograph.proto').attach(data) end,
+        run = function (data)
+            local s = require('cartograph.proto').attach(data)
+            -- (the deployment -> contract edge: a gRPC probe calls the Health rpc the proto pass just minted — CART-0834)
+            require('cartograph.k8s').link_probes(data)
+            return s
+        end,
         say = function (pb)
             local line = require('cartograph.proto').summary(pb)
             if line then return line, pb.refused > 0 and WARN or INFO end
