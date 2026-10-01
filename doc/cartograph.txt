@@ -814,6 +814,13 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
   :CartographCanvas           serve a browser canvas that paints into
                               Factorio
   :CartographCanvasStop       stop the live web canvas
+  :CartographHelmUses         in a chart's values.yaml: every template line
+                              that reads the key under the cursor (quickfix)
+                              — rendered by helmprov, else read statically
+  :CartographHelmLint [chart] the chart's silent-success findings (dangling
+                              / orphan values, chomped separators, checksum
+                              coverage, dangling references) at their
+                              template lines (quickfix)
 
 ==============================================================================
 4. KEYS                                                       *cartograph-keys*

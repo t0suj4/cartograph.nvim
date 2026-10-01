@@ -17,6 +17,48 @@ function M.register(H)
     local canvas = nil
 
 
+    -- ── HELM: a chart's values and templates (CART-0870, CART-0156) ──
+    -- the template lines that read the values key under the cursor: what the user asked for — "quickly navigate into
+    -- value use sites, so I can extend the helm chart there or here"
+    cmd('CartographHelmUses', function ()
+        local HP = require 'cartograph.helmprov'
+        local buf = vim.api.nvim_get_current_buf()
+        local file = vim.api.nvim_buf_get_name(buf)
+        local chart = HP.chart_of(file)
+        if not chart then return vim.notify('cartograph: not inside a Helm chart (no Chart.yaml above ' .. file .. ')', vim.log.levels.WARN) end
+        local pos = vim.api.nvim_win_get_cursor(0)
+        local path = HP.path_at(buf, pos[1] - 1, pos[2])
+        if not path then return vim.notify('cartograph: no values key under the cursor', vim.log.levels.WARN) end
+        local items, source = HP.use_items(chart, path)
+        if #items == 0 then return vim.notify(('cartograph: no template reads .Values.%s (%s) — an orphan value?'):format(path, source), vim.log.levels.INFO) end
+        vim.fn.setqflist({}, ' ', { title = ('helm: uses of .Values.%s (%s)'):format(path, source), items = items })
+        vim.cmd('copen')
+    end, { desc = 'cartograph: every template line reading the Helm values key under the cursor (quickfix)' })
+    -- the chart's silent-success findings, each at the template line that produced it when helmprov attributes it
+    cmd('CartographHelmLint', function (o)
+        local HP = require 'cartograph.helmprov'
+        local chart = o.args ~= '' and vim.fn.fnamemodify(o.args, ':p'):gsub('/$', '') or HP.chart_of(vim.api.nvim_buf_get_name(0))
+        if not chart then return vim.notify('cartograph: no chart (pass a chart directory, or run inside one)', vim.log.levels.WARN) end
+        local L = require 'cartograph.helmlint'
+        local r = L.lint(chart)
+        local items = {}
+        for _, f in ipairs(r.findings) do
+            items[#items + 1] = { filename = chart .. '/' .. f.file, lnum = f.line or 1, col = 1, text = f.lint .. ': ' .. f.msg }
+        end
+        -- the RENDERED findings (dangling references, selectors matching nothing), attributed through the render
+        local s = require('cartograph.helm').binary() and require('cartograph.helm').attach(chart) or nil
+        local prov = s and HP.render(chart) or nil
+        for _, d in ipairs(s and s.soft and s.soft.dangling or {}) do
+            local kind, name, target = d:match('^(%S+)/(%S+) .- names %S+/(%S+),')
+            local at = prov and kind and HP.locate(prov, kind, name, target) or nil
+            items[#items + 1] = { filename = at and (chart .. '/' .. at.file) or (chart .. '/Chart.yaml'), lnum = at and at.line or 1, col = at and at.col + 1 or 1, text = 'dangling-reference: ' .. d }
+        end
+        for _, d in ipairs(s and s.soft and s.soft.empty or {}) do items[#items + 1] = { filename = chart .. '/Chart.yaml', lnum = 1, col = 1, text = 'selector-matches-nothing: ' .. d } end
+        if #items == 0 then return vim.notify('cartograph: helm lint — no finding', vim.log.levels.INFO) end
+        vim.fn.setqflist({}, ' ', { title = 'helm lint: ' .. chart, items = items })
+        vim.cmd('copen')
+    end, { nargs = '?', complete = 'dir', desc = 'cartograph: a Helm chart\'s silent-success findings at their template lines (quickfix)' })
+
     -- ── the running system vs the static model ──────────────────────
     cmd('CartographLive', function ()
         local store = live() if not store then return end
