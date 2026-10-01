@@ -193,6 +193,12 @@ local function veq(a, b)
     if a.k == 'sym' then return a.s == b.s end
     if a.k == 'obj' then return a.id == b.id end
     if a.k == 'addr' then return a.v == b.v end
+    if a.k == 'agg' then
+        if a.T ~= b.T or a.prefix ~= b.prefix then return false end
+        for p, x in pairs(a.f) do if not veq(x, b.f[p]) then return false end end
+        for p in pairs(b.f) do if a.f[p] == nil then return false end end
+        return true
+    end
     if a.k == 'arr' then
         if a.id ~= b.id or a.n ~= b.n then return false end
         for i = 1, a.n do if not veq(a.vals[i], b.vals[i]) then return false end end
@@ -237,6 +243,12 @@ local function key_of(v)
     if v.k == 'sym' then return 'y' .. v.s end
     if v.k == 'obj' then return 'o' .. v.id end
     if v.k == 'addr' then return 'p' .. tostring(v.v) end
+    if v.k == 'agg' then
+        local l = {}
+        for p, x in pairs(v.f) do l[#l + 1] = p .. '=' .. key_of(x) end
+        table.sort(l)
+        return 'g' .. v.T .. (v.prefix or '') .. '{' .. table.concat(l, ';') .. '}'
+    end
     if v.k == 'arr' then
         local l = {}
         for i = 1, v.n do l[i] = key_of(v.vals[i]) end
@@ -261,6 +273,17 @@ end
 local UNCH = { k = 'unch' }
 local UNSET = { k = 'unset' }
 local ANY = { k = 'any' }
+--- the MEET of two values: equal stays; two AGGREGATES of one type keep the fields they agree on (a known tag beside an
+--- unknown payload survives); anything else is unknown
+local function meet(x, y)
+    if veq(x, y) then return x end
+    if x and y and x.k == 'agg' and y.k == 'agg' and x.T == y.T and x.prefix == y.prefix then
+        local f = {}
+        for p, v in pairs(x.f) do if veq(v, y.f[p]) then f[p] = v end end
+        return { k = 'agg', T = x.T, f = f, prefix = x.prefix }
+    end
+    return nil
+end
 --- the JOIN of two states, EXACT per tag where their sets are disjoint (a partition's two branches meeting again)
 local function join(a, b)
     if not a then return b end
@@ -278,7 +301,8 @@ local function join(a, b)
                 local ia, ib = a.fset[t], b.fset[t]
                 if ia and not ib then return at(va, t) elseif ib and not ia then return at(vb, t) end
                 local x, y = at(va, t), at(vb, t)
-                if veq(x, y) then return x end
+                local m = meet(x, y)
+                if m ~= nil then return m end
                 -- (an object field two paths leave differently was WRITTEN: unknown, never "as the caller had it")
                 if k:sub(1, 5) == '\0obj:' then return ANY end
                 return nil
@@ -409,8 +433,13 @@ function M.analyzer(ctx)
         if c ~= nil then return c or nil end
         local f, rep = layout.fields[path], reps.tag[tag]
         local r
-        if f and rep and rep.u64 then
-            local u = U64(tonumber(rep.u64:sub(1, 8), 16)) * U64(2 ^ 32) + U64(tonumber(rep.u64:sub(9), 16))
+        -- (a representative of SEVERAL words — QuickJS' 16-byte JSValue — is read at its field's word: `words`, one hex
+        -- word each; a one-word one is `u64`)
+        local word, off = nil, f and f.off or 0
+        if rep and rep.words then word = rep.words[math.floor(off / 8) + 1]; off = off % 8
+        elseif rep and off < 8 then word = rep.u64 end
+        if f and word then
+            local u = U64(tonumber(word:sub(1, 8), 16)) * U64(2 ^ 32) + U64(tonumber(word:sub(9), 16))
             if f.cls == 'f64' then
                 -- ★ a NaN comes back CANONICAL: a GC tag's word IS a payload NaN, and an ffi load does not canonicalize
                 if bit.band(u, U64(0x7ff00000) * U64(2 ^ 32)) == U64(0x7ff00000) * U64(2 ^ 32) and bit.band(u, U64(0xfffff) * U64(2 ^ 32) + U64(0xffffffff)) ~= U64(0) then
@@ -418,7 +447,7 @@ function M.analyzer(ctx)
                 else fbits[0] = u; r = { k = 'd', v = fdbl[0] } end
             else
                 local w = tonumber(f.cls:match('%d+'))
-                r = int(I64(f.off == 0 and u or bit.rshift(u, f.off * 8)), w, f.cls:sub(1, 1) == 'u')
+                r = int(I64(off == 0 and u or bit.rshift(u, off * 8)), w, f.cls:sub(1, 1) == 'u')
             end
         end
         fcache[ck] = r or false
@@ -681,6 +710,27 @@ function M.analyzer(ctx)
             if ty and ty.k == 'i' then return int(ty.w / 8, 64, true) end
             if ty and ty.k == 'p' then return int(8, 64, true) end
             return nil
+        elseif t == 'compound_literal_expression' then
+            -- (an AGGREGATE value `(T){ … }`: positional members in T's declaration order, `.f = v` by name, a nested
+            -- literal flattened into paths — `(JSValue){ (JSValueUnion){ .int32 = 0 }, tag }`)
+            local T = vim.trim(tx(n:field('type')[1], src):gsub('%s+', ' '))
+            local ag = ctx.aggregates and ctx.aggregates[T]
+            if not ag then return nil end
+            local f, i = {}, 0
+            for _, c in ipairs(kids(n:field('value')[1])) do
+                local name, valnode
+                if c:type() == 'initializer_pair' then
+                    local d = c:field('designator')[1]
+                    name = d and tx(d, src):match('^%.([%w_]+)$')
+                    valnode = c:field('value')[1]
+                else i = i + 1; name = ag.fields[i] and ag.fields[i].name; valnode = c end
+                if name and valnode then
+                    local v = rv(eval(valnode, st, cx), st)
+                    if v and v.k == 'agg' then for p, x in pairs(v.f) do f[name .. '.' .. p] = x end
+                    elseif v ~= nil then f[name] = v end
+                end
+            end
+            return { k = 'agg', T = T, f = f }
         elseif t == 'cast_expression' then
             local ty = M.ctype(tx(n:field('type')[1], src), ctx.typedefs)
             local a = rv(eval(n:field('value')[1], st, cx), st)
@@ -732,6 +782,19 @@ function M.analyzer(ctx)
                 if f == fr.top then return st.env['\0top'] elseif f == fr.base then return st.env['\0base'] end
                 if f == fr.origin then return { k = 'org' } end
                 return nil
+            end
+            -- (a field of an AGGREGATE VALUE: its path's value, or a view of the nested aggregate the path names)
+            local function aggfield(b)
+                local p = (b.prefix or '') .. f
+                if b.f[p] ~= nil then return b.f[p] end
+                for q in pairs(b.f) do if q:sub(1, #p + 1) == p .. '.' then return { k = 'agg', T = b.T, f = b.f, prefix = p .. '.' } end end
+                return nil
+            end
+            if base and base.k == 'agg' and op == '.' then return aggfield(base) end
+            if base and base.k == 'vec' and op == '.' then
+                local anyagg = false
+                for _, x in pairs(base.by) do if x and x.k == 'agg' then anyagg = true end end
+                if anyagg then return vmap(st.fset, function (e) local b = at(base, e); if b and b.k == 'agg' then return aggfield(b) end return M._field(b, op, f, st, layout, read_field) end) end
             end
             if base and base.k == 'obj' then
                 local v = st.env['\0obj:' .. base.id .. '.' .. f]
@@ -844,6 +907,16 @@ function M.analyzer(ctx)
                     local key = lf == fr.top and '\0top' or '\0base'
                     if op ~= '=' then v = lift2(op:sub(1, -2), st.env[key], v, st) end
                     st.env[key] = v
+                    return v
+                end
+                if lb and lb.k == 'agg' and l:field('argument')[1]:type() == 'identifier' and op == '=' then
+                    local nm = tx(l:field('argument')[1], src)
+                    local nf = {}
+                    for p, x in pairs(lb.f) do nf[p] = x end
+                    local p = (lb.prefix or '') .. lf
+                    for q in pairs(nf) do if q == p or q:sub(1, #p + 1) == p .. '.' then nf[q] = nil end end
+                    if v ~= nil then nf[p] = v end
+                    st.env[nm] = { k = 'agg', T = lb.T, f = nf }
                     return v
                 end
                 if lb and lb.k == 'obj' then
@@ -1124,7 +1197,7 @@ function M.analyzer(ctx)
                 end
                 sum.ret[tg] = true
                 local v = r.void and nil or at(r.v, tg)
-                if seen[tg] then if not veq(sum.vals[tg] or nil, v) then sum.vals[tg] = false end
+                if seen[tg] then if not veq(sum.vals[tg] or nil, v) then sum.vals[tg] = meet(sum.vals[tg] or nil, v) or false end
                 else sum.vals[tg] = v or false; seen[tg] = true end
             end
             if r.fwrite then sum.fwrite = true end
@@ -1142,7 +1215,7 @@ end
 --- THE UNITS: every function (per unit — each carries its own copies of the static inlines; its parameters with the
 --- type a pointer points to), typedefs, enum constants, over preprocessed sources { { name, text } }
 function M.units(sources)
-    local ctx = { defs = {}, unitdefs = {}, typedefs = {}, enums = {} }
+    local ctx = { defs = {}, unitdefs = {}, typedefs = {}, enums = {}, aggregates = {} }
     local fq = vim.treesitter.query.parse('c', '(function_definition) @f')
     local tq = vim.treesitter.query.parse('c', '(type_definition type: (_) @t declarator: (_) @n)')
     local eq = vim.treesitter.query.parse('c', '(enumerator_list) @e')
@@ -1159,6 +1232,29 @@ function M.units(sources)
             if tq.captures[id] == 't' then cur = node
             else
                 local ty = cur:type()
+                -- (an AGGREGATE typedef: its members in DECLARATION order — anonymous members inlined — for a compound
+                -- literal's positional initializers)
+                if (ty == 'struct_specifier' or ty == 'union_specifier') and cur:field('body')[1] and node:type() == 'type_identifier' then
+                    local fields = {}
+                    local function walk(body)
+                        for fd in body:iter_children() do
+                            if fd:type() == 'field_declaration' then
+                                local decls = fd:field('declarator')
+                                local inner = fd:field('type')[1]
+                                if #decls == 0 and inner and inner:field('body')[1] then walk(inner:field('body')[1])
+                                else
+                                    for _, dd in ipairs(decls) do
+                                        while dd and (dd:type() == 'pointer_declarator' or dd:type() == 'array_declarator') do dd = dd:field('declarator')[1] end
+                                        if dd then fields[#fields + 1] = { name = tx(dd, s.text), type = inner and tx(inner, s.text) or '' } end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    walk(cur:field('body')[1])
+                    local nm = tx(node, s.text)
+                    ctx.aggregates[nm] = ctx.aggregates[nm] or { kind = ty:match('^(%a+)'), fields = fields }
+                end
                 if ty ~= 'struct_specifier' and ty ~= 'union_specifier' and ty ~= 'enum_specifier' then
                     local nm = tx(node, s.text):gsub('^%*+', '')
                     if node:type() == 'type_identifier' or node:type() == 'primitive_type' then ctx.typedefs[nm] = ctx.typedefs[nm] or tx(cur, s.text) end
