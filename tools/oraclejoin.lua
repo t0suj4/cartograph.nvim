@@ -103,6 +103,81 @@ local JOINS = {
     },
 }
 
+-- ★ CART-1268: cartograph.k8s's DOCUMENT READING over charts RENDERED BY HELM ITSELF. The inputs are not tracked files
+-- but what `helm template --output-dir` emits for every chart under a repo (a subchart under charts/ renders with its
+-- parent); a chart Helm refuses is SKIPPED with Helm's reason. Each rendered file is projected — kind, name, the first
+-- container's image, every port, every soft-edge reference — by k8s.lua and, independently, by PyYAML
+-- (tools/oracles/k8s_docs.py). ⚠ SHARED PREMISE: both walk the DERIVED API paths (exported to the oracle as JSON), so
+-- what this joins is the YAML reading and the extraction, not the paths (tools/k8sapi.lua --check guards those).
+local function k8s_projection(src)
+    local K = require 'cartograph.k8s'
+    local docs, refused, why = K.read(src)
+    if refused > 0 and #docs == 0 then return nil, table.concat(why, '; ') end
+    local a = {}
+    for i, d in ipairs(docs) do
+        local ports, seen = {}, {}
+        for _, p in ipairs(d.ports or {}) do if not seen[p] then seen[p] = true; ports[#ports + 1] = p end end
+        table.sort(ports)
+        for j, p in ipairs(ports) do ports[j] = tostring(p) end
+        local refs = {}
+        for _, r in ipairs(d.refs or {}) do
+            if r.how == 'name' then refs[#refs + 1] = ('name %s/%s @%s'):format(r.kind, r.name, r.path)
+            elseif r.how == 'ref' then refs[#refs + 1] = ('ref %s/%s @%s%s'):format(r.kind, r.name, r.path, r.optional and ' optional' or '')
+            elseif r.how == 'selector' then
+                local ks = vim.tbl_keys(r.sel); table.sort(ks)
+                local kv = {}
+                for _, k in ipairs(ks) do kv[#kv + 1] = k .. '=' .. r.sel[k] end
+                refs[#refs + 1] = ('selector %s{%s} @%s'):format(r.kind, table.concat(kv, ','), r.path)
+            end
+        end
+        table.sort(refs)
+        a[i] = { o = { kind = d.kind or '', name = d.name or '', image = d.image or '', ports = { a = ports }, refs = { a = refs } },
+            keys = { 'kind', 'name', 'image', 'ports', 'refs' } }
+    end
+    return { a = a }
+end
+JOINS.helm = {
+    lang = 'yaml',
+    repos = { '~/git/microservices-demo', '~/git/helm/pkg/cmd/testdata/testcharts' },
+    collect = function(repos)
+        local H = require 'cartograph.helm'
+        local inputs, paths, skipped = {}, {}, {}
+        local cache = vim.fn.stdpath('cache') .. '/cartograph/helmjoin'
+        for _, r in ipairs(repos) do
+            local dir = vim.fn.expand(r)
+            local charts = vim.fn.globpath(dir, '**/Chart.yaml', false, true)
+            table.sort(charts)
+            for _, c in ipairs(charts) do
+                local cdir = vim.fn.fnamemodify(c, ':h')
+                if not cdir:find('/charts/', #dir, true) then
+                    local out = cache .. '/' .. vim.fn.sha256(cdir):sub(1, 12)
+                    vim.fn.delete(out, 'rf')
+                    local R, why = H.render(cdir, { out = out })
+                    if not R then skipped[#skipped + 1] = cdir:sub(#dir + 2) .. ' (' .. tostring(why):sub(1, 90) .. ')'
+                    else
+                        for _, rel in ipairs(R.files) do
+                            local p = out .. '/' .. rel
+                            -- (the id IS the path: the oracle answers keyed by the path it was handed)
+                            inputs[#inputs + 1] = { id = p, path = p }
+                            paths[#paths + 1] = p
+                        end
+                    end
+                end
+            end
+        end
+        return inputs, paths, skipped
+    end,
+    oracle = function()
+        local api = require('cartograph.k8s')._api
+        local refs = {}
+        for _, r in ipairs(api.refs) do refs[#refs + 1] = { r[1], r[2], r[3] or false, r[4] } end
+        local tmp = vim.fn.tempname() .. '.json'
+        local fd = assert(io.open(tmp, 'w')); fd:write(vim.json.encode({ pod = api.pod, refs = refs })); fd:close()
+        return { 'python3', REPO .. '/tools/oracles/k8s_docs.py', tmp }
+    end,
+    read = k8s_projection,
+}
+
 -- ★ CART-1053: yamlvalue's IMPLEMENTATION PROFILES, each joined against the real implementation over
 -- the same corpus — what PyYAML/ruamel/Psych/YAML::XS/yq LOAD, every scalar "type:value", against
 -- `yamlvalue.typed(doc.raw, profile)`. One row per implementation: `yaml:<name>`.
@@ -149,7 +224,9 @@ end
 pcall(vim.treesitter.language.add, spec.lang)
 
 local inputs, paths, skipped = {}, {}, {}
-for _, r in ipairs(spec.repos) do
+-- (a join that BUILDS its inputs — the helm join renders charts — supplies them; every other join lists tracked files)
+if spec.collect then inputs, paths, skipped = spec.collect(spec.repos) end
+for _, r in ipairs(spec.collect and {} or spec.repos) do
     local dir = vim.fn.expand(r)
     if vim.fn.isdirectory(dir) == 0 then skipped[#skipped + 1] = r .. ' (absent)'
     else
@@ -169,7 +246,7 @@ for _, r in ipairs(spec.repos) do
     end
 end
 local t0 = vim.uv.hrtime()
-local map, why = J.external(spec.oracle, paths)
+local map, why = J.external(type(spec.oracle) == 'function' and spec.oracle() or spec.oracle, paths)
 if not map then print('the oracle failed: ' .. tostring(why)); os.exit(1) end
 local report = J.run {
     inputs = inputs,
