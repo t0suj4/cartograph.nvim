@@ -90,3 +90,64 @@ test('k8s: a DOTTED external URL host is a counted frontier, never dangling; `lo
     eq({ 'a declares b, absent from k' }, s.dangling, 'only the undotted peer dangles')
     eq({ ['api.example.org'] = true }, s.external)
 end)
+
+-- ── SOFT EDGES, from the DERIVED API table (CART-1267 / CART-1296): every class of absence, each counter pinned ─────
+--- (one object per FILE, as `helm template --output-dir` writes them: edges join files, so a release in one file would
+--- resolve its references without an edge to draw)
+local function soft_release()
+    local text = table.concat({
+        'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: web', 'spec:',
+        '  selector:', '    matchLabels:', '      app: web',
+        '  template:', '    metadata:', '      labels:', '        app: web', '    spec:',
+        '      serviceAccountName: default', '      containers:', '      - name: web', '        image: web',
+        '        ports:', '        - name: http', '          containerPort: 8080',
+        '        envFrom:', '        - configMapRef:', '            name: web-config',
+        '        env:', '        - name: TOKEN', '          valueFrom:', '            secretKeyRef:', '              name: web-token', '              key: t',
+        '        - name: FLAG', '          valueFrom:', '            configMapKeyRef:', '              name: flags', '              key: f', '              optional: true',
+        '---', 'apiVersion: v1', 'kind: ConfigMap', 'metadata:', '  name: web-config', 'data:', '  A: "1"',
+        '---', 'apiVersion: v1', 'kind: Service', 'metadata:', '  name: web', 'spec:', '  selector:', '    app: web', '  ports:', '  - port: 80',
+        '---', 'apiVersion: v1', 'kind: Service', 'metadata:', '  name: api', 'spec:', '  selector:', '    app: api', '  ports:', '  - port: 80',
+        '---', 'apiVersion: networking.k8s.io/v1', 'kind: Ingress', 'metadata:', '  name: in', 'spec:', '  rules:', '  - http:', '      paths:',
+        '      - path: /', '        pathType: Prefix', '        backend:', '          service:', '            name: web', '            port:', '              number: 80',
+        '---', 'apiVersion: v1', 'kind: PersistentVolumeClaim', 'metadata:', '  name: data', 'spec:', '  storageClassName: fast',
+        '---', 'apiVersion: batch/v1', 'kind: CronJob', 'metadata:', '  name: nightly', 'spec:', '  schedule: "0 0 * * *"', '  jobTemplate:', '    spec:',
+        '      template:', '        spec:', '          containers:', '          - name: job', '            image: nightly-job' }, '\n') .. '\n'
+    local files, i = {}, 0
+    for doc in (text .. '---\n'):gmatch('(.-)%-%-%-\n') do if doc:match('%S') then i = i + 1; files[('k/%02d.yaml'):format(i)] = doc end end
+    return tmproot(files)
+end
+
+test('k8s: SOFT EDGES resolve by kind and name in the release; the classes of absence are told apart — CART-1296', function ()
+    if not ready() then skip 'no yaml parser' end
+    local data = { root = soft_release(), nodes = {}, edges = {} }
+    local s = K.attach(data)
+    local f = s.soft
+    ok(K._api ~= nil, 'the generated API table loads')
+    -- envFrom ConfigMap present + Ingress -> Service web: two resolved references
+    eq(2, f.resolved, 'configMapRef web-config and the Ingress backend service web')
+    eq({ 'Deployment/web spec.template.spec.containers[].env[].valueFrom.secretKeyRef names Secret/web-token, absent from k' }, f.dangling,
+        'the Secret the release does not ship dangles — and the port NAME `http` is no reference')
+    eq(1, f.optional, 'the optional configMapKeyRef is absent and allowed to be')
+    eq(1, f.implicit, 'serviceAccountName: default exists in every namespace')
+    eq(1, f.cluster, 'storageClassName: fast is the cluster\'s (StorageClass is cluster-scoped)')
+    local by = {}
+    for _, e in ipairs(data.edges) do if e.k8 then by[e.k8] = (by[e.k8] or 0) + 1 end end
+    eq(2, by.references, 'resolved references are edges')
+    eq(1, by.selects, 'Service web -> the Deployment whose pod template it selects (its own spec.selector makes no self-edge)')
+end)
+
+test('k8s: a selector matching NO pod template is the silent-success finding; a workload\'s own selector is not — CART-1296', function ()
+    if not ready() then skip 'no yaml parser' end
+    local s = K.attach({ root = soft_release(), nodes = {}, edges = {} })
+    eq({ 'Service/api spec.selector{} selects no pod in k' }, s.soft.empty, 'Service api routes nowhere; Deployment web\'s own selector matches its template')
+    ok(K.summary(s):find('selector(s) match no pod template', 1, true), 'the summary says it')
+end)
+
+test('k8s: the POD TEMPLATE is where the API types put it — CronJob spec.jobTemplate.spec.template.spec — CART-1267', function ()
+    if not ready() then skip 'no yaml parser' end
+    local s = K.attach({ root = soft_release(), nodes = {}, edges = {} })
+    local images = {}
+    for _, sv in pairs(s.services_map) do if sv.image then images[sv.name] = sv.image end end
+    eq('nightly-job', images.nightly, 'the CronJob is a workload and its image is read through the derived path')
+    eq('web', images.web)
+end)

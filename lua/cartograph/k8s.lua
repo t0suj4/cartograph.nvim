@@ -89,6 +89,62 @@ local function get(v, ...)
 end
 local function list(v) return (type(v) == 'table' and v.a) or {} end
 local function str(v) return type(v) == 'string' and v or nil end
+
+-- ── THE DERIVED API (CART-1267, CART-1296): where each kind keeps its pod template and every SOFT-EDGE reference it
+-- can make (a field that names another object without owning it — the edges the garbage collector does not walk),
+-- with its target kind and cluster scope, from Kubernetes' OWN API types through the generated table
+-- (tools/k8sapi.lua). No kind, path or field is listed in this file.
+local API = require('cartograph.k8sapi').load()
+local REFS_OF = {}
+for _, r in ipairs(API and API.refs or {}) do
+    REFS_OF[r[1]] = REFS_OF[r[1]] or {}
+    table.insert(REFS_OF[r[1]], { path = r[2], target = r[3] or nil, how = r[4] })
+end
+--- every value at a derived path ('spec.template.spec.volumes[].secret.secretName'; `{}` = the map read whole)
+local function at_path(v, path)
+    local cur = { v }
+    for seg in path:gmatch('[^.]+') do
+        local name, suf = seg:match('^([^%[{]+)(.*)$')
+        local nxt = {}
+        for _, x in ipairs(cur) do
+            local y = get(x, name)
+            if y ~= nil then
+                if suf == '[]' then for _, e in ipairs(list(y)) do nxt[#nxt + 1] = e end else nxt[#nxt + 1] = y end
+            end
+        end
+        cur = nxt
+        if #cur == 0 then break end
+    end
+    return cur
+end
+--- a label map (an object of strings) -> { key = value } | nil
+local function labels(v)
+    if type(v) ~= 'table' or not v.o then return nil end
+    local out = {}
+    for _, k in ipairs(v.keys or {}) do local s = str(v.o[k]); if s then out[k] = s end end
+    return out
+end
+--- the soft-edge REFERENCES one document makes -> { { path, kind (the target's), name | sel (labels), how, optional } }
+local function refs_of(v, kind)
+    local out = {}
+    for _, r in ipairs(REFS_OF[kind or ''] or {}) do
+        for _, x in ipairs(at_path(v, r.path)) do
+            if r.how == 'name' then
+                local n = str(x)
+                if n then out[#out + 1] = { path = r.path, kind = r.target, name = n, how = 'name' } end
+            elseif r.how == 'ref' then
+                local n, k = str(get(x, 'name')), r.target or str(get(x, 'kind'))
+                -- (yamlvalue keeps a scalar as its TEXT: the boolean is the string 'true')
+                if n and k then out[#out + 1] = { path = r.path, kind = k, name = n, how = 'ref', optional = str(get(x, 'optional')) == 'true' } end
+            elseif r.how == 'selector' then
+                local sel = labels(get(x, 'matchLabels')) or (r.path:sub(-2) == '{}' and labels(x)) or nil
+                if sel and next(sel) then out[#out + 1] = { path = r.path, kind = r.target, sel = sel, how = 'selector' } end
+            end
+        end
+    end
+    return out
+end
+M._refs_of, M._api = refs_of, API
 local function textual(chunk, d)
     d.kind = chunk:match('\nkind:%s*([%w]+)') or chunk:match('^kind:%s*([%w]+)')
     -- metadata.name is the FIRST `name:` at two-space indent
@@ -111,11 +167,15 @@ local function from_value(v, d)
     d.kind = str(get(v, 'kind'))
     d.name = str(get(v, 'metadata', 'name'))
     d.app = str(get(v, 'metadata', 'labels', 'app')) or str(get(v, 'spec', 'template', 'metadata', 'labels', 'app'))
-    -- the POD TEMPLATE, wherever its kind keeps it: every workload kind has one
+    -- the POD TEMPLATE, wherever its kind keeps it — DERIVED from Kubernetes' own types (CART-1267): every kind a
+    -- PodSpec is reachable from, at the path the types give (CronJob spec.jobTemplate.spec.template.spec)
     local pod
-    if d.kind == 'Pod' then pod = get(v, 'spec')
-    elseif d.kind == 'CronJob' then pod = get(v, 'spec', 'jobTemplate', 'spec', 'template', 'spec')
-    else pod = get(v, 'spec', 'template', 'spec') end
+    local pp = API and d.kind and API.pod[d.kind]
+    if pp then
+        pod = at_path(v, pp)[1]
+        d.podlabels = labels(at_path(v, pp == 'spec' and 'metadata.labels' or (pp:gsub('%.spec$', '.metadata.labels')))[1])
+    end
+    d.refs = refs_of(v, d.kind)
     if type(pod) == 'table' and pod.o then
         d.workload = true
         d.sa = str(get(pod, 'serviceAccountName'))
@@ -305,6 +365,16 @@ function M.attach(data, opts)
                         variant = rel:sub(1, #rel - #d.source) .. (d.source:match('^([^/]+)') or '')
                     end
                     if not counted[variant] then counted[variant] = true; stats.variants[variant] = (stats.variants[variant] or 0) + 1 end
+                    -- (every OBJECT by kind and name within its release, and every document that references or carries
+                    -- pod labels: the soft-edge pass resolves against these)
+                    if d.kind and d.name then
+                        stats.objects = stats.objects or {}
+                        stats.objects[variant .. '\31' .. d.kind .. '\31' .. d.name] = rel
+                    end
+                    if (d.refs and #d.refs > 0) or d.podlabels then
+                        stats.docs_soft = stats.docs_soft or {}
+                        table.insert(stats.docs_soft, { rel = rel, variant = variant, d = d })
+                    end
                     stats.shell_urls = (stats.shell_urls or 0) + (d.shell_urls or 0)
                     stats.embedded = (stats.embedded or 0) + (d.embedded or 0)
                     if d.kind == 'ConfigMap' and d.name and d.data then
@@ -417,6 +487,49 @@ function M.attach(data, opts)
 
     table.sort(stats.dangling) -- (an artifact field: order is output)
 
+    -- ── PASS 2b: THE SOFT EDGES (design kubernetes/: everything that binds without owning, which GC never walks), from
+    -- the DERIVED references (CART-1296). A name resolves to an object of that kind in the SAME release; absent, it is
+    -- cluster-provided when the kind is cluster-scoped (a StorageClass, a Node: a frontier), optional when the reference
+    -- says so, implicit for the `default` ServiceAccount, and otherwise DANGLING — a reference to an object the release
+    -- does not ship (CART-0156's silent-success class: every tool reports success and the pod fails to start). A pod
+    -- selector resolves to the workloads whose POD-TEMPLATE labels it matches; a selector matching none is the other
+    -- silent success: a Service that exists and routes nowhere.
+    local soft = { resolved = 0, cluster = 0, optional = 0, implicit = 0, selects = 0, dangling = {}, empty = {} }
+    stats.soft = soft
+    for _, e in ipairs(stats.docs_soft or {}) do
+        local d = e.d
+        for _, r in ipairs(d.refs or {}) do
+            if r.how == 'selector' then
+                if r.kind == 'Pod' then
+                    local hits = 0
+                    for _, o in ipairs(stats.docs_soft) do
+                        if o.variant == e.variant and o.d.podlabels then
+                            local ok = true
+                            for k, v in pairs(r.sel) do if o.d.podlabels[k] ~= v then ok = false; break end end
+                            if ok then
+                                hits = hits + 1
+                                -- (a workload's own spec.selector matches its own template: counted, no self-edge)
+                                if o ~= e then data.edges[#data.edges + 1] = { from = e.rel, to = o.rel, kind = 'use', k8 = 'selects', at = {} }; soft.selects = soft.selects + 1 end
+                            end
+                        end
+                    end
+                    if hits == 0 then soft.empty[#soft.empty + 1] = ('%s/%s %s selects no pod in %s'):format(d.kind, d.name or '?', r.path, e.variant) end
+                else soft.cluster = soft.cluster + 1 end
+            else
+                local to = (stats.objects or {})[e.variant .. '\31' .. r.kind .. '\31' .. r.name]
+                if to then
+                    soft.resolved = soft.resolved + 1
+                    if to ~= e.rel then data.edges[#data.edges + 1] = { from = e.rel, to = to, kind = 'use', k8 = 'references', at = {} } end
+                elseif API and API.cluster[r.kind] then soft.cluster = soft.cluster + 1
+                elseif r.optional then soft.optional = soft.optional + 1
+                elseif r.kind == 'ServiceAccount' and r.name == 'default' then soft.implicit = soft.implicit + 1
+                else soft.dangling[#soft.dangling + 1] = ('%s/%s %s names %s/%s, absent from %s'):format(d.kind, d.name or '?', r.path, r.kind, r.name, e.variant) end
+            end
+        end
+    end
+    table.sort(soft.dangling)
+    table.sort(soft.empty)
+
     -- ── ★★★ PASS 3: THE EDGE THAT FUSES THE LAYER TO THE CODE. Without it the
     -- deployment is an ISLAND — measured on microservices-demo, the composed
     -- graph had 42 deployment->deployment edges and ZERO deployment->source, so
@@ -491,6 +604,21 @@ local function honesty(s)
     return '\n  · ' .. table.concat(l, '\n  · ')
 end
 
+--- the SOFT-EDGE lines: what resolved, what the cluster provides, and the two silent-success findings
+local function soft_lines(s)
+    local f = s.soft
+    if not f then return '' end
+    local l = {}
+    if f.resolved + f.selects + f.cluster + f.optional + f.implicit + #f.dangling + #f.empty > 0 then
+        l[#l + 1] = ('soft edges (derived from the API types, %s): %d reference(s) resolved, %d selector edge(s), %d cluster-provided (a frontier), %d optional, %d implicit')
+            :format(API and API.stamp or 'no table', f.resolved, f.selects, f.cluster, f.optional, f.implicit)
+    end
+    if #f.dangling > 0 then l[#l + 1] = ('⚠ %d reference(s) to an object the release does not ship: %s'):format(#f.dangling, table.concat(f.dangling, ' · ')) end
+    if #f.empty > 0 then l[#l + 1] = ('⚠ %d selector(s) match no pod template (exists, routes nowhere): %s'):format(#f.empty, table.concat(f.empty, ' · ')) end
+    if #l == 0 then return '' end
+    return '\n  · ' .. table.concat(l, '\n  · ')
+end
+
 function M.summary(s)
     -- ⚠ A REFUSAL-ONLY RESULT IS STILL A RESULT (CART-1043): with no manifest read but documents
     -- refused, the old `files == 0 -> nil` made the refusal counter silent exactly when the whole
@@ -519,7 +647,7 @@ function M.summary(s)
                 :format(s.refused, table.concat(s.refusals, ' ')) or '')
         .. (#s.dangling > 0 and ('\n  ⚠ %d declared peer(s) absent from their own'
             .. ' deployment (one-sided edge, NOT automatically a bug): %s')
-            :format(#s.dangling, table.concat(s.dangling, ' · ')) or '') .. honesty(s)
+            :format(#s.dangling, table.concat(s.dangling, ' · ')) or '') .. soft_lines(s) .. honesty(s)
 end
 
 return M
