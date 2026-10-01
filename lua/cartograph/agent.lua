@@ -3335,6 +3335,9 @@ local function k8s_rows(s, rows)
     for _, d in ipairs(s.soft and s.soft.dangling or {}) do rows[#rows + 1] = { finding = 'dangling-reference', message = d } end
     for _, d in ipairs(s.soft and s.soft.empty or {}) do rows[#rows + 1] = { finding = 'selector-matches-nothing', message = d } end
     for _, d in ipairs(s.dangling or {}) do rows[#rows + 1] = { finding = 'one-sided-peer', message = d } end
+    -- (the DELETION FRONTIER: candidates and dark rows, never a delete list — CART-0139)
+    for _, d in ipairs(s.orphans and s.orphans.candidates or {}) do rows[#rows + 1] = { finding = 'orphan-candidate', message = d } end
+    for _, d in ipairs(s.orphans and s.orphans.dark or {}) do rows[#rows + 1] = { finding = 'orphan-dark', message = d } end
     return rows
 end
 local function k8s_notes(s)

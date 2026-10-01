@@ -494,8 +494,23 @@ function M.attach(data, opts)
     -- does not ship (CART-0156's silent-success class: every tool reports success and the pod fails to start). A pod
     -- selector resolves to the workloads whose POD-TEMPLATE labels it matches; a selector matching none is the other
     -- silent success: a Service that exists and routes nowhere.
-    local soft = { resolved = 0, cluster = 0, optional = 0, implicit = 0, selects = 0, dangling = {}, empty = {} }
+    local soft = { resolved = 0, cluster = 0, optional = 0, implicit = 0, selects = 0, dangling = {}, empty = {}, inbound = {}, composed = 0 }
     stats.soft = soft
+    -- (a KUSTOMIZE COMPONENT is not a release: its directory's kustomization declares `kind: Component` — kustomize's own
+    -- marker — and its objects are COMPOSED with a base, where their selectors and references resolve. Unresolved
+    -- there, they are counted as `composed`, a frontier, never findings; the base is not read through the component)
+    local component = {}
+    for v in pairs(stats.variants) do
+        for _, kf in ipairs({ 'kustomization.yaml', 'kustomization.yml', 'Kustomization' }) do
+            local fd = io.open(data.root .. '/' .. v .. '/' .. kf, 'r')
+            if fd then
+                local txt = fd:read('a'); fd:close()
+                if txt:match('\nkind:%s*Component%s') or txt:match('^kind:%s*Component%s') then component[v] = true end
+                break
+            end
+        end
+    end
+    stats.components = component
     for _, e in ipairs(stats.docs_soft or {}) do
         local d = e.d
         for _, r in ipairs(d.refs or {}) do
@@ -513,22 +528,63 @@ function M.attach(data, opts)
                             end
                         end
                     end
-                    if hits == 0 then soft.empty[#soft.empty + 1] = ('%s/%s %s selects no pod in %s'):format(d.kind, d.name or '?', r.path, e.variant) end
+                    if hits == 0 and component[e.variant] then soft.composed = soft.composed + 1
+                    elseif hits == 0 then soft.empty[#soft.empty + 1] = ('%s/%s %s selects no pod in %s'):format(d.kind, d.name or '?', r.path, e.variant) end
                 else soft.cluster = soft.cluster + 1 end
             else
                 local to = (stats.objects or {})[e.variant .. '\31' .. r.kind .. '\31' .. r.name]
                 if to then
                     soft.resolved = soft.resolved + 1
+                    soft.inbound[e.variant .. '\31' .. r.kind .. '\31' .. r.name] = true
                     if to ~= e.rel then data.edges[#data.edges + 1] = { from = e.rel, to = to, kind = 'use', k8 = 'references', at = {} } end
                 elseif API and API.cluster[r.kind] then soft.cluster = soft.cluster + 1
                 elseif r.optional then soft.optional = soft.optional + 1
                 elseif r.kind == 'ServiceAccount' and r.name == 'default' then soft.implicit = soft.implicit + 1
+                elseif component[e.variant] then soft.composed = soft.composed + 1
                 else soft.dangling[#soft.dangling + 1] = ('%s/%s %s names %s/%s, absent from %s'):format(d.kind, d.name or '?', r.path, r.kind, r.name, e.variant) end
             end
         end
     end
     table.sort(soft.dangling)
     table.sort(soft.empty)
+
+    -- ── PASS 2c: THE DELETION FRONTIER (CART-0139, design kubernetes/: "is this safe to delete?" is a question about
+    -- ABSENT edges). Only DATA kinds are asked about — derived from the API table: the kinds some reference names
+    -- (ConfigMap, Secret, PersistentVolumeClaim, ServiceAccount …) minus workloads (a pod template) and routers (a
+    -- kind that itself declares a selector: Service). Each object of such a kind in the release is TIERED, never a
+    -- delete button: LIVE (a reference resolves to it), `~` CANDIDATE (no static reference, but an operator or a
+    -- monthly CronJob may read it by name through the API), DARK (the release ships a kind the API table does not know
+    -- — a custom resource — whose references cartograph cannot read: the one row that matters, said with how far the
+    -- sight goes).
+    local data_kind = {}
+    if API then
+        local router = {}
+        for _, r in ipairs(API.refs) do if r[4] == 'selector' then router[r[1]] = true end end
+        for _, r in ipairs(API.refs) do
+            local t = r[3]
+            if t and (r[4] == 'name' or r[4] == 'ref') and not API.pod[t] and not router[t] and not API.cluster[t] then data_kind[t] = true end
+        end
+    end
+    local unknown_kinds = {}
+    for k in pairs(stats.objects or {}) do
+        local variant, kind = k:match('^(.-)\31([^\31]+)\31')
+        if API and kind and not API.group[kind] then unknown_kinds[variant] = unknown_kinds[variant] or {}; unknown_kinds[variant][kind] = true end
+    end
+    local orphans = { live = 0, candidates = {}, dark = {} }
+    for k in pairs(stats.objects or {}) do
+        local variant, kind, name = k:match('^(.-)\31([^\31]+)\31(.+)$')
+        if kind and data_kind[kind] and not component[variant] then
+            if soft.inbound[k] then orphans.live = orphans.live + 1
+            elseif unknown_kinds[variant] then
+                local ks = vim.tbl_keys(unknown_kinds[variant]); table.sort(ks)
+                orphans.dark[#orphans.dark + 1] = ('%s/%s in %s — no reference cartograph can read, and the release ships %s (custom resources whose references are not read)'):format(kind, name, variant, table.concat(ks, ', '))
+            else
+                orphans.candidates[#orphans.candidates + 1] = ('%s/%s in %s — no static reference in the release (an operator or a job may still read it by name: never auto-delete)'):format(kind, name, variant)
+            end
+        end
+    end
+    table.sort(orphans.candidates); table.sort(orphans.dark)
+    stats.orphans = orphans
 
     -- ── ★★★ PASS 3: THE EDGE THAT FUSES THE LAYER TO THE CODE. Without it the
     -- deployment is an ISLAND — measured on microservices-demo, the composed
@@ -610,11 +666,17 @@ local function soft_lines(s)
     if not f then return '' end
     local l = {}
     if f.resolved + f.selects + f.cluster + f.optional + f.implicit + #f.dangling + #f.empty > 0 then
-        l[#l + 1] = ('soft edges (derived from the API types, %s): %d reference(s) resolved, %d selector edge(s), %d cluster-provided (a frontier), %d optional, %d implicit')
-            :format(API and API.stamp or 'no table', f.resolved, f.selects, f.cluster, f.optional, f.implicit)
+        l[#l + 1] = ('soft edges (derived from the API types, %s): %d reference(s) resolved, %d selector edge(s), %d cluster-provided (a frontier), %d optional, %d implicit%s')
+            :format(API and API.stamp or 'no table', f.resolved, f.selects, f.cluster, f.optional, f.implicit,
+                (f.composed or 0) > 0 and (', %d inside kustomize components (resolve in the base they compose with: a frontier)'):format(f.composed) or '')
     end
     if #f.dangling > 0 then l[#l + 1] = ('⚠ %d reference(s) to an object the release does not ship: %s'):format(#f.dangling, table.concat(f.dangling, ' · ')) end
     if #f.empty > 0 then l[#l + 1] = ('⚠ %d selector(s) match no pod template (exists, routes nowhere): %s'):format(#f.empty, table.concat(f.empty, ' · ')) end
+    local o = s.orphans
+    if o and (o.live + #o.candidates + #o.dark) > 0 then
+        l[#l + 1] = ('deletion frontier: %d data object(s) live (referenced), %d `~` candidate(s), %d dark%s%s'):format(o.live, #o.candidates, #o.dark,
+            #o.candidates > 0 and (' — ~ ' .. table.concat(o.candidates, ' · ')) or '', #o.dark > 0 and (' — dark ' .. table.concat(o.dark, ' · ')) or '')
+    end
     if #l == 0 then return '' end
     return '\n  · ' .. table.concat(l, '\n  · ')
 end

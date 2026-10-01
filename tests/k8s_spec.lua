@@ -143,6 +143,40 @@ test('k8s: a selector matching NO pod template is the silent-success finding; a 
     ok(K.summary(s):find('selector(s) match no pod template', 1, true), 'the summary says it')
 end)
 
+test('k8s: the DELETION FRONTIER is tiered — live / ~ candidate / dark — never a delete list — CART-0139', function ()
+    if not ready() then skip 'no yaml parser' end
+    local function doc(t) return table.concat(t, '\n') .. '\n' end
+    local root = tmproot({
+        -- release a: one ConfigMap a workload reads (LIVE), one nothing reads (a ~ CANDIDATE)
+        ['a/deploy.yaml'] = doc({ 'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: w', 'spec:', '  template:', '    spec:',
+            '      containers:', '      - name: w', '        image: w', '        envFrom:', '        - configMapRef:', '            name: used' }),
+        ['a/used.yaml'] = doc({ 'apiVersion: v1', 'kind: ConfigMap', 'metadata:', '  name: used', 'data:', '  A: "1"' }),
+        ['a/stale.yaml'] = doc({ 'apiVersion: v1', 'kind: ConfigMap', 'metadata:', '  name: stale', 'data:', '  B: "2"' }),
+        -- release b: a custom resource beside an unreferenced Secret: the Secret is DARK (the CR may name it)
+        ['b/cert.yaml'] = doc({ 'apiVersion: cert-manager.io/v1', 'kind: Certificate', 'metadata:', '  name: tls', 'spec:', '  secretName: tls-key' }),
+        ['b/key.yaml'] = doc({ 'apiVersion: v1', 'kind: Secret', 'metadata:', '  name: tls-key', 'data:', '  k: eA==' }),
+    })
+    local s = K.attach({ root = root, nodes = {}, edges = {} })
+    local o = s.orphans
+    eq(1, o.live, 'ConfigMap used')
+    eq(1, #o.candidates); ok(o.candidates[1]:find('ConfigMap/stale in a', 1, true), o.candidates[1])
+    eq(1, #o.dark); ok(o.dark[1]:find('Secret/tls-key in b', 1, true) and o.dark[1]:find('Certificate', 1, true), o.dark[1])
+    ok(K.summary(s):find('deletion frontier', 1, true))
+end)
+
+test('k8s: a KUSTOMIZE COMPONENT (`kind: Component`) is composed with a base — its unresolved selector is a frontier, the same selector in a plain directory a finding', function ()
+    if not ready() then skip 'no yaml parser' end
+    local svc = table.concat({ 'apiVersion: v1', 'kind: Service', 'metadata:', '  name: s', 'spec:', '  selector:', '    app: elsewhere', '  ports:', '  - port: 80' }, '\n') .. '\n'
+    local root = tmproot({
+        ['comp/kustomization.yaml'] = 'apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\nresources:\n- svc.yaml\n',
+        ['comp/svc.yaml'] = svc,
+        ['plain/svc.yaml'] = svc,
+    })
+    local s = K.attach({ root = root, nodes = {}, edges = {} })
+    eq({ 'Service/s spec.selector{} selects no pod in plain' }, s.soft.empty, 'only the plain directory is a release')
+    eq(1, s.soft.composed, 'the component\'s selector resolves in the base it composes with')
+end)
+
 test('k8s: the POD TEMPLATE is where the API types put it — CronJob spec.jobTemplate.spec.template.spec — CART-1267', function ()
     if not ready() then skip 'no yaml parser' end
     local s = K.attach({ root = soft_release(), nodes = {}, edges = {} })
