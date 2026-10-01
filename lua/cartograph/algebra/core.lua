@@ -953,6 +953,10 @@ function M.rewrite(T, path, sub)
     if not ok then return nil, why end
     local okp, pwhy = keyed_parent_ok('rewrite', T.body, path, sub)
     if not okp then return nil, pwhy end
+    -- (the region must EXIST in this body: an earlier rewrite of the same pass may have shifted it — a guard inserted
+    -- into a statement list moves every later sibling. A refusal by name, not an index error inside set_at: a PHP
+    -- compound edit raised there where classify's straddle branch would have refused — design refactoring/03)
+    if #path > 0 and at(T.body, path) == nil then return nil, 'rewrite: no region at ' .. key(path) .. ' in this body' end
     local T2 = edited(T, { op = 'rewrite', h = key(path), path = M.copy(path), sub = M.copy(sub) })
     T2.body = set_at(T2.body, path, M.copy(sub))
     local H = M.sites(T2)

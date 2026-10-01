@@ -130,3 +130,85 @@ test('transplant: the report is a PROPOSAL and says it moves nothing', function 
         'and that transplant derives a term rather than moving a family')
     ok(txt:find('wrap(y, DEFAULT)', 1, true), 'and shows the derived line')
 end)
+
+-- (design refactoring/03, 2026-09-30: a COMPOUND exemplar edit on PHP terms — a guard inserted at the top of the body
+-- and a method chain merged further down — raised `attempt to index local 'parent'` inside set_at: the second region's
+-- path no longer existed after the first rewrite shifted the statement list. The operator is called directly, past
+-- `available` (PHP is unaudited), as the report did)
+test('transplant: a compound edit whose second region the first one shifted REFUSES that rewrite by name — no raise; the straddle route then derives both', function ()
+    if not parser_available('php') or not tp.available('lua') then return skip('no php parser / algebra') end
+    local A = require('cartograph.algebra').load()
+    local reader = require('cartograph.algebraread')
+    local src = { a = [==[<?php
+class R {
+	public function meetingsForDay(int $userId, string $day): array
+	{
+		$out = [];
+		$rows = $this->db->table(self::Table)->where('user_id', $userId)->where('day', $day)->order('started_at')->order('id')->fetchAll();
+		foreach ($rows as $row) {
+			$data = $row->toArray();
+			$out[] = new Meeting(
+				id: (int) $data['id'],
+				userId: (int) $data['user_id'],
+				day: (string) $data['day'],
+				startedAt: new \DateTimeImmutable((string) $data['started_at']),
+				endedAt: new \DateTimeImmutable((string) $data['ended_at']),
+				summary: (string) ($data['summary'] ?? ''),
+				state: (string) ($data['state'] ?? 'confirmed'),
+			);
+		}
+		return $out;
+	}
+}
+]==], b = [==[<?php
+class R {
+	public function meetingsForDay(int $userId, string $day): array
+	{
+		if ($day === '') {
+			return [];
+		}
+		$out = [];
+		$rows = $this->db->table(self::Table)->where('user_id', $userId)->where('day', $day)->order('started_at, id')->fetchAll();
+		foreach ($rows as $row) {
+			$data = $row->toArray();
+			$out[] = new Meeting(
+				id: (int) $data['id'],
+				userId: (int) $data['user_id'],
+				day: (string) $data['day'],
+				startedAt: new \DateTimeImmutable((string) $data['started_at']),
+				endedAt: new \DateTimeImmutable((string) $data['ended_at']),
+				summary: (string) ($data['summary'] ?? ''),
+				state: (string) ($data['state'] ?? 'confirmed'),
+			);
+		}
+		return $out;
+	}
+}
+]==], c = [==[<?php
+class R {
+	public function intervalsForDay(int $userId, string $day): array
+	{
+		$out = [];
+		$rows = $this->db->table(self::Table)->where('user_id', $userId)->where('day', $day)->order('started_at')->order('id')->fetchAll();
+		foreach ($rows as $row) {
+			$data = $row->toArray();
+			$out[] = new PresenceInterval(
+				id: (int) $data['id'],
+				userId: (int) $data['user_id'],
+				day: (string) $data['day'],
+				startedAt: new \DateTimeImmutable((string) $data['started_at']),
+				endedAt: new \DateTimeImmutable((string) $data['ended_at']),
+			);
+		}
+		return $out;
+	}
+}
+]==] }
+    local t = {}
+    for k, s in pairs(src) do local term, why = reader.read(s, 'php'); assert(term, k .. ': ' .. tostring(why)); t[k] = term end
+    local okr, r = pcall(A.transplant, t.a, t.b, t.c)
+    ok(okr, 'no runtime error: ' .. tostring(r))
+    local out = r and A.cst_print(r.result)
+    ok(out and out:find("if ($day === '') {", 1, true) and out:find("->order('started_at, id')", 1, true), 'both edits land')
+    ok(out and out:find('new PresenceInterval(', 1, true) and not out:find('summary:', 1, true), 'the target keeps its own differences')
+end)
