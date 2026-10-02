@@ -370,6 +370,92 @@ test('mix: a string literal\'s ESCAPES are read as Lua reads them — \\n \\t \\
     eq('>a\tb\nAB|\\|"\'', r('>'))
 end)
 
+-- ── what specializing the algebra's REAL matcher needed (CART-1279) ───────────────────────────────────────────────────
+local REAL = [[
+local function lazyerr(t, x)
+    if x then return t.kids[1] end
+    return 0
+end
+local function gen(x, n)
+    n = n or #x
+    return n + 1
+end
+local function callgen(x)
+    return gen(x)
+end
+local function pooled(t, i)
+    return t[i]
+end
+local function deep(x)
+    local list = { sites = {} }
+    list.sites[#list.sites + 1] = x
+    return list.sites[1]
+end
+local function short(env, x)
+    return env.d and env.d[x] or 0
+end
+local function viaglobal(x)
+    return G.twice(x)
+end
+local function id(x)
+    return x
+end
+local function asvalue(x)
+    local f = id
+    return f(x) + 1
+end
+]]
+-- a residual loaded with its constant pool (and G) in its environment
+local function residual_env(fname, division, statics, opts, G)
+    local T = assert(R.read(REAL, 'lua'))
+    local text, _, pool = MX.mix(T, fname, division, statics, opts)
+    local env = setmetatable({ MIXK = pool, G = G }, { __index = _G })
+    return assert(load(text, fname, 't', env))(), text, pool
+end
+
+test('mix: what the REAL matcher needed — a lazy error, a generalized parameter, the constant pool, a deep store, a static short circuit, a known global, a function as a value', function ()
+    ready()
+    -- LAZY ERROR: `t.kids[1]` of a node with no kids, under a dynamic guard — raised only if the arm runs
+    local f1, t1 = residual_env('lazyerr', { 'S', 'D' }, { {} })
+    eq(0, f1(false))
+    ok(not pcall(f1, true), 'the arm raises, as the original does')
+    ok(t1:find('error(', 1, true), 'a residual error where the static computation failed\n' .. t1)
+    -- GENERALIZE: n static (absent) at the call, dynamic in the body
+    local f2, t2 = residual_env('callgen', { 'D' }, {})
+    eq(4, f2({ 1, 2, 3 }))
+    ok(t2:find('local n_%d+ = nil'), 'the generalized parameter starts as a local\n' .. t2)
+    -- CONSTANT POOL: a static table read at a dynamic index — referenced, not copied
+    local tbl = { 'a', 'b', 'c' }
+    local f3, t3, pool = residual_env('pooled', { 'S', 'D' }, { tbl })
+    eq({ 'a', 'c' }, { f3(1), f3(3) })
+    ok(pool[1] == tbl and t3:find('MIXK[1]', 1, true), 'the SAME table, by reference\n' .. t3)
+    -- DEEP STORE: `list.sites[n] = x` makes list dynamic
+    local f4 = residual_env('deep', { 'D' }, {})
+    eq('x', f4('x'))
+    -- SHORT CIRCUIT: `env.d and …` with env.d static nil is 0, never `nil[x]`
+    local f5, t5 = residual_env('short', { 'S', 'D' }, { {} })
+    eq(0, f5('k'))
+    ok(not t5:find('[', 1, true), 'the dead `env.d[x]` is gone, not merely parenthesized\n' .. t5)
+    -- KNOWN GLOBAL: a host function reached by its PATH
+    local G = { twice = function (x) return 2 * x end }
+    local f6, t6 = residual_env('viaglobal', { 'D' }, {}, { globals = { ['G.twice'] = G.twice } }, G)
+    eq(14, f6(7))
+    ok(t6:find('G.twice(', 1, true), t6)
+    -- A FUNCTION AS A VALUE: `local f = id` then `f(x)`
+    local f7 = residual_env('asvalue', { 'D' }, {})
+    eq(42, f7(41))
+end)
+
+test('mix: an UNFOLD attempt is a transaction — a program point it made, then failed, is rolled back, never reused bodiless', function ()
+    ready()
+    -- (g unfolds to inner(x); inner's body REFUSES — a dynamic pair expanding into h's parameters. The attempt to
+    -- unfold g fails after point(inner) was registered; without the rollback the fallback reuses that bodiless point)
+    local src = 'local function h(a, b, c)\n    return a\nend\nlocal function f(x)\n    return x, x\nend\nlocal function inner(x)\n    return h(x, f(x))\nend\nlocal function g(x)\n    return inner(x)\nend\nlocal function top(x)\n    return g(x)\nend\n'
+    local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), 'top', { 'D' }, {})
+    eq(false, okm)
+    ok(type(e) == 'table' and e.refusal and e.refusal:find('expands several dynamic values', 1, true), 'refused by name, not a broken residual: ' .. vim.inspect(e))
+end)
+
 test('mix: the CENSUS — lower with { collect = {} } records every refused statement and goes on, so one run lists what blocks mix on a program', function ()
     ready()
     local got = {}

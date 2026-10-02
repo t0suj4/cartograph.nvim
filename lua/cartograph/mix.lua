@@ -467,12 +467,25 @@ end
 
 -- ── the INTERPRETER (static evaluation, and the step counter of the payoff gate) ────────────────────────────────────
 local PRIMS = {
-    tostring = tostring, tonumber = tonumber, type = type,
-    ['math.floor'] = math.floor, ['math.max'] = math.max, ['math.min'] = math.min, ['math.abs'] = math.abs,
+    tostring = tostring, tonumber = tonumber, type = type, unpack = unpack, select = select, next = next,
+    rawequal = rawequal, error = error, pcall = pcall, assert = assert,
+    ['math.floor'] = math.floor, ['math.ceil'] = math.ceil, ['math.max'] = math.max, ['math.min'] = math.min, ['math.abs'] = math.abs,
     ['string.format'] = string.format, ['string.sub'] = string.sub, ['string.len'] = string.len, ['string.rep'] = string.rep,
-    ['table.insert'] = table.insert, ['table.concat'] = table.concat,
+    ['string.gsub'] = string.gsub, ['string.find'] = string.find, ['string.match'] = string.match, ['string.byte'] = string.byte,
+    ['string.char'] = string.char, ['string.upper'] = string.upper, ['string.lower'] = string.lower,
+    ['table.insert'] = table.insert, ['table.remove'] = table.remove, ['table.sort'] = table.sort, ['table.concat'] = table.concat,
 }
 M.PRIMS = PRIMS
+-- primitives NEVER computed early: they mutate a table, or raise (an error is the residual program's, not mix's)
+local EFFECT = { ['table.insert'] = true, ['table.remove'] = true, ['table.sort'] = true, error = true, assert = true }
+M.EFFECT = EFFECT
+-- global VALUES (not calls) that are constants of the language
+local CONSTS = { ['math.huge'] = math.huge, ['math.pi'] = math.pi }
+M.CONSTS = CONSTS
+-- KNOWN GLOBALS of the current specialization (opts.globals: a module's DATA — `M.grammars` — named by its path):
+-- static values to the evaluator; a host value of them reaching dynamic code is residualized as its PATH, and the
+-- residual chunk is loaded with those globals in its environment
+local KNOWN = {}
 
 -- the value of every DYNAMIC slot in a specialization's static environment: a static computation that reads one is a
 -- binding-time gap, refused by name
@@ -545,6 +558,17 @@ function M.evaluator(prog, budget)
         local vs = applyl(c, args)
         return unpack(vs, 1, vs.n)
     end
+    -- a TOP-LEVEL FUNCTION used as a value: a closure with no free variables over a lambda that stands for it (one
+    -- per function: the same key every time)
+    local fnlam, fnval = {}, {}
+    function R.fnvalue(name)
+        if fnval[name] then return fnval[name] end
+        local f = prog.funcs[name]
+        fnlam[name] = { op = 'lambda', id = 'fn:' .. name, params = f.params, pnames = f.pnames, body = f.body, free = {} }
+        local fn = R.new_closure(fnlam[name], {})
+        fnval[name] = fn
+        return fn
+    end
     function R.new_closure(lam, env, bt, dfree)
         local c = { lam = lam, env = env, bt = bt or {}, dfree = dfree or {} }
         c.fn = wrap(c)
@@ -586,7 +610,10 @@ function M.evaluator(prog, budget)
         if op == 'prim' then
             local p = PRIMS[e.name]
             if not p then refuse('the primitive ' .. e.name .. ' (not in the table)') end
-            return host(p, evals(e.args, env))
+            local vs = host(p, evals(e.args, env))
+            -- (a static pcall must not swallow mix's own refusal: re-raised, never a value)
+            if e.name == 'pcall' and vs[1] == false and type(vs[2]) == 'table' and vs[2].refusal then error(vs[2], 0) end
+            return vs
         end
         if op == 'method' then
             local o = eval(e.obj, env)
@@ -639,8 +666,12 @@ function M.evaluator(prog, budget)
             R.steps = R.steps - 1 -- (eval_multi counts the step)
             return eval_multi(e, env)[1]
         end
-        if op == 'fn' then refuse('the top-level function ' .. e.name .. ' used as a value (rung 2: function expressions only)') end
-        if op == 'global' then refuse('the global ' .. e.name) end
+        if op == 'fn' then return R.fnvalue(e.name) end
+        if op == 'global' then
+            if CONSTS[e.name] ~= nil then return CONSTS[e.name] end
+            if KNOWN[e.name] ~= nil then return KNOWN[e.name] end
+            refuse('the global ' .. e.name)
+        end
         refuse('the IR op ' .. tostring(op))
     end
     -- exec_block -> done (a return ran), value
@@ -722,6 +753,8 @@ local function opnd(b) if b == C then return D end return b end
 local function bt_expr(e, bt)
     local op = e.op
     if op == 'num' or op == 'str' or op == 'bool' or op == 'nil' then return S end
+    if op == 'global' and (CONSTS[e.name] ~= nil or KNOWN[e.name] ~= nil) then return S end
+    if op == 'fn' then return S end
     if op == 'var' then return bt[e.id] or S end
     if op == 'lambda' then
         for _, id in ipairs(e.free) do if (bt[id] or S) ~= S then return C end end
@@ -738,7 +771,7 @@ local function bt_expr(e, bt)
     if op == 'call' or op == 'prim' then
         local r = S
         for _, a in ipairs(e.args) do r = join(r, bt_expr(a, bt)) end
-        if op == 'prim' and e.name == 'table.insert' then return D end -- (a mutation: never computed early)
+        if op == 'prim' and EFFECT[e.name] then return D end -- (a mutation or a raise: never computed early)
         return opnd(r)
     end
     if op == 'method' then
@@ -755,6 +788,17 @@ local function bt_expr(e, bt)
     return D
 end
 M._bt_expr = bt_expr
+
+-- the variable a store's target is rooted in (`t` of `t.a[i]`), or nil
+local function store_root(t)
+    local x = t
+    for _ = 1, 1000 do
+        if x.op == 'var' then return x end
+        if x.op ~= 'index' then return nil end
+        x = x.obj
+    end
+    return nil
+end
 
 local function bt_block(stmts, bt, ctrl)
     local changed = false
@@ -775,15 +819,17 @@ local function bt_block(stmts, bt, ctrl)
             for i, t in ipairs(s.targets) do
                 local e = s.es[math.min(i, #s.es)]
                 local v = join(ctrl, e and bt_expr(e, bt) or S)
-                if t.op == 'var' then set(t.id, v) elseif t.obj.op == 'var' then set(t.obj.id, D) end
+                if t.op == 'var' then set(t.id, v)
+                else local root = store_root(t); if root then set(root.id, D) end end
             end
         elseif op == 'assign' then
             local v = join(ctrl, bt_expr(s.e, bt)) -- CONGRUENCE: assigned under dynamic control -> D
             if s.target.op == 'var' then set(s.target.id, v)
             else
-                -- a store into a table: the table itself becomes dynamic (rung 1 never mutates a static table)
-                local root = s.target.obj
-                if root.op == 'var' then set(root.id, D) end
+                -- a store into a table — at any depth, `list.sites[n] = x` — makes the table it is rooted in dynamic (a
+                -- static table never changes at run time)
+                local root = store_root(s.target)
+                if root then set(root.id, D) end
             end
         elseif op == 'if' then
             local c = ctrl
@@ -887,6 +933,7 @@ end
 --- params = { rname … }, body } }, entry }, stats. opts: budget (unfold steps), name (the entry's residual name)
 function M.specialize(prog, fname, division, statics, opts)
     opts = opts or {}
+    KNOWN = opts.globals or {}
     local budget = opts.budget or 100000
     local used = 0
     local res = { funcs = {}, order = {} }
@@ -915,10 +962,29 @@ function M.specialize(prog, fname, division, statics, opts)
             end
         end
     end
-    local function sval(e, X) current = X; return ev.eval(e, X.env) end
-    local function svalm(e, X) current = X; return ev.eval_multi(e, X.env) end
-    local function svall(es, X) current = X; return ev.evals(es, X.env) end
+    -- STATIC evaluation. A Lua error it raises (not a refusal) is the PROGRAM's — a static computation in an arm the
+    -- template makes invalid (`t.kids[1]` of a node with no kids, under a dynamic guard): it is raised as LAZY and
+    -- becomes a residual `error(...)` where the statement stood (the original raises there only if it gets there)
+    local function lazy(f, a, X)
+        current = X
+        local ok, v = pcall(f, a, X.env)
+        if ok then return v end
+        if type(v) == 'table' then error(v, 0) end
+        local msg = tostring(v):gsub('^[^:]*:%d+: ', '')
+        error({ lazy = msg }, 0)
+    end
+    local function sval(e, X) return lazy(ev.eval, e, X) end
+    local function svalm(e, X) return lazy(ev.eval_multi, e, X) end
+    local function svall(es, X) return lazy(ev.evals, es, X) end
     local unfolding = {} -- program points being unfolded right now: a recursive one becomes a program point instead
+    -- (an unfold is a TRANSACTION: the program points it creates are rolled back when it fails — a failed attempt must
+    -- not leave a memoized name whose body was never built)
+    local mlog = {}
+    local function mark() return #res.order, #mlog end
+    local function rollback(no, nm)
+        for i = #res.order, no + 1, -1 do res.funcs[res.order[i]] = nil; res.order[i] = nil end
+        for i = #mlog, nm + 1, -1 do memo[mlog[i]] = nil; mlog[i] = nil end
+    end
     -- NESTING: every unfold and program point nests a specialization (and unfold a pcall — LuaJIT allows ~200 nested C
     -- calls); past opts.depth the specialization REFUSES by name instead of overflowing the C stack
     local depth, maxdepth = 0, opts.depth or 120
@@ -957,10 +1023,39 @@ function M.specialize(prog, fname, division, statics, opts)
         return X
     end
 
-    local spec_block, rexpr
+    local spec_block, rexpr, lift
+    -- the CONSTANT POOL: a static table (or a host value with no path from a known global) that reaches dynamic code
+    -- is REFERENCED, not copied — MIXK[i], a table handed to the residual chunk's environment (res.pool): identity and
+    -- sharing kept. Only data the program never stores into gets here (a table stored into is dynamic)
+    local pool, poolix = {}, {}
+    res.pool = pool
+    local function constref(v)
+        local i = poolix[v]
+        if not i then i = #pool + 1; pool[i] = v; poolix[v] = i end
+        return { op = 'index', obj = { op = 'gref', name = 'MIXK' }, key = { op = 'num', v = i } }
+    end
+    -- GENERALIZE: a parameter static at the call (division S / C) that the body makes DYNAMIC (`iend = iend or #ik`)
+    -- starts the residual body as a local holding its lifted value
+    local function generalize(params, division, X)
+        local pro = {}
+        for i, id in ipairs(params) do
+            if division[i] ~= D and X.bt[id] == D then
+                local e = lift(X.env[id], X)
+                X.env[id] = DYN
+                X.ren[id] = rname(id)
+                pro[#pro + 1] = { op = 'local', name = rname(id), e = e }
+            end
+        end
+        return pro
+    end
+    local function prepend(pro, body)
+        if #pro == 0 then return body end
+        for _, x in ipairs(body) do pro[#pro + 1] = x end
+        return pro
+    end
 
     -- a static value as residual IR (lifting); a closure becomes a residual function expression
-    local function lift(v, X)
+    function lift(v, X)
         local ty = type(v)
         if ty == 'number' then
             if v ~= v or v == math.huge or v == -math.huge then refuse('lifting a non-finite number') end
@@ -984,7 +1079,8 @@ function M.specialize(prog, fname, division, statics, opts)
             depth = depth - 1
             return { op = 'lambda', params = params, body = body }
         end
-        refuse('a static ' .. ty .. ' reaches dynamic code (lifting tables is not in rung 2)')
+        if ty == 'table' then return constref(v) end
+        refuse('a static ' .. ty .. ' reaches dynamic code')
     end
 
     -- UNFOLD: T's body specialized to (division, svals) in place -> its single returned expression, the residual
@@ -1004,10 +1100,16 @@ function M.specialize(prog, fname, division, statics, opts)
                 hs[#hs + 1] = X2.ren[id]
             else X2.env[id] = svals[i] end
         end
-        local ok, body = pcall(spec_block, t_body(T), X2)
+        local no, nm, d0 = mark()
+        d0 = depth
+        local ok, body = pcall(function ()
+            local pro = generalize(t_params(T), division, X2)
+            return prepend(pro, (spec_block(t_body(T), X2)))
+        end)
         unfolding[key] = nil
-        depth = depth - 1
+        depth = d0 - 1
         if not ok then
+            rollback(no, nm)
             if type(body) == 'table' and body.refusal and (body.refusal:find('budget', 1, true) or body.refusal:find('depth', 1, true)) then error(body, 0) end
             if type(body) ~= 'table' then error(body, 0) end
             return nil
@@ -1056,6 +1158,7 @@ function M.specialize(prog, fname, division, statics, opts)
         counter = counter + 1
         name = (counter == 1 and opts.name) or ((T.kind == 'fn' and T.name or 'lambda') .. '_' .. counter)
         memo[key] = name
+        mlog[#mlog + 1] = key
         local rf = { name = name, params = {}, body = nil }
         res.funcs[name] = rf
         res.order[#res.order + 1] = name
@@ -1066,7 +1169,8 @@ function M.specialize(prog, fname, division, statics, opts)
         end
         for _, p in ipairs(extra_params) do rf.params[#rf.params + 1] = p end
         enter('program point')
-        rf.body = (spec_block(t_body(T2), X2))
+        local pro = generalize(params, division, X2)
+        rf.body = prepend(pro, (spec_block(t_body(T2), X2)))
         depth = depth - 1
         return name, extra_args
     end
@@ -1106,6 +1210,15 @@ function M.specialize(prog, fname, division, statics, opts)
         return { op = 'call', fn = name, args = dargs }
     end
 
+    -- a static HOST value (a function or table of a known global) in a dynamic position: its PATH from that global
+    local function rpath(e, X)
+        if e.op == 'global' then return { op = 'gref', name = e.name } end
+        if e.op == 'index' then return { op = 'index', obj = rpath(e.obj, X), key = lift(sval(e.key, X), X) } end
+        local v = sval(e, X)
+        if type(v) == 'table' or type(v) == 'function' then return constref(v) end
+        refuse('a static host value reaching dynamic code by no path from a known global')
+    end
+
     -- a residual expression for e in X; a static e (or a closure) is computed and lifted
     function rexpr(e, X)
         spend()
@@ -1117,7 +1230,9 @@ function M.specialize(prog, fname, division, statics, opts)
                 for i, f in ipairs(e.fields) do fields[i] = { key = lift(sval(f.key, X), X), val = rexpr(f.val, X) } end
                 return { op = 'table', fields = fields }
             end
-            return lift(sval(e, X), X)
+            local v = sval(e, X)
+            if (type(v) == 'function' and not R.clos[v]) or type(v) == 'table' then return rpath(e, X) end
+            return lift(v, X)
         end
         local op = e.op
         if op == 'var' then
@@ -1125,7 +1240,15 @@ function M.specialize(prog, fname, division, statics, opts)
             if not nm then refuse('no residual name for `' .. tostring(prog.names[e.id]) .. '`') end
             return { op = 'var', name = nm }
         end
-        if op == 'bin' then return { op = 'bin', o = e.o, l = rexpr(e.l, X), r = rexpr(e.r, X) } end
+        if op == 'bin' then
+            -- (`and` / `or` with a STATIC left side: its value decides now — the BTA cannot know it, the specializer does)
+            if (e.o == 'and' or e.o == 'or') and bt_expr(e.l, X.bt) == S then
+                local a = sval(e.l, X)
+                if (e.o == 'and' and not a) or (e.o == 'or' and a) then return lift(a, X) end
+                return rexpr(e.r, X)
+            end
+            return { op = 'bin', o = e.o, l = rexpr(e.l, X), r = rexpr(e.r, X) }
+        end
         if op == 'un' then return { op = 'un', o = e.o, e = rexpr(e.e, X) } end
         if op == 'index' then return { op = 'index', obj = rexpr(e.obj, X), key = rexpr(e.key, X) } end
         if op == 'table' then
@@ -1151,9 +1274,15 @@ function M.specialize(prog, fname, division, statics, opts)
                 return { op = 'callv', f = rexpr(e.f, X), args = args }
             end
             local c = R.clos[sval(e.f, X)]
-            if not c then refuse('a call through a static value that is no closure of the program') end
+            if not c then
+                -- (a HOST function of a known global, called with dynamic arguments: a residual call through its path)
+                local args = {}
+                for i, a in ipairs(e.args) do args[i] = rexpr(a, X) end
+                return { op = 'callv', f = rpath(e.f, X), args = args }
+            end
             return apply_spec({ kind = 'lam', c = c }, e.args, X)
         end
+        if op == 'global' then refuse('the global `' .. tostring(e.name) .. '` (only the language\'s constants, the primitive table and opts.globals are known)') end
         refuse('residualizing the IR op ' .. tostring(op))
     end
 
@@ -1182,8 +1311,7 @@ function M.specialize(prog, fname, division, statics, opts)
     function spec_block(stmts, X)
         local out = {}
         local bt, env = X.bt, X.env
-        for _, s in ipairs(stmts) do
-            spend()
+        local function step(s)
             local op = s.op
             if op == 'local' then
                 if bt[s.id] ~= D then env[s.id] = sval(s.e, X) -- (S: its value; C: the closure)
@@ -1242,7 +1370,7 @@ function M.specialize(prog, fname, division, statics, opts)
                 else out[#out + 1] = { op = 'callstmt', e = rexpr(s.e, X) } end
             elseif op == 'ret' then
                 out[#out + 1] = { op = 'ret', es = rexprs(s.es, X) }
-                return out, true
+                return true
             elseif op == 'if' then
                 -- the static prefix of the clauses decides; from the first dynamic condition on, a residual if
                 local rclauses, rels, decided = {}, nil, false
@@ -1252,7 +1380,7 @@ function M.specialize(prog, fname, division, statics, opts)
                             if sval(c.cond, X) then
                                 local body, done = spec_block(c.body, X)
                                 for _, x in ipairs(body) do out[#out + 1] = x end
-                                if done then return out, true end
+                                if done then return true end
                                 decided = true
                             end
                         else
@@ -1265,7 +1393,7 @@ function M.specialize(prog, fname, division, statics, opts)
                     if #rclauses == 0 then
                         local body, done = spec_block(s.els, X)
                         for _, x in ipairs(body) do out[#out + 1] = x end
-                        if done then return out, true end
+                        if done then return true end
                     else
                         rels = spec_block(s.els, X)
                         out[#out + 1] = { op = 'if', clauses = rclauses, els = rels }
@@ -1278,7 +1406,7 @@ function M.specialize(prog, fname, division, statics, opts)
                         env[s.id] = i
                         local body, done = spec_block(s.body, X)
                         if #body > 0 then out[#out + 1] = { op = 'do', body = body } end
-                        if done then return out, true end
+                        if done then return true end
                     end
                 else
                     local from, to, step = rexpr(s.from, X), rexpr(s.to, X), rexpr(s.step, X)
@@ -1295,7 +1423,7 @@ function M.specialize(prog, fname, division, statics, opts)
                         if s.vid then env[s.vid] = v end
                         local body, done = spec_block(s.body, X)
                         if #body > 0 then out[#out + 1] = { op = 'do', body = body } end
-                        if done then return out, true end
+                        if done then return true end
                     end
                 else
                     local e = rexpr(s.e, X)
@@ -1308,8 +1436,21 @@ function M.specialize(prog, fname, division, statics, opts)
             elseif op == 'do' then
                 local body, done = spec_block(s.body, X)
                 if #body > 0 then out[#out + 1] = { op = 'do', body = body } end
-                if done then return out, true end
+                if done then return true end
             else refuse('specializing the IR statement ' .. tostring(op)) end
+            return false
+        end
+        for _, s in ipairs(stmts) do
+            spend()
+            local okst, done = pcall(step, s)
+            if not okst then
+                if type(done) == 'table' and done.lazy then
+                    out[#out + 1] = { op = 'callstmt', e = { op = 'prim', name = 'error', args = { { op = 'str', v = done.lazy } } } }
+                    return out, true
+                end
+                error(done, 0)
+            end
+            if done then return out, true end
         end
         return out, false
     end
@@ -1417,8 +1558,16 @@ end
 
 -- ── PRINT: residual IR -> Lua text ─────────────────────────────────────────────────────────────────────────────────
 -- (every compound expression is parenthesized: no precedence table to keep right)
-local pblock
-local function pexpr(e, ind)
+local pblock, pexpr
+-- an expression in a PREFIX position (indexed, called): a literal or constructor there is no Lua syntax — `nil[k]`,
+-- `"s"[k]`, `{ … }[k]` — so it is parenthesized (and `(nil)[k]` raises at run time, as the original would)
+local PREFIXOK = { var = true, gref = true, index = true, call = true, prim = true, callv = true, method = true, lambda = true }
+local function prefix(e, ind)
+    local t = pexpr(e, ind)
+    if PREFIXOK[e.op] then return t end
+    return '(' .. t .. ')'
+end
+function pexpr(e, ind)
     ind = ind or ''
     local op = e.op
     if op == 'num' then
@@ -1428,10 +1577,10 @@ local function pexpr(e, ind)
     if op == 'str' then return string.format('%q', e.v) end
     if op == 'bool' then return tostring(e.v) end
     if op == 'nil' then return 'nil' end
-    if op == 'var' then return e.name end
+    if op == 'var' or op == 'gref' then return e.name end
     if op == 'bin' then return '(' .. pexpr(e.l, ind) .. ' ' .. e.o .. ' ' .. pexpr(e.r, ind) .. ')' end
     if op == 'un' then return '(' .. e.o .. (e.o == 'not' and ' ' or '') .. pexpr(e.e, ind) .. ')' end
-    if op == 'index' then return pexpr(e.obj, ind) .. '[' .. pexpr(e.key, ind) .. ']' end
+    if op == 'index' then return prefix(e.obj, ind) .. '[' .. pexpr(e.key, ind) .. ']' end
     if op == 'table' then
         local parts = {}
         for i, f in ipairs(e.fields) do parts[i] = '[' .. pexpr(f.key, ind) .. '] = ' .. pexpr(f.val, ind) end
@@ -1445,7 +1594,7 @@ local function pexpr(e, ind)
     if op == 'call' or op == 'prim' or op == 'callv' then
         local parts = {}
         for i, a in ipairs(e.args) do parts[i] = pexpr(a, ind) end
-        local f = op == 'callv' and pexpr(e.f, ind) or (e.fn or e.name)
+        local f = op == 'callv' and prefix(e.f, ind) or (e.fn or e.name)
         return f .. '(' .. table.concat(parts, ', ') .. ')'
     end
     if op == 'lambda' then
@@ -1463,8 +1612,10 @@ local function pstmt(s, ind, out)
     elseif op == 'assign' then out[#out + 1] = ind .. pexpr(s.target, ind) .. ' = ' .. pexpr(s.e, ind)
     elseif op == 'callstmt' then
         -- (a statement may not begin with `(`: Lua would read it as a call of the previous line's expression)
+        -- (and a call that UNFOLDED to a plain expression is no statement at all: kept as `local _ = e`, any call
+        -- inside it still made)
         local t = pexpr(s.e, ind)
-        if t:sub(1, 1) == '(' then t = 'local _ = ' .. t end
+        if t:sub(1, 1) == '(' or not M.MULTI[s.e.op] then t = 'local _ = ' .. t end
         out[#out + 1] = ind .. t
     elseif op == 'ret' then
         local parts = {}
@@ -1521,11 +1672,12 @@ function M.print(res)
     return table.concat(out, '\n') .. '\n'
 end
 
---- mix(term, fname, division, statics) -> residual Lua text, stats
+--- mix(term, fname, division, statics) -> residual Lua text, stats, the constant pool (load the text with MIXK = pool,
+--- and opts.globals, in its environment when the residual references them)
 function M.mix(term, fname, division, statics, opts)
     local prog = M.lower(term)
     local res, stats = M.specialize(prog, fname, division, statics, opts)
-    return M.print(res), stats
+    return M.print(res), stats, res.pool
 end
 
 return M
