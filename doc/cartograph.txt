@@ -821,6 +821,12 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
                               / orphan values, chomped separators, checksum
                               coverage, dangling references) at their
                               template lines (quickfix)
+  :CartographHelmOrigin [-f values.yaml]... [--set k=v]...
+                              which values source WON the key under the
+                              cursor (a values file) or the .Values.x under
+                              it (a template): the file and line, and every
+                              source it overrode (quickfix); a null that
+                              removes a default is said so
   :CartographHelmBase {manifests} [chart]
                               the chart rendered with NO values against the
                               plain manifests it should produce: every spot

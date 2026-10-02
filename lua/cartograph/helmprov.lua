@@ -56,6 +56,7 @@ function M.render(chart, opts)
     for _, s in ipairs(opts.set or {}) do cmd[#cmd + 1] = '-set'; cmd[#cmd + 1] = s end
     if opts.branches then cmd[#cmd + 1] = '-branches' end
     if opts.symbolic then cmd[#cmd + 1] = '-symbolic' end
+    if opts.origins then cmd[#cmd + 1] = '-origins' end
     cmd[#cmd + 1] = chart
     local r = vim.system(cmd, { text = true }):wait(opts.timeout or 120000)
     if not r or r.code ~= 0 then
@@ -197,6 +198,133 @@ function M.path_at(buf, row, col)
         node = node:parent()
     end
     return #segs > 0 and table.concat(segs, '.') or nil
+end
+
+-- ── VALUE ORIGINS (CART-1307) ─────────────────────────────────────────────────────────────────────────────────────
+-- A render with { origins = true } carries `origins` = { layers = { { id, kind = chart|subchart|file|set, file, set,
+-- scope } }, values = { [path] = typed }, origin = { [path] = "<layer id>\31<path in that source>" }, defined = {
+-- [layer id] = { { path, nil } } }, refused } — computed by Helm's own merge over marked copies of every source, and
+-- REFUSED by name when the replicated merge does not reproduce Helm's effective values (tools/helmprov origin.go).
+
+--- the line (1-based) of every key path of a YAML text -> { [path] = line }
+function M.key_lines(src)
+    local out = {}
+    local ok, parser = pcall(vim.treesitter.get_string_parser, src, 'yaml')
+    if not ok or not parser then return out end
+    local function walk(node, prefix)
+        for c in node:iter_children() do
+            if c:type() == 'block_mapping_pair' or c:type() == 'flow_pair' then
+                local k = c:field('key')[1]
+                if k then
+                    local key = (vim.treesitter.get_node_text(k, src):gsub('^["\']', ''):gsub('["\']$', ''))
+                    local p = prefix == '' and key or (prefix .. '.' .. key)
+                    if not out[p] then out[p] = k:start() + 1 end
+                    local v = c:field('value')[1]
+                    if v then walk(v, p) end
+                end
+            elseif c:named() and c:type() ~= 'block_sequence' and c:type() ~= 'flow_sequence' then
+                walk(c, prefix)
+            end
+        end
+    end
+    walk(parser:parse()[1]:root(), '')
+    return out
+end
+
+local function read(f) local fd = io.open(f); if not fd then return nil end local s = fd:read('a'); fd:close(); return s end
+
+-- precedence: a later --set over an earlier, --set over -f, a later -f over an earlier, the chart over its subcharts
+local function rank(l, i)
+    if l.kind == 'set' then return 3000 + i elseif l.kind == 'file' then return 2000 + i
+    elseif l.kind == 'chart' then return 1000 end
+    return 500 - select(2, (l.scope or ''):gsub('%.', ''))
+end
+
+--- where a layer would hold an EFFECTIVE path: its own path for it (a subchart's keys sit under its scope; a root
+--- global reaches a subchart's `<scope>.global.*`) | nil
+local function source_path(l, path)
+    local scope = l.scope or ''
+    if scope ~= '' then
+        if path:sub(1, #scope + 1) == scope .. '.' then return path:sub(#scope + 2) end
+        return nil
+    end
+    local g = path:match('^.-%.global%.(.+)$')
+    if g then return 'global.' .. g, path end
+    return path
+end
+
+--- the ORIGIN of an effective values path -> { path, value, from = { layer, src, file, line, set }, over = { … },
+--- removed_by = … } | nil, why. `over` = every other source that sets the path, highest precedence first.
+function M.origin(prov, path)
+    local O = prov and prov.origins
+    if not O then return nil, 'no origins: render with { origins = true }' end
+    if O.refused then return nil, 'origins refused: ' .. O.refused end
+    local byid, order = {}, {}
+    for i, l in ipairs(O.layers or {}) do byid[l.id] = l; order[#order + 1] = { l = l, r = rank(l, i) } end
+    table.sort(order, function (a, b) return a.r > b.r end)
+    local lines = {}
+    local function line_of(l, src)
+        if not l.file then return nil end
+        if not lines[l.file] then lines[l.file] = M.key_lines(read(l.file) or '') end
+        return lines[l.file][src]
+    end
+    local function site(l, src) return { layer = l.id, kind = l.kind, file = l.file, set = l.set, src = src, line = line_of(l, src) } end
+    local defs = {}
+    for _, x in ipairs(order) do
+        local sp, alt = source_path(x.l, path)
+        for _, d in ipairs((O.defined or {})[x.l.id] or {}) do
+            if d.path == sp or (alt and d.path == alt) then defs[#defs + 1] = { site = site(x.l, d.path), isnil = d.isnil or d['nil'] } end
+        end
+    end
+    local o = (O.origin or {})[path]
+    if not o and O.values[path] == 'map:{}' and defs[1] then
+        -- an EMPTY table carries no marker (marking replaces leaves): its source is the highest-precedence one that
+        -- sets it — INFERRED from precedence, and said so
+        local over = {}
+        for i = 2, #defs do over[#over + 1] = defs[i].site end
+        return { path = path, value = O.values[path], from = defs[1].site, over = over, inferred = true }
+    end
+    if not o and O.values[path] == 'map:{}' and (path == 'global' or path:match('%.global$')) then
+        -- (Helm gives every subchart a `global` table while coalescing: a value no source wrote)
+        return { path = path, value = O.values[path], from = { kind = 'helm', src = path }, over = {} }
+    end
+    if not o then
+        for _, d in ipairs(defs) do
+            if d.isnil then
+                local over = {}
+                for _, x in ipairs(defs) do if x ~= d then over[#over + 1] = x.site end end
+                return { path = path, removed_by = d.site, over = over }
+            end
+        end
+        return nil, 'no effective value at ' .. path
+    end
+    local id, src = o:match('^(.-)\31(.*)$')
+    local from = site(byid[id] or { id = id }, src)
+    local over = {}
+    for _, d in ipairs(defs) do if not (d.site.layer == from.layer and d.site.src == from.src) then over[#over + 1] = d.site end end
+    return { path = path, value = O.values[path], from = from, over = over }
+end
+
+--- a source as text: `file:line` | `--set k=v`
+function M.site_text(s)
+    if not s then return '?' end
+    if s.kind == 'set' then return '--set ' .. tostring(s.set) end
+    if s.kind == 'helm' then return 'Helm itself (an empty subchart global table)' end
+    return vim.fn.fnamemodify(s.file or '?', ':~:.') .. (s.line and (':' .. s.line) or '') .. (s.kind == 'subchart' and ' (subchart default)' or '')
+end
+
+--- the root chart and the effective-path prefix of a file inside it (a subchart's own files sit under its scope)
+function M.root_of(file)
+    local chart = M.chart_of(file)
+    if not chart then return nil end
+    local scope = {}
+    for _ = 1, 20 do
+        local parent, name = chart:match('^(.*)/charts/([^/]+)$')
+        if not parent or vim.fn.filereadable(parent .. '/Chart.yaml') == 0 then break end
+        table.insert(scope, 1, name)
+        chart = parent
+    end
+    return chart, table.concat(scope, '.')
 end
 
 --- the chart a file belongs to: the nearest directory upward holding Chart.yaml | nil

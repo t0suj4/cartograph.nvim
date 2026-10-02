@@ -5,7 +5,9 @@
 // only what the first cannot see — their reads (untaken, with the guard), every control node's taken arm, and each
 // untaken arm's rendered text (a hole when it fails: its error and node). The files and spans are always the first, unexplored render's.
 //
-//	helmprov [-release NAME] [-namespace NS] [-f values.yaml]... [-set k=v]... [-branches] <chart dir>
+// -origins (CART-1307) adds, for every effective value, the values source that won it (origin.go).
+//
+//	helmprov [-release NAME] [-namespace NS] [-f values.yaml]... [-set k=v]... [-branches] [-origins] <chart dir>
 package main
 
 import (
@@ -39,6 +41,7 @@ func main() {
 	ns := flag.String("namespace", "default", "namespace")
 	branches := flag.Bool("branches", false, "also execute the untaken arms (reads, arms, holes)")
 	symbolic := flag.Bool("symbolic", false, "render with NO values: .Values a placeholder, every arm explored (CART-1302)")
+	origins := flag.Bool("origins", false, "for every effective value, the values source that won it (CART-1307)")
 	var files, sets multi
 	flag.Var(&files, "f", "values file (repeatable)")
 	flag.Var(&sets, "set", "k=v override (repeatable)")
@@ -62,6 +65,11 @@ func main() {
 	if err != nil {
 		fail("render values", err)
 	}
+	var org *Origins
+	if *origins && !*symbolic {
+		// (before the render: the engine is handed rv afterwards, and a template may mutate a values map)
+		org = computeOrigins(flag.Arg(0), files, sets, opts, asMap(rv["Values"]))
+	}
 	template.Rec = template.NewRecorder()
 	if *symbolic {
 		// ONE render, with nothing concrete to be authoritative about: its files ARE the symbolic text
@@ -76,7 +84,8 @@ func main() {
 		Reads    []template.Read     `json:"reads"`
 		Arms     []template.Arm      `json:"arms,omitempty"`
 		Explored []template.Explored `json:"explored,omitempty"`
-	}{Files: map[string]fileOut{}, Reads: template.Rec.Reads}
+		Origins  *Origins            `json:"origins,omitempty"`
+	}{Files: map[string]fileOut{}, Reads: template.Rec.Reads, Origins: org}
 	first := template.Rec
 	if *symbolic {
 		res.Reads, res.Arms, res.Explored = first.Reads, first.Arms, first.Explored

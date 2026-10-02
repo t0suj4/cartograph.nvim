@@ -59,6 +59,48 @@ function M.register(H)
         vim.cmd('copen')
     end, { nargs = '?', complete = 'dir', desc = 'cartograph: a Helm chart\'s silent-success findings at their template lines (quickfix)' })
 
+    -- WHERE A VALUE CAME FROM (CART-1307): the values key under the cursor (in a values file) or the `.Values.x` under it
+    -- (in a template) -> which source won it, at its line, and every source it beat (quickfix, winner first)
+    cmd('CartographHelmOrigin', function (o)
+        local HP = require 'cartograph.helmprov'
+        local file = vim.api.nvim_buf_get_name(0)
+        local chart, scope = HP.root_of(file)
+        if not chart then return vim.notify('cartograph: not inside a chart', vim.log.levels.WARN) end
+        local files, sets, i = {}, {}, 1
+        while i <= #o.fargs do
+            local a = o.fargs[i]
+            if (a == '-f' or a == '--values') and o.fargs[i + 1] then files[#files + 1] = vim.fn.fnamemodify(o.fargs[i + 1], ':p'); i = i + 2
+            elseif a == '--set' and o.fargs[i + 1] then sets[#sets + 1] = o.fargs[i + 1]; i = i + 2
+            else return vim.notify('cartograph: usage :CartographHelmOrigin [-f values.yaml]... [--set k=v]...', vim.log.levels.WARN) end
+        end
+        local path
+        local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+        local line = vim.api.nvim_get_current_line()
+        for s, p, e in line:gmatch('()%.Values%.([%w_%.]+)()') do
+            if col + 1 >= s and col + 1 < e then path = p end
+        end
+        if not path then
+            path = HP.path_at(0, row - 1, col)
+            if path and scope ~= '' then path = scope .. '.' .. path end
+        elseif scope ~= '' then path = scope .. '.' .. path end
+        if not path then return vim.notify('cartograph: no values key (or .Values.x) under the cursor', vim.log.levels.WARN) end
+        local p, why = HP.render(chart, { origins = true, values = files, set = sets })
+        if not p then return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN) end
+        local r, rwhy = HP.origin(p, path)
+        if not r then return vim.notify('cartograph: ' .. tostring(rwhy), vim.log.levels.WARN) end
+        local msg = { r.removed_by and (path .. ' is REMOVED (null) by ' .. HP.site_text(r.removed_by))
+            or (path .. ' = ' .. tostring(r.value) .. '   <- ' .. HP.site_text(r.from)) }
+        for _, s in ipairs(r.over) do msg[#msg + 1] = '   over ' .. HP.site_text(s) end
+        vim.notify(table.concat(msg, '\n'), vim.log.levels.INFO)
+        local items = {}
+        local function add(s, what)
+            if s and s.file then items[#items + 1] = { filename = s.file, lnum = s.line or 1, col = 1, text = what .. ' ' .. path } end
+        end
+        add(r.from or r.removed_by, r.removed_by and 'removes' or 'sets (wins)')
+        for _, s in ipairs(r.over) do add(s, 'sets (overridden)') end
+        if #items > 1 then vim.fn.setqflist({}, ' ', { title = 'helm origin: ' .. path, items = items }) end
+    end, { nargs = '*', complete = 'file', desc = 'cartograph: which values source won the key under the cursor, and what it overrode' })
+
     -- a chart's AUTHORED base against the plain manifests it should produce (CART-0873): where they vary and the
     -- chart hardcodes, at each template line
     cmd('CartographHelmBase', function (o)

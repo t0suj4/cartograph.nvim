@@ -215,3 +215,50 @@ test('helmprov: SYMBOLIC — no values at all: .Values a placeholder, conditions
         'the else of an unknown condition is explored')
     eq({}, P.holes(p))
 end)
+
+-- VALUE ORIGINS (CART-1307): which source won each effective value — chart defaults, a subchart's, each -f, each --set
+local LAYERED = {
+    ['Chart.yaml'] = 'apiVersion: v2\nname: shop\nversion: 0.1.0\n',
+    ['values.yaml'] = 'image:\n  repo: shop\n  tag: "1.0"\nreplicas: 1\nlegacy: on\nglobal:\n  env: dev\ndb:\n  size: 5\nresources: {}\n',
+    ['templates/cm.yaml'] = 'kind: ConfigMap\nmetadata:\n  name: x\ndata:\n  tag: {{ .Values.image.tag | quote }}\n',
+    ['charts/db/Chart.yaml'] = 'apiVersion: v2\nname: db\nversion: 0.1.0\n',
+    ['charts/db/values.yaml'] = 'size: 1\nengine: pg\n',
+    ['charts/db/templates/cm.yaml'] = 'kind: ConfigMap\nmetadata:\n  name: db\ndata:\n  env: {{ .Values.global.env }}\n',
+    ['stage-a.yaml'] = 'image:\n  tag: "1.1"\nlegacy: null\n',
+    ['stage-b.yaml'] = 'image:\n  tag: "1.2"\nglobal:\n  env: prd\n',
+}
+
+test('helmprov: VALUE ORIGIN — every effective value names the source that won it, at its line, and what it overrode', function ()
+    ready()
+    local root = chart(LAYERED)
+    local p = assert(P.render(root, { origins = true, values = { root .. '/stage-a.yaml', root .. '/stage-b.yaml' }, set = { 'replicas=3' } }))
+    eq(nil, p.origins.refused, 'the replicated merge reproduces Helm\'s effective values')
+    local function o(path)
+        local r = assert(P.origin(p, path))
+        local function s(x) return x and ((x.kind == 'set' and ('set ' .. x.set)) or (x.kind == 'helm' and 'helm') or (vim.fn.fnamemodify(x.file, ':t') .. ':' .. tostring(x.line))) end
+        return { r.value, r.removed_by and ('removed by ' .. s(r.removed_by)) or s(r.from), vim.tbl_map(s, r.over), r.inferred }
+    end
+    eq({ 'str:1.2', 'stage-b.yaml:2', { 'stage-a.yaml:2', 'values.yaml:3' } }, o('image.tag'), 'the later -f wins, over the earlier and the default')
+    eq({ 'number:3', 'set replicas=3', { 'values.yaml:4' } }, o('replicas'), '--set over everything')
+    eq({ 'number:5', 'values.yaml:9', { 'values.yaml:1' } }, o('db.size'), 'the parent chart\'s db section over the subchart default')
+    eq({ 'str:pg', 'values.yaml:2', {} }, o('db.engine'), 'the subchart\'s own default (charts/db/values.yaml)')
+    eq({ 'str:prd', 'stage-b.yaml:4', { 'values.yaml:7' } }, o('db.global.env'), 'a global reaches the subchart from where it was set')
+    eq({ nil, 'removed by stage-a.yaml:3', { 'values.yaml:5' } }, o('legacy'), 'a null in a later source REMOVES the default')
+    eq({ 'map:{}', 'values.yaml:10', {}, true }, o('resources'), 'an empty table carries no marker: its source is inferred from precedence, and says so')
+    -- with no globals anywhere, the subchart still gets an EMPTY global table — Helm's own, no source's
+    local plain = vim.deepcopy(LAYERED)
+    plain['values.yaml'] = 'replicas: 1\n'
+    plain['templates/cm.yaml'] = 'kind: ConfigMap\nmetadata:\n  name: x\n'
+    plain['charts/db/templates/cm.yaml'] = 'kind: ConfigMap\nmetadata:\n  name: db\n'
+    local q = assert(P.render(chart(plain), { origins = true }))
+    local g = assert(P.origin(q, 'db.global'))
+    eq({ 'map:{}', 'helm' }, { g.value, g.from.kind })
+end)
+
+test('helmprov: KEY_LINES — every key path of a values file at its line; ROOT_OF — a subchart file belongs to its root chart', function ()
+    ready()
+    eq({ a = 1, ['a.b'] = 2, ['a.c'] = 3, d = 4 }, P.key_lines('a:\n  b: 1\n  c: [1, 2]\nd: x\n'))
+    local root = chart(LAYERED)
+    local r, scope = P.root_of(root .. '/charts/db/values.yaml')
+    eq(vim.fn.fnamemodify(root, ':p'):gsub('/$', ''), r); eq('db', scope)
+end)
