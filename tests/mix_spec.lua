@@ -13,10 +13,10 @@ local function ready() if not pcall(vim.treesitter.get_string_parser, '', 'lua')
 local function original(src, fname) return assert(load(src .. '\nreturn ' .. fname))() end
 local function residual(src, fname, division, statics)
     local T = assert(R.read(src, 'lua'))
-    local text, stats = MX.mix(T, fname, division, statics)
+    local text, stats, pool = MX.mix(T, fname, division, statics)
     local T2 = assert(R.read(text, 'lua'))
     eq(text, A.cst_print(T2), 'the residual round-trips through algebraread')
-    return assert(load(text))(), text, stats, T, T2
+    return assert(load(text, fname, 't', setmetatable({ MIXK = pool }, { __index = _G })))(), text, stats, T, T2
 end
 local function idents(text)
     local root = vim.treesitter.get_string_parser(text, 'lua'):parse()[1]:root()
@@ -128,7 +128,7 @@ test('mix: CONGRUENCE — a variable assigned under dynamic control stays dynami
     end
 end)
 
-test('mix: what mix does not handle is REFUSED by name — while, varargs, a static value that never repeats', function ()
+test('mix: what mix does not handle is REFUSED by name — while, varargs, a static value that never repeats and generalizing cannot fix', function ()
     ready()
     local function refusal(src, fname, division, statics)
         local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), fname, division, statics)
@@ -137,7 +137,86 @@ test('mix: what mix does not handle is REFUSED by name — while, varargs, a sta
     end
     ok(refusal('local function f(x)\n    while x > 0 do x = x - 1 end\n    return x\nend\n', 'f', { 'D' }, {}):find('while', 1, true))
     ok(refusal('local function f(...)\n    return 1\nend\n', 'f', {}, {}):find('parameter', 1, true))
-    ok(refusal('local function f(x, n)\n    if x > 0 then return f(x - 1, n + 1) end\n    return n\nend\n', 'f', { 'D', 'S' }, { nil, 0 }):find('specialization depth', 1, true))
+    -- (a continuation that grows by a closure per call: the join's hole falls on a closure argument — no generalization)
+    ok(refusal('local function g(x, k)\n    if x > 0 then return g(x - 1, function (y) return k(y) + 1 end) end\n    return k(x)\nend\nlocal function f(x)\n    return g(x, function (y) return y end)\nend\n', 'f', { 'D' }, {}):find('specialization depth', 1, true))
+end)
+
+-- ── RUNG 4.0: GENERALIZATION — a configuration as an ALGEBRA TERM ─────────────────────────────────────────────────
+test('mix: the WHISTLE is homeomorphic embedding over configuration terms — a number embeds a number, a call embeds what it grew from; pinned both ways', function ()
+    local function cfg(...) return MX.config_term('f', { 'D', 'S' }, { nil, ... }, {}) end
+    ok(MX.embeds(cfg(0), cfg(1)), 'numbers: one symbol')
+    ok(MX.embeds(cfg('a'), cfg('ab')), 'strings: one symbol')
+    ok(not MX.embeds(cfg(true), cfg(false)), 'a boolean only itself')
+    ok(not MX.embeds(cfg(0), cfg('a')), 'a number is no string')
+    ok(MX.embeds(cfg({ 1 }), cfg({ 1, 2 })), 'a table embeds in a table with more around it (coupling by subsequence)')
+    ok(not MX.embeds(cfg({ 1, 2 }), cfg({ 1 })), 'never the bigger in the smaller')
+    ok(MX.embeds(cfg({ x = true }), cfg({ a = { x = true }, b = 1 })), 'diving: inside a field of the bigger')
+    ok(not MX.embeds(cfg({ x = true }), cfg({ x = false })), 'and a leaf that differs is no embedding')
+end)
+
+local GROW = [[
+local function count(x, n)
+    if x > 0 then return count(x - 1, n + 1) end
+    return n
+end
+local function walk(x, n, step)
+    if x > 0 then return walk(x - 1, n + step, step) end
+    return n
+end
+local function steps(x, n)
+    local y = x - 1
+    if x > 0 then return steps(y, n + 1) end
+    return n
+end
+local function word(x, acc)
+    if x > 0 then return word(x - 1, acc .. "a") end
+    return acc
+end
+local function sum(t, i, x)
+    if i > #t then return 0 end
+    return t[i] * x + sum(t, i + 1, x)
+end
+]]
+
+test('mix: a static value that never repeats is GENERALIZED — past the depth, A.join of the call with the one it grew from makes the changed argument dynamic; equivalent', function ()
+    ready()
+    local xs = { -1, 0, 1, 5, 50 }
+    local c0, w0, a0 = original(GROW, 'count'), original(GROW, 'walk'), original(GROW, 'word')
+    local c, ct = residual(GROW, 'count', { 'D', 'S' }, { nil, 0 })
+    local w, wt = residual(GROW, 'walk', { 'D', 'S', 'S' }, { nil, 0, 7 })
+    local a, at = residual(GROW, 'word', { 'D', 'S' }, { nil, '' })
+    for _, x in ipairs(xs) do
+        eq(c0(x, 0), c(x), 'count ' .. x)
+        eq(w0(x, 0, 7), w(x), 'walk ' .. x)
+        eq(a0(x, ''), a(x), 'word ' .. x)
+    end
+    ok(ct:find('function count_%d+%(x_%d+, n_%d+%)'), 'a recursive program point that takes n\n' .. ct)
+    -- (only what CHANGED is generalized: step repeats, so it stays static and is folded in)
+    ok(wt:find('function walk_%d+%(x_%d+, n_%d+%)'), 'walk generalizes n, not step\n' .. wt)
+    ok(wt:find('+ 7)', 1, true) and not wt:find('step_'), 'the unchanged step is still a constant\n' .. wt)
+    ok(at:find('function word_%d+%(x_%d+, acc_%d+%)'), 'a string accumulator generalizes too\n' .. at)
+    -- (a body that is no single `return`: the chain that ran past the depth was PROGRAM POINTS, rolled back before the
+    -- retry — none left without a body)
+    local p0 = original(GROW, 'steps')
+    local p, pt, pstats = residual(GROW, 'steps', { 'D', 'S' }, { nil, 0 })
+    for _, x in ipairs(xs) do eq(p0(x, 0), p(x), 'steps ' .. x) end
+    eq(2, pstats.functions, 'the entry and the generalized point\n' .. pt)
+end)
+
+test('mix: generalizing fires ONLY past the depth — a bounded static recursion still unrolls; a deeper one becomes a loop over a dynamic index', function ()
+    ready()
+    local s0 = original(GROW, 'sum')
+    local t60, t300 = {}, {}
+    for i = 1, 60 do t60[i] = i % 7 end
+    for i = 1, 300 do t300[i] = i % 5 end
+    local s, st, stats = residual(GROW, 'sum', { 'S', 'S', 'D' }, { t60, 1 })
+    eq(1, stats.functions, 'sixty static steps: unrolled, no program point\n' .. st)
+    local d, dt = residual(GROW, 'sum', { 'S', 'S', 'D' }, { t300, 1 })
+    ok(dt:find('function sum_%d+%(i_%d+, x_%d+%)'), 'three hundred: the index generalized\n' .. dt)
+    for _, x in ipairs({ -2, 0, 3 }) do
+        eq(s0(t60, 1, x), s(x), 'sum60 ' .. x)
+        eq(s0(t300, 1, x), d(x), 'sum300 ' .. x)
+    end
 end)
 
 -- ── RUNG 2: closures and continuation-passing style ───────────────────────────────────────────────────────────────

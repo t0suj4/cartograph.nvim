@@ -929,6 +929,83 @@ local function args_key(svals, n, clos)
     return '(' .. table.concat(parts, ',') .. ')'
 end
 
+-- ── GENERALIZATION (CART-1332): a program point's CONFIGURATION as an ALGEBRA TERM ─────────────────────────────────
+--- a static value as an algebra term: a number / string / boolean a lit, a table `tbl` of `kv` pairs (keys in order),
+--- a closure `clo:<lambda>` of its free values (a dynamic one `dyn`), anything else a node named by its type. budget:
+--- { n } nodes left — past it, nil (the configuration is too big to compare)
+local function vterm(v, clos, seen, budget)
+    budget.n = budget.n - 1
+    if budget.n < 0 then return nil end
+    local ty = type(v)
+    if ty == 'number' or ty == 'string' or ty == 'boolean' then return { k = 'lit', v = v } end
+    if v == nil then return { k = 'nil', kids = {} } end
+    if seen[v] then return { k = 'cycle', kids = {} } end
+    if ty == 'table' then
+        seen[v] = true
+        local keys = {}
+        for k in pairs(v) do keys[#keys + 1] = k end
+        table.sort(keys, function (a, b) return tostring(a) < tostring(b) end)
+        local kids = {}
+        for i, k in ipairs(keys) do
+            local kt, vt = vterm(k, clos, seen, budget), vterm(v[k], clos, seen, budget)
+            if not kt or not vt then return nil end
+            kids[i] = { k = 'kv', kids = { kt, vt } }
+        end
+        seen[v] = nil
+        return { k = 'tbl', kids = kids }
+    end
+    local c = ty == 'function' and clos[v]
+    if c then
+        seen[v] = true
+        local kids = {}
+        for i, id in ipairs(c.lam.free) do
+            if c.bt[id] == D then kids[i] = { k = 'dyn', kids = {} }
+            else
+                kids[i] = vterm(c.env[id], clos, seen, budget)
+                if not kids[i] then return nil end
+            end
+        end
+        seen[v] = nil
+        return { k = 'clo:' .. c.lam.id, kids = kids }
+    end
+    return { k = ty, kids = {} }
+end
+
+--- a call's configuration -> the term `<group>(arg …)`: a dynamic argument `dyn`, a static one its value's term | nil
+function M.config_term(group, division, svals, clos)
+    local kids, budget = {}, { n = 20000 }
+    for i = 1, #division do
+        if division[i] == D then kids[i] = { k = 'dyn', kids = {} }
+        else
+            kids[i] = vterm(svals[i], clos, {}, budget)
+            if not kids[i] then return nil end
+        end
+    end
+    return { k = group, kids = kids }
+end
+
+--- HOMEOMORPHIC EMBEDDING a ⊴ b: b is a with more around it — b DIVES (a embeds in one of b's kids) or COUPLES (the same
+--- head, a's kids embedded in order into a subsequence of b's). A number embeds every number and a string every string
+--- (the leaves an unbounded computation grows through); a boolean only itself
+function M.embeds(a, b)
+    if a.k == 'lit' and b.k == 'lit' then
+        local ta = type(a.v)
+        return ta == type(b.v) and (ta == 'number' or ta == 'string' or a.v == b.v)
+    end
+    if b.k == 'lit' then return false end
+    for _, c in ipairs(b.kids) do if M.embeds(a, c) then return true end end
+    if a.k ~= b.k then return false end
+    -- (the leftmost kid each of a's kids embeds in: no later choice can do better. No while/break: mix stays inside S)
+    local j = 1
+    for _, x in ipairs(a.kids) do
+        local at = nil
+        for i = j, #b.kids do if not at and M.embeds(x, b.kids[i]) then at = i end end
+        if not at then return false end
+        j = at + 1
+    end
+    return true
+end
+
 --- specialize prog's `fname` to the static values of the S parameters -> residual program { funcs = { name -> { name,
 --- params = { rname … }, body } }, entry }, stats. opts: budget (unfold steps), name (the entry's residual name)
 function M.specialize(prog, fname, division, statics, opts)
@@ -997,6 +1074,8 @@ function M.specialize(prog, fname, division, statics, opts)
     local function t_params(T) if T.kind == 'fn' then return T.f.params end return T.c.lam.params end
     local function t_body(T) if T.kind == 'fn' then return T.f.body end return T.c.lam.body end
     local function t_key(T) if T.kind == 'fn' then return T.name end return serialize(T.c.fn, 0, R.clos) end
+    -- (calls of the same FUNCTION: a closure's lambda whatever it captured — its free values are in its configuration)
+    local function group(T) if T.kind == 'fn' then return T.name end return 'λ' .. T.c.lam.id end
     local function bt_of(T, division)
         local key
         if T.kind == 'fn' then key = T.name .. ':' .. table.concat(division, '')
@@ -1011,10 +1090,12 @@ function M.specialize(prog, fname, division, statics, opts)
         end
         return btcache[key]
     end
-    -- a new specialization context for T's body: { bt, env, ren }; a closure target's free variables bound as it
-    -- carries them (static ones to their values, dynamic ones to their residual names in the caller)
-    local function context(T, division)
-        local X = { bt = bt_of(T, division), env = {}, ren = {} }
+    -- a new specialization context for T's body: { bt, env, ren, frame }; a closure target's free variables bound as it
+    -- carries them (static ones to their values, dynamic ones to their residual names in the caller). frame: the CALL
+    -- whose body it is — { g, division, svals, parent, cand }, its parent the call whose body that call was made in: the
+    -- ACTIVE CALLS are this chain, so an error caught anywhere leaves nothing stale behind
+    local function context(T, division, frame)
+        local X = { bt = bt_of(T, division), env = {}, ren = {}, frame = frame }
         if T.kind == 'lam' then
             for _, id in ipairs(T.c.lam.free) do
                 if T.c.bt[id] == D then X.env[id] = DYN; X.ren[id] = T.c.dfree[id] else X.env[id] = T.c.env[id] end
@@ -1072,7 +1153,7 @@ function M.specialize(prog, fname, division, statics, opts)
             local division = {}
             for i = 1, #c.lam.params do division[i] = D end
             enter('lifted closure')
-            local X2 = context(T, division)
+            local X2 = context(T, division, X.frame)
             local params = {}
             for i, id in ipairs(c.lam.params) do X2.env[id] = DYN; X2.ren[id] = rname(id); params[i] = rname(id) end
             local body = spec_block(c.lam.body, X2)
@@ -1085,12 +1166,12 @@ function M.specialize(prog, fname, division, statics, opts)
 
     -- UNFOLD: T's body specialized to (division, svals) in place -> its single returned expression, the residual
     -- names of its dynamic parameters (holes, substituted by the caller) | nil
-    local function unfold(T, division, svals)
+    local function unfold(T, division, svals, frame)
         local key = t_key(T) .. ':' .. table.concat(division, '') .. ':' .. args_key(svals, #division, R.clos)
         if unfolding[key] then return nil end
         unfolding[key] = true
         enter('unfold')
-        local X2 = context(T, division)
+        local X2 = context(T, division, frame)
         local hs = {}
         for i, id in ipairs(t_params(T)) do
             if division[i] == D then
@@ -1121,7 +1202,7 @@ function M.specialize(prog, fname, division, statics, opts)
     -- a PROGRAM POINT for T under (division, svals) -> its residual name, the extra arguments the call passes: the
     -- dynamic free variables of every closure in it (T's own first, then the arguments', depth first), which the
     -- residual function takes as parameters under fresh names
-    local function point(T, division, svals)
+    local function point(T, division, svals, frame)
         local extra_args, extra_params = {}, {}
         local cloned, nc = {}, 0
         local function clone(c)
@@ -1162,7 +1243,7 @@ function M.specialize(prog, fname, division, statics, opts)
         local rf = { name = name, params = {}, body = nil }
         res.funcs[name] = rf
         res.order[#res.order + 1] = name
-        local X2 = context(T2, division)
+        local X2 = context(T2, division, frame)
         for i, id in ipairs(params) do
             if division[i] == D then X2.env[id] = DYN; X2.ren[id] = rname(id); rf.params[#rf.params + 1] = rname(id)
             else X2.env[id] = csvals[i] end
@@ -1175,8 +1256,46 @@ function M.specialize(prog, fname, division, statics, opts)
         return name, extra_args
     end
 
-    -- a call of T with argument expressions argexprs, in X -> residual expression
-    local function apply_spec(T, argexprs, X)
+    -- the WHISTLE's answer, asked only when a recursion ran past the depth: the nearest active call of the same function
+    -- (anc) EMBEDS this one (fr) — fr grew from it — and A.join of their CONFIGURATIONS (algebra terms) puts a HOLE in
+    -- the static arguments that changed -> { [i] = true } the parameters to GENERALIZE (made dynamic, their values
+    -- lifted at the call) | nil. A hole in a closure argument is no answer (lifting a closure is not generalizing it)
+    local function has_hole(t)
+        if t.k == 'hole' then return true end
+        for _, c in ipairs(t.kids or {}) do if has_hole(c) then return true end end
+        return false
+    end
+    local function generalization(anc, fr)
+        local ta = M.config_term(fr.g, anc.division, anc.svals, R.clos)
+        local tb = M.config_term(fr.g, fr.division, fr.svals, R.clos)
+        if not ta or not tb or #ta.kids ~= #tb.kids or not M.embeds(ta, tb) then return nil end
+        local j = require('cartograph.algebra').load().join(ta, tb)
+        local body = j and j.template.body
+        if not body or body.k ~= fr.g then return nil end
+        local force, any = {}, false
+        for i = 1, #tb.kids do
+            if fr.division[i] ~= D and has_hole(body.kids[i]) then
+                if type(fr.svals[i]) == 'function' then return nil end
+                force[i] = true
+                any = true
+            end
+        end
+        if any then return force end
+        return nil
+    end
+
+    -- the nearest active call of g at or above the call f, and whether a call of g at or above f is a candidate already
+    local function nearest(f, g)
+        if not f then return nil, false end
+        local a, u = nearest(f.parent, g)
+        if f.g == g then return f, u or f.cand == true end
+        return a, u
+    end
+
+    local call_spec
+    -- a call of T with argument expressions argexprs, in X -> residual expression. force: parameters made DYNAMIC
+    -- whatever their argument (a generalization), its static value lifted
+    local function apply_spec(T, argexprs, X, force)
         local params = t_params(T)
         local division, svals, dargs = {}, {}, {}
         local nargs = #argexprs
@@ -1186,15 +1305,46 @@ function M.specialize(prog, fname, division, statics, opts)
             if expands and b == S then
                 -- (a static call last: its values fill the remaining parameters)
                 local vs = svalm(a, X)
-                for j = 1, math.max(vs.n, 1) do division[i + j - 1] = S; svals[i + j - 1] = vs[j] end
+                for j = 1, math.max(vs.n, 1) do
+                    local p = i + j - 1
+                    if force and force[p] then division[p] = D; dargs[#dargs + 1] = lift(vs[j], X)
+                    else division[p] = S; svals[p] = vs[j] end
+                end
                 nargs = i - 1 + math.max(vs.n, 1)
             elseif expands then refuse('the last argument of a call expands several dynamic values into its parameters (rung 3)')
-            elseif b == D then division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
+            elseif b == D or (force and force[i]) then division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
             else division[i] = b; svals[i] = sval(a, X) end
         end
-        for i = nargs + 1, #params do division[i] = S end -- (a missing argument is a static nil)
+        for i = nargs + 1, #params do -- (a missing argument is a static nil)
+            if force and force[i] then division[i] = D; dargs[#dargs + 1] = { op = 'nil' } else division[i] = S end
+        end
+        local g = group(T)
+        local anc, under = nearest(X.frame, g)
+        local fr = { g = g, division = division, svals = svals, parent = X.frame }
+        if force or not anc or under then return call_spec(T, division, svals, dargs, fr) end
+        -- a CANDIDATE: the first call of g under an active call of g. If what it starts runs past the depth, it is
+        -- GENERALIZED against that call and specialized again — once (the retry passes force: no candidate again)
+        -- (a refusal coming through an UNFOLD attempt finds its program points rolled back and the depth restored by
+        -- the attempt's own catch; the mark and the depth here cover a call whose configuration is already being
+        -- unfolded above — it goes straight to a program point. No fixture reaches that path: a mutant dropping the
+        -- rollback survives)
+        fr.cand = true
+        local no, nm = mark()
+        local d0 = depth
+        local ok, r = pcall(call_spec, T, division, svals, dargs, fr)
+        if ok then return r end
+        depth = d0
+        if not (type(r) == 'table' and r.refusal and r.refusal:find('specialization depth', 1, true)) then error(r, 0) end
+        local f2 = generalization(anc, fr)
+        if not f2 then error(r, 0) end
+        rollback(no, nm)
+        return apply_spec(T, argexprs, X, f2)
+    end
+
+    -- T under (division, svals), its dynamic arguments dargs -> the residual call (or the unfolded expression)
+    function call_spec(T, division, svals, dargs, fr)
         -- UNFOLD when the callee's residual body is one `return e`: substitute its dynamic parameters
-        local inl, hs = unfold(T, division, svals)
+        local inl, hs = unfold(T, division, svals, fr)
         if inl then
             local subst, uses = {}, {}
             for i, h in ipairs(hs) do subst[h] = dargs[i] end
@@ -1205,7 +1355,7 @@ function M.specialize(prog, fname, division, statics, opts)
             end
             if okk then return M.substitute(inl, subst) end
         end
-        local name, extra = point(T, division, svals)
+        local name, extra = point(T, division, svals, fr)
         for _, x in ipairs(extra) do dargs[#dargs + 1] = x end
         return { op = 'call', fn = name, args = dargs }
     end
@@ -1455,7 +1605,8 @@ function M.specialize(prog, fname, division, statics, opts)
         return out, false
     end
 
-    local entry = point({ kind = 'fn', name = fname, f = prog.funcs[fname] }, division, statics)
+    local root = { g = fname, division = division, svals = statics }
+    local entry = point({ kind = 'fn', name = fname, f = prog.funcs[fname] }, division, statics, root)
     res.entry = entry
     return res, { unfold_steps = used, functions = #res.order }
 end
