@@ -441,7 +441,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     'ports',
     -- INFRASTRUCTURE (CART-1048, CART-1297): Kubernetes manifests' soft edges, a Helm chart rendered and linted, a plain
     -- chart's stages — READS (a render goes to a temp directory)
-    'k8s_findings', 'helm_chart', 'helm_stages', 'kustomize_overlays',
+    'k8s_findings', 'helm_chart', 'helm_stages', 'kustomize_overlays', 'helmfile_releases',
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
@@ -3383,6 +3383,48 @@ local function v_helm_chart(store, args)
     if #rows > 0 then return { result = rows, notes = notes } end
     return { result = {}, absence = 'absent', absence_why = { premise = 'clean', why = 'rendered and linted: no finding', evidence = { files = s.helm.files } }, notes = notes }
 end
+-- the HELMFILE release layer (CART-1042) as rows (CART-1048): the session post-pass reads it whole, and until this no
+-- verb served it — on a helmfile repo (jenkins-infra/kubernetes-management: 55 releases) every other infra verb is absent
+local function v_helmfile_releases(store)
+    local hf = store.data and store.data.helmfile
+    if not hf then
+        return { result = {}, absence = 'absent', absence_why = { premise = 'no-helmfile',
+            why = 'the helmfile post-pass read no helmfile (a YAML document with a `releases:` list) in this graph', evidence = {} }, notes = {} }
+    end
+    local rows, notes, secrets = {}, {}, 0
+    for _, r in ipairs(hf.releases) do
+        local layers = {}
+        for _, l in ipairs(r.layers) do
+            layers[#layers + 1] = (l.file or '(inline)') .. ' [' .. l.state .. ']'
+            if l.state == 'templated' then
+                notes[#notes + 1] = { kind = 'frontier', premise = 'templated-values', why = ('%s is a helmfile template: not read, so the effective values of %s are a LOWER BOUND'):format(l.file, r.id) }
+            elseif l.state == 'missing' or l.state == 'unreadable' then
+                rows[#rows + 1] = { finding = 'missing-values-layer', release = r.id, message = ('%s layers %s, which is %s'):format(r.id, tostring(l.file), l.state) }
+            end
+        end
+        rows[#rows + 1] = { finding = 'release', release = r.id, chart = nn(r.chart), version = nn(r.version), namespace = nn(r.namespace),
+            needs = r.needs, layers = layers, lower_bound = r.lower_bound, secrets = #r.secrets, hosts = #r.hosts }
+        for _, path in ipairs(r.noops) do
+            rows[#rows + 1] = { finding = 'noop-override', release = r.id, message = ('%s: a later layer restates %s — the override changes nothing'):format(r.id, path) }
+        end
+        secrets = secrets + #r.secrets
+    end
+    local charts = vim.tbl_keys(hf.charts)
+    table.sort(charts)
+    for _, chart in ipairs(charts) do
+        local c = hf.charts[chart]
+        if c.skew then rows[#rows + 1] = { finding = 'version-skew', chart = chart, versions = c.versions, releases = c.releases } end
+    end
+    local hosts = vim.tbl_keys(hf.served)
+    table.sort(hosts)
+    for _, h in ipairs(hosts) do
+        if #hf.served[h] > 1 then rows[#rows + 1] = { finding = 'shared-host', host = h, releases = hf.served[h] } end
+    end
+    if secrets > 0 then
+        notes[#notes + 1] = { kind = 'frontier', premise = 'secrets', why = ('%d secrets file reference(s): they live outside this repo (private), never read'):format(secrets) }
+    end
+    return { result = rows, notes = notes }
+end
 local function v_kustomize_overlays(store)
     local root = store.data and store.data.root or vim.fn.getcwd()
     local KZ = require 'cartograph.kustomize'
@@ -3446,6 +3488,13 @@ M.VERBS = {
         tier_basis = 'observation', absences = { 'absent', 'refused' },
         args = {},
         run = v_kustomize_overlays,
+    },
+    helmfile_releases = {
+        summary = 'a HELMFILE repo\'s releases: chart, pinned version, namespace, needs and each values layer (read / templated / missing) per cluster file; no-op overrides, chart version skew between releases, hosts served by several releases, secrets as a private frontier',
+        subject = 'graph',
+        tier_basis = 'observation', absences = { 'absent' },
+        args = {},
+        run = v_helmfile_releases,
     },
     helm_stages = {
         summary = 'a plain chart deployed per stage by the repo\'s own helm command lines: each stage\'s values chain, must-override placeholders left, no-op overrides, plaintext secret count, and the drift between stages',

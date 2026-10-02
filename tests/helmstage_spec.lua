@@ -68,3 +68,12 @@ test('helmstage: every stage RENDERED, and the CROSS-STAGE drift — a service a
     ok(not text:find('hunter2', 1, true), 'the password never reaches the report')
     ok(text:find('un-overridden placeholder', 1, true))
 end)
+
+test('helmstage: a stage layer that QUOTES a chart default changes its type — not a no-op; a restated number is one', function ()
+    local root = repo({
+        ['app/Chart.yaml'] = 'apiVersion: v2\nname: app\nversion: 0.1.0\n',
+        ['app/values.yaml'] = 'ann:\n  internal: true\nport: 80\n',
+        ['st.yaml'] = 'ann:\n  internal: "true"\nport: 80.0\n',
+    })
+    eq({ 'st.yaml $.port' }, HS.effective(root, { chart = 'app', values = { 'st.yaml' } }).noops)
+end)

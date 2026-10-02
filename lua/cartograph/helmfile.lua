@@ -77,6 +77,9 @@ function M.merge(base, over)
 end
 
 --- Leaves in `over` that restate `base` at the same path: an override that changes nothing.
+--- ⚠ PASS TYPED VALUES (yamlvalue.helm_values): an override is a no-op only if HELM loads the same value. Read as
+--- strings, `true` and `"true"` are equal — but Helm loads a bool and a string, and an annotation must be a string
+--- (jenkins-infra kubernetes-management: a cluster layer QUOTING a common layer's `true` was reported as a no-op).
 function M.noops(base, over, path, out)
     out = out or {}
     path = path or '$'
@@ -84,7 +87,7 @@ function M.noops(base, over, path, out)
     if type(over) == 'table' and over.o then
         for _, k in ipairs(over.keys) do
             local b = type(base) == 'table' and base.o and base.o[k]
-            if b ~= nil then M.noops(b, over.o[k], path .. '.' .. k, out) end
+            if b ~= nil then M.noops(b, over.o[k], path .. '.' .. (k:gsub('^str:', '')), out) end
         end
     elseif base ~= nil and A.kv_eq(base, over) then
         out[#out + 1] = path
@@ -132,9 +135,9 @@ function M.read(root, rel)
             local read_layers = {}
             for _, vf in ipairs(r.o.values and r.o.values.a or {}) do
                 if type(vf) ~= 'string' then
+                    -- (an inline layer has no text of its own to type: it takes no part in the no-op comparison)
                     rr.layers[#rr.layers + 1] = { state = 'inline' }
                     rr.effective = M.merge(rr.effective, vf)
-                    read_layers[#read_layers + 1] = vf
                 else
                     local p = join(dir, vf)
                     local s = p and readf(root .. '/' .. p)
@@ -148,10 +151,13 @@ function M.read(root, rel)
                         if not v then
                             rr.layers[#rr.layers + 1] = { file = p, state = 'unreadable', why = vwhy }
                         else
-                            for _, prev in ipairs(read_layers) do M.noops(prev, v, '$', rr.noops) end
+                            local tv = Y.helm_values(s)
+                            if tv then
+                                for _, prev in ipairs(read_layers) do M.noops(prev, tv, '$', rr.noops) end
+                                read_layers[#read_layers + 1] = tv
+                            end
                             rr.layers[#rr.layers + 1] = { file = p, state = 'read' }
                             rr.effective = M.merge(rr.effective, v)
-                            read_layers[#read_layers + 1] = v
                         end
                     end
                 end

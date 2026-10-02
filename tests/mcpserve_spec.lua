@@ -358,6 +358,8 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         k8s_findings = {},
         helm_chart = { args = { chart = 'no-such-chart' }, expect = 'refusal' },
         helm_stages = {},
+        -- no helmfile (a YAML with a `releases:` list) in this fixture: an ABSENCE naming its premise
+        helmfile_releases = {},
         -- no kustomization in this fixture: an ABSENCE — or, on a host without kubectl, the named refusal
         kustomize_overlays = { args = {}, expect = require('cartograph.kustomize').binary() and 'ok' or 'refusal' },
         -- naming no container and no payload: a refusal reachable without

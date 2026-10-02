@@ -122,7 +122,8 @@ local function read_values(root, rel)
     if not src then return nil, 'unreadable' end
     local v = Y.read_one(src)
     if v == nil then return nil, 'not data' end
-    return v
+    -- the same file as HELM types it, for the no-op comparison (a quoted "true" over a `true` is not a no-op)
+    return v, nil, Y.helm_values(src)
 end
 
 --- walk leaves -> fn(path, key, value)
@@ -139,13 +140,17 @@ end
 --- one stage's EFFECTIVE values and value findings -> { values, placeholders = { path… }, noops = { path… },
 --- secrets = n, layers = { { path, state } } }
 function M.effective(root, st)
-    local chartv = read_values(root, st.chart .. '/values.yaml') or { o = {}, keys = {} }
-    local eff, layers, noops, secrets = chartv, {}, {}, 0
+    local chartv, _, chartt = read_values(root, st.chart .. '/values.yaml')
+    local eff, layers, noops, secrets = chartv or { o = {}, keys = {} }, {}, {}, 0
+    local teff = chartt or { o = {}, keys = {} }
     for _, rel in ipairs(st.values) do
-        local v, why = read_values(root, rel)
+        local v, why, tv = read_values(root, rel)
         layers[#layers + 1] = { path = rel, state = v and 'read' or why }
         if v then
-            for _, p in ipairs(HF.noops(eff, v)) do noops[#noops + 1] = rel .. ' ' .. p end
+            if tv then
+                for _, p in ipairs(HF.noops(teff, tv)) do noops[#noops + 1] = rel .. ' ' .. p end
+                teff = HF.merge(teff, tv)
+            end
             leaves(v, '$', nil, function (_, k, x) if k and M.secret_key(k) and type(x) == 'string' and x ~= '' then secrets = secrets + 1 end end)
             eff = HF.merge(eff, v)
         end

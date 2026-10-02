@@ -208,8 +208,9 @@ function M.read(src)
             local pairs_ = {}
             local function put(kraw, v)
                 local key = text_of(kraw)
-                if type(key) ~= 'string' then key = vim.inspect(key) end
-                pairs_[#pairs_ + 1] = { k = key, plain = type(kraw) == 'table' and kraw.amb == 'scalar', v = v }
+                local complex = type(key) ~= 'string'
+                if complex then key = vim.inspect(key) end
+                pairs_[#pairs_ + 1] = { k = key, plain = type(kraw) == 'table' and kraw.amb == 'scalar', v = v, complex = complex or nil }
             end
             for c in node:iter_children() do
                 local ct = c:type()
@@ -242,8 +243,9 @@ function M.read(src)
                     local k, v = c:field('key')[1], c:field('value')[1]
                     local kraw = k and value(k) or { amb = 'scalar', text = '' }
                     local key = text_of(kraw)
-                    if type(key) ~= 'string' then key = vim.inspect(key) end
-                    a[#a + 1] = { pairs = { { k = key, plain = type(kraw) == 'table' and kraw.amb == 'scalar', v = value(v) } } }
+                    local complex = type(key) ~= 'string'
+                    if complex then key = vim.inspect(key) end
+                    a[#a + 1] = { pairs = { { k = key, plain = type(kraw) == 'table' and kraw.amb == 'scalar', v = value(v), complex = complex or nil } } }
                 end
             end
             return { a = a }
@@ -496,6 +498,52 @@ R.goyaml = function(s)
     return 'str', s
 end
 
+-- HELM'S VALUES LOADER (pkg/chart/common/values.go ReadValues = sigs.k8s.io/yaml v1.6.0 = go.yaml.in/yaml/v2, then a
+-- JSON round trip): go-yaml v2's YAML 1.1 resolver (resolve.go, ported), whose results JSON then COLLAPSES — every int
+-- and float one float64 `number`, a timestamp left a STRING (v2 keeps one as text when decoding into interface{}).
+-- So `true` / `yes` / `on` / `Y` are one bool, `8080` / `8080.0` / `0x1F90` / `0_8080`... one number, and a QUOTED
+-- `"true"` a string — the distinction a values override can be made of (an annotation must be a string).
+local GOYAML2 = { y = 'bool:true', Y = 'bool:true', yes = 'bool:true', Yes = 'bool:true', YES = 'bool:true',
+    ['true'] = 'bool:true', True = 'bool:true', TRUE = 'bool:true', on = 'bool:true', On = 'bool:true', ON = 'bool:true',
+    n = 'bool:false', N = 'bool:false', no = 'bool:false', No = 'bool:false', NO = 'bool:false', ['false'] = 'bool:false',
+    False = 'bool:false', FALSE = 'bool:false', off = 'bool:false', Off = 'bool:false', OFF = 'bool:false',
+    [''] = 'null', ['~'] = 'null', null = 'null', Null = 'null', NULL = 'null',
+    ['.nan'] = 'number:nan', ['.NaN'] = 'number:nan', ['.NAN'] = 'number:nan',
+    ['.inf'] = 'number:inf', ['.Inf'] = 'number:inf', ['.INF'] = 'number:inf', ['+.inf'] = 'number:inf', ['+.Inf'] = 'number:inf',
+    ['+.INF'] = 'number:inf', ['-.inf'] = 'number:-inf', ['-.Inf'] = 'number:-inf', ['-.INF'] = 'number:-inf', ['<<'] = 'merge' }
+R.helm = function(s)
+    local m = GOYAML2[s]
+    if m then
+        local t, v = m:match('^(%a+):(.*)$')
+        if t then return t, v end
+        return m
+    end
+    local c = s:sub(1, 1)
+    if c == '.' then
+        local x = tonumber(s)
+        if x and s:match('^%.%d') then return 'number', float_canon(x) end
+    elseif c:match('[-+%d]') then
+        if s:match('^%d%d%d%d%-%d%d?%-%d%d?$') or (s:match('^%d%d%d%d%-%d%d?%-%d%d?[Tt ]%d') and s:match('%d%d?:%d%d?:%d%d?')) then return 'str', s end
+        local plain = s:gsub('_', '')
+        local sign, body = plain:match('^([-+]?)(.*)$')
+        local n
+        -- strconv.ParseInt(plain, 0, 64): 0x / 0b / 0o prefixes, a leading 0 = octal
+        if body:match('^0[xX]%x+$') then n = digits_in(body:sub(3):lower(), 16)
+        elseif body:match('^0[bB][01]+$') then n = digits_in(body:sub(3), 2)
+        elseif body:match('^0[oO][0-7]+$') then n = digits_in(body:sub(3), 8)
+        elseif body:match('^0[0-7]*$') then n = digits_in(body, 8)
+        elseif body:match('^[1-9]%d*$') then n = tonumber(body) end
+        if n then return 'number', float_canon(sign == '-' and -n or n) end
+        -- yamlStyleFloat ^[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?$
+        if plain:match('^[-+]?%.%d+$') or plain:match('^[-+]?%.%d+[eE][-+]?%d+$') or plain:match('^[-+]?%d+%.?%d*$')
+            or plain:match('^[-+]?%d+%.?%d*[eE][-+]?%d+$') then
+            local x = tonumber(plain)
+            if x then return 'number', float_canon(x) end
+        end
+    end
+    return 'str', s
+end
+
 -- YAML::XS (libyaml's Perl binding): plain `~`, `null`, `` are undef; `true`/`false` booleans;
 -- everything else a Perl STRING (one that numifies if it looks like a number — Perl is untyped)
 R['libyaml-perl'] = function(s)
@@ -530,6 +578,8 @@ M.IMPLEMENTATIONS = {
     ['psych-safe'] = { ['duplicate-key'] = 'last', ['merge-key'] = 'merge-override', scalar = 'psych', keys = 'typed', tag = 'ignore', identity = 'ruby' },
     ['yaml-xs'] = { ['duplicate-key'] = 'last', ['merge-key'] = 'literal', scalar = 'libyaml-perl', keys = 'perl', sorted = true, untyped = true, tag = 'untyped', identity = 'perl' },
     -- (yq, measured on quarkus's empty and comment-only files: an EMPTY STREAM is ONE null document)
+    -- Helm's values (R.helm): go-yaml v2 into a map overwrites a duplicate key and honours `<<`; keys are JSON strings
+    helm = { ['duplicate-key'] = 'last', ['merge-key'] = 'merge', scalar = 'helm', keys = 'json', tag = 'ignore', identity = 'text' },
     yq = { ['duplicate-key'] = 'keep', ['merge-key'] = 'merge-override', scalar = 'goyaml', keys = 'typed', types_only = true, tag = 'keep',
         empty_stream = 'null-document', identity = 'text' },
 }
@@ -584,10 +634,26 @@ local IDENTITY = {
 }
 M._identity = function(k, plain, profile) return IDENTITY[profile.identity or 'text']({ k = k, plain = plain }, profile) end
 
+-- Helm's keys (sigs.k8s.io/yaml yaml.go convertToJSONableObject): go-yaml v2 resolves a PLAIN key, then JSON needs a
+-- string — a bool `true`/`false` (GitHub Actions' `on:` IS the key "true" to Helm), an int in decimal, a float in Go's
+-- shortest float32 form (approximated: integral -> decimal, else %.7g); a timestamp key stays its text
+local function json_key(pair)
+    if not pair.plain then return pair.k end
+    local t, c = M.resolve(pair.k, 'helm')
+    if t == 'bool' then return c end
+    if t == 'number' then
+        local x = tonumber(c)
+        if x and x == math.floor(x) and math.abs(x) < 1e21 then return ('%d'):format(x) end
+        if x then return (('%.7g'):format(x)) end
+    end
+    return pair.k
+end
+
 -- how a key is SHOWN: its text (decide) or what the implementation loads (typed)
 local function key_display(pair, profile, mode)
     if mode == 'decide' then return pair.k end
     if profile.keys == 'perl' then return 'str:' .. perl_key(pair) end
+    if profile.keys == 'json' then return 'str:' .. json_key(pair) end
     if profile.keys == 'typed' then return key_tag(pair, profile) end
     return 'str:' .. pair.k
 end
@@ -903,6 +969,31 @@ function M.divergences(raw, names)
     end
     walk(raw, '$')
     return out
+end
+
+--- A HELM VALUES FILE as Helm loads it (ReadValues: the FIRST document, the `helm` profile): every scalar "type:value",
+--- keys as Helm's JSON strings -> typed { o, keys } | nil, why. Refused where Helm refuses — a top-level non-mapping, a
+--- mapping or sequence used as a KEY (JSON has none; a template's `{{ … }}` parses as one). No document, or a null one,
+--- is the empty map. Accepted by `tools/oraclejoin.lua yaml:helm` against Helm's loader itself (sigs.k8s.io/yaml).
+function M.helm_values(src)
+    local docs, why = M.read(src)
+    if not docs then return nil, why end
+    local raw = docs[1] and docs[1].raw
+    if raw == nil then return { o = {}, keys = {} } end
+    if type(raw) == 'table' and raw.amb == 'scalar' and M.resolve(raw.text, 'helm') == 'null' then return { o = {}, keys = {} } end
+    if type(raw) ~= 'table' or not raw.pairs then return nil, 'a values file is a MAPPING: Helm refuses any other top level' end
+    local function complex(v)
+        if type(v) ~= 'table' then return nil end
+        for _, p in ipairs(v.pairs or {}) do
+            if p.complex then return p.k end
+            local c = complex(p.v); if c then return c end
+        end
+        for _, x in ipairs(v.a or {}) do local c = complex(x); if c then return c end end
+        if v.value then return complex(v.value) end
+        return nil
+    end
+    if complex(raw) then return nil, 'a mapping or sequence used as a KEY: Helm (JSON) refuses it' .. (docs[1].templated and ' — this is a template, not values' or '') end
+    return M.typed(raw, M.IMPLEMENTATIONS.helm)
 end
 
 --- One document (the first), or nil and why. The common case for values files.

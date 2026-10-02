@@ -278,3 +278,27 @@ test('yamlvalue: ★★ TWO `<<` KEYS — both merge, the LATER one wins an over
     eq('int:3', assert(Y.typed(split.raw, Y.IMPLEMENTATIONS['psych-safe'])).o['str:m'].o['str:k'])
     eq('int:3', assert(Y.typed(split.raw, Y.IMPLEMENTATIONS['pyyaml-safe'])).o['str:m'].o['str:k'])
 end)
+
+test('yamlvalue: the HELM profile is Helm\'s values loader — go-yaml v2\'s YAML 1.1 types collapsed by JSON; keys JSON strings', function ()
+    ready()
+    local v = assert(Y.helm_values(table.concat({ 'a: true', 'b: "true"', 'c: yes', 'd: Y', 'e: 8080', 'f: 8080.0', 'g: 0x1F90',
+        'h: 010', 'i: ~', 'j: 2001-12-14', 'k: 1_000', 'l: "8080"', 'on: push', '1.0: x', 'm: off' }, '\n') .. '\n'))
+    local got = {}
+    for _, k in ipairs(v.keys) do got[#got + 1] = k .. '=' .. v.o[k] end
+    eq({ 'str:a=bool:true', 'str:b=str:true', 'str:c=bool:true', 'str:d=bool:true', 'str:e=number:8080', 'str:f=number:8080',
+        'str:g=number:8080', 'str:h=number:8', 'str:i=null', 'str:j=str:2001-12-14', 'str:k=number:1000', 'str:l=str:8080',
+        'str:true=str:push', 'str:1=str:x', 'str:m=bool:false' }, got,
+        'yes/Y/off are bools (YAML 1.1), every number one float64, a timestamp stays text; `on:` IS the key "true" to Helm')
+end)
+
+test('yamlvalue: helm_values REFUSES what Helm refuses — a top-level list or scalar, a mapping used as a key (a template)', function ()
+    ready()
+    local v, why = Y.helm_values('- a\n- b\n')
+    eq(nil, v); ok(why:find('MAPPING', 1, true), why)
+    v, why = Y.helm_values('just text\n')
+    eq(nil, v); ok(why:find('MAPPING', 1, true), why)
+    v, why = Y.helm_values('name: {{ .Values.x }}\n')
+    eq(nil, v); ok(why:find('KEY', 1, true) and why:find('template', 1, true), why)
+    eq({ o = {}, keys = {} }, Y.helm_values('# only a comment\n'))
+    eq({ o = {}, keys = {} }, Y.helm_values('~\n'), 'a null document is the empty map')
+end)

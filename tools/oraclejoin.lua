@@ -188,17 +188,26 @@ do
         ['psych-safe'] = { 'ruby', REPO .. '/tools/oracles/yaml_typed.rb' },
         ['yaml-xs'] = { 'perl', REPO .. '/tools/oracles/yaml_typed.pl' },
         yq = { 'python3', REPO .. '/tools/oracles/yaml_typed_yq.py' },
+        -- Helm's values loader itself (sigs.k8s.io/yaml over go-yaml v2, Go, built offline): the FIRST document only, as
+        -- Helm reads a values file, unordered (a JSON round trip into a Go map keeps no key order)
+        helm = { 'sh', REPO .. '/tools/oracles/helm_values/run.sh' },
     }
     for impl, cmd in pairs(oracles) do
         JOINS['yaml:' .. impl] = {
             -- ORDERED: key order is one of the things implementations differ on (where a merge puts
             -- the merged keys), so it is compared, not sorted away
-            lang = 'yaml', repos = JOINS.yaml.repos, match = JOINS.yaml.match, oracle = cmd, ordered = true,
+            lang = 'yaml', repos = JOINS.yaml.repos, match = JOINS.yaml.match, oracle = cmd, ordered = impl ~= 'helm',
             read = function(src)
                 local Y = require 'cartograph.yamlvalue'
+                if impl == 'helm' then
+                    local v, hwhy = Y.helm_values(src)
+                    if not v then return nil, hwhy end
+                    return { a = next(v.o) and { v } or {} }
+                end
                 local docs, why = Y.read(src)
                 if not docs then return nil, why end
-                return Y.typed_stream(docs, Y.IMPLEMENTATIONS[impl])
+                local t, twhy = Y.typed_stream(docs, Y.IMPLEMENTATIONS[impl])
+                return t, twhy
             end,
         }
     end

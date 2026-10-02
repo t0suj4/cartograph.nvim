@@ -120,3 +120,25 @@ test('k8s: a REFUSAL-ONLY result is reported, not silent (CART-1043)', function 
     ok(line and line:find('3 document', 1, true), tostring(line))
     eq(nil, K.summary({ files = 0, refused = 0, refusals = {} }))
 end)
+
+test('helmfile: a NO-OP override is one HELM loads the same — a quoted "true" over `true` changes the type, `yes` over `true` does not', function ()
+    if not parser_available('yaml') then skip('no yaml tree-sitter parser') end
+    local Y = require 'cartograph.yamlvalue'
+    local H = require 'cartograph.helmfile'
+    local base = assert(Y.helm_values('ann:\n  internal: true\nport: 8080\n'))
+    eq({}, H.noops(base, assert(Y.helm_values('ann:\n  internal: "true"\n'))),
+        'jenkins-infra kubernetes-management: the cluster layer QUOTES the annotation (it must be a string) — not a no-op')
+    eq({ '$.ann.internal' }, H.noops(base, assert(Y.helm_values('ann:\n  internal: yes\n'))), 'yes IS true to Helm (YAML 1.1)')
+    eq({ '$.port' }, H.noops(base, assert(Y.helm_values('port: 8080.0\n'))), 'one float64 to Helm')
+end)
+
+test('helmfile: read() compares LAYERS as Helm types them — the quoted annotation is no no-op, a restated port is', function ()
+    ready()
+    local root = repo({
+        ['clusters/c.yaml'] = 'releases:\n  - name: ingress\n    chart: x/ingress\n    values:\n      - ../config/common.yaml\n      - ../config/c/ingress.yaml\n',
+        ['config/common.yaml'] = 'ann:\n  internal: true\nport: 80\n',
+        ['config/c/ingress.yaml'] = 'ann:\n  internal: "true"\nport: 80\n',
+    })
+    local hf = assert(H.read(root, 'clusters/c.yaml'))
+    eq({ '$.port' }, hf.releases[1].noops)
+end)
