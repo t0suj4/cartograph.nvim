@@ -71,6 +71,7 @@ M.NODE_FIELDS = {
     k8 = true,  -- k8s.lua: 'manifest' (a module: one manifest file) | 'object' (a region: one object in it)
     tf = true,  -- terraform.lua: a terraform file's module node
     hf = true,  -- helmfile.lua: a helmfile / values file's module node
+    hv = true,  -- helmgraph.lua: 'key' (a var: one values.yaml key path) | 'values' | 'template' (their module nodes)
     pb = true,  -- proto.lua: 'service' | 'rpc' | 'message' | 'enum' …
     pkg = true, qname = true, service = true, wire = true, req = true, resp = true, -- proto.lua: an rpc's package, qualified
                 -- name, service, WIRE path (`/pkg.Svc/Method`, the join key) and request / response message
@@ -167,6 +168,7 @@ M.EDGE_FIELDS = {
     -- ★ POST-PASS DOMAIN TAGS on `use` edges (see NODE_FIELDS: same pass, same registration)
     k8 = true,      -- k8s.lua: 'selects' | 'references' | 'probes' | 'deploys' | 'declares'
     hf = true, release = true, -- helmfile.lua: 'values' (a release layers a values file), and which release
+    hv = true,      -- helmgraph.lua: 'reads' (a template reads a values key, sited at each read)
     tf = true, module = true,  -- terraform.lua: 'module' (a module call reads its source), and the module's name
 }
 M.CALL_FIELDS = {

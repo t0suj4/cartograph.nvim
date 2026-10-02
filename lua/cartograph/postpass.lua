@@ -110,6 +110,11 @@ M.PASSES = {
     -- the gRPC/protobuf CONTRACT: .proto files are claimed by no spec, so their services and rpcs enter the
     -- graph here (CART-0824). One rpc = one `method` node, SITE-ANCHORED — a vendored copy of a .proto is a
     -- second real declaration, and reunifying the copies by qualified name belongs to the cross-service join.
+    -- a chart's values as VARS and its templates' reads as sited USES (CART-1313): the cockpit's var view answers
+    -- "where is this value used" with no Helm-specific UI
+    { name = 'helmgraph',
+        run = function (data) return require('cartograph.helmgraph').attach(data) end,
+        say = function (r) return require('cartograph.helmgraph').summary(r), INFO end },
     { name = 'proto',
         run = function (data)
             local s = require('cartograph.proto').attach(data)
