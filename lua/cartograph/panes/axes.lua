@@ -70,6 +70,7 @@ local STAGEABLE = { ['function'] = true, method = true }
 --- Which subject kind an axis hangs off, from the node.
 function M.subject_kind(node)
     if not node then return nil end
+    if node.k8 == 'object' then return 'object' end -- (a Kubernetes object: a region the k8s pass minted, CART-1314)
     if node.kind == 'module' then return 'module' end
     if node.kind == 'var' then return 'var' end
     if STAGEABLE[node.kind] then return 'fn' end
@@ -131,9 +132,58 @@ local function file_rows(_, recs, key)
     return out
 end
 
-M.ORDER = { 'callees', 'reaches', 'reached_by', 'imports', 'imported_by', 'writes' }
+-- ── KUBERNETES OBJECT RELATIONS (CART-1314): the soft edges the k8s pass mints between objects, by their `k8` tag ──
+-- The store's use records keep rw/gw, not the tag, so the axes keep their own index — memoized per GRAPH IDENTITY,
+-- like the cone memo. A row is the OTHER object (descend = its own relations), named with the referencing field.
+local k8memo = setmetatable({}, { __mode = 'k' })
+local function k8edges(store)
+    local g = store.data
+    if not g then return { out = {}, inn = {} } end
+    local idx = k8memo[g]
+    if not idx then
+        idx = { out = {}, inn = {} }
+        for _, e in ipairs(g.edges or {}) do
+            if e.k8 and e.kind == 'use' then
+                idx.out[e.from] = idx.out[e.from] or {}; table.insert(idx.out[e.from], e)
+                idx.inn[e.to] = idx.inn[e.to] or {}; table.insert(idx.inn[e.to], e)
+            end
+        end
+        k8memo[g] = idx
+    end
+    return idx
+end
+local function rel_rows(store, id, dir, tag)
+    local out, seen = {}, {}
+    for _, e in ipairs(k8edges(store)[dir][id] or {}) do
+        local other = dir == 'out' and e.to or e.from
+        if e.k8 == tag and not seen[other] then
+            seen[other] = true
+            local n = store.node(other)
+            out[#out + 1] = { node = other, file = n and n.file,
+                name = (n and n.name or other) .. (e.kpath and ('  ' .. e.kpath:gsub('^spec%.template%.spec%.', '…')) or '') }
+        end
+    end
+    table.sort(out, function (a, b) return (a.name or '') < (b.name or '') end)
+    return out
+end
+
+M.ORDER = { 'callees', 'reaches', 'reached_by', 'imports', 'imported_by', 'writes',
+    'k8_references', 'k8_referenced_by', 'k8_selects', 'k8_selected_by', 'k8_probes' }
 
 M.AXES = {
+    k8_references = { glyph = '→', label = 'references', on = 'object', inverse = 'k8_referenced_by',
+        rows = function (store, id) return rel_rows(store, id, 'out', 'references') end,
+        note = function () return '(it names no object of its release by a reference field)' end },
+    k8_referenced_by = { glyph = '←', label = 'referenced by', on = 'object', inverse = 'k8_references',
+        rows = function (store, id) return rel_rows(store, id, 'inn', 'references') end,
+        note = function () return '(no object of its release references it — a deletion CANDIDATE if it is data; an operator may still read it by name)' end },
+    k8_selects = { glyph = '◎', label = 'selects', on = 'object', inverse = 'k8_selected_by',
+        rows = function (store, id) return rel_rows(store, id, 'out', 'selects') end,
+        note = function () return '(its selector matches no pod template in its release, or it has none)' end },
+    k8_selected_by = { glyph = '◉', label = 'selected by', on = 'object', inverse = 'k8_selects',
+        rows = function (store, id) return rel_rows(store, id, 'inn', 'selects') end },
+    k8_probes = { glyph = '♥', label = 'probes (gRPC health)', on = 'object', inverse = nil,
+        rows = function (store, id) return rel_rows(store, id, 'out', 'probes') end },
     callees = {
         glyph = '↗', label = 'callees', on = 'fn', inverse = 'callers',
         rows = function (store, id) return node_rows(store, store.topo():callees(id)) end,

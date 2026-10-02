@@ -682,7 +682,51 @@ local function render_files_layers(ctx)
 end
 
 
+-- ── THE VALUES TREE (CART-1315): a chart's values.yaml at the file altitude is the tree of its KEYS ───────────────
+-- Each key a row (its var node: `l` opens who reads it, at their lines), indented by depth, with its READ COUNT — and
+-- `∅` when no template reads it, an ancestor of it (`toYaml .Values.x` reads all of x) or a descendant: a key nothing
+-- reads. Keys and reads are the helmgraph pass's (static: every branch, helpers included).
+local function render_values(ctx, file, keys)
+    table.sort(keys, function (a, b) return atr.sl(a.range) < atr.sl(b.range) end)
+    local reads, total = {}, 0
+    for _, n in ipairs(keys) do
+        local c = 0
+        for _, u in ipairs(store.topo():var_used_by_detail(n.id)) do c = c + #(u.at or {}) end
+        reads[n.name] = c
+        if c > 0 then total = total + 1 end
+    end
+    local function covered(path)
+        for p, c in pairs(reads) do
+            if c > 0 and (p == path or path:sub(1, #p + 1) == p .. '.' or p:sub(1, #path + 1) == path .. '.') then return true end
+        end
+        return false
+    end
+    ctx.lines[#ctx.lines + 1] = M.fit_identity('⚙ ' .. M.shortpath(file), '')
+    ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
+    local unread = 0
+    for _, n in ipairs(keys) do if reads[n.name] == 0 and not covered(n.name) then unread = unread + 1 end end
+    ctx.lines[#ctx.lines + 1] = M.fit_text(('  %d keys · %d read · %d ∅'):format(#keys, total, unread), '')
+    ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+    for _, n in ipairs(keys) do
+        local depth = select(2, n.name:gsub('%.', ''))
+        local seg = n.name:match('([^.]+)$') or n.name
+        local ind = ('  '):rep(depth + 1)
+        local c = reads[n.name]
+        local tail = c > 0 and (' (' .. c .. ')') or (covered(n.name) and '' or ' ∅')
+        ctx.lines[#ctx.lines + 1] = ind .. M.fit_identity(seg .. tail, ind)
+        if tail == ' ∅' then ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } } end
+        ctx.vnums[#ctx.lines] = tostring(atr.sl(n.range) + 1)
+        ctx.line_node[#ctx.lines] = n.id
+        ctx.node_line[n.id] = #ctx.lines
+    end
+end
+
 local function render_file(ctx, file)
+    do -- (a chart's values.yaml: its altitude is the values tree)
+        local keys = {}
+        for _, n in ipairs(store.by_file[file] or {}) do if n.hv == 'key' then keys[#keys + 1] = n end end
+        if #keys > 0 then return render_values(ctx, file, keys) end
+    end
     -- THE DIRECTORY IS DISCLOSED HERE. Roster rows carry the shortest UNIQUE
     -- suffix because the prefix is detail (the budget law) — and this altitude is
     -- the place you descend INTO for that detail, so the dropped prefix appears as
@@ -1576,6 +1620,14 @@ local function render_region(ctx, id)
     if not node then ctx.lines[1] = '(gone)'; return end
     ctx.lines[1] = ('≡ %s'):format(node.name or '?')
     ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
+    -- a KUBERNETES OBJECT is a region of its manifest whose content is its RELATIONS (CART-1314): the doors, not the
+    -- statement forms a code region shows
+    if node.k8 == 'object' then
+        ctx.lines[2] = '  ' .. M.fit_identity(M.shortpath(node.file or '?') .. ':' .. (atr.sl(node.range) + 1), '  ')
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        door_rows(ctx, node)
+        return
+    end
     local sr, sc, er, ec = atr.sl(node.range), atr.sc(node.range),
         atr.el(node.range), atr.ec(node.range)
     -- vars DECLARED in the run, by line: the row that declares one keeps its

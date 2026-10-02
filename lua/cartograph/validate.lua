@@ -167,6 +167,7 @@ M.EDGE_FIELDS = {
     flds = true, -- per-field facts: field -> packed rw + gw*4 ('' = whole-var)
     -- ★ POST-PASS DOMAIN TAGS on `use` edges (see NODE_FIELDS: same pass, same registration)
     k8 = true,      -- k8s.lua: 'selects' | 'references' | 'probes' | 'deploys' | 'declares'
+    kpath = true,   -- k8s.lua: the referencing field's API path (`spec.template.spec.serviceAccountName`)
     hf = true, release = true, -- helmfile.lua: 'values' (a release layers a values file), and which release
     hv = true,      -- helmgraph.lua: 'reads' (a template reads a values key, sited at each read)
     tf = true, module = true,  -- terraform.lua: 'module' (a module call reads its source), and the module's name

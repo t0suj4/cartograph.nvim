@@ -426,13 +426,14 @@ test('axes: every declaration is total, and the kinds differ', function ()
         ok(e, name .. ' is in ORDER and declared')
         ok(type(e.glyph) == 'string' and #e.glyph > 0, name .. ' has a glyph')
         ok(type(e.label) == 'string', name .. ' has a label')
-        ok(e.on == 'fn' or e.on == 'module' or e.on == 'var',
+        -- (`object`: a Kubernetes object's relations, CART-1314 — a region the k8s pass mints, not a code subject)
+        ok(e.on == 'fn' or e.on == 'module' or e.on == 'var' or e.on == 'object',
             name .. ' declares its subject kind')
         ok(type(e.rows) == 'function', name .. ' declares rows')
         kinds[e.on] = true
     end
-    eq(6, #axreg.ORDER)
-    ok(kinds.fn and kinds.module and kinds.var, 'all three subject kinds are covered')
+    eq(11, #axreg.ORDER)
+    ok(kinds.fn and kinds.module and kinds.var and kinds.object, 'all four subject kinds are covered')
     -- the cone declares that COUNTING it costs a traversal: the doors arm pays
     -- that on every render, which is half of what the A/B measures
     ok(axreg.AXES.reaches.walk and axreg.AXES.reached_by.walk,

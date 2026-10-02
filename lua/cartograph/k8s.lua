@@ -598,7 +598,7 @@ function M.attach(data, opts)
                             if ok then
                                 hits = hits + 1
                                 -- (a workload's own spec.selector matches its own template: counted, no self-edge)
-                                if o ~= e then data.edges[#data.edges + 1] = { from = e.d.node or e.rel, to = o.d.node or o.rel, kind = 'use', k8 = 'selects', at = M.site(d, r.path) }; soft.selects = soft.selects + 1 end
+                                if o ~= e then data.edges[#data.edges + 1] = { from = e.d.node or e.rel, to = o.d.node or o.rel, kind = 'use', k8 = 'selects', kpath = r.path, at = M.site(d, r.path) }; soft.selects = soft.selects + 1 end
                             end
                         end
                     end
@@ -612,7 +612,7 @@ function M.attach(data, opts)
                     soft.resolved = soft.resolved + 1
                     soft.inbound[e.variant .. '\31' .. r.kind .. '\31' .. r.name] = true
                     local from = e.d.node or e.rel
-                    if to ~= from then data.edges[#data.edges + 1] = { from = from, to = to, kind = 'use', k8 = 'references', at = M.site(d, r.path, r.name) } end
+                    if to ~= from then data.edges[#data.edges + 1] = { from = from, to = to, kind = 'use', k8 = 'references', kpath = r.path, at = M.site(d, r.path, r.name) } end
                 elseif API and API.cluster[r.kind] then soft.cluster = soft.cluster + 1
                 elseif r.optional then soft.optional = soft.optional + 1
                 elseif r.kind == 'ServiceAccount' and r.name == 'default' then soft.implicit = soft.implicit + 1
