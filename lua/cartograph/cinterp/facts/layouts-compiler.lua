@@ -7,6 +7,10 @@
 -- A question the compiler refuses for this field (a struct has no -1, a scalar no [0]) is dropped and the rest asked
 -- again. No struct is listed: the engine asks for what a path reads. -> { lookup = function (unit, T, path) -> { off,
 -- to = { k = 'i', w, u } | { k = 'd' } | { k = 'p' } | { k = 's' }, array?, elem? } | nil }
+-- ★ ANSWERS ARE KEPT ACROSS RUNS (CART-1303), by CONTENT (cartograph.stampcache): an answer depends on the unit's text,
+-- its flags, the compiler, and every header it includes — the probe compile writes that INCLUDE CLOSURE (`-MD`), and a
+-- later run reuses an answer only while the unit, its flags, the compiler identity and the CONTENTS of every file in the
+-- closure are unchanged. Measured: ~20% of the cpython gate's readings went to these compiles, re-asked every run.
 return {
     fact = 'layouts',
     needs = { 'compdb' },
@@ -20,6 +24,53 @@ return {
             byname[name] = u
         end
         local memo, raw = {}, {}
+        local SC = require 'cartograph.stampcache'
+        local gccid
+        local function compiler_id()
+            if not gccid then
+                local r = vim.system({ 'gcc', '-dumpfullversion', '-dumpmachine' }, { text = true }):wait()
+                gccid = (vim.fn.exepath('gcc') or 'gcc') .. '\0' .. vim.trim((r and r.stdout) or '')
+            end
+            return gccid
+        end
+        local depslog
+        local function unit_stamp(u)
+            raw[u.file] = raw[u.file] or F.readfile(u.file) or ''
+            return SC.key({ u.file, raw[u.file], table.concat(u.flags or {}, '\1'), u.cwd or '', compiler_id() })
+        end
+        -- the answers log of a unit, while its include closure is known and unchanged | nil
+        local scopes = {}
+        local function scope_of(u)
+            depslog = depslog or SC.log('layouts-deps', SC.key({ 'deps', compiler_id() }))
+            local us = unit_stamp(u)
+            local deps = depslog.get(us)
+            if not deps then return nil end
+            local hs = {}
+            for _, d in ipairs(deps) do
+                local h = SC.file(d)
+                if not h then return nil end -- (a header gone: re-derive)
+                hs[#hs + 1] = d .. '=' .. h
+            end
+            local key = SC.key({ us, table.concat(hs, '\1') })
+            scopes[key] = scopes[key] or SC.log('layouts', key)
+            return scopes[key]
+        end
+        -- the include closure a probe compile wrote (-MD), the probe file mapped back to the real unit
+        local function record_deps(u, depfile, probe)
+            if not depslog then depslog = SC.log('layouts-deps', SC.key({ 'deps', compiler_id() })) end
+            local us = unit_stamp(u)
+            if depslog.get(us) then return end
+            local fd = io.open(depfile, 'r')
+            if not fd then return end
+            local txt = fd:read('a'):gsub('\\\n', ' ')
+            fd:close()
+            local deps, seen = { u.file }, { [u.file] = true }
+            for word in (txt:match(':(.*)$') or ''):gmatch('%S+') do
+                local p = word:sub(1, 1) == '/' and word or ((u.cwd or '.') .. '/' .. word)
+                if p ~= probe and not seen[p] then seen[p] = true; deps[#deps + 1] = p end
+            end
+            depslog.put(us, deps)
+        end
         local function ask(u, qs)
             raw[u.file] = raw[u.file] or F.readfile(u.file) or ''
             local text = raw[u.file]
@@ -35,10 +86,11 @@ return {
                 vim.fn.mkdir(tmp, 'p')
                 local c = tmp .. '/' .. vim.fn.fnamemodify(u.file, ':t')
                 local fd = assert(io.open(c, 'w')); fd:write('#include <stddef.h>\n', table.concat(lines, '\n'), '\n'); fd:close()
-                local cmd = { 'gcc', '-S', '-w', '-o', '-' }
+                local cmd = { 'gcc', '-S', '-w', '-o', '-', '-MD', '-MF', tmp .. '/deps.d' }
                 vim.list_extend(cmd, u.flags)
                 vim.list_extend(cmd, { '-I' .. vim.fn.fnamemodify(u.file, ':h'), c })
                 local r = vim.system(cmd, { text = true, cwd = u.cwd, env = db.env }):wait()
+                if r.code == 0 then record_deps(u, tmp .. '/deps.d', c) end
                 vim.fn.delete(tmp, 'rf')
                 if r.code == 0 then
                     local out = {}
@@ -69,6 +121,12 @@ return {
             if m ~= nil then return m or nil end
             local u = byname[unit]
             if not u then memo[key] = false; return nil end
+            local q = T .. '\0' .. path
+            local scope = scope_of(u)
+            if scope then
+                local v, found = scope.get(q)
+                if found then memo[key] = v or false; return v or nil end
+            end
             local f = ('(((%s *)0)->%s)'):format(T, path)
             local qs = {
                 ('offsetof(%s, %s) + 1'):format(T, path), ('sizeof(%s)'):format(f), ('__builtin_classify_type(%s) + 1'):format(f),
@@ -76,13 +134,15 @@ return {
                 ('sizeof((%s)[0])'):format(f), ('__builtin_classify_type((%s)[0]) + 1'):format(f), ('((__typeof__((%s)[0]))-1 > 0) + 1'):format(f),
             }
             local a = ask(u, qs)
-            if not (a and a[1] and a[3]) then memo[key] = false; return nil end
+            local function keep(v) local sc = scope or scope_of(u); if sc then sc.put(q, v) end end
+            if not (a and a[1] and a[3]) then memo[key] = false; keep(false); return nil end
             local r = { off = a[1] - 1 }
             local cls = a[3] - 1
             if cls == 5 and a[5] == 1 then -- (an ARRAY: its storage, the element's type)
                 r.array, r.elem = true, ty(a[6], a[7] and a[7] - 1, a[8])
             else r.to = ty(a[2], cls, a[4]) end
             memo[key] = r
+            keep(r)
             return r
         end
         return { lookup = lookup }

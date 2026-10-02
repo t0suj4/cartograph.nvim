@@ -34,6 +34,9 @@ local py = src .. '/python'
 local function runpy(code, timeout)
     local f = vim.fn.tempname() .. '.py'
     local fd = assert(io.open(f, 'w')); fd:write(code); fd:close()
+    -- (the loop's clock is CACHED: after a long stretch of pure Lua with no spawn — a warm stampcache's readings — a
+    -- timeout armed now starts from a stale `now` and fires at once; measured: builtins.len's witness 17/17 lost)
+    vim.uv.update_time()
     local r = vim.system({ py, '-I', f }, { text = true, timeout = timeout or 60000 }):wait()
     os.remove(f)
     return r.code == 0 and r.stdout or nil, r
