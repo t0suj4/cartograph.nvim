@@ -59,6 +59,23 @@ function M.register(H)
         vim.cmd('copen')
     end, { nargs = '?', complete = 'dir', desc = 'cartograph: a Helm chart\'s silent-success findings at their template lines (quickfix)' })
 
+    -- a chart's AUTHORED base against the plain manifests it should produce (CART-0873): where they vary and the
+    -- chart hardcodes, at each template line
+    cmd('CartographHelmBase', function (o)
+        local HP = require 'cartograph.helmprov'
+        local manifests = vim.fn.fnamemodify(o.fargs[1], ':p'):gsub('/$', '')
+        local chart = o.fargs[2] and vim.fn.fnamemodify(o.fargs[2], ':p'):gsub('/$', '') or HP.chart_of(vim.api.nvim_buf_get_name(0))
+        if not chart then return vim.notify('cartograph: no chart (pass it after the manifests directory, or run inside one)', vim.log.levels.WARN) end
+        local B = require 'cartograph.helmbase'
+        local r, why = B.diff(chart, manifests)
+        if not r then return vim.notify('cartograph: helm base — ' .. tostring(why), vim.log.levels.WARN) end
+        local items = B.items(chart, r)
+        vim.notify(B.lines(r)[1], vim.log.levels.INFO)
+        if #items == 0 then return end
+        vim.fn.setqflist({}, ' ', { title = 'helm base: ' .. chart .. ' vs ' .. manifests, items = items })
+        vim.cmd('copen')
+    end, { nargs = '+', complete = 'dir', desc = 'cartograph: where the plain manifests vary and the chart hardcodes, at its template lines (quickfix)' })
+
     -- ── the running system vs the static model ──────────────────────
     cmd('CartographLive', function ()
         local store = live() if not store then return end

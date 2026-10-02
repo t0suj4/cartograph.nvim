@@ -821,6 +821,11 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
                               / orphan values, chomped separators, checksum
                               coverage, dangling references) at their
                               template lines (quickfix)
+  :CartographHelmBase {manifests} [chart]
+                              the chart rendered with NO values against the
+                              plain manifests it should produce: every spot
+                              that varies across them and is a literal in the
+                              templates, at each template line (quickfix)
 
 ==============================================================================
 4. KEYS                                                       *cartograph-keys*
