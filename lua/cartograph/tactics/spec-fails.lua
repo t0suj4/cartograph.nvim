@@ -17,19 +17,28 @@ function M.run(root, spec, timeout)
     -- the runner in its OWN process group (setsid): a spec that HANGS (a mutation that makes a loop infinite) is
     -- killed WITH its children on the timeout — killing only bash left each hung `node` spinning at 100% CPU
     -- (measured: three orphans, 20-60 min each, one per re-run of one mutation)
-    local proc
-    local ok, obj = pcall(function ()
+    -- ⚠ NOT proc:wait(timeout): on its timeout nvim's wait SIGKILLs the LEADER only (`setsid bash`) and then waits a
+    -- second full timeout for the result — which needs the output pipes closed, and the hung grandchild (a busy headless
+    -- nvim, deaf to SIGTERM: harness #26) holds them open. MEASURED (CART-1333): a hung mutant ran 2 x 600 s, an outer
+    -- `timeout` killed the tool first, no verdict, and the spec process ran on as an orphan for 20+ min. So the wait is
+    -- ours: on the timeout the whole GROUP is SIGKILLed first, then the pipes close and the result arrives
+    local proc, result
+    local ok, err = pcall(function ()
         proc = vim.system({ 'setsid', 'bash', 'tests/run.sh' }, { cwd = root, text = true,
-            env = { SPEC = spec, CARTOGRAPH_NVIM = vim.v.progpath } })
-        return proc:wait(timeout or 600000)
+            env = { SPEC = spec, CARTOGRAPH_NVIM = vim.v.progpath } }, function (o) result = o end)
     end)
-    if not ok then return nil, 'the runner did not start: ' .. tostring(obj) end
-    if not obj or obj.signal == 15 or obj.signal == 9 then
-        -- TIMED OUT (wait returns no result, or the killed one): a hang is a spec that did NOT pass — a failure, named
-        if proc and proc.pid then vim.system({ 'kill', '-9', '--', '-' .. proc.pid }):wait() end
-        local secs = math.floor((timeout or 600000) / 1000)
-        return { passed = 0, failed = 1, skipped = 0, ran = 1, code = 124, timed_out = true,
-            summary = ('TIMED OUT after %d s (a hang: the spec did not pass; its process group killed)'):format(secs) }
+    if not ok then return nil, 'the runner did not start: ' .. tostring(err) end
+    local finished = vim.wait(timeout or 600000, function () return result ~= nil end, 50)
+    local obj = result
+    if not finished or (obj and (obj.signal == 15 or obj.signal == 9)) then
+        -- TIMED OUT: a hang is a spec that did NOT pass — a failure, named
+        local pgid = proc.pid
+        vim.system({ 'kill', '-9', '--', '-' .. pgid }):wait()
+        vim.wait(10000, function () return result ~= nil end, 50)
+        local gone = vim.system({ 'kill', '-0', '--', '-' .. pgid }):wait().code ~= 0
+        local secs = (timeout or 600000) / 1000
+        return { passed = 0, failed = 1, skipped = 0, ran = 1, code = 124, timed_out = true, pgid = pgid, group_gone = gone,
+            summary = ('TIMED OUT after %g s (a hang: the spec did not pass; its process group killed)'):format(secs) }
     end
     local out = (obj.stdout or '') .. '\n' .. (obj.stderr or '')
     local p, f, s
@@ -42,11 +51,14 @@ end
 M.entry = {
     name = 'spec-fails',
     kind = 'discovery',
-    summary = 'does SPEC fail in a tree? runs `SPEC=<spec> bash tests/run.sh` in root (default: the cartograph repo) and reads the summary line; a run that ran nothing refuses',
-    params = { spec = 'string', root = 'string?' },
+    summary = 'does SPEC fail in a tree? runs `SPEC=<spec> bash tests/run.sh` in root (default: the cartograph repo) and reads the summary line; a run that ran nothing refuses; timeout = seconds (default 600) — a hang is a failure, its process group killed',
+    params = { spec = 'string', root = 'string?', timeout = 'string?' },
     measure = function (_, p)
-        local v, why = M.run(p.root or repo_of_toolbelt(), p.spec)
-        return v or { error = why }
+        local t0 = vim.uv.hrtime()
+        local v, why = M.run(p.root or repo_of_toolbelt(), p.spec, p.timeout and tonumber(p.timeout) * 1000 or nil)
+        v = v or { error = why }
+        v.secs = (vim.uv.hrtime() - t0) / 1e9
+        return v
     end,
     claim = function (v)
         if v.error then return false, v.error end
@@ -71,6 +83,8 @@ M.FIXTURE = {
     ['tests/guard_spec.lua'] = "local check = ...\nlocal g = require('guard')\ncheck(g.positive(1) == true)\ncheck(g.positive(-1) == false)\ncheck(g.positive(0) == false)\ncheck(g.nonempty({}) == false)\n",
     ['tests/weak_spec.lua'] = "local check = ...\nlocal g = require('guard')\ncheck(g.positive(1) == true)\n",
     ['tests/broken_spec.lua'] = "local check = ...\ncheck(1 == 2)\n",
+    -- (a spec that HANGS busy: a headless nvim in a loop ignores SIGTERM — the case a timeout must kill by group)
+    ['tests/hang_spec.lua'] = "local check = ...\nlocal n = 0\nfor _ = 1, math.huge do n = n + 1 end\ncheck(n > 0)\n",
 }
 
 M.entry.examples = {
@@ -85,6 +99,16 @@ M.entry.examples = {
         files = M.FIXTURE,
         params = function (store) return { spec = 'guard_spec', root = store.data.root } end,
         expect = { holds = false, check = function (v) return v.passed == 4 and v.failed == 0, 'guard_spec: ' .. tostring(v.summary) end },
+    },
+    {
+        -- CART-1333: the wait used to SIGKILL only the group leader and then wait a second timeout on the pipes the
+        -- hung grandchild held — 2 x the timeout, and an orphan if anything outside gave up first
+        name = 'a spec that HANGS is a failure at the timeout — not twice it — and its whole process group is gone',
+        files = M.FIXTURE,
+        params = function (store) return { spec = 'hang_spec', root = store.data.root, timeout = '2' } end,
+        expect = { holds = true, check = function (v)
+            return v.timed_out and v.group_gone and v.secs < 4, ('timed_out %s group_gone %s after %.1f s'):format(tostring(v.timed_out), tostring(v.group_gone), v.secs or -1)
+        end },
     },
     {
         name = 'a SPEC naming no spec runs nothing: refused, never read as green',

@@ -39,7 +39,8 @@ local function measure(_, p)
     v.scratch = root
     local function done() if not p.keep then vim.fn.delete(root, 'rf'); v.scratch = nil end return v end
     -- 1. the BASELINE, in the copy: it must be green, or every mutation is "caught"
-    local base, bwhy = SF.run(root, p.spec)
+    local limit = p.timeout and tonumber(p.timeout) * 1000 or nil
+    local base, bwhy = SF.run(root, p.spec, limit)
     if not base then v.error = 'baseline: ' .. tostring(bwhy); return done() end
     v.baseline = base
     if base.ran == 0 then v.error = ('the spec RAN NOTHING (%s) — SPEC must name a spec file'):format(base.summary); return done() end
@@ -73,7 +74,7 @@ local function measure(_, p)
         end
         local wf = assert(io.open(path, 'wb')); wf:write(new); wf:close()
         v.sites, v.rules = 1, { ('`%s` -> `%s` (ground)'):format(p.before, p.after) }
-        local mut, mwhy = SF.run(root, p.spec)
+        local mut, mwhy = SF.run(root, p.spec, limit)
         if not mut then v.error = 'mutated run: ' .. tostring(mwhy); return done() end
         v.mutated, v.caught = mut, mut.failed > 0
         return done()
@@ -94,7 +95,7 @@ local function measure(_, p)
     if not applied then v.error = 'the mutation did not APPLY: ' .. tostring(awhy); return done() end
     v.sites, v.rules = applied.sites, applied.rules
     -- 3. the MUTATED run
-    local mut, mwhy = SF.run(root, p.spec)
+    local mut, mwhy = SF.run(root, p.spec, limit)
     if not mut then v.error = 'mutated run: ' .. tostring(mwhy); return done() end
     v.mutated = mut
     v.caught = mut.failed > 0
@@ -105,8 +106,8 @@ local E = {
     name = 'mutation-check',
     kind = 'discovery',
     measures = 'CART-1174',
-    summary = 'does SPEC catch a mutation? file = the file to mutate, before/after = the mutation as an example (a chunk or an EXPRESSION), spec = the spec file name (e.g. tactic_spec); runs in a scratch COPY of repo (default: this cartograph), baseline first; keep = 1 keeps the copy',
-    params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?', ground = 'string?' },
+    summary = 'does SPEC catch a mutation? file = the file to mutate, before/after = the mutation as an example (a chunk or an EXPRESSION), spec = the spec file name (e.g. tactic_spec); runs in a scratch COPY of repo (default: this cartograph), baseline first; keep = 1 keeps the copy; timeout = seconds per run (default 600): a mutant that HANGS is CAUGHT (timed out), its process group killed',
+    params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?', ground = 'string?', timeout = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
@@ -171,6 +172,20 @@ E.examples = {
             local p = params('guard_spec', 'x > 0', '#t > 0')(store); p.ground = '1'; return p
         end,
         expect = { holds = false, check = function (v) return v.error and v.error:find('did not APPLY', 1, true) ~= nil, tostring(v.error) end },
+    },
+    {
+        -- CART-1333: a mutant that makes the spec HANG is CAUGHT at the timeout (once, not twice it), its process group
+        -- killed — it used to give no verdict and leave the spec running as an orphan
+        name = 'a mutant that HANGS the spec is CAUGHT at the timeout, named TIMED OUT, and leaves no process behind',
+        files = FX, params = function (store)
+            local p = params('guard_spec', 'if x > 0 then return true end', 'for _ = 1, math.huge do end if x > 0 then return true end')(store)
+            p.ground, p.timeout = '1', '2'
+            return p
+        end,
+        expect = { holds = true, check = function (v)
+            local m = v.mutated or {}
+            return m.timed_out and m.group_gone and v.baseline.failed == 0, tostring(m.summary) .. ' ' .. tostring(v.error)
+        end },
     },
     {
         name = 'a RED baseline refuses: it would catch every mutation',
