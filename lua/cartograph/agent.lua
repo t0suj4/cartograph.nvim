@@ -3404,6 +3404,13 @@ local function v_helmfile_releases(store)
         end
         rows[#rows + 1] = { finding = 'release', release = r.id, chart = nn(r.chart), version = nn(r.version), namespace = nn(r.namespace),
             needs = r.needs, layers = layers, lower_bound = r.lower_bound, secrets = #r.secrets, hosts = #r.hosts }
+        for _, nv in ipairs(r.novalue or {}) do
+            if nv.reaches then
+                rows[#rows + 1] = { finding = 'no-value-reaches-chart', release = r.id, message = ('%s: %s renders `<no value>` at %s and no later layer overrides it — the chart receives the literal string'):format(r.id, nv.file, nv.path) }
+            else
+                notes[#notes + 1] = { kind = 'overridden', premise = 'no-value', why = ('%s renders `<no value>` at %s (a template read of an absent value); a later layer of %s overrides it'):format(nv.file, nv.path, r.id) }
+            end
+        end
         for _, path in ipairs(r.noops) do
             rows[#rows + 1] = { finding = 'noop-override', release = r.id, message = ('%s: a later layer restates %s — the override changes nothing'):format(r.id, path) }
         end
@@ -3420,6 +3427,10 @@ local function v_helmfile_releases(store)
     for _, h in ipairs(hosts) do
         if #hf.served[h] > 1 then rows[#rows + 1] = { finding = 'shared-host', host = h, releases = hf.served[h] } end
     end
+    for _, s in ipairs(hf.standins or {}) do
+        notes[#notes + 1] = { kind = 'frontier', premise = 'private-file', why = s .. ' does not exist here (a private repo): rendered as an empty {} stand-in' }
+    end
+    for _, s in ipairs(hf.render_refusals or {}) do notes[#notes + 1] = { kind = 'refused', premise = 'helmfile-render', why = s } end
     if secrets > 0 then
         notes[#notes + 1] = { kind = 'frontier', premise = 'secrets', why = ('%d secrets file reference(s): they live outside this repo (private), never read'):format(secrets) }
     end

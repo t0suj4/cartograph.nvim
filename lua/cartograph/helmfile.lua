@@ -116,9 +116,26 @@ local function is_helmfile(v)
     return type(v) == 'table' and v.o and type(v.o.releases) == 'table' and v.o.releases.a ~= nil
 end
 
---- Read one helmfile into its releases, each with its layered, effective values.
+-- every string leaf of a value whose text holds `<no value>` -> { path … } (a template read of an absent value)
+local function novalue_paths(v, path, out)
+    if type(v) == 'table' and v.o then for _, k in ipairs(v.keys) do novalue_paths(v.o[k], path .. '.' .. k, out) end
+    elseif type(v) == 'table' and v.a then for i, x in ipairs(v.a) do novalue_paths(x, path .. '[' .. i .. ']', out) end
+    elseif type(v) == 'string' and v:find('<no value>', 1, true) then out[#out + 1] = path end
+    return out
+end
+local function value_at(v, path)
+    for seg in path:gsub('^%$%.?', ''):gmatch('[^.]+') do
+        if type(v) ~= 'table' or not v.o then return nil end
+        v = v.o[seg]
+    end
+    return v
+end
+
+--- Read one helmfile into its releases, each with its layered, effective values. `rendered` (optional, from
+--- M.render_templated) = { [release name] = { [values index] = { value, typed } } }: a `.gotmpl` layer helmfile itself
+--- rendered is READ (state `rendered`) instead of counted as a lower bound.
 --- @return table|nil hf { file, cluster, releases }, string|nil why
-function M.read(root, rel)
+function M.read(root, rel, rendered)
     local src = readf(root .. '/' .. rel)
     if not src then return nil, 'unreadable: ' .. rel end
     local doc, why = Y.read_one(src)
@@ -133,7 +150,8 @@ function M.read(root, rel)
                 effective = { o = {}, keys = {} }, lower_bound = false }
             for _, n in ipairs(r.o.needs and r.o.needs.a or {}) do rr.needs[#rr.needs + 1] = n end
             local read_layers = {}
-            for _, vf in ipairs(r.o.values and r.o.values.a or {}) do
+            local mine = rendered and rendered[tostring(r.o.name)] or nil
+            for vi, vf in ipairs(r.o.values and r.o.values.a or {}) do
                 if type(vf) ~= 'string' then
                     -- (an inline layer has no text of its own to type: it takes no part in the no-op comparison)
                     rr.layers[#rr.layers + 1] = { state = 'inline' }
@@ -147,6 +165,15 @@ function M.read(root, rel)
                     -- chart's own `tpl` (kubernetes-management admin-accounts-jenkins-io.yaml: `'{{ include
                     -- "keycloak.fullname" . }}-db'` names a helper that exists only inside the keycloak chart — helmfile
                     -- rendering it would fail, and the repo deploys it)
+                    elseif vf:match('%.gotmpl$') and mine and mine[vi] then
+                        -- RENDERED by helmfile itself (CART-1318): read as any other layer
+                        local rv = mine[vi]
+                        if rv.typed then
+                            for _, prev in ipairs(read_layers) do M.noops(prev, rv.typed, '$', rr.noops) end
+                            read_layers[#read_layers + 1] = rv.typed
+                        end
+                        rr.layers[#rr.layers + 1] = { file = p, state = 'rendered', novalue = novalue_paths(rv.value, '$', {}) }
+                        rr.effective = M.merge(rr.effective, rv.value)
                     elseif vf:match('%.gotmpl$') then
                         rr.layers[#rr.layers + 1] = { file = p, state = 'templated' }
                         rr.lower_bound = true
@@ -169,11 +196,86 @@ function M.read(root, rel)
             for _, s in ipairs(r.o.secrets and r.o.secrets.a or {}) do
                 rr.secrets[#rr.secrets + 1] = type(s) == 'string' and (join(dir, s) or s) or '(inline)'
             end
+            -- a `<no value>` a rendered layer wrote: overridden by a later layer, or REACHING the chart
+            rr.novalue = {}
+            for _, l in ipairs(rr.layers) do
+                for _, path in ipairs(l.novalue or {}) do
+                    local ev = value_at(rr.effective, path)
+                    rr.novalue[#rr.novalue + 1] = { path = path, file = l.file,
+                        reaches = type(ev) == 'string' and ev:find('<no value>', 1, true) ~= nil }
+                end
+            end
             rr.hosts = M.hosts(rr.effective)
             hf.releases[#hf.releases + 1] = rr
         end
     end
     return hf
+end
+
+--- the helmfile binary (installed by pkgit from the user's checkout) | nil
+function M.binary() local b = vim.fn.exepath('helmfile'); return b ~= '' and b or nil end
+
+-- the raw node at a key of a raw mapping
+local function raw_at(raw, key)
+    for _, pr in ipairs(type(raw) == 'table' and raw.pairs or {}) do if pr.k == key then return pr.v end end
+    return nil
+end
+
+--- RENDER a helmfile's `.gotmpl` values layers WITH HELMFILE ITSELF (CART-1318): the repo's tracked files copied to a
+--- scratch directory (the repo is never written), every referenced values / secrets file that does not exist (a
+--- private repo's) STOOD IN by an empty `{}` — a frontier, listed — then `helmfile build --embed-values` offline (no
+--- network namespace when `unshare` allows it): its release `values:` list holds every layer RENDERED, in order.
+--- -> rendered = { [release] = { [index] = { value, typed } } }, standins = { path … } | nil, why
+function M.render_templated(root, hf)
+    local bin = M.binary()
+    if not bin then return nil, 'no helmfile binary on PATH: a .gotmpl layer stays a lower bound (install helmfile)' end
+    local tmp = vim.fn.tempname()
+    vim.fn.mkdir(tmp, 'p')
+    local r = vim.system({ 'sh', '-c', 'cd "$1" && git ls-files -z | xargs -0 cp --parents -t "$2"', 'sh', root, tmp }, { text = true }):wait(60000)
+    if not r or r.code ~= 0 then return nil, 'could not copy the repo (git ls-files): ' .. vim.trim((r and r.stderr) or '') end
+    local standins = {}
+    local function standin(p)
+        if p and vim.fn.filereadable(root .. '/' .. p) == 0 then
+            vim.fn.mkdir(vim.fn.fnamemodify(tmp .. '/' .. p, ':h'), 'p')
+            local fd = io.open(tmp .. '/' .. p, 'w'); if fd then fd:write('{}\n'); fd:close() end
+            standins[#standins + 1] = p
+        end
+    end
+    for _, rr in ipairs(hf.releases) do
+        for _, l in ipairs(rr.layers) do if l.state == 'missing' then standin(l.file) end end
+        for _, s in ipairs(rr.secrets) do if s ~= '(inline)' then standin(s) end end
+    end
+    local args = { bin, '-f', tmp .. '/' .. hf.file, 'build', '--embed-values' }
+    local res
+    if vim.fn.executable('unshare') == 1 then
+        local u = { 'unshare', '-rn' }
+        for _, a in ipairs(args) do u[#u + 1] = a end
+        res = vim.system(u, { text = true }):wait(120000)
+        if res and res.code ~= 0 and (res.stderr or ''):find('unshare:', 1, true) then res = nil end -- (no user namespaces here)
+    end
+    res = res or vim.system(args, { text = true }):wait(120000)
+    vim.fn.delete(tmp, 'rf')
+    if not res or res.code ~= 0 then
+        return nil, 'helmfile build failed: ' .. vim.trim(((res and res.stderr) or 'did not finish'):gsub('\n.*', ''))
+    end
+    local docs = Y.read(res.stdout or '')
+    local raw = docs and docs[1] and docs[1].raw
+    local rels = raw_at(raw, 'releases')
+    if not (rels and rels.a) then return nil, 'helmfile build printed no releases' end
+    local rendered = {}
+    for _, rraw in ipairs(rels.a) do
+        local name = raw_at(rraw, 'name')
+        name = type(name) == 'table' and name.text or name
+        local vals = raw_at(rraw, 'values')
+        if name and vals and vals.a then
+            local per = {}
+            for i, layer in ipairs(vals.a) do
+                per[i] = { value = Y.decide(layer), typed = Y.typed(layer, Y.IMPLEMENTATIONS.helm) }
+            end
+            rendered[name] = per
+        end
+    end
+    return rendered, standins
 end
 
 local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
@@ -204,6 +306,25 @@ function M.attach(data, opts)
         end
     end
     if #hfs == 0 then data.helmfile = nil; return stats end
+    -- the `.gotmpl` layers, RENDERED by helmfile itself where it is installed (CART-1318)
+    stats.rendered, stats.standins, stats.render_refusals = 0, {}, {}
+    for i, hf in ipairs(hfs) do
+        local templated = false
+        for _, rr in ipairs(hf.releases) do for _, l in ipairs(rr.layers) do if l.state == 'templated' then templated = true end end end
+        if templated and not (opts and opts.render == false) then
+            local rendered, extra = M.render_templated(data.root, hf)
+            if rendered then
+                local again = M.read(data.root, hf.file, rendered)
+                if again then
+                    hfs[i] = again
+                    for _, rr in ipairs(again.releases) do for _, l in ipairs(rr.layers) do if l.state == 'rendered' then stats.rendered = stats.rendered + 1 end end end
+                    for _, s in ipairs(extra) do stats.standins[#stats.standins + 1] = s end
+                end
+            else
+                stats.render_refusals[#stats.render_refusals + 1] = hf.file .. ': ' .. tostring(extra)
+            end
+        end
+    end
     data.nodes = data.nodes or {}
     data.edges = data.edges or {}
     local claimed, minted = {}, {}
@@ -226,7 +347,7 @@ function M.attach(data, opts)
                 stats.layers = stats.layers + 1
                 if l.state == 'templated' then stats.templated = stats.templated + 1 end
                 if l.state == 'missing' then stats.missing = stats.missing + 1 end
-                if l.file and (l.state == 'read' or l.state == 'templated') then
+                if l.file and (l.state == 'read' or l.state == 'templated' or l.state == 'rendered') then
                     claimed[l.file] = true
                     node(l.file)
                     data.edges[#data.edges + 1] = { from = hf.file, to = l.file, kind = 'use', hf = 'values',
@@ -252,7 +373,8 @@ function M.attach(data, opts)
         if n > 1 then stats.skew = stats.skew + 1; c.skew = true end
     end
     for _ in pairs(served) do stats.hosts = stats.hosts + 1 end
-    data.helmfile = { helmfiles = hfs, releases = releases, charts = charts, served = served, claimed = claimed }
+    data.helmfile = { helmfiles = hfs, releases = releases, charts = charts, served = served, claimed = claimed,
+        standins = stats.standins, render_refusals = stats.render_refusals }
     return stats
 end
 

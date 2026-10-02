@@ -154,3 +154,42 @@ test('helmfile: only a .gotmpl layer is a TEMPLATE — a `{{` in a plain values 
     eq(false, r.lower_bound)
     eq('{{ include "keycloak.fullname" . }}-db', r.effective.o.db.o.name, 'kept literally, as helmfile hands it to the chart')
 end)
+
+test('helmfile: a .gotmpl layer RENDERED by helmfile itself — state values, .Release, a <no value> overridden or REACHING the chart, a private file stood in', function ()
+    ready()
+    if not H.binary() then skip 'no helmfile binary (install it: pkgit -i helmfile)' end
+    local root = repo({
+        ['clusters/c.yaml'] = table.concat({
+            'values:', '  - region: eu', 'releases:',
+            '  - name: app', '    chart: x/app', '    values:', '      - ../config/app.yaml.gotmpl', '      - ../config/c/app.yaml',
+            '    secrets:', '      - ../secrets/app.yaml',
+            '  - name: other', '    chart: x/other', '    values:', '      - ../config/other.yaml.gotmpl' }, '\n') .. '\n',
+        -- (`get "k" nil` on an absent key PRINTS `<no value>`; a bare `.Values.nope` is an error: helmfile renders values
+        -- templates with missingkey=error — kubernetes-management's datadog.yaml.gotmpl is the first shape)
+        ['config/app.yaml.gotmpl'] = 'region: {{ .Values.region }}\nname: {{ .Release.Name }}\nlost: {{ .Values | get "nope" nil }}\n',
+        ['config/c/app.yaml'] = 'lost: fixed\n',
+        ['config/other.yaml.gotmpl'] = 'gone: {{ .Values | get "nope" nil }}\n',
+    })
+    vim.system({ 'sh', '-c', 'cd "$1" && git init -q && git add -A', 'sh', root }):wait()
+    local data = { root = root, nodes = {}, edges = {} }
+    local st = H.attach(data)
+    eq({}, st.render_refusals)
+    eq({ 'secrets/app.yaml' }, st.standins, 'the private file is stood in by {} and listed')
+    local by = {}
+    for _, r in ipairs(data.helmfile.releases) do by[r.name] = r end
+    eq('rendered', by.app.layers[1].state)
+    eq(false, by.app.lower_bound)
+    eq('eu', by.app.effective.o.region, '.Values in a values template = the helmfile\'s STATE values')
+    eq('app', by.app.effective.o.name, '.Release is the release')
+    eq('fixed', by.app.effective.o.lost)
+    eq({ { path = '$.lost', file = 'config/app.yaml.gotmpl', reaches = false } }, by.app.novalue, 'overridden by config/c/app.yaml')
+    eq({ { path = '$.gone', file = 'config/other.yaml.gotmpl', reaches = true } }, by.other.novalue, 'nothing overrides it: the chart receives the literal string')
+    -- a bare missing key is helmfile's own error: the render is REFUSED by name, the layer stays a lower bound
+    local f = io.open(root .. '/config/other.yaml.gotmpl', 'w'); f:write('gone: {{ .Values.nope }}\n'); f:close()
+    vim.system({ 'sh', '-c', 'cd "$1" && git add -A', 'sh', root }):wait()
+    local data2 = { root = root, nodes = {}, edges = {} }
+    local st2 = H.attach(data2)
+    eq(1, #st2.render_refusals)
+    ok(st2.render_refusals[1]:find('map has no entry for key "nope"', 1, true), st2.render_refusals[1])
+    eq(true, data2.helmfile.releases[1].lower_bound)
+end)
