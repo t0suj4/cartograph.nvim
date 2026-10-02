@@ -143,7 +143,11 @@ function M.read(root, rel)
                     local s = p and readf(root .. '/' .. p)
                     if not s then
                         rr.layers[#rr.layers + 1] = { file = p or vf, state = 'missing' }
-                    elseif vf:match('%.gotmpl$') or s:find('{{', 1, true) then
+                    -- ONLY a `.gotmpl` layer is a helmfile template: a `{{` in a plain values file is a STRING for the
+                    -- chart's own `tpl` (kubernetes-management admin-accounts-jenkins-io.yaml: `'{{ include
+                    -- "keycloak.fullname" . }}-db'` names a helper that exists only inside the keycloak chart — helmfile
+                    -- rendering it would fail, and the repo deploys it)
+                    elseif vf:match('%.gotmpl$') then
                         rr.layers[#rr.layers + 1] = { file = p, state = 'templated' }
                         rr.lower_bound = true
                     else

@@ -142,3 +142,15 @@ test('helmfile: read() compares LAYERS as Helm types them — the quoted annotat
     local hf = assert(H.read(root, 'clusters/c.yaml'))
     eq({ '$.port' }, hf.releases[1].noops)
 end)
+
+test('helmfile: only a .gotmpl layer is a TEMPLATE — a `{{` in a plain values file is a string for the chart\'s own tpl', function ()
+    ready()
+    local root = repo({
+        ['clusters/c.yaml'] = 'releases:\n  - name: kc\n    chart: x/keycloak\n    values:\n      - ../config/kc.yaml\n',
+        ['config/kc.yaml'] = 'db:\n  name: \'{{ include "keycloak.fullname" . }}-db\'\n',
+    })
+    local r = assert(H.read(root, 'clusters/c.yaml')).releases[1]
+    eq('read', r.layers[1].state)
+    eq(false, r.lower_bound)
+    eq('{{ include "keycloak.fullname" . }}-db', r.effective.o.db.o.name, 'kept literally, as helmfile hands it to the chart')
+end)
