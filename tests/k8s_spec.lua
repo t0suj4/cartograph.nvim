@@ -232,3 +232,33 @@ test('k8s: every OBJECT is its own node (a region of its file) and the soft edge
     local V = require 'cartograph.validate'
     eq('schema: OK', (V.report(V.check(data)) or ''):match('^schema: OK'), 'the post-pass graph is inside the closed schema')
 end)
+
+test('k8s: a REQUEST-PATH TRACE from a workload — env names the peer -> its Service port -> the selector -> the workload listening; a peer with no Service ends dangling — CART-1316', function ()
+    if not ready() then skip 'no yaml parser' end
+    local text = table.concat({
+        'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: web', 'spec:',             -- 1-5
+        '  template:', '    metadata:', '      labels:', '        app: web', '    spec:',           -- 6-10
+        '      containers:', '      - name: web', '        image: web', '        env:',            -- 11-14
+        '        - name: API_SERVICE_ADDR', '          value: "api:8080"',                         -- 15-16
+        '        - name: GONE_SERVICE_ADDR', '          value: "gone:9000"',                        -- 17-18
+        '---', 'apiVersion: v1', 'kind: Service', 'metadata:', '  name: api', 'spec:',              -- 19-24
+        '  selector:', '    app: api', '  ports:', '  - port: 8080',                               -- 25-28
+        '---', 'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: api', 'spec:',      -- 29-34
+        '  template:', '    metadata:', '      labels:', '        app: api', '    spec:',           -- 35-39
+        '      containers:', '      - name: api', '        image: api', '        ports:', '        - containerPort: 8080' }, '\n') .. '\n' -- 40-44
+    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {} }
+    K.attach(data)
+    local ts = assert(K.traces(data, 'all.yaml::Deployment/web'))
+    local function hops(t) return vim.tbl_map(function (h) return { h.text, h.line } end, t.hops) end
+    eq({ 'api', 'gone' }, vim.tbl_map(function (t) return t.peer end, ts))
+    eq({
+        { 'Deployment/web names api:8080', 16 },
+        { 'Service/api port 8080', 28 },
+        { 'selects Deployment/api', 25 },
+        { 'Deployment/api listens', 44 },
+    }, hops(ts[1]))
+    eq({ 'Deployment/web names gone:9000', 18 }, hops(ts[2])[1])
+    ok(ts[2].hops[2].text:find('dangling', 1, true), ts[2].hops[2].text)
+    local none = assert(K.traces(data, 'all.yaml::Deployment/api'))
+    eq({}, none, 'api names no peer')
+end)

@@ -155,7 +155,8 @@ do
             if not line:match('^%s*%-%-')
                 and (line:find('create_user_command', 1, true)
                     or line:match('^%s*cmd%(')) then
-                for name in line:gmatch("'(Cartograph%a*)'") do
+                -- (%w: a command name is ALPHANUMERIC — `:CartographK8sTrace` read as `:CartographK` under %a)
+                for name in line:gmatch("'(Cartograph%w*)'") do
                     site[name] = site[name] or ('%s:%d'):format(rel, lnum)
                     if not reg[name] then
                         reg[name] = { panelocal =
@@ -171,7 +172,7 @@ end
 local function surface(path)
     local s = { path = path, lines = vim.fn.readfile(REPO .. '/' .. path), at = {} }
     for i, line in ipairs(s.lines) do
-        for name in line:gmatch('Cartograph%a*') do
+        for name in line:gmatch('Cartograph%w*') do
             s.at[name] = s.at[name] or i
         end
     end

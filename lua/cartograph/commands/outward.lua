@@ -63,6 +63,65 @@ function M.register(H)
         vim.cmd('copen')
     end, { nargs = '?', complete = 'dir', desc = 'cartograph: a Helm chart\'s silent-success findings at their template lines (quickfix)' })
 
+    -- THE STAGE VANTAGE (CART-1316): a chart's values set for this session — the -f files and --set values a stage
+    -- deploys with — used by the helm commands below whenever they are given no flags of their own
+    local VANTAGE = {}
+    local function helm_opts(chart, fargs)
+        if #fargs == 0 then return VANTAGE[chart] or { values = {}, set = {} } end
+        local files, sets, i = {}, {}, 1
+        while i <= #fargs do
+            local a = fargs[i]
+            if (a == '-f' or a == '--values') and fargs[i + 1] then files[#files + 1] = vim.fn.fnamemodify(fargs[i + 1], ':p'); i = i + 2
+            elseif a == '--set' and fargs[i + 1] then sets[#sets + 1] = fargs[i + 1]; i = i + 2
+            else return nil end
+        end
+        return { values = files, set = sets }
+    end
+    cmd('CartographHelmStage', function (o)
+        local HP = require 'cartograph.helmprov'
+        local chart = HP.root_of(vim.api.nvim_buf_get_name(0))
+        if not chart then return vim.notify('cartograph: not inside a chart', vim.log.levels.WARN) end
+        if o.fargs[1] == '-' then VANTAGE[chart] = nil; return vim.notify('cartograph: ' .. chart .. ' — no stage: the chart\'s own values', vim.log.levels.INFO) end
+        if #o.fargs > 0 then
+            local opts = helm_opts(chart, o.fargs)
+            if not opts then return vim.notify('cartograph: usage :CartographHelmStage [-f values.yaml]... [--set k=v]... | -', vim.log.levels.WARN) end
+            VANTAGE[chart] = opts
+        end
+        local v = VANTAGE[chart]
+        local parts = {}
+        for _, f in ipairs(v and v.values or {}) do parts[#parts + 1] = '-f ' .. vim.fn.fnamemodify(f, ':~:.') end
+        for _, x in ipairs(v and v.set or {}) do parts[#parts + 1] = '--set ' .. x end
+        vim.notify('cartograph: ' .. vim.fn.fnamemodify(chart, ':~:.') .. ' seen from ' .. (#parts > 0 and table.concat(parts, ' ') or 'its own values'), vim.log.levels.INFO)
+    end, { nargs = '*', complete = 'file', desc = 'cartograph: set (or show; `-` clears) the values set the helm commands see this chart through' })
+
+    -- REQUEST-PATH TRACES (CART-1316): from the Kubernetes object at the cursor, every peer it names, hop by hop, each
+    -- hop at its declaring line (quickfix) — a trace, never a drawn network
+    cmd('CartographK8sTrace', function ()
+        local store = require 'cartograph.store'
+        local data = store.data
+        if not (data and data.k8s) then return vim.notify('cartograph: no Kubernetes pass on this graph', vim.log.levels.WARN) end
+        local file = vim.api.nvim_buf_get_name(0)
+        local rel = data.root and file:sub(#data.root + 2) or file
+        local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+        local id
+        for nid, od in pairs(data.k8s.object_docs or {}) do
+            if od.rel == rel and row >= (od.d.line0 or 0) and row <= (od.d.line1 or 0) then id = nid end
+        end
+        if not id then return vim.notify('cartograph: the cursor is in no Kubernetes object', vim.log.levels.INFO) end
+        local ts, why = require('cartograph.k8s').traces(data, id)
+        if not ts then return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN) end
+        if #ts == 0 then return vim.notify('cartograph: ' .. id .. ' names no peer', vim.log.levels.INFO) end
+        local items = {}
+        for _, t in ipairs(ts) do
+            for i, h in ipairs(t.hops) do
+                items[#items + 1] = { filename = h.file and (data.root .. '/' .. h.file) or file, lnum = h.line or 1, col = 1,
+                    text = ('[%s] %s%s'):format(t.peer, ('  '):rep(i - 1), h.text) }
+            end
+        end
+        vim.fn.setqflist({}, ' ', { title = 'k8s trace: ' .. id, items = items })
+        vim.cmd('copen')
+    end, { desc = 'cartograph: the request paths from the Kubernetes object at the cursor, hop by hop at their declaring lines' })
+
     -- WHERE A VALUE CAME FROM (CART-1307): the values key under the cursor (in a values file) or the `.Values.x` under it
     -- (in a template) -> which source won it, at its line, and every source it beat (quickfix, winner first)
     cmd('CartographHelmOrigin', function (o)
@@ -70,13 +129,9 @@ function M.register(H)
         local file = vim.api.nvim_buf_get_name(0)
         local chart, scope = HP.root_of(file)
         if not chart then return vim.notify('cartograph: not inside a chart', vim.log.levels.WARN) end
-        local files, sets, i = {}, {}, 1
-        while i <= #o.fargs do
-            local a = o.fargs[i]
-            if (a == '-f' or a == '--values') and o.fargs[i + 1] then files[#files + 1] = vim.fn.fnamemodify(o.fargs[i + 1], ':p'); i = i + 2
-            elseif a == '--set' and o.fargs[i + 1] then sets[#sets + 1] = o.fargs[i + 1]; i = i + 2
-            else return vim.notify('cartograph: usage :CartographHelmOrigin [-f values.yaml]... [--set k=v]...', vim.log.levels.WARN) end
-        end
+        local hopts = helm_opts(chart, o.fargs)
+        if not hopts then return vim.notify('cartograph: usage :CartographHelmOrigin [-f values.yaml]... [--set k=v]...', vim.log.levels.WARN) end
+        local files, sets = hopts.values, hopts.set
         local path
         local row, col = unpack(vim.api.nvim_win_get_cursor(0))
         local line = vim.api.nvim_get_current_line()
@@ -112,13 +167,9 @@ function M.register(H)
         local file = vim.api.nvim_buf_get_name(0)
         local chart = HP.root_of(file)
         if not chart then return vim.notify('cartograph: not inside a chart', vim.log.levels.WARN) end
-        local files, sets, i = {}, {}, 1
-        while i <= #o.fargs do
-            local a = o.fargs[i]
-            if (a == '-f' or a == '--values') and o.fargs[i + 1] then files[#files + 1] = vim.fn.fnamemodify(o.fargs[i + 1], ':p'); i = i + 2
-            elseif a == '--set' and o.fargs[i + 1] then sets[#sets + 1] = o.fargs[i + 1]; i = i + 2
-            else return vim.notify('cartograph: usage :CartographHelmBranch [-f values.yaml]... [--set k=v]...', vim.log.levels.WARN) end
-        end
+        local hopts = helm_opts(chart, o.fargs)
+        if not hopts then return vim.notify('cartograph: usage :CartographHelmBranch [-f values.yaml]... [--set k=v]...', vim.log.levels.WARN) end
+        local files, sets = hopts.values, hopts.set
         local p, why = HP.render(chart, { branches = true, origins = true, values = files, set = sets })
         if not p then return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN) end
         local rel = file:sub(#chart + 2)
@@ -148,9 +199,8 @@ function M.register(H)
         local file = vim.api.nvim_buf_get_name(0)
         local chart = HP.root_of(file)
         if not chart then return vim.notify('cartograph: not inside a chart', vim.log.levels.WARN) end
-        local files = {}
-        for i = 1, #o.fargs do if o.fargs[i - 1] == '-f' then files[#files + 1] = vim.fn.fnamemodify(o.fargs[i], ':p') end end
-        local p, why = HP.render(chart, { dots = true, values = files })
+        local hopts = helm_opts(chart, o.fargs) or { values = {}, set = {} }
+        local p, why = HP.render(chart, { dots = true, values = hopts.values, set = hopts.set })
         if not p then return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN) end
         local rel = file:sub(#chart + 2)
         local row = vim.api.nvim_win_get_cursor(0)[1]

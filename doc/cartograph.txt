@@ -833,6 +833,16 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
                               the nearest above) took its arm: what its
                               condition evaluated to, and the values source
                               of every key it read (quickfix)
+  :CartographHelmStage [-f values.yaml]... [--set k=v]... | -
+                              the values set (a stage's -f files and --set)
+                              this session sees the chart through: the helm
+                              commands use it when given no flags; no
+                              arguments shows it, `-` clears it
+  :CartographK8sTrace         from the Kubernetes object at the cursor, every
+                              peer it names, hop by hop at the declaring
+                              lines: env -> Service port -> selector ->
+                              workload containerPort -> health probe
+                              (quickfix)
   :CartographHelmDot [-f values.yaml]...
                               what `.` was at each action on the cursor
                               line — the root, a `with` value, each `range`

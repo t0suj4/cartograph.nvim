@@ -308,6 +308,72 @@ end
 
 local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
 
+--- REQUEST-PATH TRACES from a workload object (CART-1316): every peer it declares (an env `*_SERVICE_ADDR`, a URL host),
+--- hop by hop, each hop at its DECLARING line — the env line naming the peer -> the peer's Service (its port) -> the
+--- workload the Service selects (the selector line) -> that workload's containerPort -> its gRPC health probe. A trace,
+--- never a drawn network: flows are temporal, so each is a list of hops. -> { { peer, hops = { { text, file, line } } } }
+--- | nil, why. A peer with no Service in the release ends in a `dangling` hop.
+function M.traces(data, id)
+    local s = data and data.k8s
+    if not s then return nil, 'no Kubernetes pass on this graph' end
+    local od = s.object_docs and s.object_docs[id]
+    if not od then return nil, 'not a Kubernetes object: ' .. tostring(id) end
+    local d, v = od.d, od.variant
+    local svc = s.services_map[v .. '\31' .. tostring(d.name or d.app)]
+    if not svc or not next(svc.addrs or {}) then return {} end
+    local function line_of(doc, needle)
+        local l = 0
+        for line in ((doc.chunk or '') .. '\n'):gmatch('([^\n]*)\n') do
+            l = l + 1
+            if line:find(needle, 1, true) then return (doc.line0 or 0) + l end
+        end
+        return (doc.line0 or 0) + 1
+    end
+    local traces = {}
+    local hosts = vim.tbl_keys(svc.addrs)
+    table.sort(hosts)
+    for _, host in ipairs(hosts) do
+        local val = svc.addrs[host]
+        local hops = { { text = ('%s/%s names %s'):format(d.kind, tostring(d.name), val), file = od.rel, line = line_of(d, val) } }
+        local snode = (s.object_nodes or {})[v .. '\31Service\31' .. host]
+        local sd = snode and s.object_docs[snode]
+        if not sd then
+            hops[#hops + 1] = { text = ('no Service %s in %s — dangling (an overlay or operator may supply it)'):format(host, v) }
+        else
+            local port = val:match(':(%d+)')
+            hops[#hops + 1] = { text = 'Service/' .. host .. (port and (' port ' .. port) or ''), file = sd.rel,
+                line = port and line_of(sd.d, port) or (sd.d.line0 or 0) + 1 }
+            local selected = false
+            for _, e in ipairs(data.edges or {}) do
+                if e.k8 == 'selects' and e.from == snode then
+                    local wd = s.object_docs[e.to]
+                    if wd then
+                        selected = true
+                        hops[#hops + 1] = { text = 'selects ' .. wd.d.kind .. '/' .. tostring(wd.d.name), file = sd.rel,
+                            line = e.at and e.at[1] and (e.at[1].start.line + 1) or (sd.d.line0 or 0) + 1 }
+                        hops[#hops + 1] = { text = wd.d.kind .. '/' .. tostring(wd.d.name) .. ' listens', file = wd.rel, line = line_of(wd.d, 'containerPort') }
+                        -- (probe edges are probes x vendored copies of the Health contract: count each apart)
+                        local sites, copies, pline = {}, {}, nil
+                        for _, pe in ipairs(data.edges or {}) do
+                            if pe.k8 == 'probes' and pe.from == e.to then
+                                local l = pe.at and pe.at[1] and (pe.at[1].start.line + 1)
+                                if l then sites[l] = true end
+                                copies[pe.to] = true
+                                pline = (l and (not pline or l < pline)) and l or pline
+                            end
+                        end
+                        local np, nc = vim.tbl_count(sites), vim.tbl_count(copies)
+                        if nc > 0 then hops[#hops + 1] = { text = ('probed: gRPC health, %d probe%s, %d cop%s of the contract'):format(np, np == 1 and '' or 's', nc, nc == 1 and 'y' or 'ies'), file = wd.rel, line = pline } end
+                    end
+                end
+            end
+            if not selected then hops[#hops + 1] = { text = 'its selector matches no pod in ' .. v } end
+        end
+        traces[#traces + 1] = { peer = host, hops = hops }
+    end
+    return traces
+end
+
 --- the SITE of a field in a document (CART-1312): the line of `path` (the derived API path, `[]` for any list item,
 --- `{}` for a map) in the document's text — the first one whose line names `value` when given — as a use edge's `at`
 --- list { { start, end } } (0-based lines). Nothing found: {} (the edge stays, without a site).
@@ -433,6 +499,8 @@ function M.attach(data, opts)
                         variant = rel:sub(1, #rel - #d.source) .. (d.source:match('^([^/]+)') or '')
                     end
                     if not counted[variant] then counted[variant] = true; stats.variants[variant] = (stats.variants[variant] or 0) + 1 end
+                    -- (each object's document, for the TRACES that walk it after the pass — CART-1316)
+                    if d.node then stats.object_docs = stats.object_docs or {}; stats.object_docs[d.node] = { d = d, rel = rel, variant = variant } end
                     -- (every OBJECT by kind and name within its release, and every document that references or carries
                     -- pod labels: the soft-edge pass resolves against these)
                     if d.kind and d.name then
