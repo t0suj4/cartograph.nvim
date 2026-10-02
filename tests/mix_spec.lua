@@ -152,6 +152,22 @@ test('mix: the WHISTLE is homeomorphic embedding over configuration terms — a 
     ok(not MX.embeds(cfg({ 1, 2 }), cfg({ 1 })), 'never the bigger in the smaller')
     ok(MX.embeds(cfg({ x = true }), cfg({ a = { x = true }, b = 1 })), 'diving: inside a field of the bigger')
     ok(not MX.embeds(cfg({ x = true }), cfg({ x = false })), 'and a leaf that differs is no embedding')
+    -- POLYNOMIAL (CART-1334): a closure chain k deep against k + 1 — each (a, b) node pair decided ONCE, charged once.
+    -- Unmemoized, diving and coupling reach the same pair along every path: 2^k (k = 22 took 0.23 s, k = 120 never ends)
+    local function chain(k)
+        local t = { k = 'clo:0', kids = {} }
+        for _ = 1, k do t = { k = 'clo:1', kids = { t } } end
+        return { k = 'g', kids = { { k = 'dyn', kids = {} }, t } }
+    end
+    local pairs_decided = 0
+    local function charge()
+        pairs_decided = pairs_decided + 1
+        if pairs_decided > 124 * 125 then error('more pairs than |a|·|b|', 0) end
+    end
+    ok(MX.embeds(chain(120), chain(121), {}, charge), 'a chain embeds in a longer one')
+    ok(pairs_decided > 120 and pairs_decided <= 124 * 125, pairs_decided .. ' pairs decided')
+    pairs_decided = 0
+    ok(not MX.embeds(chain(121), chain(120), {}, charge), 'never the longer in the shorter')
 end)
 
 local GROW = [[

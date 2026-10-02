@@ -986,24 +986,41 @@ end
 
 --- HOMEOMORPHIC EMBEDDING a ⊴ b: b is a with more around it — b DIVES (a embeds in one of b's kids) or COUPLES (the same
 --- head, a's kids embedded in order into a subsequence of b's). A number embeds every number and a string every string
---- (the leaves an unbounded computation grows through); a boolean only itself
-function M.embeds(a, b)
+--- (the leaves an unbounded computation grows through); a boolean only itself. MEMOIZED on the (a, b) node pair: each
+--- pair is decided once, O(|a|·|b|) — without it diving and coupling reach the same pair along every path, 2^depth
+--- (CART-1334). memo: { [a] = { [b] = bool } } shared across calls on the same terms; charge(): called once per pair
+--- decided (mix passes its budget's spend)
+function M.embeds(a, b, memo, charge)
+    memo = memo or {}
+    local row = memo[a]
+    if not row then
+        row = {}
+        memo[a] = row
+    end
+    if row[b] ~= nil then return row[b] end
+    if charge then charge() end
+    local r = false
     if a.k == 'lit' and b.k == 'lit' then
         local ta = type(a.v)
-        return ta == type(b.v) and (ta == 'number' or ta == 'string' or a.v == b.v)
+        r = ta == type(b.v) and (ta == 'number' or ta == 'string' or a.v == b.v)
+    elseif b.k ~= 'lit' then
+        for _, c in ipairs(b.kids) do if not r and M.embeds(a, c, memo, charge) then r = true end end
+        if not r and a.k == b.k then
+            -- (the leftmost kid each of a's kids embeds in: no later choice can do better. No while/break: mix stays
+            -- inside S)
+            local j, all = 1, true
+            for _, x in ipairs(a.kids) do
+                local at = nil
+                if all then
+                    for i = j, #b.kids do if not at and M.embeds(x, b.kids[i], memo, charge) then at = i end end
+                end
+                if at then j = at + 1 else all = false end
+            end
+            r = all
+        end
     end
-    if b.k == 'lit' then return false end
-    for _, c in ipairs(b.kids) do if M.embeds(a, c) then return true end end
-    if a.k ~= b.k then return false end
-    -- (the leftmost kid each of a's kids embeds in: no later choice can do better. No while/break: mix stays inside S)
-    local j = 1
-    for _, x in ipairs(a.kids) do
-        local at = nil
-        for i = j, #b.kids do if not at and M.embeds(x, b.kids[i]) then at = i end end
-        if not at then return false end
-        j = at + 1
-    end
-    return true
+    row[b] = r
+    return r
 end
 
 --- specialize prog's `fname` to the static values of the S parameters -> residual program { funcs = { name -> { name,
@@ -1268,7 +1285,7 @@ function M.specialize(prog, fname, division, statics, opts)
     local function generalization(anc, fr)
         local ta = M.config_term(fr.g, anc.division, anc.svals, R.clos)
         local tb = M.config_term(fr.g, fr.division, fr.svals, R.clos)
-        if not ta or not tb or #ta.kids ~= #tb.kids or not M.embeds(ta, tb) then return nil end
+        if not ta or not tb or #ta.kids ~= #tb.kids or not M.embeds(ta, tb, {}, spend) then return nil end
         local j = require('cartograph.algebra').load().join(ta, tb)
         local body = j and j.template.body
         if not body or body.k ~= fr.g then return nil end
