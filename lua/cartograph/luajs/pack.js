@@ -346,8 +346,13 @@ G.table = $rec(
   'concat', (t, sep, i, j) => { sep = sep === undefined ? '' : sep; i = i === undefined ? 1 : i; j = j === undefined ? $len(t) : j; const o = []; for (let k = i; k <= j; k++) { const v = rawget(t, k); if (typeof v !== 'string' && typeof v !== 'number') throw new LuaError("invalid value (at index " + k + ") in table for 'concat'"); o.push(cstr(v)); } return o.join(cstr(sep)); },
   'sort', (t, cmp) => { const n = $len(t); const a = []; for (let k = 1; k <= n; k++) a.push(rawget(t, k)); a.sort((x, y) => (cmp ? ($t($1($call(cmp, x, y))) ? -1 : ($t($1($call(cmp, y, x))) ? 1 : 0)) : ($lt(x, y) ? -1 : ($lt(y, x) ? 1 : 0)))); for (let k = 1; k <= n; k++) rawset(t, k, a[k - 1]); },
   'unpack', (...a) => G.unpack(...a));
-G.math = $rec('floor', Math.floor, 'ceil', Math.ceil, 'abs', Math.abs, 'sqrt', Math.sqrt, 'pow', (a, b) => LIBM.pow(num(a), num(b)), 'max', (...a) => Math.max(...a.map(x => num(x))), 'min', (...a) => Math.min(...a.map(x => num(x))),
-  'huge', Infinity, 'pi', Math.PI, 'exp', Math.exp, 'log', (x, b) => (b === undefined ? Math.log(x) : Math.log(x) / Math.log(b)), 'fmod', (a, b) => a % b, 'modf', x => $mv(Math.trunc(x), x - Math.trunc(x)),
+// (math.max / math.min as LuaJIT's VM computes them on x64 — maxsd / minsd, pairwise from the left: the result is the
+// SECOND operand unless the first is strictly greater (smaller), so max(0, -0) is -0 and max(nan, 0) is 0; JS's
+// Math.max says +0 and NaN. math.modf as C's modf: the fraction keeps x's sign when it is zero, and is +-0 for +-inf)
+const MAXMIN = (name, pick) => (...a) => { if (a.length === 0) throw new LuaError("bad argument #1 to '" + name + "' (number expected, got no value)"); let r = num(a[0]); for (let i = 1; i < a.length; i++) r = pick(r, num(a[i])); return r; };
+const MODF = x => { x = num(x); const i = Math.trunc(x); if (i === x) return $mv(i, Object.is(x, -0) || x < 0 ? -0 : 0); return $mv(i, x - i); };
+G.math = $rec('floor', Math.floor, 'ceil', Math.ceil, 'abs', Math.abs, 'sqrt', Math.sqrt, 'pow', (a, b) => LIBM.pow(num(a), num(b)), 'max', MAXMIN('max', (r, x) => (r > x ? r : x)), 'min', MAXMIN('min', (r, x) => (r < x ? r : x)),
+  'huge', Infinity, 'pi', Math.PI, 'exp', Math.exp, 'log', (x, b) => (b === undefined ? Math.log(x) : Math.log(x) / Math.log(b)), 'fmod', (a, b) => a % b, 'modf', MODF, 'atan2', (y, x) => Math.atan2(num(y), num(x)),
   'random', () => $abort('math.random (a different generator)'), 'randomseed', () => $abort('math.randomseed'));
 const STRING = Object.create(null);
 const bpos = (s, i) => (i < 0 ? Math.max(s.length + i + 1, 1) : (i === 0 ? 1 : i));
@@ -489,15 +494,24 @@ STRING.format = (fmt, ...args) => {
   return cstr(fmt).replace(/%([-+ #0]*)(\d*)(?:\.(\d+))?([sdiqfgxXcoeE%])/g, (all, flags, width, prec, conv) => {
     if (conv === '%') return '%';
     const v = args[i++];
+    // (%e / %E / %f / %g ARE LuaJIT's lj_strfmt_wfnum — transliterated, $strfmt.js fmtnum — under the SFormat
+    // lj_strfmt_parse builds: type, width, precision (+1; 0 = none), flags. Width and flags are its own: no padding here.
+    // JS's toFixed rounds an exact tie up (0.125 -> 0.13), drops -0's sign, says NaN / Infinity and goes exponential at
+    // 1e21; and %g's default precision is 6, not tostring's 14 — CART-1322)
+    if (conv === 'e' || conv === 'E' || conv === 'f' || conv === 'g') {
+      let sf = 5 | (conv === 'f' ? 0x20 : conv === 'g' ? 0x30 : 0x10) | (conv === 'E' ? 0x2000 : 0);
+      for (const c of flags) sf |= c === '-' ? 0x100 : c === '+' ? 0x200 : c === '0' ? 0x400 : c === ' ' ? 0x800 : 0x1000;
+      if (width !== '') sf |= (+width & 255) << 16;
+      if (prec !== undefined) sf |= ((+prec + 1) & 255) << 24;
+      return STRFMT.fmtnum(sf, num(v));
+    }
     let out;
     switch (conv) {
       case 's': out = $tostring(v); if (prec !== undefined) out = out.slice(0, +prec); break;
       case 'd': case 'i': out = String(Math.trunc(num(v))); break;
-      case 'f': out = num(v).toFixed(prec === undefined ? 6 : +prec); break;
       case 'x': out = Math.trunc(num(v)).toString(16); break;
       case 'X': out = Math.trunc(num(v)).toString(16).toUpperCase(); break;
       case 'c': out = String.fromCharCode(num(v)); break;
-      case 'g': if (prec === undefined) { out = $numstr(num(v)); if (Number.isInteger(num(v)) && Math.abs(num(v)) >= 1e6) $abort('%g of a large integer'); } else $abort('%.Ng'); break;
       default: $abort('string.format %' + conv);
     }
     const w = width === '' ? 0 : +width;

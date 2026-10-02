@@ -155,3 +155,20 @@ int wrap8(int c) { u8 b = 255; b++; return b; }
     local _, ret2 = engine([[int same(int b) { return b ? (unsigned char)5 : 5; }]])
     eq('i5LL:32s', ret2('same', { nil, n = 1 }), 'b unknown: both arms are int 5')
 end)
+
+test('cinterp: a DOUBLE is its bits — a call\'s memo tells 1.5 from -1.5, a signed zero survives a call, +0 and -0 do not join into one (CART-1322 follow-up)', function ()
+    if not ready() then skip 'no C parser' end
+    local _, ret = engine([[
+static int sgn(double x) { return x < 0 ? -1 : 1; }
+int both(int c) { return sgn(1.5) * 10 + sgn(-1.5); }
+static int pos(double x) { return 1.0 / x > 0; }
+int zeros(int c) { return pos(0.0) * 10 + pos(-0.0); }
+int joined(int c) { double r = c ? 0.0 : -0.0; return 1.0 / r > 0; }
+int nan_self(int c) { double n = 0.0 / 0.0; return (n == n) * 10 + (n != n); }
+]])
+    eq('i9LL:32s', ret('both', { CI._int(0), n = 1 }), 'two calls with different doubles are two summaries')
+    eq('i10LL:32s', ret('zeros', { CI._int(0), n = 1 }), '1/+0 > 0, 1/-0 < 0: the sign reaches the callee')
+    eq({ 'i1LL:32s', 'i0LL:32s', '?' }, { ret('joined', { CI._int(1), n = 1 }), ret('joined', { CI._int(0), n = 1 }), ret('joined', { n = 1 }) },
+        'an unknown condition over +0 / -0 is an unknown sign, not one of them')
+    eq('i1LL:32s', ret('nan_self', { CI._int(0), n = 1 }), 'NaN is not equal to itself (C), whatever the key says')
+end)

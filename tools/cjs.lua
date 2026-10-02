@@ -104,6 +104,12 @@ elseif recipe == 'strfmt' then
         'MSize cjs_numstr(lua_Number n, char *p)',
         '{',
         '  return (MSize)(lj_strfmt_wfnum(NULL, STRFMT_G14, n, p) - p);',
+        '}',
+        -- (string.format's %e / %f / %g: the same engine under any SFormat — type, width, precision, flags — as
+        -- lj_strfmt_putfnum runs it)
+        'MSize cjs_fmtnum(SFormat sf, lua_Number n, char *p)',
+        '{',
+        '  return (MSize)(lj_strfmt_wfnum(NULL, sf, n, p) - p);',
         '}', '' }, '\n'), nil)
     -- the buffer lj_strfmt_num gives it: STRFMT_MAXBUF_NUM, from the preprocessor
     local probe = B.tmp .. '/maxbuf.c'
@@ -112,7 +118,7 @@ elseif recipe == 'strfmt' then
     if not maxbuf then io.stderr:write('STRFMT_MAXBUF_NUM did not preprocess to a number\n'); os.exit(1) end
     js, refusals, info = C.emit({ { text = B.ppadapter, name = 'cjs_strfmt.c' }, { text = B.pp(src .. '/lj_strfmt.c'), name = 'lj_strfmt.c' } }, {
         exact = true,
-        roots = { 'cjs_numstr' },
+        roots = { 'cjs_numstr', 'cjs_fmtnum' },
         heap = { types = { TValue = B.layout }, stack = 65536 },
         sizes = B.sizes,
         -- the shared compiler builtins (cartograph.cjs.BUILTINS; memcmp over the heap, below), and this recipe's SEAM:
@@ -134,13 +140,27 @@ elseif recipe == 'strfmt' then
             '    return s;',
             '  } finally { SP = $sp; }',
             '}',
+            '/** a number under a string.format SFormat (%e / %f / %g with their width, precision and flags) -> its bytes as a',
+            ' *  JS string. The buffer: format\'s width and precision are at most 99, and %f of the largest double is 309',
+            ' *  integer digits — sign + 309 + point + 99 < 512 */',
+            'function fmtnum(sf, x) {',
+            '  const $sp = SP;',
+            '  try {',
+            '    const p = $alloca(512);',
+            '    const len = cjs_fmtnum(sf >>> 0, x, p);',
+            '    let s = \'\';',
+            '    for (let i = 0; i < len; i++) s += String.fromCharCode(H[p + i]);',
+            '    return s;',
+            '  } finally { SP = $sp; }',
+            '}',
         }, '\n'),
-        exports = { 'numstr' },
+        exports = { 'numstr', 'fmtnum' },
         header = table.concat({
             '// GENERATED — do not edit. LuaJIT\'s number formatter, TRANSLITERATED from C by cartograph.cjs (exact heap mode,',
             '// CART-1211 leaf 3):',
             '//   source   src/lj_strfmt_num.c (lj_strfmt_wfnum …) + src/lj_strfmt.c (lj_strfmt_wint), LuaJIT ' .. B.commit .. ' — the ORACLE\'s revision',
-            '//   root     cjs_numstr = lj_strfmt_num\'s body, its GCstr result replaced by the byte count',
+            '//   root     cjs_numstr = lj_strfmt_num\'s body, its GCstr result replaced by the byte count; cjs_fmtnum = the same',
+            '//            engine under any SFormat (string.format\'s %e / %f / %g)',
             '//   flags    gcc -E -P -D__attribute__(x)= ' .. table.concat(B.cflags, ' ') .. ' (the build\'s own, from its make)',
             '//   layout   TValue ' .. tostring(B.layout.size) .. ' bytes: ' .. table.concat(B.desc, ' ') .. ' (the compiler\'s: offsetof/sizeof/classify)',
             '//   command  nvim --headless -u NONE -l tools/cjs.lua strfmt <BUILT luajit src dir> lua/cartograph/luajs/strfmt.js',

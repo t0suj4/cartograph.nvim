@@ -1,7 +1,8 @@
 // GENERATED — do not edit. LuaJIT's number formatter, TRANSLITERATED from C by cartograph.cjs (exact heap mode,
 // CART-1211 leaf 3):
 //   source   src/lj_strfmt_num.c (lj_strfmt_wfnum …) + src/lj_strfmt.c (lj_strfmt_wint), LuaJIT fbb36bb6 — the ORACLE's revision
-//   root     cjs_numstr = lj_strfmt_num's body, its GCstr result replaced by the byte count
+//   root     cjs_numstr = lj_strfmt_num's body, its GCstr result replaced by the byte count; cjs_fmtnum = the same
+//            engine under any SFormat (string.format's %e / %f / %g)
 //   flags    gcc -E -P -D__attribute__(x)= -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -U_FORTIFY_SOURCE -DLUAJIT_UNWIND_EXTERNAL (the build's own, from its make)
 //   layout   TValue 8 bytes: u64@0:u64 n@0:f64 it64@0:i64 i@0:i32 it@4:u32 ftsz@0:i64 u32.lo@0:u32 u32.hi@4:u32 (the compiler's: offsetof/sizeof/classify)
 //   command  nvim --headless -u NONE -l tools/cjs.lua strfmt <BUILT luajit src dir> lua/cartograph/luajs/strfmt.js
@@ -877,6 +878,10 @@ function cjs_numstr(n, p) {
 return (((lj_strfmt_wfnum((null), ((((((5 | 0x0030)) | ((((14 + 1)) << 24))))) >>> 0), n, p) - p)) >>> 0);
 }
 
+function cjs_fmtnum(sf, n, p) {
+return (((lj_strfmt_wfnum((null), sf, n, p) - p)) >>> 0);
+}
+
 /** a number -> its Lua string (tostring / concatenation): LuaJIT's %.14g, into a 32-byte heap buffer
  *  (STRFMT_MAXBUF_NUM, as lj_strfmt_num gives it), read back as a JS string of bytes */
 function numstr(x) {
@@ -889,4 +894,17 @@ function numstr(x) {
     return s;
   } finally { SP = $sp; }
 }
-module.exports = { setheap: h => { H = h; }, image, IMAGE_END, STRUCTS: {"*__locale_t":[],"CCallback":{"fpr":8,"gpr":8},"CTState":{"hash":128},"CType":[],"FILE":[],"FPRCBArg":{"f":2},"FormatState":[],"FrameLink":[],"GCRef":[],"GCState":[],"GCcdata":[],"GCcdataVar":[],"GCfunc":[],"GCfuncC":{"upvalue":1},"GCfuncL":{"uvptr":1},"GChead":[],"GCobj":[],"GCproto":[],"GCstr":[],"GCtab":[],"GCudata":[],"GCupval":[],"MRef":[],"Node":[],"PRNGState":{"u":4},"SBuf":[],"SBufExt":[],"StrInternState":[],"TValue":[],"Unaligned16":{"b":2},"Unaligned32":{"b":4},"__FILE":[],"__atomic_wide_counter":[],"__fpos64_t":[],"__fpos_t":[],"__fsid_t":{"__val":2},"__mbstate_t":[],"__once_flag":[],"__pthread_list_t":[],"__pthread_slist_t":[],"__sigset_t":[],"cookie_io_functions_t":[],"div_t":[],"fd_set":[],"global_State":[],"ldiv_t":[],"lldiv_t":[],"lua_Debug":[],"lua_State":[],"max_align_t":[],"pthread_attr_t":[],"pthread_barrier_t":{"__size":32},"pthread_barrierattr_t":{"__size":4},"pthread_cond_t":{"__size":48},"pthread_condattr_t":{"__size":4},"pthread_mutex_t":{"__size":40},"pthread_mutexattr_t":{"__size":4},"pthread_rwlock_t":{"__size":56},"pthread_rwlockattr_t":{"__size":8}}, ndigits_dec, lj_strfmt_wint, nd_mul2k, nd_div2k, nd_add_m10e, lj_strfmt_wuint9, nd_similar, nd_round, lj_strfmt_wfnum, cjs_numstr, numstr };
+/** a number under a string.format SFormat (%e / %f / %g with their width, precision and flags) -> its bytes as a
+ *  JS string. The buffer: format's width and precision are at most 99, and %f of the largest double is 309
+ *  integer digits — sign + 309 + point + 99 < 512 */
+function fmtnum(sf, x) {
+  const $sp = SP;
+  try {
+    const p = $alloca(512);
+    const len = cjs_fmtnum(sf >>> 0, x, p);
+    let s = '';
+    for (let i = 0; i < len; i++) s += String.fromCharCode(H[p + i]);
+    return s;
+  } finally { SP = $sp; }
+}
+module.exports = { setheap: h => { H = h; }, image, IMAGE_END, STRUCTS: {"*__locale_t":[],"CCallback":{"fpr":8,"gpr":8},"CTState":{"hash":128},"CType":[],"FILE":[],"FPRCBArg":{"f":2},"FormatState":[],"FrameLink":[],"GCRef":[],"GCState":[],"GCcdata":[],"GCcdataVar":[],"GCfunc":[],"GCfuncC":{"upvalue":1},"GCfuncL":{"uvptr":1},"GChead":[],"GCobj":[],"GCproto":[],"GCstr":[],"GCtab":[],"GCudata":[],"GCupval":[],"MRef":[],"Node":[],"PRNGState":{"u":4},"SBuf":[],"SBufExt":[],"StrInternState":[],"TValue":[],"Unaligned16":{"b":2},"Unaligned32":{"b":4},"__FILE":[],"__atomic_wide_counter":[],"__fpos64_t":[],"__fpos_t":[],"__fsid_t":{"__val":2},"__mbstate_t":[],"__once_flag":[],"__pthread_list_t":[],"__pthread_slist_t":[],"__sigset_t":[],"cookie_io_functions_t":[],"div_t":[],"fd_set":[],"global_State":[],"ldiv_t":[],"lldiv_t":[],"lua_Debug":[],"lua_State":[],"max_align_t":[],"pthread_attr_t":[],"pthread_barrier_t":{"__size":32},"pthread_barrierattr_t":{"__size":4},"pthread_cond_t":{"__size":48},"pthread_condattr_t":{"__size":4},"pthread_mutex_t":{"__size":40},"pthread_mutexattr_t":{"__size":4},"pthread_rwlock_t":{"__size":56},"pthread_rwlockattr_t":{"__size":8}}, ndigits_dec, lj_strfmt_wint, nd_mul2k, nd_div2k, nd_add_m10e, lj_strfmt_wuint9, nd_similar, nd_round, lj_strfmt_wfnum, cjs_numstr, cjs_fmtnum, numstr, fmtnum };

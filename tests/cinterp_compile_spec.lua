@@ -25,6 +25,11 @@ int calls(int x) { int (*fp)(int) = helper; return helper(x) + fp(x); }
 long tcast(int n) { return (ssz)(n) + 1; }
 int unk(int x) { return undefined_fn(x) + (int)(x > 2 ? 1u : 2u); }
 int cond(int x) { unsigned char a = x; return x > 1 ? a : -1; }
+double dneg(double x) { return -x; }
+int dsign(double x) { return x < 0 ? -1 : x > 0 ? 1 : 0; }
+int disnan(double x) { return x != x; }
+int dzsign(double x) { return 1.0 / x > 0; }
+double dmix(double x, double y) { return x * y + (x == y ? 1.0 : 0.0); }
 ]]
 
 -- one function's run as text: every return per tag, the rejected tags, over, and the steps it took
@@ -67,6 +72,12 @@ test('compile: every arm of eval / exec, compiled, answers as eval does — retu
             for j = 1, np do a[j] = CI._int(c) end
             vectors[#vectors + 1] = a
         end
+        -- (doubles where the SIGN BIT and NaN are values of their own: +0 / -0 / NaN beside an ordinary one — CART-1322)
+        for _, x in ipairs({ 0.0, -0.0, 0 / 0, -1.5 }) do
+            local a = { n = np }
+            for j = 1, np do a[j] = { k = 'd', v = x } end
+            vectors[#vectors + 1] = a
+        end
         for _, a in ipairs(vectors) do
             local want, got = run(E, d, a), run(C, d, a)
             eq(want, got, f .. ' ' .. vim.inspect(a, { newline = ' ', indent = '' }))
@@ -74,12 +85,16 @@ test('compile: every arm of eval / exec, compiled, answers as eval does — retu
             n = n + 1
         end
     end
-    eq(17 * 5, n, 'every fixture function, five argument vectors')
+    eq(22 * 9, n, 'every fixture function, nine argument vectors')
     -- (the differential is only worth what the fixture REACHES: pin that the runs are not all unknown)
     local known = 0
     for _, r in ipairs(rows) do if r:find('^i') then known = known + 1 end end
     ok(known >= 50, ('%d of %d runs return a known integer (55 when written: the all-unknown vector is mostly unknown)'):format(known, n))
     ok(run(C, u.defs.outp, { CI._int(4), n = 1 }):find('^i8LL:32s |'), 'an out-parameter written by the callee, compiled')
+    -- (the double vectors reach the double code: a signed zero comes back with its sign, NaN as NaN)
+    local function d(x) return { { k = 'd', v = x }, n = 1 } end
+    eq({ 'i1LL:32s', 'i0LL:32s', 'i1LL:32s', 'i-1LL:32s' }, { run(C, u.defs.dzsign, d(0.0)):match('^(%S+)'), run(C, u.defs.dzsign, d(-0.0)):match('^(%S+)'), run(C, u.defs.disnan, d(0 / 0)):match('^(%S+)'), run(C, u.defs.dsign, d(-1.5)):match('^(%S+)') })
+    ok(run(C, u.defs.dneg, d(-0.0)) ~= run(C, u.defs.dneg, d(0.0)), 'dneg(-0) and dneg(+0) differ: the key sees the sign')
 end)
 
 test('compile: the DEFAULT arm is eval\'s own — an expression cinterp does not model is unknown, COUNTED by type, never handed back to eval', function ()

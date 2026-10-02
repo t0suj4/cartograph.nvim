@@ -203,11 +203,17 @@ end
 -- dimension: an element is `<tag>@<count>`, and `L->top` is a vector of slot pointers over the elements.
 local function tx(n, src) return vim.treesitter.get_node_text(n, src) end
 local function kids(n) local o = {} for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then o[#o + 1] = c end end return o end
+-- ★ A DOUBLE IS ITS BITS (CART-1322 follow-up): -0.0 == 0.0 and NaN ~= NaN, so `==` is not "the same value" — a join
+-- would merge +0 and -0 into one, and a call's memo key would have no value at all (two calls of sgn(1.5) / sgn(-1.5)
+-- shared one summary: 11 where C says 9)
+local dbits_d = ffi.new('double[1]')
+local dbits_u = ffi.cast('uint64_t *', dbits_d)
+local function dbits(x) dbits_d[0] = x; return dbits_u[0] end
 local function veq(a, b)
     if a == nil or b == nil then return a == b end
     if a.k ~= b.k then return false end
     if a.k == 'i' then return a.v == b.v and a.w == b.w and a.u == b.u end
-    if a.k == 'd' then return a.v == b.v or (a.v ~= a.v and b.v ~= b.v) end
+    if a.k == 'd' then return dbits(a.v) == dbits(b.v) end
     if a.k == 'slot' then return a.i == b.i and a.view == b.view end
     if a.k == 'sym' then return a.s == b.s end
     if a.k == 'obj' then return a.id == b.id end
@@ -262,6 +268,7 @@ local function key_of(v)
     if v.k == 'sym' then return 'y' .. v.s end
     if v.k == 'obj' then return 'o' .. v.id end
     if v.k == 'addr' then return 'p' .. tostring(v.v) end
+    if v.k == 'd' then return 'd' .. tostring(dbits(v.v)) end
     if v.k == 'agg' then
         local l = {}
         for p, x in pairs(v.f) do l[#l + 1] = p .. '=' .. key_of(x) end

@@ -50,6 +50,33 @@ end
 
 local CASES = {
     numbers = [[print(1/3, 2^53, 1e15, 1e16, 0.1, -0.0 == 0, 10 % -3, -7 % 3, 7 % 0 ~= 7 % 0, math.floor(-2.5), 3 == 3.0)]],
+    -- SIGNED ZERO and NaN through every numeric operation (CART-1322: the sign bit hides from a comparison, so it is an
+    -- INPUT of its own — +0 / -0 / NaN / -NaN / +-inf beside an ordinary value, through print, arithmetic, the math
+    -- library, comparisons, table keys, tonumber and for-loop bounds)
+    signs = [==[
+local nz, nan, inf = -0.0, 0 / 0, 1 / 0
+local V = { 0.0, nz, nan, -nan, 1.5, -1.5, inf, -inf }
+-- (a zero shows its sign, a NaN only that it is one: what every op below returns is printed through z)
+local function z(x) if x ~= x then return 'nan' end if x == 0 then return 1 / x > 0 and '+0' or '-0' end return tostring(x) end
+for _, x in ipairs(V) do
+  print(tostring(x), x .. '', ('%g %.1f %5.1f %d'):format(x, x, x, x ~= x and 0 or (x == inf or x == -inf) and 0 or x), z(tonumber(tostring(x))))
+  print(z(-x), z(x + 0), z(x - 0), z(0 - x), z(x * -1), z(x * 0), z(1 / x), z(x % 1), z(x / 2))
+  print(z(math.abs(x)), z(math.floor(x)), z(math.ceil(x)), z(math.sqrt(x)), z(math.fmod(x, 1)), z((math.modf(x))), z(select(2, math.modf(x))))
+  print(z(math.max(x, 0)), z(math.min(x, 0)), z(math.max(0, x)), z(math.min(0, x)), z(math.atan2(x, -1)), z(math.atan2(x, 1)), z(x ^ 1), z(x ^ 0))
+  print(x == 0, x < 0, x <= 0, x > 0, x >= 0, x == x, x ~= x, x == nz, rawequal(x, 0))
+end
+local t = {}
+t[nz] = 'neg'; t[0] = (t[0] or '') .. '+zero'
+for k, v in pairs(t) do print('key', z(k), v) end
+local okn, en = pcall(function () local u = {}; u[nan] = 1 end)
+print(okn, (tostring(en):gsub('^[^:]*:%d+: ', '')))
+-- (string.format's %e / %f / %g are LuaJIT's own formatter: exact ties round to even, no exponent at 1e21, %g is %.6g,
+-- the flags on a signed zero)
+print(('%.2f|%.0f|%.0f|%f|%g|%.3e|%E|%+.1f|% .1f|%#.0f|%-8.2f|%08.2f|%g|%g'):format(0.125, 0.5, 2.5, 1e21, 1 / 3, 12345.678, 1e-300, nz, nz, 3, nz, nz, nan, -inf))
+print(rawget({ [0] = 'z' }, nz), z(tonumber('-0')), tonumber('nan'), tonumber('-nan'), z(tonumber(' -0.0 ')))
+local function n(a, b, s) local c = 0; for _ = a, b, s do c = c + 1; if c > 3 then break end end return c end
+print(n(1, nan, 1), n(nan, 1, 1), n(1, 2, nan), n(1, inf, 1), n(-inf, 0, 1), n(inf, 0, -1), n(nz, 0, 1), n(0, nz, 1))
+]==],
     truthiness = [[print(0 and 'zero', '' and 'empty', nil or 'dflt', false or nil, not 0, not nil, 1 and nil)]],
     multi = [[
 local function f(...) return select('#', ...), ... end
