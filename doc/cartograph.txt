@@ -833,6 +833,12 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
                               the nearest above) took its arm: what its
                               condition evaluated to, and the values source
                               of every key it read (quickfix)
+  :CartographHelmDiff [-f a.yaml ...] -- [-f b.yaml ...]
+                              the chart rendered under two values sets:
+                              every changed field at the template line that
+                              wrote it, with the values source that changed
+                              it (quickfix) — the blast radius of a values
+                              change; no `--`: A is the chart's own values
   :CartographHelmBase {manifests} [chart]
                               the chart rendered with NO values against the
                               plain manifests it should produce: every spot

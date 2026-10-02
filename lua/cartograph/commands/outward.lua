@@ -141,6 +141,36 @@ function M.register(H)
         if #items > 0 then vim.fn.setqflist({}, ' ', { title = 'helm branch: ' .. rel .. ':' .. best.line, items = items }) end
     end, { nargs = '*', complete = 'file', desc = 'cartograph: why the if/with/range at the cursor took its arm — the condition\'s value and the source of every key it read' })
 
+    -- WHAT A VALUES CHANGE DOES (CART-1311): the chart rendered under two values sets, every changed field at the
+    -- template line that wrote it and the values source that changed it — the blast radius before deploying.
+    -- `[-f a.yaml --set k=v ...] -- [-f b.yaml ...]`; with no `--`, A is the chart's own values and every flag is B's
+    cmd('CartographHelmDiff', function (o)
+        local HP = require 'cartograph.helmprov'
+        local chart = HP.root_of(vim.api.nvim_buf_get_name(0))
+        if not chart then return vim.notify('cartograph: not inside a chart', vim.log.levels.WARN) end
+        local sides, cur = { { values = {}, set = {} }, { values = {}, set = {} } }, nil
+        local args = vim.deepcopy(o.fargs)
+        local split = vim.tbl_contains(args, '--')
+        cur = split and sides[1] or sides[2]
+        local i = 1
+        while i <= #args do
+            local a = args[i]
+            if a == '--' then cur = sides[2]; i = i + 1
+            elseif (a == '-f' or a == '--values') and args[i + 1] then table.insert(cur.values, vim.fn.fnamemodify(args[i + 1], ':p')); i = i + 2
+            elseif a == '--set' and args[i + 1] then table.insert(cur.set, args[i + 1]); i = i + 2
+            else return vim.notify('cartograph: usage :CartographHelmDiff [-f a.yaml --set k=v ...] -- [-f b.yaml ...]', vim.log.levels.WARN) end
+        end
+        local rows, why = HP.diff(chart, sides[1], sides[2])
+        if not rows then return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN) end
+        if #rows == 0 then return vim.notify('cartograph: helm diff — the two values sets render identical objects', vim.log.levels.INFO) end
+        local items = {}
+        for _, r in ipairs(rows) do
+            items[#items + 1] = { filename = chart .. '/' .. (r.file or 'Chart.yaml'), lnum = r.line or 1, col = 1, text = HP.diff_text(r) }
+        end
+        vim.fn.setqflist({}, ' ', { title = ('helm diff: %d change(s)'):format(#rows), items = items })
+        vim.cmd('copen')
+    end, { nargs = '*', complete = 'file', desc = 'cartograph: the objects two values sets render, field by field, at the template line and the values source of each change' })
+
     -- a chart's AUTHORED base against the plain manifests it should produce (CART-0873): where they vary and the
     -- chart hardcodes, at each template line
     cmd('CartographHelmBase', function (o)

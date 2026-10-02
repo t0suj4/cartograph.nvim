@@ -285,3 +285,23 @@ test('helmprov: BRANCH EVIDENCE — each if / range: what its condition evaluate
     eq({ 'range', 'list(2)', { body = 1 } }, { r.kind, r.value, r.taken })
     ok(P.branch_text(i):find('-> bool:false (took none)', 1, true), P.branch_text(i))
 end)
+
+test('helmprov: RENDER DIFF — two values sets, every changed field at its template line and the values source that changed it', function ()
+    ready()
+    local files = vim.deepcopy(LAYERED)
+    -- (a line reading TWO keys, only one of which the stage changes: the change is the tag's, not the repo's)
+    files['templates/pod.yaml'] = 'kind: Pod\nmetadata:\n  name: p\nspec:\n  containers:\n  - name: c\n    image: {{ .Values.image.repo }}:{{ .Values.image.tag }}\n'
+    local root = chart(files)
+    local rows = assert(P.diff(root, {}, { values = { root .. '/stage-b.yaml' } }))
+    local by = {}
+    for _, r in ipairs(rows) do by[r.object .. ' ' .. r.path] = r end
+    local tag = by['ConfigMap/x data.tag']
+    eq({ 'str:1.0', 'str:1.2', 'templates/cm.yaml', 5 }, { tag.old, tag.new, tag.file, tag.line })
+    eq({ 'image.tag', 'stage-b.yaml', 2 }, { tag.value, vim.fn.fnamemodify(tag.from.file, ':t'), tag.from.line }, 'the stage file changed it')
+    local env = by['ConfigMap/db data.env']
+    eq({ 'str:dev', 'str:prd' }, { env.old, env.new }, 'the subchart\'s rendering of a global')
+    local img = by['Pod/p spec.containers[1].image']
+    eq({ 'str:shop:1.2', 'image.tag', 'stage-b.yaml' }, { img.new, img.value, vim.fn.fnamemodify(img.from.file, ':t') }, 'the read whose value CHANGED, not the first on the line')
+    eq(3, #rows, 'nothing else moved')
+    eq({}, assert(P.diff(root, {}, {})), 'one values set against itself: no change')
+end)

@@ -224,6 +224,127 @@ function M.branch_text(d)
     return table.concat(parts, '; ')
 end
 
+-- ── RENDER DIFF (CART-1311): two values sets, the objects they render, field by field ───────────────────────────────
+-- every object of a render by `Kind/name`, its leaves flattened (typed as the API server reads them), and for each leaf
+-- the rendered byte where it starts (its template line comes from the spans)
+local function objects_of(prov)
+    local Y = require 'cartograph.yamlvalue'
+    local out = {}
+    for name, f in pairs(prov.files or {}) do
+        local content = f.content or ''
+        -- byte offset of each line's first non-blank character, for locating a leaf's template line
+        local starts, b = {}, 0
+        for line in (content .. '\n'):gmatch('([^\n]*)\n') do starts[#starts + 1] = b + #(line:match('^%s*') or ''); b = b + #line + 1 end
+        local pos, line0 = 1, 0
+        local function each(chunk, first)
+            local docs = Y.read(chunk)
+            local d = docs and docs[1]
+            if not (d and type(d.value) == 'table' and d.value.o and type(d.value.o.kind) == 'string') then return end
+            local md = d.value.o.metadata
+            local key = d.value.o.kind .. '/' .. tostring(md and md.o and md.o.name or '?')
+            local typed = Y.typed(d.raw, Y.IMPLEMENTATIONS.helm)
+            local leaves = {}
+            local function walk(v, path)
+                if type(v) == 'table' and v.o then for _, k in ipairs(v.keys) do walk(v.o[k], (path == '' and '' or path .. '.') .. tostring(k):gsub('^%a+:', '')) end
+                elseif type(v) == 'table' and v.a then for i, x in ipairs(v.a) do walk(x, path .. '[' .. i .. ']') end
+                else leaves[path] = v end
+            end
+            walk(typed, '')
+            local lines = M.key_lines(chunk)
+            out[key] = { file = name, leaves = leaves, lines = lines, first = first, starts = starts }
+        end
+        for _ = 1, 100000 do
+            local a, bb = content:find('\n%-%-%-[^\n]*\n', pos - 1)
+            if not a then break end
+            local chunk = content:sub(pos, a)
+            each(chunk, line0 + 1)
+            line0 = line0 + select(2, chunk:gsub('\n', '')) + 1
+            pos = bb + 1
+        end
+        each(content:sub(pos), line0 + 1)
+    end
+    return out
+end
+
+-- the template position of a leaf of an object in a render
+local function leaf_site(prov, obj, path)
+    local p, l = path, nil
+    for _ = 1, 20 do l = obj.lines[p]; if l or not p:find('[.%[]') then break end p = p:gsub('[.%[][^.%[]*$', '') end
+    if not l then return nil end
+    local file, tline = M.position(prov, obj.file, obj.starts[obj.first + l - 1] or 0)
+    return file, tline
+end
+
+--- DIFF two renders of one chart -> { { object, path, change = added | removed | changed, old, new, file, line, from } }
+--- (file / line = the template line that wrote the field — in B, or in A for a removal; `from` = the values source of
+--- B's value when the field reads one at that line), objects only in one side as path '' rows. a / b = render opts.
+function M.diff(chart, a, b)
+    local A, wa = M.render(chart, vim.tbl_extend('force', a or {}, { origins = true }))
+    if not A then return nil, 'render A: ' .. tostring(wa) end
+    local B, wb = M.render(chart, vim.tbl_extend('force', b or {}, { origins = true }))
+    if not B then return nil, 'render B: ' .. tostring(wb) end
+    local OA, OB = objects_of(A), objects_of(B)
+    local rows = {}
+    -- the values source of the change: among the reads at that template line, the leaf (the read path itself, or one
+    -- under it — `toYaml .Values.x.resources` reads a whole map) whose effective value DIFFERS between A and B
+    local va, vb = (A.origins or {}).values or {}, (B.origins or {}).values or {}
+    local function origin_at(file, line)
+        for _, r in ipairs(B.reads or {}) do
+            local f, l = M.loc(r.loc)
+            if f == file and l == line then
+                local leaves = {}
+                for leaf in pairs(vb) do if leaf == r.path or leaf:sub(1, #r.path + 1) == r.path .. '.' then leaves[#leaves + 1] = leaf end end
+                for leaf in pairs(va) do if vb[leaf] == nil and (leaf == r.path or leaf:sub(1, #r.path + 1) == r.path .. '.') then leaves[#leaves + 1] = leaf end end
+                table.sort(leaves)
+                for _, leaf in ipairs(leaves) do
+                    if va[leaf] ~= vb[leaf] then
+                        local o = M.origin(B, leaf)
+                        if o then return o.from or o.removed_by, leaf end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+    local function tfile(name) return (name or ''):match('^[^/]+/(templates/.*)$') or name end
+    local keys = {}
+    for k in pairs(OA) do keys[k] = true end
+    for k in pairs(OB) do keys[k] = true end
+    local names = vim.tbl_keys(keys); table.sort(names)
+    for _, k in ipairs(names) do
+        local x, y = OA[k], OB[k]
+        if not x then rows[#rows + 1] = { object = k, path = '', change = 'added', file = tfile(y.file) }
+        elseif not y then rows[#rows + 1] = { object = k, path = '', change = 'removed', file = tfile(x.file) }
+        else
+            local paths = {}
+            for p in pairs(x.leaves) do paths[p] = true end
+            for p in pairs(y.leaves) do paths[p] = true end
+            local ps = vim.tbl_keys(paths); table.sort(ps)
+            for _, p in ipairs(ps) do
+                local ov, nv = x.leaves[p], y.leaves[p]
+                if ov ~= nv then
+                    local change = ov == nil and 'added' or nv == nil and 'removed' or 'changed'
+                    local prov, obj = (nv ~= nil) and B or A, (nv ~= nil) and y or x
+                    local file, line = leaf_site(prov, obj, p)
+                    local from, leaf
+                    if nv ~= nil and file then from, leaf = origin_at(file, line) end
+                    rows[#rows + 1] = { object = k, path = p, change = change, old = ov, new = nv, file = file, line = line,
+                        from = from, value = leaf }
+                end
+            end
+        end
+    end
+    return rows
+end
+
+--- a diff row as one line
+function M.diff_text(r)
+    if r.path == '' then return ('%s %s'):format(r.change == 'added' and '+' or '-', r.object) end
+    local function v(x) return x == nil and '∅' or (tostring(x):gsub('^%a+:', '')) end
+    return ('%s %s: %s -> %s%s'):format(r.object, r.path, v(r.old), v(r.new),
+        r.from and ('  <- .Values.' .. tostring(r.value) .. ' ' .. M.site_text(r.from)) or '')
+end
+
 --- the HOLES of a `branches` render: untaken arms that fail under these values (`{{ if .Values.a }}{{ .Values.a.b }}`
 --- with no a) -> { { guard, loc, err, text } } — not errors: what the chart would need to render that arm
 function M.holes(prov)
