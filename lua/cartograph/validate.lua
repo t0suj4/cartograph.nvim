@@ -65,6 +65,15 @@ M.NODE_FIELDS = {
                     -- alt_keys hook produced at extraction
     -- token provider (stack languages)
     effect = true, derived = true, echeck = true,
+    -- ★ POST-PASS DOMAIN TAGS (registered 2026-10-02, CART-1312): the infrastructure and contract passes minted these
+    -- for months and nothing validated a post-pass graph, so 551 node-field violations stood unseen on microservices-demo.
+    -- Each is a TAG naming which pass minted the node and what it is there — never a new node KIND (the kinds stay six).
+    k8 = true,  -- k8s.lua: 'manifest' (a module: one manifest file) | 'object' (a region: one object in it)
+    tf = true,  -- terraform.lua: a terraform file's module node
+    hf = true,  -- helmfile.lua: a helmfile / values file's module node
+    pb = true,  -- proto.lua: 'service' | 'rpc' | 'message' | 'enum' …
+    pkg = true, qname = true, service = true, wire = true, req = true, resp = true, -- proto.lua: an rpc's package, qualified
+                -- name, service, WIRE path (`/pkg.Svc/Method`, the join key) and request / response message
     -- ★★★ WHERE THIS FACT CAME FROM (CART-0887). The charter demands it in prose —
     -- "A reified fact must say how it came to be. Observed, derived, or supplied" —
     -- and until now the schema could not carry it, so the manual had to say of
@@ -155,6 +164,10 @@ M.EDGE_FIELDS = {
                -- truthy (gp>0) / falsy (gp<0) — dischargeable per call site
                -- against argv literals (skip direction only)
     flds = true, -- per-field facts: field -> packed rw + gw*4 ('' = whole-var)
+    -- ★ POST-PASS DOMAIN TAGS on `use` edges (see NODE_FIELDS: same pass, same registration)
+    k8 = true,      -- k8s.lua: 'selects' | 'references' | 'probes' | 'deploys' | 'declares'
+    hf = true, release = true, -- helmfile.lua: 'values' (a release layers a values file), and which release
+    tf = true, module = true,  -- terraform.lua: 'module' (a module call reads its source), and the module's name
 }
 M.CALL_FIELDS = {
     callee = true, full = true, file = true, line = true, at = true,

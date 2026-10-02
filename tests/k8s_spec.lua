@@ -204,3 +204,31 @@ test('k8s: the POD TEMPLATE is where the API types put it — CronJob spec.jobTe
     eq('nightly-job', images.nightly, 'the CronJob is a workload and its image is read through the derived path')
     eq('web', images.web)
 end)
+
+test('k8s: every OBJECT is its own node (a region of its file) and the soft edges run between objects, SITED at the field — inside one file too — CART-1312', function ()
+    if not ready() then skip 'no yaml parser' end
+    local text = table.concat({
+        'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: web', 'spec:',          -- 1-5
+        '  selector:', '    matchLabels:', '      app: web',                                     -- 6-8
+        '  template:', '    metadata:', '      labels:', '        app: web', '    spec:',         -- 9-13
+        '      containers:', '      - name: web', '        image: web',                         -- 14-16
+        '        envFrom:', '        - configMapRef:', '            name: web-config',          -- 17-19
+        '---', 'apiVersion: v1', 'kind: ConfigMap', 'metadata:', '  name: web-config',           -- 20-24
+        '---', 'apiVersion: v1', 'kind: Service', 'metadata:', '  name: web', 'spec:', '  selector:', '    app: web' }, '\n') .. '\n' -- 25-32
+    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {} }
+    K.attach(data)
+    local objs = {}
+    for _, n in ipairs(data.nodes) do if n.k8 == 'object' then objs[#objs + 1] = { n.id, n.kind, n.range.start.line + 1, n.range['end'].line + 1 } end end
+    eq({ { 'all.yaml::Deployment/web', 'region', 1, 19 }, { 'all.yaml::ConfigMap/web-config', 'region', 21, 24 }, { 'all.yaml::Service/web', 'region', 26, 32 } }, objs)
+    local edges = {}
+    for _, e in ipairs(data.edges) do
+        if e.k8 == 'references' or e.k8 == 'selects' then edges[#edges + 1] = { e.k8, e.from, e.to, e.at[1] and (e.at[1].start.line + 1) } end
+    end
+    table.sort(edges, function (a, b) return a[1] < b[1] end)
+    eq({
+        { 'references', 'all.yaml::Deployment/web', 'all.yaml::ConfigMap/web-config', 19 }, -- (inside ONE file: no longer a dropped self-edge)
+        { 'selects', 'all.yaml::Service/web', 'all.yaml::Deployment/web', 31 },
+    }, edges)
+    local V = require 'cartograph.validate'
+    eq('schema: OK', (V.report(V.check(data)) or ''):match('^schema: OK'), 'the post-pass graph is inside the closed schema')
+end)

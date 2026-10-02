@@ -242,11 +242,22 @@ function M.read(src, opts)
     local docs, refused, why = {}, 0, {}
     local ok = parse_docs(src)
     if not ok then return docs, 1, { 'yaml parse failed' } end
+    -- (each document's LINE RANGE, by locating its chunk in the source — the object nodes of CART-1312 need it)
+    local pos, counted, lines = 1, 1, 0
+    local function line_of(byte)
+        lines = lines + select(2, src:sub(counted, byte - 1):gsub('\n', ''))
+        counted = byte
+        return lines
+    end
     for chunk in (src .. '\n---\n'):gmatch('(.-)\n%-%-%-%s*\n') do
+        local at = src:find(chunk, pos, true) or pos
+        local line0 = line_of(at)
+        pos = at + #chunk
         -- (only comments and `---`: an EMPTY document, not a refused one)
         local body = chunk:gsub('#[^\n]*', ''):gsub('%-%-%-', '')
         if body:match('%S') then
-            local d = { ports = {}, env = {}, source = chunk:match('#%s*Source:%s*([^\n%s]+)') }
+            local d = { ports = {}, env = {}, source = chunk:match('#%s*Source:%s*([^\n%s]+)'),
+                line0 = line0, line1 = line0 + select(2, (chunk:gsub('\n+$', '')):gsub('\n', '')), chunk = chunk }
             if not rendered and chunk:find('{{', 1, true) then
                 -- a helm/kustomize template: the values are not here
                 refused = refused + 1
@@ -296,6 +307,28 @@ function M.find(root, tp)
 end
 
 local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+
+--- the SITE of a field in a document (CART-1312): the line of `path` (the derived API path, `[]` for any list item,
+--- `{}` for a map) in the document's text — the first one whose line names `value` when given — as a use edge's `at`
+--- list { { start, end } } (0-based lines). Nothing found: {} (the edge stays, without a site).
+function M.site(d, path, value)
+    if not (d and d.chunk and path) then return {} end
+    local lines = require('cartograph.helmprov').key_lines(d.chunk)
+    local want = path:gsub('%[%]', '[*]'):gsub('{}$', '')
+    local text = vim.split(d.chunk, '\n', { plain = true })
+    local best
+    for p, l in pairs(lines) do
+        local norm = p:gsub('%[%d+%]', '[*]')
+        if norm == want or norm == want .. '.name' then
+            if not value or (text[l] or ''):find(value, 1, true) then
+                if not best or l < best then best = l end
+            end
+        end
+    end
+    if not best then return {} end
+    local line = (d.line0 or 0) + best - 1
+    return { { start = { line = line, char = 0 }, ['end'] = { line = line, char = #(text[best] or '') } } }
+end
 
 --- Mint the declared deployment layer into `data`. Idempotent under refresh.
 --- Sets `data.k8s = { services = { name -> {file, image, dir, ports, addrs} },
@@ -374,6 +407,19 @@ function M.attach(data, opts)
                 data.nodes[#data.nodes + 1] = { id = rel, name = rel,
                     kind = 'module', file = rel, range = R0, order = 0,
                     k8 = 'manifest' }
+                -- every OBJECT its own node (CART-1312): a REGION of its file, `Deployment/frontend`, spanning its document
+                -- — the soft edges run between objects, so a reference inside one file is no longer a self-edge
+                local used = {}
+                for i, d in ipairs(docs) do
+                    local base = rel .. '::' .. d.kind .. '/' .. (d.name or ('#' .. i))
+                    local id = base
+                    if used[id] then id = base .. '#' .. i end
+                    used[id] = true
+                    d.node = id
+                    data.nodes[#data.nodes + 1] = { id = id, name = d.kind .. '/' .. (d.name or '?'), kind = 'region', file = rel,
+                        order = d.line0 or 0, k8 = 'object',
+                        range = { start = { line = d.line0 or 0, char = 0 }, ['end'] = { line = d.line1 or 0, char = 0 } } }
+                end
                 for _, d in ipairs(docs) do
                     -- ★ THE RELEASE ROOT, WHEN THE DOCUMENT NAMES IT (design helm-charts/02 §3b). A
                     -- `helm template --output-dir` render puts each service in its OWN directory, so a
@@ -392,10 +438,12 @@ function M.attach(data, opts)
                     if d.kind and d.name then
                         stats.objects = stats.objects or {}
                         stats.objects[variant .. '\31' .. d.kind .. '\31' .. d.name] = rel
+                        stats.object_nodes = stats.object_nodes or {}
+                        stats.object_nodes[variant .. '\31' .. d.kind .. '\31' .. d.name] = d.node
                     end
                     for _, pr in ipairs(d.probes or {}) do
                         stats.probes = stats.probes or {}
-                        stats.probes[#stats.probes + 1] = { rel = rel, variant = variant, name = d.name, kind = pr.kind, port = pr.port, service = pr.service, route = pr.route, path = pr.path }
+                        stats.probes[#stats.probes + 1] = { rel = rel, node = d.node, at = M.site(d, pr.path), variant = variant, name = d.name, kind = pr.kind, port = pr.port, service = pr.service, route = pr.route, path = pr.path }
                     end
                     if (d.refs and #d.refs > 0) or d.podlabels then
                         stats.docs_soft = stats.docs_soft or {}
@@ -550,7 +598,7 @@ function M.attach(data, opts)
                             if ok then
                                 hits = hits + 1
                                 -- (a workload's own spec.selector matches its own template: counted, no self-edge)
-                                if o ~= e then data.edges[#data.edges + 1] = { from = e.rel, to = o.rel, kind = 'use', k8 = 'selects', at = {} }; soft.selects = soft.selects + 1 end
+                                if o ~= e then data.edges[#data.edges + 1] = { from = e.d.node or e.rel, to = o.d.node or o.rel, kind = 'use', k8 = 'selects', at = M.site(d, r.path) }; soft.selects = soft.selects + 1 end
                             end
                         end
                     end
@@ -558,11 +606,13 @@ function M.attach(data, opts)
                     elseif hits == 0 then soft.empty[#soft.empty + 1] = ('%s/%s %s selects no pod in %s'):format(d.kind, d.name or '?', r.path, e.variant) end
                 else soft.cluster = soft.cluster + 1 end
             else
-                local to = (stats.objects or {})[e.variant .. '\31' .. r.kind .. '\31' .. r.name]
+                local key = e.variant .. '\31' .. r.kind .. '\31' .. r.name
+                local to = (stats.object_nodes or {})[key] or (stats.objects or {})[key]
                 if to then
                     soft.resolved = soft.resolved + 1
                     soft.inbound[e.variant .. '\31' .. r.kind .. '\31' .. r.name] = true
-                    if to ~= e.rel then data.edges[#data.edges + 1] = { from = e.rel, to = to, kind = 'use', k8 = 'references', at = {} } end
+                    local from = e.d.node or e.rel
+                    if to ~= from then data.edges[#data.edges + 1] = { from = from, to = to, kind = 'use', k8 = 'references', at = M.site(d, r.path, r.name) } end
                 elseif API and API.cluster[r.kind] then soft.cluster = soft.cluster + 1
                 elseif r.optional then soft.optional = soft.optional + 1
                 elseif r.kind == 'ServiceAccount' and r.name == 'default' then soft.implicit = soft.implicit + 1
@@ -670,7 +720,7 @@ function M.link_probes(data)
             if #targets > 0 then
                 p.linked = p.linked + 1
                 for _, t in ipairs(targets) do
-                    data.edges[#data.edges + 1] = { from = pr.rel, to = t, kind = 'use', k8 = 'probes', at = {} }
+                    data.edges[#data.edges + 1] = { from = pr.node or pr.rel, to = t, kind = 'use', k8 = 'probes', at = pr.at or {} }
                     p.edges = p.edges + 1
                 end
             else p.unlinked = p.unlinked + 1 end
