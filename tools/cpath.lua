@@ -24,6 +24,7 @@ for i = 2, #arg do
     elseif arg[i]:match('^%-%-') then opt[arg[i]:sub(3)] = arg[i + 1] end
 end
 local P, CS, B = require 'cartograph.luajs.cpath', require 'cartograph.luajs.csig', require 'cartograph.luajs.boundary'
+require('cartograph.cinterp').batch_tune() -- (a batch process: LuaJIT's trace cache and GC pause for gate volume, CART-1325)
 local cflags = {}
 for line in (vim.system({ 'make', '-n', 'lj_err.o' }, { cwd = src, text = true }):wait().stdout or ''):gmatch('[^\n]+') do
     if line:match('%-c %-o lj_err%.o lj_err%.c') then for fl in line:gmatch('%S+') do if fl:match('^%-[DU]') then cflags[#cflags + 1] = fl end end end

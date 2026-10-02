@@ -1608,6 +1608,20 @@ function M.units(sources)
     return ctx
 end
 
+--- BATCH TUNING for a HEADLESS process that interprets at gate volume (CART-1325) — LuaJIT's trace cache and the GC
+--- pause are PROCESS-wide, so only a batch tool calls this (tools/cpython, qjs, cpath — not erlbif: 0% there, +466 MB),
+--- never an editor session. Gate walls tuned vs not: qjs -20%, cpath -19%, cpython readings -19% (RSS 4.0 -> 5.6 GB).
+--- MEASURED 2026-10-02, cpython readings (caches warm, compiled interpreter): default ~30 s; maxtrace=20000
+--- maxmcode=262144 -> ~27 s at the same RSS (the default cache FLUSHED 22 times on qjs: every trace recompiled); with
+--- the GC pause 400 as well -> ~22.5 s, RSS 4.1 -> 5.1 GB (pause 800: no faster, 6.5 GB). Output byte-identical.
+--- CARTOGRAPH_BATCH_TUNE=0 leaves LuaJIT's defaults: the A/B.
+function M.batch_tune()
+    if vim.env.CARTOGRAPH_BATCH_TUNE == '0' then return false end
+    jit.opt.start('maxtrace=20000', 'maxmcode=262144')
+    collectgarbage('setpause', 400)
+    return true
+end
+
 -- (the helpers an adapter reads values with)
 M.asnum, M.elem, M.at, M.tx, M.kids, M.key_of, M.veq = asnum, elem, at, tx, kids, key_of, veq
 return M

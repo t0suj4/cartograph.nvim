@@ -14,6 +14,7 @@ local REPO = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 vim.opt.rtp:prepend(REPO)
 vim.opt.rtp:append(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 local Q = require 'cartograph.qjs'
+require('cartograph.cinterp').batch_tune() -- (a batch process: LuaJIT's trace cache and GC pause for gate volume, CART-1325)
 
 local src = arg[1]
 if not src then io.stderr:write('usage: qjs.lua <quickjs-ng src dir> [Owner.name … | --all]\n'); os.exit(2) end
