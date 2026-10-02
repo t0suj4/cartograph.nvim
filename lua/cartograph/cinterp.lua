@@ -1180,6 +1180,17 @@ function M.analyzer(ctx)
         return st
     end
 
+    -- THE CLOSURE COMPILER (CART-1317): eval / exec above, each node compiled ONCE into a closure (cartograph.cinterp.compile)
+    -- — the default. ctx.interp = 'eval' or CARTOGRAPH_CINTERP=eval walks the tree with eval / exec instead: the A/B, and
+    -- the reference the compiler is held to (the gates' readings byte-identical)
+    local CC = (ctx.interp or vim.env.CARTOGRAPH_CINTERP) ~= 'eval' and require('cartograph.cinterp.compile')({
+        A = A, ctx = ctx, M = M, tx = tx, kids = kids, literal = literal, charlit = charlit, int = int, empty = empty,
+        split = split, union = union, narrow = narrow, join = join, vmap = vmap, truth = truth, at = at, rv = rv,
+        lift1 = lift1, lift2 = lift2, key_of = key_of, convert = convert, veq = veq, icommon = icommon,
+        ipromote = ipromote, ityp = ityp, readmem = readmem, read_field = read_field, call = call,
+        write_slot = write_slot, layout = layout, fr = fr, binop = binop, asnum = asnum, promote = promote,
+    }) or nil
+
     --- run a defined function on a path: its arguments, the slots, the argument count, the focus slot and its tags ->
     --- { ret = tags that may return, rej = tags that may reject, vals = { [tag] = return value }, slots, fwrite, over }
     function A.run(d, args, slots, fi, fset, fwrite, ltop, lbase)
@@ -1289,23 +1300,30 @@ function M.analyzer(ctx)
             x = copy(x)
             if k == 'nop' then for _, e in ipairs(node.succ) do push(e.to, x) end
             elseif k == 'stmt' then
-                local after = exec(node.ast, x, cx)
+                local after
+                if CC then after = CC.node(g, id, d).stmt(x, cx) else after = exec(node.ast, x, cx) end
                 if after then for _, e in ipairs(node.succ) do push(e.to, after) end end
             elseif k == 'cond' then
-                local v = rv(eval(node.ast, x, cx), x)
+                local v
+                if CC then v = CC.node(g, id, d).expr[1](x, cx) else v = eval(node.ast, x, cx) end
+                v = rv(v, x)
                 if empty(x.fset) then return end
                 local T, F, U = split(v, x.fset)
                 for _, e in ipairs(node.succ) do
                     if e.on == 'T' then push(e.to, narrow(x, union(T, U))) elseif e.on == 'F' then push(e.to, narrow(x, union(F, U))) end
                 end
             elseif k == 'switch' then
-                local v = rv(eval(node.ast, x, cx), x)
+                local v
+                if CC then v = CC.node(g, id, d).expr[1](x, cx) else v = eval(node.ast, x, cx) end
+                v = rv(v, x)
                 if empty(x.fset) then return end
                 -- each element goes down every case its value MAY equal; default takes those no case SURELY equals
                 local surely = {}
                 for _, e in ipairs(node.succ) do
                     if e.on == 'case' then
-                        local cv = rv(eval(e.val, copy(x), cx), x)
+                        local cv
+                        if CC then cv = CC.case(g, e, d)[1](copy(x), cx) else cv = eval(e.val, copy(x), cx) end
+                        cv = rv(cv, x)
                         if cv and cv.k == 'i' then cx.compared[key_of(cv)] = cv end
                         local set = {}
                         for el in pairs(x.fset) do
@@ -1325,9 +1343,14 @@ function M.analyzer(ctx)
                     end
                 end
             elseif k == 'ret' then
-                local ex = kids(node.ast)[1]
                 local v
-                if ex then v = rv(eval(ex, x, cx), x) end
+                if CC then
+                    local r = CC.node(g, id, d).ret
+                    if r then v = rv(r[1](x, cx), x) end
+                else
+                    local ex = kids(node.ast)[1]
+                    if ex then v = rv(eval(ex, x, cx), x) end
+                end
                 -- (C 6.8.6.4p3: the value is converted to the function's return type — CART-1289)
                 if v ~= nil and d.rtype and d.rtype.k == 'i' then
                     local ty = d.rtype
