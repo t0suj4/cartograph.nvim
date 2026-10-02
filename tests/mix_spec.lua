@@ -128,18 +128,186 @@ test('mix: CONGRUENCE — a variable assigned under dynamic control stays dynami
     end
 end)
 
-test('mix: what rung 1 does not handle is REFUSED by name — closures, while, varargs, method calls, a static value that never repeats', function ()
+test('mix: what mix does not handle is REFUSED by name — while, varargs, method calls, a static value that never repeats', function ()
     ready()
     local function refusal(src, fname, division, statics)
         local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), fname, division, statics)
         eq(false, okm)
         return type(e) == 'table' and e.refusal or ('NOT A REFUSAL: ' .. tostring(e))
     end
-    ok(refusal('local function f(x)\n    local g = function (y) return y end\n    return g(x)\nend\n', 'f', { 'D' }, {}):find('closures', 1, true))
     ok(refusal('local function f(x)\n    while x > 0 do x = x - 1 end\n    return x\nend\n', 'f', { 'D' }, {}):find('while', 1, true))
     ok(refusal('local function f(...)\n    return 1\nend\n', 'f', {}, {}):find('parameter', 1, true))
     ok(refusal('local function f(s)\n    return s:upper()\nend\n', 'f', { 'D' }, {}):find('method call', 1, true))
     ok(refusal('local function f(x, n)\n    if x > 0 then return f(x - 1, n + 1) end\n    return n\nend\n', 'f', { 'D', 'S' }, { nil, 0 }):find('specialization depth', 1, true))
+end)
+
+-- ── RUNG 2: closures and continuation-passing style ───────────────────────────────────────────────────────────────
+-- a regular-expression matcher in CONTINUATION-PASSING style over a STATIC regex tree: `seq` and `star` BUILD a
+-- continuation per step, capturing the current position — the shape of the algebra's own matcher (S1)
+local REGEX = [[
+local function mt(re, s, j, k)
+    local op = re[1]
+    if op == "chr" then
+        if j <= #s and string.sub(s, j, j) == re[2] then return k(j + 1) end
+        return false
+    end
+    if op == "seq" then
+        return mt(re[2], s, j, function (j2) return mt(re[3], s, j2, k) end)
+    end
+    if op == "alt" then
+        if mt(re[2], s, j, k) then return true end
+        return mt(re[3], s, j, k)
+    end
+    if op == "star" then
+        if k(j) then return true end
+        return mt(re[2], s, j, function (j2)
+            if j2 == j then return false end
+            return mt(re, s, j2, k)
+        end)
+    end
+    return false
+end
+local function rmatch(re, s, j0)
+    return mt(re, s, j0, function (j) return j == #s + 1 end)
+end
+local function rmatchk(re, s, j0, k)
+    return mt(re, s, j0, k)
+end
+]]
+local function chr(c) return { 'chr', c } end
+local function seq(a, b) return { 'seq', a, b } end
+local REGEXES = {
+    ['ab'] = seq(chr('a'), chr('b')),
+    ['ab|a'] = { 'alt', seq(chr('a'), chr('b')), chr('a') },
+    ['a*'] = { 'star', chr('a') },
+    ['(a|b)*b'] = seq({ 'star', { 'alt', chr('a'), chr('b') } }, chr('b')),
+    ['a(ba)*'] = seq(chr('a'), { 'star', seq(chr('b'), chr('a')) }),
+}
+-- every string over {a, b} up to length 5
+local function strings()
+    local out, layer = { '' }, { '' }
+    for _ = 1, 5 do
+        local nxt = {}
+        for _, w in ipairs(layer) do nxt[#nxt + 1] = w .. 'a'; nxt[#nxt + 1] = w .. 'b' end
+        for _, w in ipairs(nxt) do out[#out + 1] = w end
+        layer = nxt
+    end
+    return out
+end
+
+test('mix: a CPS matcher specialized to its regex — continuations built PER STEP are specialized away; equivalent on every string; fewer steps', function ()
+    ready()
+    local rm = original(REGEX, 'rmatch')
+    local words = strings()
+    for name, re in pairs(REGEXES) do
+        local r, text, _, T, T2 = residual(REGEX, 'rmatch', { 'S', 'D', 'D' }, { re })
+        local hits = 0
+        for _, w in ipairs(words) do
+            local want = rm(re, w, 1)
+            eq(want, r(w, 1), ('%s on %q'):format(name, w))
+            if want then hits = hits + 1 end
+        end
+        ok(hits > 0 and hits < #words, name .. ': the strings both match and miss')
+        gone(text, { 're', 'k', 'op' })
+        ok(not text:find('function %('), name .. ': no residual closure — every continuation unfolded or a program point\n' .. text)
+        local s0, s1 = 0, 0
+        local entry = text:match('return ([%w_]+)%s*$')
+        for _, w in ipairs({ 'ab', 'aba', 'bbab', 'aaaa' }) do
+            local _, a = MX.run(MX.lower(T), 'rmatch', { re, w, 1 })
+            local _, b = MX.run(MX.lower(T2), entry, { w, 1 })
+            s0, s1 = s0 + a, s1 + b
+        end
+        -- (1.91x .. 2.24x over the five when written: every continuation call and every regex dispatch gone)
+        ok(s1 * 3 < s0 * 2, ('%s PAYOFF: %d interpreter steps -> %d'):format(name, s0, s1))
+    end
+end)
+
+test('mix: a DYNAMIC continuation stays a residual call; closures built around it still carry the position in', function ()
+    ready()
+    local rk = original(REGEX, 'rmatchk')
+    local words = strings()
+    for _, name in ipairs({ 'ab', '(a|b)*b', 'a(ba)*' }) do
+        local re = REGEXES[name]
+        local r, text = residual(REGEX, 'rmatchk', { 'S', 'D', 'D', 'D' }, { re })
+        ok(text:find('k_%d+%('), name .. ': the dynamic continuation is called in the residual\n' .. text)
+        for _, w in ipairs(words) do
+            local ends = function (j) return j == #w + 1 end
+            local any = function (j) return j > 2 end
+            eq(rk(re, w, 1, ends), r(w, 1, ends), ('%s on %q (ends)'):format(name, w))
+            eq(rk(re, w, 1, any), r(w, 1, any), ('%s on %q (any)'):format(name, w))
+        end
+        gone(text, { 're', 'op' })
+    end
+end)
+
+local LIFT = [[
+local function wrap(n, g, x)
+    return g(function (y) return y + n end, x)
+end
+local function wrap2(n, g, x)
+    return g(function (y) return y * n + x end, x)
+end
+]]
+
+test('mix: a closure reaching a DYNAMIC call is LIFTED — a residual function, its static free variables computed, its dynamic ones in scope', function ()
+    ready()
+    local w1, w2 = original(LIFT, 'wrap'), original(LIFT, 'wrap2')
+    local gs = { function (f, x) return f(x) * 2 end, function (f, x) return f(f(x)) end, function (_, x) return x end }
+    for _, n in ipairs({ 0, 5 }) do
+        local r1, t1 = residual(LIFT, 'wrap', { 'S', 'D', 'D' }, { n })
+        local r2, t2 = residual(LIFT, 'wrap2', { 'S', 'D', 'D' }, { n })
+        for _, g in ipairs(gs) do
+            for _, x in ipairs({ -2, 0, 3 }) do
+                eq(w1(n, g, x), r1(g, x), ('wrap(%d, g, %d)'):format(n, x))
+                eq(w2(n, g, x), r2(g, x), ('wrap2(%d, g, %d)'):format(n, x))
+            end
+        end
+        ok(t1:find('function %(y_%d+%)') and t2:find('function %(y_%d+%)'), 'a residual function expression\n' .. t1 .. t2)
+        gone(t1, { 'n' }); gone(t2, { 'n' })
+        ok(t2:find('x_%d+%)'), 'the dynamic free x is referenced inside the lifted function\n' .. t2)
+    end
+end)
+
+local EARLY = [[
+local function twice(f)
+    return f(f(1))
+end
+local function addx(x)
+    return twice(function (y) return y + x end)
+end
+local function mk(x)
+    return function () return x end
+end
+local function use(g)
+    local f = mk(g())
+    return f() + f()
+end
+]]
+
+test('mix: a closure\'s DYNAMIC parts are never computed early — a call whose only non-static argument is a closure is specialized, not run; an argument with an effect is not copied into a closure body', function ()
+    ready()
+    local addx, use = original(EARLY, 'addx'), original(EARLY, 'use')
+    local r1, t1 = residual(EARLY, 'addx', { 'D' }, {})
+    for _, x in ipairs({ -3, 0, 7 }) do eq(addx(x), r1(x), 'addx(' .. x .. ')') end
+    ok(not t1:find('function %('), 'the closure applied twice is unfolded, never run with x unknown\n' .. t1)
+    local r2, t2 = residual(EARLY, 'use', { 'D' }, {})
+    local function counter() local n = 0; return function () n = n + 1; return n * 10 end end
+    eq(use(counter()), r2(counter()), 'g runs ONCE, as in the original — not once per call of the closure\n' .. t2)
+end)
+
+test('mix: what rung 2 does not handle is REFUSED by name — a captured per-iteration local, a closure assigning or storing into a captured variable', function ()
+    ready()
+    local function refusal(src, fname, division, statics)
+        local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), fname, division, statics)
+        eq(false, okm)
+        return type(e) == 'table' and e.refusal or ('NOT A REFUSAL: ' .. tostring(e))
+    end
+    local r1 = refusal('local function f(t)\n    local out = {}\n    for i = 1, 3 do out[i] = function () return i end end\n    return out\nend\n', 'f', { 'D' }, {})
+    ok(r1:find('a local of one loop iteration', 1, true), r1)
+    local r2 = refusal('local function f(x)\n    local n = 0\n    local g = function () n = n + 1 end\n    g()\n    return n\nend\n', 'f', { 'D' }, {})
+    ok(r2:find('assigning the captured `n`', 1, true), r2)
+    local r3 = refusal('local function f(x)\n    local t = {}\n    local g = function () t[1] = x end\n    g()\n    return t[1]\nend\n', 'f', { 'D' }, {})
+    ok(r3:find('assigning the captured `t`', 1, true), r3)
 end)
 
 test('mix: mix itself stays INSIDE S — no while / repeat / goto / varargs / metatables / load (S4–S5 self-apply it)', function ()
