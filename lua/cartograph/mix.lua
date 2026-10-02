@@ -85,8 +85,29 @@ local function string_value(t)
     local q = raw:sub(1, 1)
     if q ~= '"' and q ~= "'" then refuse('a long-bracket string literal (rung 1 reads quoted strings only)') end
     local body = raw:sub(2, -2)
-    if body:find('\\', 1, true) then refuse('an escape sequence in a string literal (rung 1)') end
-    return body
+    if not body:find('\\', 1, true) then return body end
+    -- the escapes Lua 5.1 / LuaJIT read: \n \t \r \a \b \f \v \\ \" \' \<newline>, \ddd decimal, \xXX hex
+    local out, skip = {}, 0
+    for i = 1, #body do
+        if skip > 0 then skip = skip - 1
+        else
+            local c = body:sub(i, i)
+            if c ~= '\\' then out[#out + 1] = c
+            else
+                local d = body:sub(i + 1, i + 1)
+                local ESC = { n = '\n', t = '\t', r = '\r', a = '\a', b = '\b', f = '\f', v = '\v', ['\\'] = '\\', ['"'] = '"', ["'"] = "'", ['\n'] = '\n' }
+                if ESC[d] then out[#out + 1] = ESC[d]; skip = 1
+                elseif d:match('%d') then
+                    local digits = body:match('^%d%d?%d?', i + 1)
+                    if tonumber(digits) > 255 then refuse('the escape \\' .. digits .. ' (beyond a byte)') end
+                    out[#out + 1] = string.char(tonumber(digits)); skip = #digits
+                elseif d == 'x' and body:match('^%x%x', i + 2) then
+                    out[#out + 1] = string.char(tonumber(body:sub(i + 2, i + 3), 16)); skip = 3
+                else refuse('the escape \\' .. d .. ' in a string literal') end
+            end
+        end
+    end
+    return table.concat(out)
 end
 
 local function declare(cx, scope, name)
@@ -105,9 +126,10 @@ local function lower_lambda(pnode, bnode, cx, scope)
     for _, p in ipairs(named(pnode)) do
         if p.k ~= 'identifier' then refuse('a parameter list with ' .. p.k) end
         lam.params[#lam.params + 1] = declare(cx, ps, text(p))
+        cx.isparam[lam.params[#lam.params]] = true
         lam.pnames[#lam.pnames + 1] = text(p)
     end
-    if #lam.params > 6 then refuse('a function expression of more than 6 parameters (rung 2)') end
+    if #lam.params > 8 then refuse('a function expression of more than 8 parameters') end
     lam.body = bnode and lower_block(bnode, cx, ps) or {}
     local free = {}
     for id in pairs(lam.freeset) do free[#free + 1] = id end
@@ -152,9 +174,13 @@ function lower_expr(t, cx, scope)
     if k == 'function_call' then
         local n = named(t)
         local callee = n[1]
-        if callee.k == 'method_index_expression' then refuse('a method call `' .. text(callee) .. '` (rung 2)') end
         local args = {}
         for _, a in ipairs(named(n[#n])) do args[#args + 1] = lower_expr(a, cx, scope) end
+        if callee.k == 'method_index_expression' then
+            -- (`o:m(…)`: its own op — evaluated as o[m](o, …), whatever o is: a string's library method, a closure field)
+            local cn = named(callee)
+            return { op = 'method', obj = lower_expr(cn[1], cx, scope), m = text(cn[2]), args = args }
+        end
         local f = lower_expr(callee, cx, scope)
         if f.op == 'fn' then return { op = 'call', fn = f.name, args = args } end
         if f.op == 'global' then return { op = 'prim', name = f.name, args = args } end
@@ -204,26 +230,43 @@ local function lower_stmt(t, cx, scope, out)
         end
         local parts = named(asg)
         local vars, exprs = named(parts[1]), named(parts[2])
-        if #vars ~= #exprs then refuse('a declaration with ' .. #vars .. ' names and ' .. #exprs .. ' values (rung 1: one each)') end
         local es = {}
         for i, e in ipairs(exprs) do es[i] = lower_expr(e, cx, scope) end -- (values first: `local x = x` reads the outer x)
-        for i, v in ipairs(vars) do out[#out + 1] = { op = 'local', id = declare(cx, scope, text(v)), e = es[i] } end
+        if #vars == #exprs then
+            for i, v in ipairs(vars) do out[#out + 1] = { op = 'local', id = declare(cx, scope, text(v)), e = es[i] } end
+        else
+            -- (several values: the last expression expands — `local ok, why = f(x)` — or the rest are nil)
+            local ids = {}
+            for i, v in ipairs(vars) do ids[i] = declare(cx, scope, text(v)) end
+            out[#out + 1] = { op = 'localm', ids = ids, es = es }
+        end
         return
     end
     if k == 'assignment_statement' then
         local parts = named(t)
         local vars, exprs = named(parts[1]), named(parts[2])
-        if #vars ~= 1 or #exprs ~= 1 then refuse('a multiple assignment (rung 1)') end
-        local root = target_root(vars[1])
-        if root then
-            local _, crossed = lookup(scope, text(root))
-            if crossed > 0 then
-                refuse('a closure assigning the captured `' .. text(root) .. '` (rung 2: no upvalue boxes)')
+        local targets = {}
+        for i, v in ipairs(vars) do
+            local root = target_root(v)
+            if root then
+                local id, crossed = lookup(scope, text(root))
+                if id and crossed > 0 then
+                    -- ASSIGNMENT CONVERSION: a closure assigning a variable it captured makes that variable a BOX (one
+                    -- shared cell, whichever residual function the closure ends up in); a closure storing into a
+                    -- captured table makes that table dynamic (it is shared by reference)
+                    if root == v then
+                        if cx.isparam[id] then refuse('a closure assigning the captured parameter `' .. text(root) .. '` (rung 3: a parameter is not boxed)') end
+                        cx.boxed[id] = true
+                    else cx.forced[id] = true end
+                end
             end
+            targets[i] = lower_expr(v, cx, scope)
+            if targets[i].op ~= 'var' and targets[i].op ~= 'index' then refuse('an assignment to ' .. text(v)) end
         end
-        local target = lower_expr(vars[1], cx, scope)
-        if target.op ~= 'var' and target.op ~= 'index' then refuse('an assignment to ' .. text(vars[1])) end
-        out[#out + 1] = { op = 'assign', target = target, e = lower_expr(exprs[1], cx, scope) }
+        local es = {}
+        for i, e in ipairs(exprs) do es[i] = lower_expr(e, cx, scope) end
+        if #targets == 1 and #es == 1 then out[#out + 1] = { op = 'assign', target = targets[1], e = es[1] }
+        else out[#out + 1] = { op = 'assignm', targets = targets, es = es } end
         return
     end
     if k == 'function_call' then
@@ -232,9 +275,9 @@ local function lower_stmt(t, cx, scope, out)
     end
     if k == 'return_statement' then
         local el = named(t)[1]
-        local es = el and named(el) or {}
-        if #es > 1 then refuse('a return of several values (rung 1)') end
-        out[#out + 1] = { op = 'ret', e = es[1] and lower_expr(es[1], cx, scope) or { op = 'nil' } }
+        local es = {}
+        for i, e in ipairs(el and named(el) or {}) do es[i] = lower_expr(e, cx, scope) end
+        out[#out + 1] = { op = 'ret', es = es }
         return
     end
     if k == 'if_statement' then
@@ -284,7 +327,7 @@ local function lower_stmt(t, cx, scope, out)
         out[#out + 1] = { op = 'do', body = b and lower_block(b, cx, { names = {}, up = scope }) or {} }
         return
     end
-    if k == 'comment' then return end
+    if k == 'comment' or k == 'comment_content' or k == 'empty_statement' then return end
     if k == 'while_statement' or k == 'repeat_statement' or k == 'goto_statement' or k == 'label_statement' then
         refuse('`' .. k .. '` (not in S)')
     end
@@ -317,11 +360,82 @@ function lower_block(t, cx, scope)
     return out
 end
 
+-- the ASSIGNMENT CONVERSION of a lowered body: a boxed variable's declaration becomes `{ e }` (and is forced dynamic),
+-- a read v[1], a write a store into it; a forced variable's declaration is marked dynamic
+local box_expr, box_block
+function box_expr(e, boxed, forced)
+    local op = e.op
+    if op == 'var' then
+        if boxed[e.id] then return { op = 'index', obj = e, key = { op = 'num', v = 1 } } end
+        return e
+    end
+    local n = {}
+    for k, v in pairs(e) do n[k] = v end
+    if op == 'bin' then n.l, n.r = box_expr(e.l, boxed, forced), box_expr(e.r, boxed, forced)
+    elseif op == 'un' then n.e = box_expr(e.e, boxed, forced)
+    elseif op == 'index' then n.obj, n.key = box_expr(e.obj, boxed, forced), box_expr(e.key, boxed, forced)
+    elseif op == 'table' then
+        n.fields = {}
+        for i, f in ipairs(e.fields) do n.fields[i] = { key = box_expr(f.key, boxed, forced), val = box_expr(f.val, boxed, forced) } end
+    elseif op == 'call' or op == 'prim' or op == 'callv' or op == 'method' then
+        n.args = {}
+        for i, a in ipairs(e.args) do n.args[i] = box_expr(a, boxed, forced) end
+        if op == 'callv' then n.f = box_expr(e.f, boxed, forced) end
+        if op == 'method' then n.obj = box_expr(e.obj, boxed, forced) end
+    elseif op == 'lambda' then n.body = box_block(e.body, boxed, forced)
+    end
+    return n
+end
+function box_block(stmts, boxed, forced)
+    local out = {}
+    for i, s in ipairs(stmts) do
+        local n = {}
+        for k, v in pairs(s) do n[k] = v end
+        local op = s.op
+        if op == 'local' then
+            n.e = box_expr(s.e, boxed, forced)
+            if boxed[s.id] then n.e = { op = 'table', fields = { { key = { op = 'num', v = 1 }, val = n.e } } } end
+            if boxed[s.id] or (forced and forced[s.id]) then n.forced = true end
+        elseif op == 'localm' then
+            for _, id in ipairs(s.ids) do
+                if boxed[id] then refuse('a declaration of several values whose variable a closure assigns (rung 3)') end
+                if forced and forced[id] then n.forced = true end
+            end
+            n.es = {}
+            for j, e in ipairs(s.es) do n.es[j] = box_expr(e, boxed, forced) end
+        elseif op == 'assign' then n.target, n.e = box_expr(s.target, boxed, forced), box_expr(s.e, boxed, forced)
+        elseif op == 'assignm' then
+            n.targets, n.es = {}, {}
+            for j, t in ipairs(s.targets) do n.targets[j] = box_expr(t, boxed, forced) end
+            for j, e in ipairs(s.es) do n.es[j] = box_expr(e, boxed, forced) end
+        elseif op == 'callstmt' then n.e = box_expr(s.e, boxed, forced)
+        elseif op == 'ret' then
+            n.es = {}
+            for j, e in ipairs(s.es) do n.es[j] = box_expr(e, boxed, forced) end
+        elseif op == 'if' then
+            n.clauses = {}
+            for j, c in ipairs(s.clauses) do n.clauses[j] = { cond = box_expr(c.cond, boxed, forced), body = box_block(c.body, boxed, forced) } end
+            n.els = box_block(s.els, boxed, forced)
+        elseif op == 'fornum' then
+            n.from, n.to, n.step = box_expr(s.from, boxed, forced), box_expr(s.to, boxed, forced), box_expr(s.step, boxed, forced)
+            n.body = box_block(s.body, boxed, forced)
+        elseif op == 'forin' then n.e = box_expr(s.e, boxed, forced); n.body = box_block(s.body, boxed, forced)
+        elseif op == 'do' then n.body = box_block(s.body, boxed, forced)
+        end
+        out[i] = n
+    end
+    return out
+end
+function M.box(stmts, boxed, forced)
+    if next(boxed) == nil and next(forced) == nil then return stmts end
+    return box_block(stmts, boxed, forced)
+end
+
 --- a chunk of top-level function declarations -> program { funcs = { name -> { name, params = { id … }, pnames, body } },
 --- names = { id -> source name } }. opts.collect = {}: the CENSUS — every refused statement recorded there as
 --- { why, text } and skipped, instead of the first one refusing the whole program
 function M.lower(term, opts)
-    local cx = { funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect }
+    local cx = { funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect, isparam = {}, boxed = {}, forced = {} }
     local decls = {}
     for _, d in ipairs(named(term)) do
         if d.k == 'function_declaration' then
@@ -331,7 +445,7 @@ function M.lower(term, opts)
             decls[#decls + 1] = { name = name, params = n[2], body = n[3] }
         elseif d.k == 'variable_declaration' and named(d)[1] and named(d)[1].k ~= 'assignment_statement' then
             -- (a forward declaration `local f, g` — the residual printer's own)
-        elseif d.k ~= 'return_statement' and d.k ~= 'comment' then
+        elseif d.k ~= 'return_statement' and d.k ~= 'comment' and d.k ~= 'comment_content' and d.k ~= 'empty_statement' then
             refuse('top-level ' .. d.k .. ' (a program is top-level function declarations)')
         end
     end
@@ -341,11 +455,14 @@ function M.lower(term, opts)
         for _, p in ipairs(named(d.params)) do
             if p.k ~= 'identifier' then refuse('a parameter list with ' .. p.k) end
             params[#params + 1] = declare(cx, scope, text(p))
+            cx.isparam[params[#params]] = true
             pnames[#pnames + 1] = text(p)
         end
         cx.funcs[d.name] = { name = d.name, params = params, pnames = pnames, body = d.body and lower_block(d.body, cx, scope) or {} }
     end
-    return { funcs = cx.funcs, names = cx.names }
+    -- BOXES: every boxed variable's declaration holds { v }, every read is v[1], every write a store into it
+    for _, f in pairs(cx.funcs) do f.body = M.box(f.body, cx.boxed, cx.forced) end
+    return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed }
 end
 
 -- ── the INTERPRETER (static evaluation, and the step counter of the payoff gate) ────────────────────────────────────
@@ -377,9 +494,23 @@ M._arith = arith
 -- activations below the caller's), clos = { [function value] -> closure }, new_closure(lam, env, bt, dfree),
 -- on_closure (called for a closure made at depth 0) }. A closure value is a real Lua function (a host primitive may
 -- call it) whose record — { lam, env, bt, dfree, fn } — the specializer reads through R.clos.
+-- the ops whose value is a LIST when last in a list (Lua's expansion): a call of any kind
+local MULTI = { call = true, callv = true, prim = true, method = true }
+M.MULTI = MULTI
+
+-- a host function's results as a list (up to 8: no varargs in S, so trailing nils are not counted)
+local function host(f, a)
+    local r1, r2, r3, r4, r5, r6, r7, r8 = f(unpack(a, 1, a.n or #a))
+    local r = { r1, r2, r3, r4, r5, r6, r7, r8 }
+    local n = 0
+    for i = 1, 8 do if r[i] ~= nil then n = i end end
+    r.n = n
+    return r
+end
+
 function M.evaluator(prog, budget)
     local R = { steps = 0, budget = budget or 1e7, depth = 0, clos = {}, on_closure = nil }
-    local exec_block, apply
+    local exec_block, apply, eval, eval_multi, evals
     -- (one activation deeper; the depth restored on a refusal too)
     local function deeper(stmts, env)
         R.depth = R.depth + 1
@@ -397,14 +528,22 @@ function M.evaluator(prog, budget)
         if n == 3 then return function (a, b, d) return apply(c, { a, b, d }) end end
         if n == 4 then return function (a, b, d, e) return apply(c, { a, b, d, e }) end end
         if n == 5 then return function (a, b, d, e, f) return apply(c, { a, b, d, e, f }) end end
-        return function (a, b, d, e, f, g) return apply(c, { a, b, d, e, f, g }) end
+        if n == 6 then return function (a, b, d, e, f, g) return apply(c, { a, b, d, e, f, g }) end end
+        if n == 7 then return function (a, b, d, e, f, g, h) return apply(c, { a, b, d, e, f, g, h }) end end
+        return function (a, b, d, e, f, g, h, i) return apply(c, { a, b, d, e, f, g, h, i }) end
     end
-    function apply(c, args)
+    -- a closure applied -> the list of its results
+    local function applyl(c, args)
         local fenv = {}
         for _, id in ipairs(c.lam.free) do fenv[id] = c.env[id] end
         for i, id in ipairs(c.lam.params) do fenv[id] = args[i] end
-        local _, v = deeper(c.lam.body, fenv)
-        return v
+        local _, vs = deeper(c.lam.body, fenv)
+        return vs or { n = 0 }
+    end
+    -- (the Lua function a host primitive calls: every result handed back)
+    function apply(c, args)
+        local vs = applyl(c, args)
+        return unpack(vs, 1, vs.n)
     end
     function R.new_closure(lam, env, bt, dfree)
         local c = { lam = lam, env = env, bt = bt or {}, dfree = dfree or {} }
@@ -412,7 +551,59 @@ function M.evaluator(prog, budget)
         R.clos[c.fn] = c
         return c.fn, c
     end
-    local function eval(e, env)
+    -- a list of expressions -> its values (the last one EXPANDS when it is a call)
+    function evals(es, env)
+        local out = { n = 0 }
+        for i, e in ipairs(es) do
+            if i == #es and MULTI[e.op] then
+                local vs = eval_multi(e, env)
+                for j = 1, vs.n do out[i + j - 1] = vs[j] end
+                out.n = i - 1 + vs.n
+            else out[i] = eval(e, env); out.n = i end
+        end
+        return out
+    end
+    -- a call of any kind -> the list of its results
+    function eval_multi(e, env)
+        R.steps = R.steps + 1
+        if R.steps > R.budget then refuse('the interpreter budget (' .. R.budget .. ' steps)') end
+        local op = e.op
+        if op == 'call' then
+            local f = prog.funcs[e.fn]
+            local a = evals(e.args, env)
+            local fenv = {}
+            for i, id in ipairs(f.params) do fenv[id] = a[i] end
+            local _, vs = deeper(f.body, fenv)
+            return vs or { n = 0 }
+        end
+        if op == 'callv' then
+            local f = eval(e.f, env)
+            local a = evals(e.args, env)
+            local c = R.clos[f]
+            if not c then refuse('a call through a ' .. type(f) .. ' value that is no closure of the program') end
+            return applyl(c, a)
+        end
+        if op == 'prim' then
+            local p = PRIMS[e.name]
+            if not p then refuse('the primitive ' .. e.name .. ' (not in the table)') end
+            return host(p, evals(e.args, env))
+        end
+        if op == 'method' then
+            local o = eval(e.obj, env)
+            local a = evals(e.args, env)
+            local args = { o, n = a.n + 1 }
+            for i = 1, a.n do args[i + 1] = a[i] end
+            local f
+            if type(o) == 'string' then f = string[e.m]
+            elseif type(o) == 'table' then f = o[e.m] end
+            local c = f and R.clos[f]
+            if c then return applyl(c, args) end
+            if type(o) == 'string' and type(f) == 'function' then return host(f, args) end
+            refuse('the method `' .. tostring(e.m) .. '` of a ' .. type(o))
+        end
+        return { eval(e, env), n = 1 }
+    end
+    function eval(e, env)
         R.steps = R.steps + 1
         if R.steps > R.budget then refuse('the interpreter budget (' .. R.budget .. ' steps)') end
         local op = e.op
@@ -444,27 +635,9 @@ function M.evaluator(prog, budget)
             if R.depth == 0 and R.on_closure then R.on_closure(c) end
             return fn
         end
-        if op == 'call' then
-            local f = prog.funcs[e.fn]
-            local fenv = {}
-            for i, id in ipairs(f.params) do fenv[id] = eval(e.args[i], env) end
-            local _, v = deeper(f.body, fenv)
-            return v
-        end
-        if op == 'callv' then
-            local f = eval(e.f, env)
-            local a = {}
-            for i, x in ipairs(e.args) do a[i] = eval(x, env) end
-            local c = R.clos[f]
-            if not c then refuse('a call through a ' .. type(f) .. ' value that is no closure of the program') end
-            return apply(c, a)
-        end
-        if op == 'prim' then
-            local p = PRIMS[e.name]
-            if not p then refuse('the primitive ' .. e.name .. ' (not in the table)') end
-            local a = {}
-            for i, x in ipairs(e.args) do a[i] = eval(x, env) end
-            return p(unpack(a, 1, #e.args))
+        if MULTI[op] then
+            R.steps = R.steps - 1 -- (eval_multi counts the step)
+            return eval_multi(e, env)[1]
         end
         if op == 'fn' then refuse('the top-level function ' .. e.name .. ' used as a value (rung 2: function expressions only)') end
         if op == 'global' then refuse('the global ' .. e.name) end
@@ -476,11 +649,19 @@ function M.evaluator(prog, budget)
             R.steps = R.steps + 1
             local op = s.op
             if op == 'local' then env[s.id] = eval(s.e, env)
+            elseif op == 'localm' then
+                local vs = evals(s.es, env)
+                for i, id in ipairs(s.ids) do env[id] = vs[i] end
             elseif op == 'assign' then
                 if s.target.op == 'var' then env[s.target.id] = eval(s.e, env)
                 else eval(s.target.obj, env)[eval(s.target.key, env)] = eval(s.e, env) end
+            elseif op == 'assignm' then
+                local vs = evals(s.es, env)
+                for i, t in ipairs(s.targets) do
+                    if t.op == 'var' then env[t.id] = vs[i] else eval(t.obj, env)[eval(t.key, env)] = vs[i] end
+                end
             elseif op == 'callstmt' then eval(s.e, env)
-            elseif op == 'ret' then return true, eval(s.e, env)
+            elseif op == 'ret' then return true, evals(s.es, env)
             elseif op == 'if' then
                 local taken = false
                 for _, c in ipairs(s.clauses) do
@@ -515,7 +696,7 @@ function M.evaluator(prog, budget)
         end
         return false, nil
     end
-    return { eval = eval, exec = exec_block, R = R }
+    return { eval = eval, eval_multi = eval_multi, evals = evals, exec = exec_block, R = R }
 end
 
 -- run(prog, fname, args, budget) -> value, steps. The budget refuses by name when exhausted.
@@ -525,8 +706,8 @@ function M.run(prog, fname, args, budget)
     if not f then refuse('no function ' .. tostring(fname)) end
     local env = {}
     for i, id in ipairs(f.params) do env[id] = args[i] end
-    local _, v = ev.exec(f.body, env)
-    return v, ev.R.steps
+    local _, vs = ev.exec(f.body, env)
+    return vs and vs[1], ev.R.steps
 end
 
 -- ── BTA: per (function or lambda, division), monovariant inside it, over S < C < D ─────────────────────────────────
@@ -560,6 +741,11 @@ local function bt_expr(e, bt)
         if op == 'prim' and e.name == 'table.insert' then return D end -- (a mutation: never computed early)
         return opnd(r)
     end
+    if op == 'method' then
+        local r = bt_expr(e.obj, bt)
+        for _, a in ipairs(e.args) do r = join(r, bt_expr(a, bt)) end
+        return opnd(r)
+    end
     if op == 'callv' then
         if bt_expr(e.f, bt) ~= S then return D end
         local r = S
@@ -579,7 +765,18 @@ local function bt_block(stmts, bt, ctrl)
     end
     for _, s in ipairs(stmts) do
         local op = s.op
-        if op == 'local' then set(s.id, bt_expr(s.e, bt))
+        if op == 'local' then set(s.id, s.forced and D or bt_expr(s.e, bt))
+        elseif op == 'localm' then
+            for i, id in ipairs(s.ids) do
+                local e = s.es[math.min(i, #s.es)]
+                set(id, s.forced and D or (e and bt_expr(e, bt) or S))
+            end
+        elseif op == 'assignm' then
+            for i, t in ipairs(s.targets) do
+                local e = s.es[math.min(i, #s.es)]
+                local v = join(ctrl, e and bt_expr(e, bt) or S)
+                if t.op == 'var' then set(t.id, v) elseif t.obj.op == 'var' then set(t.obj.id, D) end
+            end
         elseif op == 'assign' then
             local v = join(ctrl, bt_expr(s.e, bt)) -- CONGRUENCE: assigned under dynamic control -> D
             if s.target.op == 'var' then set(s.target.id, v)
@@ -622,15 +819,23 @@ end
 function M.bta(prog, fname, division)
     local f = prog.funcs[fname]
     local bt = {}
-    for i, id in ipairs(f.params) do bt[id] = division[i] end
+    for i, id in ipairs(f.params) do
+        bt[id] = division[i]
+        if prog.forced and prog.forced[id] and division[i] ~= D then
+            refuse('the static parameter `' .. tostring(prog.names[id]) .. '` is stored into by a closure (a static table cannot change at run time)')
+        end
+    end
     return fixpoint(f.body, bt)
 end
 
 --- the binding times of a lambda's body: its parameters by the division, its free variables as where it was made
-function M.bta_lambda(lam, division, freebt)
+function M.bta_lambda(lam, division, freebt, forced)
     local bt = {}
     for _, id in ipairs(lam.free) do bt[id] = freebt[id] or S end
-    for i, id in ipairs(lam.params) do bt[id] = division[i] or S end
+    for i, id in ipairs(lam.params) do
+        bt[id] = division[i] or S
+        if forced and forced[id] and bt[id] ~= D then refuse('a static closure argument stored into by a closure (rung 3)') end
+    end
     return fixpoint(lam.body, bt)
 end
 
@@ -711,6 +916,8 @@ function M.specialize(prog, fname, division, statics, opts)
         end
     end
     local function sval(e, X) current = X; return ev.eval(e, X.env) end
+    local function svalm(e, X) current = X; return ev.eval_multi(e, X.env) end
+    local function svall(es, X) current = X; return ev.evals(es, X.env) end
     local unfolding = {} -- program points being unfolded right now: a recursive one becomes a program point instead
     -- NESTING: every unfold and program point nests a specialization (and unfold a pcall — LuaJIT allows ~200 nested C
     -- calls); past opts.depth the specialization REFUSES by name instead of overflowing the C stack
@@ -734,7 +941,7 @@ function M.specialize(prog, fname, division, statics, opts)
         end
         if not btcache[key] then
             if T.kind == 'fn' then btcache[key] = M.bta(prog, T.name, division)
-            else btcache[key] = M.bta_lambda(T.c.lam, division, T.c.bt) end
+            else btcache[key] = M.bta_lambda(T.c.lam, division, T.c.bt, prog.forced) end
         end
         return btcache[key]
     end
@@ -805,7 +1012,7 @@ function M.specialize(prog, fname, division, statics, opts)
             if type(body) ~= 'table' then error(body, 0) end
             return nil
         end
-        if #body == 1 and body[1].op == 'ret' then return body[1].e, hs end
+        if #body == 1 and body[1].op == 'ret' and #body[1].es == 1 then return body[1].es[1], hs end
         return nil
     end
 
@@ -868,12 +1075,20 @@ function M.specialize(prog, fname, division, statics, opts)
     local function apply_spec(T, argexprs, X)
         local params = t_params(T)
         local division, svals, dargs = {}, {}, {}
+        local nargs = #argexprs
         for i, a in ipairs(argexprs) do
             local b = bt_expr(a, X.bt)
-            if b == D then division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
+            local expands = i == nargs and M.MULTI[a.op] and nargs < #params
+            if expands and b == S then
+                -- (a static call last: its values fill the remaining parameters)
+                local vs = svalm(a, X)
+                for j = 1, math.max(vs.n, 1) do division[i + j - 1] = S; svals[i + j - 1] = vs[j] end
+                nargs = i - 1 + math.max(vs.n, 1)
+            elseif expands then refuse('the last argument of a call expands several dynamic values into its parameters (rung 3)')
+            elseif b == D then division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
             else division[i] = b; svals[i] = sval(a, X) end
         end
-        for i = #argexprs + 1, #params do division[i] = S end -- (a missing argument is a static nil)
+        for i = nargs + 1, #params do division[i] = S end -- (a missing argument is a static nil)
         -- UNFOLD when the callee's residual body is one `return e`: substitute its dynamic parameters
         local inl, hs = unfold(T, division, svals)
         if inl then
@@ -894,7 +1109,16 @@ function M.specialize(prog, fname, division, statics, opts)
     -- a residual expression for e in X; a static e (or a closure) is computed and lifted
     function rexpr(e, X)
         spend()
-        if bt_expr(e, X.bt) ~= D then return lift(sval(e, X), X) end
+        if bt_expr(e, X.bt) ~= D then
+            -- (a static table CONSTRUCTOR in a dynamic position — a forced or boxed variable's `{}` / `{ 0 }` — is built
+            -- at run time from its lifted fields: a table is never lifted whole, and two runs must not share one)
+            if e.op == 'table' then
+                local fields = {}
+                for i, f in ipairs(e.fields) do fields[i] = { key = lift(sval(f.key, X), X), val = rexpr(f.val, X) } end
+                return { op = 'table', fields = fields }
+            end
+            return lift(sval(e, X), X)
+        end
         local op = e.op
         if op == 'var' then
             local nm = X.ren[e.id]
@@ -914,6 +1138,11 @@ function M.specialize(prog, fname, division, statics, opts)
             for i, a in ipairs(e.args) do args[i] = rexpr(a, X) end
             return { op = 'prim', name = e.name, args = args }
         end
+        if op == 'method' then
+            local args = {}
+            for i, a in ipairs(e.args) do args[i] = rexpr(a, X) end
+            return { op = 'method', obj = rexpr(e.obj, X), m = e.m, args = args }
+        end
         if op == 'call' then return apply_spec({ kind = 'fn', name = e.fn, f = prog.funcs[e.fn] }, e.args, X) end
         if op == 'callv' then
             if bt_expr(e.f, X.bt) == D then
@@ -926,6 +1155,27 @@ function M.specialize(prog, fname, division, statics, opts)
             return apply_spec({ kind = 'lam', c = c }, e.args, X)
         end
         refuse('residualizing the IR op ' .. tostring(op))
+    end
+
+    -- residual expressions for a LIST (a return's, a multiple declaration's): a static call last expands to every value
+    local function rexprs(es, X)
+        local out = {}
+        for i, e in ipairs(es) do
+            if i == #es and M.MULTI[e.op] and bt_expr(e, X.bt) == S then
+                local vs = svalm(e, X)
+                for j = 1, vs.n do out[#out + 1] = lift(vs[j], X) end
+            else out[#out + 1] = rexpr(e, X) end
+        end
+        return out
+    end
+    local function list_bt(ids, es, bt)
+        local any_d, all_d = false, true
+        for i = 1, #ids do
+            local e = es[math.min(i, #es)]
+            local b = bt[ids[i]] or (e and bt_expr(e, bt)) or S
+            if b == D then any_d = true else all_d = false end
+        end
+        return any_d, all_d
     end
 
     -- residual statements for stmts in X; returns rstmts, done (a return reached under static control)
@@ -954,11 +1204,44 @@ function M.specialize(prog, fname, division, statics, opts)
                 else
                     out[#out + 1] = { op = 'assign', target = rexpr(s.target, X), e = rexpr(s.e, X) }
                 end
+            elseif op == 'localm' then
+                local any_d, all_d = list_bt(s.ids, s.es, bt)
+                if not any_d then
+                    local vs = svall(s.es, X)
+                    for i, id in ipairs(s.ids) do env[id] = vs[i] end
+                elseif all_d then
+                    local es = rexprs(s.es, X)
+                    local names = {}
+                    for i, id in ipairs(s.ids) do names[i] = rname(id); env[id] = DYN; X.ren[id] = names[i] end
+                    out[#out + 1] = { op = 'localm', names = names, es = es }
+                else refuse('a declaration of several values mixing static and dynamic ones (rung 3)') end
+            elseif op == 'assignm' then
+                local vars = {}
+                for i, t in ipairs(s.targets) do vars[i] = t.op == 'var' and t.id or -i end
+                local any_d, all_d = false, true
+                for i, t in ipairs(s.targets) do
+                    local d = t.op ~= 'var' or bt[t.id] == D
+                    if d then any_d = true else all_d = false end
+                end
+                if not any_d then
+                    local vs = svall(s.es, X)
+                    for i, t in ipairs(s.targets) do env[t.id] = vs[i] end
+                elseif all_d then
+                    local targets = {}
+                    for i, t in ipairs(s.targets) do
+                        if t.op == 'var' then
+                            local nm = X.ren[t.id]
+                            if not nm then refuse('no residual name for `' .. tostring(prog.names[t.id]) .. '`') end
+                            targets[i] = { op = 'var', name = nm }
+                        else targets[i] = rexpr(t, X) end
+                    end
+                    out[#out + 1] = { op = 'assignm', targets = targets, es = rexprs(s.es, X) }
+                else refuse('a multiple assignment mixing static and dynamic targets (rung 3)') end
             elseif op == 'callstmt' then
                 if bt_expr(s.e, bt) == S then sval(s.e, X) -- (a static call, run for its effect)
                 else out[#out + 1] = { op = 'callstmt', e = rexpr(s.e, X) } end
             elseif op == 'ret' then
-                out[#out + 1] = { op = 'ret', e = rexpr(s.e, X) }
+                out[#out + 1] = { op = 'ret', es = rexprs(s.es, X) }
                 return out, true
             elseif op == 'if' then
                 -- the static prefix of the clauses decides; from the first dynamic condition on, a residual if
@@ -1051,13 +1334,18 @@ function M.count_uses(e, uses, w)
     elseif op == 'table' then for _, f in ipairs(e.fields) do M.count_uses(f.key, uses, w); M.count_uses(f.val, uses, w) end
     elseif op == 'call' or op == 'prim' then for _, a in ipairs(e.args) do M.count_uses(a, uses, w) end
     elseif op == 'callv' then M.count_uses(e.f, uses, w); for _, a in ipairs(e.args) do M.count_uses(a, uses, w) end
+    elseif op == 'method' then M.count_uses(e.obj, uses, w); for _, a in ipairs(e.args) do M.count_uses(a, uses, w) end
     elseif op == 'lambda' then count_block(e.body, uses, 2) end
 end
 function count_block(stmts, uses, w)
     for _, s in ipairs(stmts) do
         local op = s.op
-        if op == 'local' or op == 'ret' or op == 'callstmt' then M.count_uses(s.e, uses, w)
+        if op == 'local' or op == 'callstmt' then M.count_uses(s.e, uses, w)
+        elseif op == 'ret' or op == 'localm' then for _, e in ipairs(s.es) do M.count_uses(e, uses, w) end
         elseif op == 'assign' then M.count_uses(s.target, uses, w); M.count_uses(s.e, uses, w)
+        elseif op == 'assignm' then
+            for _, t in ipairs(s.targets) do M.count_uses(t, uses, w) end
+            for _, e in ipairs(s.es) do M.count_uses(e, uses, w) end
         elseif op == 'if' then
             for _, c in ipairs(s.clauses) do M.count_uses(c.cond, uses, w); count_block(c.body, uses, w) end
             count_block(s.els, uses, w)
@@ -1090,6 +1378,11 @@ function M.substitute(e, subst)
         for i, a in ipairs(e.args) do args[i] = M.substitute(a, subst) end
         return { op = 'callv', f = M.substitute(e.f, subst), args = args }
     end
+    if op == 'method' then
+        local args = {}
+        for i, a in ipairs(e.args) do args[i] = M.substitute(a, subst) end
+        return { op = 'method', obj = M.substitute(e.obj, subst), m = e.m, args = args }
+    end
     if op == 'lambda' then return { op = 'lambda', params = e.params, body = subst_block(e.body, subst) } end
     return e
 end
@@ -1099,8 +1392,15 @@ function subst_block(stmts, subst)
         local op = s.op
         local n = {}
         for k, v in pairs(s) do n[k] = v end
-        if op == 'local' or op == 'ret' or op == 'callstmt' then n.e = M.substitute(s.e, subst)
+        if op == 'local' or op == 'callstmt' then n.e = M.substitute(s.e, subst)
+        elseif op == 'ret' or op == 'localm' then
+            n.es = {}
+            for j, e in ipairs(s.es) do n.es[j] = M.substitute(e, subst) end
         elseif op == 'assign' then n.target = M.substitute(s.target, subst); n.e = M.substitute(s.e, subst)
+        elseif op == 'assignm' then
+            n.targets, n.es = {}, {}
+            for j, t in ipairs(s.targets) do n.targets[j] = M.substitute(t, subst) end
+            for j, e in ipairs(s.es) do n.es[j] = M.substitute(e, subst) end
         elseif op == 'if' then
             n.clauses = {}
             for j, c in ipairs(s.clauses) do n.clauses[j] = { cond = M.substitute(c.cond, subst), body = subst_block(c.body, subst) } end
@@ -1137,6 +1437,11 @@ local function pexpr(e, ind)
         for i, f in ipairs(e.fields) do parts[i] = '[' .. pexpr(f.key, ind) .. '] = ' .. pexpr(f.val, ind) end
         return '{ ' .. table.concat(parts, ', ') .. ' }'
     end
+    if op == 'method' then
+        local parts = {}
+        for i, a in ipairs(e.args) do parts[i] = pexpr(a, ind) end
+        return '(' .. pexpr(e.obj, ind) .. '):' .. e.m .. '(' .. table.concat(parts, ', ') .. ')'
+    end
     if op == 'call' or op == 'prim' or op == 'callv' then
         local parts = {}
         for i, a in ipairs(e.args) do parts[i] = pexpr(a, ind) end
@@ -1161,7 +1466,19 @@ local function pstmt(s, ind, out)
         local t = pexpr(s.e, ind)
         if t:sub(1, 1) == '(' then t = 'local _ = ' .. t end
         out[#out + 1] = ind .. t
-    elseif op == 'ret' then out[#out + 1] = ind .. 'return ' .. pexpr(s.e, ind)
+    elseif op == 'ret' then
+        local parts = {}
+        for i, e in ipairs(s.es) do parts[i] = pexpr(e, ind) end
+        out[#out + 1] = ind .. 'return' .. (#parts > 0 and (' ' .. table.concat(parts, ', ')) or '')
+    elseif op == 'localm' then
+        local parts = {}
+        for i, e in ipairs(s.es) do parts[i] = pexpr(e, ind) end
+        out[#out + 1] = ind .. 'local ' .. table.concat(s.names, ', ') .. (#parts > 0 and (' = ' .. table.concat(parts, ', ')) or '')
+    elseif op == 'assignm' then
+        local ts, parts = {}, {}
+        for i, t in ipairs(s.targets) do ts[i] = pexpr(t, ind) end
+        for i, e in ipairs(s.es) do parts[i] = pexpr(e, ind) end
+        out[#out + 1] = ind .. table.concat(ts, ', ') .. ' = ' .. table.concat(parts, ', ')
     elseif op == 'if' then
         for i, c in ipairs(s.clauses) do
             out[#out + 1] = ind .. (i == 1 and 'if ' or 'elseif ') .. pexpr(c.cond, ind) .. ' then'

@@ -128,7 +128,7 @@ test('mix: CONGRUENCE — a variable assigned under dynamic control stays dynami
     end
 end)
 
-test('mix: what mix does not handle is REFUSED by name — while, varargs, method calls, a static value that never repeats', function ()
+test('mix: what mix does not handle is REFUSED by name — while, varargs, a static value that never repeats', function ()
     ready()
     local function refusal(src, fname, division, statics)
         local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), fname, division, statics)
@@ -137,7 +137,6 @@ test('mix: what mix does not handle is REFUSED by name — while, varargs, metho
     end
     ok(refusal('local function f(x)\n    while x > 0 do x = x - 1 end\n    return x\nend\n', 'f', { 'D' }, {}):find('while', 1, true))
     ok(refusal('local function f(...)\n    return 1\nend\n', 'f', {}, {}):find('parameter', 1, true))
-    ok(refusal('local function f(s)\n    return s:upper()\nend\n', 'f', { 'D' }, {}):find('method call', 1, true))
     ok(refusal('local function f(x, n)\n    if x > 0 then return f(x - 1, n + 1) end\n    return n\nend\n', 'f', { 'D', 'S' }, { nil, 0 }):find('specialization depth', 1, true))
 end)
 
@@ -295,7 +294,7 @@ test('mix: a closure\'s DYNAMIC parts are never computed early — a call whose 
     eq(use(counter()), r2(counter()), 'g runs ONCE, as in the original — not once per call of the closure\n' .. t2)
 end)
 
-test('mix: what rung 2 does not handle is REFUSED by name — a captured per-iteration local, a closure assigning or storing into a captured variable', function ()
+test('mix: what rung 3 does not handle is REFUSED by name — a captured per-iteration local, a closure assigning a captured PARAMETER', function ()
     ready()
     local function refusal(src, fname, division, statics)
         local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), fname, division, statics)
@@ -304,17 +303,78 @@ test('mix: what rung 2 does not handle is REFUSED by name — a captured per-ite
     end
     local r1 = refusal('local function f(t)\n    local out = {}\n    for i = 1, 3 do out[i] = function () return i end end\n    return out\nend\n', 'f', { 'D' }, {})
     ok(r1:find('a local of one loop iteration', 1, true), r1)
-    local r2 = refusal('local function f(x)\n    local n = 0\n    local g = function () n = n + 1 end\n    g()\n    return n\nend\n', 'f', { 'D' }, {})
-    ok(r2:find('assigning the captured `n`', 1, true), r2)
-    local r3 = refusal('local function f(x)\n    local t = {}\n    local g = function () t[1] = x end\n    g()\n    return t[1]\nend\n', 'f', { 'D' }, {})
-    ok(r3:find('assigning the captured `t`', 1, true), r3)
+    local r2 = refusal('local function f(x)\n    local g = function () x = x + 1 end\n    g()\n    return x\nend\n', 'f', { 'D' }, {})
+    ok(r2:find('assigning the captured parameter `x`', 1, true), r2)
+end)
+
+-- ── RUNG 3: several values, methods, boxes — what the algebra's own matcher needs (CART-1279's census) ─────────────
+local RUNG3 = [[
+local function check(v, lim)
+    if v > lim then return false, ("%d exceeds %d"):format(v, lim) end
+    return true, nil
+end
+local function count(xs, lim)
+    local n = 0
+    local seen = {}
+    local function inc(x) n = n + 1; seen[#seen + 1] = x end
+    for _, x in ipairs(xs) do
+        local ok, why = check(x, lim)
+        if ok then inc(x) end
+    end
+    local first, rest = 0, 0
+    first, rest = n, #seen
+    return first + rest, seen[1]
+end
+local function msg(v, lim)
+    local ok, why = check(v, lim)
+    if ok then return "ok" end
+    return why:upper()
+end
+local function pair(n)
+    return n, n * 2
+end
+local function twice(x, lim)
+    local a, b = pair(lim)
+    return x + a + b, pair(lim)
+end
+]]
+
+test('mix: RUNG 3 — several values, method calls on strings, and a counter a closure assigns (a BOX) — equivalent, the static bound gone', function ()
+    ready()
+    local count, msg = original(RUNG3, 'count'), original(RUNG3, 'msg')
+    for _, lim in ipairs({ 0, 2, 5 }) do
+        local r1, t1 = residual(RUNG3, 'count', { 'D', 'S' }, { nil, lim })
+        for _, xs in ipairs({ {}, { 1 }, { 3, 1, 6, 2 }, { 9, 9 } }) do
+            local a1, b1 = count(xs, lim)
+            local a2, b2 = r1(xs)
+            eq({ a1, b1 }, { a2, b2 }, ('count(%s, %d)'):format(vim.inspect(xs, { newline = '' }), lim))
+        end
+        gone(t1, { 'lim' })
+        ok(t1:find('n_%d+%[1%]'), 'n is a box: read and written through [1]\n' .. t1)
+        local r2, t2 = residual(RUNG3, 'msg', { 'D', 'S' }, { nil, lim })
+        for _, v in ipairs({ -1, lim, lim + 1, 40 }) do eq(msg(v, lim), r2(v), ('msg(%d, %d)'):format(v, lim)) end
+        ok(t2:find('):upper()', 1, true) or t2:find('string.format', 1, true) or t2:find('):format(', 1, true), 'the method calls stay method calls\n' .. t2)
+        -- (a STATIC call of several values: computed now, every value used — `local a, b = pair(lim)`, `return …, pair(lim)`)
+        local twice = original(RUNG3, 'twice')
+        local r3, t3 = residual(RUNG3, 'twice', { 'D', 'S' }, { nil, lim })
+        for _, x in ipairs({ 0, 7 }) do eq({ twice(x, lim) }, { r3(x) }, ('twice(%d, %d): all three values'):format(x, lim)) end
+        gone(t3, { 'lim', 'a', 'b' })
+    end
+end)
+
+test('mix: a string literal\'s ESCAPES are read as Lua reads them — \\n \\t \\\\ \\" \\ddd \\xXX — and survive the residual', function ()
+    ready()
+    local src = 'local function f(x)\n    return x .. "a\\tb\\n\\065\\x42|\\\\|\\"" .. \'\\\'\'\nend\n'
+    local r, text = residual(src, 'f', { 'D' }, {})
+    eq(original(src, 'f')('>'), r('>'), text)
+    eq('>a\tb\nAB|\\|"\'', r('>'))
 end)
 
 test('mix: the CENSUS — lower with { collect = {} } records every refused statement and goes on, so one run lists what blocks mix on a program', function ()
     ready()
     local got = {}
-    local prog = MX.lower(assert(R.read('local function f(x)\n    local a, b = g(x)\n    if x then return x:upper() end\n    return a\nend\nlocal function g(y)\n    while y do y = false end\n    return y\nend\n', 'lua')), { collect = got })
-    eq({ 'a declaration with 2 names and 1 values (rung 1: one each)', 'a method call `x:upper` (rung 2)', '`while_statement` (not in S)' },
+    local prog = MX.lower(assert(R.read('local function f(x)\n    local h = function () x = 1 end\n    if x then return x:upper() end\n    return h\nend\nlocal function g(y)\n    while y do y = false end\n    return y\nend\n', 'lua')), { collect = got })
+    eq({ 'a closure assigning the captured parameter `x` (rung 3: a parameter is not boxed)', '`while_statement` (not in S)' },
         vim.tbl_map(function (r) return r.why end, got))
     ok(prog.funcs.f and prog.funcs.g, 'both functions lowered, the refused statements skipped')
 end)
