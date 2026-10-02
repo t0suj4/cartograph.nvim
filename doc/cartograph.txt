@@ -828,6 +828,11 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
                               it (a template): the file and line, and every
                               source it overrode (quickfix); a null that
                               removes a default is said so
+  :CartographHelmBranch [-f values.yaml]... [--set k=v]...
+                              why the if / with / range at the cursor (or
+                              the nearest above) took its arm: what its
+                              condition evaluated to, and the values source
+                              of every key it read (quickfix)
   :CartographHelmBase {manifests} [chart]
                               the chart rendered with NO values against the
                               plain manifests it should produce: every spot

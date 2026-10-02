@@ -263,3 +263,25 @@ test('helmprov: KEY_LINES — every key path of a values file at its line; ROOT_
     local r, scope = P.root_of(root .. '/charts/db/values.yaml')
     eq(vim.fn.fnamemodify(root, ':p'):gsub('/$', ''), r); eq('db', scope)
 end)
+
+test('helmprov: BRANCH EVIDENCE — each if / range: what its condition evaluated to, the arm taken, and the source of every key it read', function ()
+    ready()
+    local root = chart({
+        ['Chart.yaml'] = 'apiVersion: v2\nname: shop\nversion: 0.1.0\n',
+        ['values.yaml'] = 'ingress:\n  enabled: true\nhosts:\n- a\n- b\n',
+        ['templates/in.yaml'] = '{{- if .Values.ingress.enabled }}\nkind: Ingress\n{{- end }}\n{{- range .Values.hosts }}\n# {{ . }}\n{{- end }}\n',
+        ['stage.yaml'] = 'ingress:\n  enabled: false\n',
+    })
+    local p = assert(P.render(root, { branches = true, origins = true, values = { root .. '/stage.yaml' } }))
+    local bs = P.branches(p)
+    local by = {}
+    for _, d in ipairs(bs) do by[d.line] = d end
+    local i = by[1]
+    eq({ 'if', 'bool:false', { none = 1 } }, { i.kind, i.value, i.taken })
+    eq({ 'ingress.enabled' }, vim.tbl_map(function (r) return r.path end, i.reads))
+    eq({ 'stage.yaml', 2 }, { vim.fn.fnamemodify(i.reads[1].from.file, ':t'), i.reads[1].from.line }, 'the stage file decided it')
+    eq({ 'values.yaml', 2 }, { vim.fn.fnamemodify(i.reads[1].over[1].file, ':t'), i.reads[1].over[1].line }, 'over the chart default')
+    local r = by[4]
+    eq({ 'range', 'list(2)', { body = 1 } }, { r.kind, r.value, r.taken })
+    ok(P.branch_text(i):find('-> bool:false (took none)', 1, true), P.branch_text(i))
+end)

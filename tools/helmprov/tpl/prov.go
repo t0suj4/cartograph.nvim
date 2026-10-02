@@ -52,8 +52,9 @@ type Arm struct {
 	Loc     string `json:"loc"`
 	Kind    string `json:"kind"`
 	Pipe    string `json:"pipe"`
-	Taken   string `json:"taken"`          // then | else | none (an if/with with no else, false) | body | empty | unknown (symbolic)
-	Else    bool   `json:"else,omitempty"` // the node has an else arm
+	Taken   string `json:"taken"`           // then | else | none (an if/with with no else, false) | body | empty | unknown (symbolic)
+	Else    bool   `json:"else,omitempty"`  // the node has an else arm
+	Value   string `json:"value,omitempty"` // what the condition / range pipeline evaluated to (CART-1309)
 	Untaken bool   `json:"untaken,omitempty"`
 }
 
@@ -157,11 +158,11 @@ func (r *Recorder) Finish(name, raw string) string {
 }
 
 // arm records which arm of a control node the values took (exploring only).
-func (s *state) arm(n parse.Node, kind string, pipe *parse.PipeNode, taken string, hasElse bool) {
+func (s *state) arm(n parse.Node, kind string, pipe *parse.PipeNode, taken string, hasElse bool, value string) {
 	if Rec == nil || !Rec.Branches {
 		return
 	}
-	Rec.Arms = append(Rec.Arms, Arm{Loc: loc(n, s.tmpl), Kind: kind, Pipe: pipe.String(), Taken: taken, Else: hasElse, Untaken: len(Rec.guards) > 0})
+	Rec.Arms = append(Rec.Arms, Arm{Loc: loc(n, s.tmpl), Kind: kind, Pipe: pipe.String(), Taken: taken, Else: hasElse, Value: value, Untaken: len(Rec.guards) > 0})
 }
 
 // maxGuards bounds nested exploration (each level is one untaken arm inside another).
@@ -342,4 +343,37 @@ func (s *state) symGuard(n parse.Node, f func()) {
 		}
 	}()
 	f()
+}
+
+// condText is what a condition or range pipeline evaluated to, as evidence (CART-1309): a scalar typed, a
+// collection by its size, a placeholder as itself
+func condText(v reflect.Value) string {
+	if y, ok := symOf(v); ok {
+		return y.String()
+	}
+	v = indirectInterface(v)
+	if !v.IsValid() {
+		return "nil"
+	}
+	switch v.Kind() {
+	case reflect.Bool:
+		return fmt.Sprintf("bool:%v", v.Bool())
+	case reflect.String:
+		t := v.String()
+		if len(t) > 60 {
+			t = t[:60] + "…"
+		}
+		return "str:" + t
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return fmt.Sprintf("number:%d", v.Int())
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return fmt.Sprintf("number:%d", v.Uint())
+	case reflect.Float32, reflect.Float64:
+		return fmt.Sprintf("number:%g", v.Float())
+	case reflect.Map:
+		return fmt.Sprintf("map(%d)", v.Len())
+	case reflect.Slice, reflect.Array:
+		return fmt.Sprintf("list(%d)", v.Len())
+	}
+	return v.Kind().String()
 }

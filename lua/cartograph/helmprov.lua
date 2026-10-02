@@ -174,6 +174,56 @@ function M.domains(prov)
     return out
 end
 
+--- BRANCH EVIDENCE (CART-1309), from a `branches` render (with `origins = true` too for the values' sources): every
+--- if / with / range at its template line — the condition, what it EVALUATED TO, which arm the values took, and the
+--- `.Values` paths it read with each one's origin -> { { file, line, col, kind, pipe, value, taken = { [arm] = n },
+--- reads = { { path, value, from, over, removed_by } } } } by location. A condition run in several executions (inside a
+--- range, a helper included twice) counts every arm it took; `value` is the first execution's.
+function M.branches(prov)
+    local by, out = {}, {}
+    for _, a in ipairs(prov.arms or {}) do
+        if not a.untaken then
+            local d = by[a.loc]
+            if not d then
+                local f, line, col = M.loc(a.loc)
+                d = { loc = a.loc, file = f, line = line, col = col, kind = a.kind, pipe = a.pipe, value = a.value, taken = {}, reads = {} }
+                by[a.loc] = d
+                out[#out + 1] = d
+            end
+            d.taken[a.taken] = (d.taken[a.taken] or 0) + 1
+        end
+    end
+    -- the condition's reads: the taken-render reads at the condition's own line and file
+    local seen = {}
+    for _, r in ipairs(prov.reads or {}) do
+        if not r.untaken then
+            local f, line = M.loc(r.loc)
+            for _, d in ipairs(out) do
+                if d.file == f and d.line == line and (d.pipe or ''):find(r.path:gsub('%.', '%%.'), 1) and not seen[d.loc .. r.path] then
+                    seen[d.loc .. r.path] = true
+                    local o = prov.origins and M.origin(prov, r.path) or nil
+                    d.reads[#d.reads + 1] = { path = r.path, value = o and o.value, from = o and (o.from or o.removed_by),
+                        removed = o and o.removed_by ~= nil, over = o and o.over or {} }
+                end
+            end
+        end
+    end
+    table.sort(out, function (a, b) if a.file ~= b.file then return tostring(a.file) < tostring(b.file) end return (a.line or 0) < (b.line or 0) end)
+    return out
+end
+
+--- one branch as text: `if .Values.ingress.enabled -> bool:false (took none) <- values.yaml:40`
+function M.branch_text(d)
+    local took = {}
+    for arm, n in pairs(d.taken) do took[#took + 1] = arm .. (n > 1 and ('×' .. n) or '') end
+    table.sort(took)
+    local parts = { ('%s %s -> %s (took %s)'):format(d.kind, d.pipe or '', tostring(d.value), table.concat(took, ', ')) }
+    for _, r in ipairs(d.reads) do
+        parts[#parts + 1] = ('.Values.%s %s %s'):format(r.path, r.removed and 'REMOVED by' or '<-', M.site_text(r.from))
+    end
+    return table.concat(parts, '; ')
+end
+
 --- the HOLES of a `branches` render: untaken arms that fail under these values (`{{ if .Values.a }}{{ .Values.a.b }}`
 --- with no a) -> { { guard, loc, err, text } } — not errors: what the chart would need to render that arm
 function M.holes(prov)

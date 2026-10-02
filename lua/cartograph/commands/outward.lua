@@ -105,6 +105,42 @@ function M.register(H)
         if #items > 1 then vim.fn.setqflist({}, ' ', { title = 'helm origin: ' .. path, items = items }) end
     end, { nargs = '*', complete = 'file', desc = 'cartograph: which values source won the key under the cursor, and what it overrode' })
 
+    -- WHY DID THIS BLOCK (NOT) RENDER (CART-1309): the if / with / range at the cursor line (or the nearest one above
+    -- it): what its condition evaluated to, which arm the values took, and the values source of every key it read
+    cmd('CartographHelmBranch', function (o)
+        local HP = require 'cartograph.helmprov'
+        local file = vim.api.nvim_buf_get_name(0)
+        local chart = HP.root_of(file)
+        if not chart then return vim.notify('cartograph: not inside a chart', vim.log.levels.WARN) end
+        local files, sets, i = {}, {}, 1
+        while i <= #o.fargs do
+            local a = o.fargs[i]
+            if (a == '-f' or a == '--values') and o.fargs[i + 1] then files[#files + 1] = vim.fn.fnamemodify(o.fargs[i + 1], ':p'); i = i + 2
+            elseif a == '--set' and o.fargs[i + 1] then sets[#sets + 1] = o.fargs[i + 1]; i = i + 2
+            else return vim.notify('cartograph: usage :CartographHelmBranch [-f values.yaml]... [--set k=v]...', vim.log.levels.WARN) end
+        end
+        local p, why = HP.render(chart, { branches = true, origins = true, values = files, set = sets })
+        if not p then return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN) end
+        local rel = file:sub(#chart + 2)
+        local row = vim.api.nvim_win_get_cursor(0)[1]
+        local best
+        for _, d in ipairs(HP.branches(p)) do
+            if d.file == rel and d.line <= row and (not best or d.line > best.line) then best = d end
+        end
+        if not best then return vim.notify('cartograph: no if / with / range at or above the cursor in this template', vim.log.levels.INFO) end
+        vim.notify(('%s:%d  %s'):format(rel, best.line, HP.branch_text(best)), vim.log.levels.INFO)
+        local items = {}
+        for _, r in ipairs(best.reads) do
+            if r.from and r.from.file then
+                items[#items + 1] = { filename = r.from.file, lnum = r.from.line or 1, col = 1, text = (r.removed and 'removes ' or 'sets ') .. r.path .. ' (decides line ' .. best.line .. ')' }
+            end
+            for _, s in ipairs(r.over or {}) do
+                if s.file then items[#items + 1] = { filename = s.file, lnum = s.line or 1, col = 1, text = 'overridden: ' .. r.path } end
+            end
+        end
+        if #items > 0 then vim.fn.setqflist({}, ' ', { title = 'helm branch: ' .. rel .. ':' .. best.line, items = items }) end
+    end, { nargs = '*', complete = 'file', desc = 'cartograph: why the if/with/range at the cursor took its arm — the condition\'s value and the source of every key it read' })
+
     -- a chart's AUTHORED base against the plain manifests it should produce (CART-0873): where they vary and the
     -- chart hardcodes, at each template line
     cmd('CartographHelmBase', function (o)
