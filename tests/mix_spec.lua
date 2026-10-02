@@ -310,6 +310,15 @@ test('mix: what rung 2 does not handle is REFUSED by name — a captured per-ite
     ok(r3:find('assigning the captured `t`', 1, true), r3)
 end)
 
+test('mix: the CENSUS — lower with { collect = {} } records every refused statement and goes on, so one run lists what blocks mix on a program', function ()
+    ready()
+    local got = {}
+    local prog = MX.lower(assert(R.read('local function f(x)\n    local a, b = g(x)\n    if x then return x:upper() end\n    return a\nend\nlocal function g(y)\n    while y do y = false end\n    return y\nend\n', 'lua')), { collect = got })
+    eq({ 'a declaration with 2 names and 1 values (rung 1: one each)', 'a method call `x:upper` (rung 2)', '`while_statement` (not in S)' },
+        vim.tbl_map(function (r) return r.why end, got))
+    ok(prog.funcs.f and prog.funcs.g, 'both functions lowered, the refused statements skipped')
+end)
+
 test('mix: mix itself stays INSIDE S — no while / repeat / goto / varargs / metatables / load (S4–S5 self-apply it)', function ()
     ready()
     local path = vim.api.nvim_get_runtime_file('lua/cartograph/mix.lua', false)[1]

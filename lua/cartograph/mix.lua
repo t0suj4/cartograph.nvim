@@ -303,14 +303,25 @@ end
 function lower_block(t, cx, scope)
     local out = {}
     local inner = { names = {}, up = scope }
-    for _, s in ipairs(named(t)) do lower_stmt(s, cx, inner, out) end
+    for _, s in ipairs(named(t)) do
+        if cx.collect then
+            -- (the CENSUS: a refused statement is recorded and skipped — the innermost one, since every nested block
+            -- comes through here — and lowering goes on, so one run lists everything mix does not handle yet)
+            local okl, e = pcall(lower_stmt, s, cx, inner, out)
+            if not okl then
+                if type(e) ~= 'table' or not e.refusal then error(e, 0) end
+                cx.collect[#cx.collect + 1] = { why = e.refusal, text = (text(s):gsub('%s+', ' ')):sub(1, 100) }
+            end
+        else lower_stmt(s, cx, inner, out) end
+    end
     return out
 end
 
 --- a chunk of top-level function declarations -> program { funcs = { name -> { name, params = { id … }, pnames, body } },
---- names = { id -> source name } }
-function M.lower(term)
-    local cx = { funcs = {}, names = {}, nid = 0, nlam = 0 }
+--- names = { id -> source name } }. opts.collect = {}: the CENSUS — every refused statement recorded there as
+--- { why, text } and skipped, instead of the first one refusing the whole program
+function M.lower(term, opts)
+    local cx = { funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect }
     local decls = {}
     for _, d in ipairs(named(term)) do
         if d.k == 'function_declaration' then
