@@ -603,6 +603,16 @@ func recAllTpls(c ci.Charter, templates map[string]renderable, values common.Val
 	} else if vs, err := values.Table("Values." + accessor.Name()); err == nil {
 		next["Values"] = vs
 	}
+	// PROVENANCE (CART-1302): a symbolic render knows no values — .Values is a Sym (a subchart's scoped under its name)
+	if template.Rec != nil && template.Rec.Symbolic {
+		if accessor.IsRoot() {
+			next["Values"] = template.Sym{}
+		} else if parent, ok := vals["Values"].(template.Sym); ok {
+			next["Values"] = parent.Field(accessor.Name())
+		} else {
+			next["Values"] = template.Sym{Path: accessor.Name()}
+		}
+	}
 
 	for _, child := range accessor.Dependencies() {
 		// TODO: Handle error

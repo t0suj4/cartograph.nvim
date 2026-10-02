@@ -188,3 +188,30 @@ test('helmprov: a site read in a taken arm ANYWHERE is taken (a range body takes
         { path = 'a', loc = 'c/templates/t.yaml:5:4', untaken = true, guard = 'g' } } }
     eq({ { 3, nil }, { 5, true } }, vim.tbl_map(function (u) return { u.line, u.untaken } end, P.uses(prov, 'a')))
 end)
+
+test('helmprov: SYMBOLIC — no values at all: .Values a placeholder, conditions unknown, a range one element, an uncallable call a placeholder', function ()
+    ready()
+    local files = vim.deepcopy(BR)
+    files['values.yaml'] = nil
+    files['templates/svc.yaml'] = 'apiVersion: v1\nkind: Service\nmetadata:\n  name: {{ .Values.name | trunc 63 | trimSuffix "-" }}\n'
+    local p = assert(P.render(chart(files), { release = 'r1', symbolic = true }))
+    local c = p.files['shop/templates/deployment.yaml'].content
+    for _, want in ipairs({
+        'image: \u{27e8}.Values.image.repo\u{27e9}:\u{27e8}.Values.image.tag\u{27e9}', -- through the include, as the helper wrote it
+        'containerPort: \u{27e8}.Values.port\u{27e9}',
+        'args: [--extra=\u{27e8}.Values.extraArg\u{27e9}]', -- the then-arm of an UNKNOWN condition renders
+        'minReadySeconds: \u{27e8}len .Values.image\u{27e9}', -- a builtin given a placeholder is not called
+        'paused: \u{27e8}.Values.sidecar.paused\u{27e9}', -- no hole: nothing is nil any more
+        '# \u{27e8}.Values.tags[].name\u{27e9}', -- the range's one element, through its variable
+    }) do ok(c:find(want, 1, true), want .. '\n' .. c) end
+    ok(p.files['shop/templates/svc.yaml'].content:find('name: \u{27e8}.Values.name | trunc 63 | trimSuffix "-"\u{27e9}', 1, true),
+        'a placeholder in a TYPED parameter: the call is not made, the stage keeps what was piped into it\n' .. p.files['shop/templates/svc.yaml'].content)
+    for _, a in ipairs(p.arms) do
+        if a.kind == 'range' then eq('body', a.taken) else eq('unknown', a.taken, a.loc) end
+    end
+    eq({ 'tags', 'tags[].name' }, vim.tbl_map(function (u) return u.path end, P.uses(p, 'tags')),
+        'the range reads the list; an element\'s field, through the loop variable, is a use of it too')
+    eq({ { 'fallbackPort', true } }, vim.tbl_map(function (u) return { u.path, u.untaken } end, P.uses(p, 'fallbackPort')),
+        'the else of an unknown condition is explored')
+    eq({}, P.holes(p))
+end)

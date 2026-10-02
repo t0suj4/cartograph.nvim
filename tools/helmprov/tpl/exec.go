@@ -5,14 +5,14 @@
 package template
 
 import (
+	"cartograph/helmprov/tpl/internal/fmtsort"
+	"cartograph/helmprov/tpl/parse"
 	"errors"
 	"fmt"
-	"cartograph/helmprov/tpl/internal/fmtsort"
 	"io"
 	"reflect"
 	"runtime"
 	"strings"
-	"cartograph/helmprov/tpl/parse"
 )
 
 // maxExecDepth specifies the maximum stack depth of templates within
@@ -32,14 +32,15 @@ func initMaxExecDepth() int {
 // template so that multiple executions of the same template
 // can execute in parallel.
 type state struct {
-	tmpl  *Template
-	wr    io.Writer
-	node  parse.Node // current node, for errors
-	vars  []variable // push-down stack of variable values.
-	depth int        // the height of the stack of executing templates.
-	cw    *countWriter // PROVENANCE: the output counter of a top-level execution (nil: not recording offsets)
-	file  *File        // PROVENANCE: the file whose spans this execution records
-	cur   *Span        // PROVENANCE: the action being evaluated (its .Values reads attach to it)
+	tmpl   *Template
+	wr     io.Writer
+	node   parse.Node   // current node, for errors
+	vars   []variable   // push-down stack of variable values.
+	depth  int          // the height of the stack of executing templates.
+	cw     *countWriter // PROVENANCE: the output counter of a top-level execution (nil: not recording offsets)
+	file   *File        // PROVENANCE: the file whose spans this execution records
+	cur    *Span        // PROVENANCE: the action being evaluated (its .Values reads attach to it)
+	symHit bool         // SYMBOLIC: an argument of the call being built was a Sym in a typed slot
 }
 
 // variable holds the dynamic value of a variable such as $, $x etc.
@@ -275,6 +276,17 @@ var (
 // Walk functions step through the major pieces of the template structure,
 // generating output as they go.
 func (s *state) walk(dot reflect.Value, node parse.Node) {
+	switch node.(type) {
+	case *parse.ActionNode, *parse.IfNode, *parse.RangeNode, *parse.WithNode, *parse.TemplateNode:
+		if symbolic() {
+			s.symGuard(node, func() { s.walk1(dot, node) })
+			return
+		}
+	}
+	s.walk1(dot, node)
+}
+
+func (s *state) walk1(dot reflect.Value, node parse.Node) {
 	s.at(node)
 	switch node := node.(type) {
 	case *parse.ActionNode:
@@ -343,7 +355,11 @@ func (s *state) walkIfOrWith(typ parse.NodeType, dot reflect.Value, pipe *parse.
 		kind = "with"
 	}
 	if truth {
-		s.arm(node, kind, pipe, "then", elseList != nil)
+		taken := "then"
+		if _, ok := symOf(val); ok {
+			taken = "unknown" // SYMBOLIC: both arms possible — the then-arm renders, the else-arm is explored
+		}
+		s.arm(node, kind, pipe, taken, elseList != nil)
 		if typ == parse.NodeWith {
 			s.walk(val, list)
 		} else {
@@ -432,6 +448,7 @@ func (s *state) walkRange1(dot reflect.Value, r *parse.RangeNode) (iterated bool
 	val, _ := indirect(s.evalPipeline(dot, r.Pipe))
 	// mark top of stack before any variables in the body are pushed.
 	mark := s.mark()
+	sym, isSym := symOf(val)
 	oneIteration := func(index, elem reflect.Value) {
 		iterated = true
 		if len(r.Pipe.Decl) > 0 {
@@ -466,6 +483,11 @@ func (s *state) walkRange1(dot reflect.Value, r *parse.RangeNode) (iterated bool
 			}
 		}()
 		s.walk(elem, r.List)
+	}
+	if isSym {
+		// SYMBOLIC: one element standing for all of them
+		oneIteration(reflect.ValueOf(Sym{Expr: "key of " + sym.String()}), reflect.ValueOf(sym.field("[]")))
+		return
 	}
 	switch val.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
@@ -701,7 +723,7 @@ func isHexInt(s string) bool {
 
 func (s *state) evalFieldNode(dot reflect.Value, field *parse.FieldNode, args []parse.Node, final reflect.Value) reflect.Value {
 	s.at(field)
-	if len(field.Ident) > 1 && field.Ident[0] == "Values" {
+	if len(field.Ident) > 1 && field.Ident[0] == "Values" && !symbolic() {
 		s.recordRead(field, field.Ident[1:])
 	}
 	return s.evalFieldChain(dot, dot, field, field.Ident, args, final)
@@ -723,7 +745,7 @@ func (s *state) evalChainNode(dot reflect.Value, chain *parse.ChainNode, args []
 func (s *state) evalVariableNode(dot reflect.Value, variable *parse.VariableNode, args []parse.Node, final reflect.Value) reflect.Value {
 	// $x.Field has $x as the first ident, Field as the second. Eval the var, then the fields.
 	s.at(variable)
-	if len(variable.Ident) > 2 && variable.Ident[0] == "$" && variable.Ident[1] == "Values" {
+	if len(variable.Ident) > 2 && variable.Ident[0] == "$" && variable.Ident[1] == "Values" && !symbolic() {
 		s.recordRead(variable, variable.Ident[2:])
 	}
 	value := s.varValue(variable.Ident[0])
@@ -743,7 +765,11 @@ func (s *state) evalFieldChain(dot, receiver reflect.Value, node parse.Node, ide
 		receiver = s.evalField(dot, ident[i], node, nil, missingVal, receiver)
 	}
 	// Now if it's a method, it gets the arguments.
-	return s.evalField(dot, ident[n-1], node, args, final, receiver)
+	v := s.evalField(dot, ident[n-1], node, args, final, receiver)
+	if symbolic() {
+		s.recordSym(node, v)
+	}
+	return v
 }
 
 func (s *state) evalFunction(dot reflect.Value, node *parse.IdentifierNode, cmd parse.Node, args []parse.Node, final reflect.Value) reflect.Value {
@@ -760,6 +786,9 @@ func (s *state) evalFunction(dot reflect.Value, node *parse.IdentifierNode, cmd 
 // The 'final' argument represents the return value from the preceding
 // value of the pipeline, if any.
 func (s *state) evalField(dot reflect.Value, fieldName string, node parse.Node, args []parse.Node, final, receiver reflect.Value) reflect.Value {
+	if y, ok := symOf(receiver); ok && symbolic() {
+		return reflect.ValueOf(y.field(fieldName))
+	}
 	if !receiver.IsValid() {
 		if s.tmpl.option.missingKey == mapError { // Treat invalid value as missing map key.
 			s.errorf("nil data; no entry for key %q", fieldName)
@@ -903,6 +932,8 @@ func (s *state) evalCall(dot, fun reflect.Value, isBuiltin bool, node parse.Node
 	}
 
 	// Build the arg list.
+	savedHit := s.symHit
+	s.symHit = false
 	argv := make([]reflect.Value, numIn)
 	// Args must be evaluated. Fixed args first.
 	i := 0
@@ -931,6 +962,13 @@ func (s *state) evalCall(dot, fun reflect.Value, isBuiltin bool, node parse.Node
 			}
 		}
 		argv[i] = s.validateType(final, t)
+	}
+
+	if hit := s.symHit; symbolic() {
+		s.symHit = savedHit
+		if v, ok := s.symCall(name, isBuiltin, node, argv, hit, final); ok {
+			return v
+		}
 	}
 
 	// Special case for the "call" builtin.
@@ -970,6 +1008,12 @@ func canBeNil(typ reflect.Type) bool {
 
 // validateType guarantees that the value is valid and assignable to the type.
 func (s *state) validateType(value reflect.Value, typ reflect.Type) reflect.Value {
+	if symbolic() && typ != nil && typ != reflectValueType && typ.Kind() != reflect.Interface {
+		if _, ok := symOf(value); ok {
+			s.symHit = true // the call this argument is for is not made: its result is a Sym (evalCall)
+			return reflect.Zero(typ)
+		}
+	}
 	if !value.IsValid() {
 		if typ == nil {
 			// An untyped nil interface{}. Accept as a proper nil value.

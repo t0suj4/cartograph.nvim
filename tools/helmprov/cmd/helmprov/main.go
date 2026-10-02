@@ -38,6 +38,7 @@ func main() {
 	release := flag.String("release", "release", "release name")
 	ns := flag.String("namespace", "default", "namespace")
 	branches := flag.Bool("branches", false, "also execute the untaken arms (reads, arms, holes)")
+	symbolic := flag.Bool("symbolic", false, "render with NO values: .Values a placeholder, every arm explored (CART-1302)")
 	var files, sets multi
 	flag.Var(&files, "f", "values file (repeatable)")
 	flag.Var(&sets, "set", "k=v override (repeatable)")
@@ -56,23 +57,33 @@ func main() {
 		fail("values", err)
 	}
 	opts := common.ReleaseOptions{Name: *release, Namespace: *ns, Revision: 1, IsInstall: true}
-	rv, err := util.ToRenderValues(ch, vals, opts, common.DefaultCapabilities)
+	// a symbolic render reads no values, so the values schema has nothing to judge
+	rv, err := util.ToRenderValuesWithSchemaValidation(ch, vals, opts, common.DefaultCapabilities, *symbolic)
 	if err != nil {
 		fail("render values", err)
 	}
 	template.Rec = template.NewRecorder()
+	if *symbolic {
+		// ONE render, with nothing concrete to be authoritative about: its files ARE the symbolic text
+		template.Rec.Symbolic, template.Rec.Branches = true, true
+	}
 	out, err := engine.Render(ch, rv)
 	if err != nil {
 		fail("render", err)
 	}
 	res := struct {
-		Files map[string]fileOut `json:"files"`
-		Reads []template.Read    `json:"reads"`
-		Arms  []template.Arm     `json:"arms,omitempty"`
+		Files    map[string]fileOut  `json:"files"`
+		Reads    []template.Read     `json:"reads"`
+		Arms     []template.Arm      `json:"arms,omitempty"`
 		Explored []template.Explored `json:"explored,omitempty"`
 	}{Files: map[string]fileOut{}, Reads: template.Rec.Reads}
 	first := template.Rec
-	if *branches {
+	if *symbolic {
+		res.Reads, res.Arms, res.Explored = first.Reads, first.Arms, first.Explored
+		if res.Arms == nil {
+			res.Arms = []template.Arm{}
+		}
+	} else if *branches {
 		// the explored render: from it only what lies in untaken arms, plus the arms and holes
 		rv2, err := util.ToRenderValues(ch, vals, opts, common.DefaultCapabilities)
 		if err != nil {

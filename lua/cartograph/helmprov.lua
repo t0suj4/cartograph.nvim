@@ -42,7 +42,10 @@ end
 --- reads = { { path, loc, untaken?, guard? } }, chart } | nil, why. opts: release, namespace, values = { file … },
 --- set = { 'k=v' … }, branches (CART-0871: the arms the values did NOT take are executed too, in a second render whose
 --- output never reaches `files` — their reads come back `untaken` with the guard that skipped them, plus `arms` (every
---- control node's execution: loc, kind, pipe, taken, else) and `explored` (each untaken arm's text; `err` = a HOLE))
+--- control node's execution: loc, kind, pipe, taken, else) and `explored` (each untaken arm's text; `err` = a HOLE)),
+--- symbolic (CART-1302: NO values — `.Values` is a placeholder printed `⟨.Values.a.b⟩`, every condition on it UNKNOWN (the
+--- then-arm renders, the else-arm is explored), a range over it one element `a[]`, a call that cannot take it a placeholder
+--- named by its expression, a failing action a hole; `files` are then the chart's AUTHORED BASE, not a render)
 function M.render(chart, opts)
     opts = opts or {}
     local bin, why = M.binary()
@@ -52,9 +55,16 @@ function M.render(chart, opts)
     for _, f in ipairs(opts.values or {}) do cmd[#cmd + 1] = '-f'; cmd[#cmd + 1] = f end
     for _, s in ipairs(opts.set or {}) do cmd[#cmd + 1] = '-set'; cmd[#cmd + 1] = s end
     if opts.branches then cmd[#cmd + 1] = '-branches' end
+    if opts.symbolic then cmd[#cmd + 1] = '-symbolic' end
     cmd[#cmd + 1] = chart
     local r = vim.system(cmd, { text = true }):wait(opts.timeout or 120000)
-    if not r or r.code ~= 0 then return nil, 'helmprov: ' .. vim.trim(((r and r.stderr) or 'did not finish'):gsub('\n.*', '')) end
+    if not r or r.code ~= 0 then
+        -- the error is helmprov's own `helmprov: …` line; Helm's loader may log INFO lines before it
+        local err = r and r.stderr or ''
+        local last
+        for line in err:gmatch('[^\n]+') do if line:match('^helmprov: ') then last = line end end
+        return nil, last or ('helmprov: ' .. (vim.trim(err) ~= '' and vim.trim(err):gsub('\n.*', '') or 'did not finish'))
+    end
     local ok, d = pcall(vim.json.decode, r.stdout, { luanil = { object = true, array = true } })
     if not ok then return nil, 'helmprov: undecodable output' end
     d.chart = chart
@@ -76,7 +86,8 @@ function M.uses(prov, path)
     for pass = 1, 2 do
         for _, r in ipairs(prov.reads or {}) do
             local p = r.path
-            if (pass == 1) == not r.untaken and (p == path or p:sub(1, #path + 1) == path .. '.' or path:sub(1, #p + 1) == p .. '.') then
+            if (pass == 1) == not r.untaken and (p == path or p:sub(1, #path + 1) == path .. '.' or p:sub(1, #path + 1) == path .. '['
+                or path:sub(1, #p + 1) == p .. '.') then
                 local key = p .. '\0' .. r.loc
                 if not seen[key] then
                     seen[key] = true

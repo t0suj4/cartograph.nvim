@@ -10,9 +10,17 @@
 // (`{{ if .Values.a }}{{ .Values.a.b }}` with no a) is a HOLE (its text up to the failure, the error), not an error. Run it as
 // a SEPARATE render: an untaken arm may call a mutating function (sprig's set / merge), so the authoritative render is
 // the one without exploration.
+//
+// SYMBOLIC (CART-1302): with Rec.Symbolic set the engine hands every template a Sym for `.Values` — no values needed. A
+// field of a Sym is a Sym one segment longer (`.Values.a.b`), and its read is recorded at its FINAL path, dot-relative
+// ones inside with/range included. Its truth is UNKNOWN: the then-arm renders and the else-arm is explored. Ranging
+// over it is one symbolic element (`a[]`). Printed, it is a hole marker `⟨.Values.a.b⟩`, and toYaml/toJson see the same
+// string. A function that cannot take a Sym — a typed parameter, or a builtin — is NOT called: its result is a Sym
+// named by its expression. An action that fails is a hole, not the end of the render.
 package template
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -44,7 +52,7 @@ type Arm struct {
 	Loc     string `json:"loc"`
 	Kind    string `json:"kind"`
 	Pipe    string `json:"pipe"`
-	Taken   string `json:"taken"` // then | else | none (an if/with with no else, false) | body | empty
+	Taken   string `json:"taken"`          // then | else | none (an if/with with no else, false) | body | empty | unknown (symbolic)
 	Else    bool   `json:"else,omitempty"` // the node has an else arm
 	Untaken bool   `json:"untaken,omitempty"`
 }
@@ -69,6 +77,7 @@ type Recorder struct {
 	Arms     []Arm            `json:"arms,omitempty"`
 	Explored []Explored       `json:"explored,omitempty"`
 	Branches bool             `json:"-"`
+	Symbolic bool             `json:"-"`
 	depth    int
 	guards   []string // the untaken arms being explored, innermost last
 }
@@ -196,4 +205,141 @@ func (s *state) explore(n parse.Node, kind string, pipe *parse.PipeNode, which s
 		pre()
 	}
 	s.walk(dot, list)
+}
+
+// Sym is a value the render does not know: a `.Values` path, or an expression over unknowns.
+type Sym struct {
+	Path string // the .Values path ("" = .Values itself) when Expr is empty
+	Expr string // a derived expression (a call, a key) — not a values path
+}
+
+// inner is the expression a Sym stands for, unbracketed.
+func (y Sym) inner() string {
+	if y.Expr != "" {
+		return y.Expr
+	}
+	if y.Path == "" {
+		return ".Values"
+	}
+	return ".Values." + y.Path
+}
+
+func (y Sym) String() string {
+	switch {
+	case y.Expr != "":
+		return "\u27e8" + y.Expr + "\u27e9"
+	case y.Path == "":
+		return "\u27e8.Values\u27e9"
+	}
+	return "\u27e8.Values." + y.Path + "\u27e9"
+}
+
+// MarshalJSON makes toYaml / toJson print the marker.
+func (y Sym) MarshalJSON() ([]byte, error) { return json.Marshal(y.String()) }
+
+// Field is a Sym one segment longer.
+func (y Sym) Field(f string) Sym { return y.field(f) }
+
+func (y Sym) field(f string) Sym {
+	sep := "." // an element segment `[]` joins without one: `a[].b`
+	if strings.HasPrefix(f, "[") {
+		sep = ""
+	}
+	if y.Expr != "" {
+		return Sym{Expr: y.Expr + sep + f}
+	}
+	if y.Path == "" {
+		return Sym{Path: f}
+	}
+	return Sym{Path: y.Path + sep + f}
+}
+
+var symType = reflect.TypeFor[Sym]()
+
+// symOf reports whether v (through interfaces and pointers) is a Sym.
+func symOf(v reflect.Value) (Sym, bool) {
+	for v.IsValid() && (v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer) && !v.IsNil() {
+		v = v.Elem()
+	}
+	if v.IsValid() && v.Type() == reflectValueType {
+		return symOf(v.Interface().(reflect.Value))
+	}
+	if v.IsValid() && v.Type() == symType {
+		return v.Interface().(Sym), true
+	}
+	return Sym{}, false
+}
+
+func symbolic() bool { return Rec != nil && Rec.Symbolic }
+
+// recordSym records a symbolic values read at its final path.
+func (s *state) recordSym(n parse.Node, v reflect.Value) {
+	if y, ok := symOf(v); ok && y.Expr == "" && y.Path != "" {
+		s.recordRead(n, []string{y.Path})
+	}
+}
+
+// PASS-THROUGH functions given a Sym in an interface{} slot: their result means something with the marker in it.
+var symPass = map[string]bool{"quote": true, "squote": true, "default": true, "toYaml": true, "toJson": true,
+	"toPrettyJson": true, "mustToJson": true, "toRawJson": true, "printf": true, "print": true, "println": true,
+	"required": true, "coalesce": true, "list": true, "dict": true, "include": true, "nindent": false, "indent": false}
+
+// symCall decides a call given its evaluated args: a Sym result when any arg is a Sym the function cannot take
+// (hit, from validateType) or a builtin / unknown function receives one; `index` extends a Sym's path.
+func (s *state) symCall(name string, isBuiltin bool, node parse.Node, argv []reflect.Value, hit bool, final reflect.Value) (reflect.Value, bool) {
+	if !symbolic() {
+		return reflect.Value{}, false
+	}
+	if isBuiltin && name == "index" && len(argv) > 0 {
+		if y, ok := symOf(argv[0]); ok {
+			for _, k := range argv[1:] {
+				kv := k
+				if kv.Type() == reflectValueType {
+					kv = kv.Interface().(reflect.Value)
+				}
+				kv = indirectInterface(kv)
+				if kv.IsValid() && kv.Kind() == reflect.String {
+					y = y.field(kv.String())
+				} else {
+					y = y.field("[]")
+				}
+			}
+			s.recordSym(node, reflect.ValueOf(y))
+			return reflect.ValueOf(y), true
+		}
+	}
+	symArg := hit
+	for _, a := range argv {
+		if _, ok := symOf(a); ok {
+			symArg = symArg || isBuiltin || !symPass[name]
+		}
+	}
+	if !symArg {
+		return reflect.Value{}, false
+	}
+	expr := strings.TrimSpace(node.String())
+	if fy, ok := symOf(final); ok && !isMissing(final) {
+		expr = fy.inner() + " | " + expr // a pipeline stage keeps what was piped into it
+	}
+	return reflect.ValueOf(Sym{Expr: expr}), true
+}
+
+// symGuard runs one node of a symbolic render: an execution error becomes a hole (recorded, a marker in the output),
+// never the end of the render. Off unless Symbolic; exploration (an untaken arm) records its own holes.
+func (s *state) symGuard(n parse.Node, f func()) {
+	if !symbolic() || len(Rec.guards) > 0 {
+		f()
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			e, ok := r.(ExecError)
+			if !ok {
+				panic(r)
+			}
+			Rec.Explored = append(Rec.Explored, Explored{Guard: "symbolic " + loc(n, s.tmpl), Loc: loc(s.node, s.tmpl), Err: e.Err.Error()})
+			fmt.Fprint(s.wr, "\u27e8error\u27e9")
+		}
+	}()
+	f()
 }
