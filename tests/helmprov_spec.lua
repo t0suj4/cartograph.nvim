@@ -305,3 +305,17 @@ test('helmprov: RENDER DIFF — two values sets, every changed field at its temp
     eq(3, #rows, 'nothing else moved')
     eq({}, assert(P.diff(root, {}, {})), 'one values set against itself: no change')
 end)
+
+test('helmprov: WHAT `.` WAS at each action — the root, a with\'s value, each range element (CART-1310)', function ()
+    ready()
+    local root = chart({
+        ['Chart.yaml'] = 'apiVersion: v2\nname: shop\nversion: 0.1.0\n',
+        ['values.yaml'] = 'image:\n  repo: shop\n  tag: "1.0"\nitems:\n- name: a\n  port: 1\n- name: b\n  port: 2\n',
+        ['templates/t.yaml'] = 'r: {{ .Release.Name }}\n{{- with .Values.image }}\nw: {{ .repo }}\n{{- end }}\n{{- range .Values.items }}\n# {{ .name }}\n{{- end }}\n',
+    })
+    local p = assert(P.render(root, { dots = true }))
+    local function at(line) return P.dots_at(p, 'templates/t.yaml', line) end
+    eq({ { col = 6, values = { '$ (the root: .Values .Release .Chart …)' }, n = 1 } }, at(1))
+    eq({ '{repo, tag}' }, at(3)[1].values, 'inside with: the image map')
+    eq({ { col = 5, values = { '{name, port}' }, n = 2 } }, at(6), 'inside range: each element, two executions')
+end)

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 
 	"cartograph/helmprov/tpl/parse"
@@ -79,6 +80,8 @@ type Recorder struct {
 	Explored []Explored       `json:"explored,omitempty"`
 	Branches bool             `json:"-"`
 	Symbolic bool             `json:"-"`
+	DotsOn   bool             `json:"-"`
+	Dots     map[string]*Dot  `json:"dots,omitempty"` // action loc -> what `.` was there (CART-1310)
 	depth    int
 	guards   []string // the untaken arms being explored, innermost last
 }
@@ -376,4 +379,66 @@ func condText(v reflect.Value) string {
 		return fmt.Sprintf("list(%d)", v.Len())
 	}
 	return v.Kind().String()
+}
+
+// Dot is what `.` was at one action: up to five distinct descriptions, and how many executions saw it.
+type Dot struct {
+	Values []string `json:"values"`
+	N      int      `json:"n"`
+}
+
+// dotText describes `.` briefly: the root context named as such, a map by its keys, a scalar typed
+func dotText(v reflect.Value) string {
+	if y, ok := symOf(v); ok {
+		return y.String()
+	}
+	v = indirectInterface(v)
+	if !v.IsValid() {
+		return "nil"
+	}
+	if v.Kind() == reflect.Map && v.Type().Key().Kind() == reflect.String {
+		rk := reflect.ValueOf("Release").Convert(v.Type().Key())
+		vk := reflect.ValueOf("Values").Convert(v.Type().Key())
+		if v.MapIndex(rk).IsValid() && v.MapIndex(vk).IsValid() {
+			return "$ (the root: .Values .Release .Chart …)"
+		}
+		var keys []string
+		for _, k := range v.MapKeys() {
+			keys = append(keys, k.String())
+		}
+		sort.Strings(keys)
+		more := ""
+		if len(keys) > 4 {
+			more = fmt.Sprintf(", …%d more", len(keys)-4)
+			keys = keys[:4]
+		}
+		return "{" + strings.Join(keys, ", ") + more + "}"
+	}
+	return condText(v)
+}
+
+// recordDot notes `.` at an action (only with Rec.DotsOn, and not inside an untaken arm)
+func (s *state) recordDot(n parse.Node, dot reflect.Value) {
+	if Rec == nil || !Rec.DotsOn || len(Rec.guards) > 0 {
+		return
+	}
+	if Rec.Dots == nil {
+		Rec.Dots = map[string]*Dot{}
+	}
+	l := loc(n, s.tmpl)
+	d := Rec.Dots[l]
+	if d == nil {
+		d = &Dot{}
+		Rec.Dots[l] = d
+	}
+	d.N++
+	t := dotText(dot)
+	for _, x := range d.Values {
+		if x == t {
+			return
+		}
+	}
+	if len(d.Values) < 5 {
+		d.Values = append(d.Values, t)
+	}
 }

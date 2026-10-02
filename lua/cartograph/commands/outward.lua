@@ -141,6 +141,28 @@ function M.register(H)
         if #items > 0 then vim.fn.setqflist({}, ' ', { title = 'helm branch: ' .. rel .. ':' .. best.line, items = items }) end
     end, { nargs = '*', complete = 'file', desc = 'cartograph: why the if/with/range at the cursor took its arm — the condition\'s value and the source of every key it read' })
 
+    -- WHAT `.` IS HERE (CART-1310): every action on the cursor line, and what `.` was when it ran — the rebinding
+    -- `with` and `range` do, per iteration (the first few, and how many)
+    cmd('CartographHelmDot', function (o)
+        local HP = require 'cartograph.helmprov'
+        local file = vim.api.nvim_buf_get_name(0)
+        local chart = HP.root_of(file)
+        if not chart then return vim.notify('cartograph: not inside a chart', vim.log.levels.WARN) end
+        local files = {}
+        for i = 1, #o.fargs do if o.fargs[i - 1] == '-f' then files[#files + 1] = vim.fn.fnamemodify(o.fargs[i], ':p') end end
+        local p, why = HP.render(chart, { dots = true, values = files })
+        if not p then return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN) end
+        local rel = file:sub(#chart + 2)
+        local row = vim.api.nvim_win_get_cursor(0)[1]
+        local ds = HP.dots_at(p, rel, row)
+        if #ds == 0 then return vim.notify(('cartograph: no action on line %d ran in this render (an untaken arm, or no action here)'):format(row), vim.log.levels.INFO) end
+        local msg = {}
+        for _, d in ipairs(ds) do
+            msg[#msg + 1] = ('col %d: . = %s%s'):format(d.col + 1, table.concat(d.values, ' | '), d.n > #d.values and ('  (%d executions)'):format(d.n) or '')
+        end
+        vim.notify(table.concat(msg, '\n'), vim.log.levels.INFO)
+    end, { nargs = '*', complete = 'file', desc = 'cartograph: what `.` was at the actions on the cursor line (with / range rebind it)' })
+
     -- WHAT A VALUES CHANGE DOES (CART-1311): the chart rendered under two values sets, every changed field at the
     -- template line that wrote it and the values source that changed it — the blast radius before deploying.
     -- `[-f a.yaml --set k=v ...] -- [-f b.yaml ...]`; with no `--`, A is the chart's own values and every flag is B's

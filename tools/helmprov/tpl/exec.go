@@ -298,6 +298,7 @@ func (s *state) walk1(dot reflect.Value, node parse.Node) {
 			sp = &Span{Start: s.cw.n, Kind: "action", Loc: loc(node, s.tmpl)}
 			s.cur = sp
 		}
+		s.recordDot(node, dot)
 		val := s.evalPipeline(dot, node.Pipe)
 		if len(node.Pipe.Decl) == 0 {
 			s.printValue(node, val)

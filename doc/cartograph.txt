@@ -833,6 +833,10 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
                               the nearest above) took its arm: what its
                               condition evaluated to, and the values source
                               of every key it read (quickfix)
+  :CartographHelmDot [-f values.yaml]...
+                              what `.` was at each action on the cursor
+                              line — the root, a `with` value, each `range`
+                              element (with / range rebind it)
   :CartographHelmDiff [-f a.yaml ...] -- [-f b.yaml ...]
                               the chart rendered under two values sets:
                               every changed field at the template line that

@@ -57,6 +57,7 @@ function M.render(chart, opts)
     if opts.branches then cmd[#cmd + 1] = '-branches' end
     if opts.symbolic then cmd[#cmd + 1] = '-symbolic' end
     if opts.origins then cmd[#cmd + 1] = '-origins' end
+    if opts.dots then cmd[#cmd + 1] = '-dots' end
     cmd[#cmd + 1] = chart
     local r = vim.system(cmd, { text = true }):wait(opts.timeout or 120000)
     if not r or r.code ~= 0 then
@@ -343,6 +344,19 @@ function M.diff_text(r)
     local function v(x) return x == nil and '∅' or (tostring(x):gsub('^%a+:', '')) end
     return ('%s %s: %s -> %s%s'):format(r.object, r.path, v(r.old), v(r.new),
         r.from and ('  <- .Values.' .. tostring(r.value) .. ' ' .. M.site_text(r.from)) or '')
+end
+
+--- WHAT `.` WAS at the actions of one template line (CART-1310), from a render with { dots = true } -> { { col, values =
+--- { up to five distinct descriptions }, n = executions } } in column order. `with` and `range` rebind `.`: a range body
+--- sees each element, so `values` lists the first few and `n` counts them; the root context reads `$ (the root …)`.
+function M.dots_at(prov, file, line)
+    local out = {}
+    for l, d in pairs(prov.dots or {}) do
+        local f, ln, col = M.loc(l)
+        if f == file and ln == line then out[#out + 1] = { col = col, values = d.values or {}, n = d.n or 0 } end
+    end
+    table.sort(out, function (a, b) return a.col < b.col end)
+    return out
 end
 
 --- the HOLES of a `branches` render: untaken arms that fail under these values (`{{ if .Values.a }}{{ .Values.a.b }}`
