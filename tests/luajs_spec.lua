@@ -18,6 +18,10 @@ local function lua_out(src)
     end }, { __index = _G })
     local f = assert(loadstring(src))
     setfenv(f, env)
+    -- (the REFERENCE is LuaJIT's INTERPRETER, the manual's semantics: its JIT reads a -0.0 for-step as ascending once a
+    -- trace for the loop was recorded with step 0 — `for i = 1, 0, -0.0` then stops after 1 or 2 iterations instead of
+    -- running, and whether it does depended on which specs ran before in the same worker: CART-1322)
+    jit.off(f, true)
     local ok, err = pcall(f)
     if not ok then out[#out + 1] = 'ERROR ' .. tostring(err) end
     return table.concat(out, '\n') .. (#out > 0 and '\n' or '')
@@ -230,6 +234,7 @@ m(function () return true < false end)
 m(function () return {} <= {} end)
 m(function () return 'a' < 1 end)
 local function run(a, b, s) local got, n = {}, 0; for i = a, b, s do n = n + 1; got[#got + 1] = i; if n > 3 then break end end return table.concat(got, ',') end
+for _ = 1, 100 do run(1, 2, 0) end -- (a trace recorded with step 0: LuaJIT's JIT then misreads a -0.0 step — CART-1322)
 print(run(1, 2, 0), run(2, 1, 0), run(3, 1, -1), run(1, 2, 0.5), run(1, 1, 0), run(1, 0, -0.0), run(0, 1, -0.0), run(3, 1, -0.5))]],
     -- x ^ y and math.pow are the C LIBRARY's pow, bit for bit (CART-1211): vectors where V8's Math.pow is off by an ulp
     -- (compared EXACTLY against 17-digit literals — print's %.14g would hide it), and the IEEE special cases
