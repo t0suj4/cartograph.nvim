@@ -819,8 +819,9 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
                               — rendered by helmprov, else read statically
   :CartographHelmLint [chart] the chart's silent-success findings (dangling
                               / orphan values, chomped separators, checksum
-                              coverage, dangling references) at their
-                              template lines (quickfix)
+                              coverage, dangling references, and rendered
+                              fields the Kubernetes API types reject or
+                              drop) at their template lines (quickfix)
   :CartographHelmOrigin [-f values.yaml]... [--set k=v]...
                               which values source WON the key under the
                               cursor (a values file) or the .Values.x under

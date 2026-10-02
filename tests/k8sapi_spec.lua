@@ -210,3 +210,25 @@ test('k8sapi: the SHIPPED table loads and carries the real API\'s answers', func
     for _, r in ipairs(t.refs) do if r[1] == 'Ingress' and r[2]:find('backend%.service%.name$') and r[3] == 'Service' then found = true end end
     ok(found, 'Ingress -> Service by the backend\'s referenced service name')
 end)
+
+test('k8sapi: the FIELD SCHEMA — every field typed: aliases resolved, scalars from unread packages by import path, a wire scalar over a struct read', function ()
+    if not ready() then skip 'no go parser' end
+    local root = tree({
+        ['api/core/v1/register.go'] = 'package v1\nconst GroupName = ""\nfunc addKnownTypes(scheme *runtime.Scheme) error {\n\tscheme.AddKnownTypes(SchemeGroupVersion, &Pod{}, &PodList{})\n\treturn nil\n}\n',
+        ['api/core/v1/types.go'] = table.concat({
+            'package v1', 'import (', '\tmetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"', '\t"k8s.io/apimachinery/pkg/util/intstr"', '\t"k8s.io/apimachinery/pkg/api/resource"', ')',
+            'type Protocol string', 'type ResourceName string', 'type ResourceList map[ResourceName]resource.Quantity',
+            'type Pod struct {', '\tmetav1.TypeMeta `json:",inline"`', '\tmetav1.ObjectMeta `json:"metadata,omitempty"`', '\tSpec PodSpec `json:"spec,omitempty"`', '}',
+            'type PodSpec struct {', '\tPorts []Port `json:"ports,omitempty"`', '\tLimits ResourceList `json:"limits,omitempty"`', '\tStarted metav1.Time `json:"started,omitempty"`', '\tData []byte `json:"data,omitempty"`', '}',
+            'type Port struct {', '\tProtocol Protocol `json:"protocol,omitempty"`', '\tTarget intstr.IntOrString `json:"target,omitempty"`', '\tNumber int32 `json:"number"`', '}' }, '\n') .. '\n',
+        ['meta/v1/types.go'] = 'package v1\ntype TypeMeta struct {\n\tKind string `json:"kind,omitempty"`\n\tAPIVersion string `json:"apiVersion,omitempty"`\n}\ntype ObjectMeta struct {\n\tName string `json:"name,omitempty"`\n\tLabels map[string]string `json:"labels,omitempty"`\n}\ntype Time struct {\n\tsec int64\n}\n',
+    })
+    local S = assert(K.read(root .. '/api', { extra = { ['k8s.io/apimachinery/pkg/apis/meta/v1'] = root .. '/meta/v1' } }))
+    local sc = K.schema(S)
+    eq('core/v1.Pod', sc.kinds.Pod)
+    eq({ apiVersion = 'string', kind = 'string', metadata = 'T:meta/v1.ObjectMeta', spec = 'T:core/v1.PodSpec' }, sc.types['core/v1.Pod'], 'TypeMeta inline; metadata from the extra package')
+    eq({ data = 'string', limits = 'map:quantity', ports = 'list:T:core/v1.Port', started = 'string' }, sc.types['core/v1.PodSpec'],
+        '[]byte is base64 text; an alias to a map of Quantity; metav1.Time is a STRING on the wire though its struct is read')
+    eq({ number = 'int', protocol = 'string', target = 'intorstring' }, sc.types['core/v1.Port'], 'an alias to string; IntOrString from an UNREAD package, by its import path')
+    eq({ labels = 'map:string', name = 'string' }, sc.types['meta/v1.ObjectMeta'])
+end)

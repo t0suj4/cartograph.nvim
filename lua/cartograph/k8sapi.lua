@@ -48,6 +48,21 @@ local function read_file(src, pkg, pkgs_by_import)
         local path = pathn and (tx(pathn):gsub('"', ''))
         if path then imports[namen and tx(namen) or path:match('([^/]+)$')] = path end
     end
+    -- (NAMED NON-STRUCT types — `type Protocol string`, `type ResourceList map[ResourceName]resource.Quantity` — kept as
+    -- ALIASES: the schema needs their underlying type; the reference derivation never reads them)
+    pkg.aliases = pkg.aliases or {}
+    local aq = vim.treesitter.query.parse('go', '(type_spec name: (type_identifier) @n type: (_) @t)')
+    local an
+    for id, node in aq:iter_captures(root, src, 0, -1) do
+        if aq.captures[id] == 'n' then an = tx(node)
+        elseif an and node:type() ~= 'struct_type' and node:type() ~= 'interface_type' then
+            local qual, tname, shape = parse_type(tx(node))
+            local tpkg = pkg.path
+            if qual then tpkg = (pkgs_by_import[imports[qual] or ''] and imports[qual]) or false end
+            pkg.aliases[an] = { pkg = tpkg, name = tname, shape = shape, qual = qual and imports[qual] or nil }
+            an = nil
+        else an = nil end
+    end
     local q = vim.treesitter.query.parse('go', '(type_spec name: (type_identifier) @n type: (struct_type) @s)')
     local cur
     for id, node in q:iter_captures(root, src, 0, -1) do
@@ -64,15 +79,20 @@ local function read_file(src, pkg, pkgs_by_import)
                     local tagtext = tag and tx(tag) or ''
                     local jname = tagtext:match('json:"([^",]*)')
                     local qual, tname, shape = parse_type(ty and tx(ty) or '')
-                    local tpkg = qual and (pkgs_by_import[imports[qual] or ''] and imports[qual] or false) or pkg.path
+                    -- (an `a and false or b` would turn an UNREAD qualified type into the current package's: spelled out)
+                    local tpkg = pkg.path
+                    if qual then tpkg = (pkgs_by_import[imports[qual] or ''] and imports[qual]) or false end
+                    -- (the import path of a type from a package NOT read — resource.Quantity, intstr.IntOrString,
+                    -- metav1.Time: the schema names its scalar by it; the reference derivation ignores it)
+                    local tqual = qual and imports[qual] or nil
                     local doc = table.concat(comment, ' ')
                     comment = {}
                     if #names == 0 then
                         local inline = (jname == nil or jname == '') or tagtext:find('inline', 1, true) ~= nil
-                        table.insert(pkg.structs[cur].fields, { json = (not inline) and jname or nil, type = { pkg = tpkg, name = tname }, shape = shape, inline = inline, doc = doc })
+                        table.insert(pkg.structs[cur].fields, { json = (not inline) and jname or nil, type = { pkg = tpkg, name = tname, qual = tqual }, shape = shape, inline = inline, doc = doc })
                     else
                         for _, nm in ipairs(names) do
-                            if jname ~= '-' then table.insert(pkg.structs[cur].fields, { json = jname or nm, type = { pkg = tpkg, name = tname }, shape = shape, doc = doc }) end
+                            if jname ~= '-' then table.insert(pkg.structs[cur].fields, { json = jname or nm, type = { pkg = tpkg, name = tname, qual = tqual }, shape = shape, doc = doc }) end
                         end
                     end
                 else comment = {} end
@@ -85,11 +105,16 @@ end
 --- the API packages under `dir` (…/staging/src/k8s.io/api) -> schema { pkgs = { [import path] = { group, version,
 --- structs } }, kinds = { [Kind] = { pkg, group, version } } } | nil, why. A kind registered by several versions or groups
 --- keeps the FIRST GA one (v1 over v1beta1; core over events for Event).
-function M.read(dir)
+function M.read(dir, opts)
     dir = vim.fn.fnamemodify(dir, ':p'):gsub('/$', '')
     local regs = vim.fn.glob(dir .. '/*/*/register.go', false, true)
     if #regs == 0 then return nil, 'no <group>/<version>/register.go under ' .. dir end
     local pkgs = {}
+    -- (opts.extra = { [import path] = dir }: packages read for their TYPES only — apimachinery's meta/v1 for the schema;
+    -- they register no kinds)
+    for path, edir in pairs(opts and opts.extra or {}) do
+        pkgs[path] = { path = path, dir = edir, group = '', version = vim.fn.fnamemodify(edir, ':t'), structs = {}, reg = '' }
+    end
     for _, reg in ipairs(regs) do
         local pdir = vim.fn.fnamemodify(reg, ':h')
         local rel = pdir:sub(#dir + 2)
@@ -366,6 +391,108 @@ function M.serialize(t, header)
     o[#o + 1] = '    },'
     o[#o + 1] = '}'
     return table.concat(o, '\n') .. '\n'
+end
+
+-- ── THE FIELD SCHEMA (CART-1308): every field of every kind, typed, for checking a rendered object ─────────────────
+-- types from packages not read, by import path: the scalars the API server accepts for them
+local SCALAR_Q = {
+    ['k8s.io/apimachinery/pkg/api/resource.Quantity'] = 'quantity',
+    ['k8s.io/apimachinery/pkg/util/intstr.IntOrString'] = 'intorstring',
+    ['k8s.io/apimachinery/pkg/runtime.RawExtension'] = 'any',
+    ['k8s.io/apimachinery/pkg/apis/meta/v1.Time'] = 'string',
+    ['k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime'] = 'string',
+    ['k8s.io/apimachinery/pkg/apis/meta/v1.Duration'] = 'string',
+    ['k8s.io/apimachinery/pkg/apis/meta/v1.FieldsV1'] = 'any',
+    ['k8s.io/apimachinery/pkg/types.UID'] = 'string',
+}
+local BUILTIN = { string = 'string', bool = 'bool', int = 'int', int8 = 'int', int16 = 'int', int32 = 'int', int64 = 'int',
+    uint = 'int', uint8 = 'int', uint16 = 'int', uint32 = 'int', uint64 = 'int', float32 = 'number', float64 = 'number',
+    any = 'any' }
+
+-- a type's short key: `apps/v1.DeploymentSpec`, `meta/v1.ObjectMeta`
+local function skey(pkg, name)
+    return (pkg:gsub('^k8s%.io/api/', ''):gsub('^k8s%.io/apimachinery/pkg/apis/', '')) .. '.' .. name
+end
+
+-- the schema type of a field: a scalar, `T:<key>` for a struct, wrapped in `list:` / `map:` by its shape
+local function typestr(S, ref, shape, seen)
+    seen = seen or {}
+    local base
+    if ref.name == 'byte' and shape == 'list' then return 'string' end -- ([]byte: base64 text)
+    local q = SCALAR_Q[tostring(ref.qual or ref.pkg) .. '.' .. ref.name]
+    if q then base = q -- (a WIRE scalar wins even over a struct read: metav1.Time is a string on the wire)
+    elseif BUILTIN[ref.name] then base = BUILTIN[ref.name]
+    elseif ref.pkg == false or ref.pkg == nil then base = SCALAR_Q[tostring(ref.qual) .. '.' .. ref.name] or 'any'
+    else
+        local pkg = S.pkgs[ref.pkg]
+        if pkg and pkg.structs[ref.name] then base = 'T:' .. skey(ref.pkg, ref.name)
+        elseif pkg and pkg.aliases and pkg.aliases[ref.name] and not seen[ref.pkg .. '.' .. ref.name] then
+            seen[ref.pkg .. '.' .. ref.name] = true
+            local al = pkg.aliases[ref.name]
+            base = typestr(S, al, al.shape, seen)
+        else base = SCALAR_Q[ref.pkg .. '.' .. ref.name] or 'any' end
+    end
+    if shape == 'list' then return 'list:' .. base elseif shape == 'map' then return 'map:' .. base end
+    return base
+end
+M._typestr = typestr
+
+--- the FIELD SCHEMA reachable from every kind -> { kinds = { [Kind] = key }, types = { [key] = { [json] = typestr } } }
+function M.schema(S)
+    local kinds, types = {}, {}
+    local todo = {}
+    for K, info in pairs(S.kinds) do
+        kinds[K] = skey(info.pkg, K)
+        todo[#todo + 1] = { pkg = info.pkg, name = K }
+    end
+    local i = 1
+    for _ = 1, 100000 do
+        local ref = todo[i]
+        if not ref then break end
+        i = i + 1
+        local key = skey(ref.pkg, ref.name)
+        if not types[key] then
+            local t = {}
+            types[key] = t
+            for _, f in ipairs(fields_of(S, ref)) do
+                local ts = typestr(S, f.type, f.shape)
+                t[f.json] = ts
+                local sk = ts:match('T:(.+)$')
+                if sk and not types[sk] then todo[#todo + 1] = { pkg = f.type.pkg, name = f.type.name } end
+                -- (an alias to a struct, or a list / map of one, is reached through its underlying ref)
+                if sk and not (f.type.pkg and S.pkgs[f.type.pkg] and S.pkgs[f.type.pkg].structs[f.type.name]) then
+                    local al = f.type.pkg and S.pkgs[f.type.pkg] and S.pkgs[f.type.pkg].aliases and S.pkgs[f.type.pkg].aliases[f.type.name]
+                    if al then todo[#todo + 1] = { pkg = al.pkg, name = al.name } end
+                end
+            end
+        end
+    end
+    return { kinds = kinds, types = types }
+end
+
+--- the schema as Lua source, DETERMINISTIC (one type per line, keys sorted)
+function M.serialize_schema(sc, stamp, header)
+    local o = { header or '', 'return {', ('    stamp = %q,'):format(stamp or ''), '    kinds = {' }
+    local ks = vim.tbl_keys(sc.kinds); table.sort(ks)
+    for _, k in ipairs(ks) do o[#o + 1] = ('        [%q] = %q,'):format(k, sc.kinds[k]) end
+    o[#o + 1] = '    },'
+    o[#o + 1] = '    types = {'
+    local ts = vim.tbl_keys(sc.types); table.sort(ts)
+    for _, t in ipairs(ts) do
+        local fs = vim.tbl_keys(sc.types[t]); table.sort(fs)
+        local parts = {}
+        for _, f in ipairs(fs) do parts[#parts + 1] = ('[%q] = %q'):format(f, sc.types[t][f]) end
+        o[#o + 1] = ('        [%q] = { %s },'):format(t, table.concat(parts, ', '))
+    end
+    o[#o + 1] = '    },'
+    o[#o + 1] = '}'
+    return table.concat(o, '\n') .. '\n'
+end
+
+--- the shipped, GENERATED field schema -> schema | nil (loaded only when a check runs: it is large)
+function M.schema_load()
+    local ok, t = pcall(require, 'cartograph.k8sapi_schema')
+    return ok and type(t) == 'table' and t or nil
 end
 
 --- the shipped, GENERATED table (tools/k8sapi.lua writes it from a kubernetes checkout) -> table | nil

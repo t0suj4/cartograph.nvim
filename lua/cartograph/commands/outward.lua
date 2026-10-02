@@ -54,6 +54,10 @@ function M.register(H)
             items[#items + 1] = { filename = at and (chart .. '/' .. at.file) or (chart .. '/Chart.yaml'), lnum = at and at.line or 1, col = at and at.col + 1 or 1, text = 'dangling-reference: ' .. d }
         end
         for _, d in ipairs(s and s.soft and s.soft.empty or {}) do items[#items + 1] = { filename = chart .. '/Chart.yaml', lnum = 1, col = 1, text = 'selector-matches-nothing: ' .. d } end
+        -- the RENDERED objects against the API types' field schema, at the template line that wrote each (CART-1308)
+        for _, f in ipairs(prov and require('cartograph.k8sschema').check_render(prov) or {}) do
+            items[#items + 1] = { filename = chart .. '/' .. (f.file or 'Chart.yaml'), lnum = f.line or 1, col = 1, text = 'schema-' .. f.problem .. ': ' .. require('cartograph.k8sschema').text(f) }
+        end
         if #items == 0 then return vim.notify('cartograph: helm lint — no finding', vim.log.levels.INFO) end
         vim.fn.setqflist({}, ' ', { title = 'helm lint: ' .. chart, items = items })
         vim.cmd('copen')

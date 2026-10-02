@@ -206,7 +206,7 @@ end
 -- [layer id] = { { path, nil } } }, refused } — computed by Helm's own merge over marked copies of every source, and
 -- REFUSED by name when the replicated merge does not reproduce Helm's effective values (tools/helmprov origin.go).
 
---- the line (1-based) of every key path of a YAML text -> { [path] = line }
+--- the line (1-based) of every key path of a YAML text -> { [path] = line } (list items as `a[1]`, `a[1].b`)
 function M.key_lines(src)
     local out = {}
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, 'yaml')
@@ -222,7 +222,18 @@ function M.key_lines(src)
                     local v = c:field('value')[1]
                     if v then walk(v, p) end
                 end
-            elseif c:named() and c:type() ~= 'block_sequence' and c:type() ~= 'flow_sequence' then
+            elseif c:type() == 'block_sequence' or c:type() == 'flow_sequence' then
+                -- (a list's items: `containers[1].image`, 1-based — the path form of the schema check, CART-1308)
+                local i = 0
+                for item in c:iter_children() do
+                    if item:named() and item:type() ~= 'comment' then
+                        i = i + 1
+                        local ip = prefix .. '[' .. i .. ']'
+                        if not out[ip] then out[ip] = item:start() + 1 end
+                        walk(item, ip)
+                    end
+                end
+            elseif c:named() then
                 walk(c, prefix)
             end
         end

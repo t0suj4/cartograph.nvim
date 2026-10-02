@@ -257,7 +257,8 @@ end)
 
 test('helmprov: KEY_LINES — every key path of a values file at its line; ROOT_OF — a subchart file belongs to its root chart', function ()
     ready()
-    eq({ a = 1, ['a.b'] = 2, ['a.c'] = 3, d = 4 }, P.key_lines('a:\n  b: 1\n  c: [1, 2]\nd: x\n'))
+    eq({ a = 1, ['a.b'] = 2, ['a.c'] = 3, ['a.c[1]'] = 3, ['a.c[2]'] = 3, d = 4, e = 5, ['e[1]'] = 6, ['e[1].f'] = 6 },
+        P.key_lines('a:\n  b: 1\n  c: [1, 2]\nd: x\ne:\n- f: 1\n'), 'list items as a[1] (1-based), the schema check\'s path form')
     local root = chart(LAYERED)
     local r, scope = P.root_of(root .. '/charts/db/values.yaml')
     eq(vim.fn.fnamemodify(root, ':p'):gsub('/$', ''), r); eq('db', scope)

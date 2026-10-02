@@ -3335,6 +3335,10 @@ local function k8s_rows(s, rows)
     for _, d in ipairs(s.soft and s.soft.dangling or {}) do rows[#rows + 1] = { finding = 'dangling-reference', message = d } end
     for _, d in ipairs(s.soft and s.soft.empty or {}) do rows[#rows + 1] = { finding = 'selector-matches-nothing', message = d } end
     for _, d in ipairs(s.dangling or {}) do rows[#rows + 1] = { finding = 'one-sided-peer', message = d } end
+    -- (the FIELD SCHEMA: unknown fields and wrong types, at their lines — CART-1308)
+    for _, f in ipairs(s.schema or {}) do
+        rows[#rows + 1] = { finding = 'schema-' .. f.problem, message = require('cartograph.k8sschema').text(f), file = f.file, line = f.line, path = f.path }
+    end
     -- (the DELETION FRONTIER: candidates and dark rows, never a delete list — CART-0139)
     for _, d in ipairs(s.orphans and s.orphans.candidates or {}) do rows[#rows + 1] = { finding = 'orphan-candidate', message = d } end
     for _, d in ipairs(s.orphans and s.orphans.dark or {}) do rows[#rows + 1] = { finding = 'orphan-dark', message = d } end
@@ -3371,9 +3375,16 @@ local function v_helm_chart(store, args)
     local dir = chart_dir(store, args.chart)
     local H = require 'cartograph.helm'
     if not H.binary() then return refuse('no-helm', 'no helm binary on PATH: a chart is read through its renderer', 'install helm (pkgit -i helm)') end
-    local s, why = H.attach(dir, { release = args.release, values = args.values, set = args.set })
+    local s, why = H.attach(dir, { release = args.release, values = args.values, set = args.set, schema = false })
     if not s then return refuse('unrenderable', tostring(why), 'vendor the chart dependencies, or pass the values the chart requires') end
     local rows = k8s_rows(s, {})
+    -- the FIELD SCHEMA on the rendered objects, at the TEMPLATE line that wrote each (helmprov spans; CART-1308) — not at
+    -- the render's temporary files, which is why the k8s read above skips it
+    local P = require 'cartograph.helmprov'
+    local prov = P.render(dir, { release = args.release, values = args.values, set = args.set })
+    for _, f in ipairs(prov and require('cartograph.k8sschema').check_render(prov) or {}) do
+        rows[#rows + 1] = { finding = 'schema-' .. f.problem, file = nn(f.file), line = nn(f.line), path = f.path, message = require('cartograph.k8sschema').text(f) }
+    end
     local L = require 'cartograph.helmlint'
     local lint = L.lint(dir, { render = true, release = args.release, values = args.values, set = args.set })
     for _, f in ipairs(lint.findings) do rows[#rows + 1] = { finding = f.lint, file = nn(f.file), line = nn(f.line), message = f.msg } end

@@ -55,7 +55,7 @@ function M.attach(chart, opts)
     local R, why = M.render(chart, opts)
     if not R then return nil, why end
     local data = { root = R.dir, nodes = {}, edges = {} }
-    local s = require('cartograph.k8s').attach(data, { files = R.files, rendered = true })
+    local s = require('cartograph.k8s').attach(data, { files = R.files, rendered = true, schema = opts and opts.schema })
     s.helm = { chart = R.chart, release = R.release, version = R.version, files = #R.files, dir = R.dir }
     return s, data
 end

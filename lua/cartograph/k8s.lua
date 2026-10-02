@@ -361,6 +361,14 @@ function M.attach(data, opts)
             if #docs > 0 then
                 stats.files = stats.files + 1
                 stats.docs = stats.docs + #docs
+                -- the FIELD SCHEMA check (CART-1308): unknown fields and wrong types, at their lines
+                if not (opts and opts.schema == false) then
+                    local ok, fs = pcall(require('cartograph.k8sschema').check_text, src)
+                    if ok then
+                        stats.schema = stats.schema or {}
+                        for _, f in ipairs(fs) do f.file = rel; stats.schema[#stats.schema + 1] = f end
+                    end
+                end
                 local dirvariant = rel:match('^(.*)/[^/]+$') or '.'
                 local counted = {}
                 data.nodes[#data.nodes + 1] = { id = rel, name = rel,
@@ -763,7 +771,10 @@ function M.summary(s)
                 :format(s.refused, table.concat(s.refusals, ' ')) or '')
         .. (#s.dangling > 0 and ('\n  ⚠ %d declared peer(s) absent from their own'
             .. ' deployment (one-sided edge, NOT automatically a bug): %s')
-            :format(#s.dangling, table.concat(s.dangling, ' · ')) or '') .. soft_lines(s) .. honesty(s)
+            :format(#s.dangling, table.concat(s.dangling, ' · ')) or '') .. soft_lines(s)
+        .. ((s.schema and #s.schema > 0) and ('\n  ⚠ %d field(s) the API types do not accept (unknown fields are DROPPED, wrong types REJECTED): %s')
+            :format(#s.schema, table.concat(vim.tbl_map(function (f) return f.file .. ':' .. f.line .. ' ' .. require('cartograph.k8sschema').text(f) end, { unpack(s.schema, 1, 3) }), ' · ')) or '')
+        .. honesty(s)
 end
 
 return M
