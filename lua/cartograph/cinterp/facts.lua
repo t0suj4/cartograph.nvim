@@ -8,8 +8,26 @@
 --   engine  — derived, in a shape cartograph.cinterp cannot run yet (unbuilt: a ticket);
 --   blocked — a fact it needs is itself a gap;
 --   error   — a derivation raised (a bug, named).
--- M.derive(tree) -> { rows = { [fact] = { value?, by?, gap?, kind?, tried = { [file] = why } } }, order, derived, total }
+-- M.derive(tree) -> { rows = { [fact] = { value?, by?, gap?, kind?, cached?, tried = { [file] = why } } }, order, derived,
+-- total, cache }
+-- ★ A DERIVATION'S VALUE IS KEPT ACROSS RUNS (CART-1299, cartograph.stampcache) — a derive call is replaced by its stored
+-- value only under the same KEY: the CONTENT of every file of the tree (and the scope), the toolchain (gcc's identity,
+-- make's), the derivation's CODE (its file, every cartograph module and sibling derivation its text requires or loads —
+-- read from the text — and this file), and each NEED's value (its content hash; a need with no plain value, units'
+-- tree-sitter nodes, by the key of the call that made it). The engine's order is untouched: the cache answers one
+-- call, never a fact. Stored: a value that round-trips (no function, userdata, metatable) and is worth its bytes
+-- (from a MB up, WORTH_MS_PER_MB of derivation per MB written: the preprocessed sources, 87 MB for 2 s, are re-derived). A gap
+-- or a raise is never stored (a missing gcc is not a fact of the tree). A derivation that reads a fact of `got` it
+-- does not declare in `needs` is not stored (its key would miss that input), nor one that CHANGES a need's value (a
+-- side effect: numbers-tvis adds its variants to reps.tag — a stored value would skip it, measured: cpath's join 42
+-- agree → 30) — re-derived every run, and the need re-keyed by its changed value for the facts after it. Both named in
+-- `cache.refused`.
+-- ⚠ What the key does NOT see: files outside the tree a derivation reads itself (system headers reach the key only
+-- through the sources fact's value — gcc -E's output — so a macro-only system header change is invisible to a fact
+-- that does not need sources). CARTOGRAPH_STAMPCACHE=0 (or opts.cache = false) derives everything: the A/B.
 local M = {}
+local SC = require 'cartograph.stampcache'
+local WORTH_MS_PER_MB = 100
 
 local function dir_of_facts()
     local here = debug.getinfo(1, 'S').source:sub(2)
@@ -25,7 +43,7 @@ function M.list(dir)
         if not okl then broken[#broken + 1] = name .. ': ' .. tostring(d)
         elseif type(d) ~= 'table' or type(d.fact) ~= 'string' or type(d.derive) ~= 'function' then
             broken[#broken + 1] = name .. ': a derivation needs `fact` and `derive(tree, got)`'
-        else d.name = name; d.needs = d.needs or {}; out[#out + 1] = d end
+        else d.name = name; d.path = path; d.needs = d.needs or {}; out[#out + 1] = d end
     end
     table.sort(out, function (a, b) return a.name < b.name end)
     return out, broken
@@ -41,6 +59,8 @@ function M.derive(tree, opts)
         table.insert(byfact[d.fact], d)
     end
     local rows, got, order, tried_of, pend_of = {}, {}, {}, {}, {}
+    local C = (opts.cache ~= false and vim.env.CARTOGRAPH_STAMPCACHE ~= '0') and M.cache(tree, opts.dir) or nil
+    local fkey = {} -- (fact -> the key a consumer's key reads it by)
     local function decided(f) return rows[f] ~= nil end
     local progress = true
     while progress do
@@ -66,7 +86,16 @@ function M.derive(tree, opts)
                 if #fresh > 0 or (#ready > 0 and not waiting) then
                     for _, d in ipairs(fresh) do
                         local t0 = vim.uv.hrtime()
-                        local okd, v, why, kind = pcall(d.derive, tree, got)
+                        local okd, v, why, kind, cached
+                        local key = C and C.key(d, fkey, got)
+                        if key then v, cached = C.get(key) end
+                        if cached then okd = true
+                        else
+                            local view = C and C.view(d, got) or got
+                            okd, v, why, kind = pcall(d.derive, tree, view)
+                            if C then C.after(d, got, fkey) end
+                            if key and okd and v ~= nil then C.put(key, d, v, (vim.uv.hrtime() - t0) / 1e6) end
+                        end
                         local ms = (vim.uv.hrtime() - t0) / 1e6
                         if not okd then
                             tried[d.name] = 'raised: ' .. tostring(v)
@@ -76,7 +105,8 @@ function M.derive(tree, opts)
                             -- build's units before anything reads them; the build's flags stay each unit's own)
                             if f == 'compdb' and tree.scope and v.units then v = M.scoped(v, tree) end
                             got[f] = v
-                            rows[f] = { value = v, by = d.name, ms = ms, tried = tried }
+                            rows[f] = { value = v, by = d.name, ms = ms, tried = tried, cached = cached or nil }
+                            if C then fkey[f] = C.fact_key(v, key) end
                             break
                         else
                             tried[d.name] = tostring(why)
@@ -105,7 +135,119 @@ function M.derive(tree, opts)
     end
     local derived = 0
     for _, f in ipairs(facts) do if rows[f] and rows[f].value ~= nil then derived = derived + 1 end end
-    return { rows = rows, order = order, derived = derived, total = #facts, got = got, broken = broken }
+    return { rows = rows, order = order, derived = derived, total = #facts, got = got, broken = broken, cache = C and C.stats }
+end
+
+--- THE CACHE of one derive over `tree` (see the header) -> { key(d, fkey, got), get(key), put(key, d, v, ms), view(d, got),
+--- fact_key(v, key), stats = { hits, stored, refused = { [derivation] = why }, stamp_ms } } — the stamps are taken on
+--- the first key asked for
+function M.cache(tree, dir)
+    dir = dir or dir_of_facts()
+    local blob = SC.blob('facts')
+    local stats = { hits = 0, stored = 0, refused = {}, stamp_ms = 0 }
+    local base
+    local function base_key()
+        if base then return base end
+        local t0 = vim.uv.hrtime()
+        local src = vim.fn.fnamemodify(tree.src, ':p'):gsub('/$', '')
+        local th = SC.tree(src)
+        local function out(cmd) local r = vim.system(cmd, { text = true }):wait(); return r and r.code == 0 and vim.trim(r.stdout or '') or '-' end
+        local scope = tree.scope and table.concat(tree.scope, '\1') or ''
+        local me = debug.getinfo(1, 'S').source:sub(2)
+        base = SC.key({ 'facts', th, scope, vim.fn.exepath('gcc'), out({ 'gcc', '-dumpfullversion', '-dumpmachine' }),
+            vim.fn.exepath('make'), (out({ 'make', '--version' }):match('^[^\n]*')), SC.file(me) or '' })
+        stats.stamp_ms = (vim.uv.hrtime() - t0) / 1e6
+        return base
+    end
+    -- the CODE a derivation runs, read from its text: the cartograph modules it requires (transitively), the sibling
+    -- files its text names (a dofile of a sibling derivation)
+    local lua_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h:h')
+    local function mod_path(m)
+        local b = lua_root .. '/' .. m:gsub('%.', '/')
+        if vim.uv.fs_stat(b .. '.lua') then return b .. '.lua' end
+        if vim.uv.fs_stat(b .. '/init.lua') then return b .. '/init.lua' end
+    end
+    local codes = {}
+    local function code(d)
+        if codes[d.path] then return codes[d.path] end
+        local seen, parts = {}, {}
+        local function add(path)
+            if not path or seen[path] then return end
+            seen[path] = true
+            local fd = io.open(path, 'rb'); if not fd then parts[#parts + 1] = path .. '=?'; return end
+            local text = fd:read('a'); fd:close()
+            parts[#parts + 1] = path:sub(#lua_root + 2) .. '=' .. (SC.file(path) or '?')
+            for m in text:gmatch("require%s*%(?%s*['\"]([%w_%.%-]+)['\"]") do
+                if m:match('^cartograph%.') then add(mod_path(m)) end
+            end
+            for f in text:gmatch("['\"]([%w_%-]+%.lua)['\"]") do
+                local sib = dir .. '/' .. f
+                if vim.uv.fs_stat(sib) then add(sib) end
+            end
+        end
+        add(d.path)
+        table.sort(parts)
+        codes[d.path] = SC.key(parts)
+        return codes[d.path]
+    end
+    local C = { stats = stats }
+    --- the key of one derive call | nil (a need with no key: not cached)
+    function C.key(d, fkey, got)
+        local parts = { base_key(), d.name, code(d) }
+        local ns = vim.deepcopy(d.needs)
+        table.sort(ns)
+        for _, n in ipairs(ns) do
+            if got[n] ~= nil then
+                if not fkey[n] then return nil end
+                parts[#parts + 1] = n .. '=' .. fkey[n]
+            else parts[#parts + 1] = n .. '=-' end
+        end
+        return SC.key(parts)
+    end
+    function C.get(key)
+        local v, found = blob.get(key)
+        if found then stats.hits = stats.hits + 1 end
+        return v, found
+    end
+    -- (a derive reads `got` through a view that notes a fact it does not declare: its key would not see that input)
+    local strays = {}
+    function C.view(d, got)
+        local declared = {}
+        for _, n in ipairs(d.needs) do declared[n] = true end
+        return setmetatable({}, {
+            __index = function (_, k) if not declared[k] then strays[d.name] = k end return got[k] end,
+            __newindex = function (_, k, x) got[k] = x end,
+        })
+    end
+    -- (after a derive ran: a need whose value it CHANGED — re-hashed, the derivation never stored)
+    local mutated = {}
+    function C.after(d, got, fkey)
+        for _, n in ipairs(d.needs) do
+            local was = fkey[n]
+            if was and not was:find('^call:') then
+                local now = SC.value(got[n])
+                if now ~= was then mutated[d.name] = n; fkey[n] = now or ('changed:' .. was) end
+            end
+        end
+    end
+    function C.put(key, d, v, ms)
+        if mutated[d.name] then stats.refused[d.name] = 'changes its need ' .. mutated[d.name] .. ' (a side effect a stored value would skip)'; return end
+        if strays[d.name] then stats.refused[d.name] = 'reads got.' .. strays[d.name] .. ', which its needs do not declare'; return end
+        local h, why = SC.value(v)
+        if not h then stats.refused[d.name] = why; return end
+        local ok, B = pcall(require, 'string.buffer')
+        local mb = ok and (#B.encode(v) / 1e6) or 0
+        if mb >= 1 and ms / mb < WORTH_MS_PER_MB then -- (under a MB, bytes are not worth weighing)
+            stats.refused[d.name] = ('not worth its bytes (%.1f MB for %.0f ms)'):format(mb, ms); return
+        end
+        local bytes, perr = blob.put(key, v)
+        if bytes then stats.stored = stats.stored + 1 else stats.refused[d.name] = perr end
+    end
+    --- a decided fact's key for its consumers: its value's content hash, else the key of the call that made it
+    function C.fact_key(v, key)
+        return SC.value(v) or (key and ('call:' .. key)) or nil
+    end
+    return C
 end
 
 --- a compdb narrowed to a SCOPE: `tree.scope` = { glob, … } relative to tree.src (`Objects/*.c`, `Python/bltinmodule.c`)
@@ -174,6 +316,7 @@ function M.run_c(text, unit, opts)
     cmd[#cmd + 1] = '-lm'
     local r = vim.system(cmd, { text = true, cwd = unit.cwd }):wait()
     if r.code ~= 0 then vim.fn.delete(tmp, 'rf'); return nil, 'the probe does not compile: ' .. (r.stderr or ''):sub(1, 400), r.stderr end
+    vim.uv.update_time() -- (the loop clock is cached: a warm facts cache leaves long spawn-free stretches — CART-1320)
     local out = vim.system({ tmp .. '/probe' }, { text = true, env = opts.env }):wait(opts.timeout or 120000)
     if not out then vim.fn.delete(tmp, 'rf'); return nil, 'the probe did not finish' end
     vim.fn.delete(tmp, 'rf')

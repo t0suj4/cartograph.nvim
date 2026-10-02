@@ -21,6 +21,11 @@ cd "$(dirname "$0")/.."
 # the gate snapshots, which the suite does not write and other tools rely on.
 XDG_STATE_HOME="$(mktemp -d -t cartograph-test-state-XXXXXX)"
 export XDG_STATE_HOME
+# … with ONE exception: the content-stamped answer store (cartograph.stampcache, CART-1303/1299). A spec's derive over
+# a vim.fn.tempname() tree writes entries keyed by a tree that stops existing — the journal's 27794 dead roots again,
+# in the cache this time. The suite's store lives and dies with its state home.
+CARTOGRAPH_STAMPCACHE_DIR="$XDG_STATE_HOME/stamped"
+export CARTOGRAPH_STAMPCACHE_DIR
 # no `exec` — the trap has to survive to clean up, and the suite's exit code
 # has to survive the trap
 trap 'rm -rf "$XDG_STATE_HOME"' EXIT

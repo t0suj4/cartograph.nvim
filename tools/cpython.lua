@@ -85,9 +85,10 @@ for _, k in ipairs(names) do
 end
 local t1 = vim.uv.hrtime()
 local rows = P.measure({ ctx = ctx, keys = keys, npos = npos })
-io.write(('CPYTHON %s — %d of %d facts derived (%d units%s); frame %s at %d / count at %d, slot %s, sentinel NULL (%d throwers); %d representatives (%d memory words, %d global addresses); realm %d builtins (python %s); facts %.1f s, readings %.1f s\n'):format(
+io.write(('CPYTHON %s — %d of %d facts derived (%d units%s); frame %s at %d / count at %d, slot %s, sentinel NULL (%d throwers); %d representatives (%d memory words, %d global addresses); realm %d builtins (python %s); facts %.1f s (%s), readings %.1f s\n'):format(
     src, T.derived, T.total, #T.got.compdb.units, scope and (', scope ' .. table.concat(scope, ',')) or '', T.got.slot.type, ctx.frame.arrayat, ctx.frame.countat, T.got.slot.type,
-    vim.tbl_count(ctx.throwers), #ctx.reps.order, vim.tbl_count(ctx.reps.memory), vim.tbl_count(ctx.reps.symaddr), #realm, runv, (t1 - t0) / 1e9, (vim.uv.hrtime() - t1) / 1e9))
+    vim.tbl_count(ctx.throwers), #ctx.reps.order, vim.tbl_count(ctx.reps.memory), vim.tbl_count(ctx.reps.symaddr), #realm, runv, (t1 - t0) / 1e9,
+    T.cache and ('facts cache: %d hit, %d stored'):format(T.cache.hits, T.cache.stored) or 'facts cache off', (vim.uv.hrtime() - t1) / 1e9))
 
 local WIT = [==[
 import builtins, sys

@@ -73,3 +73,94 @@ test('facts compdb-plain: holds only for a tree with NO build description', func
     eq(nil, no)
     ok(why:find('Makefile', 1, true), why)
 end)
+
+-- ── THE CACHE (CART-1299): a derive call answered from the content-stamped store ──────────────────────────────────────
+local SC = require 'cartograph.stampcache'
+local function counted(dir, tree, opts)
+    _G.FC = {}
+    SC._forget() -- (the stamps are memoized per process: a run is a snapshot; this test edits between runs)
+    local T = FT.derive({ src = tree, scope = opts and opts.scope }, { dir = dir, cache = opts and opts.cache })
+    local runs = _G.FC
+    _G.FC = nil
+    return T, runs
+end
+
+test('facts cache: a warm derive answers every call from the store, and each INPUT re-derives exactly what it reaches — tree, scope, code, a loaded sibling, a need', function ()
+    local dir, tree = vim.fn.tempname(), vim.fn.tempname()
+    write(tree, { ['a.h'] = '#define A 1\n', ['other.txt'] = 'x' })
+    write(dir, {
+        ['a.lua'] = "return { fact = 'a', derive = function (t) FC.a = 1; local fd = io.open(t.src .. '/a.h'); local s = fd:read('a'); fd:close(); return { text = s } end }",
+        ['b.lua'] = "return { fact = 'b', needs = { 'a' }, derive = function (_, got) FC.b = 1; return got.a.text:upper() end }",
+        ['h.lua'] = "return { fact = 'h', derive = function () FC.h = 1; return dofile(debug.getinfo(1, 'S').source:sub(2):gsub('[^/]+$', '') .. 's.lua').k end }",
+        ['s.lua'] = "return { fact = 's', k = 5, derive = function () FC.s = 1; return 's' end }",
+    })
+    local T, runs = counted(dir, tree)
+    eq({ a = 1, b = 1, h = 1, s = 1 }, runs)
+    eq({ '#DEFINE A 1\n', 5, 0, 4 }, { T.rows.b.value, T.rows.h.value, T.cache.hits, T.cache.stored })
+    T, runs = counted(dir, tree)
+    eq({ {}, 4, '#DEFINE A 1\n', true }, { runs, T.cache.hits, T.rows.b.value, T.rows.b.cached }, 'warm: nothing derives, the values are the same')
+    write(tree, { ['other.txt'] = 'y' })
+    _, runs = counted(dir, tree)
+    eq({ a = 1, b = 1, h = 1, s = 1 }, runs, 'ANY tree file is an input (a derivation may read any of them)')
+    _, runs = counted(dir, tree, { scope = { '*.h' } })
+    eq({ a = 1, b = 1, h = 1, s = 1 }, runs, 'the scope is an input')
+    write(dir, { ['b.lua'] = "-- (edited)\nreturn { fact = 'b', needs = { 'a' }, derive = function (_, got) FC.b = 1; return got.a.text:upper() end }" })
+    _, runs = counted(dir, tree)
+    eq({ b = 1 }, runs, 'an edited derivation re-derives itself only')
+    write(dir, { ['s.lua'] = "return { fact = 's', k = 6, derive = function () FC.s = 1; return 's' end }" })
+    T, runs = counted(dir, tree)
+    eq({ { h = 1, s = 1 }, 6 }, { runs, T.rows.h.value }, 'a sibling a derivation LOADS is its code too')
+    write(dir, { ['a.lua'] = "-- (same value)\nreturn { fact = 'a', derive = function (t) FC.a = 1; local fd = io.open(t.src .. '/a.h'); local s = fd:read('a'); fd:close(); return { text = s } end }" })
+    _, runs = counted(dir, tree)
+    eq({ a = 1 }, runs, 'a need re-derived to the SAME value: its consumer still answers from the store (a need is keyed by its value)')
+    write(dir, { ['a.lua'] = "return { fact = 'a', derive = function (t) FC.a = 1; local fd = io.open(t.src .. '/a.h'); local s = fd:read('a'); fd:close(); return { text = s .. '!' } end }" })
+    T, runs = counted(dir, tree)
+    eq({ { a = 1, b = 1 }, '#DEFINE A 1\n!' }, { runs, T.rows.b.value }, 'a need whose VALUE changed (the tree did not): its consumer re-derives')
+    write(tree, { ['a.h'] = '#define A 2\n' })
+    T, runs = counted(dir, tree)
+    eq({ { a = 1, b = 1, h = 1, s = 1 }, '#DEFINE A 2\n!' }, { runs, T.rows.b.value })
+    T, runs = counted(dir, tree, { cache = false })
+    eq({ { a = 1, b = 1, h = 1, s = 1 }, nil }, { runs, T.cache }, 'cache = false derives everything')
+end)
+
+test('facts cache: what is NEVER stored — a gap, a raise, a value that is more than data, a derivation reading a fact it does not declare', function ()
+    local dir, tree = vim.fn.tempname(), vim.fn.tempname()
+    write(tree, { ['x'] = '1' })
+    write(dir, {
+        ['a.lua'] = "return { fact = 'a', derive = function () FC.a = 1; return 1 end }",
+        ['g.lua'] = "return { fact = 'g', derive = function () FC.g = 1; return nil, 'no evidence' end }",
+        ['r.lua'] = "return { fact = 'r', derive = function () FC.r = 1; error('boom') end }",
+        ['f.lua'] = "return { fact = 'f', derive = function () FC.f = 1; return { lookup = function () end } end }",
+        ['m.lua'] = "return { fact = 'm', derive = function () FC.m = 1; return setmetatable({}, { __index = {} }) end }",
+        ['u.lua'] = "return { fact = 'u', needs = { 'g2' }, derive = function (_, got) FC.u = 1; return (got.a or 0) + got.g2 end }",
+        ['v.lua'] = "return { fact = 'g2', derive = function () FC.v = 1; return 2 end }",
+    })
+    local T, runs = counted(dir, tree)
+    eq({ a = 1, g = 1, r = 1, f = 1, m = 1, u = 1, v = 1 }, runs)
+    eq(3, T.rows.u.value, 'the stray read still sees the fact')
+    local refused = T.cache.refused
+    eq({ 'a function', 'a table with a metatable' }, { refused.f, refused.m })
+    ok((refused.u or ''):find('got.a', 1, true), tostring(refused.u))
+    T, runs = counted(dir, tree)
+    eq({ g = 1, r = 1, f = 1, m = 1, u = 1 }, runs, 'only a and g2 came from the store')
+    eq({ 'adapter', 'error' }, { T.rows.g.kind, T.rows.r.kind })
+end)
+
+test('facts cache: a derivation that CHANGES its need (numbers-tvis adds variants to reps.tag) is never stored — re-run, its change re-applied, the need re-keyed for the facts after it', function ()
+    local dir, tree = vim.fn.tempname(), vim.fn.tempname()
+    write(tree, { ['x'] = '1' })
+    local function n(x) return "return { fact = 'n', needs = { 'r' }, derive = function (_, got) FC.n = 1; got.r.tag.v = " .. x .. "; return 'n' end }" end
+    write(dir, {
+        ['a.lua'] = "return { fact = 'r', derive = function () FC.r = 1; return { tag = { base = 0 } } end }",
+        ['n.lua'] = n(1),
+        ['z.lua'] = "return { fact = 'c', needs = { 'r' }, derive = function (_, got) FC.c = 1; return got.r.tag.v or 'no variant' end }",
+    })
+    local T, runs = counted(dir, tree)
+    eq({ { r = 1, n = 1, c = 1 }, 1 }, { runs, T.rows.c.value })
+    ok((T.cache.refused.n or ''):find('changes its need r', 1, true), tostring(T.cache.refused.n))
+    T, runs = counted(dir, tree)
+    eq({ { n = 1 }, 1, 1 }, { runs, T.got.r.tag.v, T.rows.c.value }, 'warm: r and c from the store, n re-run — its variant is back in r')
+    write(dir, { ['n.lua'] = n(2) })
+    T, runs = counted(dir, tree)
+    eq({ { n = 1, c = 1 }, 2 }, { runs, T.rows.c.value }, 'the change is part of r for c: c, needing only r, re-derives')
+end)

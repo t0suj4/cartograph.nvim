@@ -36,3 +36,57 @@ test('stampcache: CARTOGRAPH_STAMPCACHE=0 is a log that remembers nothing (the A
     eq({ nil, false }, { L.get('k') })
     vim.env.CARTOGRAPH_STAMPCACHE = saved
 end)
+
+test('stampcache.tree: a directory stamped by CONTENT — an edit, a new file, a symlink retarget change it; a rewrite of the same bytes does not', function ()
+    local d = vim.fn.tempname()
+    vim.fn.mkdir(d .. '/sub', 'p')
+    local function put(rel, s) local fd = io.open(d .. '/' .. rel, 'wb'); fd:write(s); fd:close() end
+    put('a.c', 'int a;\n'); put('sub/b.h', 'bin\0ary')
+    vim.uv.fs_symlink('a.c', d .. '/l')
+    local function stamp() SC._forget(); return (SC.tree(d)) end
+    local h0 = stamp()
+    eq(h0, stamp())
+    put('a.c', 'int a;\n')
+    eq(h0, stamp(), 'the same bytes rewritten (a new mtime) is the same stamp')
+    put('sub/b.h', 'bin\0arY')
+    local h1 = stamp()
+    ok(h1 ~= h0, 'a byte after a NUL is content too')
+    put('c.c', '')
+    local h2 = stamp()
+    ok(h2 ~= h1, 'a new empty file')
+    os.remove(d .. '/l'); vim.uv.fs_symlink('sub/b.h', d .. '/l')
+    ok(stamp() ~= h2, 'a symlink is its target')
+end)
+
+test('stampcache.value: a value hashed by its DATA — table order does not matter, key types do; more than data has no hash', function ()
+    local ffi = require 'ffi'
+    local a, b = {}, {}
+    for i = 1, 50 do a['k' .. i] = i end
+    for i = 50, 1, -1 do b['k' .. i] = i end
+    eq(SC.value(a), SC.value(b), 'insertion order is not part of the value')
+    ok(SC.value({ [1] = 'x' }) ~= SC.value({ ['1'] = 'x' }), 'a number key is not a string key')
+    ok(SC.value({ 'ab', 'c' }) ~= SC.value({ 'a', 'bc' }), 'scalars are length-prefixed')
+    ok(SC.value({ w = ffi.new('uint64_t', 1) }) ~= SC.value({ w = 1 }), 'a 64-bit word is not a number')
+    eq(SC.value({ w = ffi.new('uint64_t', 7) }), SC.value({ w = ffi.new('uint64_t', 7) }))
+    local cyc = {}; cyc.self = cyc
+    eq({ nil, 'a function' }, { SC.value({ f = print }) })
+    eq({ nil, 'a table with a metatable' }, { SC.value(setmetatable({}, {})) })
+    eq({ nil, 'a cycle' }, { SC.value(cyc) })
+    local shared = { 1 }
+    ok(SC.value({ shared, shared }), 'a SHARED table is not a cycle')
+end)
+
+test('stampcache.blob: a whole value per key — 64-bit words and NUL bytes come back equal; a value string.buffer would change is refused; a torn blob is a miss', function ()
+    local ffi = require 'ffi'
+    local S = SC.blob('spec-blob')
+    local key = SC.key({ 'blob', tostring(vim.uv.hrtime()) })
+    local v = { w = ffi.new('uint64_t', 0xdeadbeef) * 2 ^ 20, s = 'x\0y', t = { 1, false, 'z' } }
+    ok(S.put(key, v))
+    local back, found = S.get(key)
+    eq({ true, SC.value(v) }, { found, SC.value(back) })
+    eq({ nil, 'a table with a metatable' }, { S.put(SC.key({ 'meta' }), { m = setmetatable({}, { __index = {} }) }) })
+    local p = SC.root_dir() .. '/spec-blob/' .. key:sub(1, 2) .. '/' .. key
+    local fd = io.open(p, 'wb'); fd:write('\1\2'); fd:close()
+    eq({ nil, false }, { S.get(key) }, 'a blob that does not decode is a miss, not an error')
+    vim.fn.delete(SC.root_dir() .. '/spec-blob', 'rf')
+end)
