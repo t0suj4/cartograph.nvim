@@ -42,7 +42,12 @@ step () { # label, cmd...
         echo ok
     else
         echo FAIL
+        # the FAILING TESTS first: a tail alone ends in the passing tests of the last spec, and an intermittent
+        # failure's name was lost three times that way (CART-1293); the whole output is kept beside the hook
+        printf '%s\n' "$out" | grep -A4 '^  FAIL' || true
         printf '%s\n' "$out" | tail -30
+        printf '%s\n' "$out" > "$(git rev-parse --git-dir)/pre-commit-last.log"
+        echo "[pre-commit] full output: $(git rev-parse --git-dir)/pre-commit-last.log"
         fail=1
     fi
 }
