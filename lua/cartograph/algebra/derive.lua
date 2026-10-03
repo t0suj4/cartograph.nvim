@@ -977,41 +977,63 @@ function D.generalize(instances, opts)
 end
 
 -- ── trace, as instantiate with origin tags carried by rebuild ──────────────────
-local function tag(t, o, path)
-    local n = B.copy(t)
-    n._o = { src = o.src, hole = o.hole, at = cat(o.at or {}, path), stage = o.stage }
-    if n.kids then for i, c in ipairs(n.kids) do n.kids[i] = tag(c, o, child(path, i)) end end
-    return n
-end
-local function untag(t)
-    local n = {}
-    for k, v in pairs(t) do if k ~= '_o' and k ~= 'kids' then n[k] = v end end
-    if t.kids then n.kids = {}; for i, c in ipairs(t.kids) do n.kids[i] = untag(c) end end
-    return n
-end
+
+-- ★ THE CONTRACT OUR COPY GREW (CART-1360, the verb audit, 2026-10-03): the original trace's origins carry, besides
+-- src / stage / hole / at, a hole occurrence's SITE (its index among the hole's sites, in preorder — CLASSIFY.md reads
+-- it: classify.lua indexes touched[hole][site]) and its TPATH (the template path of that site), and an EMBED origin
+-- (the string's grammar, text, spans and the inner trace's own origins). The older derivation carried none of it, so
+-- DERIVE=trace failed 28 tests through classify / propagate / cascade / transplant. Rebuilt from the basis alone, the
+-- original's single pass: rebuild + copy + seq + template + the grammar table (inner_template is derived here: the
+-- embed's inner template with the outer domains copied in). Keyed bodies are refused, as the original refuses them.
 function D.trace(T, V, env, stage)
     stage = stage or 1
     local r = D.instantiate(T, V, env)
     if not r.ok then return r end
     for h, e in pairs(D.sites(T)) do if e.ctx then return { ok = false, why = 'context hole ' .. h .. ' unsupported' } end end
-    local body = tag(T.body, { src = 'fixed', stage = stage }, {})
-    local W = {}
-    for h, v in pairs(V) do
-        if v.k == 'seq' then
-            local kids = {}
-            for j, e in ipairs(v.kids) do kids[j] = tag(e, { src = 'hole', hole = h, stage = stage, at = { j } }, {}) end
-            W[h] = B.seq(kids)
-        else
-            W[h] = tag(v, { src = 'hole', hole = h, stage = stage }, {})
+    if B.has_keyed(T.body) then return { ok = false, why = 'keyed nodes unsupported by trace (positional paths)' } end
+    local origins, seen = {}, {}
+    local function attribute(out_path, h, v, base, site, tpath)
+        for _, p in ipairs(B.positions(v)) do
+            origins[key(cat(out_path, p.path))] = { src = 'hole', stage = stage, hole = h, at = cat(base, p.path), site = site, tpath = tpath }
         end
     end
-    local out = D.apply({ body = body, holes = T.holes, edits = {} }, W).body
-    local origins = {}
-    for _, p in ipairs(B.positions(out)) do
-        local o = p.node._o
-        if o then origins[key(p.path)] = { src = o.src, stage = o.stage, hole = o.hole, at = o.at } end
+    local build
+    function build(t, tpath, out_path)
+        if is_hole(t) then
+            seen[t.h] = (seen[t.h] or 0) + 1
+            attribute(out_path, t.h, V[t.h], {}, seen[t.h], tpath)
+            return B.copy(V[t.h])
+        end
+        if t.k == 'embed' then
+            local Ti, Vi = B.template(t.kids[1]), {}
+            for h in pairs(Ti.holes) do
+                Ti.holes[h].domain, Ti.holes[h].origin, Ti.holes[h].was = T.holes[h].domain, T.holes[h].origin, T.holes[h].was
+                Vi[h] = V[h]
+            end
+            local inner = D.trace(Ti, Vi, env, stage)
+            local text, spans = B.grammars[t.g].print(inner.term)
+            origins[key(out_path)] = { src = 'embed', stage = stage, g = t.g, at = tpath, text = text, spans = spans, origins = inner.origins }
+            return B.lit(text)
+        end
+        origins[key(out_path)] = { src = 'fixed', stage = stage, at = tpath }
+        if not t.kids then return B.copy(t) end
+        local kids, n = {}, 0
+        for i, c in ipairs(t.kids) do
+            if is_hole(c) and c.rep then
+                seen[c.h] = (seen[c.h] or 0) + 1
+                for j, e in ipairs(V[c.h].kids or {}) do
+                    n = n + 1
+                    attribute(child(out_path, n), c.h, e, { j }, seen[c.h], child(tpath, i))
+                    kids[n] = B.copy(e)
+                end
+            else
+                n = n + 1
+                kids[n] = build(c, child(tpath, i), child(out_path, n))
+            end
+        end
+        return B.rebuild(t, kids)
     end
-    return { ok = true, term = untag(out), origins = origins }
+    return { ok = true, term = build(T.body, {}, {}), origins = origins }
 end
 
 -- ── migrate_one, as the lens round trip through the edit ───────────────────────

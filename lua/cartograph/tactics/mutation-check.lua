@@ -40,7 +40,9 @@ local function measure(_, p)
     local function done() if not p.keep then vim.fn.delete(root, 'rf'); v.scratch = nil end return v end
     -- 1. the BASELINE, in the copy: it must be green, or every mutation is "caught"
     local limit = p.timeout and tonumber(p.timeout) * 1000 or nil
-    local base, bwhy = SF.run(root, p.spec, limit)
+    -- (env = NAME=value,… for both runs — DERIVE=<op> mutation-checks a DERIVATION, CART-1368)
+    local env = SF.env_of(p.env)
+    local base, bwhy = SF.run(root, p.spec, limit, env)
     if not base then v.error = 'baseline: ' .. tostring(bwhy); return done() end
     v.baseline = base
     if base.ran == 0 then v.error = ('the spec RAN NOTHING (%s) — SPEC must name a spec file'):format(base.summary); return done() end
@@ -74,7 +76,7 @@ local function measure(_, p)
         end
         local wf = assert(io.open(path, 'wb')); wf:write(new); wf:close()
         v.sites, v.rules = 1, { ('`%s` -> `%s` (ground)'):format(p.before, p.after) }
-        local mut, mwhy = SF.run(root, p.spec, limit)
+        local mut, mwhy = SF.run(root, p.spec, limit, env)
         if not mut then v.error = 'mutated run: ' .. tostring(mwhy); return done() end
         v.mutated, v.caught = mut, mut.failed > 0
         return done()
@@ -95,7 +97,7 @@ local function measure(_, p)
     if not applied then v.error = 'the mutation did not APPLY: ' .. tostring(awhy); return done() end
     v.sites, v.rules = applied.sites, applied.rules
     -- 3. the MUTATED run
-    local mut, mwhy = SF.run(root, p.spec, limit)
+    local mut, mwhy = SF.run(root, p.spec, limit, env)
     if not mut then v.error = 'mutated run: ' .. tostring(mwhy); return done() end
     v.mutated = mut
     v.caught = mut.failed > 0
@@ -107,7 +109,7 @@ local E = {
     kind = 'discovery',
     measures = 'CART-1174',
     summary = 'does SPEC catch a mutation? file = the file to mutate, before/after = the mutation as an example (a chunk or an EXPRESSION), spec = the spec file name (e.g. tactic_spec); runs in a scratch COPY of repo (default: this cartograph), baseline first; keep = 1 keeps the copy; timeout = seconds per run (default 600): a mutant that HANGS is CAUGHT (timed out), its process group killed',
-    params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?', ground = 'string?', timeout = 'string?' },
+    params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?', ground = 'string?', timeout = 'string?', env = 'list?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
@@ -186,6 +188,15 @@ E.examples = {
             local m = v.mutated or {}
             return m.timed_out and m.group_gone and v.baseline.failed == 0, tostring(m.summary) .. ' ' .. tostring(v.error)
         end },
+    },
+    {
+        -- (env reaches BOTH runs: under DERIVE=bad the fixture's env_spec is red at the baseline already — CART-1368's
+        -- DERIVE=<op> mutation checks of a derivation ride this param)
+        name = 'env = NAME=value reaches the runs: a spec red under that variable refuses at the baseline',
+        files = FX, params = function (store)
+            local p = params('env_spec', '#t > 0', '#t >= 0')(store); p.ground, p.env = '1', { 'DERIVE=bad' }; return p
+        end,
+        expect = { holds = false, check = function (v) return v.error and v.error:find('BASELINE is red', 1, true) ~= nil, tostring(v.error) end },
     },
     {
         name = 'a RED baseline refuses: it would catch every mutation',
