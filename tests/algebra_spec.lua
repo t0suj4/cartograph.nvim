@@ -455,3 +455,16 @@ test('algebra seam: the recursion pass still measures depth under an EMBED body'
     local S = A.summarize_recursion(T, 'h1', { A.lit('run fast'), A.node('x') })
     eq(2, S.note.distinct_depths, 'the string parses into the body (depth 1), the node does not (0)')
 end)
+
+-- ⚠ AN ENVIRONMENT FAULT IS NOT AN ANSWER: a refusal from `anti_unify` would reach
+-- `element_template` as `alignable = false`, the same verdict ~70% of real
+-- containers earn honestly — so a missing algebra RAISES (CART-0939).
+test('algebra seam: anti_unify RAISES when the algebra is unavailable', function ()
+    need()
+    local load = alg.load
+    alg.load = function () return nil end
+    local fine, err = pcall(alg.anti_unify, { k = 'lit', v = 1, ty = 'num' }, { k = 'lit', v = 2, ty = 'num' })
+    alg.load = load
+    eq(false, fine, 'it raises')
+    ok(tostring(err):find('not available', 1, true), 'and says why: ' .. tostring(err))
+end)

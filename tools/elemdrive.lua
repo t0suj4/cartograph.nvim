@@ -1,5 +1,10 @@
 -- elemdrive — DOES THE LGG REPRODUCE `element_template`'s HOLES? (CART-0939)
 --
+-- ⚠⚠ VACUOUS SINCE b808b65: `element_template` now reads its members through
+-- `alg.anti_unify`, the same lgg this driver compares it against, so "identical"
+-- is true by construction and confirms nothing. Kept as the record of the
+-- pre-swap measurement; the acceptance test was a ROW join against the walker.
+--
 --   nvim --headless -u NONE -l tools/elemdrive.lua <corpus|dir> [--fns N] [--show N]
 --
 -- ★★★ THE SECOND WALKER CONSUMER, AND THE ONE THAT CAN ACTUALLY BE FINISHED.

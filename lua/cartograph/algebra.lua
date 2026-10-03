@@ -726,9 +726,10 @@ end
 -- it -- and that something must NOT be a second descent, or the walker has been
 -- rebuilt under a new name and the migration bought nothing (CART-0746).
 --
--- It lives here rather than in a driver because THREE callers need it identically
--- (`analyze_pair`, `element_template` and `clones.match` all call the walker), and
--- a copy per driver is the defect this file exists to avoid.
+-- It lives here rather than in a driver because THREE callers need it identically,
+-- and a copy per driver is the defect this file exists to avoid. Since b808b65
+-- `element_template` and `clones.match` read their members through `M.anti_unify`
+-- below; `analyze_pair` still calls the walker (locals, renaming, params in scope).
 
 --- the cartograph hole KIND for a divergence, from the two values at one site.
 ---
@@ -855,10 +856,14 @@ end
 --- @param e2 table|nil expr node
 --- @param opts table|nil { shortcircuit = set of operators whose RIGHT operand is
 ---                         conditional — a hole under one is tagged `guarded` }
---- @return boolean|nil ok (false on any struct hole), table holes | string why
+--- ⚠ IT RAISES RATHER THAN REFUSES when the algebra is missing or `generalize`
+--- throws. The walker could not fail, and a refusal here would surface as
+--- `alignable = false` — indistinguishable from the ~70% of containers that are
+--- legitimately unalignable. An environment fault is not an answer about the code.
+--- @return boolean ok (false on any struct hole), table holes
 function M.anti_unify(e1, e2, opts)
     local A = M.load()
-    if not A then return nil, 'the prototype algebra is not available' end
+    if not A then error('alg.anti_unify: the prototype algebra is not available: ' .. tostring(select(2, M.available()))) end
     opts = opts or {}
     if e1 == nil and e2 == nil then return true, {} end
     local sa, sb = {}, {}
@@ -874,10 +879,7 @@ function M.anti_unify(e1, e2, opts)
     -- key — without it `generalize` aligns keyed tables by their key sets, and the
     -- row join found exactly that: 5 of 3766 member pairs where two 3-pair tables
     -- with different keys became one `arity` hole instead of the walker's 9 holes).
-    local okg, g = pcall(A.generalize, { ta, tb }, { linear = true, align = 'none', positional = true })
-    if not okg or not g or not g.template then
-        return nil, 'generalize refused: ' .. tostring(g)
-    end
+    local g = A.generalize({ ta, tb }, { linear = true, align = 'none', positional = true })
     local sc = opts.shortcircuit or {}
     local function guarded(up)
         -- the RIGHT operand of a short-circuit `bin` is kid 3 (operator, left, right)

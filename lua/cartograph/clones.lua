@@ -1504,8 +1504,8 @@ end
 --- built by a loop.
 ---
 --- ★★ THERE IS NO NEW REPRESENTATION HERE, WHICH IS THE POINT. A template IS
---- (a DONOR member, the holes across all members). `anti_unify` already records
---- every divergence with `at_a`/`at_b` — the SOURCE SPANS — so the donor's text
+--- (a DONOR member, the holes across all members). Every hole record carries
+--- `at_a`/`at_b` — the SOURCE SPANS — so the donor's text
 --- plus the hole spans is a complete substitution recipe, and rendering never has
 --- to emit source from the IR (which is lossy about surface).
 ---
@@ -1557,7 +1557,6 @@ function M.element_template(container)
         -- walker before the swap — every field, node identity and order — identical
         -- on 7 corpora in 4 languages (~13.8k donor/member and donor/payload pairs).
         local ok, hs = alg.anti_unify(ms[1], ms[i], { shortcircuit = SHORTCIRCUIT })
-        if ok == nil then return { n = #ms, alignable = false, why = hs } end
         if not ok then alignable = false end
         for _, h in ipairs(hs) do holes[#holes + 1] = h end
     end
@@ -3366,9 +3365,8 @@ function M.match(tmpl, payload, opts)
     end
 
     -- the same lgg `element_template` reads its members with (CART-0939)
-    local aok, holes = require('cartograph.algebra').anti_unify(tmpl.donor, payload,
+    local _, holes = require('cartograph.algebra').anti_unify(tmpl.donor, payload,
         { shortcircuit = SHORTCIRCUIT })
-    if aok == nil then return no(holes) end
 
     -- THE SPLIT THIS VERB EXISTS FOR: a divergence at a position the members
     -- already vary at is a BINDING; the same divergence anywhere else is a
