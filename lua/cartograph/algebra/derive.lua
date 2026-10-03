@@ -27,6 +27,7 @@ local ALLOWED = {
     'best', 'lex_order', 'by', 'then_', -- the PREFERENCE primitive and its order builders: an order is a declared parameter (PRIMITIVES.md)
     'SCOPE_RULES', -- the library boundary, a declared parameter (DESTINATION.md, RESOLVE.md)
     'summarize', 'rederive_domains',
+    'repetition', -- REPETITION.md's analysis of a hedge column (period, unit, aligned head / tail): a summary like summarize
     'unify', -- the MEET: the fourth arrow of the basis (UNIFY.md), not derivable from the other three -- the domain summary is part of the domain algebra (DOMAINS.md)
     -- the KV LENS (CART-1379): a declared ADAPTER, like the grammar table — the data adapters' JSON-like view as keyed
     -- terms and back (kv_terms decides list keyedness per FAMILY, kv_template decodes a generalization into the kv
@@ -1113,6 +1114,74 @@ function D.generalize(instances, opts)
         T = B.template(body, holes2)
         values = vals2
     end
+    -- ★ AN ALIGNED HEAD OR TAIL MOVES OUT OF THE HEDGE (CART-1360's drift, REPETITION.md). generalize asks the
+    -- repetition analysis of a hedge's runs BEFORE minting it, and when the runs have a period with an aligned head or
+    -- tail — columns every member has — those become term columns beside the hedge: {a 1 a 2}, {a 3}, {a 4 a 5 a 6}
+    -- give (w "a" ?h1... ?h2) with unit (?v "a"), not one hedge round everything. The fold minted the hedge pairwise
+    -- and never asked; with the whole column in hand the same analysis is asked here, under generalize's own policy
+    -- (head or tail > 0, and at least `need` distinct run lengths), and each moved column is itself generalized.
+    -- ⚠ Only where every member has the hedge: a member under an absent pair has no run to align.
+    local function split_hedges()
+        local need = opts.need or 3
+        local function distinct(xs) local s, n = {}, 0; for _, x in ipairs(xs) do if not s[x] then s[x] = true; n = n + 1 end end; return n end
+        local maxn = 0
+        for h in pairs(T.holes) do local k = tonumber(tostring(h):match('(%d+)$')); if k and k > maxn then maxn = k end end
+        local changed = true
+        while changed do
+            changed = false
+            for _, pos in ipairs(B.positions(T.body)) do
+                local hh = pos.node
+                if is_hole(hh) and hh.rep and not hh.ctx and #pos.path > 0 then
+                    local runs, all = {}, true
+                    for i = 1, #values do
+                        local v = values[i][hh.h]
+                        if type(v) == 'table' and v.k == 'seq' then runs[i] = v else all = false end
+                    end
+                    local R = all and #runs > 0 and B.repetition(runs, { need = need, env = env, grammars = opts.grammars, cap = opts.cap, split_cap = opts.split_cap })
+                    if R and (R.head > 0 or R.tail > 0) and distinct(R.runs) >= need then
+                        local function column(get)
+                            local col = {}
+                            for i = 1, #values do col[i] = get(runs[i].kids) end
+                            local sub = D.generalize(col, { prefix = '\2', linear = opts.linear, align = opts.align, env = env,
+                                need = opts.need, grammars = opts.grammars, positional = opts.positional })
+                            local map = {}
+                            local body = rename_holes(sub.template.body, function (x)
+                                if not map[x] then maxn = maxn + 1; map[x] = (opts.prefix or 'h') .. maxn end
+                                return map[x]
+                            end)
+                            for x, to in pairs(map) do
+                                T.holes[to] = sub.template.holes[x] or { domain = B.open() }
+                                for i = 1, #values do values[i][to] = sub.values[i][x] end
+                            end
+                            return body
+                        end
+                        local heads, tails = {}, {}
+                        for j = 1, R.head do heads[j] = column(function (ks) return ks[j] end) end
+                        for j = 1, R.tail do tails[j] = column(function (ks) return ks[#ks - R.tail + j] end) end
+                        for i = 1, #values do
+                            local ks, mid = runs[i].kids, {}
+                            for x = R.head + 1, #ks - R.tail do mid[#mid + 1] = ks[x] end
+                            values[i][hh.h] = B.seq(mid)
+                        end
+                        local ppath = { unpack(pos.path, 1, #pos.path - 1) }
+                        local parent = B.locate_at(T.body, ppath)
+                        local kids = {}
+                        for x, c in ipairs(parent.kids) do
+                            if c == hh then
+                                for _, k in ipairs(heads) do kids[#kids + 1] = k end
+                                kids[#kids + 1] = c
+                                for _, k in ipairs(tails) do kids[#kids + 1] = k end
+                            else kids[#kids + 1] = c end
+                        end
+                        T.body = B.put(T.body, ppath, B.rebuild(parent, kids))
+                        changed = true
+                        break
+                    end
+                end
+            end
+        end
+    end
+    split_hedges()
     rekey()
     -- ★ A KEYED NODE'S ORDER NOTE (CART-1360's drift): generalize records, on each keyed node, whether every member
     -- present there WRITES its keys in the same order — { stable, support = members present, claimed = stable and
