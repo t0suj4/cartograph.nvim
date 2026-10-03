@@ -1467,6 +1467,10 @@ local function v_mentions(store, args)
                     if fd and (not st or st.size <= M.BYTE_SCAN_CAP) then lines = vim.split(fd:read('a'), '\n', { plain = true }) end
                     if fd then fd:close() end
                 end
+                -- (a NUL byte means the bytes are not the text — UTF-16, a binary: a name in it would be missed, so the
+                -- file is UNREADABLE for this question and keeps the frontier open; every unparsed module is a text file
+                -- chosen by extension — a *.min.js, a source with no grammar, a container whose code failed — or unreadable)
+                if lines then for _, l in ipairs(lines) do if l:find('[%z\n]') then lines = nil; break end end end -- (readfile turns a NUL into a NL inside the line)
                 if not lines then unread[#unread + 1] = n.file
                 else
                     scanned = scanned + 1

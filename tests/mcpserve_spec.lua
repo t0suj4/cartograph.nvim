@@ -656,6 +656,16 @@ test('agent: mentions BYTE-SCANS the unparsed files — a name in none of their 
     agent.BYTE_SCAN_CAP = cap
     eq('frontier', u.absence)
     eq({ 'src/main/resources/com/example/web/vendor.min.js' }, u.absence_why.evidence.unreadable)
+    -- ⚠ A FILE WHOSE BYTES ARE NOT ITS TEXT (UTF-16: a NUL between every ASCII byte) cannot close the question — the
+    -- name would be missed, so `absent` would be false: it is unreadable here, and the frontier stays open
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/web', 'p')
+    local fd = assert(io.open(root .. '/web/MapView.java', 'w')); fd:write(assert(io.open(FIX .. '/with-bundle/src/main/java/com/example/web/MapView.java')):read('a')); fd:close()
+    fd = assert(io.open(root .. '/web/lib.min.js', 'wb')); fd:write(('var ServletContainerFactory=1;'):gsub('.', '%0\0')); fd:close()
+    ingest(root)
+    local w = agent.answer(store, 'mentions', { name = 'ServletContainerFactory' })
+    eq('frontier', w.absence, 'a UTF-16 bundle never licenses absent')
+    eq({ 'web/lib.min.js' }, w.absence_why.evidence.unreadable)
 end)
 
 test('agent: the honesty verbs answer "no" as a fact, not as an empty set', function ()
