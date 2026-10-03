@@ -12,6 +12,20 @@
 -- list keeps its elements in the order written. The round trip is the oracle (tests/kvterm_spec.lua).
 return function (M, SHARED)
 
+-- may a list be MERGE-KEYED by kf? non-empty, every element an object whose kf is a scalar, and every kf value DISTINCT:
+-- a repeated name (two `steps` called alike) cannot be a key — keyed, both would encode as the first and the content
+-- id would depend on an unstable sort; such a list stays positional (native kv_generalize overwrites one, `o[kk] = x`)
+local function keyable(x, kf)
+    if kf == nil or #x.a == 0 then return false end
+    local seen = {}
+    for _, e in ipairs(x.a) do
+        if not (M.kv_kind(e) == 'obj' and e.o[kf] ~= nil and M.kv_kind(e.o[kf]) == 'scalar') then return false end
+        local nm = tostring(e.o[kf])
+        if seen[nm] then return false end
+        seen[nm] = true
+    end
+    return true
+end
 -- one value on its own: its lists keyed by their own elements (inside a place every value of a family shares, the
 -- FAMILY decides — M.kv_terms; on its own, or inside what will be a hole, this is the encoding)
 local function single(x, kf)
@@ -26,11 +40,7 @@ local function single(x, kf)
     if k == 'arr' then
         local kids = {}
         for i, e in ipairs(x.a) do kids[i] = single(e, kf) end
-        local keyed = kf ~= nil and #x.a > 0
-        for _, e in ipairs(x.a) do
-            if not (M.kv_kind(e) == 'obj' and e.o[kf] ~= nil and M.kv_kind(e.o[kf]) == 'scalar') then keyed = false; break end
-        end
-        if keyed then return { k = 'arr', kids = kids, align = 'keyed', key = kf } end
+        if keyable(x, kf) then return { k = 'arr', kids = kids, align = 'keyed', key = kf } end
         return { k = 'arr', kids = kids }
     end
     error('kv_term: not a kv value (' .. tostring(k) .. ')')
@@ -46,13 +56,7 @@ function M.kv_terms(values, opts)
     opts = opts or {}
     local kf = opts.keyfield
     local n = #values
-    local function eligible(x)
-        if #x.a == 0 then return false end
-        for _, e in ipairs(x.a) do
-            if not (M.kv_kind(e) == 'obj' and e.o[kf] ~= nil and M.kv_kind(e.o[kf]) == 'scalar') then return false end
-        end
-        return true
-    end
+    local function eligible(x) return keyable(x, kf) end
     local enc
     -- xs[i]: value i at this place (nil where it has none) -> out[i], its term
     enc = function(xs)

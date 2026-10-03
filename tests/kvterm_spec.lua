@@ -50,6 +50,13 @@ test('kv lens: a value ROUND TRIPS — key order, scalar types, null, nesting, m
     end
     eq('keyed', A.kv_term(v, { keyfield = 'name' }).kids[5].kids[2].align, 'a list of named objects is merge-keyed')
     eq(nil, A.kv_term(v).kids[5].kids[2].align, 'and positional with no keyfield')
+    -- ★ a REPEATED name is no key (two `steps` called alike: 1,361 such lists in jenkins-infra) — keyed, both would
+    -- encode as the first; the list stays positional and round-trips whole
+    local steps = O({ { 'steps', Arr(O({ { 'name', 'build' }, { 'run', 'make' } }), O({ { 'name', 'build' }, { 'run', 'make test' } })) } })
+    local st = A.kv_term(steps, { keyfield = 'name' })
+    eq(nil, st.kids[1].kids[2].align, 'positional')
+    eq(oser(steps), oser(A.term_kv(st)))
+    eq(oser(steps), oser(A.term_kv(A.kv_terms({ steps, steps }, { keyfield = 'name' })[2])), 'and as a family')
 end)
 
 test('kv lens: kv_eq and kv_eq_keyed ARE the term algebra\'s equality over the lens', function ()

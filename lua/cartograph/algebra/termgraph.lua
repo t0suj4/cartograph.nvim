@@ -402,8 +402,18 @@ end
 -- keyed-ordered or positional node's in their own order. Spans (`at`) and every other field eq ignores stay out.
 -- ⚠ NOT tg_of_term: its sharing keys on show() per node (quadratic) and its labels (vsym) print a literal untyped.
 local function lenq(s) s = tostring(s); return #s .. ':' .. s end
+-- ONE canonical text per number eq can tell apart: integers exactly, the rest to 17 significant digits (tostring keeps
+-- 14, so 0.1 + 0.2 and 0.3 printed alike while eq told them apart); -0 is 0 (eq: -0 == 0); NaN is REFUSED — eq never
+-- holds for it, so no id can stand for it. The wire carries the same text, so JSON never rounds a number.
+local function num(v)
+    if v ~= v then error('content id: a NaN literal has no identity (eq never holds for it)', 0) end
+    if v == 0 then return '0' end
+    if v == math.floor(v) and math.abs(v) < 2 ^ 53 then return ('%.0f'):format(v) end
+    return ('%.17g'):format(v)
+end
+M.content_num = num
 local function label(t)
-    if t.k == 'lit' then return 'L' .. type(t.v) .. lenq(t.v) end
+    if t.k == 'lit' then return 'L' .. type(t.v) .. lenq(type(t.v) == 'number' and num(t.v) or t.v) end
     if t.k == 'name' then return 'N' .. lenq(t.n) end
     local key = t.key and M.key_spec(t) or ''
     local l = 'K' .. lenq(t.k) .. '|' .. tostring(t.align or '') .. '|' .. lenq(key) .. '|' .. lenq(t.opt or '')
@@ -455,7 +465,12 @@ end
 -- so two occurrences of one subterm can differ there without un-sharing it. The round trip is the oracle:
 -- wire_decode(wire_encode(t)) is deep-equal to t (through JSON text too). A field that is no JSON value is REFUSED by
 -- name, never dropped.
-local EQ_FIELDS = { k = true, v = true, n = true, h = true, rep = true, ctx = true, align = true, key = true, opt = true, kids = true }
+-- the fields a node RECORD holds — exactly what the id hashes (label above), PER KIND, as eq reads them: a literal is its
+-- value alone (eq ignores a presence mark on it), a name its name, a hole its name / rep / ctx plus the node fields, any
+-- other node its alignment, merge key and presence mark. Everything else is per-occurrence and rides in `side`.
+local RECORD = { lit = { 'v' }, name = { 'n' }, hole = { 'h', 'rep', 'ctx', 'align', 'key', 'opt' } }
+local NODE_RECORD = { 'align', 'key', 'opt' }
+local function record_fields(u) return RECORD[u.k] or NODE_RECORD end
 local function jsonable(x, depth)
     depth = depth or 0
     if depth > 32 then return false end
@@ -473,14 +488,21 @@ end
 --- side = { [path] = { field = value } } } | nil, why
 function M.wire_encode(t)
     local memo, nodes, side = {}, {}, {}
-    local root = M.content_id(t, memo)
+    local okid, root = pcall(M.content_id, t, memo)
+    if not okid then return nil, tostring(root) end
     local why
     local function walk(u, path)
         if why then return end
         local h = memo[u]
+        local own = {}
+        for _, f in ipairs(record_fields(u)) do own[f] = true end
         if not nodes[h] then
-            local rec = { k = u.k, n = u.n, h = u.h, rep = u.rep, ctx = u.ctx, align = u.align, key = u.key, opt = u.opt }
-            if u.k == 'lit' then rec.v, rec.vt = u.v, type(u.v) end
+            local rec = { k = u.k }
+            for f in pairs(own) do rec[f] = u[f] end
+            if u.k == 'lit' then
+                rec.vt = type(u.v)
+                if rec.vt == 'number' then rec.v = num(u.v) end -- (the canonical text: JSON never rounds it)
+            end
             if rec.key ~= nil and not jsonable(rec.key) then why = 'a merge key that is no JSON value at ' .. path; return end
             if u.kids then -- (a node with no kids list keeps none: `name`, `lit`)
                 local kids = {}
@@ -501,7 +523,7 @@ function M.wire_encode(t)
             if moved then extra = { ['@order'] = perm } end
         end
         for f, x in pairs(u) do
-            if not EQ_FIELDS[f] then
+            if f ~= 'k' and f ~= 'kids' and not own[f] then
                 if not jsonable(x) then why = ('the field `%s` at %s is no JSON value'):format(tostring(f), path == '' and 'the root' or path); return end
                 extra = extra or {}; extra[f] = x
             end

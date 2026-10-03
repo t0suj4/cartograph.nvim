@@ -1568,6 +1568,9 @@ function D.kv_eq_keyed(x, y, keyfield)
     keyfield = keyfield or 'name'
     return B.eq(B.kv_term(x, { keyfield = keyfield }), B.kv_term(y, { keyfield = keyfield }))
 end
+-- ⚠ EXACT ONLY VIA THE HAND-WRITTEN generalize until CART-1395: D.generalize gives a member absent under a presence hole a
+-- neighbour's value (6 of 49 jenkins-infra families differ), and DERIVE=kv_generalize stays green because no spec reads
+-- such a value vector — the gate cannot see it.
 function D.kv_generalize(instances, opts)
     opts = opts or {}
     local keyfield = opts.keyfield or 'name'

@@ -41,3 +41,32 @@ test('term wire: the decoded term is a fresh TREE (an edit in place touches one 
     local w, why = A.wire_encode(bad)
     eq(nil, w); ok(why:find('`fn`', 1, true), why)
 end)
+test('term wire: NUMBERS — one canonical text per number eq tells apart, exact through JSON; NaN refused', function ()
+    ok(A.content_id(A.lit(0.1 + 0.2)) ~= A.content_id(A.lit(0.3)), '0.1 + 0.2 is not 0.3 (eq says so; tostring printed both alike)')
+    eq(A.content_id(A.lit(-0)), A.content_id(A.lit(0)), '-0 is 0')
+    for _, v in ipairs({ 0.1 + 0.2, 1e300, -2.5e-12, 2 ^ 53 + 2, 7 }) do
+        local t = A.node('f', A.lit(v))
+        eq(t, (rt(t)), 'exact through JSON: ' .. ('%.17g'):format(v))
+    end
+    local w, why = A.wire_encode(A.node('f', A.lit(0 / 0)))
+    eq(nil, w); ok(why:find('NaN', 1, true), why)
+end)
+
+test('term wire: the RECORD holds exactly what the id hashes — a presence mark on a LITERAL, a stray field, ride per occurrence', function ()
+    -- a keyed SET of primitives generalized under presence puts the mark on a literal (eq ignores it there)
+    local s1 = A.keyed('set', { A.lit('a'), A.lit('b') }, { key = true })
+    local s2 = A.keyed('set', { A.lit('a') }, { key = true })
+    local body = A.generalize({ s1, s2 }).template.body
+    local marked = 0
+    for _, k in ipairs(body.kids) do if k.k == 'lit' and k.opt then marked = marked + 1 end end
+    eq(1, marked, 'the premise: a literal carries a presence mark')
+    eq(body, (rt(body)))
+    -- two occurrences of ONE literal with different marks: one record, each keeps its own
+    local t = A.node('f', { k = 'lit', v = 'b', opt = 'h1' }, { k = 'lit', v = 'b', opt = 'h2' })
+    local back, w = rt(t)
+    eq(t, back)
+    eq(w.nodes[w.root].kids[1], w.nodes[w.root].kids[2])
+    -- a field eq does not read on this kind (a stray `v` on a node) is not dropped
+    local stray = A.node('f', A.lit(1)); stray.v = 3
+    eq(stray, (rt(stray)))
+end)
