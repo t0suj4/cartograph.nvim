@@ -1,6 +1,6 @@
 ---
 name: cartograph
-description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 42 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
+description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 42 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua, the `alibi` verb only). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
 ---
 
 # cartograph, for an agent
@@ -51,7 +51,7 @@ Two hosts, same envelope.
 # a session — MCP, newline-delimited JSON-RPC 2.0, one JSON object per line
 nvim --headless -u NONE -l tools/mcpserve.lua <root>... [--index-only] [--write]
 
-# one shot — one JSON document on stdout, nothing else
+# one shot — the `alibi` verb ONLY (every other verb: mcpserve); one JSON document on stdout, nothing else
 nvim --headless -u NONE -l tools/agentq.lua <root> alibi <file> <line>
 ```
 
