@@ -113,6 +113,17 @@ test('toolbelt: params are COERCED by their declaration — a ref from file::nam
     ok(need and need:find('needs param `ref`', 1, true), tostring(need))
     local fp = assert(tb.load('family-premise'))
     eq({ 'a.lua', 'b.lua' }, (tb.coerce(store, fp, { files = 'a.lua,b.lua' })).files, 'a list from a,b')
+    -- a TERM param (CART-1342) is a table with `k` or `body`; a string is refused by name
+    local cf = assert(tb.load('checked-fill'))
+    local A = require('cartograph.algebra').load()
+    local T = A.template(A.node('f', A.hole('a')))
+    ok((tb.coerce(store, cf, { template = T, hole = 'a', value = A.lit(1) })), 'a template and a term pass')
+    local _, notterm = tb.coerce(store, cf, { template = 'f(?a)', hole = 'a', value = A.lit(1) })
+    ok(notterm and notterm:find('must be an algebra term', 1, true), tostring(notterm))
+    -- a param of a type the list does not name is refused by name — it used to pass the value through unchecked
+    local odd = { name = 'odd', params = { n = 'number' } }
+    local _, unknown, ucls = tb.coerce(store, odd, { n = 3 })
+    eq('ill-posed', ucls); ok(unknown and unknown:find('unknown type `number`', 1, true), tostring(unknown))
 end)
 
 test('toolbelt: T.use composes a NAMED tactic — a discovery gates the step after it, and a failed premise stops by name', function ()

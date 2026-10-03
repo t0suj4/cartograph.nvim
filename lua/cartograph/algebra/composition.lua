@@ -32,4 +32,17 @@ end
 function M.instance_of(T1, T2, env)
     return M.match(T2, T1.body, { defs = env and env.defs, hole_domains = T1.holes }).ok
 end
+
+--- the UNIT of hole h of T: the single-hole template carrying h's own domain — fill(T, h, unit) = T, domains included
+--- (staging is composition: a hole not yet filled is filled with its unit)
+function M.unit(T, h) return M.template(M.hole(h), { [h] = M.copy(T.holes[h]) }) end
+
+--- may template T2 fill hole h of T? (CART-1342) — every instance of T2 must lie in h's domain, i.e. T2 is an INSTANCE
+--- OF h's UNIT: instance_of checks a ground part by `admits` and a hole of T2 by `entails` (domain inclusion, partial:
+--- false when it cannot tell, so the doubt lands on the refusing side). `fill` itself checks nothing. -> ok | false, why
+function M.admits_template(T, h, T2, env)
+    if not T.holes[h] then return false, 'the template has no hole ' .. tostring(h) end
+    if M.instance_of(T2, M.unit(T, h), env) then return true end
+    return false, ('%s does not fit hole %s (%s)'):format(M.show(T2.body), tostring(h), M.show_domain(T.holes[h].domain))
+end
 end
