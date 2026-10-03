@@ -1640,7 +1640,7 @@ function M.specialize(prog, fname, division, statics, opts)
 end
 
 -- ── residual IR helpers ────────────────────────────────────────────────────────────────────────────────────────────
-local count_block, subst_block
+local count_block
 
 --- count the uses of each residual variable name in a residual expression (a use inside a function expression counts
 --- as MANY: when and how often it runs is the lambda's call sites')
@@ -1676,63 +1676,21 @@ function count_block(stmts, uses, w)
     end
 end
 
---- substitute residual expressions for residual variable names
+--- UNFOLD's substitution is the ALGEBRA's (CART-1341 step 8): the inlined residual expression seen through the lens
+--- (cartograph.mixterm), its placeholder variables made HOLES, filled by A.instantiate with the dynamic arguments' terms,
+--- and the IR read back. The hand-rolled walk this replaces substituted the same names in the same places — the 33
+--- compiled luajs matchers are byte-identical across the change.
 function M.substitute(e, subst)
-    local op = e.op
-    if op == 'var' then return subst[e.name] or e end
-    if op == 'bin' then return { op = 'bin', o = e.o, l = M.substitute(e.l, subst), r = M.substitute(e.r, subst) } end
-    if op == 'un' then return { op = 'un', o = e.o, e = M.substitute(e.e, subst) } end
-    if op == 'index' then return { op = 'index', obj = M.substitute(e.obj, subst), key = M.substitute(e.key, subst) } end
-    if op == 'table' then
-        local fields = {}
-        for i, f in ipairs(e.fields) do fields[i] = { key = M.substitute(f.key, subst), val = M.substitute(f.val, subst) } end
-        return { op = 'table', fields = fields }
+    local MT, A = require 'cartograph.mixterm', require('cartograph.algebra').load()
+    local T = A.template(MT.holes(MT.to_term(e), subst))
+    local V = {}
+    for h in pairs(T.holes) do V[h] = MT.to_term(subst[h]) end -- (only the holes the expression has: a parameter
+    local r = A.instantiate(T, V)                                --  the body never reads is no hole)
+    if not r.ok then
+        refuse('the algebra refused an unfold\'s substitution: unfilled ' .. table.concat(r.unfilled or {}, ',') .. '; rejected '
+            .. table.concat(r.rejected or {}, ',') .. '; extra ' .. table.concat(r.extra or {}, ','))
     end
-    if op == 'call' or op == 'prim' then
-        local args = {}
-        for i, a in ipairs(e.args) do args[i] = M.substitute(a, subst) end
-        return { op = op, fn = e.fn, name = e.name, args = args }
-    end
-    if op == 'callv' then
-        local args = {}
-        for i, a in ipairs(e.args) do args[i] = M.substitute(a, subst) end
-        return { op = 'callv', f = M.substitute(e.f, subst), args = args }
-    end
-    if op == 'method' then
-        local args = {}
-        for i, a in ipairs(e.args) do args[i] = M.substitute(a, subst) end
-        return { op = 'method', obj = M.substitute(e.obj, subst), m = e.m, args = args }
-    end
-    if op == 'lambda' then return { op = 'lambda', params = e.params, body = subst_block(e.body, subst) } end
-    return e
-end
-function subst_block(stmts, subst)
-    local out = {}
-    for i, s in ipairs(stmts) do
-        local op = s.op
-        local n = {}
-        for k, v in pairs(s) do n[k] = v end
-        if op == 'local' or op == 'callstmt' then n.e = M.substitute(s.e, subst)
-        elseif op == 'ret' or op == 'localm' then
-            n.es = {}
-            for j, e in ipairs(s.es) do n.es[j] = M.substitute(e, subst) end
-        elseif op == 'assign' then n.target = M.substitute(s.target, subst); n.e = M.substitute(s.e, subst)
-        elseif op == 'assignm' then
-            n.targets, n.es = {}, {}
-            for j, t in ipairs(s.targets) do n.targets[j] = M.substitute(t, subst) end
-            for j, e in ipairs(s.es) do n.es[j] = M.substitute(e, subst) end
-        elseif op == 'if' then
-            n.clauses = {}
-            for j, c in ipairs(s.clauses) do n.clauses[j] = { cond = M.substitute(c.cond, subst), body = subst_block(c.body, subst) } end
-            n.els = subst_block(s.els, subst)
-        elseif op == 'fornum' then
-            n.from, n.to, n.step = M.substitute(s.from, subst), M.substitute(s.to, subst), M.substitute(s.step, subst)
-            n.body = subst_block(s.body, subst)
-        elseif op == 'forin' then n.e = M.substitute(s.e, subst); n.body = subst_block(s.body, subst)
-        elseif op == 'do' then n.body = subst_block(s.body, subst) end
-        out[i] = n
-    end
-    return out
+    return MT.of_term(r.term)
 end
 
 -- ── PRINT: residual IR -> Lua text ─────────────────────────────────────────────────────────────────────────────────

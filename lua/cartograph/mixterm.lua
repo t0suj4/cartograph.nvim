@@ -148,6 +148,23 @@ function of_term(t)
 end
 M.of_term = of_term
 
+--- the term t with every `var` NAMED in `names` (a set, or a map from name) made a HOLE of that name — residual
+--- placeholders become algebra holes, so filling them is A.instantiate / A.fill
+function M.holes(t, names)
+    if t.k == 'var' then
+        local nm = t.kids[2]
+        if nm and nm.k == 'lit' and names[nm.v] ~= nil then return { k = 'hole', h = nm.v } end
+        return t
+    end
+    if not t.kids then return t end
+    local kids = {}
+    for i, c in ipairs(t.kids) do kids[i] = M.holes(c, names) end
+    local n = {}
+    for k, v in pairs(t) do n[k] = v end
+    n.kids = kids
+    return n
+end
+
 --- a statement list (a body) <-> a `seq` term
 function M.block_term(b) return list_term(b) end
 function M.of_block(t) return of_list(t) or {} end
