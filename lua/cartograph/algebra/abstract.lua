@@ -179,6 +179,7 @@ function M.abstract(I, H)
                 end
                 if p.rep then
                     local parent = at(root, { unpack(rest, 1, #rest - 1) })
+                    M.assert_mutable(parent, 'abstract')
                     local start, n = rest[#rest], p.n or 0
                     local kids = {}
                     for j = 1, start - 1 do kids[#kids + 1] = parent.kids[j] end
@@ -190,6 +191,7 @@ function M.abstract(I, H)
                 end
             elseif p.rep then
                 local parent = at(body, { unpack(p.path, 1, #p.path - 1) })
+                M.assert_mutable(parent, 'abstract')
                 local start, n = p.path[#p.path], p.n or 0
                 local kids = {}
                 for j = 1, start - 1 do kids[#kids + 1] = parent.kids[j] end

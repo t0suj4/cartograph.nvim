@@ -419,6 +419,7 @@ function M.content_id(t, memo, ordered)
         end
         local h = vim.fn.sha256(label(u) .. '(' .. table.concat(kids, ',') .. ')')
         memo[u] = h
+        if M.FREEZE then M.OBSERVED[u] = true end
         return h
     end
     return id(t)

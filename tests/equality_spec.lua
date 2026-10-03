@@ -164,3 +164,27 @@ test('a PARTIAL variant: rename the holes a caller does not keep (xmpppeer\'s re
     eq('(f ?o1 ?P ?o1 ?@id)', A.show(r))
     eq('(f ?v1 ?v2 ?v1 ?v3)', A.show(A.rename_holes(t)), 'with no keep, every name')
 end)
+-- ── RUNG 5 (CART-1403): TERMS ARE VALUES (EGAL) — measured 2026-10-03: the whole suite under CARTOGRAPH_FREEZE=1 is
+-- green (3,926 passed): no operation edits a term in place after its content id was taken
+test('terms are values: under the freeze an in-place edit of an OBSERVED term refuses by name; a fresh copy is the caller\'s to edit', function ()
+    local was = A.FREEZE
+    A.FREEZE = true
+    local t = A.node('f', A.lit(1), A.node('g', A.lit(2)))
+    A.content_id(t)
+    local ok1, why = pcall(A.assert_mutable, t.kids[2], 'test')
+    ok(not ok1 and tostring(why):find('terms are values', 1, true), tostring(why))
+    ok(pcall(A.assert_mutable, A.copy(t).kids[2], 'test'), 'a copy is owned')
+    -- the operations that edit in place do so on their OWN copies: run them over hashed (observed) inputs
+    local I1, I2 = A.node('f', A.lit(1), A.node('g', A.lit(2))), A.node('f', A.lit(3), A.node('g', A.lit(2)))
+    A.content_id(I1); A.content_id(I2)
+    local okr, err = pcall(function ()
+        local g = A.generalize({ I1, I2 })
+        A.join(A.template(I1), I2)
+        A.dig(A.template(I1), { 2 }, 'z')
+        A.fill(g.template, next(g.template.holes), A.template(A.lit(9)))
+        A.abstract(I1, A.sites(g.template))
+        A.kv_generalize({ { o = { a = '1' }, keys = { 'a' } }, { o = { a = '2' }, keys = { 'a' } } }, {})
+    end)
+    A.FREEZE = was
+    ok(okr, tostring(err))
+end)

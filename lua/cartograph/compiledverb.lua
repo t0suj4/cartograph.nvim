@@ -97,6 +97,9 @@ function M.match(T, opts)
     M.stats[how] = M.stats[how] + 1
     if how == 'compiled' and store then store.put(key, { text = text, pool = pool }) end -- (a pool that is not plain data is refused by put: no disk copy, still correct)
     memo[T] = { f = f }
+    -- (a memo keyed by the template OBJECT is sound only while the template is a value: under CARTOGRAPH_FREEZE=1 its
+    -- body is marked observed, so an in-place edit of it afterwards refuses by name — CART-1403)
+    if A().FREEZE then A().content_id(T.body) end
     return f, how
 end
 

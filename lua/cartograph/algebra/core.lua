@@ -797,9 +797,20 @@ end
 
 
 -- ── abstract / values_at (read H and I; never T, never V) ─────────────────────
+-- ★ TERMS ARE VALUES (EGAL, CART-1403): an in-place edit is sound only on a term its caller OWNS — a fresh copy nobody
+-- has hashed or memoized. Under CARTOGRAPH_FREEZE=1 content_id marks every node it hashes as OBSERVED (a weak set), and
+-- the in-place mutators refuse to touch one by name: a memo keyed by content or by node object would go stale.
+M.FREEZE = os.getenv('CARTOGRAPH_FREEZE') == '1'
+M.OBSERVED = setmetatable({}, { __mode = 'k' })
+function M.assert_mutable(t, who)
+    if M.FREEZE and t and M.OBSERVED[t] then
+        error(('%s: mutating a term in place after its content id was taken (terms are values — copy, then edit: CART-1403)'):format(who or 'mutation'), 2)
+    end
+end
 local function set_at(root, path, node)
     if #path == 0 then return node end
     local parent = at(root, { unpack(path, 1, #path - 1) })
+    M.assert_mutable(parent, 'set_at')
     local last = path[#path]
     if type(last) == 'string' then
         local _, i = M.kid_by_key(parent, last)
