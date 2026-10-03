@@ -71,6 +71,28 @@ test('refresh sweep: unchanged-tree refresh of EVERY file is idempotent', functi
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ THE MENTION INDEX IS PART OF THE CONTRACT (CART-1393). graphdiff compares nodes and edges, not `data.names`, so a
+-- refreshed file whose name set never came back passed every test above while `mentions` answered a false `absent`.
+-- The file that lost it was a NEW one with NO FUNCTIONS: the splice handed the id pass only files with fn ranges,
+-- though the id pass itself (and the cold extract) reads a var-only file too.
+test('refresh sweep: a NEW file with no functions gets its mention names, like a fresh extract', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = build()
+    store.ingest(ts.extract(root))
+    local fd = assert(io.open(root .. '/lib/consts.lua', 'w'))
+    fd:write('local freshname = 1\nreturn freshname\n')
+    fd:close()
+    local _, why = refresh.file('lib/consts.lua')
+    ok(why == nil or why ~= 'error', 'refresh of the new file ok')
+    local fresh = ts.extract(root)
+    ok(fresh.names and fresh.names['lib/consts.lua'], 'the fresh extract indexes the new file (the control)')
+    eq(fresh.names['lib/consts.lua'], (store.data.names or {})['lib/consts.lua'], 'and so does the refreshed store')
+    for f, s in pairs(fresh.names) do
+        eq(s, (store.data.names or {})[f], 'every file\'s name set agrees: ' .. f)
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('refresh sweep: an edited file converges to the fresh extract', function ()
     if not ready() then skip 'no lua parser' end
     local root = build()

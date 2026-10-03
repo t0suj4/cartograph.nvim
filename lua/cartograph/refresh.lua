@@ -336,11 +336,13 @@ function M.splice(data, rels, deleted)
     -- reconciliation candidates (their fn extents come straight from the
     -- current nodes — no re-parse of anything but these files)
     local idfiles, franges = {}, {}
+    -- ⚠ EVERY REFRESHED FILE, NOT ONLY THOSE WITH FUNCTIONS (CART-1393). The id pass gates a file itself — fn ranges
+    -- OR a top-level var ("a var-only file has mentions") — exactly as the cold extract does; filtering here on fn
+    -- ranges alone meant a var-only file's name set, cleared above, never came back, and `mentions` answered a false
+    -- `absent` for every name in a file the tree gained since its cache.
     for _, f in ipairs(rels or {}) do
-        if mini.fn_ranges and mini.fn_ranges[f] then
-            idfiles[#idfiles + 1] = f
-            franges[f] = mini.fn_ranges[f]
-        end
+        idfiles[#idfiles + 1] = f
+        franges[f] = mini.fn_ranges and mini.fn_ranges[f] or nil
     end
     for f in pairs(candidates) do franges[f] = {} end
     for _, n in ipairs(data.nodes) do
