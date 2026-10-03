@@ -1,5 +1,6 @@
 -- Exact-structural clone detection ([[cartograph-record-fold-arc]] near-clone arc, EXACT
--- tier): two functions are clones iff their per-row canonical key sequences match. The key
+-- tier): two functions are clones iff their bodies are VARIANTS — one term each, locals as holes, equal modulo a
+-- consistent renaming of those holes (CART-1412; canon's per-row key sequence before). The key
 -- is ALPHA-INVARIANT on locals (params ∪ df-defs → positional slots) but keeps callees /
 -- globals / field names / operators / literals verbatim — so a rename is a clone, but a
 -- different callee or operator is NOT. Rides the shipped expr-IR (cartograph.expr).
@@ -69,6 +70,34 @@ test('clones: a different OPERATOR is not a clone', function ()
     local g = group_of(clones.exact(store, { min_rows = 2 }), 'add')
     ok(g and g.add2, 'add and add2 (alpha-renamed) ARE clones — the group is real')
     ok(not (g and g.mul), 'mul (a*b) is excluded — the operator discriminates')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ★ THE EXACT KEY IS THE VARIANT RELATION OVER A TERM WITH LOCALS AS HOLES (CART-1412). Two ways that encoding can
+-- go wrong, each pinned: a local collapsed to one shared symbol (g(x, x) reads as g(x, y)), and a field SELECTOR
+-- spelled like a local turned into a hole (`self.heal` beside `local heal` reads as `self.overheal` — the merge the
+-- first, post-hoc encoder made on Skada's GetHPS / GetOHPS).
+test('clones: a repeated local is not two different locals (g(x, x) vs g(x, y))', function ()
+    local root = proj {
+        ['a.lua'] = fn('same', 'x, y', '  local z = g(x, x)\n  return z'),
+        ['c.lua'] = fn('same2', 'p, q', '  local r = g(p, p)\n  return r'),
+        ['b.lua'] = fn('mixed', 'x, y', '  local z = g(x, y)\n  return z'),
+    }
+    local g = group_of(clones.exact(store, { min_rows = 2 }), 'same')
+    ok(g and g.same2, 'same and same2 (alpha-renamed) ARE clones — the group is real')
+    ok(not (g and g.mixed), 'mixed passes two different locals — not the same body')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a field selector spelled like a local is a selector, not a local', function ()
+    local root = proj {
+        ['a.lua'] = fn('hps', 'self', '  local heal = self.heal or 0\n  return heal * 2'),
+        ['c.lua'] = fn('hps2', 'me', '  local amount = me.heal or 0\n  return amount * 2'),
+        ['b.lua'] = fn('ohps', 'self', '  local overheal = self.overheal or 0\n  return overheal * 2'),
+    }
+    local g = group_of(clones.exact(store, { min_rows = 2 }), 'hps')
+    ok(g and g.hps2, 'hps and hps2 read the same field — the group is real')
+    ok(not (g and g.ohps), 'ohps reads a DIFFERENT field, whatever its local is called')
     vim.fn.delete(root, 'rf')
 end)
 

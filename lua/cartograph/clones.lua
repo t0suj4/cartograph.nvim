@@ -152,13 +152,31 @@ local function fn_row_keys(eo)
     return keys, lines, #(eo.fl.params or {}), exprs, locals, params
 end
 
---- The alpha-invariant structural signature of a function's body: (nparams, {row_key…}).
---- `eo` is the result of expr.of(store, id). Returns (sig_string, nrows) or nil when the
---- body has no harvestable rows.
+--- ★ THE EXACT TIER'S KEY IS THE ALGEBRA'S VARIANT RELATION (CART-1412): the function as ONE term, its locals as
+--- holes named after them (`alg.term`'s `lmode = 'holes'`), hashed modulo a consistent renaming of those holes —
+--- which is what `canon`'s first-occurrence slots computed by hand. ACCEPTED as PARTITIONS (the keys differ by
+--- construction) before the swap: the same exact-clone classes as canon on 4 corpora — lua/cartograph 77 classes /
+--- 190 fns, Skada 60/163, TSM 146/322, discourse 28/88 — 0 split, 0 merged.
+--- ⚠ COST, ACCEPTED BY THE USER (2026-10-03): 5.6-7x canon per function, paid once per function per index
+--- generation (cached on the index record), never per query. Interning and fusion are CART-1412 / CART-1416.
+--- ⚠ IT RAISES when the algebra cannot build the term: `hash(nil)` is one fixed id, and every function would key alike.
+local function variant_key(f)
+    if f.vkey then return f.vkey end
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    local t = A and alg.fn_term { exprs = f.exprs, locals = f.locals, lmode = 'holes' }
+    if not t then error('clones: the algebra cannot build a function term: ' .. tostring(select(2, alg.available()))) end
+    f.vkey = ('p%d|%s'):format(f.nparams or 0, A.equality('variant').hash(t))
+    return f.vkey
+end
+
+--- The alpha-invariant structural signature of a function's body: its parameter count and its body modulo a
+--- consistent renaming of locals (`variant_key`). `eo` is the result of expr.of(store, id). Returns (sig_string,
+--- nrows) or nil when the body has no harvestable rows.
 function M.signature(eo)
-    local keys, _, nparams = fn_row_keys(eo)
+    local keys, _, nparams, exprs, locals = fn_row_keys(eo)
     if not keys then return nil end
-    return ('p%d|%s'):format(nparams, table.concat(keys, '\n')), #keys
+    return variant_key({ exprs = exprs, locals = locals, nparams = nparams }), #keys
 end
 
 -- The per-fn key index is the costly part of clone detection (one expr.of per function
@@ -219,7 +237,7 @@ function M.exact(store, opts)
     local fns = build_index(store)
     for _, f in ipairs(fns) do
         if #f.keys >= min_rows then
-            local sig = ('p%d|%s'):format(f.nparams or 0, table.concat(f.keys, '\n'))
+            local sig = variant_key(f)
             local g = groups[sig]
             if not g then g = { nrows = #f.keys }; groups[sig] = g end
             g[#g + 1] = { id = f.id, name = f.name, file = f.file, line = f.line }

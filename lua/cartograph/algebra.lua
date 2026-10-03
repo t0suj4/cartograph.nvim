@@ -230,7 +230,14 @@ local tunpack = table.unpack or unpack
 --- ⇒ A map keyed by the term's identity gives the same answer, costs the term
 ---   nothing, and cannot be deep-copied by accident. It is opt-in for the same
 ---   reason `unsupported` is: a caller that does not need it pays nothing.
-function M.term(e, locals, unsupported, srcmap)
+---
+--- ★ `lmode = 'holes'` (CART-1412): a local becomes the HOLE named after it instead of the shared sentinel, so
+--- `f(x, y)` and `f(x, x)` stay distinct and the VARIANT relation (holes renamed by first occurrence) is exactly
+--- clones' alpha-invariant key. ⚠ Opt-in and PRIVATE to a key: a term with holes is a TEMPLATE to match/generalize,
+--- never an instance. The default keeps the sentinel `alg.anti_unify` was row-joined against. A discriminant (an
+--- operator, a selector) is built from the node's own field below, never through the name branch, so a selector
+--- spelled like a local (`self.heal` beside `local heal`) can never become a hole.
+function M.term(e, locals, unsupported, srcmap, lmode)
     local A = M.load()
     if not A then return nil end
     if e == nil then return nil end
@@ -240,7 +247,11 @@ function M.term(e, locals, unsupported, srcmap)
     if k == 'lit' then
         t = A.lit(tostring(e.ty) .. ':' .. tostring(e.v))
     elseif k == 'name' then
-        t = (locals and locals[e.n]) and A.name(LOCAL_SENTINEL) or A.name(tostring(e.n))
+        if locals and locals[e.n] then
+            t = (lmode == 'holes') and A.hole(tostring(e.n)) or A.name(LOCAL_SENTINEL)
+        else
+            t = A.name(tostring(e.n))
+        end
     else
         -- ★ THE CHILD LIST COMES FROM `expr.children`, THE SOURCE `walk` ITSELF
         -- CONSUMES (CART-0882). Not a per-kind descent written here -- that
@@ -248,7 +259,7 @@ function M.term(e, locals, unsupported, srcmap)
         -- kind silently.
         local kids = {}
         for _, c in ipairs(require('cartograph.expr').children(e)) do
-            local ct = M.term(c, locals, unsupported, srcmap)
+            local ct = M.term(c, locals, unsupported, srcmap, lmode)
             if ct then kids[#kids + 1] = ct end
         end
         if unsupported and #kids == 0
@@ -276,22 +287,22 @@ end
 
 --- a clone ROW ({lhs, rhs, cond}) as one term, so a pair of rows is a pair of
 --- instances the lgg can take. Shape mirrors `clones.anti_unify_row`.
-function M.row_term(r, locals, unsupported, srcmap)
+function M.row_term(r, locals, unsupported, srcmap, lmode)
     local A = M.load()
     if not A then return nil end
     if type(r) ~= 'table' then return nil end
-    if r.k ~= nil then return M.term(r, locals, unsupported, srcmap) end
+    if r.k ~= nil then return M.term(r, locals, unsupported, srcmap, lmode) end
     local kids = {}
     local function push(list, tag)
         local seq = {}
         for _, x in ipairs(list or {}) do
-            local t = M.term(x, locals, unsupported, srcmap)
+            local t = M.term(x, locals, unsupported, srcmap, lmode)
             if t then seq[#seq + 1] = t end
         end
         kids[#kids + 1] = A.node(tag, tunpack(seq))
     end
     push(r.lhs, 'lhs'); push(r.rhs, 'rhs')
-    local c = r.cond and M.term(r.cond, locals, unsupported, srcmap) or nil
+    local c = r.cond and M.term(r.cond, locals, unsupported, srcmap, lmode) or nil
     if c then kids[#kids + 1] = A.node('cond', c) end
     return A.node('row', tunpack(kids))
 end
@@ -308,7 +319,7 @@ function M.fn_term(f)
     if not A then return nil end
     local rows = {}
     for i = 1, #(f.exprs or {}) do
-        rows[i] = M.row_term(f.exprs[i], f.locals) or A.node('row~')
+        rows[i] = M.row_term(f.exprs[i], f.locals, nil, nil, f.lmode) or A.node('row~')
     end
     return A.seq(rows)
 end
