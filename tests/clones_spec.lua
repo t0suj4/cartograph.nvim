@@ -1328,6 +1328,29 @@ test('clones: an operator hole is LOCATED but marked not-a-write-site', function
         'but the span is the ENCLOSING expression, so a render must not write there')
 end)
 
+-- ★ THE TWO FIELDS THE LGG HAS TO RECONSTRUCT RATHER THAN READ (CART-0939): a hole
+-- under the RIGHT operand of a short-circuit operator is `guarded`, and a field hole
+-- comes AFTER the holes of its base, in the walker's order. Both survived a mutation
+-- of `alg.anti_unify` until these pinned them.
+test('clones: a hole under the right operand of `or` is GUARDED, under the left it is not', function ()
+    if not ready() then return skip 'no lua parser' end
+    local r = clones.element_template(container_of("local T = { x or f(1), x or f(2) }"))
+    eq(1, #r.holes, 'one literal divergence')
+    eq('the right operand of `or`', r.holes[1].guarded)
+    local l = clones.element_template(container_of("local T = { f(1) or x, f(2) or x }"))
+    eq(1, #l.holes, 'one literal divergence')
+    eq(nil, l.holes[1].guarded, 'the left operand always evaluates')
+end)
+
+test('clones: a field hole follows the holes of its base, in walk order', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of("local T = { g(1).foo, g(2).bar }"))
+    eq(2, #t.holes, 'the argument and the selector')
+    eq('literal', t.holes[1].kind, 'the base is walked first')
+    eq('field', t.holes[2].kind)
+    eq('foo', t.holes[2].a); eq('bar', t.holes[2].b)
+end)
+
 test('clones: an operator BINDS where the members vary, with site = false', function ()
     if not ready() then return skip 'no lua parser' end
     local t = clones.element_template(container_of("local T = { a + b, a - b }"))

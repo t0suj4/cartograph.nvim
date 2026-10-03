@@ -1546,12 +1546,20 @@ function M.element_template(container)
             varying = {}, unkeyed = 0,
             why = 'a single member is a shape, not yet a template' }
     end
+    local alg = require 'cartograph.algebra'
     local holes, alignable = {}, true
     for i = 2, #ms do
-        -- ⚠ EMPTY LOCALS MAPS: a container's members are declarations, not a
-        -- function body, so nothing here is alpha-renameable. Passing a locals
-        -- map would silently equate two DIFFERENT names as "both local".
-        if not anti_unify(ms[1], ms[i], {}, {}, holes) then alignable = false end
+        -- ⚠ EMPTY LOCALS: a container's members are declarations, not a function
+        -- body, so nothing here is alpha-renameable. A locals map would silently
+        -- equate two DIFFERENT names as "both local".
+        -- ★ THE LGG, NOT THE WALKER (CART-0939): `alg.anti_unify` is the binary
+        -- generalize read back into the walker's records. ROW-JOINED against the
+        -- walker before the swap — every field, node identity and order — identical
+        -- on 7 corpora in 4 languages (~13.8k donor/member and donor/payload pairs).
+        local ok, hs = alg.anti_unify(ms[1], ms[i], { shortcircuit = SHORTCIRCUIT })
+        if ok == nil then return { n = #ms, alignable = false, why = hs } end
+        if not ok then alignable = false end
+        for _, h in ipairs(hs) do holes[#holes + 1] = h end
     end
     local varying, unkeyed = {}, 0
     for _, h in ipairs(holes) do
@@ -3357,8 +3365,10 @@ function M.match(tmpl, payload, opts)
             .. 'cannot be told from a mismatch', { unkeyed = tmpl.unkeyed })
     end
 
-    local holes = {}
-    anti_unify(tmpl.donor, payload, {}, {}, holes)
+    -- the same lgg `element_template` reads its members with (CART-0939)
+    local aok, holes = require('cartograph.algebra').anti_unify(tmpl.donor, payload,
+        { shortcircuit = SHORTCIRCUIT })
+    if aok == nil then return no(holes) end
 
     -- THE SPLIT THIS VERB EXISTS FOR: a divergence at a position the members
     -- already vary at is a BINDING; the same divergence anywhere else is a

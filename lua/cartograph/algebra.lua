@@ -790,7 +790,7 @@ end
 --- @return table list of { h, pk, idx, a, b, at }, in pre-order
 function M.hole_sites(body, ia, ib)
     local out = {}
-    local function walk(t, xa, xb, pk, idx, pat)
+    local function walk(t, xa, xb, pk, idx, pat, patb, up)
         if type(t) ~= 'table' then return end
         if t.k == 'hole' then
             -- ★★★ `rep` IS REPORTED, NOT INTERPRETED. `A.generalize` places a HEDGE
@@ -805,7 +805,9 @@ function M.hole_sites(body, ia, ib)
             -- caller is what keeps this from becoming a fourth place that decides.
             out[#out + 1] = { h = t.h, pk = pk, idx = idx, a = xa, b = xb,
                 rep = t.rep or nil,
-                at = (type(xa) == 'table' and xa.at) or pat }
+                at = (type(xa) == 'table' and xa.at) or pat,
+                at_b = (type(xb) == 'table' and xb.at) or patb,
+                up = up }
             return
         end
         local ka = (type(xa) == 'table' and xa.kids) or {}
@@ -820,11 +822,128 @@ function M.hole_sites(body, ia, ib)
             -- rather than rebuilds. Reading the instance makes it hold by
             -- construction; the template is kept only as a second fallback.
             local pa = (type(xa) == 'table' and xa.at) or t.at or pat
-            walk(c, ka[i], kb[i], t.k, i, pa)
+            local pb = (type(xb) == 'table' and xb.at) or patb
+            -- ★ `up` IS THE CHAIN OF ENCLOSING INSTANCE TERMS, one link per level:
+            -- an operator or selector is a leaf `M.term` SYNTHESIZES, so it has no
+            -- source node of its own, and a caller mapping a site back to the expr
+            -- IR needs the node that encloses it (CART-0939).
+            walk(c, ka[i], kb[i], t.k, i, pa, pb, { ta = xa, tb = xb, k = t.k, idx = i, up = up })
         end
     end
-    walk(body, ia, ib, nil, nil, nil)
+    walk(body, ia, ib, nil, nil, nil, nil, nil)
     return out
+end
+
+--- `clones.anti_unify`'s HOLE RECORDS, computed by the lgg (CART-0939).
+---
+--- ★★★ THE WALKER'S TWO EMPTY-LOCALS CALLERS RIDE THIS: `element_template` (donor
+--- against each member) and `clones.match` (donor against a payload). It is the
+--- binary lgg plus ONE flat pass over its sites (`hole_sites`) — no second descent
+--- per expr kind, which is what the fifteen recursion sites of the walker were.
+---
+--- The record shape is the walker's, field for field, because `templates` exports
+--- the raw hole list and every field dropped here would leak out of it:
+---     literal / name   a, b (the leaf's text), at_a, at_b, xn, yn
+---     field            a, b (the selector), the WHOLE ACCESS's span and nodes
+---     operator         a, b (the operator), the ENCLOSING expression's span and
+---                      nodes, at_encloses = true (a key, not a place to write)
+---     struct           why = absent | kind | arity, as the walker names them
+---
+--- ⚠ EMPTY LOCALS ONLY. `analyze_pair` passes locals, a rename bijection and the
+--- parameters in scope; none of that is modelled here, so it still runs the walker.
+--- @param e1 table|nil expr node (the donor side)
+--- @param e2 table|nil expr node
+--- @param opts table|nil { shortcircuit = set of operators whose RIGHT operand is
+---                         conditional — a hole under one is tagged `guarded` }
+--- @return boolean|nil ok (false on any struct hole), table holes | string why
+function M.anti_unify(e1, e2, opts)
+    local A = M.load()
+    if not A then return nil, 'the prototype algebra is not available' end
+    opts = opts or {}
+    if e1 == nil and e2 == nil then return true, {} end
+    local sa, sb = {}, {}
+    local ta = e1 ~= nil and M.term(e1, {}, nil, sa) or nil
+    local tb = e2 ~= nil and M.term(e2, {}, nil, sb) or nil
+    if ta == nil or tb == nil then
+        return false, { { kind = 'struct', why = 'absent', xn = e1, yn = e2,
+            at_a = e1 and e1.at or nil, at_b = e2 and e2.at or nil } }
+    end
+    -- ★ THE WALKER'S READING, ALL THREE FLAGS: `linear` (no hole occurs twice — the
+    -- donor span IS the key), `align = 'none'` (a differing arity is one struct hole,
+    -- never a hedge) and `positional` (a table's members pair by POSITION, not by
+    -- key — without it `generalize` aligns keyed tables by their key sets, and the
+    -- row join found exactly that: 5 of 3766 member pairs where two 3-pair tables
+    -- with different keys became one `arity` hole instead of the walker's 9 holes).
+    local okg, g = pcall(A.generalize, { ta, tb }, { linear = true, align = 'none', positional = true })
+    if not okg or not g or not g.template then
+        return nil, 'generalize refused: ' .. tostring(g)
+    end
+    local sc = opts.shortcircuit or {}
+    local function guarded(up)
+        -- the RIGHT operand of a short-circuit `bin` is kid 3 (operator, left, right)
+        while up do
+            if up.k == 'bin' and up.idx == 3 then
+                local oa = up.ta and up.ta.kids and up.ta.kids[1]
+                local ob = up.tb and up.tb.kids and up.tb.kids[1]
+                local op = (oa and sc[oa.n] and oa.n) or (ob and sc[ob.n] and ob.n)
+                if op then return ('the right operand of `%s`'):format(tostring(op)) end
+            end
+            up = up.up
+        end
+    end
+    -- ⚠ THE WALKER'S ORDER IS PRE-ORDER EXCEPT FOR A FIELD: it descends the base
+    -- first and records the selector hole after, while the selector is this term's
+    -- FIRST kid. So a field hole waits on a stack until the sites leave its node's
+    -- subtree (innermost first) — the row join found the order differing on 1-2%
+    -- of pairs, and `clones.match` hands its bindings out in this order.
+    local holes, ok, pending = {}, true, {}
+    local function within(up, t)
+        while up do if up.ta == t then return true end; up = up.up end
+        return false
+    end
+    local function flush(up)
+        while #pending > 0 and not (up and within(up, pending[#pending].node)) do
+            holes[#holes + 1] = table.remove(pending).h
+        end
+    end
+    for _, st in ipairs(M.hole_sites(g.template.body, ta, tb)) do
+        flush(st.up)
+        local kd = (st.rep and 'struct') or M.hole_kind(st.a, st.b, st.pk, st.idx)
+        local h
+        if kd == 'operator' or kd == 'field' then
+            -- a SYNTHESIZED leaf: the record names the node that encloses it
+            local x, y = sa[st.up.ta], sb[st.up.tb]
+            h = { kind = kd, a = st.a.n, b = st.b.n, at_a = x and x.at, at_b = y and y.at,
+                xn = x, yn = y, at_encloses = (kd == 'operator') or nil }
+        elseif kd == 'literal' then
+            local x, y = sa[st.a], sb[st.b]
+            h = { kind = kd, a = tostring(x.v), b = tostring(y.v), at_a = x.at, at_b = y.at, xn = x, yn = y }
+        elseif kd == 'name' then
+            local x, y = sa[st.a], sb[st.b]
+            h = { kind = kd, a = x.n, b = y.n, at_a = x.at, at_b = y.at, xn = x, yn = y }
+        else
+            ok = false
+            local x, y
+            if st.rep then x, y = sa[st.up.ta], sb[st.up.tb]
+            else x, y = st.a and sa[st.a], st.b and sb[st.b] end
+            if x == nil or y == nil then
+                h = { kind = 'struct', why = 'absent', xn = x, yn = y,
+                    at_a = x and x.at or nil, at_b = y and y.at or nil }
+            elseif x.k ~= y.k then
+                h = { kind = 'struct', a_k = x.k, b_k = y.k,
+                    a = x.k == 'lit' and tostring(x.v) or nil, a_ty = x.ty,
+                    b = y.k == 'lit' and tostring(y.v) or nil, b_ty = y.ty,
+                    at_a = x.at, at_b = y.at, xn = x, yn = y, why = 'kind' }
+            else
+                h = { kind = 'struct', xn = x, yn = y, why = 'arity' }
+            end
+        end
+        h.guarded = guarded(st.up)
+        if kd == 'field' then pending[#pending + 1] = { h = h, node = st.up.ta }
+        else holes[#holes + 1] = h end
+    end
+    flush(nil)
+    return ok, holes
 end
 
 return M

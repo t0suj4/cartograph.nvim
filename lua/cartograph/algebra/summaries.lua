@@ -302,6 +302,16 @@ function M.summarize_recursion(T, h, col, opts)
     local need, env = opts.need or 3, opts.env or { defs = {} }
     env.defs = env.defs or {}
     if T.holes[h].rep or is_hole(T.body) then return { note = {} } end
+    -- ★ EVERY DEPTH IS 0 WHEN NO VALUE HAS THE BODY'S ROOT KIND: `match` refuses a kind
+    -- mismatch at the root (only a hole or an embed body can bind across one), so the
+    -- answer is the `dd < 2` one below — without the template COPY per hole that
+    -- computing it costs. MEASURED (CART-0939, binary lgg over table members): the copy
+    -- was 40% of `generalize`, and this exit fires on 21675 of 21681 holes.
+    if T.body.k ~= 'embed' then
+        local any = false
+        for _, v in ipairs(col) do if type(v) == 'table' and v.k == T.body.k then any = true; break end end
+        if not any then return { note = {} } end
+    end
     -- depths are read with this hole OPEN, so re-summarizing a claimed hole is idempotent
     local T0 = M.copy(T)
     T0.holes[h].domain = M.open()
@@ -352,16 +362,23 @@ function M.generalize(instances, opts)
 
     local ids = {} -- (the TERM relation's hash memo for this generalize — CART-1401)
     local function fresh(vals, why)
-        local sig = {}
-        for i = 1, n do sig[i] = M.content_id(vals[i], ids) end
-        local k = table.concat(sig, '\1')
         -- LINEAR VARIANT (survey §2): no hole occurs twice. cartograph's element_template
         -- keys holes per donor span and is this variant; analyze_pair groups by the value
         -- tuple (Plotkin's rule) and is the non-linear one.
-        if memo[k] and not opts.linear then return memo[k] end
+        -- ⚠ SO A LINEAR generalize NEVER READS THE MEMO, and its key is a content id per
+        -- value — a sha256 over the subterm, ~20% of a binary lgg (CART-0939's timing). The
+        -- only other reader is an inner generalize across a boundary, and it inherits
+        -- `linear`; no caller passes `memo` in.
+        local k
+        if not opts.linear then
+            local sig = {}
+            for i = 1, n do sig[i] = M.content_id(vals[i], ids) end
+            k = table.concat(sig, '\1')
+            if memo[k] then return memo[k] end
+        end
         counter = counter + 1
         local h = prefix .. counter
-        memo[k] = h
+        if k then memo[k] = h end
         -- an instance lacking the optional pair this column sits under (KEYED.md) owes no
         -- value here and does not enter the summary; the memo signature keeps its mark, so
         -- two columns absent in the same members share a hole exactly as kv_generalize's do

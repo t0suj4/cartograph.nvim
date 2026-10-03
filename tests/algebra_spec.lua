@@ -444,3 +444,14 @@ test('algebra seam: a site with no value of its own falls back to the enclosing 
         eq(7, sites[1].at.start.line, 'and it takes the ENCLOSING field span')
         eq('field', sites[1].pk); eq(1, sites[1].idx)
     end)
+
+-- ★ THE RECURSION PASS EXITS EARLY when no value shares the body's root kind (a
+-- match refuses a root kind mismatch) — EXCEPT under an EMBED body, which binds a
+-- string by parsing it. That exception is the exit's soundness condition and
+-- `generalize` never builds an embed root, so it is pinned here directly.
+test('algebra seam: the recursion pass still measures depth under an EMBED body', function ()
+    local A = need()
+    local T = A.template({ k = 'embed', g = 'sh', kids = { A.hole('h1') } }, { h1 = { domain = A.open() } })
+    local S = A.summarize_recursion(T, 'h1', { A.lit('run fast'), A.node('x') })
+    eq(2, S.note.distinct_depths, 'the string parses into the body (depth 1), the node does not (0)')
+end)
