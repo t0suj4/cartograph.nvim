@@ -2909,7 +2909,11 @@ local function blank_keys(rexpr, locals, cd)
             local dot = expr.dotted(e)
             if dot and cd[dot] ~= nil then leaves[#leaves + 1] = { path = path, kind = 'read', node = e }; return end
         end
-        if e and (e.k == 'table' or e.k == 'fn') then return end -- (a constructor's or closure's leaves are not this row's)
+        -- (a closure's leaves are not this row's.) ★ A CONSTRUCTOR'S ARE (CART-1419): bcanon printed a table as a bare
+        -- `T` and could not blank inside it; the term keeps a table's contents, so a literal there is a position like
+        -- any other. MEASURED before turning it on: +1 finding on our own tree (mix.lua's `{ k = 'none' }` beside
+        -- mixterm's `{ k = NONE }`, a real duplicated constant), 0 on TSM / Skada / elasticsearch common, at +1-6% time.
+        if e and e.k == 'fn' then return end
         for k, c in ipairs(u.kids or {}) do
             local p = {}
             for x = 1, #path do p[x] = path[x] end

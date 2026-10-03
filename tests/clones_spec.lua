@@ -453,6 +453,22 @@ test('clones: a literal that IS a module constant, where a twin statement reads 
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-1419: a literal INSIDE a table constructor is a position too — the shape the measurement found in our own tree
+-- (mix.lua's `{ k = 'none', kids = {} }` beside mixterm's `{ k = NONE, kids = {} }`).
+test('clones: a literal inside a TABLE CONSTRUCTOR that is a module constant, where a twin reads it, is row-drift', function ()
+    local root = proj {
+        ['a.lua'] = 'local NONE = 7\n'
+            .. 'local function good() return { k = NONE, kids = {} } end\n'
+            .. 'local function bad() return { k = 7, kids = {} } end\n'
+            .. 'return { good, bad }\n',
+    }
+    local d = clones.row_drift(store, { min_other = 1 })
+    ok(#d == 1, 'exactly one finding: ' .. #d)
+    ok(d[1] and d[1].name == 'NONE', 'it names the constant being bypassed')
+    ok(d[1] and d[1].lit_line == 3, 'and points at the HARDCODED site')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: row-drift needs BOTH halves — a matching row alone, or an equal value alone, is not enough', function ()
     -- (a) the statements match with one leaf blanked, but the literal is NOT the constant's
     -- value: `0` against QUIET (=80) is a deliberate difference, not a stale copy.
