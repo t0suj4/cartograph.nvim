@@ -940,7 +940,7 @@ end
 
 -- ── GENERALIZATION (CART-1332): a program point's CONFIGURATION as an ALGEBRA TERM ─────────────────────────────────
 --- a static value as an algebra term: a number / string / boolean a lit, a table `tbl` of `kv` pairs (keys in order),
---- a closure `clo:<lambda>` of its free values (a dynamic one `dyn`), anything else a node named by its type. budget:
+--- a closure `clo:<lambda>` of its free values (a dynamic one a HOLE `v<id>`), anything else a node named by its type. budget:
 --- { n } nodes left — past it, nil (the configuration is too big to compare)
 local function vterm(v, clos, seen, budget)
     budget.n = budget.n - 1
@@ -968,7 +968,7 @@ local function vterm(v, clos, seen, budget)
         seen[v] = true
         local kids = {}
         for i, id in ipairs(c.lam.free) do
-            if c.bt[id] == D then kids[i] = { k = 'dyn', kids = {} }
+            if c.bt[id] == D then kids[i] = { k = 'hole', h = 'v' .. tostring(id) }
             else
                 kids[i] = vterm(c.env[id], clos, seen, budget)
                 if not kids[i] then return nil end
@@ -980,11 +980,12 @@ local function vterm(v, clos, seen, budget)
     return { k = ty, kids = {} }
 end
 
---- a call's configuration -> the term `<group>(arg …)`: a dynamic argument `dyn`, a static one its value's term | nil
+--- a call's configuration -> the TEMPLATE body `<group>(arg …)` (CART-1341): a dynamic argument is a HOLE `a<i>` — the
+--- configuration is a staged instance of the call — a static one its value's term | nil
 function M.config_term(group, division, svals, clos)
     local kids, budget = {}, { n = 20000 }
     for i = 1, #division do
-        if division[i] == D then kids[i] = { k = 'dyn', kids = {} }
+        if division[i] == D then kids[i] = { k = 'hole', h = 'a' .. i }
         else
             kids[i] = vterm(svals[i], clos, {}, budget)
             if not kids[i] then return nil end
@@ -1012,6 +1013,7 @@ function M.embeds(a, b, memo, charge)
     if a.k == 'lit' and b.k == 'lit' then
         local ta = type(a.v)
         r = ta == type(b.v) and (ta == 'number' or ta == 'string' or a.v == b.v)
+    elseif b.k == 'hole' then r = a.k == 'hole' -- (every dynamic value is one symbol; a hole has no kids to dive into)
     elseif b.k ~= 'lit' then
         for _, c in ipairs(b.kids) do if not r and M.embeds(a, c, memo, charge) then r = true end end
         if not r and a.k == b.k then

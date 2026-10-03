@@ -152,12 +152,18 @@ test('mix: the WHISTLE is homeomorphic embedding over configuration terms — a 
     ok(not MX.embeds(cfg({ 1, 2 }), cfg({ 1 })), 'never the bigger in the smaller')
     ok(MX.embeds(cfg({ x = true }), cfg({ a = { x = true }, b = 1 })), 'diving: inside a field of the bigger')
     ok(not MX.embeds(cfg({ x = true }), cfg({ x = false })), 'and a leaf that differs is no embedding')
+    -- a CONFIGURATION IS A TEMPLATE (CART-1341): a dynamic argument is a hole, so filling it is staging — the config of
+    -- f(D, 5) instantiated with 7 IS the config of f(7, 5); and a hole embeds only a hole
+    local Tc = A.template(MX.config_term('f', { 'D', 'S' }, { nil, 5 }, {}))
+    eq({ 'a1' }, vim.tbl_keys(Tc.holes))
+    eq(MX.config_term('f', { 'S', 'S' }, { 7, 5 }, {}), A.instantiate(Tc, { a1 = A.lit(7) }).term)
+    ok(not MX.embeds(cfg(0), MX.config_term('f', { 'S', 'S' }, { 3, 0 }, {})), 'a dynamic argument does not embed a static one')
     -- POLYNOMIAL (CART-1334): a closure chain k deep against k + 1 — each (a, b) node pair decided ONCE, charged once.
     -- Unmemoized, diving and coupling reach the same pair along every path: 2^k (k = 22 took 0.23 s, k = 120 never ends)
     local function chain(k)
         local t = { k = 'clo:0', kids = {} }
         for _ = 1, k do t = { k = 'clo:1', kids = { t } } end
-        return { k = 'g', kids = { { k = 'dyn', kids = {} }, t } }
+        return { k = 'g', kids = { { k = 'hole', h = 'a1' }, t } }
     end
     local pairs_decided = 0
     local function charge()
