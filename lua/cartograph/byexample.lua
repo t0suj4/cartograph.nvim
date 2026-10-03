@@ -147,9 +147,12 @@ function M.rewrite(rules, src, lang)
             end
             return false
         end
+        -- (the rule's template is STATIC across every position: match COMPILED to it, accepted by its sample law
+        -- first — cartograph.compiledverb, CART-1339; refused or disabled, the interpreted A.match)
+        local compiled = require('cartograph.compiledverb').match(rule.lhs)
         for _, pos in ipairs(a.positions(t)) do
             if not inside(pos.path) then
-                local m = a.match(rule.lhs, pos.node)
+                local m = compiled and compiled(pos.node) or a.match(rule.lhs, pos.node)
                 if m.ok then hits[#hits + 1] = { path = pos.path, values = m.values }; covered[#covered + 1] = pos.path end
             end
         end

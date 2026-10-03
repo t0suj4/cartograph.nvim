@@ -170,7 +170,15 @@ function M.compile_match(T, opts)
         { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} } })
     local env = setmetatable({ MIXK = pool, M = { grammars = A.grammars } }, { __index = _G })
     local chunk = assert(load(text, 'mixalg.match', 't', env))
-    return chunk(), text, stats
+    return chunk(), text, stats, pool
+end
+
+--- a compiled matcher from its residual TEXT and constant POOL (as compile_match returned them, e.g. read back from a
+--- cache) -> the matcher function
+function M.load_match(text, pool)
+    local A = require('cartograph.algebra').load()
+    local env = setmetatable({ MIXK = pool, M = { grammars = A.grammars } }, { __index = _G })
+    return assert(load(text, 'mixalg.match', 't', env))()
 end
 
 return M
