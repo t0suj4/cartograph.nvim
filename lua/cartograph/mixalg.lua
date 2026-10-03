@@ -81,6 +81,8 @@ function M.program(root)
             local k = 'core.lua::' .. name:match('%.([%w_]+)$')
             return defs[k] and k or nil
         end
+        -- (a file's own module table: `D.x` in derive.lua, a `function D.x` of that file)
+        if name:match('^[%a_][%w_]*%.[%w_]+$') and defs[file .. '::' .. name] then return file .. '::' .. name end
         if name:match('^[%a_][%w_]*$') then
             if defs[file .. '::' .. name] then return file .. '::' .. name end
             -- (a SHARED alias: `local child, … = SHARED.child, …` makes `child` core's local)
@@ -109,7 +111,7 @@ function M.program(root)
     local function mangle(k)
         if k:match('^M[.:]') then return (k:gsub('[.:]', '_')) end
         local file, nm = k:match('^(.-)%.lua::(.*)$')
-        return file .. '__' .. nm
+        return ((file .. '__' .. nm):gsub('[.:]', '_'))
     end
     local iq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (method_index_expression) @d (identifier) @i]')
     local chunks = {}
@@ -130,6 +132,7 @@ function M.program(root)
                 if iq.captures[id] == 'd' then
                     if t:match('^M[.:][%w_]+$') and defs[(t:gsub(':', '.'))] then target = mangle((t:gsub(':', '.'))) end
                     if t:match('^SHARED%.([%w_]+)$') and defs['core.lua::' .. t:match('%.([%w_]+)$')] then target = mangle('core.lua::' .. t:match('%.([%w_]+)$')) end
+                    if not target and defs[d.file .. '::' .. t] then target = mangle(d.file .. '::' .. t) end
                 else
                     -- (an identifier that is a field name — the `f` of `a.f`, `a:f` — is no reference)
                     local par = cap:parent()

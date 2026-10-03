@@ -60,6 +60,19 @@ test('mixalg: the assembled closure of match is a mix program — every definiti
     eq('M.match', order[1])
 end)
 
+test('mixalg: a derivation\'s closure follows its FILE\'S MODULE TABLE — D.apply in derive.lua reaches D.sites, mangled to an identifier, and lowers with nothing refused (CART-1372)', function ()
+    ready()
+    local text, order = MA.program('derive.lua::D.apply')
+    local has = {}
+    for _, k in ipairs(order) do has[k] = true end
+    ok(has['derive.lua::D.sites'], 'D.sites in the closure: ' .. table.concat(order, ' '))
+    ok(text:find('local function derive__D_sites', 1, true) ~= nil, 'D.sites assembled as derive__D_sites')
+    ok(text:find('derive__D_sites(T)', 1, true) ~= nil, 'the call to D.sites rewritten to its mangled name')
+    local got = {}
+    require('cartograph.mix').lower(assert(R.read(text, 'lua')), { collect = got })
+    eq({}, got)
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')
