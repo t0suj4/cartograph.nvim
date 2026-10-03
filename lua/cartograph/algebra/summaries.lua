@@ -94,7 +94,7 @@ function M.repetition(col, opts)
     local mkey
     if memo then
         local sig = {}
-        for i, v in ipairs(col) do sig[i] = M.show(v) end
+        for i, v in ipairs(col) do sig[i] = M.content_id(v) end -- (the TERM relation's hash — CART-1401)
         mkey = table.concat(sig, '\1')
         if memo[mkey] ~= nil then return memo[mkey] or nil end
     end
@@ -350,9 +350,10 @@ function M.generalize(instances, opts)
     if not opts.values then for i = 1, n do values[i] = {} end end
     local memo, counter = opts.memo or {}, 0 -- shared with an inner generalize across a boundary
 
+    local ids = {} -- (the TERM relation's hash memo for this generalize — CART-1401)
     local function fresh(vals, why)
         local sig = {}
-        for i = 1, n do sig[i] = M.show(vals[i]) end
+        for i = 1, n do sig[i] = M.content_id(vals[i], ids) end
         local k = table.concat(sig, '\1')
         -- LINEAR VARIANT (survey §2): no hole occurs twice. cartograph's element_template
         -- keys holes per donor span and is this variant; analyze_pair groups by the value

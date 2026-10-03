@@ -156,10 +156,12 @@ end
 --- variables: a term hole a free term variable, a rep hole a free hedge variable.
 function M.tg_of_term(t, opts)
     opts = opts or {}
-    local eqs, memo, n = {}, {}, 0
+    local eqs, memo, n, ids = {}, {}, 0, {}
     local function fresh(hedge) n = n + 1; return (hedge and 'H' or 'n') .. n end
     local function enc(u)
-        local k = opts.share and M.show(u) or nil
+        -- (sharing is the TERM relation: equal subterms by eq, keyed on its hash — CART-1401; show() was the key: O(n^2),
+        -- and blind to a presence mark on a literal / a keyed node)
+        local k = opts.share and M.content_id(u, ids) or nil
         if k and memo[k] then return memo[k] end
         local id
         if u.k == 'hole' then

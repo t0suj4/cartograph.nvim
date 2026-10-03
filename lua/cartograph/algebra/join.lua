@@ -212,8 +212,9 @@ function M.join(T1, T2, opts)
         for _, c in ipairs(t.kids or {}) do holes_in(c, out) end
         return out
     end
+    local ids = {} -- (the TERM relation's hash memo for this join — CART-1401)
     local function fresh(a, b, hedge)
-        local k = (hedge and 'H' or 'T') .. '\1' .. M.show(a) .. '\1' .. M.show(b)
+        local k = (hedge and 'H' or 'T') .. '\1' .. M.content_id(a, ids) .. '\1' .. M.content_id(b, ids)
         -- LINEAR VARIANT (survey §2): no hole twice
         if memo[k] and not opts.linear then return M.hole(memo[k], hedge) end
         local name

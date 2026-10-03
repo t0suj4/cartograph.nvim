@@ -446,7 +446,7 @@ function M.propagate(T, C, Vs, i, env, opts)
             for j, V in ipairs(Vs) do
                 if M.eq(V[c.h], c.from) then class[#class + 1] = j
                 else
-                    local k = M.show(V[c.h])
+                    local k = V[c.h] == nil and 'nil' or M.content_id(V[c.h]) -- (the TERM relation's hash — CART-1401)
                     if not by[k] then by[k] = { value = V[c.h], members = {} }; others[#others + 1] = by[k] end
                     by[k].members[#by[k].members + 1] = j
                 end

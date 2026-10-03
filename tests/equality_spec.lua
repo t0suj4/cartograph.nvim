@@ -140,3 +140,20 @@ test('the TABLE: a memo DECLARES its relation (Lisp :test) — a keyed permutati
     ok(not pcall(A.table_by, 'bisimilar'), 'a relation with no hash cannot key a memo')
     local okn, why = pcall(A.equality, 'nope'); ok(not okn and tostring(why):find('no equality', 1, true), tostring(why))
 end)
+-- ── RUNG 3 (CART-1401): the stores and memos that keyed on show() — a THIRD equality — key on the relation they mean
+test('a store keyed by the TERM relation: values eq tells apart are never one hole (show printed 0.1 + 0.2 as 0.3)', function ()
+    local I1, I2 = A.node('f', A.lit(0.1 + 0.2), A.lit(0.3)), A.node('f', A.lit(1), A.lit(1))
+    for _, which in ipairs({ 'generalize', 'join' }) do
+        local T, V1
+        if which == 'generalize' then
+            local g = A.generalize({ I1, I2 }); T, V1 = g.template, g.values[1]
+        else
+            local j = A.join(A.template(I1), I2); T, V1 = j.template, j.left({})
+        end
+        eq(2, vim.tbl_count(T.holes), which .. ': two pairs, two holes')
+        ok(A.eq(A.instantiate(T, V1).term, I1), which .. ': member 1 comes back as itself')
+    end
+    -- term graphs share by the same relation: two literals by one value and different marks are two nodes
+    local G = A.tg_of_term(A.node('f', { k = 'lit', v = 'b', opt = 'h1' }, A.lit('b'), A.lit('b')), { share = true })
+    eq(3, vim.tbl_count(G.eqs), 'f, "b"?h1, "b" — the unmarked twins shared, the marked one apart')
+end)

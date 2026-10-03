@@ -2230,9 +2230,11 @@ function M.rigid(a, b, opts)
     local cap = opts.cap or 32
     local R = opts.rigidity or M.rigidity.lcs
     if type(R) == 'string' then R = M.rigidity[R] end
-    local ctx = { memo = {}, n = 0, v1 = {}, v2 = {}, domains = {}, truncated = false }
+    local ctx = { memo = {}, ids = {}, n = 0, v1 = {}, v2 = {}, domains = {}, truncated = false }
     local function fresh(x, y, hedge)
-        local k = (hedge and 'H' or 'T') .. '\1' .. M.show(x) .. '\1' .. M.show(y)
+        -- (Plotkin's store keys on the TERM relation's hash — CART-1401: show() was the key, a third equality that
+        -- dropped a presence mark and printed floats at 14 digits; one id memo per call keeps it O(n))
+        local k = (hedge and 'H' or 'T') .. '\1' .. M.content_id(x, ctx.ids) .. '\1' .. M.content_id(y, ctx.ids)
         if ctx.memo[k] then return ctx.memo[k] end
         ctx.n = ctx.n + 1
         local h = (hedge and 'X' or 'x') .. ctx.n

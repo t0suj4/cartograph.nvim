@@ -245,8 +245,9 @@ function M.eau(t, s, theory, opts)
         -- DecomposeAC left / right (AMAI Fig 7): a subset of one side against one child of the other
         local seen = {}
         local function once(pairs_)
-            local key = M.show(M.canon(pairs_[1][1], theory)) .. '\1' .. M.show(M.canon(pairs_[1][2], theory)) .. '\2'
-                .. M.show(M.canon(pairs_[2][1], theory)) .. '\1' .. M.show(M.canon(pairs_[2][2], theory))
+            -- (the THEORY relation's hash: the content id of the canonical form — CART-1401)
+            local function th(t) return M.content_id(M.canon(t, theory)) end
+            local key = th(pairs_[1][1]) .. '\1' .. th(pairs_[1][2]) .. '\2' .. th(pairs_[2][1]) .. '\1' .. th(pairs_[2][2])
             if seen[key] then return end
             seen[key] = true
             branch(pairs_)

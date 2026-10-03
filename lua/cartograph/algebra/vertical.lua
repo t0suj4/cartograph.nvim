@@ -142,7 +142,7 @@ local function rigid_lgg(S, Q, a)
     local function ctxvar(cs, ds, inner)
         if #cs == 0 and #ds == 0 then return inner end
         local vl, vr = build(cs), build(ds)
-        local key = 'C\1' .. M.show(vl) .. '\1' .. M.show(vr)
+        local key = 'C\1' .. M.content_id(vl) .. '\1' .. M.content_id(vr) -- (the TERM relation's hash — CART-1401)
         local h = ctx.memo[key]
         if not h then
             ctx.nc = ctx.nc + 1
@@ -249,7 +249,7 @@ function M.vertical(s, q, opts)
     local out, seen = { templates = {}, skeletons = info }, {}
     for _, a in ipairs(aligns) do
         local T = rigid_lgg(S, Q, a)
-        local key = M.show(T.body)
+        local key = M.content_id(T.body) -- (the TERM relation's hash — CART-1401)
         if not seen[key] then
             seen[key] = true
             out.templates[#out.templates + 1] = T

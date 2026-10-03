@@ -93,7 +93,7 @@ function M.transplant(a, b, c, opts)
         out.route, out.straddle = 'abstracted', { why = C.why, proposal = C.proposal }
         local seen = {}
         for h, v in pairs(Va) do
-            local k = M.show(v)
+            local k = M.content_id(v) -- (the TERM relation's hash — CART-1401)
             if seen[k] then return nil, ('ambiguous: holes %s and %s hold the same value %s in a, so b\'s mentions of it cannot be attributed (%s)'):format(seen[k], h, k, C.why), C end
             seen[k] = h
             local occ = {}
