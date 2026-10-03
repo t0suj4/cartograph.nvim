@@ -13,7 +13,9 @@ end
 local M = {}
 
 --- run the spec in `root` -> { passed, failed, skipped, ran, summary, code } | nil, why
-function M.run(root, spec, timeout)
+--- env: extra environment variables for the runner { NAME = value } (CART-1368: DERIVE=<op> for the verb audit) —
+--- merged over the inherited environment, never replacing SPEC
+function M.run(root, spec, timeout, env)
     -- the runner in its OWN process group (setsid): a spec that HANGS (a mutation that makes a loop infinite) is
     -- killed WITH its children on the timeout — killing only bash left each hung `node` spinning at 100% CPU
     -- (measured: three orphans, 20-60 min each, one per re-run of one mutation)
@@ -24,8 +26,10 @@ function M.run(root, spec, timeout)
     -- ours: on the timeout the whole GROUP is SIGKILLed first, then the pipes close and the result arrives
     local proc, result
     local ok, err = pcall(function ()
-        proc = vim.system({ 'setsid', 'bash', 'tests/run.sh' }, { cwd = root, text = true,
-            env = { SPEC = spec, CARTOGRAPH_NVIM = vim.v.progpath } }, function (o) result = o end)
+        local e = {}
+        for k, v in pairs(env or {}) do e[k] = v end
+        e.SPEC, e.CARTOGRAPH_NVIM = spec, vim.v.progpath
+        proc = vim.system({ 'setsid', 'bash', 'tests/run.sh' }, { cwd = root, text = true, env = e }, function (o) result = o end)
     end)
     if not ok then return nil, 'the runner did not start: ' .. tostring(err) end
     local finished = vim.wait(timeout or 600000, function () return result ~= nil end, 50)
@@ -48,14 +52,25 @@ function M.run(root, spec, timeout)
         summary = ('%d passed, %d failed, %d skipped'):format(p, f, s) }
 end
 
+--- `NAME=value` items (a list, or `A=1,B=2`) -> { NAME = value } | nil; an item without `=` is ignored by name
+function M.env_of(items)
+    if not items then return nil end
+    local e = {}
+    for _, it in ipairs(items) do
+        local k, v = tostring(it):match('^([%w_]+)=(.*)$')
+        if k then e[k] = v end
+    end
+    return e
+end
+
 M.entry = {
     name = 'spec-fails',
     kind = 'discovery',
     summary = 'does SPEC fail in a tree? runs `SPEC=<spec> bash tests/run.sh` in root (default: the cartograph repo) and reads the summary line; a run that ran nothing refuses; timeout = seconds (default 600) — a hang is a failure, its process group killed',
-    params = { spec = 'string', root = 'string?', timeout = 'string?' },
+    params = { spec = 'string', root = 'string?', timeout = 'string?', env = 'list?' },
     measure = function (_, p)
         local t0 = vim.uv.hrtime()
-        local v, why = M.run(p.root or repo_of_toolbelt(), p.spec, p.timeout and tonumber(p.timeout) * 1000 or nil)
+        local v, why = M.run(p.root or repo_of_toolbelt(), p.spec, p.timeout and tonumber(p.timeout) * 1000 or nil, M.env_of(p.env))
         v = v or { error = why }
         v.secs = (vim.uv.hrtime() - t0) / 1e9
         return v
@@ -83,6 +98,8 @@ M.FIXTURE = {
     ['tests/guard_spec.lua'] = "local check = ...\nlocal g = require('guard')\ncheck(g.positive(1) == true)\ncheck(g.positive(-1) == false)\ncheck(g.positive(0) == false)\ncheck(g.nonempty({}) == false)\n",
     ['tests/weak_spec.lua'] = "local check = ...\nlocal g = require('guard')\ncheck(g.positive(1) == true)\n",
     ['tests/broken_spec.lua'] = "local check = ...\ncheck(1 == 2)\n",
+    -- (a spec that fails only under an environment variable: the `env` param's example, and derive-check's)
+    ['tests/env_spec.lua'] = "local check = ...\ncheck(os.getenv('DERIVE') ~= 'bad')\n",
     -- (a spec that HANGS busy: a headless nvim in a loop ignores SIGTERM — the case a timeout must kill by group)
     ['tests/hang_spec.lua'] = "local check = ...\nlocal n = 0\nfor _ = 1, math.huge do n = n + 1 end\ncheck(n > 0)\n",
 }
@@ -109,6 +126,18 @@ M.entry.examples = {
         expect = { holds = true, check = function (v)
             return v.timed_out and v.group_gone and v.secs < 4, ('timed_out %s group_gone %s after %.1f s'):format(tostring(v.timed_out), tostring(v.group_gone), v.secs or -1)
         end },
+    },
+    {
+        name = 'an ENVIRONMENT for the runner (env = NAME=value): the spec fails under it',
+        files = M.FIXTURE,
+        params = function (store) return { spec = 'env_spec', root = store.data.root, env = { 'DERIVE=bad' } } end,
+        expect = { holds = true, check = function (v) return v.failed == 1, tostring(v.summary) end },
+    },
+    {
+        name = '…and the same spec WITHOUT it is green: the variable reached the runner, nothing else changed',
+        files = M.FIXTURE,
+        params = function (store) return { spec = 'env_spec', root = store.data.root } end,
+        expect = { holds = false, check = function (v) return v.passed == 1 and v.failed == 0, tostring(v.summary) end },
     },
     {
         name = 'a SPEC naming no spec runs nothing: refused, never read as green',

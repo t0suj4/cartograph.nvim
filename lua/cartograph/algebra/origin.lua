@@ -120,4 +120,14 @@ return {
     spec_file    = 'spec/algebra_spec.lua',
     spec_sha256  = 'e9806eb1c77147bb23de257b9488aec8b1d5b597ba9f8e6ecc485d4d1d780725',
     spec_lines   = 8270,
+
+    -- ★ THE THIRD UNIT (2026-10-03, CART-1368): the re-derivation pass's instrument, derive.lua
+    -- (REDERIVE.md) — vendored VERBATIM from the same donor revision (its last donor change is
+    -- ef782cf itself, the handoff tag), because the algebra VERB AUDIT (CART-1360) runs it
+    -- against OUR authoritative copy and an instrument must not live in the donor's tree (it
+    -- ran from ~/tools/templates via LUA_PATH, which also made 15 fixture-dependent tests
+    -- runnable and moved the baseline). core.lua's DERIVE hook requires this copy.
+    derive_file   = 'derive.lua',
+    derive_sha256 = '315426bca46fbe8628aeac1d5bc298142af122218dd914bb4cb36e24029f1882',
+    derive_lines  = 1551,
 }

@@ -3970,6 +3970,7 @@ require('cartograph.algebra.demandfam')(M, PARTS)
 -- and `join`, `unify`, `match`… live in part files — run above them (where the split left it),
 -- every derivation that needed one failed with "`join` is not in the basis" (14 times,
 -- found by the verb audit 2026-10-03)
-if os.getenv('DERIVE') then require('derive').apply_to(M, os.getenv('DERIVE')) end
+-- (the instrument is VENDORED beside this file, CART-1368 — no LUA_PATH into the donor's tree)
+if os.getenv('DERIVE') then require('cartograph.algebra.derive').apply_to(M, os.getenv('DERIVE')) end
 
 return M

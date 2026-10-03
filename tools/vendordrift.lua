@@ -82,6 +82,17 @@ M.units = {
             return (path:gsub('algebra%.lua$', 'spec/algebra_spec.lua'))
         end,
     },
+    {
+        -- the THIRD unit (CART-1368): the re-derivation instrument, beside the module in the donor
+        name   = 'cartograph.algebra.derive',
+        copy   = REPO .. '/lua/cartograph/algebra/derive.lua',
+        origin = 'cartograph.algebra.origin',
+        stamp_field = 'derive_sha256',
+        donor  = function ()
+            local path = (require 'cartograph.algebra').path()
+            return (path:gsub('algebra%.lua$', 'derive.lua'))
+        end,
+    },
 }
 
 --- @return table report  { name, state, copy_sha, donor_sha, stamp_sha, note }

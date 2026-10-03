@@ -231,9 +231,11 @@ test('algebra parts: what a part reads, core supplies, and core still defines', 
     -- ★ AND EVERY `S.<name>` A PART READS MUST BE SUPPLIED. This is the half that
     -- catches the `key` bug — a part reading something nobody passes it.
     local parts, missing, total = 0, {}, 0
+    -- (a VENDORED INSTRUMENT beside the parts is no part: the stamp declares it — derive.lua, CART-1368)
+    local instrument = (require('cartograph.algebra.origin').derive_file or ''):gsub('%.lua$', '')
     for _, path in ipairs(vim.fn.glob(dir .. '/*.lua', false, true)) do
         local name = path:match('([^/]+)%.lua$')
-        if name ~= 'core' and name ~= 'origin' then
+        if name ~= 'core' and name ~= 'origin' and name ~= instrument then
             local src = table.concat(vim.fn.readfile(path), '\n')
             ok(src:find('return function (M, SHARED)', 1, true),
                 name .. ' opens with the part signature')
