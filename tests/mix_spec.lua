@@ -225,6 +225,52 @@ test('mix: a static value that never repeats is GENERALIZED — past the depth, 
     eq(2, pstats.functions, 'the entry and the generalized point\n' .. pt)
 end)
 
+-- ── RUNG 4a: PARTIALLY STATIC DATA — a local RECORD is its fields (SRA) ─────────────────────────────────────────────
+local RECORD = [[
+local function f(x, n)
+    local r = { a = n, b = x, c = 0 }
+    r.c = r.a * 2
+    if x > 0 then r.b = r.b + r.c end
+    return r.a + r.b + r.c
+end
+local function k(t)
+    return t.a + t.b
+end
+local function g(x, n)
+    local r = { a = n, b = x }
+    return k(r)
+end
+local function h(x, n)
+    local r = { a = n }
+    local function get() return r.a + x end
+    return get()
+end
+local function p(x, n)
+    local r = { n, x }
+    r[1] = r[1] + 1
+    return r[1] * r[2]
+end
+]]
+
+test('mix: a local RECORD that never escapes is its FIELDS (SRA, CART-1331 rung 4a) — a static field folds away, a dynamic one is a residual local, no table is built; an escaping record stays a table', function ()
+    ready()
+    local prog = MX.lower(assert(R.read(RECORD, 'lua')))
+    eq(4, prog.sra.candidates, 'four records')
+    eq(2, prog.sra.replaced, 'f and p are replaced; g passes its record, h captures it')
+    local function same(fname)
+        local o, r, text = original(RECORD, fname), residual(RECORD, fname, { 'D', 'S' }, { nil, 5 })
+        for _, x in ipairs({ -1, 0, 3 }) do eq(o(x, 5), r(x), fname .. ' ' .. x) end
+        return text
+    end
+    local tf = same('f')
+    ok(not tf:find('{', 1, true) and not tf:find('[', 1, true), 'f: no table built, no field read\n' .. tf)
+    ok(tf:find('10', 1, true), 'f: r.c = r.a * 2 folded to 10\n' .. tf)
+    local tp = same('p')
+    ok(not tp:find('{', 1, true), 'p: positional fields too\n' .. tp)
+    ok(same('g'):find('{', 1, true), 'g: an escaping record stays a table')
+    same('h')
+end)
+
 local FOLD = [[
 local function count(x, n)
     if x > 0 then return count(x - 1, n + 1) end

@@ -469,9 +469,141 @@ function M.lower(term, opts)
         end
         cx.funcs[d.name] = { name = d.name, params = params, pnames = pnames, body = d.body and lower_block(d.body, cx, scope) or {} }
     end
+    -- RECORDS: a local table that never escapes is its fields, one local each (SRA, CART-1331 rung 4a)
+    cx.sra = { candidates = 0, replaced = 0, escapes = {} }
+    for _, f in pairs(cx.funcs) do f.body = M.sra(f.body, cx) end
     -- BOXES: every boxed variable's declaration holds { v }, every read is v[1], every write a store into it
     for _, f in pairs(cx.funcs) do f.body = M.box(f.body, cx.boxed, cx.forced) end
-    return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed }
+    return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra }
+end
+
+-- ── SRA: SCALAR REPLACEMENT OF A LOCAL RECORD (CART-1331 rung 4a) ──────────────────────────────────────────────────
+-- mix's binding times are per VARIABLE, all-or-nothing per table: one store under dynamic control, one dynamic field,
+-- and the whole record is dynamic and allocated at run time. A local table that NEVER ESCAPES — declared by a
+-- constructor whose keys are all literals, and used ONLY as `t.k` / `t[<literal>]` (read or stored) in the function or
+-- lambda that declares it — is replaced by one local per field before any analysis runs, so the existing per-variable
+-- binding times become PER-FIELD binding times: a static field folds away, a dynamic one is a residual local, and no
+-- table is built. ESCAPE (the record stays a table, as before): any other use of the variable (an argument, a return,
+-- `#t`, a method call, a comparison, stored into another table, rebound), a field read in ANOTHER function (a closure
+-- capturing it), a non-literal or duplicate constructor key. Written over the cartograph.mixterm LENS: one generic walk,
+-- no per-kind switch. -> the body, rewritten; cx.sra counts candidates / replaced and the escape reasons
+local function sra_key(k)
+    if (k.k == 'num' or k.k == 'str') and k.kids[1] and k.kids[1].k == 'lit' then return k.k .. ':' .. tostring(k.kids[1].v) end
+    return nil
+end
+local function var_id(t) if t.k == 'var' and t.kids[1] and t.kids[1].k == 'lit' then return t.kids[1].v end return nil end
+local function none_t() return { k = 'none', kids = {} } end
+
+function M.sra(body, cx)
+    local MT = require 'cartograph.mixterm'
+    local t = MT.block_term(body)
+    local cand = {}
+    -- (1) CANDIDATES: `local t = { <literal keys> }`, with the lambda that declares it (0: the function itself)
+    local owner = 0
+    local function find(n)
+        if n.k == 'lambda' then
+            local saved = owner
+            owner = n.kids[1].k == 'lit' and n.kids[1].v or saved
+            for _, c in ipairs(n.kids) do find(c) end
+            owner = saved
+            return
+        end
+        if n.k == 'local' and n.kids[4] and n.kids[4].k == 'table' and n.kids[1].k == 'lit' then
+            local fields, keys, order, ok = n.kids[4].kids[1].kids or {}, {}, {}, true
+            for _, f in ipairs(fields) do
+                local key = sra_key(f.kids[1])
+                if not key or keys[key] then ok = false else keys[key] = f.kids[1]; order[#order + 1] = key end
+            end
+            cx.sra.candidates = cx.sra.candidates + 1
+            if ok then cand[n.kids[1].v] = { keys = keys, order = order, owner = owner }
+            else cx.sra.escapes[#cx.sra.escapes + 1] = 'a non-literal or duplicate constructor key' end
+        end
+        for _, c in ipairs(n.kids or {}) do find(c) end
+    end
+    find(t)
+    if next(cand) == nil then return body end
+    -- (2) USES: only `t.<literal>` in the declaring function / lambda; anything else ESCAPES
+    local function escape(id, why)
+        if cand[id] then cand[id] = nil; cx.sra.escapes[#cx.sra.escapes + 1] = why end
+    end
+    owner = 0
+    local function use(n)
+        if n.k == 'lambda' then
+            -- (a closure capturing the record needs no rule of its own: every use inside it is a field read in another
+            -- function or a use as a value — a mutant dropping a capture rule survived, so there is none)
+            local saved = owner
+            owner = n.kids[1].k == 'lit' and n.kids[1].v or saved
+            for _, c in ipairs(n.kids) do use(c) end
+            owner = saved
+            return
+        end
+        if n.k == 'index' then
+            local id = var_id(n.kids[1])
+            if id and cand[id] then
+                local key = sra_key(n.kids[2])
+                if not key then escape(id, 'a non-literal key')
+                elseif cand[id].owner ~= owner then escape(id, 'used in another function')
+                else cand[id].keys[key] = cand[id].keys[key] or n.kids[2] end
+                return
+            end
+        end
+        local id = var_id(n)
+        if id then escape(id, 'used as a value'); return end
+        for _, c in ipairs(n.kids or {}) do use(c) end
+    end
+    use(t)
+    if next(cand) == nil then return body end
+    -- (3) REWRITE: one local per field; `t.k` -> that local; the declaration -> the fields' declarations, in order
+    for id, c in pairs(cand) do
+        c.fid = {}
+        local extra = {}
+        for key in pairs(c.keys) do
+            local seen = false
+            for _, k in ipairs(c.order) do if k == key then seen = true end end
+            if not seen then extra[#extra + 1] = key end
+        end
+        table.sort(extra)
+        for _, key in ipairs(extra) do c.order[#c.order + 1] = key end
+        for _, key in ipairs(c.order) do
+            cx.nid = cx.nid + 1
+            c.fid[key] = cx.nid
+            cx.names[cx.nid] = tostring(cx.names[id]) .. '_' .. tostring(c.keys[key].kids[1].v)
+        end
+        cx.sra.replaced = cx.sra.replaced + 1
+    end
+    local function var_t(fid) return { k = 'var', kids = { { k = 'lit', v = fid }, none_t() } } end
+    local function local_t(fid, e) return { k = 'local', kids = { { k = 'lit', v = fid }, none_t(), none_t(), e } } end
+    local rw
+    local function rw_seq(n)
+        local kids = {}
+        for _, s in ipairs(n.kids) do
+            local id = s.k == 'local' and s.kids[1].k == 'lit' and s.kids[1].v
+            local c = id and cand[id]
+            if c and s.kids[4].k == 'table' then
+                local vals = {}
+                for _, f in ipairs(s.kids[4].kids[1].kids or {}) do vals[sra_key(f.kids[1])] = rw(f.kids[2]) end
+                for _, key in ipairs(c.order) do kids[#kids + 1] = local_t(c.fid[key], vals[key] or { k = 'nil', kids = {} }) end
+            else kids[#kids + 1] = rw(s) end
+        end
+        local out = {}
+        for k, v in pairs(n) do out[k] = v end
+        out.kids = kids
+        return out
+    end
+    function rw(n)
+        if n.k == 'index' then
+            local id = var_id(n.kids[1])
+            if id and cand[id] then return var_t(cand[id].fid[sra_key(n.kids[2])]) end
+        end
+        if n.k == 'seq' then return rw_seq(n) end
+        if not n.kids then return n end
+        local out = {}
+        for k, v in pairs(n) do out[k] = v end
+        out.kids = {}
+        for i, c in ipairs(n.kids) do out.kids[i] = rw(c) end
+        return out
+    end
+    return MT.of_block(rw(t))
 end
 
 -- ── the INTERPRETER (static evaluation, and the step counter of the payoff gate) ────────────────────────────────────
