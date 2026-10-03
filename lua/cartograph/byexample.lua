@@ -150,7 +150,10 @@ function M.rewrite(rules, src, lang)
         -- (the rule's template is STATIC across every position: match COMPILED to it, accepted by its sample law
         -- first — cartograph.compiledverb, CART-1339; refused or disabled, the interpreted A.match)
         local compiled = require('cartograph.compiledverb').match(rule.lhs)
-        for _, pos in ipairs(a.positions(t)) do
+        -- (and only at the positions that CAN be a match root: an anchor token's ancestor at its fixed depth —
+        -- cartograph.prefilter, sound; no anchor, or CARTOGRAPH_PREFILTER=0, every position)
+        local poss = os.getenv('CARTOGRAPH_PREFILTER') ~= '0' and require('cartograph.prefilter').candidates(t, rule.lhs, src) or a.positions(t)
+        for _, pos in ipairs(poss) do
             if not inside(pos.path) then
                 local m = compiled and compiled(pos.node) or a.match(rule.lhs, pos.node)
                 if m.ok then hits[#hits + 1] = { path = pos.path, values = m.values }; covered[#covered + 1] = pos.path end
@@ -230,8 +233,21 @@ function M.plan(store, opts)
     end
     local scan = files_in(store, opts.scope or 'all', opts.lang)
     local edits, touched, stamps, per, total, unread = {}, {}, {}, {}, 0, {}
+    -- ★ THE PREFILTER (cartograph.prefilter): a file whose text lacks a fixed token of EVERY rule cannot hold a match —
+    -- a sound necessary condition, so it is skipped before it is parsed (CARTOGRAPH_PREFILTER=0 turns it off)
+    local filters = {}
+    if os.getenv('CARTOGRAPH_PREFILTER') ~= '0' then
+        for i, r in ipairs(rules) do filters[i] = require('cartograph.prefilter').text(r.lhs) end
+    end
+    local function may_match(text)
+        if #filters == 0 then return true end
+        for _, f in ipairs(filters) do if f(text) then return true end end
+        return false
+    end
+    local prefiltered = 0
     for _, rel in ipairs(scan) do
         local text = txn.read_file(root, rel)
+        if text and not may_match(text) then prefiltered = prefiltered + 1; text = nil end
         if text then
             local new, n = M.rewrite(rules, text, opts.lang)
             -- a file the lossless reader cannot read was NOT looked at: say so, never count it as "no match"
@@ -259,7 +275,7 @@ function M.plan(store, opts)
         guards = { 'parses' },
         generation = store.generation,
         touched = touched, stamps = stamps, refspecs = {},
-        edits = edits, rules = rule_text, sites = total,
+        edits = edits, rules = rule_text, sites = total, prefiltered = prefiltered,
         -- an example is a claim, not a proof: the rule applies what was demonstrated
         preserves = 'none',
         preserves_why = 'the rewrite applies what ONE example demonstrated; nothing checks that it preserves behaviour',

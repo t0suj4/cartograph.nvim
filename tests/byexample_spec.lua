@@ -188,13 +188,18 @@ test('byexample: a CONSTANT the example keeps stays part of the pattern, and ove
     eq(1, n2); eq('if not (y == nil) then return end\n', o2)
 end)
 
-test('byexample: a file in scope the lossless reader cannot read is NAMED as not looked at, never counted as "no match"', function ()
+test('byexample: a file in scope the lossless reader cannot read is NAMED as not looked at, never counted as "no match" — unless its TEXT already rules a match out', function ()
     if not ready() then skip 'no lua parser or algebra' end
+    -- broken.lua carries the rule's fixed tokens (`==`, `nil`), so the prefilter cannot rule it out: it must be READ,
+    -- and it cannot be — named as unread. notokens.lua is just as broken but lacks a fixed token: no instance of the
+    -- rule can be in its text (the prefilter's sound condition), so it is counted as PREFILTERED, not as unread
     project { ['a.lua'] = 'local A = {}\nfunction A.f(q)\n  if q == nil then return 3 end\nend\nreturn A\n',
-        ['broken.lua'] = 'local B = {\nfunction B.g(\n' }
-    local p = assert(BX.plan(store, { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'a.lua,broken.lua' }))
+        ['broken.lua'] = 'local B = {\nfunction B.g(q) if q == nil then\n', ['notokens.lua'] = 'local C = {\nfunction C.h(\n' }
+    local p = assert(BX.plan(store, { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'a.lua,broken.lua,notokens.lua' }))
     local h = require('cartograph.hazard').plain(p.hazards)
     eq('unread', h[1] and h[1].kind); eq('frontier', h[1].class); ok(h[1].text:find('broken.lua', 1, true), h[1].text)
+    ok(not h[1].text:find('notokens.lua', 1, true), h[1].text)
+    eq(1, p.prefiltered, 'notokens.lua ruled out by its text')
 end)
 
 test('learn-from-example: an example that shows its own rule is TOO GENERAL fails its demonstration — and is not written', function ()
