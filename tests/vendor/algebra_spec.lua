@@ -1249,6 +1249,25 @@ describe('Term-graph anti-unification (Baumgartner, Kutsia, Levy, Villaret, FSCD
         assert.equals(pairs_n, agree_shared)
         assert.is_true(disagree_plain > 0, 'plain encodings never disagreed')
     end)
+
+    it('tg_collapse_vars (CART-1344): same-label variable leaves become one node — bisimilar, idempotent — so Gen no longer splits a variable it met as two nodes', function()
+        local two = tg('x0', { x0 = { 'f', 'x1', 'x1b', 'x2', 'X1', 'X2' }, x1 = { var = 'l1' }, x1b = { var = 'l1' }, x2 = { var = 'l2' }, X1 = { hvar = 'H' }, X2 = { hvar = 'H' } })
+        local c = A.tg_collapse_vars(two)
+        assert.is_true(A.tg_bisimilar(c, two))
+        assert.equals(A.tg_nodes(two) - 2, A.tg_nodes(c))
+        assert.equals(A.tg_show(c), A.tg_show(A.tg_collapse_vars(c)))
+        -- a term variable and a hedge variable of one name are different sorts: never merged
+        local sorts = tg('x0', { x0 = { 'f', 'x1', 'X1' }, x1 = { var = 'v' }, X1 = { hvar = 'v' } })
+        assert.equals(A.tg_nodes(sorts), A.tg_nodes(A.tg_collapse_vars(sorts)))
+        -- Gen on the collapsed forms equals Gen on the one-node forms: aliasing kept
+        local one = tg('x0', { x0 = { 'f', 'x1', 'x1', 'x2' }, x1 = { var = 'l1' }, x2 = { var = 'l2' } })
+        local two2 = tg('x0', { x0 = { 'f', 'x1', 'x1b', 'x2' }, x1 = { var = 'l1' }, x1b = { var = 'l1' }, x2 = { var = 'l2' } })
+        local other = tg('y0', { y0 = { 'f', 'y1', 'y1b', 'y2' }, y1 = { var = 'm1' }, y1b = { var = 'm1' }, y2 = { var = 'm2' } })
+        local want = A.tg_show(A.tg_generalize(one, A.tg_collapse_vars(other)).G)
+        assert.equals('z0=f(z1,z1,z2) z1=u1 z2=u2', want)
+        assert.equals(want, A.tg_show(A.tg_generalize(A.tg_collapse_vars(two2), A.tg_collapse_vars(other)).G))
+        assert.equals('z0=f(z1,z2,z3) z1=u1 z2=u2 z3=u3', A.tg_show(A.tg_generalize(two2, other).G), 'the raw Gen splits them (the paper\'s Merge by node identity)')
+    end)
 end)
 
 describe('Higher-order pattern anti-unification (Baumgartner, Kutsia, Levy, Villaret, JAR 2017)', function()

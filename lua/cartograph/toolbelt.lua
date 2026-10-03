@@ -155,7 +155,8 @@ end
 ---           near names in that file (cartograph.near), never a guess applied
 ---   string  as given; `@path` reads the file (a tactic's `text` is usually a whole definition)
 ---   list    a table, or `a,b,c`
----   term    an algebra term or template, as a table (from a `T.use`, an example, an MCP client) — no text form
+---   term    an algebra term, template or term graph, as a table (from a `T.use`, an example, an MCP client) — no text
+---           form
 --- An undeclared param, a missing required one, and a param of a type this list does not name refuse as ill-posed BY
 --- NAME (an unknown type used to pass the value through unchecked).
 --- -> params | nil, why, class
@@ -219,8 +220,8 @@ function M.coerce(store, e, raw)
                 return nil, ('param `%s` must be a list (a table or a,b,c)'):format(k), 'ill-posed'
             end
         elseif base == 'term' then
-            if type(v) ~= 'table' or not (v.body or v.k) then
-                return nil, ('param `%s` must be an algebra term or template (a table with `k` or `body`)'):format(k), 'ill-posed'
+            if type(v) ~= 'table' or not (v.body or v.k or (v.root and v.eqs)) then
+                return nil, ('param `%s` must be an algebra term, template or term graph (a table with `k`, `body` or `root` + `eqs`)'):format(k), 'ill-posed'
             end
         else
             return nil, ('%s declares param `%s` of the unknown type `%s` (ref, string, list, term)'):format(e.name, k, base), 'ill-posed'

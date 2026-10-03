@@ -55,6 +55,31 @@ function M.tg_canon(G)
     return { root = G.root, eqs = keep }
 end
 
+--- COLLAPSE THE VARIABLE LEAVES (CART-1344): every node carrying the same free variable (same sort) becomes one node —
+--- they are bisimilar, so the graph is the same object. Gen's Merge pairs NODES, by identity (the paper's rule), so two
+--- nodes with one label generalize apart (f(l1,l1) against f(m1,m1) gave f(u1,u2), losing the aliasing); collapsed
+--- first, they generalize together. ⚠ A first-order graph has no binders: a label IS one entity. A producer that
+--- encodes SCOPED names must rename them apart before labelling (one label per binder instance), or this merges two
+--- entities — that contract is the encoder's, not checkable here.
+function M.tg_collapse_vars(G)
+    local function key(e) return (e.kind == 'hvar' and 'H' or 'T') .. e.var end
+    local rep = {}
+    for _, n in ipairs(tg_sorted_names(G.eqs)) do -- (a deterministic representative)
+        local e = G.eqs[n]
+        if (e.kind == 'tvar' or e.kind == 'hvar') and not rep[key(e)] then rep[key(e)] = n end
+    end
+    local redirect, eqs = {}, {}
+    for n, e in pairs(G.eqs) do if e.kind == 'tvar' or e.kind == 'hvar' then redirect[n] = rep[key(e)] end end
+    for n, e in pairs(G.eqs) do
+        if e.kind == 'node' then
+            local args = {}
+            for i, a in ipairs(e.args) do args[i] = redirect[a] or a end
+            eqs[n] = { kind = 'node', sym = e.sym, args = args }
+        elseif redirect[n] == n then eqs[n] = e end
+    end
+    return M.tg_canon({ root = redirect[G.root] or G.root, eqs = eqs })
+end
+
 function M.tg_nodes(G)
     local n = 0
     for _ in pairs(G.eqs) do n = n + 1 end
