@@ -56,19 +56,25 @@ local roots, index_only, writable = {}, nil, nil
 -- calls as PORTS (no in-graph mint) so the `ports` verb serves them to a client that mounts this host as a band and
 -- derives the linkage itself. A ported graph is extracted COLD: the cache holds minted graphs.
 local profile, profile_mint = nil, nil
+-- ★ THE QUERY LOG (F20, CART-1387), OPT-IN: `--query-log` appends every answered call of a non-mutating verb to
+-- <state>/cartograph/<root>.queries.jsonl (`--query-log-to <path>` elsewhere) — the request, the answer's envelope, the
+-- cartograph commit and THIS HOST'S FLAGS (`host_flags`), so tools/queryreplay.lua re-opens the graph the same way.
+local query_log, host_flags = nil, {}
 do
     local i = 1
     while i <= #arg do
-        if arg[i] == '--index-only' then index_only = true
+        if arg[i] == '--index-only' then index_only = true; host_flags[#host_flags + 1] = arg[i]
         elseif arg[i] == '--write' then writable = true
-        elseif arg[i] == '--profile' then profile = arg[i + 1]; i = i + 1
-        elseif arg[i] == '--no-profile-mint' then profile_mint = false
+        elseif arg[i] == '--profile' then profile = arg[i + 1]; host_flags[#host_flags + 1] = arg[i]; host_flags[#host_flags + 1] = arg[i + 1]; i = i + 1
+        elseif arg[i] == '--no-profile-mint' then profile_mint = false; host_flags[#host_flags + 1] = arg[i]
+        elseif arg[i] == '--query-log' then query_log = query_log or true
+        elseif arg[i] == '--query-log-to' then query_log = arg[i + 1]; i = i + 1
         else roots[#roots + 1] = arg[i] end
         i = i + 1
     end
 end
 if #roots == 0 then
-    io.stderr:write('usage: mcpserve <root>... [--index-only] [--write] [--profile <runtime>] [--no-profile-mint]\n')
+    io.stderr:write('usage: mcpserve <root>... [--index-only] [--write] [--profile <runtime>] [--no-profile-mint] [--query-log | --query-log-to <path>]\n')
     os.exit(2)
 end
 -- ⚠ ONE BAND PER ROOT, ENFORCED HERE BECAUSE NOTHING ELSE ENFORCES IT
@@ -256,6 +262,7 @@ local function tools_list()
     return { tools = out }
 end
 
+local QLOG -- the query logger, opened on the first logged call (the commit is read once)
 local function tools_call(id, params)
     local name = params and params.name
     if not name or not agent.VERBS[name] then
@@ -270,6 +277,17 @@ local function tools_call(id, params)
     local doc, status = agent.answer(store, name, args)
     if status == 'usage' then
         return fail(id, -32602, doc.error.reason)
+    end
+    -- (a WRITE is the journal's to record; the log holds what a replay can re-ask without touching the tree)
+    if query_log and not agent.VERBS[name].mutates then
+        if not QLOG then
+            local abs = {}
+            for i, r in ipairs(roots) do abs[i] = vim.fn.fnamemodify(vim.fn.expand(r), ':p'):gsub('/+$', '') end
+            QLOG = require('cartograph.querylog').open({ roots = abs, flags = host_flags, repo = repo,
+                path = query_log ~= true and query_log or nil })
+        end
+        local ok, why = QLOG.record(name, args, doc, status)
+        if not ok then io.stderr:write('mcpserve: query log: ' .. tostring(why) .. '\n') end
     end
     -- an ANSWER and a REFUSAL both ride as content; only a real fault is isError
     reply(id, content(doc, status == 'error'))
