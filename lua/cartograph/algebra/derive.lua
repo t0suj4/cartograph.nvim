@@ -648,6 +648,26 @@ function D.match(T, I, env)
             hole_domains = hd
         end
     end
+    -- ★ A PRESENCE MARK AT THE ROOT MEANS NOTHING (CART-1413). A mark says "this member may be absent from the node
+    -- holding it", and a root has no node holding it — the hand-written match ignores it (match(T, b) binds nothing,
+    -- instance_of(T, T) holds). Here D.sites counted it as a presence hole the join never makes a fragment for, so the
+    -- derivation CRASHED on the template's own body and refused a plain `b` as 'literal "b" vs "b"'. Drop it on both
+    -- sides — copies, never in place (a term is a value: EGAL).
+    if type(T) == 'table' and type(T.body) == 'table' and T.body.opt then
+        local mark, T2, body, holes = T.body.opt, {}, {}, {}
+        for k, v in pairs(T) do T2[k] = v end
+        for k, v in pairs(T.body) do body[k] = v end
+        body.opt = nil
+        for h, e in pairs(T.holes or {}) do if h ~= mark then holes[h] = e end end
+        T2.body, T2.holes = body, holes
+        T = T2
+    end
+    if type(I) == 'table' and I.opt then
+        local I2 = {}
+        for k, v in pairs(I) do I2[k] = v end
+        I2.opt = nil
+        I = I2
+    end
     local menv = { defs = env.defs, self = env.self or T, hole_domains = hole_domains }
     local H0 = D.sites(T)
     local last_refusal, all, seen = nil, {}, {}

@@ -472,6 +472,20 @@ test('algebra seam: two different TYPE names are a name hole at the type node', 
     eq(0, #same, 'one type is no divergence')
 end)
 
+-- ★ A PRESENCE MARK AT THE ROOT MEANS NOTHING (CART-1413): no node holds the root, so nothing can be absent from it.
+-- Written against whichever `match` is installed — the hand-written one here, the DERIVED one under DERIVE=match,
+-- which crashed on the template's own body and refused a plain `b` as 'literal "b" vs "b"'.
+test('algebra seam: a presence mark on the template ROOT is ignored, by match and instance_of alike', function ()
+    local A = need()
+    local T = A.template({ k = 'lit', v = 'b', opt = 'h1' })
+    local own = A.match(T, T.body)
+    eq(true, own.ok, 'the template matches its own body, mark and all')
+    eq(true, A.match(T, A.lit('b')).ok, 'and a plain `b`')
+    eq(nil, next(A.match(T, A.lit('b')).values or {}), 'binding nothing for the mark')
+    eq(false, A.match(T, A.lit('c')).ok, 'a different literal still refuses')
+    eq(true, A.instance_of(T, T), 'instance_of is reflexive on it')
+end)
+
 -- ⚠ AN ENVIRONMENT FAULT IS NOT AN ANSWER: a refusal from `anti_unify` would reach
 -- `element_template` as `alignable = false`, the same verdict ~70% of real
 -- containers earn honestly — so a missing algebra RAISES (CART-0939).
