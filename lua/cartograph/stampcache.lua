@@ -78,7 +78,7 @@ function M.log(name, scope)
     function L.put(q, v)
         load()
         map[q] = { v = v }
-        vim.fn.mkdir(dir, 'p')
+        M.mkdir(dir)
         local fd = io.open(path, 'a')
         if fd then fd:write(vim.json.encode({ q, v }), '\n'); fd:close() end
     end
@@ -162,6 +162,14 @@ local function canon(v, buf, stack)
 end
 --- the content hash of a VALUE (canonical: table order does not matter) | nil, why it has none (a function, userdata,
 --- a metatable, a cycle — a value that is more than its data)
+--- mkdir -p that survives a RACE (CART-1410): two processes creating one directory at once — the parallel suite's workers
+--- share a state dir — make the loser's vim.fn.mkdir raise E739 although the directory now exists; only a directory that
+--- is still missing afterwards is an error
+function M.mkdir(dir)
+    local ok, err = pcall(vim.fn.mkdir, dir, 'p')
+    if not ok and vim.fn.isdirectory(dir) == 0 then error(err, 0) end
+end
+
 function M.value(v)
     local buf = {}
     local ok, why = canon(v, buf, {})
@@ -196,7 +204,7 @@ function M.blob(name)
         local okd, back = pcall(B.decode, s)
         if not okd or M.value(back) ~= h then return nil, 'it does not round-trip' end
         local p = path(key)
-        vim.fn.mkdir(vim.fn.fnamemodify(p, ':h'), 'p')
+        M.mkdir(vim.fn.fnamemodify(p, ':h'))
         local tmp = p .. '.' .. vim.uv.os_getpid() .. '.tmp'
         local fd = io.open(tmp, 'wb')
         if not fd then return nil, 'cannot write ' .. tmp end
