@@ -147,7 +147,12 @@ local function fn_row_keys(eo)
     for _, s in ipairs(stmts) do
         keys[#keys + 1] = s.expr and row_key(s.expr, locals, slots, ctr) or '~'
         lines[#lines + 1] = s.l
-        exprs[#exprs + 1] = s.expr
+        -- ⚠ `or false`, NEVER A HOLE (CART-1417): a statement with no expression appended NOTHING, so `exprs` came out
+        -- shorter than `keys`/`lines` and every later row was index-shifted — near_report printed the wrong line as
+        -- "differs", rel_keys (ipairs) stopped at the gap, and the variant key dropped the row canon kept as '~'.
+        -- MEASURED: 31 of 6061 functions on our tree, 183 of 3047 on elasticsearch's `common`. Every reader tests a
+        -- row for truth (rel_keys' '~', row_term -> 'row~', anti_unify_row's norow guard, ho_row_parts).
+        exprs[#exprs + 1] = s.expr or false
     end
     return keys, lines, #(eo.fl.params or {}), exprs, locals, params
 end

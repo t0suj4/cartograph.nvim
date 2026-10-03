@@ -117,6 +117,26 @@ test('clones: a break is not an empty statement (a `?` construct keys by its typ
     vim.fn.delete(root, 'rf')
 end)
 
+-- ⚠ A STATEMENT WITH NO EXPRESSION KEEPS ITS ROW (CART-1417): a `catch (e)` clause has none, and the row list used to
+-- skip it — every later row's index shifted by one, so the near tier reported the row BEFORE the one that differs.
+test('clones: after a statement with no expression, a differing row reports its OWN line', function ()
+    local function body(name, lit)
+        return ('function %s(xs) {\n  let n = 0;\n  try { n = 1; } catch (e) { n = 2; }\n  let a = n + 1;\n'
+            .. '  let b = a + 2;\n  let c = b + 3;\n  let d = c + 4;\n  let e2 = d + 5;\n  return e2 * %s;\n}\n'):format(name, lit)
+    end
+    local root = proj { ['a.js'] = body('one', '7'), ['b.js'] = body('two', '9') }
+    local pair
+    for _, p in ipairs(clones.near(store, { min_rows = 4 })) do
+        if (p.a.name == 'one' and p.b.name == 'two') or (p.a.name == 'two' and p.b.name == 'one') then pair = p end
+    end
+    ok(pair, 'the two bodies are a near-clone pair')
+    local subs = {}
+    for _, o in ipairs(pair.ops) do if o.op == 'sub' then subs[#subs + 1] = pair.a.lines[o.i] end end
+    eq(1, #subs, 'exactly one row differs')
+    eq(9, subs[1], 'and it is the return on line 9, not the row before it')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: a unique function forms no group; report is honest on empty', function ()
     local root = proj {
         ['a.lua'] = fn('only', 'z', '  local q = z.field\n  return frobnicate(q, 7)'),
