@@ -456,6 +456,22 @@ test('algebra seam: the recursion pass still measures depth under an EMBED body'
     eq(2, S.note.distinct_depths, 'the string parses into the body (depth 1), the node does not (0)')
 end)
 
+-- ★ A TYPE'S NAME IS A NAME (CART-1412): `new Foo()` against `new Bar()` was NO divergence at all to clones' walker
+-- and to this adapter (a bare `type` has no kids); the name now rides as the node's discriminant kid, so it is a
+-- `name` hole located at the type node — 379 of 523 foreign pairs on elasticsearch's `common` gained one.
+test('algebra seam: two different TYPE names are a name hole at the type node', function ()
+    need()
+    local at1 = { start = { line = 3, char = 4 }, ['end'] = { line = 3, char = 7 } }
+    local at2 = { start = { line = 9, char = 4 }, ['end'] = { line = 9, char = 7 } }
+    local okv, hs = alg.anti_unify({ k = 'type', n = 'Foo', at = at1 }, { k = 'type', n = 'Bar', at = at2 })
+    eq(true, okv, 'a value divergence, not a shape one')
+    eq(1, #hs)
+    eq('name', hs[1].kind); eq('Foo', hs[1].a); eq('Bar', hs[1].b)
+    eq(3, hs[1].at_a.start.line, 'located at the type node that carries the name')
+    local same = select(2, alg.anti_unify({ k = 'type', n = 'Foo' }, { k = 'type', n = 'Foo' }))
+    eq(0, #same, 'one type is no divergence')
+end)
+
 -- ⚠ AN ENVIRONMENT FAULT IS NOT AN ANSWER: a refusal from `anti_unify` would reach
 -- `element_template` as `alignable = false`, the same verdict ~70% of real
 -- containers earn honestly — so a missing algebra RAISES (CART-0939).

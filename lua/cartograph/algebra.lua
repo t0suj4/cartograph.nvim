@@ -197,6 +197,15 @@ function M.kind_of(e)
     local k = e.k
     if k == 'bin' or k == 'un' then return k, tostring(e.op) end
     if k == 'field' then return (e.method and 'method' or 'field'), tostring(e.n) end
+    -- ★ THE TWO KINDS WHOSE IDENTITY IS NOT IN THEIR KIDS (CART-1412, found by partition-join on the row keys): a `?`
+    -- node is a grammar construct the IR does not model — its tree-sitter TYPE is what it is, so `break` and an empty
+    -- statement were both `(?)` and the exact tier could merge two bodies differing only there. A different construct
+    -- is a different SHAPE, so the type joins the KIND (a mismatch is a struct divergence, never a hole). A bare named
+    -- `type` has no kids at all (expr.key: "`new Foo()` and `new Bar()` would be STRUCTURALLY IDENTICAL"), and its name
+    -- is a NAME — so it is a discriminant kid, free to vary as a hole like an operator or a selector. canon, expr.key
+    -- and ho_term always carried both; this adapter and clones' anti_unify walker did not.
+    if k == '?' and type(e.t) == 'string' then return '?:' .. e.t end
+    if k == 'type' then return k, tostring(e.n or (e.prim and '#prim') or '') end
     return k
 end
 
@@ -933,7 +942,13 @@ function M.anti_unify(e1, e2, opts)
             h = { kind = kd, a = tostring(x.v), b = tostring(y.v), at_a = x.at, at_b = y.at, xn = x, yn = y }
         elseif kd == 'name' then
             local x, y = sa[st.a], sb[st.b]
-            h = { kind = kd, a = x.n, b = y.n, at_a = x.at, at_b = y.at, xn = x, yn = y }
+            if x and y then
+                h = { kind = kd, a = x.n, b = y.n, at_a = x.at, at_b = y.at, xn = x, yn = y }
+            else
+                -- a SYNTHESIZED name (a `type`'s name, `kind_of`'s discriminant): the node that carries it
+                local px, py = sa[st.up.ta], sb[st.up.tb]
+                h = { kind = kd, a = st.a.n, b = st.b.n, at_a = px and px.at, at_b = py and py.at, xn = px, yn = py }
+            end
         else
             ok = false
             local x, y
@@ -947,6 +962,10 @@ function M.anti_unify(e1, e2, opts)
                     a = x.k == 'lit' and tostring(x.v) or nil, a_ty = x.ty,
                     b = y.k == 'lit' and tostring(y.v) or nil, b_ty = y.ty,
                     at_a = x.at, at_b = y.at, xn = x, yn = y, why = 'kind' }
+            elseif st.a and st.b and st.a.k ~= st.b.k then
+                -- the same expr kind, different TERM kinds: two `?` constructs (`?:break_statement` against
+                -- `?:empty_statement`), or a field against a method call — a kind divergence, not an arity one
+                h = { kind = 'struct', a_k = st.a.k, b_k = st.b.k, at_a = x.at, at_b = y.at, xn = x, yn = y, why = 'kind' }
             else
                 h = { kind = 'struct', xn = x, yn = y, why = 'arity' }
             end

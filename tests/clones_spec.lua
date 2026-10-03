@@ -101,6 +101,22 @@ test('clones: a field selector spelled like a local is a selector, not a local',
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ A CONSTRUCT THE IR DOES NOT MODEL IS ITS TREE-SITTER TYPE (CART-1412): `break` and an empty statement are both
+-- `?` nodes with no kids, and the term adapter read both as `(?)` until the type joined the kind — found by
+-- partition-join on the row keys, where 724 rows of our own tree merged that canon kept apart.
+test('clones: a break is not an empty statement (a `?` construct keys by its type)', function ()
+    local root = proj {
+        ['a.lua'] = fn('stop', 'xs', '  for _, v in ipairs(xs) do\n    break\n  end\n  return xs'),
+        -- (the loop variable is spelled alike: a loop binder is not in the locals set, so it keys by NAME)
+        ['c.lua'] = fn('stop2', 'ys', '  for _, v in ipairs(ys) do\n    break\n  end\n  return ys'),
+        ['b.lua'] = fn('skip', 'xs', '  for _, v in ipairs(xs) do\n    ;\n  end\n  return xs'),
+    }
+    local g = group_of(clones.exact(store, { min_rows = 2 }), 'stop')
+    ok(g and g.stop2, 'stop and stop2 (alpha-renamed) ARE clones — the group is real')
+    ok(not (g and g.skip), 'skip has an empty statement where stop breaks')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: a unique function forms no group; report is honest on empty', function ()
     local root = proj {
         ['a.lua'] = fn('only', 'z', '  local q = z.field\n  return frobnicate(q, 7)'),
