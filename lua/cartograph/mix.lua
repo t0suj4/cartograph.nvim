@@ -32,6 +32,11 @@ local function named(t)
     for _, c in ipairs(t.kids or {}) do if c.k ~= 'lit' then out[#out + 1] = c end end
     return out
 end
+-- t when it is a `block` node, else nil — an EMPTY block has no node, so a position can hold the next clause instead
+local function block_of(t)
+    if t and t.k == 'block' then return t end
+    return nil
+end
 local function text(t)
     if t.k == 'lit' then return t.v end
     local parts = {}
@@ -281,16 +286,19 @@ local function lower_stmt(t, cx, scope, out)
         return
     end
     if k == 'if_statement' then
+        -- (an EMPTY block is no node at all: `if a then elseif b then … end` has the elseif clause where the then-block
+        -- would be — so every block is taken by KIND, never by position; CART-1335)
         local n = named(t)
         local clauses, els = {}, nil
-        clauses[1] = { cond = lower_expr(n[1], cx, scope), body = lower_block(n[2], cx, scope) }
-        for i = 3, #n do
+        local first = block_of(n[2])
+        clauses[1] = { cond = lower_expr(n[1], cx, scope), body = lower_block(first, cx, scope) }
+        for i = first and 3 or 2, #n do
             local c = n[i]
             if c.k == 'elseif_statement' then
                 local cn = named(c)
-                clauses[#clauses + 1] = { cond = lower_expr(cn[1], cx, scope), body = lower_block(cn[2], cx, scope) }
+                clauses[#clauses + 1] = { cond = lower_expr(cn[1], cx, scope), body = lower_block(block_of(cn[2]), cx, scope) }
             elseif c.k == 'else_statement' then
-                els = lower_block(named(c)[1], cx, scope)
+                els = lower_block(block_of(named(c)[1]), cx, scope)
             end
         end
         out[#out + 1] = { op = 'if', clauses = clauses, els = els or {} }
@@ -298,7 +306,7 @@ local function lower_stmt(t, cx, scope, out)
     end
     if k == 'for_statement' then
         local n = named(t)
-        local clause, body = n[1], n[2]
+        local clause, body = n[1], block_of(n[2])
         local inner = { names = {}, up = scope, loop = true }
         if clause.k == 'for_numeric_clause' then
             local cn = named(clause)
@@ -323,7 +331,7 @@ local function lower_stmt(t, cx, scope, out)
         return
     end
     if k == 'do_statement' then
-        local b = named(t)[1]
+        local b = block_of(named(t)[1])
         out[#out + 1] = { op = 'do', body = b and lower_block(b, cx, { names = {}, up = scope }) or {} }
         return
     end
@@ -345,6 +353,7 @@ end
 
 function lower_block(t, cx, scope)
     local out = {}
+    if not t then return out end -- (an empty block)
     local inner = { names = {}, up = scope }
     for _, s in ipairs(named(t)) do
         if cx.collect then

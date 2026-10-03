@@ -551,6 +551,47 @@ test('mix: an UNFOLD attempt is a transaction — a program point it made, then 
     ok(type(e) == 'table' and e.refusal and e.refusal:find('expands several dynamic values', 1, true), 'refused by name, not a broken residual: ' .. vim.inspect(e))
 end)
 
+local EMPTY = [[
+local function e1(a, b)
+    local x = 0
+    if a > 0 then elseif b > 0 then x = 1 end
+    return x
+end
+local function e2(a, b)
+    local x = 0
+    if a > 0 then x = 2 elseif b > 0 then end
+    return x
+end
+local function e3(a, b)
+    local x = 0
+    if a > 0 then else end
+    return x + b
+end
+local function e4(a, b)
+    local x = 0
+    if a > 0 then elseif b > 0 then else x = 3 end
+    return x
+end
+local function e5(a, b)
+    local x = 0
+    if a > 0 then end
+    for i = 1, b do end
+    do end
+    return x + a
+end
+]]
+
+test('mix: an EMPTY block is no node — `if a then elseif b then … end` puts the clause where the then-block would be; every block is taken by KIND (CART-1335), and each shape specializes equivalently', function ()
+    ready()
+    for _, f in ipairs({ 'e1', 'e2', 'e3', 'e4', 'e5' }) do
+        local o = original(EMPTY, f)
+        local r = residual(EMPTY, f, { 'D', 'D' }, {})
+        for _, a in ipairs({ -1, 0, 2 }) do
+            for _, b in ipairs({ -1, 0, 3 }) do eq(o(a, b), r(a, b), ('%s(%d, %d)'):format(f, a, b)) end
+        end
+    end
+end)
+
 test('mix: the CENSUS — lower with { collect = {} } records every refused statement and goes on, so one run lists what blocks mix on a program', function ()
     ready()
     local got = {}

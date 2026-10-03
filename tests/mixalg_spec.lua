@@ -59,3 +59,11 @@ test('mixalg: the assembled closure of match is a mix program — every definiti
     ok(#order >= 25, #order .. ' definitions in the closure')
     eq('M.match', order[1])
 end)
+
+test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
+    ready()
+    local text = MA.program('M.transplant')
+    local got = {}
+    local okl, e = pcall(require('cartograph.mix').lower, assert(R.read(text, 'lua')), { collect = got })
+    ok(okl or (type(e) == 'table' and e.refusal ~= nil), 'a refusal or a lowering, not ' .. tostring(e))
+end)
