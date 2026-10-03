@@ -70,10 +70,12 @@ end
 function M.match(T, opts)
     opts = opts or {}
     if os.getenv('CARTOGRAPH_COMPILED') == '0' then return nil, 'disabled (CARTOGRAPH_COMPILED=0)' end
-    if memo[T] then M.stats.memo = M.stats.memo + 1; return memo[T].f, 'memo' end
     local MA = require 'cartograph.mixalg'
     local SC = require 'cartograph.stampcache'
     local vh = SC.value(T)
+    -- (a CHECKED memo — CART-1403: keyed by the template object, served only while the template's VALUE is the one it
+    -- was compiled for; an in-place edit of its body or a hole's domain recompiles instead of serving a stale matcher)
+    if memo[T] and memo[T].vh == vh then M.stats.memo = M.stats.memo + 1; return memo[T].f, 'memo' end
     local key = vh and SC.key({ source_stamp(), vh })
     local store = key and SC.blob('compiledverb')
     local f, how
@@ -96,10 +98,7 @@ function M.match(T, opts)
     if not ok then M.stats.refused = M.stats.refused + 1; return nil, 'REJECTED by the sample law: ' .. why end
     M.stats[how] = M.stats[how] + 1
     if how == 'compiled' and store then store.put(key, { text = text, pool = pool }) end -- (a pool that is not plain data is refused by put: no disk copy, still correct)
-    memo[T] = { f = f }
-    -- (a memo keyed by the template OBJECT is sound only while the template is a value: under CARTOGRAPH_FREEZE=1 its
-    -- body is marked observed, so an in-place edit of it afterwards refuses by name — CART-1403)
-    if A().FREEZE then A().content_id(T.body) end
+    memo[T] = { f = f, vh = vh }
     return f, how
 end
 

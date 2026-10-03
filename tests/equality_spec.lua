@@ -124,6 +124,10 @@ test('law: each ORDER is consistent with its relation (equal => neither sorts fi
             else ok(r.less(a, b) ~= r.less(b, a), name .. ': unequal yet unordered') end
         end end
     end
+    -- identity orders by type first ("1" and 1 are two objects and two places); nil has one fixed term id
+    local I = A.equality('identity')
+    ok(I.less('1', 1) ~= I.less(1, '1'), 'a string and a number are ordered')
+    eq('nil', A.content_id(nil))
     -- literals: by type, then the canonical text
     local L = A.equality('literal')
     ok(L.eq(A.lit(-0), A.lit(0)) and not L.eq(A.lit(0.1 + 0.2), A.lit(0.3)) and not L.eq(A.lit('1'), A.lit(1)))
@@ -208,20 +212,19 @@ test('law: tree edit distance 0 <=> ORDERED — Zhang and Tai/JWZ, every pair of
     ok(full.zhang > #pop, 'off-diagonal full matches exist: ' .. full.zhang)
 end)
 -- ── RUNG 6 (CART-1404): MODULO TRIVIA — the code adapter declares its trivia (the parser's extras + whitespace gaps)
-test('modulo trivia: two Lua texts that differ only in whitespace and comments are one; a changed token is not', function ()
+test('modulo trivia: two Lua texts that differ only in whitespace and comments are one; a changed token — or whitespace INSIDE a string — is not', function ()
     if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
     local Rd = require 'cartograph.algebraread'
     local a = assert(Rd.read('local x = f(1, 2) -- the sum\nreturn x\n', 'lua'))
     local b = assert(Rd.read('local x=f(1,2)\n\n--[[ block ]]\nreturn   x', 'lua'))
     local c = assert(Rd.read('local x = f(1, 3)\nreturn x\n', 'lua'))
-    local spec = Rd.trivia('lua')
-    ok(spec.kinds.comment, 'the parser declared `comment` an extra (derived, not listed)')
     local Tv = A.equality('trivia')
     ok(not A.eq(a, b), 'the premise: as terms they differ')
-    ok(Tv.eq(a, b, spec), 'modulo trivia they are one')
-    eq(Tv.hash(a, spec), Tv.hash(b, spec), 'and so are their hashes')
-    ok(not Tv.eq(a, c, spec) and Tv.hash(a, spec) ~= Tv.hash(c, spec), 'a changed token is not trivia')
-    ok(not pcall(Tv.eq, a, b), 'no spec, no guess')
-    -- term => trivia (stripping is a function of the term)
-    ok(Tv.eq(a, A.copy(a), spec))
+    ok(Tv.eq(a, b), 'modulo trivia they are one')
+    eq(Tv.hash(a), Tv.hash(b), 'and so are their hashes')
+    ok(not Tv.eq(a, c) and Tv.hash(a) ~= Tv.hash(c), 'a changed token is not trivia')
+    -- ★ whitespace inside a token is CONTENT: the reader marks only its gaps and the parser's extras
+    local s1, s2 = assert(Rd.read('x = " "\n', 'lua')), assert(Rd.read('x = "  "\n', 'lua'))
+    ok(not Tv.eq(s1, s2), '" " and "  " are two strings')
+    ok(Tv.eq(A.copy(a), a), 'term => trivia')
 end)

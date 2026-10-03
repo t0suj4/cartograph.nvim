@@ -51,6 +51,23 @@ test('compiledverb: CACHED — the same template object is a memo hit; an equal 
     eq(nil, f4); ok(why4:find('disabled', 1, true), tostring(why4))
 end)
 
+test('compiledverb: a CHECKED memo — a template EDITED IN PLACE after compiling is not served the stale matcher (CART-1403)', function ()
+    ready()
+    local A = require('cartograph.algebra').load()
+    local T
+    for _, r in ipairs(rules()) do if not T and next(r.lhs.holes) then T = vim.deepcopy(r.lhs) end end
+    ok(T, 'a rule with a hole')
+    local f1 = CV.match(T)
+    local _, how = CV.match(T)
+    eq('memo', how, 'the premise: the same object, unchanged, is a hit')
+    -- pin a hole's domain IN PLACE: the template's value changed, so the memo must not answer
+    local h = next(T.holes)
+    T.holes[h].domain = A.closed(A.lit('never-this-value'))
+    local f2, how2 = CV.match(T)
+    ok(how2 ~= 'memo', 'an edited template is recompiled or read from disk, not served from the memo: ' .. tostring(how2))
+    ok(f2 ~= f1, 'and gets its own matcher')
+end)
+
 test('compiledverb: the CONSUMER gives the same answers — byexample.rewrite over real files, compiled vs interpreted, the same text and the same sites', function ()
     ready()
     local BE = require 'cartograph.byexample'

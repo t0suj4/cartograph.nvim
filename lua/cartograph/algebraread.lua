@@ -138,14 +138,16 @@ local function read(A, src, lang, given, visit)
         return nil, ('does not parse as `%s` (tree-sitter reports an error node)'):format(lang)
     end
     local ESC = M.escapes(lang)
-    M.EXTRAS[lang] = M.EXTRAS[lang] or {}
+    -- ★ TRIVIA IS MARKED ON EACH OCCURRENCE AS THE READER MAKES IT (CART-1404): a GAP — the text tree-sitter keeps out
+    -- of the tree, between children and around the root — and a node the PARSER reports as an extra (the grammar's own
+    -- trivia: comments). `trivia = true` is a per-occurrence field (not identity: eq and content ids ignore it); a
+    -- whitespace-only LITERAL inside a token (`x = " "`) is no gap and is never marked. A.strip_trivia reads the marks.
+    local function gap(text) local g = A.lit(text); g.trivia = true; return g end
     local function term(node)
         local ty = node:type()
         -- a NAMED type the grammar shares with the algebra takes its derived escape; anything else still colliding
         -- (an escape map that could not be derived — no symbol table) refuses by name, as before
         if node:named() and ESC[ty] then ty = ESC[ty] end
-        -- (a node the PARSER reports as an extra — a comment — is the grammar's own trivia declaration: CART-1404)
-        if node:extra() then M.EXTRAS[lang][ty] = true end
         if M.RESERVED[ty] then
             error(('tree-sitter type collides with an algebra kind: `%s`'):format(ty), 0)
         end
@@ -159,21 +161,25 @@ local function read(A, src, lang, given, visit)
             local text = src:sub(sb + 1, eb)
             if node:named() then
                 local t = A.node(ty, A.lit(text))
+                if node:extra() then t.trivia = true end
                 if visit then visit(node, t) end
                 return t
             end
-            return A.lit(text)
+            local l = A.lit(text)
+            if node:extra() then l.trivia = true end
+            return l
         end
         local kids, cursor = {}, sb
         for child in node:iter_children() do
             local _, _, cs, _, _, ce = child:range(true)
             -- the gap tree-sitter keeps out of the tree
-            if cs > cursor then kids[#kids + 1] = A.lit(src:sub(cursor + 1, cs)) end
+            if cs > cursor then kids[#kids + 1] = gap(src:sub(cursor + 1, cs)) end
             kids[#kids + 1] = term(child)
             cursor = ce
         end
-        if eb > cursor then kids[#kids + 1] = A.lit(src:sub(cursor + 1, eb)) end
+        if eb > cursor then kids[#kids + 1] = gap(src:sub(cursor + 1, eb)) end
         local t = A.node(ty, unpack(kids))
+        if node:extra() then t.trivia = true end
         if visit then visit(node, t) end
         return t
     end
@@ -182,21 +188,11 @@ local function read(A, src, lang, given, visit)
     -- the file's leading and trailing gaps lie OUTSIDE the root's range
     local _, _, rs, _, _, re = root:range(true)
     local kids = {}
-    if rs > 0 then kids[#kids + 1] = A.lit(src:sub(1, rs)) end
+    if rs > 0 then kids[#kids + 1] = gap(src:sub(1, rs)) end
     for _, c in ipairs(t.kids or {}) do kids[#kids + 1] = c end
-    if re < #src then kids[#kids + 1] = A.lit(src:sub(re + 1)) end
+    if re < #src then kids[#kids + 1] = gap(src:sub(re + 1)) end
     t.kids = kids
     return t
-end
-
---- the TRIVIA of a language as the reader has seen it (CART-1404, equality modulo trivia): the node types its parser
---- reported as EXTRAS (tree-sitter's grammar-declared extras: comments) — derived from the parser, not a list — and the
---- GAP rule (a literal that is whitespace only: the reader keeps every gap as a literal). -> { kinds = { [type] = true },
---- gap = function (lit) } for A.strip_trivia / A.equality('trivia')
-M.EXTRAS = M.EXTRAS or {}
-function M.trivia(lang)
-    lang = lang or 'lua'
-    return { kinds = M.EXTRAS[lang] or {}, gap = function (t) return t.k == 'lit' and type(t.v) == 'string' and t.v:match('^%s*$') ~= nil end }
 end
 
 --- the parse hook the donor's `lua` grammar asks for: `A.parsers.lua`.

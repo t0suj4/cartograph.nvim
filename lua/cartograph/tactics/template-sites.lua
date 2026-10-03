@@ -5,7 +5,7 @@
 -- keyed by term node (per-occurrence data beside the term, not on it — CART-1361's shape), the prefilter's anchor
 -- candidates, and the COMPILED matcher accepted by its sample law (cartograph.compiledverb). byexample's read-only half.
 -- Value: { sites = { { file, line, values = { hole -> text } } }, kinds = { hole -> { value kind -> n } }, files }.
--- ⚠ Matching is exact up to the example's own whitespace (CART-1158 item 1: trivia-insensitive matching is open).
+-- ⚠ Matching is exact up to the example's own whitespace unless trivia = 1 (CART-1404: modulo whitespace and comments).
 -- CLAIM: the template occurs.
 local function A() return require('cartograph.algebra').load() end
 
@@ -49,11 +49,11 @@ local E = {
         local T, why = template_of(p.example, p.holes)
         if not T then return { error = why } end
         -- ★ trivia = 1: MATCH MODULO TRIVIA (CART-1404, CART-1158 item 1) — the template and each candidate are compared
-        -- without the whitespace and comments the Lua adapter declares trivia (algebraread.trivia: the parser's extras
-        -- + whitespace gaps), so `x==nil` is a site of `x == nil`. Rows stay the original nodes'; a bound value prints
-        -- modulo trivia when it held some.
-        local spec = (p.trivia == '1' or p.trivia == true) and R.trivia('lua') or nil
-        if spec then T = a.template(a.strip_trivia(T.body, spec), T.holes) end
+        -- without the whitespace and comments the reader MARKED as trivia (the gaps it keeps between tokens, the nodes
+        -- the parser reports as extras), so `x==nil` is a site of `x == nil`. Rows stay the original nodes'; a bound
+        -- value prints modulo trivia when it held some.
+        local spec = p.trivia == '1' or p.trivia == true
+        if spec then T = a.template(a.strip_trivia(T.body), T.holes) end
         local P, CV = require 'cartograph.prefilter', require 'cartograph.compiledverb'
         local filter = P.text(T)
         local compiled = CV.match(T)
@@ -75,7 +75,7 @@ local E = {
                 if t then
                     read = read + 1
                     for _, pos in ipairs(P.candidates(t, T, src) or a.positions(t)) do
-                        local subject = spec and a.strip_trivia(pos.node, spec) or pos.node
+                        local subject = spec and a.strip_trivia(pos.node) or pos.node
                         local m = compiled and compiled(subject) or a.match(T, subject)
                         if m.ok then
                             local vals = {}

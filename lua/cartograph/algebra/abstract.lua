@@ -148,10 +148,12 @@ function M.abstract(I, H)
                 if pair == nil then
                     error(('abstract: optional pair %s (hole %s) is absent in this instance; abstract from a member carrying it'):format(p.path[#p.path], p.h))
                 end
+                M.assert_mutable(pair, 'abstract')
                 pair.opt = p.h
             elseif p.ctx then
                 local node = cut(orig, p, pool)
                 local parent = at(body, { unpack(p.path, 1, #p.path - 1) })
+                M.assert_mutable(parent, 'abstract')
                 local start, n = p.path[#p.path], p.n or 0
                 local kids = {}
                 for j = 1, start - 1 do kids[#kids + 1] = parent.kids[j] end

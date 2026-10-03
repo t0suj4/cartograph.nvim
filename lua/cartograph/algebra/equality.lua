@@ -53,16 +53,16 @@ function M.rename_holes(t, opts)
 end
 
 -- ── MODULO TRIVIA (CART-1404): code terms equal ignoring whitespace and comments ────────────────────────────────────
---- t without its TRIVIA: the kids a code adapter declares trivia (spec = algebraread.trivia(lang): `kinds`, the node
---- types its parser reports as extras — comments —, and `gap`, a whitespace-only literal) dropped at every level; the rest
---- shared, never copied. A spec is REQUIRED: what counts as trivia is the adapter's, never guessed here.
-function M.strip_trivia(t, spec)
-    if not (spec and spec.kinds and spec.gap) then error('strip_trivia: a trivia spec is required (algebraread.trivia(lang))', 2) end
+--- t without its TRIVIA: every occurrence its ADAPTER marked `trivia` when it read the code (algebraread: the gaps it
+--- keeps between tokens and the nodes the parser reports as extras — comments) dropped at every level; the rest shared,
+--- never copied. The marks are made per occurrence by the reader, so the answer is a function of the term alone — no
+--- set of kinds learned from earlier reads, and whitespace INSIDE a token (`" "`) is content, never trivia.
+function M.strip_trivia(t)
     local function go(u)
         if not u.kids then return u end
         local kids, changed = {}, false
         for _, c in ipairs(u.kids) do
-            if (c.k and spec.kinds[c.k]) or spec.gap(c) then changed = true
+            if type(c) == 'table' and c.trivia then changed = true
             else
                 local s = go(c)
                 if s ~= c then changed = true end
@@ -86,7 +86,10 @@ end
 local function by_hash(hash) return function (a, b) return hash(a) < hash(b) end end
 local REL = {}
 REL.identity = { of = 'any', eq = rawequal, hash = function (x) return x end,
-    less = function (a, b) return tostring(a) < tostring(b) end }
+    less = function (a, b) -- (by type first: tostring alone ordered "1" and 1 as one)
+        if type(a) ~= type(b) then return type(a) < type(b) end
+        return tostring(a) < tostring(b)
+    end }
 REL.literal = { of = 'lit', eq = function (a, b) return a.k == 'lit' and b.k == 'lit' and lit_key(a) == lit_key(b) end, hash = lit_key }
 REL.ordered = { of = 'term', eq = function (a, b) return M.eq(a, b, true) end, hash = function (t) return M.content_id(t, nil, true) end }
 REL.term = { of = 'term', eq = function (a, b) return M.eq(a, b) end, hash = function (t) return M.content_id(t) end }
@@ -94,9 +97,9 @@ REL.variant = { of = 'term', eq = function (a, b) return M.eq(M.rename_holes(a),
     hash = function (t) return M.content_id(M.rename_holes(t)) end }
 REL.theory = { of = 'term', parameter = 'theory', eq = function (a, b, theory) return M.eq_mod(a, b, theory) end,
     hash = function (t, theory) return M.content_id(M.canon(t, theory)) end }
-REL.trivia = { of = 'term', parameter = 'trivia spec (algebraread.trivia(lang))',
-    eq = function (a, b, spec) return M.eq(M.strip_trivia(a, spec), M.strip_trivia(b, spec)) end,
-    hash = function (t, spec) return M.content_id(M.strip_trivia(t, spec)) end }
+REL.trivia = { of = 'term',
+    eq = function (a, b) return M.eq(M.strip_trivia(a), M.strip_trivia(b)) end,
+    hash = function (t) return M.content_id(M.strip_trivia(t)) end }
 REL.bisimilar = { of = 'graph', eq = function (a, b) return (M.tg_bisimilar(a, b)) end }
 REL.equivalent = { of = 'template', eq = function (a, b) return M.instance_of(a, b) and M.instance_of(b, a) end }
 for _, r in pairs(REL) do if r.hash and not r.less then r.less = by_hash(r.hash) end end

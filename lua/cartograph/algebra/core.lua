@@ -900,6 +900,7 @@ function M.merge(T, h1, h2)
     local T2 = edited(T, { op = 'merge', h = h1, into = h2 })
     local function ren(t)
         if is_hole(t) and t.h == h2 then return M.hole(h1, t.rep) end
+        if t.kids then M.assert_mutable(t, 'merge') end
         for i, c in ipairs(t.kids or {}) do t.kids[i] = ren(c) end
         return t
     end
