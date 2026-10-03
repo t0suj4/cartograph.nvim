@@ -231,14 +231,17 @@ end
 function M.eq(a, b)
     if a == b then return true end
     if type(a) ~= 'table' or type(b) ~= 'table' or a.k ~= b.k then return false end
-    if a.k == 'lit' then return a.v == b.v end
-    if a.k == 'name' then return a.n == b.n end
+    -- (a PRESENCE MARK is identity on every kind — a keyed set's optional member is not its always-present twin; it was
+    -- ignored on a literal and a name, an early return older than marks on set members: CART-1397)
+    if a.k == 'lit' then return a.v == b.v and (a.opt or false) == (b.opt or false) end
+    if a.k == 'name' then return a.n == b.n and (a.opt or false) == (b.opt or false) end
     if a.k == 'hole' and (a.h ~= b.h or (a.rep or false) ~= (b.rep or false) or (a.ctx or false) ~= (b.ctx or false)) then
         return false
     end
     -- the alignment discipline is part of the node's identity (a span is not: it stays ignored)
     if a.align ~= b.align or not same_key(a.key, b.key) then return false end
     if (a.opt or false) ~= (b.opt or false) then return false end
+    if a.g ~= b.g then return false end -- (an embed's GRAMMAR: one tree parsed as SQL is not the same tree parsed as Lua)
     local ka, kb = a.kids or {}, b.kids or {}
     if #ka ~= #kb then return false end
     if a.align == 'keyed' then
@@ -2343,12 +2346,49 @@ end
 -- call's callee appears as a child symbol anyway, so the callee convention is not used
 -- for vertical skeletons).
 
-local function vsym(t)
-    if t.k == 'lit' then return 'lit:' .. tostring(t.v) end
-    if t.k == 'name' then return 'name:' .. t.n end
-    if t.k == 'hole' then return '?' .. t.h end
-    return t.k
+-- ★ ONE NODE LABEL (CART-1398 / CART-1396): everything eq compares about a node, minus its kids — the label content ids
+-- hash, the term wire's records hold, term graphs carry (tg_of_term), and tree edit distance / vertical match on (vsym).
+-- It used to print a literal untyped (`lit:1` for "1" and 1) and drop a node's alignment, key and presence mark, so a
+-- term graph called f("1") and f(1) bisimilar while eq said no.
+local function lenq(s) s = tostring(s); return #s .. ':' .. s end
+-- ONE canonical text per number eq can tell apart: integers exactly, the rest to 17 significant digits (tostring keeps
+-- 14, so 0.1 + 0.2 and 0.3 printed alike while eq told them apart); -0 is 0 (eq: -0 == 0); NaN is REFUSED — eq never
+-- holds for it, so no label can stand for it. The wire carries the same text, so JSON never rounds a number.
+local function content_num(v)
+    if v ~= v then error('content id: a NaN literal has no identity (eq never holds for it)', 0) end
+    if v == 0 then return '0' end
+    if v == math.floor(v) and math.abs(v) < 2 ^ 53 then return ('%.0f'):format(v) end
+    return ('%.17g'):format(v)
 end
+M.content_num = content_num
+function M.node_label(t)
+    if t.k == 'lit' then return 'L' .. type(t.v) .. lenq(type(t.v) == 'number' and content_num(t.v) or t.v) .. '|' .. lenq(t.opt or '') end
+    if t.k == 'name' then return 'N' .. lenq(t.n) .. '|' .. lenq(t.opt or '') end
+    local key = t.key and M.key_spec(t) or ''
+    local l = 'K' .. lenq(t.k) .. '|' .. tostring(t.align or '') .. '|' .. lenq(key) .. '|' .. lenq(t.opt or '') .. '|' .. lenq(t.g or '')
+    if t.k == 'hole' then l = l .. '|' .. lenq(t.h) .. (t.rep and '+' or '') .. (t.ctx and '*' or '') end
+    return l
+end
+--- the READABLE symbol of a node — the same fields as M.node_label, printed for a person (term graphs' tg_show, edit
+--- distance's alignments, vertical's skeletons): a plain node is its kind (`f`), a literal typed (`lit:"1"` is a string,
+--- `lit:1` a number in canonical text), a name `name:x`, a hole `?h` (`...` hedge, `()` context); alignment, merge key,
+--- presence mark and grammar ride only when present. Two nodes have one symbol iff they have one label.
+function M.node_sym(t)
+    local s
+    if t.k == 'lit' then
+        local v = t.v
+        s = 'lit:' .. (type(v) == 'string' and ('%q'):format(v) or type(v) == 'number' and content_num(v) or tostring(v))
+    elseif t.k == 'name' then s = 'name:' .. t.n
+    elseif t.k == 'hole' then s = '?' .. t.h .. (t.rep and '...' or '') .. (t.ctx and '()' or '')
+    else s = t.k end
+    if t.k ~= 'lit' and t.k ~= 'name' then
+        if t.align then s = s .. '[' .. t.align .. (t.key and (' key=' .. M.key_spec(t)) or '') .. ']' end
+        if t.g then s = s .. '@' .. t.g end
+    end
+    if t.opt then s = s .. '?' .. t.opt end
+    return s
+end
+local function vsym(t) return M.node_sym(t) end
 local function slice(list, i, j)
     local out = {}
     for k = i, j do out[#out + 1] = list[k] end

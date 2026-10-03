@@ -61,11 +61,13 @@ test('term wire: the RECORD holds exactly what the id hashes — a presence mark
     for _, k in ipairs(body.kids) do if k.k == 'lit' and k.opt then marked = marked + 1 end end
     eq(1, marked, 'the premise: a literal carries a presence mark')
     eq(body, (rt(body)))
-    -- two occurrences of ONE literal with different marks: one record, each keeps its own
+    -- two literals with different marks are two NODES since a mark is identity on every kind (CART-1397: it was ignored
+    -- on a literal, and they shared one record with the mark per occurrence)
     local t = A.node('f', { k = 'lit', v = 'b', opt = 'h1' }, { k = 'lit', v = 'b', opt = 'h2' })
     local back, w = rt(t)
     eq(t, back)
-    eq(w.nodes[w.root].kids[1], w.nodes[w.root].kids[2])
+    ok(w.nodes[w.root].kids[1] ~= w.nodes[w.root].kids[2], 'two marks, two records')
+    ok(not A.eq(t.kids[1], t.kids[2]), 'and eq tells them apart')
     -- a field eq does not read on this kind (a stray `v` on a node) is not dropped
     local stray = A.node('f', A.lit(1)); stray.v = 3
     eq(stray, (rt(stray)))
