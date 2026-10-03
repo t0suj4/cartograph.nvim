@@ -39,7 +39,9 @@ function M.cdata(s) return A().node('tuple', lit('xmlcdata', 'atom'), lit(s, 'bi
 local function is_el(t) return t and t.k == 'tuple' and t.kids and t.kids[1] and t.kids[1].k == 'lit' and t.kids[1].v == 'xmlel' end
 local function is_cdata(t) return t and t.k == 'tuple' and t.kids and t.kids[1] and t.kids[1].k == 'lit' and t.kids[1].v == 'xmlcdata' end
 
---- an #xmlel term with every attribute list sorted: equality where XML's is
+--- an #xmlel term with every attribute list sorted: equality where XML's is — the attributes are a SET, in the order
+--- the TERM relation declares (A.equality('term').less, consistent with term equality — CART-1398); child lists keep
+--- their order (attributes and children are both `list` nodes, so no theory over the kind could say it)
 function M.canon(t)
     if not t.kids then return t end
     local kids = {}
@@ -48,7 +50,7 @@ function M.canon(t)
     if t.k == 'tuple' and kids[1] and kids[1].k == 'lit' and kids[1].v == 'xmlel' and kids[3] then
         local as = {}
         for i, kv in ipairs(kids[3].kids or {}) do as[i] = kv end
-        table.sort(as, function (x, y) return A().show(x) < A().show(y) end)
+        table.sort(as, A().equality('term').less)
         out.kids[3] = A().node('list', unpack(as))
     end
     return out

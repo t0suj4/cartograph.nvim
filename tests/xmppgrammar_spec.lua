@@ -25,7 +25,7 @@ test('xmppgrammar: the reader — one cdata for adjacent text, entities and CDAT
     eq(nil, (XG.read('<a><b></a>')), 'text that does not parse is refused')
     -- LAW 1, modulo attribute order
     local t = XG.el('q', { { 'k', "v'<" }, { 'xmlns', 'urn:q' } }, { XG.cdata('t&') })
-    eq(A.show(XG.canon(t)), A.show(XG.canon(XG.read(XG.print_el(t)))))
+    ok(A.equality('term').eq(XG.canon(t), XG.canon(XG.read(XG.print_el(t)))), 'the round trip is the same element, attributes as a set')
 end)
 
 test('xmppgrammar: the record grammar round-trips and registers as the algebra\'s xmpp grammar', function ()
