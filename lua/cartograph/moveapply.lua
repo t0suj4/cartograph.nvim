@@ -575,6 +575,27 @@ local function collect(store, ids, dest, plan, opts)
     -- a MOVE into an existing file inherits that file's own (CART-0542)
     if okp and plan.creates and plan.creates[dest] then
         module_scaffold(plan, dest, ts, file_lines)
+    elseif okp then
+        -- ⚠ ...AND INHERITS IT BY NAME (CART-1422). The moved text is written verbatim, so `function M.foo` lands
+        -- in a module whose table is `D` and that module stops LOADING (`attempt to index global 'M'`) — the move
+        -- applied, its guard passed, and only running the module showed it. Renaming M to D in the moved text is
+        -- not sound by itself (a moved `M.bar` naming a member that STAYED would become a wrong `D.bar`), so until
+        -- that rewrite exists this refuses by name.
+        local dtbl = ts.module_table(dest, file_lines(dest) or {})
+        for _, m in ipairs(plan.moves) do
+            local ls = file_lines(m.file)
+            local n = ls and ts.module_table(m.file, ls) or nil
+            if n and n ~= dtbl then
+                for i = m.lines.s + 1, m.lines.e + 1 do
+                    if (ls[i] or ''):find('%f[%w_]' .. n .. '%f[^%w_]') then
+                        return nil, ('%s reads its module table `%s`, and %s %s — the moved text would name a table'
+                            .. ' that does not exist there. Move it into a module whose table is `%s`, or rename one'
+                            .. ' of them first'):format(m.name, n, dest,
+                            dtbl and ('exports through `' .. dtbl .. '`') or 'has no module table', n), 'unbuilt'
+                    end
+                end
+            end
+        end
     end
     -- ★ THE REBIND (CART-1146): a moved LOCAL still called by name in its old file is EXPORTED from the new home and
     -- BOUND again in the old one, where its definition was — so every one of those calls keeps working unchanged.
@@ -867,19 +888,19 @@ function M.plan_moveset(store, seed, dest, opts)
         store.set_dest(dest)
     end
 
-    local plan, why
+    local plan, why, class
     if exists then
         -- ★ EXPLICIT if/else, NOT `arm and M.plan(store, opts) or M.plan_ids(...)`:
         -- M.plan returns nil on a refusal, so the `or` arm would fire and run the
         -- OTHER planner. That is the `f.absent and false or f.before` bug found in
         -- this same repo on 2026-08-27, one line long and invisible in review.
         if arm then
-            plan, why = M.plan(store, opts)
+            plan, why, class = M.plan(store, opts)
         else
-            plan, why = M.plan_ids(store, set, dest, opts)
+            plan, why, class = M.plan_ids(store, set, dest, opts)
         end
     else
-        plan, why = M.plan_extract_ids(store, set, dest, opts)
+        plan, why, class = M.plan_extract_ids(store, set, dest, opts)
     end
 
     if not plan and arm then
@@ -887,7 +908,9 @@ function M.plan_moveset(store, seed, dest, opts)
         for _, id in ipairs(prior_ids or {}) do store.stage(id) end
         store.set_dest(prior_dest) -- nil is a legal dest: set_dest just assigns
     end
-    return plan, why
+    -- ⚠ THE CLASS TRAVELS (CART-1020: a refusal declares sound / unbuilt / ill-posed …): this kept only `plan, why`,
+    -- so every refusal from the three planners reached its caller unclassified — found pinning CART-1422's refusal
+    return plan, why, class
 end
 
 --- plan_extract from an EXPLICIT id set (not the staged move-set) — the seam the

@@ -631,6 +631,23 @@ test('moveapply: reexport=true keeps the moved name on the source module when th
     eq(6, okl and type(A) == 'table' and A.foo and A.foo(5))
 end)
 
+-- ★ A MOVE INTO A MODULE WHOSE TABLE HAS ANOTHER NAME IS REFUSED BY NAME (CART-1422): the moved `function M.foo`
+-- is written verbatim, and in `local D = {}` it named a table that does not exist — the move applied and the module
+-- stopped loading. Until the head (and every `M.` the moved text reads) can be rewritten soundly, it refuses.
+test('moveapply: moving `M.foo` into a module whose table is `D` is refused by name, nothing written', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files {
+        ['m.lua'] = table.concat({ 'local M = {}', 'function M.foo(x) return x + 1 end', 'return M' }, '\n'),
+        ['d.lua'] = table.concat({ 'local D = {}', 'return D' }, '\n'),
+    }
+    local foo = node_by(st, 'M.foo') or node_by(st, 'foo')
+    local plan, why, class = moveapply.plan_moveset(st, { foo.id }, 'd.lua', { arm = false })
+    eq(nil, plan, 'no plan')
+    ok(tostring(why):find('`D`', 1, true) and tostring(why):find('`M`', 1, true), 'the refusal names both tables: ' .. tostring(why))
+    eq('unbuilt', class)
+    eq('local D = {}\nreturn D', table.concat(vim.fn.readfile(st.data.root .. '/d.lua'), '\n'), 'd.lua untouched')
+end)
+
 --- ★★★ THE PACKAGE ROOT IS NOT PART OF THE MODULE PATH (CART-0917), and this is
 --- pinned BOTH WAYS because a one-sided assertion would pass on a dead predicate.
 --- The resolver has consulted the declared `package_root` since it existed; the
