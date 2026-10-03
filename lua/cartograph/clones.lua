@@ -2870,85 +2870,62 @@ local function const_read(node, cd)
     return key, v
 end
 
--- canon with the `ord`-th leaf replaced by '?'; st.hit records the leaf it blanked.
--- Locals are NEVER candidate leaves — two copies naming a local differently is
--- alpha-renaming, which is the one divergence that carries no information.
-local function bcanon(e, locals, slots, ctr, st)
-    if not e then return '_' end
-    local k = e.k
-    local function leaf(render, kind, node)
-        st.ord = st.ord + 1
-        if st.all then st.all[st.ord] = { kind = kind, node = node } end
-        if st.ord == st.blank then st.hit = { kind = kind, node = node }; return '?' end
-        return render
-    end
-    if k == 'name' then
-        if locals[e.n] then
-            if not slots[e.n] then ctr.n = ctr.n + 1; slots[e.n] = '#' .. ctr.n end
-            return slots[e.n]
+-- ★ A ROW WITH ONE LEAF BLANKED, AS A TERM (CART-1412): the row through the algebra's adapter with its locals as holes
+-- renamed WITHIN the row, its blankable LEAVES enumerated with their paths — every non-local read and literal, a
+-- field's selector, a resolvable constant chain as ONE leaf (`C.SHIFT` must blank whole, as a bare `SHIFT` does: the
+-- position it competes with is a literal) — and `key(i)` the content id of that row with leaf i replaced by one
+-- reserved hole. Locals are NEVER leaves: two copies naming a local differently is alpha-renaming, the one divergence
+-- that carries no information.
+-- ★ ONLY THE PATH'S SPINE IS REBUILT per blank, and the ids share one memo, so a row's untouched subtrees are hashed
+-- once however many of its leaves are blanked.
+-- It replaces bcanon (a string with the i-th leaf printed `?`, the ordinal appended). ACCEPTED by partition-join over
+-- every (row, candidate leaf): leaf counts identical on every row (lua 109154, TSM 21134, elasticsearch common 22407);
+-- 0 merged on lua and java; the SPLITS are all table constructors (lua 1459, TSM 10, java 2) — bcanon keyed a table
+-- as a bare `T`, so `rows[#rows + 1] = {…}` and `notes[#notes + 1] = {…}` were "the same statement differing at the
+-- `1`"; the term keeps contents, as canon's own CART-0357 rule said. TSM's one MERGE is one statement in two files
+-- whose per-file constant index knew `TSM.GROUP_SEP` in one and not the other: bcanon spelled it two ways.
+local BLANK = '\1blank'
+local function blank_keys(rexpr, locals, cd)
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    if not A then error('clones: the algebra cannot key a row: ' .. tostring(select(2, alg.available()))) end
+    local src = {}
+    local t = alg.row_term(rexpr, locals, nil, src, 'holes')
+    if not t then error('clones: a row the algebra cannot build') end
+    local r = A.rename_holes(t)
+    local leaves = {}
+    local function walk(u, path, pe)
+        local e = src[u]
+        if u.k == 'hole' then return end
+        if u.k == 'lit' then leaves[#leaves + 1] = { path = path, kind = 'lit', node = e }; return end
+        if u.k == 'name' then
+            if e then leaves[#leaves + 1] = { path = path, kind = 'read', node = e }
+            elseif pe and pe.k == 'field' and path[#path] == 1 then
+                leaves[#leaves + 1] = { path = path, kind = 'read', node = pe } -- a selector: the access is its node
+            end
+            return -- (an operator or a type's name is a discriminant, never a leaf)
         end
-        return leaf('N' .. e.n, 'read', e)
+        if e and e.k == 'field' and cd then
+            local dot = expr.dotted(e)
+            if dot and cd[dot] ~= nil then leaves[#leaves + 1] = { path = path, kind = 'read', node = e }; return end
+        end
+        if e and (e.k == 'table' or e.k == 'fn') then return end -- (a constructor's or closure's leaves are not this row's)
+        for k, c in ipairs(u.kids or {}) do
+            local p = {}
+            for x = 1, #path do p[x] = path[x] end
+            p[#p + 1] = k
+            walk(c, p, e or pe)
+        end
     end
-    if k == 'lit' then return leaf('L' .. (e.ty or '') .. ':' .. tostring(e.v), 'lit', e) end
-    if k == 'field' then
-        -- ★ A RESOLVABLE CONSTANT CHAIN IS ONE LEAF, NOT A STRUCTURE. `C.SHIFT` must be
-        -- blankable as a whole, exactly as a bare `SHIFT` is: the position it competes
-        -- with on the other side is a bare LITERAL, and a literal is one leaf. Descending
-        -- here instead would key it as `F<base>.?` against the literal's `?` — different
-        -- buckets forever, and the tier would report nothing while looking correct.
-        local dot = st.cd and expr.dotted(e)
-        if dot and st.cd[dot] ~= nil then return leaf('N' .. dot, 'read', e) end
-        local b = bcanon(e.b, locals, slots, ctr, st)
-        return (e.method and 'M' or 'F') .. b .. '.' .. leaf(e.n, 'read', e)
+    walk(t, {}, nil)
+    local memo = {}
+    local function with_blank(v, path, d)
+        if d > #path then return A.hole(BLANK) end
+        local kids = {}
+        for x, c in ipairs(v.kids) do kids[x] = (x == path[d]) and with_blank(c, path, d + 1) or c end
+        return A.rebuild(v, kids)
     end
-    if k == 'index' then
-        return 'I' .. bcanon(e.b, locals, slots, ctr, st) .. '[' .. bcanon(e.i, locals, slots, ctr, st) .. ']'
-    end
-    if k == 'call' then
-        local f = bcanon(e.f, locals, slots, ctr, st)
-        local p = {}
-        for _, a in ipairs(e.a or {}) do p[#p + 1] = bcanon(a, locals, slots, ctr, st) end
-        return 'C' .. f .. '(' .. table.concat(p, ',') .. ')'
-    end
-    if k == 'un' then return 'U' .. (e.op or '') .. bcanon(e.e, locals, slots, ctr, st) end
-    if k == 'bin' then
-        return 'B' .. (e.op or '') .. '(' .. bcanon(e.l, locals, slots, ctr, st)
-            .. ',' .. bcanon(e.r, locals, slots, ctr, st) .. ')'
-    end
-    if k == 'table' then return 'T' end
-    -- ★ A TYPE KEYS BY ITS NAME OR EVERY TYPE IS THE SAME TYPE (CART-0742). A
-    -- bare named type has NO KIDS, so without this `new Foo()` and `new Bar()`
-    -- key IDENTICALLY. Present in both structural keys left in this file and in
-    -- the algebra's term (`kind_of`'s discriminant — the third key, canon, moved
-    -- there in CART-1412), because a kind added to one of them and not another
-    -- is a silent disagreement about what "the same expression" means.
-    if k == 'type' then
-        local kp = {}
-        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = bcanon(c, locals, slots, ctr, st) end
-        return 'Y' .. (e.n or (e.prim and '#prim') or '') .. '(' .. table.concat(kp, ',') .. ')'
-    end
-    if k == 'fn' then return 'Fn' end
-    if k == 'vararg' then return 'V' end
-    if k == 'assign' then -- see expr.key: `t` is the TARGET here, not a type string
-        return 'A(' .. bcanon(e.t, locals, slots, ctr, st) .. ','
-            .. bcanon(e.v, locals, slots, ctr, st) .. ')'
-    end
-    local p = {}
-    for _, c in ipairs(e.kids or {}) do p[#p + 1] = bcanon(c, locals, slots, ctr, st) end
-    return '?' .. (type(e.t) == 'string' and e.t or '') .. '('
-        .. table.concat(p, ',') .. ')'
-end
-
-local function brow(rw, locals, blank, all, cd)
-    local slots, ctr, st = {}, { n = 0 }, { ord = 0, blank = blank, all = all, cd = cd }
-    local function seq(list)
-        local p = {}
-        for _, e in ipairs(list or {}) do p[#p + 1] = bcanon(e, locals, slots, ctr, st) end
-        return table.concat(p, ',')
-    end
-    local key = seq(rw.lhs) .. '=' .. seq(rw.rhs)
-    if rw.cond then key = key .. ';C:' .. bcanon(rw.cond, locals, slots, ctr, st) end
-    return key, st.ord, st.hit
+    return { leaves = leaves, key = function (i) return A.content_id(with_blank(r, leaves[i].path, 1), memo) end }
 end
 
 --- ROW-DRIFT: a literal that DUPLICATES the value of a module constant, standing where
@@ -3959,8 +3936,8 @@ function M.row_drift(store, opts)
         local cd = consts[f.file]
         for _, rw in ipairs(f.rows) do
             if rw.expr then
-                local all = {}
-                local _, nleaf = brow(rw.expr, f.locals, -1, all, cd)
+                local bk = blank_keys(rw.expr, f.locals, cd)
+                local nleaf = #bk.leaves
                 -- a statement whose ONLY content is the varying leaf is not evidence
                 if nleaf - 1 >= min_other then
                     for i = 1, nleaf do
@@ -3971,15 +3948,13 @@ function M.row_drift(store, opts)
                         -- unreachable by construction. Keying every leaf instead cost
                         -- 5.2 GB and had not finished 50 WoW addons after two minutes;
                         -- the work is O(rows x leaves) STRINGS held at once.
-                        local lf = all[i]
-                        local cand = lf and (lf.kind == 'lit' or const_read(lf.node, cd) ~= nil)
-                        if cand then
-                            local key, _, hit = brow(rw.expr, f.locals, i, nil, cd)
-                            if hit then
-                                local b = key .. '\1' .. i
-                                buckets[b] = buckets[b] or {}
-                                table.insert(buckets[b], { hit = hit, file = f.file, line = rw.l, fn = f.name })
-                            end
+                        local lf = bk.leaves[i]
+                        if lf.kind == 'lit' or const_read(lf.node, cd) ~= nil then
+                            -- (the blank's POSITION is in the term itself, so no ordinal rides on the key)
+                            local b = bk.key(i)
+                            buckets[b] = buckets[b] or {}
+                            table.insert(buckets[b], { hit = { kind = lf.kind, node = lf.node }, file = f.file,
+                                line = rw.l, fn = f.name })
                         end
                     end
                 end
