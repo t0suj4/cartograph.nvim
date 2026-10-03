@@ -1021,6 +1021,97 @@ function D.generalize(instances, opts)
             end
         end
     end
+    -- ★ A HOLE IS ITS COLUMN (CART-1423). The n-ary generalize names a hole by the WHOLE tuple of values at its site
+    -- (equal tuples share a hole, unless linear); the fold decides identity pair by pair, mid-fold, on values the
+    -- column has not finished — so a mark under an optional parent (⊥ where the parent is absent) and a top-level mark
+    -- (absent) read alike and became ONE hole (2 of 49 jenkins-infra families). With every instance in hand, each site's
+    -- column is read off the instances themselves (a value, present / absent for a mark, ⊥ where the path is gone)
+    -- and the sites are regrouped by column. ⚠ ONLY WITHOUT HEDGE OR CONTEXT HOLES: a template path then addresses
+    -- the same position in every instance (fixed arity, keyed by key) — with a hedge it does not, and this is skipped.
+    local function rekey()
+        local H2 = D.sites(T)
+        for _, e in pairs(H2) do if e.rep or e.ctx then return end end
+        -- nor across a GRAMMAR BOUNDARY: inside an embed the path runs through the PARSED string, while an instance
+        -- holds the raw text there (the cross-grammar specs went red without this)
+        for _, pos in ipairs(B.positions(T.body)) do if pos.node.k == 'embed' then return end end
+        local function col(path, presence)
+            local c = {}
+            for i, inst in ipairs(instances) do
+                if presence then
+                    -- (an explicit branch: `#path > 1 and locate_at(…) or inst` falls through to inst exactly when the
+                    -- parent is GONE — the and/or-nil trap this file has met before)
+                    local parent = inst
+                    if #path > 1 then parent = B.locate_at(inst, { unpack(path, 1, #path - 1) }) end
+                    if parent == nil then c[i] = false
+                    else c[i] = B.locate_at(inst, path) ~= nil and B.present() or B.absent() end
+                else
+                    local v = B.locate_at(inst, path)
+                    c[i] = v == nil and false or v
+                end
+            end
+            return c
+        end
+        local function same(a, b)
+            for i = 1, #instances do
+                local x, y = a[i], b[i]
+                if (x == false) ~= (y == false) then return false end
+                if x ~= false and not B.eq(x, y) then return false end
+            end
+            return true
+        end
+        local sites = {} -- { h, path, presence, col } in preorder of the body
+        for _, pos in ipairs(B.positions(T.body)) do
+            local n = pos.node
+            if is_hole(n) then sites[#sites + 1] = { h = n.h, path = pos.path, col = col(pos.path, false) } end
+            if type(n) == 'table' and n.opt then sites[#sites + 1] = { h = n.opt, path = pos.path, presence = true, col = col(pos.path, true) } end
+        end
+        local groups = {}
+        for _, s in ipairs(sites) do
+            local g
+            if not opts.linear then
+                for _, x in ipairs(groups) do if x.presence == s.presence and same(x.col, s.col) then g = x; break end end
+            end
+            if not g then g = { presence = s.presence, col = s.col, sites = {} }; groups[#groups + 1] = g end
+            g.sites[#g.sites + 1] = s
+        end
+        local moved = false
+        for _, g in ipairs(groups) do
+            for _, s in ipairs(g.sites) do if s.h ~= g.sites[1].h then moved = true end end
+        end
+        local seen = {}
+        for _, g in ipairs(groups) do
+            if seen[g.sites[1].h] then moved = true end
+            seen[g.sites[1].h] = true
+        end
+        if not moved then return end
+        -- a group keeps its first site's name unless an earlier group took it; then a fresh one
+        local used, n = {}, 0
+        for h in pairs(T.holes) do local k = tonumber(tostring(h):match('(%d+)$')); if k and k > n then n = k end end
+        local body, holes2, vals2 = T.body, {}, {}
+        for i = 1, #instances do vals2[i] = {} end
+        for _, g in ipairs(groups) do
+            local name = g.sites[1].h
+            if used[name] then n = n + 1; name = (opts.prefix or 'h') .. n end
+            used[name] = true
+            holes2[name] = T.holes[g.sites[1].h] or { domain = B.open() }
+            for _, s in ipairs(g.sites) do
+                if s.h ~= name then
+                    local node = B.locate_at(body, s.path)
+                    local c = {}
+                    for k, v in pairs(node) do c[k] = v end
+                    if s.presence then c.opt = name else c.h = name end
+                    body = B.put(body, s.path, c)
+                end
+            end
+            for i = 1, #instances do
+                local v = g.col[i]
+                if v ~= false then vals2[i][name] = g.presence and v or B.copy(v) end
+            end
+        end
+        T = B.template(body, holes2)
+        values = vals2
+    end
+    rekey()
     T.edits = {}
     -- join sees one fragment at a time and writes `open` for a fragment with holes inside; the
     -- fold has the whole column, so the derived domains are recomputed from it (DOMAINS.md),
@@ -1618,10 +1709,10 @@ function D.kv_eq_keyed(x, y, keyfield)
     keyfield = keyfield or 'name'
     return B.eq(B.kv_term(x, { keyfield = keyfield }), B.kv_term(y, { keyfield = keyfield }))
 end
--- ⚠ NOT YET EXACT, AND WHERE IT IS NOT: the jenkins-infra differential (49 families, whole record) reads SAME 47 since
--- CART-1395 (a member absent under a presence hole no longer takes a neighbour's value; algebra_spec reads that value
--- vector now, so the gate can see it). The 2 left are PRESENCE-HOLE GROUPING — the fold merges marks the n-ary
--- generalize keeps apart (CART-1423).
+-- ★ EXACT ON THE MEASURED POPULATION: the jenkins-infra differential (49 families, whole record) reads SAME 49 — 43
+-- before CART-1395 (a member absent under a presence hole took a neighbour's value) and 47 before CART-1423 (the fold
+-- grouped presence holes mid-fold; holes are now re-keyed by their full column). A random search over 3-member kv
+-- families (3000) finds no grouping difference. algebra_spec reads value vectors and columns, so the gate sees both.
 function D.kv_generalize(instances, opts)
     opts = opts or {}
     local keyfield = opts.keyfield or 'name'

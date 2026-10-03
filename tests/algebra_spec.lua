@@ -505,6 +505,30 @@ test('algebra seam: generalize owes a member that LACKS an optional pair no valu
     eq('⊥;"x";"y"', table.concat(col, ';'), 'the member without b owes no value there')
 end)
 
+-- ★ A HOLE IS ITS COLUMN (CART-1423): a mark under an optional parent (⊥ where the parent is absent) is not the same
+-- hole as a top-level mark that is merely absent there, though the two agree on every other member. The derived fold
+-- merged them mid-fold (and gave the top-level one the nested column); against whichever generalize is installed, they
+-- stay two. The fixture is the SMALLEST disagreement a random search over 3-member families found.
+test('algebra seam: generalize keeps a nested optional mark apart from a top-level one with another column', function ()
+    local A = need()
+    local function O(ps) local o, keys = {}, {}; for _, p in ipairs(ps) do o[p[1]] = p[2]; keys[#keys + 1] = p[1] end; return { o = o, keys = keys } end
+    local inst = A.kv_terms({ O{ { 'a', O{ { 'c', O{} } } } }, O{}, O{ { 'a', O{ { 'a', 1 }, { 'b', 1 } } }, { 'c', 1 } } },
+        { keyfield = 'name' })
+    local g = A.generalize(inst, { align = 'none' })
+    local by_path = {}
+    for h, e in pairs(A.sites(g.template)) do
+        for _, s in ipairs(e.sites) do
+            local c = {}
+            for i = 1, 3 do local v = g.values[i][h]; c[i] = v == nil and '⊥' or A.show(v) end
+            by_path[table.concat(vim.tbl_map(tostring, s.path), '/')] = { h = h, col = table.concat(c, ';') }
+        end
+    end
+    ok(by_path['c'] and by_path['a/2/a'], 'both marks are holes')
+    ok(by_path['c'].h ~= by_path['a/2/a'].h, 'and NOT the same hole')
+    eq('(absent);(absent);(present)', by_path['c'].col, 'the top-level mark is ABSENT in the empty member')
+    eq('(absent);⊥;(present)', by_path['a/2/a'].col, 'the nested one is ⊥ there: its parent is gone')
+end)
+
 -- ⚠ AN ENVIRONMENT FAULT IS NOT AN ANSWER: a refusal from `anti_unify` would reach
 -- `element_template` as `alignable = false`, the same verdict ~70% of real
 -- containers earn honestly — so a missing algebra RAISES (CART-0939).
