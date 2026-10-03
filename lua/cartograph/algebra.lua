@@ -65,6 +65,8 @@ local M = {}
 -- of three times (CART-0928, CART-0929, CART-0932). The `\1` prefix is chosen so
 -- no source identifier can collide with it.
 local LOCAL_SENTINEL = '\1local'
+-- (exported for DISPLAY only — a reader printing a term shows a local as `L` without restating the spelling)
+M.LOCAL_SENTINEL = LOCAL_SENTINEL
 
 --- ⚠ NO LONGER THE LOAD PATH. Since the vendoring (CART-0912) this answers
 --- "where did the copy COME FROM", and its only consumers are the drift fence

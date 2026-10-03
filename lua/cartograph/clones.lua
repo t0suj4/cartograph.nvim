@@ -565,12 +565,12 @@ local RESCUE_CAP = 64
 -- Levenshtein distance + backtrace over two arrays of atomic row-keys.
 -- Returns (dist, ops) where ops is the alignment [{op, i, j}] in forward order
 -- (op ∈ match|sub|del|ins; i indexes a, j indexes b).
--- ★★★ HOW MUCH DO TWO ROW KEYS AGREE? The COMMON PREFIX LENGTH, and that is READ
--- OFF `rcanon`'s FORMAT rather than invented: rcanon writes a key HEAD-FIRST — the
--- kind letter, then the callee/operator, then the children — so a shared prefix IS
--- shared top-level structure, and two rows that are different statements diverge
--- within a couple of characters. Measured on the pair that motivated this
--- (CART-0875):
+-- ★★★ HOW MUCH DO TWO ROWS AGREE? The COMMON PREFIX LENGTH of their terms in PREORDER
+-- (align_relative's `sim`, CART-1412; it was the common prefix of rcanon's key strings,
+-- the same question asked of text): a preorder is HEAD-FIRST — the kind, then the
+-- callee/operator, then the children — so a shared prefix IS shared top-level
+-- structure, and two rows that are different statements diverge within a node or two.
+-- Measured on the pair that motivated this (CART-0875), in the old key's characters:
 --     a[7] =CFNvim.notify(Lstr:'cartograph: focus a function first',…WARN)
 --     b[7] =CFNvim.notify(Lstr:'cartograph: focus a method first',…WARN)   -> ~40
 --     a[8] =CNmat_df(L,FL.file)          against b[7] above                ->   2
@@ -625,58 +625,10 @@ local function align(a, b, sim)
     return d[la][lb], ops
 end
 
--- RELATIVE-LOCAL canon: every local → 'L' (so the row shape is independent of how many
--- locals were introduced before it — insertion-stable, unlike the function-global slot
--- numbering, which drifts when a near-clone inserts a local used downstream). Callees,
--- globals, fields, operators, and literals are kept verbatim. `acc` collects the local
--- NAMES in a fixed traversal order so the alignment can later check a consistent local
--- bijection (the soundness guard — see align_relative). [[cartograph-record-fold-arc]]
-local function rcanon(e, locals, acc)
-    if not e then return '_' end
-    local k = e.k
-    if k == 'name' then
-        if locals[e.n] then acc[#acc + 1] = e.n; return 'L' end
-        return 'N' .. e.n
-    end
-    if k == 'lit' then return 'L' .. (e.ty or '') .. ':' .. tostring(e.v) end
-    if k == 'field' then return (e.method and 'M' or 'F') .. rcanon(e.b, locals, acc) .. '.' .. e.n end
-    if k == 'index' then return 'I' .. rcanon(e.b, locals, acc) .. '[' .. rcanon(e.i, locals, acc) .. ']' end
-    if k == 'call' then
-        local p = {}
-        for _, a in ipairs(e.a or {}) do p[#p + 1] = rcanon(a, locals, acc) end
-        return 'C' .. rcanon(e.f, locals, acc) .. '(' .. table.concat(p, ',') .. ')'
-    end
-    if k == 'un' then return 'U' .. (e.op or '') .. rcanon(e.e, locals, acc) end
-    if k == 'bin' then
-        return 'B' .. (e.op or '') .. '(' .. rcanon(e.l, locals, acc) .. ',' .. rcanon(e.r, locals, acc) .. ')'
-    end
-    if k == 'table' then -- contents are part of the key, as in the row term (CART-0357)
-        local kp = {}
-        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = rcanon(c, locals, acc) end
-        return 'T(' .. table.concat(kp, ',') .. ')'
-    end
-    -- ★ A TYPE KEYS BY ITS NAME OR EVERY TYPE IS THE SAME TYPE (CART-0742). A
-    -- bare named type has NO KIDS, so without this `new Foo()` and `new Bar()`
-    -- key IDENTICALLY. Present in both structural keys left in this file and in
-    -- the algebra's term (`kind_of`'s discriminant — the third key, canon, moved
-    -- there in CART-1412), because a kind added to one of them and not another
-    -- is a silent disagreement about what "the same expression" means.
-    if k == 'type' then
-        local kp = {}
-        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = rcanon(c, locals, acc) end
-        return 'Y' .. (e.n or (e.prim and '#prim') or '') .. '(' .. table.concat(kp, ',') .. ')'
-    end
-    if k == 'fn' then return 'Fn' end
-    if k == 'vararg' then return 'V' end
-    if k == 'assign' then -- see expr.key: `t` is the TARGET here, not a type string
-        return 'A(' .. rcanon(e.t, locals, acc) .. ',' .. rcanon(e.v, locals, acc) .. ')'
-    end
-    local p = {}
-    for _, c in ipairs(e.kids or {}) do p[#p + 1] = rcanon(c, locals, acc) end
-    return '?' .. (type(e.t) == 'string' and e.t or '') .. '('
-        .. table.concat(p, ',') .. ')'
-end
-
+-- RELATIVE-LOCAL row keys: every local is the one shared symbol (so the row shape is independent of how many locals
+-- were introduced before it — insertion-stable, unlike a function-global numbering, which drifts when a near-clone
+-- inserts a local used downstream), and the local NAMES are collected in a fixed traversal order so the alignment can
+-- check a consistent local bijection (the soundness guard — see align_relative). [[cartograph-record-fold-arc]]
 -- (relative row-keys, per-row local-name sequences) for a fn, memoized on its index entry
 local function rel_keys(f)
     if f._rk then return f._rk, f._rseq, f._rterm end
@@ -1048,7 +1000,7 @@ end
 --- running this experiment (~/tools/templates NEARBINDERS.md: "Loop variables are not
 --- recorded as definitions by cartograph's flow, so they are read off the `for` clause
 --- nodes"; its harvester notes "a copy; cartograph's set is not touched"). `f.locals`
---- feeds `rcanon` and every row key, so widening it THERE moves every exact/near tier
+--- feeds every row term and key, so widening it THERE moves every exact/near tier
 --- count and every clone baseline — a different change owing its own before/after. This
 --- widens only what `anti_unify_row`, `local_deps` and `debruijn` read, so the pairs and
 --- their distances come out bit-identical and only a hole's CLASSIFICATION moves.
@@ -1310,7 +1262,7 @@ local function anti_unify(e1, e2, la, lb, holes, ctx)
         -- ★ AND THE TWO NODES THEMSELVES — `xn`/`yn`, CART-0766 step B. A hole
         -- carries STRINGS AND SPANS, which is everything `M.drift` and the reports
         -- need; classifying a divergence in the CENSUS's vocabulary needs NODES,
-        -- because `dc_size`, `dc_kids` and `rcanon` each take one. Attaching them
+        -- because `dc_size`, `dc_kids` and `dc_term` each take one. Attaching them
         -- where both are already in hand is the alternative to a second traversal
         -- of this same shape, and a second traversal is the copied-walker bug
         -- (CART-0746, wrong in both directions in one day).
@@ -3053,7 +3005,7 @@ local function dc_kids(e)
     else
         -- ★ EVERY OTHER KIND, AND THIS WAS THE BUG. The closed schema models
         -- six shapes; everything else is a GENERIC node carrying `.kids` (see
-        -- rcanon's fallback, which prints them). This branch did not exist, so
+        -- expr.children, which yields them). This branch did not exist, so
         -- dc_kids returned NOTHING for a generic node and `leaf-vs-tree` — "a
         -- bare local facing the expression it was assigned from" — fired on
         -- every generic-vs-modelled divergence instead.
@@ -3137,6 +3089,30 @@ end
 --- target language and leaves the rest unranked; it does not filter it, because a
 --- classification is honest even where a ranking has nothing to say. See
 --- CART-0766's calibration notes for the table.
+--- ★ A NODE IS ASKED AS A TERM (CART-1412): the expr node through the algebra's adapter with its locals as the
+--- shared symbol — what rcanon's `L` collapse computed — and compared by content id. `dc_term` builds it; `dc_id`
+--- keys it; `dc_show` prints it for a person (a witness), the local symbol shown as `L`.
+local function dc_term(e, locals)
+    local alg = require 'cartograph.algebra'
+    local t = alg.term(e, locals or {})
+    if not t then error('clones: the algebra cannot build a census node: ' .. tostring(select(2, alg.available()))) end
+    return t
+end
+local function dc_id(e, locals) return require('cartograph.algebra').load().content_id(dc_term(e, locals)) end
+local function dc_show(e, locals)
+    local alg = require 'cartograph.algebra'
+    return (alg.load().show(dc_term(e, locals)):gsub(alg.LOCAL_SENTINEL, 'L'))
+end
+--- does term `big` hold `small` as a subterm (itself included)? — by content id, over every node of `big`
+local function dc_contains(big, small)
+    local A = require('cartograph.algebra').load()
+    local memo = {}
+    A.content_id(big, memo)
+    local want = A.content_id(small)
+    for _, id in pairs(memo) do if id == want then return true end end
+    return false
+end
+
 ---@return string[] feature names, never empty ('(no feature)' is an answer)
 local function dc_features(x, y, la, lb)
     local kx = x and x.k or 'NIL'
@@ -3146,11 +3122,14 @@ local function dc_features(x, y, la, lb)
         f[#f + 1] = 'one-side-absent'
     else
         local sx, sy = dc_size(x), dc_size(y)
-        local cx, cy = rcanon(x, la or {}, {}), rcanon(y, lb or {}, {})
-        if cx == cy then f[#f + 1] = 'canon-equal(alpha)' end
+        local tx, ty = dc_term(x, la), dc_term(y, lb)
+        local A = require('cartograph.algebra').load()
+        if A.content_id(tx) == A.content_id(ty) then f[#f + 1] = 'canon-equal(alpha)' end
         -- one side literally contains the other: a guard/conjunct was added,
         -- or a value was wrapped
-        if cx:find(cy, 1, true) or cy:find(cx, 1, true) then f[#f + 1] = 'containment' end
+        -- ⚠ A SUBTERM, NOT A SUBSTRING (CART-1412): rcanon asked `cx:find(cy)` of two key strings, which also
+        -- matched across token boundaries (`Lstr:a` inside `Lstr:ab`, `Nfoo` inside `Nfoobar`)
+        if dc_contains(tx, ty) or dc_contains(ty, tx) then f[#f + 1] = 'containment' end
         -- a bare local facing the expression it was assigned from: EXTRACT LOCAL
         if (#dc_kids(x) == 0) ~= (#dc_kids(y) == 0) then f[#f + 1] = 'leaf-vs-tree' end
         -- CART-0349's class, re-found by the census
@@ -3186,7 +3165,7 @@ local function dc_features(x, y, la, lb)
         -- argument list is NOT homogeneous; a homogeneous one is a
         -- REPETITION HOLE and never gets here.
         if kx == 'call' and ky == 'call'
-            and rcanon(x.f, la or {}, {}) == rcanon(y.f, lb or {}, {})
+            and dc_id(x.f, la) == dc_id(y.f, lb)
             and #(x.a or {}) ~= #(y.a or {}) then
             f[#f + 1] = 'arity'
             -- ...and the STRONG form: the shorter argument list is an
@@ -3196,9 +3175,9 @@ local function dc_features(x, y, la, lb)
             -- the class on java, 4% on C++, 0% on php.
             --
             -- ⚠⚠ AND THE PREFIX IS ALPHA-RENAMED, SO A PREFIX OF BARE
-            -- LOCALS AGREES BY CONSTRUCTION. `rcanon` maps EVERY local to
-            -- `L` — not to a position — so `f(a)` and `f(x, y)` are an
-            -- "appended" match because `L` == `L`. MEASURED on libs: 108 of
+            -- LOCALS AGREES BY CONSTRUCTION. `dc_term` maps EVERY local to
+            -- one shared symbol — not to a position — so `f(a)` and `f(x, y)`
+            -- are an "appended" match because the symbol equals itself. MEASURED on libs: 108 of
             -- the 130 strong divergences rest on an all-locals prefix and
             -- only 22 (9 signatures) have a prefix carrying structure the
             -- canon can tell apart. The tag does NOT distinguish them, so
@@ -3219,15 +3198,15 @@ local function dc_features(x, y, la, lb)
             if #sa > #sb then sa, sb, ma, mb = sb, sa, mb, ma end
             local pre = true
             for i = 1, #sa do
-                if rcanon(sa[i], ma, {}) ~= rcanon(sb[i], mb, {}) then
+                if dc_id(sa[i], ma) ~= dc_id(sb[i], mb) then
                     pre = false; break
                 end
             end
             if pre then f[#f + 1] = 'arity(appended)' end
         end
         local mx, my, ox, oy = {}, {}, {}, {}
-        for i, c in ipairs(dc_kids(x)) do local k2 = rcanon(c, la or {}, {}); mx[k2] = (mx[k2] or 0) + 1; ox[i] = k2 end
-        for i, c in ipairs(dc_kids(y)) do local k2 = rcanon(c, lb or {}, {}); my[k2] = (my[k2] or 0) + 1; oy[i] = k2 end
+        for i, c in ipairs(dc_kids(x)) do local k2 = dc_id(c, la); mx[k2] = (mx[k2] or 0) + 1; ox[i] = k2 end
+        for i, c in ipairs(dc_kids(y)) do local k2 = dc_id(c, lb); my[k2] = (my[k2] or 0) + 1; oy[i] = k2 end
         local same = true
         for k2, v in pairs(mx) do if my[k2] ~= v then same = false; break end end
         if same then for k2, v in pairs(my) do if mx[k2] ~= v then same = false; break end end end
@@ -3763,7 +3742,7 @@ end
 --   call-vs-expr   a call facing what it computes    — EXTRACT / INLINE A CALL
 --   containment    one side literally inside the other — AN ADDED GUARD
 -- ⚠ EACH IS A PROXY AT CENSUS GRADE AND MUST NOT BE READ AS A CONFIRMED
--- REFACTORING. rcanon ALPHA-RENAMES a local to 'L'; it does not substitute the
+-- REFACTORING. dc_term ALPHA-COLLAPSES a local to one symbol; it does not substitute the
 -- name's binding, so `leaf-vs-tree` says "a leaf faces a tree", not "this leaf
 -- IS that tree". Confirming it needs the local's assignment row, which the
 -- rollup below does not look up. Kept honest by name: these are CANDIDATES.
@@ -3831,8 +3810,8 @@ function M.divergence_census(store, opts)
             -- census that samples only what the taxonomy can already name
             -- cannot tell you what the taxonomy is missing.
             if x and y then
-                local ca = rcanon(x, la or {}, {})
-                local cb = rcanon(y, lb or {}, {})
+                local ca = dc_show(x, la)
+                local cb = dc_show(y, lb)
                 local s1, s2 = ca, cb
                 if s1 > s2 then s1, s2 = s2, s1 end
                 local key = s1 .. '  ⇄  ' .. s2
@@ -3869,9 +3848,8 @@ function M.divergence_census(store, opts)
                     elseif n == 'call-vs-expr' then
                         side = kx == 'call' and 'a' or 'b'
                     else
-                        local cx2 = rcanon(x, la or {}, {})
-                        local cy2 = rcanon(y, lb or {}, {})
-                        side = #cx2 <= #cy2 and 'a' or 'b'
+                        -- the SMALLER side, by node count (it read the length of rcanon's string)
+                        side = dc_size(x) <= dc_size(y) and 'a' or 'b'
                     end
                     if cur.dir == nil then cur.dir = side
                     elseif cur.dir ~= side then cur.dir = 'both' end
@@ -3884,14 +3862,14 @@ function M.divergence_census(store, opts)
                 -- level up: the tags are proxies and only the text says whether
                 -- the proxy is right here.
                 if not cur.wit then
-                    cur.wit = { a = rcanon(x, la or {}, {}), b = rcanon(y, lb or {}, {}) }
+                    cur.wit = { a = dc_show(x, la), b = dc_show(y, lb) }
                 end
             end
         end
         if want_wit then
             local tag = table.concat(f, '+')
             if not witnesses[tag] and x and y then
-                witnesses[tag] = { a = rcanon(x, la or {}, {}), b = rcanon(y, lb or {}, {}) }
+                witnesses[tag] = { a = dc_show(x, la), b = dc_show(y, lb) }
             end
         end
     end
@@ -4504,7 +4482,7 @@ function M.family_proposal(fam, store)
         -- ⚠⚠ "IDENTICAL" HERE MEANS IDENTICAL AS THE ADAPTER SEES THEM, WHICH IS
         -- WEAKER THAN IDENTICAL. `near` admitted these members at row-distance
         -- 1-2, so their canonical ROW KEYS differ while their TERMS do not --
-        -- the term is lossy relative to `rcanon` somewhere. The known mechanism
+        -- the term is lossy relative to those keys somewhere (rcanon's, then). The known mechanism
         -- is `expr.children` SKIPPING NIL CHILDREN instead of holding them as
         -- slots (CART-0882): kids (x, nil, z) and (x, z, nil) flatten to the
         -- same (x, z). That is right for a walk and wrong for a position lens.

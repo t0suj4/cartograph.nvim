@@ -177,11 +177,17 @@ local RECORDED = {
     --         call layer itself did not move — only what sits inside it.
     --         Where it really pays is php: `?` falls 72% (5447 -> 1544) and 81%
     --         on sylius, with READS/NAMES/call/lit identical throughout.
-    ['libs'] = { pairs = 2347,
-        f = { ['(no feature)'] = 5044, ['call-vs-expr'] = 4998, ['size-skew'] = 3469,
-              ['leaf-vs-tree'] = 3158, ['one-side-absent'] = 2312,
-              ['containment'] = 1538, ['drift(lit/name)'] = 1160,
-              ['arity'] = 363, ['arity(appended)'] = 145 } },
+    -- ★ 10-03  CART-1412: the census asks NODES AS TERMS (the algebra's adapter, locals as one symbol) where it asked
+    --         rcanon's strings, and `containment` became SUBTERM occurrence where it was SUBSTRING. rcanon wrote a
+    --         local as `L` and every literal as `L<type>:…`, so a lone local was "contained" in anything holding a
+    --         literal — witnesses `L` / `Lnum:48`, `L` / `T(Lstr:'…')`. On THIS corpus, HEAD before vs after:
+    --         containment 1579 -> 319, every other feature IDENTICAL. Re-recorded from that run, so the row below
+    --         also absorbs the drift since 09-05 that no note recorded (pairs 2347 -> 2403, every feature moved).
+    ['libs'] = { pairs = 2403,
+        f = { ['(no feature)'] = 4681, ['call-vs-expr'] = 4658, ['size-skew'] = 3338,
+              ['leaf-vs-tree'] = 3186, ['one-side-absent'] = 1799,
+              ['containment'] = 319, ['drift(lit/name)'] = 1269,
+              ['arity'] = 421, ['arity(appended)'] = 142 } },
     -- ★ `self` DELIBERATELY HAS NO ROW. corpora.lua calls it a LIVING corpus,
     -- "NOT GATED: every commit invalidates a snapshot baseline by construction",
     -- and recording numbers against it here would manufacture exactly the drift

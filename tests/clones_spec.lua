@@ -1079,6 +1079,35 @@ return { gamma, delta, helper }
     eq('table', type(res.kindpairs), 'kind pairs come back as data too')
 end)
 
+-- ★ `containment` IS A SUBTERM, NOT A SUBSTRING (CART-1412). The census asked it of rcanon's key strings, which wrote
+-- a local as `L` and every literal as `L<type>:…` — so a lone local was "contained" in anything holding a literal
+-- (1579 on elasticsearch/libs; 319 once it asks the terms). Both directions pinned.
+test('clones: census containment — a local facing a literal is drift, not containment', function ()
+    local function census(src)
+        proj({ ['k.lua'] = src })
+        return clones.divergence_census(store, { max_dist = 32, below = 0, min_rows = 2 })
+    end
+    local drift = census([[
+local function one(t)
+  local a = t.one
+  local b = a
+  local c = b * 2
+  return c
+end
+local function two(t)
+  local a = t.one
+  local b = 48
+  local c = b * 2
+  return c
+end
+return { one, two }
+]])
+    ok((drift.features['drift(lit/name)'] or 0) >= 1, 'the local facing the literal is drift')
+    eq(nil, drift.features['containment'], 'and NOT containment: `L` is not a part of `48`')
+    -- (the other direction — an expression facing its own part IS containment — goes through `match`'s refusal,
+    -- below: the census walks a call's arguments one by one, so a fixture for it lands in drift instead))
+end)
+
 -- CART-0742 item 4. THE OPTIONAL-ARGUMENT HOLE. CART-0729/0730 concluded the
 -- template language was missing REPETITION and RECURSION holes; this is a third
 -- thing neither named — the callee agrees and only the argument LIST length
@@ -1328,6 +1357,18 @@ test('clones: a bare payload against structured members refuses with leaf-vs-tre
     local names = {}
     for _, r in ipairs(m.refusal.features.rows) do names[r.feature] = true end
     ok(names['leaf-vs-tree'], 'the census vocabulary names it — the one feature every corpus supports')
+end)
+
+-- ★ `containment` IS A SUBTERM (CART-1412), asked here through `match`'s refusal: a payload that IS a member with a
+-- method applied holds that member as a part (the census's own test pins the other direction, drift not containment).
+test('clones: a payload holding a member as its PART is refused with `containment`', function ()
+    if not ready() then return skip 'no lua parser' end
+    local t = clones.element_template(container_of('local T = { trim(a), trim(b) }'))
+    local m = clones.match(t, member_of('local P = { trim(a):lower() }'))
+    eq(false, m.ok)
+    local names = {}
+    for _, r in ipairs(m.refusal.features.rows) do names[r.feature] = true end
+    ok(names['containment'], '`trim(a)` is a part of `trim(a):lower()`')
 end)
 
 -- ★ THIS POPULATION'S OWN ANALOGUE OF `arity`. The census's `arity` is defined on
