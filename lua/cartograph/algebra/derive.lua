@@ -28,6 +28,10 @@ local ALLOWED = {
     'SCOPE_RULES', -- the library boundary, a declared parameter (DESTINATION.md, RESOLVE.md)
     'summarize', 'rederive_domains',
     'unify', -- the MEET: the fourth arrow of the basis (UNIFY.md), not derivable from the other three -- the domain summary is part of the domain algebra (DOMAINS.md)
+    -- the KV LENS (CART-1379): a declared ADAPTER, like the grammar table — the data adapters' JSON-like view as keyed
+    -- terms and back (kv_terms decides list keyedness per FAMILY, kv_template decodes a generalization into the kv
+    -- record in the view's written order); the kv family is derived over it
+    'kv_terms', 'kv_term', 'kv_template', 'kv_kind',
 }
 
 local function is_hole(t) return type(t) == 'table' and t.k == 'hole' end
@@ -961,7 +965,7 @@ function D.generalize(instances, opts)
     local values = { {} }
     for k = 2, #instances do
         local r, why = B.join(T, instances[k], { prefix = opts.prefix or 'h', env = env,
-            linear = opts.linear, grammars = opts.grammars, positional = opts.positional })
+            linear = opts.linear, grammars = opts.grammars, positional = opts.positional, align = opts.align })
         if not r then error('generalize via join: ' .. why) end
         for i = 1, k - 1 do values[i] = r.left(values[i]) end
         values[k] = r.right({})
@@ -1556,8 +1560,22 @@ function D.classify(T, V, I2, env)
     if not hunks then return { kind = 'straddle', why = 'the two instances do not join' } end
     return B.classify_over(T, V, I2, hunks, r1, env)
 end
+-- ── the KV FAMILY over the kv lens (CART-1379): equality is the term algebra's (a keyed node is a set of pairs by
+-- key; a merge-keyed list a set of elements by key), and the generalization is generalize under the fixed-arity rigidity
+-- (a list of differing length is ONE hole, kv's rule), decoded into kv's record ─────────────────────────────────────
+function D.kv_eq(x, y) return B.eq(B.kv_term(x), B.kv_term(y)) end
+function D.kv_eq_keyed(x, y, keyfield)
+    keyfield = keyfield or 'name'
+    return B.eq(B.kv_term(x, { keyfield = keyfield }), B.kv_term(y, { keyfield = keyfield }))
+end
+function D.kv_generalize(instances, opts)
+    opts = opts or {}
+    local keyfield = opts.keyfield or 'name'
+    return B.kv_template(D.generalize(B.kv_terms(instances, { keyfield = keyfield }), { align = 'none' }), instances, { keyfield = keyfield })
+end
 D.OPERATORS = { 'sites', 'apply', 'instantiate', 'values_at', 'abstract', 'locate', 'match', 'diff_regions',
-    'fill', 'merge', 'split', 'dig', 'rewrite', 'generalize', 'trace', 'migrate_one', 'instance_of', 'primary_key', 'link', 'normalize', 'hunks', 'classify', 'cascade', 'cascade_delete', 'extract', 'extract_call', 'extract_call_of', 'resolve', 'destinations' }
+    'fill', 'merge', 'split', 'dig', 'rewrite', 'generalize', 'trace', 'migrate_one', 'instance_of', 'primary_key', 'link', 'normalize', 'hunks', 'classify', 'cascade', 'cascade_delete', 'extract', 'extract_call', 'extract_call_of', 'resolve', 'destinations',
+    'kv_eq', 'kv_eq_keyed', 'kv_generalize' }
 function D.apply_to(M, which)
     B = setmetatable({}, { __index = function(_, k) error('derive.lua: `' .. tostring(k) .. '` is not in the basis', 2) end })
     for _, k in ipairs(ALLOWED) do rawset(B, k, M[k]) end

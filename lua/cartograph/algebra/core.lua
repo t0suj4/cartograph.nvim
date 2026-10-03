@@ -2533,38 +2533,8 @@ function M.kv_generalize(instances, opts)
     local T = gen(instances, '$')
     local byid = {}
     for _, h in ipairs(holes) do byid[h.id] = h end
-    local inst
-    inst = function(t, i)
-        if type(t) ~= 'table' then return t end
-        if t.hole then return byid[t.hole].values[i] end
-        if t.opt then
-            local p = byid[t.opt.hole].values[i]
-            if p ~= true then return M.KV_ABSENT end
-            return inst(t.body, i)
-        end
-        if t.ka then
-            local ob = inst(t.ka, i)
-            if ob == M.KV_ABSENT then return M.KV_ABSENT end
-            local a = {}
-            for _, key in ipairs(ob.keys) do a[#a + 1] = ob.o[key] end
-            return { a = a }
-        end
-        if t.a then
-            local a = {}
-            for j, x in ipairs(t.a) do a[j] = inst(x, i) end
-            return { a = a }
-        end
-        if t.o then
-            local o, keys = {}, {}
-            for _, key in ipairs(t.keys) do
-                local v = inst(t.o[key], i)
-                if v ~= M.KV_ABSENT then o[key] = v; keys[#keys + 1] = key end
-            end
-            return { o = o, keys = keys }
-        end
-        return t
-    end
-    return { template = T, holes = holes, n = n, instantiate = function(i) return inst(T, i) end }
+    -- (instantiation is the kv lens's, shared with the derivation: kvterm.lua M.kv_instantiate)
+    return { template = T, holes = holes, n = n, instantiate = function(i) return M.kv_instantiate(T, byid, i) end }
 end
 
 --- equality of JSON-like values where arrays of keyed objects compare as sets by key
@@ -3963,6 +3933,7 @@ require('cartograph.algebra.composition')(M, PARTS)
 require('cartograph.algebra.match')(M, PARTS)
 require('cartograph.algebra.negatives')(M, PARTS)
 require('cartograph.algebra.demandfam')(M, PARTS)
+require('cartograph.algebra.kvterm')(M, PARTS)
 
 -- REDERIVE.md: with DERIVE=<op,op,..|all> in the environment, the named operators are
 -- replaced by their re-derivations from the basis (derive.lua) so the suite can judge them.
