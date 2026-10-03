@@ -138,11 +138,14 @@ local function read(A, src, lang, given, visit)
         return nil, ('does not parse as `%s` (tree-sitter reports an error node)'):format(lang)
     end
     local ESC = M.escapes(lang)
+    M.EXTRAS[lang] = M.EXTRAS[lang] or {}
     local function term(node)
         local ty = node:type()
         -- a NAMED type the grammar shares with the algebra takes its derived escape; anything else still colliding
         -- (an escape map that could not be derived — no symbol table) refuses by name, as before
         if node:named() and ESC[ty] then ty = ESC[ty] end
+        -- (a node the PARSER reports as an extra — a comment — is the grammar's own trivia declaration: CART-1404)
+        if node:extra() then M.EXTRAS[lang][ty] = true end
         if M.RESERVED[ty] then
             error(('tree-sitter type collides with an algebra kind: `%s`'):format(ty), 0)
         end
@@ -184,6 +187,16 @@ local function read(A, src, lang, given, visit)
     if re < #src then kids[#kids + 1] = A.lit(src:sub(re + 1)) end
     t.kids = kids
     return t
+end
+
+--- the TRIVIA of a language as the reader has seen it (CART-1404, equality modulo trivia): the node types its parser
+--- reported as EXTRAS (tree-sitter's grammar-declared extras: comments) — derived from the parser, not a list — and the
+--- GAP rule (a literal that is whitespace only: the reader keeps every gap as a literal). -> { kinds = { [type] = true },
+--- gap = function (lit) } for A.strip_trivia / A.equality('trivia')
+M.EXTRAS = M.EXTRAS or {}
+function M.trivia(lang)
+    lang = lang or 'lua'
+    return { kinds = M.EXTRAS[lang] or {}, gap = function (t) return t.k == 'lit' and type(t.v) == 'string' and t.v:match('^%s*$') ~= nil end }
 end
 
 --- the parse hook the donor's `lua` grammar asks for: `A.parsers.lua`.

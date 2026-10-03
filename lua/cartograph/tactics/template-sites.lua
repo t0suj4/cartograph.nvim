@@ -43,11 +43,17 @@ local E = {
     kind = 'discovery',
     measures = 'CART-1367',
     summary = 'every site where a template matches, with what each hole bound: example = an expression as code (vim.json.encode(x)), holes = its identifiers that are holes (x), files = scope (default: every .lua file of the graph)',
-    params = { example = 'string', holes = 'list?', files = 'list?' },
+    params = { example = 'string', holes = 'list?', files = 'list?', trivia = 'string?' },
     measure = function (store, p)
         local a, R = A(), require 'cartograph.algebraread'
         local T, why = template_of(p.example, p.holes)
         if not T then return { error = why } end
+        -- ★ trivia = 1: MATCH MODULO TRIVIA (CART-1404, CART-1158 item 1) — the template and each candidate are compared
+        -- without the whitespace and comments the Lua adapter declares trivia (algebraread.trivia: the parser's extras
+        -- + whitespace gaps), so `x==nil` is a site of `x == nil`. Rows stay the original nodes'; a bound value prints
+        -- modulo trivia when it held some.
+        local spec = (p.trivia == '1' or p.trivia == true) and R.trivia('lua') or nil
+        if spec then T = a.template(a.strip_trivia(T.body, spec), T.holes) end
         local P, CV = require 'cartograph.prefilter', require 'cartograph.compiledverb'
         local filter = P.text(T)
         local compiled = CV.match(T)
@@ -69,7 +75,8 @@ local E = {
                 if t then
                     read = read + 1
                     for _, pos in ipairs(P.candidates(t, T, src) or a.positions(t)) do
-                        local m = compiled and compiled(pos.node) or a.match(T, pos.node)
+                        local subject = spec and a.strip_trivia(pos.node, spec) or pos.node
+                        local m = compiled and compiled(subject) or a.match(T, subject)
                         if m.ok then
                             local vals = {}
                             for h, v in pairs(m.values) do
@@ -114,6 +121,19 @@ E.examples = {
         name = 'a hole naming no identifier of the example is refused by name',
         files = FILES, params = function () return { example = 'vim.json.encode(x)', holes = { 'y' }, files = { 'a.lua' } } end,
         expect = { holds = false, check = function (v) return (v.error or ''):find('hole `y`', 1, true) ~= nil, tostring(v.error) end },
+    },
+    {
+        -- CART-1404: `vim.json.encode( state --[[ the record ]] )` is the same call; exact matching misses it
+        name = 'trivia = 1 matches MODULO TRIVIA: a call written with extra spaces and a comment inside is a site; exact matching misses it',
+        files = { ['d.lua'] = 'return vim.json.encode( state --[[ the record ]] )\n' },
+        params = function () return { example = 'vim.json.encode(x)', holes = { 'x' }, files = { 'd.lua' }, trivia = '1' } end,
+        expect = { holds = true, check = function (v) return #v.sites == 1 and v.sites[1].values.x == 'state', vim.inspect(v.sites) end },
+    },
+    {
+        name = '…and the same file WITHOUT trivia = 1 has no site (the call\'s spacing is not the example\'s)',
+        files = { ['d.lua'] = 'return vim.json.encode( state --[[ the record ]] )\n' },
+        params = function () return { example = 'vim.json.encode(x)', holes = { 'x' }, files = { 'd.lua' } } end,
+        expect = { holds = false },
     },
     {
         name = 'a template that occurs nowhere says so, with how many files were read and ruled out',

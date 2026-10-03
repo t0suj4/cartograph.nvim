@@ -52,6 +52,29 @@ function M.rename_holes(t, opts)
     return go(t)
 end
 
+-- ── MODULO TRIVIA (CART-1404): code terms equal ignoring whitespace and comments ────────────────────────────────────
+--- t without its TRIVIA: the kids a code adapter declares trivia (spec = algebraread.trivia(lang): `kinds`, the node
+--- types its parser reports as extras — comments —, and `gap`, a whitespace-only literal) dropped at every level; the rest
+--- shared, never copied. A spec is REQUIRED: what counts as trivia is the adapter's, never guessed here.
+function M.strip_trivia(t, spec)
+    if not (spec and spec.kinds and spec.gap) then error('strip_trivia: a trivia spec is required (algebraread.trivia(lang))', 2) end
+    local function go(u)
+        if not u.kids then return u end
+        local kids, changed = {}, false
+        for _, c in ipairs(u.kids) do
+            if (c.k and spec.kinds[c.k]) or spec.gap(c) then changed = true
+            else
+                local s = go(c)
+                if s ~= c then changed = true end
+                kids[#kids + 1] = s
+            end
+        end
+        if not changed then return u end
+        return M.rebuild(u, kids)
+    end
+    return go(t)
+end
+
 -- ── LITERAL ────────────────────────────────────────────────────────────────────────────────────────────────────────
 M.LITERAL_POLICY = 'lua' -- the one policy implemented: Lua's == (an adapter that needs another declares it; CART-1398)
 local function lit_key(t)
@@ -71,6 +94,9 @@ REL.variant = { of = 'term', eq = function (a, b) return M.eq(M.rename_holes(a),
     hash = function (t) return M.content_id(M.rename_holes(t)) end }
 REL.theory = { of = 'term', parameter = 'theory', eq = function (a, b, theory) return M.eq_mod(a, b, theory) end,
     hash = function (t, theory) return M.content_id(M.canon(t, theory)) end }
+REL.trivia = { of = 'term', parameter = 'trivia spec (algebraread.trivia(lang))',
+    eq = function (a, b, spec) return M.eq(M.strip_trivia(a, spec), M.strip_trivia(b, spec)) end,
+    hash = function (t, spec) return M.content_id(M.strip_trivia(t, spec)) end }
 REL.bisimilar = { of = 'graph', eq = function (a, b) return (M.tg_bisimilar(a, b)) end }
 REL.equivalent = { of = 'template', eq = function (a, b) return M.instance_of(a, b) and M.instance_of(b, a) end }
 for _, r in pairs(REL) do if r.hash and not r.less then r.less = by_hash(r.hash) end end

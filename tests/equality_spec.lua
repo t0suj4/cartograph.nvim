@@ -207,3 +207,21 @@ test('law: tree edit distance 0 <=> ORDERED — Zhang and Tai/JWZ, every pair of
     end end
     ok(full.zhang > #pop, 'off-diagonal full matches exist: ' .. full.zhang)
 end)
+-- ── RUNG 6 (CART-1404): MODULO TRIVIA — the code adapter declares its trivia (the parser's extras + whitespace gaps)
+test('modulo trivia: two Lua texts that differ only in whitespace and comments are one; a changed token is not', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local Rd = require 'cartograph.algebraread'
+    local a = assert(Rd.read('local x = f(1, 2) -- the sum\nreturn x\n', 'lua'))
+    local b = assert(Rd.read('local x=f(1,2)\n\n--[[ block ]]\nreturn   x', 'lua'))
+    local c = assert(Rd.read('local x = f(1, 3)\nreturn x\n', 'lua'))
+    local spec = Rd.trivia('lua')
+    ok(spec.kinds.comment, 'the parser declared `comment` an extra (derived, not listed)')
+    local Tv = A.equality('trivia')
+    ok(not A.eq(a, b), 'the premise: as terms they differ')
+    ok(Tv.eq(a, b, spec), 'modulo trivia they are one')
+    eq(Tv.hash(a, spec), Tv.hash(b, spec), 'and so are their hashes')
+    ok(not Tv.eq(a, c, spec) and Tv.hash(a, spec) ~= Tv.hash(c, spec), 'a changed token is not trivia')
+    ok(not pcall(Tv.eq, a, b), 'no spec, no guess')
+    -- term => trivia (stripping is a function of the term)
+    ok(Tv.eq(a, A.copy(a), spec))
+end)
