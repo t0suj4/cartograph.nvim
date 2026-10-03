@@ -116,11 +116,14 @@ local function row_key(row, locals, slots, ctr)
     return key
 end
 
--- the alpha-invariant per-row canonical keys of a function body, with a SHARED
--- function-global slot map (a local is one slot everywhere). Returns (keys, lines,
--- nparams, exprs, locals) or nil — exprs/locals feed the near-clone anti-unifier.
--- Shared by signature (function tier) and the near-clone tier.
-local function fn_row_keys(eo)
+-- a function body's ROWS: (nrows, lines, nparams, exprs, locals, params) or nil when it has none. exprs/locals feed
+-- the variant key, the near tier's relative keys and the anti-unifier.
+-- ★ ROWS ARE A VIEW (CART-1412, USER 2026-10-03: "keeping rows as a view"): a row is a kid of the function's term
+-- (`alg.fn_term`), keyed by what reads it — the exact tier by the variant relation over the whole function, the near
+-- tier by its relative key (equal to the row term's id: partition-join, 3 corpora). The per-row keys this used to
+-- build — canon over a slot map SHARED across the function, so a row's key depended on the rows before it — had no
+-- reader left once the exact tier moved, and the inverted index built from them was never read at all.
+local function fn_rows(eo)
     local stmts = eo and eo.fl and eo.fl.stmts
     if not stmts or #stmts == 0 then return nil end
     local locals, params = {}, {}
@@ -142,10 +145,8 @@ local function fn_row_keys(eo)
     for _, s in ipairs(stmts) do
         for _, d in ipairs(s.def or {}) do locals[d] = true; params[d] = nil end
     end
-    local slots, ctr = {}, { n = 0 }
-    local keys, lines, exprs = {}, {}, {}
+    local lines, exprs = {}, {}
     for _, s in ipairs(stmts) do
-        keys[#keys + 1] = s.expr and row_key(s.expr, locals, slots, ctr) or '~'
         lines[#lines + 1] = s.l
         -- ⚠ `or false`, NEVER A HOLE (CART-1417): a statement with no expression appended NOTHING, so `exprs` came out
         -- shorter than `keys`/`lines` and every later row was index-shifted — near_report printed the wrong line as
@@ -154,7 +155,7 @@ local function fn_row_keys(eo)
         -- row for truth (rel_keys' '~', row_term -> 'row~', anti_unify_row's norow guard, ho_row_parts).
         exprs[#exprs + 1] = s.expr or false
     end
-    return keys, lines, #(eo.fl.params or {}), exprs, locals, params
+    return #stmts, lines, #(eo.fl.params or {}), exprs, locals, params
 end
 
 --- ★ THE EXACT TIER'S KEY IS THE ALGEBRA'S VARIANT RELATION (CART-1412): the function as ONE term, its locals as
@@ -179,9 +180,9 @@ end
 --- consistent renaming of locals (`variant_key`). `eo` is the result of expr.of(store, id). Returns (sig_string,
 --- nrows) or nil when the body has no harvestable rows.
 function M.signature(eo)
-    local keys, _, nparams, exprs, locals = fn_row_keys(eo)
-    if not keys then return nil end
-    return variant_key({ exprs = exprs, locals = locals, nparams = nparams }), #keys
+    local nrows, _, nparams, exprs, locals = fn_rows(eo)
+    if not nrows then return nil end
+    return variant_key({ exprs = exprs, locals = locals, nparams = nparams }), nrows
 end
 
 -- The per-fn key index is the costly part of clone detection (one expr.of per function
@@ -205,32 +206,25 @@ local INDEX_FLOOR = 2
 local function build_index(store)
     local c = store._clone_idx
     if c and c.gen == store.generation then
-        return c.fns, c.post
+        return c.fns
     end
     local fns = {}
     for _, n in ipairs(store.data.nodes) do
         if (n.kind == 'function' or n.kind == 'method') and n.file then
             local ok, eo = pcall(expr.of, store, n.id)
             if ok and eo then
-                local keys, lines, nparams, exprs, locals, params = fn_row_keys(eo)
-                if keys and #keys >= INDEX_FLOOR then
+                local nrows, lines, nparams, exprs, locals, params = fn_rows(eo)
+                if nrows and nrows >= INDEX_FLOOR then
                     fns[#fns + 1] = { id = n.id, name = n.name, file = n.file,
-                        keys = keys, lines = lines, exprs = exprs, locals = locals,
+                        nrows = nrows, lines = lines, exprs = exprs, locals = locals,
                         params = params,
                         nparams = nparams, line = n.range and (at.sl(n.range) + 1) or 0 }
                 end
             end
         end
     end
-    local post = {} -- inverted index of row-keys (key → fn indices)
-    for i, f in ipairs(fns) do
-        local seen = {}
-        for _, k in ipairs(f.keys) do
-            if not seen[k] then seen[k] = true; post[k] = post[k] or {}; post[k][#post[k] + 1] = i end
-        end
-    end
-    store._clone_idx = { gen = store.generation, fns = fns, post = post }
-    return fns, post
+    store._clone_idx = { gen = store.generation, fns = fns }
+    return fns
 end
 
 --- Exact-structural clone GROUPS across the store's functions. Returns a list of groups,
@@ -241,10 +235,10 @@ function M.exact(store, opts)
     local groups = {}
     local fns = build_index(store)
     for _, f in ipairs(fns) do
-        if #f.keys >= min_rows then
+        if f.nrows >= min_rows then
             local sig = variant_key(f)
             local g = groups[sig]
-            if not g then g = { nrows = #f.keys }; groups[sig] = g end
+            if not g then g = { nrows = f.nrows }; groups[sig] = g end
             g[#g + 1] = { id = f.id, name = f.name, file = f.file, line = f.line }
         end
     end
@@ -1071,7 +1065,7 @@ end
 
 --- ★★★ THE LOOP BINDERS df NEVER RECORDS AS A DEF (CART-0876). `for _, g in pairs(t)`
 --- puts `g` in `use` and never in `def` — spec/contract.lua says exactly that where it
---- declares `binders` — so `fn_row_keys`' `locals` (params ∪ df-defs) MISSES every loop
+--- declares `binders` — so `fn_rows`' `locals` (params ∪ df-defs) MISSES every loop
 --- variable and the anti-unifier below then reads one as a GLOBAL. Measured over `lua/`
 --- at max_dist 20: of the 22 `localglobal` struct holes, SEVENTEEN are two loop
 --- variables facing each other (`caller` ⇄ `id` in lsp.lua's two call-hierarchy
@@ -1196,7 +1190,7 @@ end
 --- NAME that is a local outside the parameter set becomes a `localglobal` struct hole,
 --- commented "a local the call site cannot name". This is the same question asked of a
 --- field hole's BASE, and the answer comes from the same set: `pair.a.params`, which
---- `fn_row_keys` already computes as the parameters a body does not redefine.
+--- `fn_rows` already computes as the parameters a body does not redefine.
 ---
 --- ⚠ NO `params` SET MEANS NO CLAIM, SO ANY LOCAL IS UNNAMEABLE. The name arm behaves
 --- the same way (its `ps` is nil and the local falls through to `localglobal`): without
@@ -2026,7 +2020,7 @@ function M.analyze_pair(pair, store)
                     h.upvalue = ua or ub
                 else
                     local safe = true
-                    -- `pair.a.params` is the CALL-SITE-SAFE set `fn_row_keys` already
+                    -- `pair.a.params` is the CALL-SITE-SAFE set `fn_rows` already
                     -- computes: a parameter the body does not redefine. A body-local is
                     -- not in it, and that is exactly the distinction that decides
                     -- whether the call site can write the argument down.
@@ -4944,8 +4938,8 @@ function M.family_verify(fam, store, opts)
         return nil, ('the rendered helper did not reparse though the donor\'s own'
             .. ' text does: %s'):format(tostring(ewhy)), { rendered = text }
     end
-    local keys, _, _, exprs, locals = fn_row_keys(eo)
-    if not keys then
+    local nrows, _, _, exprs, locals = fn_rows(eo)
+    if not nrows then
         return nil, 'the reparsed helper has no harvestable rows', { rendered = text }
     end
 
@@ -4986,7 +4980,7 @@ function M.family_verify(fam, store, opts)
             .. ' template it was built from',
             { rendered = text, got = A.show(term), want = A.show(want) }
     end
-    return true, nil, { rendered = text, rows = #keys, holes = #tmpl.order }
+    return true, nil, { rendered = text, rows = nrows, holes = #tmpl.order }
 end
 
 -- ── the MEET: two templates, not a template and a payload (CART-0879 item 1) ──
@@ -5642,8 +5636,8 @@ function M.family_propagate(fam, i, text, store, opts)
         return nil, ('the edited text does not parse as %s: %s')
             :format(lang, tostring(ewhy))
     end
-    local keys, _, _, exprs, locals = fn_row_keys(eo)
-    if not keys then return nil, 'the edited text has no harvestable rows' end
+    local nrows, _, _, exprs, locals = fn_rows(eo)
+    if not nrows then return nil, 'the edited text has no harvestable rows' end
     local I2 = alg.fn_term { exprs = exprs, locals = locals }
     if not I2 then return nil, 'the edited text did not convert to a term' end
 
@@ -5837,7 +5831,7 @@ function M.family_member_text(fam, P, i, text, j, store, change)
     local lang = expr.lang_of(nd.file)
     local eo, pwhy = expr.of_text(out, lang, { method = nd.kind == 'method' or nil })
     if not eo then return nil, 'the rendered member does not reparse: ' .. tostring(pwhy) end
-    local _, _, _, exprs, locals = fn_row_keys(eo)
+    local _, _, _, exprs, locals = fn_rows(eo)
     local got = require('cartograph.algebra').fn_term { exprs = exprs, locals = locals }
     local want = change.values and A.instantiate(P.new_template or fam.template, change.values).term
     if not (got and want and A.eq(got, want)) then

@@ -2606,7 +2606,7 @@ end
 function M.lang_of(file) return lang_of_file(file) end
 
 --- The statement sequence of the FIRST function in a source STRING — the same
---- shape `M.of` returns, so `.fl.stmts[i].expr` and `clones.fn_row_keys` read it
+--- shape `M.of` returns, so `.fl.stmts[i].expr` and `clones.fn_rows` read it
 --- identically.
 ---
 --- ★★★ THIS IS THE ARROW A REPARSE ORACLE NEEDS (CART-0893). Everything else in
