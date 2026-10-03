@@ -983,6 +983,8 @@ function D.generalize(instances, opts)
     env.defs = env.defs or {}
     local T = B.template(B.copy(instances[1]))
     local values = { {} }
+    local defs_before = {}
+    for k in pairs(env.defs) do defs_before[k] = true end
     for k = 2, #instances do
         local r, why = B.join(T, instances[k], { prefix = opts.prefix or 'h', env = env,
             linear = opts.linear, grammars = opts.grammars, positional = opts.positional, align = opts.align })
@@ -1144,6 +1146,43 @@ function D.generalize(instances, opts)
         T.body = body
     end
     order_notes()
+    -- ★ HOLES NAMED AS GENERALIZE NAMES THEM (CART-1360's drift): generalize numbers a hole as it MINTS it, which reads
+    -- off the finished template as a post-order walk — a hole leaf when reached, a presence mark AFTER its own subtree
+    -- ((?h2:pair "b" ?h1)). The fold numbers by join call, so a hedge minted by the third member's join read ?h3
+    -- where generalize says ?h1. Renamed here, before the domains are derived — but NOT when the fold registered a
+    -- definition: a repetition claim's names (`h1.unit`, `@h1.unit`) are hole names, and they would go stale.
+    local function canonical_names()
+        for k in pairs(env.defs) do if not defs_before[k] then return end end
+        -- nor across a grammar boundary: generalize names the holes INSIDE an embed hierarchically (`h2.1`, the inner
+        -- generalize's prefix), which a flat renaming would destroy (the cross-grammar specs went red without this)
+        for _, pos in ipairs(B.positions(T.body)) do if pos.node.k == 'embed' then return end end
+        local map, n, prefix = {}, 0, opts.prefix or 'h'
+        local function walk(t)
+            if type(t) ~= 'table' then return end
+            if is_hole(t) then
+                if not map[t.h] then n = n + 1; map[t.h] = prefix .. n end
+                return
+            end
+            for _, c in ipairs(t.kids or {}) do walk(c) end
+            if t.opt and not map[t.opt] then n = n + 1; map[t.opt] = prefix .. n end
+        end
+        walk(T.body)
+        local same = true
+        for h, to in pairs(map) do if h ~= to then same = false end end
+        if same then return end
+        local f = function (h) return map[h] or h end
+        local holes2 = {}
+        for h, e in pairs(T.holes) do holes2[f(h)] = e end
+        local T2 = B.template(rename_holes(T.body, f), holes2)
+        for k, v in pairs(T) do if k ~= 'body' and k ~= 'holes' then T2[k] = v end end
+        T = T2
+        for i = 1, #values do
+            local v2 = {}
+            for h, v in pairs(values[i]) do v2[f(h)] = v end
+            values[i] = v2
+        end
+    end
+    canonical_names()
     T.edits = {}
     -- join sees one fragment at a time and writes `open` for a fragment with holes inside; the
     -- fold has the whole column, so the derived domains are recomputed from it (DOMAINS.md),

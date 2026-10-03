@@ -558,6 +558,19 @@ test('algebra seam: generalize notes why each hole is one, the keyed order, and 
     ok(valueh and gn.notes[valueh].under_optional, 'the value under the optional pair is marked under_optional')
 end)
 
+-- ★ HOLES ARE NAMED AS GENERALIZE MINTS THEM (CART-1360's drift): post-order over the template — a hole leaf when
+-- reached, a presence mark after its own subtree. The derived fold numbered by join call (?h3 for a hedge the third
+-- member's join minted); against whichever generalize is installed, the names are the canonical ones.
+test('algebra seam: generalize names holes in mint order — a hedge ?h1, a mark after the value it guards', function ()
+    local A = need()
+    local function w(s) local ks = {}; for x in s:gmatch('%S+') do ks[#ks + 1] = A.lit(x) end; return A.node('w', unpack(ks)) end
+    local g = A.generalize({ w 'x a b y', w 'x c b d y', w 'x e y' }, { need = 100 })
+    eq('(w "x" ?h1... "y")', A.show(g.template.body), 'one hedge, the first hole minted')
+    local function O(ps) local o, keys = {}, {}; for _, p in ipairs(ps) do o[p[1]] = p[2]; keys[#keys + 1] = p[1] end; return { o = o, keys = keys } end
+    local kv = A.generalize(A.kv_terms({ O{ { 'a', 1 } }, O{ { 'a', 1 }, { 'b', 'x' } }, O{ { 'a', 1 }, { 'b', 'y' } } }))
+    eq('(obj[keyed] (pair "a" 1) (?h2:pair "b" ?h1))', A.show(kv.template.body), 'the value under b is h1, its mark h2')
+end)
+
 -- ⚠ AN ENVIRONMENT FAULT IS NOT AN ANSWER: a refusal from `anti_unify` would reach
 -- `element_template` as `alignable = false`, the same verdict ~70% of real
 -- containers earn honestly — so a missing algebra RAISES (CART-0939).
