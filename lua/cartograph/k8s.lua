@@ -741,6 +741,11 @@ function M.attach(data, opts)
                 if o.server == 'y' and host and (host == '*' or host == '0.0.0.0' or host == '::' or host == '[::]') then
                     stats.exposed[#stats.exposed + 1] = { finding = 'debug-listener', file = e.rel, line = line_of(x.jdwp),
                         message = ('%s starts a JDWP debugger listening on all interfaces (%s): remote code execution for anything that reaches the pod'):format(where, o.address) }
+                elseif o.server == 'y' and (o.address or ''):match('^%d+$') then
+                    -- (a BARE port: all interfaces on JDK 8 and earlier, localhost on JDK 9+ — and a manifest names an image,
+                    -- not its JDK; reported HEDGED, the premise named, never read as clean)
+                    stats.exposed[#stats.exposed + 1] = { finding = 'debug-listener-jdk-dependent', file = e.rel, line = line_of(x.jdwp),
+                        message = ('%s starts a JDWP debugger on bare port %s: all interfaces on JDK 8 and earlier, localhost only on JDK 9+ — the manifest does not say which JDK the image runs'):format(where, o.address) }
                 end
             elseif x.jmx then
                 stats.exposed[#stats.exposed + 1] = { finding = 'jmx-unauthenticated', file = e.rel, line = line_of('jmxremote.port=' .. x.jmx),

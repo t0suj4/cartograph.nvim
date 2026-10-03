@@ -316,7 +316,7 @@ test('k8s: DEBUG and MANAGEMENT LISTENERS a container is started with — JDWP o
         '  template:', '    metadata:', '      labels:', '        app: safe', '    spec:',               -- 31-35
         '      containers:', '      - name: a', '        image: a', '        command:',                  -- 36-39
         '        - java', '        - "-agentlib:jdwp=transport=dt_socket,server=y,address=localhost:5005"', -- 40-41
-        '        - "-agentlib:jdwp=transport=dt_socket,server=y,address=5006"',                          -- 42 (JDK 9+: localhost)
+        '        - "-agentlib:jdwp=transport=dt_socket,server=y,address=5006"',                          -- 42 (bare: JDK-dependent, hedged)
         '        - "-agentlib:jdwp=transport=dt_socket,server=n,address=*:5007"',                        -- 43 (client mode: connects out)
         '        - "-Dcom.sun.management.jmxremote.port=9011"',                                          -- 44 (auth on by default)
         '      - name: b', '        image: b', '        args:',                                           -- 45-47
@@ -327,6 +327,7 @@ test('k8s: DEBUG and MANAGEMENT LISTENERS a container is started with — JDWP o
         { 'debug-listener', 16, 'Deployment/cdc init container seed starts a JDWP debugger listening on all interfaces (0.0.0.0:8000): remote code execution for anything that reaches the pod' },
         { 'debug-listener', 21, 'Deployment/cdc container app starts a JDWP debugger listening on all interfaces (*:7897): remote code execution for anything that reaches the pod' },
         { 'jmx-unauthenticated', 22, 'Deployment/cdc container app opens remote JMX on port 9010 with authentication off and SSL off: anything that reaches the pod can invoke MBeans' },
+        { 'debug-listener-jdk-dependent', 42, 'Deployment/safe container a starts a JDWP debugger on bare port 5006: all interfaces on JDK 8 and earlier, localhost only on JDK 9+ — the manifest does not say which JDK the image runs' },
     }, vim.tbl_map(function (x) return { x.finding, x.line, x.message } end, s.exposed))
     -- and the agent verb serves them as findings, at their file and line
     local d = require('cartograph.agent').answer({ data = data }, 'k8s_findings', {})
