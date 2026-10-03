@@ -441,7 +441,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     'ports',
     -- INFRASTRUCTURE (CART-1048, CART-1297): Kubernetes manifests' soft edges, a Helm chart rendered and linted, a plain
     -- chart's stages — READS (a render goes to a temp directory)
-    'k8s_findings', 'helm_chart', 'helm_stages', 'kustomize_overlays', 'helmfile_releases',
+    'k8s_findings', 'k8s_traces', 'helm_chart', 'helm_stages', 'kustomize_overlays', 'helmfile_releases',
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_plan_declare',
@@ -3366,6 +3366,51 @@ local function v_k8s_findings(store)
     return { result = {}, absence = 'absent', absence_why = { premise = 'clean', why = ('%d manifest(s), %d document(s): every reference resolved, every selector matched'):format(s.files, s.docs),
         evidence = { files = s.files, docs = s.docs } }, notes = k8s_notes(s) }
 end
+-- REQUEST-PATH TRACES (CART-1316) as a verb (CART-1383): the Ingress -> Service -> process question an agent asks during
+-- an audit drill-down (CART-1380 hop 2) — the same k8s.traces :CartographK8sTrace runs, addressed the same way (a file
+-- and a line inside an object's document) or by the object (`Kind/name`, or its node id). One row per HOP.
+local function v_k8s_traces(store, args)
+    local data = store.data
+    local s = data and data.k8s
+    if not s or (s.files or 0) == 0 then
+        return { result = {}, absence = 'unavailable', absence_why = { premise = 'no-k8s-pass',
+            why = 'no Kubernetes manifest was read into this graph (render a chart with helm_chart, or open a tree holding manifests)', evidence = {} } }
+    end
+    local ids = {}
+    if args.object then
+        if s.object_docs[args.object] then ids[1] = args.object
+        else
+            for nid, od in pairs(s.object_docs) do
+                if (od.d.kind .. '/' .. tostring(od.d.name)) == args.object then ids[#ids + 1] = nid end
+            end
+        end
+    elseif args.file and args.line then
+        local rel = (data.root and args.file:sub(1, #data.root + 1) == data.root .. '/') and args.file:sub(#data.root + 2) or args.file
+        for nid, od in pairs(s.object_docs) do
+            if od.rel == rel and args.line - 1 >= (od.d.line0 or 0) and args.line - 1 <= (od.d.line1 or 0) then ids[#ids + 1] = nid end
+        end
+    else
+        return refuse('no-address', 'name the object: `object` (Kind/name or a node id), or `file` + `line` inside its document', 'pass object, or file and line')
+    end
+    table.sort(ids)
+    if #ids == 0 then
+        return refuse('not-k8s-object', ('no Kubernetes object at %s'):format(args.object or (tostring(args.file) .. ':' .. tostring(args.line))),
+            'k8s_findings lists the objects this graph read; address one by Kind/name')
+    end
+    if #ids > 1 then
+        return refuse('ambiguous-object', ('%d objects answer to %s'):format(#ids, args.object or (tostring(args.file) .. ':' .. tostring(args.line))),
+            'pass one node id', { candidates = ids })
+    end
+    local ts, why = require('cartograph.k8s').traces(data, ids[1])
+    if not ts then return refuse('not-k8s-object', tostring(why), 'k8s_findings lists the objects this graph read') end
+    local rows = {}
+    for _, t in ipairs(ts) do
+        for i, h in ipairs(t.hops) do rows[#rows + 1] = { object = ids[1], peer = t.peer, hop = i, text = h.text, file = nn(h.file), line = nn(h.line) } end
+    end
+    if #rows > 0 then return { result = rows } end
+    return { result = {}, absence = 'absent', absence_why = { premise = 'no-peer',
+        why = ids[1] .. ' names no peer: no *_SERVICE_ADDR env, no URL host among its containers', evidence = { object = ids[1] } } }
+end
 local function chart_dir(store, rel)
     local root = store.data and store.data.root or vim.fn.getcwd()
     local dir = rel:sub(1, 1) == '/' and rel or (root .. '/' .. rel)
@@ -3521,6 +3566,17 @@ M.VERBS = {
         tier_basis = 'observation', absences = { 'absent' },
         args = {},
         run = v_k8s_findings,
+    },
+    k8s_traces = {
+        summary = 'REQUEST-PATH TRACES from a Kubernetes workload: every peer it names (an env *_SERVICE_ADDR, a URL host), hop by hop — the naming line -> the peer\'s Service and port -> the workload it selects -> that workload listening (containerPort) -> its health probe — each hop at its declaring line; a peer with no Service ends dangling',
+        subject = 'query',
+        tier_basis = 'observation', absences = { 'absent', 'unavailable' },
+        args = {
+            { name = 'object', type = 'string', desc = 'the workload: `Kind/name` (e.g. Deployment/web) or its node id' },
+            { name = 'file', type = 'string', desc = 'or address by position: the manifest (graph-relative or absolute)' },
+            { name = 'line', type = 'integer', desc = 'or address by position: a 1-based line inside the object\'s document' },
+        },
+        run = v_k8s_traces,
     },
     helm_chart = {
         summary = 'a Helm chart RENDERED by Helm itself and read: dangling references, empty selectors, and the silent-success lints on its templates (dangling / orphan values, chomped separators, checksum coverage)',

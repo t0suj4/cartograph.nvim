@@ -1,6 +1,6 @@
 ---
 name: cartograph
-description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 42 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua, the `alibi` verb only). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
+description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 43 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua, the `alibi` verb only). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
 ---
 
 # cartograph, for an agent
@@ -101,7 +101,7 @@ instrument and surprising if you forget it.
 
 ## The verbs
 
-42, in the order they may be trusted in. `graph_info` first — it reports which verbs
+43, in the order they may be trusted in. `graph_info` first — it reports which verbs
 are available on *this* graph and host, and why any are not.
 
 ```
@@ -109,7 +109,7 @@ READ      graph_info  node_find  node_at  edges_callers  edges_callees  why  lin
 CATALOGUE clones_find  cone  ladder  territory  census  mentions  externals
 VERSION   portability_targets  portability_move  portability_move_calls
 FEDERATE  ports
-INFRA     k8s_findings  helm_chart  helm_stages  kustomize_overlays  helmfile_releases
+INFRA     k8s_findings  k8s_traces  helm_chart  helm_stages  kustomize_overlays  helmfile_releases
 WRITE     txn_plan_moveset  txn_plan_optimize  txn_plan_declare
           txn_plan_annotate  txn_plan_extract_family  txn_plan_clonemerge
           txn_plan_replace  txn_plan_propagate  txn_plan_invert  txn_plan_transplant

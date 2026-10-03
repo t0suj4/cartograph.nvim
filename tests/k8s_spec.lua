@@ -262,3 +262,37 @@ test('k8s: a REQUEST-PATH TRACE from a workload — env names the peer -> its Se
     local none = assert(K.traces(data, 'all.yaml::Deployment/api'))
     eq({}, none, 'api names no peer')
 end)
+test('k8s: the trace is a VERB — k8s_traces addressed by Kind/name or by file + line, one row per hop; no peer is an absence, no object a refusal (CART-1383)', function ()
+    if not ready() then skip 'no yaml parser' end
+    local text = table.concat({
+        'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: web', 'spec:',             -- 1-5
+        '  template:', '    metadata:', '      labels:', '        app: web', '    spec:',           -- 6-10
+        '      containers:', '      - name: web', '        image: web', '        env:',            -- 11-14
+        '        - name: API_SERVICE_ADDR', '          value: "api:8080"',                         -- 15-16
+        '---', 'apiVersion: v1', 'kind: Service', 'metadata:', '  name: api', 'spec:',              -- 17-22
+        '  selector:', '    app: api', '  ports:', '  - port: 8080',                               -- 23-26
+        '---', 'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: api', 'spec:',      -- 27-32
+        '  template:', '    metadata:', '      labels:', '        app: api', '    spec:',           -- 33-37
+        '      containers:', '      - name: api', '        image: api', '        ports:', '        - containerPort: 8080' }, '\n') .. '\n' -- 38-42
+    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {} }
+    K.attach(data)
+    local agent = require 'cartograph.agent'
+    local store = { data = data }
+    local d, st = agent.answer(store, 'k8s_traces', { object = 'Deployment/web' })
+    eq('ok', st)
+    eq({ 'Deployment/web names api:8080', 'Service/api port 8080', 'selects Deployment/api', 'Deployment/api listens' },
+        vim.tbl_map(function (r) return r.text end, d.result))
+    eq({ 1, 2, 3, 4 }, vim.tbl_map(function (r) return r.hop end, d.result))
+    eq(16, d.result[1].line, 'each hop at its declaring line')
+    -- the same object by POSITION, as :CartographK8sTrace finds it (a line inside its document)
+    local p = agent.answer(store, 'k8s_traces', { file = 'all.yaml', line = 12 })
+    eq(d.result, p.result)
+    -- a workload naming no peer: an ABSENCE with its premise, not an empty list
+    local none = agent.answer(store, 'k8s_traces', { object = 'Deployment/api' })
+    eq('absent', none.absence); eq('no-peer', none.absence_why.premise)
+    -- no such object, no address: REFUSALS by name
+    local _, s1 = agent.answer(store, 'k8s_traces', { object = 'Deployment/nope' })
+    eq('refusal', s1)
+    local r2 = agent.answer(store, 'k8s_traces', {})
+    eq('no-address', r2.refusal.rule)
+end)

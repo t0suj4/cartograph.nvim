@@ -356,6 +356,8 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- INFRASTRUCTURE (CART-1048, CART-1297): this fixture holds no manifest and no helm command line — two
         -- ABSENCES naming their premise — and a chart path that is no chart is a REFUSAL with or without a helm binary
         k8s_findings = {},
+        -- no manifest read: the trace's DATA CLASS is unavailable, named before the address is even read (CART-1383)
+        k8s_traces = { args = { object = 'Deployment/web' } },
         helm_chart = { args = { chart = 'no-such-chart' }, expect = 'refusal' },
         helm_stages = {},
         -- no helmfile (a YAML with a `releases:` list) in this fixture: an ABSENCE naming its premise
