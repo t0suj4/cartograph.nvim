@@ -1059,4 +1059,48 @@ function M.summary(s)
             s.refused > 0 and (' — %d refused'):format(s.refused) or '')
 end
 
+--- WHICH BUILD STEP WRITES `path`? (CART-1384) Every plugin execution under `root` whose configuration names an
+--- `outputDirectory` holding `path` (an absolute path) -> { { pom, execution, plugin, phase, goals, writes, includes,
+--- names_file } }. Only `${project.basedir}` (and `${basedir}`) is resolved — to the POM's directory; any other
+--- property leaves the execution out rather than guessed. Bounded by `root`: a POM above it is never read, so a chart
+--- opened on its own cites nothing. EVIDENCE, never a license: the step is named so a remedy can say what to run.
+function M.producers(root, path)
+    root = vim.fn.fnamemodify(root, ':p'):gsub('/$', '')
+    local out = {}
+    for _, rel in ipairs(M.find(root)) do
+        local src = readf(root .. '/' .. rel)
+        local pom = src and M.read_pom(src, rel)
+        local base = root .. (dirname(rel) ~= '' and ('/' .. dirname(rel)) or '')
+        for _, p in ipairs(pom and arr(get(get(get(pom.raw, 'build'), 'plugins'), 'plugin')) or {}) do
+            for _, e in ipairs(arr(get(get(p, 'executions'), 'execution'))) do
+                local c = get(e, 'configuration')
+                local dir = str(get(c, 'outputDirectory'))
+                dir = dir and dir:gsub('%${project%.basedir}', base):gsub('%${basedir}', base)
+                if dir and not dir:find('${', 1, true) then
+                    if dir:sub(1, 1) ~= '/' then dir = base .. '/' .. dir end
+                    dir = dir:gsub('/$', '')
+                    if path:sub(1, #dir + 1) == dir .. '/' then
+                        local includes, names = {}, false
+                        for _, r in ipairs(arr(get(get(c, 'resources'), 'resource'))) do
+                            for _, inc in ipairs(arr(get(get(r, 'includes'), 'include'))) do
+                                if str(inc) then
+                                    includes[#includes + 1] = inc
+                                    local pat = '^' .. vim.pesc(inc):gsub('%%%*%%%*', '.*'):gsub('%%%*', '[^/]*') .. '$'
+                                    if path:sub(#dir + 2):match(pat) or vim.fn.fnamemodify(path, ':t'):match(pat) then names = true end
+                                end
+                            end
+                        end
+                        local goals = {}
+                        for _, g in ipairs(arr(get(get(e, 'goals'), 'goal'))) do if str(g) then goals[#goals + 1] = g end end
+                        out[#out + 1] = { pom = rel, execution = str(get(e, 'id')) or 'default', plugin = plugin_key(p),
+                            phase = str(get(e, 'phase')), goals = goals, writes = dir:sub(#root + 2), includes = includes,
+                            names_file = names }
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
 return M

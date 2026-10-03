@@ -1,0 +1,14 @@
+{{- if .Values.connect.enabled -}}
+{{- $context := . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-connectors
+data:
+{{- range .Values.connect.connectors }}
+{{- $connector := ($.Files.Get .path) | fromJson -}}
+{{- $properties := (include .processor (dict "context" $context "file" $connector) | fromYaml) }}
+  connector-{{ .name }}.json: |
+    {{- (dict "name" .name "config" (mergeOverwrite $connector $properties)) | toPrettyJson | nindent 4 }}
+{{- end }}
+{{- end -}}

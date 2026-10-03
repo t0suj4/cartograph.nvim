@@ -74,3 +74,77 @@ test('helm: the MCP verb `helm_chart` answers through agent.answer — findings 
     local _, st2 = agent.answer(require 'cartograph.store', 'helm_chart', { chart = vim.fn.tempname() })
     eq('refusal', st2, 'a path that is no chart is refused by name')
 end)
+-- ── F18 (CART-1384, design corpus helm-charts/03): THE ERROR BELOW THE TOP FRAME. An include chain's first stderr line
+-- is the OUTERMOST frame; the cause is at the innermost. Fixture: tests/fixtures/helm-files-get-unbuilt, vendored from
+-- the corpus (three arms + two negative guards whose refusal is already right).
+local FIX = vim.fn.getcwd() .. '/tests/fixtures/helm-files-get-unbuilt'
+local STDERR = table.concat({
+    'Error: app/templates/cronjob-connectors.yaml:2:19',
+    '  executing "app/templates/cronjob-connectors.yaml" at <include (print $.Template.BasePath "/configmap-connectors.yaml") .>:',
+    '    error calling include:',
+    'app/templates/configmap-connectors.yaml:10:20',
+    '  executing "app/templates/configmap-connectors.yaml" at <include .processor (dict "context" $context "file" $connector)>:',
+    '    error calling include:',
+    'app/templates/_helpers.tpl:2:102',
+    '  executing "app.connector.orders" at <.context.Values.global.database.schema.value>:',
+    '    invalid value; expected string',
+    '',
+    'Use --debug flag to render out invalid YAML', '' }, '\n')
+
+test('helm: a failed render is read WHOLE — every include frame, the innermost one and its own message', function ()
+    local F = H.failure(STDERR)
+    eq({ 'app/templates/cronjob-connectors.yaml:2:19', 'app/templates/configmap-connectors.yaml:10:20', 'app/templates/_helpers.tpl:2:102' }, F.frames)
+    eq('app/templates/_helpers.tpl:2:102', F.innermost)
+    eq('invalid value; expected string', F.message)
+    eq(3, F.depth)
+    -- a single-frame `required` error: the frame is inside `execution error at (…)`, the message after it
+    local R = H.failure('Error: execution error at (app/templates/configmap.yaml:6:11): global.database.host is required\n')
+    eq(1, R.depth); eq('app/templates/configmap.yaml:6:11', R.innermost); eq('global.database.host is required', R.message)
+end)
+
+local function verb(arm, chart_rel)
+    local store = { data = { root = FIX .. '/' .. arm } }
+    return require('cartograph.agent').answer(store, 'helm_chart', { chart = chart_rel })
+end
+
+test('helm: F18 — a chart reading a file that is not there names the innermost frame, the Files.Get, the file; the producer only where the root holds it', function ()
+    if not ready() then skip 'no helm binary (or no yaml parser)' end
+    -- chart-only: rooted at the chart, nothing produces the file — cite none, and no DEPENDENCY remedy (none declared)
+    local d, st = verb('chart-only', '.')
+    eq('refusal', st)
+    local r = d.refusal
+    eq('unrenderable', r.rule, 'still unrenderable: an unbuilt dependency is unreachable, not a new kind')
+    ok(r.reason:find('_helpers.tpl:2:102', 1, true) and r.reason:find('expected string', 1, true), 'the innermost frame: ' .. r.reason)
+    ok(r.reason:find('Files.Get at templates/configmap-connectors.yaml:9', 1, true), 'the Files.Get call, cited: ' .. r.reason)
+    ok(r.reason:find('files/connector-orders.json', 1, true), 'the missing file, named')
+    ok(not r.reason:find('app.connector.orders', 1, true), 'a values string under a key Files.Get does not read is no file: ' .. r.reason)
+    ok(not r.remedy:find('dependenc'), 'Chart.yaml declares no dependency: ' .. r.remedy)
+    eq(0, #r.producers, 'rooted at the chart, no producer is visible and none is guessed')
+    -- with-producer: the project root holds pom.xml's copy-config-files — named as EVIDENCE, the rule unchanged
+    d = verb('with-producer', 'chart')
+    r = d.refusal
+    eq('unrenderable', r.rule)
+    eq(1, #r.producers)
+    eq('copy-config-files', r.producers[1].execution)
+    eq('chart/files', r.producers[1].writes)
+    eq(true, r.producers[1].names_file, 'its <includes> names connector-orders.json')
+    ok(r.remedy:find('copy-config-files', 1, true), 'the remedy names the step to run: ' .. r.remedy)
+    -- the SAME chart opened on its own, inside the project: the POM that writes chart/files sits ABOVE the root, so it is
+    -- never read — the real chart lives under a project POM, and an upward walk would invent evidence
+    d = verb('with-producer/chart', '.')
+    eq(0, #d.refusal.producers, 'a POM above the graph root is not cited')
+    -- built: the control renders
+    local _, st3 = verb('built', 'chart')
+    eq('ok', st3)
+end)
+
+test('helm: F18 GUARDS — a `required` value and an unvendored dependency keep the refusal they already had', function ()
+    if not ready() then skip 'no helm binary (or no yaml parser)' end
+    local d = verb('negative/missing-value', '.')
+    eq('helm template failed: Error: execution error at (app/templates/configmap.yaml:6:11): global.database.host is required', d.refusal.reason)
+    eq('pass the values the chart requires', d.refusal.remedy)
+    eq(nil, d.refusal.producers, 'no Files.Get: no producer, no missing file')
+    d = verb('negative/missing-dependency', '.')
+    ok(d.refusal.reason:find('^a dependency Chart.yaml declares is not vendored in charts/'), d.refusal.reason)
+    eq('vendor the chart dependencies, or pass the values the chart requires', d.refusal.remedy)
+end)

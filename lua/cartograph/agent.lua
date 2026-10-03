@@ -3375,8 +3375,38 @@ local function v_helm_chart(store, args)
     local dir = chart_dir(store, args.chart)
     local H = require 'cartograph.helm'
     if not H.binary() then return refuse('no-helm', 'no helm binary on PATH: a chart is read through its renderer', 'install helm (pkgit -i helm)') end
-    local s, why = H.attach(dir, { release = args.release, values = args.values, set = args.set, schema = false })
-    if not s then return refuse('unrenderable', tostring(why), 'vendor the chart dependencies, or pass the values the chart requires') end
+    local s, why, cause = H.attach(dir, { release = args.release, values = args.values, set = args.set, schema = false })
+    if not s then
+        -- THE REMEDY FROM THE CAUSE (CART-1384). A dependency Helm could not find keeps its own; a template error is a
+        -- VALUES problem — unless the chart READS A FILE THAT IS NOT THERE: a Files.Get call in a template AND a path the
+        -- chart could ask for missing under it (both facts cited). Then the producer is named IF THE GRAPH ROOT HOLDS
+        -- IT (a build execution writing that directory); rooted at the chart, none is guessed.
+        if not (cause and cause.kind == 'template') then
+            return refuse('unrenderable', tostring(why), 'vendor the chart dependencies, or pass the values the chart requires')
+        end
+        local fg = H.files_get(dir, { values = args.values, set = args.set })
+        if #fg.calls == 0 or #fg.missing == 0 then
+            return refuse('unrenderable', tostring(why), 'pass the values the chart requires', { frames = cause.frames })
+        end
+        local root = store.data and store.data.root or vim.fn.getcwd()
+        local missing, producers = {}, {}
+        for _, m in ipairs(fg.missing) do
+            missing[#missing + 1] = ('%s (%s %s)'):format(m.path, m.from, m.where)
+            for _, p in ipairs(require('cartograph.pom').producers(root, dir .. '/' .. m.path)) do
+                producers[#producers + 1] = { file = m.path, pom = p.pom, execution = p.execution, plugin = p.plugin, phase = nn(p.phase),
+                    goals = p.goals, writes = p.writes, names_file = p.names_file }
+            end
+        end
+        local reason = ('%s; the chart reads files that are not under it: Files.Get at %s:%d, and %s'):format(tostring(why),
+            fg.calls[1].file, fg.calls[1].line, table.concat(missing, ', '))
+        local remedy = 'provide the files the chart reads with Files.Get (they are not in this tree)'
+        if #producers > 0 then
+            local p = producers[1]
+            remedy = ('run the build step that writes them: %s execution `%s` (%s%s) writes %s, then re-open'):format(p.pom, p.execution,
+                p.plugin, p.phase ~= vim.NIL and (', phase ' .. p.phase) or '', p.writes)
+        end
+        return refuse('unrenderable', reason, remedy, { frames = cause.frames, files_get = fg.calls, missing = fg.missing, producers = producers })
+    end
     local rows = k8s_rows(s, {})
     -- the FIELD SCHEMA on the rendered objects, at the TEMPLATE line that wrote each (helmprov spans; CART-1308) — not at
     -- the render's temporary files, which is why the k8s read above skips it

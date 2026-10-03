@@ -1,0 +1,1 @@
+{"connector.class": "io.example.SourceConnector", "table.include.list": "public.orders,public.order_lines"}

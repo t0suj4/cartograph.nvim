@@ -1,0 +1,10 @@
+global:
+  database:
+    schema:
+      value: app
+connect:
+  enabled: true
+  connectors:
+    - name: orders
+      path: files/connector-orders.json
+      processor: app.connector.orders
