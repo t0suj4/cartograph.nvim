@@ -404,12 +404,13 @@ end
 -- the wire's records, term graphs and the edit-distance match (CART-1396); numbers in M.content_num's canonical text.
 local num, label = M.content_num, M.node_label
 --- the content id of term t (hex sha256). memo: a table shared across calls (keyed by node object) — optional
-function M.content_id(t, memo)
+--- `ordered` = true: the ORDERED relation's hash (a keyed node's kids in written order); its memo must be its own
+function M.content_id(t, memo, ordered)
     memo = memo or {}
     local function id(u)
         if memo[u] then return memo[u] end
         local kids = {}
-        if u.align == 'keyed' then
+        if u.align == 'keyed' and not ordered then
             for _, e in ipairs(M.keys(u)) do kids[#kids + 1] = id(e.kid) end
         else
             for i, c in ipairs(u.kids or {}) do kids[i] = id(c) end

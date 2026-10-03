@@ -45,3 +45,98 @@ test('law: the readable symbol and the hash label agree — one symbol iff one l
     end end
     ok(pairs_ > 300)
 end)
+-- ── RUNG 1 (CART-1399): the relations, their hashes and orders, and the LAWS between them ───────────────────────────
+local R = require 'cartograph.algebraread'
+local AC = { plus = { A = true, C = true } }
+local function population()
+    local pop = {}
+    local function add(t) pop[#pop + 1] = t end
+    if pcall(vim.treesitter.get_string_parser, '', 'lua') then
+        local t = assert(R.read('local a = f(x, 1) + f(x, 1)\nreturn { a, "1", 1 }\n', 'lua'))
+        local function collect(u) add(u); for _, c in ipairs(u.kids or {}) do collect(c) end end
+        collect(t)
+    end
+    -- keyed permutations (term, not ordered)
+    add(A.kv_term({ o = { a = '1', b = '2' }, keys = { 'a', 'b' } })); add(A.kv_term({ o = { a = '1', b = '2' }, keys = { 'b', 'a' } }))
+    -- renamed holes and renamed presence marks (variant, not term)
+    add(A.node('f', A.hole('x'), A.hole('y'), A.hole('x'))); add(A.node('f', A.hole('p'), A.hole('q'), A.hole('p')))
+    add(A.node('f', A.hole('x'), A.hole('x'), A.hole('y')))
+    local function marked(h) local p = A.node('pair', A.lit('k'), A.lit(1)); p.opt = h; return A.keyed('obj', { p }) end
+    add(marked('h1')); add(marked('h9'))
+    -- an AC reordering (theory, not term)
+    add(A.node('plus', A.lit(1), A.lit(2))); add(A.node('plus', A.lit(2), A.lit(1)))
+    -- what the corpus lacked: floats, -0, marks on literals, grammars
+    add(A.lit(0.1 + 0.2)); add(A.lit(0.3)); add(A.lit(-0)); add(A.lit(0)); add(A.lit('1')); add(A.lit(1))
+    add({ k = 'lit', v = 'b', opt = 'h1' }); add({ k = 'lit', v = 'b', opt = 'h2' }); add(A.lit('b'))
+    add({ k = 'embed', g = 'sql', kids = { A.lit('x') } }); add({ k = 'embed', g = 'lua', kids = { A.lit('x') } })
+    return pop
+end
+
+test('law: each relation holds IFF its hashes agree — every pair of a mixed population, both directions', function ()
+    local pop = population()
+    local checked = 0
+    for _, name in ipairs({ 'ordered', 'term', 'variant', 'theory' }) do
+        local r = A.equality(name)
+        local param = name == 'theory' and AC or nil
+        local h = {}
+        for i, t in ipairs(pop) do h[i] = r.hash(t, param) end
+        for i = 1, #pop do for j = 1, #pop do
+            eq(r.eq(pop[i], pop[j], param), h[i] == h[j], ('%s: %s / %s'):format(name, A.show(pop[i]), A.show(pop[j])))
+            checked = checked + 1
+        end end
+    end
+    ok(checked > 2000, checked .. ' pairs')
+end)
+
+test('law: ordered => term => variant => equivalent, term => theory — and every implication is STRICT (a witness each way)', function ()
+    local pop = population()
+    local O, T, V, Th = A.equality('ordered'), A.equality('term'), A.equality('variant'), A.equality('theory')
+    local strict = { term_not_ordered = 0, variant_not_term = 0, theory_not_term = 0, variant_pairs = 0 }
+    for i = 1, #pop do for j = 1, #pop do
+        local a, b = pop[i], pop[j]
+        local o, t, v, th = O.eq(a, b), T.eq(a, b), V.eq(a, b), Th.eq(a, b, AC)
+        if o then ok(t, 'ordered => term: ' .. A.show(a)) end
+        if t then ok(v, 'term => variant: ' .. A.show(a)); ok(th, 'term => theory: ' .. A.show(a)) end
+        -- (equivalent's domain: bodies without an embed — instance_of is not reflexive on one, CART-1409)
+        local function has_embed(u) if u.k == 'embed' then return true end; for _, c in ipairs(u.kids or {}) do if has_embed(c) then return true end end; return false end
+        if v and not has_embed(a) and not has_embed(b) then
+            strict.variant_pairs = strict.variant_pairs + 1
+            ok(A.equality('equivalent').eq(A.template(a), A.template(b)), 'variant => equivalent: ' .. A.show(a) .. ' / ' .. A.show(b))
+        end
+        if t and not o then strict.term_not_ordered = strict.term_not_ordered + 1 end
+        if v and not t then strict.variant_not_term = strict.variant_not_term + 1 end
+        if th and not t then strict.theory_not_term = strict.theory_not_term + 1 end
+    end end
+    ok(strict.term_not_ordered > 0 and strict.variant_not_term > 0 and strict.theory_not_term > 0, vim.inspect(strict))
+    ok(strict.variant_pairs > #pop, 'variant => equivalent was checked on more than the diagonal: ' .. strict.variant_pairs)
+    -- the presence mark is renamed WITH the holes: two marks by different names are one variant, and not one term
+    local function marked(h) local p = A.node('pair', A.lit('k'), A.lit(1)); p.opt = h; return A.keyed('obj', { p }) end
+    ok(V.eq(marked('h1'), marked('h9')) and not T.eq(marked('h1'), marked('h9')), 'a renamed presence mark')
+end)
+
+test('law: each ORDER is consistent with its relation (equal => neither sorts first) and total on what it orders', function ()
+    local pop = population()
+    for _, name in ipairs({ 'ordered', 'term', 'variant' }) do
+        local r = A.equality(name)
+        for i = 1, #pop do for j = 1, #pop do
+            local a, b = pop[i], pop[j]
+            if r.eq(a, b) then ok(not r.less(a, b) and not r.less(b, a), name .. ': equal yet ordered')
+            else ok(r.less(a, b) ~= r.less(b, a), name .. ': unequal yet unordered') end
+        end end
+    end
+    -- literals: by type, then the canonical text
+    local L = A.equality('literal')
+    ok(L.eq(A.lit(-0), A.lit(0)) and not L.eq(A.lit(0.1 + 0.2), A.lit(0.3)) and not L.eq(A.lit('1'), A.lit(1)))
+end)
+
+test('the TABLE: a memo DECLARES its relation (Lisp :test) — a keyed permutation is one key under term, two under ordered', function ()
+    local p = A.kv_term({ o = { a = '1', b = '2' }, keys = { 'a', 'b' } })
+    local q = A.kv_term({ o = { a = '1', b = '2' }, keys = { 'b', 'a' } })
+    local term, ord = A.table_by('term'), A.table_by('ordered')
+    term.put(p, 'x'); ord.put(p, 'x')
+    eq('x', term.get(q)); eq(nil, ord.get(q)); eq(1, term.size())
+    local v = A.table_by('variant'); v.put(A.node('f', A.hole('a')), 1); eq(1, v.get(A.node('f', A.hole('z'))))
+    local id = A.table_by('identity'); id.put(p, 1); eq(nil, id.get(A.copy(p))); eq(1, id.get(p))
+    ok(not pcall(A.table_by, 'bisimilar'), 'a relation with no hash cannot key a memo')
+    local okn, why = pcall(A.equality, 'nope'); ok(not okn and tostring(why):find('no equality', 1, true), tostring(why))
+end)

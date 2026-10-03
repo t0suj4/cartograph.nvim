@@ -228,7 +228,9 @@ function M.rebuild(t, kids)
     return n
 end
 
-function M.eq(a, b)
+--- TERM equality (CART-1398's `term`): structural, a keyed node a SET by key. `ordered` = true is the ORDERED relation:
+--- the same, with a keyed node's kids compared in written order (Lisp's `equal` to this one's `equal` + keyed sets).
+function M.eq(a, b, ordered)
     if a == b then return true end
     if type(a) ~= 'table' or type(b) ~= 'table' or a.k ~= b.k then return false end
     -- (a PRESENCE MARK is identity on every kind — a keyed set's optional member is not its always-present twin; it was
@@ -244,14 +246,14 @@ function M.eq(a, b)
     if a.g ~= b.g then return false end -- (an embed's GRAMMAR: one tree parsed as SQL is not the same tree parsed as Lua)
     local ka, kb = a.kids or {}, b.kids or {}
     if #ka ~= #kb then return false end
-    if a.align == 'keyed' then
+    if a.align == 'keyed' and not ordered then
         for _, e in ipairs(M.keys(a)) do
             local other = M.kid_by_key(b, e.key)
             if not other or not M.eq(e.kid, other) then return false end
         end
         return true
     end
-    for i = 1, #ka do if not M.eq(ka[i], kb[i]) then return false end end
+    for i = 1, #ka do if not M.eq(ka[i], kb[i], ordered) then return false end end
     return true
 end
 
@@ -3974,6 +3976,7 @@ require('cartograph.algebra.match')(M, PARTS)
 require('cartograph.algebra.negatives')(M, PARTS)
 require('cartograph.algebra.demandfam')(M, PARTS)
 require('cartograph.algebra.kvterm')(M, PARTS)
+require('cartograph.algebra.equality')(M, PARTS)
 
 -- REDERIVE.md: with DERIVE=<op,op,..|all> in the environment, the named operators are
 -- replaced by their re-derivations from the basis (derive.lua) so the suite can judge them.
