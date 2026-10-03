@@ -184,6 +184,23 @@ end
 --- Diff two extracts a -> b. Returns { nodes = {added, removed}, edges =
 --- {added, removed, changed}, calls = {added, removed, changed} }, every entry
 --- a human-readable line (stable-sorted, so diffs of diffs work too).
+-- ★ THE MENTION INDEX IS PART OF THE GRAPH (CART-1421). `data.names` (file -> the identifiers it mentions) answers
+-- `mentions` and every "which files can care about this name" a splice asks, and this diff never read it — so every
+-- refresh / warm-open contract passed while a file's name set was missing (CART-1393 lived behind that).
+-- ⚠ NIL IS NOT EMPTY: a side that carries NO index (an older baseline, a slim form) is "not compared" — `d.names`
+-- is nil — rather than every file reported missing; an index that exists and lacks a file IS a difference.
+local function names_diff(a, b)
+    if not (a.names and b.names) then return nil end
+    local added, removed, changed = {}, {}, {}
+    for f, s in pairs(b.names) do
+        local o = a.names[f]
+        if o == nil then added[#added + 1] = f elseif o ~= s then changed[#changed + 1] = f end
+    end
+    for f in pairs(a.names) do if b.names[f] == nil then removed[#removed + 1] = f end end
+    table.sort(added); table.sort(removed); table.sort(changed)
+    return { added = added, removed = removed, changed = changed }
+end
+
 function M.diff(a, b, opts)
     local w = opts and opts.witness or nil
     local na, nb = {}, {}
@@ -203,6 +220,7 @@ function M.diff(a, b, opts)
         nodes = { added = nadded, removed = nremoved },
         edges = ed,
         calls = cd,
+        names = names_diff(a, b),
     }
     -- kept OFF the existing sub-tables on purpose: a caller iterating d.edges
     -- with pairs() sees exactly the three keys it always saw.
@@ -261,6 +279,7 @@ function M.empty(d)
     return #d.nodes.added == 0 and #d.nodes.removed == 0
         and #d.edges.added == 0 and #d.edges.removed == 0 and #d.edges.changed == 0
         and #d.calls.added == 0 and #d.calls.removed == 0 and #d.calls.changed == 0
+        and (d.names == nil or (#d.names.added == 0 and #d.names.removed == 0 and #d.names.changed == 0))
 end
 
 --- Render a diff as report lines. opts.limit caps each section (default 20);
@@ -285,6 +304,11 @@ function M.report(d, opts)
     section('calls added', d.calls.added)
     section('calls removed', d.calls.removed)
     section('calls changed', d.calls.changed)
+    if d.names then
+        section('mention-index files added', d.names.added)
+        section('mention-index files removed', d.names.removed)
+        section('mention-index files changed', d.names.changed)
+    end
     return lines
 end
 

@@ -240,3 +240,23 @@ test('graphdiff.by_kind: nodes gained and lost, classed by kind + name shape, wi
     eq({ 'function bare=2', 'var qualified=1' }, flat(bk.added))
     eq('a.cpp::g@5', bk.added[1].example, 'the example is the smallest id, so the output is stable')
 end)
+
+-- ★ THE MENTION INDEX IS DIFFED (CART-1421): a file missing from `data.names` is a difference, so a refresh that
+-- loses one (CART-1393) cannot pass as "identical" — and a side carrying NO index is "not compared", never "every
+-- file missing" (an older baseline must not go red for predating the index).
+test('graphdiff: the mention index is compared, and an absent index is not-compared, not empty', function ()
+    local a = data({ n('m.lua::f@1') }, {}, {})
+    local b = data({ n('m.lua::f@1') }, {}, {})
+    a.names = { ['m.lua'] = '\31walk\31', ['n.lua'] = '\31freshname\31' }
+    b.names = { ['m.lua'] = '\31walk\31' }
+    local d = gd.diff(a, b)
+    eq(false, gd.empty(d), 'a file missing from one index is a difference')
+    eq({ 'n.lua' }, d.names.removed)
+    ok(table.concat(gd.report(d), '\n'):find('mention-index files removed', 1, true), 'and the report names it')
+    b.names['n.lua'] = '\31freshname\31'
+    eq(true, gd.empty(gd.diff(a, b)), 'equal indexes are no difference')
+    b.names = nil
+    local d2 = gd.diff(a, b)
+    eq(nil, d2.names, 'a side with no index at all is NOT COMPARED')
+    eq(true, gd.empty(d2), 'and does not turn the diff red')
+end)
