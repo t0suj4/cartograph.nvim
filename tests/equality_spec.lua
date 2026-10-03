@@ -188,3 +188,22 @@ test('terms are values: under the freeze an in-place edit of an OBSERVED term re
     A.FREEZE = was
     ok(okr, tostring(err))
 end)
+-- ── RUNG 7 (CART-1405): DISTANCES AGREE WITH RELATIONS — tree edit distance matches exact LABELS (node_sym) in order,
+-- so a FULL match (the common subforest is both trees whole) is the ORDERED relation, nothing looser or stricter
+test('law: tree edit distance 0 <=> ORDERED — Zhang and Tai/JWZ, every pair of the mixed population', function ()
+    local pop = population()
+    local O = A.equality('ordered')
+    local full = { zhang = 0, jwz = 0 }
+    for i = 1, #pop do for j = 1, #pop do
+        local a, b = pop[i], pop[j]
+        local sa, sb = A.size(a), A.size(b)
+        local o = O.eq(a, b)
+        local z = A.zhang({ a }, { b }).size
+        eq(o, z == sa and z == sb, ('zhang: %s / %s'):format(A.show(a), A.show(b)))
+        local w = A.jwz({ a }, { b })
+        local ws = w.size or (w.alignment and #w.alignment) or 0
+        eq(o, ws == sa and ws == sb, ('jwz: %s / %s'):format(A.show(a), A.show(b)))
+        if o then full.zhang = full.zhang + 1 end
+    end end
+    ok(full.zhang > #pop, 'off-diagonal full matches exist: ' .. full.zhang)
+end)
