@@ -628,6 +628,36 @@ test('agent: an unparsed frontier makes every empty catalogue answer a FRONTIER,
     ok(vim.tbl_contains(agent.VERBS.territory.absences, t.absence))
 end)
 
+-- F19 (CART-1386, design corpus agent-surface/08): a CLOSABLE frontier must not look like a real one. Fixture vendored
+-- from the corpus: one Java class and, in with-bundle/, a vendored *.min.js the collect pass keeps opaque.
+test('agent: mentions BYTE-SCANS the unparsed files — a name in none of their bytes is absent; one in a bundle stays frontier, NAMING the file', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'java') then skip('no java parser') end
+    local FIX = vim.fn.getcwd() .. '/tests/fixtures/mentions-unparsed-frontier'
+    ingest(FIX .. '/with-bundle')
+    eq(1, agent.graph(store).frontier.unparsed_files, 'the bundle is kept unparsed (the premise of the whole test)')
+    local a = agent.answer(store, 'mentions', { name = 'ServletContainerFactory' })
+    eq('absent', a.absence, 'not in the bundle\'s bytes: the question closes')
+    eq('name-not-in-any-index-or-byte', a.absence_why.premise)
+    eq(1, a.absence_why.evidence.byte_scanned)
+    local s = agent.answer(store, 'mentions', { name = 'ServletContainerFactory', from = 'src/main/java/com/example/web/MapView.java' })
+    eq('absent', s.absence, 'from scopes resolution, not the unparsed set: the same answer')
+    -- ⚠ THE GUARD: a name defined ONLY in the bundle keeps the frontier, and now says which file holds it
+    local v = agent.answer(store, 'mentions', { name = 'vendorMap' })
+    eq('frontier', v.absence)
+    eq({ 'src/main/resources/com/example/web/vendor.min.js' }, v.absence_why.evidence.occurs_in)
+    ok(v.absence_why.why:find('vendor.min.js', 1, true), v.absence_why.why)
+    -- a substring is no mention: identifier boundaries
+    eq('absent', agent.answer(store, 'mentions', { name = 'vendorMa' }).absence)
+    eq(1, #agent.answer(store, 'mentions', { name = 'MapView' }).result, 'the control')
+    -- an unreadable unparsed file keeps the frontier, named — the scan never guesses
+    local cap = agent.BYTE_SCAN_CAP
+    agent.BYTE_SCAN_CAP = 1
+    local u = agent.answer(store, 'mentions', { name = 'ServletContainerFactory' })
+    agent.BYTE_SCAN_CAP = cap
+    eq('frontier', u.absence)
+    eq({ 'src/main/resources/com/example/web/vendor.min.js' }, u.absence_why.evidence.unreadable)
+end)
+
 test('agent: the honesty verbs answer "no" as a fact, not as an empty set', function ()
     if not ready() then skip('no treesitter') end
     local root = mkfixture()

@@ -1396,6 +1396,8 @@ end
 
 -- ── verb: mentions ──────────────────────────────────────────────────────────
 
+-- the largest unparsed file `mentions` byte-scans to close its frontier (a bigger one stays frontier, named)
+M.BYTE_SCAN_CAP = 32 * 1024 * 1024
 local function v_mentions(store, args)
     -- THE REFUSAL COMES FIRST, and mentions.lua is explicit about why: an empty
     -- mentioning() means EITHER "no file mentions this" OR "this graph has no
@@ -1448,11 +1450,44 @@ local function v_mentions(store, args)
     if #rows > 0 then return { result = rows, notes = notes } end
     local g = M.graph(store)
     if g.frontier.unparsed_files > 0 then
+        -- ★ CLOSE THE FRONTIER BY BYTES (F19, CART-1386). An unparsed file (a vendored *.min.js) is outside the index but
+        -- not outside the bytes: a name that occurs in NONE of them cannot be mentioned there, so the question closes as
+        -- `absent`; a name that occurs in one keeps the frontier OPEN and names that file. Not a language filter — Java
+        -- names a JavaScript function by string in an Eclipse RAP client, so "a Java name cannot be in a .js" is unsound.
+        -- A file that cannot be read (or is over the cap) keeps the frontier too, named; the scan never guesses.
+        local pat = (args.name:sub(1, 1):match('[%w_]') and '%f[%w_]' or '') .. vim.pesc(args.name)
+            .. (args.name:sub(-1):match('[%w_]') and '%f[^%w_]' or '')
+        local hit, unread, scanned = {}, {}, 0
+        for _, n in ipairs(store.data and store.data.nodes or {}) do
+            if n.kind == 'module' and n.unparsed then
+                local st = vim.uv.fs_stat(store.abs and store.abs(n.file) or ((store.data.root or '') .. '/' .. n.file))
+                local lines = (not st or st.size <= M.BYTE_SCAN_CAP) and store.content and store.content(n) or nil
+                if not lines and not store.content then
+                    local fd = io.open((store.data.root or '') .. '/' .. n.file, 'rb')
+                    if fd and (not st or st.size <= M.BYTE_SCAN_CAP) then lines = vim.split(fd:read('a'), '\n', { plain = true }) end
+                    if fd then fd:close() end
+                end
+                if not lines then unread[#unread + 1] = n.file
+                else
+                    scanned = scanned + 1
+                    for _, l in ipairs(lines) do if l:find(pat) then hit[#hit + 1] = n.file; break end end
+                end
+            end
+        end
+        table.sort(hit); table.sort(unread)
+        if #hit == 0 and #unread == 0 then
+            return { result = {}, absence = 'absent', absence_why = {
+                premise = 'name-not-in-any-index-or-byte',
+                why = ('the identifier occurs in none of the %d indexed file(s), and in none of the %d unparsed file(s), byte-scanned — an unparsed file cannot mention a name its bytes do not hold'):format(ev.indexed, scanned),
+                evidence = { indexed_files = ev.indexed, unparsed_files = g.frontier.unparsed_files, byte_scanned = scanned, from = nn(from) } }, notes = notes }
+        end
         return { result = {}, absence = 'frontier', absence_why = {
             premise = 'unparsed-files',
-            why = ('no indexed file mentions this name, but %d file(s) never parsed — the collect pass never read them, so they are not in the index at all'):format(g.frontier.unparsed_files),
-            evidence = { unparsed_files = g.frontier.unparsed_files,
-                indexed_files = ev.indexed } }, notes = notes }
+            why = #hit > 0
+                and ('no indexed file mentions this name, but its bytes occur in %d unparsed file(s) the collect pass never read: %s'):format(#hit, table.concat(hit, ', '))
+                or ('no indexed file mentions this name and no readable unparsed file holds it, but %d unparsed file(s) could not be byte-scanned: %s'):format(#unread, table.concat(unread, ', ')),
+            evidence = { unparsed_files = g.frontier.unparsed_files, indexed_files = ev.indexed, byte_scanned = scanned,
+                occurs_in = hit, unreadable = unread } }, notes = notes }
     end
     return { result = {}, absence = 'absent', absence_why = {
         premise = 'name-not-in-any-index',
