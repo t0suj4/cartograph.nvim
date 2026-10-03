@@ -631,21 +631,60 @@ test('moveapply: reexport=true keeps the moved name on the source module when th
     eq(6, okl and type(A) == 'table' and A.foo and A.foo(5))
 end)
 
--- ★ A MOVE INTO A MODULE WHOSE TABLE HAS ANOTHER NAME IS REFUSED BY NAME (CART-1422): the moved `function M.foo`
--- is written verbatim, and in `local D = {}` it named a table that does not exist — the move applied and the module
--- stopped loading. Until the head (and every `M.` the moved text reads) can be rewritten soundly, it refuses.
-test('moveapply: moving `M.foo` into a module whose table is `D` is refused by name, nothing written', function ()
+-- ★ A MOVE INTO A MODULE WHOSE TABLE HAS ANOTHER NAME IS RENAMED INTO IT (CART-1422): the moved `function M.foo` was
+-- written verbatim, and in `local D = {}` it named a table that does not exist — the module stopped loading. The moved
+-- text now binds into the destination's table; what it still reaches that the move did not bring is DISCLOSED (the
+-- same contract a created file's scaffold has); a destination with no module table still refuses.
+test('moveapply: moving `M.foo` into a module whose table is `D` renames it into D, and both modules load', function ()
     if not ready() then skip('no lua parser') end
     local st = ingest_files {
         ['m.lua'] = table.concat({ 'local M = {}', 'function M.foo(x) return x + 1 end', 'return M' }, '\n'),
         ['d.lua'] = table.concat({ 'local D = {}', 'return D' }, '\n'),
     }
+    local root = st.data.root
+    local foo = node_by(st, 'M.foo') or node_by(st, 'foo')
+    local plan = assert(moveapply.plan_moveset(st, { foo.id }, 'd.lua', { arm = false, reexport = true }))
+    st.clear_stage(); st.stage(foo.id); st.set_dest('d.lua')
+    local okay, why = moveapply.apply(st, plan)
+    ok(okay, 'applied: ' .. tostring(why))
+    local dsrc = table.concat(vim.fn.readfile(root .. '/d.lua'), '\n')
+    ok(dsrc:find('function D.foo', 1, true), 'the definition binds into D: ' .. dsrc)
+    ok(not dsrc:find('M.', 1, true), 'and names no M there')
+    package.path = root .. '/?.lua;' .. package.path
+    package.loaded['m'], package.loaded['d'] = nil, nil
+    local okd, Dm = pcall(require, 'd')
+    ok(okd, 'd loads: ' .. tostring(Dm))
+    eq(6, okd and type(Dm) == 'table' and Dm.foo and Dm.foo(5))
+    local okm, Mm = pcall(require, 'm')
+    ok(okm, 'm loads: ' .. tostring(Mm))
+    eq(6, okm and type(Mm) == 'table' and Mm.foo and Mm.foo(5), 'and still reaches foo through its re-export')
+end)
+
+test('moveapply: a moved body that still reaches a member that STAYED is disclosed, not silently renamed', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files {
+        ['m.lua'] = table.concat({ 'local M = {}', 'function M.bar(x) return x * 2 end',
+            'function M.foo(x) return M.bar(x) + 1 end', 'return M' }, '\n'),
+        ['d.lua'] = table.concat({ 'local D = {}', 'return D' }, '\n'),
+    }
+    local foo = node_by(st, 'M.foo') or node_by(st, 'foo')
+    local plan = assert(moveapply.plan_moveset(st, { foo.id }, 'd.lua', { arm = false, reexport = true }))
+    local said = table.concat(vim.tbl_map(tostring, plan.hazards or {}), '\n')
+    ok(said:find('M.bar', 1, true) and said:find('wire those by hand', 1, true), 'the residual names M.bar: ' .. said)
+end)
+
+test('moveapply: moving `M.foo` into a file with NO module table is refused by name, nothing written', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files {
+        ['m.lua'] = table.concat({ 'local M = {}', 'function M.foo(x) return x + 1 end', 'return M' }, '\n'),
+        ['d.lua'] = 'print("a script, not a module")',
+    }
     local foo = node_by(st, 'M.foo') or node_by(st, 'foo')
     local plan, why, class = moveapply.plan_moveset(st, { foo.id }, 'd.lua', { arm = false })
     eq(nil, plan, 'no plan')
-    ok(tostring(why):find('`D`', 1, true) and tostring(why):find('`M`', 1, true), 'the refusal names both tables: ' .. tostring(why))
+    ok(tostring(why):find('no module table', 1, true), 'the refusal says why: ' .. tostring(why))
     eq('unbuilt', class)
-    eq('local D = {}\nreturn D', table.concat(vim.fn.readfile(st.data.root .. '/d.lua'), '\n'), 'd.lua untouched')
+    eq('print("a script, not a module")', table.concat(vim.fn.readfile(st.data.root .. '/d.lua'), '\n'), 'd.lua untouched')
 end)
 
 --- ★★★ THE PACKAGE ROOT IS NOT PART OF THE MODULE PATH (CART-0917), and this is

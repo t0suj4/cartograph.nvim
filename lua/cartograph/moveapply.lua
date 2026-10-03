@@ -576,25 +576,51 @@ local function collect(store, ids, dest, plan, opts)
     if okp and plan.creates and plan.creates[dest] then
         module_scaffold(plan, dest, ts, file_lines)
     elseif okp then
-        -- ⚠ ...AND INHERITS IT BY NAME (CART-1422). The moved text is written verbatim, so `function M.foo` lands
-        -- in a module whose table is `D` and that module stops LOADING (`attempt to index global 'M'`) — the move
-        -- applied, its guard passed, and only running the module showed it. Renaming M to D in the moved text is
-        -- not sound by itself (a moved `M.bar` naming a member that STAYED would become a wrong `D.bar`), so until
-        -- that rewrite exists this refuses by name.
+        -- ★ ...AND INHERITS IT BY NAME (CART-1422). The moved text is written into a module whose table may have
+        -- another name: `function M.foo` landing in `local D = {}` named a table that does not exist there, and the
+        -- module stopped LOADING. The moved text is RENAMED to the destination's table (every mention of the source
+        -- table as a word, `edits_for` below) — the same contract `module_scaffold` gives a created file: the moved
+        -- definitions bind into the destination's table, and what the moved code still reaches that the move did not
+        -- bring (`M.bar` for a member that STAYED, a bare `M` handed somewhere as a value) is not rewritten but
+        -- DISCLOSED, because after the rename it reads the destination's table, which does not hold it. A destination
+        -- with NO module table still refuses: there is nothing to rename into.
         local dtbl = ts.module_table(dest, file_lines(dest) or {})
+        local moved = {}
+        for _, m in ipairs(plan.moves) do moved[m.name] = true end
+        local left, order = {}, {}
         for _, m in ipairs(plan.moves) do
             local ls = file_lines(m.file)
             local n = ls and ts.module_table(m.file, ls) or nil
             if n and n ~= dtbl then
+                local reads = false
                 for i = m.lines.s + 1, m.lines.e + 1 do
-                    if (ls[i] or ''):find('%f[%w_]' .. n .. '%f[^%w_]') then
-                        return nil, ('%s reads its module table `%s`, and %s %s — the moved text would name a table'
-                            .. ' that does not exist there. Move it into a module whose table is `%s`, or rename one'
-                            .. ' of them first'):format(m.name, n, dest,
-                            dtbl and ('exports through `' .. dtbl .. '`') or 'has no module table', n), 'unbuilt'
+                    local l, pos = ls[i] or '', 1
+                    while true do
+                        local a, b = l:find('%f[%w_]' .. n .. '%f[^%w_]', pos)
+                        if not a then break end
+                        reads = true
+                        local member = l:match('^%.([%a_][%w_]*)', b + 1)
+                        local spell = member and (n .. '.' .. member) or n
+                        if not moved[spell] and not left[spell] then left[spell] = true; order[#order + 1] = spell end
+                        pos = b + 1
                     end
                 end
+                if reads then
+                    if not dtbl then
+                        return nil, ('%s reads its module table `%s`, and %s has no module table to bind it into —'
+                            .. ' move it into a module that returns a table, or give %s one first'):format(m.name, n, dest, dest),
+                            'unbuilt'
+                    end
+                    m.retable = { from = n, to = dtbl }
+                end
             end
+        end
+        if #order > 0 then
+            table.sort(order)
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('retable-residual', ('the moved code is'
+                .. ' renamed into %s\'s table `%s`, but still reaches %s, which the move did not bring — after the rename'
+                .. ' it reads `%s`, which does not hold it: wire those by hand'):format(dest, dtbl, table.concat(order, ', '),
+                dtbl), nil, nil, 'unbuilt')
         end
     end
     -- ★ THE REBIND (CART-1146): a moved LOCAL still called by name in its old file is EXPORTED from the new home and
@@ -1098,7 +1124,10 @@ function M.edits_for(plan)
                 if mi > 1 then ins[#ins + 1] = '' end
                 local src = vim.split(all[m.file], '\n', { plain = true })
                 for i = m.lines.s + 1, m.lines.e + 1 do
-                    ins[#ins + 1] = src[i]
+                    -- (renamed into the destination's table when the planner said so — CART-1422)
+                    local l = src[i]
+                    if m.retable and l then l = l:gsub('%f[%w_]' .. m.retable.from .. '%f[^%w_]', m.retable.to) end
+                    ins[#ins + 1] = l
                 end
             end
             for _, x in ipairs(plan.exports or {}) do ins[#ins + 1] = x end
