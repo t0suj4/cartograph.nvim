@@ -607,6 +607,30 @@ test('moveapply: reexport=true keeps the moved name on the source module', funct
     eq(6, okl and A.foo(5))
 end)
 
+-- ★ AND INTO AN EXISTING FILE (CART-1418's census): plan_ids took no `opts`, and the `opts` it handed collect() was
+-- an undeclared GLOBAL — always nil — so `reexport` was silently dropped for every move into a file that exists.
+test('moveapply: reexport=true keeps the moved name on the source module when the destination EXISTS', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files {
+        ['m.lua'] = table.concat({ 'local M = {}', 'function M.foo(x) return x + 1 end', 'return M' }, '\n'),
+        -- (the destination's table is ALSO called M: a differently-named one is CART-1422, a separate defect)
+        ['d.lua'] = table.concat({ 'local M = {}', 'return M' }, '\n'),
+    }
+    local root = st.data.root
+    local foo = node_by(st, 'M.foo') or node_by(st, 'foo')
+    local plan = assert(moveapply.plan_moveset(st, { foo.id }, 'd.lua', { arm = false, reexport = true }))
+    st.clear_stage(); st.stage(foo.id); st.set_dest('d.lua')
+    local okay, why = moveapply.apply(st, plan)
+    ok(okay, 'applied: ' .. tostring(why))
+    local src = table.concat(vim.fn.readfile(root .. '/m.lua'), '\n')
+    ok(src:find('M.foo = ', 1, true), 'the source rebinds the moved name: ' .. src)
+    package.path = root .. '/?.lua;' .. package.path
+    package.loaded['m'], package.loaded['d'] = nil, nil
+    local okl, A = pcall(require, 'm')
+    ok(okl, 'the rewritten module loads: ' .. tostring(A))
+    eq(6, okl and type(A) == 'table' and A.foo and A.foo(5))
+end)
+
 --- ★★★ THE PACKAGE ROOT IS NOT PART OF THE MODULE PATH (CART-0917), and this is
 --- pinned BOTH WAYS because a one-sided assertion would pass on a dead predicate.
 --- The resolver has consulted the declared `package_root` since it existed; the

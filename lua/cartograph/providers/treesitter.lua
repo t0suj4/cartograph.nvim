@@ -1749,6 +1749,7 @@ local function parse_lang_for(file)
         plang = H_LANG
     else
         -- base_for, not lang_for: cache the undisclaimed answer (see elang_for)
+        local _
         plang, _, discl = base_for(ext) -- the REAL registered grammar (typescript for .ts)
     end
     EXT_PLANG[ext] = { plang or false, discl or false }
@@ -5195,9 +5196,6 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                     vput(parts, er)
                     vput(parts, ec)
                 end
-            end
-            if head and (cnamed or cnamed == nil and c:named()) then
-                head = false
             end
             if c:child(0) then
                 if wdepth < WALK_SEG then

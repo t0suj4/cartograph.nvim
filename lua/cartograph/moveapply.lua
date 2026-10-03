@@ -719,7 +719,7 @@ end
 --- Build the MOVE plan from the staged move-set + destination.
 --- Everything the apply verifies rides along: refs, stamps, the
 --- generation, the insertion point (pinned by the dest stamp).
-function M.plan(store)
+function M.plan(store, opts)
     local ids = store.staged_ids()
     if #ids == 0 then
         return nil, 'nothing staged — dd cuts a function into the move-set', 'ill-posed'
@@ -727,7 +727,7 @@ function M.plan(store)
     if not store.dest then
         return nil, 'no destination — p on a file row sets it', 'ill-posed'
     end
-    return M.plan_ids(store, ids, store.dest)
+    return M.plan_ids(store, ids, store.dest, opts)
 end
 
 --- plan a MOVE from an EXPLICIT id set and destination, the way plan_extract_ids
@@ -737,7 +737,9 @@ end
 --- never the staged set, so an unarmed plan still previews.
 --- @param ids string[]  the move-set, explicitly
 --- @param dest string   an EXISTING file (that is what makes it a move)
-function M.plan_ids(store, ids, dest)
+-- ⚠ `opts` IS A PARAMETER (CART-1418): collect() below always took it, and this function passed an undeclared GLOBAL
+-- `opts` — nil — so `reexport` was silently dropped for every move into an existing file.
+function M.plan_ids(store, ids, dest, opts)
     if not ids or #ids == 0 then return nil, 'no functions to move', 'ill-posed' end
     local txn = require 'cartograph.txn'
     -- ★ THE CHECK THIS BRANCH NEVER HAD (CART-0577). plan_extract_ids has always
@@ -867,14 +869,14 @@ function M.plan_moveset(store, seed, dest, opts)
 
     local plan, why
     if exists then
-        -- ★ EXPLICIT if/else, NOT `arm and M.plan(store) or M.plan_ids(...)`:
+        -- ★ EXPLICIT if/else, NOT `arm and M.plan(store, opts) or M.plan_ids(...)`:
         -- M.plan returns nil on a refusal, so the `or` arm would fire and run the
         -- OTHER planner. That is the `f.absent and false or f.before` bug found in
         -- this same repo on 2026-08-27, one line long and invisible in review.
         if arm then
-            plan, why = M.plan(store)
+            plan, why = M.plan(store, opts)
         else
-            plan, why = M.plan_ids(store, set, dest)
+            plan, why = M.plan_ids(store, set, dest, opts)
         end
     else
         plan, why = M.plan_extract_ids(store, set, dest, opts)

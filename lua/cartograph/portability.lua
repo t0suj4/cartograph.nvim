@@ -62,6 +62,10 @@
 
 local M = {}
 
+-- (forward: callers above its definition reach it — CART-1418 found it a GLOBAL function, shadowed further down by
+-- a stray nil `local ext_lang`)
+local ext_lang
+
 --- Does `prof` provide `name`? Returns the EVIDENCE (which part of the profile
 --- answered) or nil. Several sources because profile artifacts differ: a
 --- distilled zig std is free-function-heavy, a hand-authored Factorio profile is
@@ -1383,8 +1387,6 @@ function ext_lang()
     end
     return _ext_lang
 end
-
-local ext_lang
 
 -- A name's provenance as one report cell: the first file, plus a COUNT of the others.
 -- Naming one file out of several and staying silent about the rest is the class this
