@@ -448,4 +448,95 @@ function M.content_dag(t)
     walk(t)
     return { root = root, nodes = nodes, count = count }
 end
+
+-- ── THE TERM WIRE (CART-1366, step 2): a term as a Merkle DAG of NODE RECORDS plus a SIDE MAP. A shared node holds only
+-- what eq compares (its id is its content); every other field — a span (`at`), a template's statistics, a grammar tag —
+-- is PER-OCCURRENCE and rides in `side`, keyed by the occurrence's path ('' for the root, '2/1' for kid 1 of kid 2),
+-- so two occurrences of one subterm can differ there without un-sharing it. The round trip is the oracle:
+-- wire_decode(wire_encode(t)) is deep-equal to t (through JSON text too). A field that is no JSON value is REFUSED by
+-- name, never dropped.
+local EQ_FIELDS = { k = true, v = true, n = true, h = true, rep = true, ctx = true, align = true, key = true, opt = true, kids = true }
+local function jsonable(x, depth)
+    depth = depth or 0
+    if depth > 32 then return false end
+    local ty = type(x)
+    if ty == 'string' or ty == 'boolean' or x == nil then return true end
+    if ty == 'number' then return x == x and x ~= math.huge and x ~= -math.huge end
+    if ty ~= 'table' or getmetatable(x) ~= nil then return false end
+    for k, v in pairs(x) do
+        if type(k) ~= 'string' and type(k) ~= 'number' then return false end
+        if not jsonable(v, depth + 1) then return false end
+    end
+    return true
+end
+--- t -> { v = 1, root, nodes = { [id] = { k, v, vt, n, h, rep, ctx, align, key, opt, kids = { id … } } },
+--- side = { [path] = { field = value } } } | nil, why
+function M.wire_encode(t)
+    local memo, nodes, side = {}, {}, {}
+    local root = M.content_id(t, memo)
+    local why
+    local function walk(u, path)
+        if why then return end
+        local h = memo[u]
+        if not nodes[h] then
+            local rec = { k = u.k, n = u.n, h = u.h, rep = u.rep, ctx = u.ctx, align = u.align, key = u.key, opt = u.opt }
+            if u.k == 'lit' then rec.v, rec.vt = u.v, type(u.v) end
+            if rec.key ~= nil and not jsonable(rec.key) then why = 'a merge key that is no JSON value at ' .. path; return end
+            if u.kids then -- (a node with no kids list keeps none: `name`, `lit`)
+                local kids = {}
+                if u.align == 'keyed' then -- ★ a KEYED node's record holds its kids in KEY order (its id ignores order)
+                    for _, e in ipairs(M.keys(u)) do kids[#kids + 1] = memo[e.kid] end
+                else
+                    for i, c in ipairs(u.kids) do kids[i] = memo[c] end
+                end
+                rec.kids = kids
+            end
+            nodes[h] = rec
+        end
+        local extra
+        -- …and each OCCURRENCE's written order is its own: a permutation of the key order, kept only where it differs
+        if u.align == 'keyed' and u.kids then
+            local perm, moved = {}, false
+            for pos, e in ipairs(M.keys(u)) do perm[e.i] = pos; if e.i ~= pos then moved = true end end
+            if moved then extra = { ['@order'] = perm } end
+        end
+        for f, x in pairs(u) do
+            if not EQ_FIELDS[f] then
+                if not jsonable(x) then why = ('the field `%s` at %s is no JSON value'):format(tostring(f), path == '' and 'the root' or path); return end
+                extra = extra or {}; extra[f] = x
+            end
+        end
+        if extra then side[path] = extra end
+        for i, c in ipairs(u.kids or {}) do walk(c, path == '' and tostring(i) or (path .. '/' .. i)) end
+    end
+    walk(t, '')
+    if why then return nil, why end
+    return { v = 1, root = root, nodes = nodes, side = side }
+end
+--- the wire -> a fresh TREE (no table shared between occurrences: a decoded term may be edited in place) | nil, why
+function M.wire_decode(w)
+    if type(w) ~= 'table' or w.v ~= 1 or not w.nodes or not w.root then return nil, 'not a term wire (v = 1)' end
+    local why
+    local function build(id, path)
+        if why then return nil end
+        local rec = w.nodes[id]
+        if not rec then why = 'no node ' .. tostring(id) .. ' at ' .. path; return nil end
+        local u = {}
+        for f, x in pairs(rec) do if f ~= 'kids' and f ~= 'vt' then u[f] = x end end
+        if rec.k == 'lit' then
+            if rec.vt == 'number' then u.v = tonumber(rec.v) elseif rec.vt == 'boolean' then u.v = rec.v == true else u.v = rec.v end
+        end
+        local here = (w.side or {})[path] or {}
+        if rec.kids then
+            u.kids = {}
+            local perm = here['@order'] -- (written position i holds the record's kid perm[i])
+            for i = 1, #rec.kids do u.kids[i] = build(rec.kids[perm and perm[i] or i], path == '' and tostring(i) or (path .. '/' .. i)) end
+        end
+        for f, x in pairs(here) do if f ~= '@order' then u[f] = x end end
+        return u
+    end
+    local t = build(w.root, '')
+    if why then return nil, why end
+    return t
+end
 end
