@@ -22,8 +22,11 @@ local function repo_of_toolbelt()
 end
 
 --- copy `repo` (everything but .git) into a fresh scratch root -> root | nil, why
-local function scratch_copy(repo)
-    local root = vim.fn.tempname() .. '-mutation'
+local function scratch_copy(repo, keep)
+    -- (a KEPT copy outlives this process: nvim deletes its own tempdir — where tempname() points — at exit, so keep = 1
+    -- under it kept nothing; measured 2026-10-03, the copy was gone when the command returned)
+    local root = keep and (vim.fn.stdpath('cache') .. '/cartograph/mutation-kept/' .. os.date('%Y%m%dT%H%M%S') .. '-' .. vim.uv.hrtime() % 1e6)
+        or (vim.fn.tempname() .. '-mutation')
     vim.fn.mkdir(root, 'p')
     local obj = vim.system({ 'bash', '-c', 'tar --exclude=.git -C "$1" -cf - . | tar -C "$2" -xf -', 'copy', repo, root },
         { text = true }):wait(120000)
@@ -34,7 +37,7 @@ end
 local function measure(_, p)
     local repo = p.repo or repo_of_toolbelt()
     local v = { file = p.file, spec = p.spec, repo = repo }
-    local root, why = scratch_copy(repo)
+    local root, why = scratch_copy(repo, p.keep)
     if not root then v.error = why; return v end
     v.scratch = root
     local function done() if not p.keep then vim.fn.delete(root, 'rf'); v.scratch = nil end return v end

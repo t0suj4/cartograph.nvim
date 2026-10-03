@@ -48,7 +48,13 @@ function M.run(root, spec, timeout, env)
     local p, f, s
     for a, b, c in out:gmatch('(%d+) passed, (%d+) failed, (%d+) skipped') do p, f, s = tonumber(a), tonumber(b), tonumber(c) end
     if not p then return nil, ('no summary line from %s/tests/run.sh (exit %s)'):format(root, tostring(obj.code)) end
-    return { passed = p, failed = f, skipped = s, ran = p + f, code = obj.code,
+    -- the NAMES of the failed tests (the harness's `  FAIL  <name>` lines) — WHICH tests a mutation broke is what a
+    -- perturbation experiment reads (CART-1398: swap a semantics, see who depends on it). The SUMMARY still decides the
+    -- counts: a lost newline can glue a FAIL onto the line before it (harness #11), so the names are read anywhere in a
+    -- line and never counted.
+    local failures = {}
+    for name in out:gmatch('  FAIL  ([^\n]+)') do failures[#failures + 1] = vim.trim(name) end
+    return { passed = p, failed = f, skipped = s, ran = p + f, code = obj.code, failures = failures,
         summary = ('%d passed, %d failed, %d skipped'):format(p, f, s) }
 end
 
@@ -92,7 +98,7 @@ M.FIXTURE = {
         "local pass, fail = 0, 0",
         "package.path = 'lib/?.lua;' .. package.path",
         "local f = loadfile('tests/' .. spec .. '.lua')",
-        "if f then local ok = pcall(f, function (c) if c then pass = pass + 1 else fail = fail + 1 end end); if not ok then fail = fail + 1 end end",
+        "if f then local ok = pcall(f, function (c) if c then pass = pass + 1 else fail = fail + 1; io.write(('  FAIL  check %d\\n'):format(pass + fail)) end end); if not ok then fail = fail + 1 end end",
         "io.write(('%d passed, %d failed, %d skipped\\n'):format(pass, fail, 0))",
     }, '\n') .. '\n',
     ['tests/guard_spec.lua'] = "local check = ...\nlocal g = require('guard')\ncheck(g.positive(1) == true)\ncheck(g.positive(-1) == false)\ncheck(g.positive(0) == false)\ncheck(g.nonempty({}) == false)\n",
@@ -106,10 +112,10 @@ M.FIXTURE = {
 
 M.entry.examples = {
     {
-        name = 'a spec with a failing check: the claim holds',
+        name = 'a spec with a failing check: the claim holds, and the failed test is NAMED',
         files = M.FIXTURE,
         params = function (store) return { spec = 'broken_spec', root = store.data.root } end,
-        expect = { holds = true },
+        expect = { holds = true, check = function (v) return vim.deep_equal(v.failures, { 'check 1' }), vim.inspect(v.failures) end },
     },
     {
         name = 'a green spec: the claim fails, and says what ran',
