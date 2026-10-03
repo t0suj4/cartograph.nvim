@@ -197,10 +197,38 @@ local function from_value(v, d)
                 end
             end
         end
+        -- DEBUG AND MANAGEMENT LISTENERS (CART-1388, the audit drill-down's finding of the walk itself): a JVM started
+        -- with a JDWP agent in server mode bound to every interface, or a remote JMX port with authentication off, is
+        -- remote code execution for anything that reaches the pod IP. Read from EVERY string the container is started
+        -- with — its command / args items and its env values (JAVA_TOOL_OPTIONS and kin, without listing them).
+        -- ⚠ PRECISION: JDWP only with server=y and an address on all interfaces (`*:N`, `0.0.0.0:N`, `[::]:N`) — a bare
+        -- `address=N` binds localhost on JDK 9+; JMX only with authenticate=false AND a remote port (no port: local attach).
+        local function listeners(c, init)
+            local strings = {}
+            for _, key in ipairs({ 'command', 'args' }) do
+                for _, x in ipairs(list(get(c, key))) do if type(x) == 'string' then strings[#strings + 1] = x end end
+            end
+            for _, e in ipairs(list(get(c, 'env'))) do
+                local val = str(get(e, 'value'))
+                if val then strings[#strings + 1] = val end
+            end
+            local all = table.concat(strings, ' ')
+            local cname = str(get(c, 'name')) or '?'
+            for opts in all:gmatch('%-agentlib:jdwp=([^%s"\']+)') do d.debug = d.debug or {}; table.insert(d.debug, { jdwp = opts, container = cname, init = init }) end
+            for opts in all:gmatch('%-Xrunjdwp:([^%s"\']+)') do d.debug = d.debug or {}; table.insert(d.debug, { jdwp = opts, container = cname, init = init }) end
+            if all:find('com%.sun%.management%.jmxremote%.authenticate=false') then
+                local port = all:match('com%.sun%.management%.jmxremote%.port=(%d+)')
+                if port then
+                    d.debug = d.debug or {}
+                    table.insert(d.debug, { jmx = port, ssl_off = all:find('com%.sun%.management%.jmxremote%.ssl=false') ~= nil, container = cname, init = init })
+                end
+            end
+        end
         d.init_images = {}
         for _, c in ipairs(list(get(pod, 'initContainers'))) do
             d.init_images[#d.init_images + 1] = str(get(c, 'image'))
             shell(c)
+            listeners(c, true)
         end
         for i, c in ipairs(list(get(pod, 'containers'))) do
             if i == 1 then d.image = str(get(c, 'image')) end
@@ -217,6 +245,7 @@ local function from_value(v, d)
                 if cm then d.envfrom = d.envfrom or {}; d.envfrom[#d.envfrom + 1] = cm end
             end
             shell(c)
+            listeners(c, false)
         end
     end
     if d.kind == 'Service' then
@@ -513,7 +542,7 @@ function M.attach(data, opts)
                         stats.probes = stats.probes or {}
                         stats.probes[#stats.probes + 1] = { rel = rel, node = d.node, at = M.site(d, pr.path), variant = variant, name = d.name, kind = pr.kind, port = pr.port, service = pr.service, route = pr.route, path = pr.path }
                     end
-                    if (d.refs and #d.refs > 0) or d.podlabels then
+                    if (d.refs and #d.refs > 0) or d.podlabels or d.debug then
                         stats.docs_soft = stats.docs_soft or {}
                         table.insert(stats.docs_soft, { rel = rel, variant = variant, d = d })
                     end
@@ -691,6 +720,35 @@ function M.attach(data, opts)
     end
     table.sort(soft.dangling)
     table.sort(soft.empty)
+    -- the DEBUG / MANAGEMENT LISTENERS each workload starts (CART-1388), at the line that starts them
+    stats.exposed = {}
+    for _, e in ipairs(stats.docs_soft or {}) do
+        local d = e.d
+        local function line_of(needle)
+            local l = 0
+            for line in ((d.chunk or '') .. '\n'):gmatch('([^\n]*)\n') do
+                l = l + 1
+                if line:find(needle, 1, true) then return (d.line0 or 0) + l end
+            end
+            return (d.line0 or 0) + 1
+        end
+        for _, x in ipairs(d.debug or {}) do
+            local where = ('%s/%s %scontainer %s'):format(d.kind, d.name or '?', x.init and 'init ' or '', x.container)
+            if x.jdwp then
+                local o = {}
+                for k, v in x.jdwp:gmatch('([%w_]+)=([^,]*)') do o[k] = v end
+                local host = (o.address or ''):match('^(.*):%d+$')
+                if o.server == 'y' and host and (host == '*' or host == '0.0.0.0' or host == '::' or host == '[::]') then
+                    stats.exposed[#stats.exposed + 1] = { finding = 'debug-listener', file = e.rel, line = line_of(x.jdwp),
+                        message = ('%s starts a JDWP debugger listening on all interfaces (%s): remote code execution for anything that reaches the pod'):format(where, o.address) }
+                end
+            elseif x.jmx then
+                stats.exposed[#stats.exposed + 1] = { finding = 'jmx-unauthenticated', file = e.rel, line = line_of('jmxremote.port=' .. x.jmx),
+                    message = ('%s opens remote JMX on port %s with authentication off%s: anything that reaches the pod can invoke MBeans'):format(where, x.jmx, x.ssl_off and ' and SSL off' or '') }
+            end
+        end
+    end
+    table.sort(stats.exposed, function (a, b) if a.file ~= b.file then return a.file < b.file end return a.line < b.line end)
 
     -- ── PASS 2c: THE DELETION FRONTIER (CART-0139, design kubernetes/: "is this safe to delete?" is a question about
     -- ABSENT edges). Only DATA kinds are asked about — derived from the API table: the kinds some reference names

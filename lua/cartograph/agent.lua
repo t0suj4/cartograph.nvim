@@ -3370,6 +3370,7 @@ local function k8s_rows(s, rows)
     for _, d in ipairs(s.soft and s.soft.dangling or {}) do rows[#rows + 1] = { finding = 'dangling-reference', message = d } end
     for _, d in ipairs(s.soft and s.soft.empty or {}) do rows[#rows + 1] = { finding = 'selector-matches-nothing', message = d } end
     for _, d in ipairs(s.dangling or {}) do rows[#rows + 1] = { finding = 'one-sided-peer', message = d } end
+    for _, x in ipairs(s.exposed or {}) do rows[#rows + 1] = { finding = x.finding, file = x.file, line = x.line, message = x.message } end
     -- (the FIELD SCHEMA: unknown fields and wrong types, at their lines — CART-1308)
     for _, f in ipairs(s.schema or {}) do
         rows[#rows + 1] = { finding = 'schema-' .. f.problem, message = require('cartograph.k8sschema').text(f), file = f.file, line = f.line, path = f.path }

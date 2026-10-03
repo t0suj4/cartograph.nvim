@@ -296,3 +296,41 @@ test('k8s: the trace is a VERB — k8s_traces addressed by Kind/name or by file 
     local r2 = agent.answer(store, 'k8s_traces', {})
     eq('no-address', r2.refusal.rule)
 end)
+-- CART-1388 (the audit drill-down's finding of the walk itself, design corpus cve-drilldown/01): a container started
+-- with a JDWP debugger in server mode on all interfaces, or remote JMX with authentication off, is remote code execution
+-- for anything reaching the pod — found by hand on a real deployment, "larger than all 154 rows put together".
+test('k8s: DEBUG and MANAGEMENT LISTENERS a container is started with — JDWP on all interfaces, JMX without auth — at their lines; localhost, client mode and authenticated JMX are not', function ()
+    if not ready() then skip 'no yaml parser' end
+    local text = table.concat({
+        'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: cdc', 'spec:',                     -- 1-5
+        '  template:', '    metadata:', '      labels:', '        app: cdc', '    spec:',                   -- 6-10
+        '      initContainers:', '      - name: seed', '        image: seed',                             -- 11-13
+        '        env:', '        - name: JAVA_TOOL_OPTIONS',                                             -- 14-15
+        '          value: "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=0.0.0.0:8000"', -- 16
+        '      containers:', '      - name: app', '        image: cdc', '        args:',                  -- 17-20
+        '        - "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:7897"',              -- 21
+        '        - "-Dcom.sun.management.jmxremote.port=9010"',                                          -- 22
+        '        - "-Dcom.sun.management.jmxremote.authenticate=false"',                                 -- 23
+        '        - "-Dcom.sun.management.jmxremote.ssl=false"',                                          -- 24
+        '---', 'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: safe', 'spec:',          -- 25-30
+        '  template:', '    metadata:', '      labels:', '        app: safe', '    spec:',               -- 31-35
+        '      containers:', '      - name: a', '        image: a', '        command:',                  -- 36-39
+        '        - java', '        - "-agentlib:jdwp=transport=dt_socket,server=y,address=localhost:5005"', -- 40-41
+        '        - "-agentlib:jdwp=transport=dt_socket,server=y,address=5006"',                          -- 42 (JDK 9+: localhost)
+        '        - "-agentlib:jdwp=transport=dt_socket,server=n,address=*:5007"',                        -- 43 (client mode: connects out)
+        '        - "-Dcom.sun.management.jmxremote.port=9011"',                                          -- 44 (auth on by default)
+        '      - name: b', '        image: b', '        args:',                                           -- 45-47
+        '        - "-Dcom.sun.management.jmxremote.authenticate=false"' }, '\n') .. '\n'                -- 48 (no port: local attach)
+    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {} }
+    local s = K.attach(data)
+    eq({
+        { 'debug-listener', 16, 'Deployment/cdc init container seed starts a JDWP debugger listening on all interfaces (0.0.0.0:8000): remote code execution for anything that reaches the pod' },
+        { 'debug-listener', 21, 'Deployment/cdc container app starts a JDWP debugger listening on all interfaces (*:7897): remote code execution for anything that reaches the pod' },
+        { 'jmx-unauthenticated', 22, 'Deployment/cdc container app opens remote JMX on port 9010 with authentication off and SSL off: anything that reaches the pod can invoke MBeans' },
+    }, vim.tbl_map(function (x) return { x.finding, x.line, x.message } end, s.exposed))
+    -- and the agent verb serves them as findings, at their file and line
+    local d = require('cartograph.agent').answer({ data = data }, 'k8s_findings', {})
+    local got = {}
+    for _, r in ipairs(d.result) do if r.finding == 'debug-listener' or r.finding == 'jmx-unauthenticated' then got[#got + 1] = r.file .. ':' .. r.line end end
+    eq({ 'all.yaml:16', 'all.yaml:21', 'all.yaml:22' }, got)
+end)
