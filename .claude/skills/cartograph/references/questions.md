@@ -92,6 +92,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 | Registered vs declared namespaces, joined by URI (the older CONFORM) | `tools/rootjoin.lua [<left>] [<right>] [--rows]` |
 | Could we emit a client for this endpoint, and if not, who blocks it? | `tools/endpointcensus.lua <corpus|dir> [--rows]` |
 | Who implements and who calls each gRPC method across languages? | `tools/grpcjoin.lua [<corpus>|<dir>]` |
+| Which files call an EXTERNAL / library function (`vim.json.encode`, a stdlib member) — a census of a dependency's use sites? | MCP `mentions { name }` — the files where the IDENTIFIER occurs, each marked `resolved` when a call by that name landed on a definition in the graph; it is NAME-level (the last segment: ask `encode`, not `vim.json.encode` — a dotted name answers `frontier`, no file), one row per (file, name), never per site, and it never claims two files mean the same thing. MCP `externals` — every call base that LEAVES the graph with its members, its files and how the boundary was decided. MEASURED 2026-10-03 (the CART-1366 census): `encode` in 45 files across lua/ tools/ tests/ (9 resolved) where a grep of lua/cartograph alone found 24. ⚠ Per SITE, and WHAT each call sends (the argument's value shape), is not answered here — CART-1345 (records through parameters) and a per-site external altitude are the gaps. |
 
 ## Templates, clones, the algebra
 
