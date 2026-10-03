@@ -47,11 +47,16 @@ end
 --- opts: roots, flags (the host's own argv flags, so a replay opens the graph the same way), repo, path
 function M.open(opts)
     local path = opts.path or M.path(opts.roots[1])
-    local stamp = { commit = M.commit(opts.repo), roots = opts.roots, flags = opts.flags or {} }
+    -- ★ TWO STAMPS, because a replay pair has two sides that can move: the CARTOGRAPH commit (the build that answered)
+    -- and each ROOT's own (the code it answered about — its git HEAD, `+dirty` with edits, 'unknown' outside git). A
+    -- changed answer under a moved subject is not a regression of the build.
+    local subjects = {}
+    for i, r in ipairs(opts.roots) do subjects[i] = M.commit(r) end
+    local stamp = { commit = M.commit(opts.repo), roots = opts.roots, flags = opts.flags or {}, subjects = subjects }
     local L = { path = path, stamp = stamp }
     function L.record(verb, args, doc, status)
         local rec = { ts = os.date('!%Y-%m-%dT%H:%M:%SZ'), commit = stamp.commit, roots = stamp.roots, flags = stamp.flags,
-            verb = verb, args = args, answer = M.envelope(doc, status) }
+            subjects = stamp.subjects, verb = verb, args = args, answer = M.envelope(doc, status) }
         local fd = io.open(path, 'a')
         if not fd then return nil, 'cannot append to ' .. path end
         fd:write(vim.json.encode(rec), '\n')

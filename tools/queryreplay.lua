@@ -28,7 +28,7 @@ for i, r in ipairs(recs) do
 end
 
 local after_commit = Q.commit(repo)
-local same, changed, failed, before_commits = 0, 0, 0, {}
+local same, changed, failed, before_commits, subject_moved = 0, 0, 0, {}, 0
 for _, key in ipairs(order) do
     local g = groups[key]
     local lines = { vim.json.encode({ jsonrpc = '2.0', id = 0, method = 'initialize', params = vim.empty_dict() }) }
@@ -41,6 +41,9 @@ for _, key in ipairs(order) do
     for _, r in ipairs(g.roots) do cmd[#cmd + 1] = r end
     for _, f in ipairs(g.flags) do cmd[#cmd + 1] = f end
     local res = vim.system(cmd, { stdin = table.concat(lines, '\n') .. '\n', text = true }):wait(1800000)
+    -- the SUBJECT now, per root: a record answered about other code than this is flagged, never blamed on the build
+    local now = {}
+    for i, r in ipairs(g.roots) do now[i] = Q.commit(r) end
     local got = {}
     for line in ((res and res.stdout) or ''):gmatch('[^\n]+') do
         local ok, m = pcall(vim.json.decode, line)
@@ -59,10 +62,15 @@ for _, key in ipairs(order) do
             if not okd or type(doc) ~= 'table' then doc = {} end
             local status = m.result.isError and 'error' or (type(doc.refusal) == 'table' and 'refusal' or 'ok')
             local d = Q.diff(r.answer, Q.envelope(doc, status))
+            local moved = {}
+            for i, s in ipairs(r.subjects or {}) do
+                if s ~= now[i] then moved[#moved + 1] = ('%s %s -> %s'):format(g.roots[i], s, now[i]) end
+            end
+            if #moved > 0 then subject_moved = subject_moved + 1 end
             if #d == 0 then same = same + 1; io.write(('%s\n    SAME\n'):format(label))
             else
                 changed = changed + 1
-                io.write(('%s\n    CHANGED\n'):format(label))
+                io.write(('%s\n    CHANGED%s\n'):format(label, #moved > 0 and (' (SUBJECT MOVED: ' .. table.concat(moved, '; ') .. ' — not only the build changed)') or ''))
                 for _, x in ipairs(d) do io.write(('      %-8s %s -> %s\n'):format(x.field, tostring(x.before), tostring(x.after))) end
             end
         end
@@ -70,4 +78,5 @@ for _, key in ipairs(order) do
 end
 io.write(('queryreplay %s: %d record(s) (%d unreadable line(s)) — %d same, %d changed, %d failed\n'):format(logf, #recs, bad, same, changed, failed))
 io.write(('  before: %s\n  after:  %s\n'):format(table.concat(vim.tbl_keys(before_commits), ', '), after_commit))
+if subject_moved > 0 then io.write(('  ⚠ %d record(s) were answered about a SUBJECT that has since moved (its own commit differs): a change there is not only the build\'s\n'):format(subject_moved)) end
 if gate and (changed > 0 or failed > 0) then os.exit(1) end

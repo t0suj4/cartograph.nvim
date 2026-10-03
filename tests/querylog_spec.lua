@@ -67,3 +67,20 @@ test('queryreplay: the logged queries re-asked against this build — the same a
     eq(1, d.code, 'a changed answer fails --gate')
     ok(d.stdout:find('absence  frontier -> absent', 1, true), d.stdout)
 end)
+test('queryreplay: an answer that changed because the CODE moved says so — each root\'s own commit is stamped and compared', function ()
+    if not ready() then skip 'no lua parser' end
+    local root, log = tree(), vim.fn.tempname() .. '.jsonl'
+    local function git(...) return vim.system({ 'git', '-C', root, '-c', 'user.email=t@t', '-c', 'user.name=t', ... }, { text = true }):wait() end
+    git('init', '-q'); git('add', '.'); git('commit', '-q', '-m', 'one')
+    serve(root, log, { { 'mentions', { name = 'freshname' } } })
+    local recs = assert(Q.read(log))
+    ok(recs[1].subjects and recs[1].subjects[1]:match('^%x+$'), 'the subject is stamped with its own commit: ' .. vim.inspect(recs[1].subjects))
+    eq('absent', recs[1].answer.absence)
+    -- the CODE moves (a new commit mentions the name): the answer changes, and the replay names the subject, not the build
+    -- (an EDIT of an existing file: a file ADDED since the cache was written loses its mentions on a warm open, CART-1393)
+    local fd = assert(io.open(root .. '/a.lua', 'w')); fd:write('local function walk(t) return t end\nlocal freshname = 1\nreturn walk\n'); fd:close()
+    git('add', '.'); git('commit', '-q', '-m', 'two')
+    local r = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', repo .. '/tools/queryreplay.lua', log }, { text = true }):wait(600000)
+    ok(r.stdout:find('CHANGED (SUBJECT MOVED: ', 1, true), r.stdout)
+    ok(r.stdout:find('answered about a SUBJECT that has since moved', 1, true), r.stdout)
+end)
