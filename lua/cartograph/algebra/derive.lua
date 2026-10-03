@@ -991,6 +991,36 @@ function D.generalize(instances, opts)
         values[k] = r.right({})
         T = r.template
     end
+    -- ★ A MEMBER THAT LACKS AN OPTIONAL PAIR OWES NO VALUE UNDER IT (CART-1395). The fold is pairwise: when a later
+    -- member's value differs under a pair an EARLIER member lacks, the join that mints the value hole fills every
+    -- earlier member from the template's constant — so {a=1} read "x" under b, beside {a=1,b='x'} and {a=1,b='y'},
+    -- where generalize reads ⊥ (D.kv_generalize differed from native on 6 of 49 jenkins-infra families, all this).
+    -- The fold cannot see it pairwise; the whole column can: a hole whose site lies under a presence mark that a
+    -- member holds `absent` is ⊥ for that member — before the domains below are derived from the values.
+    local H = D.sites(T)
+    local marks = {}
+    for p, e in pairs(H) do
+        if e.presence then for _, s in ipairs(e.sites) do marks[#marks + 1] = { p = p, path = s.path } end end
+    end
+    if #marks > 0 then
+        local function under(path, mark)
+            if #path <= #mark then return false end
+            for x = 1, #mark do if path[x] ~= mark[x] then return false end end
+            return true
+        end
+        for h, e in pairs(H) do
+            for _, s in ipairs(e.sites) do
+                for _, m in ipairs(marks) do
+                    if m.p ~= h and under(s.path, m.path) then
+                        for i = 1, #values do
+                            local pv = values[i][m.p]
+                            if type(pv) == 'table' and pv.k == 'absent' then values[i][h] = nil end
+                        end
+                    end
+                end
+            end
+        end
+    end
     T.edits = {}
     -- join sees one fragment at a time and writes `open` for a fragment with holes inside; the
     -- fold has the whole column, so the derived domains are recomputed from it (DOMAINS.md),
@@ -1588,9 +1618,10 @@ function D.kv_eq_keyed(x, y, keyfield)
     keyfield = keyfield or 'name'
     return B.eq(B.kv_term(x, { keyfield = keyfield }), B.kv_term(y, { keyfield = keyfield }))
 end
--- ⚠ EXACT ONLY VIA THE HAND-WRITTEN generalize until CART-1395: D.generalize gives a member absent under a presence hole a
--- neighbour's value (6 of 49 jenkins-infra families differ), and DERIVE=kv_generalize stays green because no spec reads
--- such a value vector — the gate cannot see it.
+-- ⚠ NOT YET EXACT, AND WHERE IT IS NOT: the jenkins-infra differential (49 families, whole record) reads SAME 47 since
+-- CART-1395 (a member absent under a presence hole no longer takes a neighbour's value; algebra_spec reads that value
+-- vector now, so the gate can see it). The 2 left are PRESENCE-HOLE GROUPING — the fold merges marks the n-ary
+-- generalize keeps apart (CART-1423).
 function D.kv_generalize(instances, opts)
     opts = opts or {}
     local keyfield = opts.keyfield or 'name'

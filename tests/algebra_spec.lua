@@ -486,6 +486,25 @@ test('algebra seam: a presence mark on the template ROOT is ignored, by match an
     eq(true, A.instance_of(T, T), 'instance_of is reflexive on it')
 end)
 
+-- ★ A MEMBER THAT LACKS AN OPTIONAL PAIR OWES NO VALUE UNDER IT (CART-1395). The VALUE VECTOR is asserted, because
+-- no spec read one and DERIVE=generalize stayed green while the derived fold gave {a=1} the neighbour's "x". Written
+-- against whichever generalize is installed: the hand-written one here, the fold of join under DERIVE=generalize.
+test('algebra seam: generalize owes a member that LACKS an optional pair no value under it', function ()
+    local A = need()
+    local function O(ps) local o, keys = {}, {}; for _, p in ipairs(ps) do o[p[1]] = p[2]; keys[#keys + 1] = p[1] end; return { o = o, keys = keys } end
+    local inst = A.kv_terms({ O{ { 'a', 1 } }, O{ { 'a', 1 }, { 'b', 'x' } }, O{ { 'a', 1 }, { 'b', 'y' } } })
+    local g = A.generalize(inst)
+    local col
+    for h, e in pairs(g.template.holes) do
+        if not e.presence then
+            col = {}
+            for i = 1, 3 do local v = g.values[i][h]; col[i] = v == nil and '⊥' or A.show(v) end
+        end
+    end
+    ok(col, 'there is a value hole under b')
+    eq('⊥;"x";"y"', table.concat(col, ';'), 'the member without b owes no value there')
+end)
+
 -- ⚠ AN ENVIRONMENT FAULT IS NOT AN ANSWER: a refusal from `anti_unify` would reach
 -- `element_template` as `alignable = false`, the same verdict ~70% of real
 -- containers earn honestly — so a missing algebra RAISES (CART-0939).
