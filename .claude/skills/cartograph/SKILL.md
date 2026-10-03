@@ -22,12 +22,14 @@ lenses) is for humans and you cannot use it.
 | `refused` | something might qualify and a rule declined to pick | **do not** treat as nothing — read `absence_why.evidence` |
 | `frontier` | the analysis cannot see this far | a different tool, or accept the limit |
 | `unavailable` | the capability is missing on this graph or host | change the invocation |
-| `unbuilt` | the artifact is produced by a step nobody ran (codegen, a build) | run the build, then re-open |
+| `unbuilt` | cartograph has no machinery for this question yet (a capability gap) | not an answer about the code — a ticket; use another tool meanwhile |
 
-`absent` is the **only** one that licenses acting. `unbuilt` exists because it
-used to be reported as `absent`: a reading can be complete over the files that
-exist and still be incomplete over the system, when something outside them
-produces more of it.
+`absent` is the **only** one that licenses acting. A file a build step would
+produce (codegen, a copy step) is `frontier` with `absence_why.premise =
+"unproduced"`: a reading can be complete over the files that exist and still be
+incomplete over the system, so it is never `absent` — run the build, then
+re-open. `unbuilt` means the same on write verbs: a stop of class `unbuilt` is a
+capability the verb does not have yet.
 
 Every empty answer also carries a **`warrant`** — a second, independent question:
 `absence` asks why the GRAPH is silent, `warrant` asks why nothing OBSERVED it

@@ -93,7 +93,8 @@ M.LADDER = {
 -- ⚠⚠ AND AN UNGRADED HOP IS RETURNED, NOT SWALLOWED. A hop whose mechanism has
 -- no rung on this ladder (the banked `convention`, or anything a caller invents)
 -- cannot be approximated by its nearest neighbour — that is exactly the mistake
--- `unbuilt` exists to prevent on the absence axis. The count comes back so a
+-- CART-0831 caught on the absence axis (a build product read as `absent`, the
+-- nearest kind, which licenses acting). The count comes back so a
 -- caller must render it; an empty or wholly-ungraded list returns `nil` and the
 -- caller must say UNGRADED rather than "no downgrade", which is the
 -- guard-that-reads-like-a-pass shape.
@@ -148,7 +149,8 @@ end
 --- what makes the set checkable, and puts it where tiers live.
 --- ⚠ NOT bit-packed, unlike M.LADDER — fold.lua encodes M.RANK and nothing
 --- else, so a new row here is one line plus its consumers. `unbuilt` arrived
---- that way; do not read the ladder's "the table is full" note as applying.
+--- that way (CART-0831; re-meant by CART-1389); do not read the ladder's "the
+--- table is full" note as applying.
 M.ABSENCE = {
     -- the reading was COMPLETE and found nothing. The only one that licenses
     -- acting, and only where the world is closed (see the upper-bound rule).
@@ -156,21 +158,28 @@ M.ABSENCE = {
     -- a rule declined to draw the edge: the graph SPEAKS about this
     { name = 'refused',     licenses = 'nothing' },
     -- the region was never analysed (no parser, unparsed file, outside the root)
+    -- — or it does not EXIST yet: a build step nobody ran produces it (premise
+    -- `unproduced`; CART-0831's measured instance: no `*Grpc.java` in the tree
+    -- because protoc writes it at build time; a chart's `Files.Get` of a file a
+    -- Maven copy step writes). A reading complete over the TREE is then false of
+    -- the SYSTEM, so it can never be `absent`; the remedy ("run the build,
+    -- re-open") is `absence_why` data, never a license.
     { name = 'frontier',    licenses = 'nothing' },
     -- the DATA CLASS was never extracted (a thin index, calls not materialised)
     { name = 'unavailable', licenses = 'nothing' },
-    -- ★★★ THE FIFTH KIND, AND IT IS THE ONE THE FALSIFIER FOUND (CART-0831).
-    -- A reading can be COMPLETE OVER THE ARTIFACTS READ and still not be
-    -- complete over the system, because something outside those artifacts
-    -- PRODUCES more of them. So this is not `absent` (whose 'act' license would
-    -- be actively wrong) and not `frontier` (the region was not skipped — it
-    -- does not exist yet).
-    -- NAMED INSTANCE, measured on microservices-demo: java is present, the
-    -- gRPC contract declares its rpcs, and NO `*Grpc.java` exists in the tree
-    -- because protoc runs at BUILD time. Reading the tree completely and
-    -- finding no java binding is true of the tree and false of the system.
-    -- ⚠ The remedy ("run the build, re-fold") is `absence_why` data, never a
-    -- license: an unrun producer licenses NOTHING on its own.
+    -- cartograph has NO MACHINERY for this question yet — a CAPABILITY gap, not
+    -- a fact about the code. The SAME meaning as the write axis's stop class
+    -- (hazard.CLASSES.unbuilt: "the verb could do this and does not yet — FAIL
+    -- and file the ticket"), so one word means one thing on both axes, and the
+    -- remedy is a ticket. Named instance: the audit drill-down's hop 3 — does
+    -- the process an image runs load this library? — before an image provider
+    -- exists (CART-1380, CART-1381).
+    -- ★★ HISTORY (CART-1389): this name first meant "produced by a build step
+    -- nobody ran" (CART-0831) while every write-verb stop already used it for a
+    -- missing capability: one word, two axes, two meanings, and the skill taught
+    -- agents the one no verb emitted. Resolved the way `warrant` was (header
+    -- above): the build-product case moved to `frontier` (premise `unproduced`),
+    -- and this name took the author's meaning.
     { name = 'unbuilt',     licenses = 'nothing' },
 }
 

@@ -1816,9 +1816,9 @@ M.EDGE_KINDS = { ref = true, import = true, use = true, reg = true }
 M.ABSENCE = {
     absent      = { licenses = 'act',     why = 'the reading was complete and found nothing' },
     refused     = { licenses = 'nothing', why = 'a rule declined to draw the edge; a navigable fork' },
-    frontier    = { licenses = 'nothing', why = 'the region was never analysed' },
+    frontier    = { licenses = 'nothing', why = 'the region was never analysed, or a build step that produces it never ran (premise unproduced)' },
     unavailable = { licenses = 'nothing', why = 'the data class was never extracted' },
-    unbuilt     = { licenses = 'nothing', why = 'something outside produces more artifacts; no counterpart in this algebra' },
+    unbuilt     = { licenses = 'nothing', why = 'no machinery for this question yet: a capability gap, a ticket (CART-1389)' },
 }
 local function absence(name, at, why, extra)
     assert(M.ABSENCE[name], 'undeclared absence: ' .. tostring(name)) -- CART-0831: the set is a table

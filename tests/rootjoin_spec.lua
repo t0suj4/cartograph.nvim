@@ -236,7 +236,7 @@ test('rootjoin: the tool runs on the fixture and reports its populations', funct
     ok(not out:find('rung%(call%) = xlang'), 'the flat overclaim must be gone')
     -- ⚠ AND THE UNGRADED HOP IS VISIBLE. The tuple's meaning comes from an
     -- INTERPRETATION — a `convention`, which the ladder has no slot for because
-    -- it is full. Reporting it is the `unbuilt` lesson one axis over: do not
+    -- it is full. Reporting it is the CART-0831 lesson one axis over: do not
     -- approximate a missing rung with its nearest neighbour.
     ok(out:find('UNGRADED', 1, true),
         'the interpretation hop is reported as ungraded: ' .. tostring(rtup))

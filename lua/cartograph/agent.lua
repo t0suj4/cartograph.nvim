@@ -18,9 +18,9 @@
 --   `absence_why` NAMES THE PREMISE that failed, with its evidence. They MUST
 --   render differently: on this repo's own fold the 266 dead-code findings
 --   split 7 absent / 229 refused / 12 frontier / 18 unavailable, and only the 7
---   license a deletion. (`unbuilt` is 0 there and that is not a hole — this
---   repo has no code generation step. It was minted from a java gRPC stub that
---   protoc writes at build time; see tier.lua.) M.answer ENFORCES this for every verb (see the
+--   license a deletion. (`unbuilt` — cartograph has no machinery for this yet,
+--   the write axis's stop-class meaning — is 0 there; a file a build step would
+--   produce is `frontier` with premise `unproduced`: see tier.lua, CART-1389.) M.answer ENFORCES this for every verb (see the
 --   invariant check at the bottom) so a future verb cannot ship a bare list.
 --   ⚠ AND THE SET IS NOW A TABLE, NOT THIS SENTENCE (CART-0831). It lived here
 --   as prose and was checked by nothing — `absence = 'banana'` passed the

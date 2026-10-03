@@ -105,7 +105,8 @@ local RELATIONS = {
                 -- point that DOES NOT EXIST, because the ladder is full (7
                 -- rungs, fold packs 3 bits, an 8th decodes as none). It is
                 -- reported as UNGRADED rather than approximated by its nearest
-                -- neighbour — the `unbuilt` lesson, one axis over. CART-0848.
+                -- neighbour — the CART-0831 lesson (a build product read as
+                -- `absent`), one axis over. CART-0848.
                 'convention',
             },
         },

@@ -129,7 +129,9 @@ print(('  %d of %d wire path(s) bound'):format(bound, #order))
 -- the kind is not a relabelling — `is_absence` is asserted below, so a typo
 -- fails loudly the way agent.lua's envelope check does, and the five reasons
 -- became the taxonomy's own falsifier: FOUR fit, and the java one did not fit
--- anything, which is where `unbuilt` came from.
+-- anything, which is where `unbuilt` came from (CART-0831). Since CART-1389 that
+-- row is `frontier` with premise `unproduced`: `unbuilt` now means what the write
+-- axis means by it, a capability cartograph does not have yet.
 --
 -- ⚠ AND ONE WORD HAD TO GO. The no-parser row below used to read "a language
 -- with no spec is dark" — but on the OBSERVATION axis `dark` is a declared
@@ -195,15 +197,15 @@ local WARRANTS = {
         'exact key, so it is not silently mixed in.',
         '→ `unavailable`: the file was read, the call was extracted, the DATA',
         '  CLASS (a const\'s literal value) was not.' } },
-    { kind = 'unbuilt', why = {
+    { kind = 'frontier', premise = 'unproduced', why = {
         'a language whose stubs are GENERATED AT BUILD TIME contributes no file',
         'to read at all (java here: no *Grpc.java in the tree).',
-        '→ `unbuilt`, AND THIS IS THE ROW THAT MINTED THAT KIND (CART-0831).',
-        '  The reading was COMPLETE over the tree, so the taxonomy said `absent`',
-        '  — which licenses ACTING, and acting is exactly wrong: protoc writes',
-        '  the file at build time. Not `frontier` either; the region was not',
-        '  skipped, it does not exist yet. A reading complete over the artifacts',
-        '  read is not complete over the system when something PRODUCES more.' } },
+        '→ `frontier`, premise `unproduced`: the file does not exist until a build',
+        '  step nobody ran writes it. The reading was COMPLETE over the tree, so',
+        '  the taxonomy once said `absent` — which licenses ACTING, and acting is',
+        '  exactly wrong: protoc writes the file at build time. This row minted a',
+        '  fifth kind (CART-0831); CART-1389 folded it into `frontier`, the remedy',
+        '  ("run the build") riding as data.' } },
     { kind = 'frontier', why = {
         'a language with no spec cannot be read at all (`unread extensions`',
         'above).',
@@ -237,7 +239,7 @@ for _, w in ipairs(WARRANTS) do
         print(('  ⚠ FAULT: %q is not a declared tier.ABSENCE kind'):format(w.kind))
         os.exit(2)
     end
-    print(('    · [%s, licenses %s]'):format(w.kind, tiers.licenses(w.kind)))
+    print(('    · [%s%s, licenses %s]'):format(w.kind, w.premise and (', premise ' .. w.premise) or '', tiers.licenses(w.kind)))
     for _, line in ipairs(w.why) do print('      ' .. line) end
 end
 if #unbound > 0 then

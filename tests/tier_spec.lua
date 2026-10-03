@@ -156,28 +156,43 @@ test('tier: the READING axis is a table, not a sentence in a comment', function 
     end
 end)
 
--- ── ★★★ `unbuilt` IS THE ONE KIND THE FALSIFIER PRODUCED, and this spec is the
--- reason it is not `absent`. CART-0831 declared its own falsifier — "if some
--- existing analysis cannot honestly say which absence warrant its negatives
--- carry, the taxonomy is wrong and should be fixed here, not papered over with
--- a default" — and grpcjoin's five hand-written warrants were run against the
--- four original kinds: four fitted, and the java one did not fit anything.
-test('tier: unbuilt exists because a COMPLETE reading can still be incomplete', function ()
-    -- THE MEASURED INSTANCE: microservices-demo declares gRPC rpcs, java is
-    -- present, and no `*Grpc.java` exists in the tree because protoc runs at
-    -- BUILD time. A reading complete over the artifacts read is NOT complete
-    -- over the system when something outside them PRODUCES more.
+-- ── ★★★ A BUILD PRODUCT IS A FRONTIER, NEVER ABSENT (CART-0831, re-homed by
+-- CART-1389). CART-0831 declared its own falsifier — "if some existing analysis
+-- cannot honestly say which absence warrant its negatives carry, the taxonomy is
+-- wrong" — and grpcjoin's java row did not fit the four kinds: microservices-demo
+-- declares gRPC rpcs, java is present, and no `*Grpc.java` exists because protoc
+-- writes it at BUILD time. It minted a fifth kind; CART-1389 folded that case into
+-- `frontier` with premise `unproduced`, because the word it used (`unbuilt`) meant
+-- a missing CAPABILITY on the write axis. The load-bearing half is unchanged.
+test('tier: a build product never inherits the license to act — it reads as frontier, premise unproduced', function ()
+    -- ⚠ THE LOAD-BEARING ASSERTION: before CART-0831 the case read as `absent`,
+    -- which licenses ACTING, and acting on it is exactly wrong.
+    ok(tier.licenses('frontier') ~= tier.licenses('absent'),
+        'a frontier must never inherit the one license that permits acting')
+    eq('nothing', tier.licenses('frontier'))
+    -- and the measured row says so in the tool that minted it: kind and premise
+    local src = assert(io.open(vim.fn.getcwd() .. '/tools/grpcjoin.lua')):read('a')
+    ok(src:find("kind = 'frontier', premise = 'unproduced'", 1, true),
+        'grpcjoin\'s build-time-stub row is a frontier with premise unproduced')
+end)
+
+-- ── ★★ `unbuilt` MEANS ONE THING ON BOTH AXES (CART-1389): cartograph has no
+-- machinery for this yet. The write axis's stop class says it, the algebra's
+-- reading table says it, and the SKILL — the agent's only description of the
+-- absence kinds — must say it too: the skill once taught the build-product
+-- meaning no verb emitted, while every write-verb stop meant the capability.
+test('tier: unbuilt is a CAPABILITY gap on the read axis, as on the write axis', function ()
     ok(tier.is_absence('unbuilt'))
-    -- ⚠ THE LOAD-BEARING ASSERTION. Before this kind, that case classified as
-    -- `absent` — which licenses ACTING, and acting on it is exactly wrong. If a
-    -- later hand collapses the two, this fails.
-    ok(tier.licenses('unbuilt') ~= tier.licenses('absent'),
-        'unbuilt must never inherit the one license that permits acting')
     eq('nothing', tier.licenses('unbuilt'))
-    -- and it is not `frontier` either: the region was never SKIPPED, it does
-    -- not exist yet. Same license, different cause, so the distinction lives in
-    -- the kind rather than in prose a reader has to find.
-    ok(tier.is_absence('frontier'))
+    local hz = require 'cartograph.hazard'
+    ok(hz.CLASSES.unbuilt and hz.CLASSES.unbuilt:find('does not yet', 1, true), 'the write axis: ' .. tostring(hz.CLASSES.unbuilt))
+    local A = require('cartograph.algebra').load()
+    ok(A.ABSENCE.unbuilt.why:find('capability', 1, true), 'the algebra: ' .. A.ABSENCE.unbuilt.why)
+    ok(A.ABSENCE.frontier.why:find('unproduced', 1, true), 'the algebra\'s frontier carries the build-product case: ' .. A.ABSENCE.frontier.why)
+    local skill = assert(io.open(vim.fn.getcwd() .. '/.claude/skills/cartograph/SKILL.md')):read('a')
+    local row = assert(skill:match('\n| `unbuilt` |([^\n]*)'), 'the skill has an `unbuilt` row')
+    ok(row:find('capability', 1, true) and not row:find('run the build', 1, true), 'the skill\'s unbuilt row: ' .. row)
+    ok(skill:find('"unproduced"', 1, true), 'the skill names the build-product premise')
 end)
 
 test('tier: the OBSERVATION axis is a second question, never one more reading kind', function ()
