@@ -392,4 +392,60 @@ function M.tg_generalize_all(G1, G2, opts)
     end
     return out
 end
+
+-- ── CONTENT IDS AS A VIEW (CART-1390, one representation): a term's MERKLE id — the hash of its own label and its
+-- kids' ids — computed over the tree as it is stored (no hash-consing at creation; sharing is a view). Two peers agree
+-- on an id with no coordination, so a subterm crosses a wire once (CART-1366) and any cache keys on it.
+-- ★ THE ORACLE IS `M.eq`: eq(a, b) <=> content_id(a) == content_id(b). So the label carries exactly what eq compares —
+-- the kind, a literal's value WITH ITS TYPE ("1" is not 1), a name, a hole's name / rep / ctx, the alignment discipline,
+-- the merge key, the presence mark — and a KEYED node's kids enter by KEY order (eq reads them as a set by key), a
+-- keyed-ordered or positional node's in their own order. Spans (`at`) and every other field eq ignores stay out.
+-- ⚠ NOT tg_of_term: its sharing keys on show() per node (quadratic) and its labels (vsym) print a literal untyped.
+local function lenq(s) s = tostring(s); return #s .. ':' .. s end
+local function label(t)
+    if t.k == 'lit' then return 'L' .. type(t.v) .. lenq(t.v) end
+    if t.k == 'name' then return 'N' .. lenq(t.n) end
+    local key = t.key and M.key_spec(t) or ''
+    local l = 'K' .. lenq(t.k) .. '|' .. tostring(t.align or '') .. '|' .. lenq(key) .. '|' .. lenq(t.opt or '')
+    if t.k == 'hole' then l = l .. '|' .. lenq(t.h) .. (t.rep and '+' or '') .. (t.ctx and '*' or '') end
+    return l
+end
+--- the content id of term t (hex sha256). memo: a table shared across calls (keyed by node object) — optional
+function M.content_id(t, memo)
+    memo = memo or {}
+    local function id(u)
+        if memo[u] then return memo[u] end
+        local kids = {}
+        if u.align == 'keyed' then
+            for _, e in ipairs(M.keys(u)) do kids[#kids + 1] = id(e.kid) end
+        else
+            for i, c in ipairs(u.kids or {}) do kids[i] = id(c) end
+        end
+        local h = vim.fn.sha256(label(u) .. '(' .. table.concat(kids, ',') .. ')')
+        memo[u] = h
+        return h
+    end
+    return id(t)
+end
+--- the MERKLE DAG of t: each DISTINCT subterm once, by id -> { root = id, nodes = { [id] = { label, kids = { id … } } },
+--- count = distinct subterms }. The wire form (CART-1366): a peer that holds an id sends nothing under it.
+function M.content_dag(t)
+    local memo, nodes, count = {}, {}, 0
+    local root = M.content_id(t, memo)
+    local function walk(u)
+        local h = memo[u]
+        if nodes[h] then return end
+        local kids = {}
+        if u.align == 'keyed' then
+            for _, e in ipairs(M.keys(u)) do kids[#kids + 1] = memo[e.kid] end
+        else
+            for i, c in ipairs(u.kids or {}) do kids[i] = memo[c] end
+        end
+        nodes[h] = { label = label(u), kids = kids }
+        count = count + 1
+        for _, c in ipairs(u.kids or {}) do walk(c) end
+    end
+    walk(t)
+    return { root = root, nodes = nodes, count = count }
+end
 end
