@@ -55,31 +55,65 @@ function M.tg_canon(G)
     return { root = G.root, eqs = keep }
 end
 
---- COLLAPSE THE VARIABLE LEAVES (CART-1344): every node carrying the same free variable (same sort) becomes one node —
---- they are bisimilar, so the graph is the same object. Gen's Merge pairs NODES, by identity (the paper's rule), so two
---- nodes with one label generalize apart (f(l1,l1) against f(m1,m1) gave f(u1,u2), losing the aliasing); collapsed
---- first, they generalize together. ⚠ A first-order graph has no binders: a label IS one entity. A producer that
---- encodes SCOPED names must rename them apart before labelling (one label per binder instance), or this merges two
---- entities — that contract is the encoder's, not checkable here.
-function M.tg_collapse_vars(G)
-    local function key(e) return (e.kind == 'hvar' and 'H' or 'T') .. e.var end
+--- THE COLLAPSE (CART-1344): the graph quotiented by its own MAXIMAL BISIMULATION — the canonical form under the
+--- equality this file uses (Def. 6/7: a graph, its unwinding and its full collapse are one object). Not a primitive:
+--- derived from the definition of bisimulation by PARTITION REFINEMENT — start from the labels (a node's symbol and
+--- arity, a variable's name and sort), split a block while its members' arguments fall in different blocks, stop when
+--- nothing splits; then every node is redirected to its block's representative. Gen's Merge pairs NODES by identity
+--- (the paper's rule), so it gives the least general generalization only on COLLAPSED inputs — measured: f(l1,l1,l2)
+--- with l1 as two nodes generalized to f(u1,u2,u3) against f(m1,m1,m2), and f(g(a),g(a)) unshared to f(g(u1),g(u2))
+--- against a shared f(g(b)); collapsed first, both keep their sharing.
+--- ⚠ A first-order graph has no binders: a label IS one entity. A producer that encodes SCOPED names must rename them
+--- apart before labelling (one label per binder instance), or this merges two entities — the encoder's contract.
+function M.tg_collapse(G)
+    local names = tg_sorted_names(G.eqs)
+    local function label(e)
+        if e.kind == 'node' then return 'N' .. e.sym .. '/' .. #e.args end
+        return (e.kind == 'hvar' and 'H' or 'T') .. e.var
+    end
+    -- block[n]: the block id of node n; refined until the count stops growing (at most one split round per node)
+    local block, count = {}, 0
+    local function renumber(keys)
+        local ids, nb = {}, 0
+        for _, n in ipairs(names) do
+            local k = keys[n]
+            if not ids[k] then nb = nb + 1; ids[k] = nb end
+            block[n] = ids[k]
+        end
+        return nb
+    end
+    local keys = {}
+    for _, n in ipairs(names) do keys[n] = label(G.eqs[n]) end
+    count = renumber(keys)
+    local stable = false
+    for _ = 1, #names + 1 do -- (no while / break: mix reads this module)
+        if not stable then
+            local nk = {}
+            for _, n in ipairs(names) do
+                local e, parts = G.eqs[n], { tostring(block[n]) }
+                if e.kind == 'node' then for i, a in ipairs(e.args) do parts[i + 1] = tostring(block[a]) end end
+                nk[n] = table.concat(parts, ',')
+            end
+            local nc = renumber(nk)
+            stable = nc == count
+            count = nc
+        end
+    end
     local rep = {}
-    for _, n in ipairs(tg_sorted_names(G.eqs)) do -- (a deterministic representative)
-        local e = G.eqs[n]
-        if (e.kind == 'tvar' or e.kind == 'hvar') and not rep[key(e)] then rep[key(e)] = n end
+    for _, n in ipairs(names) do rep[block[n]] = rep[block[n]] or n end -- (the first name in order represents its block)
+    local eqs = {}
+    for _, n in ipairs(names) do
+        if rep[block[n]] == n then
+            local e = G.eqs[n]
+            if e.kind == 'node' then
+                local args = {}
+                for i, a in ipairs(e.args) do args[i] = rep[block[a]] end
+                eqs[n] = { kind = 'node', sym = e.sym, args = args }
+            else eqs[n] = e end
+        end
     end
-    local redirect, eqs = {}, {}
-    for n, e in pairs(G.eqs) do if e.kind == 'tvar' or e.kind == 'hvar' then redirect[n] = rep[key(e)] end end
-    for n, e in pairs(G.eqs) do
-        if e.kind == 'node' then
-            local args = {}
-            for i, a in ipairs(e.args) do args[i] = redirect[a] or a end
-            eqs[n] = { kind = 'node', sym = e.sym, args = args }
-        elseif redirect[n] == n then eqs[n] = e end
-    end
-    return M.tg_canon({ root = redirect[G.root] or G.root, eqs = eqs })
+    return M.tg_canon({ root = rep[block[G.root]], eqs = eqs })
 end
-
 function M.tg_nodes(G)
     local n = 0
     for _ in pairs(G.eqs) do n = n + 1 end

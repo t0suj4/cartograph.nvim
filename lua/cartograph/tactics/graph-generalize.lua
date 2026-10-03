@@ -1,9 +1,10 @@
 -- GRAPH-GENERALIZE (discovery, CART-1344): the least general generalization of two TERM GRAPHS, invariant under
 -- bisimilarity of the inputs. A.tg_generalize follows the paper — its Merge pairs NODES by identity — so a free
 -- variable written as two nodes generalizes apart from its one-node form (measured 2026-10-03: f(l1,l1,l2) vs
--- f(m1,m1,m2) gave f(z1,z2,z3) with l1 as two nodes, f(z1,z1,z2) with one: the aliasing lost). The STEP collapses each
--- input's variable leaves first (A.tg_collapse_vars — sound: same-label leaves are bisimilar) and then generalizes; the
--- CLAIM is the algebra's own law, the ORACLE: each side's store instance rebuilds that input up to bisimilarity.
+-- f(m1,m1,m2) gave f(z1,z2,z3) with l1 as two nodes, f(z1,z1,z2) with one: the aliasing lost; and an unshared
+-- f(g(a), g(a)) against a shared f(g(b)) gave f(g(u1), g(u2))). The STEP collapses each input to its quotient by its own
+-- maximal bisimulation first (A.tg_collapse — derived by partition refinement, not a primitive) and then generalizes;
+-- the CLAIM is the algebra's own law, the ORACLE: each side's store instance rebuilds that input up to bisimilarity.
 -- ⚠ The encoder's contract, not checked here: labels are global in a first-order graph, so scoped names (locations per
 -- allocation, shadowed locals) must be renamed apart BEFORE they become labels.
 local function A() return require('cartograph.algebra').load() end
@@ -12,11 +13,11 @@ local E = {
     name = 'graph-generalize',
     kind = 'discovery',
     measures = 'CART-1344',
-    summary = 'generalize two term graphs (g1, g2) with their variable leaves collapsed first, so bisimilar inputs give the same generalization; the claim is that the store rebuilds both inputs',
+    summary = 'generalize two term graphs (g1, g2), each collapsed to its bisimulation quotient first, so bisimilar inputs give the same generalization; the claim is that the store rebuilds both inputs',
     params = { g1 = 'term', g2 = 'term' },
     measure = function (_, p)
         local a = A()
-        local c1, c2 = a.tg_collapse_vars(p.g1), a.tg_collapse_vars(p.g2)
+        local c1, c2 = a.tg_collapse(p.g1), a.tg_collapse(p.g2)
         local r = a.tg_generalize(c1, c2)
         local i1 = a.tg_instantiate(r.G, r.sigmaL, { c1 })
         local i2 = a.tg_instantiate(r.G, r.sigmaR, { c2 })
@@ -58,6 +59,12 @@ E.examples = {
         files = {}, params = gen(tg('x0', { x0 = { 'f', 'x1', 'x1' }, x1 = { var = 'l1' } }),
             tg('y0', { y0 = { 'f', 'y1', 'y2' }, y1 = { var = 'm1' }, y2 = { var = 'm2' } })),
         expect = { holds = true, check = shows('z0=f(z1,z2) z1=u1 z2=u2') },
+    },
+    {
+        name = 'INTERNAL sharing counts too: an unshared f(g(a), g(a)) generalizes like the shared one — the vars-only collapse gave f(g(u1), g(u2))',
+        files = {}, params = gen(tg('x0', { x0 = { 'f', 'x1', 'x3' }, x1 = { 'g', 'x2' }, x3 = { 'g', 'x4' }, x2 = { 'a' }, x4 = { 'a' } }),
+            tg('y0', { y0 = { 'f', 'y1', 'y1' }, y1 = { 'g', 'y2' }, y2 = { 'b' } })),
+        expect = { holds = true, check = shows('z0=f(z1,z1) z1=g(z2) z2=u1') },
     },
     {
         name = 'a reference and its store entry keep their tie, however the location is written',

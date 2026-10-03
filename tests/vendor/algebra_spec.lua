@@ -1250,23 +1250,39 @@ describe('Term-graph anti-unification (Baumgartner, Kutsia, Levy, Villaret, FSCD
         assert.is_true(disagree_plain > 0, 'plain encodings never disagreed')
     end)
 
-    it('tg_collapse_vars (CART-1344): same-label variable leaves become one node — bisimilar, idempotent — so Gen no longer splits a variable it met as two nodes', function()
+    it('tg_collapse (CART-1344): the quotient by the graph\'s own maximal bisimulation — bisimilar, idempotent, the fully shared encoding of a tree — so Gen meets collapsed inputs and keeps their sharing', function()
         local two = tg('x0', { x0 = { 'f', 'x1', 'x1b', 'x2', 'X1', 'X2' }, x1 = { var = 'l1' }, x1b = { var = 'l1' }, x2 = { var = 'l2' }, X1 = { hvar = 'H' }, X2 = { hvar = 'H' } })
-        local c = A.tg_collapse_vars(two)
+        local c = A.tg_collapse(two)
         assert.is_true(A.tg_bisimilar(c, two))
         assert.equals(A.tg_nodes(two) - 2, A.tg_nodes(c))
-        assert.equals(A.tg_show(c), A.tg_show(A.tg_collapse_vars(c)))
+        assert.equals(A.tg_show(c), A.tg_show(A.tg_collapse(c)))
         -- a term variable and a hedge variable of one name are different sorts: never merged
         local sorts = tg('x0', { x0 = { 'f', 'x1', 'X1' }, x1 = { var = 'v' }, X1 = { hvar = 'v' } })
-        assert.equals(A.tg_nodes(sorts), A.tg_nodes(A.tg_collapse_vars(sorts)))
-        -- Gen on the collapsed forms equals Gen on the one-node forms: aliasing kept
-        local one = tg('x0', { x0 = { 'f', 'x1', 'x1', 'x2' }, x1 = { var = 'l1' }, x2 = { var = 'l2' } })
-        local two2 = tg('x0', { x0 = { 'f', 'x1', 'x1b', 'x2' }, x1 = { var = 'l1' }, x1b = { var = 'l1' }, x2 = { var = 'l2' } })
+        assert.equals(A.tg_nodes(sorts), A.tg_nodes(A.tg_collapse(sorts)))
+        -- THE INDEPENDENT ORACLE: on trees, the collapse of the plain encoding IS tg_of_term's fully shared encoding
+        local rnd = lcg(31)
+        for _ = 1, 30 do
+            local t = rand_tree(rnd, 9)
+            assert.equals(A.tg_show(A.tg_of_term(t, { share = true })), A.tg_show(A.tg_collapse(A.tg_of_term(t))))
+        end
+        -- REFINEMENT RUNS TO A FIXPOINT: the two f nodes of h(f(g(a)), f(g(b))) differ only two levels down — one
+        -- round splits the g's, a second round the f's; stopping after one would merge them into a non-bisimilar graph
+        local deep = tg('x0', { x0 = { 'h', 'x1', 'x2' }, x1 = { 'f', 'x3' }, x2 = { 'f', 'x4' }, x3 = { 'g', 'x5' }, x4 = { 'g', 'x6' }, x5 = { 'a' }, x6 = { 'b' } })
+        assert.equals(7, A.tg_nodes(A.tg_collapse(deep)))
+        assert.is_true(A.tg_bisimilar(A.tg_collapse(deep), deep))
+        -- cycles: an unrolled cycle collapses to the period-1 loop it is bisimilar to
+        local loop = tg('x0', { x0 = { 'f', 'x0' } })
+        local unrolled = tg('x0', { x0 = { 'f', 'x1' }, x1 = { 'f', 'x2' }, x2 = { 'f', 'x0' } })
+        assert.equals(A.tg_show(loop), A.tg_show(A.tg_collapse(unrolled)))
+        -- Gen on collapsed forms keeps sharing — of a variable and of an inner node — where the raw Gen splits it
         local other = tg('y0', { y0 = { 'f', 'y1', 'y1b', 'y2' }, y1 = { var = 'm1' }, y1b = { var = 'm1' }, y2 = { var = 'm2' } })
-        local want = A.tg_show(A.tg_generalize(one, A.tg_collapse_vars(other)).G)
-        assert.equals('z0=f(z1,z1,z2) z1=u1 z2=u2', want)
-        assert.equals(want, A.tg_show(A.tg_generalize(A.tg_collapse_vars(two2), A.tg_collapse_vars(other)).G))
-        assert.equals('z0=f(z1,z2,z3) z1=u1 z2=u2 z3=u3', A.tg_show(A.tg_generalize(two2, other).G), 'the raw Gen splits them (the paper\'s Merge by node identity)')
+        local two2 = tg('x0', { x0 = { 'f', 'x1', 'x1b', 'x2' }, x1 = { var = 'l1' }, x1b = { var = 'l1' }, x2 = { var = 'l2' } })
+        assert.equals('z0=f(z1,z1,z2) z1=u1 z2=u2', A.tg_show(A.tg_generalize(A.tg_collapse(two2), A.tg_collapse(other)).G))
+        assert.equals('z0=f(z1,z2,z3) z1=u1 z2=u2 z3=u3', A.tg_show(A.tg_generalize(two2, other).G), 'the raw Gen splits them (Merge by node identity)')
+        local plain = tg('x0', { x0 = { 'f', 'x1', 'x3' }, x1 = { 'g', 'x2' }, x3 = { 'g', 'x4' }, x2 = { 'a' }, x4 = { 'a' } })
+        local shared = tg('y0', { y0 = { 'f', 'y1', 'y1' }, y1 = { 'g', 'y2' }, y2 = { 'b' } })
+        assert.equals('z0=f(z1,z1) z1=g(z2) z2=u1', A.tg_show(A.tg_generalize(A.tg_collapse(plain), shared).G))
+        assert.equals('z0=f(z1,z3) z1=g(z2) z2=u1 z3=g(z4) z4=u2', A.tg_show(A.tg_generalize(plain, shared).G))
     end)
 end)
 
