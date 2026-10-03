@@ -3498,6 +3498,10 @@ edits through the same journal.
 ```sh
 nvim --headless -u NONE -l tools/mcpserve.lua          # MCP server, stdio
 nvim --headless -u NONE -l tools/agentq.lua <verb> …   # one-shot JSON
+# opt-in: every READ query logged (request, answer envelope, cartograph + subject commits), then
+# re-asked against this build and diffed — a real before/after pair (`--gate` fails on a change)
+nvim --headless -u NONE -l tools/mcpserve.lua <root> --query-log
+nvim --headless -u NONE -l tools/queryreplay.lua <state>/cartograph/<root>.queries.jsonl [--gate]
 ```
 
 The verbs are grouped by how far they may be trusted — read, catalogue, version,
