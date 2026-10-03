@@ -225,6 +225,38 @@ test('mix: a static value that never repeats is GENERALIZED — past the depth, 
     eq(2, pstats.functions, 'the entry and the generalized point\n' .. pt)
 end)
 
+local FOLD = [[
+local function count(x, n)
+    if x > 0 then return count(x - 1, n + 1) end
+    return n
+end
+local function pair(x, y)
+    return count(x, 0) + count(4, y)
+end
+]]
+
+test('mix: reuse of a GENERALIZED configuration — by default only after the depth (today\'s behaviour); with reuse = eager, any call whose configuration is an INSTANCE of a recorded generalization folds onto it at once', function ()
+    ready()
+    local T = assert(R.read(FOLD, 'lua'))
+    local o = original(FOLD, 'pair')
+    local function run(opts)
+        local text, _, pool = MX.mix(T, 'pair', { 'D', 'D' }, {}, opts)
+        return assert(load(text, 'pair', 't', setmetatable({ MIXK = pool }, { __index = _G })))(), text
+    end
+    local d, dt = run(nil)
+    local e, et = run({ reuse = 'eager' })
+    for _, x in ipairs({ -1, 0, 3, 40 }) do
+        for _, y in ipairs({ 0, 5 }) do
+            eq(o(x, y), d(x, y), ('default pair(%d, %d)'):format(x, y))
+            eq(o(x, y), e(x, y), ('eager pair(%d, %d)'):format(x, y))
+        end
+    end
+    -- count(x, 0) generalized n; count(4, y) is an instance of count(?x, ?n): by default it is specialized to its
+    -- static 4 and unrolls; eager, it folds onto the generalized function
+    ok(not dt:find('count_%d+%(4, '), 'default: count(4, y) unrolled, no call\n' .. dt)
+    ok(et:find('count_%d+%(4, y_%d+%)'), 'eager: count(4, y) calls the generalized count\n' .. et)
+end)
+
 test('mix: generalizing fires ONLY past the depth — a bounded static recursion still unrolls; a deeper one becomes a loop over a dynamic index', function ()
     ready()
     local s0 = original(GROW, 'sum')

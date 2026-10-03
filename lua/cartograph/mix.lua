@@ -1312,6 +1312,42 @@ function M.specialize(prog, fname, division, statics, opts)
         return nil
     end
 
+    -- THE GENERALIZED CONFIGURATIONS, per function: { template, force } — the configuration a generalization retried
+    -- with, as a TEMPLATE (its holes the dynamic arguments, the generalized ones included), and the parameters it made
+    -- dynamic. Recorded always; READ only under opts.reuse = 'eager' (USER, 2026-10-03: "we can have both, the eager one
+    -- could be useful for code analysis/exploration. But we can keep today's behavior"): a later call whose configuration
+    -- is an INSTANCE of a recorded template (A.instance_of) reuses that generalization at once, instead of specializing
+    -- to its static values first — the supercompiler's folding: fewer residual functions, less specialization.
+    local general = {}
+    local function record_general(fr, f2)
+        local div = {}
+        for i = 1, #fr.division do div[i] = f2[i] and D or fr.division[i] end
+        local t = M.config_term(fr.g, div, fr.svals, R.clos)
+        if not t then return end
+        general[fr.g] = general[fr.g] or {}
+        local l = general[fr.g]
+        l[#l + 1] = { template = require('cartograph.algebra').load().template(t), force = f2 }
+    end
+    -- under reuse = 'eager': the parameters to make dynamic for the first recorded generalization this call's
+    -- configuration is an instance of — every position where the template has a HOLE and this call is static (the
+    -- generalized function is specialized with all of them dynamic, whichever made them so) | nil
+    local function eager_force(g, division, svals)
+        local l = general[g]
+        if opts.reuse ~= 'eager' or not l then return nil end
+        local t = M.config_term(g, division, svals, R.clos)
+        if not t then return nil end
+        local A = require('cartograph.algebra').load()
+        local mine = A.template(t)
+        for _, e in ipairs(l) do
+            if A.instance_of(mine, e.template) then
+                local f = {}
+                for i, kid in ipairs(e.template.body.kids) do if kid.k == 'hole' and division[i] ~= D then f[i] = true end end
+                return f
+            end
+        end
+        return nil
+    end
+
     -- the nearest active call of g at or above the call f, and whether a call of g at or above f is a candidate already
     local function nearest(f, g)
         if not f then return nil, false end
@@ -1347,6 +1383,10 @@ function M.specialize(prog, fname, division, statics, opts)
             if force and force[i] then division[i] = D; dargs[#dargs + 1] = { op = 'nil' } else division[i] = S end
         end
         local g = group(T)
+        if not force then
+            local ef = eager_force(g, division, svals)
+            if ef and next(ef) then return apply_spec(T, argexprs, X, ef) end
+        end
         local anc, under = nearest(X.frame, g)
         local fr = { g = g, division = division, svals = svals, parent = X.frame }
         if force or not anc or under then return call_spec(T, division, svals, dargs, fr) end
@@ -1366,6 +1406,7 @@ function M.specialize(prog, fname, division, statics, opts)
         local f2 = generalization(anc, fr)
         if not f2 then error(r, 0) end
         rollback(no, nm)
+        record_general(fr, f2)
         return apply_spec(T, argexprs, X, f2)
     end
 
