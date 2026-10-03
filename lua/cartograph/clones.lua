@@ -639,15 +639,8 @@ local RESCUE_CAP = 64
 --     a[8] =CNmat_df(L,FL.file)          against b[7] above                ->   2
 -- ⚠ It is a TIE-BREAK ONLY. It never enters the DP, so the edit DISTANCE is
 -- untouched and every `max_dist` threshold, tier count and baseline is unchanged.
-local function keysim(x, y)
-    if not x or not y then return -1 end
-    local n = math.min(#x, #y)
-    local i = 1
-    while i <= n and x:byte(i) == y:byte(i) do i = i + 1 end
-    return i - 1
-end
-
-local function align(a, b)
+--- `sim(i, j)`: how much row i of `a` and row j of `b` have in common — consulted only to break a TIE (below).
+local function align(a, b, sim)
     local la, lb = #a, #b
     local d = {}
     for i = 0, la do d[i] = { [0] = i } end
@@ -681,8 +674,8 @@ local function align(a, b)
             -- ONE STEP OF LOOKAHEAD IS ENOUGH: if the row this `sub` would consume on
             -- one side agrees BETTER with the other side's NEXT row, take the deletion
             -- (or insertion) and let the better pairing happen.
-            and not (d[i][j] == d[i - 1][j] + 1 and keysim(a[i - 1], b[j]) > keysim(a[i], b[j]))
-            and not (d[i][j] == d[i][j - 1] + 1 and keysim(a[i], b[j - 1]) > keysim(a[i], b[j]))
+            and not (d[i][j] == d[i - 1][j] + 1 and sim(i - 1, j) > sim(i, j))
+            and not (d[i][j] == d[i][j - 1] + 1 and sim(i, j - 1) > sim(i, j))
         then
             ops[#ops + 1] = { op = 'sub', i = i, j = j }; i = i - 1; j = j - 1
         elseif i > 0 and d[i][j] == d[i - 1][j] + 1 then
@@ -748,33 +741,71 @@ end
 
 -- (relative row-keys, per-row local-name sequences) for a fn, memoized on its index entry
 local function rel_keys(f)
-    if f._rk then return f._rk, f._rseq end
-    local keys, seqs = {}, {}
+    if f._rk then return f._rk, f._rseq, f._rterm end
+    -- ★ THE ROW AS A VIEW (CART-1412): the key is the row TERM's content id with every local as the one shared symbol
+    -- (`alg.row_term`'s default), and the row's locals in order come from walking that same term through its source
+    -- map — one build gives both halves. ACCEPTED by partition-join against rcanon's key (lua 6491 classes / 39587
+    -- rows, TSM 3117 / 14286, java 1998 / 11651: 0 split, 0 merged) and by near()'s pair set, identical before and
+    -- after. The ORDER of the locals is the term's preorder, not rcanon's (which visited a call's arguments before its
+    -- callee): align_relative pairs two matched rows position by position, and two rows with one key are walked alike.
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    if not A then error('clones: the algebra cannot key a row: ' .. tostring(select(2, alg.available()))) end
+    local keys, seqs, terms = {}, {}, {}
     for i, e in ipairs(f.exprs or {}) do
         local acc = {}
         if e then
-            local function seq(list)
-                local p = {}
-                for _, x in ipairs(list or {}) do p[#p + 1] = rcanon(x, f.locals, acc) end
-                return table.concat(p, ',')
+            local src = {}
+            local t = alg.row_term(e, f.locals, nil, src)
+            if not t then error('clones: a row the algebra cannot build') end
+            keys[i], terms[i] = A.content_id(t), t
+            local function walk(u)
+                local x = u.k == 'name' and src[u]
+                if x and x.k == 'name' and f.locals[x.n] then acc[#acc + 1] = x.n end
+                for _, c in ipairs(u.kids or {}) do walk(c) end
             end
-            keys[i] = seq(e.lhs) .. '=' .. seq(e.rhs) .. (e.cond and (';C:' .. rcanon(e.cond, f.locals, acc)) or '')
+            walk(t)
         else
             keys[i] = '~'
         end
         seqs[i] = acc
     end
-    f._rk, f._rseq = keys, seqs
-    return keys, seqs
+    f._rk, f._rseq, f._rterm = keys, seqs, terms
+    return keys, seqs, terms
 end
 
 -- align two fns on RELATIVE keys, then verify matched rows admit a CONSISTENT local
 -- bijection; a matched row whose locals conflict is reclassified as a difference (sound —
 -- rejects coarse over-matches). Returns (distance, ops, consistent_match_count).
 local function align_relative(fa, fb)
-    local ak, aseq = rel_keys(fa)
-    local bk, bseq = rel_keys(fb)
-    local dist, ops = align(ak, bk)
+    local ak, aseq, aterm = rel_keys(fa)
+    local bk, bseq, bterm = rel_keys(fb)
+    -- ★ THE TIE-BREAK ASKS THE TERMS (CART-1412): how many nodes the two rows share in PREORDER before they first
+    -- differ — the question `keysim` asked of two key strings, whose common prefix a content id no longer has.
+    -- ⚠ NOT `A.zhang` (the largest common subforest), though it is the principled similarity: MEASURED, near() over
+    -- our own tree did not finish in 10 minutes with it (it was 43 s), because a tie-break runs per DP cell and a
+    -- big table constructor is a big tree. A row with no term (`~`) shares nothing.
+    local label = require('cartograph.algebra').load().node_label
+    local function shared_prefix(x, y)
+        local n = 0
+        local function go(u, v)
+            if label(u) ~= label(v) then return false end
+            n = n + 1
+            local ku, kv = u.kids or {}, v.kids or {}
+            for c = 1, math.max(#ku, #kv) do
+                if not (ku[c] and kv[c] and go(ku[c], kv[c])) then return false end
+            end
+            return true
+        end
+        go(x, y)
+        return n
+    end
+    local function sim(i, j)
+        local x, y = aterm[i], bterm[j]
+        if not x or not y then return -1 end
+        return shared_prefix(x, y)
+    end
+    local dist, ops = align(ak, bk, sim)
     local mapAB, mapBA = {}, {}
     local nmatch, extra = 0, 0
     for _, o in ipairs(ops) do

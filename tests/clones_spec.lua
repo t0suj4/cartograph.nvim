@@ -137,6 +137,27 @@ test('clones: after a statement with no expression, a differing row reports its 
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ MATCHED ROWS MUST AGREE ON ONE RENAMING OF LOCALS (align_relative): the near tier keys a row with its locals
+-- collapsed, so `h(p, q)` and `h(q, p)` key alike — the per-row ORDER of the locals is what tells them apart, and a
+-- later row reading `p` on both sides then contradicts the `p -> q` the first row learned. Pinned when the key
+-- moved to the row term (CART-1412): a mutant that dropped the locals list survived the whole spec.
+test('clones: rows that cannot share one renaming of locals are a difference, not a match', function ()
+    local function body(first)
+        return ('  local s = h(%s)\n  local t = k(p)\n  local u = m(t)\n  local v = n(u)\n  return v'):format(first)
+    end
+    local root = proj {
+        ['a.lua'] = fn('swap_a', 'p, q', body('p, q')),
+        ['b.lua'] = fn('swap_b', 'p, q', body('q, p')),
+    }
+    local pair
+    for _, p in ipairs(clones.near(store, { min_rows = 3 })) do
+        if (p.a.name == 'swap_a' and p.b.name == 'swap_b') or (p.a.name == 'swap_b' and p.b.name == 'swap_a') then pair = p end
+    end
+    ok(pair, 'a near pair: every row keys alike, yet one row cannot keep the renaming')
+    eq(1, pair.dist, 'exactly one row is reclassified as a difference')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: a unique function forms no group; report is honest on empty', function ()
     local root = proj {
         ['a.lua'] = fn('only', 'z', '  local q = z.field\n  return frobnicate(q, 7)'),
