@@ -3776,6 +3776,25 @@ end)
 -- and then claimed a single helper was blocked. Merging is not cosmetic: the survey
 -- states about this very file that the unmerged (linear) answer is STRICTLY more
 -- general than the lgg, and the witness runs in tests/vendor/algebra_spec.lua.
+-- ★ A FUNCTION PARAMETER'S DEPENDENCIES ARE IN SOURCE ORDER (CART-1412): the de Bruijn key is the algebra's variant
+-- relation over the term, and its first-occurrence order is the term's preorder — a callee before its arguments.
+-- rcanon visited the arguments first, so `cfg.render(name)` listed `name, cfg`.
+test('clones: a function parameter lists the locals it reads in SOURCE order', function ()
+    local base = '  local cfg = load(src)\n  local name = trim(cfg)\n'
+    local root = proj {
+        ['o1.lua'] = fn('ord_one', 'src', base .. '  emit(cfg.render(name))\n  persist(cfg)\n  log(name)\n  return cfg'),
+        ['o2.lua'] = fn('ord_two', 'src', base .. '  emit(name)\n  persist(cfg)\n  log(name)\n  return cfg'),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 2, min_rows = 3, min_shared = 2 }), 'ord_one', 'ord_two')
+    ok(p, 'ord_one and ord_two are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local f = an and an.fparams and an.fparams[1]
+    ok(f, 'the wrapper divergence is a function parameter')
+    local deps = (p and p.a.name == 'ord_one') and f.deps_a or f.deps_b
+    eq('cfg,name', table.concat(deps or {}, ','), 'the callee\'s base first, then the argument')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: Mer-S merges one wrapper divergence at many sites into ONE parameter', function ()
     local base = '  local a = load(src)\n  local p = trim(a)\n'
     local body_a = base .. '  emit(p.line)\n  emit(p.line)\n  emit(p.line)\n  persist(a)\n  return a'

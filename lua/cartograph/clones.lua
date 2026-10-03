@@ -1189,19 +1189,28 @@ end
 --- on the raw text would split `nm -> #info + 1` from `out -> #stats + 1`, which are one
 --- parameter applied to different arguments.
 ---
---- ★ AND `rcanon` ALREADY COMPUTES THE CLOSURE — it collapses every local to `L` and
---- appends its NAME to `acc` in traversal order. All that was missing is the numbering:
---- `L` alone cannot tell `f(x, y)` from `f(x, x)`, and the index sequence can.
+--- ★ AND THE KEY IS THE ALGEBRA'S VARIANT RELATION (CART-1412): the node as a term with its locals as holes named
+--- after them, hashed modulo renaming those holes by first occurrence — the de Bruijn form, without the hand-rolled
+--- `rcanon` shape plus index sequence it replaces. ACCEPTED by partition-join over every sub-expression of our tree
+--- (9433 classes / 80218 nodes, 0 split, 0 merged).
+--- ⚠ `ordered` IS THE TERM'S PREORDER, which is SOURCE order: rcanon visited a call's ARGUMENTS before its callee
+--- (`store.materialize(rel)` gave `rel, store`), so 753 of those 80218 dependency lists change order — the helper's
+--- parameters now read left to right. The key and the list use one traversal, so "the k-th dependency" still means
+--- the same thing at every merged site.
 --- @return string key, table ordered  the de Bruijn key and the first-occurrence deps
 local function debruijn(e, locals)
-    local acc = {}
-    local shape = rcanon(e, locals or {}, acc)
-    local idx, seq, ordered, n = {}, {}, {}, 0
-    for i, nm in ipairs(acc) do
-        if not idx[nm] then n = n + 1; idx[nm] = n; ordered[n] = nm end
-        seq[i] = idx[nm]
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    if not A then error('clones: the algebra cannot key a struct hole: ' .. tostring(select(2, alg.available()))) end
+    local t = alg.term(e, locals or {}, nil, nil, 'holes')
+    if not t then error('clones: a struct hole the algebra cannot build') end
+    local ordered, seen = {}, {}
+    local function walk(u)
+        if u.k == 'hole' and not seen[u.h] then seen[u.h] = true; ordered[#ordered + 1] = u.h end
+        for _, c in ipairs(u.kids or {}) do walk(c) end
     end
-    return shape .. '\30' .. table.concat(seq, ','), ordered
+    walk(t)
+    return A.equality('variant').hash(t), ordered
 end
 
 -- "nameA / nameB" for a pair, for report headers
