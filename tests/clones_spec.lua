@@ -200,6 +200,25 @@ test('clones: a shared statement BLOCK inside two different functions is found',
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ A BLOCK KEYS ITS LOCALS BY POSITION WITHIN THE WINDOW (CART-1412: the variant relation over the window's row
+-- terms, locals as holes). Collapsing them to one symbol would make `combine(a, a)` the same block as `combine(a, src)`
+-- — a mutant that did exactly that survived every other block test.
+test('clones: a block that repeats a local is not a block that reads two', function ()
+    local function mid(arg2)
+        return '  local a = compute(src)\n  local b = combine(a, ' .. arg2 .. ')\n  local c = wrap(b)\n  persist(c)\n  return c'
+    end
+    local root = proj {
+        ['a.lua'] = fn('rep_one', 'src', '  log("one")\n' .. mid('a')),
+        ['b.lua'] = fn('rep_two', 'src', '  banner()\n  setup(src)\n' .. mid('a')),
+        ['c.lua'] = fn('two_reads', 'src', '  notice()\n' .. mid('src')),
+    }
+    local groups = clones.blocks(store, { min_len = 4 })
+    local g = block_has(groups, 'rep_one')
+    ok(g and block_has(groups, 'rep_two') == g, 'the two blocks that repeat `a` are one group')
+    ok(not (g and block_has(groups, 'two_reads') == g), 'the block reading `a` and `src` is not in it')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: functions with no shared block yield no block group', function ()
     local root = proj {
         ['a.lua'] = fn('one', 'a', '  local x = a + 1\n  local y = x * 2\n  local z = y - 3\n  return z'),

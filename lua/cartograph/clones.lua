@@ -22,99 +22,14 @@
 -- missed local keeps its NAME, so two sites key differently and SPLIT. The cost is
 -- recall. (3)
 -- FUNCTION-granular; block/window granularity (a clone inside one function, e.g. the
--- provider's resolve logic shared by extract & relink) is the next increment on this
--- same `canon` — sketched in M.blocks but not the first cut.
+-- provider's resolve logic shared by extract & relink) is M.blocks, keyed by the same
+-- variant relation over a window of rows (CART-1412).
 
 local expr = require 'cartograph.expr'
 local at = require 'cartograph.at'
 local shortlist = require 'cartograph.shortlist'
 
 local M = {}
-
--- canonical structural key of one expr node, renaming locals to positional slots.
--- Mirrors expr.key but (a) rewrites local `name` nodes via slots/ctr, (b) is otherwise
--- identical so callee/field/literal/operator structure is preserved verbatim.
-local function canon(e, locals, slots, ctr)
-    if not e then return '_' end
-    local k = e.k
-    if k == 'name' then
-        if locals[e.n] then
-            if not slots[e.n] then ctr.n = ctr.n + 1; slots[e.n] = '#' .. ctr.n end
-            return slots[e.n]
-        end
-        return 'N' .. e.n
-    end
-    if k == 'lit' then return 'L' .. (e.ty or '') .. ':' .. tostring(e.v) end
-    if k == 'field' then
-        return (e.method and 'M' or 'F') .. canon(e.b, locals, slots, ctr) .. '.' .. e.n
-    end
-    if k == 'index' then
-        return 'I' .. canon(e.b, locals, slots, ctr) .. '[' .. canon(e.i, locals, slots, ctr) .. ']'
-    end
-    if k == 'call' then
-        local parts = {}
-        for _, a in ipairs(e.a or {}) do parts[#parts + 1] = canon(a, locals, slots, ctr) end
-        return 'C' .. canon(e.f, locals, slots, ctr) .. '(' .. table.concat(parts, ',') .. ')'
-    end
-    if k == 'un' then return 'U' .. (e.op or '') .. canon(e.e, locals, slots, ctr) end
-    if k == 'bin' then
-        return 'B' .. (e.op or '') .. '(' .. canon(e.l, locals, slots, ctr)
-            .. ',' .. canon(e.r, locals, slots, ctr) .. ')'
-    end
-    -- ★ A CONSTRUCTOR'S CONTENTS ARE PART OF THE KEY (CART-0357). A bare 'T' says only
-    -- "an allocation happened here", so two functions returning DIFFERENT objects key
-    -- identically and are reported as exact clones. The schema carries the kids
-    -- deliberately (expr.lua: "its field VALUES/keys READ names — carry them as kids");
-    -- discarding them here was throwing away content the IR had already harvested.
-    -- Measured: on this tree it removes 4 manufactured groups (81 -> 77), and on jquery
-    -- it is what keeps 12 unrelated ajax test callbacks from being called one clone.
-    if k == 'table' then
-        local kp = {}
-        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = canon(c, locals, slots, ctr) end
-        return 'T(' .. table.concat(kp, ',') .. ')'
-    end
-    -- ★ A TYPE KEYS BY ITS NAME OR EVERY TYPE IS THE SAME TYPE (CART-0742). A
-    -- bare named type has NO KIDS, so without this `new Foo()` and `new Bar()`
-    -- canon IDENTICALLY. Present in all THREE structural keys in this file,
-    -- because they are three copies of one function and a kind added to two of
-    -- them is a silent disagreement about what "the same expression" means.
-    if k == 'type' then
-        local kp = {}
-        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = canon(c, locals, slots, ctr) end
-        return 'Y' .. (e.n or (e.prim and '#prim') or '') .. '(' .. table.concat(kp, ',') .. ')'
-    end
-    if k == 'fn' then return 'Fn' end
-    if k == 'vararg' then return 'V' end
-    -- ★ AN EMBEDDED ASSIGNMENT, and the reason it CRASHED here rather than
-    -- keying badly: `t` is the tree-sitter type STRING on every kind except
-    -- `assign`, where the schema uses it for the assignment TARGET (a node).
-    -- The fallthrough concatenated it. Same collision class as the expr
-    -- attribute collision (a field name meaning two things), and unreachable
-    -- from a lua corpus BECAUSE LUA HAS NO ASSIGNMENT EXPRESSION -- measured
-    -- present in php, c and javascript, absent in python (the walrus builds a
-    -- different node). Every clone tier over any of those languages raised
-    -- "attempt to concatenate a table value" on the first such body.
-    if k == 'assign' then
-        return 'A(' .. canon(e.t, locals, slots, ctr) .. ','
-            .. canon(e.v, locals, slots, ctr) .. ')'
-    end
-    local parts = {}
-    for _, c in ipairs(e.kids or {}) do parts[#parts + 1] = canon(c, locals, slots, ctr) end
-    return '?' .. (type(e.t) == 'string' and e.t or '') .. '('
-        .. table.concat(parts, ',') .. ')'
-end
-
--- one row (lhs = rhs [; cond]) canonicalized, sharing the function's slot map
-local function row_key(row, locals, slots, ctr)
-    local function seq(list)
-        local p = {}
-        for _, e in ipairs(list or {}) do p[#p + 1] = canon(e, locals, slots, ctr) end
-        return table.concat(p, ',')
-    end
-    local key = seq(row.lhs) .. '=' .. seq(row.rhs)
-    if row.cond then key = key .. ';C:' .. canon(row.cond, locals, slots, ctr) end
-    return key
-end
 
 -- a function body's ROWS: (nrows, lines, nparams, exprs, locals, params) or nil when it has none. exprs/locals feed
 -- the variant key, the near tier's relative keys and the anti-unifier.
@@ -262,19 +177,32 @@ end
 -- ── block/window tier ───────────────────────────────────────────────────────
 -- A block clone is a contiguous run of statements duplicated INSIDE functions
 -- (the extract↔relink four-site resolve dup is a block, not a named fn — the
--- function tier is blind to it). Same `canon`, but the slot map is WINDOW-LOCAL:
--- renumbered fresh at each window so two structurally-identical blocks match
--- regardless of what locals their surrounding functions introduced first
--- (function-global numbering would shift the slots and miss the clone).
+-- function tier is blind to it). The window's locals are numbered WINDOW-LOCALLY:
+-- fresh at each window, so two structurally-identical blocks match regardless of
+-- what locals their surrounding functions introduced first (function-global
+-- numbering would shift them and miss the clone).
 
--- canonical key of rows[s .. s+len-1] with a FRESH slot map (window-local).
-local function window_key(rows, locals, s, len)
-    local slots, ctr = {}, { n = 0 }
-    local parts = {}
+--- the key of rows[s .. s+len-1]: the algebra's VARIANT relation over the window's rows as terms, locals as holes —
+--- holes renamed by first occurrence WITHIN the window is exactly the window-local slot map canon kept (CART-1412).
+--- ACCEPTED by partition-join against canon's window key over every 6-row window: lua/cartograph 1203 classes / 79949
+--- windows, TSM 773 / 13190, elasticsearch common 139 / 8229 — 0 split, 0 merged; and blocks() itself unchanged on
+--- all three. A row's term is built once per function (`f._rt`). Cost, accepted: ~8x canon per window.
+local function window_key(f, s, len)
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    if not A then error('clones: the algebra cannot key a window: ' .. tostring(select(2, alg.available()))) end
+    f._rt = f._rt or {}
+    local kids = {}
     for i = s, s + len - 1 do
-        parts[#parts + 1] = rows[i].expr and row_key(rows[i].expr, locals, slots, ctr) or '~'
+        local t = f._rt[i]
+        if t == nil then
+            local e = f.rows[i].expr
+            t = (e and alg.row_term(e, f.locals, nil, nil, 'holes')) or A.node('row~')
+            f._rt[i] = t
+        end
+        kids[#kids + 1] = t
     end
-    return table.concat(parts, '\30')
+    return A.equality('variant').hash(A.seq(kids))
 end
 
 -- collect every function's harvestable rows + its locals set (params ∪ df-defs)
@@ -311,7 +239,7 @@ function M.blocks(store, opts)
     local buckets = {}
     for fi, f in ipairs(fns) do
         for s = 1, #f.rows - min_len + 1 do
-            local key = window_key(f.rows, f.locals, s, min_len)
+            local key = window_key(f, s, min_len)
             buckets[key] = buckets[key] or {}
             buckets[key][#buckets[key] + 1] = { fi = fi, s = s }
         end
@@ -324,7 +252,7 @@ function M.blocks(store, opts)
             for _, o in ipairs(occ) do
                 local f = fns[o.fi]
                 if o.s + len <= #f.rows then -- room for one more row
-                    local key = window_key(f.rows, f.locals, o.s, len + 1)
+                    local key = window_key(f, o.s, len + 1)
                     grow[key] = grow[key] or {}
                     grow[key][#grow[key] + 1] = o
                 end
@@ -338,10 +266,19 @@ function M.blocks(store, opts)
             -- code, same input. A detector whose OUTPUT SET moves between identical runs
             -- cannot have a rank quoted against it. Keying the tie makes M.blocks a pure
             -- function of its input again. (CART-0348)
-            local best, bestk
-            for k, sub in pairs(grow) do
+            -- ⚠ A TIE BETWEEN EQUAL-SIZE GROUPS IS BROKEN BY POSITION, NOT BY THE KEY (CART-1412): it read `k < bestk`,
+            -- an order over canon's TEXT, so the answer depended on how a key is spelled — swapping canon for the variant
+            -- relation's hash changed one group on our tree (6 rows -> 7) with the window partitions identical at 6, 7
+            -- and 8 rows. The group whose earliest occurrence comes first wins: deterministic, and blind to the key.
+            local function first(sub)
+                local m = math.huge
+                for _, o in ipairs(sub) do m = math.min(m, o.fi * 1000000 + o.s) end
+                return m
+            end
+            local best
+            for _, sub in pairs(grow) do
                 if #sub >= 2 and (not best or #sub > #best
-                    or (#sub == #best and k < bestk)) then best, bestk = sub, k end
+                    or (#sub == #best and first(sub) < first(best))) then best = sub end
             end
             if best then occ, len = best, len + 1 else return occ, len end
         end
@@ -713,16 +650,17 @@ local function rcanon(e, locals, acc)
     if k == 'bin' then
         return 'B' .. (e.op or '') .. '(' .. rcanon(e.l, locals, acc) .. ',' .. rcanon(e.r, locals, acc) .. ')'
     end
-    if k == 'table' then -- contents are part of the key, as in canon above (CART-0357)
+    if k == 'table' then -- contents are part of the key, as in the row term (CART-0357)
         local kp = {}
         for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = rcanon(c, locals, acc) end
         return 'T(' .. table.concat(kp, ',') .. ')'
     end
     -- ★ A TYPE KEYS BY ITS NAME OR EVERY TYPE IS THE SAME TYPE (CART-0742). A
     -- bare named type has NO KIDS, so without this `new Foo()` and `new Bar()`
-    -- canon IDENTICALLY. Present in all THREE structural keys in this file,
-    -- because they are three copies of one function and a kind added to two of
-    -- them is a silent disagreement about what "the same expression" means.
+    -- key IDENTICALLY. Present in both structural keys left in this file and in
+    -- the algebra's term (`kind_of`'s discriminant — the third key, canon, moved
+    -- there in CART-1412), because a kind added to one of them and not another
+    -- is a silent disagreement about what "the same expression" means.
     if k == 'type' then
         local kp = {}
         for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = rcanon(c, locals, acc) end
@@ -730,7 +668,7 @@ local function rcanon(e, locals, acc)
     end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
-    if k == 'assign' then -- see canon: `t` is the TARGET here, not a type string
+    if k == 'assign' then -- see expr.key: `t` is the TARGET here, not a type string
         return 'A(' .. rcanon(e.t, locals, acc) .. ',' .. rcanon(e.v, locals, acc) .. ')'
     end
     local p = {}
@@ -3019,9 +2957,10 @@ local function bcanon(e, locals, slots, ctr, st)
     if k == 'table' then return 'T' end
     -- ★ A TYPE KEYS BY ITS NAME OR EVERY TYPE IS THE SAME TYPE (CART-0742). A
     -- bare named type has NO KIDS, so without this `new Foo()` and `new Bar()`
-    -- canon IDENTICALLY. Present in all THREE structural keys in this file,
-    -- because they are three copies of one function and a kind added to two of
-    -- them is a silent disagreement about what "the same expression" means.
+    -- key IDENTICALLY. Present in both structural keys left in this file and in
+    -- the algebra's term (`kind_of`'s discriminant — the third key, canon, moved
+    -- there in CART-1412), because a kind added to one of them and not another
+    -- is a silent disagreement about what "the same expression" means.
     if k == 'type' then
         local kp = {}
         for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = bcanon(c, locals, slots, ctr, st) end
@@ -3029,7 +2968,7 @@ local function bcanon(e, locals, slots, ctr, st)
     end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
-    if k == 'assign' then -- see canon: `t` is the TARGET here, not a type string
+    if k == 'assign' then -- see expr.key: `t` is the TARGET here, not a type string
         return 'A(' .. bcanon(e.t, locals, slots, ctr, st) .. ','
             .. bcanon(e.v, locals, slots, ctr, st) .. ')'
     end
