@@ -1112,12 +1112,73 @@ function D.generalize(instances, opts)
         values = vals2
     end
     rekey()
+    -- ★ A KEYED NODE'S ORDER NOTE (CART-1360's drift): generalize records, on each keyed node, whether every member
+    -- present there WRITES its keys in the same order — { stable, support = members present, claimed = stable and
+    -- support >= need }. The fold never computed it; it is read here off the instances at the node's path, under the
+    -- same condition as the re-keying (a path addresses one position in every instance), on a rebuilt copy.
+    local function order_notes()
+        for _, e in pairs(D.sites(T)) do if e.rep or e.ctx then return end end
+        for _, pos in ipairs(B.positions(T.body)) do if pos.node.k == 'embed' then return end end
+        local need = opts.need or 3
+        local body = T.body
+        for _, pos in ipairs(B.positions(T.body)) do
+            if pos.node.align and not is_hole(pos.node) then
+                local seqs, live = {}, 0
+                for _, inst in ipairs(instances) do
+                    local m = B.locate_at(inst, pos.path)
+                    if m then
+                        live = live + 1
+                        local ks = {}
+                        for _, q in ipairs(B.positions(m)) do if #q.path == 1 then ks[#ks + 1] = tostring(q.path[1]) end end
+                        seqs[#seqs + 1] = table.concat(ks, '\1')
+                    end
+                end
+                local stable = true
+                for x = 2, #seqs do if seqs[x] ~= seqs[1] then stable = false end end
+                local c = {}
+                for k, v in pairs(B.locate_at(body, pos.path)) do c[k] = v end
+                c.order = { stable = stable, support = live, claimed = stable and live >= need }
+                body = B.put(body, pos.path, c)
+            end
+        end
+        T.body = body
+    end
+    order_notes()
     T.edits = {}
     -- join sees one fragment at a time and writes `open` for a fragment with holes inside; the
     -- fold has the whole column, so the derived domains are recomputed from it (DOMAINS.md),
     -- and the structural claims (repetition, recursion) are the same summaries generalize
     -- makes, read off the same column (HEDGEJOIN.md)
     local _, notes = B.rederive_domains(T, values, { env = env, need = opts.need, grammars = opts.grammars, split_cap = opts.split_cap })
+    -- ★ WHY A HOLE IS A HOLE, READ OFF ITS COLUMN (CART-1360's drift): generalize records it as it mints the hole
+    -- (`presence`, `kind`, `alignment`, `literal`, `name`, `hole`, `arity`); the fold never knew it. It is a function
+    -- of the hole and its column, in generalize's own order of tests: a mark is `presence`; values of different kinds
+    -- are `kind`; a keyed value beside a positional one — or a keyed node that is a hole at all, which generalize
+    -- reaches only when keyed alignment failed — is `alignment`; else the leaf kind, else `arity`. A hedge hole keeps
+    -- the hedge summary's note.
+    notes = notes or {}
+    for h, e in pairs(T.holes) do
+        notes[h] = notes[h] or {}
+        -- (and `under_optional`, generalize's mark for a column with a GAP — a member owes no value there, so no
+        -- recursion claim is made over it: also a property of the column alone)
+        for i = 1, #values do if values[i][h] == nil then notes[h].under_optional = true end end
+        if notes[h].why == nil and not e.rep then
+            local live = {}
+            for i = 1, #values do if values[i][h] ~= nil then live[#live + 1] = values[i][h] end end
+            local why
+            if e.presence then why = 'presence'
+            elseif #live > 0 then
+                local k, aligned, plain = live[1].k, false, false
+                for _, v in ipairs(live) do
+                    if v.k ~= k then why = 'kind' end
+                    if v.align then aligned = true else plain = true end
+                end
+                if not why and aligned then why = 'alignment' end
+                if not why then why = (k == 'lit' and 'literal') or (k == 'name' and 'name') or (k == 'hole' and 'hole') or 'arity' end
+            end
+            notes[h].why = why
+        end
+    end
     return { template = T, values = values, notes = notes, env = env }
 end
 

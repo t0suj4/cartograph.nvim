@@ -529,6 +529,35 @@ test('algebra seam: generalize keeps a nested optional mark apart from a top-lev
     eq('(absent);⊥;(present)', by_path['a/2/a'].col, 'the nested one is ⊥ there: its parent is gone')
 end)
 
+-- ★ WHAT GENERALIZE SAYS ABOUT ITS HOLES, NOT ONLY WHERE THEY ARE (CART-1360's drift): a hole's `why`, a keyed node's
+-- `order` note and `under_optional` on a column with a gap. The derived fold recorded none of them; the donor suite
+-- asserts them, but its baseline under DERIVE=generalize carries two unrelated hedge failures, so a mutation check
+-- cannot run there — these assert the same three, against whichever generalize is installed.
+test('algebra seam: generalize notes why each hole is one, the keyed order, and a column with a gap', function ()
+    local A = need()
+    local function P(k, v) return A.node('pair', A.lit(k), v) end
+    local function obj(...) local n = A.node('obj', ...); n.align = 'keyed'; return n end
+    -- a keyed list whose elements under one key diverge in kind: the whole list is the hole, and it says why
+    local function list(...) local n = A.node('list', ...); n.align = 'keyed'; n.key = 'name'; return n end
+    local a = list(A.node('c', P('name', A.lit('x'))), A.node('c', P('name', A.lit('y'))))
+    local b = list(A.node('c', P('name', A.lit('x'))), A.node('s', P('name', A.lit('y'))))
+    local g = A.generalize({ a, b }, {})
+    ok(A.is_hole(g.template.body), 'the whole list is the hole')
+    eq('alignment', g.notes[g.template.body.h].why)
+    -- three members writing their keys in one order: stable, claimed; a permuted one is not stable
+    local o = function (x, y) return obj(P('a', A.lit(x)), P('b', A.lit(y))) end
+    local g3 = A.generalize({ o(1, 2), o(3, 4), o(5, 6) }, {})
+    ok(g3.template.body.order and g3.template.body.order.stable and g3.template.body.order.claimed, 'stable and claimed')
+    eq(3, g3.template.body.order.support)
+    local g3p = A.generalize({ o(1, 2), o(3, 4), obj(P('b', A.lit(6)), P('a', A.lit(5))) }, {})
+    eq(false, g3p.template.body.order.stable, 'a permuted member breaks it')
+    -- a value hole under an optional pair: its column has a gap
+    local gn = A.generalize({ obj(P('a', A.lit(1))), obj(P('a', A.lit(1)), P('m', A.lit(1))), obj(P('a', A.lit(1)), P('m', A.lit(2))) }, {})
+    local valueh
+    for h, e in pairs(gn.template.holes) do if not e.presence then valueh = h end end
+    ok(valueh and gn.notes[valueh].under_optional, 'the value under the optional pair is marked under_optional')
+end)
+
 -- ⚠ AN ENVIRONMENT FAULT IS NOT AN ANSWER: a refusal from `anti_unify` would reach
 -- `element_template` as `alignable = false`, the same verdict ~70% of real
 -- containers earn honestly — so a missing algebra RAISES (CART-0939).
