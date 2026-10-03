@@ -3912,9 +3912,6 @@ function M.compare_mappings(t)
     return out
 end
 
--- REDERIVE.md: with DERIVE=<op,op,..|all> in the environment, the named operators are
--- replaced by their re-derivations from the basis (derive.lua) so the suite can judge them
-if os.getenv('DERIVE') then require('derive').apply_to(M, os.getenv('DERIVE')) end
 
 -- ── PARTS ─────────────────────────────────────────────────────────────────
 -- Sections extracted by cartograph's own move-set. Each part RECEIVES this
@@ -3967,5 +3964,12 @@ require('cartograph.algebra.match')(M, PARTS)
 require('cartograph.algebra.negatives')(M, PARTS)
 require('cartograph.algebra.demandfam')(M, PARTS)
 
+-- REDERIVE.md: with DERIVE=<op,op,..|all> in the environment, the named operators are
+-- replaced by their re-derivations from the basis (derive.lua) so the suite can judge them.
+-- ⚠ AFTER THE PARTS, never before: derive.lua's basis table is filled from M when the hook runs,
+-- and `join`, `unify`, `match`… live in part files — run above them (where the split left it),
+-- every derivation that needed one failed with "`join` is not in the basis" (14 times,
+-- found by the verb audit 2026-10-03)
+if os.getenv('DERIVE') then require('derive').apply_to(M, os.getenv('DERIVE')) end
 
 return M
