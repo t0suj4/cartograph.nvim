@@ -271,24 +271,27 @@ function Scan:use(node, taint, via)
                 via = via, detail = callee .. '()' }
             return
         end
+        -- (the argument's POSITION: the helper follow uses it, and so does record-flow across files — CART-1345)
+        local sl2, sc2 = cur:range()
+        local idx = 0
+        for ch in p:iter_children() do
+            if ch:named() then
+                idx = idx + 1
+                local cl, cc = ch:range()
+                if cl == sl2 and cc == sc2 then break end
+            end
+        end
         -- INTERPROC 1-HOP: the WHOLE record (not a derived sub-value) passed to
         -- a resolvable same-file helper → FOLLOW it (taint that helper's matching
         -- param, resolve_params re-walks the body). Coverage no longer stops here.
         if not esc and self.helpers[callee] then
-            local sl2, sc2 = cur:range()
-            local idx = 0
-            for ch in p:iter_children() do
-                if ch:named() then
-                    idx = idx + 1
-                    local cl, cc = ch:range()
-                    if cl == sl2 and cc == sc2 then break end
-                end
-            end
             self.props[#self.props + 1] = { name = callee, idx = idx, kind = kindof(taint) }
             return
         end
+        -- (crossing a FILE: an `arg` escape that says which argument, of which call, carrying what — the record-flow
+        -- tactic resolves the callee through the graph and seeds that parameter, CART-1345)
         self.escapes[#self.escapes + 1] = { line = l, col = c, kind = esc or 'arg',
-            via = via, detail = callee .. '()' }
+            via = via, detail = callee .. '()', idx = idx, call_line = (p:parent():range()) + 1, taint = kindof(taint) }
         return
     end
     if pt == 'field' then -- table_constructor field value: `{ range = r }`
@@ -550,6 +553,13 @@ function M.scan(src, file, spec)
     local root = parser:parse()[1]:root()
     local s = Scan.new(src, file, spec)
     s:collect_helpers(root)   -- index helpers first (defs may follow call sites)
+    -- ★ PARAMETER SEEDS (CART-1345): spec.params = { [file] = { { name = <function's last segment>, idx = k, kind } } }
+    -- — "parameter k of function F carries the shape", the seed form record-flow needs to follow a record into
+    -- ANOTHER file's function; it rides the same worklist the same-file helper follow uses
+    for _, ps in ipairs((spec.params or {})[file] or {}) do
+        s.props[#s.props + 1] = { name = ps.name, idx = ps.idx, kind = ps.kind }
+        s.seeds = s.seeds + 1
+    end
     s:walk(root)              -- main producer walk (records interproc worklist)
     s:resolve_params()        -- follow the worklist into helper bodies
     return { file = file, seeds = s.seeds, derefs = s.derefs,
@@ -591,7 +601,7 @@ function M.roster(root, files, spec)
                 end
                 for _, e in ipairs(r.escapes) do
                     frontier[#frontier + 1] = { file = f, line = e.line, col = e.col,
-                        kind = e.kind, via = e.via, detail = e.detail }
+                        kind = e.kind, via = e.via, detail = e.detail, idx = e.idx, call_line = e.call_line, taint = e.taint }
                 end
                 for _, e in ipairs(r.seamed) do
                     seamed[#seamed + 1] = { file = f, line = e.line, col = e.col,
