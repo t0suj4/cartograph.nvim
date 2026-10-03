@@ -12,6 +12,13 @@ test('eq: a PRESENCE MARK is identity on every kind — on a literal and a name 
     ok(A.content_id(lit('b', 'h1')) ~= A.content_id(lit('b')), 'and the content id follows')
 end)
 
+test('instance_of is REFLEXIVE on an embed body, and two embeds of different grammars are not instances of each other (CART-1409)', function ()
+    local E = { k = 'embed', g = 'lua', kids = { A.node('call', A.name('f'), A.hole('x')) } }
+    ok(A.instance_of(A.template(E), A.template(E)), 'instance_of(T, T)')
+    local F = { k = 'embed', g = 'sql', kids = { A.node('call', A.name('f'), A.hole('x')) } }
+    ok(not A.instance_of(A.template(E), A.template(F)) and not A.instance_of(A.template(F), A.template(E)))
+end)
+
 test('eq: an EMBED\'s grammar is identity — one tree parsed as SQL is not the same tree parsed as Lua', function ()
     local inner = A.node('select', A.lit('x'))
     local s, l = { k = 'embed', g = 'sql', kids = { inner } }, { k = 'embed', g = 'lua', kids = { A.copy(inner) } }
@@ -97,9 +104,7 @@ test('law: ordered => term => variant => equivalent, term => theory — and ever
         local o, t, v, th = O.eq(a, b), T.eq(a, b), V.eq(a, b), Th.eq(a, b, AC)
         if o then ok(t, 'ordered => term: ' .. A.show(a)) end
         if t then ok(v, 'term => variant: ' .. A.show(a)); ok(th, 'term => theory: ' .. A.show(a)) end
-        -- (equivalent's domain: bodies without an embed — instance_of is not reflexive on one, CART-1409)
-        local function has_embed(u) if u.k == 'embed' then return true end; for _, c in ipairs(u.kids or {}) do if has_embed(c) then return true end end; return false end
-        if v and not has_embed(a) and not has_embed(b) then
+        if v then
             strict.variant_pairs = strict.variant_pairs + 1
             ok(A.equality('equivalent').eq(A.template(a), A.template(b)), 'variant => equivalent: ' .. A.show(a) .. ' / ' .. A.show(b))
         end

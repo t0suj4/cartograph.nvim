@@ -188,6 +188,12 @@ function M.match(T, I, env)
             return k(st2)
         end
         if t.k == 'embed' then
+            -- an EMBED in the subject too (a string already parsed — a template's own body, as instance_of reads it):
+            -- the same grammar, and the parsed kids match (CART-1409: instance_of(T, T) was false on an embed body)
+            if type(i) == 'table' and i.k == 'embed' then
+                if i.g ~= t.g then return fail(path, ('embed %s vs embed %s'):format(tostring(t.g), tostring(i.g))) end
+                return go(t.kids[1], i.kids[1], child(path, 1), st, k)
+            end
             if type(i) ~= 'table' or i.k ~= 'lit' or type(i.v) ~= 'string' then
                 return fail(path, 'embed ' .. t.g .. ': not a string')
             end
