@@ -226,22 +226,14 @@ function M.model(root, opts)
         for _, p in ipairs(g.params) do pset[p] = true end
         local replies, seen = {}, {}
         for _, c in ipairs(g.cases) do
-            local ren, cnt = {}, 0
-            local function canon(t)
-                if t.k == 'hole' then
-                    if pset[t.h] or t.h:sub(1, 1) == '@' then return t end
-                    if not ren[t.h] then cnt = cnt + 1; ren[t.h] = 'o' .. cnt end
-                    return a.hole(ren[t.h], t.rep)
-                end
-                if not t.kids then return t end
-                local kids = {}
-                for i, x in ipairs(t.kids) do kids[i] = canon(x) end
-                return copy(t, kids)
-            end
-            local ct = canon(c)
+            -- (a PARTIAL VARIANT — CART-1398: the reply modulo renaming of the holes no parameter names, `o1, o2, …` by
+            -- first occurrence; two replies are one when their renamed forms are one TERM. The serialized text stays
+            -- the SORT key, so the generated code keeps its order.)
+            local ct = a.rename_holes(c, { keep = function (h) return pset[h] or h:sub(1, 1) == '@' end, prefix = 'o' })
             local sk = PG.serialize(ct)
-            if not seen[sk] then
-                seen[sk] = true
+            local id = a.content_id(ct)
+            if not seen[id] then
+                seen[id] = true
                 local cname = (ct.k == 'rec:iq' and ct.kids[2] and ct.kids[2].k == 'lit' and tostring(ct.kids[2].v))
                     or (ct.k == 'lit' and tostring(ct.v)) or (ct.k == 'hole' and 'unknown') or 'reply'
                 replies[#replies + 1] = { name = cname, term = ct, key = sk }

@@ -20,11 +20,15 @@ return function (M, SHARED)
 
 -- ── VARIANT: hole names renamed canonically ────────────────────────────────────────────────────────────────────────
 --- a copy of t with every HOLE NAME — a hole's `h` and a presence mark's `opt`, one namespace — renamed `v1, v2, …` by
---- first occurrence in preorder (a keyed node's kids in KEY order: keys hold no holes, so the order is the term's own)
-function M.rename_holes(t)
-    local map, n = {}, 0
+--- first occurrence in preorder (a keyed node's kids in KEY order: keys hold no holes, so the order is the term's own).
+--- opts.keep(name) -> true keeps a name (a PARTIAL variant: modulo renaming of the other holes — a generator's
+--- parameters keep theirs); opts.prefix replaces `v` (xmpppeer's outputs are `o1, o2, …`)
+function M.rename_holes(t, opts)
+    opts = opts or {}
+    local map, n, prefix = {}, 0, opts.prefix or 'v'
     local function name(h)
-        if not map[h] then n = n + 1; map[h] = 'v' .. n end
+        if opts.keep and opts.keep(h) then return h end
+        if not map[h] then n = n + 1; map[h] = prefix .. n end
         return map[h]
     end
     local function go(u)

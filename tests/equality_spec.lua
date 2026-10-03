@@ -157,3 +157,10 @@ test('a store keyed by the TERM relation: values eq tells apart are never one ho
     local G = A.tg_of_term(A.node('f', { k = 'lit', v = 'b', opt = 'h1' }, A.lit('b'), A.lit('b')), { share = true })
     eq(3, vim.tbl_count(G.eqs), 'f, "b"?h1, "b" — the unmarked twins shared, the marked one apart')
 end)
+-- ── RUNG 4 (CART-1402): the audit's switches — a hand-rolled relation replaced by the family's
+test('a PARTIAL variant: rename the holes a caller does not keep (xmpppeer\'s replies: parameters keep their names, the rest o1, o2, …)', function ()
+    local t = A.node('f', A.hole('a'), A.hole('P'), A.hole('a'), A.hole('@id'))
+    local r = A.rename_holes(t, { keep = function (h) return h == 'P' or h:sub(1, 1) == '@' end, prefix = 'o' })
+    eq('(f ?o1 ?P ?o1 ?@id)', A.show(r))
+    eq('(f ?v1 ?v2 ?v1 ?v3)', A.show(A.rename_holes(t)), 'with no keep, every name')
+end)
