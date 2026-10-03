@@ -165,6 +165,42 @@ function M.holes(t, names)
     return n
 end
 
+--- A RESIDUAL PROGRAM AS A TERM GRAPH (CART-1341 step 9): one recursion equation per residual function — `fun(params,
+--- body)` — and every call of a residual function an EDGE to that function's equation instead of its generated name,
+--- so recursion is a cycle and the program is the term-graph object of termgraph.lua (canonical form = Def. 4). Printed
+--- by A.tg_show it is independent of the generated function names and their order: two residuals that differ only by
+--- naming print the same. Variable names stay labels (lowering derives them from declaration ids — deterministic).
+--- res: { funcs = { name -> { params, body } }, order, entry } -> term graph
+function M.program_graph(res)
+    local eqs, n, fun_rv = {}, 0, {}
+    for i, name in ipairs(res.order) do fun_rv[name] = 'f' .. i end
+    local emit
+    function emit(t)
+        n = n + 1
+        local rv = 'x' .. n
+        if t.k == 'lit' then
+            eqs[rv] = { kind = 'node', sym = 'lit:' .. type(t.v) .. ':' .. tostring(t.v), args = {} }
+            return rv
+        end
+        local args = {}
+        if t.k == 'call' and t.kids[1].k == 'lit' and fun_rv[t.kids[1].v] then
+            args[1] = fun_rv[t.kids[1].v] -- (the callee's equation: a residual call is an edge, recursion a cycle)
+            args[2] = emit(t.kids[2])
+        else
+            for i, c in ipairs(t.kids or {}) do args[i] = emit(c) end
+        end
+        eqs[rv] = { kind = 'node', sym = t.k, args = args }
+        return rv
+    end
+    for _, name in ipairs(res.order) do
+        local f = res.funcs[name]
+        local ps = {}
+        for i, p in ipairs(f.params) do ps[i] = { k = 'lit', v = p } end
+        eqs[fun_rv[name]] = { kind = 'node', sym = 'fun', args = { emit({ k = 'seq', kids = ps }), emit(M.block_term(f.body)) } }
+    end
+    return require('cartograph.algebra').load().tg_canon({ root = fun_rv[res.entry], eqs = eqs })
+end
+
 --- a statement list (a body) <-> a `seq` term
 function M.block_term(b) return list_term(b) end
 function M.of_block(t) return of_list(t) or {} end

@@ -75,6 +75,41 @@ test('mixterm: the SCHEMA is held to mix.lua — every constructor site\'s field
     ok(sites >= 80, sites .. ' constructor sites')
 end)
 
+test('mixterm: a RESIDUAL PROGRAM is a term graph — calls are edges, recursion a cycle — so tg_show compares residuals independent of the generated function names', function ()
+    ready()
+    local src = 'local function count(x, n)\n    if x > 0 then return count(x - 1, n + 1) end\n    return n\nend\n'
+    local prog = MX.lower(assert(R.read(src, 'lua')))
+    local res = MX.specialize(prog, 'count', { 'D', 'S' }, { nil, 0 })
+    -- the same residual with every function renamed: different text, the same graph
+    local ren = {}
+    for i, nm in ipairs(res.order) do ren[nm] = 'renamed_' .. (#res.order - i + 1) end
+    local function rename(t)
+        if t.k == 'call' and t.kids[1].k == 'lit' and ren[t.kids[1].v] then
+            return { k = 'call', kids = { { k = 'lit', v = ren[t.kids[1].v] }, rename(t.kids[2]) } }
+        end
+        if not t.kids then return t end
+        local kids = {}
+        for i, c in ipairs(t.kids) do kids[i] = rename(c) end
+        return { k = t.k, kids = kids }
+    end
+    local res2 = { funcs = {}, order = {}, entry = ren[res.entry] }
+    for i = #res.order, 1, -1 do
+        local nm = res.order[i]
+        res2.order[#res2.order + 1] = ren[nm]
+        res2.funcs[ren[nm]] = { name = ren[nm], params = res.funcs[nm].params, body = MT.of_block(rename(MT.block_term(res.funcs[nm].body))) }
+    end
+    ok(MX.print(res) ~= MX.print(res2), 'the texts differ')
+    local s1, s2 = A.tg_show(MT.program_graph(res)), A.tg_show(MT.program_graph(res2))
+    eq(s1, s2, 'the graphs print the same')
+    -- recursion is a CYCLE: some function's equation is called from inside its own body
+    local cyclic = false
+    for z in s1:gmatch('(z%d+)=fun%(') do if s1:find('call(' .. z .. ',', 1, true) then cyclic = true end end
+    ok(cyclic, 'a residual function calls itself through an edge\n' .. s1)
+    -- and a structural difference is seen: n starting at 1 instead of 0
+    local res3 = MX.specialize(MX.lower(assert(R.read(src, 'lua'))), 'count', { 'D', 'S' }, { nil, 1 })
+    ok(A.tg_show(MT.program_graph(res3)) ~= s1, 'a different residual prints differently')
+end)
+
 test('mixterm: what the lens does not know is REFUSED by name — an unknown kind, a field outside the schema', function ()
     local okk, e1 = pcall(MT.to_term, { op = 'goto', label = 'x' })
     ok(not okk and e1.refusal:find('no schema for the IR kind goto', 1, true), vim.inspect(e1))
