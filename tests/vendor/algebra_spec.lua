@@ -3945,6 +3945,15 @@ describe('hedge-aware join: alignment is forced by one hedge hole, else by ident
         assert.equals('(f 1 2 ?j1...)', A.show(r2.template.body))
     end)
 
+    it("generalize honours the 'none' rigidity too (CART-0950): unequal lists are ONE hole, n-ary and non-linear like any other", function()
+        local r = A.generalize({ node('f', lit(1), lit(2)), node('f', lit(1), lit(2), lit(3)) }, { align = 'none' })
+        assert.equals('?h1', A.show(r.template.body))
+        assert.equals('(f 1 2 ?h1...)', A.show(A.generalize({ node('f', lit(1), lit(2)), node('f', lit(1), lit(2), lit(3)) }).template.body))
+        -- equal lengths still align column by column, and two sites with one value vector share one hole
+        local g = A.generalize({ node('g', node('f', lit(1)), node('f', lit(1))), node('g', node('f', lit(1), lit(2)), node('f', lit(1), lit(2))) }, { align = 'none' })
+        assert.equals('(g ?h1 ?h1)', A.show(g.template.body))
+    end)
+
     it("adjoin under the 'none' rigidity keeps the old shape (a node hole), so classify still works on an arity-divergent family", function()
         local T, Vs = A.template(node('f', hole 'a', lit(2))), { { a = lit(1) } }
         local j = A.adjoin(T, Vs, node('f', lit(1), lit(2), lit(3)))

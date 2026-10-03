@@ -627,6 +627,10 @@ function M.generalize(instances, opts)
             lens[i] = #(ts[i].kids or {})
             if lens[i] ~= lens[live[1]] then same = false end
         end
+        -- ★ THE FIXED-ARITY LGG (CART-0950, join's `align = 'none'`): kids-lists of differing lengths are ONE hole, never
+        -- an alignment with hedge holes — what a positional data model (kv arrays, CART-1379) and elemdrive's fixed-arity
+        -- comparison mean. generalize never read this option before; a caller passing it got the hedge alignment.
+        if not same and opts.align == 'none' then return M.hole(fresh(ts, 'arity')) end
         if not same then return arity_divergence(ts, lens) end
         local kids = {}
         for j = 1, lens[live[1]] do
