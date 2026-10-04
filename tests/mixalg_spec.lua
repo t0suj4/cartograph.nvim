@@ -95,12 +95,34 @@ test('mixalg: an UNFOLD is specialized ONCE per configuration — a statement-li
     eq(1, hits, 'the one two-statement function matches')
 end)
 
-test('mixalg: a configuration whose KEY cannot be formed refuses FAST — the fallback program point would meet the same key (CART-1455)', function ()
+test('mixalg: a continuation that keeps GROWING is made DYNAMIC — a statement template whose chain nested past 20 compiles, and equals A.match on real declarations (CART-1456)', function ()
     ready()
-    -- (`local ?1 = 1 return ?1`: match's continuation chain nests past 20 — CART-1456. Under the budget given here the
-    -- old behaviour, rollback and retry, ran out of BUDGET instead of naming the key)
+    -- (`local ?1 = 1 return ?1`: go_kids adds a continuation per template child, trivia included — refused before)
     local rules_ = assert(require('cartograph.byexample').learn('local function f()\n  local a = 1\n  return a\nend', 'local function f()\n  local a = 1\n  a = a + 1\n  return a\nend', 'lua'))
-    local okc, e = pcall(MA.compile_match, rules_[1].lhs, { budget = 2e5 })
+    local T = rules_[1].lhs
+    local m = MA.compile_match(T, { budget = 2e5 })
+    local src = io.open('lua/cartograph/mixalg.lua'):read('a'):gsub('\nreturn M%s*$', '\n') .. 'local function g()\n  local q = 1\n  return q\nend\n'
+    local hits, n = 0, 0
+    local function walk(t)
+        if t.k == T.body.k then -- (the rule's own root kind)
+            n = n + 1
+            local want = A.match(T, t)
+            eq(want, m(t))
+            if want.ok then hits = hits + 1 end
+        end
+        for _, c in ipairs(t.kids or {}) do walk(c) end
+    end
+    walk(assert(R.read(src, 'lua')))
+    ok(n > 5, n .. ' declarations'); eq(1, hits)
+end)
+
+test('mixalg: a configuration whose KEY cannot be formed — a static TEMPLATE nested past 20 — refuses FAST, by name (CART-1455)', function ()
+    ready()
+    -- (no closure to make dynamic: the template itself is the deep static value. Under this budget the old behaviour,
+    -- rollback and retry, ran out of BUDGET instead of naming the key)
+    local src = 'local x = ' .. string.rep('(', 25) .. 'y' .. string.rep(')', 25)
+    local T = A.template(assert(R.read(src, 'lua')))
+    local okc, e = pcall(MA.compile_match, T, { budget = 2e5 })
     eq(false, okc)
     ok(type(e) == 'table' and tostring(e.refusal):find('nested deeper than', 1, true), vim.inspect(e))
 end)
@@ -127,6 +149,51 @@ test('mixalg: the assembled program keeps a LINE MAP, so a compiled matcher\'s s
     local _, orig = pcall(A.keys, { k = 'nil', align = 'keyed', kids = { { k = 'lit', v = 1 } } })
     local prefix = tostring(orig):match('^(.-:%d+: )')
     ok(prefix and residual:find(prefix .. 'keyed nil', 1, true), tostring(prefix))
+end)
+
+test('mixalg: a KEYED template compiles to a matcher EQUAL to A.match on keyed subjects — missing and extra keys, keyed lists, deep refusal paths (CART-1460, CART-1461)', function ()
+    ready()
+    -- (the luajs population has no keyed node and no refusal deeper than two steps: compiled keyed matching was a
+    -- different program — `key` rewritten to a function — and every deep path lost its middle, both unseen)
+    -- (plain tables as kv values: objects { o, keys }, lists { a }; `svc` merge-keyed by its `id`)
+    local function kv(x)
+        if type(x) ~= 'table' then return x end
+        if x[1] ~= nil then local a = {}; for i, e in ipairs(x) do a[i] = kv(e) end; return { a = a } end
+        local o, keys = {}, {}
+        for k, v in pairs(x) do o[k] = kv(v); keys[#keys + 1] = k end
+        table.sort(keys)
+        return { o = o, keys = keys }
+    end
+    local function K(v) return A.kv_term(kv(v), { keyfield = 'id' }) end
+    local function cfg(name, port, deeper, tags)
+        return { name = name, port = port, tags = tags, sub = { deep = { deeper = deeper } }, svc = { { id = 'a', w = port }, { id = 'b', w = 1 } } }
+    end
+    -- (the template: one config, its port a hole — keyed objects three deep, a keyed list)
+    local function holed(t)
+        if t.k == 'lit' and tostring(t.v) == '80' then return A.hole('p') end
+        if not t.kids then return t end
+        local kids = {}
+        for i, c in ipairs(t.kids) do kids[i] = holed(c) end
+        return A.rebuild(t, kids)
+    end
+    local T = A.template(holed(K(cfg('a', 80, 1, { 'x', 'y' }))))
+    local m, _, stats = MA.compile_match(T)
+    ok(stats.functions > 1, 'compiled')
+    local subjects = {
+        K(cfg('a', 90, 1, { 'x', 'y' })), K(cfg('a', 90, 3, { 'x', 'y' })), K(cfg('a', 90, { 1 }, { 'x', 'y' })), K(cfg('a', 9, 1, { 'x' })),
+        K(cfg('b', 90, 1, { 'x', 'y' })),
+        K({ name = 'a', port = 1, tags = { 'x', 'y' }, sub = { deep = { other = 1 } }, svc = { { id = 'a', w = 1 } } }),
+        K({ name = 'a', port = 1, tags = { 'x', 'y' }, sub = { deep = { deeper = 1, extra = 2 } }, svc = { { id = 'a', w = 1 }, { id = 'b', w = 1 } } }),
+        K({ name = 'a', port = 2, tags = { 'x', 'y' }, sub = { deep = { deeper = 1 } }, svc = { { id = 'a', w = 3 }, { id = 'b', w = 1 } } }),
+        K({}), K({ 1, 2, 3 }), K('x'),
+    }
+    local deep = 0
+    for i, s in ipairs(subjects) do
+        local want = A.match(T, s)
+        eq(want, m(s), 'subject ' .. i)
+        if want.refusal and select(2, tostring(want.refusal.at):gsub('/', '')) >= 2 then deep = deep + 1 end
+    end
+    ok(deep >= 2, deep .. ' refusals three or more steps deep')
 end)
 
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()

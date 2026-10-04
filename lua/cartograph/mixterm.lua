@@ -46,7 +46,8 @@ M.SCHEMA = {
     ['repeat'] = { { 'body', LIST }, { 'cond', NODE }, { 'at', CARRY } },
     ret = { { 'es', LIST }, { 'at', CARRY } },
     str = { { 'v', LIT } },
-    table = { { 'fields', FIELDS } },
+    -- (`rest`: the expanding last positional field, from index `restat` — `{ unpack(path) }`)
+    table = { { 'fields', FIELDS }, { 'rest', NODE }, { 'restat', LIT } },
     un = { { 'o', LIT }, { 'e', NODE } },
     var = { { 'id', LIT }, { 'name', LIT } },
     ['while'] = { { 'cond', NODE }, { 'body', LIST }, { 'at', CARRY } },

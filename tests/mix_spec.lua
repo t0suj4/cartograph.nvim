@@ -223,6 +223,37 @@ test('mix: LOOPS — a BREAK: a static one ends the unrolling, a dynamic one lea
     ok(text:find('s_%d+ = '), 'the sum is residual\n' .. text)
 end)
 
+test('mix: a constructor\'s LAST POSITIONAL field EXPANDS a call\'s values — `{ unpack(t) }` copies the whole list, statically and at run time (CART-1461)', function ()
+    ready()
+    local src = [[
+local function two() return 7, 8 end
+local function child(path, i)
+    local p = { unpack(path) }
+    p[#p + 1] = i
+    return p
+end
+local function f(path, d)
+    local a = child(path, #d)
+    local b = { 0, unpack(path) }
+    local c = { k = 1, two() }
+    local e = { [2] = 5, two() }
+    local g = { 1, 2, unpack(d) }
+    local h = { k = 3, unpack(d) }
+    return table.concat(a, '/') .. '|' .. table.concat(b, '/') .. '|' .. c[1] .. c[2] .. c.k .. '|' .. e[1] .. e[2] .. '|' .. table.concat(g, '/')
+        .. '|' .. h.k .. table.concat(h, '/')
+end
+]]
+    local o = original(src, 'f')
+    -- (path static: the expansion is computed; d dynamic: the tables holding it are built at run time)
+    local r, text = residual(src, 'f', { 'S', 'D' }, { { 1, 3, 5 } })
+    for _, d in ipairs({ { 9 }, { 9, 10, 11 } }) do eq(o({ 1, 3, 5 }, d), r(d)) end
+    -- (and both dynamic: the residual prints the expanding field positionally, or appends it past other keys)
+    local r2, text2 = residual(src, 'f', { 'D', 'D' }, {})
+    for _, p in ipairs({ { 1 }, { 1, 3, 5, 7 } }) do eq(o(p, { 4 }), r2(p, { 4 })) end
+    ok(text2:find('{ unpack(path_', 1, true), 'positional: `{ unpack(path) }`\n' .. text2)
+    ok(text2:find('select("#", ...)', 1, true), 'past a named key: appended at run time\n' .. text2)
+end)
+
 test('mix: a NON-FINITE number reaching dynamic code is lifted as the division that makes it — 1/0, -1/0, 0/0', function ()
     ready()
     local src = 'local function f(x)\n    local best, worst = math.huge, -math.huge\n    if x < best then best = x end\n    if x > worst then worst = x end\n    return best, worst\nend\n'

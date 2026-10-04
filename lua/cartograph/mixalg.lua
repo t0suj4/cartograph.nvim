@@ -8,8 +8,10 @@
 -- The residual is loaded with its CONSTANT POOL (static data it references: MIXK) and the algebra's grammars (M) in its
 -- environment. MEASURED 2026-10-02 (the luajs rules, 33 templates): every compiled matcher equals A.match on every
 -- projected subterm of lua/cartograph with the rule's head — 231,451 subjects, 0 differ — and 3.3x faster in all.
--- ⚠ Names are resolved BY NAME, not by scope: a local shadowing a file function of the same name would be rewritten
--- to that function — the equivalence gate (tests/mixalg_spec.lua) is what guards the closure it builds.
+-- ★ Names are resolved BY BINDING (CART-1460): an identifier is rewritten — and followed into the closure — only when
+-- the algebra's Lua scope graph has a REFERENCE at its offset whose declaration lies outside the definition (a
+-- file-level binding, or free). By name, a parameter `key` became core's function `key` and `{ key = a }`'s field was
+-- renamed: compiled keyed matching had been a different program since S3, unseen by a population with no keyed node.
 local M = {}
 
 local function algebra_dir()
@@ -87,6 +89,50 @@ function M.program(root)
             end
         end
     end
+    -- ★ BY BINDING, NOT BY NAME (CART-1460): which identifier occurrences are REFERENCES, and where each one's declaration
+    -- is — the algebra's own Lua scope graph over the file's lossless read, its reference sites turned into byte offsets.
+    -- By name, `kid_by_key(t, key)`'s parameter `key` was rewritten to core's file local `key` (the body compared a kid's
+    -- key to a FUNCTION) and the field of `{ key = a }` was renamed too: compiled keyed matching was a different
+    -- program. -> refs[byte offset] = { decl = the declaration's byte offset | nil (free) }
+    local refcache = {}
+    local function refs_of(rel)
+        if refcache[rel] then return refcache[rel] end
+        local A = require('cartograph.algebra').load()
+        local term = assert(require('cartograph.algebraread').read(src[rel], 'lua'))
+        local G = A.scope_graph()
+        A.lua_scope_graph(term, G, { file = rel })
+        pcall(A.sg_link, G)
+        local pos_at, pos = {}, 0
+        local function walk(n, path)
+            pos_at[table.concat(path, ',')] = pos_at[table.concat(path, ',')] or pos
+            if n.k == 'lit' then pos = pos + #tostring(n.v == nil and '' or n.v); return end
+            for i, c in ipairs(n.kids or {}) do path[#path + 1] = i; walk(c, path); path[#path] = nil end
+        end
+        walk(term, {})
+        local out = {}
+        for id, r in pairs(G.refs or {}) do
+            local at = r.site and pos_at[table.concat(r.site, ',')]
+            if at then
+                local res = A.resolve(G, id)
+                local e = res.entries and res.entries[1]
+                local d = e and G.decls[e.decl]
+                out[at] = { decl = d and d.site and pos_at[table.concat(d.site, ',')] or nil }
+            end
+        end
+        refcache[rel] = out
+        return out
+    end
+    -- is the identifier node `cap` of definition d a REFERENCE to something declared OUTSIDE d (a file-level binding, or
+    -- free)? A parameter, a local, a field name, a declaration's own name: no
+    local function outer_ref(cap, d)
+        local _, _, s0 = cap:start()
+        local r = refs_of(d.file)[s0]
+        if not r then return false end
+        if not r.decl then return true end
+        local _, _, d0 = d.node:start()
+        local _, _, d1 = d.node:end_()
+        return r.decl < d0 or r.decl >= d1
+    end
     -- a name inside a definition -> the definition it reaches
     local function resolve(name, file)
         if name:match('^M[.:][%w_]+$') then local k = name:gsub(':', '.'); return defs[k] and k or nil end
@@ -115,7 +161,7 @@ function M.program(root)
             order[#order + 1] = k
             local d = defs[k]
             for _, c in rq:iter_captures(d.node, d.src, 0, -1) do
-                local r = resolve(tx(c, d.src), d.file)
+                local r = (c:type() ~= 'identifier' or outer_ref(c, d)) and resolve(tx(c, d.src), d.file)
                 if r and not seen[r] then todo[#todo + 1] = r end
             end
         end
@@ -149,7 +195,8 @@ function M.program(root)
                 else
                     -- (an identifier that is a field name — the `f` of `a.f`, `a:f` — is no reference)
                     local par = cap:parent()
-                    if not (par and (par:type() == 'dot_index_expression' or par:type() == 'method_index_expression') and par:named_child(0):id() ~= cap:id()) then
+                    if not (par and (par:type() == 'dot_index_expression' or par:type() == 'method_index_expression') and par:named_child(0):id() ~= cap:id())
+                        and outer_ref(cap, d) then
                         local r = resolve(t, d.file)
                         if r and not r:match('^M') then target = mangle(r) end
                     end

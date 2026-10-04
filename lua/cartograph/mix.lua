@@ -216,9 +216,10 @@ function lower_expr(t, cx, scope)
         return { op = 'callv', f = f, args = args } -- (a call through a value: a closure)
     end
     if k == 'table_constructor' then
-        local fields, pos = {}, 0
+        local fields, pos, lastpos = {}, 0, false
         for _, f in ipairs(named(t)) do
             local fn = named(f)
+            lastpos = #fn == 1
             if #fn == 1 then
                 pos = pos + 1
                 fields[#fields + 1] = { key = { op = 'num', v = pos }, val = lower_expr(fn[1], cx, scope) }
@@ -227,6 +228,13 @@ function lower_expr(t, cx, scope)
             else
                 fields[#fields + 1] = { key = { op = 'str', v = text(fn[1]) }, val = lower_expr(fn[2], cx, scope) }
             end
+        end
+        -- (the LAST positional field EXPANDS a call's values from its position on — `{ unpack(path) }` copies the whole
+        -- list. As one field it kept only the first: algebra core's child() lost every middle step of a path, CART-1461)
+        local last = fields[#fields]
+        if lastpos and last and M.MULTI[last.val.op] then
+            fields[#fields] = nil
+            return { op = 'table', fields = fields, rest = last.val, restat = pos }
         end
         return { op = 'table', fields = fields }
     end
@@ -445,6 +453,7 @@ function box_expr(e, boxed, forced)
     elseif op == 'table' then
         n.fields = {}
         for i, f in ipairs(e.fields) do n.fields[i] = { key = box_expr(f.key, boxed, forced), val = box_expr(f.val, boxed, forced) } end
+        if e.rest then n.rest = box_expr(e.rest, boxed, forced) end
     elseif op == 'call' or op == 'prim' or op == 'callv' or op == 'method' then
         n.args = {}
         for i, a in ipairs(e.args) do n.args[i] = box_expr(a, boxed, forced) end
@@ -607,7 +616,7 @@ function M.sra(body, cx)
             owner = saved
             return
         end
-        if n.k == 'local' and n.kids[4] and n.kids[4].k == 'table' and n.kids[1].k == 'lit' then
+        if n.k == 'local' and n.kids[4] and n.kids[4].k == 'table' and n.kids[4].kids[2].k == 'none' and n.kids[1].k == 'lit' then
             local fields, keys, order, ok = n.kids[4].kids[1].kids or {}, {}, {}, true
             for _, f in ipairs(fields) do
                 local key = sra_key(f.kids[1])
@@ -934,6 +943,10 @@ function M.evaluator(prog, budget)
         if op == 'table' then
             local t = {}
             for _, f in ipairs(e.fields) do t[eval(f.key, env)] = eval(f.val, env) end
+            if e.rest then
+                local vs = eval_multi(e.rest, env)
+                for j = 1, vs.n do t[e.restat + j - 1] = vs[j] end
+            end
             return t
         end
         if op == 'lambda' then
@@ -1066,6 +1079,7 @@ local function bt_expr(e, bt)
     if op == 'table' then
         local r = S
         for _, f in ipairs(e.fields) do r = join(r, join(bt_expr(f.key, bt), bt_expr(f.val, bt))) end
+        if e.rest then r = join(r, bt_expr(e.rest, bt)) end
         return opnd(r)
     end
     if op == 'call' or op == 'prim' then
@@ -1451,7 +1465,7 @@ function M.specialize(prog, fname, division, statics, opts)
         return X
     end
 
-    local spec_block, rexpr, lift, dnames
+    local spec_block, rexpr, lift, dnames, table_rest
     -- a loop body specialized inside its own ITERATION SCOPE
     local function loop_body(stmts, X)
         local n = #iters
@@ -1750,7 +1764,7 @@ function M.specialize(prog, fname, division, statics, opts)
         return a, u
     end
 
-    local call_spec
+    local call_spec, dispatch
     -- a call of T with argument expressions argexprs, in X -> residual expression. force: parameters made DYNAMIC
     -- whatever their argument (a generalization), its static value lifted
     local function apply_spec(T, argexprs, X, force)
@@ -1781,6 +1795,34 @@ function M.specialize(prog, fname, division, statics, opts)
             local ef = eager_force(g, division, svals)
             if ef and next(ef) then return apply_spec(T, argexprs, X, ef) end
         end
+        -- ★ A CLOSURE THAT KEEPS GROWING IS MADE DYNAMIC (CART-1456). A continuation built per step — match's go_kids
+        -- adds one per template child — nests a little deeper with every call, until no key can be formed for it ("a
+        -- static value nested deeper than 20": the configuration itself refuses, so the call is not retried as it is).
+        -- Generalizing cannot help (a hole in a closure refuses): instead the call is specialized again ONCE with every
+        -- closure argument DYNAMIC — each lifted to a residual function and called at run time — and the chain stops
+        -- growing at this call
+        if not force then
+            local grow = {}
+            for i = 1, #division do
+                if division[i] ~= D and type(svals[i]) == 'function' and R.clos[svals[i]] then grow[i] = true end
+            end
+            if next(grow) then
+                local no, nm = mark()
+                local d0, ni = depth, #iters
+                local ok, r = pcall(dispatch, T, argexprs, X, force, g, division, svals, dargs)
+                if ok then return r end
+                depth = d0
+                cut_iters(ni)
+                if not (type(r) == 'table' and r.refusal and r.refusal:find('nested deeper than', 1, true)) then error(r, 0) end
+                rollback(no, nm)
+                return apply_spec(T, argexprs, X, grow)
+            end
+        end
+        return dispatch(T, argexprs, X, force, g, division, svals, dargs)
+    end
+
+    -- the call's DISPATCH, its arguments evaluated: a program point / unfold, or a CANDIDATE for generalization
+    function dispatch(T, argexprs, X, force, g, division, svals, dargs)
         local anc, under = nearest(X.frame, g)
         local fr = { g = g, division = division, svals = svals, parent = X.frame, at = T.kind == 'fn' and T.f.at or T.c.lam.at }
         if force or not anc or under then return call_spec(T, division, svals, dargs, fr) end
@@ -1833,6 +1875,18 @@ function M.specialize(prog, fname, division, statics, opts)
         refuse('a static host value reaching dynamic code by no path from a known global')
     end
 
+    -- a residual table's REST (the expanding last positional field): a static call's values become fields at their
+    -- indices, a dynamic one stays the residual table's rest -> out
+    function table_rest(out, e, X)
+        if not e.rest then return out end
+        if bt_expr(e.rest, X.bt) == S then
+            local vs = svalm(e.rest, X)
+            for j = 1, vs.n do out.fields[#out.fields + 1] = { key = { op = 'num', v = e.restat + j - 1 }, val = lift(vs[j], X) } end
+            return out
+        end
+        out.rest, out.restat = rexpr(e.rest, X), e.restat
+        return out
+    end
     -- a residual expression for e in X; a static e (or a closure) is computed and lifted
     function rexpr(e, X)
         spend()
@@ -1842,7 +1896,7 @@ function M.specialize(prog, fname, division, statics, opts)
             if e.op == 'table' then
                 local fields = {}
                 for i, f in ipairs(e.fields) do fields[i] = { key = lift(sval(f.key, X), X), val = rexpr(f.val, X) } end
-                return { op = 'table', fields = fields }
+                return table_rest({ op = 'table', fields = fields }, e, X)
             end
             local v = sval(e, X)
             if (type(v) == 'function' and not R.clos[v]) or type(v) == 'table' then return rpath(e, X) end
@@ -1868,7 +1922,7 @@ function M.specialize(prog, fname, division, statics, opts)
         if op == 'table' then
             local fields = {}
             for i, f in ipairs(e.fields) do fields[i] = { key = rexpr(f.key, X), val = rexpr(f.val, X) } end
-            return { op = 'table', fields = fields }
+            return table_rest({ op = 'table', fields = fields }, e, X)
         end
         if op == 'prim' then
             local args = {}
@@ -2147,7 +2201,9 @@ function M.count_uses(e, uses, w)
     elseif op == 'bin' then M.count_uses(e.l, uses, w); M.count_uses(e.r, uses, w)
     elseif op == 'un' then M.count_uses(e.e, uses, w)
     elseif op == 'index' then M.count_uses(e.obj, uses, w); M.count_uses(e.key, uses, w)
-    elseif op == 'table' then for _, f in ipairs(e.fields) do M.count_uses(f.key, uses, w); M.count_uses(f.val, uses, w) end
+    elseif op == 'table' then
+        for _, f in ipairs(e.fields) do M.count_uses(f.key, uses, w); M.count_uses(f.val, uses, w) end
+        if e.rest then M.count_uses(e.rest, uses, w) end
     elseif op == 'call' or op == 'prim' then for _, a in ipairs(e.args) do M.count_uses(a, uses, w) end
     elseif op == 'callv' then M.count_uses(e.f, uses, w); for _, a in ipairs(e.args) do M.count_uses(a, uses, w) end
     elseif op == 'method' then M.count_uses(e.obj, uses, w); for _, a in ipairs(e.args) do M.count_uses(a, uses, w) end
@@ -2210,6 +2266,8 @@ end
 -- ── PRINT: residual IR -> Lua text ─────────────────────────────────────────────────────────────────────────────────
 -- (every compound expression is parenthesized: no precedence table to keep right)
 local pblock, pexpr
+-- (while printing a program of many functions: the table its functions are fields of — M.print sets it)
+local FNTABLE = nil
 -- an expression in a PREFIX position (indexed, called): a literal or constructor there is no Lua syntax — `nil[k]`,
 -- `"s"[k]`, `{ … }[k]` — so it is parenthesized (and `(nil)[k]` raises at run time, as the original would)
 local PREFIXOK = { var = true, gref = true, index = true, call = true, prim = true, callv = true, method = true, lambda = true }
@@ -2234,8 +2292,22 @@ function pexpr(e, ind)
     if op == 'index' then return prefix(e.obj, ind) .. '[' .. pexpr(e.key, ind) .. ']' end
     if op == 'table' then
         local parts = {}
+        -- (a REST expands in Lua only as the last POSITIONAL field: printed positionally after fields that are exactly
+        -- the positions before it — `{ a, b, f() }` — or, past anything else, appended at its index at run time)
+        local positional = e.rest ~= nil
+        for i, f in ipairs(e.fields) do
+            if not (f.key.op == 'num' and f.key.v == i) then positional = false end
+        end
+        if e.rest and positional and #e.fields == e.restat - 1 then
+            for i, f in ipairs(e.fields) do parts[i] = pexpr(f.val, ind) end
+            parts[#parts + 1] = pexpr(e.rest, ind)
+            return '{ ' .. table.concat(parts, ', ') .. ' }'
+        end
         for i, f in ipairs(e.fields) do parts[i] = '[' .. pexpr(f.key, ind) .. '] = ' .. pexpr(f.val, ind) end
-        return '{ ' .. table.concat(parts, ', ') .. ' }'
+        local t = '{ ' .. table.concat(parts, ', ') .. ' }'
+        if not e.rest then return t end
+        return ('(function (t, ...) for i = 1, select("#", ...) do t[%d + i - 1] = (select(i, ...)) end return t end)(%s, %s)')
+            :format(e.restat, t, pexpr(e.rest, ind))
     end
     if op == 'method' then
         local parts = {}
@@ -2246,6 +2318,7 @@ function pexpr(e, ind)
         local parts = {}
         for i, a in ipairs(e.args) do parts[i] = pexpr(a, ind) end
         local f = op == 'callv' and prefix(e.f, ind) or (e.fn or e.name)
+        if op == 'call' and FNTABLE then f = FNTABLE .. '.' .. f end
         return f .. '(' .. table.concat(parts, ', ') .. ')'
     end
     if op == 'lambda' then
@@ -2344,19 +2417,28 @@ function M.describe(e)
     return s
 end
 
---- the residual program as a Lua chunk: its functions, forward-declared, and `return <entry>`
+--- the residual program as a Lua chunk: its functions, forward-declared, and `return <entry>`. Past 180 functions
+--- they are FIELDS of one table instead (a chunk holds at most 200 locals: a keyed template's matcher had more, and
+--- its chunk did not load, CART-1462)
 function M.print(res)
     local out = {}
     local names = {}
     for i, n in ipairs(res.order) do names[i] = n end
-    out[#out + 1] = 'local ' .. table.concat(names, ', ')
-    for _, n in ipairs(res.order) do
-        local f = res.funcs[n]
-        out[#out + 1] = 'function ' .. n .. '(' .. table.concat(f.params, ', ') .. ')'
-        pblock(f.body, '    ', out)
-        out[#out + 1] = 'end'
-    end
-    out[#out + 1] = 'return ' .. res.entry
+    FNTABLE = (#names > 180) and 'MIXF' or nil
+    if FNTABLE then out[#out + 1] = 'local MIXF = {}'
+    else out[#out + 1] = 'local ' .. table.concat(names, ', ') end
+    local okp, err = pcall(function ()
+        for _, n in ipairs(res.order) do
+            local f = res.funcs[n]
+            out[#out + 1] = 'function ' .. (FNTABLE and (FNTABLE .. '.') or '') .. n .. '(' .. table.concat(f.params, ', ') .. ')'
+            pblock(f.body, '    ', out)
+            out[#out + 1] = 'end'
+        end
+    end)
+    local tbl = FNTABLE
+    FNTABLE = nil
+    if not okp then error(err, 0) end
+    out[#out + 1] = 'return ' .. (tbl and (tbl .. '.') or '') .. res.entry
     return table.concat(out, '\n') .. '\n'
 end
 
