@@ -179,6 +179,22 @@ test('working set: toggle, order, persistence, honest pending', function ()
     store.workset = { ids = {}, refs = {}, pending = {} }
 end)
 
+test('working set: it belongs to a ROOT — another root\'s ingest clears it, the same root re-ingested keeps it (CART-1293)', function ()
+    graph({ mod('a.lua', false), fn('a.lua', 'f', 5) })
+    vim.fn.delete(store.ws_file('/x'))
+    store.ws_load()
+    store.ws_toggle('a.lua::f')
+    -- the same root again (a refresh): the member stays
+    graph({ mod('a.lua', false), fn('a.lua', 'f', 5) })
+    ok(store.ws_has('a.lua::f'), 'a re-ingest of the same root keeps the set')
+    -- another root: the previous project's attention is not this one's — and a refresh then has nothing to strand
+    store.ingest({ schema = 1, root = '/elsewhere', edges = {}, nodes = { mod('z.lua', false) } })
+    store.ws_resolve()
+    eq(0, #store.ws_list()); eq(0, #store.workset.pending, 'no member of /x pending under /elsewhere')
+    vim.fn.delete(store.ws_file('/x'))
+    store.workset = { ids = {}, refs = {}, pending = {} }
+end)
+
 test('index orientation: closest route and return path', function ()
     graph({ mod('m.lua', false), fn('m.lua', 'a'), fn('m.lua', 'b'),
             fn('m.lua', 'c') },

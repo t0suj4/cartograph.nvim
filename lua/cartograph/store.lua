@@ -204,6 +204,7 @@ local function apply_observed_registration(data)
 end
 
 function M.ingest(data, opts)
+    local prev_root = M.data and M.data.root -- (the working set is per root: see below)
     M.data    = data
     -- ★ RE-ADOPT WHAT `.h` MEANT WHEN THIS GRAPH WAS BUILT (CART-0410). A cache load
     -- lands here with no tree walk behind it, and every on-demand re-parse afterwards
@@ -230,6 +231,16 @@ function M.ingest(data, opts)
     -- staged ids belong to the previous graph; init.open refuses to swap
     -- graphs while staged, so anything left here is a ghost — drop it
     if next(M.moveset or {}) then M.clear_stage() end
+    -- ★ THE WORKING SET BELONGS TO A ROOT (CART-1293): it is persisted per root (ws_file), so a set held in memory
+    -- when ANOTHER root arrives is the previous project's attention. Kept, a refresh re-resolved it against the new
+    -- graph, every member landed in `pending` and the pane showed another project's names as "unresolved" — the width
+    -- gate's flaky 0 in the parallel suite (a spec that marked a member, a later spec that refreshed, width_spec last).
+    -- The same root re-ingested (a refresh) keeps the set: members FOLLOW their ids. init.open loads the new root's own.
+    local function rootkey(r) return (tostring(r or '')):gsub('/+$', '') end
+    if rootkey(prev_root) ~= rootkey(data and data.root) and M.workset
+        and (next(M.workset.ids) or #(M.workset.pending or {}) > 0 or #(M.workset.refs or {}) > 0) then
+        M.workset = { ids = {}, refs = {}, pending = {}, last = nil }
+    end
     -- REENTRANCY CONTRACT: sync waits (LSP oracle, future apply) pump the
     -- event loop, so a deferred refresh can re-ingest mid-operation. Any
     -- operation spanning a wait captures M.generation before and compares
