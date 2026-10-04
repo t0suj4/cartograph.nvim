@@ -3801,17 +3801,31 @@ end
 -- local — lua's `local f; function f() end` forward-decl, IS the same-file fn), or
 -- nil (free). The two local kinds are DISJOINT by language (js sets fn.locals + has
 -- no df locals; lua the reverse), so the check order is unambiguous.
+-- ★ THE NAMES A FUNCTION'S df DEFINES, once per node (CART-1440): hasdf decoded the whole df (dfmod.stmts: folded
+-- columns read through bytecol) once PER CALL — 60,613 decodes in one relink of our graph, half of relink's time,
+-- because only build_symtab (federated_resolve) carries the precomputed `dfdef`. Weak by node object: a refreshed
+-- file's nodes are NEW objects, so a memo entry can never describe a node's old df.
+local dfdef_of = setmetatable({}, { __mode = 'k' })
+local function dfdef_set(f)
+    local s = dfdef_of[f]
+    if s == nil then
+        s = false
+        for _, st in ipairs(dfmod.stmts(f)) do -- dual-mode: folded OR raw (fold-agnostic)
+            for _, d in ipairs(st.def or {}) do s = s or {}; s[d] = true end
+        end
+        dfdef_of[f] = s
+    end
+    return s
+end
 local function callee_binding(callee, fn, parent_fn)
     local function hasp(f) for _, p in ipairs(f.params or {}) do if p == callee then return true end end end
     local function hasdecl(f) for _, l in ipairs(f.locals or {}) do if l == callee then return true end end end
     local function hasdf(f)
         -- light path (F2 build_symtab): dfdef is the precomputed set of names df defines
-        -- — the only projection of df resolution reads. Else the DUAL-MODE df accessor
-        -- (folded columns OR raw records — fold-agnostic; the fat-record migration).
+        -- — the only projection of df resolution reads. Else the set read once per node.
         if f.dfdef then return f.dfdef[callee] == true end
-        for _, st in ipairs(dfmod.stmts(f)) do
-            for _, d in ipairs(st.def or {}) do if d == callee then return true end end
-        end
+        local s = dfdef_set(f)
+        return s and s[callee] == true or nil
     end
     local f = fn
     while f do

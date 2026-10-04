@@ -5614,3 +5614,24 @@ test('treesitter: a NESTED returned closure mints, a TOP-LEVEL one does not', fu
     for _ in pairs(byname) do n_fn = n_fn + 1 end
     eq(2, n_fn, 'exactly two: the top-level factory stays part of its region')
 end)
+
+test('treesitter: relink reads a function\'s df-defined names ONCE, however many calls ask (CART-1440)', function ()
+    -- one function, a local it defines, and many calls inside it: each call's binding check (is the callee a local
+    -- this function defines?) used to decode the whole df again — 60,613 decodes in one relink of our graph
+    local body = { 'local function many()', '  local helper = load()' }
+    for i = 1, 40 do body[#body + 1] = ('  helper(%d); other%d()'):format(i, i) end
+    body[#body + 1] = 'end'
+    body[#body + 1] = 'return many'
+    local root = mkroot('m.lua', table.concat(body, '\n') .. '\n')
+    local dfmod = require 'cartograph.df'
+    local real, calls = dfmod.stmts, {}
+    dfmod.stmts = function (f, ...) calls[f] = (calls[f] or 0) + 1; return real(f, ...) end
+    local okx, data = pcall(ts.extract, root)
+    dfmod.stmts = real
+    if not okx then error(data) end
+    local worst = 0
+    for _, n in pairs(calls) do if n > worst then worst = n end end
+    ok(next(calls) ~= nil, 'the binding check read df at all')
+    ok(worst <= 2, 'one node\'s df decoded ' .. worst .. ' times (40 calls ask)')
+    vim.fn.delete(root, 'rf')
+end)
