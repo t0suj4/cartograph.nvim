@@ -19,11 +19,22 @@ end
 
 local cache = {}
 
+-- a file's name AS LUA SHOWS IT in an error message (luaL_where / short_src): asked of Lua itself, so it is exact
+local shortcache = {}
+local function short_src(path)
+    if not shortcache[path] then
+        shortcache[path] = assert(load('return debug.getinfo(1, "S").short_src', '@' .. path))()
+    end
+    return shortcache[path]
+end
+M._short_src = short_src
+
 --- the CALL CLOSURE of an algebra function (default M.match) as one mix program -> program text, the closure's keys in
---- order (memoized per root and per process)
+--- order, the LINE MAP: lines[n] = { src = the file's short name, line } — where line n of the text came from (a
+--- definition's renames never add a line, so its lines map one to one) (memoized per root and per process)
 function M.program(root)
     root = root or 'M.match'
-    if cache[root] then return cache[root].text, cache[root].order end
+    if cache[root] then return cache[root].text, cache[root].order, cache[root].lines end
     local files = vim.fn.glob(algebra_dir() .. '/*.lua', false, true)
     local fq = vim.treesitter.query.parse('lua', '(function_declaration) @f')
     local aq = vim.treesitter.query.parse('lua', '(function_definition) @f')
@@ -44,10 +55,12 @@ function M.program(root)
         end
         return false
     end
+    local path = {}
     for _, f in ipairs(files) do
         local s = io.open(f):read('a')
         local rel = f:match('algebra/(.*)$')
         src[rel] = s
+        path[rel] = f
         local tree = vim.treesitter.get_string_parser(s, 'lua'):parse()[1]:root()
         for _, n in fq:iter_captures(tree, s, 0, -1) do
             local nm = not nested(n) and n:field('name')[1]
@@ -114,7 +127,7 @@ function M.program(root)
         return ((file .. '__' .. nm):gsub('[.:]', '_'))
     end
     local iq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (method_index_expression) @d (identifier) @i]')
-    local chunks = {}
+    local chunks, lines, nline = {}, {}, 1
     for _, k in ipairs(order) do
         local d = defs[k]
         local n = d.node
@@ -154,11 +167,21 @@ function M.program(root)
                 if e[2] <= last then btext = btext:sub(1, e[1]) .. e[3] .. btext:sub(e[2] + 1); last = e[1] end
             end
         end
-        chunks[#chunks + 1] = 'local function ' .. mangle(k) .. ptext .. '\n' .. btext .. '\nend\n'
+        local chunk = 'local function ' .. mangle(k) .. ptext .. '\n' .. btext .. '\nend\n'
+        -- (the header holds the parameters, the body starts on the next line: each line from there is the body's)
+        local hdr = (n:start()) + 1
+        local _, pl = ptext:gsub('\n', '')
+        for i = 0, pl do lines[nline + i] = { src = short_src(path[d.file]), line = hdr + i } end
+        local b0 = body and ((body:start()) + 1) or hdr
+        local _, bl = btext:gsub('\n', '')
+        for i = 0, bl do lines[nline + pl + 1 + i] = { src = short_src(path[d.file]), line = b0 + i } end
+        local _, cl = chunk:gsub('\n', '')
+        nline = nline + cl + 1 -- (the blank line between chunks)
+        chunks[#chunks + 1] = chunk
     end
     local text = table.concat(chunks, '\n')
-    cache[root] = { text = text, order = order }
-    return text, order
+    cache[root] = { text = text, order = order, lines = lines }
+    return text, order, lines
 end
 
 local term_cache
@@ -169,8 +192,9 @@ function M.compile_match(T, opts)
     local MX = require 'cartograph.mix'
     local A = require('cartograph.algebra').load()
     if not term_cache then term_cache = assert(require('cartograph.algebraread').read((M.program('M.match')), 'lua')) end
+    local _, _, lines = M.program('M.match')
     local text, stats, pool = MX.mix(term_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, nil },
-        { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} } })
+        { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines })
     local env = setmetatable({ MIXK = pool, M = { grammars = A.grammars } }, { __index = _G })
     local chunk = assert(load(text, 'mixalg.match', 't', env))
     return chunk(), text, stats, pool

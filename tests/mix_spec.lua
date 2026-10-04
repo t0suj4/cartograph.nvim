@@ -235,6 +235,42 @@ test('mix: a NON-FINITE number reaching dynamic code is lifted as the division t
     ok(text:find('(1 / 0)', 1, true) and text:find('(-1 / 0)', 1, true), text)
 end)
 
+test('mix: a refusal is LOCATED — lowering names the innermost statement\'s line, specialization adds the active calls (CART-1459)', function ()
+    ready()
+    local okl, e = pcall(MX.lower, assert(R.read('local function f(x)\n    if x then\n        goto done\n    end\n    ::done::\n    return x\nend\n', 'lua')))
+    eq(false, okl)
+    eq(3, e.at, 'the goto, line 3 — not its if')
+    local got = {}
+    MX.lower(assert(R.read('local function f(x)\n    goto e\n    ::e::\n    return x\nend\n', 'lua')), { collect = got })
+    eq({ 2, 3 }, vim.tbl_map(function (r) return r.at end, got))
+    -- (a specialization refusal: the static value that never repeats, located at its statement, with the calls)
+    local src = 'local function g(x, k)\n    if x > 0 then return g(x - 1, function (y) return k(y) + 1 end) end\n    return k(x)\nend\nlocal function f(x)\n    return g(x, function (y) return y end)\nend\n'
+    local oks, e2 = pcall(MX.mix, assert(R.read(src, 'lua')), 'f', { 'D' }, {})
+    eq(false, oks)
+    eq(2, e2.at)
+    ok(#e2.chain > 3 and e2.chain[#e2.chain] == 'f', vim.inspect(e2.chain))
+    ok(MX.describe(e2):find('at line 2, in g', 1, true), MX.describe(e2))
+end)
+
+test('mix: with a LINE MAP, an error the evaluator raises carries the ORIGINAL\'s position — `error(msg)` and a lazy error alike (CART-1458)', function ()
+    ready()
+    -- (line n of the text mix reads came from line 100 + n of orig.lua)
+    local lines = {}
+    for n = 1, 20 do lines[n] = { src = 'orig.lua', line = 100 + n } end
+    local src = 'local function bad(x)\n    error("bad " .. x)\nend\nlocal function f(x, d)\n    local ok, why = pcall(bad, x)\n    return why .. d\nend\n'
+    local text, _, pool = MX.mix(assert(R.read(src, 'lua')), 'f', { 'S', 'D' }, { 7 }, { lines = lines })
+    local r = assert(load(text, 'f', 't', setmetatable({ MIXK = pool }, { __index = _G })))()
+    eq('orig.lua:102: bad 7!', r('!'), 'the position of the error call in the ORIGINAL, not mix.lua\'s\n' .. text)
+    -- (a lazy error: a static computation that raises, in an arm only a dynamic guard reaches)
+    local src2 = 'local function f(t, d)\n    if d then\n        return t.kids[1].k\n    end\n    return 0\nend\n'
+    local text2, _, pool2 = MX.mix(assert(R.read(src2, 'lua')), 'f', { 'S', 'D' }, { { kids = {} } }, { lines = lines })
+    local r2 = assert(load(text2, 'f', 't', setmetatable({ MIXK = pool2 }, { __index = _G })))()
+    eq(0, r2(false))
+    local okr, err = pcall(r2, true)
+    eq(false, okr)
+    ok(tostring(err):find('^orig%.lua:103: '), tostring(err))
+end)
+
 test('mix: a COMMENT is trivia anywhere — between a table\'s fields, a call\'s arguments', function ()
     ready()
     local src = 'local function f(x)\n    local t = {\n        -- one\n        x,\n        -- two\n        x + 1,\n    }\n    return math.max(\n        -- a\n        t[1], t[2]\n    )\nend\n'

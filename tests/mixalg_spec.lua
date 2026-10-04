@@ -105,6 +105,30 @@ test('mixalg: a configuration whose KEY cannot be formed refuses FAST — the fa
     ok(type(e) == 'table' and tostring(e.refusal):find('nested deeper than', 1, true), vim.inspect(e))
 end)
 
+test('mixalg: the assembled program keeps a LINE MAP, so a compiled matcher\'s static error message names the ALGEBRA\'s position, byte for byte (CART-1458)', function ()
+    ready()
+    local text, _, lines = MA.program('M.match')
+    -- (every line of the program maps to a line of an algebra file holding the same text, renames aside)
+    local n, same = 0, 0
+    for l, src in ipairs(vim.split(text, '\n')) do
+        local m = lines[l]
+        if m and src:match('%S') then
+            n = n + 1
+            local file = io.open(vim.fn.glob('lua/cartograph/algebra/' .. m.src:match('algebra/(.*)$'))):read('a')
+            local orig = vim.split(file, '\n')[m.line] or ''
+            if orig:gsub('%s', ''):sub(1, 8) == src:gsub('%s', ''):sub(1, 8) or src:match('^local function') then same = same + 1 end
+        end
+    end
+    ok(n > 300 and same / n > 0.9, ('%d of %d mapped lines start like their original'):format(same, n))
+    -- (the `nil` rule's matcher holds a refusal raised by core's M.keys at compile time: the original's own prefix)
+    local lhs
+    for _, r in ipairs(rules.all()) do if r.lua == 'nil' then lhs = r.lhs end end
+    local _, residual = MA.compile_match(lhs)
+    local _, orig = pcall(A.keys, { k = 'nil', align = 'keyed', kids = { { k = 'lit', v = 1 } } })
+    local prefix = tostring(orig):match('^(.-:%d+: )')
+    ok(prefix and residual:find(prefix .. 'keyed nil', 1, true), tostring(prefix))
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')

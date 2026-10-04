@@ -140,7 +140,7 @@ function M.match(T, opts)
         local okc, g, t, _, p = pcall(opts.compile or MA.compile_match, T)
         if not okc then
             M.stats.refused = M.stats.refused + 1
-            local why = 'mix refused to compile the matcher: ' .. (type(g) == 'table' and tostring(g.refusal) or tostring(g))
+            local why = 'mix refused to compile the matcher: ' .. require('cartograph.mix').describe(g)
             if key then refused_by_value[key] = why end
             memo[T] = { vh = vh, refused = why }
             if store then store.put(key, { refused = why }) end

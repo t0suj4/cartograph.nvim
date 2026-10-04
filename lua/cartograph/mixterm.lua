@@ -17,39 +17,39 @@ local M = {}
 local NODE, LIST, LIT, LITS, CARRY, CLAUSES, FIELDS = 'node', 'list', 'lit', 'lits', 'carry', 'clauses', 'fields'
 
 M.SCHEMA = {
-    assign = { { 'target', NODE }, { 'e', NODE } },
-    assignm = { { 'targets', LIST }, { 'es', LIST } },
+    assign = { { 'target', NODE }, { 'e', NODE }, { 'at', CARRY } },
+    assignm = { { 'targets', LIST }, { 'es', LIST }, { 'at', CARRY } },
     bin = { { 'o', LIT }, { 'l', NODE }, { 'r', NODE } },
     bool = { { 'v', LIT } },
-    ['break'] = {},
+    ['break'] = { { 'at', CARRY } },
     call = { { 'fn', LIT }, { 'args', LIST } },
-    callstmt = { { 'e', NODE } },
+    callstmt = { { 'e', NODE }, { 'at', CARRY } },
     callv = { { 'f', NODE }, { 'args', LIST } },
-    ['do'] = { { 'body', LIST } },
+    ['do'] = { { 'body', LIST }, { 'at', CARRY } },
     fn = { { 'name', LIT } },
-    forin = { { 'kind', LIT }, { 'kid', LIT }, { 'vid', LIT }, { 'kname', LIT }, { 'vname', LIT }, { 'e', NODE }, { 'body', LIST } },
-    fornum = { { 'id', LIT }, { 'name', LIT }, { 'from', NODE }, { 'to', NODE }, { 'step', NODE }, { 'body', LIST } },
+    forin = { { 'kind', LIT }, { 'kid', LIT }, { 'vid', LIT }, { 'kname', LIT }, { 'vname', LIT }, { 'e', NODE }, { 'body', LIST }, { 'at', CARRY } },
+    fornum = { { 'id', LIT }, { 'name', LIT }, { 'from', NODE }, { 'to', NODE }, { 'step', NODE }, { 'body', LIST }, { 'at', CARRY } },
     global = { { 'name', LIT } },
     gref = { { 'name', LIT } },
-    ['if'] = { { 'clauses', CLAUSES }, { 'els', LIST } },
+    ['if'] = { { 'clauses', CLAUSES }, { 'els', LIST }, { 'at', CARRY } },
     index = { { 'obj', NODE }, { 'key', NODE } },
     -- (`pin`: the per-iteration locals the closure copies when it is made — semantic, so a kid)
-    lambda = { { 'id', LIT }, { 'params', LITS }, { 'pnames', LITS }, { 'free', LITS }, { 'pin', LITS }, { 'freeset', CARRY }, { 'body', LIST } },
+    lambda = { { 'id', LIT }, { 'params', LITS }, { 'pnames', LITS }, { 'free', LITS }, { 'pin', LITS }, { 'freeset', CARRY }, { 'body', LIST }, { 'at', CARRY } },
     -- (`forced`: set after construction by assignment conversion — a variable a closure stores into is dynamic; the
     -- round trip on real IR found it, the constructor census cannot)
-    ['local'] = { { 'id', LIT }, { 'name', LIT }, { 'forced', LIT }, { 'e', NODE } },
-    localm = { { 'ids', LITS }, { 'names', LITS }, { 'forced', LIT }, { 'es', LIST } },
+    ['local'] = { { 'id', LIT }, { 'name', LIT }, { 'forced', LIT }, { 'e', NODE }, { 'at', CARRY } },
+    localm = { { 'ids', LITS }, { 'names', LITS }, { 'forced', LIT }, { 'es', LIST }, { 'at', CARRY } },
     method = { { 'obj', NODE }, { 'm', LIT }, { 'args', LIST } },
     ['nil'] = {},
     num = { { 'v', LIT } },
     prim = { { 'name', LIT }, { 'args', LIST } },
-    ['repeat'] = { { 'body', LIST }, { 'cond', NODE } },
-    ret = { { 'es', LIST } },
+    ['repeat'] = { { 'body', LIST }, { 'cond', NODE }, { 'at', CARRY } },
+    ret = { { 'es', LIST }, { 'at', CARRY } },
     str = { { 'v', LIT } },
     table = { { 'fields', FIELDS } },
     un = { { 'o', LIT }, { 'e', NODE } },
     var = { { 'id', LIT }, { 'name', LIT } },
-    ['while'] = { { 'cond', NODE }, { 'body', LIST } },
+    ['while'] = { { 'cond', NODE }, { 'body', LIST }, { 'at', CARRY } },
 }
 
 local function refuse(why) error({ refusal = 'mixterm: ' .. why }, 0) end

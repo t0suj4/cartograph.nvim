@@ -20,6 +20,11 @@
 -- break puts its unrolled iterations in `repeat … until true`, which that break leaves. A break under DYNAMIC control
 -- makes every store in its loop's body dynamic (the congruence: the code after the loop sees one of several exits).
 -- PINS: a closure capturing a per-iteration local copies it when made (lam.pin, M.cval).
+-- POSITIONS (CART-1459): every lowered statement and lambda carries `at`, its first line in the text mix read (the reader
+-- is lossless: counting its lits' newlines places every node); opts.lines maps those lines to the ORIGINAL ({ src,
+-- line }: mixalg's assembled programs) -> prog.where(at). A refusal is LOCATED (e.at, e.where, e.chain: the active
+-- calls, innermost first; M.describe prints it), and an error the evaluator raises carries the original's position —
+-- `error(msg)` and a lazy error alike — never mix.lua's own line (CART-1458).
 -- REFUSED by name, never residualized silently: varargs, goto, metatables (not in S); a pinned local the loop body
 -- assigns after the capture, a dynamic one used after its iteration; a closure assigning a captured parameter;
 -- a static table reaching dynamic code. A STATIC computation that reads a dynamic variable REFUSES (every dynamic slot
@@ -141,7 +146,7 @@ end
 -- a function expression -> { op = 'lambda', id, params = { id … }, pnames, body, free = { id … } (sorted) }
 local function lower_lambda(pnode, bnode, cx, scope)
     cx.nlam = cx.nlam + 1
-    local lam = { op = 'lambda', id = cx.nlam, params = {}, pnames = {}, freeset = {}, pin = {} }
+    local lam = { op = 'lambda', id = cx.nlam, params = {}, pnames = {}, freeset = {}, pin = {}, at = cx.lineof[pnode] }
     local ps = { names = {}, up = scope, fnb = lam }
     for _, p in ipairs(named(pnode)) do
         if p.k ~= 'identifier' then refuse('a parameter list with ' .. p.k) end
@@ -406,15 +411,19 @@ function lower_block(t, cx, scope, inner)
     if not t then return out end -- (an empty block)
     inner = inner or { names = {}, up = scope }
     for _, s in ipairs(named(t)) do
-        if cx.collect then
-            -- (the CENSUS: a refused statement is recorded and skipped — the innermost one, since every nested block
-            -- comes through here — and lowering goes on, so one run lists everything mix does not handle yet)
-            local okl, e = pcall(lower_stmt, s, cx, inner, out)
-            if not okl then
-                if type(e) ~= 'table' or not e.refusal then error(e, 0) end
-                cx.collect[#cx.collect + 1] = { why = e.refusal, text = (text(s):gsub('%s+', ' ')):sub(1, 100) }
-            end
-        else lower_stmt(s, cx, inner, out) end
+        local n0, at = #out, cx.lineof[s]
+        -- (a refusal is LOCATED: the innermost statement's line — every nested block comes through here first)
+        local okl, e = pcall(lower_stmt, s, cx, inner, out)
+        if not okl then
+            if type(e) ~= 'table' or not e.refusal then error(e, 0) end
+            e.at = e.at or at
+            -- (the CENSUS: a refused statement is recorded and skipped, and lowering goes on, so one run lists
+            -- everything mix does not handle yet)
+            if not cx.collect then error(e, 0) end
+            cx.collect[#cx.collect + 1] = { why = e.refusal, text = (text(s):gsub('%s+', ' ')):sub(1, 100), at = e.at,
+                where = cx.where and cx.where(e.at) }
+        end
+        for i = n0 + 1, #out do out[i].at = out[i].at or at end
     end
     return out
 end
@@ -497,6 +506,30 @@ end
 function M.lower(term, opts)
     local cx = { funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect, isparam = {}, boxed = {}, forced = {},
         pinned = {}, pinfirst = {}, assigned = {}, loopvar = {}, tick = 0 }
+    -- LINES (CART-1459): every node's FIRST LINE — the reader is lossless, its lits ARE the source, so counting their
+    -- newlines in order places every node. Statements and lambdas carry it as `at` (bookkeeping: the algebra does not
+    -- see it). opts.lines maps a line of THIS text to where it came from ({ src, line }: an assembled program's
+    -- definitions come from several files) -> prog.where(at) = 'src:line', as Lua itself prints a position
+    local lineof, line = {}, 1
+    local function place(t)
+        if t.k == 'lit' then
+            local v = tostring(t.v)
+            local first = v:find('%S') and line + select(2, v:sub(1, v:find('%S') - 1):gsub('\n', '')) or nil
+            line = line + select(2, v:gsub('\n', ''))
+            return first
+        end
+        local first
+        for _, c in ipairs(t.kids or {}) do
+            local f = place(c)
+            first = first or f
+        end
+        lineof[t] = first
+        return first
+    end
+    place(term)
+    cx.lineof = lineof
+    local lines = opts and opts.lines
+    if lines then cx.where = function (at) local l = at and lines[at]; return l and (l.src .. ':' .. l.line) or nil end end
     local decls = {}
     for _, d in ipairs(named(term)) do
         if d.k == 'function_declaration' then
@@ -519,7 +552,8 @@ function M.lower(term, opts)
             cx.isparam[params[#params]] = true
             pnames[#pnames + 1] = text(p)
         end
-        cx.funcs[d.name] = { name = d.name, params = params, pnames = pnames, body = d.body and lower_block(d.body, cx, scope) or {} }
+        cx.funcs[d.name] = { name = d.name, params = params, pnames = pnames, body = d.body and lower_block(d.body, cx, scope) or {},
+            at = lineof[d.params] }
     end
     -- PINS are copies: a pinned local the loop body ASSIGNS AFTER a closure captured it (not through a closure — that
     -- one is a box, made afresh each iteration) would change under the copy. An assignment written before the first
@@ -539,7 +573,7 @@ function M.lower(term, opts)
     for _, f in pairs(cx.funcs) do f.body = M.sra(f.body, cx) end
     -- BOXES: every boxed variable's declaration holds { v }, every read is v[1], every write a store into it
     for _, f in pairs(cx.funcs) do f.body = M.box(f.body, cx.boxed, cx.forced) end
-    return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra }
+    return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra, where = cx.where }
 end
 
 -- ── SRA: SCALAR REPLACEMENT OF A LOCAL RECORD (CART-1331 rung 4a) ──────────────────────────────────────────────────
@@ -762,9 +796,11 @@ function M.evaluator(prog, budget)
     -- (one activation deeper; the depth restored on a refusal too)
     local function deeper(stmts, env)
         R.depth = R.depth + 1
+        local at0 = R.at
         local ok, done, v = pcall(exec_block, stmts, env)
         R.depth = R.depth - 1
-        if not ok then error(done, 0) end
+        if not ok then error(done, 0) end -- (R.at stays the INNERMOST statement: where the error happened)
+        R.at = at0
         return done, v
     end
     -- a closure's Lua function, one per arity (no varargs: mix stays inside S)
@@ -845,6 +881,14 @@ function M.evaluator(prog, budget)
         if op == 'prim' then
             local p = PRIMS[e.name]
             if not p then refuse('the primitive ' .. e.name .. ' (not in the table)') end
+            -- (an `error(msg)` at the default level is prefixed with the position of its call — the ORIGINAL's, from
+            -- the program's line map, never this evaluator's own line in mix.lua: CART-1458)
+            if e.name == 'error' and prog.where then
+                local a = evals(e.args, env)
+                local w = prog.where(R.at)
+                if w and type(a[1]) == 'string' and (a[2] == nil or a[2] == 1) then error(w .. ': ' .. a[1], 0) end
+                error(a[1], a[2] == nil and 1 or a[2])
+            end
             local vs = host(p, evals(e.args, env))
             -- (a static pcall must not swallow mix's own refusal: re-raised, never a value)
             if e.name == 'pcall' and vs[1] == false and type(vs[2]) == 'table' and vs[2].refusal then error(vs[2], 0) end
@@ -921,6 +965,7 @@ function M.evaluator(prog, budget)
     function exec_block(stmts, env)
         for _, s in ipairs(stmts) do
             R.steps = R.steps + 1
+            R.at = s.at
             local op = s.op
             if op == 'local' then env[s.id] = eval(s.e, env)
             elseif op == 'localm' then
@@ -1348,7 +1393,8 @@ function M.specialize(prog, fname, division, statics, opts)
         if ok then return v end
         if type(v) == 'table' then error(v, 0) end
         local msg = tostring(v):gsub('^[^:]*:%d+: ', '')
-        error({ lazy = msg }, 0)
+        -- (where it happened in the ORIGINAL — the innermost statement the evaluator ran — when the program has a map)
+        error({ lazy = msg, where = prog.where and prog.where(R.at) or nil }, 0)
     end
     local function sval(e, X) return lazy(ev.eval, e, X) end
     local function svalm(e, X) return lazy(ev.eval_multi, e, X) end
@@ -1736,7 +1782,7 @@ function M.specialize(prog, fname, division, statics, opts)
             if ef and next(ef) then return apply_spec(T, argexprs, X, ef) end
         end
         local anc, under = nearest(X.frame, g)
-        local fr = { g = g, division = division, svals = svals, parent = X.frame }
+        local fr = { g = g, division = division, svals = svals, parent = X.frame, at = T.kind == 'fn' and T.f.at or T.c.lam.at }
         if force or not anc or under then return call_spec(T, division, svals, dargs, fr) end
         -- a CANDIDATE: the first call of g under an active call of g. If what it starts runs past the depth, it is
         -- GENERALIZED against that call and specialized again — once (the retry passes force: no candidate again)
@@ -2055,11 +2101,26 @@ function M.specialize(prog, fname, division, statics, opts)
         end
         for _, s in ipairs(stmts) do
             spend()
+            R.at = s.at
             local okst, done = pcall(step, s)
             if not okst then
                 if type(done) == 'table' and done.lazy then
-                    out[#out + 1] = { op = 'callstmt', e = { op = 'prim', name = 'error', args = { { op = 'str', v = done.lazy } } } }
+                    -- (with a position, the residual raises the ORIGINAL's message whole: `error(msg, 0)`)
+                    local args = { { op = 'str', v = done.lazy } }
+                    if done.where then args = { { op = 'str', v = done.where .. ': ' .. done.lazy }, { op = 'num', v = 0 } } end
+                    out[#out + 1] = { op = 'callstmt', e = { op = 'prim', name = 'error', args = args } }
                     return out, true
+                end
+                -- (a refusal is LOCATED: the innermost statement and the active calls)
+                if type(done) == 'table' and done.refusal and not done.at then
+                    done.at, done.where = s.at, prog.where and prog.where(s.at) or nil
+                    done.chain = {}
+                    local fr = X.frame
+                    for _ = 1, 200 do
+                        if not fr then break end
+                        done.chain[#done.chain + 1] = fr.g .. (fr.at and prog.where and prog.where(fr.at) and (' (' .. prog.where(fr.at) .. ')') or '')
+                        fr = fr.parent
+                    end
                 end
                 error(done, 0)
             end
@@ -2068,7 +2129,7 @@ function M.specialize(prog, fname, division, statics, opts)
         return out, false
     end
 
-    local root = { g = fname, division = division, svals = statics }
+    local root = { g = fname, division = division, svals = statics, at = prog.funcs[fname] and prog.funcs[fname].at }
     local entry = point({ kind = 'fn', name = fname, f = prog.funcs[fname] }, division, statics, root)
     res.entry = entry
     return res, { unfold_steps = used, functions = #res.order }
@@ -2255,6 +2316,34 @@ local function pstmt(s, ind, out)
 end
 function pblock(stmts, ind, out) for _, s in ipairs(stmts) do pstmt(s, ind, out) end end
 
+--- a refusal as a sentence: why, WHERE in the original (`src:line`, when the program has a line map, else the line of
+--- the text mix read), and the calls that were active (innermost first)
+function M.describe(e)
+    if type(e) ~= 'table' then return tostring(e) end
+    local function short(x) return (tostring(x):gsub('[^%s(]*lua/cartograph/', '')) end -- (display only: `where` stays exact)
+    local s = tostring(e.refusal or e.lazy or '?')
+    if e.where then s = s .. ' — at ' .. short(e.where) elseif e.at then s = s .. ' — at line ' .. e.at end
+    local c = e.chain or {}
+    if #c > 0 then
+        local shown = {}
+        for i, f in ipairs(c) do shown[i] = short(f) end
+        -- (a long chain is a RECURSION: the innermost calls, how often each function recurs in between, the outermost)
+        if #shown > 8 then
+            local mid, order = {}, {}
+            for i = 5, #shown - 1 do
+                local g = c[i]:match('^(%S+)')
+                if not mid[g] then order[#order + 1] = g end
+                mid[g] = (mid[g] or 0) + 1
+            end
+            local parts = {}
+            for _, g in ipairs(order) do parts[#parts + 1] = g .. '×' .. mid[g] end
+            shown = { shown[1], shown[2], shown[3], shown[4], ('… %d calls: %s …'):format(#c - 5, table.concat(parts, ' ')), shown[#shown] }
+        end
+        s = s .. ', in ' .. table.concat(shown, ' ← ')
+    end
+    return s
+end
+
 --- the residual program as a Lua chunk: its functions, forward-declared, and `return <entry>`
 function M.print(res)
     local out = {}
@@ -2274,7 +2363,7 @@ end
 --- mix(term, fname, division, statics) -> residual Lua text, stats, the constant pool (load the text with MIXK = pool,
 --- and opts.globals, in its environment when the residual references them)
 function M.mix(term, fname, division, statics, opts)
-    local prog = M.lower(term)
+    local prog = M.lower(term, { lines = opts and opts.lines })
     local res, stats = M.specialize(prog, fname, division, statics, opts)
     return M.print(res), stats, res.pool
 end
