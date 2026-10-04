@@ -22,7 +22,9 @@ local function A() A_ = A_ or require('cartograph.algebra').load(); return A_ en
 local memo = setmetatable({}, { __mode = 'k' })
 --- how many matchers were served, by how ('memo' | 'disk' | 'compiled') and how many were REFUSED — the consumer's
 --- tests read it to know the compiled path was actually taken (an equivalence test alone passes with it switched off)
-M.stats = { memo = 0, disk = 0, compiled = 0, refused = 0 }
+M.stats = { memo = 0, disk = 0, compiled = 0, refused = 0, remembered = 0 }
+-- the refusals of this process by key (template value + loaded code), so an EQUAL template from another object hits too
+local refused_by_value = {}
 
 --- boundary subjects for template T (see the header)
 function M.samples(T)
@@ -77,20 +79,42 @@ function M.match(T, opts)
     local vh = SC.value(T)
     -- (a CHECKED memo — CART-1403: keyed by the template object, served only while the template's VALUE is the one it
     -- was compiled for; an in-place edit of its body or a hole's domain recompiles instead of serving a stale matcher)
-    if memo[T] and memo[T].vh == vh then M.stats.memo = M.stats.memo + 1; return memo[T].f, 'memo' end
+    if memo[T] and memo[T].vh == vh then
+        if memo[T].refused then M.stats.remembered = M.stats.remembered + 1; return nil, memo[T].refused end
+        M.stats.memo = M.stats.memo + 1; return memo[T].f, 'memo'
+    end
     local key = vh and SC.key({ source_stamp(), vh })
+    -- ★ A REFUSAL IS REMEMBERED LIKE A SUCCESS (CART-1436): mix's refusal is a fact about the template VALUE and the loaded
+    -- code, under the same key. Unremembered, every call paid it again — a two-hole template from byexample ran mix to
+    -- its 5M-step unfold budget (110 s) and byexample.rewrite asks once per FILE: a 16-site TSM plan ran past 15 min.
+    -- (The sample law's rejection is not remembered: the caller's subjects enter it.)
+    if key and refused_by_value[key] then
+        memo[T] = { vh = vh, refused = refused_by_value[key] }
+        M.stats.remembered = M.stats.remembered + 1
+        return nil, refused_by_value[key]
+    end
     local store = key and SC.blob('compiledverb')
     local f, how
     if store then
         local hit, found = store.get(key)
         if found and type(hit) == 'table' and hit.text then f, how = MA.load_match(hit.text, hit.pool), 'disk' end
+        if found and type(hit) == 'table' and hit.refused then
+            refused_by_value[key] = hit.refused
+            memo[T] = { vh = vh, refused = hit.refused }
+            M.stats.remembered = M.stats.remembered + 1
+            return nil, hit.refused
+        end
     end
     local text, pool
     if not f then
         local okc, g, t, _, p = pcall(MA.compile_match, T)
         if not okc then
             M.stats.refused = M.stats.refused + 1
-            return nil, 'mix refused to compile the matcher: ' .. (type(g) == 'table' and tostring(g.refusal) or tostring(g))
+            local why = 'mix refused to compile the matcher: ' .. (type(g) == 'table' and tostring(g.refusal) or tostring(g))
+            if key then refused_by_value[key] = why end
+            memo[T] = { vh = vh, refused = why }
+            if store then store.put(key, { refused = why }) end
+            return nil, why
         end
         f, text, pool, how = g, t, p, 'compiled'
     end

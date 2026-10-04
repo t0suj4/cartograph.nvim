@@ -51,6 +51,31 @@ test('compiledverb: CACHED — the same template object is a memo hit; an equal 
     eq(nil, f4); ok(why4:find('disabled', 1, true), tostring(why4))
 end)
 
+test('compiledverb: a mix REFUSAL is remembered like a success — the same object, an equal template, and a fresh process (from disk) do not pay it again (CART-1436)', function ()
+    local MA = require 'cartograph.mixalg'
+    local real, calls = MA.compile_match, 0
+    MA.compile_match = function () calls = calls + 1; error({ refusal = 'synthetic budget' }, 0) end
+    local T = A.template(A.node('refusal_probe_' .. tostring(vim.uv.hrtime()), A.hole('x')))
+    local ok1, f1, why1 = pcall(CV.match, T)
+    local ok2, f2, why2 = pcall(CV.match, T)
+    local ok3, f3 = pcall(CV.match, vim.deepcopy(T))
+    -- a fresh process: the module's memo and refusal table gone, only the disk store left
+    package.loaded['cartograph.compiledverb'] = nil
+    local CV2 = require 'cartograph.compiledverb'
+    local ok4, f4, why4 = pcall(CV2.match, vim.deepcopy(T))
+    package.loaded['cartograph.compiledverb'] = CV
+    MA.compile_match = real
+    ok(ok1 and ok2 and ok3 and ok4, 'no call raised')
+    eq(nil, f1); ok(tostring(why1):find('synthetic budget', 1, true), tostring(why1))
+    eq(nil, f2); eq(why1, why2, 'the same object: the remembered refusal')
+    eq(nil, f3)
+    eq(nil, f4)
+    if os.getenv('CARTOGRAPH_STAMPCACHE') ~= '0' then
+        eq(1, calls, 'mix ran ONCE for the object, an equal template and a fresh process')
+        ok(tostring(why4):find('synthetic budget', 1, true), 'the disk keeps the reason: ' .. tostring(why4))
+    end
+end)
+
 test('compiledverb: a CHECKED memo — a template EDITED IN PLACE after compiling is not served the stale matcher (CART-1403)', function ()
     ready()
     local A = require('cartograph.algebra').load()
