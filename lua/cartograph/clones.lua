@@ -120,12 +120,15 @@ end
 -- function set, which every clone tier then reports pairs over.
 local INDEX_FLOOR = 2
 
+-- ★ `all` (CART-1427): every function with a row, the index's records below its floor included — what collect_fns
+-- reads (the block, subterm and row-drift tiers) instead of calling expr.of again per function per tier. expr.of was
+-- 51% of a warm clone workload on TSM, each function derived three times; the floor still filters what exact / near see
 local function build_index(store)
     local c = store._clone_idx
     if c and c.gen == store.generation then
-        return c.fns
+        return c.fns, c.all
     end
-    local fns = {}
+    local fns, all = {}, {}
     -- ★ ONE ID SCOPE PER INDEX GENERATION (CART-1412): the exact tier's variant keys and the near tier's row keys are
     -- compared ACROSS functions, so they are interned in one scope, which dies with the generation's index
     local idscope = require('cartograph.algebra').load().id_scope()
@@ -134,17 +137,19 @@ local function build_index(store)
             local ok, eo = pcall(expr.of, store, n.id)
             if ok and eo then
                 local nrows, lines, nparams, exprs, locals, params = fn_rows(eo)
-                if nrows and nrows >= INDEX_FLOOR then
-                    fns[#fns + 1] = { id = n.id, name = n.name, file = n.file,
+                if nrows then
+                    local rec = { id = n.id, name = n.name, file = n.file,
                         nrows = nrows, lines = lines, exprs = exprs, locals = locals, idscope = idscope,
                         params = params,
                         nparams = nparams, line = n.range and (at.sl(n.range) + 1) or 0 }
+                    all[#all + 1] = rec
+                    if nrows >= INDEX_FLOOR then fns[#fns + 1] = rec end
                 end
             end
         end
     end
-    store._clone_idx = { gen = store.generation, fns = fns }
-    return fns
+    store._clone_idx = { gen = store.generation, fns = fns, all = all }
+    return fns, all
 end
 
 --- Exact-structural clone GROUPS across the store's functions. Returns a list of groups,
@@ -217,23 +222,14 @@ local function window_key(f, s, len, scope)
 end
 
 -- collect every function's harvestable rows + its locals set (params ∪ df-defs)
+-- read off the generation's index (CART-1427): a fresh record per call, so what a tier caches on it (window_key's row
+-- terms) lives as long as the call, as before
 local function collect_fns(store)
     local out = {}
-    for _, n in ipairs(store.data.nodes) do
-        if (n.kind == 'function' or n.kind == 'method') and n.file then
-            local ok, eo = pcall(expr.of, store, n.id)
-            local stmts = ok and eo and eo.fl and eo.fl.stmts
-            if stmts and #stmts > 0 then
-                local locals = {}
-                for _, p in ipairs(eo.fl.params or {}) do locals[p] = true end
-                for _, s in ipairs(stmts) do
-                    for _, d in ipairs(s.def or {}) do locals[d] = true end
-                end
-                local rows = {}
-                for _, s in ipairs(stmts) do rows[#rows + 1] = { expr = s.expr, l = s.l } end
-                out[#out + 1] = { name = n.name, file = n.file, locals = locals, rows = rows }
-            end
-        end
+    for _, f in ipairs(select(2, build_index(store))) do
+        local rows = {}
+        for i = 1, f.nrows do rows[i] = { expr = f.exprs[i] or nil, l = f.lines[i] } end
+        out[#out + 1] = { name = f.name, file = f.file, locals = f.locals, rows = rows }
     end
     return out
 end

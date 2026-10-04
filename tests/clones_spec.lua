@@ -4137,6 +4137,23 @@ test('clones: a SUBTERM shared by two functions under renamed locals is one grou
     vim.fn.delete(root, 'rf')
 end)
 
+-- ── one derivation per function per generation (CART-1427) ──────────────────
+test('clones: the exact, block and subterm tiers derive each function ONCE per generation — collect_fns reads the index', function ()
+    if not ready() then skip 'no lua parser' end
+    local body = '  local out = {}\n  local seed = load(src)\n  local n = count(out)\n  persist(out)\n  return n'
+    local root = proj { ['o1.lua'] = fn('one', 'src', body), ['o2.lua'] = fn('two', 'src', body) }
+    local real, calls = expr.of, {}
+    expr.of = function (st, id) calls[id] = (calls[id] or 0) + 1; return real(st, id) end
+    local okp, err = pcall(function () clones.exact(store); clones.blocks(store, { min_len = 2 }); clones.subterms(store) end)
+    expr.of = real
+    if not okp then error(err) end
+    local nfn, worst = 0, 0
+    for _, n in pairs(calls) do nfn = nfn + 1; worst = math.max(worst, n) end
+    ok(nfn >= 2, 'the tiers read the functions: ' .. nfn)
+    eq(1, worst, 'no function derived twice in one generation')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ★ THE SAME SPELLING IS NOT THE SAME BINDING (CART-1424). The walker asked the spelling before the scope, and the
 -- swap onto the algebra kept it for parity: `length` a FIELD in one body and a PARAMETER in the other read as no
 -- divergence at all — elasticsearch's ES91OSQVectorsScorer.quantizeScore against ES940OSQVectorsScorer's
