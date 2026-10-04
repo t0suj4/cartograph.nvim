@@ -1,7 +1,8 @@
--- the TERM WIRE (CART-1366 step 2): a term as a Merkle DAG of node records (what eq compares) plus a side map of
--- per-occurrence fields by path. The oracle is the round trip: wire_decode(wire_encode(t)) deep-equals t, through JSON
--- text too. MEASURED 2026-10-03: 536 terms (60 lua/cartograph files, every jenkins-infra yaml document, a template)
--- round trip 536/536 through JSON; 743,782 occurrences -> 229,838 wire nodes (3.2x).
+-- the TERM WIRE (CART-1366): a term as a DAG of node records (what eq compares) plus a side map of per-occurrence
+-- fields by path. The oracle is the round trip: wire_decode(wire_encode(t)) deep-equals t, through JSON text too.
+-- MEASURED: 536 terms (60 lua/cartograph files, every jenkins-infra yaml document, a template) round trip 536/536
+-- through JSON; 743,253 occurrences -> 230,395 wire nodes (3.2x). v = 3 (2026-10-04): message-local indices and one
+-- digest per message instead of a sha256 per node — 65.8 -> 16.6 MB JSON, encode 4.89 -> 2.79 s.
 local A = require('cartograph.algebra').load()
 
 local function rt(t)
@@ -71,4 +72,36 @@ test('term wire: the RECORD holds exactly what the id hashes — a presence mark
     -- a field eq does not read on this kind (a stray `v` on a node) is not dropped
     local stray = A.node('f', A.lit(1)); stray.v = 3
     eq(stray, (rt(stray)))
+end)
+-- ── v = 3: message-local indices, ONE digest per message (CART-1366; the user: "sha256 is overkill") ──
+test('term wire v3: the numbering is CANONICAL — two eq-equal terms (other spans, keyed kids written in another order) are the same records and the same digest', function ()
+    local function at(t, line) local c = A.copy(t); c.at = { line = line }; return c end
+    local p = A.node('f', at(A.kv_term(O({ 'a', 'b' }, { '1', '2' })), 1), A.lit(3))
+    local q = A.node('f', at(A.kv_term(O({ 'b', 'a' }, { '2', '1' })), 7), A.lit(3))
+    ok(A.eq(p, q), 'the premise: eq says they are one term')
+    local wp, wq = assert(A.wire_encode(p)), assert(A.wire_encode(q))
+    eq(wp.nodes, wq.nodes, 'the same records at the same indices')
+    eq(wp.root, wq.root); eq(wp.digest, wq.digest)
+    ok(next(wq.side) ~= nil, 'and what differs rides in the side map')
+    -- ★ and the other side: a term eq tells apart has another digest (a dead digest would pass every line above)
+    local r = A.node('f', A.kv_term(O({ 'a', 'b' }, { '1', '2' })), A.lit('3'))
+    ok(not A.eq(p, r)); ok(assert(A.wire_encode(r)).digest ~= wp.digest, 'the literal 3 against the string "3"')
+    -- every kid is an earlier node: the order a decoder can check without building anything
+    for i, rec in ipairs(wp.nodes) do for _, c in ipairs(rec.kids or {}) do ok(c < i, ('node %d kid %d'):format(i, c)) end end
+end)
+
+test('term wire v3: a wire changed in transit is REFUSED by name — a record edited, a forward kid, a v = 2 wire', function ()
+    local t = A.node('f', A.node('g', A.lit(1)), A.name('x'))
+    local function fresh() return vim.json.decode(vim.json.encode(assert(A.wire_encode(t)))) end
+    eq(t, (A.wire_decode(fresh())), 'the unchanged wire decodes')
+    local w = fresh()
+    for _, rec in ipairs(w.nodes) do if rec.k == 'name' then rec.n = 'y' end end
+    local back, why = A.wire_decode(w)
+    eq(nil, back); ok(why:find('digest does not match', 1, true), why)
+    w = fresh(); w.nodes[1].kids = { #w.nodes }
+    back, why = A.wire_decode(w)
+    eq(nil, back); ok(why:find('a kid is an earlier node', 1, true), why)
+    w = fresh(); w.v = 2
+    back, why = A.wire_decode(w)
+    eq(nil, back); ok(why:find('v = 3', 1, true), why)
 end)

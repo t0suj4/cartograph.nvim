@@ -452,7 +452,8 @@ function M.content_id(t, memo, ordered)
     return id(t)
 end
 --- the MERKLE DAG of t: each DISTINCT subterm once, by id -> { root = id, nodes = { [id] = { label, kids = { id … } } },
---- count = distinct subterms }. The wire form (CART-1366): a peer that holds an id sends nothing under it.
+--- count = distinct subterms }. A per-node DIGEST view (each id a sha256); the wire (CART-1366, v = 3) does not use it: its
+--- nodes are message-local indices and one digest names the whole message
 function M.content_dag(t)
     local memo, nodes, count = {}, {}, 0
     local root = M.content_id(t, memo)
@@ -473,12 +474,18 @@ function M.content_dag(t)
     return { root = root, nodes = nodes, count = count }
 end
 
--- ── THE TERM WIRE (CART-1366, step 2): a term as a Merkle DAG of NODE RECORDS plus a SIDE MAP. A shared node holds only
--- what eq compares (its id is its content); every other field — a span (`at`), a template's statistics, a grammar tag —
--- is PER-OCCURRENCE and rides in `side`, keyed by the occurrence's path ('' for the root, '2/1' for kid 1 of kid 2),
--- so two occurrences of one subterm can differ there without un-sharing it. The round trip is the oracle:
--- wire_decode(wire_encode(t)) is deep-equal to t (through JSON text too). A field that is no JSON value is REFUSED by
--- name, never dropped.
+-- ── THE TERM WIRE (CART-1366): a term as a DAG of NODE RECORDS plus a SIDE MAP. A shared node holds only what eq
+-- compares; every other field — a span (`at`), a template's statistics, a grammar tag — is PER-OCCURRENCE and rides in
+-- `side`, keyed by the occurrence's path ('' for the root, '2/1' for kid 1 of kid 2), so two occurrences of one
+-- subterm can differ there without un-sharing it. The round trip is the oracle: wire_decode(wire_encode(t)) is
+-- deep-equal to t (through JSON text too). A field that is no JSON value is REFUSED by name, never dropped.
+-- ★ v = 3 (the user: "sha256 is overkill"; the band design: segment-local ids, NO global id per node): a node is a
+-- MESSAGE-LOCAL INDEX, the id a fresh id scope interns it to. That numbering is CANONICAL — content_id visits kids in
+-- record order (a keyed node's by key) and numbers each new label at first sight, post-order — so it depends on the
+-- content alone, and every kid's index is below its parent's (the decoder refuses a wire where it is not: no cycle,
+-- no forward reference). ONE digest names the whole message: the sha256 of the intern keys in index order, a
+-- function of the term's eq-content (spans and written order do not enter); the decoder recomputes it and refuses a
+-- mismatch. v = 2 hashed EVERY node (64-hex ids as keys and kid lists); its wires are refused by name
 -- the fields a node RECORD holds — exactly what the id hashes (label above), PER KIND, as eq reads them: a literal is its
 -- value alone (eq ignores a presence mark on it), a name its name, a hole its name / rep / ctx plus the node fields, any
 -- other node its alignment, merge key and presence mark. Everything else is per-occurrence and rides in `side`.
@@ -498,12 +505,18 @@ local function jsonable(x, depth)
     end
     return true
 end
---- t -> { v = 2, root, nodes = { [id] = { k, v, vt, n, h, rep, ctx, align, key, opt, kids = { id … } } },
---- side = { [path] = { field = value } } } | nil, why
+-- the digest of a message: one sha256 over its intern keys in index order (a key = the node's label and its kids'
+-- indices, exactly what content_id interned)
+local function wire_digest(keys) return vim.fn.sha256(table.concat(keys, '\n')) end
+--- t -> { v = 3, hash = 'sha256', root = index, digest, nodes = { [index] = { k, v, vt, n, h, rep, ctx, align, key,
+--- opt, kids = { index … } } }, side = { [path] = { field = value } } } | nil, why
 function M.wire_encode(t)
-    local memo, nodes, side = {}, {}, {}
-    local okid, root = pcall(M.content_id, t, memo)
+    local scope = M.id_scope()
+    local okid, root = pcall(M.content_id, t, scope)
     if not okid then return nil, tostring(root) end
+    local memo, keys = scope.nodes, {}
+    for key, n in pairs(scope.intern) do keys[n] = key end
+    local nodes, side = {}, {}
     local why
     local function walk(u, path)
         if why then return end
@@ -547,23 +560,38 @@ function M.wire_encode(t)
     end
     walk(t, '')
     if why then return nil, why end
-    -- (v = 2: the node label carries the presence mark on every kind and an embed's grammar since CART-1400 — a v = 1
-    -- wire's ids were computed under another label and are not comparable)
-    return { v = 2, root = root, nodes = nodes, side = side }
+    return { v = 3, hash = 'sha256', root = root, digest = wire_digest(keys), nodes = nodes, side = side }
 end
 --- the wire -> a fresh TREE (no table shared between occurrences: a decoded term may be edited in place) | nil, why
 function M.wire_decode(w)
-    if type(w) ~= 'table' or w.v ~= 2 or not w.nodes or not w.root then return nil, 'not a term wire (v = 2)' end
-    local why
-    local function build(id, path)
-        if why then return nil end
-        local rec = w.nodes[id]
-        if not rec then why = 'no node ' .. tostring(id) .. ' at ' .. path; return nil end
+    if type(w) ~= 'table' or w.v ~= 3 or type(w.nodes) ~= 'table' or not w.root then
+        return nil, ('not a term wire v = 3 (got v = %s)'):format(type(w) == 'table' and tostring(w.v) or type(w))
+    end
+    if w.hash ~= 'sha256' then return nil, 'unknown wire hash ' .. tostring(w.hash) end
+    -- ★ THE RECORDS ARE CHECKED BEFORE ANYTHING IS BUILT: every kid below its parent (so no cycle and no dangling
+    -- index), and the digest recomputed from the records — a wire whose records were changed in transit is refused
+    local n = #w.nodes
+    local recs, keys = {}, {}
+    for i = 1, n do
+        local rec = w.nodes[i]
+        if type(rec) ~= 'table' then return nil, 'no node ' .. i end
         local u = {}
         for f, x in pairs(rec) do if f ~= 'kids' and f ~= 'vt' then u[f] = x end end
         if rec.k == 'lit' then
             if rec.vt == 'number' then u.v = tonumber(rec.v) elseif rec.vt == 'boolean' then u.v = rec.v == true else u.v = rec.v end
         end
+        for _, c in ipairs(rec.kids or {}) do
+            if type(c) ~= 'number' or c < 1 or c >= i then return nil, ('node %d names kid %s: a kid is an earlier node'):format(i, tostring(c)) end
+        end
+        recs[i] = u
+        keys[i] = label(u) .. '(' .. table.concat(rec.kids or {}, ',') .. ')'
+    end
+    if type(w.root) ~= 'number' or w.root < 1 or w.root > n then return nil, 'no root node ' .. tostring(w.root) end
+    if wire_digest(keys) ~= w.digest then return nil, 'the digest does not match the records' end
+    local function build(id, path)
+        local rec, u0 = w.nodes[id], recs[id]
+        local u = {}
+        for f, x in pairs(u0) do u[f] = x end
         local here = (w.side or {})[path] or {}
         if rec.kids then
             u.kids = {}
@@ -573,8 +601,6 @@ function M.wire_decode(w)
         for f, x in pairs(here) do if f ~= '@order' then u[f] = x end end
         return u
     end
-    local t = build(w.root, '')
-    if why then return nil, why end
-    return t
+    return build(w.root, '')
 end
 end
