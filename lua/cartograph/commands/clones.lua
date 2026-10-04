@@ -47,6 +47,14 @@ function M.register(H)
         scratch(require('cartograph.clones').near_report(pairs_, store))
     end, { count = -1, desc = 'cartograph: near-clone pairs — functions whose statement sequences differ by only a few edits. The matched rows are the shared template, the differing rows are the holes (parameters of the helper the copies could factor into). [count] = max edit distance (default 2)' })
 
+    -- ── subterm clones: variants below the statement row (CART-1426) ──
+    cmd('CartographSubtermClones', function (o)
+        local store = live() if not store then return end
+        vim.notify('cartograph: scanning for subterm clones (hashing modulo alpha)…', vim.log.levels.INFO)
+        local cl = require 'cartograph.clones'
+        scratch(cl.subterms_report(cl.subterms(store, { min_nodes = o.count ~= -1 and o.count or 12 })))
+    end, { count = -1, desc = 'cartograph: subterm clone groups — an expression, condition or constructor below the statement row that is a variant (locals renamed) of one in another function; maximal classes only, ranked by spread. [count] = min nodes (default 12)' })
+
     -- ── clone findings as in-buffer signs (the interactive surface) ──
     cmd('CartographClonesSigns', function ()
         local store = live() if not store then return end

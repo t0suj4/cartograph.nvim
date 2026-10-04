@@ -196,7 +196,8 @@ end
 --- holes renamed by first occurrence WITHIN the window is exactly the window-local slot map canon kept (CART-1412).
 --- ACCEPTED by partition-join against canon's window key over every 6-row window: lua/cartograph 1203 classes / 79949
 --- windows, TSM 773 / 13190, elasticsearch common 139 / 8229 — 0 split, 0 merged; and blocks() itself unchanged on
---- all three. A row's term is built once per function (`f._rt`). Cost, accepted: ~8x canon per window.
+--- all three. A row's term is built once per function (`f._rt`). Cost, accepted: ~8x canon per window — then ~30% of
+--- blocks() won back by the compositional variant id (CART-1426: each row's summary is reused by every window over it).
 local function window_key(f, s, len, scope)
     local alg = require 'cartograph.algebra'
     local A = alg.load()
@@ -235,6 +236,97 @@ local function collect_fns(store)
         end
     end
     return out
+end
+
+-- ── SUBTERM tier (CART-1426) ─────────────────────────────────────────────────
+--- SUBTERM clones: an expression, a condition, a constructor — any subterm BELOW statement level — that is a variant
+--- (locals renamed consistently) of one in another function. Every tier above keys a statement, a window of them or a
+--- whole function; this one reads the algebra's per-subterm variant ids (A.variant_ids: hashing modulo
+--- alpha-equivalence, one pass per function) in ONE scope across the tree. MEASURED before shipping (>= 12 nodes):
+--- TSM 458 classes in 2+ of 2273 functions (`not TSM.db.profile.groups[path]` in 10, a 60-node IsDuplicatePage
+--- condition in two files), elasticsearch libs/core 97 in 600.
+--- Only MAXIMAL classes: a class whose every occurrence sits under one other class's occurrences, in as many functions,
+--- is that class's part and is not reported. opts.min_nodes (default 12). -> groups sorted by spread, each
+--- { size, nfns, nfiles, show, members = { { name, file, line } } }
+function M.subterms(store, opts)
+    local min = (opts and opts.min_nodes) or 12
+    local alg = require 'cartograph.algebra'
+    local A = alg.load()
+    if not A then error('clones: the algebra cannot key a subterm: ' .. tostring(select(2, alg.available()))) end
+    local scope = A.id_scope()
+    local classes, parent_of = {}, {}
+    for _, f in ipairs(collect_fns(store)) do
+        local exprs = {}
+        for i, r in ipairs(f.rows) do exprs[i] = r.expr end
+        local ft = alg.fn_term { exprs = exprs, locals = f.locals, lmode = 'holes' }
+        if ft then
+            local ids = A.variant_ids(ft, scope)
+            local size = {}
+            local function sz(u) local s = 1; for _, c in ipairs(u.kids or {}) do s = s + sz(c) end; size[u] = s; return s end
+            sz(ft)
+            local function walk(u, up, row, depth)
+                -- (depth 2 and deeper: the function term's kids are its statements, which the other tiers key)
+                if depth >= 2 and size[u] >= min and u.k ~= 'hole' then
+                    local c = classes[ids[u]]
+                    if not c then c = { size = size[u], sample = u, occ = {}, fns = {} }; classes[ids[u]] = c end
+                    c.occ[#c.occ + 1] = { f = f, row = row, node = u }
+                    c.fns[f] = true
+                    parent_of[u] = up and up.k ~= nil and depth >= 3 and ids[up] or false
+                end
+                for _, k in ipairs(u.kids or {}) do walk(k, u, row or k, depth + 1) end
+            end
+            for i, r in ipairs(ft.kids or {}) do walk(r, ft, i, 1) end
+        end
+    end
+    local function nf(c) local n = 0; for _ in pairs(c.fns) do n = n + 1 end; return n end
+    local out = {}
+    for _, c in pairs(classes) do
+        local n = nf(c)
+        if n >= 2 then
+            -- maximal: not every occurrence under one other class's occurrence, in as many functions
+            local p, dominated = parent_of[c.occ[1].node], true
+            for _, o in ipairs(c.occ) do if not p or parent_of[o.node] ~= p then dominated = false; break end end
+            if dominated and classes[p] and nf(classes[p]) == n then dominated = true else dominated = false end
+            if not dominated then
+                local members, files, seen = {}, {}, {}
+                for _, o in ipairs(c.occ) do
+                    if not seen[o.f] then
+                        seen[o.f] = true
+                        local r = type(o.row) == 'number' and o.f.rows[o.row]
+                        members[#members + 1] = { name = o.f.name, file = o.f.file, line = r and r.l }
+                        files[o.f.file] = true
+                    end
+                end
+                table.sort(members, function (a, b)
+                    if a.file ~= b.file then return a.file < b.file end
+                    return (a.line or 0) < (b.line or 0)
+                end)
+                local nfiles = 0
+                for _ in pairs(files) do nfiles = nfiles + 1 end
+                out[#out + 1] = { size = c.size, nfns = n, nfiles = nfiles, show = A.show(c.sample), members = members }
+            end
+        end
+    end
+    table.sort(out, function (a, b)
+        if a.nfiles ~= b.nfiles then return a.nfiles > b.nfiles end
+        if a.nfns ~= b.nfns then return a.nfns > b.nfns end
+        if a.size ~= b.size then return a.size > b.size end
+        return a.show < b.show
+    end)
+    return out
+end
+
+function M.subterms_report(groups)
+    if #groups == 0 then return { 'subterm clones: none' } end
+    local lines = { ('subterm clones: %d groups (variants below statement level, in 2+ functions)'):format(#groups) }
+    for k, g in ipairs(groups) do
+        lines[#lines + 1] = ('[%d] %d functions / %d files, %d nodes: %s'):format(k, g.nfns, g.nfiles, g.size,
+            (g.show:gsub('%s+', ' ')):sub(1, 160))
+        for _, m in ipairs(g.members) do
+            lines[#lines + 1] = ('    %s:%s  %s'):format(m.file, m.line and tostring(m.line) or '?', m.name)
+        end
+    end
+    return lines
 end
 
 --- Block/window clones: contiguous statement runs (≥ opts.min_len, default 4)

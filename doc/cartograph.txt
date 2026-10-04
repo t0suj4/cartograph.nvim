@@ -427,6 +427,12 @@ CLONES                                                  *cartograph-cmd-clones*
                               across OR WITHIN functions — the tier a
                               whole-function census is blind to.
                               [count] = min statements, default 6
+  :CartographSubtermClones [count]
+                              an expression, condition or constructor
+                              below the statement row that is a variant
+                              (locals renamed) of one in another
+                              function; maximal classes only, ranked by
+                              spread. [count] = min nodes, default 12
   :CartographNearClones [count]
                               functions whose statement sequences differ
                               by only a few edits: the matched rows are

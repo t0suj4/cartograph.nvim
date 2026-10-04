@@ -3,6 +3,7 @@
 --                                               [--blocks [--min-len N]]
 --                                               [--near [--max-dist N]]
 --                                               [--rowdrift]
+--                                               [--subterms [--min-nodes N]]
 -- Rides the shipped expression-IR (cartograph.expr) — two functions are clones iff
 -- their per-row canonical key sequences match, ALPHA-INVARIANT on locals (callees /
 -- globals / operators / literals kept). Three clone tiers + a defect tier:
@@ -11,6 +12,9 @@
 --              alpha-invariance; catches the extract↔relink resolve dup a fn-tier misses).
 --   --near     NEAR-clones: whole functions whose row sequences differ by ≤ max-dist edits
 --              (anti-unification — matched rows = shared template, differing rows = holes).
+--   --subterms SUBTERM clones: an expression, a condition, a constructor BELOW the statement row that is a variant
+--              (locals renamed) of one in another function — the algebra's per-subterm ids (hashing modulo
+--              alpha-equivalence, CART-1426); maximal classes only. --min-nodes (default 12).
 --   --fold     NOT a tier either — THE QUEUE. Joins discovery to PLANNING: for every
 --              near-clone pair it asks the extract verb for a plan and ranks by what the
 --              fold would COST (lines removed minus added, hazards, params), with the
@@ -33,7 +37,7 @@ local repo = vim.fn.fnamemodify(here, ':p:h:h')
 vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
-local root, min_rows, mode, min_len, max_dist = repo, 3, 'exact', 6, 2
+local root, min_rows, mode, min_len, max_dist, min_nodes = repo, 3, 'exact', 6, 2, 12
 local i = 1
 while arg and arg[i] do
     if arg[i] == '--min-rows' then i = i + 1; min_rows = tonumber(arg[i]) or min_rows
@@ -41,6 +45,8 @@ while arg and arg[i] do
     elseif arg[i] == '--near' then mode = 'near'
     elseif arg[i] == '--rowdrift' then mode = 'rowdrift'
     elseif arg[i] == '--fold' then mode = 'fold'
+    elseif arg[i] == '--subterms' then mode = 'subterms'
+    elseif arg[i] == '--min-nodes' then i = i + 1; min_nodes = tonumber(arg[i]) or min_nodes
     elseif arg[i] == '--min-len' then i = i + 1; min_len = tonumber(arg[i]) or min_len
     elseif arg[i] == '--max-dist' then i = i + 1; max_dist = tonumber(arg[i]) or max_dist
     else root = vim.fn.expand(arg[i]) end
@@ -61,6 +67,8 @@ elseif mode == 'near' then
 elseif mode == 'fold' then
     local fr = require 'cartograph.foldrank'
     lines = fr.report(fr.rank(store, { max_dist = max_dist }))
+elseif mode == 'subterms' then
+    lines = clones.subterms_report(clones.subterms(store, { min_nodes = min_nodes }))
 elseif mode == 'rowdrift' then
     lines = clones.row_drift_report(clones.row_drift(store))
 else

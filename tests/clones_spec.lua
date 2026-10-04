@@ -4108,6 +4108,35 @@ test('clones: a BODY local against a global is STILL a localglobal hole', functi
     vim.fn.delete(root, 'rf')
 end)
 
+-- ── the SUBTERM tier (CART-1426): variants below the statement row, from the algebra's per-subterm ids ──
+test('clones: a SUBTERM shared by two functions under renamed locals is one group — only the maximal one, and a near miss is not in it', function ()
+    if not ready() then skip 'no lua parser' end
+    local function body(v, field)
+        return ('  local total = 0\n  if %s.items[%s.key] and %s.items[%s.%s].count > 10 then total = 1 end\n  return total'):format(v, v, v, v, field)
+    end
+    local root = proj {
+        ['st1.lua'] = fn('first_of', 'cfg', body('cfg', 'key')),
+        ['st2.lua'] = fn('second_of', 'opts', body('opts', 'key')),
+        ['st3.lua'] = fn('third_of', 'cfg', body('cfg', 'other')),
+    }
+    local groups = clones.subterms(store, { min_nodes = 12 })
+    local hit
+    for _, g in ipairs(groups) do
+        for _, m in ipairs(g.members) do if m.name == 'first_of' then hit = g end end
+    end
+    ok(hit, 'the shared condition is found: ' .. #groups .. ' groups')
+    local names = {}
+    for _, m in ipairs(hit and hit.members or {}) do names[#names + 1] = m.name end
+    table.sort(names)
+    eq({ 'first_of', 'second_of' }, names, 'cfg / opts renamed is one subterm; `.other` for `.key` is not a renaming')
+    -- maximal: the condition's `... .count > 10` half is as widespread as the condition itself, so it is its part
+    for _, g in ipairs(groups) do
+        ok(not (g.show:find('^%(bin >') and g.nfns == 2), 'the dominated inner subterm is not reported: ' .. g.show)
+    end
+    eq('subterm clones: none', clones.subterms_report({})[1])
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ★ THE SAME SPELLING IS NOT THE SAME BINDING (CART-1424). The walker asked the spelling before the scope, and the
 -- swap onto the algebra kept it for parity: `length` a FIELD in one body and a PARAMETER in the other read as no
 -- divergence at all — elasticsearch's ES91OSQVectorsScorer.quantizeScore against ES940OSQVectorsScorer's

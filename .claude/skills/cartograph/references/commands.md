@@ -118,6 +118,7 @@ guessing. The write is journaled, so `:CartographUndo` reverses it.
 |---|---|
 | `:CartographClones [count]` | exact-structural clone groups (alpha-invariant on locals). `[count]` = min statements, default 3 |
 | `:CartographBlockClones [count]` | contiguous statement runs duplicated across **or within** functions — the tier a whole-function census is blind to. Default 6 |
+| `:CartographSubtermClones [count]` | an expression, condition or constructor BELOW the statement row that is a variant (locals renamed) of one in another function — the algebra's per-subterm ids (hashing modulo alpha-equivalence); maximal classes only, ranked by spread. `[count]` = min nodes, default 12. Headless: `tools/clones.lua --subterms` |
 | `:CartographNearClones [count]` | functions differing by only a few edits: matched rows are the shared template, differing rows are the holes. `[count]` = max edit distance, default 2 |
 | `:CartographClonesSigns` / `:CartographClonesSignsClear` | publish / clear clone signs — each hole sign sits at its exact substitution column, so `]d` jumps to it |
 

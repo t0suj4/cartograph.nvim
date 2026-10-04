@@ -513,6 +513,16 @@ functions. Run it with `nvim -l tools/clones.lua --near`. Exact, block, and
 near are the three tiers of the clone ladder; all three key off the same
 expression IR, differing only in how much divergence they tolerate.
 
+A fourth tier, `:CartographSubtermClones`, goes below the statement: an expression, a
+condition or a table constructor that is the same code under renamed locals
+in another function. Every subterm of every function gets an id in one pass —
+hashing modulo alpha-equivalence (Maziarz et al., PLDI 2021), where a node's
+summary is built from its children's, so nothing is re-hashed per candidate —
+and only the largest shared piece of each duplication is reported. On
+TradeSkillMaster it finds a `SetFont(Design:GetContentFont(), "normal")` call
+repeated in 16 widget constructors across 15 files and the vendored LibStub's
+lookup in 7 copies. Run it with `nvim -l tools/clones.lua --subterms`.
+
 A near-clone's holes are described at statement granularity, but whether they
 are a *clean parameter* is a finer question, and `:CartographExtractHelper`
 answers it by **anti-unifying** the differing rows — descending both
