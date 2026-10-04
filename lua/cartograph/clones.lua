@@ -425,9 +425,13 @@ function M.blocks(store, opts)
             end
         end
     end
+    -- (a TOTAL order — CART-1434: `out` is filled from pairs() over table-keyed groups, so equal-ranked groups came out
+    -- in address order and two runs printed them differently; the first member breaks the tie, as members are ordered)
     table.sort(out, function (a, b)
         if a.len ~= b.len then return a.len > b.len end
-        return #a > #b
+        if #a ~= #b then return #a > #b end
+        if a[1].file ~= b[1].file then return a[1].file < b[1].file end
+        return (a[1].from_line or 0) < (b[1].from_line or 0)
     end)
     return out
 end

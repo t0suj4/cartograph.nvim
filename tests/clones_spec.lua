@@ -4137,6 +4137,24 @@ test('clones: a SUBTERM shared by two functions under renamed locals is one grou
     vim.fn.delete(root, 'rf')
 end)
 
+-- ── block groups in a TOTAL order (CART-1434) ───────────────────────────────
+test('clones.blocks: equal-ranked groups are ordered by their first member, not by hash order (CART-1434)', function ()
+    if not ready() then skip 'no lua parser' end
+    local files = {}
+    for g = 1, 6 do
+        -- six independent duplicated blocks of the same length, each in two files: one rank, six groups
+        local body = ('  local a%d = load%d(src)\n  local b%d = mix%d(a%d)\n  persist%d(b%d)\n  return b%d'):format(g, g, g, g, g, g, g, g)
+        files[('g%d_a.lua'):format(g)] = fn('fa' .. g, 'src', body)
+        files[('g%d_b.lua'):format(g)] = fn('fb' .. g, 'src', body)
+    end
+    local root = proj(files)
+    local groups = clones.blocks(store, { min_len = 4 })
+    local firsts = {}
+    for _, g in ipairs(groups) do firsts[#firsts + 1] = g[1].file:match('[^/]+$') end
+    eq({ 'g1_a.lua', 'g2_a.lua', 'g3_a.lua', 'g4_a.lua', 'g5_a.lua', 'g6_a.lua' }, firsts)
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ── one derivation per function per generation (CART-1427) ──────────────────
 test('clones: the exact, block and subterm tiers derive each function ONCE per generation — collect_fns reads the index', function ()
     if not ready() then skip 'no lua parser' end
