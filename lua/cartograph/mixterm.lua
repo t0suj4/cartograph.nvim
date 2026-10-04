@@ -21,6 +21,7 @@ M.SCHEMA = {
     assignm = { { 'targets', LIST }, { 'es', LIST } },
     bin = { { 'o', LIT }, { 'l', NODE }, { 'r', NODE } },
     bool = { { 'v', LIT } },
+    ['break'] = {},
     call = { { 'fn', LIT }, { 'args', LIST } },
     callstmt = { { 'e', NODE } },
     callv = { { 'f', NODE }, { 'args', LIST } },
@@ -32,7 +33,8 @@ M.SCHEMA = {
     gref = { { 'name', LIT } },
     ['if'] = { { 'clauses', CLAUSES }, { 'els', LIST } },
     index = { { 'obj', NODE }, { 'key', NODE } },
-    lambda = { { 'id', LIT }, { 'params', LITS }, { 'pnames', LITS }, { 'free', LITS }, { 'freeset', CARRY }, { 'body', LIST } },
+    -- (`pin`: the per-iteration locals the closure copies when it is made — semantic, so a kid)
+    lambda = { { 'id', LIT }, { 'params', LITS }, { 'pnames', LITS }, { 'free', LITS }, { 'pin', LITS }, { 'freeset', CARRY }, { 'body', LIST } },
     -- (`forced`: set after construction by assignment conversion — a variable a closure stores into is dynamic; the
     -- round trip on real IR found it, the constructor census cannot)
     ['local'] = { { 'id', LIT }, { 'name', LIT }, { 'forced', LIT }, { 'e', NODE } },
@@ -41,11 +43,13 @@ M.SCHEMA = {
     ['nil'] = {},
     num = { { 'v', LIT } },
     prim = { { 'name', LIT }, { 'args', LIST } },
+    ['repeat'] = { { 'body', LIST }, { 'cond', NODE } },
     ret = { { 'es', LIST } },
     str = { { 'v', LIT } },
     table = { { 'fields', FIELDS } },
     un = { { 'o', LIT }, { 'e', NODE } },
     var = { { 'id', LIT }, { 'name', LIT } },
+    ['while'] = { { 'cond', NODE }, { 'body', LIST } },
 }
 
 local function refuse(why) error({ refusal = 'mixterm: ' .. why }, 0) end

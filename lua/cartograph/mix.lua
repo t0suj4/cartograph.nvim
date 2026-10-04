@@ -16,8 +16,12 @@
 --            built per step — the matcher's shape — carries its captured positions in. A closure reaching a dynamic
 --            position (a residual call, a returned value) is LIFTED: its body specialized into a residual `function`.
 --   PRINT    residual IR -> Lua text (the caller re-reads it through algebraread and loads it)
--- REFUSED by name, never residualized silently: varargs, while / repeat / goto, method calls, metatables (not in S);
--- a closure capturing a per-iteration loop local or ASSIGNING a captured variable (rung 2 keeps no upvalue boxes);
+-- LOOPS (CART-1450 rung 1): while / repeat / break. A loop whose condition is static UNROLLS; one left with a residual
+-- break puts its unrolled iterations in `repeat … until true`, which that break leaves. A break under DYNAMIC control
+-- makes every store in its loop's body dynamic (the congruence: the code after the loop sees one of several exits).
+-- PINS: a closure capturing a per-iteration local copies it when made (lam.pin, M.cval).
+-- REFUSED by name, never residualized silently: varargs, goto, metatables (not in S); a pinned local the loop body
+-- assigns after the capture, a dynamic one used after its iteration; a closure assigning a captured parameter;
 -- a static table reaching dynamic code. A STATIC computation that reads a dynamic variable REFUSES (every dynamic slot
 -- holds DYN): a binding-time gap is a named refusal, never a nil. ⚠ mix is written INSIDE S (no while / repeat /
 -- goto / varargs / metatables / load): S4–S5 self-apply it — tests/mix_spec.lua fences that.
@@ -27,9 +31,12 @@ local function refuse(why) error({ refusal = why }, 0) end
 M.refuse = refuse
 
 -- ── LOWER: algebra term -> IR ──────────────────────────────────────────────────────────────────────────────────────
+-- (a COMMENT is trivia wherever it stands — between a table's fields, a call's arguments, an if's clauses — and the
+-- reader keeps it as a kid: never a named kid, or a position would read it as the next expression)
+local TRIVIA = { comment = true, comment_content = true }
 local function named(t)
     local out = {}
-    for _, c in ipairs(t.kids or {}) do if c.k ~= 'lit' then out[#out + 1] = c end end
+    for _, c in ipairs(t.kids or {}) do if c.k ~= 'lit' and not TRIVIA[c.k] then out[#out + 1] = c end end
     return out
 end
 -- t when it is a `block` node, else nil — an EMPTY block has no node, so a position can hold the next clause instead
@@ -60,19 +67,27 @@ local lower_expr, lower_block
 
 -- scopes: a chain of { names = { name -> id }, up, fnb = the lambda whose parameters it holds, loop = a loop's scope }.
 -- -> id, the number of lambda boundaries crossed (each crossed lambda records the id as FREE)
-local function lookup(scope, name)
+local function lookup(scope, name, cx)
+    cx.tick = cx.tick + 1 -- (lowering runs in textual order: the tick orders captures and assignments)
     local s, crossed = scope, {}
     for _ = 1, 10000 do
         if not s then return nil, 0 end
         local id = s.names[name]
         if id then
             if #crossed > 0 then
-                -- (a per-iteration local — a loop's variable or a local of its body — captured by a closure: each
-                -- iteration is its own variable in Lua, and rung 2 keeps one slot per declaration)
+                -- (a PER-ITERATION local — a loop's variable or a local of its body — captured by a closure: each
+                -- iteration is its own variable in Lua, while an activation keeps one slot per declaration. The
+                -- closure made in the iteration (the outermost one crossed) PINS it: its value is copied when the
+                -- closure is made. Exact unless the loop body assigns it afterwards — M.lower refuses that)
                 local t = s
                 for _ = 1, 10000 do
                     if not t or t.fnb then break end
-                    if t.loop then refuse('a closure capturing `' .. name .. '`, a local of one loop iteration (rung 2: no upvalue boxes)') end
+                    if t.loop then
+                        crossed[#crossed].pin[id] = true
+                        cx.pinned[id] = name
+                        cx.pinfirst[id] = cx.pinfirst[id] or cx.tick
+                        break
+                    end
                     t = t.up
                 end
                 for _, lam in ipairs(crossed) do lam.freeset[id] = true end
@@ -126,7 +141,7 @@ end
 -- a function expression -> { op = 'lambda', id, params = { id … }, pnames, body, free = { id … } (sorted) }
 local function lower_lambda(pnode, bnode, cx, scope)
     cx.nlam = cx.nlam + 1
-    local lam = { op = 'lambda', id = cx.nlam, params = {}, pnames = {}, freeset = {} }
+    local lam = { op = 'lambda', id = cx.nlam, params = {}, pnames = {}, freeset = {}, pin = {} }
     local ps = { names = {}, up = scope, fnb = lam }
     for _, p in ipairs(named(pnode)) do
         if p.k ~= 'identifier' then refuse('a parameter list with ' .. p.k) end
@@ -141,6 +156,10 @@ local function lower_lambda(pnode, bnode, cx, scope)
     table.sort(free)
     lam.free = free
     lam.freeset = nil
+    local pin = {}
+    for id in pairs(lam.pin) do pin[#pin + 1] = id end
+    table.sort(pin)
+    lam.pin = pin
     return lam
 end
 
@@ -153,7 +172,7 @@ function lower_expr(t, cx, scope)
     if k == 'nil' then return { op = 'nil' } end
     if k == 'identifier' then
         local name = text(t)
-        local id = lookup(scope, name)
+        local id = lookup(scope, name, cx)
         if id then return { op = 'var', id = id, name = name } end
         if cx.funcs[name] then return { op = 'fn', name = name } end
         return { op = 'global', name = name }
@@ -250,19 +269,30 @@ local function lower_stmt(t, cx, scope, out)
     if k == 'assignment_statement' then
         local parts = named(t)
         local vars, exprs = named(parts[1]), named(parts[2])
-        local targets = {}
+        local targets, writes = {}, {}
         for i, v in ipairs(vars) do
             local root = target_root(v)
             if root then
-                local id, crossed = lookup(scope, text(root))
+                local id, crossed = lookup(scope, text(root), cx)
                 if id and crossed > 0 then
                     -- ASSIGNMENT CONVERSION: a closure assigning a variable it captured makes that variable a BOX (one
                     -- shared cell, whichever residual function the closure ends up in); a closure storing into a
                     -- captured table makes that table dynamic (it is shared by reference)
                     if root == v then
                         if cx.isparam[id] then refuse('a closure assigning the captured parameter `' .. text(root) .. '` (rung 3: a parameter is not boxed)') end
+                        if cx.loopvar[id] then refuse('a closure assigning the captured loop variable `' .. text(root) .. '` (rung 3: a loop variable is not boxed)') end
                         cx.boxed[id] = true
                     else cx.forced[id] = true end
+                elseif id and root == v then
+                    -- (when: its tick, or LATE when a loop nested in the variable's scope repeats it — a later round
+                    -- of that loop runs after a capture written above it)
+                    local t, late = scope, false
+                    for _ = 1, 10000 do
+                        if not t or t.names[text(root)] == id then break end
+                        if t.loop then late = true end
+                        t = t.up
+                    end
+                    writes[#writes + 1] = { id = id, late = late }
                 end
             end
             targets[i] = lower_expr(v, cx, scope)
@@ -270,6 +300,9 @@ local function lower_stmt(t, cx, scope, out)
         end
         local es = {}
         for i, e in ipairs(exprs) do es[i] = lower_expr(e, cx, scope) end
+        -- (the write happens AFTER its values are computed: `v = function () return v end` captures, then assigns)
+        cx.tick = cx.tick + 1
+        for _, w in ipairs(writes) do cx.assigned[w.id] = math.max(cx.assigned[w.id] or 0, w.late and math.huge or cx.tick) end
         if #targets == 1 and #es == 1 then out[#out + 1] = { op = 'assign', target = targets[1], e = es[1] }
         else out[#out + 1] = { op = 'assignm', targets = targets, es = es } end
         return
@@ -313,6 +346,7 @@ local function lower_stmt(t, cx, scope, out)
             local from, to = lower_expr(cn[2], cx, scope), lower_expr(cn[3], cx, scope)
             local step = cn[4] and lower_expr(cn[4], cx, scope) or { op = 'num', v = 1 }
             local id = declare(cx, inner, text(cn[1]))
+            cx.loopvar[id] = true
             out[#out + 1] = { op = 'fornum', id = id, from = from, to = to, step = step, body = lower_block(body, cx, inner) }
             return
         end
@@ -327,6 +361,8 @@ local function lower_stmt(t, cx, scope, out)
         end
         local kid = declare(cx, inner, text(vl[1]))
         local vid = vl[2] and declare(cx, inner, text(vl[2])) or nil
+        cx.loopvar[kid] = true
+        if vid then cx.loopvar[vid] = true end
         out[#out + 1] = { op = 'forin', kind = it.name, e = it.args[1], kid = kid, vid = vid, body = lower_block(body, cx, inner) }
         return
     end
@@ -335,11 +371,24 @@ local function lower_stmt(t, cx, scope, out)
         out[#out + 1] = { op = 'do', body = b and lower_block(b, cx, { names = {}, up = scope }) or {} }
         return
     end
-    if k == 'comment' or k == 'comment_content' or k == 'empty_statement' then return end
-    if k == 'while_statement' or k == 'repeat_statement' or k == 'goto_statement' or k == 'label_statement' then
-        refuse('`' .. k .. '` (not in S)')
+    if k == 'while_statement' then
+        -- (the body's locals are per ITERATION, as a for's: a closure capturing one refuses — the loop scope)
+        local n = named(t)
+        local cond = lower_expr(n[1], cx, scope)
+        out[#out + 1] = { op = 'while', cond = cond, body = lower_block(block_of(n[2]), cx, { names = {}, up = scope, loop = true }) }
+        return
     end
-    if k == 'break_statement' then refuse('break (rung 1)') end
+    if k == 'repeat_statement' then
+        -- (`until` is read INSIDE the body's scope: it sees the body's locals)
+        local n = named(t)
+        local inner = { names = {}, up = { names = {}, up = scope, loop = true } }
+        local body = lower_block(#n > 1 and block_of(n[1]) or nil, cx, nil, inner)
+        out[#out + 1] = { op = 'repeat', body = body, cond = lower_expr(n[#n], cx, inner) }
+        return
+    end
+    if k == 'break_statement' then out[#out + 1] = { op = 'break' }; return end
+    if k == 'comment' or k == 'comment_content' or k == 'empty_statement' then return end
+    if k == 'goto_statement' or k == 'label_statement' then refuse('`' .. k .. '` (not in S)') end
     if k == 'function_declaration' then
         -- `local function f(…)`: f is declared before its body, so the body may call it (a closure capturing itself)
         if token(t) ~= 'local' then refuse('a nested non-local function declaration (rung 2: `local function` only)') end
@@ -351,10 +400,11 @@ local function lower_stmt(t, cx, scope, out)
     refuse('the statement kind ' .. k)
 end
 
-function lower_block(t, cx, scope)
+-- inner: the block's own scope when the caller must read it afterwards (a repeat's `until`)
+function lower_block(t, cx, scope, inner)
     local out = {}
     if not t then return out end -- (an empty block)
-    local inner = { names = {}, up = scope }
+    inner = inner or { names = {}, up = scope }
     for _, s in ipairs(named(t)) do
         if cx.collect then
             -- (the CENSUS: a refused statement is recorded and skipped — the innermost one, since every nested block
@@ -430,6 +480,7 @@ function box_block(stmts, boxed, forced)
             n.body = box_block(s.body, boxed, forced)
         elseif op == 'forin' then n.e = box_expr(s.e, boxed, forced); n.body = box_block(s.body, boxed, forced)
         elseif op == 'do' then n.body = box_block(s.body, boxed, forced)
+        elseif op == 'while' or op == 'repeat' then n.cond = box_expr(s.cond, boxed, forced); n.body = box_block(s.body, boxed, forced)
         end
         out[i] = n
     end
@@ -444,7 +495,8 @@ end
 --- names = { id -> source name } }. opts.collect = {}: the CENSUS — every refused statement recorded there as
 --- { why, text } and skipped, instead of the first one refusing the whole program
 function M.lower(term, opts)
-    local cx = { funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect, isparam = {}, boxed = {}, forced = {} }
+    local cx = { funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect, isparam = {}, boxed = {}, forced = {},
+        pinned = {}, pinfirst = {}, assigned = {}, loopvar = {}, tick = 0 }
     local decls = {}
     for _, d in ipairs(named(term)) do
         if d.k == 'function_declaration' then
@@ -468,6 +520,19 @@ function M.lower(term, opts)
             pnames[#pnames + 1] = text(p)
         end
         cx.funcs[d.name] = { name = d.name, params = params, pnames = pnames, body = d.body and lower_block(d.body, cx, scope) or {} }
+    end
+    -- PINS are copies: a pinned local the loop body ASSIGNS AFTER a closure captured it (not through a closure — that
+    -- one is a box, made afresh each iteration) would change under the copy. An assignment written before the first
+    -- capture, outside any loop nested in the variable's scope, runs before it in every iteration
+    local stale = {}
+    for id, name in pairs(cx.pinned) do
+        if (cx.assigned[id] or 0) > cx.pinfirst[id] and not cx.boxed[id] then stale[#stale + 1] = name end
+    end
+    table.sort(stale)
+    for _, name in ipairs(stale) do
+        local why = 'a closure capturing `' .. name .. '`, a local of one loop iteration that the loop body assigns (rung 2: no upvalue boxes)'
+        if not cx.collect then refuse(why) end
+        cx.collect[#cx.collect + 1] = { why = why, text = name }
     end
     -- RECORDS: a local table that never escapes is its fields, one local each (SRA, CART-1331 rung 4a)
     cx.sra = { candidates = 0, replaced = 0, escapes = {} }
@@ -644,6 +709,35 @@ local function arith(o, a, b)
 end
 M._arith = arith
 
+-- a block's DONE when a `break` ran: not a return — the innermost loop stops, and nothing above it sees it
+local BREAK = 'break'
+M.BREAK = BREAK
+-- a closure's free variable: its PINNED copy (a per-iteration local, copied when the closure was made — NILV a pinned
+-- nil), else the slot of the activation it was made in
+local NILV = {}
+function M.cval(c, id)
+    local p = c.pin
+    if p then
+        local v = p[id]
+        if v == NILV then return nil end
+        if v ~= nil then return v end
+    end
+    return c.env[id]
+end
+-- does a loop body hold a break of ITS loop (under any control: in an if, a do — not in a nested loop or function)?
+local function breaks(stmts)
+    for _, s in ipairs(stmts) do
+        if s.op == 'break' then return true end
+        if s.op == 'do' and breaks(s.body) then return true end
+        if s.op == 'if' then
+            for _, c in ipairs(s.clauses) do if breaks(c.body) then return true end end
+            if breaks(s.els) then return true end
+        end
+    end
+    return false
+end
+M._breaks = breaks
+
 -- an evaluator over prog: { eval(e, env), exec(stmts, env) -> done, value, R }. R: { steps, budget, depth (the
 -- activations below the caller's), clos = { [function value] -> closure }, new_closure(lam, env, bt, dfree),
 -- on_closure (called for a closure made at depth 0) }. A closure value is a real Lua function (a host primitive may
@@ -689,7 +783,7 @@ function M.evaluator(prog, budget)
     -- a closure applied -> the list of its results
     local function applyl(c, args)
         local fenv = {}
-        for _, id in ipairs(c.lam.free) do fenv[id] = c.env[id] end
+        for _, id in ipairs(c.lam.free) do fenv[id] = M.cval(c, id) end
         for i, id in ipairs(c.lam.params) do fenv[id] = args[i] end
         local _, vs = deeper(c.lam.body, fenv)
         return vs or { n = 0 }
@@ -800,6 +894,14 @@ function M.evaluator(prog, budget)
         end
         if op == 'lambda' then
             local fn, c = R.new_closure(e, env)
+            if e.pin and #e.pin > 0 then
+                c.pin = {}
+                for _, id in ipairs(e.pin) do
+                    local v = env[id]
+                    if v == nil then v = NILV end
+                    c.pin[id] = v
+                end
+            end
             if R.depth == 0 and R.on_closure then R.on_closure(c) end
             return fn
         end
@@ -834,23 +936,25 @@ function M.evaluator(prog, budget)
                 end
             elseif op == 'callstmt' then eval(s.e, env)
             elseif op == 'ret' then return true, evals(s.es, env)
+            elseif op == 'break' then return BREAK
             elseif op == 'if' then
                 local taken = false
                 for _, c in ipairs(s.clauses) do
                     if not taken and eval(c.cond, env) then
                         taken = true
                         local done, v = exec_block(c.body, env)
-                        if done then return true, v end
+                        if done then return done, v end
                     end
                 end
                 if not taken then
                     local done, v = exec_block(s.els, env)
-                    if done then return true, v end
+                    if done then return done, v end
                 end
             elseif op == 'fornum' then
                 for i = eval(s.from, env), eval(s.to, env), eval(s.step, env) do
                     env[s.id] = i
                     local done, v = exec_block(s.body, env)
+                    if done == BREAK then break end
                     if done then return true, v end
                 end
             elseif op == 'forin' then
@@ -859,11 +963,21 @@ function M.evaluator(prog, budget)
                     env[s.kid] = k
                     if s.vid then env[s.vid] = v end
                     local done, rv = exec_block(s.body, env)
+                    if done == BREAK then break end
                     if done then return true, rv end
+                end
+            elseif op == 'while' or op == 'repeat' then
+                -- (no host while: mix stays inside the S it accepts by habit — a bounded for, the step budget the bound)
+                for _ = 1, math.huge do
+                    if op == 'while' and not eval(s.cond, env) then break end
+                    local done, v = exec_block(s.body, env)
+                    if done == BREAK then break end
+                    if done then return true, v end
+                    if op == 'repeat' and eval(s.cond, env) then break end
                 end
             elseif op == 'do' then
                 local done, v = exec_block(s.body, env)
-                if done then return true, v end
+                if done then return done, v end
             else refuse('the IR statement ' .. tostring(op)) end
         end
         return false, nil
@@ -941,7 +1055,8 @@ local function store_root(t)
     return nil
 end
 
-local function bt_block(stmts, bt, ctrl)
+-- loop: the innermost enclosing loop's record — { dyn = true } once a `break` of it runs under DYNAMIC control
+local function bt_block(stmts, bt, ctrl, loop)
     local changed = false
     local function set(id, v)
         local old = bt[id]
@@ -976,20 +1091,29 @@ local function bt_block(stmts, bt, ctrl)
             local c = ctrl
             for _, cl in ipairs(s.clauses) do
                 c = join(c, opnd(bt_expr(cl.cond, bt)))
-                if bt_block(cl.body, bt, c) then changed = true end
+                if bt_block(cl.body, bt, c, loop) then changed = true end
             end
-            if bt_block(s.els, bt, c) then changed = true end
-        elseif op == 'fornum' then
-            local b = join(ctrl, opnd(join(bt_expr(s.from, bt), join(bt_expr(s.to, bt), bt_expr(s.step, bt)))))
-            set(s.id, b)
-            if bt_block(s.body, bt, b) then changed = true end
-        elseif op == 'forin' then
-            local b = join(ctrl, opnd(bt_expr(s.e, bt)))
-            set(s.kid, b)
-            if s.vid then set(s.vid, b) end
-            if bt_block(s.body, bt, b) then changed = true end
+            if bt_block(s.els, bt, c, loop) then changed = true end
+        elseif op == 'break' then
+            if ctrl == D and loop then loop.dyn = true end
+        elseif op == 'fornum' or op == 'forin' or op == 'while' or op == 'repeat' then
+            local b
+            if op == 'fornum' then b = join(ctrl, opnd(join(bt_expr(s.from, bt), join(bt_expr(s.to, bt), bt_expr(s.step, bt)))))
+            elseif op == 'forin' then b = join(ctrl, opnd(bt_expr(s.e, bt)))
+            else b = join(ctrl, opnd(bt_expr(s.cond, bt))) end
+            if op == 'fornum' then set(s.id, b)
+            elseif op == 'forin' then set(s.kid, b); if s.vid then set(s.vid, b) end end
+            -- CONGRUENCE OF A BREAK: once a break runs under dynamic control, which iteration is the last is dynamic —
+            -- every store in the body is under dynamic control (the code after the loop sees one of several exits).
+            -- The loop itself is marked (bt[s] = D): a static condition still cannot unroll it
+            local lp = { dyn = bt[s] == D }
+            if bt_block(s.body, bt, lp.dyn and D or b, lp) then changed = true end
+            if lp.dyn and bt[s] ~= D then
+                set(s, D)
+                bt_block(s.body, bt, D, lp)
+            end
         elseif op == 'do' then
-            if bt_block(s.body, bt, ctrl) then changed = true end
+            if bt_block(s.body, bt, ctrl, loop) then changed = true end
         end
     end
     return changed
@@ -1055,7 +1179,7 @@ local function serialize(v, depth, clos, seen, intable)
             if b == D then
                 if intable then refuse('a closure with a dynamic free variable inside a static table (rung 2)') end
                 parts[#parts + 1] = id .. ':D'
-            else parts[#parts + 1] = id .. '=' .. serialize(c.env[id], (depth or 0) + 1, clos, seen, intable) end
+            else parts[#parts + 1] = id .. '=' .. serialize(M.cval(c, id), (depth or 0) + 1, clos, seen, intable) end
         end
         seen[c] = nil
         return 'λ' .. c.lam.id .. '{' .. table.concat(parts, ',') .. '}'
@@ -1102,7 +1226,7 @@ local function vterm(v, clos, seen, budget)
         for i, id in ipairs(c.lam.free) do
             if c.bt[id] == D then kids[i] = { k = 'hole', h = 'v' .. tostring(id) }
             else
-                kids[i] = vterm(c.env[id], clos, seen, budget)
+                kids[i] = vterm(M.cval(c, id), clos, seen, budget)
                 if not kids[i] then return nil end
             end
         end
@@ -1187,6 +1311,19 @@ function M.specialize(prog, fname, division, statics, opts)
     local ev = M.evaluator(prog, opts.static_budget or 1e7)
     local R = ev.R
     local current
+    -- ITERATION SCOPES: every loop body specialized (an unrolled iteration, a residual loop's body) is a token on
+    -- iters while it is. A closure capturing a DYNAMIC per-iteration local carries its residual NAME, declared in that
+    -- iteration's residual block: used after the iteration — lifted, unfolded, passed to a program point — the name
+    -- would be out of scope, so that use refuses by name
+    local iters, active, ntok = {}, {}, 0
+    local function cut_iters(n)
+        for i = #iters, n + 1, -1 do active[iters[i]] = nil; iters[i] = nil end
+    end
+    local function check_iter(c)
+        if c.iter and not active[c.iter] then
+            refuse('a closure capturing a dynamic local of one loop iteration, used after that iteration (rung 2: no upvalue boxes)')
+        end
+    end
     function R.on_closure(c)
         local X = current
         for _, id in ipairs(c.lam.free) do
@@ -1197,6 +1334,9 @@ function M.specialize(prog, fname, division, statics, opts)
                 if not nm then refuse('no residual name for the captured `' .. tostring(prog.names[id]) .. '`') end
                 c.dfree[id] = nm
             end
+        end
+        for _, id in ipairs(c.lam.pin or {}) do
+            if c.bt[id] == D then c.iter = iters[#iters]; break end
         end
     end
     -- STATIC evaluation. A Lua error it raises (not a refusal) is the PROGRAM's — a static computation in an arm the
@@ -1257,14 +1397,25 @@ function M.specialize(prog, fname, division, statics, opts)
     local function context(T, division, frame)
         local X = { bt = bt_of(T, division), env = {}, ren = {}, frame = frame }
         if T.kind == 'lam' then
+            check_iter(T.c)
             for _, id in ipairs(T.c.lam.free) do
-                if T.c.bt[id] == D then X.env[id] = DYN; X.ren[id] = T.c.dfree[id] else X.env[id] = T.c.env[id] end
+                if T.c.bt[id] == D then X.env[id] = DYN; X.ren[id] = T.c.dfree[id] else X.env[id] = M.cval(T.c, id) end
             end
         end
         return X
     end
 
     local spec_block, rexpr, lift
+    -- a loop body specialized inside its own ITERATION SCOPE
+    local function loop_body(stmts, X)
+        local n = #iters
+        ntok = ntok + 1
+        iters[n + 1] = ntok
+        active[ntok] = true
+        local b, d = spec_block(stmts, X)
+        cut_iters(n)
+        return b, d
+    end
     -- the CONSTANT POOL: a static table (or a host value with no path from a known global) that reaches dynamic code
     -- is REFERENCED, not copied — MIXK[i], a table handed to the residual chunk's environment (res.pool): identity and
     -- sharing kept. Only data the program never stores into gets here (a table stored into is dynamic)
@@ -1299,7 +1450,10 @@ function M.specialize(prog, fname, division, statics, opts)
     function lift(v, X)
         local ty = type(v)
         if ty == 'number' then
-            if v ~= v or v == math.huge or v == -math.huge then refuse('lifting a non-finite number') end
+            -- (a non-finite number has no literal: lifted as the division that makes it — no global needed)
+            if v ~= v then return { op = 'bin', o = '/', l = { op = 'num', v = 0 }, r = { op = 'num', v = 0 } } end
+            if v == math.huge then return { op = 'bin', o = '/', l = { op = 'num', v = 1 }, r = { op = 'num', v = 0 } } end
+            if v == -math.huge then return { op = 'bin', o = '/', l = { op = 'num', v = -1 }, r = { op = 'num', v = 0 } } end
             return { op = 'num', v = v }
         end
         if ty == 'string' then return { op = 'str', v = v } end
@@ -1343,12 +1497,14 @@ function M.specialize(prog, fname, division, statics, opts)
         end
         local no, nm, d0 = mark()
         d0 = depth
+        local ni = #iters
         local ok, body = pcall(function ()
             local pro = generalize(t_params(T), division, X2)
             return prepend(pro, (spec_block(t_body(T), X2)))
         end)
         unfolding[key] = nil
         depth = d0 - 1
+        cut_iters(ni)
         if not ok then
             rollback(no, nm)
             if type(body) == 'table' and body.refusal and (body.refusal:find('budget', 1, true) or body.refusal:find('depth', 1, true)) then error(body, 0) end
@@ -1367,6 +1523,7 @@ function M.specialize(prog, fname, division, statics, opts)
         local cloned, nc = {}, 0
         local function clone(c)
             if cloned[c] then return cloned[c] end
+            check_iter(c)
             local env, dfree = {}, {}
             local _, copy = R.new_closure(c.lam, env, c.bt, dfree)
             cloned[c] = copy
@@ -1379,8 +1536,8 @@ function M.specialize(prog, fname, division, statics, opts)
                     extra_params[#extra_params + 1] = nm
                     dfree[id] = nm
                     env[id] = DYN
-                elseif b == C and R.clos[c.env[id]] then env[id] = clone(R.clos[c.env[id]]).fn
-                else env[id] = c.env[id] end
+                elseif b == C and R.clos[M.cval(c, id)] then env[id] = clone(R.clos[M.cval(c, id)]).fn
+                else env[id] = M.cval(c, id) end
             end
             return copy
         end
@@ -1530,10 +1687,11 @@ function M.specialize(prog, fname, division, statics, opts)
         -- rollback survives)
         fr.cand = true
         local no, nm = mark()
-        local d0 = depth
+        local d0, ni = depth, #iters
         local ok, r = pcall(call_spec, T, division, svals, dargs, fr)
         if ok then return r end
         depth = d0
+        cut_iters(ni)
         if not (type(r) == 'table' and r.refusal and r.refusal:find('specialization depth', 1, true)) then error(r, 0) end
         local f2 = generalization(anc, fr)
         if not f2 then error(r, 0) end
@@ -1662,6 +1820,7 @@ function M.specialize(prog, fname, division, statics, opts)
     function spec_block(stmts, X)
         local out = {}
         local bt, env = X.bt, X.env
+        local unrolled
         local function step(s)
             local op = s.op
             if op == 'local' then
@@ -1722,6 +1881,11 @@ function M.specialize(prog, fname, division, statics, opts)
             elseif op == 'ret' then
                 out[#out + 1] = { op = 'ret', es = rexprs(s.es, X) }
                 return true
+            elseif op == 'break' then
+                -- (residual whatever its control: in a residual loop it is that loop's; in an unrolled one the unrolled
+                -- iterations sit in a `repeat … until true`, which it leaves)
+                out[#out + 1] = { op = 'break' }
+                return BREAK
             elseif op == 'if' then
                 -- the static prefix of the clauses decides; from the first dynamic condition on, a residual if
                 local rclauses, rels, decided = {}, nil, false
@@ -1731,7 +1895,7 @@ function M.specialize(prog, fname, division, statics, opts)
                             if sval(c.cond, X) then
                                 local body, done = spec_block(c.body, X)
                                 for _, x in ipairs(body) do out[#out + 1] = x end
-                                if done then return true end
+                                if done then return done end
                                 decided = true
                             end
                         else
@@ -1744,7 +1908,7 @@ function M.specialize(prog, fname, division, statics, opts)
                     if #rclauses == 0 then
                         local body, done = spec_block(s.els, X)
                         for _, x in ipairs(body) do out[#out + 1] = x end
-                        if done then return true end
+                        if done then return done end
                     else
                         rels = spec_block(s.els, X)
                         out[#out + 1] = { op = 'if', clauses = rclauses, els = rels }
@@ -1752,44 +1916,83 @@ function M.specialize(prog, fname, division, statics, opts)
                 end
             elseif op == 'fornum' then
                 if bt[s.id] == S then -- UNROLL
+                    local seq, done = {}, false
                     for i = sval(s.from, X), sval(s.to, X), sval(s.step, X) do
                         spend(10)
                         env[s.id] = i
-                        local body, done = spec_block(s.body, X)
-                        if #body > 0 then out[#out + 1] = { op = 'do', body = body } end
-                        if done then return true end
+                        local body, d = loop_body(s.body, X)
+                        if #body > 0 then seq[#seq + 1] = { op = 'do', body = body } end
+                        if d then done = d; break end
                     end
+                    return unrolled(s, seq, done)
                 else
                     local from, to, step = rexpr(s.from, X), rexpr(s.to, X), rexpr(s.step, X)
                     env[s.id] = DYN
                     X.ren[s.id] = rname(s.id)
-                    out[#out + 1] = { op = 'fornum', name = rname(s.id), from = from, to = to, step = step, body = (spec_block(s.body, X)) }
+                    out[#out + 1] = { op = 'fornum', name = rname(s.id), from = from, to = to, step = step, body = (loop_body(s.body, X)) }
                 end
             elseif op == 'forin' then
                 if bt[s.kid] == S then -- UNROLL (pairs: in the order this host iterates — order-sensitive programs are not gated)
                     local it = s.kind == 'ipairs' and ipairs or pairs
+                    local seq, done = {}, false
                     for k, v in it(sval(s.e, X)) do
                         spend(10)
                         env[s.kid] = k
                         if s.vid then env[s.vid] = v end
-                        local body, done = spec_block(s.body, X)
-                        if #body > 0 then out[#out + 1] = { op = 'do', body = body } end
-                        if done then return true end
+                        local body, d = loop_body(s.body, X)
+                        if #body > 0 then seq[#seq + 1] = { op = 'do', body = body } end
+                        if d then done = d; break end
                     end
+                    return unrolled(s, seq, done)
                 else
                     local e = rexpr(s.e, X)
                     env[s.kid] = DYN
                     X.ren[s.kid] = rname(s.kid)
                     if s.vid then env[s.vid] = DYN; X.ren[s.vid] = rname(s.vid) end
                     out[#out + 1] = { op = 'forin', kind = s.kind, e = e, kname = rname(s.kid),
-                        vname = s.vid and rname(s.vid) or nil, body = (spec_block(s.body, X)) }
+                        vname = s.vid and rname(s.vid) or nil, body = (loop_body(s.body, X)) }
+                end
+            elseif op == 'while' or op == 'repeat' then
+                if opnd(bt_expr(s.cond, bt)) == S and bt[s] ~= D then -- UNROLL (the budget bounds a loop that never ends)
+                    local seq, done = {}, false
+                    for _ = 1, math.huge do
+                        if op == 'while' and not sval(s.cond, X) then break end
+                        spend(10)
+                        local body, d = loop_body(s.body, X)
+                        if #body > 0 then seq[#seq + 1] = { op = 'do', body = body } end
+                        if d then done = d; break end
+                        if op == 'repeat' and sval(s.cond, X) then break end
+                    end
+                    return unrolled(s, seq, done)
+                end
+                -- (every store in a dynamic loop's body is dynamic — the congruence — so its static values hold in
+                -- every iteration and the body is specialized once; `until` after the body: it reads the body's locals)
+                if op == 'while' then
+                    local cond = rexpr(s.cond, X)
+                    out[#out + 1] = { op = 'while', cond = cond, body = (loop_body(s.body, X)) }
+                else
+                    local body = loop_body(s.body, X)
+                    out[#out + 1] = { op = 'repeat', body = body, cond = rexpr(s.cond, X) }
                 end
             elseif op == 'do' then
                 local body, done = spec_block(s.body, X)
                 if #body > 0 then out[#out + 1] = { op = 'do', body = body } end
-                if done then return true end
+                if done then return done end
             else refuse('specializing the IR statement ' .. tostring(op)) end
             return false
+        end
+        -- an UNROLLED loop's iterations into out -> done. A STATIC break ended the unrolling: its residual `break`,
+        -- the last statement of the last iteration, is dropped. A residual break still there (one under dynamic
+        -- control) puts the iterations in `repeat … until true`, which it leaves with the iterations still to come
+        function unrolled(_, seq, done)
+            local last = seq[#seq]
+            if done == BREAK and last and last.body[#last.body].op == 'break' then
+                table.remove(last.body)
+                if #last.body == 0 then table.remove(seq) end
+            end
+            if breaks(seq) then out[#out + 1] = { op = 'repeat', body = seq, cond = { op = 'bool', v = true } }
+            else for _, x in ipairs(seq) do out[#out + 1] = x end end
+            return done == true
         end
         for _, s in ipairs(stmts) do
             spend()
@@ -1801,7 +2004,7 @@ function M.specialize(prog, fname, division, statics, opts)
                 end
                 error(done, 0)
             end
-            if done then return out, true end
+            if done then return out, done end
         end
         return out, false
     end
@@ -1845,6 +2048,7 @@ function count_block(stmts, uses, w)
         elseif op == 'fornum' then
             M.count_uses(s.from, uses, w); M.count_uses(s.to, uses, w); M.count_uses(s.step, uses, w); count_block(s.body, uses, w)
         elseif op == 'forin' then M.count_uses(s.e, uses, w); count_block(s.body, uses, w)
+        elseif op == 'while' or op == 'repeat' then M.count_uses(s.cond, uses, w); count_block(s.body, uses, w)
         elseif op == 'do' then count_block(s.body, uses, w) end
     end
 end
@@ -1962,6 +2166,15 @@ local function pstmt(s, ind, out)
         out[#out + 1] = ind .. 'do'
         pblock(s.body, ind .. '    ', out)
         out[#out + 1] = ind .. 'end'
+    elseif op == 'while' then
+        out[#out + 1] = ind .. 'while ' .. pexpr(s.cond, ind) .. ' do'
+        pblock(s.body, ind .. '    ', out)
+        out[#out + 1] = ind .. 'end'
+    elseif op == 'repeat' then
+        out[#out + 1] = ind .. 'repeat'
+        pblock(s.body, ind .. '    ', out)
+        out[#out + 1] = ind .. 'until ' .. pexpr(s.cond, ind)
+    elseif op == 'break' then out[#out + 1] = ind .. 'break'
     else refuse('printing the IR statement ' .. tostring(op)) end
 end
 function pblock(stmts, ind, out) for _, s in ipairs(stmts) do pstmt(s, ind, out) end end

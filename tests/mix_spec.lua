@@ -128,14 +128,130 @@ test('mix: CONGRUENCE — a variable assigned under dynamic control stays dynami
     end
 end)
 
-test('mix: what mix does not handle is REFUSED by name — while, varargs, a static value that never repeats and generalizing cannot fix', function ()
+-- ── LOOPS (CART-1450 rung 1): while / repeat / break ─────────────────────────────────────────────────────────────
+local LOOPS = [[
+local function wpow(x, n)
+    local r, i = 1, 0
+    while i < n do r = r * x; i = i + 1 end
+    return r
+end
+local function collatz(x)
+    local c = 0
+    while x > 1 do
+        if x % 2 == 0 then x = x / 2 else x = 3 * x + 1 end
+        c = c + 1
+    end
+    return c
+end
+local function find(t, x)
+    local at = 0
+    for i, v in ipairs(t) do
+        if v == x then at = i; break end
+    end
+    return at
+end
+local function prefix(t, x)
+    local s = 0
+    for _, v in ipairs(t) do
+        if v == x then break end
+        s = s + v
+    end
+    return s
+end
+local function upto(t, x)
+    local s = x
+    for _, v in ipairs(t) do
+        if v < 0 then break end
+        s = s + v
+    end
+    return s
+end
+local function rep(x)
+    local n = 0
+    repeat
+        local y = x - n
+        n = n + 1
+    until y <= 0
+    return n
+end
+local function isqrt(x)
+    local i = 0
+    while true do
+        i = i + 1
+        if i * i > x then break end
+    end
+    return i
+end
+]]
+
+test('mix: LOOPS — a static while unrolls, a dynamic while / repeat stays; equivalent, the static bound gone', function ()
+    ready()
+    local o = original(LOOPS, 'wpow')
+    for _, n in ipairs({ 0, 1, 3 }) do
+        local r, text = residual(LOOPS, 'wpow', { 'D', 'S' }, { nil, n })
+        for _, x in ipairs({ -2, 0, 5 }) do eq(o(x, n), r(x), ('wpow(%d, %d)'):format(x, n)) end
+        gone(text, { 'n', 'i' })
+        ok(not text:find('while', 1, true), 'a static condition unrolls\n' .. text)
+    end
+    for _, f in ipairs({ 'collatz', 'rep', 'isqrt' }) do
+        local of = original(LOOPS, f)
+        local r, text = residual(LOOPS, f, { 'D' }, {})
+        for _, x in ipairs({ 0, 1, 3, 6, 7, 10 }) do eq(of(x), r(x), ('%s(%d)'):format(f, x)) end
+        ok(text:find(f == 'rep' and 'until %(y_%d+ <= 0%)' or 'while ', 1), 'the dynamic loop stays a loop\n' .. text)
+    end
+end)
+
+test('mix: LOOPS — a BREAK: a static one ends the unrolling, a dynamic one leaves `repeat … until true`, and makes every store of its loop dynamic', function ()
+    ready()
+    local T = { 5, 7, 9 }
+    for _, f in ipairs({ 'find', 'prefix', 'upto' }) do
+        local of = original(LOOPS, f)
+        local tt = f == 'upto' and { 1, 2, -1, 5 } or T
+        local r, text = residual(LOOPS, f, { 'S', 'D' }, { tt })
+        for _, x in ipairs({ 4, 5, 7, 9, 10 }) do eq(of(tt, x), r(x), ('%s(%d)'):format(f, x)) end
+        gone(text, { 't', 'v', 'i' })
+        if f == 'upto' then
+            -- (a STATIC break: the unrolling stops at -1, no wrapper, no break, the sum folded to x + 3)
+            ok(not text:find('repeat', 1, true) and not text:find('break', 1, true), 'a static break leaves nothing\n' .. text)
+        else
+            ok(text:find('repeat', 1, true) and text:find('until true', 1, true), 'a dynamic break leaves a wrapper\n' .. text)
+        end
+    end
+    -- (the CONGRUENCE of a break: `s = s + v` after a dynamic `if v == x then break end` — a static s would sum every
+    -- element whatever x is)
+    local _, text = residual(LOOPS, 'prefix', { 'S', 'D' }, { T })
+    ok(text:find('s_%d+ = '), 'the sum is residual\n' .. text)
+end)
+
+test('mix: a NON-FINITE number reaching dynamic code is lifted as the division that makes it — 1/0, -1/0, 0/0', function ()
+    ready()
+    local src = 'local function f(x)\n    local best, worst = math.huge, -math.huge\n    if x < best then best = x end\n    if x > worst then worst = x end\n    return best, worst\nend\n'
+    local r, text = residual(src, 'f', { 'D' }, {})
+    for _, x in ipairs({ -3, 0, 7 }) do
+        local b, w = r(x)
+        local ob, ow = original(src, 'f')(x)
+        eq(ob, b); eq(ow, w)
+    end
+    ok(text:find('(1 / 0)', 1, true) and text:find('(-1 / 0)', 1, true), text)
+end)
+
+test('mix: a COMMENT is trivia anywhere — between a table\'s fields, a call\'s arguments', function ()
+    ready()
+    local src = 'local function f(x)\n    local t = {\n        -- one\n        x,\n        -- two\n        x + 1,\n    }\n    return math.max(\n        -- a\n        t[1], t[2]\n    )\nend\n'
+    local r = residual(src, 'f', { 'D' }, {})
+    eq(original(src, 'f')(3), r(3))
+end)
+
+test('mix: what mix does not handle is REFUSED by name — goto, varargs, a static value that never repeats and generalizing cannot fix', function ()
     ready()
     local function refusal(src, fname, division, statics)
         local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), fname, division, statics)
         eq(false, okm)
         return type(e) == 'table' and e.refusal or ('NOT A REFUSAL: ' .. tostring(e))
     end
-    ok(refusal('local function f(x)\n    while x > 0 do x = x - 1 end\n    return x\nend\n', 'f', { 'D' }, {}):find('while', 1, true))
+    ok(refusal('local function f(x)\n    goto done\n    ::done::\n    return x\nend\n', 'f', { 'D' }, {}):find('goto', 1, true))
+    -- (a while whose static condition never turns false: the budget, by name)
+    ok(refusal('local function f(x)\n    local i = 0\n    while i >= 0 do i = i + 1 end\n    return x\nend\n', 'f', { 'D' }, {}):find('budget', 1, true))
     ok(refusal('local function f(...)\n    return 1\nend\n', 'f', {}, {}):find('parameter', 1, true))
     -- (a continuation that grows by a closure per call: the join's hole falls on a closure argument — no generalization)
     ok(refusal('local function g(x, k)\n    if x > 0 then return g(x - 1, function (y) return k(y) + 1 end) end\n    return k(x)\nend\nlocal function f(x)\n    return g(x, function (y) return y end)\nend\n', 'f', { 'D' }, {}):find('specialization depth', 1, true))
@@ -473,15 +589,78 @@ test('mix: a closure\'s DYNAMIC parts are never computed early — a call whose 
     eq(use(counter()), r2(counter()), 'g runs ONCE, as in the original — not once per call of the closure\n' .. t2)
 end)
 
-test('mix: what rung 3 does not handle is REFUSED by name — a captured per-iteration local, a closure assigning a captured PARAMETER', function ()
+-- ── PINS (CART-1450): a closure capturing a local of one loop iteration copies it when it is made ─────────────────
+local PINS = [[
+local function mk(n)
+    local fs = {}
+    for i = 1, n do
+        local k = i * 10
+        fs[i] = function () return k + i end
+    end
+    return fs
+end
+local function late(x, n)
+    local fs = mk(n)
+    return fs[1]() + fs[n]() + x
+end
+local function apply(g, a) return g(a) end
+local function pre(t, x)
+    local s = 0
+    for _, e in ipairs(t) do
+        local v = e
+        if v < 0 then v = 0 end
+        s = s + (function () return v + x end)()
+    end
+    return s
+end
+local function each(t, x)
+    local r = 0
+    for i, v in ipairs(t) do
+        local d = v + x
+        r = r + apply(function (y) return y * d end, i)
+    end
+    return r
+end
+]]
+
+test('mix: PINS — a closure made in a loop sees ITS iteration\'s locals, called after the loop (static) or inside it (dynamic); equivalent', function ()
+    ready()
+    local o = original(PINS, 'late')
+    for _, n in ipairs({ 1, 3 }) do
+        local r, text = residual(PINS, 'late', { 'D', 'S' }, { nil, n })
+        for _, x in ipairs({ 0, 5 }) do eq(o(x, n), r(x), ('late(%d, %d)'):format(x, n)) end
+        ok(text:find('return %(' .. (11 + 11 * n) .. ' %+ x_%d+%)'), 'fs[1]() + fs[n]() folds to 11 + 11n — a shared slot would give the LAST iteration\'s k and i twice (22n)\n' .. text)
+    end
+    local oe = original(PINS, 'each')
+    local T = { 2, 4, 6 }
+    local r, text = residual(PINS, 'each', { 'S', 'D' }, { T })
+    for _, x in ipairs({ -1, 0, 3 }) do eq(oe(T, x), r(x), ('each(%d)'):format(x)) end
+    gone(text, { 't', 'v', 'i' })
+    -- (a pin ASSIGNED BEFORE the closure captures it — derive.lua's `if … then v = nil end` before an immediately
+    -- called function — copies the assigned value: accepted)
+    local op = original(PINS, 'pre')
+    local T2 = { 3, -2, 5 }
+    local rp = residual(PINS, 'pre', { 'S', 'D' }, { T2 })
+    for _, x in ipairs({ 0, 4 }) do eq(op(T2, x), rp(x), ('pre(%d)'):format(x)) end
+end)
+
+test('mix: what rung 3 does not handle is REFUSED by name — a pin the loop body assigns, a dynamic pin used after its iteration, a closure assigning a captured PARAMETER', function ()
     ready()
     local function refusal(src, fname, division, statics)
         local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), fname, division, statics)
         eq(false, okm)
         return type(e) == 'table' and e.refusal or ('NOT A REFUSAL: ' .. tostring(e))
     end
-    local r1 = refusal('local function f(t)\n    local out = {}\n    for i = 1, 3 do out[i] = function () return i end end\n    return out\nend\n', 'f', { 'D' }, {})
-    ok(r1:find('a local of one loop iteration', 1, true), r1)
+    local r1 = refusal('local function f(x)\n    local s = 0\n    for i = 1, 3 do\n        local k = i\n        local g = function () return k end\n        k = k + x\n        s = s + g()\n    end\n    return s\nend\n', 'f', { 'D' }, {})
+    ok(r1:find('a local of one loop iteration that the loop body assigns', 1, true), r1)
+    -- (the write comes AFTER its values: a closure in the right-hand side captures, then the variable changes)
+    local r4 = refusal('local function f(x)\n    local s = 0\n    for i = 1, 3 do\n        local v = i\n        local g = nil\n        v, g = i * 2, function () return v end\n        s = s + g()\n    end\n    return s + x\nend\n', 'f', { 'D' }, {})
+    ok(r4:find('that the loop body assigns', 1, true), r4)
+    -- (an assignment written BEFORE the capture, but in a loop nested in the variable's scope: its next round runs after)
+    local r5 = refusal('local function f(x)\n    local s = 0\n    for i = 1, 2 do\n        local v = i\n        local fs = {}\n        for j = 1, 2 do\n            v = v + 10\n            fs[j] = function () return v end\n        end\n        s = s + fs[1]()\n    end\n    return s + x\nend\n', 'f', { 'D' }, {})
+    ok(r5:find('that the loop body assigns', 1, true), r5)
+    local r3 = refusal('local function f(t, x)\n    local g = nil\n    for _, v in ipairs(t) do\n        local d = v + x\n        g = function () return d end\n    end\n    return g()\nend\n', 'f', { 'S', 'D' }, { { 1, 2 } })
+    ok(r3:find('used after that iteration', 1, true), r3)
     local r2 = refusal('local function f(x)\n    local g = function () x = x + 1 end\n    g()\n    return x\nend\n', 'f', { 'D' }, {})
     ok(r2:find('assigning the captured parameter `x`', 1, true), r2)
 end)
@@ -679,8 +858,8 @@ end)
 test('mix: the CENSUS — lower with { collect = {} } records every refused statement and goes on, so one run lists what blocks mix on a program', function ()
     ready()
     local got = {}
-    local prog = MX.lower(assert(R.read('local function f(x)\n    local h = function () x = 1 end\n    if x then return x:upper() end\n    return h\nend\nlocal function g(y)\n    while y do y = false end\n    return y\nend\n', 'lua')), { collect = got })
-    eq({ 'a closure assigning the captured parameter `x` (rung 3: a parameter is not boxed)', '`while_statement` (not in S)' },
+    local prog = MX.lower(assert(R.read('local function f(x)\n    local h = function () x = 1 end\n    if x then return x:upper() end\n    return h\nend\nlocal function g(y)\n    goto e\n    ::e::\n    return y\nend\n', 'lua')), { collect = got })
+    eq({ 'a closure assigning the captured parameter `x` (rung 3: a parameter is not boxed)', '`goto_statement` (not in S)', '`label_statement` (not in S)' },
         vim.tbl_map(function (r) return r.why end, got))
     ok(prog.funcs.f and prog.funcs.g, 'both functions lowered, the refused statements skipped')
 end)
