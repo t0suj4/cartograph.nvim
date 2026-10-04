@@ -15,33 +15,46 @@ local M = {}
 --- run the spec in `root` -> { passed, failed, skipped, ran, summary, code } | nil, why
 --- env: extra environment variables for the runner { NAME = value } (CART-1368: DERIVE=<op> for the verb audit) —
 --- merged over the inherited environment, never replacing SPEC
-function M.run(root, spec, timeout, env)
-    -- the runner in its OWN process group (setsid): a spec that HANGS (a mutation that makes a loop infinite) is
-    -- killed WITH its children on the timeout — killing only bash left each hung `node` spinning at 100% CPU
-    -- (measured: three orphans, 20-60 min each, one per re-run of one mutation)
-    -- ⚠ NOT proc:wait(timeout): on its timeout nvim's wait SIGKILLs the LEADER only (`setsid bash`) and then waits a
-    -- second full timeout for the result — which needs the output pipes closed, and the hung grandchild (a busy headless
-    -- nvim, deaf to SIGTERM: harness #26) holds them open. MEASURED (CART-1333): a hung mutant ran 2 x 600 s, an outer
-    -- `timeout` killed the tool first, no verdict, and the spec process ran on as an orphan for 20+ min. So the wait is
-    -- ours: on the timeout the whole GROUP is SIGKILLed first, then the pipes close and the result arrives
+--- run `cmd` in its OWN process group (setsid) and wait for it, killing the WHOLE GROUP on the timeout ->
+--- { code, signal, stdout, stderr } | { timed_out = true, pgid, group_gone } | nil, why. Shared with ab-equivalence.
+-- ★ the runner in its OWN process group (setsid): a run that HANGS (a mutation that makes a loop infinite) is
+-- killed WITH its children on the timeout — killing only bash left each hung `node` spinning at 100% CPU
+-- (measured: three orphans, 20-60 min each, one per re-run of one mutation)
+-- ⚠ NOT proc:wait(timeout): on its timeout nvim's wait SIGKILLs the LEADER only (`setsid bash`) and then waits a
+-- second full timeout for the result — which needs the output pipes closed, and the hung grandchild (a busy headless
+-- nvim, deaf to SIGTERM: harness #26) holds them open. MEASURED (CART-1333): a hung mutant ran 2 x 600 s, an outer
+-- `timeout` killed the tool first, no verdict, and the spec process ran on as an orphan for 20+ min. So the wait is
+-- ours: on the timeout the whole GROUP is SIGKILLed first, then the pipes close and the result arrives
+function M.exec(cmd, opts)
+    opts = opts or {}
     local proc, result
     local ok, err = pcall(function ()
-        local e = {}
-        for k, v in pairs(env or {}) do e[k] = v end
-        e.SPEC, e.CARTOGRAPH_NVIM = spec, vim.v.progpath
-        proc = vim.system({ 'setsid', 'bash', 'tests/run.sh' }, { cwd = root, text = true, env = e }, function (o) result = o end)
+        local c = { 'setsid' }
+        for _, x in ipairs(cmd) do c[#c + 1] = x end
+        proc = vim.system(c, { cwd = opts.cwd, text = true, env = opts.env }, function (o) result = o end)
     end)
-    if not ok then return nil, 'the runner did not start: ' .. tostring(err) end
-    local finished = vim.wait(timeout or 600000, function () return result ~= nil end, 50)
-    local obj = result
-    if not finished or (obj and (obj.signal == 15 or obj.signal == 9)) then
-        -- TIMED OUT: a hang is a spec that did NOT pass — a failure, named
+    if not ok then return nil, 'the process did not start: ' .. tostring(err) end
+    local finished = vim.wait(opts.timeout or 600000, function () return result ~= nil end, 50)
+    if not finished or (result and (result.signal == 15 or result.signal == 9)) then
         local pgid = proc.pid
         vim.system({ 'kill', '-9', '--', '-' .. pgid }):wait()
         vim.wait(10000, function () return result ~= nil end, 50)
         local gone = vim.system({ 'kill', '-0', '--', '-' .. pgid }):wait().code ~= 0
+        return { timed_out = true, pgid = pgid, group_gone = gone }
+    end
+    return result
+end
+
+function M.run(root, spec, timeout, env)
+    local e = {}
+    for k, v in pairs(env or {}) do e[k] = v end
+    e.SPEC, e.CARTOGRAPH_NVIM = spec, vim.v.progpath
+    local obj, err = M.exec({ 'bash', 'tests/run.sh' }, { cwd = root, env = e, timeout = timeout })
+    if not obj then return nil, 'the runner did not start: ' .. tostring(err) end
+    if obj.timed_out then
+        -- TIMED OUT: a hang is a spec that did NOT pass — a failure, named
         local secs = (timeout or 600000) / 1000
-        return { passed = 0, failed = 1, skipped = 0, ran = 1, code = 124, timed_out = true, pgid = pgid, group_gone = gone,
+        return { passed = 0, failed = 1, skipped = 0, ran = 1, code = 124, timed_out = true, pgid = obj.pgid, group_gone = obj.group_gone,
             summary = ('TIMED OUT after %g s (a hang: the spec did not pass; its process group killed)'):format(secs) }
     end
     local out = (obj.stdout or '') .. '\n' .. (obj.stderr or '')

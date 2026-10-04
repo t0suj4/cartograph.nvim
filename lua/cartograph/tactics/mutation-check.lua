@@ -31,6 +31,21 @@ local function scratch_copy(repo, keep)
     local obj = vim.system({ 'bash', '-c', 'tar --exclude=.git -C "$1" -cf - . | tar -C "$2" -xf -', 'copy', repo, root },
         { text = true }):wait(120000)
     if obj.code ~= 0 then return nil, ('copying %s failed: %s'):format(repo, tostring(obj.stderr)), 'environment' end
+    -- ★ THE COPY READS THE REPO'S HISTORY, AND CANNOT WRITE IT (CART-1444): a tactic whose examples read git (ab-equivalence
+    -- unpacks `git archive HEAD`) ran in a copy with no .git and turned toolbelt_spec's baseline red — every mutation
+    -- check against toolbelt_spec then refused. The copy gets a git repo of its OWN whose objects come from the original
+    -- through `objects/info/alternates` (read-only) and whose HEAD is the original's commit; a write lands in the copy's
+    -- .git, never in the original's (a `.git` file pointing at the original would have let a test commit into it)
+    local head = vim.system({ 'git', '-C', repo, 'rev-parse', '--verify', 'HEAD' }, { text = true }):wait()
+    if head.code == 0 then
+        local objs = vim.system({ 'git', '-C', repo, 'rev-parse', '--path-format=absolute', '--git-path', 'objects' }, { text = true }):wait()
+        local init = vim.system({ 'git', 'init', '-q', root }, { text = true }):wait()
+        if init.code == 0 and objs.code == 0 then
+            local fd = io.open(root .. '/.git/objects/info/alternates', 'w')
+            if fd then fd:write(vim.trim(objs.stdout), '\n'); fd:close() end
+            vim.system({ 'git', '-C', root, 'update-ref', 'HEAD', vim.trim(head.stdout) }, { text = true }):wait()
+        end
+    end
     return root
 end
 
