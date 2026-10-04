@@ -153,13 +153,18 @@ function M.c_graph(src, dir, cflags)
 end
 
 --- a function node's body text (its file range in the preprocessed dir)
+-- (keyed by the FULL path and re-read when the file's stat signature moved — CART-1432: keyed by the relative name, a
+-- second build in one process read the first build's preprocessed text, which c_graph rewrites under work/pp)
 local text_cache = {}
 local function body_of(dir, n)
-    local lines = text_cache[n.file]
-    if not lines then
-        lines = vim.split(readfile(dir .. '/' .. n.file) or '', '\n', { plain = true })
-        text_cache[n.file] = lines
+    local path = dir .. '/' .. n.file
+    local sig = require('cartograph.stampcache').signature(path)
+    local e = text_cache[path]
+    if not (e and e.sig == sig) then
+        e = { sig = sig, lines = vim.split(readfile(path) or '', '\n', { plain = true }) }
+        text_cache[path] = e
     end
+    local lines = e.lines
     local s, e = n.range and n.range.start, n.range and n.range['end']
     if not (s and e) then return '' end
     local out = {}

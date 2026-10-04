@@ -11,6 +11,16 @@ local function fixture(files)
     return dir
 end
 
+test('packmap body_of: one relative name in two trees is two texts, and a rewritten file is read again (CART-1432)', function ()
+    local a, b = fixture { ['x.c'] = 'int alpha;\n' }, fixture { ['x.c'] = 'int beta;\n' }
+    local n = { file = 'x.c', range = { start = { line = 0 }, ['end'] = { line = 0 } } }
+    eq('int alpha;', PM.body_of(a, n))
+    eq('int beta;', PM.body_of(b, n), 'keyed by the relative name, this was the first tree\'s text')
+    local fd = assert(io.open(a .. '/x.c', 'w')); fd:write('int gamma_rewritten;\n'); fd:close()
+    eq('int gamma_rewritten;', PM.body_of(a, n), 'a rewrite (c_graph rewrites work/pp per build) is read again')
+    vim.fn.delete(a, 'rf'); vim.fn.delete(b, 'rf')
+end)
+
 test('packmap registrations: modules, CF/ASM/ASM_/LUA, the module prefix stripped, NOREG unregistered, #if gates, LJ_LIB_REG names', function ()
     local dir = fixture {
         ['lualib.h'] = '#define LUA_MYLIBNAME\t"mylib"\n',

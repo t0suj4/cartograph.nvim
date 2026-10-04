@@ -46,6 +46,9 @@ local filehash, pinned = {}, {}
 local function sig(st)
     return st.ino .. ':' .. st.size .. ':' .. st.mtime.sec .. '.' .. st.mtime.nsec .. ':' .. st.ctime.sec .. '.' .. st.ctime.nsec
 end
+--- a path's STAT SIGNATURE (inode, size, mtime + ctime to the ns) | nil when it does not exist — for any memo of a file's
+--- bytes: the TRIGGER to re-read, never a key (CART-1301, CART-1432)
+function M.signature(path) local st = vim.uv.fs_stat(path); return st and sig(st) or nil end
 --- the content hash of a file, re-read only when its stat signature moved | nil when unreadable
 function M.file(path)
     local st = vim.uv.fs_stat(path)
