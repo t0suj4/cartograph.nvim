@@ -1431,6 +1431,14 @@ end
 function D.instance_of(T1, T2, env)
     return D.match(T2, T1.body, { defs = env and env.defs, hole_domains = T1.holes }).ok
 end
+-- the UNIT of hole h: a constructor composition, the single-hole template carrying h's own domain
+function D.unit(T, h) return B.template(B.hole(h), { [h] = B.copy(T.holes[h]) }) end
+-- may T2 fill hole h of T? T2 is an instance of h's unit — the generality order, nothing new (CART-1342)
+function D.admits_template(T, h, T2, env)
+    if not T.holes[h] then return false, 'the template has no hole ' .. tostring(h) end
+    if D.instance_of(T2, D.unit(T, h), env) then return true end
+    return false, ('%s does not fit hole %s (%s)'):format(B.show(T2.body), tostring(h), B.show_domain(T.holes[h].domain))
+end
 
 -- ── link by value and normalization (LINK.md), from equality and the derived match ─────────
 local function dfamily(F) if F.body then return { template = F, values = F.values or {} } end; return F end
@@ -1930,7 +1938,7 @@ function D.kv_generalize(instances, opts)
 end
 D.OPERATORS = { 'sites', 'apply', 'instantiate', 'values_at', 'abstract', 'locate', 'match', 'diff_regions',
     'fill', 'merge', 'split', 'dig', 'rewrite', 'generalize', 'trace', 'migrate_one', 'instance_of', 'primary_key', 'link', 'normalize', 'hunks', 'classify', 'cascade', 'cascade_delete', 'extract', 'extract_call', 'extract_call_of', 'resolve', 'destinations',
-    'kv_eq', 'kv_eq_keyed', 'kv_generalize' }
+    'kv_eq', 'kv_eq_keyed', 'kv_generalize', 'unit', 'admits_template' }
 function D.apply_to(M, which)
     B = setmetatable({}, { __index = function(_, k) error('derive.lua: `' .. tostring(k) .. '` is not in the basis', 2) end })
     for _, k in ipairs(ALLOWED) do rawset(B, k, M[k]) end
