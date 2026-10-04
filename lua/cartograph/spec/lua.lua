@@ -415,7 +415,56 @@ local function reexports(src)
     return map
 end
 
+-- ── the memo idiom's EARLY-EXIT spelling (CART-1433) ─────────────────────────
+-- `if c[k] then return c[k] end … c[k] = v` and `local v = c[k]; if v then return v end … c[k] = v`: a preceding
+-- statement that RETURNS when the written chain is PRESENT dominates the write exactly as `if not c[k] then c[k] = v end`
+-- does. The census of our own caches (CART-1430) found the classifier saw 3 of ~15 real memos as absence-guarded.
+-- `local v = X` (one name, one value) -> v, X
+local function lua_alias_decl(stmt)
+    if stmt:type() ~= 'variable_declaration' then return nil end
+    local asg = stmt:named_child(0)
+    if not (asg and asg:type() == 'assignment_statement') then return nil end
+    local vl, el = asg:named_child(0), asg:named_child(1)
+    if not (vl and el and vl:named_child_count() == 1 and el:named_child_count() == 1) then return nil end
+    local v, x = vl:named_child(0), el:named_child(0)
+    if v:type() ~= 'identifier' then return nil end
+    return v, x
+end
+-- `local v = X`, X the written chain -> v (its name), else nil
+local function lua_alias_of(stmt, src, chain)
+    local v, x = lua_alias_decl(stmt)
+    if v and chain_eq(x, src, chain) then return vim.treesitter.get_node_text(v, src) end
+    return nil
+end
+-- is `n` the written chain, or a local alias of it?
+local function lua_is_chain(n, src, chain, aliases)
+    n = unparen(n)
+    if chain_eq(n, src, chain) then return true end
+    return n:type() == 'identifier' and aliases[vim.treesitter.get_node_text(n, src)] == true
+end
+-- `if X then … return … end` / `if X ~= nil then … return … end` -> X, the expression an EARLY EXIT tests for presence
+local function lua_exit_target(stmt, src)
+    if stmt:type() ~= 'if_statement' then return nil end
+    local cond, body = stmt:named_child(0), stmt:field('consequence')[1]
+    if not (cond and body) then return nil end
+    local last = body:named_child(body:named_child_count() - 1)
+    if not (last and last:type() == 'return_statement') then return nil end
+    cond = unparen(cond)
+    if cond:type() == 'binary_expression' and optext_is(cond, src, { ['~='] = true }) then
+        local a, b = cond:named_child(0), cond:named_child(1)
+        if a and b then
+            if a:type() == 'nil' then return b end
+            if b:type() == 'nil' then return a end
+        end
+        return nil
+    end
+    return cond
+end
+
 local LUA_GUARDS = {
+    -- the early-exit memo guard (CART-1433): the BLOCK kinds whose earlier statements are scanned, an alias reader, the
+    -- guard test (providers/treesitter.lua guard_class)
+    block = { block = true }, alias_of = lua_alias_of, alias_decl = lua_alias_decl, exit_target = lua_exit_target,
     cond = { if_statement = true, elseif_statement = true, while_statement = true },
     else_t = 'else_statement', elseif_t = 'elseif_statement',
     fn = { function_declaration = true, function_definition = true },
@@ -423,19 +472,21 @@ local LUA_GUARDS = {
     negop = 'unary_expression', negtok = 'not', pfield = 'parameters',
     pw_refsem = true, -- tables are reference-typed: param writes escape
     -- `not X` / `X == nil` / `nil == X`, X the written chain
-    abs_test = function (n, src, chain)
+    -- (`aliases`: the `local v = X` names before the `if` — `local v = c[k]; if not v then … c[k] = v end`, CART-1433)
+    abs_test = function (n, src, chain, aliases)
+        aliases = aliases or {}
         local t = n:type()
         if t == 'unary_expression' then
             local op = n:child(0)
             if op and not op:named() and op:type() == 'not' then
                 local x = n:named_child(0)
-                return x ~= nil and chain_eq(x, src, chain)
+                return x ~= nil and lua_is_chain(x, src, chain, aliases)
             end
         elseif t == 'binary_expression' and optext_is(n, src, { ['=='] = true }) then
             local a, b = n:named_child(0), n:named_child(1)
             if a and b then
-                if a:type() == 'nil' then return chain_eq(b, src, chain) end
-                if b:type() == 'nil' then return chain_eq(a, src, chain) end
+                if a:type() == 'nil' then return lua_is_chain(b, src, chain, aliases) end
+                if b:type() == 'nil' then return lua_is_chain(a, src, chain, aliases) end
             end
         end
         return false

@@ -67,6 +67,40 @@ test('guards: lua set-once forms, hedges, and soundness traps', function ()
     eq(1, gw_of(data, 'mixed', 'mix'), 'min over writes: the unguarded one wins')
 end)
 
+test('guards: the memo idiom\'s EARLY-EXIT spelling is set-once too — direct, through a local alias, `~= nil`; and its traps are not (CART-1433)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = mkroot('e.lua', table.concat({
+        'local ec, al, nn, ok1, nr, ng, ox = {}, {}, {}, {}, {}, {}, {}',
+        'local function earlyret(k) if ec[k] then return ec[k] end ec[k] = 1 return ec[k] end',
+        'local function aliased(k) local v = al[k] if v then return v end v = 2 al[k] = v return v end',
+        'local function nilcheck(k) if nn[k] ~= nil then return nn[k] end nn[k] = 3 end',
+        -- traps
+        'local function otherkey(a, b) if ok1[a] then return ok1[a] end ok1[b] = 1 end',
+        'local function noreturn(k) if nr[k] then use(nr[k]) end nr[k] = 1 end',
+        'local function onabsence(k) if not ng[k] then return end ng[k] = 1 end',
+        'local function otheralias(j, k) local v = ox[j] if v then return v end ox[k] = 1 end',
+        -- the absence test spelled on an alias, the write INSIDE the `if`
+        'local ia, ib, ic, ae = {}, {}, {}, {}',
+        'local function exitafter(k) ae[k] = 1 if ae[k] then return ae[k] end end',
+        'local function inside(k) local v = ia[k] if not v then v = 1 ia[k] = v end return v end',
+        'local function insidenil(k) local v = ib[k] if v == nil then ib[k] = 2 end end',
+        'local function insideother(j, k) local v = ic[j] if not v then ic[k] = 1 end end',
+        'return { earlyret, aliased, nilcheck, otherkey, noreturn, onabsence, otheralias, inside, insidenil, insideother, exitafter }',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(3, gw_of(data, 'earlyret', 'ec'), 'if c[k] then return c[k] end … c[k] = v')
+    eq(3, gw_of(data, 'aliased', 'al'), 'local v = c[k]; if v then return v end … c[k] = v')
+    eq(3, gw_of(data, 'nilcheck', 'nn'), 'if c[k] ~= nil then return … end')
+    eq(1, gw_of(data, 'otherkey', 'ok1'), 'the exit tests another key: no claim')
+    eq(1, gw_of(data, 'noreturn', 'nr'), 'a presence test that does not exit: no claim')
+    eq(1, gw_of(data, 'onabsence', 'ng'), 'an exit on ABSENCE leaves only present keys: no claim')
+    eq(1, gw_of(data, 'otheralias', 'ox'), 'an alias of another chain: no claim')
+    eq(3, gw_of(data, 'inside', 'ia'), 'local v = c[k]; if not v then … c[k] = v end')
+    eq(3, gw_of(data, 'insidenil', 'ib'), 'local v = c[k]; if v == nil then … end')
+    eq(2, gw_of(data, 'insideother', 'ic'), 'an alias of another key: guarded, not set-once')
+    eq(1, gw_of(data, 'exitafter', 'ae'), 'an exit AFTER the write guards nothing')
+end)
+
 test('guards: php isset/empty/coalesce forms and the || trap', function ()
     if not ready('php') then skip 'no php parser' end
     local root = mkroot('m.php', table.concat({

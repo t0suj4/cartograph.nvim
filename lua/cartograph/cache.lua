@@ -409,7 +409,11 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 211 -- v211: A CALL IN AN ERLANG MACRO BODY IS ATTRIBUTED AT EACH USE OF THE MACRO (CART-1133, spec.fun_refs):
+M.VERSION = 212 -- v212: THE MEMO IDIOM'S EARLY-EXIT SPELLING IS SET-ONCE (CART-1433): `if c[k] then return c[k] end … c[k] = v`
+--- (directly, through a `local v = c[k]` alias, or `~= nil`) classifies the write gw = 3 like `if not c[k] then … end`;
+--- also the absence test spelled on an alias, the write inside it (`local v = c[k]; if not v then … c[k] = v end`);
+--- lua/cartograph's set-once use edges 15 -> 50. Cached graphs carry gw on their use edges.
+--- Prior: v211: A CALL IN AN ERLANG MACRO BODY IS ATTRIBUTED AT EACH USE OF THE MACRO (CART-1133, spec.fun_refs):
 --- `?INFO_IDENTITY(...)` in a function references the same-file functions the -define body calls (to a fixpoint).
 --- Prior: v210: AN ERLANG `fun f/N` IS A REFERENCE (CART-1132, spec.fun_refs): the named function of the same module
 --- gets the callback convention's hedged ref from the enclosing function (47 of 76 dead-function findings on ejabberd).

@@ -445,13 +445,13 @@ local function ntext(x, src) return (node_text(x, src):gsub('%s', '')) end
 local optext_is = tsutil.optext_is
 
 -- absence test anywhere in CONJUNCT position (descend parens + and only)
-local function conj_abs(G, n, src, chain)
+local function conj_abs(G, n, src, chain, aliases)
     n = tsutil.unparen(n)
     if n:type() == G.binop and optext_is(n, src, G.andops) then
-        return conj_abs(G, n:named_child(0), src, chain)
-            or conj_abs(G, n:named_child(1), src, chain)
+        return conj_abs(G, n:named_child(0), src, chain, aliases)
+            or conj_abs(G, n:named_child(1), src, chain, aliases)
     end
-    return G.abs_test(n, src, chain)
+    return G.abs_test(n, src, chain, aliases)
 end
 
 -- param-name map of a fn node: name -> 1-based index (nil when no params)
@@ -575,6 +575,59 @@ local function param_conj(G, n, src, params)
     return i
 end
 
+-- ★ THE EARLY-EXIT GUARD (CART-1433): `if c[k] then return c[k] end … c[k] = v` — a statement BEFORE the write, in a
+-- block that encloses it, that returns when the written chain is present (directly or through a `local v = c[k]` alias)
+-- makes the write set-once exactly as `if not c[k] then … end` does. Only a language that declares the hooks
+-- (G.block / G.alias_decl / G.exit_target) is read, and only function-body blocks (never the chunk: a load-time write is
+-- no memo). Each block's early exits are read ONCE — the tested text, resolved through the `local v = X` aliases before
+-- it, and where the exit ends — so a write costs a lookup and a text compare: the classifier runs per write x per
+-- ancestor and is measured hot (a per-write scan of the preceding statements cost ~6% of an extraction).
+-- ⚠ memoized for the CURRENT SOURCE only: a node id is reused once its tree is freed, so the memo is one-slot per file.
+local exit_src, exit_memo = nil, {}
+local function block_exits(G, blk, src)
+    if exit_src ~= src then exit_src, exit_memo = src, {} end
+    local id = blk:id()
+    local ex = exit_memo[id]
+    if ex == nil then
+        ex = {}
+        local alias = {}
+        for st in blk:iter_children() do
+            if st:named() then
+                local v, x = G.alias_decl(st)
+                if v then alias[node_text(v, src)] = ntext(x, src) end
+                local tgt = G.exit_target(st, src)
+                if tgt then
+                    local t = ntext(tgt, src)
+                    ex[#ex + 1] = { e = select(3, st:end_()), t = t, a = alias[t] }
+                end
+            end
+        end
+        exit_memo[id] = ex
+    end
+    return ex
+end
+local function exit_guarded(G, node, src, ch)
+    local ex = block_exits(G, node:parent(), src)
+    if #ex == 0 then return false end
+    local s = select(3, node:start())
+    for _, x in ipairs(ex) do
+        if x.e <= s and (x.t == ch() or x.a == ch()) then return true end
+    end
+    return false
+end
+-- the `local v = <chain>` aliases among the statements before `stmt` — for an absence test spelled on the alias:
+-- `local v = c[k]; if not v then … c[k] = v end` (CART-1433). Asked only when the direct test failed.
+local function aliases_before(G, stmt, src, ch)
+    local al, s = nil, stmt:prev_named_sibling()
+    while s do
+        -- (the statement's shape is the LANGUAGE's question: alias_of reads it in the spec)
+        local a = G.alias_of(s, src, ch())
+        if a then al = al or {}; al[a] = true end
+        s = s:prev_named_sibling()
+    end
+    return al
+end
+
 local function guard_class(c, n, src, G)
     local top = chain_top(c, n)
     local chain -- LAZY: most writes never reach a text comparison
@@ -589,6 +642,7 @@ local function guard_class(c, n, src, G)
     while p do
         local pt = p:type()
         if G.fn[pt] then fnnode = p break end
+        if G.exit_target and G.block[pt] and exit_guarded(G, node, src, ch) then return 2 end
         if G.cond[pt] then
             -- the condition is the first named child in both grammars
             -- (field() allocates a result table per call — this loop is
@@ -602,6 +656,10 @@ local function guard_class(c, n, src, G)
                     negcond = negcond or cond
                 elseif at ~= G.elseif_t then
                     if conj_abs(G, cond, src, ch()) then return 2 end
+                    if G.alias_of then
+                        local al = aliases_before(G, p, src, ch)
+                        if al and conj_abs(G, cond, src, ch(), al) then return 2 end
+                    end
                     nc = (nc or 0) + 1
                     conds = conds or {}
                     conds[nc] = cond
