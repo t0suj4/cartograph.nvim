@@ -4137,6 +4137,31 @@ test('clones: a SUBTERM shared by two functions under renamed locals is one grou
     vim.fn.delete(root, 'rf')
 end)
 
+-- ── the subterm tier's IDIOMS and wrappers (CART-1428) ───────────────────────
+test('clones.subterms: a shared expression of pure structure (no anchors) is an IDIOM, left out and counted; one reached as `if X` and `return X` is reported at its wrappers, never also bare', function ()
+    if not ready() then skip 'no lua parser' end
+    local idiom = '  local n = (a + b) * (c - d) / (a - b)\n  return n'
+    local anchored = '  if cfg.items[cfg.key] and cfg.items[cfg.key].count > limit then use(1) end\n'
+        .. '  return cfg.items[cfg.key] and cfg.items[cfg.key].count > limit'
+    local root = proj {
+        ['i1.lua'] = fn('mix_one', 'a, b, c, d', idiom), ['i2.lua'] = fn('mix_two', 'a, b, c, d', idiom),
+        ['w1.lua'] = fn('wrap_one', 'cfg, limit', anchored), ['w2.lua'] = fn('wrap_two', 'cfg, limit', anchored),
+    }
+    local groups = clones.subterms(store, { min_nodes = 12 })
+    for _, g in ipairs(groups) do
+        for _, m in ipairs(g.members) do ok(m.name ~= 'mix_one', 'the all-locals arithmetic is not reported: ' .. g.show) end
+    end
+    ok((groups.idioms or 0) >= 1, 'and it is counted as an idiom: ' .. tostring(groups.idioms))
+    ok(clones.subterms_report(groups)[1]:find('idioms', 1, true), 'the report says so')
+    local bare = 0
+    for _, g in ipairs(groups) do if g.show:find('^%(bin and') then bare = bare + 1 end end
+    eq(0, bare, 'the condition is reported at `if` and `return`, not again bare')
+    local anchored_group
+    for _, g in ipairs(groups) do if g.show:find('items', 1, true) then anchored_group = g end end
+    ok(anchored_group and anchored_group.anchors >= 3, 'items / key / count are its anchors')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ── block groups in a TOTAL order (CART-1434) ───────────────────────────────
 test('clones.blocks: equal-ranked groups are ordered by their first member, not by hash order (CART-1434)', function ()
     if not ready() then skip 'no lua parser' end

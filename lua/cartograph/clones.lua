@@ -241,11 +241,40 @@ end
 --- alpha-equivalence, one pass per function) in ONE scope across the tree. MEASURED before shipping (>= 12 nodes):
 --- TSM 458 classes in 2+ of 2273 functions (`not TSM.db.profile.groups[path]` in 10, a 60-node IsDuplicatePage
 --- condition in two files), elasticsearch libs/core 97 in 600.
---- Only MAXIMAL classes: a class whose every occurrence sits under one other class's occurrences, in as many functions,
---- is that class's part and is not reported. opts.min_nodes (default 12). -> groups sorted by spread, each
---- { size, nfns, nfiles, show, members = { { name, file, line } } }
+--- Only MAXIMAL classes: a class whose every occurrence sits under an occurrence of a class found in as many functions
+--- is that class's part and is not reported (one condition reached as `if X` and `return X` is reported at each
+--- wrapper, never also bare).
+--- ★ RANKED BY DISTINCTIVENESS × SPREAD (CART-1428): spread alone put idioms first — a counting for-loop header in 7
+--- Java functions topped elasticsearch core, LibStub's `not self.libs[major] and not silent` TSM. A class's ANCHORS are
+--- its distinct leaves a reader would search for: names that are not locals (calls, fields, types, globals) and
+--- literals other than 0 / 1 / true / false / nil / "" — operators, holes and `#` markers (`#prim`) are structure.
+--- Groups rank by files × anchors; a class with fewer than opts.min_anchors (default 2) is pure structure and is
+--- dropped, counted in `out.idioms`. MEASURED 2026-10-04: TSM 265 groups + 17 idioms (316 before, the rest removed by
+--- the maximality fix; LibStub's lookup gone), SetFont(… GetContentFont() …) first at 15 files x 6 anchors; elasticsearch
+--- libs/core 55 groups + 1 idiom — the counting for-loop header that used to top it.
+--- opts.min_nodes (default 12). -> groups, each { size, nfns, nfiles, anchors, show, members = { { name, file, line } } }
+-- the ANCHORS of a term (CART-1428): distinct leaves a reader would search for — a name that is not a local (holes are
+-- the locals) and is not an operator (a bin / un node's first kid), a literal other than 0 / 1 / true / false / nil / ""
+local TRIVIAL_LIT = { ['number:0'] = true, ['number:1'] = true, ['boolean:true'] = true, ['boolean:false'] = true, ['string:'] = true }
+local function anchors_of(t)
+    local seen, n = {}, 0
+    local function walk(u, parent, i)
+        if u.k == 'name' and type(u.n) == 'string' then
+            local op = parent and (parent.k == 'bin' or parent.k == 'un') and i == 1
+            if not op and u.n:sub(1, 1) ~= '#' and not seen['n:' .. u.n] then seen['n:' .. u.n] = true; n = n + 1 end
+        elseif u.k == 'lit' then
+            local key = type(u.v) .. ':' .. tostring(u.v)
+            if u.v ~= nil and not TRIVIAL_LIT[key] and not seen['l:' .. key] then seen['l:' .. key] = true; n = n + 1 end
+        end
+        for j, c in ipairs(u.kids or {}) do walk(c, u, j) end
+    end
+    walk(t)
+    return n
+end
+
 function M.subterms(store, opts)
     local min = (opts and opts.min_nodes) or 12
+    local min_anchors = (opts and opts.min_anchors) or 2
     local alg = require 'cartograph.algebra'
     local A = alg.load()
     if not A then error('clones: the algebra cannot key a subterm: ' .. tostring(select(2, alg.available()))) end
@@ -275,15 +304,19 @@ function M.subterms(store, opts)
         end
     end
     local function nf(c) local n = 0; for _ in pairs(c.fns) do n = n + 1 end; return n end
-    local out = {}
+    local out, idioms = {}, 0
     for _, c in pairs(classes) do
         local n = nf(c)
         if n >= 2 then
-            -- maximal: not every occurrence under one other class's occurrence, in as many functions
-            local p, dominated = parent_of[c.occ[1].node], true
-            for _, o in ipairs(c.occ) do if not p or parent_of[o.node] ~= p then dominated = false; break end end
-            if dominated and classes[p] and nf(classes[p]) == n then dominated = true else dominated = false end
-            if not dominated then
+            -- maximal: dominated when EVERY occurrence sits under an occurrence of a class found in as many functions
+            local dominated = true
+            for _, o in ipairs(c.occ) do
+                local p = parent_of[o.node]
+                if not (p and classes[p] and nf(classes[p]) >= n) then dominated = false; break end
+            end
+            local anchors = not dominated and anchors_of(c.sample) or 0
+            if not dominated and anchors < min_anchors then idioms = idioms + 1
+            elseif not dominated then
                 local members, files, seen = {}, {}, {}
                 for _, o in ipairs(c.occ) do
                     if not seen[o.f] then
@@ -299,22 +332,26 @@ function M.subterms(store, opts)
                 end)
                 local nfiles = 0
                 for _ in pairs(files) do nfiles = nfiles + 1 end
-                out[#out + 1] = { size = c.size, nfns = n, nfiles = nfiles, show = A.show(c.sample), members = members }
+                out[#out + 1] = { size = c.size, nfns = n, nfiles = nfiles, anchors = anchors, show = A.show(c.sample), members = members }
             end
         end
     end
     table.sort(out, function (a, b)
-        if a.nfiles ~= b.nfiles then return a.nfiles > b.nfiles end
+        local sa, sb = a.nfiles * a.anchors, b.nfiles * b.anchors
+        if sa ~= sb then return sa > sb end
         if a.nfns ~= b.nfns then return a.nfns > b.nfns end
         if a.size ~= b.size then return a.size > b.size end
         return a.show < b.show
     end)
+    out.idioms = idioms
     return out
 end
 
 function M.subterms_report(groups)
-    if #groups == 0 then return { 'subterm clones: none' } end
-    local lines = { ('subterm clones: %d groups (variants below statement level, in 2+ functions)'):format(#groups) }
+    local idioms = groups.idioms and groups.idioms > 0
+        and (' — %d more with fewer than 2 anchors left out as idioms'):format(groups.idioms) or ''
+    if #groups == 0 then return { 'subterm clones: none' .. idioms } end
+    local lines = { ('subterm clones: %d groups (variants below statement level, in 2+ functions, by files x anchors)%s'):format(#groups, idioms) }
     for k, g in ipairs(groups) do
         lines[#lines + 1] = ('[%d] %d functions / %d files, %d nodes: %s'):format(k, g.nfns, g.nfiles, g.size,
             (g.show:gsub('%s+', ' ')):sub(1, 160))
