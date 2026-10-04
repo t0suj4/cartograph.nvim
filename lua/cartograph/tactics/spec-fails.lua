@@ -58,13 +58,18 @@ function M.run(root, spec, timeout, env)
         summary = ('%d passed, %d failed, %d skipped'):format(p, f, s) }
 end
 
---- `NAME=value` items (a list, or `A=1,B=2`) -> { NAME = value } | nil; an item without `=` is ignored by name
+--- `NAME=value` items (a list, or `A=1,B=2`) -> { NAME = value } | nil, why. An item without `=` CONTINUES the value
+--- before it: the list param is split at commas, so `env=DERIVE=unit,admits_template` arrives as two items, and the
+--- second used to be dropped in silence — the run swapped in `unit` alone and a mutation of the other SURVIVED.
+--- One with no item before it is refused by name
 function M.env_of(items)
     if not items then return nil end
-    local e = {}
+    local e, last = {}, nil
     for _, it in ipairs(items) do
         local k, v = tostring(it):match('^([%w_]+)=(.*)$')
-        if k then e[k] = v end
+        if k then e[k], last = v, k
+        elseif last then e[last] = e[last] .. ',' .. tostring(it)
+        else return nil, ('env item `%s` is not NAME=value'):format(tostring(it)) end
     end
     return e
 end
@@ -76,7 +81,10 @@ M.entry = {
     params = { spec = 'string', root = 'string?', timeout = 'string?', env = 'list?' },
     measure = function (_, p)
         local t0 = vim.uv.hrtime()
-        local v, why = M.run(p.root or repo_of_toolbelt(), p.spec, p.timeout and tonumber(p.timeout) * 1000 or nil, M.env_of(p.env))
+        local env, ewhy = M.env_of(p.env)
+        local v, why
+        if p.env and not env then why = ewhy
+        else v, why = M.run(p.root or repo_of_toolbelt(), p.spec, p.timeout and tonumber(p.timeout) * 1000 or nil, env) end
         v = v or { error = why }
         v.secs = (vim.uv.hrtime() - t0) / 1e9
         return v
@@ -106,6 +114,7 @@ M.FIXTURE = {
     ['tests/broken_spec.lua'] = "local check = ...\ncheck(1 == 2)\n",
     -- (a spec that fails only under an environment variable: the `env` param's example, and derive-check's)
     ['tests/env_spec.lua'] = "local check = ...\ncheck(os.getenv('DERIVE') ~= 'bad')\n",
+    ['tests/envlist_spec.lua'] = "local check = ...\ncheck(os.getenv('DERIVE') ~= 'x,y')\n",
     -- (a spec that HANGS busy: a headless nvim in a loop ignores SIGTERM — the case a timeout must kill by group)
     ['tests/hang_spec.lua'] = "local check = ...\nlocal n = 0\nfor _ = 1, math.huge do n = n + 1 end\ncheck(n > 0)\n",
 }
@@ -138,6 +147,18 @@ M.entry.examples = {
         files = M.FIXTURE,
         params = function (store) return { spec = 'env_spec', root = store.data.root, env = { 'DERIVE=bad' } } end,
         expect = { holds = true, check = function (v) return v.failed == 1, tostring(v.summary) end },
+    },
+    {
+        name = 'a VALUE WITH A COMMA reaches the runner whole: the list param splits it, the next item continues it',
+        files = M.FIXTURE,
+        params = function (store) return { spec = 'envlist_spec', root = store.data.root, env = { 'DERIVE=x', 'y' } } end,
+        expect = { holds = true, check = function (v) return v.failed == 1, tostring(v.summary) end },
+    },
+    {
+        name = 'an env item with no NAME= before it is refused by name, never dropped',
+        files = M.FIXTURE,
+        params = function (store) return { spec = 'env_spec', root = store.data.root, env = { 'y' } } end,
+        expect = { holds = false, check = function (v) return (v.error or ''):find('`y` is not NAME=value', 1, true) ~= nil, tostring(v.error) end },
     },
     {
         name = '…and the same spec WITHOUT it is green: the variable reached the runner, nothing else changed',

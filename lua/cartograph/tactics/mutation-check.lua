@@ -44,7 +44,8 @@ local function measure(_, p)
     -- 1. the BASELINE, in the copy: it must be green, or every mutation is "caught"
     local limit = p.timeout and tonumber(p.timeout) * 1000 or nil
     -- (env = NAME=value,… for both runs — DERIVE=<op> mutation-checks a DERIVATION, CART-1368)
-    local env = SF.env_of(p.env)
+    local env, ewhy = SF.env_of(p.env)
+    if p.env and not env then v.error = ewhy; return done() end
     local base, bwhy = SF.run(root, p.spec, limit, env)
     if not base then v.error = 'baseline: ' .. tostring(bwhy); return done() end
     v.baseline = base
