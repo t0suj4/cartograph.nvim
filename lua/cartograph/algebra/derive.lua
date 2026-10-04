@@ -20,6 +20,7 @@ local ALLOWED = {
     'eq', 'show', 'admits', 'entails', 'meet', 'open', 'closed', 'kinds', 'alt', 'ref', 'rep', 'both',
     'context', 'show_domain', 'template', 'grammars', 'observed',
     'key_name', 'widen', -- the key's name in a message, the domain widening (CASCADE.md)
+    'key_of', -- a keyed node's reading of one kid's key (KEYED.md): the alignment's declared parameter, as key_name is its printer
     'classify_over', 'has_keyed', -- the edit calculus's reading of attributed regions (CLASSIFY.md) and the keyed test
     'admits_slice', -- the domain algebra's arm for a slice holding hedge variables (a query template as the instance)
     'spans', 'unfold_why', -- the sheet's byte ranges under cst_print (SURGERY.md), a print-side lens like show
@@ -958,8 +959,27 @@ function D.split(T, h, site_index, h2)
     T2.holes[h2] = { domain = B.copy(T.holes[h].domain), origin = T.holes[h].origin }
     return T2
 end
+-- a keyed node never holds an unkeyed kid, nor two kids under one key (KEYED.md): an edit at `path` that would put
+-- one there is refused by name. Composed from the lens and the alignment's key_of; dig and rewrite share it
+local function keyed_parent_ok(who, root, path, kid)
+    if #path == 0 then return true end
+    local parent = B.locate_at(root, { unpack(path, 1, #path - 1) })
+    if not (parent and parent.align) then return true end
+    local k, why = B.key_of(parent, kid)
+    if not k then return false, ('%s: the kid under a keyed %s must carry a key (%s)'):format(who, parent.k, why) end
+    local step = path[#path]
+    for i, c in ipairs(parent.kids) do
+        local ck = B.key_of(parent, c)
+        if ck == k and not (type(step) == 'string' and ck == step) and not (type(step) == 'number' and i == step) then
+            return false, ('%s: key %s is already a kid of this %s'):format(who, k, parent.k)
+        end
+    end
+    return true
+end
 function D.dig(T, path, h, domain)
     if is_hole(B.locate_at(T.body, path)) then return nil, 'already a hole' end
+    local okp, pwhy = keyed_parent_ok('dig', T.body, path, B.hole(h))
+    if not okp then return nil, pwhy .. '; dig the pair\'s value instead' end
     local T2 = edited(T, { op = 'dig', h = h, at = key(path), path = B.copy(path), domain = domain })
     T2.body = B.put(T2.body, path, B.hole(h))
     T2.holes[h] = { domain = domain or B.open(), origin = domain and 'supplied' or 'derived' }
@@ -969,6 +989,30 @@ function D.dig(T, path, h, domain)
 end
 function D.rewrite(T, path, sub)
     local before = D.sites(T)
+    -- the substitution names only holes the template has (a hedge only if the template's own is one), and every keyed
+    -- node inside it is well-formed
+    local function check(t)
+        if is_hole(t) then
+            if not T.holes[t.h] then return false, 'rewrite: unknown hole ' .. t.h end
+            if t.ctx or (t.rep and not (before[t.h] and before[t.h].rep)) then return false, 'rewrite: repetition/context holes not supported' end
+        end
+        if t.align then
+            for i, c in ipairs(t.kids or {}) do
+                local k, why = B.key_of(t, c)
+                if not k then return false, ('rewrite: keyed %s: kid %d: %s'):format(t.k, i, why) end
+            end
+        end
+        for _, c in ipairs(t.kids or {}) do
+            local ok, why = check(c)
+            if not ok then return ok, why end
+        end
+        return true
+    end
+    local ok, why = check(sub)
+    if not ok then return nil, why end
+    local okp, pwhy = keyed_parent_ok('rewrite', T.body, path, sub)
+    if not okp then return nil, pwhy end
+    if #path > 0 and B.locate_at(T.body, path) == nil then return nil, 'rewrite: no region at ' .. key(path) .. ' in this body' end
     local T2 = edited(T, { op = 'rewrite', h = '*', at = key(path), path = B.copy(path), sub = B.copy(sub) })
     T2.body = B.put(T2.body, path, B.copy(sub))
     local after = D.sites(T2)
@@ -1368,7 +1412,13 @@ function D.migrate_one(T, T2, op, V, env)
     local I = D.instantiate(T, V, env)
     if not I.ok then return nil, op.op .. ' ' .. tostring(op.h) .. ': member does not instantiate' end
     local m = D.match(T2, I.term, env)
-    if not m.ok then return nil, op.op .. ' ' .. tostring(op.h) .. ': ' .. m.refusal.why end
+    if not m.ok then
+        -- the member instantiates T and T2 is T plus this one edit, so the edit is the only thing the match can refuse:
+        -- the refusal is named in the edit's own words (a pin's value, a merge's two values, a dug domain)
+        local label = op.op == 'merge' and ('merge ' .. op.h .. '/' .. op.into) or (op.op .. ' ' .. tostring(op.h))
+        local named = ({ pin = 'value differs', merge = 'values differ' })[op.op]
+        return nil, label .. ': ' .. (named or ((op.op == 'dig' and 'domain refuses ' or '') .. m.refusal.why))
+    end
     return m.values
 end
 
