@@ -73,6 +73,38 @@ test('mixalg: a derivation\'s closure follows its FILE\'S MODULE TABLE — D.app
     eq({}, got)
 end)
 
+test('mixalg: an UNFOLD is specialized ONCE per configuration — a statement-list template compiles in a few thousand steps (it ran out of 5e6 before CART-1455) and equals A.match on real declarations', function ()
+    ready()
+    local rules_ = assert(require('cartograph.byexample').learn('local function f()\n  a()\n  b()\nend', 'local function f()\n  a()\n  x()\n  b()\nend', 'lua'))
+    local T = rules_[1].lhs
+    local m, _, stats = MA.compile_match(T, { budget = 2e5 })
+    ok(stats.unfold_steps < 1e5, stats.unfold_steps .. ' unfold steps')
+    local src = io.open('lua/cartograph/mixalg.lua'):read('a'):gsub('\nreturn M%s*$', '\n') .. 'local function g()\n  a()\n  b()\nend\n'
+    local subjects, hits = {}, 0
+    local function walk(t)
+        if t.k == 'function_declaration' then subjects[#subjects + 1] = t end
+        for _, c in ipairs(t.kids or {}) do walk(c) end
+    end
+    walk(assert(R.read(src, 'lua')))
+    ok(#subjects > 5, #subjects .. ' declarations')
+    for _, s in ipairs(subjects) do
+        local want = A.match(T, s)
+        eq(want, m(s))
+        if want.ok then hits = hits + 1 end
+    end
+    eq(1, hits, 'the one two-statement function matches')
+end)
+
+test('mixalg: a configuration whose KEY cannot be formed refuses FAST — the fallback program point would meet the same key (CART-1455)', function ()
+    ready()
+    -- (`local ?1 = 1 return ?1`: match's continuation chain nests past 20 — CART-1456. Under the budget given here the
+    -- old behaviour, rollback and retry, ran out of BUDGET instead of naming the key)
+    local rules_ = assert(require('cartograph.byexample').learn('local function f()\n  local a = 1\n  return a\nend', 'local function f()\n  local a = 1\n  a = a + 1\n  return a\nend', 'lua'))
+    local okc, e = pcall(MA.compile_match, rules_[1].lhs, { budget = 2e5 })
+    eq(false, okc)
+    ok(type(e) == 'table' and tostring(e.refusal):find('nested deeper than', 1, true), vim.inspect(e))
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')

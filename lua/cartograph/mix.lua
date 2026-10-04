@@ -1405,7 +1405,7 @@ function M.specialize(prog, fname, division, statics, opts)
         return X
     end
 
-    local spec_block, rexpr, lift
+    local spec_block, rexpr, lift, dnames
     -- a loop body specialized inside its own ITERATION SCOPE
     local function loop_body(stmts, X)
         local n = #iters
@@ -1478,11 +1478,59 @@ function M.specialize(prog, fname, division, statics, opts)
         refuse('a static ' .. ty .. ' reaches dynamic code')
     end
 
+    -- the RESIDUAL NAMES a static value carries: every dynamic free variable of every closure reachable from it (through
+    -- closures' static free values and tables), as `id=name` into out — what an unfolded expression reads by name
+    function dnames(v, seen, out)
+        if type(v) == 'function' then
+            local c = R.clos[v]
+            if not c or seen[c] then return end
+            seen[c] = true
+            for _, id in ipairs(c.lam.free) do
+                if c.dfree[id] then out[#out + 1] = id .. '=' .. c.dfree[id] else dnames(M.cval(c, id), seen, out) end
+            end
+        elseif type(v) == 'table' and not seen[v] then
+            seen[v] = true
+            for _, x in pairs(v) do if type(x) == 'function' or type(x) == 'table' then dnames(x, seen, out) end end
+        end
+    end
     -- UNFOLD: T's body specialized to (division, svals) in place -> its single returned expression, the residual
     -- names of its dynamic parameters (holes, substituted by the caller) | nil
     local function unfold(T, division, svals, frame)
         local key = t_key(T) .. ':' .. table.concat(division, '') .. ':' .. args_key(svals, #division, R.clos)
         if unfolding[key] then return nil end
+        -- THE OUTCOME IS MEMOIZED per configuration — the body is specialized once, not once per call site: an unrolled
+        -- static loop calls the same helper with the same configuration again and again (compiling match: 105,972
+        -- attempts over 138 configurations, 70,714 of them re-discovering the same failure, CART-1455). Kept in `memo`,
+        -- so a rolled-back transaction forgets it with the program points its residual may call. A closure's key also
+        -- names the residual variables its dynamic free values live in: the unfolded expression reads them directly
+        -- (MODULO RENAMING: the names are fresh in every nested unfold — `#hole9537` here, `#hole26511` there — so the key
+        -- holds them as placeholders by first occurrence, and a hit renames the stored residual's names to this call's)
+        local names = {}
+        if T.kind == 'lam' then dnames(T.c.fn, {}, names) end
+        for i = 1, #division do dnames(svals[i], {}, names) end
+        local canon, order, idx = {}, {}, {}
+        for i, s in ipairs(names) do
+            local id, nm = s:match('^(.-)=(.*)$')
+            if not idx[nm] then order[#order + 1] = nm; idx[nm] = #order end
+            canon[i] = id .. '=@' .. idx[nm]
+        end
+        local ukey = 'unfold:' .. key .. ':' .. table.concat(canon, ',')
+        local m = memo[ukey]
+        if m == false then return nil end
+        if m then
+            local subst, any, captured = {}, false, false
+            for k, old in ipairs(m.order) do
+                if old ~= order[k] then
+                    subst[old] = { op = 'var', name = order[k] }; any = true
+                    -- (a name the stored residual also BINDS — a lifted function's local — would be renamed away from its
+                    -- binder: no reuse, the configuration is specialized afresh)
+                    if m.bound[old] then captured = true end
+                end
+            end
+            if not any then return m.inl, m.hs end
+            if not captured then return M.substitute(m.inl, subst), m.hs end
+            m = nil
+        end
         unfolding[key] = true
         enter('unfold')
         local X2 = context(T, division, frame)
@@ -1507,11 +1555,22 @@ function M.specialize(prog, fname, division, statics, opts)
         cut_iters(ni)
         if not ok then
             rollback(no, nm)
-            if type(body) == 'table' and body.refusal and (body.refusal:find('budget', 1, true) or body.refusal:find('depth', 1, true)) then error(body, 0) end
+            -- (FAIL FAST on a refusal no retry can escape: a budget, the depth, and a KEY that cannot be formed — a static
+            -- value nested too deep is a property of the configuration, so the program point the caller falls back to
+            -- meets the same key again: 19,585 rollbacks of fully built points compiling one template, CART-1455)
+            if type(body) == 'table' and body.refusal and (body.refusal:find('budget', 1, true) or body.refusal:find('depth', 1, true)
+                or body.refusal:find('nested deeper than', 1, true)) then error(body, 0) end
             if type(body) ~= 'table' then error(body, 0) end
+            memo[ukey] = false
+            mlog[#mlog + 1] = ukey
             return nil
         end
-        if #body == 1 and body[1].op == 'ret' and #body[1].es == 1 then return body[1].es[1], hs end
+        memo[ukey] = false
+        if #body == 1 and body[1].op == 'ret' and #body[1].es == 1 then
+            memo[ukey] = { inl = body[1].es[1], hs = hs, order = order, bound = M.bound_names(body[1].es[1], {}) }
+        end
+        mlog[#mlog + 1] = ukey
+        if memo[ukey] then return memo[ukey].inl, hs end
         return nil
     end
 
@@ -2051,6 +2110,23 @@ function count_block(stmts, uses, w)
         elseif op == 'while' or op == 'repeat' then M.count_uses(s.cond, uses, w); count_block(s.body, uses, w)
         elseif op == 'do' then count_block(s.body, uses, w) end
     end
+end
+
+--- the residual names a residual expression BINDS (a lifted function's parameters, its locals, its loop variables)
+--- into set -> set
+function M.bound_names(e, set)
+    if type(e) ~= 'table' then return set end
+    local op = e.op
+    if op == 'lambda' then for _, p in ipairs(e.params or {}) do set[p] = true end end
+    if op == 'local' and e.name then set[e.name] = true end
+    if op == 'localm' then for _, n in ipairs(e.names or {}) do set[n] = true end end
+    if op == 'fornum' and e.name then set[e.name] = true end
+    if op == 'forin' then
+        if e.kname then set[e.kname] = true end
+        if e.vname then set[e.vname] = true end
+    end
+    for k, v in pairs(e) do if k ~= 'op' and type(v) == 'table' then M.bound_names(v, set) end end
+    return set
 end
 
 --- UNFOLD's substitution is the ALGEBRA's (CART-1341 step 8): the inlined residual expression seen through the lens
