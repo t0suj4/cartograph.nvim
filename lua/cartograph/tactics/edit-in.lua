@@ -30,6 +30,7 @@ end
 return {
     name = 'edit-in',
     kind = 'write',
+    tags = { 'code' },
     summary = 'a span edit INSIDE one function: ref = the function (file::name), before = text unique inside it, after = its replacement; the sibling functions are never touched',
     params = { ref = 'ref', before = 'string', after = 'string' },
     build = function (p) return T.step('edit', { file = p.ref.file, before = p.before, after = p.after, within = p.ref }) end,

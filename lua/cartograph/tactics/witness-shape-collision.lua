@@ -17,6 +17,7 @@ end
 return {
     name = 'witness-shape-collision',
     kind = 'discovery',
+    tags = { 'find', 'code' },
     measures = 'CART-1154',
     summary = 'functions whose witness collides although their bodies differ (the witness is a shape hash)',
     params = {},

@@ -23,6 +23,7 @@ local function tail(name) return tostring(name):match('([%w_]+)$') end
 local E = {
     name = 'record-flow',
     kind = 'discovery',
+    tags = { 'find', 'code' },
     measures = 'CART-1345',
     summary = 'where a record shape goes ACROSS FILES: consumers.lua\'s roster iterated to a fixpoint over the graph\'s resolved call edges (an `arg` escape seeds the callee\'s parameter); fields / rooted / calls = producers as name=kind, files = scope, rounds = cap; unresolved calls are named frontier rows',
     params = { fields = 'list?', rooted = 'list?', calls = 'list?', files = 'list?', rounds = 'string?' },

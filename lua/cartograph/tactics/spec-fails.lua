@@ -90,6 +90,7 @@ end
 M.entry = {
     name = 'spec-fails',
     kind = 'discovery',
+    tags = { 'accept', 'repo' },
     summary = 'does SPEC fail in a tree? runs `SPEC=<spec> bash tests/run.sh` in root (default: the cartograph repo) and reads the summary line; a run that ran nothing refuses; timeout = seconds (default 600) — a hang is a failure, its process group killed',
     params = { spec = 'string', root = 'string?', timeout = 'string?', env = 'list?' },
     measure = function (_, p)

@@ -21,6 +21,7 @@ local M = {}
 
 local REQUIRED = { name = 'string', kind = 'string', summary = 'string', examples = 'table' }
 local KINDS = { write = true, discovery = true }
+local TAG = '^[a-z][a-z0-9-]*$'
 
 --- the BUILT-IN directory, derived from this module's own path
 local function dir()
@@ -126,6 +127,16 @@ function M.load(name, d, root)
         return nil, path .. ': a discovery needs measure(store, params) and claim(value)', 'unbuilt'
     end
     if #e.examples == 0 then return nil, path .. ': at least one example — it is the usage AND the test', 'unbuilt' end
+    -- TAGS (CART-1446): a list of lowercase words — a malformed one is refused by name, never dropped
+    if e.tags ~= nil then
+        if type(e.tags) ~= 'table' then return nil, path .. ': `tags` must be a list of words', 'unbuilt' end
+        for _, t in ipairs(e.tags) do
+            if type(t) ~= 'string' or not t:match(TAG) then
+                return nil, ('%s: tag `%s` is not a lowercase word (%s)'):format(path, tostring(t), TAG), 'unbuilt'
+            end
+        end
+    end
+    if e.applies ~= nil and type(e.applies) ~= 'function' then return nil, path .. ': `applies` must be a function (subject) -> ok, why', 'unbuilt' end
     e.path = path
     e.scope = (path:sub(1, #dir()) == dir()) and 'built-in' or 'project'
     -- an override says so on the entry: what it replaced, and the hash the user chose
@@ -146,6 +157,112 @@ function M.list(d, root)
         if e then entries[#entries + 1] = e else broken[name] = why end
     end
     return entries, broken, promoted, overridden
+end
+
+-- ── LOOKUP (CART-1446, under CART-1447: the universality of scopes) ────────────────────────────────────────────────
+-- A tactic is a BINDER in the namespace mounted at `tactics` (built-in, then a project's .cartograph/tactics/ unioned
+-- after it); finding one is the scope contract every resolver here shares — the nearest binding, the bindings it
+-- shadows, the scope that decided — composed from what exists: namespace.resolve gives the mounts in precedence
+-- order, M.files settles a name by precedence / a promoted copy / a pinned override, and config.at gives what a
+-- SCOPE says about the subject (the tags it adds), with the scope that decided. No new resolver.
+
+-- the tags an entry DERIVES — never declared, so never out of step: `act` for a write
+local function derived_tags(e)
+    local out = {}
+    if e.kind == 'write' then out[#out + 1] = 'act' end
+    return out
+end
+
+--- every tag on entry `e` at `subject`, each with its SOURCE -> { { tag, source = 'declared' | 'derived' | 'scope',
+--- scope? } }, note? (a scope disagreement: config.at's `ambiguous`, named, its tags not applied)
+function M.tags_of(e, subject)
+    local out, seen = {}, {}
+    local function add(t, source, scope)
+        if not seen[t] then seen[t] = true; out[#out + 1] = { tag = t, source = source, scope = scope } end
+    end
+    for _, t in ipairs(e.tags or {}) do add(t, 'declared') end
+    for _, t in ipairs(derived_tags(e)) do add(t, 'derived') end
+    local note
+    if subject then
+        local v, prov = require('cartograph.config').at(subject, 'tactic_tags')
+        if prov and prov.source == 'ambiguous' then
+            note = ('scopes disagree on tactic_tags at %s: %s'):format(subject, vim.inspect(prov.entries):gsub('%s+', ' '))
+        elseif type(v) == 'table' and type(v[e.name]) == 'table' then
+            for _, t in ipairs(v[e.name]) do if type(t) == 'string' and t:match(TAG) then add(t, 'scope', prov and prov.scope) end end
+        end
+    end
+    return out, note
+end
+
+--- the BINDINGS of a name: every mount holding a tactic file by that name, nearest first, the one that runs marked
+--- -> { { scope, path, chosen, why? } }
+local function chain_of(name, d, root)
+    local files, conflicts, promoted, overridden = M.files(d, root)
+    local hit = require('cartograph.namespace').resolve(M.namespace(d, root), 'tactics')
+    local out = {}
+    for _, layer in ipairs(hit and hit.layers or {}) do
+        local path = layer.target.dir .. '/' .. name .. '.lua'
+        if vim.uv.fs_stat(path) then
+            local chosen = files[name] == path
+            local why
+            if chosen and overridden[name] then why = 'your pinned override (tactic_overrides)'
+            elseif chosen then why = 'the nearest mount holding it'
+            elseif promoted[name] == path then why = 'a promoted copy: identical to the one that runs'
+            elseif conflicts[name] then why = 'shadowed, undecided: ' .. conflicts[name]
+            else why = 'shadowed' end
+            out[#out + 1] = { scope = layer.target.scope, path = path, chosen = chosen, why = why }
+        end
+    end
+    return out
+end
+
+--- FIND tactics: `query` is a NAME, or { tag = <t> } -> rows { name, kind, scope, path, summary, chain, tags,
+--- applicable, why_not }, notes. opts: { d, root, at = subject } — `at` (an absolute path: a file, a dir, a tree)
+--- decides the scoped tags and applicability; an entry with `applies(subject) -> ok, why` that refuses there is
+--- RETURNED, marked inapplicable with the reason — never silently hidden.
+function M.find(query, opts)
+    opts = opts or {}
+    local at = opts.at or opts.root
+    local entries, broken = M.list(opts.d, opts.root)
+    local rows, notes = {}, {}
+    local want_name = type(query) == 'string' and query or nil
+    local want_tag = type(query) == 'table' and query.tag or nil
+    for _, e in ipairs(entries) do
+        if not want_name or e.name == want_name then
+            local tags, note = M.tags_of(e, at)
+            if note then notes[#notes + 1] = note end
+            local has = not want_tag
+            for _, t in ipairs(tags) do if t.tag == want_tag then has = true end end
+            if has then
+                local applicable, why_not = true, nil
+                if e.applies and at then
+                    local okp, r, w = pcall(e.applies, at)
+                    if not okp then applicable, why_not = false, 'its applies() raised: ' .. tostring(r)
+                    elseif not r then applicable, why_not = false, tostring(w or 'it does not apply here') end
+                end
+                rows[#rows + 1] = { name = e.name, kind = e.kind, scope = e.scope, path = e.path, summary = e.summary,
+                    chain = chain_of(e.name, opts.d, opts.root), tags = tags, applicable = applicable, why_not = why_not }
+            end
+        end
+    end
+    -- a NAME that does not load is still a binding: say why, with its chain, rather than "no such tactic"
+    if want_name and #rows == 0 and broken[want_name] then
+        rows[1] = { name = want_name, broken = broken[want_name], chain = chain_of(want_name, opts.d, opts.root), tags = {} }
+    end
+    return rows, notes
+end
+
+--- the TAG VOCABULARY, derived from the entries (no central list): { [tag] = count }, and the SINGLETONS — a tag only
+--- one entry carries, the likeliest misspelling of another
+function M.tag_census(d, root, at)
+    local counts = {}
+    for _, e in ipairs((M.list(d, root))) do
+        for _, t in ipairs((M.tags_of(e, at))) do counts[t.tag] = (counts[t.tag] or 0) + 1 end
+    end
+    local singletons = {}
+    for t, n in pairs(counts) do if n == 1 then singletons[#singletons + 1] = t end end
+    table.sort(singletons)
+    return counts, singletons
 end
 
 --- ★ PARAMETERS, COERCED BY THEIR DECLARED TYPE — one function for every caller (the CLI's strings, an MCP client's

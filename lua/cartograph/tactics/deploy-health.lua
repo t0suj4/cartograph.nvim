@@ -5,6 +5,7 @@ local D = require 'cartograph.deploy'
 return {
     name = 'deploy-health',
     kind = 'discovery',
+    tags = { 'gate', 'world' },
     summary = 'is the deployed release healthy? target = the deployment world; reads releases/<CURRENT>/health',
     params = { target = 'string' },
     measure = function (_, p)

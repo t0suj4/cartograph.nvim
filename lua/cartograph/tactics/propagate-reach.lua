@@ -14,6 +14,7 @@ end
 return {
     name = 'propagate-reach',
     kind = 'discovery',
+    tags = { 'find', 'code' },
     measures = 'CART-1155',
     summary = 'how many near-clone siblings the propagate renderer can reach, per path (value / template), with the refusal reasons',
     params = {},

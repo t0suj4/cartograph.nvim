@@ -5,6 +5,7 @@
 return {
     name = 'family-premise',
     kind = 'discovery',
+    tags = { 'gate', 'code' },
     summary = 'the near-clone families with 2+ members inside a file set (params.files = { rel, ... }; omitted = every file)',
     params = { files = 'list?' },
     measure = function (store, p)

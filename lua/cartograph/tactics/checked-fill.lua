@@ -13,6 +13,7 @@ local function tpl(t) if t.body then return t end return A().template(t) end
 local E = {
     name = 'checked-fill',
     kind = 'discovery',
+    tags = { 'gate', 'algebra' },
     measures = 'CART-1342',
     summary = 'fill hole `hole` of `template` with `value` only if every instance of value lies in the hole\'s domain (value is an instance of the hole\'s unit); the value carries the composite',
     params = { template = 'term', hole = 'string', value = 'term' },

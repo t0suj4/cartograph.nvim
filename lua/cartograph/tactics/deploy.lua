@@ -24,6 +24,7 @@ end
 return {
     name = 'deploy',
     kind = 'write',
+    tags = { 'world' },
     summary = 'a deployment plan: from = the source tree to release, target = the deployment world (a directory: releases/<id>/, CURRENT); approve = yes answers the target-write and approve-deploy gates; a failed health check under rollback compensates the switch and undoes the release',
     params = { from = 'string', target = 'string', approve = 'string?' },
     build = function (p)

@@ -2555,18 +2555,37 @@ function M._v_ports(store)
     return { subject = subject, result = rows }
 end
 
-local function v_toolbelt_list(store)
-    local entries, broken, promoted, overridden = require('cartograph.toolbelt').list(nil, (store.data or {}).root)
+local function v_toolbelt_list(store, args)
+    args = args or {}
+    local tb = require 'cartograph.toolbelt'
+    local root = (store.data or {}).root
+    local entries, broken, promoted, overridden = tb.list(nil, root)
+    -- ★ LOOKUP (CART-1446): `name` or `tag` narrows through the tactic scope (the binding, what it shadows, each tag with
+    -- its source); `at` is the subject whose scoped tags and applicability count (default: the graph's root)
+    local at = (args.at ~= nil and args.at ~= NUL and args.at ~= '') and args.at or root
+    local found = {}
+    local query = (args.name ~= nil and args.name ~= NUL and args.name ~= '') and args.name
+        or ((args.tag ~= nil and args.tag ~= NUL and args.tag ~= '') and { tag = args.tag } or nil)
+    local frows, fnotes = tb.find(query or { tag = nil }, { root = root, at = at })
+    for _, r in ipairs(frows) do found[r.name] = r end
     local rows = {}
     for _, e in ipairs(entries) do
-        local ps, ex = {}, {}
-        for k, ty in pairs(e.params or {}) do ps[#ps + 1] = k .. ':' .. tostring(ty) end
-        table.sort(ps)
-        for _, x in ipairs(e.examples) do ex[#ex + 1] = x.name end
-        rows[#rows + 1] = { name = e.name, kind = e.kind, scope = e.scope, summary = e.summary, measures = nn(e.measures),
-            params = table.concat(ps, ' '), examples = ex, overrides = nn(e.overrides) }
+        local f = found[e.name]
+        if f then
+            local ps, ex = {}, {}
+            for k, ty in pairs(e.params or {}) do ps[#ps + 1] = k .. ':' .. tostring(ty) end
+            table.sort(ps)
+            for _, x in ipairs(e.examples) do ex[#ex + 1] = x.name end
+            local tags, chain = {}, {}
+            for _, t in ipairs(f.tags) do tags[#tags + 1] = t.tag .. (t.source ~= 'declared' and ('(' .. t.source .. (t.scope and (':' .. t.scope) or '') .. ')') or '') end
+            for _, b in ipairs(f.chain) do chain[#chain + 1] = { scope = b.scope, path = b.path, chosen = b.chosen, why = b.why } end
+            rows[#rows + 1] = { name = e.name, kind = e.kind, scope = e.scope, summary = e.summary, measures = nn(e.measures),
+                params = table.concat(ps, ' '), examples = ex, overrides = nn(e.overrides), tags = tags, chain = chain,
+                applicable = f.applicable, why_not = nn(f.why_not) }
+        end
     end
     local notes = {}
+    for _, n in ipairs(fnotes or {}) do notes[#notes + 1] = { kind = 'scoped-tags-ambiguous', premise = 'two scopes disagree on tactic_tags', why = n, evidence = NUL } end
     for name, ov in pairs(overridden or {}) do
         notes[#notes + 1] = { kind = 'overridden-built-in', premise = 'the user chose, by content hash, to run a project tactic over a built-in one',
             why = ('%s runs instead of the built-in `%s` (%s) — pinned %s in your scoped config'):format(ov.path, name, ov.over, ov.use), evidence = NUL }
@@ -2577,6 +2596,11 @@ local function v_toolbelt_list(store)
     end
     for name, why in pairs(broken) do
         notes[#notes + 1] = { kind = 'broken-entry', premise = 'a tactic file that does not load', why = ('%s: %s'):format(name, why), evidence = NUL }
+    end
+    if #rows == 0 and query then
+        return { result = {}, absence = 'absent', absence_why = { premise = 'no-match',
+            why = ('no tactic matches %s at %s'):format(type(query) == 'table' and ('tag `' .. tostring(query.tag) .. '`') or ('the name `' .. query .. '`'), tostring(at)),
+            evidence = NUL }, notes = notes }
     end
     if #rows == 0 then
         return { result = {}, absence = 'absent', absence_why = { premise = 'no-entries',
@@ -4004,11 +4028,15 @@ M.VERBS = {
         run = function (store) return M._v_ports(store) end,
     },
     toolbelt_list = {
-        summary = 'the NAMED TACTICS in the toolbelt: each entry\'s kind (write | discovery), params, the ticket a discovery measures, and its EXAMPLES — the usage, which the toolbelt fence also runs as tests',
+        summary = 'the NAMED TACTICS in the toolbelt: each entry\'s kind (write | discovery), params, the ticket a discovery measures, its EXAMPLES (the usage, which the toolbelt fence also runs as tests), its TAGS with their source (declared | derived | scope) and its binding CHAIN (the mount that runs it and what it shadows); `name` or `tag` looks tactics up, `at` is the subject whose scoped tags and applicability count',
         subject = 'graph',
         tier_basis = 'observation',
         absences = { 'absent' },
-        args = {},
+        args = {
+            { name = 'name', type = 'string', desc = 'look up ONE tactic by name: its binding and the chain of what it shadows' },
+            { name = 'tag', type = 'string', desc = 'only the tactics carrying this tag (declared, derived, or added by a scope)' },
+            { name = 'at', type = 'string', desc = 'the subject (absolute path: file, dir, tree) whose scoped tags and applicability count; default the graph root' },
+        },
         run = v_toolbelt_list,
     },
     toolbelt_run = {

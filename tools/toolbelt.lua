@@ -4,6 +4,9 @@
 --   nvim --headless -u NONE -l tools/toolbelt.lua run <name> <dir> [key=value ...]   (a discovery re-measures <dir>;
 --                                                                                   a write tactic PREVIEWS, add apply=1)
 --   nvim --headless -u NONE -l tools/toolbelt.lua examples [name]                    (run the examples: usage AND test)
+--   nvim --headless -u NONE -l tools/toolbelt.lua find <name> | tag=<t> [at=<path>] [root=<dir>]   (the binding and what
+--                                                   it shadows; tags with their source: declared | derived | scope)
+--   nvim --headless -u NONE -l tools/toolbelt.lua tags [root]                        (the tag vocabulary, derived)
 --   nvim --headless -u NONE -l tools/toolbelt.lua run mutation-check - file=<f> before='<expr>' after='<expr>' spec=<x>_spec
 --                                                   (`-` = no graph: does the spec CATCH the mutation? in a scratch copy)
 --   a tactic FROM AN EXAMPLE is itself a tactic — learn into a project, then promote:
@@ -17,10 +20,38 @@ local cmd = arg[1] or 'list'
 if cmd == 'list' then
     local entries, broken = tb.list(nil, arg[2] and vim.fn.fnamemodify(arg[2], ':p'):gsub('/$', '') or nil)
     for _, e in ipairs(entries) do
-        io.write(('%-26s %-9s %-8s %s%s\n'):format(e.name, e.kind, e.scope, e.summary, e.measures and (' [' .. e.measures .. ']') or ''))
+        io.write(('%-26s %-9s %-8s %s%s%s\n'):format(e.name, e.kind, e.scope, e.summary, e.measures and (' [' .. e.measures .. ']') or '',
+            e.tags and #e.tags > 0 and (' {' .. table.concat(e.tags, ' ') .. '}') or ''))
         for _, ex in ipairs(e.examples) do io.write(('  e.g. %s\n'):format(ex.name)) end
     end
     for k, v in pairs(broken) do io.write(('BROKEN %s: %s\n'):format(k, v)) end
+elseif cmd == 'find' then
+    -- find <name> | tag=<t> [at=<path>] [root=<dir>]: the binding(s) and the shadow chain, each tag with its source
+    local query, at, root
+    for i = 2, #arg do
+        local k, v = arg[i]:match('^([%w_]+)=(.*)$')
+        if k == 'tag' then query = { tag = v } elseif k == 'at' then at = vim.fn.fnamemodify(v, ':p'):gsub('/$', '')
+        elseif k == 'root' then root = vim.fn.fnamemodify(v, ':p'):gsub('/$', '') elseif not k then query = arg[i] end
+    end
+    if not query then io.stderr:write('usage: find <name> | tag=<t> [at=<path>] [root=<dir>]\n'); os.exit(2) end
+    local rows, notes = tb.find(query, { root = root, at = at })
+    for _, r in ipairs(rows) do
+        local ts = {}
+        for _, t in ipairs(r.tags) do ts[#ts + 1] = t.tag .. (t.source ~= 'declared' and ('(' .. t.source .. (t.scope and (':' .. t.scope) or '') .. ')') or '') end
+        io.write(('%-26s %-9s %s%s\n'):format(r.name, r.kind or 'BROKEN', table.concat(ts, ' '),
+            r.applicable == false and ('  — not applicable here: ' .. r.why_not) or ''))
+        if r.broken then io.write('    does not load: ' .. r.broken .. '\n') end
+        for _, b in ipairs(r.chain or {}) do io.write(('    %s %-9s %s — %s\n'):format(b.chosen and '*' or ' ', b.scope, b.path, b.why)) end
+    end
+    for _, n in ipairs(notes) do io.write('NOTE ' .. n .. '\n') end
+    if #rows == 0 then io.write('no tactic matches\n'); os.exit(1) end
+elseif cmd == 'tags' then
+    -- tags [root]: the vocabulary, derived from the entries, with counts; a tag only one entry carries is flagged
+    local root = arg[2] and vim.fn.fnamemodify(arg[2], ':p'):gsub('/$', '') or nil
+    local counts, singles = tb.tag_census(nil, root, root)
+    local ks = vim.tbl_keys(counts); table.sort(ks)
+    for _, t in ipairs(ks) do io.write(('%-16s %d\n'):format(t, counts[t])) end
+    if #singles > 0 then io.write('SINGLETONS (one entry each — a misspelling?): ' .. table.concat(singles, ', ') .. '\n') end
 elseif cmd == 'examples' then
     -- examples [name] [--dir <d>]: --dir confines the toolbelt to one directory (a new entry is validated this way)
     local only, d

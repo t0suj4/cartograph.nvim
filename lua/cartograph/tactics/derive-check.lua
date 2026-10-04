@@ -17,6 +17,7 @@ end
 local E = {
     name = 'derive-check',
     kind = 'discovery',
+    tags = { 'accept', 'algebra' },
     measures = 'CART-1368',
     summary = 'is algebra verb `op` (or a,b) derivable from the basis? runs `spec` (default algebradonor_spec) as it is and with DERIVE=<op>; the extra failures are the verdict. repo = the tree (default this cartograph), timeout = seconds per run',
     params = { op = 'string', spec = 'string?', repo = 'string?', timeout = 'string?' },

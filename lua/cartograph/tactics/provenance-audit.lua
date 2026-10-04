@@ -32,6 +32,7 @@ end
 return {
     name = 'provenance-audit',
     kind = 'discovery',
+    tags = { 'find', 'code' },
     measures = 'CART-1181',
     summary = 'how much of a commit range did cartograph WRITE? added lines explained by a journal entry vs hand edits (range = git range, default HEAD~20..HEAD; repo = default this cartograph); the ratio is reported, the claim is "any byte explained"',
     params = { range = 'string?', repo = 'string?' },

@@ -85,6 +85,7 @@ end
 local E = {
     name = 'cache-census',
     kind = 'discovery',
+    tags = { 'find', 'code', 'optimize' },
     measures = 'CART-1430',
     summary = 'every process-level cache of a Lua tree from the state atlas: computed-key tables written and read (writer load | function, bound weak | reset | unbounded, absence-guarded, the key at the write) and generation slots; prefix = a path prefix (default: the whole graph)',
     params = { prefix = 'string?' },

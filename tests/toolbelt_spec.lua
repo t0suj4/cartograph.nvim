@@ -201,3 +201,73 @@ test('toolbelt: running an example from a LIVE session leaves that session\'s gr
     eq(before_root, store.data.root); eq(before_gen, store.generation)
     eq(before_line, g1_line(), 'a folded range still reads through the caller\'s own columns')
 end)
+
+-- ── LOOKUP: a tactic is a binder in the `tactics` scope (CART-1446, under CART-1447) ─────────────────────────────────
+local function tactic_src(name, extra)
+    return ([[
+return {
+    name = %q, kind = 'discovery', summary = 'a probe', params = {},%s
+    measure = function () return 1 end,
+    claim = function () return true, 'one' end,
+    examples = { { name = 'runs', files = { ['a.lua'] = 'return 1\n' }, expect = { holds = true } } },
+}
+]]):format(name, extra or '')
+end
+local function put_tactic(name, text)
+    vim.fn.mkdir(root .. '/.cartograph/tactics', 'p')
+    local fd = assert(io.open(root .. '/.cartograph/tactics/' .. name .. '.lua', 'w')); fd:write(text); fd:close()
+end
+
+test('toolbelt LOOKUP: a name resolves to its binding and the CHAIN of what it shadows — a project tactic named like a built-in is shown shadowed-undecided, not hidden', function ()
+    project { ['m.lua'] = 'local M = {}\nreturn M\n' }
+    local rows = tb.find('spec-fails', { root = root })
+    eq(1, #rows); eq(1, #rows[1].chain); ok(rows[1].chain[1].chosen and rows[1].chain[1].scope == 'built-in', vim.inspect(rows[1].chain))
+    put_tactic('spec-fails', tactic_src('spec-fails'))
+    local again = tb.find('spec-fails', { root = root })
+    eq(1, #again); ok(again[1].broken, 'the name is undecided: ' .. vim.inspect(again[1]))
+    eq(2, #again[1].chain, 'both bindings are in the chain')
+    local project_b = again[1].chain[2]
+    eq('project', project_b.scope); ok(project_b.why:find('shadowed, undecided', 1, true), project_b.why)
+end)
+
+test('toolbelt LOOKUP: tags — DECLARED on the entry, DERIVED (act = a write), and added by a SCOPE in the user\'s config, each with its source; at another subject the scope\'s tags do not reach', function ()
+    project { ['m.lua'] = 'local M = {}\nreturn M\n' }
+    local config = require 'cartograph.config'
+    local saved = config.scoped
+    local okp, err = pcall(function ()
+        local function tags(name, at)
+            local r = tb.find(name, { root = root, at = at })[1]
+            local out = {}
+            for _, t in ipairs(r.tags) do out[t.tag] = t.source end
+            return out, r
+        end
+        eq('declared', tags('spec-fails').accept)
+        eq('derived', tags('edit').act, 'a write is `act` without saying so')
+        config.scoped = { [root] = { tactic_tags = { ['spec-fails'] = { 'release-gate' } } } }
+        local t, r = tags('spec-fails', root)
+        eq('scope', t['release-gate'])
+        local src
+        for _, x in ipairs(r.tags) do if x.tag == 'release-gate' then src = x end end
+        ok(src and src.scope, 'the deciding scope is named: ' .. vim.inspect(src))
+        local by_tag = tb.find({ tag = 'release-gate' }, { root = root, at = root })
+        eq(1, #by_tag); eq('spec-fails', by_tag[1].name)
+        eq(0, #tb.find({ tag = 'release-gate' }, { root = root, at = '/somewhere/else' }), 'another subject: the scope does not hold there')
+    end)
+    config.scoped = saved
+    ok(okp, tostring(err))
+end)
+
+test('toolbelt LOOKUP: a malformed tag is refused BY NAME; an entry that does not apply at a subject is RETURNED, marked, with its reason; a tag only one entry carries is flagged as a likely misspelling', function ()
+    project { ['m.lua'] = 'local M = {}\nreturn M\n' }
+    put_tactic('bad-tag', tactic_src('bad-tag', "\n    tags = { 'Release Gate' },"))
+    local _, broken = tb.list(nil, root)
+    ok(broken['bad-tag'] and broken['bad-tag']:find('not a lowercase word', 1, true), tostring(broken['bad-tag']))
+    os.remove(root .. '/.cartograph/tactics/bad-tag.lua')
+    put_tactic('c-only', tactic_src('c-only', "\n    tags = { 'optimise' },\n    applies = function (at) return at:match('%.c$') ~= nil, 'C sources only' end,"))
+    local rows = tb.find('c-only', { root = root, at = root .. '/m.lua' })
+    eq(1, #rows); eq(false, rows[1].applicable); eq('C sources only', rows[1].why_not)
+    eq(true, tb.find('c-only', { root = root, at = root .. '/x.c' })[1].applicable)
+    local counts, singles = tb.tag_census(nil, root)
+    eq(1, counts.optimise); ok(vim.tbl_contains(singles, 'optimise'), 'singletons: ' .. table.concat(singles, ','))
+    ok(not vim.tbl_contains(singles, 'optimize'), 'a tag two entries carry is not flagged')
+end)

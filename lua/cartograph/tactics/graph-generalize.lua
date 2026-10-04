@@ -12,6 +12,7 @@ local function A() return require('cartograph.algebra').load() end
 local E = {
     name = 'graph-generalize',
     kind = 'discovery',
+    tags = { 'find', 'algebra' },
     measures = 'CART-1344',
     summary = 'generalize two term graphs (g1, g2), each collapsed to its bisimulation quotient first, so bisimilar inputs give the same generalization; the claim is that the store rebuilds both inputs',
     params = { g1 = 'term', g2 = 'term' },

@@ -9,6 +9,7 @@ local T = require('cartograph.tactic').T
 return {
     name = 'rename-field',
     kind = 'write',
+    tags = { 'code' },
     summary = 'rename a record field: base = the base spelling (spec), field -> to, define = the files whose constructors define the record (a,b), accept = name-occupied to move an occupant to a placeholder',
     params = { base = 'string', field = 'string', to = 'string', define = 'list?', accept = 'string?' },
     build = function (p)

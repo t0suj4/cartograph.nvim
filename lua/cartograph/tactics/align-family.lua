@@ -20,6 +20,7 @@ end
 return {
     name = 'align-family',
     kind = 'write',
+    tags = { 'code' },
     summary = 'carry an edit made to ONE near-clone to its family: ref = the member, text = its new source, scope = member | class | all | clean',
     params = { ref = 'ref', text = 'string', scope = 'string?' },
     build = function (p) return T.step('propagate', { ref = p.ref, text = p.text, scope = p.scope }) end,

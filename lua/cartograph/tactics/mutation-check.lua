@@ -126,6 +126,7 @@ end
 local E = {
     name = 'mutation-check',
     kind = 'discovery',
+    tags = { 'accept', 'repo' },
     measures = 'CART-1174',
     summary = 'does SPEC catch a mutation? file = the file to mutate, before/after = the mutation as an example (a chunk or an EXPRESSION), spec = the spec file name (e.g. tactic_spec); runs in a scratch COPY of repo (default: this cartograph), baseline first; keep = 1 keeps the copy; timeout = seconds per run (default 600): a mutant that HANGS is CAUGHT (timed out), its process group killed',
     params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?', ground = 'string?', timeout = 'string?', env = 'list?' },

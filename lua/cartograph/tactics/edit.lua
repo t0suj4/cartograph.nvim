@@ -8,6 +8,7 @@ local T = require('cartograph.tactic').T
 return {
     name = 'edit',
     kind = 'write',
+    tags = { 'code' },
     summary = 'the ground edit: file = the key, before = the text at the one site (\'\' creates), after = its replacement; exact-once, idempotent, journaled',
     params = { file = 'string', before = 'string', after = 'string' },
     build = function (p) return T.step('edit', { file = p.file, before = p.before, after = p.after }) end,

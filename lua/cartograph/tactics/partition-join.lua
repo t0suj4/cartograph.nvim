@@ -77,6 +77,7 @@ end
 return {
     name = 'partition-join',
     kind = 'discovery',
+    tags = { 'accept', 'algebra' },
     measures = 'CART-1412',
     summary = 'do two keyings of one population induce the same partition (the acceptance test for swapping an equality key)?',
     params = { keys = 'string', show = 'string?' },
