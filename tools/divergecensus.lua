@@ -183,8 +183,13 @@ local RECORDED = {
     --         literal — witnesses `L` / `Lnum:48`, `L` / `T(Lstr:'…')`. On THIS corpus, HEAD before vs after:
     --         containment 1579 -> 319, every other feature IDENTICAL. Re-recorded from that run, so the row below
     --         also absorbs the drift since 09-05 that no note recorded (pairs 2347 -> 2403, every feature moved).
+    -- ★ 10-04  CART-0939: the census's ALIGNMENT test (dc_align, which decides when one side merely WRAPS the other)
+    --         asks the algebra instead of clones' deleted walker. The walker compared two `?` constructs by kid
+    --         count alone and a method call as a field access, so it took different constructs for aligned and
+    --         named the outer node a wrapper; now they are divergences. HEAD before vs after, this corpus:
+    --         divergences 15428 -> 15497 — (no feature) +27, call-vs-expr +37, size-skew +7, the rest IDENTICAL.
     ['libs'] = { pairs = 2403,
-        f = { ['(no feature)'] = 4681, ['call-vs-expr'] = 4658, ['size-skew'] = 3338,
+        f = { ['(no feature)'] = 4708, ['call-vs-expr'] = 4695, ['size-skew'] = 3345,
               ['leaf-vs-tree'] = 3186, ['one-side-absent'] = 1799,
               ['containment'] = 319, ['drift(lit/name)'] = 1269,
               ['arity'] = 421, ['arity(appended)'] = 142 } },

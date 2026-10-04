@@ -3827,6 +3827,39 @@ test('clones: a MEMBER of an import is priced too', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ WHAT THE WALKER COULD NOT SEE, NOW REFUSED (CART-0939's swap). It compared a `type` by its kids only, so
+-- `new Foo(x)` against `new Bar(x)` was NO divergence and a pair differing only there read as an exact clone; and it
+-- compared `a:f(x)` and `a.f(x)` as two field accesses, proposing VALUE parameters for receiver and selector of what
+-- are two different calls. The lgg sees both; for extraction they are shape divergences.
+test('clones: two Java bodies that construct DIFFERENT types are refused, not one helper for both', function ()
+    local function m(name, ty) return ('  int %s(int x) {\n    Object o = new %s(x);\n    int a = x + 1;\n    int b = a * 2;\n    int c = b - 3;\n    return c;\n  }\n'):format(name, ty) end
+    local root = proj { ['K.java'] = 'class K {\n' .. m('one', 'Foo') .. m('two', 'Bar') .. '}\n' }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }), 'K::one', 'K::two')
+        or near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }), 'one', 'two')
+    ok(p, 'the two methods are a near pair')
+    local an = p and clones.analyze_pair(p, store)
+    local why
+    for _, h in ipairs(an and an.structs or {}) do if h.why == 'type' then why = h.why end end
+    eq('type', why, 'the constructed type is a shape divergence')
+    ok(an and an.kind ~= 'exact' and an.kind ~= 'value', 'and the pair is not offered as a value extraction: ' .. tostring(an and an.kind))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a METHOD call against a FIELD call is not a selector hole', function ()
+    local base = '  local a = load(src)\n  local p = trim(a)\n'
+    local root = proj {
+        ['m1.lua'] = fn('mf_one', 'src', base .. '  local q = p:gsub("x", "y")\n  persist(q)\n  return q'),
+        ['m2.lua'] = fn('mf_two', 'src', base .. '  local q = table.concat(p, "y")\n  persist(q)\n  return q'),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 2 }), 'mf_one', 'mf_two')
+    ok(p, 'mf_one and mf_two are a near pair')
+    local an = p and clones.analyze_pair(p, store)
+    local field
+    for _, h in ipairs(an and an.holes or {}) do if h.kind == 'field' then field = h end end
+    ok(not field, 'no selector hole pairs gsub with concat: ' .. tostring(field and (field.a .. '/' .. field.b)))
+    vim.fn.delete(root, 'rf')
+end)
+
 -- Mer-S (Baumgartner & Kutsia 2014 §3; BK.md "merge identical stored pairs into one
 -- variable"). The value holes have been grouped by their pair since they were written;
 -- the struct holes never were, so ONE accessor migration reported as eight parameters

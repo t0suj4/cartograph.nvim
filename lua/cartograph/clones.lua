@@ -1252,199 +1252,11 @@ local SHORTCIRCUIT = {
     ['??'] = true, ['?:'] = true,      -- php / javascript null-coalescing
 }
 
-local function anti_unify(e1, e2, la, lb, holes, ctx)
-    if e1 == nil and e2 == nil then return true end
-    if e1 == nil or e2 == nil then
-        -- `absent`: one side has a sub-term the other does not. ⚠ THE ASYMMETRY IS
-        -- THE EVIDENCE — exactly one of at_a/at_b is non-nil, and which one says
-        -- where the extra sub-term lives. Nothing can be abstracted over a node that
-        -- is not there, so this never becomes a function parameter.
-        holes[#holes + 1] = { kind = 'struct', why = 'absent', xn = e1, yn = e2,
-            at_a = e1 and e1.at or nil, at_b = e2 and e2.at or nil }
-        return false
-    end
-    if e1.k ~= e2.k then
-        -- A struct hole is where the two copies stop having the same SHAPE, and until
-        -- now it recorded nothing but that fact. Keep the two sides: a shape divergence
-        -- is not always a restructure — when one side is a literal and the other reads a
-        -- name, the copies may have DRIFTED rather than been parameterized. M.drift
-        -- reads these; nothing else depends on the extra fields. (CART-0349)
-        --
-        -- ★ AND THE TWO NODES THEMSELVES — `xn`/`yn`, CART-0766 step B. A hole
-        -- carries STRINGS AND SPANS, which is everything `M.drift` and the reports
-        -- need; classifying a divergence in the CENSUS's vocabulary needs NODES,
-        -- because `dc_size`, `dc_kids` and `dc_term` each take one. Attaching them
-        -- where both are already in hand is the alternative to a second traversal
-        -- of this same shape, and a second traversal is the copied-walker bug
-        -- (CART-0746, wrong in both directions in one day).
-        -- ⚠ LIVE REFERENCES into the expression tree, not copies. Holes are
-        -- ephemeral — nothing persists them and no cache version is involved — but
-        -- a consumer must not mutate through them.
-        holes[#holes + 1] = { kind = 'struct', a_k = e1.k, b_k = e2.k,
-            a = e1.k == 'lit' and tostring(e1.v) or nil, a_ty = e1.ty,
-            b = e2.k == 'lit' and tostring(e2.v) or nil, b_ty = e2.ty,
-            at_a = e1.at, at_b = e2.at, xn = e1, yn = e2, why = 'kind' }
-        return false
-    end
-    local k = e1.k
-    if k == 'lit' then
-        if e1.ty == e2.ty and tostring(e1.v) == tostring(e2.v) then return true end
-        -- at_a/at_b (the source span of the diverging leaf, from the expr-IR ranges)
-        -- are the exact substitution sites a future extract-helper transaction rewrites.
-        holes[#holes + 1] = { kind = 'literal', a = tostring(e1.v), b = tostring(e2.v),
-            at_a = e1.at, at_b = e2.at, xn = e1, yn = e2 }
-        return true
-    elseif k == 'name' then
-        local l1, l2 = is_local(e1.n, la), is_local(e2.n, lb)
-        if l1 and l2 then
-            -- ★★★ TWO LOCALS ARE ALPHA-EQUIVALENT ONLY UNDER A BIJECTION, and until
-            -- `ctx` there was no map to check it against: the rule was "any local
-            -- equals any local", which is sound for a consistent rename and WRONG for
-            -- a swap. The witness is lsp.lua's two call-hierarchy handlers —
-            -- `occurrences(caller, id)` against `occurrences(id, callee)`, the SAME
-            -- two arguments in the OPPOSITE order. Unmapped, `caller ≡ id` and
-            -- `id ≡ callee` both hold and the pair reads as a clean two-parameter
-            -- extraction, which no single helper can implement.
-            --
-            -- ⚠ IT WAS THE MISSING LOOP BINDERS THAT HID THIS. While `caller` was not
-            -- in `locals` the arm minted a local-vs-global hole and refused the pair —
-            -- the right verdict for the wrong reason. Teaching the anti-unifier about
-            -- binders (`with_binders`) removed the accident, so the guarantee has to
-            -- be stated rather than inherited: the row aligner's bijection filter
-            -- covers row-key SLOTS, and a loop binder is not a slot.
-            --
-            -- ⚠ A map, not a set: BOTH directions are checked, so `a ⇄ x` and
-            -- `b ⇄ x` collide as surely as `a ⇄ x` and `a ⇄ y`. Equal names register
-            -- too (`n ⇄ n`), or a later `n ⇄ m` would slip past. `ctx.ra`/`ctx.rb` are
-            -- per PAIR and filled greedily in op order; a caller passing no `ctx` (the
-            -- template matcher, the repetition aligner) gets exactly the old behaviour.
-            if ctx then
-                local ra, rb = ctx.ra[e1.n], ctx.rb[e2.n]
-                if (ra and ra ~= e2.n) or (rb and rb ~= e1.n) then
-                    holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'rename' }
-                    return false
-                end
-                ctx.ra[e1.n], ctx.rb[e2.n] = e2.n, e1.n
-            end
-            return true
-        end
-        if e1.n == e2.n then return true end
-        if not l1 and not l2 then
-            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n,
-                at_a = e1.at, at_b = e2.at, xn = e1, yn = e2 }
-            return true
-        end
-        -- ★★★ A LOCAL FACING A GLOBAL IS A LEAF DIFFERENCE, SO IT IS A TERM HOLE —
-        -- a value parameter, not a refusal (CART-0876 item 2). The algebra says so
-        -- twice over: NEARBINDERS.md found every such hole to be "a parameter whose
-        -- argument is the local here and the expression there", and the BK pass
-        -- corrected an earlier reading of its own — "that mismatch is a LEAF
-        -- difference and stays a term hole"; the CONTEXT variable names the other
-        -- struct hole (kind/arity differing with a shared subtree), not this one.
-        --
-        -- ⚠⚠ AND IT IS A VALUE ONLY IF THE LOCAL IS IN SCOPE AT THE CALL SITE, which
-        -- is NOT the same as being in `locals`. The proposal's own sentence is
-        -- "introduce a helper carrying the N shared statement(s) ... then replace each
-        -- body with a call": a body local defined in the shared region MOVES INTO THE
-        -- HELPER, so passing it at the call site names something that does not exist
-        -- yet. A PARAMETER of the enclosing function is in scope there by
-        -- construction; nothing else is guaranteed to be. Of the five holes over
-        -- `lua/`, `mod` (spec/haskell.lua `resolve_import(mod, files)`) and `extra`
-        -- (flow.lua `extend_set(base, extra)`) are parameters and lift; `so`
-        -- (`local so = require 'cartograph.self_oracle'`, confirm.lua:148, the FIRST
-        -- row of the shared region) is not, and stays a struct hole for the function
-        -- parameter Mer-S already derives for it.
-        local lnm = l1 and e1.n or e2.n
-        local ps = ctx and (l1 and ctx.pa or ctx.pb)
-        if ps and ps[lnm] then
-            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n,
-                at_a = e1.at, at_b = e2.at, xn = e1, yn = e2 }
-            return true
-        end
-        holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'localglobal' }
-        return false -- a local the call site cannot name
-    elseif k == 'field' then
-        local ok = anti_unify(e1.b, e2.b, la, lb, holes, ctx)
-        -- a field-NAME hole lifts as the whole field ACCESS (a value param): e1/e2 ARE
-        -- the field nodes, so e1.at/e2.at span `base.name` — the value to pass.
-        if e1.n ~= e2.n then
-            -- ⚠⚠ THE BASE TRAVELS WITH THE VALUE (CART-0984). `e1.at` spans `base.name`,
-            -- so lifting this hole writes the BASE at every call site. A base the call
-            -- site cannot name makes code that parses and does not run, and no guard
-            -- downstream looks at the span's contents.
-            -- ★★★ MARK IT, DO NOT RECLASSIFY IT. My first cut minted a STRUCT hole here
-            -- and broke two classification tests, correctly: a field divergence off a
-            -- shared base IS selector evidence — `X(base)` with `field:a(◦)` against
-            -- `field:b(◦)` — and that evidence is how a wrapper is told from a
-            -- rows-only difference. Whether the pair is a SELECTOR and whether the hole
-            -- can be LIFTED are two questions, and answering the second by destroying
-            -- the answer to the first is the same mistake as a fact with no accessor
-            -- becoming a conservative gate. The classification stands; the mark travels
-            -- with it and the extract verb refuses on it.
-            holes[#holes + 1] = { kind = 'field', a = e1.n, b = e2.n,
-                at_a = e1.at, at_b = e2.at, xn = e1, yn = e2,
-                unnameable = unnameable_local(e1.b, la, ctx and ctx.pa)
-                    or unnameable_local(e2.b, lb, ctx and ctx.pb) }
-        end
-        return ok
-    elseif k == 'index' then
-        local o1 = anti_unify(e1.b, e2.b, la, lb, holes, ctx)
-        return anti_unify(e1.i, e2.i, la, lb, holes, ctx) and o1
-    elseif k == 'call' then
-        if #(e1.a or {}) ~= #(e2.a or {}) then
-            holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'arity' }; return false
-        end
-        local ok = anti_unify(e1.f, e2.f, la, lb, holes, ctx)
-        for i = 1, #(e1.a or {}) do ok = anti_unify(e1.a[i], e2.a[i], la, lb, holes, ctx) and ok end
-        return ok
-    elseif k == 'un' then
-        -- ⚠ THE SPAN OF AN OPERATOR HOLE IS THE ENCLOSING EXPRESSION, NOT THE
-        -- TOKEN — the IR gives `un`/`bin` a range and the operator no node of its
-        -- own. That makes it a sound positional KEY (every node's span is unique)
-        -- and NOT a substitution site: writing the payload there would replace the
-        -- operands too. `at_encloses` says so at the point of use, so a renderer
-        -- (CART-0766 step C) refuses rather than silently overwriting. Measured on
-        -- our own lua tree: 56 of 11,614 template holes are this kind, and they
-        -- were the ONLY value holes carrying no span at all.
-        if e1.op ~= e2.op then
-            holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op,
-                at_a = e1.at, at_b = e2.at, at_encloses = true, xn = e1, yn = e2 }
-        end
-        return anti_unify(e1.e, e2.e, la, lb, holes, ctx)
-    elseif k == 'bin' then
-        if e1.op ~= e2.op then
-            holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op,
-                at_a = e1.at, at_b = e2.at, at_encloses = true, xn = e1, yn = e2 }
-        end
-        local o1 = anti_unify(e1.l, e2.l, la, lb, holes, ctx)
-        -- ⚠ TAGGED BY RANGE, like `side` and `literal_dep`, and for the same reason:
-        -- the fact is a property of WHERE the hole sits, this arm knows every hole the
-        -- right operand just produced, and threading a parameter through the fifteen
-        -- recursion sites is the change this file keeps paying for. Only the RIGHT
-        -- operand is conditional — the left always evaluates.
-        local rstart = #holes
-        local o2 = anti_unify(e1.r, e2.r, la, lb, holes, ctx)
-        if SHORTCIRCUIT[e1.op] or SHORTCIRCUIT[e2.op] then
-            local op = SHORTCIRCUIT[e1.op] and e1.op or e2.op
-            for i = rstart + 1, #holes do
-                holes[i].guarded = holes[i].guarded
-                    or ('the right operand of `%s`'):format(tostring(op))
-            end
-        end
-        return o2 and o1
-    else -- table / fn / vararg / ? fallback: compare kid lists
-        local k1, k2 = e1.kids or {}, e2.kids or {}
-        if #k1 ~= #k2 then
-            if #k1 > 0 or #k2 > 0 then
-                holes[#holes + 1] = { kind = 'struct', xn = e1, yn = e2, why = 'arity' }; return false
-            end
-            return true
-        end
-        local ok = true
-        for i = 1, #k1 do ok = anti_unify(k1[i], k2[i], la, lb, holes, ctx) and ok end
-        return ok
-    end
-end
+-- ★ THE HAND-WRITTEN WALKER THAT STOOD HERE IS GONE (CART-0939). Fifteen recursion sites, one per expr kind, answered
+-- "where do two expressions differ, and how"; every caller now asks the algebra — alg.anti_unify (the binary lgg read
+-- back into these records), through `au_alg` below for a pair's rows (locals, the renaming context, the field-hole
+-- mark) and directly for element_template / match / the census's alignment. Accepted before the swap by a ROW join,
+-- every field and the renaming maps, and by analyze_pair's output on every near pair of four corpora (see the commit).
 
 -- A hole's POSITION, as a string. `at` is either a packed integer or the
 -- {start,end} table depending on where the node came from, so it goes through
@@ -1613,7 +1425,21 @@ local function row_at(r)
     return e and e.at or nil
 end
 
-local function anti_unify_row(r1, r2, la, lb, holes, imp, ctx)
+-- ★ THE WALKER'S PER-EXPRESSION CALL, BY THE LGG (CART-0939): alg.anti_unify with the pair's locals, the renaming
+-- context threaded in place, and the field-hole mark answered here (`unnameable_local` reads clones' own scope facts).
+-- anti_unify_row takes it as its last argument; the walker stays the default until the pair-level join says equal.
+local function au_alg(e1, e2, la, lb, holes, ctx)
+    local ok, hs = require('cartograph.algebra').anti_unify(e1, e2, { locals_a = la or {}, locals_b = lb or {}, ctx = ctx,
+        shortcircuit = SHORTCIRCUIT, type_struct = true,
+        unnameable = function (base, side)
+            return unnameable_local(base, side == 'a' and la or lb, ctx and (side == 'a' and ctx.pa or ctx.pb))
+        end })
+    for _, h in ipairs(hs) do holes[#holes + 1] = h end
+    return ok
+end
+
+local function anti_unify_row(r1, r2, la, lb, holes, imp, ctx, au)
+    au = au or au_alg -- (the walker this replaced is gone — CART-0939; the argument stays for a differential)
     local row_start = #holes
     if not r1 or not r2 then
         -- `norow`: MEASURED UNREACHED and kept as a guard (see anti_unify's note).
@@ -1675,7 +1501,7 @@ local function anti_unify_row(r1, r2, la, lb, holes, imp, ctx)
     for i = 1, #(r1.lhs or {}) do
         local before = #holes
         local d1, d2 = r1.lhs[i], r2.lhs[i]
-        ok = anti_unify(d1, d2, la, lb, holes, ctx) and ok
+        ok = au(d1, d2, la, lb, holes, ctx) and ok
         -- does the TARGET ITSELF diverge, and in what
         local tk, tn1, tn2
         if d1 and d2 and d1.k == d2.k and (d1.k == 'field' or d1.k == 'name')
@@ -1721,8 +1547,8 @@ local function anti_unify_row(r1, r2, la, lb, holes, imp, ctx)
     -- become a transaction, and it is not this. `guarded` today means SHORT-CIRCUIT
     -- ONLY, the tests say so, and this paragraph is the absence stated rather than
     -- an over-claim left standing.
-    for i = 1, #(r1.rhs or {}) do ok = anti_unify(r1.rhs[i], r2.rhs[i], la, lb, holes, ctx) and ok end
-    if r1.cond or r2.cond then ok = anti_unify(r1.cond, r2.cond, la, lb, holes, ctx) and ok end
+    for i = 1, #(r1.rhs or {}) do ok = au(r1.rhs[i], r2.rhs[i], la, lb, holes, ctx) and ok end
+    if r1.cond or r2.cond then ok = au(r1.cond, r2.cond, la, lb, holes, ctx) and ok end
     -- ★ TAGGED BY RANGE, the same way `side` is, and for the same reason: the cost is
     -- a property of WHERE the hole sits, the row knows every hole it just produced,
     -- and threading a sixth parameter through `anti_unify`'s fifteen recursion sites
@@ -3037,8 +2863,8 @@ end
 
 local function dc_align(x, y, la, lb)
     if not x or not y then return false end
-    local h = {}
-    return anti_unify(x, y, la, lb, h)
+    -- (does x align with y — no shape divergence — with each side's locals, no renaming context: CART-0939)
+    return (require('cartograph.algebra').anti_unify(x, y, { locals_a = la or {}, locals_b = lb or {} }))
 end
 
 -- a repetition hole is only honest if the list's elements are instances of ONE

@@ -1,5 +1,10 @@
 -- algebradrive — DRIVE THE PROVEN ALGEBRA WITH REAL CARTOGRAPH IR (CART-0881).
 --
+-- ⚠⚠ ITS WALKER-VS-LGG ARMS ARE VACUOUS SINCE CART-0939's SWAP: clones' anti_unify walker is deleted and
+-- analyze_pair reads its pairs through the lgg, so "identical" holds by construction. Kept as the record of the
+-- pre-swap measurement; the acceptance was a pair-level ROW join (records, order, the renaming maps) plus
+-- analyze_pair's output on every near pair of four corpora.
+--
 --   nvim --headless -u NONE -l tools/algebradrive.lua <corpus|dir> [--pairs N] [--show N]
 --
 -- USER (2026-09-12): "We should start reconciliating the algebra into our

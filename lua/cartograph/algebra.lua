@@ -65,6 +65,10 @@ local M = {}
 -- of three times (CART-0928, CART-0929, CART-0932). The `\1` prefix is chosen so
 -- no source identifier can collide with it.
 local LOCAL_SENTINEL = '\1local'
+-- (`lmode = 'named'`: a local keeps its NAME behind this prefix, so two locals stay apart AND are told from a global
+-- of the same spelling — what a renaming check needs, CART-0939; display and keys never see it)
+local LOCAL_PREFIX = '\1L:'
+M.LOCAL_PREFIX = LOCAL_PREFIX
 -- (exported for DISPLAY only — a reader printing a term shows a local as `L` without restating the spelling)
 M.LOCAL_SENTINEL = LOCAL_SENTINEL
 
@@ -259,7 +263,9 @@ function M.term(e, locals, unsupported, srcmap, lmode)
         t = A.lit(tostring(e.ty) .. ':' .. tostring(e.v))
     elseif k == 'name' then
         if locals and locals[e.n] then
-            t = (lmode == 'holes') and A.hole(tostring(e.n)) or A.name(LOCAL_SENTINEL)
+            t = (lmode == 'holes') and A.hole(tostring(e.n))
+                or (lmode == 'named' and A.name(LOCAL_PREFIX .. tostring(e.n)))
+                or A.name(LOCAL_SENTINEL)
         else
             t = A.name(tostring(e.n))
         end
@@ -811,10 +817,17 @@ end
 --- @param ia table|nil instance A as a term
 --- @param ib table|nil instance B as a term
 --- @return table list of { h, pk, idx, a, b, at }, in pre-order
-function M.hole_sites(body, ia, ib)
+function M.hole_sites(body, ia, ib, opts)
     local out = {}
+    -- (opts.locals: ALSO report every position where both instances hold the SAME local — not a site, since the lgg
+    -- copied it, but a renaming check must see it in walk order: the walker registers x <-> x too, CART-0939)
+    local wantl = opts and opts.locals
     local function walk(t, xa, xb, pk, idx, pat, patb, up)
         if type(t) ~= 'table' then return end
+        if wantl and t.k == 'name' and type(t.n) == 'string' and t.n:sub(1, #LOCAL_PREFIX) == LOCAL_PREFIX then
+            out[#out + 1] = { copy = true, a = xa, b = xb, pk = pk, idx = idx, up = up }
+            return
+        end
         if t.k == 'hole' then
             -- ★★★ `rep` IS REPORTED, NOT INTERPRETED. `A.generalize` places a HEDGE
             -- hole -- a slice of a child list -- whenever the instances' arities
@@ -889,8 +902,15 @@ function M.anti_unify(e1, e2, opts)
     opts = opts or {}
     if e1 == nil and e2 == nil then return true, {} end
     local sa, sb = {}, {}
-    local ta = e1 ~= nil and M.term(e1, {}, nil, sa) or nil
-    local tb = e2 ~= nil and M.term(e2, {}, nil, sb) or nil
+    -- ★ WITH LOCALS (CART-0939, analyze_pair's call): `locals_a` / `locals_b` name each side's locals, `ctx` is the
+    -- caller's renaming ({ ra, rb, pa, pb }, mutated IN PLACE as the walker did, threaded across a pair's rows), and
+    -- `unnameable(base_expr, side)` answers the field-hole mark. Locals are encoded NAMED (lmode 'named') so two
+    -- locals stay apart and a local is told from a global of the same spelling. Without locals: unchanged.
+    local la, lb = opts.locals_a, opts.locals_b
+    local withl = la ~= nil or lb ~= nil
+    local lmode = withl and 'named' or nil
+    local ta = e1 ~= nil and M.term(e1, la or {}, nil, sa, lmode) or nil
+    local tb = e2 ~= nil and M.term(e2, lb or {}, nil, sb, lmode) or nil
     if ta == nil or tb == nil then
         return false, { { kind = 'struct', why = 'absent', xn = e1, yn = e2,
             at_a = e1 and e1.at or nil, at_b = e2 and e2.at or nil } }
@@ -930,18 +950,66 @@ function M.anti_unify(e1, e2, opts)
             holes[#holes + 1] = table.remove(pending).h
         end
     end
-    for _, st in ipairs(M.hole_sites(g.template.body, ta, tb)) do
+    local ctx = opts.ctx
+    local function lname(v)
+        return withl and type(v) == 'table' and v.k == 'name' and type(v.n) == 'string'
+            and v.n:sub(1, #LOCAL_PREFIX) == LOCAL_PREFIX and v.n:sub(#LOCAL_PREFIX + 1) or nil
+    end
+    for _, st in ipairs(M.hole_sites(g.template.body, ta, tb, { locals = withl })) do
         flush(st.up)
-        local kd = (st.rep and 'struct') or M.hole_kind(st.a, st.b, st.pk, st.idx)
-        local h
-        if kd == 'operator' or kd == 'field' then
+        local h, handled, kd
+        local n1, n2 = lname(st.a), lname(st.b)
+        if st.copy or (n1 and n2) then
+            -- ★ TWO LOCALS ARE ALPHA-EQUAL ONLY UNDER ONE RENAMING OF THE PAIR (the walker's rule, CART-0939): a map
+            -- both ways, equal names registered too, learned in WALK order — a copied (shared) local is visited here
+            -- exactly like a site, or a later swap would slip past
+            handled = true
+            if ctx then
+                local ra, rb = ctx.ra[n1], ctx.rb[n2]
+                if (ra and ra ~= n2) or (rb and rb ~= n1) then
+                    ok = false
+                    h = { kind = 'struct', xn = sa[st.a], yn = sb[st.b], why = 'rename' }
+                else
+                    ctx.ra[n1], ctx.rb[n2] = n2, n1
+                end
+            end
+        elseif (n1 or n2) and type(st.a) == 'table' and type(st.b) == 'table' and st.a.k == 'name' and st.b.k == 'name' then
+            -- a local facing a global: the walker asks the SPELLING first (equal spellings are equal, local or not),
+            -- then whether the local is a parameter the call site can name (a value), else it refuses (localglobal)
+            handled = true
+            local x, y = sa[st.a], sb[st.b]
+            if not (x and y and tostring(x.n) == tostring(y.n)) then
+                local ps = ctx and (n1 and ctx.pa or ctx.pb)
+                if ps and ps[n1 or n2] then
+                    h = { kind = 'name', a = x.n, b = y.n, at_a = x.at, at_b = y.at, xn = x, yn = y }
+                else
+                    ok = false
+                    h = { kind = 'struct', xn = x, yn = y, why = 'localglobal' }
+                end
+            end
+        end
+        if not handled then kd = (st.rep and 'struct') or M.hole_kind(st.a, st.b, st.pk, st.idx) end
+        if handled then
+            -- (classified above)
+        elseif kd == 'operator' or kd == 'field' then
             -- a SYNTHESIZED leaf: the record names the node that encloses it
             local x, y = sa[st.up.ta], sb[st.up.tb]
             h = { kind = kd, a = st.a.n, b = st.b.n, at_a = x and x.at, at_b = y and y.at,
                 xn = x, yn = y, at_encloses = (kd == 'operator') or nil }
+            if kd == 'field' and opts.unnameable then
+                h.unnameable = opts.unnameable(x and x.b, 'a') or opts.unnameable(y and y.b, 'b')
+            end
         elseif kd == 'literal' then
             local x, y = sa[st.a], sb[st.b]
             h = { kind = kd, a = tostring(x.v), b = tostring(y.v), at_a = x.at, at_b = y.at, xn = x, yn = y }
+        elseif kd == 'name' and opts.type_struct and st.pk == 'type' and st.idx == 1 then
+            -- ★ A TYPE'S NAME UNDER EXTRACTION (CART-0939, opts.type_struct): a value parameter cannot stand for a
+            -- type (`new Foo(x)` / `new Bar(x)` is no helper taking a value), so for analyze_pair it is a shape
+            -- divergence — a refusal — where a template's match may bind it (it renders text). The walker saw NO
+            -- divergence at all here, which proposed one helper constructing one type for both.
+            ok = false
+            local x, y = sa[st.up.ta], sb[st.up.tb]
+            h = { kind = 'struct', xn = x, yn = y, why = 'type', at_a = x and x.at, at_b = y and y.at }
         elseif kd == 'name' then
             local x, y = sa[st.a], sb[st.b]
             if x and y then
@@ -972,9 +1040,11 @@ function M.anti_unify(e1, e2, opts)
                 h = { kind = 'struct', xn = x, yn = y, why = 'arity' }
             end
         end
-        h.guarded = guarded(st.up)
-        if kd == 'field' then pending[#pending + 1] = { h = h, node = st.up.ta }
-        else holes[#holes + 1] = h end
+        if h then
+            h.guarded = guarded(st.up)
+            if kd == 'field' then pending[#pending + 1] = { h = h, node = st.up.ta }
+            else holes[#holes + 1] = h end
+        end
     end
     flush(nil)
     return ok, holes
