@@ -91,15 +91,17 @@ REL.identity = { of = 'any', eq = rawequal, hash = function (x) return x end,
         return tostring(a) < tostring(b)
     end }
 REL.literal = { of = 'lit', eq = function (a, b) return a.k == 'lit' and b.k == 'lit' and lit_key(a) == lit_key(b) end, hash = lit_key }
-REL.ordered = { of = 'term', eq = function (a, b) return M.eq(a, b, true) end, hash = function (t) return M.content_id(t, nil, true) end }
-REL.term = { of = 'term', eq = function (a, b) return M.eq(a, b) end, hash = function (t) return M.content_id(t) end }
+-- (every term-valued hash takes an optional ID SCOPE third — `M.id_scope()`, CART-1412: interned ids, exact and cheap,
+-- meaningful only inside that scope; without one, the stable digest. The second slot is the relation's parameter.)
+REL.ordered = { of = 'term', eq = function (a, b) return M.eq(a, b, true) end, hash = function (t, _, scope) return M.content_id(t, scope, true) end }
+REL.term = { of = 'term', eq = function (a, b) return M.eq(a, b) end, hash = function (t, _, scope) return M.content_id(t, scope) end }
 REL.variant = { of = 'term', eq = function (a, b) return M.eq(M.rename_holes(a), M.rename_holes(b)) end,
-    hash = function (t) return M.content_id(M.rename_holes(t)) end }
+    hash = function (t, _, scope) return M.content_id(M.rename_holes(t), scope) end }
 REL.theory = { of = 'term', parameter = 'theory', eq = function (a, b, theory) return M.eq_mod(a, b, theory) end,
-    hash = function (t, theory) return M.content_id(M.canon(t, theory)) end }
+    hash = function (t, theory, scope) return M.content_id(M.canon(t, theory), scope) end }
 REL.trivia = { of = 'term',
     eq = function (a, b) return M.eq(M.strip_trivia(a), M.strip_trivia(b)) end,
-    hash = function (t) return M.content_id(M.strip_trivia(t)) end }
+    hash = function (t, _, scope) return M.content_id(M.strip_trivia(t), scope) end }
 REL.bisimilar = { of = 'graph', eq = function (a, b) return (M.tg_bisimilar(a, b)) end }
 REL.equivalent = { of = 'template', eq = function (a, b) return M.instance_of(a, b) and M.instance_of(b, a) end }
 for _, r in pairs(REL) do if r.hash and not r.less then r.less = by_hash(r.hash) end end

@@ -37,6 +37,40 @@ test('content id: what eq compares is in the id, what it ignores is not', functi
     ok(A.content_id(p) ~= A.content_id(q), 'a presence mark is identity')
 end)
 
+-- ★ AN ID SCOPE INTERNS (CART-1412): the same law with small integers in place of the digest — eq(a, b) <=> the same
+-- id, inside ONE scope — and the same identity facts. Interning is exact, so this is not "rarely collides": no two
+-- different keys can share an id.
+test('content id in an ID SCOPE: eq <=> the same interned id over every pair of subterms, and the identity facts hold', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local t = assert(R.read('local function f(x) return x + 1 end\nlocal y = f(1) + f(1)\nlocal z = { a = 1, b = "1" }\nreturn y, z\n', 'lua'))
+    local subs = {}
+    local function collect(u) subs[#subs + 1] = u; for _, c in ipairs(u.kids or {}) do collect(c) end end
+    collect(t)
+    local scope, ids, shared = A.id_scope(), {}, 0
+    for i, s in ipairs(subs) do ids[i] = A.content_id(s, scope) end
+    eq('number', type(ids[1]), 'an interned id is a small integer, not a digest')
+    for i = 1, #subs do
+        for j = i + 1, #subs do
+            local e = A.eq(subs[i], subs[j])
+            eq(e, ids[i] == ids[j], ('pair %d,%d: %s / %s'):format(i, j, A.show(subs[i]), A.show(subs[j])))
+            if e then shared = shared + 1 end
+        end
+    end
+    ok(shared > 10, 'the known-nonzero half (' .. shared .. ' pairs)')
+    local s2 = A.id_scope()
+    local function kv(keys) return A.kv_term({ o = { a = '1', b = '2' }, keys = keys }) end
+    eq(A.content_id(kv({ 'a', 'b' }), s2), A.content_id(kv({ 'b', 'a' }), s2), 'a KEYED node is a set by key')
+    ok(A.content_id(A.lit('1'), s2) ~= A.content_id(A.lit(1), s2), 'a literal keeps its type')
+    local sp = A.node('f', A.lit(1)); sp.at = { start = { line = 3 } }
+    eq(A.content_id(A.node('f', A.lit(1)), s2), A.content_id(sp, s2), 'a span is not identity')
+    local so = A.id_scope()
+    local o1 = A.keyed('obj', { kv({ 'a' }).kids[1], kv({ 'b' }).kids[1] }, { ordered = true })
+    local o2 = A.keyed('obj', { kv({ 'b' }).kids[1], kv({ 'a' }).kids[1] }, { ordered = true })
+    ok(A.content_id(o1, so, true) ~= A.content_id(o2, so, true), 'an ORDERED scope keeps the written order')
+    local okx, why = pcall(A.content_id, o1, so)
+    ok(not okx and tostring(why):find('ONE relation', 1, true), 'and refuses to serve the term relation too: ' .. tostring(why))
+end)
+
 test('content dag: a subterm two trees share is ONE node, and every node re-hashes to its own id (a peer can verify)', function ()
     local shared = A.node('g', A.lit('deep'), A.node('h', A.lit(2)))
     local t = A.node('f', shared, A.copy(shared), A.node('k', A.copy(shared)))

@@ -87,7 +87,9 @@ local function variant_key(f)
     local A = alg.load()
     local t = A and alg.fn_term { exprs = f.exprs, locals = f.locals, lmode = 'holes' }
     if not t then error('clones: the algebra cannot build a function term: ' .. tostring(select(2, alg.available()))) end
-    f.vkey = ('p%d|%s'):format(f.nparams or 0, A.equality('variant').hash(t))
+    -- (interned in the index generation's ID SCOPE when the record carries one — every key exact() groups by comes
+    -- from that one scope; an ad-hoc record (M.signature) keeps the digest — CART-1412)
+    f.vkey = ('p%d|%s'):format(f.nparams or 0, A.equality('variant').hash(t, nil, f.idscope))
     return f.vkey
 end
 
@@ -124,6 +126,9 @@ local function build_index(store)
         return c.fns
     end
     local fns = {}
+    -- ★ ONE ID SCOPE PER INDEX GENERATION (CART-1412): the exact tier's variant keys and the near tier's row keys are
+    -- compared ACROSS functions, so they are interned in one scope, which dies with the generation's index
+    local idscope = require('cartograph.algebra').load().id_scope()
     for _, n in ipairs(store.data.nodes) do
         if (n.kind == 'function' or n.kind == 'method') and n.file then
             local ok, eo = pcall(expr.of, store, n.id)
@@ -131,7 +136,7 @@ local function build_index(store)
                 local nrows, lines, nparams, exprs, locals, params = fn_rows(eo)
                 if nrows and nrows >= INDEX_FLOOR then
                     fns[#fns + 1] = { id = n.id, name = n.name, file = n.file,
-                        nrows = nrows, lines = lines, exprs = exprs, locals = locals,
+                        nrows = nrows, lines = lines, exprs = exprs, locals = locals, idscope = idscope,
                         params = params,
                         nparams = nparams, line = n.range and (at.sl(n.range) + 1) or 0 }
                 end
@@ -167,9 +172,14 @@ function M.exact(store, opts)
             out[#out + 1] = g
         end
     end
+    -- ⚠ A TOTAL ORDER (CART-1412): size and row count tie often, and the tie fell to pairs() over the signature keys —
+    -- so the report's order depended on how a key is SPELLED (a digest, an interned id). The first member breaks it:
+    -- each group's members are already sorted by file and line.
     table.sort(out, function (a, b)
         if #a ~= #b then return #a > #b end
-        return a.nrows > b.nrows
+        if a.nrows ~= b.nrows then return a.nrows > b.nrows end
+        if a[1].file ~= b[1].file then return a[1].file < b[1].file end
+        return (a[1].line or 0) < (b[1].line or 0)
     end)
     return out
 end
@@ -187,7 +197,7 @@ end
 --- ACCEPTED by partition-join against canon's window key over every 6-row window: lua/cartograph 1203 classes / 79949
 --- windows, TSM 773 / 13190, elasticsearch common 139 / 8229 — 0 split, 0 merged; and blocks() itself unchanged on
 --- all three. A row's term is built once per function (`f._rt`). Cost, accepted: ~8x canon per window.
-local function window_key(f, s, len)
+local function window_key(f, s, len, scope)
     local alg = require 'cartograph.algebra'
     local A = alg.load()
     if not A then error('clones: the algebra cannot key a window: ' .. tostring(select(2, alg.available()))) end
@@ -202,7 +212,7 @@ local function window_key(f, s, len)
         end
         kids[#kids + 1] = t
     end
-    return A.equality('variant').hash(A.seq(kids))
+    return A.equality('variant').hash(A.seq(kids), nil, scope) -- (one blocks() run's ID SCOPE, CART-1412)
 end
 
 -- collect every function's harvestable rows + its locals set (params ∪ df-defs)
@@ -235,11 +245,12 @@ end
 function M.blocks(store, opts)
     local min_len = (opts and opts.min_len) or 6
     local fns = collect_fns(store)
+    local idscope = require('cartograph.algebra').load().id_scope() -- one scope per run: buckets compare across windows
     -- seed: bucket every min_len-window by its window-local key
     local buckets = {}
     for fi, f in ipairs(fns) do
         for s = 1, #f.rows - min_len + 1 do
-            local key = window_key(f, s, min_len)
+            local key = window_key(f, s, min_len, idscope)
             buckets[key] = buckets[key] or {}
             buckets[key][#buckets[key] + 1] = { fi = fi, s = s }
         end
@@ -252,7 +263,7 @@ function M.blocks(store, opts)
             for _, o in ipairs(occ) do
                 local f = fns[o.fi]
                 if o.s + len <= #f.rows then -- room for one more row
-                    local key = window_key(f, o.s, len + 1)
+                    local key = window_key(f, o.s, len + 1, idscope)
                     grow[key] = grow[key] or {}
                     grow[key][#grow[key] + 1] = o
                 end
@@ -648,7 +659,7 @@ local function rel_keys(f)
             local src = {}
             local t = alg.row_term(e, f.locals, nil, src)
             if not t then error('clones: a row the algebra cannot build') end
-            keys[i], terms[i] = A.content_id(t), t
+            keys[i], terms[i] = A.content_id(t, f.idscope), t
             local function walk(u)
                 local x = u.k == 'name' and src[u]
                 if x and x.k == 'name' and f.locals[x.n] then acc[#acc + 1] = x.n end
@@ -2885,7 +2896,7 @@ end
 -- `1`"; the term keeps contents, as canon's own CART-0357 rule said. TSM's one MERGE is one statement in two files
 -- whose per-file constant index knew `TSM.GROUP_SEP` in one and not the other: bcanon spelled it two ways.
 local BLANK = '\1blank'
-local function blank_keys(rexpr, locals, cd)
+local function blank_keys(rexpr, locals, cd, scope)
     local alg = require 'cartograph.algebra'
     local A = alg.load()
     if not A then error('clones: the algebra cannot key a row: ' .. tostring(select(2, alg.available()))) end
@@ -2929,7 +2940,8 @@ local function blank_keys(rexpr, locals, cd)
         for x, c in ipairs(v.kids) do kids[x] = (x == path[d]) and with_blank(c, path, d + 1) or c end
         return A.rebuild(v, kids)
     end
-    return { leaves = leaves, key = function (i) return A.content_id(with_blank(r, leaves[i].path, 1), memo) end }
+    -- (in the caller's ID SCOPE when given — the buckets of one row_drift run compare keys across rows; CART-1412)
+    return { leaves = leaves, key = function (i) return A.content_id(with_blank(r, leaves[i].path, 1), scope or memo) end }
 end
 
 --- ROW-DRIFT: a literal that DUPLICATES the value of a module constant, standing where
@@ -3936,11 +3948,12 @@ function M.row_drift(store, opts)
     local min_other = (opts and opts.min_other) or 2
     local consts = require('cartograph.constfold').literal_index(store)
     local buckets = {}
+    local idscope = require('cartograph.algebra').load().id_scope() -- one scope per run: buckets compare across rows
     for _, f in ipairs(collect_fns(store)) do
         local cd = consts[f.file]
         for _, rw in ipairs(f.rows) do
             if rw.expr then
-                local bk = blank_keys(rw.expr, f.locals, cd)
+                local bk = blank_keys(rw.expr, f.locals, cd, idscope)
                 local nleaf = #bk.leaves
                 -- a statement whose ONLY content is the varying leaf is not evidence
                 if nleaf - 1 >= min_other then

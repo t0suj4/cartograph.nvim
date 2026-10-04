@@ -407,11 +407,28 @@ end
 local num, label = M.content_num, M.node_label
 --- the content id of term t (hex sha256). memo: a table shared across calls (keyed by node object) — optional
 --- `ordered` = true: the ORDERED relation's hash (a keyed node's kids in written order); its memo must be its own
+--- ★ AN ID SCOPE (CART-1412, the user: "sha256 is overkill"): passed in the MEMO slot, it makes content_id INTERN —
+--- (label, kid ids) -> a small integer, one table per scope — instead of hashing. Exact (equal iff eq, no collision),
+--- ~2.7x cheaper (a vim.fn.sha256 per node, over 64-hex-char kid ids, was most of a variant key). ⚠ AN INTERNED ID
+--- MEANS NOTHING OUTSIDE ITS SCOPE: two scopes both start at 1, so whoever compares ids across calls must share ONE
+--- scope (the clone index's generation, one blocks() run) — and an id that leaves the process (the wire, content_dag)
+--- is never interned: with no scope, content_id is the sha256 digest, unchanged. ⚠ ONE RELATION PER SCOPE: the
+--- `ordered` id of a keyed node is a different id; a scope is bound to the first relation it serves and refuses the
+--- other. The node memo is weak-keyed, the intern table dies with the scope.
+function M.id_scope() return { id_scope = true, intern = {}, n = 0, nodes = setmetatable({}, { __mode = 'k' }) } end
 function M.content_id(t, memo, ordered)
     -- (nil has one fixed id: show(nil) printed 'nil', and the keys that moved from show to content ids — CART-1401 —
     -- must not raise where show answered)
     if t == nil then return 'nil' end
-    memo = memo or {}
+    local scope = type(memo) == 'table' and memo.id_scope == true and memo or nil
+    if scope then
+        local rel = ordered and 'ordered' or 'term'
+        if scope.rel == nil then scope.rel = rel
+        elseif scope.rel ~= rel then error(('content_id: an id scope serves ONE relation (%s), asked for %s'):format(scope.rel, rel), 2) end
+        memo = scope.nodes
+    else
+        memo = memo or {}
+    end
     local function id(u)
         if memo[u] then return memo[u] end
         local kids = {}
@@ -420,7 +437,14 @@ function M.content_id(t, memo, ordered)
         else
             for i, c in ipairs(u.kids or {}) do kids[i] = id(c) end
         end
-        local h = vim.fn.sha256(label(u) .. '(' .. table.concat(kids, ',') .. ')')
+        local key = label(u) .. '(' .. table.concat(kids, ',') .. ')'
+        local h
+        if scope then
+            h = scope.intern[key]
+            if not h then scope.n = scope.n + 1; h = scope.n; scope.intern[key] = h end
+        else
+            h = vim.fn.sha256(key)
+        end
         memo[u] = h
         if M.FREEZE then M.OBSERVED[u] = true end
         return h
