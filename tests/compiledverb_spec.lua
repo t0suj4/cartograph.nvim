@@ -153,6 +153,26 @@ test('compiledverb: a compiled matcher that raises where the original ANSWERS ha
     eq(nil, again); ok(tostring(why):find('DIVERGED at run time', 1, true), tostring(why))
 end)
 
+test('compiledverb: refusal = \'none\' serves refusals WITHOUT details — equal to A.match but for the reason, its own memo and disk key; the default stays exact (CART-1465)', function ()
+    ready()
+    local T = rules()[8].lhs
+    local full = assert(CV.match(T))
+    local none = assert(CV.match(T, { refusal = 'none' }))
+    ok(full ~= none, 'two contracts, two matchers')
+    local bad = { k = 'lit', v = 'not this' }
+    local want = A.match(T, bad)
+    eq(false, want.ok); ok(want.refusal ~= nil, 'the premise: the original gives a reason')
+    eq(want, full(bad), 'the default is exact, reason included')
+    local got = none(bad)
+    eq(nil, got.refusal, 'no reason built')
+    local w2 = vim.deepcopy(want); w2.refusal = nil
+    eq(w2, got)
+    -- (a hit is whole: ok, values, sites, steps, provenance)
+    local hit = CV.samples(T)[1]
+    eq(A.match(T, hit), none(hit))
+    eq(none, (CV.match(T, { refusal = 'none' })), 'memo hit in its own mode')
+end)
+
 test('compiledverb: matchers SPECULATE that a subject is not keyed — a keyed subject is served by the original (no divergence), and a matcher that deoptimizes on most calls gives way to it (CART-1463)', function ()
     ready()
     local T = rules()[8].lhs

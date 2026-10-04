@@ -252,7 +252,8 @@ local function served(text, pool)
 end
 
 --- match specialized to the template T: a COMPILED MATCHER -> function (I) -> what A.match(T, I) returns, the residual
---- text, stats. opts.budget / opts.depth pass to mix; opts.assume: SPECULATE — e.g. { align = { value = nil } }, a
+--- text, stats. opts.env: match's env, STATIC (e.g. { lazy_refusal = true }). opts.budget / opts.depth pass to mix;
+--- opts.assume: SPECULATE — e.g. { align = { value = nil } }, a
 --- subject's nodes are never keyed (algebraread's are not): the keyed code folds away, a guard raises M.DEOPT when a
 --- node is keyed after all
 function M.compile_match(T, opts)
@@ -261,7 +262,7 @@ function M.compile_match(T, opts)
     local A = require('cartograph.algebra').load()
     if not term_cache then term_cache = assert(require('cartograph.algebraread').read((M.program('M.match')), 'lua')) end
     local _, _, lines = M.program('M.match')
-    local text, stats, pool = MX.mix(term_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, nil },
+    local text, stats, pool = MX.mix(term_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, opts.env },
         { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, assume = opts.assume })
     return served(text, pool), text, stats, pool
 end

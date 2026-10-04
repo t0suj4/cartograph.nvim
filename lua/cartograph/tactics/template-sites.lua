@@ -57,7 +57,7 @@ local E = {
         if spec then T = a.template(a.strip_trivia(T.body), T.holes) end
         local P, CV = require 'cartograph.prefilter', require 'cartograph.compiledverb'
         local filter = P.text(T)
-        local compiled = CV.match(T)
+        local compiled = CV.match(T, { refusal = 'none' }) -- (only `ok` and a hit's `values` are read: CART-1465)
         local files = p.files
         if not files then
             files = {}

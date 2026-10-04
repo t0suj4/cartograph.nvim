@@ -230,7 +230,8 @@ function M.rewrite(rules, src, lang)
         end
         -- (the rule's template is STATIC across every position: match COMPILED to it, accepted by its sample law
         -- first — cartograph.compiledverb, CART-1339; refused or disabled, the interpreted A.match)
-        local compiled = require('cartograph.compiledverb').match(rule.lhs)
+        -- (only `ok` and a hit's `values` are read here: refusals without details, -31% matching — CART-1465)
+        local compiled = require('cartograph.compiledverb').match(rule.lhs, { refusal = 'none' })
         -- (and only at the positions that CAN be a match root: an anchor token's ancestor at its fixed depth —
         -- cartograph.prefilter, sound; no anchor, or CARTOGRAPH_PREFILTER=0, every position)
         local poss = os.getenv('CARTOGRAPH_PREFILTER') ~= '0' and require('cartograph.prefilter').candidates(t, rule.lhs, src) or a.positions(t)

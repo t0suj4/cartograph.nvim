@@ -24,12 +24,19 @@ local A_ = nil
 local function A() A_ = A_ or require('cartograph.algebra').load(); return A_ end
 
 local memo = setmetatable({}, { __mode = 'k' })
+local memo_none = setmetatable({}, { __mode = 'k' }) -- (refusal = 'none' matchers: another contract, another memo)
 --- how many matchers were served, by how ('memo' | 'disk' | 'compiled') and how many were REFUSED — the consumer's
 --- tests read it to know the compiled path was actually taken (an equivalence test alone passes with it switched off)
 M.stats = { memo = 0, disk = 0, compiled = 0, refused = 0, remembered = 0, deopt = 0, diverged = 0, speculated = 0, unspeculated = 0 }
 -- ★ THE ASSUMPTION compiled matchers SPECULATE on (CART-1463): a subject's nodes are not KEYED — algebraread never sets
 -- `align`, so on code the keyed machinery (a quarter of every residual) folds away; a keyed subject deoptimizes
 M.ASSUME = { align = { value = nil } }
+-- ★ REFUSALS WITHOUT DETAILS, OPT-IN (CART-1465): `CV.match(T, { refusal = 'none' })` compiles with match's
+-- env.lazy_refusal — a refusal is `{ ok = false, values = {}, sites = {}, steps }` with NO `refusal` record. Building
+-- its `at` and `why` was 45% of matching when 99.9% of the calls refuse; a caller that reads only `ok` (and `values`
+-- on success — byexample's rewrite, template-sites) opts in and asks A.match for a reason when it wants one. Serving
+-- the details LAZILY instead (a metatable per refusal) kept only -8%, and was dropped.
+M.NO_REFUSAL = { lazy_refusal = true }
 --- the runtime DIVERGENCES of this process (capped): { template, subject, error } — a compiled matcher raised where
 --- the original answered (a mix bug, located by its template and subject)
 M.divergences = {}
@@ -88,11 +95,16 @@ function M.samples(T)
 end
 
 --- does the compiled matcher f equal A.match(T, ·) on every subject? -> ok | false, why
-function M.accept(T, f, subjects)
+function M.accept(T, f, subjects, no_refusal)
     local a = A()
     for i, I in ipairs(subjects) do
         local okc, got = pcall(f, I)
         local want = a.match(T, I)
+        -- (no_refusal: a refusal's DETAILS are not part of the contract — compared without them)
+        if no_refusal and not want.ok then want = vim.deepcopy(want); want.refusal = nil end
+        if no_refusal and okc and type(got) == 'table' and not got.ok and got.refusal ~= nil then -- (a deopt: the original's)
+            got = vim.deepcopy(got); got.refusal = nil
+        end
         if not okc and got == require('cartograph.mixalg').DEOPT then okc, got = true, want end -- (a failed assumption: served by the original)
         if not okc then return false, ('subject %d: the compiled matcher raised: %s'):format(i, tostring(got)) end
         if not vim.deep_equal(got, want) then return false, ('subject %d (%s): the compiled matcher differs from A.match'):format(i, a.show(I)) end
@@ -116,6 +128,8 @@ end
 function M.match(T, opts)
     opts = opts or {}
     if os.getenv('CARTOGRAPH_COMPILED') == '0' then return nil, 'disabled (CARTOGRAPH_COMPILED=0)' end
+    local none = opts.refusal == 'none'
+    local memo = none and memo_none or memo -- (one memo per mode: the two serve different contracts)
     local MA = require 'cartograph.mixalg'
     local SC = require 'cartograph.stampcache'
     local vh = SC.value(T)
@@ -126,7 +140,8 @@ function M.match(T, opts)
         M.stats.memo = M.stats.memo + 1; return memo[T].f, 'memo'
     end
     local assume = opts.speculate ~= false and M.ASSUME or nil
-    local key = vh and SC.key({ source_stamp(), vh, assume and 'assume:align' or 'exact' })
+    local env = none and M.NO_REFUSAL or nil
+    local key = vh and SC.key({ source_stamp(), vh, assume and 'assume:align' or 'exact', none and 'refusal:none' or 'refusal:full' })
     -- ★ A REFUSAL IS REMEMBERED LIKE A SUCCESS (CART-1436): mix's refusal is a fact about the template VALUE and the loaded
     -- code, under the same key. Unremembered, every call paid it again — a two-hole template from byexample ran mix to
     -- its 5M-step unfold budget (110 s) and byexample.rewrite asks once per FILE: a 16-site TSM plan ran past 15 min.
@@ -151,7 +166,7 @@ function M.match(T, opts)
     end
     local text, pool
     if not f then
-        local okc, g, t, _, p = pcall(opts.compile or MA.compile_match, T, { assume = assume })
+        local okc, g, t, _, p = pcall(opts.compile or MA.compile_match, T, { assume = assume, env = env })
         if not okc then
             M.stats.refused = M.stats.refused + 1
             local why = 'mix refused to compile the matcher: ' .. require('cartograph.mix').describe(g)
@@ -162,12 +177,6 @@ function M.match(T, opts)
         end
         f, text, pool, how = g, t, p, 'compiled'
     end
-    local subjects = M.samples(T)
-    for _, s in ipairs(opts.subjects or {}) do subjects[#subjects + 1] = s end
-    local ok, why = M.accept(T, f, subjects)
-    if not ok then M.stats.refused = M.stats.refused + 1; return nil, 'REJECTED by the sample law: ' .. why end
-    M.stats[how] = M.stats[how] + 1
-    if how == 'compiled' and store then store.put(key, { text = text, pool = pool }) end -- (a pool that is not plain data is refused by put: no disk copy, still correct)
     -- (a DIVERGED matcher is refused from then on, like mix's own refusal: in this process and on disk)
     local served = M.deopt(T, f, function (d)
         local why = 'DIVERGED at run time: ' .. d.error
@@ -175,6 +184,13 @@ function M.match(T, opts)
         if key then refused_by_value[key] = why end
         if store then store.put(key, { refused = why }) end
     end)
+    -- (the sample law judges what is SERVED; under refusal = 'none' a refusal's DETAILS are not part of the contract)
+    local subjects = M.samples(T)
+    for _, s in ipairs(opts.subjects or {}) do subjects[#subjects + 1] = s end
+    local ok, why = M.accept(T, served, subjects, none)
+    if not ok then M.stats.refused = M.stats.refused + 1; return nil, 'REJECTED by the sample law: ' .. why end
+    M.stats[how] = M.stats[how] + 1
+    if how == 'compiled' and store then store.put(key, { text = text, pool = pool }) end -- (a pool that is not plain data is refused by put: no disk copy, still correct)
     memo[T] = { f = served, vh = vh }
     return served, how
 end

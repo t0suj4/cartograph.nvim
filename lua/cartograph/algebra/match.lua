@@ -16,10 +16,17 @@ local child, is_hole, key, same_key, unpack =
 function M.match(T, I, env)
     env = env or {}
     local cap = env.cap or 20000
+    -- (env.lazy_refusal: a refusal is recorded as NOTHING — no path key, no message. For a caller that only reads `ok`
+    -- and asks for the reason later, from the original: compiled, every refusal skips building its `at` and `why`,
+    -- -45% matching time when 99.9% of the calls refuse, CART-1465)
+    local lazy = env.lazy_refusal
     env = { defs = env.defs, self = env.self or T, hole_domains = env.hole_domains, cap = cap, collect = env.collect }
     local H = M.sites(T)
     local refusal, steps, nid = nil, 0, 0
-    local function fail(path, why) refusal = { at = key(path), why = why }; return nil end
+    local function fail(path, why)
+        if not lazy then refusal = { at = key(path), why = why } end
+        return nil
+    end
     -- every site carries an id (monotone in binding order) and `within`, the id of the
     -- context site whose applied hedge it was matched inside: the third leg needs the
     -- enclosure, since coinciding sites (X(Y(a)) against Y(X(a)) on (a)) have one geometry
