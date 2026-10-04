@@ -75,12 +75,15 @@ test('retained: ★ the ORACLE — what a flagged grower retains after a full co
         end
         return at[4] - at[2]
     end
+    -- (each retained value carries a 200-byte PAD: 2000 calls retain ~400 KB, far above what another spec's leftovers
+    -- in the same parallel worker move the count by — `'e' .. i` alone retained ~40 KB and once measured 37, CART-1454)
+    local PAD = string.rep('x', 200)
     local per = {
-        record = function(i) F.record('r' .. i) end,
-        memo = function(i) F.memo('m' .. i) end,
-        register = function(i) F.register('g' .. i) end,
-        see = function(i) F.see('s' .. i) end,
-        emit = function(i) F.emit('e' .. i) end,
+        record = function(i) F.record('r' .. i .. PAD) end,
+        memo = function(i) F.memo('m' .. i .. PAD) end,
+        register = function(i) F.register('g' .. i .. PAD) end,
+        see = function(i) F.see('s' .. i .. PAD) end,
+        emit = function(i) F.emit('e' .. i .. PAD) end,
         tag = function() F.tag({}) end,                 -- weak: the key is garbage at once
         build = function(i) F.build({ i, i + 1 }) end,  -- the call's own table
     }
@@ -89,7 +92,7 @@ test('retained: ★ the ORACLE — what a flagged grower retains after a full co
         local flagged = name ~= 'tag' and name ~= 'build'
         if flagged then ok(by_container(({ record = 'log', memo = 'cache', register = 'M.registry', see = 'seen_all', emit = 'events' })[name]),
             name .. ' is also flagged statically') end
-        if flagged then ok(kb > 40, ('%s grew %.1f KB over two batches of 2000 calls: it should'):format(name, kb))
+        if flagged then ok(kb > 200, ('%s grew %.1f KB over two batches of 2000 calls: it should'):format(name, kb))
         else ok(kb < 8, ('%s grew %.1f KB over two batches of 2000 calls: it should not'):format(name, kb)) end
     end
     _G.seen_all = nil
