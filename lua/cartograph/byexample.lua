@@ -54,6 +54,57 @@ function M.learn(before, after, lang)
     local regions = {}
     a.diff_regions(Tb, Ta, {}, regions)
     if #regions == 0 then return nil, 'before and after are the same term: the example demonstrates no edit', 'ill-posed' end
+    -- ★ DEPENDENT REGIONS ARE ONE EDIT (CART-1435). A region's rule carries over only ITS OWN subterms, so a move that
+    -- takes a subterm OUT of one region and INTO another — `x:SetFont(D:GetContentFont("normal"))` ->
+    -- `D:SetContentFont(x, "normal")`, the receiver moving into the arguments — was learned as independent token rules,
+    -- one of them `iconText -> TSMAPI.Design` (83 sites in TSM). When one region's AFTER side carries a named subterm of
+    -- another's BEFORE side, the two are merged at their lowest common ancestor (and every region under it dropped),
+    -- to a fixpoint: the rule is then the whole demonstrated edit, its moved subterm a hole on both sides.
+    -- (lifted FIRST: a bare-token region is its node — the per-region loop below says why — and a dependence between
+    -- regions is between nodes: `f(a, b)` -> `g(b, a)` reports the literals `a` and `b`, the identifiers carry them)
+    for k, path in ipairs(regions) do
+        while #path > 0 and (get(Tb, path).k == 'lit' or get(Ta, path).k == 'lit') do
+            local up = {}
+            for i = 1, #path - 1 do up[i] = path[i] end
+            path = up
+        end
+        regions[k] = path
+    end
+    local function carries(pi, pj)
+        local bsubs, found = subtrees(get(Tb, pi), {}), false
+        local function look(t)
+            if found then return end
+            if t.k ~= 'lit' and has_name(t) then
+                for _, s in ipairs(bsubs) do if a.eq(s, t) then found = true; return end end
+            end
+            for _, c in ipairs(t.kids or {}) do look(c) end
+        end
+        look(get(Ta, pj))
+        return found
+    end
+    local function under(p, q) -- is q at or below p?
+        if #q < #p then return false end
+        for i = 1, #p do if p[i] ~= q[i] then return false end end
+        return true
+    end
+    local merged = true
+    while merged and #regions > 1 do
+        merged = false
+        for i = 1, #regions do
+            for j = 1, #regions do
+                if not merged and i ~= j and carries(regions[i], regions[j]) then
+                    local l = {}
+                    for k = 1, math.min(#regions[i], #regions[j]) do
+                        if regions[i][k] ~= regions[j][k] then break end
+                        l[k] = regions[i][k]
+                    end
+                    local keep = { l }
+                    for _, r in ipairs(regions) do if not under(l, r) then keep[#keep + 1] = r end end
+                    regions, merged = keep, true
+                end
+            end
+        end
+    end
     local rules = {}
     for _, path in ipairs(regions) do
         -- ⚠ A REGION THAT IS A BARE TOKEN IS LIFTED TO ITS NODE. `x == 0` -> `x <= 0` differs only in the operator,

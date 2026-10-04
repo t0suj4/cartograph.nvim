@@ -175,6 +175,27 @@ test('byexample: a STATEMENT INSERTION applies — every hole the right side use
     eq(1, n2); eq('local function h()\n  local q = 1\n  q = q + 1\n  return q\nend\n', renamed, 'the inserted line uses the TARGET\'s name')
 end)
 
+test('byexample: a STRUCTURAL MOVE is ONE rule — regions that exchange a carried subterm are merged at their common ancestor (CART-1435)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    -- the receiver moving into the arguments: three differing regions, `iconText` leaving the first for the third
+    local moved = assert(BX.learn('iconText:SetFont(TSMAPI.Design:GetContentFont("normal"))',
+        'TSMAPI.Design:SetContentFont(iconText, "normal")', 'lua'))
+    eq(1, #moved, 'one rule, not `iconText -> TSMAPI.Design` among three')
+    eq('iconText:SetFont(TSMAPI.Design:GetContentFont("normal"))', moved[1].lhs_text)
+    -- the same move, small enough to apply: the method's receiver becomes the function's first argument; the name
+    -- `obj` elsewhere is left alone (under the old learning, `obj -> show` was a rule of its own)
+    local move = assert(BX.learn('obj:Show(a)', 'show(obj, a)', 'lua'))
+    eq(1, #move)
+    local out, n = BX.rewrite(move, 'local r = w:Show(z)\nlocal obj = 1\n', 'lua')
+    eq('local r = show(w, z)\nlocal obj = 1\n', out); eq(1, n)
+    -- a swap's two argument regions report bare LITERALS; lifted to their identifiers they carry each other's name and
+    -- merge — into `(a, b) -> (b, a)`, which matches its own output: refused by name, never three token rules
+    -- (`a -> b`, `b -> a`, `f -> g`) that would rewrite every `a` and `b`. (The callee `f -> g` carries nothing, so it
+    -- is not merged in: a sibling edit with no shared subterm is a further case, noted on CART-1435)
+    local swap, why = BX.learn('f(a, b)', 'g(b, a)', 'lua')
+    eq(nil, swap); ok(tostring(why):find('matches its own output', 1, true), tostring(why))
+end)
+
 test('byexample: a CONSTANT the example keeps stays part of the pattern, and overlapping matches rewrite once', function ()
     if not ready() then skip 'no lua parser or algebra' end
     local rules = assert(BX.learn('if x == 0 then return end', 'if x <= 0 then return end'))
