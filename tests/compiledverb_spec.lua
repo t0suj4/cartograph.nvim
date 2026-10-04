@@ -112,3 +112,43 @@ test('compiledverb: the CONSUMER gives the same answers — byexample.rewrite ov
     ok(total > 0, total .. ' sites rewritten')
     ok(served() >= before + 3, 'the rewrite took the COMPILED path (one matcher per file served)')
 end)
+
+test('compiledverb: a compiled matcher that RAISES is DEOPTIMIZED — the original runs, and ITS error is the one the caller sees, from the algebra\'s source (CART-1459)', function ()
+    ready()
+    local T = rules()[8].lhs
+    local f = assert(CV.match(T))
+    local d0 = CV.stats.deopt
+    -- (a subject the original cannot read: a kid that is no term — A.match raises in algebra/match.lua)
+    local bad = { k = T.body.k, kids = { 5 } }
+    local okw, want = pcall(A.match, T, bad)
+    eq(false, okw)
+    local okf, got = pcall(f, bad)
+    eq(false, okf)
+    ok(tostring(got):find('algebra/match.lua', 1, true), 'the ORIGINAL\'s error: ' .. tostring(got))
+    eq(tostring(want), tostring(got))
+    eq(d0 + 1, CV.stats.deopt, 'the compiled matcher raised and was deoptimized')
+end)
+
+test('compiledverb: a compiled matcher that raises where the original ANSWERS has DIVERGED — the right answer returned, the divergence recorded, the matcher retired (CART-1459)', function ()
+    ready()
+    local T = rules()[8].lhs
+    local I = CV.samples(T)[1]
+    local calls, told = 0, nil
+    local served = CV.deopt(T, function () calls = calls + 1; error('boom in residual code') end, function (d) told = d end)
+    local v0 = CV.stats.diverged
+    eq(A.match(T, I), served(I))
+    eq(v0 + 1, CV.stats.diverged)
+    ok(told and told.error:find('boom in residual code', 1, true), vim.inspect(told))
+    eq(told, CV.divergences[#CV.divergences])
+    eq(A.match(T, I), served(I))
+    eq(1, calls, 'retired: the second call runs only the original')
+    -- (and CV.match REFUSES it from then on: a fake compiler that passes the sample law, then raises on one subject)
+    local T2 = vim.deepcopy(rules()[9].lhs)
+    local odd = { k = T2.body.k, kids = {} }
+    local fake = function (S) if S == odd then error('boom at run time') end return A.match(T2, S) end
+    local f2, how = CV.match(T2, { compile = function () return fake, 'fake text', {}, {} end })
+    eq('compiled', how)
+    eq(A.match(T2, odd), f2(odd))
+    local again, why = CV.match(T2)
+    eq(nil, again); ok(tostring(why):find('DIVERGED at run time', 1, true), tostring(why))
+end)

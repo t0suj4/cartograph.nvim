@@ -14,6 +14,10 @@
 -- ★ CACHED twice: per template OBJECT for the process, and per template VALUE on disk (stampcache blob, keyed by the
 -- value hash and the source of everything that compiles it: the algebra tree, mix, mixalg) — a changed algebra or
 -- specializer is a miss, never a stale matcher. CARTOGRAPH_COMPILED=0 turns compilation off (the interpreted oracle).
+-- ★ SERVED DEOPTIMIZABLE (CART-1459): the function returned runs the compiled code under a pcall and, when it raises,
+-- runs the ORIGINAL — so an error a caller sees is the algebra's own (its message, its source), never the residual's
+-- generated names and lines; a compiled matcher that raises where the original answers has DIVERGED: answered right,
+-- recorded in M.divergences, and refused from then on (in the process and on disk). Cost: +3.7% per call, measured.
 local M = {}
 
 local A_ = nil
@@ -22,7 +26,32 @@ local function A() A_ = A_ or require('cartograph.algebra').load(); return A_ en
 local memo = setmetatable({}, { __mode = 'k' })
 --- how many matchers were served, by how ('memo' | 'disk' | 'compiled') and how many were REFUSED — the consumer's
 --- tests read it to know the compiled path was actually taken (an equivalence test alone passes with it switched off)
-M.stats = { memo = 0, disk = 0, compiled = 0, refused = 0, remembered = 0 }
+M.stats = { memo = 0, disk = 0, compiled = 0, refused = 0, remembered = 0, deopt = 0, diverged = 0 }
+--- the runtime DIVERGENCES of this process (capped): { template, subject, error } — a compiled matcher raised where
+--- the original answered (a mix bug, located by its template and subject)
+M.divergences = {}
+
+--- ★ DEOPTIMIZATION (CART-1459): the matcher SERVED is the compiled one under a pcall; when it raises, the ORIGINAL runs
+--- instead — A.match is pure, so running it again is safe. If the original raises too, THAT is the error the caller
+--- sees: its own message and traceback, in the algebra's source, never the residual's generated names and lines. If
+--- the original ANSWERS, the compiled matcher DIVERGED — a mix bug: recorded (M.divergences), the right answer
+--- returned, and the compiled matcher RETIRED (on_diverge: every later call runs the original). -> the served function
+function M.deopt(T, f, on_diverge)
+    local retired = false
+    return function (I)
+        if retired then return A().match(T, I) end
+        local okc, got = pcall(f, I)
+        if okc then return got end
+        M.stats.deopt = M.stats.deopt + 1
+        local want = A().match(T, I) -- (raises the ORIGINAL's error when the subject is one the original refuses to read)
+        retired = true
+        M.stats.diverged = M.stats.diverged + 1
+        local d = { template = A().show(T.body), subject = A().show(I), error = tostring(got) }
+        if #M.divergences < 100 then M.divergences[#M.divergences + 1] = d end
+        if on_diverge then on_diverge(d) end
+        return want
+    end
+end
 -- the refusals of this process by key (template value + loaded code), so an EQUAL template from another object hits too
 local refused_by_value = {}
 
@@ -93,7 +122,8 @@ function M.match(T, opts)
         M.stats.remembered = M.stats.remembered + 1
         return nil, refused_by_value[key]
     end
-    local store = key and SC.blob('compiledverb')
+    -- (opts.compile: an injected COMPILER — a test's fake — is never read from nor written to the disk cache)
+    local store = key and not opts.compile and SC.blob('compiledverb')
     local f, how
     if store then
         local hit, found = store.get(key)
@@ -107,7 +137,7 @@ function M.match(T, opts)
     end
     local text, pool
     if not f then
-        local okc, g, t, _, p = pcall(MA.compile_match, T)
+        local okc, g, t, _, p = pcall(opts.compile or MA.compile_match, T)
         if not okc then
             M.stats.refused = M.stats.refused + 1
             local why = 'mix refused to compile the matcher: ' .. (type(g) == 'table' and tostring(g.refusal) or tostring(g))
@@ -124,8 +154,15 @@ function M.match(T, opts)
     if not ok then M.stats.refused = M.stats.refused + 1; return nil, 'REJECTED by the sample law: ' .. why end
     M.stats[how] = M.stats[how] + 1
     if how == 'compiled' and store then store.put(key, { text = text, pool = pool }) end -- (a pool that is not plain data is refused by put: no disk copy, still correct)
-    memo[T] = { f = f, vh = vh }
-    return f, how
+    -- (a DIVERGED matcher is refused from then on, like mix's own refusal: in this process and on disk)
+    local served = M.deopt(T, f, function (d)
+        local why = 'DIVERGED at run time: ' .. d.error
+        memo[T] = { vh = vh, refused = why }
+        if key then refused_by_value[key] = why end
+        if store then store.put(key, { refused = why }) end
+    end)
+    memo[T] = { f = served, vh = vh }
+    return served, how
 end
 
 return M
