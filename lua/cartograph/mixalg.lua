@@ -232,8 +232,29 @@ function M.program(root)
 end
 
 local term_cache
+-- ★ SPECULATION (CART-1463): the DEOPTIMIZATION a compiled matcher raises when an assumption it was compiled under
+-- (opts.assume, see cartograph.mix) fails at run time — the caller then runs the ORIGINAL. A deopt is also FLAGGED: a
+-- residual `pcall` (key computations keep the original's) would otherwise swallow it and answer from a wrong branch
+M.DEOPT = setmetatable({}, { __tostring = function () return 'mixalg: an assumption of the compiled matcher failed (deoptimize)' end })
+-- the residual chunk's environment and the function it serves: the matcher, checked for a swallowed deopt
+local function served(text, pool)
+    local A = require('cartograph.algebra').load()
+    local flag = { up = false }
+    local env = setmetatable({ MIXK = pool, M = { grammars = A.grammars },
+        MIXDEOPT = function () flag.up = true; error(M.DEOPT, 0) end }, { __index = _G })
+    local m = assert(load(text, 'mixalg.match', 't', env))()
+    return function (I)
+        flag.up = false
+        local r = m(I)
+        if flag.up then error(M.DEOPT, 0) end
+        return r
+    end
+end
+
 --- match specialized to the template T: a COMPILED MATCHER -> function (I) -> what A.match(T, I) returns, the residual
---- text, stats. opts.budget / opts.depth pass to mix
+--- text, stats. opts.budget / opts.depth pass to mix; opts.assume: SPECULATE — e.g. { align = { value = nil } }, a
+--- subject's nodes are never keyed (algebraread's are not): the keyed code folds away, a guard raises M.DEOPT when a
+--- node is keyed after all
 function M.compile_match(T, opts)
     opts = opts or {}
     local MX = require 'cartograph.mix'
@@ -241,18 +262,14 @@ function M.compile_match(T, opts)
     if not term_cache then term_cache = assert(require('cartograph.algebraread').read((M.program('M.match')), 'lua')) end
     local _, _, lines = M.program('M.match')
     local text, stats, pool = MX.mix(term_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, nil },
-        { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines })
-    local env = setmetatable({ MIXK = pool, M = { grammars = A.grammars } }, { __index = _G })
-    local chunk = assert(load(text, 'mixalg.match', 't', env))
-    return chunk(), text, stats, pool
+        { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, assume = opts.assume })
+    return served(text, pool), text, stats, pool
 end
 
 --- a compiled matcher from its residual TEXT and constant POOL (as compile_match returned them, e.g. read back from a
 --- cache) -> the matcher function
 function M.load_match(text, pool)
-    local A = require('cartograph.algebra').load()
-    local env = setmetatable({ MIXK = pool, M = { grammars = A.grammars } }, { __index = _G })
-    return assert(load(text, 'mixalg.match', 't', env))()
+    return served(text, pool)
 end
 
 return M

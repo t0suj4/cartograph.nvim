@@ -26,7 +26,10 @@ local function A() A_ = A_ or require('cartograph.algebra').load(); return A_ en
 local memo = setmetatable({}, { __mode = 'k' })
 --- how many matchers were served, by how ('memo' | 'disk' | 'compiled') and how many were REFUSED — the consumer's
 --- tests read it to know the compiled path was actually taken (an equivalence test alone passes with it switched off)
-M.stats = { memo = 0, disk = 0, compiled = 0, refused = 0, remembered = 0, deopt = 0, diverged = 0 }
+M.stats = { memo = 0, disk = 0, compiled = 0, refused = 0, remembered = 0, deopt = 0, diverged = 0, speculated = 0, unspeculated = 0 }
+-- ★ THE ASSUMPTION compiled matchers SPECULATE on (CART-1463): a subject's nodes are not KEYED — algebraread never sets
+-- `align`, so on code the keyed machinery (a quarter of every residual) folds away; a keyed subject deoptimizes
+M.ASSUME = { align = { value = nil } }
 --- the runtime DIVERGENCES of this process (capped): { template, subject, error } — a compiled matcher raised where
 --- the original answered (a mix bug, located by its template and subject)
 M.divergences = {}
@@ -37,11 +40,20 @@ M.divergences = {}
 --- the original ANSWERS, the compiled matcher DIVERGED — a mix bug: recorded (M.divergences), the right answer
 --- returned, and the compiled matcher RETIRED (on_diverge: every later call runs the original). -> the served function
 function M.deopt(T, f, on_diverge)
-    local retired = false
+    local retired, calls, speculated = false, 0, 0
     return function (I)
         if retired then return A().match(T, I) end
+        calls = calls + 1
         local okc, got = pcall(f, I)
         if okc then return got end
+        -- (a failed ASSUMPTION is no divergence: the original answers, as planned. A matcher whose assumption fails on
+        -- most of its subjects — keyed data, when it was compiled for code — gives way to the original for good)
+        if got == require('cartograph.mixalg').DEOPT then
+            M.stats.speculated = M.stats.speculated + 1
+            speculated = speculated + 1
+            if speculated > 16 and speculated * 2 > calls then retired = true; M.stats.unspeculated = M.stats.unspeculated + 1 end
+            return A().match(T, I)
+        end
         M.stats.deopt = M.stats.deopt + 1
         local want = A().match(T, I) -- (raises the ORIGINAL's error when the subject is one the original refuses to read)
         retired = true
@@ -81,6 +93,7 @@ function M.accept(T, f, subjects)
     for i, I in ipairs(subjects) do
         local okc, got = pcall(f, I)
         local want = a.match(T, I)
+        if not okc and got == require('cartograph.mixalg').DEOPT then okc, got = true, want end -- (a failed assumption: served by the original)
         if not okc then return false, ('subject %d: the compiled matcher raised: %s'):format(i, tostring(got)) end
         if not vim.deep_equal(got, want) then return false, ('subject %d (%s): the compiled matcher differs from A.match'):format(i, a.show(I)) end
     end
@@ -112,7 +125,8 @@ function M.match(T, opts)
         if memo[T].refused then M.stats.remembered = M.stats.remembered + 1; return nil, memo[T].refused end
         M.stats.memo = M.stats.memo + 1; return memo[T].f, 'memo'
     end
-    local key = vh and SC.key({ source_stamp(), vh })
+    local assume = opts.speculate ~= false and M.ASSUME or nil
+    local key = vh and SC.key({ source_stamp(), vh, assume and 'assume:align' or 'exact' })
     -- ★ A REFUSAL IS REMEMBERED LIKE A SUCCESS (CART-1436): mix's refusal is a fact about the template VALUE and the loaded
     -- code, under the same key. Unremembered, every call paid it again — a two-hole template from byexample ran mix to
     -- its 5M-step unfold budget (110 s) and byexample.rewrite asks once per FILE: a 16-site TSM plan ran past 15 min.
@@ -137,7 +151,7 @@ function M.match(T, opts)
     end
     local text, pool
     if not f then
-        local okc, g, t, _, p = pcall(opts.compile or MA.compile_match, T)
+        local okc, g, t, _, p = pcall(opts.compile or MA.compile_match, T, { assume = assume })
         if not okc then
             M.stats.refused = M.stats.refused + 1
             local why = 'mix refused to compile the matcher: ' .. require('cartograph.mix').describe(g)

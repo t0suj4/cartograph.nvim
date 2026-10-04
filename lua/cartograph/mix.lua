@@ -20,6 +20,8 @@
 -- break puts its unrolled iterations in `repeat … until true`, which that break leaves. A break under DYNAMIC control
 -- makes every store in its loop's body dynamic (the congruence: the code after the loop sees one of several exits).
 -- PINS: a closure capturing a per-iteration local copies it when made (lam.pin, M.cval).
+-- ASSUMPTIONS (CART-1463): opts.assume — a read of an assumed field of a dynamic variable is STATIC, guarded at run time
+-- (MIXDEOPT before its statement): speculative specialization, the caller runs the original when a guard fires.
 -- POSITIONS (CART-1459): every lowered statement and lambda carries `at`, its first line in the text mix read (the reader
 -- is lossless: counting its lits' newlines places every node); opts.lines maps those lines to the ORIGINAL ({ src,
 -- line }: mixalg's assembled programs) -> prog.where(at). A refusal is LOCATED (e.at, e.where, e.chain: the active
@@ -735,6 +737,24 @@ M.CONSTS = CONSTS
 -- static values to the evaluator; a host value of them reaching dynamic code is residualized as its PATH, and the
 -- residual chunk is loaded with those globals in its environment
 local KNOWN = {}
+-- ASSUMPTIONS of the current specialization (opts.assume, CART-1463): { [field] = { value = v } } — a read `x.field` of a
+-- DYNAMIC variable x is taken to be v: STATIC, so the code it guards folds away; a residual GUARD before its statement
+-- checks it at run time (`if type(x) == 'table' and x.field ~= v then MIXDEOPT() end`) and deoptimizes when it fails.
+-- Speculative specialization: the compiled code is smaller and faster on the inputs it assumes, and still right on
+-- the rest, because the caller runs the original when MIXDEOPT fires
+local ASSUME = {}
+-- is `e` an assumed read — a static field name in ASSUME, of a variable?
+local function assumed_read(e)
+    return e.op == 'index' and e.key.op == 'str' and ASSUME[e.key.v] ~= nil and e.obj.op == 'var'
+end
+-- an assumed value (a scalar or nil) as residual IR
+local function scalar_ir(v)
+    if v == nil then return { op = 'nil' } end
+    if type(v) == 'boolean' then return { op = 'bool', v = v } end
+    if type(v) == 'number' then return { op = 'num', v = v } end
+    if type(v) == 'string' then return { op = 'str', v = v } end
+    refuse('an assumption whose value is a ' .. type(v) .. ' (scalars and nil only)')
+end
 
 -- the value of every DYNAMIC slot in a specialization's static environment: a static computation that reads one is a
 -- binding-time gap, refused by name
@@ -939,7 +959,13 @@ function M.evaluator(prog, budget)
             if e.o == 'not' then return not v elseif e.o == '-' then return -v elseif e.o == '#' then return #v end
             refuse('the unary operator ' .. tostring(e.o))
         end
-        if op == 'index' then return eval(e.obj, env)[eval(e.key, env)] end
+        if op == 'index' then
+            -- (an ASSUMED read of a dynamic variable: the assumed value, and the specializer is told to guard it)
+            if assumed_read(e) and env[e.obj.id] == DYN and R.on_assume and R.on_assume(e.obj, e.key.v) then
+                return ASSUME[e.key.v].value
+            end
+            return eval(e.obj, env)[eval(e.key, env)]
+        end
         if op == 'table' then
             local t = {}
             for _, f in ipairs(e.fields) do t[eval(f.key, env)] = eval(f.val, env) end
@@ -1075,7 +1101,10 @@ local function bt_expr(e, bt)
     end
     if op == 'bin' then return opnd(join(bt_expr(e.l, bt), bt_expr(e.r, bt))) end
     if op == 'un' then return opnd(bt_expr(e.e, bt)) end
-    if op == 'index' then return opnd(join(bt_expr(e.obj, bt), bt_expr(e.key, bt))) end
+    if op == 'index' then
+        if assumed_read(e) then return S end -- (speculated: its value is the assumption's, guarded at run time)
+        return opnd(join(bt_expr(e.obj, bt), bt_expr(e.key, bt)))
+    end
     if op == 'table' then
         local r = S
         for _, f in ipairs(e.fields) do r = join(r, join(bt_expr(f.key, bt), bt_expr(f.val, bt))) end
@@ -1354,6 +1383,7 @@ end
 function M.specialize(prog, fname, division, statics, opts)
     opts = opts or {}
     KNOWN = opts.globals or {}
+    ASSUME = opts.assume or {}
     local budget = opts.budget or 100000
     local used = 0
     local res = { funcs = {}, order = {} }
@@ -1382,6 +1412,22 @@ function M.specialize(prog, fname, division, statics, opts)
         if c.iter and not active[c.iter] then
             refuse('a closure capturing a dynamic local of one loop iteration, used after that iteration (rung 2: no upvalue boxes)')
         end
+    end
+    -- an ASSUMED read of the dynamic variable `obj` (evaluated now, in `current`): guard it before the statement being
+    -- specialized -> true when it can be guarded (the variable has a residual name and a statement is collecting)
+    function R.on_assume(obj, field)
+        local X = current
+        local nm = X and X.ren[obj.id]
+        if not nm or not X.guards then return false end
+        local k = nm .. '.' .. field
+        if not X.guards[k] then
+            X.guards[k] = true
+            X.guards[#X.guards + 1] = { op = 'if', clauses = { { cond = { op = 'bin', o = 'and',
+                l = { op = 'bin', o = '==', l = { op = 'prim', name = 'type', args = { { op = 'var', name = nm } } }, r = { op = 'str', v = 'table' } },
+                r = { op = 'bin', o = '~=', l = { op = 'index', obj = { op = 'var', name = nm }, key = { op = 'str', v = field } }, r = scalar_ir(ASSUME[field].value) } },
+                body = { { op = 'callstmt', e = { op = 'prim', name = 'MIXDEOPT', args = {} } } } } }, els = {} }
+        end
+        return true
     end
     function R.on_closure(c)
         local X = current
@@ -1626,6 +1672,8 @@ function M.specialize(prog, fname, division, statics, opts)
             return nil
         end
         memo[ukey] = false
+        -- (a body with an assumption's GUARDS is no single `return e`: it becomes a program point. Folding the guards into
+        -- the expression was measured to fire on no template, CART-1463)
         if #body == 1 and body[1].op == 'ret' and #body[1].es == 1 then
             memo[ukey] = { inl = body[1].es[1], hs = hs, order = order, bound = M.bound_names(body[1].es[1], {}) }
         end
@@ -2156,7 +2204,13 @@ function M.specialize(prog, fname, division, statics, opts)
         for _, s in ipairs(stmts) do
             spend()
             R.at = s.at
+            -- (the GUARDS of the assumptions this statement's static parts made go BEFORE its residual)
+            local mark0, prevg = #out, X.guards
+            X.guards = {}
             local okst, done = pcall(step, s)
+            local gs = X.guards
+            X.guards = prevg
+            for i, g in ipairs(gs) do table.insert(out, mark0 + i, g) end
             if not okst then
                 if type(done) == 'table' and done.lazy then
                     -- (with a position, the residual raises the ORIGINAL's message whole: `error(msg, 0)`)

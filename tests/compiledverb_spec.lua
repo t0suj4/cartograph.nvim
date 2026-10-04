@@ -152,3 +152,21 @@ test('compiledverb: a compiled matcher that raises where the original ANSWERS ha
     local again, why = CV.match(T2)
     eq(nil, again); ok(tostring(why):find('DIVERGED at run time', 1, true), tostring(why))
 end)
+
+test('compiledverb: matchers SPECULATE that a subject is not keyed — a keyed subject is served by the original (no divergence), and a matcher that deoptimizes on most calls gives way to it (CART-1463)', function ()
+    ready()
+    local T = rules()[8].lhs
+    local f = assert(CV.match(T))
+    local s0, v0 = CV.stats.speculated, CV.stats.diverged
+    local keyed = { k = T.body.k, align = 'keyed', kids = {} }
+    eq(A.match(T, keyed), f(keyed))
+    eq(s0 + 1, CV.stats.speculated); eq(v0, CV.stats.diverged, 'a failed assumption is no divergence')
+    -- (a matcher whose assumption fails on most subjects: after 16, the original serves it for good)
+    local calls = 0
+    local MA = require 'cartograph.mixalg'
+    local served = CV.deopt(T, function () calls = calls + 1; error(MA.DEOPT, 0) end)
+    local u0 = CV.stats.unspeculated
+    for _ = 1, 30 do eq(A.match(T, keyed), served(keyed)) end
+    eq(17, calls, 'retired after the 17th deoptimization')
+    eq(u0 + 1, CV.stats.unspeculated)
+end)

@@ -196,6 +196,28 @@ test('mixalg: a KEYED template compiles to a matcher EQUAL to A.match on keyed s
     ok(deep >= 2, deep .. ' refusals three or more steps deep')
 end)
 
+test('mixalg: SPECULATION — compiled under "no subject node is keyed", a matcher is smaller and equal to A.match on code; a keyed subject DEOPTIMIZES (CART-1463)', function ()
+    ready()
+    local ASSUME = require('cartograph.compiledverb').ASSUME
+    local by = population()
+    for _, want in ipairs({ 'nil', 'a.f', 'return a' }) do
+        local c
+        for _, r in ipairs(rules.all()) do if r.lua == want then c = r end end
+        local _, exact = MA.compile_match(c.lhs)
+        local m, spec = MA.compile_match(c.lhs, { assume = ASSUME })
+        ok(#spec < #exact * 0.8, ('%s: %d -> %d bytes'):format(want, #exact, #spec))
+        ok(spec:find('MIXDEOPT()', 1, true), want .. ': the assumption is guarded')
+        for _, p in ipairs(by[c.key] or {}) do eq(A.match(c.lhs, p), m(p), want) end
+        -- (a keyed subject: the guard fires — the caller runs the original)
+        local okm, e = pcall(m, { k = c.lhs.body.k, align = 'keyed', kids = {} })
+        eq(false, okm); eq(MA.DEOPT, e)
+    end
+    -- (a deopt a residual `pcall` swallowed is still raised: the flag is checked after the call)
+    local f = MA.load_match('return function (I) local ok = pcall(function () MIXDEOPT() end); return { ok = ok } end', {})
+    local okf, ef = pcall(f, {})
+    eq(false, okf); eq(MA.DEOPT, ef)
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')

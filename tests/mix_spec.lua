@@ -254,6 +254,22 @@ end
     ok(text2:find('select("#", ...)', 1, true), 'past a named key: appended at run time\n' .. text2)
 end)
 
+test('mix: an ASSUMPTION makes a dynamic read static — the code it guards folds away, a guard before its statement deoptimizes when it fails (CART-1463)', function ()
+    ready()
+    local src = 'local function f(x)\n    if x.kind == "big" then\n        return x.a * 1000 + x.b * 100 + x.c\n    end\n    return x.a\nend\n'
+    local text, _, pool = MX.mix(assert(R.read(src, 'lua')), 'f', { 'D' }, {}, { assume = { kind = { value = 'small' } } })
+    ok(not text:find('1000', 1, true), 'the "big" arm is gone\n' .. text)
+    ok(text:find('MIXDEOPT()', 1, true), 'guarded\n' .. text)
+    local DEOPT = {}
+    local r = assert(load(text, 'f', 't', setmetatable({ MIXK = pool, MIXDEOPT = function () error(DEOPT, 0) end }, { __index = _G })))()
+    eq(7, r({ kind = 'small', a = 7 }))
+    local okr, e = pcall(r, { kind = 'big', a = 1, b = 2, c = 3 })
+    eq(false, okr); eq(DEOPT, e)
+    -- (a non-table where the assumption is read: no deopt — the original would fail there too, or not read it)
+    local okn = pcall(r, 5)
+    eq(false, okn)
+end)
+
 test('mix: a NON-FINITE number reaching dynamic code is lifted as the division that makes it — 1/0, -1/0, 0/0', function ()
     ready()
     local src = 'local function f(x)\n    local best, worst = math.huge, -math.huge\n    if x < best then best = x end\n    if x > worst then worst = x end\n    return best, worst\nend\n'
