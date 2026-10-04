@@ -95,6 +95,95 @@ test('law: each relation holds IFF its hashes agree — every pair of a mixed po
     ok(checked > 2000, checked .. ' pairs')
 end)
 
+-- ── the COMPOSITIONAL variant id (CART-1426, hashing modulo alpha): in a scope, the variant hash is a summary built
+-- from the kids' summaries — the laws must hold for it as for the digest, and memoized summaries must not leak
+test('law: in an ID SCOPE the variant hash holds IFF variant — the mixed population, every pair', function ()
+    local pop, V = population(), A.equality('variant')
+    local scope, h, checked = A.id_scope(), {}, 0
+    for i, t in ipairs(pop) do h[i] = V.hash(t, nil, scope) end
+    for i = 1, #pop do for j = 1, #pop do
+        eq(V.eq(pop[i], pop[j]), h[i] == h[j], ('%s / %s'):format(A.show(pop[i]), A.show(pop[j])))
+        checked = checked + 1
+    end end
+    ok(checked > 500, checked .. ' pairs')
+end)
+
+test('law: random terms with holes, hedges, presence marks and keyed nodes — the scoped id agrees with the variant relation, in a fresh scope and in one shared memoized scope (500 seeds)', function ()
+    local function gen(depth, r)
+        local x = r(10)
+        if depth <= 0 or x <= 3 then
+            local leaf = ({ function () return A.hole(({ 'a', 'b', 'c' })[r(3)]) end, function () return A.lit(r(2)) end,
+                function () return A.name(({ 'f', 'g' })[r(2)]) end })[r(3)]()
+            if r(8) == 1 then leaf.opt = ({ 'a', 'b', 'm' })[r(3)] end
+            return leaf
+        end
+        if x == 4 then return A.hole(({ 'a', 'b' })[r(2)], true) end
+        if x == 5 then -- a keyed node: pairs under distinct literal keys, written in a random order
+            local ks, kids = { 'k1', 'k2', 'k3' }, {}
+            for i = 1, r(3) do kids[#kids + 1] = A.node('pair', A.lit(ks[i]), gen(depth - 1, r)) end
+            if #kids > 1 and r(2) == 1 then kids[1], kids[#kids] = kids[#kids], kids[1] end
+            return A.keyed('obj', kids)
+        end
+        local kids = {}
+        for i = 1, r(3) do kids[i] = gen(depth - 1, r) end
+        local n = A.node(({ 'f', 'g', 'seq' })[r(3)], unpack(kids))
+        if r(9) == 1 then n.opt = ({ 'a', 'm' })[r(2)] end
+        return n
+    end
+    local V, shared = A.equality('variant'), A.id_scope()
+    local pop = {}
+    for seed = 1, 500 do
+        local state = seed * 7919
+        local function r(n) state = (state * 1103515245 + 12345) % 2147483648; return 1 + math.floor(state / 65536) % n end
+        local t = gen(4, r)
+        pop[#pop + 1] = t
+        -- a renamed copy is a variant of it, and a term reusing it (memoized summary) twice must not disturb it
+        pop[#pop + 1] = A.rename_holes(t, { prefix = 'z' })
+        pop[#pop + 1] = A.node('f', t, t)
+    end
+    local fresh, sh, same, checked = {}, {}, 0, 0
+    for i, t in ipairs(pop) do fresh[i] = V.hash(t, nil, A.id_scope()); sh[i] = V.hash(t, nil, shared) end
+    -- (within the shared scope ids are comparable; a fresh scope per term numbers alike for variants, so equal ids)
+    for i = 1, #pop, 7 do for j = 1, #pop, 3 do
+        local v = V.eq(pop[i], pop[j])
+        eq(v, sh[i] == sh[j], ('shared: %s / %s'):format(A.show(pop[i]), A.show(pop[j])))
+        if v then same = same + 1 end
+        checked = checked + 1
+    end end
+    for i = 1, #pop, 3 do eq(sh[i], sh[i + 1], 'a renamed copy: ' .. A.show(pop[i])) end
+    ok(same > 30 and checked > 10000, ('pairs %d, variant pairs %d'):format(checked, same))
+    -- the memo is not a leak: asked again, every term gets the id it first got
+    for i, t in ipairs(pop) do eq(sh[i], V.hash(t, nil, shared)) end
+end)
+
+test('variant_ids: one pass names EVERY subterm, each id the one variant_id gives that subterm alone — and a row met twice in one window is still itself', function ()
+    local row = A.node('call', A.name('f'), A.hole('x'), A.hole('y'))
+    local win = A.seq({ row, A.node('call', A.name('f'), A.hole('p'), A.hole('q')), row })
+    local scope = A.id_scope()
+    local rid = A.variant_id(row, scope)
+    local ids = A.variant_ids(win, scope)
+    eq(rid, ids[row]); eq(ids[win.kids[1]], ids[win.kids[2]], 'f(x, y) and f(p, q) are variants')
+    for u, id in pairs(ids) do eq(id, A.variant_id(u, scope)) end
+    eq(rid, A.variant_id(row, scope), 'the row is unchanged by the windows built on it')
+    -- ★ and the other side: the window is not its variant with the holes crossed (f(x,y) f(p,q) f(x,y) vs f(x,y) f(p,q) f(y,x))
+    local win2 = A.seq({ row, A.node('call', A.name('f'), A.hole('p'), A.hole('q')), A.node('call', A.name('f'), A.hole('y'), A.hole('x')) })
+    ok(A.variant_id(win, scope) ~= A.variant_id(win2, scope))
+end)
+
+test('variant id: a JOIN carries the node that made it (the paper\'s structure tag) — without it these two non-variants are one id', function ()
+    -- found by brute force over every set partition of up to 6 variable leaves: with the tag 0 collisions in 111,138
+    -- terms, without it 17,616 — a position joined at one depth read as one joined at another
+    local f, v = function (...) return A.node('f', ...) end, A.hole
+    local t1 = f(v('v1'), f(v('v2'), v('v1'), f(v('v2'), v('v3'))))
+    local t2 = f(v('v1'), f(v('v2'), v('v3'), f(v('v1'), v('v2'))))
+    local V, scope = A.equality('variant'), A.id_scope()
+    ok(not V.eq(t1, t2), 'the premise: they are not variants')
+    ok(A.variant_id(t1, scope) ~= A.variant_id(t2, scope))
+    -- and the other side: each is one id with its renamed copy
+    eq(A.variant_id(t1, scope), A.variant_id(A.rename_holes(t1, { prefix = 'q' }), scope))
+    eq(A.variant_id(t2, scope), A.variant_id(A.rename_holes(t2, { prefix = 'q' }), scope))
+end)
+
 test('law: ordered => term => variant => equivalent, term => theory — and every implication is STRICT (a witness each way)', function ()
     local pop = population()
     local O, T, V, Th = A.equality('ordered'), A.equality('term'), A.equality('variant'), A.equality('theory')
