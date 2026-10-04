@@ -32,20 +32,41 @@ function M.key(parts)
     return vim.fn.sha256(table.concat(buf, '\0'))
 end
 
-local filehash, trees = {}, {}
---- the content hash of a file (memoized per path for this process: a run reads a header once) | nil when unreadable
-function M.file(path)
-    local h = filehash[path]
-    if h == nil then
-        local fd = io.open(path, 'rb')
-        if not fd then filehash[path] = false; return nil end
-        local s = fd:read('a'); fd:close()
-        h = vim.fn.sha256(s)
-        filehash[path] = h
-    end
-    return h or nil
+-- ★ A PATH'S STAMP IS A POINTER, NOT CONTENT (CART-1431; CART-1430's first principle: content never changes, only
+-- pointers go stale). The memo used to keep a path's hash for the whole PROCESS, so in a long-lived one (the nvim
+-- session, mcpserve) an edited file kept its old stamp and every entry keyed on it was served from the old file. Now the
+-- memo keeps the hash beside the file's STAT SIGNATURE (inode, size, mtime and ctime to the nanosecond) and re-reads the
+-- bytes only when the signature moved. The signature is the TRIGGER to rehash, never the key (CART-1301): the key stays
+-- the bytes' hash. ⚠ A rewrite inside one timestamp tick that keeps the size and the inode is not seen — the price of
+-- not hashing every file on every ask.
+-- ★ CODE THIS PROCESS RUNS is the other kind of fact: a module's text is what was LOADED, and an edit on disk does not
+-- change the running code. A stamp of loaded code must not follow the disk (a matcher compiled by the old code would be
+-- filed under the new code's key), so M.loaded / M.loaded_tree PIN the stamp at the first ask in this process.
+local filehash, pinned = {}, {}
+local function sig(st)
+    return st.ino .. ':' .. st.size .. ':' .. st.mtime.sec .. '.' .. st.mtime.nsec .. ':' .. st.ctime.sec .. '.' .. st.ctime.nsec
 end
-function M._forget() filehash = {}; trees = {} end
+--- the content hash of a file, re-read only when its stat signature moved | nil when unreadable
+function M.file(path)
+    local st = vim.uv.fs_stat(path)
+    if not st then filehash[path] = nil; return nil end
+    local s, e = sig(st), filehash[path]
+    if e and e.sig == s then return e.h end
+    local fd = io.open(path, 'rb')
+    if not fd then filehash[path] = nil; return nil end
+    local bytes = fd:read('a'); fd:close()
+    if bytes == nil then filehash[path] = nil; return nil end
+    local h = vim.fn.sha256(bytes)
+    filehash[path] = { sig = s, h = h, bytes = #bytes }
+    return h
+end
+--- the content hash of LOADED code (see above): pinned at the first ask in this process | nil when unreadable
+function M.loaded(path)
+    local k = 'f:' .. path
+    if pinned[k] == nil then pinned[k] = M.file(path) or false end
+    return pinned[k] or nil
+end
+function M._forget() filehash = {}; pinned = {} end
 
 --- a LOG of answers under (store name, scope key) -> { get(q) -> value | nil, found, put(q, value) }. `false` is a valid
 --- stored answer (the derivation said "none"); `found` tells it from a miss.
@@ -88,8 +109,8 @@ end
 --- the CONTENT stamp of a directory: every regular file's path and bytes, every symlink's target, in path order
 --- (memoized per process: a run stamps its tree once) -> hash, { files, bytes, ms }
 function M.tree(dir)
-    local t = trees[dir]
-    if t then return t.h, t end
+    -- (walked on every ask — a new, removed or retargeted entry is a change too; each file's bytes are re-read only when
+    -- its stat signature moved, through M.file's memo)
     local t0 = vim.uv.hrtime()
     local files, links = {}, {}
     local function walk(d, rel)
@@ -107,17 +128,20 @@ function M.tree(dir)
         local h
         if links[r] then h = 'link:' .. tostring(vim.uv.fs_readlink(dir .. '/' .. r))
         else
-            local fd = io.open(dir .. '/' .. r, 'rb')
-            local s = fd and fd:read('a') or '\0unreadable'
-            if fd then fd:close() end
-            bytes = bytes + #s
-            h = vim.fn.sha256(s)
+            h = M.file(dir .. '/' .. r) or vim.fn.sha256('\0unreadable')
+            local e = filehash[dir .. '/' .. r]
+            bytes = bytes + (e and e.bytes or 0)
         end
         rows[i] = #r .. ':' .. r .. '=' .. h
     end
-    t = { h = vim.fn.sha256(table.concat(rows, '\n')), files = #files, bytes = bytes, ms = (vim.uv.hrtime() - t0) / 1e6 }
-    trees[dir] = t
+    local t = { h = vim.fn.sha256(table.concat(rows, '\n')), files = #files, bytes = bytes, ms = (vim.uv.hrtime() - t0) / 1e6 }
     return t.h, t
+end
+--- a directory of LOADED code, pinned like M.loaded
+function M.loaded_tree(dir)
+    local k = 't:' .. dir
+    if pinned[k] == nil then pinned[k] = { M.tree(dir) } end
+    return pinned[k][1], pinned[k][2]
 end
 
 -- the CANONICAL bytes of a value: a type tag and a length before every scalar, a table's keys in a total order — two

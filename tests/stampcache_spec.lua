@@ -28,6 +28,36 @@ test('stampcache: keys hash CONTENT — length-prefixed parts, so concatenation 
     ok(SC.file(p) ~= h1, 'a changed file is a changed key, whatever its mtime')
 end)
 
+test('stampcache: a path\'s stamp FOLLOWS AN EDIT in one long-lived process (CART-1431) — and a LOADED-code stamp does not', function ()
+    local p = vim.fn.tempname()
+    local function put(s) local fd = io.open(p, 'wb'); fd:write(s); fd:close() end
+    put('one')
+    local h1 = SC.file(p)
+    eq(h1, SC.file(p), 'unchanged: the memo answers')
+    eq(h1, SC.loaded(p))
+    put('three') -- (no _forget: the process lives on, as the nvim session and mcpserve do)
+    local h2 = SC.file(p)
+    ok(h2 ~= h1, 'the edit is a new stamp')
+    eq(vim.fn.sha256('three'), h2, 'the stamp is the bytes, not the signature that triggered the re-read')
+    eq(h1, SC.loaded(p), 'loaded code is pinned at the first ask: the running code did not change')
+    os.remove(p)
+    eq(nil, SC.file(p), 'a removed file has no stamp')
+    -- a tree follows too, and a pinned tree does not
+    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
+    local fd = io.open(d .. '/a.lua', 'wb'); fd:write('x'); fd:close()
+    local t1 = SC.tree(d)
+    local l1 = SC.loaded_tree(d)
+    eq(t1, l1)
+    fd = io.open(d .. '/a.lua', 'wb'); fd:write('yy'); fd:close()
+    ok(SC.tree(d) ~= t1, 'an edited file in the tree')
+    fd = io.open(d .. '/b.lua', 'wb'); fd:write(''); fd:close()
+    local t3 = SC.tree(d)
+    fd = io.open(d .. '/b.lua', 'wb'); fd:write(''); fd:close()
+    eq(t3, SC.tree(d), 'the same bytes rewritten is the same stamp')
+    eq(l1, SC.loaded_tree(d), 'the loaded tree is pinned')
+    vim.fn.delete(d, 'rf')
+end)
+
 test('stampcache: CARTOGRAPH_STAMPCACHE=0 is a log that remembers nothing (the A/B that proves a cache changes no answer)', function ()
     local saved = vim.env.CARTOGRAPH_STAMPCACHE
     vim.env.CARTOGRAPH_STAMPCACHE = '0'

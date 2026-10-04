@@ -155,7 +155,7 @@ function M.cache(tree, dir)
         local scope = tree.scope and table.concat(tree.scope, '\1') or ''
         local me = debug.getinfo(1, 'S').source:sub(2)
         base = SC.key({ 'facts', th, scope, vim.fn.exepath('gcc'), out({ 'gcc', '-dumpfullversion', '-dumpmachine' }),
-            vim.fn.exepath('make'), (out({ 'make', '--version' }):match('^[^\n]*')), SC.file(me) or '' })
+            vim.fn.exepath('make'), (out({ 'make', '--version' }):match('^[^\n]*')), SC.loaded(me) or '' })
         stats.stamp_ms = (vim.uv.hrtime() - t0) / 1e6
         return base
     end
@@ -171,14 +171,16 @@ function M.cache(tree, dir)
     local function code(d)
         if codes[d.path] then return codes[d.path] end
         local seen, parts = {}, {}
-        local function add(path)
+        -- (a REQUIRED module is code this process loaded: its stamp is pinned; a derivation and its siblings are
+        -- dofile'd afresh, so theirs follow the disk — CART-1431)
+        local function add(path, loaded)
             if not path or seen[path] then return end
             seen[path] = true
             local fd = io.open(path, 'rb'); if not fd then parts[#parts + 1] = path .. '=?'; return end
             local text = fd:read('a'); fd:close()
-            parts[#parts + 1] = path:sub(#lua_root + 2) .. '=' .. (SC.file(path) or '?')
+            parts[#parts + 1] = path:sub(#lua_root + 2) .. '=' .. ((loaded and SC.loaded(path) or SC.file(path)) or '?')
             for m in text:gmatch("require%s*%(?%s*['\"]([%w_%.%-]+)['\"]") do
-                if m:match('^cartograph%.') then add(mod_path(m)) end
+                if m:match('^cartograph%.') then add(mod_path(m), true) end
             end
             for f in text:gmatch("['\"]([%w_%-]+%.lua)['\"]") do
                 local sib = dir .. '/' .. f

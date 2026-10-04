@@ -59,9 +59,11 @@ end
 local function source_stamp()
     local SC = require 'cartograph.stampcache'
     local here = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:gsub('^@', ''), ':p:h')
-    local tree = SC.tree(here .. '/algebra')
-    return SC.key({ 'match', tostring(tree), tostring(SC.file(here .. '/mix.lua')), tostring(SC.file(here .. '/mixalg.lua')),
-        tostring(SC.file(here .. '/mixterm.lua')) })
+    -- (the code this process RUNS: pinned at the first ask — CART-1431 — so a matcher is never filed under the key of an
+    -- edit the process has not loaded)
+    local tree = SC.loaded_tree(here .. '/algebra')
+    return SC.key({ 'match', tostring(tree), tostring(SC.loaded(here .. '/mix.lua')), tostring(SC.loaded(here .. '/mixalg.lua')),
+        tostring(SC.loaded(here .. '/mixterm.lua')) })
 end
 
 --- match specialized to template T -> f(I) equal to A.match(T, I), and how it was obtained ('memo' | 'disk' |
