@@ -1423,22 +1423,13 @@ function D.migrate_one(T, T2, op, V, env)
 end
 
 -- ── the hook ───────────────────────────────────────────────────────────────────
--- ── instance_of, as the meet being a renaming: T1 ≤ T2  iff  meet(T1, T2) ≅ T1 ───
--- the left map sends every hole of T1 to a distinct hole whose meet domain is T1's own, or a
--- pinned hole to its pin (a pin and its value are the same set of instances)
+-- ── instance_of, as subsumption by the derived match: T1 ≤ T2  iff  T2 matches T1's body with T1's holes as rigid
+-- constants carrying their domains (a hole of T1 facing a hole of T2 is domain inclusion, a hedge of T1 is counted
+-- against T2's bounds). ⚠ NOT the meet law meet(T1, T2) ≅ T1 (unify, then the left map a renaming with T1's own
+-- domains): with hedge and context variables the meet is not unique, and the law read 4 donor examples wrong, every
+-- one a hedge or context case — KLV Example 4.12, VMIN.md x2, a query template with hedges as the instance (CART-1360)
 function D.instance_of(T1, T2, env)
-    local r = B.unify(T1, T2, { env = env })
-    if not r then return false end
-    local seen = {}
-    for h, e in pairs(T1.holes) do
-        local t = r.left[h]
-        if is_hole(t) then
-            if seen[t.h] then return false end
-            seen[t.h] = true
-            if B.show_domain(r.template.holes[t.h].domain) ~= B.show_domain(e.domain) then return false end
-        elseif not (e.domain.kind == 'closed' and B.eq(t, e.domain.value)) then return false end
-    end
-    return true
+    return D.match(T2, T1.body, { defs = env and env.defs, hole_domains = T1.holes }).ok
 end
 
 -- ── link by value and normalization (LINK.md), from equality and the derived match ─────────

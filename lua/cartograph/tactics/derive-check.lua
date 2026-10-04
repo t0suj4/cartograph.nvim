@@ -2,7 +2,8 @@
 -- the vendored algebra suite runs twice — as it is, and with DERIVE=<op> (core.lua's hook swaps the operator for its
 -- re-derivation from the basis, cartograph.algebra.derive) — and the EXTRA failures over the baseline are the verdict.
 -- The verb audit (CART-1360) runs it per operator: on 2026-10-03, 22 of the 29 derived operators derived cleanly and
--- 7 had drifted (trace +28, migrate_one +5, generalize +4, instance_of +4, classify +4, rewrite +2, dig +1).
+-- 7 had drifted (trace +28, migrate_one +5, generalize +4, instance_of +4, classify +4, rewrite +2, dig +1); on
+-- 2026-10-04 every one derives clean and DERIVE=all fails nothing the native run does (358/0 over algebra + donor + kvterm).
 -- ⚠ An operator with NO derivation is refused by name before anything runs (DERIVE would raise while loading the
 -- algebra and fail EVERY test — a count that would read as a verdict).
 -- CLAIM: derivable — the derived run fails nothing the baseline does not.
