@@ -4108,6 +4108,49 @@ test('clones: a BODY local against a global is STILL a localglobal hole', functi
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ THE SAME SPELLING IS NOT THE SAME BINDING (CART-1424). The walker asked the spelling before the scope, and the
+-- swap onto the algebra kept it for parity: `length` a FIELD in one body and a PARAMETER in the other read as no
+-- divergence at all — elasticsearch's ES91OSQVectorsScorer.quantizeScore against ES940OSQVectorsScorer's
+-- quantized4BitScore was offered as EXACT. A helper reading `length` sees neither the caller's parameter nor its local.
+test('clones: a PARAMETER facing a global OF THE SAME SPELLING is a value parameter, never exact', function ()
+    local base = '  local out = {}\n  local seed = load(src)\n'
+    local tail = '  local n = count(out)\n  persist(out)\n  return n'
+    local body = base .. '  out[#out + 1] = tag(mode)\n' .. tail
+    local root = proj {
+        ['sp1.lua'] = fn('mode_param', 'src, mode', body),
+        ['sp2.lua'] = fn('mode_global', 'src', body),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'mode_param', 'mode_global')
+    ok(p, 'mode_param and mode_global are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    local saw = false
+    for _, h in ipairs(an and an.holes or {}) do
+        if h.kind == 'name' and h.a == 'mode' and h.b == 'mode' then saw = true end
+    end
+    ok(saw, 'the parameter mode / the global mode is a value parameter')
+    eq('value', an and an.kind, 'and the pair is a value extraction, not exact')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a BODY local facing a global OF THE SAME SPELLING is a localglobal hole', function ()
+    local base = '  local out = {}\n  local seed = load(src)\n'
+    local tail = '  persist(out)\n  return out'
+    local body_a = base .. '  local mode = pick(seed)\n  out[#out + 1] = mode\n' .. tail
+    local body_b = base .. '  local seen = pick(seed)\n  out[#out + 1] = mode\n' .. tail
+    local root = proj {
+        ['sl1.lua'] = fn('mode_local', 'src', body_a),
+        ['sl2.lua'] = fn('mode_upvalue', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 4, min_shared = 2 }),
+        'mode_local', 'mode_upvalue')
+    ok(p, 'mode_local and mode_upvalue are a near-clone')
+    local an = p and clones.analyze_pair(p)
+    ok(lg_holes(an) >= 1, 'the local mode ⇄ the global mode reads as local-vs-global: '
+        .. tostring(an and #(an.structs or {})))
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: two locals that SWAP are a rename divergence, not a clean extraction', function ()
     -- ⚠ THE SHIPPED WITNESS is lsp.lua's two call-hierarchy handlers:
     -- `occurrences(caller, id)` against `occurrences(id, callee)` — the same two

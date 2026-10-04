@@ -974,18 +974,19 @@ function M.anti_unify(e1, e2, opts)
                 end
             end
         elseif (n1 or n2) and type(st.a) == 'table' and type(st.b) == 'table' and st.a.k == 'name' and st.b.k == 'name' then
-            -- a local facing a global: the walker asks the SPELLING first (equal spellings are equal, local or not),
-            -- then whether the local is a parameter the call site can name (a value), else it refuses (localglobal)
+            -- a local facing a global: a value parameter when the local is a parameter the call site can name, else a
+            -- refusal (localglobal). ★ THE SPELLING DOES NOT ENTER (CART-1424): the walker asked it first and called
+            -- equal spellings equal, so a field `length` facing a parameter `length` read as EXACT — a helper reading
+            -- `length` sees neither. Measured: 8 of 3692 near pairs on our tree, 50 of 5360 on elasticsearch/libs (2
+            -- of them exact -> value), 0 of 718 on TradeSkillMaster
             handled = true
             local x, y = sa[st.a], sb[st.b]
-            if not (x and y and tostring(x.n) == tostring(y.n)) then
-                local ps = ctx and (n1 and ctx.pa or ctx.pb)
-                if ps and ps[n1 or n2] then
-                    h = { kind = 'name', a = x.n, b = y.n, at_a = x.at, at_b = y.at, xn = x, yn = y }
-                else
-                    ok = false
-                    h = { kind = 'struct', xn = x, yn = y, why = 'localglobal' }
-                end
+            local ps = ctx and (n1 and ctx.pa or ctx.pb)
+            if ps and ps[n1 or n2] then
+                h = { kind = 'name', a = x.n, b = y.n, at_a = x.at, at_b = y.at, xn = x, yn = y }
+            else
+                ok = false
+                h = { kind = 'struct', xn = x, yn = y, why = 'localglobal' }
             end
         end
         if not handled then kd = (st.rep and 'struct') or M.hole_kind(st.a, st.b, st.pk, st.idx) end
