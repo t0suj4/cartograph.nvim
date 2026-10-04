@@ -2411,6 +2411,16 @@ end
 --- stamps, VERSION and the profile, and every warm cache went confidently stale.
 --- The requires are what pull those registrations in; without them a contributor
 --- declared in a module nobody loaded would silently not contribute.
+-- ★ THE ENGINE IS AN ARTIFACT TOO (CART-1449): a graph is what THIS code extracted, so the content stamp of the loaded
+-- engine (lua/cartograph, pinned per process: 427 files, ~96 ms once) is part of every key. Before, only the hand-bumped
+-- VERSION stood for the code — an extractor edit without a bump served graphs the OLD code extracted (unchanged files
+-- from the cache, changed ones from the new code, spliced), which is why ab-equivalence needed isolated homes. VERSION
+-- stays as the format number; this makes a forgotten bump harmless.
+local ENGINE = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h')
+require('cartograph.validity').contribute('engine', function ()
+    return (require('cartograph.stampcache').loaded_tree(ENGINE))
+end)
+
 local function artifact_key()
     pcall(require, 'cartograph.spec.profile')
     pcall(require, 'cartograph.spec.ecosystem')
@@ -2839,11 +2849,26 @@ end
 --- attach. Latent trap, not a live bug: see kb `synthetic-var-node-
 --- families`. Unparsed bundle modules live in the manifest and are
 --- synthesized at load.
+-- ★ ONLY A RAW GRAPH IS PERSISTED (CART-1449). Ingest FOLDS argv (one global column store, each call an offset into it)
+-- and ranges (`at`: each range an index into a module-level store) — a contract every save path keeps by encoding
+-- BEFORE ingest (at.lua, df.lua). Saved after, every call wrote the WHOLE argv store into its shard (`_av`: 977 copies
+-- of ~1.9 MB in erlterms.lua's shard alone — 18 GB written for lua/, a 9-minute save on a 97%-full disk) and every
+-- range an index into a store the cache never writes. Refused by name instead: save the graph before store.ingest.
+local function folded(data)
+    if data._argvcol or data._atcol then
+        return 'the graph is FOLDED (store.ingest ran: argv and ranges are indices into in-memory stores) — save it before ingest'
+    end
+    return nil
+end
+M._folded = folded
+
 function M.save(data, dirty)
     if require('cartograph.config').cache == false then return end
     -- persistable <=> stamps: the source supplied wire-free validity
     -- keys, whatever it is. Samples (no stamps) never persist.
     if not (data and data.provider and data.stamps) then return end
+    local fwhy = folded(data)
+    if fwhy then vim.notify('cartograph: cache.save refused — ' .. fwhy, vim.log.levels.WARN); return nil, fwhy end
     if profile_overridden(data) then return end -- CART-0217: see profile_overridden
     local dir = M.path(data.root)
     vim.fn.mkdir(dir, 'p')
@@ -2907,6 +2932,8 @@ end
 function M.save_bg(data)
     if require('cartograph.config').cache == false then return end
     if not (data and data.provider and data.stamps) then return end
+    local fwhy = folded(data)
+    if fwhy then vim.notify('cartograph: cache.save_bg refused — ' .. fwhy, vim.log.levels.WARN); return nil, fwhy end
     if profile_overridden(data) then return end -- CART-0217: see profile_overridden
     local dir = M.path(data.root)
     vim.fn.mkdir(dir, 'p')
@@ -3217,6 +3244,19 @@ end
 --- splices changes through refresh.splice, which re-extracts AND relinks FULL — that would
 --- pollute the thin graph with a call graph and defeat the point; a per-file defs-only,
 --- relink-free incremental splice is the banked refinement. Returns (data, note) or nil.
+--- THE GRAPH OF A ROOT, warm when it can be (CART-1449): the cache's warm open (changed files re-extracted and spliced),
+--- else a cold extraction SAVED RAW — before anything ingests it — for the next run. -> data (not ingested), 'warm' |
+--- 'cold', the cache's note. For headless callers that extract a tree per run (the dogfood fence, a toolbelt run): a
+--- run that follows another without an engine edit opens in ~2 s instead of re-extracting (21.6 s on lua/).
+function M.graph(root, opts)
+    local data, note = M.open(root)
+    if data then return data, 'warm', note end
+    data = require('cartograph.providers.treesitter').extract(root, opts)
+    data.root = data.root or root
+    if not (opts and opts.subdirs) then M.save(data) end -- (a slice would poison the full-tree entry)
+    return data, 'cold', note
+end
+
 function M.open_index_only(root)
     if require('cartograph.config').cache == false then return nil end
     local m, changed, deleted = warm_decision(root)

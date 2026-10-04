@@ -92,7 +92,7 @@ elseif cmd == 'run' then
     -- `-` = no graph: a discovery that measures something else (mutation-check, spec-fails) need not extract a tree
     -- `stub`: there is no graph behind this world, so a write has nothing to refresh (txn.execute skips it)
     if dir == '-' then store.ingest({ root = vim.fn.getcwd(), nodes = {}, edges = {}, calls = {}, stub = true })
-    else store.ingest(require('cartograph.providers.treesitter').extract((vim.fn.fnamemodify(dir, ':p'):gsub('/$', '')))) end
+    else store.ingest((require('cartograph.cache').graph((vim.fn.fnamemodify(dir, ':p'):gsub('/$', ''))))) end -- (warm when unchanged, CART-1449)
     -- `@<file>` / `@-` (stdin): a THROWAWAY — an entry from a source anywhere, run by the same machinery, committed to
     -- nothing (toolbelt.throwaway)
     local entry

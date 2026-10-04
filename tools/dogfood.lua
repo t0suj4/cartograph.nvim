@@ -11,13 +11,12 @@ vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 pcall(vim.treesitter.language.add, 'lua')
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
-local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local dogfood = require 'cartograph.dogfood'
 
 local root = repo .. '/lua'
-local data = ts.extract(root)
-data.root = data.root or root
+-- (warm when the tree and the engine are unchanged since the last run, else extracted and saved raw — CART-1449)
+local data = require('cartograph.cache').graph(root)
 store.ingest(data)
 
 local lines, counts = dogfood.run(store)

@@ -171,10 +171,11 @@ test('cache: the inheritance rows survive the round trip, sharded by their own f
     if not ok then error(err) end
 end)
 
-test('cache × callcols: build_shards materializes proxy calls (no unserializable __cc)', function ()
-    -- a flow-LESS graph (no n._flow accessor) ingested with the flag on has proxy
-    -- CALLS but serializable nodes — so build_shards must materialize the proxies
-    -- (else pairs() over one captures its __cc column closures → cannot serialize).
+test('cache × callcols: a POST-ingest save is REFUSED by name — proxy calls, folded argv and folded ranges never reach a shard (CART-1449)', function ()
+    -- a flow-LESS graph ingested with the flag on has proxy CALLS. This test once saved it and checked callee/to came
+    -- back — but ingest had also folded `at` into an INDEX into an in-memory store the cache never writes (and argv into
+    -- a global store every call would have copied whole: 18 GB for lua/). Every production path saves BEFORE ingest;
+    -- the contract is now enforced instead of half-served.
     local root = vim.fn.tempname()
     local was = config.callcols_store
     local ok, err = pcall(function ()
@@ -190,10 +191,9 @@ test('cache × callcols: build_shards materializes proxy calls (no unserializabl
         config.callcols_store = true
         store.ingest(g)
         ok(rawget(store.data.calls[1], '__cc') ~= nil, 'the call is a proxy row')
-        cache.save(store.data, nil)                 -- POST-ingest save: materialize kicks in
-        local loaded = cache.load(root)
-        ok(loaded ~= nil, 'reload after post-ingest save')
-        eq('g', loaded.calls[1].callee); eq('x', loaded.calls[1].to)
+        local r, why = cache.save(store.data, nil)  -- POST-ingest save: refused
+        eq(nil, r); ok(tostring(why):find('FOLDED', 1, true), tostring(why))
+        eq(nil, (cache.load(root)), 'nothing was written')
     end)
     config.callcols_store = was
     cache.wipe(root)
