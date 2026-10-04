@@ -80,19 +80,36 @@ function M.measure(rule, fn)
         function(n) return 'x' .. (' '):rep(n - 1) end,
         function(n) return ('x '):rep(math.floor(n / 2)) end,
     }
+    -- ★ ROBUST TO A LOADED MACHINE (CART-1319): one timing per size read the parallel suite's contention as growth (a
+    -- linear rule measured up to 1.92, past the naive quadratic rewrite's own floor). The sizes are now INTERLEAVED over
+    -- ROUNDS (load hits every size alike) and each keeps its MINIMUM (load only ever adds time); the repetitions per size
+    -- are calibrated once, to ~2 ms a batch.
+    local sizes, ROUNDS = { 1000, 2000, 4000, 8000 }, 5
     local worst = 0
     for _, f in ipairs(fams) do
         local xs, ys = {}, {}
-        for _, n in ipairs({ 1000, 2000, 4000, 8000 }) do
-            local s, reps, t = f(n), 1, 0
-            repeat
+        local inputs, reps, best = {}, {}, {}
+        for i, n in ipairs(sizes) do
+            inputs[i] = f(n)
+            local r = 1
+            while true do
                 local t0 = os.clock()
-                for _ = 1, reps do fn(s) end
-                t = os.clock() - t0
-                reps = reps * 4
-            until t > 0.01 or reps > 4 ^ 7
-            t = t / (reps / 4)
-            if t > 1e-6 then xs[#xs + 1] = math.log(n); ys[#ys + 1] = math.log(t) end
+                for _ = 1, r do fn(inputs[i]) end
+                if os.clock() - t0 > 0.002 or r >= 4 ^ 7 then break end
+                r = r * 4
+            end
+            reps[i] = r
+        end
+        for _ = 1, ROUNDS do
+            for i = 1, #sizes do
+                local t0 = os.clock()
+                for _ = 1, reps[i] do fn(inputs[i]) end
+                local t = (os.clock() - t0) / reps[i]
+                if not best[i] or t < best[i] then best[i] = t end
+            end
+        end
+        for i, n in ipairs(sizes) do
+            if best[i] > 1e-6 then xs[#xs + 1] = math.log(n); ys[#ys + 1] = math.log(best[i]) end
         end
         if #xs >= 3 then
             local mx, my = 0, 0
