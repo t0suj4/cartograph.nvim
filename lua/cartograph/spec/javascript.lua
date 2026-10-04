@@ -134,7 +134,7 @@ local function build_js_ret_map(tsroot, src)
                 end
             end
         end
-        for c in n:iter_children() do walk(c, curfn) end
+        for _, c in tsutil.inext, n, -1 do walk(c, curfn) end
     end
     walk(tsroot, nil)
     return map
@@ -357,7 +357,7 @@ return {
                     seen_fn = true
                     local ps = up:field('parameters')[1]
                     if ps then
-                        for p in ps:iter_children() do
+                        for _, p in tsutil.inext, ps, -1 do
                             local pt = p:type()
                             if (pt == 'object_pattern' or pt == 'array_pattern')
                                 and node_text(p, src):find(
@@ -385,14 +385,14 @@ return {
                 local found = false
                 local function walk(n)
                     if found then return end
-                    for c in n:iter_children() do
+                    for _, c in tsutil.inext, n, -1 do
                         if found then return end
                         if c:named() then
                             local ct = c:type()
                             if fn_types[ct] then -- a nested fn: its own scope
                             elseif ct == 'variable_declaration'
                                 or ct == 'lexical_declaration' then
-                                for d in c:iter_children() do
+                                for _, d in tsutil.inext, c, -1 do
                                     if d:type() == 'variable_declarator' then
                                         local nm = d:field('name')[1]
                                         -- destructuring binds several names; any
@@ -652,7 +652,7 @@ return {
                 end
             end
             local function walk(node)
-                for ch in node:iter_children() do
+                for _, ch in tsutil.inext, node, -1 do
                     if ch:named() then
                         local t = ch:type()
                         if t == 'shorthand_property_identifier_pattern' then

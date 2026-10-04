@@ -200,7 +200,7 @@ local function normlbl(s) return (vim.trim(s):gsub("^'", ""):gsub(":$", "")) end
 local function target_label(node, src)
     local lf = node:field('label')[1]
     if lf then return normlbl(txt(lf, src)) end
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         if c:named() and not COMMENT[c:type()] then return normlbl(txt(c, src)) end
     end
     return nil
@@ -211,7 +211,7 @@ local function labeled_parts(node, src)
     local lf = node:field('label')[1]
     local label = lf and normlbl(txt(lf, src)) or nil
     local inner
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         if c:named() and not COMMENT[c:type()] and c ~= lf then
             local ct = c:type()
             if not label and (ct == 'identifier' or ct == 'statement_identifier'
@@ -224,7 +224,7 @@ local function labeled_parts(node, src)
 end
 -- a loop's OWN label (rust `'outer: loop`), else nil
 local function loop_label(node, src)
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         -- @langs-ok `label` is rust's (and haskell's) node; no other grammar in the
         -- roster has labelled loops at all, so there is nothing to mirror it with
         if c:type() == 'label' then return normlbl(txt(c, src)) end
@@ -476,7 +476,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         elseif bf then
             bindset, bindskip = {}, {}
             if bf == true then
-                for c in node:iter_children() do
+                for _, c in tsutil.inext, node, -1 do
                     if c:named() then bindset[c:id()] = true end
                 end
             else
@@ -542,7 +542,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
             -- CONSTRUCTION rather than by two tables being kept in step. A declaration with
             -- no `=` is untouched, which is every lua node that reaches here.
             local past = false
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 if not c:named() then
                     if ASSIGN_TOK[txt(c, src)] then past = true end
                 elseif past then
@@ -577,7 +577,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         else
             k = defpos and WRAP[t] or false
         end
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() then
               local ct = c:type() -- cache the per-child type FFI (was called 2-6× below)
               -- a BINDING MODIFIER decorates the declaration and reads nothing; descending
@@ -699,7 +699,7 @@ local function param_names(fn, src, pfield, method, params_of)
     -- parameter list either (odin nests `parameters` inside its `procedure` wrapper).
     local ps = (pfield and fn:field(pfield)[1]) or (params_of and params_of(fn))
     if ps then
-        for c in ps:iter_children() do
+        for _, c in tsutil.inext, ps, -1 do
             local t = c:type()
             if t == 'identifier' or t == 'variable' then
                 out[#out + 1] = txt(c, src)
@@ -708,7 +708,7 @@ local function param_names(fn, src, pfield, method, params_of)
             elseif DESTRUCT[t] then
                 -- every name inside, at any nesting (`|(a, (b, c))|`)
                 local function collect(n)
-                    for id in n:iter_children() do
+                    for _, id in tsutil.inext, n, -1 do
                         local it = id:type()
                         if it == 'identifier' then out[#out + 1] = txt(id, src)
                         elseif DESTRUCT[it] then collect(id) end
@@ -716,7 +716,7 @@ local function param_names(fn, src, pfield, method, params_of)
                 end
                 collect(c)
             elseif c:named() then
-                for id in c:iter_children() do
+                for _, id in tsutil.inext, c, -1 do
                     local it = id:type()
                     if it == 'identifier' then out[#out + 1] = txt(id, src); break end
                     if it == 'variable_name' then out[#out + 1] = txt(id, src):gsub('^%$', ''); break end
@@ -749,11 +749,11 @@ function M.binders(node, src, field)
     local values = {}
     local ps = field and node:field(field)[1]
     if ps then
-        for c in ps:iter_children() do
+        for _, c in tsutil.inext, ps, -1 do
             local t = c:type()
             if c:named() and t ~= 'identifier' and not DESTRUCT[t] then
                 local bound = false -- the FIRST identifier is the binder; the rest is a value
-                for x in c:iter_children() do
+                for _, x in tsutil.inext, c, -1 do
                     if x:named() then
                         -- @langs-ok reached only for a language that DECLARES a `blocks`
                         -- spec key — ruby alone, whose binder leaves are `identifier`
@@ -809,7 +809,7 @@ function M.pattern_binders(node, bindf, ids)
         local bf = bindf and bindf[n:type()]
         local bindset, bindskip = {}, {}
         if bf == true then
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:named() then bindset[c:id()] = true end
             end
         elseif bf then
@@ -822,7 +822,7 @@ function M.pattern_binders(node, bindf, ids)
                 end
             end
         end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() and not bindskip[c:id()] then
                 local ct = c:type()
                 if bindset[c:id()] then
@@ -860,7 +860,7 @@ function M.head_binders(node, src, cls)
             local x = node:field(f)[1]
             if x then hdr[x:id()] = true end
         end
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and not hdr[c:id()] then nodes[#nodes + 1] = c end
         end
     end
@@ -872,7 +872,7 @@ function M.head_binders(node, src, cls)
             if n:type() == 'identifier' then names[#names + 1] = txt(n, src) end
             return
         end
-        for c in n:iter_children() do if c:named() then leaves(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then leaves(c) end end
     end
     for _, b in ipairs(nodes) do skip[b:id()] = true; leaves(b) end
     return names, skip, {}
@@ -888,7 +888,7 @@ function M.case_labels(node)
         for _, x in ipairs(node:field(f)) do labels[#labels + 1] = x end
     end
     if #labels == 0 then
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and CASELABEL[c:type()] then labels[#labels + 1] = c end
         end
     end
@@ -899,7 +899,7 @@ end
 local function fn_body(fn)
     local b = fn:field('body')[1]
     if b then return b end
-    for c in fn:iter_children() do if c:named() and BODY[c:type()] then return c end end
+    for _, c in tsutil.inext, fn, -1 do if c:named() and BODY[c:type()] then return c end end
     return nil -- no body block (e.g. `function() end`) → no statements; NEVER
     -- fall back to `fn` itself (that walks the parameters as bogus statements)
 end
@@ -1104,7 +1104,7 @@ function M.build(fnnode, src, cfg)
         if not cond then return nil end
         -- java / php: the initializer carries no field name, so take the named child
         -- that PRECEDES the condition (and is not a clause or the body).
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:id() == cond:id() then return nil end
             if c:named() and not COMMENT[c:type()]
                 and not BODY_[c:type()] and not CLAUSE_[c:type()] then return c end
@@ -1119,7 +1119,7 @@ function M.build(fnnode, src, cfg)
         -- Unwrap a sole CTRL child so it is regioned like a control statement.
         if t == 'expression_statement' then
             local inner
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 if c:named() and not COMMENT[c:type()] then
                     if inner then inner = nil; break end
                     inner = c
@@ -1282,7 +1282,7 @@ function M.build(fnnode, src, cfg)
             -- a HEAD-ONLY form has no `body` field at all: every named child that is not
             -- the head and not a clause IS a body statement, which is what the generic
             -- loop below already does once body_field stays nil.
-            for gc in node:iter_children() do
+            for _, gc in tsutil.inext, node, -1 do
                 if gc:named() and gc ~= cond and not (finit and gc:id() == finit:id())
                     and not (body_field and gc:id() ~= body_field:id()
                              and not CLAUSE_[gc:type()]) then
@@ -1313,7 +1313,7 @@ function M.build(fnnode, src, cfg)
     -- (a C switch body is a compound_statement of `case_statement`s) route to
     -- clause() so their bodies are regioned, not folded.
     function region(block, parent, pol)
-        for c in block:iter_children() do
+        for _, c in tsutil.inext, block, -1 do
             if c:named() then
                 local ct = c:type()
                 if not COMMENT[ct] then
@@ -1341,7 +1341,7 @@ function M.build(fnnode, src, cfg)
             local b = node:field('body')[1]
             if b and BODY_[b:type()] then region(b, idx, 'body')
             else
-                for c in node:iter_children() do
+                for _, c in tsutil.inext, node, -1 do
                     if c:named() and BODY_[c:type()] then region(c, idx, 'body') end
                 end
             end
@@ -1388,7 +1388,7 @@ function M.build(fnnode, src, cfg)
                 pol = (#labels == 0) and 'default' or 'case', def = d, use = u, t = node:type() }
             if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'casehead') end
             emit_blocks(lblk, idx)  -- a block inside a case LABEL (`when xs.any? { … }`)
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 if c:named() and not islabel[c:id()] and not COMMENT[c:type()] then
                     if BODY_[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
                 end
@@ -1438,7 +1438,7 @@ function M.build(fnnode, src, cfg)
                 region(cons, idx, 'body')
             else -- fallback: region non-condition named children
                 local condn = node:field('condition')[1]
-                for c in node:iter_children() do
+                for _, c in tsutil.inext, node, -1 do
                     if c:named() and c ~= condn and c ~= alt and not COMMENT[c:type()] then
                         if BODY_[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
                     end
@@ -1461,7 +1461,7 @@ function M.build(fnnode, src, cfg)
             -- child); fall back to the first BODY-type child.
             local b = node:field('body')[1]
             if not (b and BODY_[b:type()]) then
-                for c in node:iter_children() do
+                for _, c in tsutil.inext, node, -1 do
                     if BODY_[c:type()] then b = c break end
                 end
             end
@@ -1481,7 +1481,7 @@ function M.build(fnnode, src, cfg)
             or ct:find('default') and 'default' or 'clause')
         local b = node:field('body')[1]
         if b and BODY_[b:type()] then region(b, parent, pol) return end
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and not COMMENT[c:type()] then
                 if BODY_[c:type()] then region(c, parent, pol)
                 else emit(c, parent, pol) end
@@ -1602,7 +1602,7 @@ function M.pattern_parts(node, src, ids, reads, skip)
         -- `skip` (spec.name_skip, CART-1121): a field whose leaves are not variables — a macro name binds nothing
         local sf = skip and skip[n:type()]
         local sn = sf and n:field(sf)[1]
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() and not (sn and c:id() == sn:id()) then
                 if rn and c:id() == rn:id() then readn[#readn + 1] = c
                 else leaf(c); walk(c) end

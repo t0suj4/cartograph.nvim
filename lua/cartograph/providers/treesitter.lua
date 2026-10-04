@@ -212,7 +212,7 @@ local function qname(namen, src)
     -- nested case without this made the v8 residual go 15 -> 17, because three names that had
     -- been fully glued became half-glued and my detector counts both the same.
     local last
-    for c in namen:iter_children() do if c:named() then last = c end end
+    for _, c in tsutil.inext, namen, -1 do if c:named() then last = c end end
     -- @langs-ok `qualified_identifier` is a CPP-ONLY node type; the comparison
     -- being false in every other grammar is exactly what confines this unglue to
     -- C++ misparses, and they fall through to the plain squeezed text (the
@@ -223,7 +223,7 @@ local function qname(namen, src)
     end
     -- shape 1: a MISSING (zero-width) `::` — everything after it is the real name
     local past, tail = false, nil
-    for c in namen:iter_children() do
+    for _, c in tsutil.inext, namen, -1 do
         if not c:named() then
             if c:type() == '::' and node_text(c, src) == '' then past = true end
         elseif past then tail = c; break end
@@ -238,7 +238,7 @@ local function qname(namen, src)
     end
     -- shape 2: an ERROR child — the real name starts there
     local parts, seen = {}, false
-    for c in namen:iter_children() do
+    for _, c in tsutil.inext, namen, -1 do
         if not seen and c:named() and c:type() == 'ERROR' then seen = true end
         if seen then parts[#parts + 1] = node_text(c, src) end
     end
@@ -317,7 +317,7 @@ local function name_text(namen, src)
     -- because the grammar knows where its own string starts better than a regex.
     local nt = namen:type()
     if nt == 'string' or nt == 'string_literal' then
-        for c in namen:iter_children() do
+        for _, c in tsutil.inext, namen, -1 do
             -- @langs-ok a PREFERENCE with a total fallback; see the note above
             if c:named() and c:type() == 'string_content' then
                 return (node_text(c, src):gsub('%s+', ''))
@@ -459,7 +459,7 @@ local function param_map(fnnode, src, pfield)
     local ps = fnnode:field(pfield)[1]
     if not ps then return nil end
     local map, i = nil, 0
-    for ch in ps:iter_children() do
+    for _, ch in tsutil.inext, ps, -1 do
         if ch:named() then
             local nm
             local t = ch:type()
@@ -591,7 +591,7 @@ local function block_exits(G, blk, src)
     if ex == nil then
         ex = {}
         local alias = {}
-        for st in blk:iter_children() do
+        for _, st in tsutil.inext, blk, -1 do
             if st:named() then
                 local v, x = G.alias_decl(st)
                 if v then alias[node_text(v, src)] = ntext(x, src) end
@@ -734,7 +734,7 @@ local function ruby_rails_synth(tsroot, src)
                 local C = owner(n)
                 if C then
                     -- the FIRST symbol is the association name → reader + writer
-                    for c in args:iter_children() do
+                    for _, c in tsutil.inext, args, -1 do
                         -- @langs-ok ruby `simple_symbol` (`:sym`) — ruby-only literal, no analogue to mirror
                         if c:type() == 'simple_symbol' then
                             local sym = node_text(c, src):sub(2)
@@ -751,7 +751,7 @@ local function ruby_rails_synth(tsroot, src)
                 if C then
                     -- every top-level symbol is a delegated method; the `to:`/
                     -- `prefix:`/`allow_nil:` options are pairs, skipped
-                    for c in args:iter_children() do
+                    for _, c in tsutil.inext, args, -1 do
                         -- @langs-ok ruby `simple_symbol` again, same harvest
                         if c:type() == 'simple_symbol' then
                             local sym = node_text(c, src):sub(2)
@@ -763,7 +763,7 @@ local function ruby_rails_synth(tsroot, src)
                 end
             end
         end
-        for ch in n:iter_children() do walk(ch) end
+        for _, ch in tsutil.inext, n, -1 do walk(ch) end
     end
     walk(tsroot)
     return out
@@ -4656,7 +4656,7 @@ function M.names(file, sr, sc, er, ec)
                     er = ner, ec = nec }
             end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(tree:root())
     table.sort(out, function(a, b)
@@ -4895,7 +4895,7 @@ local function fold_str(n, src, spec, consts, depth)
         local opn = n:field('operator')[1]
         local op = opn and node_text(opn, src)
         if not op then -- lua exposes no `operator` field; the token IS the type
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if not c:named() then op = c:type(); break end
             end
         end

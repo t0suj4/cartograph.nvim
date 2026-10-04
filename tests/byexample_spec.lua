@@ -196,6 +196,25 @@ test('byexample: a STRUCTURAL MOVE is ONE rule — regions that exchange a carri
     eq(nil, swap); ok(tostring(why):find('matches its own output', 1, true), tostring(why))
 end)
 
+test('byexample: a region with NO CONSTANT is no evidence — lifted until it holds one, so a binder-list edit stays with its loop (CART-1452)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    -- `c -> _, c` alone (everything in it carried over) matched every one-name list: `local M = {}` became `local _, M`
+    local rules = assert(BX.learn('for c in node:iter_children() do g(c) end', 'for _, c in tsutil.inext, node, -1 do g(c) end', 'lua'))
+    eq(1, #rules, 'one rule for the loop header, not a binder-list rule beside it')
+    eq('c in node:iter_children()', rules[1].lhs_text)
+    local src = 'local M = {}\nfor x in n:iter_children() do if x:named() then f(x) end end\nfor k, v in pairs(t) do end\n'
+    local out, n = BX.rewrite(rules, src, 'lua')
+    eq('local M = {}\nfor _, x in tsutil.inext, n, -1 do if x:named() then f(x) end end\nfor k, v in pairs(t) do end\n', out)
+    eq(1, n)
+    -- (WHITESPACE is no constant: inserting `x()` between two carried statements makes the block `?1 ?2` — any
+    -- two-statement block, an if's body included — so it is lifted to the function that holds it)
+    local ins = assert(BX.learn('local function f()\n  a()\n  b()\nend', 'local function f()\n  a()\n  x()\n  b()\nend', 'lua'))
+    eq(1, #ins)
+    local src2 = 'if c then\n  a()\n  b()\nend\n'
+    local out2, n2 = BX.rewrite(ins, src2, 'lua')
+    eq(src2, out2, 'an if body is no function'); eq(0, n2)
+end)
+
 test('byexample: a CONSTANT the example keeps stays part of the pattern, and overlapping matches rewrite once', function ()
     if not ready() then skip 'no lua parser or algebra' end
     local rules = assert(BX.learn('if x == 0 then return end', 'if x <= 0 then return end'))

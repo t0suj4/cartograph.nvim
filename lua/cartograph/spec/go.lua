@@ -54,7 +54,7 @@ local function go_is_write(c, n)
         -- `for i := range s` BINDS i; `for g = range s` WRITES g. The operator
         -- is an anonymous child, so the distinction is invisible to node types.
         if p:named_child(0) ~= cur then return false end -- the iterated s reads
-        for ch in p:iter_children() do
+        for _, ch in tsutil.inext, p, -1 do
             if not ch:named() and ch:type() == '=' then return true end
         end
         return false

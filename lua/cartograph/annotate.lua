@@ -74,7 +74,7 @@ local function candidate_prefixes(text, lang)
                 if p and not seen[p] then seen[p] = true; out[#out + 1] = p end
             end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(root)
     return out

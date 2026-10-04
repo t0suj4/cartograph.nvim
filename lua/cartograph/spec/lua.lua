@@ -172,12 +172,12 @@ local STRING_CACHE = { src = nil, seen = {} } -- the last file's verdicts, keyed
 local function assigned(vl, el, name, src)
     -- the expression a `name` in variable list `vl` receives from expression list `el` (by position), or false
     local i = 0
-    for v in vl:iter_children() do
+    for _, v in tsutil.inext, vl, -1 do
         if v:named() then
             i = i + 1
             if v:type() == 'identifier' and node_text(v, src) == name then
                 local ei, e = 0, nil
-                for x in el:iter_children() do
+                for _, x in tsutil.inext, el, -1 do
                     if x:named() then ei = ei + 1; if ei == i then e = x end end
                 end
                 return e or false
@@ -196,9 +196,9 @@ local function local_all(id, src, depth, seen, pred, tag)
         if t == 'function_declaration' or t == 'function_definition' or t == 'for_generic_clause'
             or t == 'for_numeric_clause' then
             -- a parameter or a loop variable of this name shadows anything further out: not typed here
-            for c in p:iter_children() do
+            for _, c in tsutil.inext, p, -1 do
                 if c:type() == 'parameters' or c:type() == 'variable_list' then
-                    for v in c:iter_children() do
+                    for _, v in tsutil.inext, c, -1 do
                         if v:named() and node_text(v, src) == name then return false end
                     end
                 end
@@ -209,7 +209,7 @@ local function local_all(id, src, depth, seen, pred, tag)
         local idx = seen.decls and seen.decls[p:id()]
         if not idx then
             idx = {}
-            for c in p:iter_children() do
+            for _, c in tsutil.inext, p, -1 do
                 if c:type() == 'variable_declaration' then
                     local a = c:named_child(0)
                     local vl = a and (a:type() == 'assignment_statement' and a:named_child(0) or a)
@@ -260,7 +260,7 @@ local function local_all(id, src, depth, seen, pred, tag)
                                     and assigned(a2:named_child(0), a2:named_child(1), name, src)
                                 if r == false or (r and not pred(r, src, depth + 1, seen)) then ok = false end
                             end
-                            for y in x:iter_children() do scan(y) end
+                            for _, y in tsutil.inext, x, -1 do scan(y) end
                         end
                         scan(p)
                         seen[key] = ok
@@ -318,7 +318,7 @@ stringish = function (e, src, depth, seen)
     if t == 'string' then return true end
     if t == 'binary_expression' then
         local op
-        for c in e:iter_children() do if not c:named() then op = node_text(c, src) end end
+        for _, c in tsutil.inext, e, -1 do if not c:named() then op = node_text(c, src) end end
         if op == '..' then return true end
         if op == 'or' then
             return stringish(e:named_child(0), src, depth + 1, seen) and stringish(e:named_child(1), src, depth + 1, seen)
@@ -510,7 +510,7 @@ local LUA_GUARDS = {
         local vl = top:parent()
         if not vl or vl:type() ~= 'variable_list' then return false end
         local pos, i = nil, 0
-        for ch in vl:iter_children() do
+        for _, ch in tsutil.inext, vl, -1 do
             if ch:named() then
                 i = i + 1
                 if ch == top then pos = i break end
@@ -520,7 +520,7 @@ local LUA_GUARDS = {
         local exprs = asg and asg:named_child(1)
         if not (pos and exprs) then return false end
         local rhs, j = nil, 0
-        for ch in exprs:iter_children() do
+        for _, ch in tsutil.inext, exprs, -1 do
             if ch:named() then
                 j = j + 1
                 if j == pos then rhs = ch break end
@@ -987,7 +987,7 @@ return {
         while scope do
             local st = scope:type()
             if st == 'block' or st == 'chunk' then
-                for c in scope:iter_children() do
+                for _, c in tsutil.inext, scope, -1 do
                     if c:type() == 'variable_declaration' then
                         -- child(0) is the UNNAMED `local` token, not the binding list.
                         -- (A dump filtered to named children hides that and makes
@@ -995,11 +995,11 @@ return {
                         -- named child: a variable_list directly for `local x`, or one
                         -- nested under an assignment_statement for `local x = v`.
                         local l
-                        for k in c:iter_children() do
+                        for _, k in tsutil.inext, c, -1 do
                             local kt = k:type()
                             if kt == 'variable_list' then l = k break end
                             if kt == 'assignment_statement' then
-                                for k2 in k:iter_children() do
+                                for _, k2 in tsutil.inext, k, -1 do
                                     if k2:type() == 'variable_list' then l = k2 break end
                                 end
                                 break

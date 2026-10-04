@@ -105,16 +105,9 @@ function M.learn(before, after, lang)
             end
         end
     end
-    local rules = {}
-    for _, path in ipairs(regions) do
-        -- ⚠ A REGION THAT IS A BARE TOKEN IS LIFTED TO ITS NODE. `x == 0` -> `x <= 0` differs only in the operator,
-        -- and a rule `== -> <=` would rewrite EVERY `==` in a file (`x == nil` included): the demonstrated edit is
-        -- the comparison, so the region is the expression that holds the token
-        while #path > 0 and (get(Tb, path).k == 'lit' or get(Ta, path).k == 'lit') do
-            local up = {}
-            for i = 1, #path - 1 do up[i] = path[i] end
-            path = up
-        end
+    -- a region's RULE SIDES: its before and after subterms with the carried-over subterms made holes -> lhs term, rhs
+    -- term, Lb, La, the number of holes
+    local function sides(path)
         local Lb, La = get(Tb, path), get(Ta, path)
         -- the carried-over subterms: MAXIMAL subtrees of the after-region equal to one in the before-region
         local bsubs, picks = subtrees(Lb, {}), {}
@@ -169,13 +162,50 @@ function M.learn(before, after, lang)
             if #keep == #picks then break end
             picks = keep
         end
-        local lhs, rhs = a.template(holed(Lb)), a.template(holed(La))
+        return holed(Lb), holed(La), Lb, La, #picks
+    end
+    -- ★ A REGION WITH NO CONSTANT IS NO EVIDENCE (CART-1452). When its rule's LEFT side holds nothing but holes and
+    -- node kinds, it matches any node of that kind: `for c in n:iter_children()` -> `for _, c in tsutil.inext, n, -1`
+    -- made the binder list a region of its own, `c -> _, c` (`?1 -> _, ?1`), which rewrote EVERY one-name list in a
+    -- file (547 corrupt declarations in flow.lua) while its demonstration passed. Such a region is lifted to its parent
+    -- until its left side holds a constant (a token: here the clause's `in`), and a region it then contains is part of it
+    local function constant(t)
+        if t.k == 'lit' then return tostring(t.v):match('%S') ~= nil end
+        for _, c in ipairs(t.kids or {}) do if constant(c) then return true end end
+        return false
+    end
+    for _ = 1, 10000 do
+        local lifted = false
+        for k, path in ipairs(regions) do
+            if #path > 0 and not constant((sides(path))) then
+                local up = {}
+                for i = 1, #path - 1 do up[i] = path[i] end
+                local keep = { up }
+                for j, r in ipairs(regions) do if j ~= k and not under(up, r) then keep[#keep + 1] = r end end
+                regions, lifted = keep, true
+                break
+            end
+        end
+        if not lifted then break end
+    end
+    local rules = {}
+    for _, path in ipairs(regions) do
+        -- ⚠ A REGION THAT IS A BARE TOKEN IS LIFTED TO ITS NODE. `x == 0` -> `x <= 0` differs only in the operator,
+        -- and a rule `== -> <=` would rewrite EVERY `==` in a file (`x == nil` included): the demonstrated edit is
+        -- the comparison, so the region is the expression that holds the token
+        while #path > 0 and (get(Tb, path).k == 'lit' or get(Ta, path).k == 'lit') do
+            local up = {}
+            for i = 1, #path - 1 do up[i] = path[i] end
+            path = up
+        end
+        local hl, hr, Lb, La, nholes = sides(path)
+        local lhs, rhs = a.template(hl), a.template(hr)
         -- ★ A RULE THAT MATCHES ITS OWN OUTPUT NEVER RUNS OUT OF WORK (and could not be re-run as `empty`)
         if a.match(lhs, La).ok then
             return nil, ('the learned rule `%s -> %s` matches its own output — applying it again would rewrite forever')
                 :format(a.cst_print(Lb), a.cst_print(La)), 'ill-posed'
         end
-        rules[#rules + 1] = { lhs = lhs, rhs = rhs, lhs_text = a.cst_print(Lb), rhs_text = a.cst_print(La), holes = #picks }
+        rules[#rules + 1] = { lhs = lhs, rhs = rhs, lhs_text = a.cst_print(Lb), rhs_text = a.cst_print(La), holes = nholes }
     end
     return rules
 end

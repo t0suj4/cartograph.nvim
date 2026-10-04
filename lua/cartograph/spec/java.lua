@@ -463,14 +463,14 @@ local function java_body_fields(body, src)
     local out = flowfields[key]
     if out then return out end
     out = {}
-    for c in body:iter_children() do
+    for _, c in tsutil.inext, body, -1 do
         if c:type() == 'field_declaration' then
             local ty = c:field('type')[1]
             local fin = false
-            for m in c:iter_children() do
+            for _, m in tsutil.inext, c, -1 do
                 if m:type() == 'modifiers' then fin = node_text(m, src):match('%f[%w]final%f[%W]') ~= nil end
             end
-            for d in c:iter_children() do
+            for _, d in tsutil.inext, c, -1 do
                 if d:type() == 'variable_declarator' then
                     local nm = d:field('name')[1]
                     if nm then out[node_text(nm, src)] = { ty = ty, init = d:field('value')[1], final = fin } end
@@ -497,7 +497,7 @@ local function java_ret_flow(defn, src, tvars)
             local nm = n:field('name')[1]
             if nm then bound[node_text(nm, src)] = true end
         end
-        for c in n:iter_children() do if c:named() then bind(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then bind(c) end end
     end
     bind(defn)
     -- a type NAME the project may define: a plain identifier, not a type variable, not the JDK's
@@ -566,7 +566,7 @@ local function java_ret_flow(defn, src, tvars)
             if not ts_ then ok = false; return end
             for _, x in ipairs(ts_) do if not seen[x] then seen[x] = true; all[#all + 1] = x end end
         end
-        for c in n:iter_children() do if c:named() then walk(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end
     end
     local b = defn:field('body')[1]
     if b then walk(b) end
@@ -598,7 +598,7 @@ local function java_tvflow_heads(body, src)
     if out then return out end
     out = {}
     local count = {}
-    for c in body:iter_children() do
+    for _, c in tsutil.inext, body, -1 do
         if c:type() == 'method_declaration' then
             local nm = c:field('name')[1]
             local s = nm and node_text(nm, src)
@@ -1149,9 +1149,9 @@ return {
     -- the importer's source root, from its own `package` declaration (see JAVA_BASENAMES)
     import_context = function (tsroot, src, file)
         local pkg = ''
-        for child in tsroot:iter_children() do
+        for _, child in tsutil.inext, tsroot, -1 do
             if child:type() == 'package_declaration' then
-                for n in child:iter_children() do
+                for _, n in tsutil.inext, child, -1 do
                     local t = n:type()
                     if t == 'scoped_identifier' or t == 'identifier' then pkg = node_text(n, src) end
                 end

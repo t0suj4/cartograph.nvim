@@ -47,7 +47,7 @@ local function php_is_write(c, n)
         elseif pt == 'foreach_statement' then
             -- the ITERATED array is written only when iterated by reference
             if p:named_child(0) ~= cur then return false end
-            for ch in p:iter_children() do
+            for _, ch in tsutil.inext, p, -1 do
                 if ch:type() == 'by_ref' then return true end
             end
             return false

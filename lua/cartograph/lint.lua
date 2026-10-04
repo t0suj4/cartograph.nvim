@@ -704,7 +704,7 @@ local function tagcover_findings(store)
                                 tested[field][fnk][unq(rhs)] = true
                             end
                         end
-                        for c in n:iter_children() do
+                        for _, c in tsutil.inext, n, -1 do
                             if c:named() then walk(c, fnk) end
                         end
                     end
@@ -770,7 +770,7 @@ local function truncation_findings(store)
                         local t = n:type()
                         if t == 'function_call' then return true end
                         if t == 'binary_expression' or t == 'parenthesized_expression' then
-                            for c in n:iter_children() do
+                            for _, c in tsutil.inext, n, -1 do
                                 if c:named() and has_call(c) then return true end
                             end
                         end
@@ -800,7 +800,7 @@ local function truncation_findings(store)
                                 end
                             end
                         end
-                        for c in n:iter_children() do
+                        for _, c in tsutil.inext, n, -1 do
                             if c:named() and c:child(0) then walk(c) end
                         end
                     end
@@ -992,7 +992,7 @@ local function member_leak_findings(store)
                                 end
                             end
                         end
-                        for c in t:iter_children() do walk(c) end
+                        for _, c in tsutil.inext, t, -1 do walk(c) end
                     end
                     walk(root)
                 end

@@ -478,14 +478,14 @@ local function field_unstable_of(fn, src)
         -- a `variable_declaration` wrapping one, so handling the inner form catches both.
         if t == 'assignment_statement' then
             local vlist, elist
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 -- @langs-ok lua-only: field_unstable_of gates depth-≥1 PATHS, and ruby
                 -- has none by design, so this walk is never reached for ruby facts
                 if c:type() == 'variable_list' then vlist = c
                 -- @langs-ok lua-only, same reason
                 elseif c:type() == 'expression_list' then elist = c end
             end
-            if vlist then for tgt in vlist:iter_children() do -- field-write targets
+            if vlist then for _, tgt in tsutil.inext, vlist, -1 do -- field-write targets
                 -- @langs-ok lua-only, same reason: ruby facts are all depth 0
                 if tgt:type() == 'dot_index_expression' then
                     local p = path_of(tgt, src); if p then mark(p.path, true) end -- A.f inclusive
@@ -494,12 +494,12 @@ local function field_unstable_of(fn, src)
                     local b = path_of(tgt:named_child(0), src); if b then mark(b.path, false) end -- A[?] → A.*
                 end
             end end
-            if elist then for v in elist:iter_children() do -- alias RHS (identifier or field path)
+            if elist then for _, v in tsutil.inext, elist, -1 do -- alias RHS (identifier or field path)
                 if v:named() then local p = path_of(v, src); if p then mark(p.path, false) end end -- y = A → A.*
             end end
         elseif t == 'function_call' then -- A passed as arg, or A:m() receiver
             local args = n:field('arguments')[1]
-            if args then for a in args:iter_children() do
+            if args then for _, a in tsutil.inext, args, -1 do
                 if a:named() then local p = path_of(a, src); if p then mark(p.path, false) end end
             end end
             local callee = n:named_child(0)
@@ -508,7 +508,7 @@ local function field_unstable_of(fn, src)
                 local p = path_of(callee:named_child(0), src); if p then mark(p.path, false) end
             end
         end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() and not FN_TYPES[c:type()] then walk(c) end -- nested fns = own scope
         end
     end
@@ -574,10 +574,10 @@ function M.narrow(store, fn_id)
 
     local points, seenguard = {}, {}
     local function visit(n)
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then
                 if STMT_BLOCK[c:type()] then
-                    for stmt in c:iter_children() do
+                    for _, stmt in tsutil.inext, c, -1 do
                         if stmt:named() and not tsutil.is_comment(stmt) then
                             local env = {}
                             for _, g in ipairs(cfg.guards_over(stmt, src)) do
@@ -824,7 +824,7 @@ function M.param_nilability(store, fn_id)
                 return
             end
         end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() and not FN_TYPES[c:type()] then walk(c, proven) end
         end
     end
@@ -881,7 +881,7 @@ function M.redundant(store, fn_id)
     -- gates the branch.
     local checks = {}
     local function visit(n)
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then
                 -- @langs-ok `redundant` is gated to lua by VERB_LANG: its subject IS
                 -- a lua if_statement, and ruby's equivalent needs its own finder (CART-0302)
@@ -933,7 +933,7 @@ function M.devirt(store, fn_id)
     local sites = {}
     local summary = { method_calls = 0, typed = 0, certified = 0, candidate = 0 }
     local function visit(n)
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then
                 -- @langs-ok `devirt` is gated to lua by VERB_LANG: its subject is a lua
                 -- method call, and ruby dispatch needs its own finder (CART-0302)

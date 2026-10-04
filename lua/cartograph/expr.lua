@@ -793,7 +793,7 @@ end
 -- this]]). Filtering comments makes operand extraction position-stable.
 local function operands(node)
     local out = {}
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         if c:named() and not tsutil.is_comment(c) then out[#out + 1] = c end
     end
     return out
@@ -801,7 +801,7 @@ end
 -- the OPERATOR token = the first UNNAMED child (operators are anonymous tokens;
 -- operands and comments are named). Robust to interspersed comments.
 local function op_token(node, src)
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         if not c:named() then
             local x = vim.trim(txt(c, src))
             if x ~= '' then return x end
@@ -813,7 +813,7 @@ end
 -- callee + flattened argument nodes of a call (handles `f(a,b)`, `f{}`, `f"s"`)
 local function call_parts(node)
     local callee, args, i = nil, {}, 0
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         if c:named() and not tsutil.is_comment(c) then
             if i == 0 then callee = c
             -- @langs-ok the WRAPPER is what varies: haskell/scheme/bash have no
@@ -822,7 +822,7 @@ local function call_parts(node)
             -- below, which takes an unwrapped child AS an argument. Verified: odin call
             -- args do reach the IR.  @langs-ok the wrapper varies; the else-branch covers it
             elseif c:type() == 'arguments' or c:type() == 'argument_list' then
-                for a in c:iter_children() do
+                for _, a in tsutil.inext, c, -1 do
                     if a:named() and not tsutil.is_comment(a) then args[#args + 1] = a end
                 end
             else args[#args + 1] = c end
@@ -864,11 +864,11 @@ local function declared_call_parts(node, lang, t)
     -- it is an argument, and a wrapper is expanded wherever it appears.
     local _, _, nb = namen:start()
     local objn, args = nil, {}
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         if c:named() and not tsutil.is_comment(c) and not c:equal(namen) then
             local ct = c:type()
             if ct == 'arguments' or ct == 'argument_list' then
-                for a in c:iter_children() do
+                for _, a in tsutil.inext, c, -1 do
                     if a:named() and not tsutil.is_comment(a) then args[#args + 1] = a end
                 end
             else
@@ -935,7 +935,7 @@ function build_core(node, src, lang)
     -- single one of them is the value. Those keep falling to `?`, correctly.
     if UNWRAP[t] or STMT_WRAP[t] or SOLE_WRAP[t] then -- one expr expected: sole child, else `?`
         local only, n = nil, 0
-        for c in node:iter_children() do if c:named() and not tsutil.is_comment(c) then only = c; n = n + 1 end end
+        for _, c in tsutil.inext, node, -1 do if c:named() and not tsutil.is_comment(c) then only = c; n = n + 1 end end
         if n == 1 then return build(only, src, lang) end
     end
     local lty = LIT[t]
@@ -953,7 +953,7 @@ function build_core(node, src, lang)
     -- bash — the failure tools/langaudit.lua exists for.
     if lty == 'str' then
         local interp = nil
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and not tsutil.is_comment(c) and not STRING_INERT[c:type()] then
                 interp = interp or {}
                 interp[#interp + 1] = build(c, src, lang)
@@ -1024,7 +1024,7 @@ function build_core(node, src, lang)
         if sf then
             local sn = node:field(sf)[1]
             local kids = {}
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 if c:named() and not (sn and c:id() == sn:id()) and not tsutil.is_comment(c) then
                     kids[#kids + 1] = build(c, src, lang)
                 end
@@ -1044,7 +1044,7 @@ function build_core(node, src, lang)
             local flow = require 'cartograph.flow'
             local _, reads = flow.pattern_parts(pn, src, flow.leaf_ids(sp.df_ids), sp.pattern.reads, sp.name_skip)
             local kids = {}
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 if c:named() and c:id() ~= pn:id() and not tsutil.is_comment(c) then kids[#kids + 1] = build(c, src, lang) end
             end
             for _, x in ipairs(reads) do kids[#kids + 1] = build(x, src, lang) end
@@ -1100,7 +1100,7 @@ function build_core(node, src, lang)
         -- one anonymous keyword token + exactly one named child (the path
         -- expression, which PAREN unwraps transparently on the way down)
         local kwn, argn
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if not c:named() then
                 if not kwn then kwn = c end
             elseif not tsutil.is_comment(c) and not argn then
@@ -1184,7 +1184,7 @@ function build_core(node, src, lang)
         -- kids from EVERY named child, exactly as the `?` path did, so nothing a
         -- kids-walker used to see disappears
         local kids = {}
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and not tsutil.is_comment(c) then
                 kids[#kids + 1] = build(c, src, lang)
             end
@@ -1196,7 +1196,7 @@ function build_core(node, src, lang)
         -- an ALLOCATION (fresh identity) but its field VALUES/keys READ names — carry
         -- them as kids so the read-set stays faithful to du (which descends the table).
         local kids = {}
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and not tsutil.is_comment(c) then kids[#kids + 1] = build(c, src, lang) end
         end
         return { k = 'table', kids = kids }
@@ -1224,7 +1224,7 @@ function build_core(node, src, lang)
         -- for array-style constructors, which are the common case in every language.
         if not kn then return vn and build(vn, src, lang) or { k = '?', t = t, kids = {} } end
         local bracketed = false
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if not c:named() and vim.trim(txt(c, src)) == '[' then bracketed = true; break end
         end
         local key
@@ -1313,7 +1313,7 @@ function build_core(node, src, lang)
     -- RIGHT to count a binder as a read is a different question, filed apart.
     if ALLOCFN[t] then
         local kids = {}
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and not tsutil.is_comment(c) then
                 kids[#kids + 1] = build(c, src, lang)
             end
@@ -1360,7 +1360,7 @@ function build_core(node, src, lang)
     -- what keeps this from being one more place a grammar can be forgotten.
     local bnd = binder_nodes(lang)
     local kids = {}
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         if c:named() and not tsutil.is_comment(c) then
             if bnd and bnd[t] and NAMEISH[c:type()] then
                 -- ⚠ BUILT ONCE AND SHARED, not built twice (CART-0743). This
@@ -1424,7 +1424,7 @@ local function assign_sides(node, src)
     local left = node:field('left')[1]
     local right = node:field('right')[1] or node:field('value')[1]
     if not left or not right then
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() then
                 local ct = c:type()
                 if ct == 'variable_list' and not left then left = c
@@ -1441,7 +1441,7 @@ local function assign_sides(node, src)
     -- assignment grammar has in common. (CART-0304, found by declaring expr's @langs.)
     if not (left and right) and src then
         local before, after, seen = {}, {}, false
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if not c:named() then
                 if ASSIGN_OP[vim.treesitter.get_node_text(c, src)] then seen = true end
             elseif not tsutil.is_comment(c) then
@@ -1460,7 +1460,7 @@ local function list_children(node) -- the named exprs of a *_list (or the node i
     if not node then return {} end
     if UNWRAP[node:type()] then
         local out = {}
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and not tsutil.is_comment(c) then out[#out + 1] = c end
         end
         return out
@@ -1611,7 +1611,7 @@ function M.harvest_row(node, src, hint, lang)
         -- re-deriving — the same reason head_binders and case_labels are exported. A
         -- mirrored rule is one rule; two rules that agree today are two rules.
         local bodyc = require('cartograph.flow').body_children(node, CT, C)
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() then
                 local ct = c:type()
                 if not tsutil.COMMENT[ct] and not B[ct] and not C[ct]
@@ -1670,7 +1670,7 @@ function M.harvest_row(node, src, hint, lang)
         -- A STRUCTURAL WALK AND A POSITIONAL READ DO NOT FAIL ON THE SAME INPUTS, which is
         -- the whole reason the two-implementation gate earns its keep.
         local _, _, wrapt = binderset(lang)
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if wrapt and c:named() and c:type() == wrapt then
                 local inner = c:named_child(0)
                 if inner and PLAIN_ASSIGN[inner:type()] then
@@ -1678,7 +1678,7 @@ function M.harvest_row(node, src, hint, lang)
                 end
             end
         end
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and PLAIN_ASSIGN[c:type()] then
                 return M.harvest_row(c, src, nil, lang)
             end
@@ -1704,7 +1704,7 @@ function M.harvest_row(node, src, hint, lang)
     end
     -- lua `local x = e` wraps an assignment_statement; unwrap to it
     if (lang and LOCALDECL_OF[lang][t]) or LOCALDECL[t] then
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and ASSIGN[c:type()] then return M.harvest_row(c, src, nil, lang) end
         end
         -- a DECLARATOR child carries name/value as fields — split it like an assignment
@@ -1717,7 +1717,7 @@ function M.harvest_row(node, src, hint, lang)
         -- array declarator, which is the same DECLWRAP walk du does, so the two arrive at the
         -- same identifier instead of one of them reading the wrapper.
         local dlhs, drhs, seen = {}, {}, false
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and DECLARATOR[c:type()] then
                 seen = true
                 local nm = c:field('name')[1] or c:field('declarator')[1]
@@ -1799,7 +1799,7 @@ function M.harvest_row(node, src, hint, lang)
             -- while every row underneath it changed: a count that holds still is not a count
             -- that means nothing changed.
             local before, after, past = {}, {}, false
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 if not c:named() then
                     if ASSIGN_OP[vim.treesitter.get_node_text(c, src)] then past = true end
                 elseif not tsutil.is_comment(c) then
@@ -1845,7 +1845,7 @@ function M.harvest_row(node, src, hint, lang)
         -- rather than inventing an lhs. An honest unknown beats a confident partial answer.
         local lhs, all = {}, true
         local tyf = node:field('type')[1]
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and not tsutil.is_comment(c) then
                 local cn = false
                 if tyf and c:id() == tyf:id() then cn = true end -- a TYPE reads no variable
@@ -1909,7 +1909,7 @@ function M.harvest_row(node, src, hint, lang)
     if cond then return { lhs = {}, rhs = {}, cond = build(cond, src, lang) } end
     if RET[t] then
         local rhs = {}
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             for _, vn in ipairs(list_children(c)) do
                 if vn:named() and not tsutil.is_comment(vn) then rhs[#rhs + 1] = build(vn, src, lang) end
             end
@@ -2520,7 +2520,7 @@ local function head_facts(clauses, src, s)
         local args = s.params_field and c:field(s.params_field)[1]
         local facts, i = {}, 0
         if args then
-            for a in args:iter_children() do
+            for _, a in tsutil.inext, args, -1 do
                 if a:named() and not tsutil.is_comment(a) then
                     i = i + 1
                     for _, f in ipairs(paths(a, src)) do f.arg = i; facts[#facts + 1] = f end
@@ -2542,7 +2542,7 @@ local function merged_clauses(node, root, lang)
     local fnt = ts.fn_types(lang)
     local out = {}
     local function walk(n)
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then
                 local r0, _, r1 = c:range()
                 if r1 >= sl and r0 <= el then
@@ -2647,7 +2647,7 @@ function M.of_text(src, lang, opts)
     local fnt = ts.fn_types(lang)
     local function find(n)
         if fnt[n:type()] then return n end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then local r = find(c); if r then return r end end
         end
     end
@@ -2742,7 +2742,7 @@ function M.bound_names(fn, src, binders)
     for _, b in ipairs(binders) do by_node[b.node] = b end
     local function collect_names(n)
         if BINDNAME[n:type()] then out[txt(n, src)] = true end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then collect_names(c) end
         end
     end
@@ -2756,7 +2756,7 @@ function M.bound_names(fn, src, binders)
                 end
             end
         end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then walk(c) end
         end
     end

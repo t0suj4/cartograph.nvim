@@ -43,9 +43,9 @@ local function constrained_sig(def)
     for c, field in def:iter_children() do
         if field == 'declarator' then return nil end
         if c:type() == 'ERROR' then
-            for d in c:iter_children() do
+            for _, d in tsutil.inext, c, -1 do
                 if d:type() == 'function_declarator' then
-                    for r in d:iter_children() do
+                    for _, r in tsutil.inext, d, -1 do
                         if r:type() == 'requires_clause' then return d end
                     end
                 end
@@ -195,7 +195,7 @@ return {
                         -- declarator: then the "function declarator" is a mangled
                         -- base clause, not a signature.
                         local _, _, db = decl:start()
-                        for c in n:iter_children() do
+                        for _, c in tsutil.inext, n, -1 do
                             if c:type() == 'ERROR' then
                                 local _, _, eb = c:start()
                                 if eb < db then genuine = false break end
@@ -229,7 +229,7 @@ return {
                     end
                 end
             end
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:named() or c:type() == 'ERROR' then scan(c) end
             end
         end
