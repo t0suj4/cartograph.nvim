@@ -181,7 +181,10 @@ function lower_expr(t, cx, scope)
         local name = text(t)
         local id = lookup(scope, name, cx)
         if id then return { op = 'var', id = id, name = name } end
-        if cx.funcs[name] then return { op = 'fn', name = name } end
+        if cx.funcs[name] then
+            if cx.vararg[name] and not cx.calling then refuse('the vararg function ' .. name .. ' used as a value (only a direct call packs its arguments)') end
+            return { op = 'fn', name = name }
+        end
         return { op = 'global', name = name }
     end
     if k == 'parenthesized_expression' then return lower_expr(named(t)[1], cx, scope) end
@@ -212,7 +215,33 @@ function lower_expr(t, cx, scope)
             local cn = named(callee)
             return { op = 'method', obj = lower_expr(cn[1], cx, scope), m = text(cn[2]), args = args }
         end
+        cx.calling = true
         local f = lower_expr(callee, cx, scope)
+        cx.calling = false
+        local nf = f.op == 'fn' and cx.vararg[f.name]
+        if nf then
+            -- (a direct call of a VARARG function: its fixed arguments, then the PACK of the rest — counted here, so a
+            -- last argument that expands several values, whose count only the run knows, refuses)
+            -- (a last argument that EXPANDS: a pure `unpack(…)` in the extra positions is counted at run time — evaluated
+            -- twice, `n = <extras before it> + select('#', X)`, the values the table's expanding rest; anything else, or an
+            -- expansion that would also fill fixed parameters, refuses)
+            local last = args[#args]
+            local multi = last and M.MULTI[last.op]
+            local deferred = multi and last.op == 'call' and #args > nf -- (a program function: single-valued? decided after lowering)
+            if multi and not deferred and not (last.op == 'prim' and last.name == 'unpack' and #args > nf) then
+                refuse('a call of the vararg function ' .. f.name .. ' whose last argument expands several values (the count is not known)')
+            end
+            local fixed = {}
+            local nextra = math.max(#args - nf, 0) - (multi and 1 or 0)
+            local count = { op = 'num', v = nextra }
+            if multi then count = { op = 'bin', o = '+', l = count, r = { op = 'prim', name = 'select', args = { { op = 'str', v = '#' }, last } } } end
+            local fields = { { key = { op = 'str', v = 'n' }, val = count } }
+            for i = 1, nf do fixed[i] = args[i] or { op = 'nil' } end
+            for i = nf + 1, #args - (multi and 1 or 0) do fields[#fields + 1] = { key = { op = 'num', v = i - nf }, val = args[i] } end
+            fixed[nf + 1] = multi and { op = 'table', fields = fields, rest = last, restat = nextra + 1 } or { op = 'table', fields = fields }
+            if deferred then cx.packfix[#cx.packfix + 1] = { pack = fixed[nf + 1], last = last, nextra = nextra, callee = f.name } end
+            args = fixed
+        end
         if f.op == 'fn' then return { op = 'call', fn = f.name, args = args } end
         if f.op == 'global' then return { op = 'prim', name = f.name, args = args } end
         return { op = 'callv', f = f, args = args } -- (a call through a value: a closure)
@@ -244,7 +273,12 @@ function lower_expr(t, cx, scope)
         local n = named(t)
         return lower_lambda(n[1], n[2], cx, scope)
     end
-    if k == 'vararg_expression' then refuse('varargs (not in S)') end
+    if k == 'vararg_expression' then
+        local id = lookup(scope, '...', cx)
+        if not id then refuse('varargs (not in S): `...` outside a top-level vararg function') end
+        local v = { op = 'var', id = id, name = 'varg' }
+        return { op = 'prim', name = 'unpack', args = { v, { op = 'num', v = 1 }, { op = 'index', obj = { op = 'var', id = id, name = 'varg' }, key = { op = 'str', v = 'n' } } } }
+    end
     refuse('the expression kind ' .. k)
 end
 
@@ -516,7 +550,7 @@ end
 --- { why, text } and skipped, instead of the first one refusing the whole program
 function M.lower(term, opts)
     local cx = { funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect, isparam = {}, boxed = {}, forced = {},
-        pinned = {}, pinfirst = {}, assigned = {}, loopvar = {}, tick = 0 }
+        pinned = {}, pinfirst = {}, assigned = {}, loopvar = {}, tick = 0, vararg = {}, packfix = {} }
     -- LINES (CART-1459): every node's FIRST LINE — the reader is lossless, its lits ARE the source, so counting their
     -- newlines in order places every node. Statements and lambdas carry it as `at` (bookkeeping: the algebra does not
     -- see it). opts.lines maps a line of THIS text to where it came from ({ src, line }: an assembled program's
@@ -548,6 +582,11 @@ function M.lower(term, opts)
             local name = text(n[1])
             cx.funcs[name] = true
             decls[#decls + 1] = { name = name, params = n[2], body = n[3] }
+            -- (a VARARG function: how many fixed parameters precede its `...` — a direct call PACKS the rest)
+            local nfixed = 0
+            for _, p in ipairs(named(n[2])) do
+                if p.k == 'vararg_expression' then cx.vararg[name] = nfixed else nfixed = nfixed + 1 end
+            end
         elseif d.k == 'variable_declaration' and named(d)[1] and named(d)[1].k ~= 'assignment_statement' then
             -- (a forward declaration `local f, g` — the residual printer's own)
         elseif d.k ~= 'return_statement' and d.k ~= 'comment' and d.k ~= 'comment_content' and d.k ~= 'empty_statement' then
@@ -558,13 +597,64 @@ function M.lower(term, opts)
         local scope = { names = {}, up = nil }
         local params, pnames = {}, {}
         for _, p in ipairs(named(d.params)) do
-            if p.k ~= 'identifier' then refuse('a parameter list with ' .. p.k) end
-            params[#params + 1] = declare(cx, scope, text(p))
-            cx.isparam[params[#params]] = true
-            pnames[#pnames + 1] = text(p)
+            if p.k == 'vararg_expression' then
+                -- VARARGS (CART-1466): `...` is one hidden parameter, the PACK `{ n = count, … }` its direct callers build;
+                -- in the body `...` is `unpack(varg, 1, varg.n)` — a multi-value call, which the rest already handles
+                local id = declare(cx, scope, '...')
+                cx.names[id] = 'varg'
+                params[#params + 1] = id
+                cx.isparam[id] = true
+                pnames[#pnames + 1] = 'varg'
+            elseif p.k ~= 'identifier' then refuse('a parameter list with ' .. p.k)
+            else
+                params[#params + 1] = declare(cx, scope, text(p))
+                cx.isparam[params[#params]] = true
+                pnames[#pnames + 1] = text(p)
+            end
         end
         cx.funcs[d.name] = { name = d.name, params = params, pnames = pnames, body = d.body and lower_block(d.body, cx, scope) or {},
             at = lineof[d.params] }
+    end
+    -- SINGLE-VALUED program functions (greatest fixpoint): every `return` yields one expression that does not expand,
+    -- or a call of a single-valued function. A vararg call whose last argument is such a call packs it as ONE value
+    -- (`M.node('text', M.lit(s))`); any other expanding call there refuses — it would have to be evaluated twice
+    if #cx.packfix > 0 then
+        local single = {}
+        for name in pairs(cx.funcs) do single[name] = true end
+        local function rets(stmts, out)
+            for _, s in ipairs(stmts or {}) do
+                if s.op == 'ret' then out[#out + 1] = s end
+                for _, k in ipairs({ 'body', 'els' }) do if type(s[k]) == 'table' then rets(s[k], out) end end
+                for _, c in ipairs(s.clauses or {}) do rets(c.body, out) end
+            end
+            return out
+        end
+        for _ = 1, 1000 do
+            local changed = false
+            for name, f in pairs(cx.funcs) do
+                if single[name] then
+                    local rs = rets(f.body, {})
+                    local ok1 = #rs > 0
+                    for _, r in ipairs(rs) do
+                        local e = r.es[1]
+                        if #r.es ~= 1 or (M.MULTI[e.op] and not (e.op == 'call' and single[e.fn])) then ok1 = false end
+                    end
+                    if not ok1 then single[name] = false; changed = true end
+                end
+            end
+            if not changed then break end
+        end
+        for _, fx in ipairs(cx.packfix) do
+            if not single[fx.last.fn] then
+                local why = 'a call of the vararg function ' .. fx.callee .. ' whose last argument (' .. fx.last.fn .. ') may return several values'
+                if not cx.collect then refuse(why) end
+                cx.collect[#cx.collect + 1] = { why = why, text = fx.callee }
+            else
+                fx.pack.rest, fx.pack.restat = nil, nil
+                fx.pack.fields[1].val = { op = 'num', v = fx.nextra + 1 }
+                fx.pack.fields[#fx.pack.fields + 1] = { key = { op = 'num', v = fx.nextra + 1 }, val = fx.last }
+            end
+        end
     end
     -- PINS are copies: a pinned local the loop body ASSIGNS AFTER a closure captured it (not through a closure — that
     -- one is a box, made afresh each iteration) would change under the copy. An assignment written before the first

@@ -270,6 +270,34 @@ test('mix: an ASSUMPTION makes a dynamic read static — the code it guards fold
     eq(false, okn)
 end)
 
+test('mix: VARARGS — a top-level `f(k, ...)` packs its extra arguments at every direct call; `...` expands, `select` counts, a pure unpack is counted at run time (CART-1466)', function ()
+    ready()
+    local src = [[
+local function node(k, ...) return { k = k, kids = { ... }, n = select('#', ...) } end
+local function one(x) return x + 1 end
+local function f(a, list)
+    local t1 = node('x', a, 2)
+    local t2 = node('y')
+    local t3 = node('z', unpack(list))
+    local t4 = node('w', a, one(a))
+    return t1.k .. #t1.kids .. t1.n .. t2.n .. #t2.kids .. t3.n .. #t3.kids .. t4.n .. t4.kids[2]
+end
+]]
+    local o = original(src, 'f')
+    local r = residual(src, 'f', { 'D', 'D' }, {})
+    for _, c in ipairs({ { 1, {} }, { 5, { 'a', 'b', 'c' } }, { 0, { 1, nil, 3 } } }) do eq(o(c[1], c[2]), r(c[1], c[2])) end
+    local r2 = residual(src, 'f', { 'S', 'D' }, { 4 })
+    eq(o(4, { 'q' }), r2({ 'q' }))
+    local function refusal(s, fname)
+        local okm, e = pcall(MX.mix, assert(R.read(s, 'lua')), fname, { 'D' }, {})
+        eq(false, okm)
+        return type(e) == 'table' and e.refusal or ('NOT A REFUSAL: ' .. tostring(e))
+    end
+    -- (a last argument that may return SEVERAL values, and a vararg function used as a value: refused by name)
+    ok(refusal('local function two() return 1, 2 end\nlocal function n(...) return { ... } end\nlocal function f(x)\n    return n(x, two())\nend\n', 'f'):find('may return several values', 1, true))
+    ok(refusal('local function n(...) return { ... } end\nlocal function f(x)\n    local g = n\n    return g(x)\nend\n', 'f'):find('used as a value', 1, true))
+end)
+
 test('mix: a NON-FINITE number reaching dynamic code is lifted as the division that makes it — 1/0, -1/0, 0/0', function ()
     ready()
     local src = 'local function f(x)\n    local best, worst = math.huge, -math.huge\n    if x < best then best = x end\n    if x > worst then worst = x end\n    return best, worst\nend\n'
@@ -335,7 +363,8 @@ test('mix: what mix does not handle is REFUSED by name — goto, varargs, a stat
     ok(refusal('local function f(x)\n    goto done\n    ::done::\n    return x\nend\n', 'f', { 'D' }, {}):find('goto', 1, true))
     -- (a while whose static condition never turns false: the budget, by name)
     ok(refusal('local function f(x)\n    local i = 0\n    while i >= 0 do i = i + 1 end\n    return x\nend\n', 'f', { 'D' }, {}):find('budget', 1, true))
-    ok(refusal('local function f(...)\n    return 1\nend\n', 'f', {}, {}):find('parameter', 1, true))
+    -- (a vararg LAMBDA: only a top-level function's direct calls pack their arguments — CART-1466)
+    ok(refusal('local function f(x)\n    local g = function (...) return 1 end\n    return g(x)\nend\n', 'f', { 'D' }, {}):find('parameter', 1, true))
     -- (a continuation that grows by a closure per call: the join's hole falls on a closure argument — no generalization)
     ok(refusal('local function g(x, k)\n    if x > 0 then return g(x - 1, function (y) return k(y) + 1 end) end\n    return k(x)\nend\nlocal function f(x)\n    return g(x, function (y) return y end)\nend\n', 'f', { 'D' }, {}):find('specialization depth', 1, true))
 end)
