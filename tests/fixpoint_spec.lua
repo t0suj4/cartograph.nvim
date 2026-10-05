@@ -167,8 +167,12 @@ test('signatures: packs un-hedge, io orders, higher-order inherits', function ()
     -- exists and `argv.to` now points at it, but the effects fixpoint's
     -- higher-order path resolves a NAMED callee and does not yet read a `func`
     -- argument's target. That is a real follow-on, not a thing to assert away.
-    eq('pure~', effects.purity(store, by.guarded2.id),
-        'pcall(anonymous): the callback is a node, but effects do not read argv.to yet')
+    -- ★ AND THE FOLLOW-ON, CORRECTED (CART-1494): the fixpoint DID read `argv.to` — the miss was ORDER. The callback
+    -- is no call edge of `guarded2`, so the condensation (ids sorted: `guarded2` < `pcall#cb`) summarized guarded2
+    -- first and found no summary to inherit. The callback is now a successor of its enclosing function, and the
+    -- empty closure's effects (none) are guarded2's: pure, for the callback's reason this time.
+    eq('pure', effects.purity(store, by.guarded2.id),
+        'pcall(anonymous): the callback node is summarized first, and it does nothing')
     -- io-io ordering conflict through commute
     local c1, c2
     for _, c in ipairs(store.data.calls) do
@@ -197,6 +201,18 @@ test('signatures: asserted tier applies AND hedges with the name', function ()
     ok(sum.h and sum.h[1]:find('asserted contract: MYAPI_poke', 1, true),
         'and every use is hedged with the assertion named')
     -- label: io~ — conditional on the user being right, visibly
+end)
+
+test('fixpoint: a FRESH local sorted with an INLINE comparator is the call\'s own business — pure; a local read from a parameter is not fresh (CART-1494)', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        -- (named to sort BEFORE the minted `sort#cb` node: the condensation must still summarize the callback first)
+        'local function a_sorted(t) local out = {} for k in pairs(t) do out[#out + 1] = k end table.sort(out, function (x, y) return x < y end) return out end',
+        'local function b_alias(t) local out = t.list table.sort(out) return out end',
+        'return { a_sorted, b_alias }' }, '\n'))))
+    local by = byname()
+    eq('pure', effects.purity(store, by.a_sorted.id), 'a table this call made, sorted by a pure inline comparator')
+    eq('pure~', effects.purity(store, by.b_alias.id), 'a local bound to a parameter\'s field may alias the caller\'s table')
 end)
 
 test('fixpoint: REBINDING a parameter (`t = t.kids[i]`) is no write through it — only a store INTO it (`t.x = 1`, `t[k] = 1`) mutates the caller\'s table', function ()

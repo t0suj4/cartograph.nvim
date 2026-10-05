@@ -287,9 +287,30 @@ local function s_hedge(sum, why)
     sum.nh = (sum.nh or 0) + 1
 end
 
+-- is `name` a FRESH local of `fn` — defined in it, and only by statements that read nothing (a literal right side,
+-- `local out = {}`)? From the dataflow rows (df.stmts: def/use per statement). Memoized per function node.
+local fresh_memo = setmetatable({}, { __mode = 'k' })
+local function fresh_local(fn, name)
+    local m = fresh_memo[fn]
+    if not m then
+        m = {}
+        fresh_memo[fn] = m
+        local ok, stmts = pcall(require('cartograph.df').stmts, fn)
+        local seen, stale = {}, {}
+        for _, st in ipairs(ok and stmts or {}) do
+            for _, d in ipairs(st.def or {}) do
+                seen[d] = true
+                if #(st.use or {}) > 0 then stale[d] = true end
+            end
+        end
+        for d in pairs(seen) do m[d] = not stale[d] end
+    end
+    return m[name] == true
+end
+
 -- resolve a call argument to what a callee-side param write would hit:
--- a same-file module var ('var'), the CALLER's own param ('param'), or
--- nothing nameable ('opaque')
+-- a same-file module var ('var'), the CALLER's own param ('param'), a local
+-- this call made ('fresh': no effect outside it), or nothing nameable ('opaque')
 local function arg_target(store, c, i, caller)
     local a = argv.at(c, i)
     if not a then return 'opaque' end
@@ -305,6 +326,11 @@ local function arg_target(store, c, i, caller)
                 if ps[pi] == a.name then return 'param', pi end
             end
         end
+        -- a FRESH local (CART-1494): every definition of it in this function reads nothing — `local out = {}` — so it
+        -- holds a table made by this call (or an immutable literal) and a write into it is the call's own business.
+        -- It can still ESCAPE (stored into module state, handed to a storing callee), but that store is a write of
+        -- its own and recorded as one. core's M.keys sorting its own `out` made eq, show and 7 more basis fns `~`.
+        if caller and fresh_local(caller, a.name) then return 'fresh' end
         return 'opaque' -- a plain local: mutation invisible outside — but
         -- it MAY alias module state; the caller hedges (no alias analysis)
     end
@@ -331,7 +357,39 @@ function M.summaries(store)
         end
     end
     table.sort(ids)
-    local con = scc.condense(store.uses, ids)
+    -- an INLINE callback (`table.sort(out, function (a, b) … end)`, its argv `to` = the minted `sort#cb` node) is no
+    -- call edge of its enclosing function, so the condensation could summarize the function BEFORE the callback and
+    -- hedge "callback effects unknown" (CART-1494). Order them: the callback is a successor of the function.
+    local extra = {}
+    for _, c in ipairs(store.data.calls or {}) do
+        local fn = callrec.fn(c)
+        if fn then
+            for ai = 1, argv.n(c) do
+                local a = argv.at(c, ai)
+                if a and a.k == 'func' and a.to then
+                    local l = extra[fn]; if not l then l = {}; extra[fn] = l end
+                    l[#l + 1] = a.to
+                end
+            end
+        end
+    end
+    local adj = store.uses
+    if next(extra) then
+        local base, memo = store.uses, {}
+        adj = setmetatable({}, { __index = function (_, v)
+            if memo[v] ~= nil then return memo[v] or nil end
+            local u, x = base[v], extra[v]
+            local out = u
+            if x then
+                out = {}
+                for _, w in ipairs(u or {}) do out[#out + 1] = w end
+                for _, w in ipairs(x) do out[#out + 1] = w end
+            end
+            memo[v] = out or false
+            return out
+        end })
+    end
+    local con = scc.condense(adj, ids)
     local sums = {}
     for ci = 1, con.n do
         local members = con.members[ci]
