@@ -1,3 +1,4 @@
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local callrec = require 'cartograph.callrec'
 -- SINKFLOW — taint rung 0 ([[cartograph-taint-analysis]]): a DIVERGENT
 -- SQL-injection smell — one function string-concatenates a param into a
@@ -76,7 +77,7 @@ local function collect(node, types)
     for _, t in ipairs(types) do want[t] = true end
     local function rec(n)
         if want[n:type()] then acc[#acc + 1] = n end
-        for c in n:iter_children() do if c:named() then rec(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
     end
     rec(node)
     return acc
@@ -142,11 +143,11 @@ end
 local function param_info(fnnode, src)
     local info = {}
     local fp
-    for c in fnnode:iter_children() do
+    for _, c in tsutil.inext, fnnode, -1 do
         if c:type() == 'formal_parameters' then fp = c break end
     end
     if not fp then return info end
-    for p in fp:iter_children() do
+    for _, p in tsutil.inext, fp, -1 do
         local t = p:type()
         if p:named() and (t == 'simple_parameter'
             or t == 'property_promotion_parameter' or t == 'variadic_parameter') then
@@ -368,7 +369,7 @@ local function collect_scoped(node, types)
     local function rec(n, top)
         if not top and BODY_STOP[n:type()] then return end
         if want[n:type()] then acc[#acc + 1] = n end
-        for c in n:iter_children() do if c:named() then rec(c, false) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c, false) end end
     end
     rec(node, true)
     return acc
@@ -417,12 +418,12 @@ local CALLTYPES = { 'member_call_expression', 'function_call_expression',
 -- $args['id']) as external input — the portable framework-source shape.
 local function entry_sources(fnnode, src)
     local fp
-    for c in fnnode:iter_children() do
+    for _, c in tsutil.inext, fnnode, -1 do
         if c:type() == 'formal_parameters' then fp = c break end
     end
     if not fp then return nil end
     local ps, hasreq = {}, false
-    for p in fp:iter_children() do
+    for _, p in tsutil.inext, fp, -1 do
         if p:named() and p:type() == 'simple_parameter' then
             local ty, nm = txt(p, src):match('^%s*%??%s*([%w_\\]+)%s+%$([%w_]+)')
             if nm then
@@ -500,7 +501,7 @@ local function guard_validates(v, src)
                 local argsn = call:field('arguments')[1]
                 local hit = false
                 if argsn then
-                    for arg in argsn:iter_children() do
+                    for _, arg in tsutil.inext, argsn, -1 do
                         if arg:named() and arg:type() == 'argument'
                             and normtext(arg:named_child(0) or arg, src) == target then
                             hit = true; break
@@ -575,7 +576,7 @@ local function scope_findings(scope, src, file, out, seed)
         local argsn = call:field('arguments')[1]
         if callee ~= '?' and argsn and sink_reason({ callee = callee,
             receiver = objf and txt(objf, src) or nil }) then
-            for arg in argsn:iter_children() do
+            for _, arg in tsutil.inext, argsn, -1 do
                 if arg:named() and arg:type() == 'argument' then
                     local w = embed_witness(arg:named_child(0) or arg, src, tainted)
                     -- only STRING-EMBEDDED taint is injection; a bare tainted
@@ -653,11 +654,11 @@ end
 local function ordered_params(fnnode, src)
     local out = {}
     local fp
-    for c in fnnode:iter_children() do
+    for _, c in tsutil.inext, fnnode, -1 do
         if c:type() == 'formal_parameters' then fp = c break end
     end
     if not fp then return out end
-    for p in fp:iter_children() do
+    for _, p in tsutil.inext, fp, -1 do
         local t = p:type()
         if p:named() and (t == 'simple_parameter'
             or t == 'property_promotion_parameter' or t == 'variadic_parameter') then
@@ -724,7 +725,7 @@ function M.reach_findings(store)
                     -- is_sql_method, not the DB-receiver catch-all, so a
                     -- parameterized createRow does not read as a sink)
                     if callee ~= '?' and argsn and is_sql_method(callee) then
-                        for arg in argsn:iter_children() do
+                        for _, arg in tsutil.inext, argsn, -1 do
                             if arg:named() and arg:type() == 'argument' then
                                 local w = embed_witness(arg:named_child(0) or arg, s, tainted)
                                 if w and w.embedded and type(w.origin) == 'number' then

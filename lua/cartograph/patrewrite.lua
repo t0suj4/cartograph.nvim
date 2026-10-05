@@ -14,6 +14,7 @@
 -- which is how the catalog's own reference implementations below keep their idioms. ⚠ A METHOD call (`x:match(p)`) is rewritten on the PREMISE that `x` is a string — a user
 -- object with its own :match would change meaning — and the plan says so on every such site.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local txn = require 'cartograph.txn'
 
 local M = {}
@@ -183,7 +184,7 @@ local function call_shape(node, src)
     local args = node:field('arguments')[1]
     if not (name and args) then return nil end
     local list = {}
-    for c in args:iter_children() do if c:named() then list[#list + 1] = c end end
+    for _, c in tsutil.inext, args, -1 do if c:named() then list[#list + 1] = c end end
     local nt = name:type()
     if nt == 'method_index_expression' then
         local m = name:field('method')[1]
@@ -259,7 +260,7 @@ function M.sites(src)
                 end
             end
         end
-        for c in n:iter_children() do if c:named() then visit(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then visit(c) end end
     end
     visit(root)
     table.sort(found, function(a, b) return a.line < b.line end)

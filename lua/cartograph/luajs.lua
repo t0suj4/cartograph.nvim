@@ -19,6 +19,7 @@
 --     TDZ error in JS, and two `local x` in one block a SyntaxError); a free name is `$G.<name>`.
 -- NOT YET (refused by name): general goto, labels other than the loop-end `continue` idiom, a map constructor whose
 -- last positional value is multi-valued, attributes (<const>/<close> are not LuaJIT syntax anyway).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local JS_RESERVED = {}
@@ -35,7 +36,7 @@ local function fields_of(n, name)
 end
 local function named_kids(n)
     local out = {}
-    for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
+    for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
     return out
 end
 
@@ -154,11 +155,11 @@ function M.emit(src, file, opts)
         local rep = T.representation(sh and sh.class or 'OPAQUE')
         local pos, named = {}, {}
         local fields = {}
-        for c in n:iter_children() do if c:type() == 'field' then fields[#fields + 1] = c end end
+        for _, c in tsutil.inext, n, -1 do if c:type() == 'field' then fields[#fields + 1] = c end end
         for i, f in ipairs(fields) do
             local k, v = field_of(f, 'name'), field_of(f, 'value')
             local bracketed = false
-            for cc in f:iter_children() do if not cc:named() and cc:type() == '[' then bracketed = true end end
+            for _, cc in tsutil.inext, f, -1 do if not cc:named() and cc:type() == '[' then bracketed = true end end
             if not k then
                 pos[#pos + 1] = { node = v, last = (i == #fields) }
             elseif not bracketed then
@@ -295,7 +296,7 @@ function M.emit(src, file, opts)
                 return ('let %s;'):format(table.concat(names, ', '))
             end
             local vl, el = nil, nil
-            for c in asg:iter_children() do
+            for _, c in tsutil.inext, asg, -1 do
                 if c:type() == 'variable_list' then vl = c elseif c:type() == 'expression_list' then el = c end
             end
             local vals = el and named_kids(el) or {}
@@ -315,7 +316,7 @@ function M.emit(src, file, opts)
             return ('let [%s] = %s;'):format(table.concat(jn, ', '), js)
         elseif t == 'assignment_statement' then
             local vl, el
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:type() == 'variable_list' then vl = c elseif c:type() == 'expression_list' then el = c end
             end
             local targets, vals = named_kids(vl), named_kids(el)
@@ -329,7 +330,7 @@ function M.emit(src, file, opts)
             return expr(n, sc, true) .. ';'
         elseif t == 'function_declaration' then
             local is_local = false
-            for c in n:iter_children() do if not c:named() and c:type() == 'local' then is_local = true end end
+            for _, c in tsutil.inext, n, -1 do if not c:named() and c:type() == 'local' then is_local = true end end
             local name = field_of(n, 'name')
             if is_local then
                 local js = declare(sc, text(name)) -- declared BEFORE the body: a local function sees itself
@@ -379,7 +380,7 @@ function M.emit(src, file, opts)
                     :format(a, b, c, up, start, stop, step, lbl, i, a, up, i, b, i, b, i, c, var, i, body)
             end
             local vl, el
-            for cc in clause:iter_children() do
+            for _, cc in tsutil.inext, clause, -1 do
                 if cc:type() == 'variable_list' then vl = cc elseif cc:type() == 'expression_list' then el = cc end
             end
             local f, s, ctl = fresh('f'), fresh('s'), fresh('c')

@@ -27,6 +27,7 @@
 -- @langs lua
 -- Lua-gated at every entry (`%.lua$`), so the lua node types below are the whole
 -- claim rather than an assumption.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 -- taint kinds: 'list' = a list of shape records; 'elem' = one record;
@@ -274,7 +275,7 @@ function Scan:use(node, taint, via)
         -- (the argument's POSITION: the helper follow uses it, and so does record-flow across files — CART-1345)
         local sl2, sc2 = cur:range()
         local idx = 0
-        for ch in p:iter_children() do
+        for _, ch in tsutil.inext, p, -1 do
             if ch:named() then
                 idx = idx + 1
                 local cl, cc = ch:range()
@@ -337,12 +338,12 @@ end
 -- positional (name_i, expr_i) binding for declarations and assignments
 function Scan:bind_pairs(vars, exprs)
     local names = {}
-    for ch in vars:iter_children() do
+    for _, ch in tsutil.inext, vars, -1 do
         if ch:named() then names[#names + 1] = ch end
     end
     local vals = {}
     if exprs then
-        for ch in exprs:iter_children() do
+        for _, ch in tsutil.inext, exprs, -1 do
             if ch:named() then vals[#vals + 1] = ch end
         end
     end
@@ -387,7 +388,7 @@ function Scan:walk(node, pending)
     local t = node:type()
     if t == 'block' or t == 'chunk' then
         self.frames[#self.frames + 1] = pending or {}
-        for ch in node:iter_children() do
+        for _, ch in tsutil.inext, node, -1 do
             if ch:named() then self:walk(ch) end
         end
         self.frames[#self.frames] = nil
@@ -406,7 +407,7 @@ function Scan:walk(node, pending)
         local vars, exprs = node:named_child(0), node:named_child(1)
         if exprs then self:walk(exprs) end
         if vars then
-            for ch in vars:iter_children() do
+            for _, ch in tsutil.inext, vars, -1 do
                 -- index-expression target (`t[k] = r`): its base/subscript are reads
                 if ch:named() and ch:type() ~= 'identifier' then self:walk(ch) end
             end
@@ -416,7 +417,7 @@ function Scan:walk(node, pending)
     end
     if t == 'for_statement' then
         local clause, body
-        for ch in node:iter_children() do
+        for _, ch in tsutil.inext, node, -1 do
             if ch:named() then
                 local ct = ch:type()
                 if ct == 'for_generic_clause' or ct == 'for_numeric_clause' then clause = ch
@@ -439,7 +440,7 @@ function Scan:walk(node, pending)
         local pend = {}
         local ps = node:field('parameters')[1]
         if ps then
-            for ch in ps:iter_children() do
+            for _, ch in tsutil.inext, ps, -1 do
                 if ch:named() and ch:type() == 'identifier' then
                     pend[node_text(ch, self.src)] = false
                 end
@@ -488,7 +489,7 @@ function Scan:walk(node, pending)
         if args then self:walk(args) end
         return
     end
-    for ch in node:iter_children() do
+    for _, ch in tsutil.inext, node, -1 do
         if ch:named() then self:walk(ch) end
     end
 end
@@ -514,7 +515,7 @@ function Scan:collect_helpers(node)
             local params = {}
             local ps = node:field('parameters')[1]
             if ps then
-                for ch in ps:iter_children() do
+                for _, ch in tsutil.inext, ps, -1 do
                     if ch:named() and ch:type() == 'identifier' then
                         params[#params + 1] = node_text(ch, self.src)
                     end
@@ -523,7 +524,7 @@ function Scan:collect_helpers(node)
             self.helpers[key] = { params = params, body = body }
         end
     end
-    for ch in node:iter_children() do
+    for _, ch in tsutil.inext, node, -1 do
         if ch:named() then self:collect_helpers(ch) end
     end
 end

@@ -45,6 +45,7 @@
 -- ctx = { module, record_fields = fn(rec) -> names | nil, defaults = fn(rec) -> { field -> text } | nil,
 --         program = M.program(...) | nil (calls stay holes without one), macros = { name -> value } | nil }
 -- -> term, holes { name -> reason }, session  (a whole-hole term means nothing was readable)
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 local unpack = table.unpack or unpack
 
@@ -173,7 +174,7 @@ local comprehension             -- list comprehensions (defined beside M.eval)
 
 local function named(x)
     local out = {}
-    if x then for c in x:iter_children() do if c:named() then out[#out + 1] = c end end end
+    if x then for _, c in tsutil.inext, x, -1 do if c:named() then out[#out + 1] = c end end end
     return out
 end
 local function last_expr(clause)
@@ -484,7 +485,7 @@ end
 local function bound_before(n, nm, src)
     local function has(x)
         if T.var[x:type()] and txt(x, src) == nm then return true end
-        for c in x:iter_children() do if c:named() and has(c) then return true end end
+        for _, c in tsutil.inext, x, -1 do if c:named() and has(c) then return true end end
         return false
     end
     local function within(a, b)
@@ -501,7 +502,7 @@ local function bound_before(n, nm, src)
             if args and not within(n, args) and has(args) then return true end
             local found = false
             local function walk(y)
-                for c in y:iter_children() do
+                for _, c in tsutil.inext, y, -1 do
                     if found or select(3, c:start()) >= at then return end
                     if T.match[c:type()] then
                         local l = c:field('lhs')[1]
@@ -653,7 +654,7 @@ end
 -- ── VARIABLES: head binders, enclosing case arms, `Pat = Expr` matches before the use ────────────────────────────
 local function contains_var(n, name, src)
     if T.var[n:type()] and txt(n, src) == name then return true end
-    for c in n:iter_children() do if c:named() and contains_var(c, name, src) then return true end end
+    for _, c in tsutil.inext, n, -1 do if c:named() and contains_var(c, name, src) then return true end end
     return false
 end
 local function inside(n, outer)
@@ -700,7 +701,7 @@ local function matched(x, var, name, at, env, S)
     local src = env.src
     local found
     local function walk(y)
-        for c in y:iter_children() do
+        for _, c in tsutil.inext, y, -1 do
             if found or select(3, c:start()) >= at then return end
             if T.match[c:type()] then
                 local l = c:field('lhs')[1]
@@ -986,7 +987,7 @@ function M.carried(m, key, clauses)
                     return
                 end
                 if T.match[t] then scan(n:field('lhs')[1], depth); scan(n:field('rhs')[1], depth); return end
-                for c in n:iter_children() do if c:named() then scan(c, depth + 1) end end
+                for _, c in tsutil.inext, n, -1 do if c:named() then scan(c, depth + 1) end end
             end
             scan(p, 0)
         end
@@ -1039,7 +1040,7 @@ function M.carried(m, key, clauses)
             return 'other'
         end
         local function walk(x)
-            for c in x:iter_children() do
+            for _, c in tsutil.inext, x, -1 do
                 if T.call[c:type()] and not T.remote[c:parent():type()] then
                     local e = c:field('expr')[1]
                     local cargs = named(c:field('args')[1])
@@ -1876,7 +1877,7 @@ function M.program(opts)
         if not src or not ok then self.mods[name] = false; return nil end
         local root = parser:parse()[1]:root()
         local fns = {}
-        for d in root:iter_children() do
+        for _, d in tsutil.inext, root, -1 do
             if T.decl[d:type()] then
                 for _, cl in ipairs(d:field('clause')) do
                     local nn = cl:field('name')[1]

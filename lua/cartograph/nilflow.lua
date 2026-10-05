@@ -21,6 +21,7 @@
 -- — extensible via config. Full CFG-merge + a real nullable-return lattice are the
 -- banked refinement (nil-flow N2/N4). Definite findings only; no maybe-tier lint.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local cfg = require 'cartograph.cfg'
 
 -- @langs cpp
@@ -155,7 +156,7 @@ function M.null_derefs(src, opts)
                     end
                 end
             end
-            for c in n:iter_children() do visit(c) end
+            for _, c in tsutil.inext, n, -1 do visit(c) end
         end
         visit(body)
     end
@@ -166,7 +167,7 @@ function M.null_derefs(src, opts)
             local decl = n:field('declarator')[1]
             if body then analyze_fn(body, decl and txt(decl):match('([%w_:~]+)%s*%(') or '?') end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(root)
     return out

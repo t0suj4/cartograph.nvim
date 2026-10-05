@@ -13,6 +13,7 @@
 -- A signature is COMPLETE only when the body reads its arguments through checkers at literal positions and nothing
 -- else; a direct slot read (`L->base`, `L->top`), a position that is not a literal, or a same-unit helper handed `L`
 -- makes it PARTIAL — and a partial signature is compared only at the positions it states.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function readfile(p) local fd = io.open(p, 'rb'); if not fd then return nil end local s = fd:read('a'); fd:close(); return s end
@@ -175,7 +176,7 @@ function M.signature(unit, fnode, checkers, helpers, vocab)
             local name = vim.treesitter.get_node_text(node, unit)
             local args = {}
             local al = node:next_named_sibling()
-            for a in al:iter_children() do if a:named() and a:type() ~= 'comment' then args[#args + 1] = vim.treesitter.get_node_text(a, unit) end end
+            for _, a in tsutil.inext, al, -1 do if a:named() and a:type() ~= 'comment' then args[#args + 1] = vim.treesitter.get_node_text(a, unit) end end
             local c = checkers[name]
             if c and args[1] == 'L' then
                 -- (the preprocessor parenthesizes a macro's argument: `(1)`)

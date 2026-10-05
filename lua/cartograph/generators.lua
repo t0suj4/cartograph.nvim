@@ -52,6 +52,7 @@
 --
 -- A FACT: { gen, form, kind (the output node's type), parts = { text… } (its kids, projected), name (parts joined),
 --           site = { sl, sc, el, ec } (the site), at = { … } (the repeated element's node, when `each`), file }
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local A_, A_err
@@ -67,7 +68,7 @@ end
 --- arrows untouched (`eq` compares only k, v, n and kids).
 function M.term(A, node, src)
     local kids = {}
-    for c in node:iter_children() do
+    for _, c in tsutil.inext, node, -1 do
         if c:named() and not require('cartograph.spec.tsutil').is_comment(c) then kids[#kids + 1] = M.term(A, c, src) end
     end
     local t = #kids > 0 and A.node(node:type(), unpack(kids))
@@ -116,7 +117,7 @@ function M.snippet(A, lang, snippet, holes, wrap)
     local function find(n)
         local _, _, sb, _, _, eb = n:range(true)
         if sb == off and eb == off + #snippet and n:named() then best = n end
-        for c in n:iter_children() do find(c) end
+        for _, c in tsutil.inext, n, -1 do find(c) end
     end
     find(root)
     if not best then return nil, 'no node spans the snippet `' .. snippet .. '`' end
@@ -324,7 +325,7 @@ function M.read(gen, troot, src, file)
                 end
             end
         end
-        for c in node:iter_children() do if c:named() then visit(c) end end
+        for _, c in tsutil.inext, node, -1 do if c:named() then visit(c) end end
     end
     visit(troot)
     return facts, refusals, selected, nonsites

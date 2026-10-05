@@ -16,6 +16,7 @@
 -- ⚠ WHERE IT APPLIES IS A DECISION: the matches are inferred, so without a `scope` the plan refuses as a decision
 -- that lists them (the wrong-symbol lesson: nothing inferred is applied behind the caller).
 -- ⚠ FIRST CUT, MEASURED: matching is TRIVIA-SENSITIVE — `y==nil` does not match an example written `x == nil`.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function A() return require('cartograph.algebra').load() end

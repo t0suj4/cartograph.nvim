@@ -7,6 +7,7 @@
 -- @langs ruby — a spec IS one grammar's mapping, so every node type here is
 -- ruby's by construction.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local node_text = require('cartograph.spec.tsutil').node_text
 
 -- Ruby bare-call capture (the "open ceiling"): a bare identifier `save` with
@@ -58,7 +59,7 @@ local function ruby_bare_calls(tsroot, src)
         locals[key] = set
         local function harvest(n) -- all identifiers in a binding subtree
             if n:type() == 'identifier' then set[node_text(n, src)] = true end
-            for c in n:iter_children() do harvest(c) end
+            for _, c in tsutil.inext, n, -1 do harvest(c) end
         end
         local function scan(n)
             local t = n:type()
@@ -78,7 +79,7 @@ local function ruby_bare_calls(tsroot, src)
                     harvest(l)
                 end
             end
-            for c in n:iter_children() do scan(c) end
+            for _, c in tsutil.inext, n, -1 do scan(c) end
         end
         local body = mnode:field('body')[1]
         if body then scan(body) end
@@ -129,7 +130,7 @@ local function ruby_bare_calls(tsroot, src)
                 end
             end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(tsroot)
     return out
@@ -168,7 +169,7 @@ local function ruby_synth_defs(tsroot, src)
                 local owner, inst = owner_kind(n)
                 if owner then
                     local sep = inst and '#' or '.'
-                    for c in args:iter_children() do
+                    for _, c in tsutil.inext, args, -1 do
                         local sym
                         if c:type() == 'simple_symbol' then
                             sym = node_text(c, src):sub(2)
@@ -187,7 +188,7 @@ local function ruby_synth_defs(tsroot, src)
                 end
             end
         end
-        for ch in n:iter_children() do walk(ch) end
+        for _, ch in tsutil.inext, n, -1 do walk(ch) end
     end
     walk(tsroot)
     return out
@@ -278,7 +279,7 @@ local function ruby_ancestors(tsroot, src)
             if mn == 'include' or mn == 'prepend' or mn == 'extend' then
                 local a = n:field('arguments')[1]
                 if a then
-                    for ac in a:iter_children() do
+                    for _, ac in tsutil.inext, a, -1 do
                         local at = ac:type()
                         if at == 'constant' or at == 'scope_resolution' then
                             out[#out + 1] = { c = cls, p = tailc(ac),
@@ -288,7 +289,7 @@ local function ruby_ancestors(tsroot, src)
                 end
             end
         end
-        for ch in n:iter_children() do walk(ch, mine) end
+        for _, ch in tsutil.inext, n, -1 do walk(ch, mine) end
     end
     walk(tsroot, nil)
     return out
@@ -325,7 +326,7 @@ local function ruby_super_calls(tsroot, src)
                 out[#out + 1] = { node = n, member = member, sing = sing, cls = cls }
             end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(tsroot)
     return out
@@ -373,7 +374,7 @@ local function ruby_ctor_binds(tsroot, src, finders)
                 end
             end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(tsroot)
     return out

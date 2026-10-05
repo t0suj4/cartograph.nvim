@@ -21,6 +21,7 @@
 --           their bytes change, to `{;}` (see cpp_mask). `= 0;` (pure virtual) is never touched.
 -- Every parse site routes through M.view: providers/treesitter.lua M.parse_view, and the analysis re-parses (expr,
 -- lens, write verbs, lints) that used to call luadialect.view directly.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 -- a guile EXTENDED symbol `#{any text}#` (psyntax, the elisp compiler, autofrisk's 13-line one) is rejected too, and
@@ -78,7 +79,7 @@ local function cpp_misreads(root, src)
             local l = a and a:field('left')[1]
             if r and l and CPP_CALL[l:type()] and vim.treesitter.get_node_text(r, src) == 'default' then
                 local eq
-                for c in a:iter_children() do if not c:named() and c:type() == '=' then eq = c end end
+                for _, c in tsutil.inext, a, -1 do if not c:named() and c:type() == '=' then eq = c end end
                 kw_span(eq, r)
             end
             return
@@ -91,9 +92,9 @@ local function cpp_misreads(root, src)
             while d and CPP_WRAPDECL[d:type()] do d = d:named_child(0) end
             if d and v and CPP_FDECL[d:type()] then
                 local eq, kw
-                for c in n:iter_children() do if not c:named() and c:type() == '=' then eq = c end end
+                for _, c in tsutil.inext, n, -1 do if not c:named() and c:type() == '=' then eq = c end end
                 if CPP_DELETE[v:type()] then
-                    for c in v:iter_children() do if not c:named() and c:type() == 'delete' then kw = c; break end end
+                    for _, c in tsutil.inext, v, -1 do if not c:named() and c:type() == 'delete' then kw = c; break end end
                 elseif CPP_IDENT[v:type()] and vim.treesitter.get_node_text(v, src) == 'default' then
                     kw = v
                 end
@@ -102,7 +103,7 @@ local function cpp_misreads(root, src)
             return
         end
         if CPP_NO_DESCEND[t] then return end
-        for c in n:iter_children() do if c:named() then walk(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end
     end
     walk(root)
     return spans

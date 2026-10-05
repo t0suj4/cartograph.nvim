@@ -21,6 +21,7 @@
 --         carrier = 'call' | 'tuple', file, line (the registration site), mod, fn (the handler atoms),
 --         handler = node id | nil, why = nil | 'no uri' | 'handler unresolved' | 'not a literal' }
 -- READS  = M.reads(store, handler) -> { clauses = n, heads = eo.heads } | nil, why
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local argv = require 'cartograph.argv'
@@ -219,7 +220,7 @@ function M.sends(dir, opts)
             local m = P:adopt(f, src)
             local ctx = m and m.ctx or ET.file_ctx(src, f, E, P)
             local function walk(x)
-                for c in x:iter_children() do
+                for _, c in tsutil.inext, x, -1 do
                     if ERLT.call[c:type()] then
                         local e = c:field('expr')[1]
                         local fname = e and vim.treesitter.get_node_text(e, src)
@@ -250,7 +251,7 @@ function M.sends(dir, opts)
                                 local fnm = cl and cl:field('name')[1]
                                 local arity = 0
                                 local ca = cl and cl:field('args')[1]
-                                if ca then for a in ca:iter_children() do if a:named() then arity = arity + 1 end end end
+                                if ca then for _, a in tsutil.inext, ca, -1 do if a:named() then arity = arity + 1 end end end
                                 local rec = term.k and term.k:match('^rec:(.+)$')
                                 rows[#rows + 1] = { file = f:sub(#dir + 2), line = c:start() + 1,
                                     fn = fnm and (vim.treesitter.get_node_text(fnm, src) .. '/' .. arity) or '?',

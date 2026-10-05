@@ -51,6 +51,7 @@
 --   so the stanza does not parse whenever the value is non-empty.
 --   ns.via: 'literal' | 'strophe' (built-in Strophe.NS) | 'addNamespace' (harvested) | 'const' (file-local
 --           string const) | 'export' (a corpus-exported const) | 'unresolved' (expr kept) | 'none' | 'undeclared-prefix'
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local xv = require('cartograph.xmlvalue')
@@ -132,7 +133,7 @@ local function const_expr(n, src, subst)
     if t == 'parenthesized_expression' then return const_expr(n:named_child(0), src, subst) end
     if t == 'template_string' then
         local parts = {}
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:type() == 'string_fragment' then parts[#parts + 1] = { k = 'str', v = ntext(c, src) }
             elseif c:type() == 'template_substitution' then
                 local x = const_expr(c:named_child(0), src, subst)
@@ -408,14 +409,14 @@ local function read_tree(view, body, holes, shift, resolve, file_consts, lc, bod
 
     local function element(n, scope, ppath)
         local tag, content
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             local t = c:type()
             if t == 'STag' or t == 'EmptyElemTag' then tag = c elseif t == 'content' then content = c end
         end
         local el = { attrs = {}, attr = {}, attr_holes = {}, children = {} }
         el.line, el.col = where(sbyte(n))
         local decl = {}
-        for c in tag:iter_children() do
+        for _, c in tsutil.inext, tag, -1 do
             local t = c:type()
             if t == 'Name' and not el.name and not el.name_hole then
                 local hs = holes_in(sbyte(c), ebyte(c))
@@ -436,7 +437,7 @@ local function read_tree(view, body, holes, shift, resolve, file_consts, lc, bod
                     el.attr_holes[#el.attr_holes + 1] = whole.i
                 else
                     local a = {}
-                    for x in c:iter_children() do
+                    for _, x in tsutil.inext, c, -1 do
                         if x:type() == 'Name' then
                             local hs = holes_in(sbyte(x), ebyte(x))
                             for _, h in ipairs(hs) do place(h, 'name') end
@@ -484,7 +485,7 @@ local function read_tree(view, body, holes, shift, resolve, file_consts, lc, bod
             if s:find('%S') then el.children[#el.children + 1] = { text = s } end
         end
         if content then
-            for c in content:iter_children() do
+            for _, c in tsutil.inext, content, -1 do
                 local t = c:type()
                 if t == 'element' then
                     flush()
@@ -496,7 +497,7 @@ local function read_tree(view, body, holes, shift, resolve, file_consts, lc, bod
                 elseif t == 'EntityRef' or t == 'CharRef' then
                     texts[#texts + 1] = xv.decode(raw(sbyte(c), ebyte(c)))
                 elseif t == 'CDSect' then
-                    for x in c:iter_children() do
+                    for _, x in tsutil.inext, c, -1 do
                         if x:type() == 'CData' then
                             for _, p in ipairs(pieces(sbyte(x), ebyte(x), 'cdata', { element = el.path })) do
                                 if type(p) == 'table' then flush(); el.children[#el.children + 1] = p else texts[#texts + 1] = p end
@@ -518,10 +519,10 @@ local function read_tree(view, body, holes, shift, resolve, file_consts, lc, bod
     if shift > 0 then
         -- the wrapped view: the synthetic <_> element's content holds the real roots
         top = nil
-        for c in root:iter_children() do if c:type() == 'element' then top = c end end
-        for c in top:iter_children() do if c:type() == 'content' then top = c end end
+        for _, c in tsutil.inext, root, -1 do if c:type() == 'element' then top = c end end
+        for _, c in tsutil.inext, top, -1 do if c:type() == 'content' then top = c end end
     end
-    for c in top:iter_children() do
+    for _, c in tsutil.inext, top, -1 do
         local t = c:type()
         if t == 'element' then roots[#roots + 1] = element(c, {}, nil)
         elseif t == 'CharData' then
@@ -537,7 +538,7 @@ local function read_tree(view, body, holes, shift, resolve, file_consts, lc, bod
             for _, h in ipairs(holes_in(sbyte(c), ebyte(c))) do place(h, 'comment') end
         elseif t == 'prolog' then
             -- a comment BEFORE the root parses inside the prolog: place by the prolog child's own type
-            for x in c:iter_children() do
+            for _, x in tsutil.inext, c, -1 do
                 local site = x:type() == 'Comment' and 'comment' or 'pi'
                 for _, h in ipairs(holes_in(sbyte(x), ebyte(x))) do place(h, site) end
             end
@@ -604,7 +605,7 @@ function M.templates(src, opts)
         local body = src:sub(body_s + 1, body_e)
         local r = { id = idx, s = sbyte(call.node), e = ebyte(call.node), body_s = body_s, holes = {} }
         r.line, r.col = lc(r.s)
-        for c in tpl:iter_children() do
+        for _, c in tsutil.inext, tpl, -1 do
             if c:type() == 'template_substitution' then
                 local expr = c:named_child(0)
                 local h = {

@@ -26,6 +26,7 @@
 -- reaches — a hedge, not a verdict (a message can come from outside the tree or from a variable).
 -- NOT HERE YET: gen_statem (its callback mode decides the receiving function), `Pid ! Msg` (handle_info, whose
 -- target is a pid). ⚠ SESSION-LIVE, a post-pass (cartograph.postpass).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function read(p)
@@ -36,7 +37,7 @@ end
 local function named(n)
     local out = {}
     if not n then return out end
-    for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
+    for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
     return out
 end
 
@@ -143,7 +144,7 @@ function M.attach(data)
                     local mod = n.file:match('([^/]+)%.erl$')
                     local byfn = {} -- 'name/arity' -> clauses (args lists), in source order
                     local order = {}
-                    for form in r:iter_children() do
+                    for _, form in tsutil.inext, r, -1 do
                         if form:type() == 'fun_decl' then
                             for _, cl in ipairs(named(form)) do
                                 local nm = cl:field('name')[1]
@@ -215,7 +216,7 @@ function M.attach(data)
     local function defines(t)
         if define_memo[t] then return define_memo[t] end
         local d = {}
-        for form in t.root:iter_children() do
+        for _, form in tsutil.inext, t.root, -1 do
             if form:type() == 'pp_define' then
                 local lhs, rep = form:field('lhs')[1], form:field('replacement')[1]
                 local nm = lhs and lhs:field('name')[1]
@@ -239,12 +240,12 @@ function M.attach(data)
         elseif ty == 'atom' and servers[unq(vim.treesitter.get_node_text(n, t.src))] then
             acc[unq(vim.treesitter.get_node_text(n, t.src))] = true
         end
-        for c in n:iter_children() do if c:named() then names_in(c, t, own, acc) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then names_in(c, t, own, acc) end end
         return acc
     end
     local function helper_body(t, name)
         local clauses = {}
-        for form in t.root:iter_children() do
+        for _, form in tsutil.inext, t.root, -1 do
             if form:type() == 'fun_decl' then
                 for _, cl in ipairs(named(form)) do
                     local nm = cl:field('name')[1]
@@ -274,7 +275,7 @@ function M.attach(data)
                     local l, r = n:field('lhs')[1], n:field('rhs')[1]
                     if l and r and l:type() == 'var' and vim.treesitter.get_node_text(l, t.src) == name then from_expr(r) end
                 end
-                for c in n:iter_children() do if c:named() then scan(c) end end
+                for _, c in tsutil.inext, n, -1 do if c:named() then scan(c) end end
             end
             if cl then scan(cl) end
         end

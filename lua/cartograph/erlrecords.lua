@@ -68,6 +68,7 @@
 -- bodies are reported, not resolved against their expansion site; all ifdef branches are read and tagged, never
 -- evaluated, so two exclusive branches' records both appear, as `variants`.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function read(path)
@@ -121,7 +122,7 @@ function M.parse_source(src, path)
     -- an include guard: the file's first directive is -ifndef(X) and the next form is -define(X, …)
     do
         local forms = {}
-        for ch in root:iter_children() do if ch:named() then forms[#forms + 1] = ch end end
+        for _, ch in tsutil.inext, root, -1 do if ch:named() then forms[#forms + 1] = ch end end
         local a, b = forms[1], forms[2]
         if a and b and a:type() == 'pp_ifndef' and b:type() == 'pp_define' then
             local nm = f1(a, 'name')
@@ -192,10 +193,10 @@ function M.parse_source(src, path)
                 end
             end
         end
-        for ch in n:iter_children() do if ch:named() then walk(ch, ctx) end end
+        for _, ch in tsutil.inext, n, -1 do if ch:named() then walk(ch, ctx) end end
     end
 
-    for form in root:iter_children() do
+    for _, form in tsutil.inext, root, -1 do
         if form:named() then
             local t = form:type()
             if t == 'pp_ifdef' or t == 'pp_ifndef' then

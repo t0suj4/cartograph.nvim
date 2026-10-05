@@ -5,6 +5,7 @@
 -- needs NO fold ([[cartograph-branch-value-lens]]). MVP = read-only report; the
 -- path-predicate / shape / oracle-concrete overlays are later increments.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local flow = require 'cartograph.flow'
 local M = {}
 
@@ -34,7 +35,7 @@ local function build_flow(store, node)
     local sl, target = atr.sl(node.range), nil
     local function rec(n)
         if FN[n:type()] and select(1, n:range()) == sl and not target then target = n end
-        for c in n:iter_children() do if c:named() then rec(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
     end
     rec(parser:parse()[1]:root())
     if not target then return nil, 'could not locate the function AST' end

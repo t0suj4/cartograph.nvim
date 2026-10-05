@@ -25,6 +25,7 @@
 --   M.obligations(root, attached) -> per -behaviour(B) line: the producer of B's callbacks — a module B.erl in the tree,
 --                                   in an attachable dependency (src/ or ebin/), the runtime profile (OTP + installed libs:
 --                                   otp-api, distilled from the running runtime), or NONE
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function read(p)
@@ -44,7 +45,7 @@ local function erl_terms(path)
     local erllit = require 'cartograph.erllit'
     local out = {}
     local function walk(n)
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then
                 local t = c:type()
                 -- a tuple or list literal: read it as a term and stop (its insides are part of the term)

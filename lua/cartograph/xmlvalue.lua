@@ -63,6 +63,7 @@
 --   html.parser     keep → last      literal           keep
 --   HTML5 (spec)    first            literal           keep (a parse error, the character kept)
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 M.XMLNS = 'http://www.w3.org/2000/xmlns/'
@@ -119,14 +120,14 @@ function M.read(src)
     -- the DTD's INTERNAL general entities (parameter entities and external ones are not expandable
     -- here: an external entity is never fetched)
     local decl, external = {}, {}
-    for c in root:iter_children() do
+    for _, c in tsutil.inext, root, -1 do
         if c:type() == 'prolog' then
-            for d in c:iter_children() do
+            for _, d in tsutil.inext, c, -1 do
                 if d:type() == 'doctypedecl' then
-                    for g in d:iter_children() do
+                    for _, g in tsutil.inext, d, -1 do
                         if g:type() == 'GEDecl' then
                             local gname, gval, ext
-                            for x in g:iter_children() do
+                            for _, x in tsutil.inext, g, -1 do
                                 if x:type() == 'Name' then gname = node_text(x, src)
                                 elseif x:type() == 'EntityValue' then gval = node_text(x, src):sub(2, -2)
                                 elseif x:type() == 'ExternalID' then ext = true end
@@ -168,7 +169,7 @@ function M.read(src)
         local t = n:type()
         if t == 'CharData' then return (node_text(n, src):gsub('\r\n', '\n'):gsub('\r', '\n')) end
         if t == 'CDSect' then
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:type() == 'CData' then
                     local d = node_text(c, src)
                     -- ⚠ A CDATA ENDS AT THE FIRST `]]>`. tree-sitter-xml mis-tokenises `…]]]>` and runs
@@ -182,7 +183,7 @@ function M.read(src)
         end
         if t == 'EntityRef' then
             local name
-            for c in n:iter_children() do if c:type() == 'Name' then name = node_text(c, src) end end
+            for _, c in tsutil.inext, n, -1 do if c:type() == 'Name' then name = node_text(c, src) end end
             if name and PREDEF[name] then return PREDEF[name] end
             undefined = undefined + 1
             local lit = node_text(n, src)
@@ -213,7 +214,7 @@ function M.read(src)
 
     local function attr_value(av)
         local out = {}
-        for c in av:iter_children() do
+        for _, c in tsutil.inext, av, -1 do
             local p = piece(c)
             if p then out[#out + 1] = p end
         end
@@ -254,18 +255,18 @@ function M.read(src)
     local home -- the root element's namespace
     local function element(n, scope)
         local tag, attrs, content = n, {}, nil
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             local t = c:type()
             if t == 'STag' or t == 'EmptyElemTag' then tag = c
             elseif t == 'content' then content = c end
         end
         local qname
         local decl, raw_attrs = {}, {}
-        for c in tag:iter_children() do
+        for _, c in tsutil.inext, tag, -1 do
             if c:type() == 'Name' and not qname then qname = node_text(c, src)
             elseif c:type() == 'Attribute' then
                 local an, av
-                for x in c:iter_children() do
+                for _, x in tsutil.inext, c, -1 do
                     if x:type() == 'Name' then an = node_text(x, src) elseif x:type() == 'AttValue' then av = attr_value(x) end
                 end
                 if an then
@@ -313,7 +314,7 @@ function M.read(src)
         end
         local counts = {}
         if content then
-            for c in content:iter_children() do
+            for _, c in tsutil.inext, content, -1 do
                 local t = c:type()
                 if t == 'element' then
                     any_child = true
@@ -340,7 +341,7 @@ function M.read(src)
         return name, { o = o, keys = keys }
     end
 
-    for c in root:iter_children() do
+    for _, c in tsutil.inext, root, -1 do
         if c:type() == 'element' then
             local okr, name, value = pcall(element, c, {})
             if not okr then

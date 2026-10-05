@@ -22,6 +22,7 @@
 --                        variable pulls in, and every region whose default-compiled branch EXCLUDES code (with the
 --                        disabled line range and the functions defined in it)
 --   M.disabled_at(F, file, line) -> the feature that compiles `file:line` out by default, or nil
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function read(p)
@@ -82,7 +83,7 @@ function M.rebar(root)
     local troot = parser:parse()[1]:root()
     local terms = {}
     local function collect(n)
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() then
                 local t = c:type()
                 if t == 'tuple' or t == 'list' then terms[#terms + 1] = erllit.term(c, src) else collect(c) end

@@ -14,12 +14,13 @@
 -- call reaches it" is a claim about the whole program.
 -- The argument terms come from erlterms WITHOUT summarizing calls (a call's result is a hole: a maybe, never a
 -- wrong no), so this reads records, atoms, tuples, lists, bindings and patterns in scope.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
 local function named(x)
     local out = {}
-    if x then for c in x:iter_children() do if c:named() then out[#out + 1] = c end end end
+    if x then for _, c in tsutil.inext, x, -1 do if c:named() then out[#out + 1] = c end end end
     return out
 end
 
@@ -62,7 +63,7 @@ function M.census(dir, opts)
             for k, v in pairs(m.ctx) do ctx[k] = v end
             ctx.program = nil   -- a call's result is a hole: the arguments are read, never summarized
             local function walk(x, fnname)
-                for c in x:iter_children() do
+                for _, c in tsutil.inext, x, -1 do
                     local here = fnname
                     if c:type() == 'function_clause' then
                         local nn = c:field('name')[1]

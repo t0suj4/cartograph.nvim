@@ -15,6 +15,7 @@
 -- ⚠ A `.Values` chain inside a `range`/`with` body with a PLAIN dot is relative to the rebound dot: counted as a
 -- frontier, not resolved. Static values describe a HYPOTHETICAL release: `helm upgrade` with no -f/--set reuses the
 -- previous release's values (Finding 3) — the report says so.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 local Y = require 'cartograph.yamlvalue'
 
@@ -59,7 +60,7 @@ function M.reads(src)
                     pl = pl:parent()
                 end
                 if pl and pl:type() == 'chained_pipeline' then
-                    for c in pl:iter_children() do
+                    for _, c in tsutil.inext, pl, -1 do
                         if c:type() == 'function_call' then
                             local fname = c:named_child(0) and tx(c:named_child(0), src)
                             if fname == 'default' or fname == 'required' then defaulted = true end
@@ -88,14 +89,14 @@ function M.reads(src)
                 while #stack > 0 do
                     local x = table.remove(stack)
                     if x:type() == 'selector_expression' then local p = values_path(x, src); if p then g2[#g2 + 1] = p end end
-                    for c in x:iter_children() do if c:named() then stack[#stack + 1] = c end end
+                    for _, c in tsutil.inext, x, -1 do if c:named() then stack[#stack + 1] = c end end
                 end
             end
             local inner_scoped = scoped or t == 'with_action' or t == 'range_action'
             for i = 1, n:named_child_count() - 1 do walk(n:named_child(i), (t ~= 'range_action') and g2 or guards, inner_scoped) end
             return
         end
-        for c in n:iter_children() do if c:named() then walk(c, guards, scoped) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then walk(c, guards, scoped) end end
     end
     walk(root, {}, false)
     return out, whole
@@ -127,7 +128,7 @@ function M.chomped(src)
                 end
             end
         end
-        for c in n:iter_children() do if c:named() then stack[#stack + 1] = c end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then stack[#stack + 1] = c end end
     end
     table.sort(out)
     return out

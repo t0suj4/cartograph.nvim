@@ -35,12 +35,13 @@
 -- structure the audit cannot see, since it reads the comparison and not the table
 -- it lives in. Hence the `@langs-ok` waivers rather than a rewrite: the tabling it
 -- would ask for is already there, one level up.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 -- ── detector helpers (over the tree) ───────────────────────────────────────
 -- an anonymous child IS its token text (`&.`, `=`), per the grammar probe
 local function anon(n, token)
-    for c in n:iter_children() do
+    for _, c in tsutil.inext, n, -1 do
         if not c:named() and c:type() == token then return true end
     end
     return false
@@ -48,7 +49,7 @@ end
 
 local function named_count(n)
     local k = 0
-    for c in n:iter_children() do if c:named() then k = k + 1 end end
+    for _, c in tsutil.inext, n, -1 do if c:named() then k = k + 1 end end
     return k
 end
 
@@ -122,7 +123,7 @@ M.FEATURES = {
         { id = 'var-annotation', v = '3.6', desc = 'x: int = 1 variable annotation',
             node = 'assignment',
             test = function (n)
-                for c in n:iter_children() do
+                for _, c in tsutil.inext, n, -1 do
                     -- @langs-ok inside FEATURES.python — python's annotation node
                     if c:named() and c:type() == 'type' then return true end
                 end
@@ -137,7 +138,7 @@ M.FEATURES = {
         { id = 'union-type', v = '3.10', desc = 'X | Y union in an annotation',
             node = 'type',
             test = function (n)
-                for c in n:iter_children() do
+                for _, c in tsutil.inext, n, -1 do
                     -- @langs-ok inside FEATURES.python — PEP 604 `X | Y` union
                 if c:named() and c:type() == 'binary_operator' and anon(c, '|') then
                         return true
@@ -184,7 +185,7 @@ local ES = {
     { id = 'optional-catch', v = '2019', desc = 'catch {} without a binding',
         node = 'catch_clause',
         test = function (n)
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 -- @langs-ok inside ES (the js/ts/tsx ladder) — optional catch binding
                 if c:named() and c:type() ~= 'statement_block' then return false end
             end
@@ -372,7 +373,7 @@ function M.scan(lang, src)
                 end
             end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(root)
     return out
@@ -627,7 +628,7 @@ M.CHANGED_SYNTAX = {
         { id = 'symbol-to-proc', v = '3.0', node = 'block_argument',
             desc = '&:sym — Symbol#to_proc returns a lambda since 3.0',
             test = function (n)
-                for c in n:iter_children() do
+                for _, c in tsutil.inext, n, -1 do
                     -- @langs-ok inside FEATURES.ruby / CHANGED.ruby — ruby symbol
                     if c:named() and c:type() == 'simple_symbol' then return true end
                 end
@@ -747,7 +748,7 @@ function M.syntax_facts(store, which, prefix)
                         end
                     end
                 end
-                for c in n:iter_children() do walk(c) end
+                for _, c in tsutil.inext, n, -1 do walk(c) end
             end
             walk(root)
         end

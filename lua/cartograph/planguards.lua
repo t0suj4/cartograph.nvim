@@ -35,6 +35,7 @@
 -- rung ladder that falls out of it (parses / same kind / re-derives its own
 -- authorisation) is deliberately NOT built here — this increment is rung 0.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 M.PASS = 'pass'
@@ -190,7 +191,7 @@ function M.code_skeleton(text, lang)
     local function walk(nd)
         if tsutil.is_comment(nd) then return end
         local kids = 0
-        for c in nd:iter_children() do kids = kids + 1; walk(c) end
+        for _, c in tsutil.inext, nd, -1 do kids = kids + 1; walk(c) end
         if kids == 0 then
             local sr, sc, er, ec = nd:range()
             local t = (sr == er) and (lines[sr + 1] or ''):sub(sc + 1, ec) or nd:type()

@@ -18,6 +18,7 @@
 -- `kind` field names it at run time (scaleTargetRef, dataSourceRef: target nil); (3) a SELECTOR's doc comment — the
 -- first kind it mentions ("Label selector for pods", "a label query over volumes"); a field whose words name no kind is
 -- not an edge (schedulerName, signerName, a metric's selector).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function readfile(p) local fd = io.open(p, 'rb'); if not fd then return nil end local s = fd:read('a'); fd:close(); return s end

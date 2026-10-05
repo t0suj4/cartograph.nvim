@@ -11,6 +11,7 @@
 -- (the field's def is the join, like the linker's multi-definer globals). Analysis-
 -- only — a per-fn lens over re-parsed content, no schema/fold change, no VERSION bump.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local at = require 'cartograph.at'
 
 -- @langs lua
@@ -50,9 +51,9 @@ local function collect_writes(fn, src, method, file, out)
     if not fn then return end
     local function walk(n)
         if n:type() == 'assignment_statement' then
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:type() == 'variable_list' then
-                    for t in c:iter_children() do
+                    for _, t in tsutil.inext, c, -1 do
                         if t:type() == 'dot_index_expression' then
                             local base, fld = t:named_child(0), t:field('field')[1]
                             if base and txt(base, src) == 'self' and fld then
@@ -65,11 +66,11 @@ local function collect_writes(fn, src, method, file, out)
                 end
             end
         end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() and (c == fn or not FN_TYPES[c:type()]) then walk(c) end
         end
     end
-    for c in fn:iter_children() do if c:named() and not FN_TYPES[c:type()] then walk(c) end end
+    for _, c in tsutil.inext, fn, -1 do if c:named() and not FN_TYPES[c:type()] then walk(c) end end
 end
 
 -- `self.field` READS within a method's fn node (not a write target) → { {field, line} }.
@@ -78,12 +79,12 @@ local function collect_reads(fn, src, out)
     local function walk(n, inwrite)
         if n:type() == 'assignment_statement' then -- LHS targets are writes, RHS are reads
             local vl, el
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:type() == 'variable_list' then vl = c
                 elseif c:type() == 'expression_list' then el = c end
             end
-            if vl then for t in vl:iter_children() do if t:named() then walk(t, true) end end end
-            if el then for e in el:iter_children() do if e:named() then walk(e, false) end end end
+            if vl then for _, t in tsutil.inext, vl, -1 do if t:named() then walk(t, true) end end end
+            if el then for _, e in tsutil.inext, el, -1 do if e:named() then walk(e, false) end end end
             return
         end
         if n:type() == 'dot_index_expression' and not inwrite then
@@ -93,11 +94,11 @@ local function collect_reads(fn, src, out)
                 out[#out + 1] = { field = txt(fld, src), line = n:start() + 1, row = frow, col = fcol }
             end
         end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:named() and not FN_TYPES[c:type()] then walk(c, inwrite) end
         end
     end
-    for c in fn:iter_children() do if c:named() and not FN_TYPES[c:type()] then walk(c, false) end end
+    for _, c in tsutil.inext, fn, -1 do if c:named() and not FN_TYPES[c:type()] then walk(c, false) end end
 end
 
 -- the class NAME that owns a colon-method node (`C:method` → C), else nil

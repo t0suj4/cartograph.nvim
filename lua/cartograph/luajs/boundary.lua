@@ -9,6 +9,7 @@
 -- Nothing is listed by hand: the GC types are the structs holding the fields of LuaJIT's own `#define GCHeader`
 -- (lj_obj.h), plus any struct/union holding one BY VALUE (GCobj, global_State); the C is the build's own preprocessing
 -- (its make's flags); the amalgamation unit (a .c that includes .c files) is left out, as it redefines everything.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local C = require 'cartograph.cjs'
@@ -57,7 +58,7 @@ function M.gc_types(sources, src)
         if q.captures[id] == 'n' then nm = vim.treesitter.get_node_text(node, unit.text)
         else
             local d = { names = {}, by_value = {} }
-            for fd in node:iter_children() do
+            for _, fd in tsutil.inext, node, -1 do
                 if fd:type() == 'field_declaration' then
                     local ty = fd:field('type')[1]
                     for _, dec in ipairs(fd:field('declarator')) do

@@ -22,6 +22,7 @@
 -- THE LAWS (checked, not assumed): read(print(el)) = el MODULO ATTRIBUTE ORDER (XML gives it no meaning, and fxml's own
 -- parse does not keep it: namespace declarations come first); decode(read(print(encode(r)))) = r; print agrees with
 -- fxml:element_to_binary byte for byte, read with fxml_stream:parse_element term for term.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 local unpack = table.unpack or unpack
 
@@ -120,10 +121,10 @@ function M.read(text)
     local function t(n) return vim.treesitter.get_node_text(n, text) end
     local function attrs_of(tag)
         local out = {}
-        for c in tag:iter_children() do
+        for _, c in tsutil.inext, tag, -1 do
             if c:type() == 'Attribute' then
                 local nm, val
-                for d in c:iter_children() do
+                for _, d in tsutil.inext, c, -1 do
                     if d:type() == 'Name' then nm = t(d) elseif d:type() == 'AttValue' then val = t(d) end
                 end
                 if nm and val then out[#out + 1] = { nm, decode_refs(val:sub(2, -2)) } end
@@ -143,19 +144,19 @@ function M.read(text)
         local text_buf
         local function flush() if text_buf then kids[#kids + 1] = M.cdata(text_buf); text_buf = nil end end
         local function addtext(s) text_buf = (text_buf or '') .. s end
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             local ty = c:type()
             if ty == 'STag' or ty == 'EmptyElemTag' then
-                for d in c:iter_children() do if d:type() == 'Name' then name = t(d); break end end
+                for _, d in tsutil.inext, c, -1 do if d:type() == 'Name' then name = t(d); break end end
                 attrs = attrs_of(c)
             elseif ty == 'content' then
-                for d in c:iter_children() do
+                for _, d in tsutil.inext, c, -1 do
                     local dt = d:type()
                     if dt == 'element' then flush(); kids[#kids + 1] = element(d)
                     elseif dt == 'CharData' then addtext(t(d))
                     elseif dt == 'EntityRef' or dt == 'CharRef' then addtext(decode_refs(t(d)))
                     elseif dt == 'CDSect' then
-                        for e in d:iter_children() do if e:type() == 'CData' then addtext(t(e)) end end
+                        for _, e in tsutil.inext, d, -1 do if e:type() == 'CData' then addtext(t(e)) end end
                     end
                 end
             end
@@ -163,7 +164,7 @@ function M.read(text)
         flush()
         return M.el(name, attrs, kids)
     end
-    for c in root:iter_children() do
+    for _, c in tsutil.inext, root, -1 do
         if c:type() == 'element' then return element(c) end
     end
     return nil, 'no element'

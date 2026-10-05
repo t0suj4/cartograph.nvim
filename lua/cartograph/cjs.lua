@@ -22,6 +22,7 @@
 --              the body's own switch-level `break`s exit the hoisted block
 -- Anything else — another goto shape, address-of, sizeof, a pointer to a non-byte type used arithmetically, a call with
 -- no definition and no template — is REFUSED by name.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local JS_RESERVED = {}
@@ -45,7 +46,7 @@ local EXACT_NAMED = {
 local function field_of(n, name) for c, f in n:iter_children() do if f == name then return c end end end
 local function named_kids(n)
     local out = {}
-    for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
+    for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
     return out
 end
 
@@ -198,7 +199,7 @@ function M.emit(sources, opts)
     end
     for _, tr in ipairs(trees) do
         cur_src = tr.src
-        for n in tr.root:iter_children() do
+        for _, n in tsutil.inext, tr.root, -1 do
             local t = n:type()
             if t == 'type_definition' then
                 local ty, nm = field_of(n, 'type'), field_of(n, 'declarator')
@@ -989,7 +990,7 @@ function M.emit(sources, opts)
         elseif t == 'labeled_statement' then
             local label = text(field_of(n, 'label'))
             local body = named_kids(n)[2] or named_kids(n)[1]
-            for c in n:iter_children() do if c:named() and c:type() ~= 'statement_identifier' then body = c end end
+            for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'statement_identifier' then body = c end end
             local inside = #gotos_to(body, label)
             if inside > 0 then
                 -- BACKWARD: every goto to it lies inside the labeled statement -> a loop, `continue label`
@@ -1035,7 +1036,7 @@ function M.emit(sources, opts)
             local sjs = ('%s: switch (%s) {\n%s\n}'):format(sw, cond, table.concat(cases, '\n'))
             if not hoist then return sjs end
             local inner
-            for c in hoist.node:iter_children() do if c:named() and c:type() ~= 'statement_identifier' then inner = c end end
+            for _, c in tsutil.inext, hoist.node, -1 do if c:named() and c:type() ~= 'statement_identifier' then inner = c end end
             local hb = '$blk' .. swcount
             -- the hoisted body is the labeled statement AND every statement after it in its case: a C label names ONE
             -- statement, the rest of the case are its siblings (measured: `default: plainnumber: if (…) break; n = …;
@@ -1137,7 +1138,7 @@ function M.emit(sources, opts)
                 emit(user[label] and jump(user[label]) or (refuse(n, 'goto', 'a goto to no label of this function (`' .. label .. '`)') .. ';'))
             elseif t == 'labeled_statement' then
                 place(user[text(field_of(n, 'label'))])
-                for c in n:iter_children() do if c:named() and c:type() ~= 'statement_identifier' then lower(c, cx) end end
+                for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'statement_identifier' then lower(c, cx) end end
             elseif t == 'switch_statement' then
                 local sv = '$s' .. newlab()
                 hoist.names[#hoist.names + 1] = sv

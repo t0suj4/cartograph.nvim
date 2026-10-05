@@ -40,6 +40,7 @@
 -- ⚠ A TEMPLATE IS NOT DATA: a document carrying `{{` is returned with `templated = true`, and
 -- whatever parsed is NOT to be trusted as the values (helm charts, `.gotmpl`, updatecli).
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function node_text(node, src) return vim.treesitter.get_node_text(node, src) end
@@ -180,10 +181,10 @@ function M.read(src)
         local t = node:type()
         if t == 'block_node' or t == 'flow_node' then
             local anchor, content, tagname
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 local ct = c:type()
                 if ct == 'anchor' then
-                    for a in c:iter_children() do if a:type() == 'anchor_name' then anchor = node_text(a, src) end end
+                    for _, a in tsutil.inext, c, -1 do if a:type() == 'anchor_name' then anchor = node_text(a, src) end end
                 elseif ct == 'tag' then tagname = node_text(c, src)
                 elseif ct ~= 'comment' and c:named() then content = c end
             end
@@ -193,7 +194,7 @@ function M.read(src)
             return v
         end
         if t == 'alias' then
-            for a in node:iter_children() do
+            for _, a in tsutil.inext, node, -1 do
                 if a:type() == 'alias_name' then
                     local v = anchors[node_text(a, src)]
                     return v == nil and { amb = 'scalar', text = '' } or v
@@ -212,7 +213,7 @@ function M.read(src)
                 if complex then key = vim.inspect(key) end
                 pairs_[#pairs_ + 1] = { k = key, plain = type(kraw) == 'table' and kraw.amb == 'scalar', v = v, complex = complex or nil }
             end
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 local ct = c:type()
                 if ct == 'block_mapping_pair' or ct == 'flow_pair' then
                     local k = c:field('key')[1]
@@ -226,10 +227,10 @@ function M.read(src)
         end
         if t == 'block_sequence' then
             local a = {}
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 if c:type() == 'block_sequence_item' then
                     local item
-                    for x in c:iter_children() do if x:named() and x:type() ~= 'comment' then item = x end end
+                    for _, x in tsutil.inext, c, -1 do if x:named() and x:type() ~= 'comment' then item = x end end
                     a[#a + 1] = value(item)
                 end
             end
@@ -237,7 +238,7 @@ function M.read(src)
         end
         if t == 'flow_sequence' then
             local a = {}
-            for c in node:iter_children() do
+            for _, c in tsutil.inext, node, -1 do
                 if c:type() == 'flow_node' then a[#a + 1] = value(c)
                 elseif c:type() == 'flow_pair' then -- `[a: 1]` is a single-pair mapping
                     local k, v = c:field('key')[1], c:field('value')[1]
@@ -254,14 +255,14 @@ function M.read(src)
             return scalar(node)
         end
         -- a scalar's inner node (string_scalar, integer_scalar, …): its parent decides
-        for c in node:iter_children() do if c:named() then return value(c) end end
+        for _, c in tsutil.inext, node, -1 do if c:named() then return value(c) end end
         return node_text(node, src)
     end
     local docs = {}
-    for d in root:iter_children() do
+    for _, d in tsutil.inext, root, -1 do
         if d:type() == 'document' then
             local content
-            for c in d:iter_children() do if c:named() and c:type() ~= 'comment' then content = c end end
+            for _, c in tsutil.inext, d, -1 do if c:named() and c:type() ~= 'comment' then content = c end end
             local text = node_text(d, src)
             local raw = content and value(content) or { amb = 'scalar', text = '' }
             docs[#docs + 1] = { raw = raw, value = M.decide(raw, M.BASE), templated = text:find('{{', 1, true) ~= nil }

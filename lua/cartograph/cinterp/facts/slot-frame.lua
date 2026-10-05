@@ -18,7 +18,7 @@ return {
                 for id, node in q:iter_captures(root, s.text, 0, -1) do
                     if q.captures[id] == 'n' then nm = vim.treesitter.get_node_text(node, s.text)
                     elseif tags[nm] then
-                        for fd in node:iter_children() do
+                        for _, fd in require('cartograph.spec.tsutil').inext, node, -1 do
                             if fd:type() == 'field_declaration' then
                                 for _, d in ipairs(fd:field('declarator')) do
                                     local ptr = d:type() == 'pointer_declarator'

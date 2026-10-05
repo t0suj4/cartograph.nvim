@@ -85,7 +85,7 @@ M.IF_HEAD = {
 function M.unparen(node)
     while node and M.PARENS[node:type()] do
         local inner
-        for c in node:iter_children() do if c:named() then inner = c break end end
+        for _, c in M.inext, node, -1 do if c:named() then inner = c break end end
         if not inner then break end
         node = inner
     end
@@ -161,7 +161,7 @@ function M.c_file_local(defn, src, file)
     if t ~= 'function_definition' then return false end
     local p = defn:parent()
     if p and p:type() == 'field_declaration_list' then return false end
-    for c in defn:iter_children() do
+    for _, c in M.inext, defn, -1 do
         if c:type() == 'storage_class_specifier' and M.node_text(c, src) == 'static' then return true end
     end
     return false
@@ -190,7 +190,7 @@ local C_STRUCTURAL = {
 local function has_error_node(n)
     if n:type() == 'ERROR' then return true end
     if not n:has_error() then return false end
-    for c in n:iter_children() do
+    for _, c in M.inext, n, -1 do
         if has_error_node(c) then return true end
     end
     return false
@@ -213,7 +213,7 @@ function M.c_torn_context(dn, dname)
     local body = dn:type() == 'function_definition' and dn:field('body')[1] or nil
     if body then
         local bid = body:id()
-        for c in dn:iter_children() do
+        for _, c in M.inext, dn, -1 do
             if c:id() ~= bid and has_error_node(c) then return true end
         end
     elseif has_error_node(dn) then

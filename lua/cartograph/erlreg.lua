@@ -47,6 +47,7 @@
 -- that compute the same thing SEPARATELY will disagree, and the disagreement
 -- will be discovered by a reader who trusts the wrong one".
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local prof = require 'cartograph.spec.profile'
@@ -85,19 +86,19 @@ end
 local function tuples_tagged(root, src, tag, out)
     if root:type() == 'tuple' then
         local first
-        for c in root:iter_children() do
+        for _, c in tsutil.inext, root, -1 do
             if c:named() then first = c; break end
         end
         if first and first:type() == 'atom'
             and vim.treesitter.get_node_text(first, src) == tag then
             local els = {}
-            for c in root:iter_children() do
+            for _, c in tsutil.inext, root, -1 do
                 if c:named() then els[#els + 1] = c end
             end
             out[#out + 1] = els
         end
     end
-    for c in root:iter_children() do
+    for _, c in tsutil.inext, root, -1 do
         if c:named() then tuples_tagged(c, src, tag, out) end
     end
 end
@@ -121,7 +122,7 @@ end
 local function element(node, src)
     local t = node:type()
     if t == 'macro_call_expr' then
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() and (c:type() == 'var' or c:type() == 'atom') then
                 return vim.treesitter.get_node_text(c, src), t
             end

@@ -35,6 +35,7 @@
 -- early-exit guard clause — where it is the whole point, because ruby's guard
 -- clause is `return unless p`, after which p is TRUTHY.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 -- constructs whose condition positively dominates their guarded body.
@@ -180,7 +181,7 @@ local function positive_guard(p, child)
     if COMPREHENSION[pt] then
         local body = p:field('body')[1]
         if not (body and same(child, body)) then return nil end
-        for c in p:iter_children() do
+        for _, c in tsutil.inext, p, -1 do
             -- @langs-ok if_clause exists only in python; the enclosing branch is
             -- already gated on COMPREHENSION, which no other declared grammar has
             if c:type() == 'if_clause' then return c:named_child(0) end
@@ -213,7 +214,7 @@ end
 local function negated_chain(p, child, out)
     local cond = condition_of(p)
     if not cond then return end
-    for c in p:iter_children() do
+    for _, c in tsutil.inext, p, -1 do
         if same(c, child) then break end
         if c:named() and ELSEIF[c:type()] then
             local cc = c:field('condition')[1]
@@ -286,7 +287,7 @@ local function terminates(body, src)
     -- (else early-exit guards without braces are silently missed, [[cartograph-nil-flow]]).
     if TERM[body:type()] then return true end
     local last
-    for c in body:iter_children() do if c:named() then last = c end end
+    for _, c in tsutil.inext, body, -1 do if c:named() then last = c end end
     if not last then return false end
     if TERM[last:type()] then return true end
     local s = txt(last, src)
@@ -297,7 +298,7 @@ end
 local function if_body(ifnode)
     local b = ifnode:field('body')[1] or ifnode:field('consequence')[1]
     if b then return b end
-    for c in ifnode:iter_children() do
+    for _, c in tsutil.inext, ifnode, -1 do
         if c:named() and BLOCK[c:type()] then return c end
     end
 end
@@ -330,7 +331,7 @@ function M.guards_over(node, src)
         -- itself, when the clause is INVERTED (`return unless p` ⇒ p is truthy
         -- after it, which is the ruby guard clause).
         if BLOCK[p:type()] then
-            for c in p:iter_children() do
+            for _, c in tsutil.inext, p, -1 do
                 if same(c, child) then break end
                 if c:named() and GUARD_CLAUSE[c:type()]
                     and not c:field('alternative')[1] then -- no else branch
@@ -357,7 +358,7 @@ end
 ---      heads = { [id] = true } (targets of a back edge: where a fixpoint widens) }
 function M.graph(fnnode, src)
     local nodes, labels, gotos = {}, {}, {}
-    local function kids(n) local o = {} for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then o[#o + 1] = c end end return o end
+    local function kids(n) local o = {} for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'comment' then o[#o + 1] = c end end return o end
     local function new(k, ast) local id = #nodes + 1; nodes[id] = { k = k, ast = ast, succ = {} }; return id end
     local function edge(a, b, on, val) table.insert(nodes[a].succ, { to = b, on = on or 'always', val = val }) end
     local lower
@@ -428,7 +429,7 @@ function M.graph(fnnode, src)
             return j
         elseif t == 'labeled_statement' then
             local inner
-            for c in n:iter_children() do if c:named() and c:type() ~= 'statement_identifier' then inner = c end end -- @langs-ok M.graph is C only
+            for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'statement_identifier' then inner = c end end -- @langs-ok M.graph is C only
             local l = new('nop', n)
             edge(l, inner and lower(inner, nxt, cx) or nxt)
             labels[vim.treesitter.get_node_text(n:field('label')[1], src)] = l

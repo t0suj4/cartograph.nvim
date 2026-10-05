@@ -6,6 +6,7 @@
 -- @langs odin — a spec IS one grammar's mapping, so every node type here is
 -- odin's by construction.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local node_text = require('cartograph.spec.tsutil').node_text
 
 -- Odin package-qualified resolution (R1). A .odin file declares `package P`; the
@@ -30,18 +31,18 @@ local function odin_context(node, src)
     -- leaving big files like fmt.odin/io.odin only partially package-keyed)
     local pkg, imports = nil, {}
     if r then
-        for n in r:iter_children() do
+        for _, n in tsutil.inext, r, -1 do
             local t = n:type()
             if t == 'package_declaration' then
-                for c in n:iter_children() do
+                for _, c in tsutil.inext, n, -1 do
                     if c:type() == 'identifier' then pkg = node_text(c, src); break end
                 end
             elseif t == 'import_declaration' then
                 local alias, path
-                for c in n:iter_children() do
+                for _, c in tsutil.inext, n, -1 do
                     if c:type() == 'identifier' then alias = node_text(c, src)
                     elseif c:type() == 'string' then
-                        for cc in c:iter_children() do
+                        for _, cc in tsutil.inext, c, -1 do
                             if cc:type() == 'string_content' then path = node_text(cc, src) end
                         end
                     end
@@ -129,9 +130,9 @@ return {
         -- (CART-0305, measured). These two hooks are the positional twins of
         -- body_field / params_field; flow.build prefers the field and falls back here.
         body_of = function (def)
-            for c in def:iter_children() do
+            for _, c in tsutil.inext, def, -1 do
                 if c:named() and c:type() == 'procedure' then
-                    for g in c:iter_children() do
+                    for _, g in tsutil.inext, c, -1 do
                         if g:named() and g:type() == 'block' then return g end
                     end
                 end
@@ -139,9 +140,9 @@ return {
             return nil
         end,
         params_of = function (def)
-            for c in def:iter_children() do
+            for _, c in tsutil.inext, def, -1 do
                 if c:named() and c:type() == 'procedure' then
-                    for g in c:iter_children() do
+                    for _, g in tsutil.inext, c, -1 do
                         if g:named() and g:type() == 'parameters' then return g end
                     end
                 end
@@ -175,7 +176,7 @@ return {
             local me = calln:parent()
             if not me or me:type() ~= 'member_expression' then return nil end
             local op
-            for c in me:iter_children() do
+            for _, c in tsutil.inext, me, -1 do
                 if c:named() then op = c; break end -- operand = first named child
             end
             if not op or op:type() ~= 'identifier' then return nil end

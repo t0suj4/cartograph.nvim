@@ -62,6 +62,7 @@
 --   is text, and a head that descends INTO a decoded value (`from = #jid{luser = U}`) is a named frontier;
 --   xdata_codec's .xdata forms (muc_roomconfig etc.) are a second generator and are not read here.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function read(path)
@@ -237,7 +238,7 @@ function M.parse_source(src, path)
     local tree = okp and parser and parser:parse()[1]
     if not tree then spec.unparsed = true; return spec end
     local root = tree:root()
-    for form in root:iter_children() do
+    for _, form in tsutil.inext, root, -1 do
         if form:type() == 'wild_attribute' then
             local an = form:field('name')[1]
             local ai = an and an:field('name')[1]
@@ -252,7 +253,7 @@ function M.parse_source(src, path)
                 local v = form:field('value')[1]
                 local nm, body, extra = nil, nil, 0
                 if v and v:type() == 'paren_expr' then
-                    for ch in v:iter_children() do
+                    for _, ch in tsutil.inext, v, -1 do
                         if ch:named() then
                             if ch:type() == 'ERROR' and not nm then
                                 local a = ch:named_child(0)

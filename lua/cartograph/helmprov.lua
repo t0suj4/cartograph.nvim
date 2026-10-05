@@ -4,6 +4,7 @@
 -- renders are Helm's (verified per file against `helm template`, as documents); the attribution is exact (every text
 -- span reproduces the template source at its location). Built OFFLINE on first use (tools/helmprov/build.sh).
 -- USER, 2026-09-11: "quickly navigate into value use sites, so I can extend the helm chart there or here".
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local REPO = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h:h')
@@ -397,7 +398,7 @@ function M.key_lines(src)
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, 'yaml')
     if not ok or not parser then return out end
     local function walk(node, prefix)
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:type() == 'block_mapping_pair' or c:type() == 'flow_pair' then
                 local k = c:field('key')[1]
                 if k then
@@ -410,7 +411,7 @@ function M.key_lines(src)
             elseif c:type() == 'block_sequence' or c:type() == 'flow_sequence' then
                 -- (a list's items: `containers[1].image`, 1-based — the path form of the schema check, CART-1308)
                 local i = 0
-                for item in c:iter_children() do
+                for _, item in tsutil.inext, c, -1 do
                     if item:named() and item:type() ~= 'comment' then
                         i = i + 1
                         local ip = prefix .. '[' .. i .. ']'

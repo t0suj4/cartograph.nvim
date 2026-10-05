@@ -18,6 +18,7 @@
 -- setting it up EARLIER changes nothing else (unchecked — run the affected specs ALONE after applying: that is the
 -- check, and `SPEC=<name>` is the isolation it needs).
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local expr = require 'cartograph.expr'
 local txn = require 'cartograph.txn'
 local redundancy = require 'cartograph.redundancy'
@@ -34,7 +35,7 @@ local function node_index(src, lang)
         local sr = n:range()
         local k = n:type() .. ':' .. sr
         if not idx[k] then idx[k] = n end
-        for c in n:iter_children() do if c:named() then walk(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end
     end
     walk(tree:root())
     return idx

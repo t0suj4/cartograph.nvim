@@ -23,6 +23,7 @@
 -- SKIPS every literal in this file and a clean run proves nothing about it. `any`
 -- rather than `yaml` says that honestly: the claim is "not a tree-sitter node
 -- vocabulary the fence can check", not "checked and clean" (CART-0304).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
@@ -60,7 +61,7 @@ local function map_of_extracted(node, p1, p2)
         return node
     end
     if node:type() == 'block_node' or node:type() == 'flow_node' then
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:type() == p1 or c:type() == p2 then
                 return c
             end
@@ -81,7 +82,7 @@ local function top_sequence_extracted(tree, hp1)
     local n = tree
     for _, want in ipairs({ 'document', 'block_node' }) do
         local nx
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if c:type() == want then nx = c; break end
         end
         n = nx
@@ -199,7 +200,7 @@ function M.attach(data)
                         local val = n:next_named_sibling() or n:parent()
                         if nm then anchors[vim.treesitter.get_node_text(nm, src)] = val end
                     end
-                    for c in n:iter_children() do
+                    for _, c in tsutil.inext, n, -1 do
                         if c:named() then find_anchors(c) end
                     end
                 end
@@ -223,12 +224,12 @@ function M.attach(data)
     end
     local function add_handler(seq, rel, src)
         if not seq then return end
-        for item in seq:iter_children() do
+        for _, item in tsutil.inext, seq, -1 do
             if item:type() == 'block_sequence_item' then
                 local m = map_of(item:named_child(0))
                 if m then
                     local hname, listens, line
-                    for p in m:iter_children() do
+                    for _, p in tsutil.inext, m, -1 do
                         if p:type() == 'block_mapping_pair' then
                             local k, v = pair_kv(p, src)
                             local sk = short_key(k)
@@ -243,7 +244,7 @@ function M.attach(data)
                                 else
                                     local ls = seq_of(v)
                                     if ls then
-                                        for li in ls:iter_children() do
+                                        for _, li in tsutil.inext, ls, -1 do
                                             if li:type() == 'block_sequence_item' then
                                                 local lt = scalar_text(li:named_child(0), src)
                                                 if lt then
@@ -290,7 +291,7 @@ function M.attach(data)
                 local k, v = pair_kv(n, pf.src)
                 if short_key(k) == 'handlers' then add_handler(seq_of(v), rel, pf.src) end
             end
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:named() then find_handler_blocks(c) end
             end
         end
@@ -322,7 +323,7 @@ function M.attach(data)
         if s then out[#out + 1] = s; return end
         local seq = seq_of(vnode)
         if seq then
-            for item in seq:iter_children() do
+            for _, item in tsutil.inext, seq, -1 do
                 if item:type() == 'block_sequence_item' then
                     local iv = item:named_child(0)
                     local ial = alias_name(iv, src)
@@ -387,7 +388,7 @@ function M.attach(data)
                     if not target then
                         local m = map_of(v)
                         if m then
-                            for p in m:iter_children() do
+                            for _, p in tsutil.inext, m, -1 do
                                 if p:type() == 'block_mapping_pair' then
                                     local pk, pv = pair_kv(p, src)
                                     if short_key(pk) == 'file' then target = scalar_text(pv, src) end
@@ -411,7 +412,7 @@ function M.attach(data)
                     local m = map_of(v)
                     local rolename
                     if m then
-                        for p in m:iter_children() do
+                        for _, p in tsutil.inext, m, -1 do
                             if p:type() == 'block_mapping_pair' then
                                 local pk, pv = pair_kv(p, src)
                                 if short_key(pk) == 'name' then rolename = scalar_text(pv, src) end
@@ -429,7 +430,7 @@ function M.attach(data)
                     end
                 end
             end
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:named() then visit(c) end
             end
         end
@@ -449,7 +450,7 @@ function M.attach(data)
         local pf = parsed[rel]
         local top = pf and top_mapping(pf.tree)
         if not top then return end
-        for p in top:iter_children() do
+        for _, p in tsutil.inext, top, -1 do
             if p:type() == 'block_mapping_pair' then
                 local name = pair_kv(p, pf.src)
                 if name and name:match('^[%a_][%w_]*$') then

@@ -11,6 +11,7 @@
 -- zig's by construction.
 
 local node_text = require('cartograph.spec.tsutil').node_text
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 
 -- zig_base_type peels *, ?, [], [N] wrappers to the base type identifier,
 -- returning it only when PascalCase (Zig convention: types are PascalCase,
@@ -20,7 +21,7 @@ local function zig_base_type(node, src)
     local t = node:type()
     if t == 'pointer_type' or t == 'optional_type'
         or t == 'slice_type' or t == 'array_type' then
-        for c in node:iter_children() do
+        for _, c in tsutil.inext, node, -1 do
             if c:named() then
                 local inner = zig_base_type(c, src)
                 if inner then return inner end
@@ -48,14 +49,14 @@ end
 -- constructor's value first-param (`gpa: Allocator`) as a bogus method owner.
 -- Receiver-less (static) fns and non-struct first params stay bare.
 local function zig_method_owner(defn, src)
-    for c in defn:iter_children() do
+    for _, c in tsutil.inext, defn, -1 do
         if c:type() == 'parameters' then
-            for pc in c:iter_children() do
+            for _, pc in tsutil.inext, c, -1 do
                 if pc:type() == 'parameter' then
                     -- parameter = (identifier <name>) <type>; the receiver
                     -- type is the second named child.
                     local seen_name, tynode
-                    for cc in pc:iter_children() do
+                    for _, cc in tsutil.inext, pc, -1 do
                         if cc:named() then
                             if not seen_name then seen_name = true
                             else tynode = cc break end
@@ -86,12 +87,12 @@ end
 -- keys nothing: gpa is neither `self` nor `allocator`... it's an arg, not a
 -- receiver). Value (identifier) type ONLY — pointers are zig_method_owner's.
 local function zig_value_owner(defn, src)
-    for c in defn:iter_children() do
+    for _, c in tsutil.inext, defn, -1 do
         if c:type() == 'parameters' then
-            for pc in c:iter_children() do
+            for _, pc in tsutil.inext, c, -1 do
                 if pc:type() == 'parameter' then
                     local nm, tynode
-                    for cc in pc:iter_children() do
+                    for _, cc in tsutil.inext, pc, -1 do
                         if cc:named() then
                             if not nm then nm = node_text(cc, src)
                             else tynode = cc break end
@@ -117,12 +118,12 @@ local function zig_recv_type(calln, recv, src)
     while p do
         local t = p:type()
         if t == 'function_declaration' then
-            for c in p:iter_children() do
+            for _, c in tsutil.inext, p, -1 do
                 if c:type() == 'parameters' then
-                    for pc in c:iter_children() do
+                    for _, pc in tsutil.inext, c, -1 do
                         if pc:type() == 'parameter' then
                             local nm, tynode
-                            for cc in pc:iter_children() do
+                            for _, cc in tsutil.inext, pc, -1 do
                                 if cc:named() then
                                     if cc:type() == 'identifier' and not nm then
                                         nm = node_text(cc, src)
@@ -166,12 +167,12 @@ local function zig_ident_type(node, name, src)
     while p do
         local t = p:type()
         if t == 'function_declaration' then
-            for c in p:iter_children() do
+            for _, c in tsutil.inext, p, -1 do
                 if c:type() == 'parameters' then
-                    for pc in c:iter_children() do
+                    for _, pc in tsutil.inext, c, -1 do
                         if pc:type() == 'parameter' then
                             local pn, tynode
-                            for cc in pc:iter_children() do
+                            for _, cc in tsutil.inext, pc, -1 do
                                 if cc:named() then
                                     if not pn then pn = node_text(cc, src)
                                     else tynode = cc break end
@@ -204,7 +205,7 @@ local function build_zig_lf_map(tsroot, src)
         if t == 'function_declaration' then curfn = n end
         if t == 'variable_declaration' and curfn then
             local nm, rhs, seen
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:named() then
                     if not seen and c:type() == 'identifier' then
                         nm = node_text(c, src); seen = true
@@ -226,7 +227,7 @@ local function build_zig_lf_map(tsroot, src)
                 end
             end
         end
-        for c in n:iter_children() do walk(c, curfn) end
+        for _, c in tsutil.inext, n, -1 do walk(c, curfn) end
     end
     walk(tsroot, nil)
     return map
@@ -268,7 +269,7 @@ local function build_zig_ret_map(tsroot, src)
         if t == 'variable_declaration' and curfn
             and node_text(n, src):match('^const%f[%W]') then
             local nm, rhs, seen
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 if c:named() then
                     if not seen and c:type() == 'identifier' then
                         nm = node_text(c, src); seen = true
@@ -292,7 +293,7 @@ local function build_zig_ret_map(tsroot, src)
                 end
             end
         end
-        for c in n:iter_children() do walk(c, curfn) end
+        for _, c in tsutil.inext, n, -1 do walk(c, curfn) end
     end
     walk(tsroot, nil)
     return map
@@ -328,18 +329,18 @@ local function zig_imports(tsroot, src)
     local function walk(n)
         if n:type() == 'variable_declaration' then
             local alias, bf
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 local t = c:type()
                 if t == 'identifier' and not alias then alias = node_text(c, src)
                 elseif t == 'builtin_function' then bf = c end
             end
             if alias and bf then
                 local bi, path
-                for c in bf:iter_children() do
+                for _, c in tsutil.inext, bf, -1 do
                     local t = c:type()
                     if t == 'builtin_identifier' then bi = node_text(c, src)
                     elseif t == 'arguments' then
-                        for a in c:iter_children() do
+                        for _, a in tsutil.inext, c, -1 do
                             if a:type() == 'string' then
                                 path = node_text(a, src):gsub('^["\']', '')
                                     :gsub('["\']$', '')
@@ -354,7 +355,7 @@ local function zig_imports(tsroot, src)
                 end
             end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(tsroot)
     -- ⚠ SORTED, because THIS LIST'S ORDER BECOMES THE GRAPH'S. The caller appends
@@ -404,11 +405,11 @@ local function zig_std_aliases(tsroot, src)
     local function std_import(v)
         if not v or v:type() ~= 'builtin_function' then return nil end
         local bi, path
-        for c in v:iter_children() do
+        for _, c in tsutil.inext, v, -1 do
             local t = c:type()
             if t == 'builtin_identifier' then bi = node_text(c, src)
             elseif t == 'arguments' then
-                for a in c:iter_children() do
+                for _, a in tsutil.inext, c, -1 do
                     if a:type() == 'string' then
                         path = node_text(a, src):gsub('^["\']', ''):gsub('["\']$', '')
                         break
@@ -423,7 +424,7 @@ local function zig_std_aliases(tsroot, src)
     local function walk(n)
         if n:type() == 'variable_declaration' then
             local name, value, eq = nil, nil, false
-            for c in n:iter_children() do
+            for _, c in tsutil.inext, n, -1 do
                 local t = c:type()
                 if t == '=' then eq = true
                 elseif not eq and t == 'identifier' and not name then
@@ -435,7 +436,7 @@ local function zig_std_aliases(tsroot, src)
                     rhs = node_text(value, src):gsub('%s+', ''), imp = std_import(value) }
             end
         end
-        for c in n:iter_children() do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
     end
     walk(tsroot)
 
@@ -542,7 +543,7 @@ return {
                 if t == 'struct_declaration' then
                     local vd = p:parent()
                     if vd and vd:type() == 'variable_declaration' then
-                        for c in vd:iter_children() do
+                        for _, c in tsutil.inext, vd, -1 do
                             if c:type() == 'identifier' then
                                 return node_text(c, src) .. '.' .. name
                             end
@@ -765,17 +766,17 @@ return {
                 if n:type() == 'struct_declaration' then
                     local vd, tn = n:parent(), nil
                     if vd and vd:type() == 'variable_declaration' then
-                        for c in vd:iter_children() do
+                        for _, c in tsutil.inext, vd, -1 do
                             if c:type() == 'identifier' then
                                 tn = node_text(c, src) break
                             end
                         end
                     end
                     if tn then
-                        for c in n:iter_children() do
+                        for _, c in tsutil.inext, n, -1 do
                             if c:type() == 'container_field' then
                                 local fname, tynode
-                                for cc in c:iter_children() do
+                                for _, cc in tsutil.inext, c, -1 do
                                     if cc:named() then
                                         if not fname and cc:type() == 'identifier' then
                                             fname = node_text(cc, src)
@@ -791,7 +792,7 @@ return {
                         end
                     end
                 end
-                for c in n:iter_children() do walk(c) end
+                for _, c in tsutil.inext, n, -1 do walk(c) end
             end
             walk(tsroot)
             return out
@@ -806,7 +807,7 @@ return {
         -- generic) → nil (honest — no keyable summary).
         def_ret = function (defn, src)
             local params_seen, rt
-            for c in defn:iter_children() do
+            for _, c in tsutil.inext, defn, -1 do
                 local t = c:type()
                 if t == 'parameters' then params_seen = true
                 elseif params_seen and c:named() and t ~= 'block' then
@@ -824,7 +825,7 @@ return {
                 if t == 'error_union_expression' or t == 'error_union'
                     or t == 'optional_type' or t == 'pointer_type'
                     or t == 'slice_type' or t == 'array_type' then
-                    for c in node:iter_children() do
+                    for _, c in tsutil.inext, node, -1 do
                         if c:named() then
                             local r = resolve_rt(c, depth + 1)
                             if r then return r end

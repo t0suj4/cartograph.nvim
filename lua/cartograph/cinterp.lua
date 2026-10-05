@@ -6,6 +6,7 @@
 -- fields of the thread are the frame's top / base / origin (ctx.frame), the no-return raisers and the builtins all come
 -- from the caller's ctx — cartograph.luajs.cpath is the adapter that derives them for LuaJIT.
 -- @langs c
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 -- ── THE INTERPRETER: three-valued C over the preprocessed AST ────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ end
 -- every tag what a per-tag walk would, without repeating the walk per tag. The ARGUMENT COUNT is the same kind of
 -- dimension: an element is `<tag>@<count>`, and `L->top` is a vector of slot pointers over the elements.
 local function tx(n, src) return vim.treesitter.get_node_text(n, src) end
-local function kids(n) local o = {} for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then o[#o + 1] = c end end return o end
+local function kids(n) local o = {} for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'comment' then o[#o + 1] = c end end return o end
 -- ★ A DOUBLE IS ITS BITS (CART-1322 follow-up): -0.0 == 0.0 and NaN ~= NaN, so `==` is not "the same value" — a join
 -- would merge +0 and -0 into one, and a call's memo key would have no value at all (two calls of sgn(1.5) / sgn(-1.5)
 -- shared one summary: 11 where C says 9)
@@ -1476,7 +1477,7 @@ function M.units(sources)
     local function fields_of(body0, text)
         local fields = {}
         local function walk(body)
-            for fd in body:iter_children() do
+            for _, fd in tsutil.inext, body, -1 do
                 if fd:type() == 'field_declaration' then
                     local decls = fd:field('declarator')
                     local inner = fd:field('type')[1]

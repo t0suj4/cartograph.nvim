@@ -13,6 +13,7 @@
 -- neither endpoint of the boundary they join, which is what a wire protocol looks
 -- like from inside one side of it. Absent artifact = macro names without values,
 -- which is still strictly better than an opaque `expr`.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local MACROS
 do
     local ok, prof = pcall(require, 'cartograph.spec.profile')
@@ -26,7 +27,7 @@ local function arity_of(n)
     local args = n and n:field('args')[1]
     if not args then return 0 end
     local k = 0
-    for c in args:iter_children() do if c:named() then k = k + 1 end end
+    for _, c in tsutil.inext, args, -1 do if c:named() then k = k + 1 end end
     return k
 end
 
@@ -37,7 +38,7 @@ local function unq(s) return (s:gsub("^'(.*)'$", '%1')) end
 local function exports_of(root, src)
     if exp_src == src then return exp_set, exp_all end
     local set, all = {}, false
-    for form in root:iter_children() do
+    for _, form in tsutil.inext, root, -1 do
         local t = form:type()
         if t == 'export_attribute' then
             for _, fa in ipairs(form:field('funs')) do
@@ -49,7 +50,7 @@ local function exports_of(root, src)
             local o = form:field('options')[1]
             local function scan(n)
                 if n:type() == 'atom' and vim.treesitter.get_node_text(n, src) == 'export_all' then all = true end
-                for c in n:iter_children() do if c:named() then scan(c) end end
+                for _, c in tsutil.inext, n, -1 do if c:named() then scan(c) end end
             end
             if o then scan(o) end
         end
@@ -179,7 +180,7 @@ return {
         macro_call_expr = function (node, src, file)
             -- (the vocabulary is loaded once, below the spec table)
             local nm
-            for ch in node:iter_children() do
+            for _, ch in tsutil.inext, node, -1 do
                 if ch:named() and (ch:type() == 'var' or ch:type() == 'atom') then
                     nm = vim.treesitter.get_node_text(ch, src); break
                 end
@@ -389,12 +390,12 @@ return {
             local a = n:field(f)[1]
             if not a then return -1 end
             local k = 0
-            for c in a:iter_children() do if c:named() then k = k + 1 end end
+            for _, c in tsutil.inext, a, -1 do if c:named() then k = k + 1 end end
             return k
         end
         -- the local calls and macro uses in each -define body
         local macros = {}
-        for form in tsroot:iter_children() do
+        for _, form in tsutil.inext, tsroot, -1 do
             if form:type() == 'pp_define' then
                 local lhs, body = form:field('lhs')[1], form:field('replacement')[1]
                 local nm = lhs and lhs:field('name')[1]
@@ -410,7 +411,7 @@ return {
                             local mn = n:field('name')[1]
                             if mn then m.uses[#m.uses + 1] = { T(mn), argc(n, 'args') } end
                         end
-                        for c in n:iter_children() do if c:named() then scan(c) end end
+                        for _, c in tsutil.inext, n, -1 do if c:named() then scan(c) end end
                     end
                     scan(body)
                     macros[T(nm) .. '/' .. argc(lhs, 'args')] = m
@@ -454,7 +455,7 @@ return {
                     end
                 end
             end
-            for c in n:iter_children() do if c:named() then walk(c, in_define) end end
+            for _, c in tsutil.inext, n, -1 do if c:named() then walk(c, in_define) end end
         end
         walk(tsroot, false)
         return out
@@ -560,7 +561,7 @@ return {
                     end
                 end
             end
-            for c in n:iter_children() do if c:named() then walk(c) end end
+            for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end
         end
         walk(tsroot)
         local out = {}

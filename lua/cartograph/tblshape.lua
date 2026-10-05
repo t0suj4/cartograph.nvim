@@ -17,6 +17,7 @@
 -- An UNBOUND constructor (an argument, a return value, a field of another table) is judged by its own entries only.
 -- ⚠ A.resolve(G, id) takes the reference's ID: passing the record raised inside the pcall and every use was dropped
 -- (measured on the fixture: 11 references, 0 resolved — a uniform zero).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local ARRAY_FNS = { ipairs = true, ['table.insert'] = true, ['table.remove'] = true, ['table.concat'] = true,
@@ -31,11 +32,11 @@ local function field_of(n, name) for c, f in n:iter_children() do if f == name t
 --- a RECORD that must then hold a non-string key — an abort the emitter would ship)
 function M.entries(tc)
     local pos, named, dyn = 0, 0, 0
-    for c in tc:iter_children() do
+    for _, c in tsutil.inext, tc, -1 do
         if c:type() == 'field' then
             local k = field_of(c, 'name')
             local bracketed = false
-            for cc in c:iter_children() do if not cc:named() and cc:type() == '[' then bracketed = true end end
+            for _, cc in tsutil.inext, c, -1 do if not cc:named() and cc:type() == '[' then bracketed = true end end
             if not k then pos = pos + 1
             elseif not bracketed then named = named + 1
             elseif k:type() == 'string' then named = named + 1
@@ -68,7 +69,7 @@ function M.context(n, src, name)
         if ARRAY_FNS[cname] then
             -- only as the FIRST argument (table.insert(t, x): t is the array; x is stored = an escape)
             local first
-            for c in p:iter_children() do if c:named() and c:type() ~= 'comment' then first = c; break end end
+            for _, c in tsutil.inext, p, -1 do if c:named() and c:type() ~= 'comment' then first = c; break end end
             return first == n and 'array' or 'escape'
         end
         if NEUTRAL_FNS[cname] then return 'neutral' end
@@ -82,7 +83,7 @@ function M.context(n, src, name)
     elseif t == 'field' then return 'escape' -- stored in another table
     elseif t == 'binary_expression' then
         local op
-        for c in p:iter_children() do if not c:named() then op = text(c, src) end end
+        for _, c in tsutil.inext, p, -1 do if not c:named() then op = text(c, src) end end
         if op == '==' or op == '~=' then return 'neutral' end
         return 'escape' -- `t or {}`, `t and t.x`: the value flows on
     elseif t == 'parenthesized_expression' then return 'escape'
@@ -144,9 +145,9 @@ function M.of(src, file, tree)
         local nameid
         if stmt and stmt:type() == 'assignment_statement' and stmt:parent() and stmt:parent():type() == 'variable_declaration' then
             local idx, i = nil, 0
-            for c in el:iter_children() do if c:named() then i = i + 1; if c:equal(tc) then idx = i end end end
+            for _, c in tsutil.inext, el, -1 do if c:named() then i = i + 1; if c:equal(tc) then idx = i end end end
             local names = {}
-            for c in stmt:iter_children() do if c:type() == 'variable_list' then for v in c:iter_children() do if v:named() then names[#names + 1] = v end end end end
+            for _, c in tsutil.inext, stmt, -1 do if c:type() == 'variable_list' then for _, v in tsutil.inext, c, -1 do if v:named() then names[#names + 1] = v end end end end
             nameid = idx and names[idx]
             if nameid and nameid:type() ~= 'identifier' then nameid = nil end
         end

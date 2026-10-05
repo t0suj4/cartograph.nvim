@@ -15,6 +15,7 @@
 -- ⚠ LIMITS, reported and never silent: the per-run step budget (`over`); an FFI conversion is content-dependent; a
 -- recursive call is OPTIMISTIC (every element returns, the stack where it was — CART-1243). A char* view of the frame
 -- counts bytes (the slot's compiler size — CART-1244, fixed).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function readfile(p) local fd = io.open(p, 'rb'); if not fd then return nil end local s = fd:read('a'); fd:close(); return s end
@@ -96,7 +97,7 @@ function M.frame(ctx)
     local function find_pfield(n, src, p)
         local f = pfield(n, src, p)
         if f then return f end
-        for c in n:iter_children() do if c:named() then f = find_pfield(c, src, p); if f then return f end end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then f = find_pfield(c, src, p); if f then return f end end end
         return nil
     end
     local mq = vim.treesitter.query.parse('c', '(binary_expression operator: "-") @b')
@@ -137,7 +138,7 @@ function M.frame(ctx)
                                 if f and f ~= fr.top and f ~= fr.base then found[f] = d.name end
                             end
                         end
-                        for c in n:iter_children() do if c:named() then idents(c) end end
+                        for _, c in tsutil.inext, n, -1 do if c:named() then idents(c) end end
                     end
                     idents(node)
                 end

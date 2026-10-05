@@ -14,6 +14,7 @@
 --             one says no), maybe (one cannot decide), shadowed (an earlier one takes it: not emitted).
 --   REPLIES   the handler run on the template (erlterms.call): one case per alternative (S.alts), a hole named by a
 --             parameter echoes the input, the others are outputs, named by position.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 local unpack = table.unpack or unpack
 
@@ -75,7 +76,7 @@ function M.model(root, opts)
                 for k, cl in ipairs(clauses) do
                     stats.clauses = stats.clauses + 1
                     local heads = {}
-                    for c in (cl:field('args')[1] or cl):iter_children() do if c:named() then heads[#heads + 1] = c end end
+                    for _, c in tsutil.inext, (cl:field('args')[1] or cl), -1 do if c:named() then heads[#heads + 1] = c end end
                     local ai = arity
                     for i, h in ipairs(heads) do
                         if vim.treesitter.get_node_text(h, m.src):find('#iq', 1, true) then ai = i; break end

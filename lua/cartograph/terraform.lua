@@ -23,6 +23,7 @@
 -- instances (a root module, or a module call with its inputs bound), resources, and DNS
 -- records with their evaluated hosts.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 -- ── values ────────────────────────────────────────────────────────────────────
@@ -54,19 +55,19 @@ local expr
 
 local function named_kids(n)
     local out = {}
-    for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
+    for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
     return out
 end
 
 -- a quoted/heredoc template: literal pieces and interpolations
 local function template(n, src)
     local parts = {}
-    for c in n:iter_children() do
+    for _, c in tsutil.inext, n, -1 do
         local t = c:type()
         if t == 'template_literal' then parts[#parts + 1] = unescape(txt(c, src))
         elseif t == 'template_interpolation' then
             local e
-            for x in c:iter_children() do if x:type() == 'expression' then e = x end end
+            for _, x in tsutil.inext, c, -1 do if x:type() == 'expression' then e = x end end
             parts[#parts + 1] = e and expr(e, src) or { t = 'unknown', text = txt(c, src) }
         elseif t == 'template_directive' then
             parts[#parts + 1] = { t = 'unknown', text = 'a %{ } template directive' }
@@ -139,16 +140,16 @@ local function primary(n, src)
         local c = named_kids(n)[1]
         if not c then return { t = 'unknown', text = txt(n, src) } end
         local f = { t = 'for', kind = c:type() == 'for_object_expr' and 'object' or 'tuple', vars = {}, bodies = {} }
-        for x in c:iter_children() do
+        for _, x in tsutil.inext, c, -1 do
             local xt = x:type()
             if xt == 'for_intro' then
-                for y in x:iter_children() do
+                for _, y in tsutil.inext, x, -1 do
                     if y:type() == 'identifier' then f.vars[#f.vars + 1] = txt(y, src)
                     elseif y:type() == 'expression' then f.coll = expr(y, src) end
                 end
             elseif xt == 'expression' then f.bodies[#f.bodies + 1] = expr(x, src)
             elseif xt == 'for_cond' then
-                for y in x:iter_children() do if y:type() == 'expression' then f.cond = expr(y, src) end end
+                for _, y in tsutil.inext, x, -1 do if y:type() == 'expression' then f.cond = expr(y, src) end end
             elseif xt == 'ellipsis' then f.group = true end
         end
         return f
@@ -163,7 +164,7 @@ local function primary(n, src)
         -- operator token, then the right operand. And the grammar attaches `.y` AFTER `!var`
         -- (`!var.y` parses as `(!var).y`), so a unary operator takes trailing steps inside.
         local groups, op, cur = {}, nil, {}
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             if not c:named() and c:type() ~= '(' and c:type() ~= ')' then
                 if #cur > 0 or t == 'binary_operation' then groups[#groups + 1] = cur; cur = {} end
                 op = c:type()
@@ -240,7 +241,7 @@ function M.parse(src, file)
     if not tree then return nil, 'terraform parse failed' end
     local function block(n)
         local b = { labels = {}, attrs = {}, blocks = {}, file = file, line = (n:range()) }
-        for c in n:iter_children() do
+        for _, c in tsutil.inext, n, -1 do
             local t = c:type()
             if t == 'identifier' and not b.kind then b.kind = txt(c, src)
             elseif t == 'string_lit' then
@@ -248,7 +249,7 @@ function M.parse(src, file)
                 b.labels[#b.labels + 1] = (#s.parts == 1 and type(s.parts[1]) == 'string') and s.parts[1] or txt(c, src)
             elseif t == 'identifier' then b.labels[#b.labels + 1] = txt(c, src)
             elseif t == 'body' then
-                for x in c:iter_children() do
+                for _, x in tsutil.inext, c, -1 do
                     if x:type() == 'attribute' then
                         local k = named_kids(x)
                         local id = k[1] and txt(k[1], src)
@@ -263,9 +264,9 @@ function M.parse(src, file)
     end
     local out = {}
     local root = tree:root()
-    for c in root:iter_children() do
+    for _, c in tsutil.inext, root, -1 do
         if c:type() == 'body' then
-            for x in c:iter_children() do if x:type() == 'block' then out[#out + 1] = block(x) end end
+            for _, x in tsutil.inext, c, -1 do if x:type() == 'block' then out[#out + 1] = block(x) end end
         end
     end
     return out, root:has_error() and 'the file has a parse error; blocks after it may be missing' or nil

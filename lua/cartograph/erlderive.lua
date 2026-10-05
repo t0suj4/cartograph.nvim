@@ -29,12 +29,13 @@
 -- value position INSIDE that callback. Measured on ejabberd before adding it: 257 of 258 derived facts sat in
 -- start/2; the one outside was `{commands, ACmds}` built by ejabberd_old_config's config transform — a tag is not
 -- unique to the registry. ⚠ A registration built in a HELPER that start/2 calls would be missed (none today).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function T(n, src) return vim.treesitter.get_node_text(n, src) end
 local function named(n)
     local out = {}
-    for c in n:iter_children() do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
+    for _, c in tsutil.inext, n, -1 do if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end end
     return out
 end
 local function field(n, f) return n and n:field(f)[1] end
@@ -53,7 +54,7 @@ end
 local function vars_of(n, src, out)
     out = out or {}
     if n:type() == 'var' then out[#out + 1] = n end
-    for c in n:iter_children() do if c:named() then vars_of(c, src, out) end end
+    for _, c in tsutil.inext, n, -1 do if c:named() then vars_of(c, src, out) end end
     return out
 end
 
@@ -103,7 +104,7 @@ function M.find(src, file)
                 found[#found + 1] = it
             end
         end
-        for c in n:iter_children() do if c:named() then visit(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then visit(c) end end
     end
     visit(root)
     for _, it in ipairs(found) do it.src = src end
@@ -143,7 +144,7 @@ function M.context_chain(it, files)
                     end
                 end
             end
-            for c in n:iter_children() do if c:named() then visit(c) end end
+            for _, c in tsutil.inext, n, -1 do if c:named() then visit(c) end end
         end
         if root then visit(root) end
     end

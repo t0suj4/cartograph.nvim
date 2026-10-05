@@ -38,6 +38,7 @@
 -- hedge whose premise was never in question. It now names the gap. Declaring `lua`
 -- rather than the admitted fourteen states what is true; CART-0315 tracks closing
 -- the admission itself (CART-0304).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local optimize = require 'cartograph.optimize'
 local txn = require 'cartograph.txn'
 local expr = require 'cartograph.expr'
@@ -129,11 +130,11 @@ local function rhs_node(root, src, line, defname)
             local asg
             if ASSIGN[t] then asg = n
             elseif LOCALDECL[t] then
-                for c in n:iter_children() do if c:named() and ASSIGN[c:type()] then asg = c end end
+                for _, c in tsutil.inext, n, -1 do if c:named() and ASSIGN[c:type()] then asg = c end end
             end
             if asg then
                 local left, right
-                for c in asg:iter_children() do
+                for _, c in tsutil.inext, asg, -1 do
                     local ct = c:type()
                     if ct == 'variable_list' and not left then left = c
                     elseif ct == 'expression_list' and not right then right = c end
@@ -147,7 +148,7 @@ local function rhs_node(root, src, line, defname)
                 end
             end
         end
-        for c in n:iter_children() do if c:named() then rec(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
     end
     rec(root)
     return found
@@ -270,7 +271,7 @@ local function loop_node(root, line, loops)
     local function rec(n)
         if found then return end
         if n:start() + 1 == line and loops[n:type()] then found = n; return end
-        for c in n:iter_children() do if c:named() then rec(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
     end
     rec(root)
     return found
@@ -285,7 +286,7 @@ end
 -- `procedure_declaration` — so on those languages the conservative guard was not
 -- conservative, it was blind. syngate's localize rung is the fence.
 local function has_nested_fn(n, fnt)
-    for c in n:iter_children() do
+    for _, c in tsutil.inext, n, -1 do
         if c:named() then
             if fnt[c:type()] then return true end
             if has_nested_fn(c, fnt) then return true end
@@ -304,7 +305,7 @@ local function callee_occurrences(loopn, src, full)
                 if sr == er then out[#out + 1] = { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } } end
             end
         end
-        for c in n:iter_children() do if c:named() then rec(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
     end
     rec(loopn)
     return out

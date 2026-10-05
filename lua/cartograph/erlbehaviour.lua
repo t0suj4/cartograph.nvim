@@ -38,6 +38,7 @@
 -- seen (the node's own file is read) — the finding stays reported, the pre-existing state. Quoted-atom
 -- function names are matched by their unquoted text.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function unq(s)
@@ -61,7 +62,7 @@ function M.parse_source(src)
     local function text(n) return vim.treesitter.get_node_text(n, view) end
     local function f1(n, f) return n and n:field(f)[1] end
     local defines, optional = {}, {}
-    for ch in tree:root():iter_children() do
+    for _, ch in tsutil.inext, tree:root(), -1 do
         local t = ch:type()
         local line = ch:start() + 1
         if t == 'behaviour_attribute' then

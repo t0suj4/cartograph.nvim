@@ -28,6 +28,7 @@
 -- certified call findings on cartograph, 15 are filter-shaped — 4 equality filters (this verb), 11
 -- range containments (`x >= r.from and x <= r.to`, fn_at's kind: an interval index, not this one).
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local txn = require 'cartograph.txn'
 
 local M = {}
@@ -80,7 +81,7 @@ end
 local function recognize(n, src)
     if n:type() ~= 'for_statement' then return nil end
     local clause
-    for c in n:iter_children() do if c:type() == 'for_generic_clause' then clause = c end end
+    for _, c in tsutil.inext, n, -1 do if c:type() == 'for_generic_clause' then clause = c end end
     if not clause then return nil end
     local head = text(src, clause)
     local iv, v, e = head:match('^([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s+in%s+ipairs%s*%((.*)%)%s*$')
@@ -88,10 +89,10 @@ local function recognize(n, src)
     local body = n:field('body')[1]
     if not body then return nil end
     local stmts = {}
-    for c in body:iter_children() do if c:named() and c:type() ~= 'comment' then stmts[#stmts + 1] = c end end
+    for _, c in tsutil.inext, body, -1 do if c:named() and c:type() ~= 'comment' then stmts[#stmts + 1] = c end end
     if #stmts ~= 1 or stmts[1]:type() ~= 'if_statement' then return nil end
     local ifn = stmts[1]
-    for c in ifn:iter_children() do
+    for _, c in tsutil.inext, ifn, -1 do
         if c:type() == 'elseif_statement' or c:type() == 'else_statement' then return nil, 'the if has an else branch', 'unbuilt' end
     end
     local cond = ifn:field('condition')[1]
@@ -160,7 +161,7 @@ function M.sites(src)
                 declined[#declined + 1] = { line = n:range() + 1, reason = why, class = why_class }
             end
         end
-        for c in n:iter_children() do if c:named() then visit(c) end end
+        for _, c in tsutil.inext, n, -1 do if c:named() then visit(c) end end
     end
     visit(root)
     if src:find('%f[%w_]cg_bucket%f[^%w_]') and #sites > 0 then

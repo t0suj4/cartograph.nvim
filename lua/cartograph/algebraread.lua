@@ -66,6 +66,7 @@
 --     spec catch it — the whole-tree law is not a superset of them.
 --   · the node type becomes the term KIND, which is why a type that collides
 --     with an algebra kind must refuse rather than be silently accepted.
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local unpack = table.unpack or unpack
@@ -170,7 +171,7 @@ local function read(A, src, lang, given, visit)
             return l
         end
         local kids, cursor = {}, sb
-        for child in node:iter_children() do
+        for _, child in tsutil.inext, node, -1 do
             local _, _, cs, _, _, ce = child:range(true)
             -- the gap tree-sitter keeps out of the tree
             if cs > cursor then kids[#kids + 1] = gap(src:sub(cursor + 1, cs)) end

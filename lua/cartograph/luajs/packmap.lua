@@ -17,6 +17,7 @@
 -- C functions whose bodies use MM_<name>), `msg` (a LuaJIT message the pack raises — lj_errmsg.h's ERRDEF text, its
 -- longest fixed fragment >= 10 characters — ↔ the C functions that use LJ_ERR_<name>), `cite` (an lj_* name the pack's
 -- own text cites that exists in the C graph).
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
 local function readfile(p) local fd = io.open(p, 'rb'); if not fd then return nil end local s = fd:read('a'); fd:close(); return s end
@@ -270,13 +271,13 @@ function M.pack_static(pack_path, companion_dir)
     local tree = vim.treesitter.get_string_parser(src, 'javascript'):parse()[1]
     local defs, generated, host = {}, {}, {}
     local function tx(n) return vim.treesitter.get_node_text(n, src) end
-    for n in tree:root():iter_children() do
+    for _, n in tsutil.inext, tree:root(), -1 do
         local t = n:type()
         if t == 'function_declaration' then
             local nm = n:field('name')[1]
             if nm then defs[tx(nm)] = tx(n) end
         elseif t == 'lexical_declaration' or t == 'variable_declaration' then
-            for d in n:iter_children() do
+            for _, d in tsutil.inext, n, -1 do
                 if d:type() == 'variable_declarator' then
                     local nm, val = d:field('name')[1], d:field('value')[1]
                     local vtext = val and tx(val) or ''
@@ -418,7 +419,7 @@ function M.compatible(text, args, src)
         local t = node:type()
         if t == 'string' then
             local s = {}
-            for c in node:iter_children() do if c:type() == 'string_fragment' or c:type() == 'escape_sequence' then s[#s + 1] = vim.treesitter.get_node_text(c, src) end end
+            for _, c in tsutil.inext, node, -1 do if c:type() == 'string_fragment' or c:type() == 'escape_sequence' then s[#s + 1] = vim.treesitter.get_node_text(c, src) end end
             pieces[#pieces + 1] = { lit = table.concat(s) }
         elseif t == 'binary_expression' and vim.treesitter.get_node_text(node:child(1), src) == '+' then
             flat(node:named_child(0)); flat(node:named_child(1))
