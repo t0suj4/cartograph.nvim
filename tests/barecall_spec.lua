@@ -18,6 +18,7 @@ local FILES = {
         'local P = {}',
         'function P:open() return self end',
         'return M', '' }, '\n'),
+    ['other.lua'] = 'local M = {}\nfunction M.pack(x) return { x } end\nreturn M\n',
     ['use.lua'] = table.concat({
         'local lib = require("lib")',
         'local pack, getter = lib.pack, lib.reader',
@@ -28,6 +29,7 @@ local FILES = {
         '  local n = tonumber(s)',
         '  local q = lib.FAMILIES.tonumber(s)',
         '  local fd = io.open(s); fd:shut(); fd:open()',
+        '  local o = require("other").pack(s)',
         '  return pack(n), getter(n), one(n), second(n)',
         'end',
         'return M', '' }, '\n'),
@@ -70,6 +72,13 @@ test('method call: Lua `fd:shut()` cannot reach a plain `M.shut(h)` — the colo
     eq(nil, by['fd:shut'].to, 'no edge to a plain function')
     eq('blocked', by['fd:shut'].refused, 'refused by name: a candidate exists and cannot receive the call')
     eq('lib.lua::P:open@8', by['fd:open'].to)
+end)
+
+test('inline require: `require("other").pack(s)` inside a function names its module — it reaches other.lua\'s M.pack, not ambiguous with lib.lua\'s (CART-1113)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local by = extract()
+    eq('other.lua::M.pack@1', by['require("other").pack'].to)
+    eq(nil, by['require("other").pack'].refused)
 end)
 
 test('method call and bare call: an INCREMENTAL refresh decides the same way — the relink path is a second copy of the resolver (CART-1487, CART-1491)', function ()

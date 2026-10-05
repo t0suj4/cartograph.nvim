@@ -2405,13 +2405,27 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
         if n.unparsed and n.file then unread[n.file] = true end
     end
     local amap = {} -- file -> { alias -> module-file }, from require binds
+    -- (INLINE requires, CART-1113: `require('m').f(…)` names its module at the call site. Every require mints an
+    -- import edge AT ITS PATH ARGUMENT (`at` = { pos }, CART-1122): file -> { 'line:col' of the string -> module-file })
+    local inl = {}
+    local function pos1(a)
+        if type(a) == 'table' and a[1] ~= nil and not a.start then a = a[1] end
+        if type(a) == 'number' or (type(a) == 'table' and a.start) then return atr.sl(a), atr.sc(a) end
+    end
     for _, e in ipairs(edges or {}) do
         if e.kind == 'import' and e.bind and e.from and e.to then
             local m = amap[e.from]; if not m then m = {}; amap[e.from] = m end
             m[e.bind] = e.to
         end
+        if e.kind == 'import' and e.from and e.to then
+            local l, c = pos1(e.at)
+            if l then
+                local m = inl[e.from]; if not m then m = {}; inl[e.from] = m end
+                m[l .. ':' .. c] = e.to
+            end
+        end
     end
-    if not next(amap) then return 0 end
+    if not next(amap) and not next(inl) then return 0 end
     local cget, cset = cv.get, cv.set
     local n = 0
     for i = 1, cv.n do
@@ -2444,6 +2458,14 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
                 recv, member = crecv, ccallee
             end
             local mod = recv and amap[cfile] and amap[cfile][recv]
+            if not recv and cfull and inl[cfile] then
+                -- (the call starts at `require`; its path string at the quote's offset in the call text)
+                local m2 = cfull:match('^require%s*%(?%s*[\'"][^\'"]+[\'"]%s*%)?%.([%w_]+)$')
+                local l, c
+                if m2 then l, c = pos1(cget(i, 'at')) end -- (not `m2 and pos1(…)`: `and` keeps only the first return)
+                local q = l and cfull:find('[\'"]')
+                if q then member, mod = m2, inl[cfile][l .. ':' .. (c + q - 1)] end
+            end
             if mod then
                 -- the UNIQUE fn/method with this tail defined in the alias's module
                 local fit, dup = fit_in_file(tail, exact, member, mod)

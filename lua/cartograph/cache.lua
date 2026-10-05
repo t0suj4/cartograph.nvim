@@ -409,7 +409,8 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 216 -- v216: A LUA METHOD CALL IS NEVER LINKED TO A PLAIN FUNCTION (CART-1491): `x:f()` passes x as self, so a name-only resolution to `M.f(...)` / a local `f` is vetoed to a `blocked` refusal (1,053 such links on lua/: tree:root -> M.root, timer:is_closing -> a local)
+M.VERSION = 217 -- v217: AN INLINE REQUIRE NAMES ITS MODULE (CART-1113): `require('m').f(…)` resolves to m's f through the import edge at its path argument (lua/: ambiguous 407 -> 21)
+-- v216: A LUA METHOD CALL IS NEVER LINKED TO A PLAIN FUNCTION (CART-1491): `x:f()` passes x as self, so a name-only resolution to `M.f(...)` / a local `f` is vetoed to a `blocked` refusal (1,053 such links on lua/: tree:root -> M.root, timer:is_closing -> a local)
 -- v215: THREE RESOLUTION FIXES, ONE BUMP (the cache holds linked graphs; 65bb8cc and bc7560c shipped without moving it): a rebound parameter is no param write (CART-1484, the `pw` fact); a same-file name defined several times is bound by LEXICAL scope (CART-1059, Lua samefile 670 -> 33); a bare Lua call binds bare names only and a multi-assignment pairs name i with value i (CART-1487/1488: 714 bare calls had been linked to a wrong qualified def)
 -- v214: A SAVE NO LONGER RE-APPENDS SITES (CART-1439): xlang.link and relink's module ownership appended every site again on each save (our tree: 39,671 -> 45,602 at-sites over three saves); a cache written after saves held the inflated counts
 -- v213: A LUA `local` MODULE VAR IS NEVER A CROSS-FILE USE TARGET (CART-1473): var nodes carry `vlocal`; TSM 1,061 -> 371 cross-file use edges, our tree 2,831 -> 1,040

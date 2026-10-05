@@ -102,9 +102,10 @@ end
 test('fabcensus --backward: an inline require that NAMES its module settles an ambiguous refusal', function ()
     if not parser_available('lua') then skip('no lua parser') end
     local o = out()
-    ok(o:find('settles, by inline require: 3 row', 1, true),
-        'three inline requires settle (pkg.a, and pkg.j twice through re-exports): ' .. o)
-    ok(o:find('=> lua/pkg/a.lua::M.go', 1, true), 'and the pick is the bound file\'s own def')
+    -- (the census found CART-1113; the RESOLVER now settles all three — pkg.a, and pkg.j twice through re-exports —
+    -- so the work list holds none of them: `require('m').f` reaches m's f through the import edge at its path)
+    ok(not o:find('by inline require', 1, true), 'no inline require is left refused: ' .. o)
+    ok(not o:find('pkg/a.lua::M.go', 1, true), 'pkg.a.go is resolved, not listed')
 end)
 
 test('fabcensus --backward: a method on a call RESULT is not pinned by the root binding', function ()
@@ -113,7 +114,7 @@ test('fabcensus --backward: a method on a call RESULT is not pinned by the root 
     -- `s.name():upper()` is refused (x.lua and nobody else defines `upper`
     -- reachable) but `s` pins the receiver of `name`, never of `upper`
     ok(not o:find('upper', 1, true), 'no row may name upper: ' .. o)
-    ok(o:match('population: %d+ refused call%(s%); 10 candidate'),
+    ok(o:match('population: %d+ refused call%(s%); 7 candidate'), -- (10 before CART-1113 resolved the 3 inline requires)
         'ten candidates, the call-result chain is not one: ' .. o)
 end)
 
@@ -152,11 +153,10 @@ end)
 test('fabcensus --backward: a re-export by assignment is a member through its alt key', function ()
     if not parser_available('lua') then skip('no lua parser') end
     local o = out()
-    ok(o:find('pkg/j.lua.hash  bound -> lua/pkg/j.lua  [ambiguous]   => lua/pkg/j.lua::hash', 1, true),
-        'M.hash = hash settles to the local: ' .. o)
-    -- the alt key's tail differs from the def's own name: only the alt-key INDEX finds it
-    ok(o:find('pkg/j.lua.digest  bound -> lua/pkg/j.lua  [ambiguous]   => lua/pkg/j.lua::hash', 1, true),
-        'M.digest = hash settles to the same local: ' .. o)
+    -- (the RESOLVER now settles both through the alt key, CART-1113 — the census lists neither; the census's own
+    -- alt-key index is what found them, and is still what reads a re-export if a refusal remains)
+    ok(not o:find('pkg/j.lua.hash', 1, true), 'M.hash = hash is resolved, not listed: ' .. o)
+    ok(not o:find('pkg/j.lua.digest', 1, true), 'M.digest = hash is resolved, not listed: ' .. o)
 end)
 
 test('fabcensus --backward: require(\'pkg\') never binds to an unrelated file with the same suffix', function ()
