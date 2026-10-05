@@ -1032,6 +1032,21 @@ test('mix: the CENSUS — lower with { collect = {} } records every refused stat
     ok(prog.funcs.f and prog.funcs.g, 'both functions lowered, the refused statements skipped')
 end)
 
+test('mix: the FORWARD-DECLARED recursive local — `local build; function build(…)` — is the assignment of a lambda to that local: specialized static it folds, dynamic it recurses; a global target still refuses (CART-1373)', function ()
+    ready()
+    local SRC = 'local function f(n)\n  local build\n  function build(k) if k <= 0 then return 0 end return k + build(k - 1) end\n  return build(n)\nend\n'
+    local want = original(SRC, 'f')
+    local fs, ts = residual(SRC, 'f', { 'S' }, { 4 })
+    eq(want(4), fs()); ok(not ts:find('build', 1, true), 'n static: the recursion folds away\n' .. ts)
+    local fd = residual(SRC, 'f', { 'D' }, {})
+    for _, n in ipairs({ 0, 1, 5 }) do eq(want(n), fd(n)) end
+    -- (a non-local function declaration whose name is no local in scope assigns a global or a field: refused by name)
+    for _, src in ipairs({ 'local function g() function h() return 1 end return h() end', 'local function g(t) function t.h() return 1 end return t end' }) do
+        local okl, e = pcall(MX.lower, assert(R.read(src, 'lua')))
+        eq(false, okl); ok(type(e) == 'table' and tostring(e.refusal):find('nested non-local function', 1, true), vim.inspect(e))
+    end
+end)
+
 test('mix: mix itself stays INSIDE S — no while / repeat / goto / varargs / metatables / load (S4–S5 self-apply it)', function ()
     ready()
     local path = vim.api.nvim_get_runtime_file('lua/cartograph/mix.lua', false)[1]

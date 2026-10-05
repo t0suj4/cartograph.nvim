@@ -293,6 +293,33 @@ local function target_root(t)
     return nil
 end
 
+-- a WRITE to the target `v` whose root variable is `root` (v itself, or a store into it): the records the assignment
+-- conversion and the pins need -> the variable's id (nil: a global)
+local function note_write(v, root, cx, scope, writes)
+    local id, crossed = lookup(scope, text(root), cx)
+    if id and crossed > 0 then
+        -- ASSIGNMENT CONVERSION: a closure assigning a variable it captured makes that variable a BOX (one
+        -- shared cell, whichever residual function the closure ends up in); a closure storing into a
+        -- captured table makes that table dynamic (it is shared by reference)
+        if root == v then
+            if cx.isparam[id] then refuse('a closure assigning the captured parameter `' .. text(root) .. '` (rung 3: a parameter is not boxed)') end
+            if cx.loopvar[id] then refuse('a closure assigning the captured loop variable `' .. text(root) .. '` (rung 3: a loop variable is not boxed)') end
+            cx.boxed[id] = true
+        else cx.forced[id] = true end
+    elseif id and root == v then
+        -- (when: its tick, or LATE when a loop nested in the variable's scope repeats it — a later round
+        -- of that loop runs after a capture written above it)
+        local t, late = scope, false
+        for _ = 1, 10000 do
+            if not t or t.names[text(root)] == id then break end
+            if t.loop then late = true end
+            t = t.up
+        end
+        writes[#writes + 1] = { id = id, late = late }
+    end
+    return id
+end
+
 local function lower_stmt(t, cx, scope, out)
     local k = t.k
     if k == 'variable_declaration' then
@@ -321,29 +348,7 @@ local function lower_stmt(t, cx, scope, out)
         local targets, writes = {}, {}
         for i, v in ipairs(vars) do
             local root = target_root(v)
-            if root then
-                local id, crossed = lookup(scope, text(root), cx)
-                if id and crossed > 0 then
-                    -- ASSIGNMENT CONVERSION: a closure assigning a variable it captured makes that variable a BOX (one
-                    -- shared cell, whichever residual function the closure ends up in); a closure storing into a
-                    -- captured table makes that table dynamic (it is shared by reference)
-                    if root == v then
-                        if cx.isparam[id] then refuse('a closure assigning the captured parameter `' .. text(root) .. '` (rung 3: a parameter is not boxed)') end
-                        if cx.loopvar[id] then refuse('a closure assigning the captured loop variable `' .. text(root) .. '` (rung 3: a loop variable is not boxed)') end
-                        cx.boxed[id] = true
-                    else cx.forced[id] = true end
-                elseif id and root == v then
-                    -- (when: its tick, or LATE when a loop nested in the variable's scope repeats it — a later round
-                    -- of that loop runs after a capture written above it)
-                    local t, late = scope, false
-                    for _ = 1, 10000 do
-                        if not t or t.names[text(root)] == id then break end
-                        if t.loop then late = true end
-                        t = t.up
-                    end
-                    writes[#writes + 1] = { id = id, late = late }
-                end
-            end
+            if root then note_write(v, root, cx, scope, writes) end
             targets[i] = lower_expr(v, cx, scope)
             if targets[i].op ~= 'var' and targets[i].op ~= 'index' then refuse('an assignment to ' .. text(v)) end
         end
@@ -448,8 +453,21 @@ local function lower_stmt(t, cx, scope, out)
     if k == 'goto_statement' or k == 'label_statement' then refuse('`' .. k .. '` (not in S)') end
     if k == 'function_declaration' then
         -- `local function f(…)`: f is declared before its body, so the body may call it (a closure capturing itself)
-        if token(t) ~= 'local' then refuse('a nested non-local function declaration (rung 2: `local function` only)') end
         local n = named(t)
+        if token(t) ~= 'local' then
+            -- `function f(…)` where f is a LOCAL already in scope (the forward-declared recursive local: `local build;
+            -- function build(…) … build(…) end`, CART-1373) is the assignment `f = function (…) … end` — the body's
+            -- reads of f are of that variable, set once the assignment runs. Any other target (a global, `a.b`) refuses
+            local writes = {}
+            local id = n[1].k == 'identifier' and note_write(n[1], n[1], cx, scope, writes)
+            if not id then refuse('a nested non-local function declaration (rung 2: `local function`, or one assigning a local in scope)') end
+            local target = lower_expr(n[1], cx, scope)
+            local e = lower_lambda(n[2], n[3], cx, scope)
+            cx.tick = cx.tick + 1
+            for _, w in ipairs(writes) do cx.assigned[w.id] = math.max(cx.assigned[w.id] or 0, w.late and math.huge or cx.tick) end
+            out[#out + 1] = { op = 'assign', target = target, e = e }
+            return
+        end
         local id = declare(cx, scope, text(n[1]))
         out[#out + 1] = { op = 'local', id = id, e = lower_lambda(n[2], n[3], cx, scope) }
         return
