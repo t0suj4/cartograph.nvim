@@ -54,14 +54,12 @@
 -- (GC stopped, JIT off — deterministic), and the static degree must match the growth exponent.
 -- ⚠ With the JIT on, LuaJIT's allocation SINKING can remove an allocation this counts: an upper bound.
 --
--- ── CALLEES: THE CALL GRAPH, THEN LEXICAL SCOPE ─────────────────────────────────────
--- A call the resolver linked (`c.to`) is followed. A BARE call it refused is resolved here by
--- LEXICAL SCOPE when exactly one same-named function is visible from the call: defined in the
--- same file, inside a function (or the file) that encloses the call. That is how the fixture is
--- reached at all: treesitter.lua holds TWO local `fn_at`s in two enclosing functions, so name
--- matching refuses all 8 calls, and each is decided by which function it sits in. Such an edge
--- is `lexical` on the finding (name-matched, scoped), never a claim the call graph made. The rule
--- belongs in the resolver (CART-1059); it lives here until it moves.
+-- ── CALLEES: THE CALL GRAPH, THEN LEXICAL SCOPE FOR A FUNCTION PASSED BY NAME ───────
+-- A call the resolver linked (`c.to`) is followed — including a call of a same-named local function,
+-- which the resolver now decides by LEXICAL SCOPE (CART-1059: treesitter.lua's two local `fn_at`s,
+-- once refused at all 8 calls, are linked there). What stays here is a function passed BY NAME
+-- (`pcall(heavy, t)`): an argument, not a call, so the resolver links nothing — it is resolved by
+-- the same scope rule (`resolve_lexical`) and is `lexical` on the finding, never a call-graph claim.
 
 local expr = require 'cartograph.expr'
 local argv = require 'cartograph.argv'
@@ -452,9 +450,6 @@ function M.analyze(store, data, opts)
     end
     function callee_of_raw(c)
         if c.to and by_id[c.to] then return by_id[c.to], 'graph' end
-        if c.to or not c.callee or (c.full and c.full ~= c.callee) or not c.file then return nil end
-        local g = resolve_lexical(c.callee, c.file, (c.line or 0) + 1)
-        if g then return g, 'lexical' end
         return nil
     end
     function resolve_lexical(name, file, line)

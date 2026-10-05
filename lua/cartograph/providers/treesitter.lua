@@ -3856,6 +3856,45 @@ local function localdecl_shadow(callee, file, fn, parent_fn, exact)
     return true
 end
 
+-- LEXICAL SCOPE for a same-file refusal (CART-1485): a name defined several times in ONE file — core.lua's many nested
+-- `local function walk` — is one binding at each call. A definition is VISIBLE from the call when the function
+-- enclosing it (parent_fn; none = file level) is on the call's enclosing chain; the INNERMOST visible one wins, and
+-- within one scope the latest declared before the call (a re-declaration shadows the earlier one). A forward-declared
+-- `local f; … function f(…)` is a definition in that scope like any other. -> the node, or nil (still ambiguous).
+-- Lua's scoping, asked only for Lua files; the acceptance joined it against the algebra's lua_scope_graph over lua/:
+-- 617 calls resolved alike, 0 to different targets.
+local function lexical_pick(cands, file, fn, call_at, parent_fn, node_index)
+    if not (fn and call_at and file:match('%.lua$')) then return nil end
+    local depth, d, f = {}, 0, fn
+    while f do depth[f.id] = d; d = d + 1; f = parent_fn[f.id] end
+    local cl, cc = atr.sl(call_at), atr.sc(call_at)
+    -- (glob: a NON-LOCAL declaration — `function walk()`, exported — shares the innermost scope: which one a call reaches
+    -- is the last ASSIGNMENT executed, a run-time order, so it stays refused)
+    local best, bdepth, bl, bc, tie, glob
+    for _, cid in ipairs(cands or {}) do
+        local n = type(cid) == 'table' and cid or node_index[cid] -- (a refusal's candidates are node IDS)
+        if n and n.file == file and not n.cbarg and n.range then
+            local p = parent_fn[n.id]
+            local nd = p == nil and d or depth[p.id]
+            if nd then
+                local l, c = atr.sl(n.range), atr.sc(n.range)
+                local before = l < cl or (l == cl and c <= cc)
+                if not best or nd < bdepth then best, bdepth, bl, bc, tie, glob = n, nd, l, c, not before, false
+                elseif nd == bdepth then
+                    if n.exported or best.exported then glob = true end
+                    -- (one scope, two declarations: the latest one declared before the call)
+                    local bbefore = bl < cl or (bl == cl and bc <= cc)
+                    if before and (not bbefore or l > bl or (l == bl and c > bc)) then best, bl, bc, tie = n, l, c, false
+                    elseif not bbefore and not before then tie = true end
+                end
+            end
+        end
+    end
+    if tie or glob then return nil end
+    return best
+end
+M._lexical_pick = lexical_pick
+
 local function resolve_local_callable(cv, node_index, exact, addref, parent_fn)
     local cget, cset = cv.get, cv.set
     local n = 0
@@ -9053,6 +9092,10 @@ local MATCH_OPTS = { match_limit = 65536 }
             local fdef = p.call.rt and (p.call.rt.fld or p.call.rt.tv)
             if not shadowed and not fdef then
                 target, inferred, refused, ext = resolve(p.full or p.call.callee, p.file)
+                if refused and refused.rule == 'samefile' then
+                    local pick = M._lexical_pick(refused.cands, p.file, from and node_index[from], p.at, parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
+                    if pick then target, inferred, refused = pick, false, nil end
+                end
             end
         end
         if not target and not p.call.dynamic
@@ -9855,6 +9898,10 @@ function M.relink(data, touched, opts)
             elseif not (cget(i, 'rt') and (cget(i, 'rt').fld or cget(i, 'rt').tv)) then -- a field or type-variable
                 -- deferral waits for the rounds (see extract)
                 target, inferred, refused, ext = resolve(cfull or ccallee, cfile)
+                if refused and refused.rule == 'samefile' and not cfull then
+                    local pick = M._lexical_pick(refused.cands, cfile, cfn and node_index[cfn], cget(i, 'at'), parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
+                    if pick then target, inferred, refused = pick, false, nil end
+                end
             end
             if target then
                 cset(i, 'to', target.id)

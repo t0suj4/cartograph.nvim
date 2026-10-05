@@ -734,13 +734,15 @@ test('moveapply: a file-local whose calls do not resolve is still disclosed', fu
     if not ready() then skip('no lua parser') end
     local st = ingest_files { ['m.lua'] = table.concat({
         'local M = {}',
-        'local function helper(x) return x + 1 end',
         'function M.early(y) return helper(y) end',
-        'local function helper(x) return x + 2 end',   -- the SECOND definition
         'local function untouched(x) return x - 1 end',
         'function M.uses_it(x)',
         '    return helper(x)',
         'end',
+        -- (both definitions AFTER the calls: no declaration precedes them, so lexical scope cannot pick one and the
+        -- calls stay unresolved — a re-declaration BETWEEN them now resolves, each call to the one before it, CART-1059)
+        'local function helper(x) return x + 1 end',
+        'local function helper(x) return x + 2 end',
         'return M',
     }, '\n') }
     local n = node_by(st, 'M.uses_it') or node_by(st, 'uses_it')
@@ -779,10 +781,10 @@ test('moveapply: an unresolved capture is NEVER pulled into the move-set', funct
     if not ready() then skip('no lua parser') end
     local st = ingest_files { ['m.lua'] = table.concat({
         'local M = {}',
-        'local function helper(x) return x + 1 end',
         'function M.stays(y) return helper(y) end',    -- STAYING code uses it
-        'local function helper(x) return x + 2 end',
         'function M.uses_it(x) return helper(x) end',
+        'local function helper(x) return x + 1 end',   -- (both after the calls: unresolved, CART-1059)
+        'local function helper(x) return x + 2 end',
         'return M',
     }, '\n') }
     local n = node_by(st, 'M.uses_it') or node_by(st, 'uses_it')

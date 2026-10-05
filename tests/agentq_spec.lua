@@ -59,20 +59,18 @@ function M.pub(z) return z end
 return M
 ]]
 
--- REFUSED: the same-named nested helper, twice. `walk(...)` cannot be resolved to
--- one of them, so the call is REFUSED with a candidate list — and each `walk` then
--- reads as callerless while being perfectly alive. The measured false-positive
--- idiom the dead-confined rule's premise 3 exists for.
+-- REFUSED: the same-named file-local helper, declared twice, AFTER the calls. Neither
+-- declaration precedes `walk(...)`, so lexical scope cannot pick one (CART-1059) and each
+-- call is REFUSED with a candidate list — and each `walk` then reads as callerless while
+-- possibly alive. The measured false-positive idiom the dead-confined rule's premise 3
+-- exists for. (It was two NESTED helpers until CART-1059: lexical scope now resolves
+-- those, each to its own.)
 local REFUSED = [[
 local M = {}
-function M.a()
-    local function walk(t) return t end
-    return walk({})
-end
-function M.b()
-    local function walk(t) return t end
-    return walk({})
-end
+function M.a() return walk({}) end
+function M.b() return walk({}) end
+local function walk(t) return t end
+local function walk(t) return { t } end
 return M
 ]]
 

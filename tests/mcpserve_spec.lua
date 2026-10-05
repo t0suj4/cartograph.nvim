@@ -41,18 +41,16 @@ function M.caller() return M.pub(1) end
 return M
 ]]
 
--- REFUSED (`walk`): the same-named nested helper twice, so `walk(...)` cannot be
--- bound to one of them and each reads as callerless while being perfectly alive.
+-- REFUSED (`walk`): the same-named file-local helper twice, both declared AFTER the
+-- calls, so lexical scope cannot bind `walk(...)` to one of them (CART-1059) and each
+-- reads as callerless while possibly alive. (Two NESTED helpers until CART-1059:
+-- lexical scope now resolves those, each to its own.)
 local W_LUA = [[
 local M = {}
-function M.a()
-    local function walk(t) return t end
-    return walk({})
-end
-function M.b()
-    local function walk(t) return t end
-    return walk({})
-end
+function M.a() return walk({}) end
+function M.b() return walk({}) end
+local function walk(t) return t end
+local function walk(t) return { t } end
 return M
 ]]
 

@@ -40,7 +40,7 @@ test('loopcost: ★ the fn_at shape — a scan of shared state per element of an
     local f = to('owner')
     eq(1, #f)
     eq('hidden-shared', f[1].kind)
-    eq('lexical', f[1].how, 'two local `owner`s: name matching refuses, the enclosing function decides')
+    eq('graph', f[1].how, 'two local `owner`s: the RESOLVER decides by the enclosing function (CART-1059; loopcost did it before)')
     -- ids carry 0-based lines: owner@15 is M.attribute's (line 16), M.other's is owner@28
     eq('shapes.lua::owner@15', f[1].callee)
     eq({ 'byfile' }, f[1].shared)
