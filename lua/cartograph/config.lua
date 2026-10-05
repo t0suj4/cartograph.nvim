@@ -171,10 +171,11 @@ M.federated_resolve = vim.env.CARTOGRAPH_FEDERATED == '1'
 
 -- INCREMENTAL REFRESH (CART-1439, EARLY CUTOFF): a save whose files keep their INTERFACE re-resolves only the calls
 -- that edit can change (ts.relink opts.only). ACCEPTED by the refresh-parity oracle on 122 real edits of our tree: the
--- graph equals the full refresh's after every step; the 88 cutoff saves 1.28 -> 0.99 s. Default off until the oracle
--- has run on other languages' histories (a population-dependent pass is the risk: `self` was one). setup{
--- incremental_refresh = true } or env CARTOGRAPH_INCREMENTAL=1.
-M.incremental_refresh = vim.env.CARTOGRAPH_INCREMENTAL == '1'
+-- graph equals the full refresh's after every step; the 88 cutoff saves 1.28 -> 0.99 s. ON BY DEFAULT since the oracle
+-- ran on four more languages' histories (2026-10-05): java spring-petclinic 144 edits, go hugo 34, python django-oscar
+-- 64, typescript typescript-language-server 124 — equal at every step, every changed file reported dirty. Off:
+-- setup{ incremental_refresh = false } or env CARTOGRAPH_INCREMENTAL=0.
+M.incremental_refresh = vim.env.CARTOGRAPH_INCREMENTAL ~= '0'
 
 -- parallel cold extraction: worker processes parse file slices while the
 -- browser opens immediately and fills in as chunks arrive. Kicks in at

@@ -5642,6 +5642,21 @@ test('treesitter: relink reads a function\'s df-defined names ONCE, however many
     vim.fn.delete(root, 'rf')
 end)
 
+test('treesitter: dedupe_reg REPORTS the file of every copy it drops — the cache save rewrites only reported files (CART-1439)', function ()
+    local at = function (l) return { start = { line = l, char = 0 }, ['end'] = { line = l, char = 1 } } end
+    local edges = {
+        { kind = 'reg', from = 'a.py', to = 'u.py::f@5', at = { at(3) } },
+        { kind = 'reg', from = 'a.py', to = 'u.py::f@5', at = { at(3) } },
+        { kind = 'reg', from = 'b.py::g@1', to = 'u.py::f@5', at = { at(9) } },
+        { kind = 'ref', from = 'c.py::h@2', to = 'u.py::f@5', at = { at(4) } },
+    }
+    local touched = {}
+    eq(1, ts.dedupe_reg(edges, touched))
+    eq(3, #edges)
+    eq(true, touched['a.py'], 'the file whose copy was dropped is reported')
+    eq(nil, touched['b.py'], 'a file with nothing dropped is not')
+end)
+
 test('treesitter: a lua `local` module var is never the cross-file target of a free name in another file (CART-1473)', function ()
     -- m.lua's `local verified` and o.lua's GLOBAL `verified`: lua scopes a local to its chunk, so o.lua's write is not
     -- a use of m.lua's var. The unique-name fallback linked them (TSM: 1,061 -> 371 cross-file use edges; our tree

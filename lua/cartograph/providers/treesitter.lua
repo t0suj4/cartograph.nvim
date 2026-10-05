@@ -6358,7 +6358,10 @@ end
 --- Exported because the PARALLEL parent mints its last reg edges in `phase2()`,
 --- which runs AFTER ts.relink (parallel.lua) — so neither of this module's own
 --- call sites is the last word there, and the finalizer has to ask for it.
-function M.dedupe_reg(edges)
+--- `touched` (optional): every file a dropped copy came from is marked — a collapse changes that file's shard, and
+--- the O(diff) cache save trusts the account (refresh-parity on django-oscar: a reg edge in abstract_models.py
+--- vanished on a save of admin.py, its file never reported)
+function M.dedupe_reg(edges, touched)
     local best, drop, dropped = {}, {}, 0
     for i, e in ipairs(edges) do
         if e.kind == 'reg' then
@@ -6372,6 +6375,7 @@ function M.dedupe_reg(edges)
                 local newer = nb > na or (nb == na and first_at(b) < first_at(a))
                 if newer then drop[cur] = true; best[k] = i else drop[i] = true end
                 dropped = dropped + 1
+                if touched then touched[e.from:match('^(.-)::') or e.from] = true end
             end
         end
     end
@@ -9926,7 +9930,7 @@ function M.relink(data, touched, opts)
     own_module_calls(full_cv.n, full_cv.get, region_at, addref)
     -- the parallel parent assembles its reg set from worker chunks plus relink's
     -- own minting, so the same collapse is owed here (CART-0623)
-    M.dedupe_reg(data.edges)
+    M.dedupe_reg(data.edges, touched)
     return n
 end
 

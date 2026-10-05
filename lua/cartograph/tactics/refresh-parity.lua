@@ -28,9 +28,12 @@ local function edits_of(world, sub, n)
         local c = commits[i]
         local names = git(world, { 'diff-tree', '--no-commit-id', '--name-only', '-r', c, '--', sub }) or ''
         for _, path in ipairs(vim.split(vim.trim(names), '\n', { trimempty = true })) do
-            if path:match('%.lua$') then
+            -- (any file the extractor reads — its language derived from the path, never a list here)
+            if require('cartograph.providers.treesitter').lang_of(path) then
                 local after = git(world, { 'show', c .. ':' .. path })
-                if after then out[#out + 1] = { rel = path:sub(#sub + 2), after = after, commit = c:sub(1, 8) } end
+                -- (relative to the extraction root: `sub` = '.' is the repo itself)
+                local rel = (sub == '.' or sub == '') and path or path:sub(#sub + 2)
+                if after then out[#out + 1] = { rel = rel, after = after, commit = c:sub(1, 8) } end
             end
         end
     end
@@ -115,8 +118,11 @@ local function replay(p)
             -- save keeps its old shard — a difference the in-memory digest cannot show
             local dset, undirty = { [e.rel] = true }, {}
             for _, f in ipairs(stats and stats.dirty or {}) do dset[f] = true end
-            for f, hh in pairs(per) do if f ~= '?' and prev[f] ~= hh and not dset[f] then undirty[#undirty + 1] = f end end
-            for f in pairs(prev) do if f ~= '?' and not per[f] and not dset[f] then undirty[#undirty + 1] = f end end
+            -- (only files that HAVE a shard — a stamp: a minted external lives in a pseudo-file like `node` and rides
+            -- the manifest, which every save rewrites from the whole graph)
+            local stamps = store.data.stamps or {}
+            for f, hh in pairs(per) do if stamps[f] and prev[f] ~= hh and not dset[f] then undirty[#undirty + 1] = f end end
+            for f in pairs(prev) do if stamps[f] and not per[f] and not dset[f] then undirty[#undirty + 1] = f end end
             table.sort(undirty)
             prev = per
             -- (dump = <dir>: every step's digest lines, per path — what a difference is made of)
@@ -143,7 +149,7 @@ local function measure(_, p)
     local sub = p.sub or 'lua'
     local edits, why = edits_of(world, sub, tonumber(p.history or 20))
     if not edits then return { error = why } end
-    if #edits == 0 then return { error = 'no Lua file changed under ' .. sub .. ' in the last commits' } end
+    if #edits == 0 then return { error = 'no extractable file changed under ' .. sub .. ' in the last commits' } end
     local ef = vim.fn.tempname() .. '-edits.json'
     local fd = assert(io.open(ef, 'w')); fd:write(vim.json.encode(edits)); fd:close()
     local runs = {}
