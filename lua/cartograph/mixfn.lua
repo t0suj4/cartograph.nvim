@@ -69,6 +69,28 @@ function M.lower_alone(store, ref)
     return prog, names, 'f', { cone = false }
 end
 
+--- the ENVIRONMENT a residual loads in: the constant pool as MIXK, every KNOWN global (opts.globals — mixalg.program's
+--- `knowns`) at its dotted path, the rest of _G behind them. A known reaching dynamic code is residualized as its PATH
+--- (`fix__RULES[a]`), so a residual loaded without its knowns reads nil (CART-1374). A path whose root is already set
+--- (`x.f` when `x` is known) is the root's own field and is not written over.
+function M.env(pool, globals, extra)
+    local env = { MIXK = pool }
+    for k, v in pairs(extra or {}) do env[k] = v end
+    local keys = vim.tbl_keys(globals or {})
+    table.sort(keys, function (a, b) local na, nb = select(2, a:gsub('%.', '')), select(2, b:gsub('%.', '')); if na ~= nb then return na < nb end return a < b end)
+    for _, path in ipairs(keys) do
+        local parts = vim.split(path, '.', { plain = true })
+        local t = env
+        for i = 1, #parts - 1 do
+            if t[parts[i]] == nil then t[parts[i]] = {} end
+            t = t[parts[i]]
+            if type(t) ~= 'table' then t = nil; break end
+        end
+        if t and t[parts[#parts]] == nil then t[parts[#parts]] = globals[path] end
+    end
+    return setmetatable(env, { __index = _G })
+end
+
 --- a mix error (a refusal record or a message) as one sentence
 function M.why(e)
     if type(e) == 'table' and e.refusal then return MX().describe(e) end

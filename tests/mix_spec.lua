@@ -1040,6 +1040,11 @@ test('mix: the FORWARD-DECLARED recursive local — `local build; function build
     eq(want(4), fs()); ok(not ts:find('build', 1, true), 'n static: the recursion folds away\n' .. ts)
     local fd = residual(SRC, 'f', { 'D' }, {})
     for _, n in ipairs({ 0, 1, 5 }) do eq(want(n), fd(n)) end
+    -- (assigned under DYNAMIC control: the local's binding time joins both arms)
+    local SRC2 = 'local function f(d, k)\n  local build\n  if d then function build(x) return x + k end else function build(x) return x * k end end\n  return build(10)\nend\n'
+    local want2 = original(SRC2, 'f')
+    local f2 = residual(SRC2, 'f', { 'D', 'S' }, { nil, 3 })
+    eq(want2(true, 3), f2(true)); eq(want2(false, 3), f2(false))
     -- (a non-local function declaration whose name is no local in scope assigns a global or a field: refused by name)
     for _, src in ipairs({ 'local function g() function h() return 1 end return h() end', 'local function g(t) function t.h() return 1 end return t end' }) do
         local okl, e = pcall(MX.lower, assert(R.read(src, 'lua')))

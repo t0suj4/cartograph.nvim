@@ -243,6 +243,7 @@ test('mixalg: a closure\'s FILE-LEVEL LOCALS are carried from the loaded code â€
         '  return a .. SEP .. RULES.width .. tostring(cache)',
         'end',
         'function M.warm() cache = 7 end',
+        'function M.g(a) return RULES[a] end',
         'return M', '' }, '\n'))
     fd:close()
     local saved = package.path
@@ -264,8 +265,16 @@ test('mixalg: a closure\'s FILE-LEVEL LOCALS are carried from the loaded code â€
         eq({ 'fix.lua::cache' }, sr.snapshots); eq({}, sr.free)
         local sprog = MX.lower(assert(R.read(snap, 'lua')))
         local res = MX.specialize(sprog, 'M_f', { 'D' }, {}, { budget = 2e5, globals = sk })
-        local f = assert(load(MX.print(res, sprog.where), 'residual', 't', setmetatable({ MIXK = res.pool }, { __index = _G })))()
+        local F = require 'cartograph.mixfn'
+        local f = assert(load(MX.print(res, sprog.where), 'residual', 't', F.env(res.pool, sk)))()
         eq('x-37', f('x'))
+        -- (a known read by DYNAMIC code is residualized as its path â€” `fix__RULES[a]` â€” so the residual loads with
+        -- the knowns in its environment: mixfn.env)
+        local gt, _, _, gk = MA.program('M.g', { path })
+        local gprog = MX.lower(assert(R.read(gt, 'lua')))
+        local gres = MX.specialize(gprog, 'M_g', { 'D' }, {}, { budget = 2e5, globals = gk })
+        local g = assert(load(MX.print(gres, gprog.where), 'residual', 't', F.env(gres.pool, gk)))()
+        eq(3, g('width')); eq('r', g('name'))
     end)
     package.path = saved
     package.loaded['mxk1374.fix'] = nil
