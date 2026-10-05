@@ -42,7 +42,7 @@ local function measure(store, p)
     end
     local t0 = vim.uv.hrtime()
     local ok, okr, rerr = W.run_wrapped(store, work, targets, function (real, t)
-        local row = { name = t, calls = 0, distinct = 0, ns = 0, bytes = 0, keys = {}, seen = {}, pos = {} }
+        local row = { name = t, calls = 0, distinct = 0, ns = 0, bytes = 0, keys = {}, seen = {}, pos = {}, held = {} }
         rows[#rows + 1] = row
         return function (...)
             local n = select('#', ...)
@@ -69,18 +69,32 @@ local function measure(store, p)
             row.ns = row.ns + (vim.uv.hrtime() - s)
             -- (ONE `seen` per target, CART-1469: structure SHARED between results is held once by a memo, and was
             -- counted once per result — expr.of priced 2.99 GB where the GC-retained bytes were 91 MB)
-            if fresh then row.bytes = row.bytes + size(r, row.seen, row) end
+            if fresh then row.bytes = row.bytes + size(r, row.seen, row); row.held[#row.held + 1] = r end
             return unpack(r)
         end
     end)
     local total = (vim.uv.hrtime() - t0) / 1e9
     if not ok then return { error = okr } end
     if not okr then return { error = 'the workload raised: ' .. tostring(rerr) } end
+    -- ★ THE RETAINED PRICE (CART-1469): what a memo would KEEP ALIVE is what is reachable only through its results —
+    -- the reference walk (result_kb) also counts every table a result POINTS INTO that lives anyway (the graph, spec
+    -- tables): expr.of read 141 MB walked, ~91 MB retained. The distinct results were held during the run, as the memo
+    -- would hold them; after full collections, releasing one target's results frees exactly its retained bytes.
+    for _, r in ipairs(rows) do r.seen = nil end -- (the walk's seen-set holds the results' reachable tables strongly)
+    local function full() collectgarbage(); collectgarbage() end
+    for _, r in ipairs(rows) do
+        full()
+        local c1 = collectgarbage('count')
+        r.held = nil
+        full()
+        r.retained = math.max(0, c1 - collectgarbage('count')) -- KB
+    end
     local out = {}
     for _, r in ipairs(rows) do
         local secs = r.ns / 1e9
         out[#out + 1] = { name = r.name, calls = r.calls, distinct = r.distinct, repeat_ratio = r.calls / math.max(r.distinct, 1),
             seconds = secs, saved = secs * (1 - r.distinct / math.max(r.calls, 1)), result_kb = r.bytes / 1e3,
+            retained_kb = r.retained * 1.024,
             userdata = r.userdata or false, functions = r.functions or false, keys = r.kind or 'none', arg_kinds = r.pos }
     end
     table.sort(out, function (a, b) if a.saved ~= b.saved then return a.saved > b.saved end return a.name < b.name end)
@@ -105,8 +119,8 @@ local E = {
         for _, r in ipairs(v.rows) do if r.calls == 0 then unreached[#unreached + 1] = r.name end end
         local missed = #unreached > 0 and ('%s never called through its module field — a caller holds a local reference (wrap where it is bound)'):format(table.concat(unreached, ', ')) or nil
         if not best or best.saved <= 0 then return false, missed or 'no target repeats an argument' end
-        return true, ('%s: %d calls on %d distinct arguments (%.1fx), a memo saves %.3f s of %.3f s (result %.1f KB%s)%s'):format(
-            best.name, best.calls, best.distinct, best.repeat_ratio, best.saved, v.workload_seconds, best.result_kb,
+        return true, ('%s: %d calls on %d distinct arguments (%.1fx), a memo saves %.3f s of %.3f s (retains %.1f KB; reaches %.1f KB%s)%s'):format(
+            best.name, best.calls, best.distinct, best.repeat_ratio, best.saved, v.workload_seconds, best.retained_kb, best.result_kb,
             best.userdata and ', holds userdata' or '', missed and ('; ' .. missed) or '')
     end,
 }
@@ -145,7 +159,9 @@ E.examples = {
         expect = { holds = false, check = function (v)
             local one = measure({ data = {} }, { targets = 'madv.share', workload = 'return function () require("madv").share({ 1 }) end' })
             local many, single = v.rows[1].result_kb, one.rows[1].result_kb
-            return many < single * 2, ('21 results %.1f KB, 1 result %.1f KB'):format(many, single)
+            -- (and the RETAINED price leaves out the big table altogether: the module holds it whether or not a memo does)
+            local kept = v.rows[1].retained_kb
+            return many < single * 2 and kept < many / 4, ('21 results %.1f KB walked / %.1f KB retained, 1 result %.1f KB'):format(many, kept, single)
         end },
     },
     {

@@ -96,9 +96,11 @@ local function build(p, store)
             -- REJECTED exactly this memo (expr.of, ~91-141 MB) on its price and restructured instead; a loop that only
             -- reads time would accept it. Above `max_kb` (default 64 MB) it stops and asks
             local max_kb = tonumber(p.max_kb or 65536)
-            if best.result_kb > max_kb then
+            -- (the RETAINED price when measured — what only the memo keeps alive — else the reference walk's)
+            local price = best.retained_kb or best.result_kb
+            if price > max_kb then
                 return nil, ('a memo of %s would hold ~%.0f MB of results to save %.2f s of %.2f s: accept the price (max_kb = %d or more), or restructure so the callers derive once'):format(
-                    best.name, best.result_kb / 1024, best.saved, adv.workload_seconds, math.ceil(best.result_kb)), 'decision'
+                    best.name, price / 1024, best.saved, adv.workload_seconds, math.ceil(price)), 'decision'
             end
             local w = where[best.name]
             local ref = node_at(store, w.file, w.line)
@@ -172,7 +174,7 @@ return {
         {
             name = 'a memo whose results cost more than max_kb STOPS on the price decision before anything is written',
             files = { ['lua/optm.lua'] = OPTM }, requires = in_git,
-            params = function (store) commit(store); return { workload = work('optm'), measure = measure_of('optm'), corpus = { store.data.root }, max_kb = '0' } end,
+            params = function (store) commit(store); return { workload = work('optm'), measure = measure_of('optm'), corpus = { store.data.root }, max_kb = '-1' } end,
             expect = { status = 'stopped', applied = 0, check = function (root)
                 return io.open(root .. '/lua/optm.lua'):read('a') == OPTM, 'written past the price'
             end },
