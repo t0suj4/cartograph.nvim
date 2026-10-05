@@ -1340,8 +1340,11 @@ local function fixpoint(body, bt)
     refuse('the binding-time analysis did not reach a fixpoint')
 end
 
---- the binding times of one function under a division ({ 'S' | 'C' | 'D' } per parameter) -> { [id] = S | C | D }
-function M.bta(prog, fname, division)
+--- the binding times of one function under a division ({ 'S' | 'C' | 'D' } per parameter) -> { [id] = S | C | D }.
+--- `globals` (optional, CART-1374): the KNOWN globals — a file's constants mixalg.program carried — static here as they
+--- are to specialize (which sets them from opts.globals)
+function M.bta(prog, fname, division, globals)
+    if globals then KNOWN = globals end
     local f = prog.funcs[fname]
     local bt = {}
     for i, id in ipairs(f.params) do

@@ -20,7 +20,7 @@ local function measure(store, p)
         if not vim.tbl_contains(params, k) then return { error = ('known = %s: no such parameter (it takes: %s)'):format(k, table.concat(params, ', ')) } end
     end
     local function bta(div)
-        local ok, bt = pcall(MX.bta, prog, entry, div)
+        local ok, bt = pcall(MX.bta, prog, entry, div, how.knowns or {})
         if not ok then error(F.why(bt), 0) end
         return bt
     end

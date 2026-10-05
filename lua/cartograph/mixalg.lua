@@ -44,10 +44,20 @@ M._short_src = short_src
 --- definition's renames never add a line, so its lines map one to one) (memoized per root and per process)
 --- `files` (CART-1445): ANY Lua files (absolute paths) instead of the algebra's — a module's own call closure (its
 --- `M.x` and file locals; a name in another file is a free name, as anything required is). Default: the algebra.
-function M.program(root, files)
+--- ★ FILE-LEVEL LOCALS THE CLOSURE READS (CART-1374): a definition's free names that are not definitions — `local Q =
+--- 'q\1'`, a table of rules, the basis bound once — used to reach mix as unknown GLOBALS and refuse. Their VALUES are
+--- read from the LOADED code: each closure function's runtime object (found by file and first line among the loaded
+--- modules) names, through debug.getupvalue, exactly the bindings it captures — no name guessing. A local NO code in
+--- its file writes is a constant: a scalar is inlined as a literal, a table becomes a KNOWN global (`<file>__<name>`,
+--- returned in `knowns`: the caller passes them to mix as opts.globals and to the residual's environment). A local
+--- the file WRITES (the basis bound in apply_to, a lazy cache) is a value only at this moment: taken only with
+--- opts.snapshot, and listed in `report.snapshots`; otherwise it stays free (`report.free`).
+--- -> text, order, lines, knowns, report { known = { name }, snapshots = { name }, free = { name } }
+function M.program(root, files, opts)
     root = root or 'M.match'
-    local ckey = root .. (files and ('\0' .. table.concat(files, '\0')) or '')
-    if cache[ckey] then return cache[ckey].text, cache[ckey].order, cache[ckey].lines end
+    opts = opts or {}
+    local ckey = root .. (files and ('\0' .. table.concat(files, '\0')) or '') .. (opts.snapshot and '\0snap' or '')
+    if cache[ckey] then local c = cache[ckey]; return c.text, c.order, c.lines, c.knowns, c.report end
     files = files or vim.fn.glob(algebra_dir() .. '/*.lua', false, true)
     local fq = vim.treesitter.query.parse('lua', '(function_declaration) @f')
     local aq = vim.treesitter.query.parse('lua', '(function_definition) @f')
@@ -180,10 +190,98 @@ function M.program(root, files)
     -- ASSEMBLE: every definition a top-level `local function <mangled>`, its references rewritten
     local mangle = M.mangle
     local iq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (method_index_expression) @d (identifier) @i]')
+    -- THE LOADED CODE, indexed by (absolute file, first line): every Lua function reachable from a loaded module's table
+    -- or from another such function's upvalues (the algebra loaded first, so its parts are among them)
+    local fobj = {}
+    do
+        pcall(function () require('cartograph.algebra').load() end)
+        local seen = {}
+        local function visit(f, depth)
+            if seen[f] or depth > 6 then return end
+            seen[f] = true
+            if type(f) == 'function' then
+                local info = debug.getinfo(f, 'S')
+                if info and info.what == 'Lua' and info.source:sub(1, 1) == '@' then
+                    fobj[vim.fn.fnamemodify(info.source:sub(2), ':p') .. ':' .. info.linedefined] = f
+                end
+                for i = 1, 255 do
+                    local nm, v = debug.getupvalue(f, i)
+                    if not nm then break end
+                    if type(v) == 'function' then visit(v, depth + 1) end
+                end
+            elseif type(f) == 'table' then
+                for _, v in pairs(f) do if type(v) == 'function' then visit(v, depth + 1) end end
+            end
+        end
+        for _, mod in pairs(package.loaded) do if type(mod) == 'table' then visit(mod, 0) end end
+        -- a closure file whose module nothing has loaded yet (derive.lua: required only under DERIVE): load it by its
+        -- module name — `<…>/lua/a/b.lua` is `a.b` — and index what it brings
+        M._visit = visit
+    end
+    local function ensure_loaded(abs)
+        local mod = abs:match('/lua/(.-)%.lua$')
+        if not mod then return end
+        mod = mod:gsub('/', '.')
+        if package.loaded[mod] == nil then
+            local ok, m = pcall(require, mod)
+            if ok and type(m) == 'table' then M._visit(m, 0) end
+        end
+    end
+    -- the module tables of the closure's files (`M`, `D` …): their dotted calls are rewritten whole above, so the bare
+    -- name is no value to carry
+    local modtab = {}
+    for k in pairs(defs) do
+        local file, nm = k:match('^(.-)::(.*)$')
+        local t = nm and nm:match('^([%a_][%w_]*)[.:]')
+        if t then modtab[file] = modtab[file] or {}; modtab[file][t] = true end
+    end
+    -- is `name` WRITTEN anywhere in `file`'s text (a reassignment or a store into it — not its own declaration)?
+    local written_memo = {}
+    local function written(file, name)
+        local key = file .. '\0' .. name
+        if written_memo[key] == nil then
+            local s, w = src[file], false
+            local p = vim.pesc(name)
+            for line in s:gmatch('[^\n]+') do
+                local l = line:gsub('%-%-.*$', '')
+                if not l:match('^%s*local%s+' .. p .. '%f[^%w_]') and (l:find('%f[%w_]' .. p .. '%s*=[^=]') or l:find('%f[%w_]' .. p .. '%s*%[[^%]]*%]%s*=[^=]')
+                    or l:find('%f[%w_.]' .. p .. '%.[%w_]+%s*=[^=]')) then w = true; break end
+            end
+            written_memo[key] = w
+        end
+        return written_memo[key]
+    end
+    local knowns, report = {}, { known = {}, snapshots = {}, free = {} }
+    local noted = {}
+    local function note(list, nm) if not noted[list .. nm] then noted[list .. nm] = true; table.insert(report[list], nm) end end
+    -- a scalar as a Lua literal that adds NO line (the line map counts the original's lines one to one)
+    local function literal(v)
+        if v == nil then return 'nil' end
+        if type(v) == 'boolean' then return tostring(v) end
+        if type(v) == 'number' then
+            if v ~= v or v == math.huge or v == -math.huge then return nil end
+            return math.floor(v) == v and string.format('%d', v) or string.format('%.17g', v)
+        end
+        if type(v) == 'string' then return (string.format('%q', v):gsub('\\\n', '\\n')) end
+        return nil
+    end
     local chunks, lines, nline = {}, {}, 1
     for _, k in ipairs(order) do
         local d = defs[k]
         local n = d.node
+        -- the bindings THIS definition captures, by name, from its runtime object (nil: not loaded — nothing carried)
+        local uv
+        local fkey = vim.fn.fnamemodify(path[d.file], ':p') .. ':' .. ((n:start()) + 1)
+        if not fobj[fkey] then ensure_loaded(vim.fn.fnamemodify(path[d.file], ':p')) end
+        local fo = fobj[fkey]
+        if fo then
+            uv = {}
+            for i = 1, 255 do
+                local nm, v = debug.getupvalue(fo, i)
+                if not nm then break end
+                uv[nm] = { v = v }
+            end
+        end
         local params = n:field('parameters')[1]
         local body = n:field('body')[1]
         local ptext = params and tx(params, d.src) or '()'
@@ -205,7 +303,36 @@ function M.program(root, files)
                     if not (par and (par:type() == 'dot_index_expression' or par:type() == 'method_index_expression') and par:named_child(0):id() ~= cap:id())
                         and outer_ref(cap, d) then
                         local r = resolve(t, d.file)
-                        if r and not r:match('^M') then target = mangle(r) end
+                        if r and not r:match('^M') then target = mangle(r)
+                        elseif not r and uv and uv[t] and not (modtab[d.file] and modtab[d.file][t])
+                            and t ~= 'M' and t ~= 'SHARED' and t ~= 'PARTS' then -- (the algebra's own tables: mix knows M.x by name)
+                            -- (CART-1374: a captured file-level VALUE — a constant inlined or carried known; a written one
+                            -- only as a snapshot; a function value stays free: mix calls only what it can see)
+                            local v = uv[t].v
+                            local w = written(d.file, t)
+                            if type(v) ~= 'function' and (not w or (opts.snapshot and v ~= nil)) then
+                                local lit = literal(v)
+                                -- (a literal as the OBJECT of an index or a call needs parentheses: `nil.x`, `"s":m()` do
+                                -- not parse)
+                                local pt = par and par:type()
+                                if lit and (pt == 'dot_index_expression' or pt == 'method_index_expression'
+                                    or pt == 'bracket_index_expression' or pt == 'function_call') then lit = '(' .. lit .. ')' end
+                                if lit then target = lit
+                                elseif type(v) == 'table' then
+                                    target = mangle(d.file .. '::' .. t)
+                                    knowns[target] = v
+                                    -- (mix names a known global by its DOTTED PATH — `M.grammars` — so a field this
+                                    -- closure reads is known under `<file>__<name>.<field>` too; a function field is
+                                    -- a call mix must see as a primitive, never a value carried here)
+                                    if pt == 'dot_index_expression' then
+                                        local fld = par:field('field')[1]
+                                        local fname = fld and tx(fld, d.src)
+                                        if fname and type(v[fname]) ~= 'function' and v[fname] ~= nil then knowns[target .. '.' .. fname] = v[fname] end
+                                    end
+                                end
+                                if target then note(w and 'snapshots' or 'known', d.file .. '::' .. t) end
+                            else note('free', d.file .. '::' .. t) end
+                        end
                     end
                 end
                 if target then
@@ -234,8 +361,8 @@ function M.program(root, files)
         chunks[#chunks + 1] = chunk
     end
     local text = table.concat(chunks, '\n')
-    cache[ckey] = { text = text, order = order, lines = lines }
-    return text, order, lines
+    cache[ckey] = { text = text, order = order, lines = lines, knowns = knowns, report = report }
+    return text, order, lines, knowns, report
 end
 
 local term_cache

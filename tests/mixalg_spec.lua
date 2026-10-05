@@ -228,6 +228,51 @@ test('mixalg: a compiled matcher comes with its SOURCE MAP — residual lines ma
     ok(n > 50 and into == n, ('%d of %d mapped lines point into algebra/'):format(into, n))
 end)
 
+test('mixalg: a closure\'s FILE-LEVEL LOCALS are carried from the loaded code — a constant inlined, a table KNOWN, a written one free unless snapshot (CART-1374)', function ()
+    ready()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir .. '/lua/mxk1374', 'p')
+    local path = dir .. '/lua/mxk1374/fix.lua'
+    local fd = assert(io.open(path, 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local SEP = "-"',
+        'local RULES = { width = 3, name = "r" }',
+        'local cache = nil',
+        'function M.f(a)',
+        '  return a .. SEP .. RULES.width .. tostring(cache)',
+        'end',
+        'function M.warm() cache = 7 end',
+        'return M', '' }, '\n'))
+    fd:close()
+    local saved = package.path
+    package.path = dir .. '/lua/?.lua;' .. package.path
+    local MX = require 'cartograph.mix'
+    local okall, err = pcall(function ()
+        local text, _, _, knowns, report = MA.program('M.f', { path })
+        ok(text:find('"-"', 1, true) and not text:find('SEP', 1, true), 'the never-written scalar is inlined: ' .. text)
+        eq(3, knowns.fix__RULES.width); eq(3, knowns['fix__RULES.width'])
+        eq({ 'fix.lua::SEP', 'fix.lua::RULES' }, report.known)
+        eq({ 'fix.lua::cache' }, report.free)
+        ok(text:find('tostring(cache)', 1, true), 'a WRITTEN local stays free without a snapshot')
+        -- (mix specializes it with the knowns as globals, and refuses it without them: the carried table is what it needed)
+        local prog = MX.lower(assert(R.read(text, 'lua')))
+        local okn = pcall(MX.specialize, prog, 'M_f', { 'D' }, {}, { budget = 2e5 })
+        eq(false, okn)
+        require('mxk1374.fix').warm()
+        local snap, _, _, sk, sr = MA.program('M.f', { path }, { snapshot = true })
+        eq({ 'fix.lua::cache' }, sr.snapshots); eq({}, sr.free)
+        local sprog = MX.lower(assert(R.read(snap, 'lua')))
+        local res = MX.specialize(sprog, 'M_f', { 'D' }, {}, { budget = 2e5, globals = sk })
+        local f = assert(load(MX.print(res, sprog.where), 'residual', 't', setmetatable({ MIXK = res.pool }, { __index = _G })))()
+        eq('x-37', f('x'))
+    end)
+    package.path = saved
+    package.loaded['mxk1374.fix'] = nil
+    vim.fn.delete(dir, 'rf')
+    if not okall then error(err, 0) end
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')

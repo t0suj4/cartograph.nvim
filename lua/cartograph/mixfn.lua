@@ -19,7 +19,7 @@ function M.lower_ref(store, ref)
     if n and tostring(n.file):match('%.lua$') and not tostring(n.name):find(':', 1, true) then
         local MA = require 'cartograph.mixalg'
         local key = tostring(n.name):match('^M%.') and n.name or (vim.fn.fnamemodify(n.file, ':t') .. '::' .. n.name)
-        local okp, text, order, lines = pcall(MA.program, key, { store.data.root .. '/' .. n.file })
+        local okp, text, order, lines, knowns = pcall(MA.program, key, { store.data.root .. '/' .. n.file })
         local why
         if okp then
             local term = require('cartograph.algebraread').read(text, 'lua')
@@ -28,7 +28,8 @@ function M.lower_ref(store, ref)
             if okl and prog.funcs[entry] then
                 local names = {}
                 for i, pid in ipairs(prog.funcs[entry].params) do names[i] = prog.names[pid] end
-                return prog, names, entry, { cone = true, members = #order }
+                -- (knowns: the file's constants the cone reads — static to bta and specialize as opts.globals)
+                return prog, names, entry, { cone = true, members = #order, knowns = knowns }
             end
             why = okl and ('no entry ' .. entry) or M.why(prog)
         else why = tostring(text) end
