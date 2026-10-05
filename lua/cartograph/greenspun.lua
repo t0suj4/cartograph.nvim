@@ -1152,7 +1152,11 @@ function M.mirrors(data, opts)
                 extras = extras, node = sets[members[1]].node }
         end
     end
-    table.sort(out, function (a, b) return a.core > b.core end)
+    -- (TOTAL: equal cores kept the input's order — 19 ties under sort-ties, CART-1442)
+    table.sort(out, function (a, b)
+        if a.core ~= b.core then return a.core > b.core end
+        return tostring(a.members[1]) < tostring(b.members[1])
+    end)
     return out, stop > 0
         and ('%d ubiquitous member string(s) skipped'):format(stop) or nil
 end
@@ -1198,12 +1202,20 @@ function M.clones(data, opts)
         if #g >= 2 and (g.callees or df.count(g[1]) >= 5) then
             table.sort(g, function (a, b)
                 if a.file ~= b.file then return a.file < b.file end
-                return a.order < b.order
+                if a.order ~= b.order then return a.order < b.order end
+                return tostring(a.id) < tostring(b.id)
             end)
             out[#out + 1] = g
         end
     end
-    table.sort(out, function (a, b) return df.count(a[1]) > df.count(b[1]) end)
+    -- (TOTAL: `out` comes from pairs(groups) — equal counts kept that order; sort-ties: 97 ties, CART-1442)
+    table.sort(out, function (a, b)
+        local ca, cb = df.count(a[1]), df.count(b[1])
+        if ca ~= cb then return ca > cb end
+        if a[1].file ~= b[1].file then return a[1].file < b[1].file end
+        if a[1].order ~= b[1].order then return a[1].order < b[1].order end
+        return tostring(a[1].id) < tostring(b[1].id)
+    end)
     return out
 end
 

@@ -128,7 +128,8 @@ function M.report(store)
         for r in pairs(by_rule) do
             if r ~= 'seam-guard' and disp[r] == g then rules[#rules + 1] = r end
         end
-        table.sort(rules, function (a, b) return by_rule[a] > by_rule[b] end)
+        -- (TOTAL: `rules` comes from pairs(by_rule); equal counts printed in that order — CART-1442)
+        table.sort(rules, function (a, b) if by_rule[a] ~= by_rule[b] then return by_rule[a] > by_rule[b] end return a < b end)
         if g == 'authoritative' or #rules > 0 then
             line('  ' .. LABEL[g] .. ':')
             for _, r in ipairs(rules) do line(('    %-18s %d'):format(r, by_rule[r])) end

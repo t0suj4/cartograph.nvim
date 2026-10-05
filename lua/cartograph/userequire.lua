@@ -342,7 +342,13 @@ function M.classify(data, read)
     table.sort(rows, function (a, b)
         if a.file ~= b.file then return a.file < b.file end
         if a.def.file ~= b.def.file then return a.def.file < b.def.file end
-        return (a.line or 0) < (b.line or 0)
+        if (a.line or 0) ~= (b.line or 0) then return (a.line or 0) < (b.line or 0) end
+        -- (TOTAL: several rows share a line — sort-ties found 283 ties here, their order the input's, CART-1442)
+        if tostring(a.def.id) ~= tostring(b.def.id) then return tostring(a.def.id) < tostring(b.def.id) end
+        if tostring(a.root) ~= tostring(b.root) then return tostring(a.root) < tostring(b.root) end
+        if tostring(a.how) ~= tostring(b.how) then return tostring(a.how) < tostring(b.how) end
+        if tostring(a.class) ~= tostring(b.class) then return tostring(a.class) < tostring(b.class) end
+        return tostring(a.tier) < tostring(b.tier)
     end)
     return { rows = rows, census = census }
 end

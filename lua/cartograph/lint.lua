@@ -2347,7 +2347,11 @@ function M.run(store, opts)
     end
     table.sort(findings, function (a, b)
         if a.file ~= b.file then return a.file < b.file end
-        return a.line < b.line
+        if a.line ~= b.line then return a.line < b.line end
+        -- (TOTAL: several findings share a line — 139 ties under sort-ties, CART-1442)
+        if tostring(a.rule) ~= tostring(b.rule) then return tostring(a.rule) < tostring(b.rule) end
+        if (a.col or 0) ~= (b.col or 0) then return (a.col or 0) < (b.col or 0) end
+        return tostring(a.message or a.msg) < tostring(b.message or b.msg)
     end)
     return findings, refused
 end
