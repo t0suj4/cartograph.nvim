@@ -39,7 +39,24 @@ end
 --- Landings in refreshed unparsed files are evicted (cache, not state);
 --- sql:: entities are always dropped for the caller's re-attach.
 --- Returns stats { removed, added, remapped, relinked, remap, removed_ids }.
-function M.splice(data, rels, deleted)
+-- a file's INTERFACE (CART-1439): its named definitions as other files link against them — kind, name, exported,
+-- arity; lines are not part of it (the refs remap absorbs a shift)
+local function interface_of(nodes, rel)
+    local s, n = {}, 0
+    for _, x in ipairs(nodes or {}) do
+        if x.file == rel and x.kind ~= 'module' and x.name then
+            local k = ('%s\t%s\t%s\t%d'):format(x.kind, x.name, tostring(x.exported), #(x.params or {}))
+            s[k] = (s[k] or 0) + 1
+            n = n + 1
+        end
+    end
+    return s, n
+end
+
+--- opts.incremental (CART-1439): EARLY CUTOFF — when every refreshed file's interface is unchanged (and nothing was
+--- deleted, no name's uniqueness flipped, the calls are plain records), relink re-resolves only the calls of the
+--- files this splice touched (ts.relink opts.only). Anything else takes the full relink. stats.path says which.
+function M.splice(data, rels, deleted, opts)
     local ts = require 'cartograph.providers.treesitter'
     -- the SOURCE does the re-extraction: the filesystem provider parses
     -- files, an MCP substrate re-fetches the changed keys from its
@@ -330,7 +347,33 @@ function M.splice(data, rels, deleted)
         end
     end
 
-    stats.relinked = ts.relink(data, dirty)
+    -- ★ EARLY CUTOFF (CART-1439): the refreshed files' interfaces, old (the removed nodes) against new (the mini's)
+    local cutoff = opts and opts.incremental and not next(del) and not next(candidates) and not data._callstore
+    if cutoff then
+        local old_nodes = {}
+        for _, olds in pairs(old_by_file) do for _, x in ipairs(olds) do old_nodes[#old_nodes + 1] = x end end
+        for _, f in ipairs(rels or {}) do
+            local a, na = interface_of(old_nodes, f)
+            local b, nb = interface_of(mini.nodes, f)
+            if na ~= nb then cutoff = false; break end
+            for k, c in pairs(a) do if b[k] ~= c then cutoff = false; break end end
+            if not cutoff then break end
+        end
+    end
+    stats.path = cutoff and 'cutoff' or 'full'
+    local only, names
+    if cutoff then
+        only, names = {}, {}
+        for f in pairs(dirty) do only[f] = true end
+        -- the names the refreshed files define, before and after (and their tails): the calls whose refusals can
+        -- name these files' ids
+        local function add(n)
+            if n.name then names[n.name] = true; local t = n.name:match('([%w_]+)$'); if t then names[t] = true end end
+        end
+        for _, olds in pairs(old_by_file) do for _, x in ipairs(olds) do add(x) end end
+        for _, x in ipairs(mini.nodes) do add(x) end
+    end
+    stats.relinked = ts.relink(data, dirty, { only = only, names = names })
 
     -- the id pass at GLOBAL scope, over the refreshed files AND the
     -- reconciliation candidates (their fn extents come straight from the
@@ -378,12 +421,12 @@ end
 
 --- Refresh one file (store-relative path). Returns stats or nil, reason.
 function M.file(rel)
-    return M.files({ rel })
+    return M.files({ rel }, { incremental = require('cartograph.config').incremental_refresh })
 end
 
 --- Refresh a batch of files (one splice, one relink) — the post-apply
 --- path for transactions, and the single-file save path with one rel.
-function M.files(rels)
+function M.files(rels, opts)
     local store = require 'cartograph.store'
     local data = store.data
     if not data or data.provider ~= 'treesitter' then
@@ -397,7 +440,7 @@ function M.files(rels)
         return nil, 'staged changes pending — refresh is frozen until applied or cleared'
     end
 
-    local stats, why = M.splice(data, rels, nil)
+    local stats, why = M.splice(data, rels, nil, opts)
     if not stats then return nil, why end
     local removed, remap = stats.removed_ids, stats.remap
 

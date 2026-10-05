@@ -3977,7 +3977,7 @@ local RESOLVE_PASSES = {
             end
         end
         return n end },
-    { name = 'self', run = function (x)
+    { name = 'self', whole = true, run = function (x)
         -- data.selft_seed: a whole-graph self-type map carried into a PARTIAL call set
         -- (demand materialization). nil on every whole-graph path, so extract/relink
         -- are byte-identical — the gates are the proof.
@@ -4028,10 +4028,20 @@ local function run_resolve_passes(ctx)
         if cget(i, 'to') and not cget(i, 'prov') then cset(i, 'prov', 'base') end
     end
     local n = 0
+    -- ★ A PASS THAT READS THE WHOLE CALL POPULATION (`whole = true`) gets the whole graph's calls even when the
+    -- driver handed a SUBSET (ts.relink's early cutoff, CART-1439): its evidence is global — resolve_self's type map
+    -- reads ABSENCE as positive evidence, so a subset types more than the whole graph does (refresh-parity's third
+    -- difference: a `self:walk` the full graph refuses as ambiguous). The pass then resolves over every call, as the
+    -- full relink would; the rest see only the subset.
+    local whole_data = ctx.whole_data
     for _, p in ipairs(RESOLVE_PASSES) do
+        local saved_cv, saved_data = ctx.cv, ctx.data
+        if p.whole and whole_data then ctx.data = whole_data; ctx.cv = require('cartograph.callview').of(whole_data) end
         n = n + (p.run(ctx) or 0)
-        for i = 1, cv.n do
-            if cget(i, 'to') and not cget(i, 'prov') then cset(i, 'prov', p.name) end
+        local pcv = ctx.cv
+        ctx.cv, ctx.data = saved_cv, saved_data
+        for i = 1, pcv.n do
+            if pcv.get(i, 'to') and not pcv.get(i, 'prov') then pcv.set(i, 'prov', p.name) end
         end
     end
     return n
@@ -9360,7 +9370,15 @@ M.build_symtab = build_symtab -- the F2 light index (drop-in for build_index's r
 --- unique-tail fallback, stdlib gates, min-length guard. Used by live
 --- refresh, where a changed file's calls (and other files' calls INTO
 --- the changed file) need relinking.
-function M.relink(data, touched)
+--- opts.only (CART-1439, EARLY CUTOFF): a set of files — re-resolve only THEIR calls (the main loop, the pipeline,
+--- module ownership); every other call keeps its resolution. Sound only when the caller has established that nothing
+--- outside those files can resolve differently: refresh.splice passes it for an edit that left every refreshed file's
+--- INTERFACE unchanged (no name added, removed or re-shaped, no uniqueness flipped, nothing deleted), with `only` =
+--- every file the splice touched (the refreshed ones and those whose calls it remapped or re-opened). The cbarg
+--- pre-scan stays whole-graph (it reads module-level calls only: cheap), so a re-extracted node is marked as a full
+--- relink marks it. The refresh-parity discovery is its oracle.
+function M.relink(data, touched, opts)
+    local only = opts and opts.only
     local relset = {}
     for _, n in ipairs(data.nodes) do
         if n.kind == 'module' then relset[n.file] = true end
@@ -9704,18 +9722,36 @@ function M.relink(data, touched)
     -- relink's base resolve loop + the cbarg pre-scan + the pipeline (via ctx.cv)
     -- read/write calls INDEX-FORM over the columnar store when the parent holds
     -- one (data._callstore), else raw records. [[cartograph-record-fold-arc]]
-    local cv = require('cartograph.callview').of(data)
+    local full_cv = require('cartograph.callview').of(data)
+    -- (the CUTOFF's view: the same call records, only those of `only`'s files — writes land on the records)
+    local vdata = data
+    if only then
+        -- ... and every UNRESOLVED call elsewhere whose name (or its tail) a refreshed file defines: its refusal lists
+        -- candidate IDS, and an id carries its line — an edit that moved `M.match` 102 -> 115 rewrites every refusal
+        -- naming it (the oracle's second difference). A refusal depends only on the definitions sharing the name.
+        local names = opts.names or {}
+        local function named(c)
+            local nm = c.full or c.callee
+            return nm and (names[nm] or names[nm:match('([%w_]+)$') or ''])
+        end
+        local sub = {}
+        for _, c in ipairs(data.calls or {}) do
+            if only[c.file] or (not c.to and named(c)) then sub[#sub + 1] = c end
+        end
+        vdata = setmetatable({ calls = sub }, { __index = data })
+    end
+    local cv = only and require('cartograph.callview').of(vdata) or full_cv
     local cget, cset = cv.get, cv.set
     -- cbarg pre-scan, mirroring extract's: marks are resolution INPUT and
     -- must be complete before the pass (see extract; --parallel parity).
     -- An arg a WORKER already upgraded arrives as k='func' with a.up —
     -- it still testifies (skipping it hid the mark from relink while the
     -- inline pre-scan saw it: a tier flip the parity gate caught)
-    for i = 1, cv.n do
-        if not cget(i, 'fn') then
-            for j = 1, cv.argn(i) do
-                local ak, aname = cv.aget(i, j, 'k'), cv.aget(i, j, 'name')
-                if (ak == 'local' or (ak == 'func' and cv.aget(i, j, 'up'))) and aname then
+    for i = 1, full_cv.n do
+        if not full_cv.get(i, 'fn') then
+            for j = 1, full_cv.argn(i) do
+                local ak, aname = full_cv.aget(i, j, 'k'), full_cv.aget(i, j, 'name')
+                if (ak == 'local' or (ak == 'func' and full_cv.aget(i, j, 'up'))) and aname then
                     local cands = exact[aname]
                     if cands and #cands == 1 and (cands[1].kind == 'function'
                         or cands[1].kind == 'method') then
@@ -9813,7 +9849,7 @@ function M.relink(data, touched)
     -- ([[cartograph-resolution-pipeline]]): one list, two drivers. relink's ctx
     -- passes consts=nil (const-fold keys are extract-only); node_index was
     -- built above, before the resolve loop.
-    n = n + run_resolve_passes({ calls = data.calls, data = data, exact = exact, resolve = resolve,
+    n = n + run_resolve_passes({ calls = vdata.calls, data = vdata, whole_data = only and data or nil, exact = exact, resolve = resolve,
         tail = tail, addref = addref, node_index = node_index,
         scope_of = scope_of, consts = nil, parent_fn = parent_fn,
         -- relink reads the roster off the graph, where extract could not: by this
@@ -9843,7 +9879,9 @@ function M.relink(data, touched)
     -- the column view. Both must run — in a parallel extraction a worker owns what
     -- it resolved and relink owns the rest — and addref dedupes by (from,to), so the
     -- union is exactly the inline set.
-    own_module_calls(cv.n, cget, region_at, addref)
+    -- (WHOLE-GRAPH even under `only`: a module-level call the id pass resolved AFTER the last relink gets its region
+    -- edge here, on whatever save comes next — a cutoff that skipped it would lag the full path by that edge)
+    own_module_calls(full_cv.n, full_cv.get, region_at, addref)
     -- the parallel parent assembles its reg set from worker chunks plus relink's
     -- own minting, so the same collapse is owed here (CART-0623)
     M.dedupe_reg(data.edges)
