@@ -218,6 +218,16 @@ test('mixalg: SPECULATION — compiled under "no subject node is keyed", a match
     eq(false, okf); eq(MA.DEOPT, ef)
 end)
 
+test('mixalg: a compiled matcher comes with its SOURCE MAP — residual lines map into the algebra\'s own files (CART-1459)', function ()
+    ready()
+    local c
+    for _, r in ipairs(rules.all()) do if r.lua == 'a.f' then c = r end end
+    local _, text, _, _, map = MA.compile_match(c.lhs)
+    local n, into = 0, 0
+    for line, w in pairs(map) do n = n + 1; if tostring(w):find('algebra/[%w_]+%.lua:%d+$') then into = into + 1 end end
+    ok(n > 50 and into == n, ('%d of %d mapped lines point into algebra/'):format(into, n))
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')

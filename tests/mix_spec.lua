@@ -223,6 +223,22 @@ test('mix: LOOPS — a BREAK: a static one ends the unrolling, a dynamic one lea
     ok(text:find('s_%d+ = '), 'the sum is residual\n' .. text)
 end)
 
+test('mix: a SOURCE MAP — every residual statement carries the line it came from; an error residual code raises is TRANSLATED to the original\'s src:line (CART-1459)', function ()
+    ready()
+    local lines = {}
+    for n = 1, 20 do lines[n] = { src = 'orig.lua', line = 100 + n } end
+    local src = 'local function f(k, x)\n    local a = k * 2\n    local y = x.inner\n    return a + y.value\nend\n'
+    local text, _, pool, map = MX.mix(assert(R.read(src, 'lua')), 'f', { 'S', 'D' }, { 3 }, { lines = lines })
+    ok(map and next(map), 'a map came back')
+    local r = assert(load(text, 'residual', 't', setmetatable({ MIXK = pool }, { __index = _G })))()
+    eq(6 + 7, r({ inner = { value = 7 } }))
+    local okr, err = pcall(r, { inner = nil })
+    eq(false, okr)
+    ok(tostring(err):find('^%[string "residual"%]:%d+:'), 'raised in the residual: ' .. tostring(err))
+    local t = MX.translate(err, map)
+    ok(t:find('^orig%.lua:104:'), 'the ORIGINAL\'s line of `return a + y.value`: ' .. t)
+end)
+
 test('mix: a constructor\'s LAST POSITIONAL field EXPANDS a call\'s values — `{ unpack(t) }` copies the whole list, statically and at run time (CART-1461)', function ()
     ready()
     local src = [[

@@ -262,9 +262,10 @@ function M.compile_match(T, opts)
     local A = require('cartograph.algebra').load()
     if not term_cache then term_cache = assert(require('cartograph.algebraread').read((M.program('M.match')), 'lua')) end
     local _, _, lines = M.program('M.match')
-    local text, stats, pool = MX.mix(term_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, opts.env },
+    local text, stats, pool, map = MX.mix(term_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, opts.env },
         { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, assume = opts.assume })
-    return served(text, pool), text, stats, pool
+    -- (map: residual line -> the algebra's src:line — MX.translate turns an error of this code into the source's terms)
+    return served(text, pool), text, stats, pool, map
 end
 
 --- a compiled matcher from its residual TEXT and constant POOL (as compile_match returned them, e.g. read back from a

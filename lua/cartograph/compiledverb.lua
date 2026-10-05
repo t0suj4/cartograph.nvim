@@ -153,10 +153,10 @@ function M.match(T, opts)
     end
     -- (opts.compile: an injected COMPILER — a test's fake — is never read from nor written to the disk cache)
     local store = key and not opts.compile and SC.blob('compiledverb')
-    local f, how
+    local f, how, srcmap
     if store then
         local hit, found = store.get(key)
-        if found and type(hit) == 'table' and hit.text then f, how = MA.load_match(hit.text, hit.pool), 'disk' end
+        if found and type(hit) == 'table' and hit.text then f, how, srcmap = MA.load_match(hit.text, hit.pool), 'disk', hit.map end
         if found and type(hit) == 'table' and hit.refused then
             refused_by_value[key] = hit.refused
             memo[T] = { vh = vh, refused = hit.refused }
@@ -166,7 +166,7 @@ function M.match(T, opts)
     end
     local text, pool
     if not f then
-        local okc, g, t, _, p = pcall(opts.compile or MA.compile_match, T, { assume = assume, env = env })
+        local okc, g, t, _, p, mp = pcall(opts.compile or MA.compile_match, T, { assume = assume, env = env })
         if not okc then
             M.stats.refused = M.stats.refused + 1
             local why = 'mix refused to compile the matcher: ' .. require('cartograph.mix').describe(g)
@@ -175,10 +175,11 @@ function M.match(T, opts)
             if store then store.put(key, { refused = why }) end
             return nil, why
         end
-        f, text, pool, how = g, t, p, 'compiled'
+        f, text, pool, how, srcmap = g, t, p, 'compiled', mp
     end
     -- (a DIVERGED matcher is refused from then on, like mix's own refusal: in this process and on disk)
     local served = M.deopt(T, f, function (d)
+        d.error = require('cartograph.mix').translate(d.error, srcmap) -- (in the ALGEBRA's terms: CART-1459's source map)
         local why = 'DIVERGED at run time: ' .. d.error
         memo[T] = { vh = vh, refused = why }
         if key then refused_by_value[key] = why end
@@ -190,7 +191,7 @@ function M.match(T, opts)
     local ok, why = M.accept(T, served, subjects, none)
     if not ok then M.stats.refused = M.stats.refused + 1; return nil, 'REJECTED by the sample law: ' .. why end
     M.stats[how] = M.stats[how] + 1
-    if how == 'compiled' and store then store.put(key, { text = text, pool = pool }) end -- (a pool that is not plain data is refused by put: no disk copy, still correct)
+    if how == 'compiled' and store then store.put(key, { text = text, pool = pool, map = srcmap }) end -- (a pool that is not plain data is refused by put: no disk copy, still correct)
     memo[T] = { f = served, vh = vh }
     return served, how
 end

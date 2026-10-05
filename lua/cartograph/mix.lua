@@ -2358,6 +2358,8 @@ function M.specialize(prog, fname, division, statics, opts)
             local gs = X.guards
             X.guards = prevg
             for i, g in ipairs(gs) do table.insert(out, mark0 + i, g) end
+            -- (every residual statement this one produced CARRIES its line: the printer's source map, CART-1459)
+            for i = mark0 + 1, #out do if out[i].at == nil then out[i].at = s.at end end
             if not okst then
                 if type(done) == 'table' and done.lazy then
                     -- (with a position, the residual raises the ORIGINAL's message whole: `error(msg, 0)`)
@@ -2535,8 +2537,11 @@ function pexpr(e, ind)
 end
 M._pexpr = pexpr
 
+-- (while printing with a source map: residual line -> the original position of the statement it came from)
+local SRCMAP, SRCWHERE = nil, nil
 local function pstmt(s, ind, out)
     local op = s.op
+    if SRCMAP and s.at then SRCMAP[#out + 1] = SRCWHERE and SRCWHERE(s.at) or s.at end
     if op == 'local' then out[#out + 1] = ind .. 'local ' .. s.name .. ' = ' .. pexpr(s.e, ind)
     elseif op == 'assign' then out[#out + 1] = ind .. pexpr(s.target, ind) .. ' = ' .. pexpr(s.e, ind)
     elseif op == 'callstmt' then
@@ -2631,7 +2636,27 @@ end
 --- the residual program as a Lua chunk: its functions, forward-declared, and `return <entry>`. Past 180 functions
 --- they are FIELDS of one table instead (a chunk holds at most 200 locals: a keyed template's matcher had more, and
 --- its chunk did not load, CART-1462)
-function M.print(res)
+function M.print(res, where)
+    SRCMAP, SRCWHERE = {}, where
+    local okp, text = pcall(M._print, res)
+    local map = SRCMAP
+    SRCMAP, SRCWHERE = nil, nil
+    if not okp then error(text, 0) end
+    return text, map
+end
+
+--- a message an error in residual code raised, its residual POSITIONS (`<chunk>:N:`) rewritten to the ORIGINAL's
+--- through M.print's map (where the line maps): code mix generated speaks of the source it came from
+function M.translate(msg, map)
+    if type(msg) ~= 'string' or not map then return msg end
+    return (msg:gsub('%[string "[^"]*"%]:(%d+):', function (n)
+        local w = map[tonumber(n)]
+        if w then return tostring(w) .. ':' end
+        return nil
+    end))
+end
+
+function M._print(res)
     local out = {}
     local names = {}
     for i, n in ipairs(res.order) do names[i] = n end
@@ -2658,7 +2683,8 @@ end
 function M.mix(term, fname, division, statics, opts)
     local prog = M.lower(term, { lines = opts and opts.lines })
     local res, stats = M.specialize(prog, fname, division, statics, opts)
-    return M.print(res), stats, res.pool
+    local text, map = M.print(res, prog.where)
+    return text, stats, res.pool, map
 end
 
 return M
