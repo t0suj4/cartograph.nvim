@@ -126,6 +126,7 @@ function M.splice(data, rels, deleted, opts)
     -- disambiguate reordered same-named siblings; renames are NOT followed
     -- here (relink rebuilds those edges by the new name honestly)
     local old_callees = callee_ctx(data.calls)
+    local old_calls = data.calls -- (the list before the splice replaces it: the cutoff compares its refreshed files' shapes)
     local mini_ctx = { callees = callee_ctx(mini.calls) }
     local remap = {}
     for _, olds in pairs(old_by_file) do
@@ -361,6 +362,34 @@ function M.splice(data, rels, deleted, opts)
         end
     end
     stats.path = cutoff and 'cutoff' or 'full'
+    -- ★ THE CALL SHAPES (CART-1439, rung 2): what registry discovery (greenspun.registries) reads of a call — callee,
+    -- dynamic, method, and each argument's kind / literal / name — compared as a multiset, old against new, over the
+    -- refreshed files. Unchanged (with an unchanged interface: the function-name set is the same) the discovered
+    -- bindings cannot change, and refresh.relink may reuse them.
+    if cutoff then
+        local function shapes(list, from_data)
+            local m = {}
+            for _, c in ipairs(list or {}) do
+                local f = callrec.file(c)
+                if (not from_data) or relset[f] then
+                    local parts = { tostring(callrec.callee(c)), tostring(c.dynamic), tostring(c.method) }
+                    local av = require 'cartograph.argv'
+                    for i = 1, av.n(c) do
+                        local a = av.at(c, i)
+                        parts[#parts + 1] = tostring(a.k) .. '\30' .. tostring(a.v) .. '\30' .. tostring(a.name)
+                    end
+                    local k = table.concat(parts, '\31')
+                    m[k] = (m[k] or 0) + 1
+                end
+            end
+            return m
+        end
+        local a, b = shapes(old_calls, true), shapes(mini.calls, false)
+        local same = true
+        for k, n in pairs(a) do if b[k] ~= n then same = false; break end end
+        if same then for k, n in pairs(b) do if a[k] ~= n then same = false; break end end end
+        stats.calls_same = same
+    end
     local only, names
     if cutoff then
         only, names = {}, {}
@@ -444,7 +473,7 @@ function M.files(rels, opts)
     if not stats then return nil, why end
     local removed, remap = stats.removed_ids, stats.remap
 
-    M.relink(data)
+    stats.bindings_reused = M.relink(data, { reuse_bindings = stats.path == 'cutoff' and stats.calls_same }) or nil
 
     -- carry navigation across the re-ingest: history entries remap like
     -- everything else; an entry whose node is gone and unmappable is
@@ -487,14 +516,30 @@ end
 
 --- The post-splice passes (all idempotent over existing edges): what a spliced graph needs re-derived before it is
 --- read. ONE copy — refresh.files and an overlay world (world.edit) both run it (CART-1160).
-function M.relink(data)
+-- the bindings a relink derived, per graph, with the store generation they stay valid at: the NEXT one — the ingest
+-- that follows this relink in refresh.files. Anything else that moved the graph (another ingest, another source)
+-- moves the generation further, and the memo is not used. Weak by the graph object.
+local XL_MEMO = setmetatable({}, { __mode = 'k' })
+
+--- opts.reuse_bindings (CART-1439, rung 2): the save left the refreshed files' interfaces AND their call shapes
+--- unchanged (refresh.splice's stats.calls_same), so registry discovery — greenspun.registries, a whole-graph group-by
+--- of every call (0.535 s of a save on our full tree) — would return what it returned last save; that answer is reused.
+function M.relink(data, opts)
     local xl = require 'cartograph.xlang'
-    xl.link(data, xl.effective_bindings(data))
+    local gen = require('cartograph.store').generation or 0
+    local memo = XL_MEMO[data]
+    local bindings
+    local reused = false
+    if opts and opts.reuse_bindings and memo and memo.gen == gen then bindings, reused = memo.bindings, true
+    else bindings = xl.effective_bindings(data) end
+    XL_MEMO[data] = { bindings = bindings, gen = gen + 1 }
+    xl.link(data, bindings)
     require('cartograph.sql').attach(data)
     require('cartograph.dblink').attach(data) -- session-cached db schema
     require('cartograph.django').attach(data)  -- routes/templates re-derive
     require('cartograph.symfony').attach(data)  -- yaml routes + twig re-derive
     require('cartograph.ansible').attach(data)  -- notify/handler + includes
+    return reused
 end
 
 --- Full refresh: re-extract the whole root (small projects; the manual

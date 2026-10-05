@@ -132,6 +132,7 @@ local function replay(p)
             end
             steps[i] = { rel = e.rel, commit = e.commit, class = class_of(before, interface(store.data, e.rel)), hash = h, rows = n,
                 secs = secs, refused = (not stats) and tostring(why) or nil, path = stats and stats.path or nil,
+                reused = stats and stats.bindings_reused or nil,
                 undirty = #undirty > 0 and undirty or nil }
         end
     end)
@@ -168,7 +169,7 @@ local function measure(_, p)
         classes[a.class] = (classes[a.class] or 0) + 1
         secs.full, secs.incremental = secs.full + (a.secs or 0), secs.incremental + (b.secs or 0)
         steps[i] = { rel = a.rel, commit = a.commit, class = a.class, equal = equal, rows = a.rows, rows_b = b.rows,
-            secs = a.secs, secs_b = b.secs, path_b = b.path, refused = a.refused or b.refused,
+            secs = a.secs, secs_b = b.secs, path_b = b.path, reused_b = b.reused, refused = a.refused or b.refused,
             undirty = a.undirty, undirty_b = b.undirty }
         if (a.undirty or b.undirty) and not v_undirty then v_undirty = i end
     end
