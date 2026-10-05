@@ -1210,6 +1210,10 @@ test('greenspun: funcall tables and evals are surfaced', function ()
     local g = require 'cartograph.greenspun'
     local data = { schema = 1, root = '/x', edges = {}, calls = {
         { callee = 'loadstring', args = { '' }, argv = {}, file = 'a.lua', line = 3 },
+        -- (a module's `load` and a regex's `.exec` are not the interpreter — CART-1468)
+        { callee = 'load', full = 'pm.load', args = { '' }, argv = {}, file = 'a.lua', line = 6 },
+        { callee = 'exec', full = '/^T(\\d+)/.exec', args = { '' }, argv = {}, file = 'a.lua', line = 7 },
+        { callee = 'load', method = true, full = 'cfg:load', args = { '' }, argv = {}, file = 'a.lua', line = 8 },
     }, nodes = {
         { id = 'f1', name = 'on_tick', kind = 'function', file = 'a.lua', order = 1,
           range = { start = { line = 0, char = 0 }, ['end'] = { line = 1, char = 0 } } },

@@ -1299,7 +1299,11 @@ end
 function M.evals(data)
     local out = {}
     for _, c in callrec.each(data) do
-        if EVAL_VERBS[callrec.callee(c)] and not callrec.to(c) then
+        -- (a BARE call only: the interpreter's verbs are globals. A module's `load` — algebra.load, profile.load,
+        -- pm.load — and a regex's `.exec` were 70 of 79 findings on lua/, CART-1468)
+        local full = callrec.full(c)
+        local bare = not callrec.method(c) and (full == nil or full == callrec.callee(c))
+        if EVAL_VERBS[callrec.callee(c)] and bare and not callrec.to(c) then
             out[#out + 1] = c
         end
     end
