@@ -36,3 +36,17 @@ test('refused: clearing one call leaves its sharers intact', function ()
     ok(data.calls[2].refused and data.calls[2].refused.rule == 'ambiguous',
         'the shared record survives on the sibling')
 end)
+
+test('refused.intern: the key is the WHOLE record — two refusals that differ only in a field outside the old list (owner/param, macro) stay apart; identical ones share (CART-1496)', function ()
+    local R = require 'cartograph.refused'
+    local a = { rule = 'higher-order', owner = 'm.lua::walk@1', param = 2 }
+    local b = { rule = 'higher-order', owner = 'm.lua::seq@5', param = 3 }
+    local a2 = { rule = 'higher-order', owner = 'm.lua::walk@1', param = 2 }
+    local v1 = { rule = 'variants', cands = { 'x', 'y' }, n = 2, macro = 'OLD' }
+    local v2 = { rule = 'variants', cands = { 'x', 'y' }, n = 2, macro = 'FAST' }
+    local data = { calls = { { refused = a }, { refused = b }, { refused = a2 }, { refused = v1 }, { refused = v2 } } }
+    eq(1, R.intern(data), 'only the identical pair shares')
+    eq('m.lua::seq@5', data.calls[2].refused.owner)
+    ok(data.calls[3].refused == a, 'the identical record is the first one')
+    eq('FAST', data.calls[5].refused.macro)
+end)

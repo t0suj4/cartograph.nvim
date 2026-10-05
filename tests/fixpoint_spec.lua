@@ -215,6 +215,26 @@ test('fixpoint: a FRESH local sorted with an INLINE comparator is the call\'s ow
     eq('pure~', effects.purity(store, by.b_alias.id), 'a local bound to a parameter\'s field may alias the caller\'s table')
 end)
 
+test('fixpoint: a call through a PARAMETER is substituted at each call to its owner — a CPS walker handed pure continuations is pure; handed a writing one, it writes; left unsubstituted, it is hedged (CART-1495)', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local log = {}',
+        -- (CPS: the walker calls its continuation, and recurses handing on a closure that calls the outer one)
+        'local function walk(t, k) if not t then return k(0) end return walk(t.next, function (n) return k(n + 1) end) end',
+        'local function count(t) return walk(t, function (n) return n end) end',
+        'local function noisy(t) return walk(t, function (n) log[#log + 1] = n; return n end) end',
+        'local function apply(f, x) return f(x) end',
+        -- (a continuation that RE-ENTERS the walker: the closure is in the walker's own component, as the matcher's are)
+        'local function seq(l, i, k) if i > #l then return k() end return seq(l, i + 1, function () return seq(l, #l + 1, k) end) end',
+        'local function done(l) return seq(l, 1, function () return true end) end',
+        'return { count, noisy, apply, done }' }, '\n'))))
+    local by = byname()
+    eq('pure', effects.purity(store, by.count.id), 'every continuation it can reach is pure')
+    eq('writes', effects.purity(store, by.noisy.id), 'the continuation it hands in writes `log`')
+    eq('pure~', effects.purity(store, by.apply.id), 'calls what it is handed: as pure as that')
+    eq('pure', effects.purity(store, by.done.id), 'a continuation inside the walker\'s component is the component\'s own')
+end)
+
 test('fixpoint: REBINDING a parameter (`t = t.kids[i]`) is no write through it — only a store INTO it (`t.x = 1`, `t[k] = 1`) mutates the caller\'s table', function ()
     if not ready() then skip 'no lua parser' end
     store.ingest(ts.extract(mkroot(table.concat({

@@ -346,6 +346,75 @@ local VERDICT_TIER = { ['writes-once'] = 3, ['writes-guarded'] = 2,
 local IOKEY = '\1io\31'
 M.IOKEY = IOKEY
 
+-- ── HIGHER-ORDER THROUGH A PARAMETER (CART-1495) ──────────────────────────
+-- A call `k(x)` where k is a PARAMETER (the resolver's `higher-order` refusal, which names the parameter's OWNER fn
+-- and its index) runs whatever a call to the owner passes there. It is a PENDING PAIR (owner, j) in the summary, not
+-- a hedge; it travels up through nested closures, and at every CALL TO THE OWNER it is substituted with that call's
+-- argument j: an inline function or a named one (its summary inherited), the caller's own parameter (a new pair), a
+-- member of the same component (already in the shared summary), else a named hedge. A pair still pending makes the
+-- function hedged: it is as pure as what it is handed. (The matcher's CPS `go(…, k)` hedged every basis function
+-- that matches: "refused (higher-order): k @match.lua:231".)
+local function cp_add(sum, owner, j)
+    sum.cpo = sum.cpo or {}
+    sum.cpo[owner .. '\0' .. j] = { owner = owner, j = j }
+end
+-- a callee or callback summary folded into `sum`
+local function inherit(sum, ts)
+    if ts.over then sum.over = true end
+    if ts.h then s_hedge(sum, ts.h[1]) end
+    if ts.nd then sum.nd = true end
+    for key, tier in pairs(ts.w) do s_add(sum, key, tier) end
+    if ts.pwx then s_hedge(sum, 'a function handed in as an argument mutates its params') end
+    for k, p in pairs(ts.cpo or {}) do sum.cpo = sum.cpo or {}; sum.cpo[k] = p end
+end
+-- the PARAMETER `name` refers to inside `caller`: its own (caller, index), or — when the caller neither declares nor
+-- defines it (a closure passing on a captured `k`) — the innermost ENCLOSING function's, by range in the same file
+local function param_of(store, caller, name)
+    for pi, p in ipairs(caller.params or {}) do if p == name then return caller.id, pi end end
+    local ok, stmts = pcall(require('cartograph.df').stmts, caller)
+    for _, st in ipairs(ok and stmts or {}) do
+        for _, d in ipairs(st.def or {}) do if d == name then return nil end end -- (a local of its own)
+    end
+    if not caller.range then return nil end
+    local at = require 'cartograph.at'
+    local cs, ce = at.sl(caller.range), at.el(caller.range)
+    local best, bi, bsz
+    for _, f in ipairs(store.by_file[caller.file] or {}) do
+        if f ~= caller and (f.kind == 'function' or f.kind == 'method') and f.range then
+            local fs, fe = at.sl(f.range), at.el(f.range)
+            if fs <= cs and ce <= fe and (not bsz or fe - fs < bsz) then
+                for pi, p in ipairs(f.params or {}) do
+                    if p == name then best, bi, bsz = f, pi, fe - fs end
+                end
+            end
+        end
+    end
+    if best then return best.id, bi end
+end
+-- substitute argument j of call `c` (made by `caller`) for a pending pair owned by the callee
+local function subst(store, sums, sum, c, caller, j, tname, member)
+    if callrec.method(c) then
+        s_hedge(sum, ('calls parameter %d of method %s @%s:%d'):format(j, tname, callrec.file(c) or '?', callrec.line(c) or 0))
+        return
+    end
+    local a = argv.at(c, j)
+    if not a or a.k == 'lit' or a.k == 'scalar' then return end -- (nothing or a value: calling it raises, no write)
+    local target = a.to
+    if not target and (a.k == 'local' or a.k == 'callable') and a.name then
+        local owner, pi = nil, nil
+        if caller then owner, pi = param_of(store, caller, a.name) end
+        if owner then cp_add(sum, owner, pi); return end -- (handing on a parameter: the pair moves to its owner)
+        for _, fn2 in ipairs(store.by_file[callrec.file(c)] or {}) do
+            if (fn2.kind == 'function' or fn2.kind == 'method') and fn2.name == a.name then target = fn2.id; break end
+        end
+    end
+    if target and member(target) then return end -- (its effects are this component's own)
+    local ts = target and sums[target]
+    if ts then inherit(sum, ts); return end
+    s_hedge(sum, ('calls parameter %d of %s with an unknown function @%s:%d')
+        :format(j, tname, callrec.file(c) or '?', callrec.line(c) or 0))
+end
+
 --- Compute (and cache per graph generation) every fn's write summary.
 function M.summaries(store)
     if store._fx and store._fxgen == store.generation then return store._fx end
@@ -424,6 +493,8 @@ function M.summaries(store)
         end
         -- CALL inheritance (external callees are already summarized:
         -- Tarjan emission order is callees-first)
+        local intra = {} -- (calls between members: their pending pairs are substituted once the summary is whole)
+        local function member(id) return con.comp[id] == ci end
         for _, fid in ipairs(members) do
             local caller = store.node(fid)
             local file = caller and caller.file
@@ -431,6 +502,7 @@ function M.summaries(store)
                 local to = callrec.to(c)
                 if to and con.comp[to] == ci then
                     -- intra-SCC: members share this summary already
+                    intra[#intra + 1] = { c = c, caller = caller, to = to }
                 elseif to and sums[to] then
                     local cs = sums[to]
                     if cs.over then sum.over = true end
@@ -464,6 +536,11 @@ function M.summaries(store)
                                     :format(tn and tn.name or to, callrec.file(c) or '?', callrec.line(c) or 0))
                             end
                         end
+                    end
+                    -- the callee calls ITS parameter j: what did WE pass there? (an outer owner's pair travels on)
+                    for _, p in pairs(cs.cpo or {}) do
+                        if p.owner == to then subst(store, sums, sum, c, caller, p.j, tn and tn.name or to, member)
+                        else cp_add(sum, p.owner, p.j) end
                     end
                 elseif to then
                     s_hedge(sum, ('callee outside the fn graph: %s'):format(to))
@@ -533,6 +610,8 @@ function M.summaries(store)
                                     s_hedge(sum, ('callback %s mutates its params @%s:%d')
                                         :format(a.name or '?', callrec.file(c) or '?', callrec.line(c) or 0))
                                 end
+                                -- (a callback calling a parameter of an enclosing function: still pending here)
+                                for _, p in pairs(ts2.cpo or {}) do cp_add(sum, p.owner, p.j) end
                             elseif a then
                                 s_hedge(sum, ('%s: callback effects unknown @%s:%d')
                                     :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
@@ -540,6 +619,8 @@ function M.summaries(store)
                         end
                         -- sig.pure / sig.reads / sig.returns_arg: no hedge,
                         -- no effect (reads/aliasing land with their consumers)
+                    elseif c.refused and c.refused.rule == 'higher-order' and c.refused.owner and c.refused.param then
+                        cp_add(sum, c.refused.owner, c.refused.param) -- (a call through a parameter: pending, CART-1495)
                     elseif c.refused then
                         s_hedge(sum, ('refused (%s): %s @%s:%d'):format(
                             c.refused.rule or '?', bname or '?',
@@ -552,6 +633,22 @@ function M.summaries(store)
                             callrec.file(c) or '?', callrec.line(c) or 0))
                     end
                 end
+            end
+        end
+        -- a member calling a member: substitute its pending pairs, until no new pair appears
+        local done = {}
+        for _ = 1, 50 do
+            local todo = {}
+            for _, x in ipairs(intra) do
+                for key, p in pairs(sum.cpo or {}) do
+                    if p.owner == x.to and not done[x] then done[x] = {} end
+                    if p.owner == x.to and not done[x][key] then done[x][key] = true; todo[#todo + 1] = { x = x, p = p } end
+                end
+            end
+            if #todo == 0 then break end
+            for _, t in ipairs(todo) do
+                local tn = store.node(t.x.to)
+                subst(store, sums, sum, t.x.c, t.x.caller, t.p.j, tn and tn.name or t.x.to, member)
             end
         end
         for _, fid in ipairs(members) do sums[fid] = sum end
@@ -628,6 +725,7 @@ function M.purity(store, fid)
     end
     local world = sum.w[IOKEY] ~= nil
     local hedged = sum.h ~= nil or sum.over or sum.mh
+        or (sum.cpo ~= nil and next(sum.cpo) ~= nil) -- (calls a function it is handed: as pure as that, CART-1495)
     local base = wmod and 'writes' or world and 'io' or 'pure'
     return hedged and (base .. '~') or base
 end

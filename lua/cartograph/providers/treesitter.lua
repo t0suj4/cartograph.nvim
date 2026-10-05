@@ -3879,8 +3879,10 @@ local function dfdef_set(f)
     end
     return s
 end
+-- -> regime, and for 'higher-order' the OWNER fn node and the parameter's index (CART-1495: the effects fixpoint
+-- substitutes what a call to the owner passes there)
 local function callee_binding(callee, fn, parent_fn)
-    local function hasp(f) for _, p in ipairs(f.params or {}) do if p == callee then return true end end end
+    local function hasp(f) for pi, p in ipairs(f.params or {}) do if p == callee then return pi end end end
     local function hasdecl(f) for _, l in ipairs(f.locals or {}) do if l == callee then return true end end end
     local function hasdf(f)
         -- light path (F2 build_symtab): dfdef is the precomputed set of names df defines
@@ -3891,7 +3893,8 @@ local function callee_binding(callee, fn, parent_fn)
     end
     local f = fn
     while f do
-        if hasp(f) then return 'higher-order' end
+        local pi = hasp(f)
+        if pi then return 'higher-order', f, pi end
         if hasdecl(f) then return 'localdecl' end
         if hasdf(f) then return 'local' end
         f = parent_fn and parent_fn[f.id]
@@ -3996,9 +3999,10 @@ local function resolve_local_callable(cv, node_index, exact, addref, parent_fn)
             and not cget(i, 'refused') and cfn then
             local fn = node_index[cfn]
             if fn then
-                local regime = callee_binding(ccallee, fn, parent_fn)
+                local regime, owner, pidx = callee_binding(ccallee, fn, parent_fn)
                 if regime == 'higher-order' then
-                    cset(i, 'refused', { rule = 'higher-order' })
+                    -- (whose parameter, which one: a call to the owner says what runs here — CART-1495)
+                    cset(i, 'refused', { rule = 'higher-order', owner = owner and owner.id, param = pidx })
                     n = n + 1
                 elseif regime == 'local' or regime == 'localdecl' then
                     -- resolve to the UNIQUE same-file function/method def the local
