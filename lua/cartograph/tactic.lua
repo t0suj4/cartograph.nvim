@@ -253,7 +253,8 @@ function M.T.try(t) return { op = 'try', t } end
 function M.T.rep(t, limit) return { op = 'repeat', t, limit = limit } end
 function M.T.each(items, body) return { op = 'each', items = items, body = body } end
 --- a NAMED toolbelt entry as a step (cartograph.toolbelt): a write entry runs its own term, a discovery is a PREMISE
---- gate — it passes when its claim holds and fails ill-posed, by name, when it does not
+--- gate — it passes when its claim holds and fails ill-posed, by name, when it does not. `name` may be a QUERY
+--- { tag, at?, kind? }: the one tactic so tagged that APPLIES at the subject (CART-1448; several = a decision)
 function M.T.use(name, params) return { op = 'use', name = name, params = params or {} } end
 --- ★ DATA FLOW (CART-1444): run the NAMED discovery and hand its VALUE to `body(value) -> term | nil, why, class` — the
 --- next step is built from what was measured (an optimization loop: profile -> advise -> rewrite). Gates like `use`:
@@ -631,6 +632,32 @@ function eval(store, t, opts, where)
         -- ★ TACTICS COMPOSE BY NAME: the toolbelt is a library, not a flat list. Params are coerced by the entry's
         -- own declaration (the same function the CLI and the MCP verb use), and a cycle of uses refuses.
         local tb = require 'cartograph.toolbelt'
+        -- ★ RESOLVED AT A SUBJECT (CART-1448): `name` may be a QUERY { tag, at?, kind? } — "the tactic tagged X that
+        -- applies here", found through the same lookup scope as `toolbelt find` (mounts, scoped tags, applies()) at `at`
+        -- (default: the graph's root). Exactly one applicable runs; several are a DECISION (which one is a choice the
+        -- term should name); none refuses BY NAME, with every tagged one that does not apply and why.
+        if type(t.name) == 'table' then
+            local q = t.name
+            local root = store.data and store.data.root
+            local at = q.at or root
+            local kind = q.kind or (op == 'bind' and 'discovery' or nil)
+            local rows = tb.find({ tag = q.tag }, { d = opts.toolbelt_dir, root = root, at = at })
+            local fits, not_here = {}, {}
+            for _, r in ipairs(rows) do
+                if r.applicable and not r.broken and (not kind or r.kind == kind) then fits[#fits + 1] = r.name
+                else not_here[#not_here + 1] = ('%s (%s)'):format(r.name, tostring(r.why_not or r.broken or ('a ' .. tostring(r.kind)))) end
+            end
+            local label = ('%s.%s(tag=%s)'):format(where, op, tostring(q.tag))
+            if #fits == 0 then
+                return adopt(outcome(), { class = 'ill-posed', where = label, why = ('no %stactic tagged `%s` applies at %s%s'):format(kind and (kind .. ' ') or '',
+                    tostring(q.tag), tostring(at), #not_here > 0 and (' — not here: ' .. table.concat(not_here, '; ')) or '') })
+            end
+            if #fits > 1 then
+                return adopt(outcome(), { class = 'decision', where = label, why = ('%d tactics tagged `%s` apply at %s: %s — which one? (name it in the term)')
+                    :format(#fits, tostring(q.tag), tostring(at), table.concat(fits, ', ')) })
+            end
+            t = { op = t.op, name = fits[1], params = t.params, body = t.body, ungated = t.ungated }
+        end
         local here = ('%s.%s(%s)'):format(where, op, tostring(t.name))
         opts.using = opts.using or {}
         if opts.using[t.name] then

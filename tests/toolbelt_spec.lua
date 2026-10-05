@@ -263,6 +263,52 @@ test('toolbelt LOOKUP: a name resolves to its binding and the CHAIN of what it s
     eq('project', project_b.scope); ok(project_b.why:find('shadowed, undecided', 1, true), project_b.why)
 end)
 
+test('toolbelt LOOKUP: the USER mount sits between the built-in and the project — its own tactic runs everywhere, its copy of a built-in is a decision (CART-1448)', function ()
+    project { ['m.lua'] = 'local M = {}\nreturn M\n' }
+    local saved = tb.user_dir
+    local ud = vim.fn.tempname(); vim.fn.mkdir(ud, 'p')
+    tb.user_dir = function () return ud end
+    local okp, err = pcall(function ()
+        local fd = assert(io.open(ud .. '/mine.lua', 'w')); fd:write(tactic_src('mine')); fd:close()
+        local e = assert(tb.load('mine', nil, root))
+        eq('user', e.scope)
+        local rows = tb.find('mine', { root = root })
+        eq('user', rows[1].chain[1].scope)
+        -- a USER copy of a built-in that differs: undecided, both in the chain (built-in first, user after)
+        fd = assert(io.open(ud .. '/spec-fails.lua', 'w')); fd:write(tactic_src('spec-fails')); fd:close()
+        local sf = tb.find('spec-fails', { root = root })
+        ok(sf[1].broken, vim.inspect(sf[1]))
+        eq('built-in', sf[1].chain[1].scope); eq('user', sf[1].chain[2].scope)
+        -- and a PROJECT copy of the user's tactic is shadowed by it the same way
+        put_tactic('mine', tactic_src('mine', "\n    tags = { 'zz' },"))
+        local m2 = tb.find('mine', { root = root })
+        eq('user', m2[1].chain[1].scope); eq('project', m2[1].chain[2].scope)
+    end)
+    tb.user_dir = saved
+    if not okp then error(err, 0) end
+end)
+
+test('toolbelt LOOKUP: T.use of a TAG resolves at the subject — one applicable runs, several are a decision, none is refused with the reasons (CART-1448)', function ()
+    project { ['m.lua'] = 'local M = {}\nreturn M\n' }
+    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
+    local function put(name, extra) local fd = assert(io.open(d .. '/' .. name .. '.lua', 'w')); fd:write(tactic_src(name, extra)); fd:close() end
+    put('here', "\n    tags = { 'zz' },")
+    put('elsewhere', "\n    tags = { 'zz' },\n    applies = function () return false, 'not a C tree' end,")
+    local T = tactic.T
+    local one = tactic.run(store, T.use({ tag = 'zz' }), { apply = true, toolbelt_dir = d })
+    eq('done', one.status, tostring(one.why))
+    local premise
+    for _, h in ipairs(one.residue) do if h.kind == 'premise' then premise = h.text end end
+    ok(premise and premise:find('`here`', 1, true), 'the applicable one ran: ' .. tostring(premise))
+    put('also', "\n    tags = { 'zz' },")
+    local two = tactic.run(store, T.use({ tag = 'zz' }), { apply = true, toolbelt_dir = d })
+    eq('stopped', two.status); eq('decision', two.class); ok(two.why:find('also, here', 1, true), two.why)
+    local none = tactic.run(store, T.use({ tag = 'qq' }), { apply = true, toolbelt_dir = d })
+    eq('ill-posed', none.class); ok(none.why:find('no tactic tagged `qq`', 1, true), none.why)
+    local why_not = tactic.run(store, T.use({ tag = 'zz', kind = 'write' }), { apply = true, toolbelt_dir = d })
+    ok(why_not.why:find('elsewhere (not a C tree)', 1, true), why_not.why)
+end)
+
 test('toolbelt LOOKUP: tags — DECLARED on the entry, DERIVED (act = a write), and added by a SCOPE in the user\'s config, each with its source; at another subject the scope\'s tags do not reach', function ()
     project { ['m.lua'] = 'local M = {}\nreturn M\n' }
     local config = require 'cartograph.config'

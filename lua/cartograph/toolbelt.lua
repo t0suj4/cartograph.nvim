@@ -35,6 +35,10 @@ M.builtin_dir = dir
 --- promotion into the built-in toolbelt is a separate, reviewed act (the promote-tactic entry).
 function M.project_dir(root) return root and (root .. '/.cartograph/tactics') or nil end
 
+--- ★ THE USER'S OWN TACTICS (CART-1448): `<stdpath config>/cartograph/tactics/` — every project of this user, between
+--- the built-in toolbelt and a project's own. A function, so a caller (a spec) may point it elsewhere.
+function M.user_dir() return vim.fn.stdpath('config') .. '/cartograph/tactics' end
+
 local function slurp(path) local fd = io.open(path); if not fd then return nil end; local x = fd:read('a'); fd:close(); return x end
 
 --- ★ WHERE TACTICS COME FROM, AS A NAMESPACE (CART-1160 step 4): the built-in directory mounted at `tactics`, and a
@@ -45,6 +49,12 @@ function M.namespace(d, root)
     local ns = namespace.empty()
     if d then return (namespace.mount(ns, 'tactics', { dir = d, scope = 'given' })) end
     ns = namespace.mount(ns, 'tactics', { dir = dir(), scope = 'built-in' })
+    -- (the USER mount, unioned after the built-in and before the project: the same rule as a project's — a name it
+    -- shares with an earlier layer is a promoted copy when identical, else a DECISION or a pinned override)
+    local ud = M.user_dir()
+    if ud and vim.fn.isdirectory(ud) == 1 then
+        ns = namespace.mount(ns, 'tactics', { dir = ud, scope = 'user' }, { union = 'after' })
+    end
     local pd = M.project_dir(root)
     if pd and vim.fn.isdirectory(pd) == 1 then
         ns = namespace.mount(ns, 'tactics', { dir = pd, scope = 'project' }, { union = 'after' })
@@ -113,7 +123,7 @@ function M.load(name, d, root)
     if conflicts[name] then return nil, conflicts[name], 'decision' end
     local path = files[name]
     if not path then return nil, ('no tactic `%s` in the toolbelt (%s%s)'):format(tostring(name), d or dir(),
-        (not d and root) and (' + ' .. M.project_dir(root)) or ''), 'ill-posed' end
+        (not d) and (' + ' .. M.user_dir() .. (root and (' + ' .. M.project_dir(root)) or '')) or ''), 'ill-posed' end
     local okl, e = pcall(dofile, path)
     if not okl then return nil, ('the tactic file %s raised: %s'):format(path, tostring(e)), 'unbuilt' end
     if type(e) ~= 'table' then return nil, ('%s returns no entry table'):format(path), 'unbuilt' end
@@ -138,7 +148,8 @@ function M.load(name, d, root)
     end
     if e.applies ~= nil and type(e.applies) ~= 'function' then return nil, path .. ': `applies` must be a function (subject) -> ok, why', 'unbuilt' end
     e.path = path
-    e.scope = (path:sub(1, #dir()) == dir()) and 'built-in' or 'project'
+    local ud = M.user_dir()
+    e.scope = (path:sub(1, #dir()) == dir()) and 'built-in' or (ud and path:sub(1, #ud + 1) == ud .. '/') and 'user' or 'project'
     -- an override says so on the entry: what it replaced, and the hash the user chose
     if overridden[name] then e.overrides, e.override_hash = overridden[name].over, overridden[name].use end
     return e
