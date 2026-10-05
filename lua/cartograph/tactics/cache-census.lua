@@ -43,22 +43,39 @@ local function measure(store, p)
         return nil
     end
     local memos, slots, nvars = {}, {}, 0
+    -- (per table, who rebinds it whole; and every function that writes a field named `generation` — the BUMPS a
+    -- generation-owned cache must be reset from, derived from the code, never listed)
+    local resetters, bumps = {}, {}
+    -- (`file`: a module-local var is written only in its own file — the var-use index also returns SAME-NAMED locals
+    -- of other files, CART-1473: core.lua's REBUILDERS read as rebinding approvals.lua's `verified`)
+    local function fnames(set, file)
+        local out = {}
+        for id in pairs(set or {}) do
+            local wn = store.node(id)
+            if wn and (wn.kind == 'function' or wn.kind == 'method') and (not file or wn.file == file) then
+                out[#out + 1] = { id = id, name = wn.name, file = wn.file }
+            end
+        end
+        table.sort(out, function (a, b) if a.file ~= b.file then return a.file < b.file end return a.name < b.name end)
+        return out
+    end
     for _, n in ipairs(store.data.nodes) do
         if n.kind == 'var' and n.file and n.file:sub(1, #prefix) == prefix and n.file:match('%.lua$') then
             nvars = nvars + 1
             local f = atlas.fields(store, n.id, parse)
+            if f and f.fields.generation then
+                for _, b in ipairs(fnames(f.fields.generation.writers, n.file)) do bumps[b.id] = b end
+            end
             if f then
+                resetters[n.id] = fnames(f.whole.writers, n.file)
                 local line = n.range and (at.sl(n.range) + 1) or 0
                 local decl = lines(n.file)[line] or ''
                 local weak = decl:find('__mode', 1, true) ~= nil
                 local dyn = f.fields['[]']
                 if dyn and dyn.nw > 0 and dyn.nr > 0 then
                     local writer = 'load'
-                    for w in pairs(dyn.writers) do
-                        local wn = store.node(w)
-                        if wn and (wn.kind == 'function' or wn.kind == 'method') then writer = 'function' end
-                    end
-                    memos[#memos + 1] = { name = n.name, file = n.file, line = line, writer = writer,
+                    if #fnames(dyn.writers, n.file) > 0 then writer = 'function' end
+                    memos[#memos + 1] = { id = n.id, name = n.name, file = n.file, line = line, writer = writer,
                         bound = weak and 'weak' or (f.whole.nw > 0 and 'reset' or 'unbounded'),
                         guarded = dyn.gw == 3, key = key_at(n.file, n.name), decl = shortline(decl) }
                 else
@@ -66,11 +83,51 @@ local function measure(store, p)
                     for name, rec in pairs(f.fields) do if name ~= '[]' and rec.nw > 0 then names[#names + 1] = name end end
                     if #names > 0 and f.whole.nw > 0 then
                         table.sort(names)
-                        slots[#slots + 1] = { name = n.name, file = n.file, line = line, fields = names }
+                        slots[#slots + 1] = { id = n.id, name = n.name, file = n.file, line = line, fields = names }
                     end
                 end
             end
         end
+    end
+    -- ★ THE OWNING SCOPE (CART-1447): what ends a cache's entries — constant (filled at load), key (weak: an entry goes
+    -- with its key), generation (rebound by a function a generation BUMP reaches through calls), reset (rebound by
+    -- functions no bump reaches: a lifetime of its own, named), process (nothing ends it). A `process` row whose key
+    -- grows with the input is the defect class CART-1427 / 1440 had; a `reset` row is a hand-written lifetime.
+    local reach, from = {}, {}
+    local band = store.topo()
+    local todo = {}
+    for id, b in pairs(bumps) do reach[id] = true; from[id] = b.name; todo[#todo + 1] = id end
+    for _ = 1, 200000 do
+        local id = table.remove(todo)
+        if not id then break end
+        for _, c in ipairs(band:callees(id) or {}) do
+            if not reach[c] then reach[c] = true; from[c] = from[id]; todo[#todo + 1] = c end
+        end
+    end
+    local function scope_of(r, constant, weak)
+        if constant then return 'constant', 'the module chunk fills it' end
+        if weak then return 'key', 'weak (__mode): an entry goes when its key is collected' end
+        local rs = resetters[r.id] or {}
+        if #rs == 0 then return 'process', 'nothing rebinds it: it lives as long as the process' end
+        local names = {}
+        for _, x in ipairs(rs) do names[#names + 1] = x.name end
+        for _, x in ipairs(rs) do
+            if reach[x.id] then
+                return 'generation', ('rebound by %s, which the generation bump %s reaches'):format(table.concat(names, ', '), from[x.id])
+            end
+        end
+        return 'reset', ('rebound by %s (no generation bump reaches it)'):format(table.concat(names, ', '))
+    end
+    local by_scope = {}
+    for _, m in ipairs(memos) do
+        m.scope, m.scope_why = scope_of(m, m.writer == 'load', m.bound == 'weak')
+        by_scope[m.scope] = (by_scope[m.scope] or 0) + 1
+        m.id = nil
+    end
+    for _, s in ipairs(slots) do
+        s.scope, s.scope_why = scope_of(s, false, false)
+        by_scope[s.scope] = (by_scope[s.scope] or 0) + 1
+        s.id = nil
     end
     local function order(a, b) if a.file ~= b.file then return a.file < b.file end return a.line < b.line end
     table.sort(memos, order); table.sort(slots, order)
@@ -79,7 +136,10 @@ local function measure(store, p)
         if m.writer == 'load' then counts.load = counts.load + 1 else counts[m.bound] = counts[m.bound] + 1 end
         if m.guarded then counts.guarded = counts.guarded + 1 end
     end
-    return { vars = nvars, memos = memos, slots = slots, counts = counts }
+    local nb = {}
+    for _, b in pairs(bumps) do nb[#nb + 1] = b.file .. '::' .. b.name end
+    table.sort(nb)
+    return { vars = nvars, memos = memos, slots = slots, counts = counts, scopes = by_scope, bumps = nb }
 end
 
 local E = {
@@ -111,7 +171,12 @@ local FILES = {
         'local gen = {}',
         'local function put(k) gen[k] = 1 return gen[k] end',
         'local function clear() gen = {} end',
-        'return { twice = twice, box = box, known = known, put = put, clear = clear }',
+        'local S = { generation = 0 }',
+        'function S.bump() S.generation = S.generation + 1 clear() end',
+        'local other = {}',
+        'local function put2(k) other[k] = 1 return other[k] end',
+        'local function drop() other = {} end',
+        'return { twice = twice, box = box, known = known, put = put, clear = clear, bump = S.bump, put2 = put2, drop = drop }',
     }, '\n') .. '\n',
 }
 local function row(v, name) for _, m in ipairs(v.memos) do if m.name == name then return m end end end
@@ -139,6 +204,29 @@ E.examples = {
         expect = { holds = true, check = function (v)
             local g = row(v, 'gen')
             return g and g.bound == 'reset' and not g.guarded, vim.inspect(g)
+        end },
+    },
+    {
+        name = 'the OWNING SCOPE of each: constant / key / process — and a reset table is GENERATION-owned only when a generation bump reaches its resetter',
+        files = FILES, params = function () return {} end,
+        expect = { holds = true, check = function (v)
+            local got = {}
+            for _, n in ipairs({ 'KNOWN', 'weak', 'memo', 'gen', 'other' }) do got[n] = (row(v, n) or {}).scope end
+            return got.KNOWN == 'constant' and got.weak == 'key' and got.memo == 'process' and got.gen == 'generation'
+                and got.other == 'reset' and (row(v, 'gen').scope_why or ''):find('S.bump', 1, true) ~= nil, vim.inspect(got) .. vim.inspect(v.bumps)
+        end },
+    },
+    {
+        -- (CART-1473: the var-use index attributes o.lua's GLOBAL write `verified = {}` to m.lua's file-local `verified`)
+        name = 'a file-local table is rebound only by its own file: a same-named GLOBAL write elsewhere does not make it a reset cache',
+        files = {
+            ['m.lua'] = 'local verified = {}\nlocal function f(k) if verified[k] then return verified[k] end verified[k] = 1 return 1 end\nreturn f\n',
+            ['o.lua'] = 'local M = {}\nfunction M.render() verified = {} return verified end\nreturn M\n',
+        },
+        params = function () return {} end,
+        expect = { holds = true, check = function (v)
+            local m = row(v, 'verified')
+            return m and m.scope == 'process' and m.file == 'm.lua', vim.inspect(m)
         end },
     },
     {

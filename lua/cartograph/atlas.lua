@@ -174,7 +174,7 @@ function M.fields(store, id, cache)
     local uses = store.topo():var_used_by_detail(id)
     if #uses == 0 then return nil, 'no uses' end
     cache = cache or {}
-    local fields, whole = {}, { nr = 0, nw = 0 }
+    local fields, whole = {}, { nr = 0, nw = 0, writers = {} } -- (whole.writers: who REBINDS the table — CART-1447's owning scope)
     for _, u in ipairs(uses) do
         local fn = store.node(u.from)
         local file = fn and fn.file
@@ -212,7 +212,7 @@ function M.fields(store, id, cache)
                         local n = c:parent()
                         local w = n and spec.is_write(c, n)
                         if not f then
-                            if w then whole.nw = whole.nw + 1
+                            if w then whole.nw = whole.nw + 1; whole.writers[u.from] = true
                             else whole.nr = whole.nr + 1 end
                         else
                             local rec = fields[f]
