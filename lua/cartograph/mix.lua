@@ -857,6 +857,33 @@ M.CONSTS = CONSTS
 -- static values to the evaluator; a host value of them reaching dynamic code is residualized as its PATH, and the
 -- residual chunk is loaded with those globals in its environment
 local KNOWN = {}
+-- the PROGRAM'S OWN PRIMITIVES of the current specialization (opts.prims, CART-1372 rung 5): { [path] = function } —
+-- the function fields of a known table the closure calls (`derive__B.kinds`: the basis), opaque to mix as any library
+-- function is. Each is an EFFECT unless opts.pure names it: never computed early, its result dynamic, called by its
+-- path in the residual (sound with no facts about it). A PURE one (opts.pure[path] = true — proven, never assumed) is
+-- computed on static arguments as the table above is
+local XPRIMS, XPURE = {}, {}
+-- does a CALLED global's name reach a value where the residual runs — a primitive, a known global (or a field under
+-- one), a host global? A name reaching nothing (a captured local the assembler did not carry, CART-1372) would be a
+-- call of nil at run time, so the residualizer refuses it by name instead
+local function reachable(name)
+    if PRIMS[name] or XPRIMS[name] or name == 'MIXDEOPT' then return true end
+    local prefix = ''
+    for part in name:gmatch('[^.]+') do
+        prefix = prefix == '' and part or (prefix .. '.' .. part)
+        if KNOWN[prefix] ~= nil then return true end
+    end
+    local v = _G
+    for part in name:gmatch('[^.]+') do
+        if type(v) ~= 'table' then return false end
+        v = v[part]
+    end
+    return v ~= nil
+end
+-- the per-specialization environment (specialize, and bta called on its own)
+local function set_env(opts)
+    KNOWN, XPRIMS, XPURE = opts.globals or {}, opts.prims or {}, opts.pure or {}
+end
 -- ASSUMPTIONS of the current specialization (opts.assume, CART-1463): { [field] = { value = v } } — a read `x.field` of a
 -- DYNAMIC variable x is taken to be v: STATIC, so the code it guards folds away; a residual GUARD before its statement
 -- checks it at run time (`if type(x) == 'table' and x.field ~= v then MIXDEOPT() end`) and deoptimizes when it fails.
@@ -1036,7 +1063,7 @@ function M.evaluator(prog, budget)
             return applyl(c, a)
         end
         if op == 'prim' then
-            local p = PRIMS[e.name]
+            local p = PRIMS[e.name] or XPRIMS[e.name]
             if not p then refuse('the primitive ' .. e.name .. ' (not in the table)') end
             -- (an `error(msg)` at the default level is prefixed with the position of its call — the ORIGINAL's, from
             -- the program's line map, never this evaluator's own line in mix.lua: CART-1458)
@@ -1255,6 +1282,7 @@ local function bt_expr(e, bt)
         local r = S
         for _, a in ipairs(e.args) do r = join(r, bt_expr(a, bt)) end
         if op == 'prim' and EFFECT[e.name] then return D end -- (a mutation or a raise: never computed early)
+        if op == 'prim' and XPRIMS[e.name] and not XPURE[e.name] then return D end -- (the program's own, not proven pure)
         return opnd(r)
     end
     if op == 'method' then
@@ -1359,10 +1387,10 @@ local function fixpoint(body, bt)
 end
 
 --- the binding times of one function under a division ({ 'S' | 'C' | 'D' } per parameter) -> { [id] = S | C | D }.
---- `globals` (optional, CART-1374): the KNOWN globals — a file's constants mixalg.program carried — static here as they
---- are to specialize (which sets them from opts.globals)
-function M.bta(prog, fname, division, globals)
-    if globals then KNOWN = globals end
+--- `env` (optional, CART-1374): { globals, prims, pure } as specialize's opts — a file's constants and primitives
+--- mixalg.program carried; omitted, the current specialization's (specialize calls it so)
+function M.bta(prog, fname, division, env)
+    if env then set_env(env) end
     local f = prog.funcs[fname]
     local bt = {}
     for i, id in ipairs(f.params) do
@@ -1529,7 +1557,7 @@ end
 --- params = { rname … }, body } }, entry }, stats. opts: budget (unfold steps), name (the entry's residual name)
 function M.specialize(prog, fname, division, statics, opts)
     opts = opts or {}
-    KNOWN = opts.globals or {}
+    set_env(opts)
     ASSUME = opts.assume or {}
     local budget = opts.budget or 100000
     local used = 0
@@ -2120,6 +2148,9 @@ function M.specialize(prog, fname, division, statics, opts)
             return table_rest({ op = 'table', fields = fields }, e, X)
         end
         if op == 'prim' then
+            if not reachable(e.name) then
+                refuse('a residual call of `' .. e.name .. '`, which reaches no value (a primitive, a known global, a host global) — a free name the program did not carry')
+            end
             local args = {}
             for i, a in ipairs(e.args) do args[i] = rexpr(a, X) end
             return { op = 'prim', name = e.name, args = args }

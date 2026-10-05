@@ -32,7 +32,7 @@ local function measure(store, p)
     for k in pairs(statics) do
         if not vim.tbl_contains(params, k) then return { error = ('statics: no parameter `%s` (it takes: %s)'):format(k, table.concat(params, ', ')) } end
     end
-    local oks, res, stats = pcall(MX.specialize, prog, entry, division, svals, { budget = tonumber(p.budget or 2e6), globals = how.knowns })
+    local oks, res, stats = pcall(MX.specialize, prog, entry, division, svals, { budget = tonumber(p.budget or 2e6), globals = how.knowns, prims = how.prims })
     if not oks then return { error = 'mix refused: ' .. F.why(res), refused = true } end
     local text, map = MX.print(res, prog.where)
     local okl, f = pcall(function () return assert(load(text, 'residual', 't', F.env(res.pool, how.knowns)))() end)

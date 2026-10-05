@@ -244,6 +244,12 @@ test('mixalg: a closure\'s FILE-LEVEL LOCALS are carried from the loaded code â€
         'end',
         'function M.warm() cache = 7 end',
         'function M.g(a) return RULES[a] end',
+        'local LIB = { twice = function (x) return x * 2 end }',
+        'function M.h(a) return LIB.twice(a) + RULES.width end',
+        'local function count(n) if n <= 0 then return 0 end return 1 + count(n - 1) end',
+        'function M.k(a) return count(a) end',
+        'local up = string.upper',
+        'function M.u(a) return up(a) end',
         'return M', '' }, '\n'))
     fd:close()
     local saved = package.path
@@ -275,6 +281,30 @@ test('mixalg: a closure\'s FILE-LEVEL LOCALS are carried from the loaded code â€
         local gres = MX.specialize(gprog, 'M_g', { 'D' }, {}, { budget = 2e5, globals = gk })
         local g = assert(load(MX.print(gres, gprog.where), 'residual', 't', F.env(gres.pool, gk)))()
         eq(3, g('width')); eq('r', g('name'))
+        -- (CART-1372 rung 5: a FUNCTION field of a known table is a PRIMITIVE of the program â€” an EFFECT to mix unless
+        -- proven pure: called by its path in the residual, never computed early; named pure, it folds on static args)
+        local ht, _, _, hk, _, hp = MA.program('M.h', { path })
+        eq({ 'fix__LIB.twice' }, vim.tbl_keys(hp))
+        local hprog = MX.lower(assert(R.read(ht, 'lua')))
+        for _, pure in ipairs({ false, true }) do
+            local hres = MX.specialize(hprog, 'M_h', { 'S' }, { 4 }, { budget = 2e5, globals = hk, prims = hp, pure = pure and { ['fix__LIB.twice'] = true } or nil })
+            local htext = MX.print(hres, hprog.where)
+            eq(not pure, htext:find('fix__LIB.twice(', 1, true) ~= nil, htext)
+            eq(11, assert(load(htext, 'residual', 't', F.env(hres.pool, hk)))()())
+        end
+        -- (a SELF-RECURSIVE local function calls itself by its mangled name â€” its own name is the definition, not a
+        -- local of it; unrewritten it was a call of a nil global in fill / match / classify's residuals)
+        local kt = MA.program('M.k', { path })
+        ok(kt:find('return 1 + fix__count(n - 1)', 1, true), kt)
+        local kprog = MX.lower(assert(R.read(kt, 'lua')))
+        local kres = MX.specialize(kprog, 'M_k', { 'D' }, {}, { budget = 2e5 })
+        eq(3, assert(load(MX.print(kres, kprog.where), 'residual', 't', F.env(kres.pool, {})))()(3))
+        -- (a captured FUNCTION value is not carried, and a residual call of a name that reaches nothing REFUSES by name
+        -- â€” it would be a call of nil at run time)
+        local ut, _, _, uk = MA.program('M.u', { path })
+        local uprog = MX.lower(assert(R.read(ut, 'lua')))
+        local oku, eu = pcall(MX.specialize, uprog, 'M_u', { 'D' }, {}, { budget = 2e5, globals = uk })
+        eq(false, oku); ok(MX.describe(eu):find('reaches no value', 1, true), MX.describe(eu))
     end)
     package.path = saved
     package.loaded['mxk1374.fix'] = nil

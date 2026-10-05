@@ -39,6 +39,31 @@ local function short_src(path)
 end
 M._short_src = short_src
 
+-- the LOADED-CODE index (M.program, CART-1374): { ['<abs file>:<first line>'] = function }, and the visit that grows
+-- it. Walked per call: 1,197 functions in 9 ms against ~1 s for the assembly (measured 2026-10-05) — no cache
+local function loaded_index()
+    local fobj, seen = {}, {}
+    local function visit(f, depth)
+        if seen[f] or depth > 6 then return end
+        seen[f] = true
+        if type(f) == 'function' then
+            local info = debug.getinfo(f, 'S')
+            if info and info.what == 'Lua' and info.source:sub(1, 1) == '@' then
+                fobj[vim.fn.fnamemodify(info.source:sub(2), ':p') .. ':' .. info.linedefined] = f
+            end
+            for i = 1, 255 do
+                local nm, v = debug.getupvalue(f, i)
+                if not nm then break end
+                if type(v) == 'function' then visit(v, depth + 1) end
+            end
+        elseif type(f) == 'table' then
+            for _, v in pairs(f) do if type(v) == 'function' then visit(v, depth + 1) end end
+        end
+    end
+    for _, mod in pairs(package.loaded) do if type(mod) == 'table' then visit(mod, 0) end end
+    return fobj, visit
+end
+
 --- the CALL CLOSURE of an algebra function (default M.match) as one mix program -> program text, the closure's keys in
 --- order, the LINE MAP: lines[n] = { src = the file's short name, line } — where line n of the text came from (a
 --- definition's renames never add a line, so its lines map one to one) (memoized per root and per process)
@@ -52,12 +77,15 @@ M._short_src = short_src
 --- returned in `knowns`: the caller passes them to mix as opts.globals and to the residual's environment). A local
 --- the file WRITES (the basis bound in apply_to, a lazy cache) is a value only at this moment: taken only with
 --- opts.snapshot, and listed in `report.snapshots`; otherwise it stays free (`report.free`).
---- -> text, order, lines, knowns, report { known = { name }, snapshots = { name }, free = { name } }
+--- A FUNCTION field the closure reads off such a table (`B.kinds` of the bound basis) is a PRIMITIVE of the program
+--- (CART-1372 rung 5): returned in `prims` ({ [path] = function }) for mix's opts.prims — an effect to mix unless
+--- proven pure (opts.pure).
+--- -> text, order, lines, knowns, report { known = { name }, snapshots = { name }, free = { name } }, prims
 function M.program(root, files, opts)
     root = root or 'M.match'
     opts = opts or {}
     local ckey = root .. (files and ('\0' .. table.concat(files, '\0')) or '') .. (opts.snapshot and '\0snap' or '')
-    if cache[ckey] then local c = cache[ckey]; return c.text, c.order, c.lines, c.knowns, c.report end
+    if cache[ckey] then local c = cache[ckey]; return c.text, c.order, c.lines, c.knowns, c.report, c.prims end
     files = files or vim.fn.glob(algebra_dir() .. '/*.lua', false, true)
     local fq = vim.treesitter.query.parse('lua', '(function_declaration) @f')
     local aq = vim.treesitter.query.parse('lua', '(function_definition) @f')
@@ -150,6 +178,10 @@ function M.program(root, files, opts)
         local r = refs_of(d.file)[s0]
         if not r then return false end
         if not r.decl then return true end
+        -- (the definition's OWN name — `local function f` declares f inside its own node — is the definition, not a
+        -- local of it: a self-recursive local function's call of itself is rewritten with the rest)
+        local own = d.node:field('name')[1]
+        if own and select(3, own:start()) == r.decl then return true end
         local _, _, d0 = d.node:start()
         local _, _, d1 = d.node:end_()
         return r.decl < d0 or r.decl >= d1
@@ -192,39 +224,15 @@ function M.program(root, files, opts)
     local iq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (method_index_expression) @d (identifier) @i]')
     -- THE LOADED CODE, indexed by (absolute file, first line): every Lua function reachable from a loaded module's table
     -- or from another such function's upvalues (the algebra loaded first, so its parts are among them)
-    local fobj = {}
-    do
-        pcall(function () require('cartograph.algebra').load() end)
-        local seen = {}
-        local function visit(f, depth)
-            if seen[f] or depth > 6 then return end
-            seen[f] = true
-            if type(f) == 'function' then
-                local info = debug.getinfo(f, 'S')
-                if info and info.what == 'Lua' and info.source:sub(1, 1) == '@' then
-                    fobj[vim.fn.fnamemodify(info.source:sub(2), ':p') .. ':' .. info.linedefined] = f
-                end
-                for i = 1, 255 do
-                    local nm, v = debug.getupvalue(f, i)
-                    if not nm then break end
-                    if type(v) == 'function' then visit(v, depth + 1) end
-                end
-            elseif type(f) == 'table' then
-                for _, v in pairs(f) do if type(v) == 'function' then visit(v, depth + 1) end end
-            end
-        end
-        for _, mod in pairs(package.loaded) do if type(mod) == 'table' then visit(mod, 0) end end
-        -- a closure file whose module nothing has loaded yet (derive.lua: required only under DERIVE): load it by its
-        -- module name — `<…>/lua/a/b.lua` is `a.b` — and index what it brings
-        M._visit = visit
-    end
+    pcall(function () require('cartograph.algebra').load() end)
+    local fobj, visit = loaded_index()
     local function ensure_loaded(abs)
         local mod = abs:match('/lua/(.-)%.lua$')
         if not mod then return end
         mod = mod:gsub('/', '.')
         if package.loaded[mod] == nil then
             local ok, m = pcall(require, mod)
-            if ok and type(m) == 'table' then M._visit(m, 0) end
+            if ok and type(m) == 'table' then visit(m, 0) end
         end
     end
     -- the module tables of the closure's files (`M`, `D` …): their dotted calls are rewritten whole above, so the bare
@@ -251,7 +259,7 @@ function M.program(root, files, opts)
         end
         return written_memo[key]
     end
-    local knowns, report = {}, { known = {}, snapshots = {}, free = {} }
+    local knowns, prims, report = {}, {}, { known = {}, snapshots = {}, free = {} }
     local noted = {}
     local function note(list, nm) if not noted[list .. nm] then noted[list .. nm] = true; table.insert(report[list], nm) end end
     -- a scalar as a Lua literal that adds NO line (the line map counts the original's lines one to one)
@@ -324,10 +332,17 @@ function M.program(root, files, opts)
                                     -- (mix names a known global by its DOTTED PATH — `M.grammars` — so a field this
                                     -- closure reads is known under `<file>__<name>.<field>` too; a function field is
                                     -- a call mix must see as a primitive, never a value carried here)
+                                    -- (a FUNCTION field is a PRIMITIVE of this program — rung 5: the basis `B.kinds` —
+                                    -- returned in `prims` for mix's opts.prims; read under pcall: the basis table
+                                    -- raises on a name it does not hold)
                                     if pt == 'dot_index_expression' then
                                         local fld = par:field('field')[1]
                                         local fname = fld and tx(fld, d.src)
-                                        if fname and type(v[fname]) ~= 'function' and v[fname] ~= nil then knowns[target .. '.' .. fname] = v[fname] end
+                                        local okf, fv = pcall(function () return v[fname] end)
+                                        if fname and okf and fv ~= nil then
+                                            if type(fv) == 'function' then prims[target .. '.' .. fname] = fv
+                                            else knowns[target .. '.' .. fname] = fv end
+                                        end
                                     end
                                 end
                                 if target then note(w and 'snapshots' or 'known', d.file .. '::' .. t) end
@@ -361,8 +376,8 @@ function M.program(root, files, opts)
         chunks[#chunks + 1] = chunk
     end
     local text = table.concat(chunks, '\n')
-    cache[ckey] = { text = text, order = order, lines = lines, knowns = knowns, report = report }
-    return text, order, lines, knowns, report
+    cache[ckey] = { text = text, order = order, lines = lines, knowns = knowns, report = report, prims = prims }
+    return text, order, lines, knowns, report, prims
 end
 
 local term_cache
