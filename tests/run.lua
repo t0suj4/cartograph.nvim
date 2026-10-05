@@ -113,8 +113,31 @@ do
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
 end
+-- ── COVER_EARLY: the coverage hook, installed before any spec loads ───────────
+-- `COVER=<file>` (CART-0990) records every (source, line) under lua/cartograph/ the suite executes. `COVER_SPEC=1`
+-- (the mutation campaign) keys each line by the SPEC that executed it — load time included, which is why the hook goes
+-- in before the loop: a spec's top-level fixture work (an extract at load) is that spec's coverage too.
+-- ⚠ JIT OFF: LuaJIT does not call hooks from compiled traces, so a hot loop would execute lines the hook never sees
+-- — a coverage map with holes exactly where the code is busiest.
+local cover, cover_spec
+if vim.env.COVER and vim.env.COVER ~= '' then
+    cover = {}
+    if rawget(_G, 'jit') then jit.off(); jit.flush() end
+    local by_spec = vim.env.COVER_SPEC == '1'
+    debug.sethook(function (_, line)
+        local i = debug.getinfo(2, 'S')
+        local s = i and i.short_src
+        if s and s:find('lua/cartograph/', 1, true) then
+            local key = by_spec and ((cover_spec or '?') .. '\t' .. s) or s
+            local t = cover[key]
+            if not t then t = {}; cover[key] = t end
+            t[line] = true
+        end
+    end, 'l')
+end
 for _, f in ipairs(vim.fn.glob('tests/*_spec.lua', false, true)) do
     if not only or only[f:match('([^/]+)%.lua$')] then
+        cover_spec = f:match('([^/]+)%.lua$')
         -- A LOAD-TIME FAILURE MUST EXIT, NOT ESCAPE. Both paths below used to raise out of
         -- run.lua's main chunk — and an error there means `vim.cmd('qall!')` at the bottom
         -- is NEVER REACHED, so headless nvim prints a traceback and then sits in the event
@@ -151,19 +174,7 @@ end
 -- ⚠ IT RECORDS ONLY `lua/cartograph/**`. The hook fires for every line in the process —
 -- the spec files, the harness, nvim's own runtime — and the census only ever asks about
 -- our engine, so filtering in the handler keeps the table small and the join honest.
-local cover
-if vim.env.COVER and vim.env.COVER ~= '' then
-    cover = {}
-    debug.sethook(function (_, line)
-        local i = debug.getinfo(2, 'S')
-        local s = i and i.short_src
-        if s and s:find('lua/cartograph/', 1, true) then
-            local t = cover[s]
-            if not t then t = {}; cover[s] = t end
-            t[line] = true
-        end
-    end, 'l')
-end
+-- (the hook itself is installed BEFORE the specs load — see COVER_EARLY above — so a spec's top-level fixture work counts)
 
 -- ── OPT-IN TIMINGS ──────────────────────────────────────────────────────────
 -- `TIMES=<file>` records each test's wall time as `ms<TAB>spec<TAB>status<TAB>name` there (TIMES_QUIET=1: no printed summary) and prints the slowest specs and
@@ -173,6 +184,7 @@ local times = vim.env.TIMES and vim.env.TIMES ~= '' and {} or nil
 local pass, fail, skipped, pending = 0, 0, 0, 0
 print('')
 for _, t in ipairs(reg) do
+    cover_spec = t.spec
     local t0 = times and vim.uv.hrtime()
     local good, err = pcall(t.fn)
     if times then
@@ -197,9 +209,11 @@ end
 if cover then
     debug.sethook()
     local out = {}
-    for src, lines in pairs(cover) do
+    for key, lines in pairs(cover) do
+        local spec, src = key:match('^(.-)\t(.*)$')
+        src = src or key
         local rel = src:match('lua/cartograph/.*$') or src
-        for line in pairs(lines) do out[#out + 1] = rel .. ':' .. line end
+        for line in pairs(lines) do out[#out + 1] = (spec and (spec .. '\t') or '') .. rel .. ':' .. line end
     end
     table.sort(out)
     local fd = io.open(vim.env.COVER, 'w')

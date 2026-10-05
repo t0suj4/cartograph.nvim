@@ -425,6 +425,8 @@ end
 
 test('bytes: ★ the static degree MATCHES the measured allocation growth, function by function', function ()
     if not has_lua() then skip 'no lua parser' end
+    -- (COVER turns the JIT off and runs a line hook: the measured allocation is the instrument's, not the function's)
+    if vim.env.COVER and vim.env.COVER ~= '' then skip 'COVER: a line hook and JIT-off change what an allocation measurement sees' end
     local cases = {
         { 'M.pairs_of', 2 },
         { 'M.members', 1, function(n) local ys = {} for i = 1, n do ys[i] = 'w' .. i end return ys end }, { 'M.grid', 2 }, { 'M.thunks', 1 }, { 'M.snapshots', 2 },

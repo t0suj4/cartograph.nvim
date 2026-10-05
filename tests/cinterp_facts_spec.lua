@@ -85,6 +85,30 @@ local function counted(dir, tree, opts)
     return T, runs
 end
 
+test('facts cache: a stored value never points into ANOTHER tree — identical content elsewhere gets its OWN paths back (CART-1479)', function ()
+    -- the content key is shared by identical trees; a compdb holds absolute paths. Before: tree B was handed tree A's
+    -- paths, and with A deleted every derivation compiling a source failed on its cwd (ENOENT) — 15 erlbif tests, red
+    -- only when two specs with the same fixture shared a test worker
+    local dir, a, b = vim.fn.tempname(), vim.fn.tempname(), vim.fn.tempname()
+    for _, t in ipairs({ a, b }) do write(t, { ['x.h'] = '#define X 1\n' }) end
+    write(dir, {
+        ['where.lua'] = "return { fact = 'where', derive = function (t) FC.where = (FC.where or 0) + 1; return { cwd = t.src, file = t.src .. '/x.h', flags = { '-I' .. t.src .. '/inc', '-I' .. t.src .. '0' } } end }",
+        ['text.lua'] = "return { fact = 'text', needs = { 'where' }, derive = function (_, got) FC.text = 1; local fd = io.open(got.where.file); local s = fd:read('a'); fd:close(); return s end }",
+    })
+    local T1 = counted(dir, a)
+    eq(2, T1.cache.stored)
+    vim.fn.delete(a, 'rf')
+    local T2, runs = counted(dir, b)
+    local B = vim.fn.fnamemodify(b, ':p'):gsub('/$', '')
+    eq({}, runs, 'answered from the store: identical content')
+    eq(B, T2.rows.where.value.cwd, 'the stored cwd is THIS tree\'s')
+    eq(B .. '/x.h', T2.rows.where.value.file)
+    -- (a path INSIDE a flag follows the tree; a SIBLING path `<A>0` is not inside A, so it is left exactly as derived)
+    local A = vim.fn.fnamemodify(a, ':p'):gsub('/$', '')
+    eq({ '-I' .. B .. '/inc', '-I' .. A .. '0' }, T2.rows.where.value.flags)
+    eq('#define X 1\n', T2.rows.text.value)
+end)
+
 test('facts cache: a warm derive answers every call from the store, and each INPUT re-derives exactly what it reaches — tree, scope, code, a loaded sibling, a need', function ()
     local dir, tree = vim.fn.tempname(), vim.fn.tempname()
     write(tree, { ['a.h'] = '#define A 1\n', ['other.txt'] = 'x' })

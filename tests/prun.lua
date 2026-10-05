@@ -81,8 +81,11 @@ for i, b in ipairs(bins) do
     vim.fn.mkdir(state, 'p')
     local times = vim.fn.tempname() .. '-times.tsv'
     b.state, b.times = state, times
+    -- (COVER: each worker its own part — they would overwrite one file — concatenated below)
+    b.cover = (vim.env.COVER and vim.env.COVER ~= '') and (vim.fn.tempname() .. '-cover') or nil
     b.proc = vim.system({ 'nvim', '--headless', '-u', 'NONE', '--noplugin', '-c', 'set rtp+=' .. cwd, '-c', 'luafile tests/run.lua' },
-        { cwd = cwd, text = true, env = { SPEC = table.concat(b.specs, ','), XDG_STATE_HOME = state, TIMES = times, TIMES_QUIET = '1' } })
+        { cwd = cwd, text = true, env = { SPEC = table.concat(b.specs, ','), XDG_STATE_HOME = state, TIMES = times, TIMES_QUIET = '1',
+            COVER = b.cover } })
     procs[i] = b
 end
 local pass, fail, skipped, pending, broken = 0, 0, 0, 0, {}
@@ -123,6 +126,15 @@ if cf then for _, s in ipairs(names) do cf:write(('%s\t%.1f\n'):format(s, cost[s
 if vim.env.TIMES and vim.env.TIMES ~= '' then
     local tf = io.open(vim.env.TIMES, 'w')
     if tf then tf:write(table.concat(rows, '\n'), '\n'); tf:close() end
+end
+if vim.env.COVER and vim.env.COVER ~= '' then
+    local parts = {}
+    for _, b in ipairs(procs) do
+        local f = b.cover and io.open(b.cover)
+        if f then parts[#parts + 1] = f:read('a'); f:close(); os.remove(b.cover) end
+    end
+    local cf2 = io.open(vim.env.COVER, 'w')
+    if cf2 then cf2:write(table.concat(parts, '\n')); cf2:close() end
 end
 local wall = (vim.uv.hrtime() - t0) / 1e9
 local loads = {}

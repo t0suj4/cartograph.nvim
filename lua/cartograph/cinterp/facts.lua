@@ -145,6 +145,44 @@ function M.cache(tree, dir)
     dir = dir or dir_of_facts()
     local blob = SC.blob('facts')
     local stats = { hits = 0, stored = 0, refused = {}, stamp_ms = 0 }
+    -- ★ THE KEY IS THE TREE'S CONTENT, SO A STORED VALUE MAY NOT HOLD THE TREE'S PATH (CART-1479). A compdb carries
+    -- absolute `file` / `cwd` paths — POINTERS into the tree that derived it — and two trees with identical content
+    -- (two specs' fixtures in two temp dirs, two clones) share the entry: the second got the FIRST tree's paths, and
+    -- once that tree was deleted every derivation compiling a source failed with ENOENT on its cwd (the mutation
+    -- campaign's coverage run: 15 erlbif tests, red only when the workers grouped the specs that way). A value is
+    -- stored with this tree's path replaced by a placeholder and read back with the CURRENT tree's; a fact's key
+    -- hashes the relocated form, so identical trees still share every entry.
+    local here = vim.fn.fnamemodify(tree.src, ':p'):gsub('/$', '')
+    local TOKEN = '\0tree\0'
+    local function relocate(v, from, to, seen)
+        local ty = type(v)
+        if ty == 'string' then
+            if not v:find(from, 1, true) then return v end
+            local out, i = {}, 1
+            while true do
+                local s, e = v:find(from, i, true)
+                if not s then out[#out + 1] = v:sub(i); break end
+                -- (a whole path component only: `/tmp/x/1` is not the start of a sibling `/tmp/x/10`)
+                local nxt = v:sub(e + 1, e + 1)
+                if nxt == '' or nxt == '/' or from == TOKEN then
+                    out[#out + 1] = v:sub(i, s - 1); out[#out + 1] = to
+                else
+                    out[#out + 1] = v:sub(i, e)
+                end
+                i = e + 1
+            end
+            return table.concat(out)
+        end
+        if ty ~= 'table' then return v end
+        seen = seen or {}
+        if seen[v] then return seen[v] end
+        local c = {}
+        seen[v] = c
+        for k, x in pairs(v) do c[relocate(k, from, to, seen)] = relocate(x, from, to, seen) end
+        return setmetatable(c, getmetatable(v))
+    end
+    local function portable(v) return relocate(v, here, TOKEN) end
+    local function local_(v) return relocate(v, TOKEN, here) end
     local base
     local function base_key()
         if base then return base end
@@ -208,7 +246,7 @@ function M.cache(tree, dir)
     end
     function C.get(key)
         local v, found = blob.get(key)
-        if found then stats.hits = stats.hits + 1 end
+        if found then stats.hits = stats.hits + 1; v = local_(v) end
         return v, found
     end
     -- (a derive reads `got` through a view that notes a fact it does not declare: its key would not see that input)
@@ -227,7 +265,7 @@ function M.cache(tree, dir)
         for _, n in ipairs(d.needs) do
             local was = fkey[n]
             if was and not was:find('^call:') then
-                local now = SC.value(got[n])
+                local now = SC.value(portable(got[n]))
                 if now ~= was then mutated[d.name] = n; fkey[n] = now or ('changed:' .. was) end
             end
         end
@@ -242,12 +280,12 @@ function M.cache(tree, dir)
         if mb >= 1 and ms / mb < WORTH_MS_PER_MB then -- (under a MB, bytes are not worth weighing)
             stats.refused[d.name] = ('not worth its bytes (%.1f MB for %.0f ms)'):format(mb, ms); return
         end
-        local bytes, perr = blob.put(key, v)
+        local bytes, perr = blob.put(key, portable(v))
         if bytes then stats.stored = stats.stored + 1 else stats.refused[d.name] = perr end
     end
     --- a decided fact's key for its consumers: its value's content hash, else the key of the call that made it
     function C.fact_key(v, key)
-        return SC.value(v) or (key and ('call:' .. key)) or nil
+        return SC.value(portable(v)) or (key and ('call:' .. key)) or nil
     end
     return C
 end
