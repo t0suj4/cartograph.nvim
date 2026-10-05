@@ -473,7 +473,16 @@ function M.files(rels, opts)
     if not stats then return nil, why end
     local removed, remap = stats.removed_ids, stats.remap
 
-    stats.bindings_reused = M.relink(data, { reuse_bindings = stats.path == 'cutoff' and stats.calls_same }) or nil
+    -- (the adapters' own changes join the O(diff) account: a module-level call link resolves gets its region edge now)
+    local adapter_touched = {}
+    stats.bindings_reused = M.relink(data, { reuse_bindings = stats.path == 'cutoff' and stats.calls_same,
+        touched = adapter_touched }) or nil
+    if next(adapter_touched) then
+        local seen = {}
+        for _, f in ipairs(stats.dirty or {}) do seen[f] = true end
+        for f in pairs(adapter_touched) do if not seen[f] then stats.dirty[#stats.dirty + 1] = f end end
+        table.sort(stats.dirty)
+    end
 
     -- carry navigation across the re-ingest: history entries remap like
     -- everything else; an entry whose node is gone and unmappable is
@@ -533,7 +542,7 @@ function M.relink(data, opts)
     if opts and opts.reuse_bindings and memo and memo.gen == gen then bindings, reused = memo.bindings, true
     else bindings = xl.effective_bindings(data) end
     XL_MEMO[data] = { bindings = bindings, gen = gen + 1 }
-    xl.link(data, bindings)
+    xl.link(data, bindings, { touched = opts and opts.touched })
     require('cartograph.sql').attach(data)
     require('cartograph.dblink').attach(data) -- session-cached db schema
     require('cartograph.django').attach(data)  -- routes/templates re-derive

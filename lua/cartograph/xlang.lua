@@ -429,9 +429,12 @@ end
 ---@param data table  neutral-schema graph (mutated)
 ---@param bindings table?  defaults to config.bindings or M.default_bindings
 ---@return { links:integer, exports:integer, unresolved:integer }
-function M.link(data, bindings)
+--- opts.touched (optional): the files whose graph this link changed beyond the edges it adds from functions — the
+--- module-level calls it resolves get their region edges here, and their files are marked (refresh's O(diff) account)
+function M.link(data, bindings, opts)
     bindings = bindings or require('cartograph.config').bindings
         or M.default_bindings
+    local newly_module = {}
     local coop = require 'cartograph.coop' -- tick() yields under coop.run; else no-op
     local exact, tails = M.def_index(data)
     local refEdge = {}
@@ -711,7 +714,11 @@ function M.link(data, bindings)
                 if hs then
                     -- a single handler is a descend target; a fan-out keeps
                     -- c.to empty (edges carry it, callers views show sites)
-                    if #hs == 1 then c.to = callrec.to(c) or hs[1] end
+                    if #hs == 1 then
+                        -- (a module-level call newly resolved here is OWNED below, now — not one relink later: CART-1474)
+                        if not callrec.to(c) and not callrec.fn(c) then newly_module[#newly_module + 1] = c end
+                        c.to = callrec.to(c) or hs[1]
+                    end
                     if callrec.fn(c) then
                         for _, h in ipairs(hs) do
                             addref(callrec.fn(c), h, key_range(c, key))
@@ -723,6 +730,7 @@ function M.link(data, bindings)
         end
         end
     end
+    stats.owned = require('cartograph.providers.treesitter').own_module_calls_of(data, newly_module, opts and opts.touched)
     return stats
 end
 

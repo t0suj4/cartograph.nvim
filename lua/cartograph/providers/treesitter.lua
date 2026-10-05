@@ -6168,6 +6168,29 @@ local function ref_adder(refEdge, edges)
     end
 end
 
+--- ★ OWN THESE module-level calls NOW (CART-1474): a pass that resolves a module-level call AFTER relink's ownership
+--- pass — xlang.link's registry imports set `c.to` on calls with no enclosing function — left its region edge to the
+--- NEXT relink, so a graph's edges depended on how many saves had happened (a freshly opened graph lacked them).
+--- `calls` = the call records just resolved; their files are marked in `touched` (the O(diff) save's account).
+function M.own_module_calls_of(data, calls, touched)
+    if not calls or #calls == 0 then return 0 end
+    local refEdge = {}
+    for _, e in ipairs(data.edges) do if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end end
+    local add = ref_adder(refEdge, data.edges)
+    local function addref(from, to, at, inferred)
+        local e = refEdge[from .. '\31' .. to]
+        if e then
+            for _, x in ipairs(e.at) do
+                if rawequal(x, at) or (atr.sl(x) == atr.sl(at) and atr.sc(x) == atr.sc(at) and atr.el(x) == atr.el(at) and atr.ec(x) == atr.ec(at)) then return end
+            end
+        end
+        add(from, to, at, inferred)
+        if touched then touched[from:match('^(.-)::') or from] = true end
+    end
+    return own_module_calls(#calls, function (i, f) return calls[i][f] end, region_index(data.nodes), addref)
+end
+
+
 --- INDEX-ONLY front-end ([[cartograph-thin-index]]): the thin symbol index — parse +
 --- DEF nodes only (no calls, df, flow, mentions, or resolution). Reuses extract's own
 --- extract_defs, so the def set is byte-faithful to a full extract's; ~10x cheaper in

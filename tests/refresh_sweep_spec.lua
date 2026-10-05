@@ -123,6 +123,34 @@ test('refresh sweep: a string-keyed REGISTRY\'s cross-language links keep one si
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ A CALL RESOLVED LATE IS OWNED AT ONCE (CART-1474): xlang.link resolves a module-level registry import AFTER relink's
+-- ownership pass, and its region edge used to wait for the NEXT relink — a freshly opened graph lacked it, a save added
+-- it (our tree: 4 region edges into helmprov's `v` appeared on the first save of an unrelated file).
+test('refresh sweep: a module-level call xlang.link resolves gets its region edge from that link, not from a later save', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = build()
+    local fd = assert(io.open(root .. '/reg.lua', 'w'))
+    -- (the real case's shape: a registry discovered from `istype(key, fn)` exports and `typeof(key)` imports; the
+    -- module-level `typeof('beta')` is unresolved by name, and link resolves it to the handler)
+    fd:write(table.concat({
+        'local function istype(name, fn) return fn end',
+        'local function a1() return 1 end', 'local function a2() return 2 end', 'local function a3() return 3 end',
+        "istype('alpha', a1)", "istype('beta', a2)", "istype('gamma', a3)",
+        "local function f() return typeof('alpha') end", "typeof('beta')", 'return { f = f }', '' }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local xl = require 'cartograph.xlang'
+    local touched = {}
+    local st = xl.link(data, xl.effective_bindings(data), { touched = touched })
+    local owned
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from:find('^reg%.lua::region@') and e.to:find('::a2@', 1, true) then owned = e end
+    end
+    ok(owned, 'the region owning the module-level `typeof(\'beta\')` refs its handler right after the link (owned: ' .. tostring(st.owned) .. ')')
+    eq(true, touched['reg.lua'], 'and its file is reported')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ★ THE MENTION INDEX IS PART OF THE CONTRACT (CART-1393). graphdiff compares nodes and edges, not `data.names`, so a
 -- refreshed file whose name set never came back passed every test above while `mentions` answered a false `absent`.
 -- The file that lost it was a NEW one with NO FUNCTIONS: the splice handed the id pass only files with fn ranges,
