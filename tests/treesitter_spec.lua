@@ -1143,6 +1143,33 @@ test('frontier: landings are content-keyed cache — regeneration evicts them', 
     vim.fn.delete(root, 'rf')
 end)
 
+test('greenspun: a local VALUE named like a function nested in ANOTHER file is no handler — no registry is invented (CART-1476)', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- stampcache.lua's `ffi.istype('uint64_t', v)` (v a value) read as a registration because helmprov.lua nests a
+    -- helper `v`; `ffi.typeof(...)` then linked to it as the lookup. A bare local reaches its own file's functions
+    -- and the exported ones, nothing else. The control: the same calls naming a function OF THEIR OWN FILE register.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(rel, text) local f = assert(io.open(root .. '/' .. rel, 'w')); f:write(text); f:close() end
+    put('helm.lua', 'local M = {}\nfunction M.diff(r)\n  local function v(x) return x end\n  return v(r)\nend\nreturn M\n')
+    put('stamp.lua', table.concat({
+        "local ffi = require 'ffi'", 'local M = {}',
+        "function M.canon(v) if ffi.istype('uint64_t', v) then return 1 elseif ffi.istype('int64_t', v) then return 2 end end",
+        "M.U = ffi.typeof('uint64_t')", "M.I = ffi.typeof('int64_t')", 'return M', '' }, '\n'))
+    local g = require 'cartograph.greenspun'
+    local verbs = {}
+    for _, b in ipairs(g.registries(ts.extract(root))) do verbs[b.export.verb] = true end
+    ok(not verbs.istype, 'a registry was invented from a value named like a nested function elsewhere')
+    -- the control: the handler is a function of the registering file itself
+    put('stamp.lua', table.concat({
+        "local ffi = require 'ffi'", 'local M = {}', 'local function v(x) return x end',
+        "function M.canon() if ffi.istype('uint64_t', v) then return 1 elseif ffi.istype('int64_t', v) then return 2 end end",
+        "M.U = ffi.typeof('uint64_t')", "M.I = ffi.typeof('int64_t')", 'return M', '' }, '\n'))
+    verbs = {}
+    for _, b in ipairs(g.registries(ts.extract(root))) do verbs[b.export.verb] = true end
+    ok(verbs.istype, 'the same registrations naming a function of their own file do register')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('greenspun: the wiretap registry is discovered, not configured', function ()
     if not has_parser('lua') then skip 'no lua parser' end
     local g = require 'cartograph.greenspun'

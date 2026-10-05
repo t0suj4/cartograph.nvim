@@ -106,6 +106,28 @@ local function fn_names(data)
     return names
 end
 
+-- ★ WHICH FUNCTIONS A BARE LOCAL NAME CAN REACH FROM A FILE (CART-1476): those defined IN that file, and the
+-- EXPORTED ones anywhere. A local variable named like some function NESTED in another file names nothing there —
+-- stampcache.lua's `ffi.istype('uint64_t', v)` (v a value) read as a registration because helmprov.lua has a nested
+-- helper `v`, and `ffi.typeof(...)` then linked to it as this "registry's" lookup. -> reaches(file, name)
+local function local_reach(data)
+    local exported, by_file = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and n.name then
+            local tail = n.name:match('([%w_]+)$')
+            local f = by_file[n.file or '']
+            if not f then f = {}; by_file[n.file or ''] = f end
+            f[n.name] = true
+            if tail then f[tail] = true end
+            if n.exported ~= false then
+                exported[n.name] = true
+                if tail then exported[tail] = true end
+            end
+        end
+    end
+    return function (file, name) return exported[name] or (by_file[file or ''] or {})[name] or false end
+end
+
 -- the bounded edit distance lives in cartograph.near (one copy for every did-you-mean)
 local editdist = require('cartograph.near').dist
 
@@ -218,6 +240,7 @@ end
 function M.registries(data, opts)
     local min_sites = opts and opts.min_sites or 2
     local known = fn_names(data)
+    local reaches = local_reach(data)
     local coop = require 'cartograph.coop' -- tick() chunks this off the main
     local by_verb = {}                     -- loop when run under coop.run; else no-op
     -- INDEX FORM (brick 3 step c): the discovery scan reads callee/dynamic off
@@ -258,7 +281,7 @@ function M.registries(data, opts)
                         if li >= 1 and li ~= kpos
                             and (a.k == 'func' or a.k == 'callable'
                                 or (a.k == 'lit' and known[a.v])
-                                or (a.k == 'local' and known[a.name])) then
+                                or (a.k == 'local' and reaches(callrec.file(c), a.name))) then
                             hit = true
                             fnpos = fnpos or li
                             break
@@ -441,6 +464,7 @@ end
 function M.explain(data, verb, opts)
     local min_sites = opts and opts.min_sites or 2
     local known = fn_names(data)
+    local reaches = local_reach(data)
     local by_verb = {}
     for _, c in callrec.each(data) do
         if not c.dynamic then
@@ -483,7 +507,7 @@ function M.explain(data, verb, opts)
                 if li >= 1 and li ~= kpos then
                     if a.k == 'func' or a.k == 'callable'
                         or (a.k == 'lit' and known[a.v])
-                        or (a.k == 'local' and known[a.name]) then
+                        or (a.k == 'local' and reaches(callrec.file(c), a.name)) then
                         hit = true
                     elseif not hit then
                         by_k[a.k] = (by_k[a.k] or 0) + 1
