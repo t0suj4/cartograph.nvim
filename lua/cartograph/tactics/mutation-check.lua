@@ -247,4 +247,6 @@ E.examples = {
     },
 }
 
+-- (shared with mutation-campaign: the same scratch copy, git alternates included)
+E.scratch_copy = scratch_copy
 return E
