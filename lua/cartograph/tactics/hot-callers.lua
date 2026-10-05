@@ -13,7 +13,7 @@ local function measure(store, p)
         return function (...)
             calls = calls + 1
             local info = debug.getinfo(2, 'Sln')
-            local k = (info and info.short_src or '?') .. ':' .. tostring(info and info.currentline or '?') .. ' ' .. tostring(info and info.name or '?')
+            local k = W.site(info, store and store.data and store.data.root) .. ' ' .. tostring(info and info.name or '?')
             local row = by[k]
             if not row then row = { caller = k, calls = 0, ns = 0 }; by[k] = row end
             local s = vim.uv.hrtime()
@@ -36,8 +36,8 @@ local E = {
     tags = { 'find', 'code', 'optimize' },
     measures = 'CART-1444',
     summary = 'who calls a function during a workload: target = module.fn wrapped for one run of `workload` (Lua returning function (store); @file) — per caller site (file:line, name) its calls and inclusive seconds',
-    params = { target = 'string', workload = 'string' },
-    measure = measure,
+    params = { target = 'string', workload = 'string', code = 'string?', timeout = 'string?' },
+    measure = W.code_aware('hot-callers', measure),
     claim = function (v)
         if v.error then return false, v.error end
         if v.calls == 0 then return false, v.target .. ' was never called through its module field' end

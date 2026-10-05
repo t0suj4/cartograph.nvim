@@ -39,8 +39,8 @@ local E = {
     tags = { 'find', 'code', 'optimize' },
     measures = 'CART-1444',
     summary = 'where a workload\'s time goes by named function: targets = module.fn[,…] wrapped for one run of `workload` (Lua returning function (store); @file) — calls, inclusive seconds, share of the run',
-    params = { targets = 'string', workload = 'string' },
-    measure = measure,
+    params = { targets = 'string', workload = 'string', code = 'string?', timeout = 'string?' },
+    measure = W.code_aware('phase-profile', measure),
     claim = function (v)
         if v.error then return false, v.error end
         for _, r in ipairs(v.rows) do if r.calls == 0 then return false, r.name .. ' was never called through its module field' end end
@@ -59,6 +59,25 @@ E.examples = {
             local src = debug.getinfo(require('pprof').slow, 'S').short_src
             return v.rows and v.rows[1].name == 'pprof.slow' and v.rows[1].calls == 3 and v.rows[2].calls == 3 and src:find('pprof%.lua$') ~= nil,
                 vim.inspect(v) .. ' ' .. src
+        end },
+    },
+    {
+        name = 'a workload\'s SETUP runs before anything is wrapped: its calls are not counted, its value reaches run',
+        files = FILES, params = function () return { targets = 'pprof.quick', workload = table.concat({
+            'return { setup = function () local m = require("pprof"); for _ = 1, 5 do m.quick() end; return 2 end,',
+            '  run = function (_, n) for _ = 1, n do require("pprof").quick() end end }' }, '\n') } end,
+        expect = { holds = true, check = function (v) return v.rows and v.rows[1].calls == 2, vim.inspect(v) end },
+    },
+    {
+        -- (`cartograph.clones` is LOADED in the measuring process — its blocks(nil) raises there; the tree's own module of
+        -- that name is a counter. Only a run in the tree's code sees 3 calls)
+        name = 'code = <dir>: the workload runs THAT tree\'s modules in a process of its own, even one already loaded here',
+        files = { ['lua/cartograph/clones.lua'] = 'local M = {}\nfunction M.blocks() return 1 end\nreturn M\n' },
+        params = function (store) return { targets = 'cartograph.clones.blocks', code = store.data.root,
+            workload = 'return function () for _ = 1, 3 do require("cartograph.clones").blocks() end end' } end,
+        expect = { holds = true, check = function (v)
+            local here = measure(nil, { targets = 'cartograph.clones.blocks', workload = 'return function () for _ = 1, 3 do require("cartograph.clones").blocks() end end' })
+            return v.rows and v.rows[1].calls == 3 and here.error ~= nil, vim.inspect(v) .. ' / here: ' .. vim.inspect(here)
         end },
     },
 }

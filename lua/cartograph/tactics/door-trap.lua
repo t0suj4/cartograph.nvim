@@ -57,8 +57,8 @@ local E = {
     tags = { 'gate', 'code', 'optimize' },
     measures = 'CART-1444',
     summary = 'does a workload open any DOOR (a write, a delete, a process) in one run: the host\'s doors wrapped while `workload` (Lua returning function (store); @file) runs — each opening with what it opened and its caller. The gate for "a measurement must not be destructive"',
-    params = { workload = 'string' },
-    measure = measure,
+    params = { workload = 'string', code = 'string?', timeout = 'string?' },
+    measure = W.code_aware('door-trap', measure),
     claim = function (v)
         if v.error then return false, v.error end
         if #v.doors == 0 then return true, 'CLOSED: the workload opened no door' end

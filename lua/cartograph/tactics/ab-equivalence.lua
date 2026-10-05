@@ -56,7 +56,7 @@ local function measure(_, p)
     local repo = p.repo or repo_of_toolbelt()
     local scratch = vim.fn.tempname() .. '-ab'
     vim.fn.mkdir(scratch, 'p')
-    local v = { runs = {} }
+    local v = { runs = {}, faster = p.faster == '1' or nil }
     local function side(name, ref)
         if not ref then return { root = repo, label = 'working tree' } end
         local dir = scratch .. '/' .. name
@@ -75,13 +75,20 @@ local function measure(_, p)
     local function run(S, corpus, tag)
         local out, secs = scratch .. '/' .. tag .. '.out', scratch .. '/' .. tag .. '.secs'
         local wrapper = scratch .. '/' .. tag .. '-wrapper.lua'
-        local w = assert(io.open(wrapper, 'w')); w:write(WRAPPER:format(mfile, out, secs)); w:close()
+        -- ★ A SIDE THAT IS NOT A CARTOGRAPH CHECKOUT (any Lua project — the optimize loop's world): this toolbelt runs
+        -- it, with the side's own `lua/` and root FIRST on package.path, so the measure loads that side's modules
+        local tb, prefix = S.root .. '/tools/toolbelt.lua', ''
+        if vim.fn.filereadable(tb) == 0 then
+            tb = repo_of_toolbelt() .. '/tools/toolbelt.lua'
+            prefix = ('package.path = %q .. package.path\n'):format(S.root .. '/lua/?.lua;' .. S.root .. '/lua/?/init.lua;' .. S.root .. '/?.lua;')
+        end
+        local w = assert(io.open(wrapper, 'w')); w:write(prefix .. WRAPPER:format(mfile, out, secs)); w:close()
         local env = {}
         if p.warm ~= '1' then
             env.XDG_CACHE_HOME, env.XDG_STATE_HOME = scratch .. '/' .. tag .. '-cache', scratch .. '/' .. tag .. '-state'
         end
         local t0 = vim.uv.hrtime()
-        local obj, err = SF.exec({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', S.root .. '/tools/toolbelt.lua', 'run', '@' .. wrapper, corpus },
+        local obj, err = SF.exec({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', tb, 'run', '@' .. wrapper, corpus },
             { cwd = S.root, env = env, timeout = limit })
         local wall = (vim.uv.hrtime() - t0) / 1e9
         if not obj then return nil, err end
@@ -120,9 +127,9 @@ local E = {
     kind = 'discovery',
     tags = { 'accept', 'repo', 'optimize' },
     measures = 'CART-1444',
-    summary = 'does a code change keep a measurement\'s output? measure (Lua returning { measure = fn(store, p) -> string | lines }) run on each corpus by the code at ref (git archive: the tree is never touched) and by the working tree (or ref_b), each side in its own process and cache; sorted = 1 compares as sets; warm = 1 shares caches; timeout = seconds per side',
+    summary = 'does a code change keep a measurement\'s output? measure (Lua returning { measure = fn(store, p) -> string | lines }) run on each corpus by the code at ref (git archive: the tree is never touched) and by the working tree (or ref_b), each side in its own process and cache; sorted = 1 compares as sets; warm = 1 shares caches; timeout = seconds per side; faster = 1 also requires B to be faster (a performance change); a side that is not a cartograph checkout (any Lua project) is run by this toolbelt with its own lua/ first',
     params = { ref = 'string', ref_b = 'string?', measure = 'string', corpus = 'list', sorted = 'string?', warm = 'string?',
-        timeout = 'string?', repo = 'string?', keep = 'string?' },
+        timeout = 'string?', repo = 'string?', keep = 'string?', faster = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
@@ -133,6 +140,10 @@ local E = {
                 local d = r.first_difference
                 return false, ('%s: outputs DIFFER at line %d — A (%s): %s | B (%s): %s'):format(r.corpus, d.line, v.a.ref,
                     tostring(d.a):sub(1, 120), v.b.ref, tostring(d.b):sub(1, 120))
+            end
+            -- (faster = 1: the change is a PERFORMANCE change, and equal output alone does not accept it)
+            if v.faster and not ((r.b.secs or math.huge) < (r.a.secs or 0)) then
+                return false, ('%s: outputs equal, but B (%s) is not faster: A %.3fs / B %.3fs'):format(r.corpus, v.b.ref, r.a.secs or -1, r.b.secs or -1)
             end
             parts[#parts + 1] = ('%s: %d lines equal, A %.2fs / B %.2fs'):format(vim.fn.fnamemodify(r.corpus, ':t'), r.a.lines,
                 r.a.secs or -1, r.b.secs or -1)

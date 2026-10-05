@@ -42,7 +42,7 @@ local function measure(store, p)
     end
     local t0 = vim.uv.hrtime()
     local ok, okr, rerr = W.run_wrapped(store, work, targets, function (real, t)
-        local row = { name = t, calls = 0, distinct = 0, ns = 0, bytes = 0, keys = {} }
+        local row = { name = t, calls = 0, distinct = 0, ns = 0, bytes = 0, keys = {}, seen = {} }
         rows[#rows + 1] = row
         return function (...)
             local n = select('#', ...)
@@ -50,12 +50,21 @@ local function measure(store, p)
             for i = 1, n do parts[i] = key_of((select(i, ...))) end
             local k = table.concat(parts, '\31')
             local fresh = not row.keys[k]
-            if fresh then row.keys[k] = true; row.distinct = row.distinct + 1 end
+            if fresh then
+                row.keys[k] = true; row.distinct = row.distinct + 1
+                -- the KEY KIND decides a memo's residence (memoize): all by identity -> weak, all scalar -> strong
+                local ids = 0
+                for i = 1, n do if parts[i]:sub(1, 1) == '#' then ids = ids + 1 end end
+                local kind = ids == n and 'identity' or ids == 0 and 'scalar' or 'mixed'
+                row.kind = (row.kind == nil or row.kind == kind) and kind or 'mixed'
+            end
             row.calls = row.calls + 1
             local s = vim.uv.hrtime()
             local r = { real(...) }
             row.ns = row.ns + (vim.uv.hrtime() - s)
-            if fresh then row.bytes = row.bytes + size(r, {}, row) end
+            -- (ONE `seen` per target, CART-1469: structure SHARED between results is held once by a memo, and was
+            -- counted once per result — expr.of priced 2.99 GB where the GC-retained bytes were 91 MB)
+            if fresh then row.bytes = row.bytes + size(r, row.seen, row) end
             return unpack(r)
         end
     end)
@@ -67,7 +76,7 @@ local function measure(store, p)
         local secs = r.ns / 1e9
         out[#out + 1] = { name = r.name, calls = r.calls, distinct = r.distinct, repeat_ratio = r.calls / math.max(r.distinct, 1),
             seconds = secs, saved = secs * (1 - r.distinct / math.max(r.calls, 1)), result_kb = r.bytes / 1e3,
-            userdata = r.userdata or false, functions = r.functions or false }
+            userdata = r.userdata or false, functions = r.functions or false, keys = r.kind or 'none' }
     end
     table.sort(out, function (a, b) if a.saved ~= b.saved then return a.saved > b.saved end return a.name < b.name end)
     return { rows = out, workload_seconds = total }
@@ -78,19 +87,22 @@ local E = {
     kind = 'discovery',
     tags = { 'find', 'code', 'optimize' },
     measures = 'CART-1441',
-    summary = 'repeated work on a repeating argument, in ONE run: targets = module.fn[,…] wrapped while `workload` (Lua returning function (store); @file) runs — per target calls, distinct argument keys (tables by identity), time, what a memo would SAVE and its PRICE (bytes; userdata / functions in results). Purity is yours to establish (effects.lua)',
-    params = { targets = 'string', workload = 'string' },
-    measure = measure,
+    summary = 'repeated work on a repeating argument, in ONE run: targets = module.fn[,…] wrapped while `workload` (Lua returning function (store); @file) runs — per target calls, distinct argument keys (tables by identity) and their KIND (identity | scalar | mixed: the memo residence), time, what a memo would SAVE and its PRICE (bytes; userdata / functions in results). Purity is yours to establish (effects.lua)',
+    params = { targets = 'string', workload = 'string', code = 'string?', timeout = 'string?' },
+    measure = W.code_aware('memo-advisor', measure),
     claim = function (v)
         if v.error then return false, v.error end
         local best = v.rows[1]
-        for _, r in ipairs(v.rows) do
-            if r.calls == 0 then return false, ('%s was never called through its module field — a caller holds a local reference (wrap where it is bound)'):format(r.name) end
-        end
-        if not best or best.saved <= 0 then return false, 'no target repeats an argument' end
-        return true, ('%s: %d calls on %d distinct arguments (%.1fx), a memo saves %.3f s of %.3f s (result %.1f KB%s)'):format(
+        -- a target never reached through its field is NAMED, never read as "no repetition"; it refuses the claim only
+        -- when no reached target shows a saving (among several hot fields, one bound locally by its caller — df's
+        -- `local rd = bytecol.rd` — must not hide the others' finding)
+        local unreached = {}
+        for _, r in ipairs(v.rows) do if r.calls == 0 then unreached[#unreached + 1] = r.name end end
+        local missed = #unreached > 0 and ('%s never called through its module field — a caller holds a local reference (wrap where it is bound)'):format(table.concat(unreached, ', ')) or nil
+        if not best or best.saved <= 0 then return false, missed or 'no target repeats an argument' end
+        return true, ('%s: %d calls on %d distinct arguments (%.1fx), a memo saves %.3f s of %.3f s (result %.1f KB%s)%s'):format(
             best.name, best.calls, best.distinct, best.repeat_ratio, best.saved, v.workload_seconds, best.result_kb,
-            best.userdata and ', holds userdata' or '')
+            best.userdata and ', holds userdata' or '', missed and ('; ' .. missed) or '')
     end,
 }
 
@@ -99,6 +111,9 @@ local FILES = {
         'local M = {}',
         'function M.slow(t) local s = 0 for i = 1, 20000 do s = s + #t end return s end',
         'function M.fresh(i) return i * 2 end',
+        'function M.never() return 0 end',
+        'local BIG = {} for i = 1, 4000 do BIG[i] = i end',
+        'function M.share(t) return { big = BIG, n = #t } end',
         'function M.work(items) local s = 0 for i, it in ipairs(items) do s = s + M.slow(it.f) + M.fresh(i) end return s end',
         'return M',
     }, '\n') .. '\n',
@@ -114,7 +129,26 @@ E.examples = {
             local by = {}
             for _, r in ipairs(v.rows or {}) do by[r.name] = r end
             return by['madv.slow'] and by['madv.slow'].calls == 200 and by['madv.slow'].distinct == 1 and by['madv.slow'].saved > 0
-                and by['madv.fresh'] and by['madv.fresh'].distinct == 200 and by['madv.fresh'].saved == 0, vim.inspect(by)
+                and by['madv.fresh'] and by['madv.fresh'].distinct == 200 and by['madv.fresh'].saved == 0
+                and by['madv.slow'].keys == 'identity' and by['madv.fresh'].keys == 'scalar', vim.inspect(by)
+        end },
+    },
+    {
+        name = 'the PRICE counts structure shared between results once (CART-1469): 20 results over one big table cost about one',
+        files = FILES,
+        params = function () return { targets = 'madv.share', workload = 'return function () local m = require "madv"; for i = 1, 20 do m.share({ i }) end; m.share({}) end' } end,
+        expect = { holds = false, check = function (v)
+            local one = measure({ data = {} }, { targets = 'madv.share', workload = 'return function () require("madv").share({ 1 }) end' })
+            local many, single = v.rows[1].result_kb, one.rows[1].result_kb
+            return many < single * 2, ('21 results %.1f KB, 1 result %.1f KB'):format(many, single)
+        end },
+    },
+    {
+        name = 'among several targets an UNREACHED one is named, and does not hide the saving another one shows',
+        files = FILES, params = function () return { targets = 'madv.slow,madv.never', workload = WORK } end,
+        expect = { holds = true, check = function (v)
+            local _, why = E.claim(v)
+            return why:find('madv.never never called', 1, true) ~= nil and why:find('^madv%.slow') ~= nil, why
         end },
     },
     {

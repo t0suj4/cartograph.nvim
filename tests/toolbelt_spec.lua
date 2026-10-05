@@ -148,6 +148,39 @@ test('toolbelt: T.use composes a NAMED tactic — a discovery gates the step aft
     eq(before, disk(), 'the step after a failed premise never ran')
 end)
 
+test('toolbelt: T.bind hands a discovery\'s VALUE to the next term — measured, then rewritten from the measurement (CART-1444)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local SRC = 'local M = {}\nM.runs = 0\nfunction M.slow(t) M.runs = M.runs + 1 return #t end\nfunction M.work(xs) local s = 0 for _, x in ipairs(xs) do s = s + M.slow(x) end return s end\nreturn M\n'
+    project { ['bindm.lua'] = SRC }
+    local function disk() local fd = assert(io.open(root .. '/bindm.lua')); local s = fd:read('a'); fd:close(); return s end
+    local T = tactic.T
+    -- (the module is loaded by the WRAPPER, from the graph's root: a fresh copy per project, never one left from before)
+    package.loaded.bindm = nil
+    local WORK = 'return function () local m = require "bindm"; local t = { 1, 2 }; local xs = {}; for i = 1, 50 do xs[i] = t end; m.work(xs) end'
+    local seen
+    local term = T.bind('memo-advisor', { targets = 'bindm.slow', workload = WORK }, function (v)
+        seen = v.rows[1]
+        return T.use('memoize', { ref = 'bindm.lua::M.slow', residence = v.rows[1].keys == 'identity' and 'weak' or 'strong' })
+    end)
+    local r = tactic.run(store, term, { apply = true })
+    package.loaded.bindm = nil
+    eq('done', r.status, tostring(r.why)); eq(1, r.applied)
+    eq(50, seen.calls); eq('identity', seen.keys)
+    ok(disk():find("__mode = 'k'", 1, true), 'the residence came from the measured key kind')
+    -- a body that leaves the choice open STOPS as a decision; a claim that fails never reaches the body
+    project { ['bindm.lua'] = SRC }
+    local d = tactic.run(store, T.bind('memo-advisor', { targets = 'bindm.slow', workload = WORK }, function ()
+        return nil, 'which residence?', 'decision' end), { apply = true })
+    package.loaded.bindm = nil
+    eq('stopped', d.status, tostring(d.why)); eq('decision', d.class)
+    local reached = false
+    local f = tactic.run(store, T.bind('memo-advisor', { targets = 'bindm.slow', workload = 'return function () end' }, function ()
+        reached = true; return T.use('memoize', { ref = 'bindm.lua::M.slow', residence = 'weak' }) end), { apply = true })
+    eq('failed', f.status); ok(not reached, 'the body ran after a failed claim'); eq(SRC, disk())
+    local w = tactic.run(store, T.bind('memoize', { ref = 'bindm.lua::M.slow' }, function () return T.seq() end), { apply = true })
+    eq('ill-posed', w.class); ok(w.why:find('needs a DISCOVERY', 1, true), w.why)
+end)
+
 test('toolbelt: a cycle of uses refuses by name, and an unknown entry or a bad param fails at its own step', function ()
     if not ready() then skip 'no lua parser or algebra' end
     project { ['fe.lua'] = FAMILY }

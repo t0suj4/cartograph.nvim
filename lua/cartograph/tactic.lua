@@ -255,6 +255,15 @@ function M.T.each(items, body) return { op = 'each', items = items, body = body 
 --- a NAMED toolbelt entry as a step (cartograph.toolbelt): a write entry runs its own term, a discovery is a PREMISE
 --- gate — it passes when its claim holds and fails ill-posed, by name, when it does not
 function M.T.use(name, params) return { op = 'use', name = name, params = params or {} } end
+--- ★ DATA FLOW (CART-1444): run the NAMED discovery and hand its VALUE to `body(value) -> term | nil, why, class` — the
+--- next step is built from what was measured (an optimization loop: profile -> advise -> rewrite). Gates like `use`:
+--- a claim that does not hold stops the run by name. A body that returns nil stops with its class (`decision` = the
+--- choice the measurement left open). ⚠ the body is a Lua function, so (like `each`) the term is not serializable.
+--- `opts.ungated`: the body gets the value whether or not the claim holds (a check that a rewrite REMOVED what the
+--- discovery finds: its claim failing is the success)
+function M.T.bind(name, params, body, opts)
+    return { op = 'bind', name = name, params = params or {}, body = body, ungated = opts and opts.ungated or nil }
+end
 M.T['then'], M.T['repeat'] = M.T.seq, M.T.rep
 
 -- ── the runner ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -618,11 +627,11 @@ function eval(store, t, opts, where)
         return adopt(out, { class = 'ill-posed', where = where,
             why = ('repeat did not converge within %d iterations — each made a change, none ran out of work'):format(limit) })
     end
-    if op == 'use' then
+    if op == 'use' or op == 'bind' then
         -- ★ TACTICS COMPOSE BY NAME: the toolbelt is a library, not a flat list. Params are coerced by the entry's
         -- own declaration (the same function the CLI and the MCP verb use), and a cycle of uses refuses.
         local tb = require 'cartograph.toolbelt'
-        local here = ('%s.use(%s)'):format(where, tostring(t.name))
+        local here = ('%s.%s(%s)'):format(where, op, tostring(t.name))
         opts.using = opts.using or {}
         if opts.using[t.name] then
             return adopt(outcome(), { class = 'ill-posed', where = here,
@@ -632,21 +641,40 @@ function eval(store, t, opts, where)
         if not e then return adopt(outcome(), { class = 'ill-posed', where = here, why = lwhy }) end
         local p, pwhy, pclass = tb.coerce(store, e, t.params)
         if not p then return adopt(outcome(), { class = pclass or 'ill-posed', where = here, why = pwhy }) end
+        if t.op == 'bind' and e.kind ~= 'discovery' then
+            return adopt(outcome(), { class = 'ill-posed', where = here, why = ('bind needs a DISCOVERY to measure; `%s` is a %s'):format(t.name, tostring(e.kind)) })
+        end
         if e.kind == 'discovery' then
             local okm, value = pcall(e.measure, store, p)
             if not okm then return adopt(outcome(), { class = 'unbuilt', where = here, why = 'the measurement raised: ' .. tostring(value) }) end
             local holds, cwhy = e.claim(value)
             local o = outcome()
-            o.trace[1] = { where = here, verb = 'use:' .. t.name, ok = holds and true or false, why = cwhy }
-            if not holds then
+            o.trace[1] = { where = here, verb = (t.op == 'bind' and 'bind:' or 'use:') .. t.name, ok = holds and true or false, why = cwhy }
+            if not holds and not t.ungated then
                 return adopt(o, { class = 'ill-posed', where = here,
                     why = ('the premise `%s` does not hold: %s'):format(t.name, tostring(cwhy)) })
             end
-            o.residue[1] = { kind = 'premise', class = 'informational', where = here, text = ('premise `%s` holds: %s'):format(t.name, tostring(cwhy)) }
+            o.residue[1] = { kind = 'premise', class = 'informational', where = here,
+                text = ('premise `%s` %s: %s'):format(t.name, holds and 'holds' or 'does not hold (ungated)', tostring(cwhy)) }
+            if t.op ~= 'bind' then return o end
+            local okb, next_t, bwhy, bclass = pcall(t.body, value)
+            if not okb then return adopt(o, { class = 'unbuilt', where = here, why = 'the bind body raised: ' .. tostring(next_t) }) end
+            if not next_t then return adopt(o, { class = bclass or 'ill-posed', where = here, why = tostring(bwhy) }) end
+            local k = eval(store, next_t, opts, here .. '.1')
+            merge(o, k)
+            o.empty = k.empty
+            if not k.ok then adopt(o, k) end
             return o
         end
         opts.using[t.name] = true
-        local o = eval(store, e.build(p), opts, here)
+        -- (build sees the STORE: a write built from the code it rewrites — memoize reads the function's header. A build
+        -- that cannot build returns nil, why, class and stops by name)
+        local built, bwhy, bclass = e.build(p, store)
+        if not built then
+            opts.using[t.name] = nil
+            return adopt(outcome(), { class = bclass or 'ill-posed', where = here, why = tostring(bwhy) })
+        end
+        local o = eval(store, built, opts, here)
         opts.using[t.name] = nil
         if o.ok and opts.apply and e.oracle then
             local ook, owhy = e.oracle(store, o, p)
@@ -655,7 +683,7 @@ function eval(store, t, opts, where)
         return o
     end
     return adopt(outcome(), { class = 'ill-posed', where = where,
-        why = ('no tactical `%s` (then|first|try|repeat|each|step|use)'):format(tostring(op)) })
+        why = ('no tactical `%s` (then|first|try|repeat|each|step|use|bind)'):format(tostring(op)) })
 end
 
 --- ★ NO POINT OF NO RETURN BEFORE A CHECK (CART-1187): walk the term in EXECUTION ORDER before anything runs. Each
@@ -688,8 +716,8 @@ function M.no_return_check(term, verbs, has_oracle)
         elseif op == 'first' or op == 'repeat' then
             -- an irreversible step inside is refused by the runner itself; the tactical as a whole can stop the run
             if not safe then events[#events + 1] = { kind = 'stop', where = where, what = '`' .. op .. '`' } end
-        elseif op == 'use' then
-            if not safe then events[#events + 1] = { kind = 'stop', where = where, what = 'use `' .. tostring(t.name) .. '`' } end
+        elseif op == 'use' or op == 'bind' then
+            if not safe then events[#events + 1] = { kind = 'stop', where = where, what = op .. ' `' .. tostring(t.name) .. '`' } end
         end
     end
     walk(term, 'root', false)

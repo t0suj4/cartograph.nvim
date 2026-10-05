@@ -527,8 +527,17 @@ function M.run(store, name, params, opts)
         local holds, cwhy = e.claim(value)
         return { value = value, holds = holds and true or false, why = cwhy, throwaway = e.throwaway or nil }
     end
-    local term = e.build(params or {})
-    local ropts = { apply = opts.apply, on_stop = opts.on_stop, correct = opts.correct, verbs = opts.verbs,
+    local term, bwhy, bclass = e.build(params or {}, store)
+    if not term then
+        -- a write that cannot BUILD (the code is a shape it does not rewrite) is a run that failed at its first step, by
+        -- name and class — the same result a refused step gives, so a caller reads one shape
+        bclass = bclass or 'ill-posed'
+        return { status = bclass == 'decision' and 'stopped' or 'failed', class = bclass, why = ('%s: %s'):format(name, tostring(bwhy)),
+            where = 'build', residue = {}, trace = {}, completed = {}, resumable = true, applied = 0, rolled_back = 0, corrections = {},
+            work_orders = bclass == 'unbuilt' and { { where = 'build', why = tostring(bwhy) } } or {}, worlds = 0 }
+    end
+    -- (an entry may declare its own `on_stop`: the optimize loop ROLLS BACK a rewrite its A/B check rejects)
+    local ropts = { apply = opts.apply, on_stop = opts.on_stop or e.on_stop, correct = opts.correct, verbs = opts.verbs,
         approvals = opts.approvals }
     if e.oracle then ropts.oracle = function (st, res) return e.oracle(st, res, params or {}) end end
     return require('cartograph.tactic').run(store, term, ropts)

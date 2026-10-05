@@ -141,6 +141,16 @@ function M.plan(store, args)
         hazards = {},
         desc = ('edit %s: %d -> %d bytes at one site%s'):format(rel, #args.before, #args.after, creates and ' (create)' or ''),
     }
+    -- ★ A GATED EDIT (CART-1444): `decide = { kind, reason, evidence? }` makes the step a DECISION — it stops until the
+    -- run accepts `kind` (or a remembered / signed answer does). For a write tactic whose text embodies a choice the
+    -- code cannot make (memoize's residence). The decision key covers the evidence AND the text written, so one answer
+    -- never covers another site or another text.
+    if type(args.decide) == 'table' and args.decide.kind then
+        local ev = {}
+        for k, v in pairs(args.decide.evidence or {}) do ev[k] = v end
+        ev.file, ev.text = rel, vim.fn.sha256(args.after)
+        plan.hazards[1] = require('cartograph.hazard').new(args.decide.kind, tostring(args.decide.reason or args.decide.kind), nil, ev, 'decision')
+    end
     plan.within = slice_of and true or nil
     return txn.protocol(plan, function (p)
         return function (r, before_text)
