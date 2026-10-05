@@ -497,7 +497,7 @@ function M.files(rels, opts)
     local focused = store.focused
     local back, fwd = carry_stack(store._nav_back), carry_stack(store._nav_fwd)
     local loc = store.loc_provider and store.loc_provider.get()
-    store.ingest(data)
+    store.ingest(data, { refresh = true })
     store._nav_back, store._nav_fwd = back, fwd
     require('cartograph.toc').attach(store)
     -- the working set re-resolves through its refs (renames followed,

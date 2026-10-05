@@ -371,7 +371,10 @@ function M.ingest(data, opts)
         if cfg.nodecols_store then M._install_nodecols() end
         if cfg.edgecols_store then M._install_edgecols() end
     end
-    if #M.data.nodes > 20000 and rawget(_G, 'jit') and jit.flush then
+    -- ⚠ NOT ON A SAVE (opts.refresh, CART-1439): a refresh re-extracts one file, which pins next to nothing, yet the
+    -- flush + two full collections were ~30% of a cutoff save on our full tree (636 of 2,128 samples) — and the flush
+    -- threw away every compiled trace each time. The incremental GC reclaims the previous indexes on its own.
+    if not (opts and opts.refresh) and #M.data.nodes > 20000 and rawget(_G, 'jit') and jit.flush then
         jit.flush()
         collectgarbage(); collectgarbage()
     end
