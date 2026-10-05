@@ -64,6 +64,8 @@ M.SLOTS = {
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
     exported_def = 'SCOPE&KEY',    -- visibility (pub/export) detection
     flocal = 'SCOPE&KEY',          -- C/C++: file-local by linkage (static, a source-file macro), CART-1081
+    var_local = 'SCOPE&KEY',       -- a module VAR invisible outside its file (lua `local`): never the cross-file
+                                   -- fallback target of a free name in another file (CART-1473)
     clink = 'SCOPE&KEY',           -- C/C++: declared inside extern "C" (the C/C++ join bridge, CART-1079)
     escape_names = 'SCOPE&KEY',    -- names mentioned in a VALUE position in a file:
                                    -- the other half of exported_def, since a

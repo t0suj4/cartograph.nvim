@@ -409,7 +409,8 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 212 -- v212: THE MEMO IDIOM'S EARLY-EXIT SPELLING IS SET-ONCE (CART-1433): `if c[k] then return c[k] end … c[k] = v`
+M.VERSION = 213 -- v213: A LUA `local` MODULE VAR IS NEVER A CROSS-FILE USE TARGET (CART-1473): var nodes carry `vlocal`; TSM 1,061 -> 371 cross-file use edges, our tree 2,831 -> 1,040
+-- v212: THE MEMO IDIOM'S EARLY-EXIT SPELLING IS SET-ONCE (CART-1433): `if c[k] then return c[k] end … c[k] = v`
 --- (directly, through a `local v = c[k]` alias, or `~= nil`) classifies the write gw = 3 like `if not c[k] then … end`;
 --- also the absence test spelled on an alias, the write inside it (`local v = c[k]; if not v then … c[k] = v end`);
 --- lua/cartograph's set-once use edges 15 -> 50. Cached graphs carry gw on their use edges.

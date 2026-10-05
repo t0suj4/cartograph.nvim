@@ -1835,7 +1835,8 @@ test('mention index: globals reconcile in UNCHANGED files, both ways', function 
 
     -- 0 -> 1: an EDIT ELSEWHERE creates the global; alpha's file is
     -- untouched, yet its inbound use edge must appear
-    write('sub/b.lua', 'local shiny = {}\n\nlocal function beta(y)\n'
+    -- (a GLOBAL: a lua `local` is its chunk's only, and never the target of another file's mention — CART-1473)
+    write('sub/b.lua', 'shiny = {}\n\nlocal function beta(y)\n'
         .. '  return y\nend\n')
     local warm = cache.open(root)
     ok(edge_alpha_shiny(warm), 'inbound use edge appeared in unchanged file')
@@ -1846,7 +1847,7 @@ test('mention index: globals reconcile in UNCHANGED files, both ways', function 
 
     -- 1 -> 2: a second definition makes the name ambiguous; the edge
     -- that only uniqueness justified must disappear
-    write('c.lua', 'local shiny = 1\n')
+    write('c.lua', 'shiny = 1\n')
     local warm2 = cache.open(root)
     ok(not edge_alpha_shiny(warm2),
         'ambiguity retracted the inferred use edge')
@@ -1865,7 +1866,8 @@ test('incremental cache: warm open re-extracts only the diff', function ()
         fd:write(text)
         fd:close()
     end
-    write('a.lua', 'local registry = {}\n\nlocal function alpha(x)\n'
+    -- (registry a GLOBAL: a lua `local` never reaches another file — CART-1473)
+    write('a.lua', 'registry = {}\n\nlocal function alpha(x)\n'
         .. '  return beta(x)\nend\n')
     -- beta is a GLOBAL: a.lua calls it by bare name from another file, and since
     -- CART-0230 that only resolves when the def is actually reachable from there
@@ -5637,5 +5639,30 @@ test('treesitter: relink reads a function\'s df-defined names ONCE, however many
     for _, n in pairs(calls) do if n > worst then worst = n end end
     ok(next(calls) ~= nil, 'the binding check read df at all')
     ok(worst <= 2, 'one node\'s df decoded ' .. worst .. ' times (40 calls ask)')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('treesitter: a lua `local` module var is never the cross-file target of a free name in another file (CART-1473)', function ()
+    -- m.lua's `local verified` and o.lua's GLOBAL `verified`: lua scopes a local to its chunk, so o.lua's write is not
+    -- a use of m.lua's var. The unique-name fallback linked them (TSM: 1,061 -> 371 cross-file use edges; our tree
+    -- 2,831 -> 1,040 — every removed one into a local). A GLOBAL var stays linkable across files
+    local root = mkroot('m.lua', 'local verified = {}\nlocal function f(k) verified[k] = 1 return verified[k] end\nG = 1\nreturn f\n')
+    local fd = assert(io.open(root .. '/o.lua', 'w'))
+    fd:write('local M = {}\nfunction M.render() verified = {} return verified end\nfunction M.g() return G end\nreturn M\n'); fd:close()
+    local data = ts.extract(root)
+    local function users(name)
+        local id = var_id(data, name)
+        local out = {}
+        for from in pairs(uses_into(data, id)) do out[#out + 1] = from end
+        table.sort(out)
+        return out, id
+    end
+    local v = users('verified')
+    for _, from in ipairs(v) do ok(not from:find('^o%.lua'), 'o.lua reaches m.lua\'s local: ' .. vim.inspect(v)) end
+    ok(#v > 0, 'm.lua\'s own uses stay: ' .. vim.inspect(v))
+    local g = users('G')
+    local cross = false
+    for _, from in ipairs(g) do if from:find('^o%.lua') then cross = true end end
+    ok(cross, 'a GLOBAL is still linked across files: ' .. vim.inspect(g))
     vim.fn.delete(root, 'rf')
 end)

@@ -908,6 +908,9 @@ return {
                 (variable_list name: (identifier) @vname)
                 (expression_list value: (_) @value)) @vdef)
     ]],
+    -- a `local` module var is visible in its file only (CART-1473): the @vdef of a `local x = …` is the declaration,
+    -- of a global `x = …` the bare assignment
+    var_local = function (defn) return defn:type() == 'variable_declaration' end,
     params_field = 'parameters',
     body_field = 'body',
     -- see spec/php.lua for what these two are for. `_G[k]` is lua's index form;

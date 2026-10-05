@@ -5592,7 +5592,9 @@ local function reduce_mentions(file, buf, L)
                 end
                 var = up or down
             end
-            if not var and #cands == 1
+            -- (never to a FILE-LOCAL var, CART-1473: lua's `local x` in one file is not the `x` a free mention in
+            -- another file names — it read as a global write rebinding approvals.lua's `verified`)
+            if not var and #cands == 1 and not cands[1].vlocal
                 and not (L.scopes and L.scopes[cands[1].file]
                     ~= L.scopes[file]) then
                 -- the cross-file unique fallback only for FREE names:
@@ -5810,7 +5812,7 @@ function M.lookups(nodes, root, narrow)
             -- interface types/macros (ctype) are browse-only, not use targets
             var_named[n.name] = var_named[n.name] or {}
             table.insert(var_named[n.name],
-                { id = n.id, file = n.file, line = atr.sl(n.range) })
+                { id = n.id, file = n.file, line = atr.sl(n.range), vlocal = n.vlocal })
         end
     end
     -- scope map: languages with a resolution boundary (rust crates) get
@@ -7047,7 +7049,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
                         file = file, range = sp, order = sp.start.line,
                         torn = torn, decl = declonly or nil,
-                        data = type(d) == 'table' and d or nil }
+                        data = type(d) == 'table' and d or nil,
+                        vlocal = spec.var_local and spec.var_local(defn) or nil }
                     if not torn then
                         varsByName[name] = varsByName[name] or {}
                         table.insert(varsByName[name], nodes[#nodes])
@@ -9124,7 +9127,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             local list = {}
             for _, v in ipairs(vars) do
                 list[#list + 1] = { id = v.id, file = v.file,
-                    line = atr.sl(v.range) }
+                    line = atr.sl(v.range), vlocal = v.vlocal }
             end
             var_named[name] = list
         end
