@@ -9,23 +9,14 @@
 -- ⚠ A wrapper on a module FIELD sees only calls made through the field: a caller that bound `local f = M.f` at load
 -- is invisible (harness #47) — zero calls REFUSES by name instead of reading as "no repetition".
 -- CLAIM: some target repeats (distinct < calls) and a memo would save time.
-local function load_text(s)
-    if type(s) ~= 'string' then return nil end
-    return s
-end
+local W = require 'cartograph.workload'
 
 local function measure(store, p)
-    local targets = {}
-    for t in tostring(p.targets or ''):gmatch('[^,%s]+') do targets[#targets + 1] = t end
+    local targets = W.list(p.targets)
     if #targets == 0 then return { error = 'targets = module.fn[,module.fn…] names nothing' } end
-    local chunk, cwhy = load(load_text(p.workload) or '', 'workload', 't')
-    if not chunk then return { error = 'the workload does not load: ' .. tostring(cwhy) } end
-    local okw, work = pcall(chunk)
-    if not okw or type(work) ~= 'function' then return { error = 'the workload must return function (store): ' .. tostring(work) } end
-    -- (a target may be a module of the measured TREE: its root resolves `require` too)
-    local root = store.data and store.data.root
-    if root and not package.path:find(root .. '/?.lua', 1, true) then package.path = root .. '/?.lua;' .. root .. '/?/init.lua;' .. package.path end
-    local rows, undo = {}, {}
+    local work, why = W.load(p.workload)
+    if not work then return { error = why } end
+    local rows = {}
     local idkey = setmetatable({}, { __mode = 'k' })
     local nid = 0
     local function key_of(v)
@@ -49,14 +40,11 @@ local function measure(store, p)
         for k, x in pairs(v) do s = s + 16 + size(k, seen, row) + size(x, seen, row) end
         return s
     end
-    for _, t in ipairs(targets) do
-        local mod, fn = t:match('^(.*)%.([%w_]+)$')
-        local okm, M = pcall(require, mod or '')
-        if not (okm and type(M) == 'table' and type(M[fn]) == 'function') then return { error = 'no function ' .. t } end
-        local real = M[fn]
+    local t0 = vim.uv.hrtime()
+    local ok, okr, rerr = W.run_wrapped(store, work, targets, function (real, t)
         local row = { name = t, calls = 0, distinct = 0, ns = 0, bytes = 0, keys = {} }
         rows[#rows + 1] = row
-        M[fn] = function (...)
+        return function (...)
             local n = select('#', ...)
             local parts = {}
             for i = 1, n do parts[i] = key_of((select(i, ...))) end
@@ -64,18 +52,15 @@ local function measure(store, p)
             local fresh = not row.keys[k]
             if fresh then row.keys[k] = true; row.distinct = row.distinct + 1 end
             row.calls = row.calls + 1
-            local t0 = vim.uv.hrtime()
+            local s = vim.uv.hrtime()
             local r = { real(...) }
-            row.ns = row.ns + (vim.uv.hrtime() - t0)
+            row.ns = row.ns + (vim.uv.hrtime() - s)
             if fresh then row.bytes = row.bytes + size(r, {}, row) end
             return unpack(r)
         end
-        undo[#undo + 1] = function () M[fn] = real end
-    end
-    local t0 = vim.uv.hrtime()
-    local okr, rerr = pcall(work, store)
+    end)
     local total = (vim.uv.hrtime() - t0) / 1e9
-    for i = #undo, 1, -1 do undo[i]() end
+    if not ok then return { error = okr } end
     if not okr then return { error = 'the workload raised: ' .. tostring(rerr) } end
     local out = {}
     for _, r in ipairs(rows) do
@@ -110,7 +95,7 @@ local E = {
 }
 
 local FILES = {
-    ['m.lua'] = table.concat({
+    ['madv.lua'] = table.concat({
         'local M = {}',
         'function M.slow(t) local s = 0 for i = 1, 20000 do s = s + #t end return s end',
         'function M.fresh(i) return i * 2 end',
@@ -118,23 +103,23 @@ local FILES = {
         'return M',
     }, '\n') .. '\n',
 }
-local WORK = 'return function (store) package.path = store.data.root .. "/?.lua;" .. package.path; local m = require "m"; '
+local WORK = 'return function (store) package.path = store.data.root .. "/?.lua;" .. package.path; local m = require "madv"; '
     .. 'local f = { 1, 2, 3 }; local items = {}; for i = 1, 200 do items[i] = { f = f } end; m.work(items) end'
 
 E.examples = {
     {
         name = 'a function called 200 times on ONE table is a memo candidate; one called on 200 distinct values is not',
-        files = FILES, params = function () return { targets = 'm.slow,m.fresh', workload = WORK } end,
+        files = FILES, params = function () return { targets = 'madv.slow,madv.fresh', workload = WORK } end,
         expect = { holds = true, check = function (v)
             local by = {}
             for _, r in ipairs(v.rows or {}) do by[r.name] = r end
-            return by['m.slow'] and by['m.slow'].calls == 200 and by['m.slow'].distinct == 1 and by['m.slow'].saved > 0
-                and by['m.fresh'] and by['m.fresh'].distinct == 200 and by['m.fresh'].saved == 0, vim.inspect(by)
+            return by['madv.slow'] and by['madv.slow'].calls == 200 and by['madv.slow'].distinct == 1 and by['madv.slow'].saved > 0
+                and by['madv.fresh'] and by['madv.fresh'].distinct == 200 and by['madv.fresh'].saved == 0, vim.inspect(by)
         end },
     },
     {
         name = 'a target never reached through its module field REFUSES by name — never "no repetition"',
-        files = FILES, params = function () return { targets = 'm.fresh', workload = 'return function (store) end' } end,
+        files = FILES, params = function () return { targets = 'madv.fresh', workload = 'return function (store) end' } end,
         expect = { holds = false, check = function (v) return v.rows and v.rows[1] and v.rows[1].calls == 0, vim.inspect(v) end },
     },
 }

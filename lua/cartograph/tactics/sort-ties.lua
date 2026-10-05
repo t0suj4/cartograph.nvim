@@ -10,10 +10,8 @@
 -- `workload` = Lua source returning `function (store)` (`@file` reads one).
 -- CLAIM: some sort in the run leaves ties among distinct elements.
 local function measure(store, p)
-    local chunk, cwhy = load(p.workload or '', 'workload', 't')
-    if not chunk then return { error = 'the workload does not load: ' .. tostring(cwhy) } end
-    local okw, work = pcall(chunk)
-    if not okw or type(work) ~= 'function' then return { error = 'the workload must return function (store): ' .. tostring(work) } end
+    local work, why = require('cartograph.workload').load(p.workload)
+    if not work then return { error = why } end
     local sites, nsorts = {}, 0
     local real = table.sort
     local function lt_default(a, b) return a < b end
