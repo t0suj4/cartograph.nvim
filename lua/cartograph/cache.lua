@@ -409,7 +409,8 @@ end
 -- to the importer's OWN source root (its path minus its declared package, `import_context`) and is
 -- otherwise REFUSED. Accepted by tools/javaimports.lua against every file's package declaration:
 -- 0 wrong over eight corpora.
-M.VERSION = 219 -- v219: A HIGHER-ORDER REFUSAL NAMES ITS PARAMETER (CART-1495: owner fn + index, for the effects fixpoint's substitution) and refusals intern by their WHOLE content (CART-1496: the listed key merged records differing in owner/param/macro)
+M.VERSION = 220 -- v220: THREE MORE FALSE LINKS GONE (CART-1497/1498/1499): an installer part's SHARED aliases and the host's table-of-locals alt keys (PARTS.key); an identifier argument bound as the caller's param never upgrades to another file's function; a stdlib-prefixed override binds only its own file
+-- v219: A HIGHER-ORDER REFUSAL NAMES ITS PARAMETER (CART-1495: owner fn + index, for the effects fixpoint's substitution) and refusals intern by their WHOLE content (CART-1496: the listed key merged records differing in owner/param/macro)
 -- v218: THE INSTALLER FAMILY (CART-1493): a part `return function (M, …)` installed by `require('part')(M, …)` writes the host's table — the algebra parts' M.x calls resolve to the family's one M.x (lua/: algebra M.* ambiguous 158 -> 17)
 -- v217: AN INLINE REQUIRE NAMES ITS MODULE (CART-1113): `require('m').f(…)` resolves to m's f through the import edge at its path argument (lua/: ambiguous 407 -> 21)
 -- v216: A LUA METHOD CALL IS NEVER LINKED TO A PLAIN FUNCTION (CART-1491): `x:f()` passes x as self, so a name-only resolution to `M.f(...)` / a local `f` is vetoed to a `blocked` refusal (1,053 such links on lua/: tree:root -> M.root, timer:is_closing -> a local)

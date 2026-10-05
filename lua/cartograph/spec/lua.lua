@@ -411,6 +411,21 @@ local function reexports(src)
             end
         end
     end
+    -- …and a FILE-LEVEL TABLE OF LOCALS (CART-1497): `local PARTS = { key = key, child = child, … }` hands the table to
+    -- whoever receives it (core's PARTS, installed into every algebra part as SHARED): field `f` IS the local `id`. The
+    -- DOTTED key only (`PARTS.f`) — a bare `f` would let any file's bare call reach this local. Top-level `name = id`
+    -- fields only: a nested table's fields are not this table's.
+    if type(src) == 'string' then
+        for tname, body in src:gmatch('\nlocal%s+([%a_][%w_]*)%s*=%s*(%b{})') do
+            local flat = body:sub(2, -2):gsub('%b{}', '{}')
+            for f, id in (flat .. ','):gmatch('([%a_][%w_]*)%s*=%s*([%a_][%w_]*)%s*[,;]') do
+                if id ~= tname then
+                    map[id] = map[id] or {}
+                    map[id][#map[id] + 1] = tname .. '.' .. f
+                end
+            end
+        end
+    end
     reexport_src, reexport_map = src, map
     return map
 end
@@ -1345,6 +1360,17 @@ return {
     -- a BARE call reaches a bare name only: Lua has no implicit receiver, so `tonumber(x)` is never some file's
     -- `T.tonumber` (the resolver's tail join otherwise links it there, CART-1487)
     bare_calls_bind_bare = true,
+    -- a statement directly in a `return function (…) … end` wrapper: an INSTALLER part's body, which is its module scope
+    -- (CART-1497 — its `local key = SHARED.key` aliases are recorded like a file's own)
+    installer_scope = function (defn)
+        local b = defn:parent()
+        local f = b and b:parent()
+        local e = f and f:parent()
+        local r = e and e:parent()
+        local c = r and r:parent()
+        return (b and b:type() == 'block' and f:type() == 'function_definition' and e and e:type() == 'expression_list'
+            and r and r:type() == 'return_statement' and c and c:type() == 'chunk') or false
+    end,
     -- `x:f()` passes x as the first argument: its target is a method (`T:f` or a first parameter `self`), never a
     -- plain function of the same name (CART-1491)
     colon_calls_pass_self = true,

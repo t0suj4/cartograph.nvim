@@ -3901,6 +3901,19 @@ local function callee_binding(callee, fn, parent_fn)
     end
 end
 
+-- the CALLBACK UPGRADE's shadow gate (CART-1498): an identifier ARGUMENT bound in the calling function's chain is that
+-- binding, never a function of the corpus by name. A PARAMETER (`child(path, i) … unpack(path)`) or a JS local decl
+-- is a value handed in — measured: core's `child` passing its `path` param was linked to stampcache.lua's function
+-- `path`, which glued core into a 53-member cycle with ir.lua and every basis fn read its hedges. A df-tracked LOCAL
+-- (lua's `local function f` / forward decl) may still be a same-file function, never another file's. -> true = skip.
+function M._arg_shadowed(name, fn, parent_fn, target, file)
+    if not fn then return false end
+    local b = callee_binding(name, fn, parent_fn)
+    if b == 'higher-order' or b == 'localdecl' then return true end
+    if b == 'local' and target and target.file ~= file then return true end
+    return false
+end
+
 -- the LOCAL-SHADOW gate: a bare callee is a shadow iff it's a JS/TS localdecl
 -- binding (const/let/var, incl. destructuring) AND no same-file fn/method of that
 -- name exists for it to legitimately BE. `const f = ()=>{}` HAS a same-file fn
@@ -4060,7 +4073,7 @@ end
 -- = the name it binds the table to }; a part installed into two tables is no member of either (which table it
 -- writes is the run's). A dotted call `B.f` in a member, B its binding, resolves to the ONE `<binding>.f` defined in
 -- the family's files — or is CORRECTED when the name join landed outside them — hedged ~ like module_alias.
-local function resolve_installer(cv, edges, exact, addref, node_index)
+local function resolve_installer(cv, edges, exact, addref, node_index, fieldalias)
     local argv = require 'cartograph.argv'
     local params_of = {}
     for _, n in pairs(node_index or {}) do
@@ -4110,7 +4123,14 @@ local function resolve_installer(cv, edges, exact, addref, node_index)
     for i = 1, cv.n do
         local cfull, cfile = cget(i, 'full'), cget(i, 'file')
         local recv, member = nil, nil
-        if cfull then recv, member = tostring(cfull):match('^([%a_][%w_]*)%.([%w_]+)$') end
+        if cfull then recv, member = tostring(cfull):match('^([%a_][%w_]*)%.([%w_]+)$')
+        else
+            -- a BARE call through a field alias of the shared table (CART-1497): `local key = SHARED.key` in a part,
+            -- `key(path)` — the member `key` of the family's table (the host's `PARTS = { key = key }` gives its local
+            -- the alt key `PARTS.key`)
+            local b = fieldalias and fieldalias[cfile] and fieldalias[cfile][tostring(cget(i, 'callee'))]
+            if b and b.n == 1 then recv, member = b.recv, b.member end
+        end
         local f = recv and of[cfile] and of[cfile][recv]
         if f then
             local fit, dup
@@ -4149,7 +4169,7 @@ local RESOLVE_PASSES = {
         return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.unparsed) end },
     { name = 'installer', run = function (x) -- `require('part')(M, …)`: the part's M IS the host's (CART-1493)
-        return resolve_installer(x.cv, x.data.edges, x.exact, x.addref, x.node_index) end },
+        return resolve_installer(x.cv, x.data.edges, x.exact, x.addref, x.node_index, x.data.fieldalias) end },
     { name = 'field_alias', run = function (x) -- `local f = mod.field` then bare f()
         return resolve_field_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.data.fieldalias) end },
@@ -7360,6 +7380,24 @@ local MATCH_OPTS = { match_limit = 65536 }
                         end
                     end
                 end
+            elseif defn and namen and valn and spec.field_alias and spec.installer_scope and spec.installer_scope(defn) then
+                -- an INSTALLER part's body IS its module scope (CART-1497): `return function (M, SHARED) local key =
+                -- SHARED.key … end` — its field aliases are recorded like a file's own (and nothing else: no var node).
+                -- Once per name (seen_var: the vars query matches a multi-assignment's name once per value)
+                local name = node_text(namen, src)
+                local id = ('%s::alias:%s@%d'):format(file, name, pos_of(defn).start.line)
+                if not seen_var[id] then
+                    seen_var[id] = true
+                    local arecv, amember = spec.field_alias(valn, src)
+                    if arecv and amember then
+                        data.fieldalias = data.fieldalias or {}
+                        local fa = data.fieldalias[file]
+                        if not fa then fa = {}; data.fieldalias[file] = fa end
+                        local b = fa[name]
+                        if not b then fa[name] = { recv = arecv, member = amember, n = 1 }
+                        else b.n = b.n + 1 end
+                    end
+                end
             end
         end
         -- header/interface elements (C/C++): prototypes, macros and types.
@@ -8726,6 +8764,21 @@ local MATCH_OPTS = { match_limit = 65536 }
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil, nil, nil, EXT.vocab end
         local cands = exact[name]
+        -- (a project def UNDER A STDLIB PREFIX — `table.sort = function …` inside a tactic — is a RUNTIME OVERRIDE: a
+        -- call in another file reaches the builtin unless that code has run, so only its own file binds to it. Through
+        -- this tier core's `table.sort` had reached sort-ties.lua's override, and every basis fn that sorts read
+        -- workload.lua's hedges — CART-1499)
+        if cands and spec and spec.stdlib_prefixes then
+            for _, pre in ipairs(spec.stdlib_prefixes) do
+                if name:sub(1, #pre) == pre then
+                    local own = {}
+                    for _, n in ipairs(cands) do if n.file == file then own[#own + 1] = n end end
+                    if #own == 0 then return nil, nil, nil, EXT.prefix end
+                    cands = own
+                    break
+                end
+            end
+        end
         -- the stdlib TAIL gate guards the fallbacks below; an exact match
         -- on a fully-qualified name (Engine::new) clears first. Literal-
         -- name languages (bash) have no qualification syntax at all — a
@@ -9315,7 +9368,8 @@ local MATCH_OPTS = { match_limit = 65536 }
         for _, a in ipairs(p.call.argv) do
             if a.k == 'local' and a.name then
                 local t2, _ = resolve(a.name, p.file)
-                if t2 and (t2.kind == 'function' or t2.kind == 'method') then
+                if t2 and (t2.kind == 'function' or t2.kind == 'method')
+                    and not M._arg_shadowed(a.name, p.call.fn and node_index[p.call.fn], parent_fn, t2, p.file) then
                     a.k, a.to, a.up = 'func', t2.id, true
                     local from = p.call.fn
                     if from then
@@ -9743,6 +9797,21 @@ function M.relink(data, touched, opts)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil, nil, nil, EXT.vocab end
         local cands = exact[name]
+        -- (a project def UNDER A STDLIB PREFIX — `table.sort = function …` inside a tactic — is a RUNTIME OVERRIDE: a
+        -- call in another file reaches the builtin unless that code has run, so only its own file binds to it. Through
+        -- this tier core's `table.sort` had reached sort-ties.lua's override, and every basis fn that sorts read
+        -- workload.lua's hedges — CART-1499)
+        if cands and spec and spec.stdlib_prefixes then
+            for _, pre in ipairs(spec.stdlib_prefixes) do
+                if name:sub(1, #pre) == pre then
+                    local own = {}
+                    for _, n in ipairs(cands) do if n.file == file then own[#own + 1] = n end end
+                    if #own == 0 then return nil, nil, nil, EXT.prefix end
+                    cands = own
+                    break
+                end
+            end
+        end
         -- the stdlib TAIL gate guards the fallbacks below; an exact match
         -- on a fully-qualified name (Engine::new) clears first. Literal-
         -- name languages (bash) have no qualification syntax at all — a
@@ -10136,7 +10205,8 @@ function M.relink(data, touched, opts)
             local ak, aname = cv.aget(i, j, 'k'), cv.aget(i, j, 'name')
             if ak == 'local' and aname then
                 local t2 = resolve(aname, cfile)
-                if t2 and (t2.kind == 'function' or t2.kind == 'method') then
+                if t2 and (t2.kind == 'function' or t2.kind == 'method')
+                    and not M._arg_shadowed(aname, cfn and node_index[cfn], parent_fn, t2, cfile) then -- (CART-1498)
                     cv.aset(i, j, 'k', 'func'); cv.aset(i, j, 'to', t2.id); cv.aset(i, j, 'up', true)
                     if touched then touched[cfile] = true end
                     local cline = cget(i, 'line')

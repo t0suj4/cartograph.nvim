@@ -6,11 +6,15 @@
 local ts = require 'cartograph.providers.treesitter'
 
 local FILES = {
-    ['host.lua'] = table.concat({ 'local M = {}', 'function M.node(x) return x end', "require('part')(M, {})",
+    ['host.lua'] = table.concat({ 'local M = {}', 'function M.node(x) return x end', 'local function key(p) return p end',
+        'local PARTS = { key = key, other = M }', "require('part')(M, PARTS)",
         "require('part2')(M)", 'function M.both(x) return x end', 'return M', '' }, '\n'),
+    -- (a rival bare `key` elsewhere: by name alone a part's `key()` would be ambiguous)
+    ['rivalkey.lua'] = 'local function key(p) return -p end\nreturn key\n',
     ['part2.lua'] = table.concat({ 'return function (M)', '  function M.call(x) return M.both(x) end', 'end', '' }, '\n'),
     ['rival.lua'] = table.concat({ 'local M = {}', 'function M.node(x) return -x end', 'function M.twin(x) return x end', 'return M', '' }, '\n'),
-    ['part.lua'] = table.concat({ 'return function (M, SHARED)', '  function M.use(x) return M.node(x) end',
+    ['part.lua'] = table.concat({ 'return function (M, SHARED)', '  local key = SHARED.key', '  function M.use(x) return M.node(x) end',
+        '  function M.k(p) return key(p) end',
         '  function M.both(x) return x end', 'end', '' }, '\n'),
     ['shared.lua'] = table.concat({ 'return function (T)', '  function T.go(x) return T.twin(x) end', 'end', '' }, '\n'),
     ['h1.lua'] = table.concat({ 'local A = {}', 'function A.twin(x) return x end', "require('shared')(A)", 'return A', '' }, '\n'),
@@ -39,6 +43,12 @@ test('installer family: `M.node` in a part installed by `require(\'part\')(M, �
     eq(true, by['part.lua M.node'].inferred, 'hedged ~, like a module alias')
     -- (two members define M.both — the host and the part: whichever runs last owns the field, so no pick)
     eq(nil, by['part2.lua M.both'].to, 'a member defined twice in the family is not picked')
+end)
+
+test('installer family: a part\'s `local key = SHARED.key` is the host\'s `PARTS = { key = key }` local — the bare `key()` reaches host.lua\'s key, not the rival file\'s (CART-1497)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local by = calls()
+    eq('host.lua::key@2', by['part.lua key'].to)
 end)
 
 test('installer family: a part installed by TWO hosts joins no family — its `T.twin` stays refused (CART-1493)', function ()

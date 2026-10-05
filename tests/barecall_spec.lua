@@ -81,6 +81,33 @@ test('inline require: `require("other").pack(s)` inside a function names its mod
     eq(nil, by['require("other").pack'].refused)
 end)
 
+test('shadowing: a PARAMETER passed as an argument is the value handed in — never another file\'s function of that name; a STDLIB call never reaches another file\'s runtime override (CART-1498, CART-1499)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, s) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(s); fd:close() end
+    w('paths.lua', 'local function path(x) return x end\nreturn path\n')
+    w('patch.lua', 'local real = table.sort\nlocal function arm()\n  table.sort = function (t, c) real(t, c) end\n  table.sort({ 2, 1 })\nend\nreturn arm\n')
+    w('user.lua', 'local function child(path, i) return f(path, i) end\nlocal function order(t) table.sort(t); return t end\nreturn { child, order }\n')
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    for _, e in ipairs(data.edges) do
+        ok(not (e.from == 'user.lua::child@0' and e.to == 'paths.lua::path@0'), 'the param `path` is not paths.lua\'s function')
+    end
+    local cv = require('cartograph.callview').of(data)
+    local seen = 0
+    for i = 1, cv.n do
+        if cv.get(i, 'full') == 'table.sort' then
+            seen = seen + 1
+            if cv.get(i, 'file') == 'user.lua' then
+                eq(nil, cv.get(i, 'to'), 'the builtin, not patch.lua\'s override')
+                eq(nil, cv.get(i, 'refused'), 'and no refusal: it is disposed as the stdlib it names')
+                ok(cv.get(i, 'ext') ~= nil, 'an external disposition')
+            else ok(tostring(cv.get(i, 'to')):match('^patch%.lua::table%.sort'), 'the override binds in its own file') end
+        end
+    end
+    eq(2, seen)
+end)
+
 test('method call and bare call: an INCREMENTAL refresh decides the same way — the relink path is a second copy of the resolver (CART-1487, CART-1491)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local store = require 'cartograph.store'

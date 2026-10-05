@@ -157,8 +157,11 @@ end)
 test('use-without-require: patching a HOST table defines nothing to require', function ()
     if not parser_available('lua') then skip('no lua parser') end
     local data = graph()
-    ok(resolved(data, 'user4.lua', 'stub.lua::vim.cmd@0'), 'vim.cmd("x") landed on the stub')
-    eq('host-root', row(classify(data), 'user4.lua').class, 'nothing in the corpus defines `vim`')
+    -- (the stub's `vim.cmd = function` is a RUNTIME OVERRIDE of a stdlib-prefixed name: it binds only its own file —
+    -- CART-1499 — so the call reaches the host's vim.cmd, and there is nothing in the corpus to require)
+    ok(not resolved(data, 'user4.lua', 'stub.lua::vim.cmd@0'), 'vim.cmd("x") does NOT land on the stub')
+    local r = row(classify(data), 'user4.lua')
+    eq(nil, r, 'no cross-file use reaches the stub: nothing to classify (it was `host-root` while the call landed there)')
     ok(not lint_files()['user4.lua'])
 end)
 
