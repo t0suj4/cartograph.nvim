@@ -699,6 +699,33 @@ function M.lower(term, opts)
         if not cx.collect then refuse(why) end
         cx.collect[#cx.collect + 1] = { why = why, text = name }
     end
+    -- FORCED ACROSS CALLS (CART-1500): a callee's parameter that a closure stores into is forced dynamic; the variable a
+    -- CALLER passes there must be too — the same table at run time. Otherwise a static `local ids = {}` handed to
+    -- `content_id(a, ids)` reaches a forced parameter and the specialization is refused (join.lua:217, the first
+    -- derivation followed through the basis). To a fixpoint over every direct call.
+    do
+        local changed = true
+        local function walk(x, seen)
+            if type(x) ~= 'table' or seen[x] then return end
+            seen[x] = true
+            if x.op == 'call' and x.fn and cx.funcs[x.fn] and x.args then
+                local ps = cx.funcs[x.fn].params or {}
+                for i, a in ipairs(x.args) do
+                    local pid = ps[i]
+                    if pid and cx.forced[pid] and type(a) == 'table' and a.op == 'var' and a.id and not cx.forced[a.id] then
+                        cx.forced[a.id] = true
+                        changed = true
+                    end
+                end
+            end
+            for _, v in pairs(x) do if type(v) == 'table' then walk(v, seen) end end
+        end
+        for _ = 1, 50 do
+            if not changed then break end
+            changed = false
+            for _, f in pairs(cx.funcs) do walk(f.body, {}) end
+        end
+    end
     -- RECORDS: a local table that never escapes is its fields, one local each (SRA, CART-1331 rung 4a)
     cx.sra = { candidates = 0, replaced = 0, escapes = {} }
     for _, f in pairs(cx.funcs) do f.body = M.sra(f.body, cx) end
@@ -2036,7 +2063,10 @@ function M.specialize(prog, fname, division, statics, opts)
                 if ok then return r end
                 depth = d0
                 cut_iters(ni)
-                if not (type(r) == 'table' and r.refusal and r.refusal:find('nested deeper than', 1, true)) then error(r, 0) end
+                -- (the same growth can surface as the DEPTH first — a key still forms while 120 unfolds go by: the
+                -- derived match through the basis reached M.match's go_kids that way, CART-1500)
+                if not (type(r) == 'table' and r.refusal and (r.refusal:find('nested deeper than', 1, true)
+                    or r.refusal:find('specialization depth', 1, true))) then error(r, 0) end
                 rollback(no, nm)
                 return apply_spec(T, argexprs, X, grow)
             end

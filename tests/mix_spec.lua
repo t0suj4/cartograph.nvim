@@ -374,13 +374,14 @@ test('mix: a refusal is LOCATED — lowering names the innermost statement\'s li
     local got = {}
     MX.lower(assert(R.read('local function f(x)\n    goto e\n    ::e::\n    return x\nend\n', 'lua')), { collect = got })
     eq({ 2, 3 }, vim.tbl_map(function (r) return r.at end, got))
-    -- (a specialization refusal: the static value that never repeats, located at its statement, with the calls)
-    local src = 'local function g(x, k)\n    if x > 0 then return g(x - 1, function (y) return k(y) + 1 end) end\n    return k(x)\nend\nlocal function f(x)\n    return g(x, function (y) return y end)\nend\n'
+    -- (a specialization refusal: a static loop that never ends, four calls down — located at its statement, with the
+    -- calls. It was a growing continuation until CART-1500 made that one specialize)
+    local src = 'local function d(x)\n    local i = 0\n    while i >= 0 do i = i + 1 end\n    return x\nend\nlocal function c(x) return d(x) + 1 end\nlocal function b(x) return c(x) + 1 end\nlocal function f(x) return b(x) + 1 end\n'
     local oks, e2 = pcall(MX.mix, assert(R.read(src, 'lua')), 'f', { 'D' }, {})
     eq(false, oks)
-    eq(2, e2.at)
+    eq(3, e2.at)
     ok(#e2.chain > 3 and e2.chain[#e2.chain] == 'f', vim.inspect(e2.chain))
-    ok(MX.describe(e2):find('at line 2, in g', 1, true), MX.describe(e2))
+    ok(MX.describe(e2):find('at line 3, in d ← c ← b ← f', 1, true), MX.describe(e2))
 end)
 
 test('mix: with a LINE MAP, an error the evaluator raises carries the ORIGINAL\'s position — `error(msg)` and a lazy error alike (CART-1458)', function ()
@@ -409,7 +410,7 @@ test('mix: a COMMENT is trivia anywhere — between a table\'s fields, a call\'s
     eq(original(src, 'f')(3), r(3))
 end)
 
-test('mix: what mix does not handle is REFUSED by name — goto, varargs, a static value that never repeats and generalizing cannot fix', function ()
+test('mix: what mix does not handle is REFUSED by name — goto, a static loop that never ends, a vararg lambda; a growing continuation now specializes', function ()
     ready()
     local function refusal(src, fname, division, statics)
         local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), fname, division, statics)
@@ -421,8 +422,12 @@ test('mix: what mix does not handle is REFUSED by name — goto, varargs, a stat
     ok(refusal('local function f(x)\n    local i = 0\n    while i >= 0 do i = i + 1 end\n    return x\nend\n', 'f', { 'D' }, {}):find('budget', 1, true))
     -- (a vararg LAMBDA: only a top-level function's direct calls pack their arguments — CART-1466)
     ok(refusal('local function f(x)\n    local g = function (...) return 1 end\n    return g(x)\nend\n', 'f', { 'D' }, {}):find('parameter', 1, true))
-    -- (a continuation that grows by a closure per call: the join's hole falls on a closure argument — no generalization)
-    ok(refusal('local function g(x, k)\n    if x > 0 then return g(x - 1, function (y) return k(y) + 1 end) end\n    return k(x)\nend\nlocal function f(x)\n    return g(x, function (y) return y end)\nend\n', 'f', { 'D' }, {}):find('specialization depth', 1, true))
+    -- (a continuation that grows by a closure per call USED to refuse here — the join's hole falls on a closure. Since
+    -- CART-1500 the depth refusal retries with the closure DYNAMIC, as a key that cannot be formed always did: it
+    -- specializes, and equals the original)
+    local gsrc = 'local function g(x, k)\n    if x > 0 then return g(x - 1, function (y) return k(y) + 1 end) end\n    return k(x)\nend\nlocal function f(x)\n    return g(x, function (y) return y end)\nend\n'
+    local gres = residual(gsrc, 'f', { 'D' }, {})
+    for _, x in ipairs({ 0, 1, 5, 30 }) do eq(original(gsrc, 'f')(x), gres(x)) end
 end)
 
 -- ── RUNG 4.0: GENERALIZATION — a configuration as an ALGEBRA TERM ─────────────────────────────────────────────────
@@ -1030,6 +1035,16 @@ test('mix: the CENSUS — lower with { collect = {} } records every refused stat
     eq({ 'a closure assigning the captured parameter `x` (rung 3: a parameter is not boxed)', '`goto_statement` (not in S)', '`label_statement` (not in S)' },
         vim.tbl_map(function (r) return r.why end, got))
     ok(prog.funcs.f and prog.funcs.g, 'both functions lowered, the refused statements skipped')
+end)
+
+test('mix: a table a CALLEE\'s closure stores into is dynamic in the CALLER too — `local ids = {}` handed to it is allocated per run, never a shared constant (CART-1500)', function ()
+    ready()
+    local SRC = 'local function note(memo, k)\n  local function set(v) memo[k] = (memo[k] or 0) + v end\n  set(1)\n  return memo[k]\nend\n'
+        .. 'local function f(x)\n  local ids = {}\n  return note(ids, x) + note(ids, x)\nend\n'
+    local want = original(SRC, 'f')
+    local r = residual(SRC, 'f', { 'D' }, {})
+    -- (twice: a memo lifted into the constant pool would keep counting across runs — 1+2, then 3+4)
+    eq(want('a'), r('a')); eq(want('a'), r('a')); eq(want('b'), r('b'))
 end)
 
 test('mix: the FORWARD-DECLARED recursive local — `local build; function build(…)` — is the assignment of a lambda to that local: specialized static it folds, dynamic it recurses; a global target still refuses (CART-1373)', function ()

@@ -85,6 +85,8 @@ function M.program(root, files, opts)
     root = root or 'M.match'
     opts = opts or {}
     local ckey = root .. (files and ('\0' .. table.concat(files, '\0')) or '') .. (opts.snapshot and '\0snap' or '')
+        .. (opts.through and '\0through' or '')
+        .. (opts.opaque and ('\0opaque:' .. table.concat((function () local t = vim.tbl_keys(opts.opaque); table.sort(t); return t end)(), ',')) or '')
     if cache[ckey] then local c = cache[ckey]; return c.text, c.order, c.lines, c.knowns, c.report, c.prims end
     files = files or vim.fn.glob(algebra_dir() .. '/*.lua', false, true)
     local fq = vim.treesitter.query.parse('lua', '(function_declaration) @f')
@@ -188,7 +190,13 @@ function M.program(root, files, opts)
     end
     -- a name inside a definition -> the definition it reaches
     local function resolve(name, file)
-        if name:match('^M[.:][%w_]+$') then local k = name:gsub(':', '.'); return defs[k] and k or nil end
+        if name:match('^M[.:][%w_]+$') then
+            local k = name:gsub(':', '.')
+            -- (opts.opaque: a definition named there is NOT followed — it stays a primitive call, `M.admits(…)`; the
+            -- domain NARROWED to what the specialization can handle, CART-1500)
+            if opts.opaque and opts.opaque[k] then return nil end
+            return defs[k] and k or nil
+        end
         if name:match('^SHARED%.([%w_]+)$') or name:match('^PARTS%.([%w_]+)$') then
             local k = 'core.lua::' .. name:match('%.([%w_]+)$')
             return defs[k] and k or nil
@@ -203,22 +211,6 @@ function M.program(root, files, opts)
         return nil
     end
     if not defs[root] then error('mixalg: no definition ' .. root .. ' in ' .. (files and #files == 1 and files[1] or 'the algebra'), 0) end
-    -- THE CLOSURE: calls and references-as-values (`local with_cursor = M.with_cursor`)
-    local rq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (identifier) @d]')
-    local seen, order, todo = {}, {}, { root }
-    for _ = 1, 100000 do
-        if #todo == 0 then break end
-        local k = table.remove(todo, 1)
-        if not seen[k] then
-            seen[k] = true
-            order[#order + 1] = k
-            local d = defs[k]
-            for _, c in rq:iter_captures(d.node, d.src, 0, -1) do
-                local r = (c:type() ~= 'identifier' or outer_ref(c, d)) and resolve(tx(c, d.src), d.file)
-                if r and not seen[r] then todo[#todo + 1] = r end
-            end
-        end
-    end
     -- ASSEMBLE: every definition a top-level `local function <mangled>`, its references rewritten
     local mangle = M.mangle
     local iq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (method_index_expression) @d (identifier) @i]')
@@ -258,6 +250,80 @@ function M.program(root, files, opts)
             written_memo[key] = w
         end
         return written_memo[key]
+    end
+    -- the runtime object of a definition (nil: not loaded), and each loaded definition's key by its function object
+    local function fkey_of(d) return vim.fn.fnamemodify(path[d.file], ':p') .. ':' .. ((d.node:start()) + 1) end
+    local function obj_of(d)
+        local fk = fkey_of(d)
+        if not fobj[fk] then ensure_loaded(vim.fn.fnamemodify(path[d.file], ':p')) end
+        return fobj[fk]
+    end
+    local key_of_fn
+    -- THROUGH THE BASIS (opts.through, CART-1500): `B.join` where B is a captured table whose field IS a definition of
+    -- these files (the derivations' basis is the algebra's own functions) is that definition — followed into the
+    -- closure and rewritten to its mangled name, so mix specializes it with the rest instead of calling it opaque.
+    -- The table is read as knowns are: never written in its file, or a snapshot. -> the definition's key, or nil
+    local function through(cap, d)
+        if not opts.through then return nil end
+        local ident = cap:type() == 'identifier'
+        if not ident and cap:type() ~= 'dot_index_expression' then return nil end
+        -- (`B.join` — a field of a captured table — or `label` — a captured local ALIAS, `local label = M.node_label`)
+        local obj, fld = cap, nil
+        if not ident then obj, fld = cap:named_child(0), cap:field('field')[1] end
+        if not (obj and obj:type() == 'identifier' and (ident or fld)) then return nil end
+        if ident then
+            local par = cap:parent()
+            if par and (par:type() == 'dot_index_expression' or par:type() == 'method_index_expression') and par:named_child(0):id() ~= cap:id() then return nil end
+        end
+        local nm = tx(obj, d.src)
+        if nm == 'M' or nm == 'SHARED' or nm == 'PARTS' or not outer_ref(obj, d) then return nil end
+        if written(d.file, nm) and not opts.snapshot then return nil end
+        local fo = obj_of(d)
+        if not fo then return nil end
+        local tbl, found
+        for i = 1, 255 do
+            local un, uv = debug.getupvalue(fo, i)
+            if not un then break end
+            if un == nm then tbl, found = uv, true; break end
+        end
+        if not found then return nil end
+        local fv
+        if ident then fv = tbl
+        else
+            if type(tbl) ~= 'table' then return nil end
+            local okf, v = pcall(function () return tbl[tx(fld, d.src)] end)
+            if not okf then return nil end
+            fv = v
+        end
+        if type(fv) ~= 'function' then return nil end
+        if not key_of_fn then
+            key_of_fn = {}
+            for k2, d2 in pairs(defs) do
+                local o2 = fobj[fkey_of(d2)]
+                if o2 then key_of_fn[o2] = k2 end
+            end
+        end
+        local k3 = key_of_fn[fv]
+        if k3 and opts.opaque and opts.opaque[k3] then return nil end -- (kept a primitive)
+        return k3
+    end
+    -- THE CLOSURE: calls and references-as-values (`local with_cursor = M.with_cursor`), and with opts.through the
+    -- basis fields that are definitions of these files
+    local rq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (identifier) @d]')
+    local seen, order, todo = {}, {}, { root }
+    for _ = 1, 100000 do
+        if #todo == 0 then break end
+        local k = table.remove(todo, 1)
+        if not seen[k] then
+            seen[k] = true
+            order[#order + 1] = k
+            local d = defs[k]
+            for _, c in rq:iter_captures(d.node, d.src, 0, -1) do
+                local r = (c:type() ~= 'identifier' or outer_ref(c, d)) and resolve(tx(c, d.src), d.file)
+                if not r then r = through(c, d) end
+                if r and not seen[r] then todo[#todo + 1] = r end
+            end
+        end
     end
     local knowns, prims, report = {}, {}, { known = {}, snapshots = {}, free = {} }
     local noted = {}
@@ -302,16 +368,34 @@ function M.program(root, files, opts)
                 local t = tx(cap, d.src)
                 local target
                 if iq.captures[id] == 'd' then
-                    if t:match('^M[.:][%w_]+$') and defs[(t:gsub(':', '.'))] then target = mangle((t:gsub(':', '.'))) end
+                    if t:match('^M[.:][%w_]+$') and defs[(t:gsub(':', '.'))] then
+                        local k2 = (t:gsub(':', '.'))
+                        if opts.opaque and opts.opaque[k2] then
+                            -- (kept opaque: a primitive by its path — the caller passes it as opts.prims and in the env)
+                            local okA, Acore = pcall(require, 'cartograph.algebra.core')
+                            local fv = okA and Acore[k2:match('^M%.(.*)$')]
+                            if type(fv) == 'function' then prims[k2] = fv end
+                        else target = mangle(k2) end
+                    end
                     if t:match('^SHARED%.([%w_]+)$') and defs['core.lua::' .. t:match('%.([%w_]+)$')] then target = mangle('core.lua::' .. t:match('%.([%w_]+)$')) end
                     if not target and defs[d.file .. '::' .. t] then target = mangle(d.file .. '::' .. t) end
+                    if not target then local th = through(cap, d); if th then target = mangle(th) end end -- (CART-1500)
+                    -- (through: an algebra DATA field the followed code reads — `M.OBSERVED`, `M.grammars` — is a KNOWN
+                    -- global by its dotted name, as compile_match passes M.grammars)
+                    if not target and opts.through and t:match('^M%.[%w_]+$') and knowns[t] == nil then
+                        local okA, Acore = pcall(require, 'cartograph.algebra.core')
+                        local v = okA and Acore[t:match('^M%.([%w_]+)$')]
+                        if v ~= nil and type(v) ~= 'function' then knowns[t] = v end
+                    end
                 else
                     -- (an identifier that is a field name — the `f` of `a.f`, `a:f` — is no reference)
                     local par = cap:parent()
                     if not (par and (par:type() == 'dot_index_expression' or par:type() == 'method_index_expression') and par:named_child(0):id() ~= cap:id())
                         and outer_ref(cap, d) then
                         local r = resolve(t, d.file)
-                        if r and not r:match('^M') then target = mangle(r)
+                        local th = not r and through(cap, d) -- (CART-1500: a captured alias of a definition)
+                        if th then target = mangle(th)
+                        elseif r and not r:match('^M') then target = mangle(r)
                         elseif not r and uv and uv[t] and not (modtab[d.file] and modtab[d.file][t])
                             and t ~= 'M' and t ~= 'SHARED' and t ~= 'PARTS' then -- (the algebra's own tables: mix knows M.x by name)
                             -- (CART-1374: a captured file-level VALUE — a constant inlined or carried known; a written one
@@ -357,7 +441,8 @@ function M.program(root, files, opts)
                 end
             end
             btext = d.src:sub(b0 + 1, b1)
-            table.sort(edits, function (a, b) return a[1] > b[1] end)
+            -- (from the end; at one start the LONGER edit — `B.join` rewritten whole, not its `B`)
+            table.sort(edits, function (a, b) if a[1] ~= b[1] then return a[1] > b[1] end return a[2] > b[2] end)
             local last = math.huge
             for _, e in ipairs(edits) do
                 if e[2] <= last then btext = btext:sub(1, e[1]) .. e[3] .. btext:sub(e[2] + 1); last = e[1] end

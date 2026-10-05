@@ -312,6 +312,61 @@ test('mixalg: a closure\'s FILE-LEVEL LOCALS are carried from the loaded code �
     if not okall then error(err, 0) end
 end)
 
+test('mixalg: THROUGH THE BASIS — a captured table\'s field or a captured alias that IS a definition of these files is followed and specialized with the rest; without opts.through it stays a primitive; opts.opaque keeps one (CART-1500)', function ()
+    ready()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir .. '/lua/mxk1500', 'p')
+    local path = dir .. '/lua/mxk1500/fix.lua'
+    local fd = assert(io.open(path, 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'function M.inc(x) return x + 1 end',
+        'function M.dbl(x) return x * 2 end',
+        'local B = { inc = M.inc, dbl = M.dbl }',
+        'local inc2 = M.inc',
+        'function M.use(a) return B.inc(a) + inc2(a) + B.dbl(a) end',
+        'return M', '' }, '\n'))
+    fd:close()
+    local saved = package.path
+    package.path = dir .. '/lua/?.lua;' .. package.path
+    local okall, err = pcall(function ()
+        local plain = MA.program('M.use', { path })
+        ok(plain:find('fix__B.inc(', 1, true) and not plain:find('M_inc(', 1, true), 'without through: a primitive\n' .. plain)
+        local thr, order = MA.program('M.use', { path }, { through = true })
+        ok(thr:find('M_inc(a)', 1, true) and thr:find('M_dbl(a)', 1, true), 'the field and the alias are the definitions\n' .. thr)
+        ok(not thr:find('fix__B', 1, true) and not thr:find('inc2', 1, true), 'nothing opaque left\n' .. thr)
+        ok(vim.tbl_contains(order, 'M.inc') and vim.tbl_contains(order, 'M.dbl'), 'and followed into the closure')
+        local op, _, _, _, _, prims = MA.program('M.use', { path }, { through = true, opaque = { ['M.dbl'] = true } })
+        ok(op:find('M_inc(a)', 1, true) and op:find('fix__B.dbl(', 1, true), 'M.dbl kept opaque\n' .. op)
+        ok(prims['fix__B.dbl'] ~= nil, 'as a primitive')
+        -- (and the followed program specializes and equals the original)
+        local MX = require 'cartograph.mix'
+        local p2 = MX.lower(assert(R.read(thr, 'lua')))
+        local res = MX.specialize(p2, 'M_use', { 'D' }, {}, { budget = 2e5 })
+        local F = require 'cartograph.mixfn'
+        local f = assert(load(MX.print(res, p2.where), 'r', 't', F.env(res.pool, {})))()
+        eq(require('mxk1500.fix').use(5), f(5))
+    end)
+    package.path = saved
+    package.loaded['mxk1500.fix'] = nil
+    vim.fn.delete(dir, 'rf')
+    if not okall then error(err, 0) end
+end)
+
+test('mixalg: THROUGH THE BASIS on the real derivation — D.match follows its basis into the algebra (join and beyond), lowers with nothing refused, and carries the algebra DATA it reads (M.OBSERVED) as a known (CART-1500)', function ()
+    ready()
+    require('cartograph.algebra.derive').apply_to(A, '')
+    local text, order, _, knowns = MA.program('derive.lua::D.match', nil, { snapshot = true, through = true })
+    local alg = 0
+    for _, k in ipairs(order) do if not k:match('^derive%.lua::') then alg = alg + 1 end end
+    ok(alg > 20, alg .. ' algebra definitions followed')
+    ok(not text:find('derive__B%.[%w_]+%('), 'no opaque basis call left')
+    ok(knowns['M.OBSERVED'] ~= nil, 'M.OBSERVED carried')
+    local got = {}
+    require('cartograph.mix').lower(assert(R.read(text, 'lua')), { collect = got })
+    eq({}, vim.tbl_map(function (g) return g.why end, got))
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')
