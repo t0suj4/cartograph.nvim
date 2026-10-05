@@ -198,3 +198,16 @@ test('signatures: asserted tier applies AND hedges with the name', function ()
         'and every use is hedged with the assertion named')
     -- label: io~ — conditional on the user being right, visibly
 end)
+
+test('fixpoint: REBINDING a parameter (`t = t.kids[i]`) is no write through it — only a store INTO it (`t.x = 1`, `t[k] = 1`) mutates the caller\'s table', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local function walk(t, path) for _, i in ipairs(path) do t = t.kids[i] end return t end',
+        'local function poke(t) t.x = 1 end',
+        'local function poke2(t, k) t[k] = 1 end',
+        'return { walk, poke, poke2 }' }, '\n'))))
+    local by = byname()
+    eq('pure', effects.purity(store, by.walk.id), 'a rebound parameter is a local')
+    eq('writes', effects.purity(store, by.poke.id), 'a field store into a parameter')
+    eq('writes', effects.purity(store, by.poke2.id), 'an index store into a parameter')
+end)

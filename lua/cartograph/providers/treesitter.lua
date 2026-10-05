@@ -679,7 +679,9 @@ local function guard_class(c, n, src, G)
     -- outer fn's param are not attributed — a known honesty gap.
     local params = fnnode and param_map(fnnode, src, G.pfield)
     local pw
-    if params and G.pw_refsem and leftmost(top) == c then
+    -- (a STORE into the param — `t.x = 1`, `t[k] = 1` —, never the param itself: `t = t.kids[i]` rebinds a local and
+    -- writes nothing the caller holds; it made core's `at`, and so locate_at, read as 'writes')
+    if params and G.pw_refsem and leftmost(top) == c and top ~= c then
         pw = params[node_text(c, src)]
     end
     -- the param predicate (gp): only when guarded, not set-once, in a fn
