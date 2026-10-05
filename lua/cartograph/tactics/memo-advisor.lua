@@ -42,7 +42,7 @@ local function measure(store, p)
     end
     local t0 = vim.uv.hrtime()
     local ok, okr, rerr = W.run_wrapped(store, work, targets, function (real, t)
-        local row = { name = t, calls = 0, distinct = 0, ns = 0, bytes = 0, keys = {}, seen = {} }
+        local row = { name = t, calls = 0, distinct = 0, ns = 0, bytes = 0, keys = {}, seen = {}, pos = {} }
         rows[#rows + 1] = row
         return function (...)
             local n = select('#', ...)
@@ -54,7 +54,12 @@ local function measure(store, p)
                 row.keys[k] = true; row.distinct = row.distinct + 1
                 -- the KEY KIND decides a memo's residence (memoize): all by identity -> weak, all scalar -> strong
                 local ids = 0
-                for i = 1, n do if parts[i]:sub(1, 1) == '#' then ids = ids + 1 end end
+                for i = 1, n do
+                    local pk = parts[i]:sub(1, 1) == '#' and 'identity' or 'scalar'
+                    if pk == 'identity' then ids = ids + 1 end
+                    -- (per POSITION too: a memo keyed on some arguments only — binding-times' key — takes ITS kinds)
+                    row.pos[i] = (row.pos[i] == nil or row.pos[i] == pk) and pk or 'mixed'
+                end
                 local kind = ids == n and 'identity' or ids == 0 and 'scalar' or 'mixed'
                 row.kind = (row.kind == nil or row.kind == kind) and kind or 'mixed'
             end
@@ -76,7 +81,7 @@ local function measure(store, p)
         local secs = r.ns / 1e9
         out[#out + 1] = { name = r.name, calls = r.calls, distinct = r.distinct, repeat_ratio = r.calls / math.max(r.distinct, 1),
             seconds = secs, saved = secs * (1 - r.distinct / math.max(r.calls, 1)), result_kb = r.bytes / 1e3,
-            userdata = r.userdata or false, functions = r.functions or false, keys = r.kind or 'none' }
+            userdata = r.userdata or false, functions = r.functions or false, keys = r.kind or 'none', arg_kinds = r.pos }
     end
     table.sort(out, function (a, b) if a.saved ~= b.saved then return a.saved > b.saved end return a.name < b.name end)
     return { rows = out, workload_seconds = total }

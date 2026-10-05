@@ -100,17 +100,33 @@ local function build(p, store)
                 return nil, ('a memo of %s would hold ~%.0f MB of results to save %.2f s of %.2f s: accept the price (max_kb = %d or more), or restructure so the callers derive once'):format(
                     best.name, best.result_kb / 1024, best.saved, adv.workload_seconds, math.ceil(best.result_kb)), 'decision'
             end
-            -- `residence` ANSWERS the decision (and overrides the derived one: an identity key into a store whose content
-            -- changes per generation is CART-1430's pointer case — only the caller knows)
-            if best.keys == 'mixed' and not p.residence then
-                return nil, ('%s is keyed by identity AND by value: where does its memo live (answer with residence = weak | strong | generation + generation = <expr>)?'):format(best.name), 'decision'
-            end
             local w = where[best.name]
             local ref = node_at(store, w.file, w.line)
             if not ref then return nil, ('%s (%s:%d) is no function of the graph'):format(best.name, w.file, w.line), 'stale' end
-            local residence = p.residence or (best.keys == 'identity' and 'weak' or 'strong')
             local check = vim.tbl_extend('force', ab, { faster = '1' })
-            return T.seq(T.use('memoize', { ref = ref, residence = residence, generation = p.generation }), T.use('ab-equivalence', check))
+            -- the KEY from mix's binding-time analysis (CART-1445): when it PROVES the result independent of a parameter
+            -- (and of anything outside them), the memo is keyed without it; otherwise by every parameter. The RESIDENCE
+            -- then follows the kinds of the KEY's arguments only
+            return T.bind('binding-times', { ref = ref }, function (bt)
+                local key = (not bt.error and not bt.outside and bt.key and #bt.key > 0 and #bt.key < #bt.params) and bt.key or nil
+                local kind = best.keys
+                if key then
+                    kind = nil
+                    for i, n in ipairs(bt.params) do
+                        if vim.tbl_contains(key, n) then
+                            local k = (best.arg_kinds or {})[i] or 'mixed'
+                            kind = (kind == nil or kind == k) and k or 'mixed'
+                        end
+                    end
+                end
+                -- `residence` ANSWERS the decision (and overrides the derived one: an identity key into a store whose
+                -- content changes per generation is CART-1430's pointer case — only the caller knows)
+                if kind == 'mixed' and not p.residence then
+                    return nil, ('%s is keyed by identity AND by value: where does its memo live (answer with residence = weak | strong | generation + generation = <expr>)?'):format(best.name), 'decision'
+                end
+                local residence = p.residence or (kind == 'identity' and 'weak' or 'strong')
+                return T.seq(T.use('memoize', { ref = ref, residence = residence, generation = p.generation, key = key }), T.use('ab-equivalence', check))
+            end, { ungated = true })
         end)
     end)
 end

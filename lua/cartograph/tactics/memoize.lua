@@ -56,11 +56,21 @@ local function build(p, store)
     local residence = p.residence or 'weak'
     local mode = residence == 'weak' and "setmetatable({}, { __mode = 'k' })" or '{}'
     local args = table.concat(keys, ', ')
+    -- `key` (CART-1445): memo only on the parameters the RESULT depends on — binding-times proves the others irrelevant;
+    -- the raw function still gets every argument
+    if p.key and #p.key > 0 then
+        for _, k in ipairs(p.key) do
+            if not vim.tbl_contains(keys, k) then return nil, ('key = %s: no parameter of %s (it takes: %s)'):format(k, name, args), 'ill-posed' end
+        end
+        local sub = {}
+        for _, k in ipairs(keys) do if vim.tbl_contains(p.key, k) then sub[#sub + 1] = k end end
+        keys = sub
+    end
     local I = ind .. '    '
     local out = {}
     local function put(s) out[#out + 1] = s end
     put(('%slocal %s, %s%s = nil, %s%s -- memoize (CART-1444): %s, keyed by (%s)'):format(ind, raw, memo,
-        residence == 'generation' and (', ' .. memo .. '_gen') or '', mode, residence == 'generation' and ', nil' or '', residence, args))
+        residence == 'generation' and (', ' .. memo .. '_gen') or '', mode, residence == 'generation' and ', nil' or '', residence, table.concat(keys, ', ')))
     put(("%slocal function %s(...) return { n = select('#', ...), ... } end"):format(ind, pack))
     put(header)
     local guard = {}
@@ -105,7 +115,7 @@ return {
     kind = 'write',
     tags = { 'code', 'optimize' },
     summary = 'wrap a Lua function in a memo keyed by its arguments (ref = file::name): the body becomes NAME_raw, the header a wrapper answering from the memo — every result kept (nil, multiple values); residence = weak (by identity) | strong | generation (+ generation = <expr>), absent = the memo-residence decision. Purity and unshared results are yours to establish: run ab-equivalence after',
-    params = { ref = 'ref', residence = 'string?', generation = 'string?' },
+    params = { ref = 'ref', residence = 'string?', generation = 'string?', key = 'list?' },
     build = build,
     examples = {
         {
@@ -150,6 +160,21 @@ return {
                 local _, err = pcall(m.size, nil)
                 return after_one == 1 and after_two == 2 and tostring(err):find('length of', 1, true) ~= nil,
                     ('runs %d then %d; %s'):format(after_one, after_two, tostring(err))
+            end },
+        },
+        {
+            name = 'key = a: a memo on the parameter the result depends on; the other still reaches the raw function',
+            files = { ['m.lua'] = SRC:gsub('return a %+ b end', 'return a * 2, b end', 1) },
+            params = function (store) return { ref = ref_of(store, 'M.pair'), residence = 'strong', key = 'a' } end,
+            expect = { status = 'done', applied = 1, check = function (root)
+                local m = load_m(root)
+                local x = m.pair(1, 'p')
+                local y = m.pair(1, 'q')
+                local _, b2 = m.pair(1, nil)
+                local src = io.open(root .. '/m.lua'):read('a')
+                -- (keyed by a ONLY: the second call is a hit — and it answers the FIRST call's b, which is why the key must
+                -- come from a proof like binding-times', never a guess)
+                return x == 2 and y == 2 and m.runs == 1 and b2 == 'p' and src:find('keyed by (a)', 1, true) ~= nil, ('runs %d; %s'):format(m.runs, src)
             end },
         },
         {

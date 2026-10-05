@@ -21,6 +21,14 @@ end
 
 local cache = {}
 
+--- a closure key's name in the assembled program: `M.x` -> `M_x`, `<file>.lua::x` -> `<file>__x` (the entry a caller
+--- of M.program specializes)
+function M.mangle(k)
+    if k:match('^M[.:]') then return (k:gsub('[.:]', '_')) end
+    local file, nm = k:match('^(.-)%.lua::(.*)$')
+    return ((file .. '__' .. nm):gsub('[.:]', '_'))
+end
+
 -- a file's name AS LUA SHOWS IT in an error message (luaL_where / short_src): asked of Lua itself, so it is exact
 local shortcache = {}
 local function short_src(path)
@@ -34,10 +42,13 @@ M._short_src = short_src
 --- the CALL CLOSURE of an algebra function (default M.match) as one mix program -> program text, the closure's keys in
 --- order, the LINE MAP: lines[n] = { src = the file's short name, line } — where line n of the text came from (a
 --- definition's renames never add a line, so its lines map one to one) (memoized per root and per process)
-function M.program(root)
+--- `files` (CART-1445): ANY Lua files (absolute paths) instead of the algebra's — a module's own call closure (its
+--- `M.x` and file locals; a name in another file is a free name, as anything required is). Default: the algebra.
+function M.program(root, files)
     root = root or 'M.match'
-    if cache[root] then return cache[root].text, cache[root].order, cache[root].lines end
-    local files = vim.fn.glob(algebra_dir() .. '/*.lua', false, true)
+    local ckey = root .. (files and ('\0' .. table.concat(files, '\0')) or '')
+    if cache[ckey] then return cache[ckey].text, cache[ckey].order, cache[ckey].lines end
+    files = files or vim.fn.glob(algebra_dir() .. '/*.lua', false, true)
     local fq = vim.treesitter.query.parse('lua', '(function_declaration) @f')
     local aq = vim.treesitter.query.parse('lua', '(function_definition) @f')
     local defs, src = {}, {}
@@ -60,7 +71,7 @@ function M.program(root)
     local path = {}
     for _, f in ipairs(files) do
         local s = io.open(f):read('a')
-        local rel = f:match('algebra/(.*)$')
+        local rel = f:match('algebra/(.*)$') or vim.fn.fnamemodify(f, ':t')
         src[rel] = s
         path[rel] = f
         local tree = vim.treesitter.get_string_parser(s, 'lua'):parse()[1]:root()
@@ -149,7 +160,7 @@ function M.program(root)
         end
         return nil
     end
-    if not defs[root] then error('mixalg: no algebra definition ' .. root, 0) end
+    if not defs[root] then error('mixalg: no definition ' .. root .. ' in ' .. (files and #files == 1 and files[1] or 'the algebra'), 0) end
     -- THE CLOSURE: calls and references-as-values (`local with_cursor = M.with_cursor`)
     local rq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (identifier) @d]')
     local seen, order, todo = {}, {}, { root }
@@ -167,11 +178,7 @@ function M.program(root)
         end
     end
     -- ASSEMBLE: every definition a top-level `local function <mangled>`, its references rewritten
-    local function mangle(k)
-        if k:match('^M[.:]') then return (k:gsub('[.:]', '_')) end
-        local file, nm = k:match('^(.-)%.lua::(.*)$')
-        return ((file .. '__' .. nm):gsub('[.:]', '_'))
-    end
+    local mangle = M.mangle
     local iq = vim.treesitter.query.parse('lua', '[(dot_index_expression) @d (method_index_expression) @d (identifier) @i]')
     local chunks, lines, nline = {}, {}, 1
     for _, k in ipairs(order) do
@@ -227,7 +234,7 @@ function M.program(root)
         chunks[#chunks + 1] = chunk
     end
     local text = table.concat(chunks, '\n')
-    cache[root] = { text = text, order = order, lines = lines }
+    cache[ckey] = { text = text, order = order, lines = lines }
     return text, order, lines
 end
 
