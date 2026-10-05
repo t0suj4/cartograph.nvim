@@ -3921,6 +3921,26 @@ local function lexical_pick(cands, file, fn, call_at, parent_fn, node_index)
 end
 M._lexical_pick = lexical_pick
 
+-- can definition `n` RECEIVE a `x:f()` call (CART-1491)? The colon passes x as the first argument, so in a language
+-- whose spec sets `colon_calls_pass_self` (Lua) the target is a method — `T:f`, or a first parameter `self`. A plain
+-- function (`M.root(...)`, a local `is_closing`) never is: `tree:root()` had been linked to ecosystem's M.root.
+function M._takes_self(n)
+    if n.kind == 'method' or tostring(n.name):find(':', 1, true) then return true end
+    local p = n.params
+    return type(p) == 'table' and (p[1] == 'self' or (type(p[1]) == 'table' and p[1].name == 'self'))
+end
+
+-- a resolution VETO (CART-1491): `x:f()` resolved to a definition that cannot receive self, in a language whose spec
+-- sets colon_calls_pass_self, is no edge — a `blocked` refusal naming the candidate. It only VETOES: an ambiguous set
+-- is left as it is, because dropping its impossible members turns a refusal into a name-only guess about the receiver
+-- (measured: `fd:close()` → mcp's Client:close, `node:named()` → band's Band:named). -> the refusal, or nil.
+function M._method_veto(target, name, file)
+    if not (target and name and file and tostring(name):find(':', 1, true)) then return nil end
+    local _, spec = elang_for(file)
+    if not (spec and spec.colon_calls_pass_self) or M._takes_self(target) then return nil end
+    return tsutil.refusal('blocked', { target })
+end
+
 local function resolve_local_callable(cv, node_index, exact, addref, parent_fn)
     local cget, cset = cv.get, cv.set
     local n = 0
@@ -9129,6 +9149,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     local pick = M._lexical_pick(refused.cands, p.file, from and node_index[from], p.at, parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
+                local veto = M._method_veto(target, p.full or p.call.callee, p.file) -- (CART-1491)
+                if veto then target, inferred, refused = nil, nil, veto end
             end
         end
         if not target and not p.call.dynamic
@@ -9940,6 +9962,8 @@ function M.relink(data, touched, opts)
                     local pick = M._lexical_pick(refused.cands, cfile, cfn and node_index[cfn], cget(i, 'at'), parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
+                local veto = M._method_veto(target, cfull or ccallee, cfile) -- (CART-1491)
+                if veto then target, inferred, refused = nil, nil, veto end
             end
             if target then
                 cset(i, 'to', target.id)

@@ -1345,6 +1345,9 @@ return {
     -- a BARE call reaches a bare name only: Lua has no implicit receiver, so `tonumber(x)` is never some file's
     -- `T.tonumber` (the resolver's tail join otherwise links it there, CART-1487)
     bare_calls_bind_bare = true,
+    -- `x:f()` passes x as the first argument: its target is a method (`T:f` or a first parameter `self`), never a
+    -- plain function of the same name (CART-1491)
+    colon_calls_pass_self = true,
     -- stdlib receivers must not tail-match a project def: string.format
     -- would otherwise link to the one module that defines M.format
     stdlib_prefixes = { 'string.', 'table.', 'math.', 'os.', 'io.',

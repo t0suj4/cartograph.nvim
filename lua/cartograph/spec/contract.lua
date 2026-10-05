@@ -97,6 +97,7 @@ M.SLOTS = {
     id_fn_refs = 'SCOPE&KEY',      -- identifier arg = fn reference (callback)
     dot_calls_are_methods = 'SCOPE&KEY',
     bare_calls_bind_bare = 'SCOPE&KEY', -- no implicit receiver: a bare call never tail-matches `T.f` (CART-1487)
+    colon_calls_pass_self = 'SCOPE&KEY', -- `x:f()` reaches a method only, never a plain `M.f` (CART-1491)
     hash_qualified = 'SCOPE&KEY',
     qualified_scope_local = 'SCOPE&KEY',
     literal_names = 'SCOPE&KEY',   -- literal-name langs (bash): no tail-match
