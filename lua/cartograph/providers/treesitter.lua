@@ -2391,6 +2391,34 @@ end
 -- (~): a derived resolution via the alias binding (a single-assignment/reaching
 -- check would promote it, and rule out reassigned aliases — banked). Lua-only
 -- today (only lua's spec captures import_bind); js/php import forms come later.
+-- a position in either shape — a range table, a packed number, or a one-element list of either (an import edge's
+-- `at` is `{ pos }`) -> line, col (0-based)
+local function at_pos(a)
+    if type(a) == 'table' and a[1] ~= nil and not a.start then a = a[1] end
+    if type(a) == 'number' or (type(a) == 'table' and a.start) then return atr.sl(a), atr.sc(a) end
+end
+-- every require's import edge keyed by its PATH ARGUMENT (CART-1122): file -> { 'line:col' of the string -> module file }
+local function require_index(edges)
+    local inl = {}
+    for _, e in ipairs(edges or {}) do
+        if e.kind == 'import' and e.from and e.to then
+            local l, c = at_pos(e.at)
+            if l then
+                local m = inl[e.from]; if not m then m = {}; inl[e.from] = m end
+                m[l .. ':' .. c] = e.to
+            end
+        end
+    end
+    return inl
+end
+-- the module file a call whose TEXT begins with `require('m')` names (CART-1113): the call starts at `require`, its path
+-- string at the quote's offset in the call text — the import edge there
+local function required_module(inl, file, text, at)
+    local l, c = at_pos(at)
+    local q = l and tostring(text):find('[\'"]')
+    return q and inl[file] and inl[file][l .. ':' .. (c + q - 1)] or nil
+end
+
 local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, unparsed)
     -- files that are KNOWN but never PARSED (bundle / missing grammar / UNAVAILABLE
     -- read). THREADED, not derived from node_index: in the extract driver the
@@ -2405,24 +2433,12 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
         if n.unparsed and n.file then unread[n.file] = true end
     end
     local amap = {} -- file -> { alias -> module-file }, from require binds
-    -- (INLINE requires, CART-1113: `require('m').f(…)` names its module at the call site. Every require mints an
-    -- import edge AT ITS PATH ARGUMENT (`at` = { pos }, CART-1122): file -> { 'line:col' of the string -> module-file })
-    local inl = {}
-    local function pos1(a)
-        if type(a) == 'table' and a[1] ~= nil and not a.start then a = a[1] end
-        if type(a) == 'number' or (type(a) == 'table' and a.start) then return atr.sl(a), atr.sc(a) end
-    end
+    -- (INLINE requires, CART-1113: `require('m').f(…)` names its module at the call site — require_index)
+    local inl = require_index(edges)
     for _, e in ipairs(edges or {}) do
         if e.kind == 'import' and e.bind and e.from and e.to then
             local m = amap[e.from]; if not m then m = {}; amap[e.from] = m end
             m[e.bind] = e.to
-        end
-        if e.kind == 'import' and e.from and e.to then
-            local l, c = pos1(e.at)
-            if l then
-                local m = inl[e.from]; if not m then m = {}; inl[e.from] = m end
-                m[l .. ':' .. c] = e.to
-            end
         end
     end
     if not next(amap) and not next(inl) then return 0 end
@@ -2459,12 +2475,8 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
             end
             local mod = recv and amap[cfile] and amap[cfile][recv]
             if not recv and cfull and inl[cfile] then
-                -- (the call starts at `require`; its path string at the quote's offset in the call text)
                 local m2 = cfull:match('^require%s*%(?%s*[\'"][^\'"]+[\'"]%s*%)?%.([%w_]+)$')
-                local l, c
-                if m2 then l, c = pos1(cget(i, 'at')) end -- (not `m2 and pos1(…)`: `and` keeps only the first return)
-                local q = l and cfull:find('[\'"]')
-                if q then member, mod = m2, inl[cfile][l .. ':' .. (c + q - 1)] end
+                if m2 then member, mod = m2, required_module(inl, cfile, cfull, cget(i, 'at')) end
             end
             if mod then
                 -- the UNIQUE fn/method with this tail defined in the alias's module
@@ -4035,12 +4047,105 @@ end
 -- node_index, scope_of, consts, parent_fn } — `data` carries the per-language
 -- fact tables. Z1 (local type inference) lands as a NEW ENTRY here, never a
 -- new inline arm.
+-- THE INSTALLER FAMILY (CART-1493): a part file that `return function (M, SHARED)` and a host that calls
+-- `require('part')(M, PARTS)` — the algebra's sixteen parts installed into core's M. The part's parameter i IS the
+-- host's argument i: one table, written by every member, so `M.node` in linkvalue.lua is core's `M.node` (it had been
+-- refused ambiguous against store.lua's M.node and the rest). Derived from the code: the part's returned function
+-- (its `return function (…)` region), the installer call (its callee is the require's text, its argument a local),
+-- the module through the import edge at the path argument. A family is (host file, argument name) -> { [member file]
+-- = the name it binds the table to }; a part installed into two tables is no member of either (which table it
+-- writes is the run's). A dotted call `B.f` in a member, B its binding, resolves to the ONE `<binding>.f` defined in
+-- the family's files — or is CORRECTED when the name join landed outside them — hedged ~ like module_alias.
+local function resolve_installer(cv, edges, exact, addref, node_index)
+    local argv = require 'cartograph.argv'
+    local params_of = {}
+    for _, n in pairs(node_index or {}) do
+        if n.kind == 'region' and n.file then
+            local pl = tostring(n.name):match('^return%s+function%s*%(([^)]*)%)')
+            if pl then
+                local ps = {}
+                for p in pl:gmatch('[%a_][%w_]*') do ps[#ps + 1] = p end
+                params_of[n.file] = ps
+            end
+        end
+    end
+    if not next(params_of) then return 0 end
+    local inl = require_index(edges)
+    local cget, cset = cv.get, cv.set
+    local installs = {}
+    for i = 1, cv.n do
+        local callee = cget(i, 'callee')
+        if callee and tostring(callee):match('^require%s*%(?%s*[\'"][^\'"]+[\'"]%s*%)?$') then
+            local host = cget(i, 'file')
+            local part = required_module(inl, host, callee, cget(i, 'at'))
+            local ps = part and params_of[part]
+            if ps then
+                local rec = { _av = cget(i, '_av'), _av0 = cget(i, '_av0'), _avn = cget(i, '_avn'), argv = cget(i, 'argv') }
+                for k, p in ipairs(ps) do
+                    local a = argv.at(rec, k)
+                    if a and a.k == 'local' and a.name then installs[#installs + 1] = { host = host, arg = a.name, part = part, param = p } end
+                end
+            end
+        end
+    end
+    -- families, and each member file's bindings: of[file][name] = family
+    local fams, of = {}, {}
+    local function bind(f, file, name)
+        of[file] = of[file] or {}
+        if of[file][name] and of[file][name] ~= f then of[file][name] = false; return end -- (two families: neither)
+        if of[file][name] ~= false then of[file][name] = f; f[file] = name end
+    end
+    for _, x in ipairs(installs) do
+        local key = x.host .. '\0' .. x.arg
+        local f = fams[key]
+        if not f then f = {}; fams[key] = f; bind(f, x.host, x.arg) end
+        bind(f, x.part, x.param) -- (a part installed into two tables binds its name to two families: neither — bind)
+    end
+    if not next(fams) then return 0 end
+    local n = 0
+    for i = 1, cv.n do
+        local cfull, cfile = cget(i, 'full'), cget(i, 'file')
+        local recv, member = nil, nil
+        if cfull then recv, member = tostring(cfull):match('^([%a_][%w_]*)%.([%w_]+)$') end
+        local f = recv and of[cfile] and of[cfile][recv]
+        if f then
+            local fit, dup
+            for file, name in pairs(f) do
+                for _, d in ipairs(exact[name .. '.' .. member] or {}) do
+                    if d.file == file then
+                        if fit and fit.id ~= d.id then dup = true end
+                        fit = fit or d
+                    end
+                end
+            end
+            local cto = cget(i, 'to')
+            local cur = cto and node_index[cto]
+            local outside = cur ~= nil and not f[cur.file]
+            if fit and not dup and fit.id ~= cto and (not cto or outside) then
+                cset(i, 'to', fit.id)
+                cset(i, 'inferred', true)
+                cset(i, 'refused', nil)
+                cset(i, 'ext', nil)
+                local cfn = cget(i, 'fn')
+                if cfn then
+                    local cline = cget(i, 'line')
+                    addref(cfn, fit.id, cget(i, 'at') or { start = { line = cline, char = 0 }, ['end'] = { line = cline, char = 0 } }, true)
+                end
+                n = n + 1
+            end
+        end
+    end
+    return n
+end
+
 local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
     { name = 'module_alias', run = function (x)
         return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.unparsed) end },
+    { name = 'installer', run = function (x) -- `require('part')(M, …)`: the part's M IS the host's (CART-1493)
+        return resolve_installer(x.cv, x.data.edges, x.exact, x.addref, x.node_index) end },
     { name = 'field_alias', run = function (x) -- `local f = mod.field` then bare f()
         return resolve_field_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.data.fieldalias) end },
