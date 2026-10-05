@@ -115,6 +115,23 @@ local function measure(_, p)
     if not ok then v.error = 'the rewrite raised: ' .. tostring(applied); return done() end
     if not applied then v.error = 'the mutation did not APPLY: ' .. tostring(awhy); return done() end
     v.sites, v.rules = applied.sites, applied.rules
+    -- ★ A WIDENED MUTANT IS SAID (CART-1457): the learned rule generalizes, so it may change more than the text written —
+    -- `okc` -> `true` became every `okc` of the file (it no longer parsed), `false -> 0` 30 sites. When it applied at more
+    -- sites than the written text occurs, the verdict names it and the exact alternative, ground = 1
+    do
+        local fd0 = io.open(repo .. '/' .. p.file) -- (the ORIGINAL file: the copy is mutated by now)
+        local src = fd0 and fd0:read('a') or ''
+        if fd0 then fd0:close() end
+        local n, at = 0, 1
+        for _ = 1, 100000 do
+            local i = src:find(p.before, at, true)
+            if not i then break end
+            n, at = n + 1, i + 1
+        end
+        if (v.sites or 0) > n then
+            v.widened = ('the learned rule applied at %d site(s), the written text occurs at %d — ground=1 applies exactly it'):format(v.sites, n)
+        end
+    end
     -- 3. the MUTATED run
     local mut, mwhy = SF.run(root, p.spec, limit, env)
     if not mut then v.error = 'mutated run: ' .. tostring(mwhy); return done() end
@@ -134,15 +151,16 @@ local E = {
     claim = function (v)
         if v.error then return false, v.error end
         local rules = table.concat(v.rules or {}, ', ')
+        local widened = v.widened and (' ⚠ ' .. v.widened) or ''
         if v.caught then
-            return true, ('CAUGHT: %s at %d site(s) in %s — %s: baseline %s, mutated %s'):format(rules, v.sites or 0, v.file, v.spec,
-                v.baseline.summary, v.mutated.summary)
+            return true, ('CAUGHT: %s at %d site(s) in %s — %s: baseline %s, mutated %s%s'):format(rules, v.sites or 0, v.file, v.spec,
+                v.baseline.summary, v.mutated.summary, widened)
         end
         -- ⚠ a survivor is a TEST GAP or an EQUIVALENT mutant (one that changes no behaviour) — the check cannot tell
         -- which; MEASURED on its first real run: `#e.point > #best` -> `>=` in namespace.lua survives, and equal-length
         -- containing points are the same point, so that one is equivalent. Say both, never "nothing pins this".
-        return false, ('SURVIVED: %s at %d site(s) in %s — %s stays green (%s): a test gap, or an EQUIVALENT mutant (read the sites)')
-            :format(rules, v.sites or 0, v.file, v.spec, v.mutated.summary)
+        return false, ('SURVIVED: %s at %d site(s) in %s — %s stays green (%s): a test gap, or an EQUIVALENT mutant (read the sites)%s')
+            :format(rules, v.sites or 0, v.file, v.spec, v.mutated.summary, widened)
     end,
 }
 
@@ -165,7 +183,11 @@ E.examples = {
         -- sites. That is rewrite-by-example's generalization, reported in the claim (`at N site(s)`), not hidden
         name = 'an EXPRESSION mutation starting with `#` is read as an expression, not a shebang line — and is CAUGHT',
         files = FX, params = params('guard_spec', '#t > 0', '#t >= 0'),
-        expect = { holds = true, check = function (v) return (v.sites or 0) >= 1, 'sites ' .. tostring(v.sites) .. ' ' .. tostring(v.error) end },
+        -- (and the verdict SAYS the rule widened past the written text, naming ground=1 — CART-1457)
+        expect = { holds = true, check = function (v)
+            return (v.sites or 0) >= 2 and (v.widened or ''):find('ground=1', 1, true) ~= nil,
+                'sites ' .. tostring(v.sites) .. ' widened ' .. tostring(v.widened) .. ' ' .. tostring(v.error)
+        end },
     },
     {
         name = 'a spec that never tests zero lets it SURVIVE — the finding this entry exists for',
