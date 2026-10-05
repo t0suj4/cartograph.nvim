@@ -1342,6 +1342,9 @@ return {
             { ('return %s'):format(name) }
     end,
     litdata_types = { table_constructor = true },
+    -- a BARE call reaches a bare name only: Lua has no implicit receiver, so `tonumber(x)` is never some file's
+    -- `T.tonumber` (the resolver's tail join otherwise links it there, CART-1487)
+    bare_calls_bind_bare = true,
     -- stdlib receivers must not tail-match a project def: string.format
     -- would otherwise link to the one module that defines M.format
     stdlib_prefixes = { 'string.', 'table.', 'math.', 'os.', 'io.',

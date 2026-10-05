@@ -1,0 +1,62 @@
+-- BARE CALLS AND MULTI-ASSIGNMENT ALIASES (CART-1487, CART-1488). Lua has no implicit receiver: a bare `tonumber(x)` is
+-- the builtin, never some file's `T.tonumber` field function — the resolver's tail join linked 714 such calls on lua/
+-- to a wrong definition and refused ~3,100 more as ambiguous. And a multi-assignment handed every name the FIRST
+-- value, so `local pack, getter = lib.pack, lib.reader` aliased getter to pack. Pinned both ways: a single-name alias
+-- still resolves. (`lib.FAMILIES.tonumber(s)` — a nested field through the alias — is refused `blocked`: CART-1489.)
+
+local ts = require 'cartograph.providers.treesitter'
+
+local FILES = {
+    ['lib.lua'] = table.concat({
+        'local M = {}',
+        'M.FAMILIES = {}',
+        'function M.FAMILIES.tonumber(x) return x end',
+        'function M.pack(x) return x end',
+        'function M.reader(x) return x end',
+        'function M.make() return 1, 2 end',
+        'return M', '' }, '\n'),
+    ['use.lua'] = table.concat({
+        'local lib = require("lib")',
+        'local pack, getter = lib.pack, lib.reader',
+        'local one = lib.reader',
+        'local first, second = lib.make()',
+        'local M = {}',
+        'function M.go(s)',
+        '  local n = tonumber(s)',
+        '  local q = lib.FAMILIES.tonumber(s)',
+        '  return pack(n), getter(n), one(n), second(n)',
+        'end',
+        'return M', '' }, '\n'),
+}
+
+local function extract()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for rel, src in pairs(FILES) do local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(src); fd:close() end
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local cv = require('cartograph.callview').of(data)
+    local by = {}
+    for i = 1, cv.n do
+        local k = cv.get(i, 'full') or cv.get(i, 'callee')
+        local r = cv.get(i, 'refused')
+        by[k] = { to = cv.get(i, 'to'), refused = type(r) == 'table' and r.rule or r, ext = cv.get(i, 'ext') }
+    end
+    return by
+end
+
+test('bare call: Lua `tonumber(x)` is the builtin — never a qualified `T.tonumber` of another file: no link, no ambiguity, an EXTERNAL disposition (CART-1487)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local by = extract()
+    eq(nil, by.tonumber.to, 'the bare builtin links to no project definition')
+    eq(nil, by.tonumber.refused, 'and is not refused as ambiguous either')
+    ok(by.tonumber.ext ~= nil, 'it is disposed as external')
+end)
+
+test('multi-assignment: name i takes value i — `local pack, getter = lib.pack, lib.reader` aliases each to its own member; a name past the last value is no alias (CART-1488)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local by = extract()
+    eq('lib.lua::M.pack@3', by.pack.to)
+    eq('lib.lua::M.reader@4', by.getter.to, 'the SECOND name, the second value')
+    eq('lib.lua::M.reader@4', by.one.to, 'a single-name alias still resolves')
+    eq(nil, by.second.to, '`local first, second = lib.make()`: second is make\'s second return, no alias')
+end)

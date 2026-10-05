@@ -1044,6 +1044,32 @@ local function cap_node(ns)
     return ns
 end
 
+-- A MULTI-ASSIGNMENT's value for ONE of its names (CART-1488): a vars query `(list (identifier) @vname) (list (_)
+-- @value)` hands every name the FIRST value — `local pack_u32, getter = bytecol.pack_u32, bytecol.reader_u32` made
+-- `getter` an alias of pack_u32 (a wrong call edge), and const-fold would read `local a, b = 'x', 'y'` as b = 'x'.
+-- Name i takes value i; past the last value (`local a, b = f()`: b is f's SECOND return) it has none. A name and
+-- value under one parent, or a single name, are left as captured.
+local function pair_value(vnamen, valn)
+    if not (vnamen and valn) then return valn end
+    local np, vp = vnamen:parent(), valn:parent()
+    if not (np and vp) or np == vp or np:id() == vp:id() then return valn end
+    local function items(p)
+        local out = {}
+        for i = 0, p:named_child_count() - 1 do
+            local c = p:named_child(i)
+            if not c:extra() then out[#out + 1] = c end -- (a comment is an EXTRA in every grammar, whatever it is named)
+        end
+        return out
+    end
+    local names = items(np)
+    if #names < 2 then return valn end
+    local idx
+    for i, c in ipairs(names) do if c:id() == vnamen:id() then idx = i end end
+    if not idx then return valn end
+    return items(vp)[idx]
+end
+M._pair_value = pair_value
+
 -- The raw-parser rider (fusion Stage C): the extract hot loop parses via
 -- a REUSED raw TSParser per language — LanguageTree construction
 -- (injection scanning, a per-file object graph) measured ~16% of parse
@@ -7343,7 +7369,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                 elseif childn and parentn then
                     handle_super(childn, parentn)
                 elseif vdefn and vnamen then
-                    handle_var(vdefn, vnamen, valn)
+                    -- (handle_var keeps a name's FIRST match only — seen_var, the cross-product guard — and the query
+                    -- pairs every name with the first value first: pair_value picks the name's own value)
+                    handle_var(vdefn, vnamen, M._pair_value(vnamen, valn)) -- (via M: M.extract is at the 60-upvalue limit)
                 elseif vdecln and vnamen then
                     -- an EXPLICIT capture rather than "valn happened to be nil":
                     -- three specs' vars queries capture no @value at all, so
@@ -8726,6 +8754,11 @@ local MATCH_OPTS = { match_limit = 65536 }
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
+        -- (a BARE call binds a bare name only, in a language with no implicit receiver — Lua's `tonumber(x)` is the
+        -- builtin, never some file's `T.tonumber` field: the tail join linked 714 such calls on lua/ to a wrong def and
+        -- refused ~3,100 more as ambiguous (CART-1487). The exact tier above already tried the bare definitions, so
+        -- the call falls through to the profile / nodef disposition)
+        if tc and spec and spec.bare_calls_bind_bare and not name:find('[%.:]') and not name:find('->', 1, true) then tc = nil end
         if tc then
             local sc = scope_of(file)
             local dotted = name:find('.', 1, true) ~= nil
@@ -9716,6 +9749,11 @@ function M.relink(data, touched, opts)
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
+        -- (a BARE call binds a bare name only, in a language with no implicit receiver — Lua's `tonumber(x)` is the
+        -- builtin, never some file's `T.tonumber` field: the tail join linked 714 such calls on lua/ to a wrong def and
+        -- refused ~3,100 more as ambiguous (CART-1487). The exact tier above already tried the bare definitions, so
+        -- the call falls through to the profile / nodef disposition)
+        if tc and spec and spec.bare_calls_bind_bare and not name:find('[%.:]') and not name:find('->', 1, true) then tc = nil end
         if tc then
             local sc = scope_of(file)
             local dotted = name:find('.', 1, true) ~= nil

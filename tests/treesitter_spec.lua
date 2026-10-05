@@ -4410,10 +4410,10 @@ end)
 
 test('refusals are places: an ambiguous call keeps its candidates', function ()
     if not has_parser('lua') then skip 'no lua parser' end
-    -- alpha.lua and beta.lua both define M.roll; user.lua calls it BARE (roll(x))
-    -- — no require-alias receiver, so module-alias can't narrow it: genuinely
-    -- ambiguous. (a.pick, by contrast, IS module-alias-resolved — see the oracle
-    -- test.) The refusal-as-a-PLACE contract rides the bare call.
+    -- alpha.lua and beta.lua both define a GLOBAL roll; user.lua calls it BARE
+    -- (roll(x)): whichever file loads last owns it — genuinely ambiguous. (a.pick,
+    -- by contrast, IS module-alias-resolved — see the oracle test.) The
+    -- refusal-as-a-PLACE contract rides the bare call.
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
     local site
     for _, c in ipairs(data.calls) do
@@ -4425,10 +4425,10 @@ test('refusals are places: an ambiguous call keeps its candidates', function ()
     eq('ambiguous', site.refused.rule)
     eq(2, site.refused.n)
     eq(2, #site.refused.cands)
-    -- the candidates are real, jumpable defs (both M.roll)
+    -- the candidates are real, jumpable defs (both global roll)
     for _, cid in ipairs(site.refused.cands) do
         local n = store.ingest(data) or store.node(cid)
-        ok(store.node(cid) and store.node(cid).name == 'M.roll', tostring(cid))
+        ok(store.node(cid) and store.node(cid).name == 'roll', tostring(cid))
     end
 end)
 

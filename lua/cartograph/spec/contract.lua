@@ -96,6 +96,7 @@ M.SLOTS = {
     local_decls = 'SCOPE&KEY',     -- in-fn local bindings (local-shadow gate)
     id_fn_refs = 'SCOPE&KEY',      -- identifier arg = fn reference (callback)
     dot_calls_are_methods = 'SCOPE&KEY',
+    bare_calls_bind_bare = 'SCOPE&KEY', -- no implicit receiver: a bare call never tail-matches `T.f` (CART-1487)
     hash_qualified = 'SCOPE&KEY',
     qualified_scope_local = 'SCOPE&KEY',
     literal_names = 'SCOPE&KEY',   -- literal-name langs (bash): no tail-match

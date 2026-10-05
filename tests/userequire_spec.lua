@@ -138,9 +138,11 @@ end)
 test('use-without-require: a use that lands on a def its caller cannot NAME is no finding', function ()
     if not parser_available('lua') then skip('no lua parser') end
     local data = graph()
-    ok(resolved(data, 'user6.lua', 'lib.lua::Lib.fmt@1'), 'bare fmt() was linked to Lib.fmt (a tail guess)')
-    eq('other-name', row(classify(data), 'user6.lua').class,
-        'the environment carries `fmt`, and lib.lua defines only `Lib.fmt`')
+    -- (the resolver USED to link bare fmt() to Lib.fmt by tail; Lua has no implicit receiver, so it no longer guesses —
+    -- CART-1487 — and the use must still be no finding)
+    ok(not resolved(data, 'user6.lua', 'lib.lua::Lib.fmt@1'), 'bare fmt() is NOT linked to Lib.fmt (no tail guess)')
+    eq(nil, row(classify(data), 'user6.lua'),
+        'no cross-file use reaches lib.lua at all: nothing to classify (it was `other-name` while the tail guess linked it)')
     ok(not lint_files()['user6.lua'])
 end)
 
