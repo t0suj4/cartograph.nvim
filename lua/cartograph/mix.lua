@@ -399,14 +399,22 @@ local function lower_stmt(t, cx, scope, out)
             out[#out + 1] = { op = 'fornum', id = id, from = from, to = to, step = step, body = lower_block(body, cx, inner) }
             return
         end
-        -- generic: `for k, v in ipairs(e)` / `pairs(e)` only
+        -- generic: `for k, v in ipairs(e)` / `pairs(e)` — and any other iterator, through the protocol (forgen)
         local cn = named(clause)
         local vl = cn[1].k == 'variable_list' and named(cn[1]) or { cn[1] }
         local el = cn[#cn]
-        local iter = el.k == 'expression_list' and named(el)[1] or el
+        local exprs = el.k == 'expression_list' and named(el) or { el }
+        local iter = exprs[1]
         local it = lower_expr(iter, cx, scope)
-        if it.op ~= 'prim' or (it.name ~= 'ipairs' and it.name ~= 'pairs') or #it.args ~= 1 then
-            refuse('a generic for over ' .. text(iter) .. ' (rung 1: ipairs / pairs of one table)')
+        if #exprs ~= 1 or it.op ~= 'prim' or (it.name ~= 'ipairs' and it.name ~= 'pairs') or #it.args ~= 1 then
+            -- THE ITERATOR PROTOCOL (CART-1467): `for a, b in f, s, c` — f(s, c) until its first value is nil, that
+            -- value the next c; f a host iterator (gmatch's), a closure, a function of the program
+            local es = { it }
+            for i = 2, #exprs do es[i] = lower_expr(exprs[i], cx, scope) end
+            local ids = {}
+            for i, v in ipairs(vl) do ids[i] = declare(cx, inner, text(v)); cx.loopvar[ids[i]] = true end
+            out[#out + 1] = { op = 'forgen', ids = ids, es = es, body = lower_block(body, cx, inner) }
+            return
         end
         local kid = declare(cx, inner, text(vl[1]))
         local vid = vl[2] and declare(cx, inner, text(vl[2])) or nil
@@ -535,6 +543,10 @@ function box_block(stmts, boxed, forced)
         elseif op == 'forin' then n.e = box_expr(s.e, boxed, forced); n.body = box_block(s.body, boxed, forced)
         elseif op == 'do' then n.body = box_block(s.body, boxed, forced)
         elseif op == 'while' or op == 'repeat' then n.cond = box_expr(s.cond, boxed, forced); n.body = box_block(s.body, boxed, forced)
+        elseif op == 'forgen' then
+            n.es = {}
+            for j, e in ipairs(s.es) do n.es[j] = box_expr(e, boxed, forced) end
+            n.body = box_block(s.body, boxed, forced)
         end
         out[i] = n
     end
@@ -911,7 +923,7 @@ end
 
 function M.evaluator(prog, budget)
     local R = { steps = 0, budget = budget or 1e7, depth = 0, clos = {}, on_closure = nil }
-    local exec_block, apply, eval, eval_multi, evals
+    local exec_block, apply, eval, eval_multi, evals, callf
     -- (one activation deeper; the depth restored on a refusal too)
     local function deeper(stmts, env)
         R.depth = R.depth + 1
@@ -976,6 +988,14 @@ function M.evaluator(prog, budget)
             else out[i] = eval(e, env); out.n = i end
         end
         return out
+    end
+    -- a function VALUE called -> the list of its results: a closure of the program, or a host function (an iterator
+    -- a host primitive returned — gmatch's)
+    function callf(f, args)
+        local c = R.clos[f]
+        if c then return applyl(c, args) end
+        if type(f) == 'function' then return host(f, args) end
+        refuse('a call of a ' .. type(f) .. ' value')
     end
     -- a call of any kind -> the list of its results
     function eval_multi(e, env)
@@ -1140,6 +1160,18 @@ function M.evaluator(prog, budget)
                     if done == BREAK then break end
                     if done then return true, rv end
                 end
+            elseif op == 'forgen' then
+                local vs = evals(s.es, env)
+                local f, st, ctrl = vs[1], vs[2], vs[3]
+                for _ = 1, math.huge do
+                    local rs = callf(f, { st, ctrl, n = 2 })
+                    if rs[1] == nil then break end
+                    ctrl = rs[1]
+                    for i, id in ipairs(s.ids) do env[id] = rs[i] end
+                    local done, v = exec_block(s.body, env)
+                    if done == BREAK then break end
+                    if done then return true, v end
+                end
             elseif op == 'while' or op == 'repeat' then
                 -- (no host while: mix stays inside the S it accepts by habit — a bounded for, the step budget the bound)
                 for _ = 1, math.huge do
@@ -1156,7 +1188,7 @@ function M.evaluator(prog, budget)
         end
         return false, nil
     end
-    return { eval = eval, eval_multi = eval_multi, evals = evals, exec = exec_block, R = R }
+    return { eval = eval, eval_multi = eval_multi, evals = evals, exec = exec_block, R = R, callf = callf }
 end
 
 -- run(prog, fname, args, budget) -> value, steps. The budget refuses by name when exhausted.
@@ -1274,13 +1306,17 @@ local function bt_block(stmts, bt, ctrl, loop)
             if bt_block(s.els, bt, c, loop) then changed = true end
         elseif op == 'break' then
             if ctrl == D and loop then loop.dyn = true end
-        elseif op == 'fornum' or op == 'forin' or op == 'while' or op == 'repeat' then
+        elseif op == 'fornum' or op == 'forin' or op == 'while' or op == 'repeat' or op == 'forgen' then
             local b
             if op == 'fornum' then b = join(ctrl, opnd(join(bt_expr(s.from, bt), join(bt_expr(s.to, bt), bt_expr(s.step, bt)))))
             elseif op == 'forin' then b = join(ctrl, opnd(bt_expr(s.e, bt)))
+            elseif op == 'forgen' then
+                b = ctrl
+                for _, e in ipairs(s.es) do b = join(b, opnd(bt_expr(e, bt))) end
             else b = join(ctrl, opnd(bt_expr(s.cond, bt))) end
             if op == 'fornum' then set(s.id, b)
-            elseif op == 'forin' then set(s.kid, b); if s.vid then set(s.vid, b) end end
+            elseif op == 'forin' then set(s.kid, b); if s.vid then set(s.vid, b) end
+            elseif op == 'forgen' then for _, id in ipairs(s.ids) do set(id, b) end end
             -- CONGRUENCE OF A BREAK: once a break runs under dynamic control, which iteration is the last is dynamic —
             -- every store in the body is under dynamic control (the code after the loop sees one of several exits).
             -- The loop itself is marked (bt[s] = D): a static condition still cannot unroll it
@@ -2249,6 +2285,27 @@ function M.specialize(prog, fname, division, statics, opts)
                     out[#out + 1] = { op = 'forin', kind = s.kind, e = e, kname = rname(s.kid),
                         vname = s.vid and rname(s.vid) or nil, body = (loop_body(s.body, X)) }
                 end
+            elseif op == 'forgen' then
+                if bt[s.ids[1]] == S then -- UNROLL: the iterator, its state and control are static (gmatch over a known string)
+                    local vs = svall(s.es, X)
+                    local f, st, ctrl = vs[1], vs[2], vs[3]
+                    local seq, done = {}, false
+                    for _ = 1, math.huge do
+                        local rs = lazy(function (a) return ev.callf(a[1], a[2]) end, { f, { st, ctrl, n = 2 } }, X)
+                        if rs[1] == nil then break end
+                        ctrl = rs[1]
+                        spend(10)
+                        for i, id in ipairs(s.ids) do env[id] = rs[i] end
+                        local body, d = loop_body(s.body, X)
+                        if #body > 0 then seq[#seq + 1] = { op = 'do', body = body } end
+                        if d then done = d; break end
+                    end
+                    return unrolled(s, seq, done)
+                end
+                local es = rexprs(s.es, X)
+                local names = {}
+                for i, id in ipairs(s.ids) do env[id] = DYN; X.ren[id] = rname(id); names[i] = rname(id) end
+                out[#out + 1] = { op = 'forgen', names = names, es = es, body = (loop_body(s.body, X)) }
             elseif op == 'while' or op == 'repeat' then
                 if opnd(bt_expr(s.cond, bt)) == S and bt[s] ~= D then -- UNROLL (the budget bounds a loop that never ends)
                     local seq, done = {}, false
@@ -2369,6 +2426,9 @@ function count_block(stmts, uses, w)
             M.count_uses(s.from, uses, w); M.count_uses(s.to, uses, w); M.count_uses(s.step, uses, w); count_block(s.body, uses, w)
         elseif op == 'forin' then M.count_uses(s.e, uses, w); count_block(s.body, uses, w)
         elseif op == 'while' or op == 'repeat' then M.count_uses(s.cond, uses, w); count_block(s.body, uses, w)
+        elseif op == 'forgen' then
+            for _, e in ipairs(s.es) do M.count_uses(e, uses, w) end
+            count_block(s.body, uses, w)
         elseif op == 'do' then count_block(s.body, uses, w) end
     end
 end
@@ -2386,6 +2446,7 @@ function M.bound_names(e, set)
         if e.kname then set[e.kname] = true end
         if e.vname then set[e.vname] = true end
     end
+    if op == 'forgen' then for _, n in ipairs(e.names or {}) do set[n] = true end end
     for k, v in pairs(e) do if k ~= 'op' and type(v) == 'table' then M.bound_names(v, set) end end
     return set
 end
@@ -2528,6 +2589,12 @@ local function pstmt(s, ind, out)
         out[#out + 1] = ind .. 'repeat'
         pblock(s.body, ind .. '    ', out)
         out[#out + 1] = ind .. 'until ' .. pexpr(s.cond, ind)
+    elseif op == 'forgen' then
+        local parts = {}
+        for i, e in ipairs(s.es) do parts[i] = pexpr(e, ind) end
+        out[#out + 1] = ind .. 'for ' .. table.concat(s.names, ', ') .. ' in ' .. table.concat(parts, ', ') .. ' do'
+        pblock(s.body, ind .. '    ', out)
+        out[#out + 1] = ind .. 'end'
     elseif op == 'break' then out[#out + 1] = ind .. 'break'
     else refuse('printing the IR statement ' .. tostring(op)) end
 end

@@ -29,6 +29,8 @@ M.SCHEMA = {
     fn = { { 'name', LIT } },
     forin = { { 'kind', LIT }, { 'kid', LIT }, { 'vid', LIT }, { 'kname', LIT }, { 'vname', LIT }, { 'e', NODE }, { 'body', LIST }, { 'at', CARRY } },
     fornum = { { 'id', LIT }, { 'name', LIT }, { 'from', NODE }, { 'to', NODE }, { 'step', NODE }, { 'body', LIST }, { 'at', CARRY } },
+    -- (the iterator protocol, CART-1467: `ids` lowered, `names` residual)
+    forgen = { { 'ids', LITS }, { 'names', LITS }, { 'es', LIST }, { 'body', LIST }, { 'at', CARRY } },
     global = { { 'name', LIT } },
     gref = { { 'name', LIT } },
     ['if'] = { { 'clauses', CLAUSES }, { 'els', LIST }, { 'at', CARRY } },

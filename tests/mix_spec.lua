@@ -298,6 +298,46 @@ end
     ok(refusal('local function n(...) return { ... } end\nlocal function f(x)\n    local g = n\n    return g(x)\nend\n', 'f'):find('used as a value', 1, true))
 end)
 
+test('mix: the ITERATOR PROTOCOL — `for a, b in f, s, c`: gmatch over a static string UNROLLS, over a dynamic one stays a loop; a stateless index iterator, a closure iterator, a break (CART-1467)', function ()
+    ready()
+    local src = [[
+local function inext(t, i)
+    i = i + 1
+    local v = t[i]
+    if v ~= nil then return i, v end
+end
+local function upto(n)
+    local i = 0
+    return function () i = i + 1; if i <= n then return i end end
+end
+local function words(s)
+    local c = 0
+    for _ in s:gmatch('%a+') do c = c + 1 end
+    return c
+end
+local function f(path, s, t, n)
+    local out = {}
+    for part in path:gmatch('[^.]+') do out[#out + 1] = part end
+    for w in s:gmatch('%a+') do out[#out + 1] = w:upper() end
+    for i, v in inext, t, 0 do
+        if v == 'stop' then break end
+        out[#out + 1] = i .. v
+    end
+    for k in upto(n) do out[#out + 1] = tostring(k * 10) end
+    out[#out + 1] = tostring(words('three small words'))
+    return table.concat(out, ',')
+end
+]]
+    local o = original(src, 'f')
+    local r, text = residual(src, 'f', { 'S', 'D', 'D', 'D' }, { 'a.bb.c' })
+    for _, c in ipairs({ { 'hi there', { 'x', 'y' }, 2 }, { '', { 'p', 'stop', 'q' }, 0 }, { 'one', {}, 3 } }) do
+        eq(o('a.bb.c', c[1], c[2], c[3]), r(c[1], c[2], c[3]))
+    end
+    ok(not text:find("gmatch(\"[^.]+\")", 1, true) and text:find('"bb"', 1, true), 'the static gmatch unrolled to its parts\n' .. text)
+    ok(text:find(':gmatch("%a+")', 1, true), 'the dynamic one stays a loop\n' .. text)
+    ok(text:find('"3"', 1, true) and not text:find('words', 1, true), 'a static call RAN its loop (the evaluator\'s protocol)\n' .. text)
+end)
+
 test('mix: a NON-FINITE number reaching dynamic code is lifted as the division that makes it — 1/0, -1/0, 0/0', function ()
     ready()
     local src = 'local function f(x)\n    local best, worst = math.huge, -math.huge\n    if x < best then best = x end\n    if x > worst then worst = x end\n    return best, worst\nend\n'
