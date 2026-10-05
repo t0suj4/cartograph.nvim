@@ -71,6 +71,58 @@ test('refresh sweep: unchanged-tree refresh of EVERY file is idempotent', functi
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ REPEATED SAVES CONVERGE (CART-1439): every relink re-ran module ownership (own_module_calls walks every call) and
+-- appended each module-level call's site AGAIN — the occurrence counts grew with every save of ANY file (our tree:
+-- ~280 sites a save, ~1,700 more from xlang.link). Saving one file four times must leave the graph a fresh extract
+-- gives, occurrence counts included.
+test('refresh sweep: saving the same file FOUR times leaves every edge\'s sites where one save left them', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = build()
+    -- (module-level calls: their region edges are what every relink re-owned)
+    local fd = assert(io.open(root .. '/boot.lua', 'w'))
+    fd:write("local d = require 'lib.deep'\nd.deep_probe(1)\nd.deep_scan(2)\nlocal m = require 'app.main'\nm.main_run()\n")
+    fd:close()
+    store.ingest(ts.extract(root))
+    local function sites()
+        local n = 0
+        for _, e in ipairs(store.data.edges) do n = n + #(e.at or {}) end
+        return n
+    end
+    local _, why = refresh.file('lib/util.lua')
+    ok(why == nil or why ~= 'error', 'first save ok')
+    local once = sites()
+    for _ = 1, 3 do refresh.file('lib/util.lua') end
+    eq(once, sites(), 'the at-sites after four saves equal those after one')
+    local d = gd.diff(store.data, ts.extract(root))
+    ok(gd.empty(d), 'and the store equals a fresh extract, per-item')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('refresh sweep: a string-keyed REGISTRY\'s cross-language links keep one site each, however many saves relink them', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = build()
+    local fd = assert(io.open(root .. '/reg.lua', 'w'))
+    fd:write(table.concat({
+        'local R = {}', 'local function on(name, fn) R[name] = fn end', 'local function emit(name, ...) return R[name](...) end',
+        'local function alpha_handler() return 1 end', 'local function beta_handler() return 2 end', 'local function gamma_handler() return 3 end',
+        "on('alpha', alpha_handler)", "on('beta', beta_handler)", "on('gamma', gamma_handler)",
+        "local function run() emit('alpha'); emit('beta'); emit('gamma') end", 'return { run = run }', '' }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local function xsites()
+        local e, n = 0, 0
+        for _, x in ipairs(store.data.edges) do if x.xlang then e = e + 1; n = n + #(x.at or {}) end end
+        return e, n
+    end
+    refresh.file('lib/util.lua')
+    local e1, n1 = xsites()
+    ok(e1 >= 3, 'the registry is linked (' .. e1 .. ' xlang edges)')
+    for _ = 1, 3 do refresh.file('lib/util.lua') end
+    local e4, n4 = xsites()
+    eq(e1, e4); eq(n1, n4, 'xlang.link appended its sites again on every save')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ★ THE MENTION INDEX IS PART OF THE CONTRACT (CART-1393). graphdiff compares nodes and edges, not `data.names`, so a
 -- refreshed file whose name set never came back passed every test above while `mentions` answered a false `absent`.
 -- The file that lost it was a NEW one with NO FUNCTIONS: the splice handed the id pass only files with fn ranges,

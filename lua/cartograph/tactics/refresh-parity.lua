@@ -49,7 +49,20 @@ local function digest(data)
             .. '\t' .. (type(r) == 'table' and (vim.inspect(r):gsub('%s+', ' ')) or tostring(r))
     end
     table.sort(rows)
-    return vim.fn.sha256(table.concat(rows, '\n')), #rows, rows
+    -- per FILE too (the file a row belongs to = its first id's file): what the cache's O(diff) save must rewrite
+    local per = {}
+    for _, r in ipairs(rows) do
+        -- (N kind id · E kind from to · C fn callee to refused: a node's id, an edge's FROM, a call's FN; a module-level
+        -- call has no fn and lands in '?', which no file owns and the check skips)
+        local f
+        if r:sub(1, 1) == 'C' then f = r:match('^C\t([^\t]-)::') or '?'
+        else f = r:match('^%a\t[^\t]*\t([^\t]-)::') or r:match('^%a\t[^\t]*\t([^\t:]+)') or '?' end
+        per[f] = per[f] or {}
+        per[f][#per[f] + 1] = r
+    end
+    local hashes = {}
+    for f, rs in pairs(per) do hashes[f] = vim.fn.sha256(table.concat(rs, '\n')) end
+    return vim.fn.sha256(table.concat(rows, '\n')), #rows, rows, hashes
 end
 
 -- a file's INTERFACE: what other files link against (lines ignored — the remap absorbs shifts)
@@ -76,9 +89,19 @@ local function replay(p)
     local fd = assert(io.open(p.edits_file)); local edits = vim.json.decode(fd:read('a')); fd:close()
     local store = require 'cartograph.store'
     local root = world .. '/' .. sub
-    store.ingest(require('cartograph.providers.treesitter').extract(root))
+    -- (the graph a SAVE meets: extracted, then the open path's enrichment passes — cartograph.postpass, as init.open
+    -- runs them — and re-ingested. Without them the first refresh's adapters added every cross-language link at once)
+    local data = require('cartograph.providers.treesitter').extract(root)
+    store.ingest(data)
+    require('cartograph.postpass').run(data, { say = function () end })
+    store.ingest(data)
     local refresh = require 'cartograph.refresh'
     local steps = {}
+    local _, _, rows0, prev = digest(store.data)
+    if p.dump then
+        vim.fn.mkdir(p.dump, 'p')
+        local d = assert(io.open(('%s/%s-000.txt'):format(p.dump, p.mode), 'w')); d:write(table.concat(rows0, '\n')); d:close()
+    end
     local ok, err = pcall(function ()
         for i, e in ipairs(edits) do
             if p.steps and i > tonumber(p.steps) then break end
@@ -87,14 +110,23 @@ local function replay(p)
             local t0 = vim.uv.hrtime()
             local stats, why = refresh.files({ e.rel }, p.mode == 'incremental' and { incremental = true } or nil)
             local secs = (vim.uv.hrtime() - t0) / 1e9
-            local h, n, rows = digest(store.data)
+            local h, n, rows, per = digest(store.data)
+            -- ★ THE PERSISTED SIDE: every file whose rows changed this step must be in stats.dirty, or the O(diff) cache
+            -- save keeps its old shard — a difference the in-memory digest cannot show
+            local dset, undirty = { [e.rel] = true }, {}
+            for _, f in ipairs(stats and stats.dirty or {}) do dset[f] = true end
+            for f, hh in pairs(per) do if f ~= '?' and prev[f] ~= hh and not dset[f] then undirty[#undirty + 1] = f end end
+            for f in pairs(prev) do if f ~= '?' and not per[f] and not dset[f] then undirty[#undirty + 1] = f end end
+            table.sort(undirty)
+            prev = per
             -- (dump = <dir>: every step's digest lines, per path — what a difference is made of)
             if p.dump then
                 vim.fn.mkdir(p.dump, 'p')
                 local d = assert(io.open(('%s/%s-%03d.txt'):format(p.dump, p.mode, i), 'w')); d:write(table.concat(rows, '\n')); d:close()
             end
             steps[i] = { rel = e.rel, commit = e.commit, class = class_of(before, interface(store.data, e.rel)), hash = h, rows = n,
-                secs = secs, refused = (not stats) and tostring(why) or nil, path = stats and stats.path or nil }
+                secs = secs, refused = (not stats) and tostring(why) or nil, path = stats and stats.path or nil,
+                undirty = #undirty > 0 and undirty or nil }
         end
     end)
     git(world, { 'checkout', '--', '.' })
@@ -121,7 +153,7 @@ local function measure(_, p)
         if runs[mode].error then os.remove(ef); return { error = mode .. ': ' .. runs[mode].error } end
     end
     os.remove(ef)
-    local steps, first = {}, nil
+    local steps, first, v_undirty = {}, nil, nil
     local classes, secs = {}, { full = 0, incremental = 0 }
     for i, a in ipairs(runs.full.steps) do
         local b = runs.incremental.steps[i] or {}
@@ -130,9 +162,11 @@ local function measure(_, p)
         classes[a.class] = (classes[a.class] or 0) + 1
         secs.full, secs.incremental = secs.full + (a.secs or 0), secs.incremental + (b.secs or 0)
         steps[i] = { rel = a.rel, commit = a.commit, class = a.class, equal = equal, rows = a.rows, rows_b = b.rows,
-            secs = a.secs, secs_b = b.secs, path_b = b.path, refused = a.refused or b.refused }
+            secs = a.secs, secs_b = b.secs, path_b = b.path, refused = a.refused or b.refused,
+            undirty = a.undirty, undirty_b = b.undirty }
+        if (a.undirty or b.undirty) and not v_undirty then v_undirty = i end
     end
-    return { steps = steps, first_difference = first, classes = classes, secs = secs }
+    return { steps = steps, first_difference = first, first_undirty = v_undirty, classes = classes, secs = secs }
 end
 
 local E = {
@@ -151,6 +185,11 @@ local E = {
             local s = v.steps[v.first_difference]
             return false, ('step %d (%s @%s, interface %s): the incremental graph differs from the full one (%d vs %d rows)'):format(
                 v.first_difference, s.rel, tostring(s.commit), s.class, s.rows or -1, s.rows_b or -1)
+        end
+        if v.first_undirty then
+            local s = v.steps[v.first_undirty]
+            return false, ('step %d (%s): files whose graph changed are NOT in stats.dirty (the cache save would keep their old shards) — full: %s; incremental: %s'):format(
+                v.first_undirty, s.rel, table.concat(s.undirty or {}, ', '), table.concat(s.undirty_b or {}, ', '))
         end
         return true, ('%d steps equal (%s); full %.2f s, incremental %.2f s'):format(#v.steps,
             vim.inspect(v.classes):gsub('%s+', ' '), v.secs.full, v.secs.incremental)

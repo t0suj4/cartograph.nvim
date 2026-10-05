@@ -438,6 +438,25 @@ function M.link(data, bindings)
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
     end
+    -- ★ IDEMPOTENT OVER EXISTING EDGES (refresh's contract for its post-splice passes): link runs on EVERY save, and
+    -- appended its sites again each time — `fn_at -> territory.lang` held 3, 6, 9 copies of one site after 1, 2, 3
+    -- saves (refresh-parity, CART-1439). A site the edge held BEFORE this link is matched, as a MULTISET (two calls on
+    -- one line stay two), and not appended again.
+    local atr = require 'cartograph.at'
+    local site_state = {}
+    local function fresh_site(e, at)
+        local st = site_state[e]
+        if not st then st = { base = #e.at, used = {} }; site_state[e] = st end
+        for j = 1, st.base do
+            local x = e.at[j]
+            if not st.used[j] and (rawequal(x, at) or (atr.sl(x) == atr.sl(at) and atr.sc(x) == atr.sc(at)
+                and atr.el(x) == atr.el(at) and atr.ec(x) == atr.ec(at))) then
+                st.used[j] = true
+                return false
+            end
+        end
+        return true
+    end
     local function addref(from, to, at)
         local k = from .. '\31' .. to
         local e = refEdge[k]
@@ -447,7 +466,7 @@ function M.link(data, bindings)
             data.edges[#data.edges + 1] = e
         end
         e.inferred = nil -- the key match outranks a name hypothesis
-        if at then e.at[#e.at + 1] = at end
+        if at and fresh_site(e, at) then e.at[#e.at + 1] = at end
     end
     local regEdge = {}
     for _, e in ipairs(data.edges) do
@@ -462,7 +481,7 @@ function M.link(data, bindings)
             regEdge[k] = e
             data.edges[#data.edges + 1] = e
         end
-        if at then e.at[#e.at + 1] = at end
+        if at and fresh_site(e, at) then e.at[#e.at + 1] = at end
     end
     -- precise site range: the key literal on the call line, when findable
     local line_cache = {}

@@ -9431,7 +9431,41 @@ function M.relink(data, touched, opts)
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e
         elseif e.kind == 'reg' then regEdge[e.from .. '\31' .. e.to] = e end
     end
-    local addref = ref_adder(refEdge, data.edges)
+    -- ★ RELINK RE-ADDS WHAT IT ALREADY HAS (measured on our tree, CART-1439): every module-level call's region edge
+    -- re-appended its site on EVERY relink (own_module_calls walks every call) — ~280 duplicate sites a save, and
+    -- xlang.link ~1,700 more (fixed there); 39,671 at-sites became 41,644 / 43,623 / 45,602 over three saves and the
+    -- occurrence counts (`×N`) grew with them. A site the edge held
+    -- BEFORE this relink is matched, as a MULTISET (two calls on one line stay two), and not appended again; what IS
+    -- new — an edge, a site, a flag — marks its file touched, or the O(diff) cache save keeps the old shard.
+    -- Extraction keeps the plain adder: there every site is new.
+    local addref
+    do
+        local raw_add = ref_adder(refEdge, data.edges)
+        local state = {}
+        local function same_site(a, b)
+            if rawequal(a, b) then return true end
+            if a == nil or b == nil then return false end
+            return atr.sl(a) == atr.sl(b) and atr.sc(a) == atr.sc(b) and atr.el(a) == atr.el(b) and atr.ec(a) == atr.ec(b)
+        end
+        local function mark(from) if touched then touched[from:match('^(.-)::') or from] = true end end
+        addref = function (from, to, at, inferred, tinf)
+            local e = refEdge[from .. '\31' .. to]
+            if e then
+                local st = state[e]
+                if not st then st = { base = #e.at, used = {} }; state[e] = st end
+                for j = 1, st.base do
+                    if not st.used[j] and same_site(e.at[j], at) then
+                        st.used[j] = true
+                        if not inferred and e.inferred then e.inferred = nil; mark(from) end
+                        if tinf and not e.tinf then e.tinf = true; mark(from) end
+                        return
+                    end
+                end
+            end
+            raw_add(from, to, at, inferred, tinf)
+            mark(from)
+        end
+    end
     local function addreg(from, to, at)
         local k = from .. '\31' .. to
         if regEdge[k] then return end -- already registered from this module
@@ -9814,8 +9848,16 @@ function M.relink(data, touched, opts)
             else
                 -- the refusal recomputed against the CURRENT global
                 -- node set (a worker's slice-local refusal is stale)
+                local old_refused, old_ext = cget(i, 'refused'), cget(i, 'ext')
                 cset(i, 'refused', refused)
                 cset(i, 'ext', not refused and ext or nil) -- else external/noise why
+                -- ★ A CHANGED REFUSAL IS A CHANGE TO ITS FILE (refresh-parity, CART-1439): a refusal lists candidate
+                -- ids and an id carries its line, so an edit elsewhere rewrites it — unreported, the O(diff) cache save
+                -- kept the old shard and a warm load read the old ids. (Compared by value: interned or not.)
+                if touched and not touched[cfile] and (old_ext ~= cget(i, 'ext')
+                    or not vim.deep_equal(old_refused, refused)) then
+                    touched[cfile] = true
+                end
             end
         end
         -- callback-pattern mirror: an identifier argument naming a unique
