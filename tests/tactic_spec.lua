@@ -143,6 +143,21 @@ test('tactic: on_stop = rollback undoes a stopped run — journaled writes only'
     local u = run(T.use('shipper'), { toolbelt_dir = d })
     eq('failed', u.status); eq('ill-posed', u.class); eq(0, shipped, 'the used write\'s irreversible step never ran')
     ok(u.why:find('point of no return', 1, true), u.why)
+    -- ★ ACROSS THE BOUNDARY (CART-1470): the built term alone is fine (one irreversible step, nothing after it INSIDE),
+    -- but the run continues past the `use` with a step that can still stop it
+    fd = assert(io.open(d .. '/onlyship.lua', 'w'))
+    fd:write("local T = require('cartograph.tactic').T\nreturn { name = 'onlyship', kind = 'write', summary = 's', params = {}, examples = { { name = 'x' } }, "
+        .. "build = function () return T.step('ship', { file = 'a.lua' }) end }\n"); fd:close()
+    local x = run(T.seq(T.use('onlyship'), R('unbuilt')), { toolbelt_dir = d })
+    eq('failed', x.status); eq('ill-posed', x.class); eq(0, shipped, 'shipped past a point of no return')
+    ok(x.why:find('across the boundary', 1, true), x.why)
+    -- the accepted orderings: the check BEFORE the use, or what follows wrapped in `try`
+    eq('done', run(T.seq(W('b.lua'), T.use('onlyship')), { toolbelt_dir = d }).status)
+    eq('done', run(T.seq(T.use('onlyship'), T.try(R('unbuilt'))), { toolbelt_dir = d }).status)
+    -- and a BIND body's term the same way
+    shipped = 0
+    local y = run(T.seq(T.bind('always', {}, function () return T.step('ship', { file = 'a.lua' }) end), R('unbuilt')), { toolbelt_dir = d })
+    eq('ill-posed', y.class); eq(0, shipped); ok(y.why:find('across the boundary', 1, true), y.why)
 end)
 
 test('tactic: an unaccepted DECISION hazard STOPS the run with its options; answering it and re-running finishes', function ()

@@ -572,8 +572,15 @@ function eval(store, t, opts, where)
             kids = {}
             for i, item in ipairs(t.items or {}) do kids[i] = t.body(item, i) end
         end
+        local outer = opts.tail_can_stop
         for i, k in ipairs(kids) do
+            -- (what follows THIS child — inside this sequence or after it — can it still stop the run? a term built at
+            -- run time is checked against it: CART-1470)
+            local later = outer
+            for j = i + 1, #kids do if not later and M._can_stop(kids[j]) then later = true end end
+            opts.tail_can_stop = later
             local o = eval(store, k, opts, where .. '.' .. i)
+            opts.tail_can_stop = outer
             merge(out, o)
             if not o.ok then return adopt(out, o) end
             if not o.empty then out.empty = false end
@@ -691,6 +698,10 @@ function eval(store, t, opts, where)
             -- it was never seen by the static check
             local nr = M.no_return_check(next_t, opts.verbs)
             if nr then return adopt(o, { class = 'ill-posed', where = here .. '.' .. tostring(nr.gate), why = nr.why }) end
+            local irr = opts.tail_can_stop and M._irreversible_in(next_t, opts.verbs or require('cartograph.compose').VERBS)
+            if irr then
+                return adopt(o, { class = 'ill-posed', where = here, why = ('the term `%s` built holds the irreversible step `%s`, and what follows it can still stop the run — past a point of no return across the boundary (CART-1470). Move the check BEFORE it, or wrap what follows in `try`'):format(tostring(t.name), irr) })
+            end
             local k = eval(store, next_t, opts, here .. '.1')
             merge(o, k)
             o.empty = k.empty
@@ -711,6 +722,14 @@ function eval(store, t, opts, where)
             opts.using[t.name] = nil
             return adopt(outcome(), { class = 'ill-posed', where = here .. '.' .. tostring(nr.gate), why = nr.why })
         end
+        -- ★ ACROSS THE BOUNDARY (CART-1470): the built term's own walk cannot see what follows it OUTSIDE — an
+        -- irreversible step in here, with something after this `use` that can still stop the run, is the same point
+        -- of no return the run-start walk refuses
+        local irr = opts.tail_can_stop and M._irreversible_in(built, opts.verbs or require('cartograph.compose').VERBS)
+        if irr then
+            opts.using[t.name] = nil
+            return adopt(outcome(), { class = 'ill-posed', where = here, why = ('`%s` builds the irreversible step `%s`, and what follows it can still stop the run — past a point of no return across the boundary (CART-1470). Move the check BEFORE it, or wrap what follows in `try`'):format(tostring(t.name), irr) })
+        end
         local o = eval(store, built, opts, here)
         opts.using[t.name] = nil
         if o.ok and opts.apply and e.oracle then
@@ -721,6 +740,37 @@ function eval(store, t, opts, where)
     end
     return adopt(outcome(), { class = 'ill-posed', where = where,
         why = ('no tactical `%s` (then|first|try|repeat|each|step|use|bind)'):format(tostring(op)) })
+end
+
+--- CAN `t` STOP THE RUN? (a refusal, a decision, a failed premise) — the same reading no_return_check uses: every
+--- step, use and bind can; `first` / `repeat` can as a whole; `try` cannot (it turns a failure into no change)
+function M._can_stop(t)
+    local op = t and t.op
+    if op == 'step' or op == 'use' or op == 'bind' or op == 'first' or op == 'repeat' then return true end
+    if op == 'then' then for _, k in ipairs(t) do if M._can_stop(k) then return true end end return false end
+    if op == 'each' then return #(t.items or {}) > 0 end
+    return false
+end
+
+--- the first IRREVERSIBLE step `t` holds (by the verbs' declared effects), or nil — a built term's own `use` / `bind`
+--- are checked when THEY run
+function M._irreversible_in(t, verbs)
+    local op = t and t.op
+    if op == 'step' then
+        local spec = verbs[t.verb] or {}
+        return (not EFFECTS[spec.effect] or spec.effect == 'irreversible') and t.verb or nil
+    end
+    if op == 'then' or op == 'first' or op == 'try' or op == 'repeat' then
+        for _, k in ipairs(t) do local v = M._irreversible_in(k, verbs); if v then return v end end
+    end
+    if op == 'each' then
+        for i, item in ipairs(t.items or {}) do
+            local ok, k = pcall(t.body, item, i)
+            local v = ok and M._irreversible_in(k, verbs)
+            if v then return v end
+        end
+    end
+    return nil
 end
 
 --- ★ NO POINT OF NO RETURN BEFORE A CHECK (CART-1187): walk the term in EXECUTION ORDER before anything runs. Each
@@ -795,6 +845,7 @@ end
 function M.run(store, term, opts)
     opts = opts or {}
     local eopts = { apply = opts.apply and true or false, verbs = opts.verbs, depth = 0, correct = opts.correct,
+        tail_can_stop = opts.oracle ~= nil, -- (the oracle runs after everything: it can stop the run)
         toolbelt_dir = opts.toolbelt_dir, ns = opts.ns, remembered = opts.remembered,
         -- signed approvals (CART-1183): a directory store, a list of tokens, or a list of directories
         approvals = opts.approvals }
