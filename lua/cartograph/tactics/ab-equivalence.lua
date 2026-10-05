@@ -115,8 +115,18 @@ local function measure(_, p)
         for k = 1, math.max(#la, #lb) do
             if la[k] ~= lb[k] then first = { line = k, a = la[k], b = lb[k] }; break end
         end
-        v.runs[#v.runs + 1] = { corpus = corpus, equal = first == nil, first_difference = first,
+        local row = { corpus = corpus, equal = first == nil, first_difference = first,
             a = { lines = #a.lines, secs = a.secs, wall = a.wall }, b = { lines = #b.lines, secs = b.secs, wall = b.wall } }
+        -- ★ faster = 1 TIMES BOTH ORDERS (A,B then B,A): one sample in one order decides nothing — whichever side runs
+        -- second inherits a warmer machine (the standing timing rule). B must win BOTH pairs
+        if p.faster == '1' and first == nil then
+            local b2, bw2 = run(B, corpus, 'b' .. i .. 'r')
+            if not b2 then v.error = bw2; break end
+            local a2, aw2 = run(A, corpus, 'a' .. i .. 'r')
+            if not a2 then v.error = aw2; break end
+            row.a.secs2, row.b.secs2 = a2.secs, b2.secs
+        end
+        v.runs[#v.runs + 1] = row
     end
     if p.keep ~= '1' then vim.fn.delete(scratch, 'rf') else v.scratch = scratch end
     return v
@@ -142,11 +152,12 @@ local E = {
                     tostring(d.a):sub(1, 120), v.b.ref, tostring(d.b):sub(1, 120))
             end
             -- (faster = 1: the change is a PERFORMANCE change, and equal output alone does not accept it)
-            if v.faster and not ((r.b.secs or math.huge) < (r.a.secs or 0)) then
-                return false, ('%s: outputs equal, but B (%s) is not faster: A %.3fs / B %.3fs'):format(r.corpus, v.b.ref, r.a.secs or -1, r.b.secs or -1)
+            if v.faster and not ((r.b.secs or math.huge) < (r.a.secs or 0) and (r.b.secs2 or math.huge) < (r.a.secs2 or 0)) then
+                return false, ('%s: outputs equal, but B (%s) is not faster in both orders: A,B %.3fs / %.3fs; B,A %.3fs / %.3fs'):format(r.corpus,
+                    v.b.ref, r.a.secs or -1, r.b.secs or -1, r.b.secs2 or -1, r.a.secs2 or -1)
             end
-            parts[#parts + 1] = ('%s: %d lines equal, A %.2fs / B %.2fs'):format(vim.fn.fnamemodify(r.corpus, ':t'), r.a.lines,
-                r.a.secs or -1, r.b.secs or -1)
+            parts[#parts + 1] = ('%s: %d lines equal, A %.2fs / B %.2fs%s'):format(vim.fn.fnamemodify(r.corpus, ':t'), r.a.lines,
+                r.a.secs or -1, r.b.secs or -1, r.a.secs2 and (' (B,A: %.2fs / %.2fs)'):format(r.b.secs2, r.a.secs2) or '')
         end
         return true, table.concat(parts, '; ')
     end,
@@ -177,7 +188,39 @@ local function in_git()
     return r.code == 0, 'not a git checkout: ' .. repo_of_toolbelt()
 end
 
+-- the same output on both sides; side A (the unpacked `…-ab/a` tree) or side B is the SLOW one
+local function slow_side(side) return ([[
+return { measure = function ()
+    local src = debug.getinfo(require('cartograph.store').ingest, 'S').source
+    if (src:find('-ab/a/', 1, true) ~= nil) == %s then vim.uv.sleep(300) end
+    return { 'same' } end }
+]]):format(side == 'a' and 'true' or 'false') end
+
 E.examples = {
+    {
+        name = 'faster = 1 times BOTH orders: a B that is faster in A,B and in B,A holds; a slower B is refused with all four times',
+        files = FILES, requires = in_git,
+        params = function (store) return { ref = 'HEAD', measure = slow_side('a'), corpus = { store.data.root }, faster = '1', timeout = '120' } end,
+        expect = { holds = true, check = function (v)
+            local r = v.runs[1]
+            local slower = measure(nil, { ref = 'HEAD', measure = slow_side('b'), corpus = { r.corpus }, faster = '1', timeout = '120' })
+            local held, why = E.claim(slower)
+            -- B faster in A,B only: the THIRD run (B's second) is the slow one — one order's win is not a verdict
+            local n = vim.fn.tempname()
+            local once = measure(nil, { ref = 'HEAD', corpus = { r.corpus }, faster = '1', timeout = '120', measure = ([[
+return { measure = function ()
+    local f = io.open(%q); local k = f and tonumber(f:read('a')) or 0; if f then f:close() end
+    f = io.open(%q, 'w'); f:write(tostring(k + 1)); f:close()
+    if k == 0 then vim.uv.sleep(300) end
+    if k == 2 then vim.uv.sleep(600) end
+    return { 'same' } end }
+]]):format(n, n) })
+            local held2 = E.claim(once)
+            return r.a.secs2 and r.b.secs2 and r.b.secs2 < r.a.secs2 and not held and why:find('both orders', 1, true) ~= nil
+                and once.runs[1] and once.runs[1].b.secs < once.runs[1].a.secs and not held2,
+                vim.inspect(r) .. ' / ' .. tostring(why) .. ' / ' .. vim.inspect(once.runs)
+        end },
+    },
     {
         name = 'HEAD against the working tree on a small corpus: the same function names on both sides',
         files = FILES, requires = in_git,

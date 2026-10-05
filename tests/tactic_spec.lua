@@ -128,6 +128,21 @@ test('tactic: on_stop = rollback undoes a stopped run — journaled writes only'
     -- and the tactic's ORACLE is a gate too: an irreversible step with an oracle after it is refused
     local z = run(T.step('ship', { file = 'a.lua' }), { oracle = function () return true end })
     eq('ill-posed', z.class); ok(z.why:find('the oracle', 1, true), z.why)
+    -- ★ a term BUILT AT RUN TIME (a bind body, a used write's build) gets the same walk before it runs (CART-1444)
+    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
+    local fd = assert(io.open(d .. '/always.lua', 'w'))
+    fd:write("return { name = 'always', kind = 'discovery', summary = 's', params = {}, examples = { { name = 'x' } }, "
+        .. "measure = function () return 1 end, claim = function () return true, 'yes' end }\n"); fd:close()
+    shipped = 0
+    local b = run(T.bind('always', {}, function () return T.seq(T.step('ship', { file = 'a.lua' }), R('unbuilt')) end), { toolbelt_dir = d })
+    eq('failed', b.status); eq('ill-posed', b.class); eq(0, shipped, 'the built irreversible step never ran')
+    ok(b.why:find('point of no return', 1, true), b.why)
+    fd = assert(io.open(d .. '/shipper.lua', 'w'))
+    fd:write("local T = require('cartograph.tactic').T\nreturn { name = 'shipper', kind = 'write', summary = 's', params = {}, examples = { { name = 'x' } }, "
+        .. "build = function () return T.seq(T.step('ship', { file = 'a.lua' }), T.step('refuse', { class = 'unbuilt' })) end }\n"); fd:close()
+    local u = run(T.use('shipper'), { toolbelt_dir = d })
+    eq('failed', u.status); eq('ill-posed', u.class); eq(0, shipped, 'the used write\'s irreversible step never ran')
+    ok(u.why:find('point of no return', 1, true), u.why)
 end)
 
 test('tactic: an unaccepted DECISION hazard STOPS the run with its options; answering it and re-running finishes', function ()

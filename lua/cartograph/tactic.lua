@@ -660,6 +660,10 @@ function eval(store, t, opts, where)
             local okb, next_t, bwhy, bclass = pcall(t.body, value)
             if not okb then return adopt(o, { class = 'unbuilt', where = here, why = 'the bind body raised: ' .. tostring(next_t) }) end
             if not next_t then return adopt(o, { class = bclass or 'ill-posed', where = here, why = tostring(bwhy) }) end
+            -- ★ the BUILT term gets the point-of-no-return walk the run's own term got (CART-1187): built at run time,
+            -- it was never seen by the static check
+            local nr = M.no_return_check(next_t, opts.verbs)
+            if nr then return adopt(o, { class = 'ill-posed', where = here .. '.' .. tostring(nr.gate), why = nr.why }) end
             local k = eval(store, next_t, opts, here .. '.1')
             merge(o, k)
             o.empty = k.empty
@@ -673,6 +677,12 @@ function eval(store, t, opts, where)
         if not built then
             opts.using[t.name] = nil
             return adopt(outcome(), { class = bclass or 'ill-posed', where = here, why = tostring(bwhy) })
+        end
+        -- (the built term's own point-of-no-return walk, CART-1187 — promised by no_return_check's header, never run)
+        local nr = M.no_return_check(built, opts.verbs, e.oracle ~= nil)
+        if nr then
+            opts.using[t.name] = nil
+            return adopt(outcome(), { class = 'ill-posed', where = here .. '.' .. tostring(nr.gate), why = nr.why })
         end
         local o = eval(store, built, opts, here)
         opts.using[t.name] = nil

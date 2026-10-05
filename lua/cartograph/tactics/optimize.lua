@@ -92,6 +92,14 @@ local function build(p, store)
                 return nil, ('no memo saves %.0f%% of the workload (best: %s, %.3f s of %.3f s)'):format(min * 100,
                     best and best.name or '-', best and best.saved or 0, adv.workload_seconds), 'empty'
             end
+            -- ★ THE PRICE IS A DECISION TOO: the A/B checks output and time, never memory. CART-1427's hand process
+            -- REJECTED exactly this memo (expr.of, ~91-141 MB) on its price and restructured instead; a loop that only
+            -- reads time would accept it. Above `max_kb` (default 64 MB) it stops and asks
+            local max_kb = tonumber(p.max_kb or 65536)
+            if best.result_kb > max_kb then
+                return nil, ('a memo of %s would hold ~%.0f MB of results to save %.2f s of %.2f s: accept the price (max_kb = %d or more), or restructure so the callers derive once'):format(
+                    best.name, best.result_kb / 1024, best.saved, adv.workload_seconds, math.ceil(best.result_kb)), 'decision'
+            end
             -- `residence` ANSWERS the decision (and overrides the derived one: an identity key into a store whose content
             -- changes per generation is CART-1430's pointer case — only the caller knows)
             if best.keys == 'mixed' and not p.residence then
@@ -133,7 +141,7 @@ return {
     on_stop = 'rollback',
     summary = 'THE OPTIMIZATION LOOP on this world: rewrite = memo (hot-spots -> memo-advisor -> memoize, residence from the key kind) | order (sort-ties -> total-order) — then ab-equivalence of `measure` on `corpus` at HEAD vs the rewritten tree (memo: equal AND faster), rolled back when it fails. workload = what the discoveries run (Lua returning function (store) or { setup, run }; @file). Apply only, on a clean git checkout; stops only on decisions (mixed key kind, several separators)',
     params = { workload = 'string', measure = 'string', corpus = 'list', sorted = 'string?', rewrite = 'string?', top = 'string?',
-        min = 'string?', timeout = 'string?', by = 'list?', residence = 'string?', generation = 'string?' },
+        min = 'string?', timeout = 'string?', by = 'list?', residence = 'string?', generation = 'string?', max_kb = 'string?' },
     build = build,
     examples = {
         {
@@ -143,6 +151,14 @@ return {
             expect = { status = 'done', applied = 1, check = function (root)
                 local s = io.open(root .. '/lua/optm.lua'):read('a')
                 return s:find('slow_raw', 1, true) ~= nil and s:find("__mode = 'k'", 1, true) ~= nil, s
+            end },
+        },
+        {
+            name = 'a memo whose results cost more than max_kb STOPS on the price decision before anything is written',
+            files = { ['lua/optm.lua'] = OPTM }, requires = in_git,
+            params = function (store) commit(store); return { workload = work('optm'), measure = measure_of('optm'), corpus = { store.data.root }, max_kb = '0' } end,
+            expect = { status = 'stopped', applied = 0, check = function (root)
+                return io.open(root .. '/lua/optm.lua'):read('a') == OPTM, 'written past the price'
             end },
         },
         {
