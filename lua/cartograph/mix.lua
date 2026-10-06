@@ -1597,6 +1597,52 @@ function M.specialize(prog, fname, division, statics, opts)
     local budget = opts.budget or 100000
     local used = 0
     local res = { funcs = {}, order = {} }
+    -- ── THE DECISION HOOK (CART-1501) ────────────────────────────────────────────────────────────────────────────────
+    -- every choice the specializer makes at a DECISION POINT is asked through opts.decide(kind, ctx, default) — nil
+    -- keeps the default, which is today's rule, so a run without the hook is unchanged — and LOGGED in res.decisions as
+    -- { kind, ctx, default, choice }: a run can be read, replayed, and ONE decision flipped (USER, 2026-10-06: "insert
+    -- interaction points so it's easier to explore — right now the compiler is pretty much autonomous"). Kinds:
+    --   'fold'        a pure primitive computed on static arguments (default true; false = called at run time)
+    --   'unfold'      a call whose residual body is one `return e`, substituted in place (default true; false = a
+    --                 residual function)
+    --   'generalize'  the whistle's answer for a configuration that grew: { [param] = true } to make dynamic (default:
+    --                 the join's holes; false = refuse)
+    --   'grow'        a continuation that kept growing, retried with its closure arguments dynamic (default true;
+    --                 false = refuse)
+    -- ctx: { fn, division, at (the source position, through the line map), chain (the active calls, innermost first) }
+    -- plus the kind's own fields. Policies over this hook are later work.
+    res.decisions = {}
+    local function decide(kind, ctx, default)
+        local choice = default
+        if opts.decide then
+            local c = opts.decide(kind, ctx, default)
+            if c ~= nil then choice = c end
+        end
+        res.decisions[#res.decisions + 1] = { kind = kind, ctx = ctx, default = default, choice = choice }
+        return choice
+    end
+    -- a frame's context for the hook
+    local function ctx_of(fr, extra)
+        local chain = {}
+        local f = fr and fr.parent
+        for _ = 1, 12 do
+            if not f then break end
+            chain[#chain + 1] = f.g
+            f = f.parent
+        end
+        local c = { fn = fr and fr.g, division = fr and fr.division and table.concat(fr.division, '') or nil,
+            at = fr and fr.at and prog.where and prog.where(fr.at) or (fr and fr.at), chain = chain }
+        for k, v in pairs(extra or {}) do c[k] = v end
+        return c
+    end
+    -- (the 'fold' decision is made once per primitive, before any binding time is computed)
+    if next(XPURE) then
+        local kept = {}
+        for name in pairs(XPURE) do
+            if decide('fold', { prim = name }, true) then kept[name] = true end
+        end
+        XPURE = kept
+    end
     local memo, btcache = {}, {}
     local counter, holes = 0, 0
     local function spend(n)
@@ -2107,6 +2153,8 @@ function M.specialize(prog, fname, division, statics, opts)
                 -- derived match through the basis reached M.match's go_kids that way, CART-1500)
                 if not (type(r) == 'table' and r.refusal and (r.refusal:find('nested deeper than', 1, true)
                     or r.refusal:find('specialization depth', 1, true))) then error(r, 0) end
+                if not decide('grow', { fn = g, division = table.concat(division, ''), closures = grow, refusal = r.refusal,
+                    chain = ctx_of(X.frame and { parent = X.frame } or nil).chain }, true) then error(r, 0) end
                 rollback(no, nm)
                 return apply_spec(T, argexprs, X, grow)
             end
@@ -2134,6 +2182,7 @@ function M.specialize(prog, fname, division, statics, opts)
         cut_iters(ni)
         if not (type(r) == 'table' and r.refusal and r.refusal:find('specialization depth', 1, true)) then error(r, 0) end
         local f2 = generalization(anc, fr)
+        f2 = decide('generalize', ctx_of(fr, { refusal = r.refusal, ancestor = anc.division and table.concat(anc.division, '') }), f2 or false)
         if not f2 then error(r, 0) end
         rollback(no, nm)
         record_general(fr, f2)
@@ -2152,7 +2201,7 @@ function M.specialize(prog, fname, division, statics, opts)
             for nm, a in pairs(subst) do
                 if (uses[nm] or 0) > 1 and a.op ~= 'var' and a.op ~= 'num' and a.op ~= 'str' and a.op ~= 'bool' and a.op ~= 'nil' then okk = false end
             end
-            if okk then return M.substitute(inl, subst) end
+            if okk and decide('unfold', ctx_of(fr), true) then return M.substitute(inl, subst) end
         end
         local name, extra = point(T, division, svals, fr)
         for _, x in ipairs(extra) do dargs[#dargs + 1] = x end
@@ -2806,6 +2855,7 @@ function M.mix(term, fname, division, statics, opts)
     local prog = M.lower(term, { lines = opts and opts.lines })
     local res, stats = M.specialize(prog, fname, division, statics, opts)
     local text, map = M.print(res, prog.where)
+    stats.decisions = res.decisions -- (the decision log, CART-1501)
     return text, stats, res.pool, map
 end
 

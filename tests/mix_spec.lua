@@ -1037,6 +1037,47 @@ test('mix: the CENSUS — lower with { collect = {} } records every refused stat
     ok(prog.funcs.f and prog.funcs.g, 'both functions lowered, the refused statements skipped')
 end)
 
+test('mix: THE DECISION HOOK — every decision is logged; a hook answering nil changes nothing; flipping one changes the residual and keeps it right (CART-1501)', function ()
+    ready()
+    local function kinds(st) local k = {}; for _, d in ipairs(st.decisions) do k[d.kind] = (k[d.kind] or 0) + 1 end; return k end
+    -- 'unfold': a one-return helper is substituted by default, kept a residual function when the hook says no
+    local U = 'local function sq(y) return y * y end\nlocal function f(x) return sq(x) + 1 end\n'
+    local T = assert(R.read(U, 'lua'))
+    local t0, s0 = MX.mix(T, 'f', { 'D' }, {})
+    local t1, s1 = MX.mix(T, 'f', { 'D' }, {}, { decide = function () return nil end })
+    eq(t0, t1, 'a hook that answers nothing is no change')
+    ok((kinds(s0).unfold or 0) >= 1, vim.inspect(s0.decisions))
+    local ud
+    for _, d in ipairs(s0.decisions) do if d.kind == 'unfold' then ud = d end end
+    eq('sq', ud.ctx.fn, 'the context names the callee'); eq('D', ud.ctx.division)
+    ok(type(ud.ctx.chain) == 'table', 'and the active calls')
+    local t2, s2 = MX.mix(T, 'f', { 'D' }, {}, { decide = function (kind) if kind == 'unfold' then return false end end })
+    ok(s2.functions > s0.functions, ('unfold refused: %d residual functions, %d before'):format(s2.functions, s0.functions))
+    eq(false, s2.decisions[1].choice); eq(true, s2.decisions[1].default)
+    local f2 = assert(load(t2, 'r', 't', setmetatable({ MIXK = {} }, { __index = _G })))()
+    eq(original(U, 'f')(7), f2(7))
+    -- 'grow': the growing continuation is retried with its closure dynamic by default; vetoed, the refusal stands
+    local G = 'local function g(x, k)\n    if x > 0 then return g(x - 1, function (y) return k(y) + 1 end) end\n    return k(x)\nend\nlocal function f(x)\n    return g(x, function (y) return y end)\nend\n'
+    local _, sg = MX.mix(assert(R.read(G, 'lua')), 'f', { 'D' }, {})
+    ok((kinds(sg).grow or 0) >= 1, 'the retry was a logged decision')
+    local okv = pcall(MX.mix, assert(R.read(G, 'lua')), 'f', { 'D' }, {}, { decide = function (kind) if kind == 'grow' then return false end end })
+    eq(false, okv, 'vetoed: refused')
+    -- 'generalize': the whistle's answer for a counter that grows (n over a dynamic list); vetoed, the depth refuses
+    local W = 'local function walk(t, n)\n  n = n or 1\n  if n > #t then return 0 end\n  return t[n] + walk(t, n + 1)\nend\nlocal function f(t) return walk(t) end\n'
+    local _, sw = MX.mix(assert(R.read(W, 'lua')), 'f', { 'D' }, {})
+    ok((kinds(sw).generalize or 0) >= 1, vim.inspect(kinds(sw)))
+    local okw = pcall(MX.mix, assert(R.read(W, 'lua')), 'f', { 'D' }, {}, { decide = function (kind) if kind == 'generalize' then return false end end })
+    eq(false, okw, 'vetoed: refused')
+    -- 'fold': a PURE primitive computes on static arguments by default; answered false, it is called at run time
+    local P = 'local function f(x) return twice(3) + x end\n'
+    local prims = { twice = function (n) return n * 2 end }
+    local tp = MX.mix(assert(R.read(P, 'lua')), 'f', { 'D' }, {}, { prims = prims, pure = { twice = true } })
+    ok(not tp:find('twice', 1, true), 'folded\n' .. tp)
+    local tq, sq = MX.mix(assert(R.read(P, 'lua')), 'f', { 'D' }, {}, { prims = prims, pure = { twice = true }, decide = function (kind) if kind == 'fold' then return false end end })
+    ok(tq:find('twice(3)', 1, true), 'not folded\n' .. tq)
+    eq('twice', sq.decisions[1].ctx.prim)
+end)
+
 test('mix: a table a CALLEE\'s closure stores into is dynamic in the CALLER too — `local ids = {}` handed to it is allocated per run, never a shared constant (CART-1500)', function ()
     ready()
     local SRC = 'local function note(memo, k)\n  local function set(v) memo[k] = (memo[k] or 0) + v end\n  set(1)\n  return memo[k]\nend\n'

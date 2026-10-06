@@ -87,7 +87,8 @@ function M.program(root, files, opts)
     local ckey = root .. (files and ('\0' .. table.concat(files, '\0')) or '') .. (opts.snapshot and '\0snap' or '')
         .. (opts.through and '\0through' or '')
         .. (opts.opaque and ('\0opaque:' .. table.concat((function () local t = vim.tbl_keys(opts.opaque); table.sort(t); return t end)(), ',')) or '')
-    if cache[ckey] then local c = cache[ckey]; return c.text, c.order, c.lines, c.knowns, c.report, c.prims end
+    -- (a run with a decision hook is never served from, nor stored in, the cache: its answers may differ)
+    if cache[ckey] and not opts.decide then local c = cache[ckey]; return c.text, c.order, c.lines, c.knowns, c.report, c.prims end
     files = files or vim.fn.glob(algebra_dir() .. '/*.lua', false, true)
     local fq = vim.treesitter.query.parse('lua', '(function_declaration) @f')
     local aq = vim.treesitter.query.parse('lua', '(function_definition) @f')
@@ -259,6 +260,7 @@ function M.program(root, files, opts)
         return fobj[fk]
     end
     local key_of_fn
+    local decisions, follow_memo = {}, {} -- (the decision hook's log and per-site answers, CART-1501)
     -- THROUGH THE BASIS (opts.through, CART-1500): `B.join` where B is a captured table whose field IS a definition of
     -- these files (the derivations' basis is the algebra's own functions) is that definition — followed into the
     -- closure and rewritten to its mangled name, so mix specializes it with the rest instead of calling it opaque.
@@ -305,6 +307,21 @@ function M.program(root, files, opts)
         end
         local k3 = key_of_fn[fv]
         if k3 and opts.opaque and opts.opaque[k3] then return nil end -- (kept a primitive)
+        -- (the DECISION HOOK, CART-1501: 'follow' — default true; false keeps this site a primitive call. Asked once per
+        -- site: the closure walk and the assembly both come here)
+        if k3 then
+            local sk = d.file .. ':' .. cap:id()
+            if follow_memo[sk] == nil then
+                local choice = true
+                if opts.decide then
+                    local c = opts.decide('follow', { from = d.file, name = tx(cap, d.src), target = k3 }, true)
+                    if c ~= nil then choice = c end
+                end
+                decisions[#decisions + 1] = { kind = 'follow', ctx = { from = d.file, name = tx(cap, d.src), target = k3 }, default = true, choice = choice }
+                follow_memo[sk] = choice and true or false
+            end
+            if not follow_memo[sk] then return nil end
+        end
         return k3
     end
     -- THE CLOSURE: calls and references-as-values (`local with_cursor = M.with_cursor`), and with opts.through the
@@ -461,7 +478,8 @@ function M.program(root, files, opts)
         chunks[#chunks + 1] = chunk
     end
     local text = table.concat(chunks, '\n')
-    cache[ckey] = { text = text, order = order, lines = lines, knowns = knowns, report = report, prims = prims }
+    report.decisions = decisions
+    if not opts.decide then cache[ckey] = { text = text, order = order, lines = lines, knowns = knowns, report = report, prims = prims } end
     return text, order, lines, knowns, report, prims
 end
 

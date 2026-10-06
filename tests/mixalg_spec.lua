@@ -339,6 +339,16 @@ test('mixalg: THROUGH THE BASIS — a captured table\'s field or a captured alia
         local op, _, _, _, _, prims = MA.program('M.use', { path }, { through = true, opaque = { ['M.dbl'] = true } })
         ok(op:find('M_inc(a)', 1, true) and op:find('fix__B.dbl(', 1, true), 'M.dbl kept opaque\n' .. op)
         ok(prims['fix__B.dbl'] ~= nil, 'as a primitive')
+        -- (the DECISION HOOK, CART-1501: each followed site is a 'follow' decision — logged, and answerable per site)
+        local _, _, _, _, rep = MA.program('M.use', { path }, { through = true })
+        local fl = {}
+        for _, dd in ipairs(rep.decisions) do if dd.kind == 'follow' then fl[#fl + 1] = dd.ctx.target end end
+        table.sort(fl)
+        eq({ 'M.dbl', 'M.inc', 'M.inc' }, fl, 'B.dbl, B.inc and the alias inc2: three sites')
+        local hk = MA.program('M.use', { path }, { through = true, decide = function (kind, ctx)
+            if kind == 'follow' and ctx.name == 'B.inc' then return false end end })
+        ok(hk:find('fix__B.inc(', 1, true) and hk:find('M_dbl(a)', 1, true) and hk:find('M_inc(a)', 1, true),
+            'B.inc left a primitive at that site only; the alias still follows\n' .. hk)
         -- (and the followed program specializes and equals the original)
         local MX = require 'cartograph.mix'
         local p2 = MX.lower(assert(R.read(thr, 'lua')))
