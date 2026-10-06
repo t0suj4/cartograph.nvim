@@ -862,6 +862,11 @@ function M.sra(body, cx)
             if c == false then cand[id] = nil end
         end
     end
+    -- (a FORCED record — mutated through a primitive or a callee, `table.insert(s.items, d)` — is not split: its fields
+    -- would be fresh, unforced locals and the mutated table would fold static again — CART-1510: #s.items was 0)
+    for id in pairs(cand) do
+        if cx.forced[id] then escape(id, 'mutated through a primitive or a callee (forced)') end
+    end
     if next(cand) == nil then return body end
     -- (3) REWRITE: one local per field; `t.k` -> that local; the declaration -> the fields' declarations, in order
     for id, c in pairs(cand) do

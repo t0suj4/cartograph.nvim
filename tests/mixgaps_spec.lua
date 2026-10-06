@@ -1260,7 +1260,7 @@ test('BUG CART-1510: SRA keeps the forcing of a mutated record — `table.insert
     eq(1, original(src, 'f')(10))
     local r, text = mixed(src, 'f', { 'D' })
     local got = r(10)
-    if got == 0 then skip('CART-1510 open: the field local SRA makes is not forced, #s.items folds to 0') end
+    -- (CART-1510 fixed: a forced record is not split — a 0 is a regression, not a skip)
     eq(1, got, text)
 end)
 
