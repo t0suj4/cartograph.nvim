@@ -392,6 +392,17 @@ test('mixalg: the assembler\'s EDGES — a scalar a literal (nil, false, a float
         'function M.w(a) return W.inc(a) end',
         'local CO = coroutine.create(function () end)',
         'function M.co(a) return type(CO) .. a end',
+        'local DEEP = { a = { b = 1 } }',
+        'function M.deep() DEEP.a.b = 2 end',
+        'function M.rdeep(x) return DEEP.a.b + x end',
+        'local LIST = {}',
+        'function M.push(v) table.insert(LIST, v) end',
+        'function M.rlist(x) return #LIST + x end',
+        'local IDX = { { v = 1 } }',
+        'function M.setidx() IDX[1].v = 2 end',
+        'function M.ridx(x) return IDX[1].v + x end',
+        'local RO = { v = 1 }',
+        'function M.rro(x) return RO.v + x end',
         'local function helper2(x) return x * 10 end',
         'function M.shadow(a) local helper2 = a + 1; return helper2 end',
         '-- (a comment line: a header mapped one line too high lands here, never on a one-line definition)',
@@ -475,6 +486,14 @@ test('mixalg: the assembler\'s EDGES — a scalar a literal (nil, false, a float
         -- rewritten to the function, and the function not in the closure
         local sht, shorder = MA.program('M.shadow', { path })
         ok(not vim.tbl_contains(shorder, 'fix.lua::helper2') and not sht:find(MA.mangle('fix.lua::helper2'), 1, true), sht)
+        -- WRITTEN from the syntax tree, at any depth and through a mutating primitive (CART-1481: a line regex missed
+        -- `DEEP.a.b =` and `table.insert(LIST, …)`) — free without a snapshot; a table only READ stays known
+        for root, name in pairs({ ['M.rdeep'] = 'DEEP', ['M.rlist'] = 'LIST', ['M.ridx'] = 'IDX' }) do
+            local _, _, _, _, wr = MA.program(root, { path })
+            eq({ 'fix.lua::' .. name }, wr.free, root)
+        end
+        local _, _, _, rk, rr = MA.program('M.rro', { path })
+        eq({}, rr.free); eq(1, rk.fix__RO.v)
         -- a root that is no definition: refused by name
         local okn, en = pcall(MA.program, 'M.nope', { path })
         eq(false, okn); ok(tostring(en):find('no definition M.nope', 1, true), tostring(en))

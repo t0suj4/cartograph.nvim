@@ -109,13 +109,14 @@ function M.program(root, files, opts)
         end
         return false
     end
-    local path = {}
+    local path, trees = {}, {}
     for _, f in ipairs(files) do
         local s = io.open(f):read('a')
         local rel = f:match('algebra/(.*)$') or vim.fn.fnamemodify(f, ':t')
         src[rel] = s
         path[rel] = f
         local tree = vim.treesitter.get_string_parser(s, 'lua'):parse()[1]:root()
+        trees[rel] = tree
         for _, n in fq:iter_captures(tree, s, 0, -1) do
             local nm = not nested(n) and n:field('name')[1]
             if nm then
@@ -238,15 +239,39 @@ function M.program(root, files, opts)
     end
     -- is `name` WRITTEN anywhere in `file`'s text (a reassignment or a store into it — not its own declaration)?
     local written_memo = {}
+    -- is file-level `name` WRITTEN anywhere in its file? An ASSIGNMENT whose target is ROOTED in it — `T = …`, `T.a.b = …`,
+    -- `T[k].x = …`, at any depth (its declaration `local T = …` is none) — or a MUTATING PRIMITIVE whose first argument is
+    -- (table.insert / remove / sort, rawset). From the syntax tree (CART-1481: a line regex missed `T.a.b =` and the
+    -- primitives). Syntactic: a callee that mutates it elsewhere, or `T:m()`, is unseen
+    local MUTATES = { ['table.insert'] = true, ['table.remove'] = true, ['table.sort'] = true, rawset = true }
+    local wq = vim.treesitter.query.parse('lua', '[(assignment_statement (variable_list) @vl) (function_call) @call]')
     local function written(file, name)
         local key = file .. '\0' .. name
         if written_memo[key] == nil then
             local s, w = src[file], false
-            local p = vim.pesc(name)
-            for line in s:gmatch('[^\n]+') do
-                local l = line:gsub('%-%-.*$', '')
-                if not l:match('^%s*local%s+' .. p .. '%f[^%w_]') and (l:find('%f[%w_]' .. p .. '%s*=[^=]') or l:find('%f[%w_]' .. p .. '%s*%[[^%]]*%]%s*=[^=]')
-                    or l:find('%f[%w_.]' .. p .. '%.[%w_]+%s*=[^=]')) then w = true; break end
+            local function root(n)
+                for _ = 1, 1000 do
+                    if not n then return nil end
+                    local t = n:type()
+                    if t == 'identifier' then return tx(n, s) end
+                    if t ~= 'dot_index_expression' and t ~= 'bracket_index_expression' then return nil end
+                    n = n:field('table')[1]
+                end
+            end
+            for id, n in wq:iter_captures(trees[file], s, 0, -1) do
+                if wq.captures[id] == 'vl' then
+                    local decl = n:parent() and n:parent():parent()
+                    if not (decl and decl:type() == 'variable_declaration') then
+                        for i = 0, n:named_child_count() - 1 do
+                            if root(n:named_child(i)) == name then w = true end
+                        end
+                    end
+                else
+                    local fname = n:field('name')[1]
+                    local args = n:field('arguments')[1]
+                    if fname and MUTATES[tx(fname, s)] and args and root(args:named_child(0)) == name then w = true end
+                end
+                if w then break end
             end
             written_memo[key] = w
         end
