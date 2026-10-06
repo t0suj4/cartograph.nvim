@@ -159,12 +159,12 @@ local function prefix(t, x)
     return s
 end
 local function upto(t, x)
-    local s = x
+    local s = 0
     for _, v in ipairs(t) do
         if v < 0 then break end
         s = s + v
     end
-    return s
+    return s + x
 end
 local function rep(x)
     local n = 0
@@ -211,8 +211,11 @@ test('mix: LOOPS — a BREAK: a static one ends the unrolling, a dynamic one lea
         for _, x in ipairs({ 4, 5, 7, 9, 10 }) do eq(of(tt, x), r(x), ('%s(%d)'):format(f, x)) end
         gone(text, { 't', 'v', 'i' })
         if f == 'upto' then
-            -- (a STATIC break: the unrolling stops at -1, no wrapper, no break, the sum folded to x + 3)
+            -- (a STATIC break: the unrolling stops at -1, no wrapper, no break, the sum folded to x + 3 — the sum starts
+            -- STATIC, so a static break that made its loop dynamic would leave `s` residual: CART-1516)
             ok(not text:find('repeat', 1, true) and not text:find('break', 1, true), 'a static break leaves nothing\n' .. text)
+            gone(text, { 's' })
+            ok(text:find('return %(3 %+ x_%d+%)'), 'the sum folded to x + 3\n' .. text)
         else
             ok(text:find('repeat', 1, true) and text:find('until true', 1, true), 'a dynamic break leaves a wrapper\n' .. text)
         end
@@ -284,6 +287,14 @@ test('mix: an ASSUMPTION makes a dynamic read static — the code it guards fold
     -- (a non-table where the assumption is read: no deopt — the original would fail there too, or not read it)
     local okn = pcall(r, 5)
     eq(false, okn)
+    -- (and an assumption of the value that SELECTS the guarded arm keeps that arm: `nil` takes the "small" arm too, so
+    -- assuming 'small' alone cannot tell an assumption read from an assumption lost — CART-1516)
+    local text2, _, pool2 = MX.mix(assert(R.read(src, 'lua')), 'f', { 'D' }, {}, { assume = { kind = { value = 'big' } } })
+    ok(text2:find('1000', 1, true), 'the "big" arm is kept\n' .. text2)
+    local r2 = assert(load(text2, 'f', 't', setmetatable({ MIXK = pool2, MIXDEOPT = function () error(DEOPT, 0) end }, { __index = _G })))()
+    eq(1203, r2({ kind = 'big', a = 1, b = 2, c = 3 }))
+    local okr2, e2 = pcall(r2, { kind = 'small', a = 7 })
+    eq(false, okr2); eq(DEOPT, e2)
 end)
 
 test('mix: VARARGS — a top-level `f(k, ...)` packs its extra arguments at every direct call; `...` expands, `select` counts, a pure unpack is counted at run time (CART-1466)', function ()
@@ -895,10 +906,12 @@ end)
 
 test('mix: a string literal\'s ESCAPES are read as Lua reads them — \\n \\t \\\\ \\" \\ddd \\xXX — and survive the residual', function ()
     ready()
-    local src = 'local function f(x)\n    return x .. "a\\tb\\n\\065\\x42|\\\\|\\"" .. \'\\\'\'\nend\n'
+    -- (the hex escape follows `\n`, not a decimal escape: after `\065` a check reading two characters too EARLY sees
+    -- "65" and matches by coincidence — CART-1516)
+    local src = 'local function f(x)\n    return x .. "a\\tb\\n\\x42\\065|\\\\|\\"" .. \'\\\'\'\nend\n'
     local r, text = residual(src, 'f', { 'D' }, {})
     eq(original(src, 'f')('>'), r('>'), text)
-    eq('>a\tb\nAB|\\|"\'', r('>'))
+    eq('>a\tb\nBA|\\|"\'', r('>'))
 end)
 
 -- ── what specializing the algebra's REAL matcher needed (CART-1279) ───────────────────────────────────────────────────
