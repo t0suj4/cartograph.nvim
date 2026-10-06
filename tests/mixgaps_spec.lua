@@ -566,7 +566,8 @@ test('B C-BTA: what folds, what is dynamic, and the fixpoint over loops and do-b
     text = same('local function f(x)\n    local a, b = 1, 2\n    a, b = b, a\n    return a * 10 + b + x\nend\n', 'f', { 'D' }, {}, { 0 }, 21)
     nolocal(text, 'a'); nolocal(text, 'b')
     same('local function f(x)\n    local t = { k = 0 }\n    local y\n    t.k, y = x, x\n    return t.k + y\nend\n', 'f', { 'D' }, {}, { 5 }, 10)
-    same('local function mk(x) return {} end\nlocal function f(x)\n    local y\n    mk(x).k, y = x, x\n    return y\nend\n', 'f', { 'D' }, {}, { 3 }, 3)
+    -- (a store through a call's result is refused by name: whether the call returns a fresh table is unknown — CART-1509)
+    refuses('a store into a table reached through mk(x)', 'local function mk(x) return {} end\nlocal function f(x)\n    local y\n    mk(x).k, y = x, x\n    return y\nend\n', 'f', { 'D' })
     local r, text2 = mixed('local function f(x)\n    local t = { k = 0 }\n    local y\n    t.k, y = x, x\n    return t, y\nend\n', 'f', { 'D' })
     local t, y = r(5)
     eq(5, t.k, text2); eq(5, y, text2)
@@ -1246,10 +1247,11 @@ test('BUG CART-1509: a store through a call result `id(t).x = d` reaches t (CART
     ready()
     local src = 'local function id(t) return t end\nlocal function f(d)\n  local t = {}\n  id(t).x = d\n  return t.x\nend\n'
     eq(5, original(src, 'f')(5))
-    local r, text = mixed(src, 'f', { 'D' })
-    local got = r(5)
-    if got == nil then skip('CART-1509 open: t folds static, the store goes to a pooled constant, f(5) is nil') end
-    eq(5, got, text)
+    -- (FIXED as a REFUSAL BY NAME: the table a call's result names is unknown to the analysis — it folded t.x to nil)
+    refuses('a store into a table reached through id(t)', src, 'f', { 'D' })
+    -- (a parenthesized base is its variable, and stores into it)
+    local src2 = 'local function f(d)\n  local t = {}\n  (t).x = d\n  return t.x\nend\n'
+    eq(5, mixed(src2, 'f', { 'D' })(5))
 end)
 
 test('BUG CART-1510: SRA keeps the forcing of a mutated record — `table.insert(s.items, d)` (CART-1506)', function ()
@@ -1276,10 +1278,9 @@ test('BUG CART-1512: a multi-assignment to a call\'s field `mk().k, y = x, x` pr
     ready()
     local src = 'local function mk() return {} end\nlocal function f(x)\n    local y\n    mk().k, y = x, x\n    return y\nend\n'
     eq(3, original(src, 'f')(3))
-    local okm, r = pcall(mixed, src, 'f', { 'D' })
-    if not okm and tostring(r):find("unexpected symbol near 'nil'", 1, true) then skip('CART-1512 open: the target prints as `nil, y = …`') end
-    eq(true, okm, tostring(r))
-    eq(3, r(3))
+    -- (FIXED with CART-1509: a target reached through a call is refused by name at lowering — never a residual that
+    -- does not load)
+    refuses('a store into a table reached through mk()', src, 'f', { 'D' })
 end)
 
 test('BUG CART-1513: -0 prints as -0 — `x / (0 * -1)` is -inf (CART-1506)', function ()

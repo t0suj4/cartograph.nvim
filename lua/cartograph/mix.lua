@@ -298,7 +298,8 @@ local function target_root(t)
     local x = t
     for _ = 1, 1000 do
         if x.k == 'identifier' then return x end
-        if x.k ~= 'bracket_index_expression' and x.k ~= 'dot_index_expression' then return nil end
+        -- (a parenthesized base is its expression: `(t).x = v` stores into t)
+        if x.k ~= 'bracket_index_expression' and x.k ~= 'dot_index_expression' and x.k ~= 'parenthesized_expression' then return nil end
         x = named(x)[1]
     end
     return nil
@@ -365,6 +366,12 @@ local function lower_stmt(t, cx, scope, out)
             local root = target_root(v)
             if root then note_write(v, root, cx, scope, writes) end
             targets[i] = lower_expr(v, cx, scope)
+            -- (a store into a table reached through a CALL or another expression — `id(t).x = d` — writes a table the
+            -- analysis cannot name: no variable is marked written, and a static `t` would fold its old field. Refused
+            -- by name — CART-1509: it computed nil where Lua gives 5)
+            if not root and targets[i].op == 'index' then
+                refuse('a store into a table reached through ' .. text(named(v)[1]) .. ' (not a variable: the table it writes is unknown)')
+            end
             -- (a GLOBAL target — `derive__WF_PATH = …`, `G.t.seen = …` — only as the one target of one value: it is
             -- residualized as a store by its path, and what writes it is never run early — CART-1504)
             local single = #vars == 1 and #named(parts[2]) == 1
