@@ -1289,7 +1289,7 @@ test('BUG CART-1513: -0 prints as -0 — `x / (0 * -1)` is -inf (CART-1506)', fu
     eq(-math.huge, original(src, 'f')(3))
     local r, text = mixed(src, 'f', { 'D' })
     local got = r(3)
-    if got == math.huge then skip('CART-1513 open: the printer\'s integer branch prints -0 as 0') end
+    -- (CART-1513 fixed: the printer spells -0 — an inf is a regression, not a skip)
     eq(-math.huge, got, text)
 end)
 
@@ -1299,7 +1299,7 @@ test('BUG CART-1514: an assumed math.huge guards with a real infinity, not a bar
     eq(1, original(src, 'f')({ n = math.huge }))
     local r, text = mixed(src, 'f', { 'D' }, {}, { assume = { n = { value = math.huge } } })
     local okr, got = pcall(r, { n = math.huge })
-    if not okr and got == DEOPT then skip('CART-1514 open: the guard compares with the undefined global `inf`, it deopts on the assumed input') end
+    -- (CART-1514 fixed: the printer spells an assumed inf — a deopt is a regression, not a skip)
     eq(true, okr, tostring(got)); eq(1, got, text)
     -- (n missing: the original raises, the residual raises or deoptimizes — never returns)
     eq(false, (pcall(r, {})), text)

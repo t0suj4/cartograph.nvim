@@ -365,7 +365,7 @@ end
     ok(text:find('"3"', 1, true) and not text:find('words', 1, true), 'a static call RAN its loop (the evaluator\'s protocol)\n' .. text)
 end)
 
-test('mix: a NON-FINITE number reaching dynamic code is lifted as the division that makes it — 1/0, -1/0, 0/0', function ()
+test('mix: a NON-FINITE number reaching dynamic code is spelled by the printer as the division that makes it — 1/0, -1/0, 0/0', function ()
     ready()
     local src = 'local function f(x)\n    local best, worst = math.huge, -math.huge\n    if x < best then best = x end\n    if x > worst then worst = x end\n    return best, worst\nend\n'
     local r, text = residual(src, 'f', { 'D' }, {})
@@ -374,7 +374,7 @@ test('mix: a NON-FINITE number reaching dynamic code is lifted as the division t
         local ob, ow = original(src, 'f')(x)
         eq(ob, b); eq(ow, w)
     end
-    ok(text:find('(1 / 0)', 1, true) and text:find('(-1 / 0)', 1, true), text)
+    ok(text:find('(1/0)', 1, true) and text:find('(-1/0)', 1, true), text)
 end)
 
 test('mix: a refusal is LOCATED — lowering names the innermost statement\'s line, specialization adds the active calls (CART-1459)', function ()

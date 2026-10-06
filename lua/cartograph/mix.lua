@@ -2007,13 +2007,8 @@ function M.specialize(prog, fname, division, statics, opts)
     -- a static value as residual IR (lifting); a closure becomes a residual function expression
     function lift(v, X)
         local ty = type(v)
-        if ty == 'number' then
-            -- (a non-finite number has no literal: lifted as the division that makes it — no global needed)
-            if v ~= v then return { op = 'bin', o = '/', l = { op = 'num', v = 0 }, r = { op = 'num', v = 0 } } end
-            if v == math.huge then return { op = 'bin', o = '/', l = { op = 'num', v = 1 }, r = { op = 'num', v = 0 } } end
-            if v == -math.huge then return { op = 'bin', o = '/', l = { op = 'num', v = -1 }, r = { op = 'num', v = 0 } } end
-            return { op = 'num', v = v }
-        end
+        -- (any number, NaN and ±inf included: the printer spells the ones with no numeral)
+        if ty == 'number' then return { op = 'num', v = v } end
         if ty == 'string' then return { op = 'str', v = v } end
         if ty == 'boolean' then return { op = 'bool', v = v } end
         if ty == 'nil' then return { op = 'nil' } end
@@ -2920,6 +2915,13 @@ function pexpr(e, ind)
     ind = ind or ''
     local op = e.op
     if op == 'num' then
+        -- (the numbers with no numeral are SPELLED here, the target's printer — every stage before carries the value:
+        -- NaN, ±inf, and -0, which '%d' printed as 0 — CART-1513: x / -0 gave inf; CART-1514: an assumed math.huge
+        -- printed as a bare `inf`, an undefined global)
+        if e.v ~= e.v then return '(0/0)' end
+        if e.v == math.huge then return '(1/0)' end
+        if e.v == -math.huge then return '(-1/0)' end
+        if e.v == 0 and 1 / e.v < 0 then return '(-0)' end
         if e.v == math.floor(e.v) and e.v > -1e15 and e.v < 1e15 then return string.format('%d', e.v) end
         return string.format('%.17g', e.v)
     end
