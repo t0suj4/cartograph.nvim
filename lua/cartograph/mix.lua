@@ -799,8 +799,25 @@ function M.lower(term, opts)
     for _, f in pairs(cx.funcs) do f.body = M.sra(f.body, cx) end
     -- BOXES: every boxed variable's declaration holds { v }, every read is v[1], every write a store into it
     for _, f in pairs(cx.funcs) do f.body = M.box(f.body, cx.boxed, cx.forced) end
+    -- FRESH ROOTS (CART-1502): locals declared with a table CONSTRUCTOR and never assigned again — not a parameter,
+    -- not forced, not boxed. A store `r[k] = v` into one with everything static is done at specialization time (the
+    -- table is mix's own, never a host object or a caller's), so a table BUILT by stores can stay static
+    local initt, reassigned = {}, {}
+    local function fresh_walk(x, seen)
+        if type(x) ~= 'table' or seen[x] then return end
+        seen[x] = true
+        if x.op == 'local' and x.id and x.e and x.e.op == 'table' and not x.forced then initt[x.id] = true end
+        if x.op == 'assign' and x.target and x.target.op == 'var' then reassigned[x.target.id] = true end
+        if x.op == 'assignm' then for _, t in ipairs(x.targets or {}) do if t.op == 'var' then reassigned[t.id] = true end end end
+        for _, c in pairs(x) do fresh_walk(c, seen) end
+    end
+    for _, f in pairs(cx.funcs) do fresh_walk(f.body, {}) end
+    local freshroot = {}
+    for id in pairs(initt) do
+        if not reassigned[id] and not cx.forced[id] and not cx.boxed[id] and not cx.isparam[id] then freshroot[id] = true end
+    end
     return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra, where = cx.where,
-        single = single, decisions = cx.decisions }
+        single = single, decisions = cx.decisions, freshroot = freshroot }
 end
 
 -- ── SRA: SCALAR REPLACEMENT OF A LOCAL RECORD (CART-1331 rung 4a) ──────────────────────────────────────────────────
@@ -967,6 +984,8 @@ M.CONSTS = CONSTS
 -- static values to the evaluator; a host value of them reaching dynamic code is residualized as its PATH, and the
 -- residual chunk is loaded with those globals in its environment
 local KNOWN = {}
+-- the FRESH ROOTS of the program being specialized (prog.freshroot, CART-1502): a store into one may stay static
+local FRESHROOT = {}
 -- known globals the 'known' decision VETOED: read at run time by their path (the residual environment still holds them)
 local DYNG = {}
 -- what READS one of them, transitively (a program function by name, a lambda by its IR node): never RUN on static
@@ -1448,6 +1467,13 @@ local function store_root(t)
     return nil
 end
 
+-- the binding time of a STORE `t = v` into a table (v: the value's, its control joined in): S only into a FRESH ROOT
+-- directly (`r[k] = v`, depth 1 — a deeper table may be a host's) with a static key — else D, which makes the root
+-- dynamic (CART-1502)
+local function store_bt(t, v, bt)
+    if t.op ~= 'index' or t.obj.op ~= 'var' or not FRESHROOT[t.obj.id] then return D end
+    return join(v, opnd(bt_expr(t.key, bt)))
+end
 -- loop: the innermost enclosing loop's record — { dyn = true } once a `break` of it runs under DYNAMIC control
 local function bt_block(stmts, bt, ctrl, loop)
     local changed = false
@@ -1474,16 +1500,17 @@ local function bt_block(stmts, bt, ctrl, loop)
                 local e = s.es[math.min(i, #s.es)]
                 local v = join(ctrl, e and bt_expr(e, bt) or S)
                 if t.op == 'var' then set(t.id, v)
-                else local root = store_root(t); if root then set(root.id, D) end end
+                else local root = store_root(t); if root and store_bt(t, v, bt) == D then set(root.id, D) end end
             end
         elseif op == 'assign' then
             local v = join(ctrl, bt_expr(s.e, bt)) -- CONGRUENCE: assigned under dynamic control -> D
             if s.target.op == 'var' then set(s.target.id, v)
             else
                 -- a store into a table — at any depth, `list.sites[n] = x` — makes the table it is rooted in dynamic (a
-                -- static table never changes at run time)
+                -- static table never changes at run time) — unless it is a FRESH ROOT stored into at depth 1 with a
+                -- static key and value under static control: done at specialization time (CART-1502)
                 local root = store_root(s.target)
-                if root then set(root.id, D) end
+                if root and store_bt(s.target, v, bt) == D then set(root.id, D) end
             end
         elseif op == 'if' then
             local c = ctrl
@@ -1532,7 +1559,7 @@ end
 --- `env` (optional, CART-1374): { globals, prims, pure } as specialize's opts — a file's constants and primitives
 --- mixalg.program carried; omitted, the current specialization's (specialize calls it so)
 function M.bta(prog, fname, division, env)
-    if env then set_env(env) end
+    if env then set_env(env); FRESHROOT = prog.freshroot or {} end
     local f = prog.funcs[fname]
     local bt = {}
     for i, id in ipairs(f.params) do
@@ -1707,6 +1734,7 @@ end
 function M.specialize(prog, fname, division, statics, opts)
     opts = opts or {}
     set_env(opts)
+    FRESHROOT = prog.freshroot or {}
     ASSUME = opts.assume or {}
     local budget = opts.budget or 100000
     local used = 0
@@ -1982,7 +2010,7 @@ function M.specialize(prog, fname, division, statics, opts)
         return X
     end
 
-    local spec_block, rexpr, lift, dnames, table_rest
+    local spec_block, rexpr, rexpr_guarded, lift, dnames, table_rest
     -- a loop body specialized inside its own ITERATION SCOPE
     local function loop_body(stmts, X)
         local n = #iters
@@ -2009,15 +2037,32 @@ function M.specialize(prog, fname, division, statics, opts)
         table.sort(ks)
         return tostring(v.k or '') .. '#' .. #v .. '{' .. table.concat(ks, ',') .. '}'
     end
+    -- FROZEN: every table residual code may see — lifted into the pool, and all it reaches. A static store into a FRESH
+    -- ROOT (CART-1502) after its table was lifted would change what the residual already holds: refused by name
+    local frozen = {}
+    local function freeze(v)
+        if type(v) ~= 'table' or frozen[v] then return end
+        frozen[v] = true
+        for k, x in pairs(v) do freeze(k); freeze(x) end
+    end
     local function constref(v)
         local i = poolix[v]
-        if not i then i = #pool + 1; pool[i] = v; poolix[v] = i end
+        if not i then i = #pool + 1; pool[i] = v; poolix[v] = i; freeze(v) end
         local ref = { op = 'index', obj = { op = 'gref', name = 'MIXK' }, key = { op = 'num', v = i } }
         if type(v) == 'table' then
             if pooldec[i] == nil then pooldec[i] = decide('pool', { shape = shape_of(v), index = i }, 'share') end
             if pooldec[i] == 'copy' then return { op = 'prim', name = 'vim.deepcopy', args = { ref } } end
         end
         return ref
+    end
+    -- a store `r[k] = v` the BTA kept STATIC (r a fresh root, CART-1502): done now, into mix's own table
+    local function is_fresh_store(t, bt)
+        return t.op == 'index' and t.obj.op == 'var' and FRESHROOT[t.obj.id] and bt[t.obj.id] ~= D
+    end
+    local function fresh_store(t, v, X)
+        local o = sval(t.obj, X)
+        if frozen[o] then refuse('a static table changed after residual code saw it — `' .. tostring(prog.names[t.obj.id]) .. '`') end
+        o[sval(t.key, X)] = v
     end
     -- GENERALIZE: a parameter static at the call (division S / C) that the body makes DYNAMIC (`iend = iend or #ik`)
     -- starts the residual body as a local holding its lifted value
@@ -2488,6 +2533,21 @@ function M.specialize(prog, fname, division, statics, opts)
         out.rest, out.restat = rexpr(e.rest, X), e.restat
         return out
     end
+    -- a residual expression for e where it runs only CONDITIONALLY (`and` / `or`'s right, a later elseif's condition):
+    -- a static computation in it that fails becomes `error(msg, 0)` in its place — raised only if the code gets there —
+    -- instead of a LAZY error replacing the whole statement (the statement-level form, spec_block) — CART-1502
+    function rexpr_guarded(e, X)
+        local d0 = depth
+        local ok, r = pcall(rexpr, e, X)
+        if ok then return r end
+        depth = d0
+        if type(r) == 'table' and r.lazy then
+            local args = { { op = 'str', v = r.lazy } }
+            if r.where then args = { { op = 'str', v = r.where .. ': ' .. r.lazy }, { op = 'num', v = 0 } } end
+            return { op = 'prim', name = 'error', args = args }
+        end
+        error(r, 0)
+    end
     -- a residual expression for e in X; a static e (or a closure) is computed and lifted
     function rexpr(e, X)
         spend()
@@ -2516,6 +2576,9 @@ function M.specialize(prog, fname, division, statics, opts)
                 if (e.o == 'and' and not a) or (e.o == 'or' and a) then return lift(a, X) end
                 return rexpr(e.r, X)
             end
+            -- (the right operand of `and` / `or` runs only when the left lets it: a static computation in it that fails
+            -- raises THERE, never for the whole statement — `kind(e) == 'obj' and e.o[kf]` with e a number)
+            if e.o == 'and' or e.o == 'or' then return { op = 'bin', o = e.o, l = rexpr(e.l, X), r = rexpr_guarded(e.r, X) } end
             return { op = 'bin', o = e.o, l = rexpr(e.l, X), r = rexpr(e.r, X) }
         end
         if op == 'un' then return { op = 'un', o = e.o, e = rexpr(e.e, X) } end
@@ -2607,6 +2670,7 @@ function M.specialize(prog, fname, division, statics, opts)
                     -- (a store to a GLOBAL by its path, CART-1504: always at run time — the global is dynamic, its writer
                     -- never run early)
                     out[#out + 1] = { op = 'assign', target = { op = 'gref', name = s.target.name }, e = rexpr(s.e, X) }
+                elseif is_fresh_store(s.target, bt) then fresh_store(s.target, sval(s.e, X), X)
                 elseif s.target.op == 'index' and bt_expr(s.target, bt) ~= D then
                     -- (a store into a STATIC place — a known global's table, `M.OBSERVED[u] = true` — happens at run time
                     -- into the same table: the target is its PATH, never its current value lifted)
@@ -2631,12 +2695,14 @@ function M.specialize(prog, fname, division, statics, opts)
                 for i, t in ipairs(s.targets) do vars[i] = t.op == 'var' and t.id or -i end
                 local any_d, all_d = false, true
                 for i, t in ipairs(s.targets) do
-                    local d = t.op ~= 'var' or bt[t.id] == D
+                    local d = (t.op ~= 'var' and not is_fresh_store(t, bt)) or (t.op == 'var' and bt[t.id] == D)
                     if d then any_d = true else all_d = false end
                 end
                 if not any_d then
                     local vs = svall(s.es, X)
-                    for i, t in ipairs(s.targets) do env[t.id] = vs[i] end
+                    for i, t in ipairs(s.targets) do
+                        if t.op == 'var' then env[t.id] = vs[i] else fresh_store(t, vs[i], X) end
+                    end
                 elseif all_d then
                     local targets = {}
                     for i, t in ipairs(s.targets) do
@@ -2673,7 +2739,9 @@ function M.specialize(prog, fname, division, statics, opts)
                             end
                         else
                             local body = spec_block(c.body, X)
-                            rclauses[#rclauses + 1] = { cond = rexpr(c.cond, X), body = body }
+                            -- (a later clause's condition runs only when the earlier ones failed: guarded as `and`'s right)
+                            local cond = #rclauses == 0 and rexpr(c.cond, X) or rexpr_guarded(c.cond, X)
+                            rclauses[#rclauses + 1] = { cond = cond, body = body }
                         end
                     end
                 end
@@ -2708,7 +2776,13 @@ function M.specialize(prog, fname, division, statics, opts)
                 if bt[s.kid] == S then -- UNROLL (pairs: in the order this host iterates — order-sensitive programs are not gated)
                     local it = s.kind == 'ipairs' and ipairs or pairs
                     local seq, done = {}, false
-                    for k, v in it(sval(s.e, X)) do
+                    -- (a static iterable that is no table raises as Lua does — LAZILY, a residual error where the loop
+                    -- stood: an arm a dynamic guard makes unreachable may hold a static `ka` that is an error message)
+                    local itv = sval(s.e, X)
+                    if type(itv) ~= 'table' then
+                        lazy(function () if s.kind == 'ipairs' then ipairs(itv) else pairs(itv) end end, nil, X)
+                    end
+                    for k, v in it(itv) do
                         spend(10)
                         env[s.kid] = k
                         -- (a value variable the body assigns under dynamic control is DYNAMIC though the loop unrolls:

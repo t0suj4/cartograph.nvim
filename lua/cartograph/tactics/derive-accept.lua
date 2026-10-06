@@ -98,52 +98,83 @@ local function measure(_, p)
             local key = 'derive.lua::D.' .. op
             local row = { op = op, samples = #(samples[op] or {}) }
             local okp, text, _, lines, knowns, _, prims = pcall(MA.program, key, nil, { snapshot = true, through = through or nil, opaque = opaque })
-            local resid
+            local prog, entry, G
             if not okp then row.refused = 'assemble: ' .. tostring(text)
             else
-                local okl, prog = pcall(MX.lower, R.read(text, 'lua'), { lines = lines })
-                if not okl then row.refused = 'lower: ' .. MX.describe(prog)
+                local okl, pr = pcall(MX.lower, R.read(text, 'lua'), { lines = lines })
+                if not okl then row.refused = 'lower: ' .. MX.describe(pr)
                 else
-                    local entry = MA.mangle(key)
-                    local div = {}
-                    for i = 1, #prog.funcs[entry].params do div[i] = 'D' end
-                    local G = { ['M.grammars'] = A.grammars }
+                    prog, entry = pr, MA.mangle(key)
+                    G = { ['M.grammars'] = A.grammars }
                     for k, v in pairs(knowns or {}) do G[k] = v end
-                    local oks, res, st = pcall(MX.specialize, prog, entry, div, {}, { budget = 5e6, globals = G, prims = prims, reuse = p.reuse })
-                    if not oks then row.refused = 'specialize: ' .. MX.describe(res)
-                    else
-                        local out = MX.print(res, prog.where)
-                        row.bytes, row.functions, row.dead_dropped = #out, #res.order, st.dead_dropped
-                        local K = {}
-                        for k, v in pairs(G) do K[k] = v end
-                        for k in pairs(opaque or {}) do K[k] = A[k:sub(3)] end
-                        local okf, f = pcall(function () return assert(load(out, 'residual', 't', F.env(res.pool, K)))() end)
-                        if not okf then row.refused = 'load: ' .. tostring(f) else resid = f end
-                        -- (a PLANTED difference — the tool's own negative control: this operator's compiled result gets one
-                        -- field more, so a run that still calls it right has a dead comparison or a dead tally)
-                        if resid and p.plant == op then
-                            local r0 = resid
-                            resid = function (...)
-                                local r = { r0(...) }
-                                if type(r[1]) == 'table' then r[1] = vim.deepcopy(r[1]); r[1].__planted = true else r[1] = { planted = r[1] } end
-                                return unpack(r, 1, table.maxn(r))
-                            end
-                        end
+                end
+            end
+            -- one residual for a division and its statics -> the residual function | nil, why
+            local function build(div, statics)
+                local oks, res, st = pcall(MX.specialize, prog, entry, div, statics, { budget = 5e6, globals = G, prims = prims, reuse = p.reuse })
+                if not oks then return nil, 'specialize: ' .. MX.describe(res) end
+                local out = MX.print(res, prog.where)
+                row.bytes, row.functions = (row.bytes or 0) + #out, (row.functions or 0) + #res.order
+                row.dead_dropped = (row.dead_dropped or 0) + (st.dead_dropped or 0)
+                local K = {}
+                for k, v in pairs(G) do K[k] = v end
+                for k in pairs(opaque or {}) do K[k] = A[k:sub(3)] end
+                local okf, f = pcall(function () return assert(load(out, 'residual', 't', F.env(res.pool, K)))() end)
+                if not okf then return nil, 'load: ' .. tostring(f) end
+                -- (a PLANTED difference — the tool's own negative control: this operator's compiled result gets one
+                -- field more, so a run that still calls it right has a dead comparison or a dead tally)
+                if p.plant == op then
+                    local r0 = f
+                    f = function (...)
+                        local r = { r0(...) }
+                        if type(r[1]) == 'table' then r[1] = vim.deepcopy(r[1]); r[1].__planted = true else r[1] = { planted = r[1] } end
+                        return unpack(r, 1, table.maxn(r))
                     end
+                end
+                return f
+            end
+            -- the CASES: every sample against one all-dynamic residual, or (static = first) the samples grouped by their
+            -- FIRST argument, a residual specialized to each — the compiled form a template-first verb is used in
+            local cases = {}
+            if prog and row.samples > 0 then
+                local np = #prog.funcs[entry].params
+                if p.static == 'first' then
+                    local groups, order = {}, {}
+                    for _, a in ipairs(samples[op]) do
+                        local okk, gk = pcall(vim.inspect, a[1], { depth = 12 })
+                        gk = okk and gk or tostring(a[1])
+                        if not groups[gk] and #order < tonumber(p.groups or 4) then groups[gk] = { first = a[1], list = {} }; order[#order + 1] = gk end
+                        if groups[gk] then table.insert(groups[gk].list, a) end
+                    end
+                    for _, gk in ipairs(order) do
+                        local div = { 'S' }
+                        for i = 2, np do div[i] = 'D' end
+                        local f, why = build(div, { groups[gk].first })
+                        if not f then row.refused = why; break end
+                        for _, a in ipairs(groups[gk].list) do cases[#cases + 1] = { a = a, f = f, rest = true } end
+                    end
+                    row.samples = #cases
+                else
+                    local div = {}
+                    for i = 1, np do div[i] = 'D' end
+                    local f, why = build(div, {})
+                    if not f then row.refused = why
+                    else for _, a in ipairs(samples[op]) do cases[#cases + 1] = { a = a, f = f } end end
                 end
             end
             if row.refused then row.class = 'refused'
             elseif row.samples == 0 then row.class = 'nosample'
             else
-                local function guarded(f, a)
+                local function guarded(f, a, rest)
                     debug.sethook(function () error('GUARD: instruction budget', 0) end, '', 5e7)
-                    local r = { pcall(f, unpack(vim.deepcopy(a), 1, a.n)) }
+                    local c = vim.deepcopy(a)
+                    local r = { pcall(f, unpack(c, rest and 2 or 1, c.n)) }
                     debug.sethook()
                     return r
                 end
                 local agree, w1 = 0, nil
-                for i, a in ipairs(samples[op]) do
-                    local w, g = guarded(D[op], a), guarded(resid, a)
+                for i, cs in ipairs(cases) do
+                    local w, g = guarded(D[op], cs.a), guarded(cs.f, cs.a, cs.rest)
                     local same = same_result(w, g)
                     -- (the CONTROL: two of the derivation's own results that differ must compare as different — a dead
                     -- comparison would call every residual right)
@@ -175,7 +206,7 @@ local E = {
     tags = { 'accept', 'algebra' },
     measures = 'CART-1483',
     summary = 'does every algebra derivation, COMPILED by mix (all-dynamic), agree with itself interpreted on the arguments a real suite passes? ops = a,b (default all), through = 1 (follow the basis), opaque = M.x,… (through: kept primitives), reuse = eager, cap = samples per op (12), suite = the spec to tap (default the vendored donor suite), plant = op (a planted difference: the negative control); rows carry residual bytes / functions',
-    params = { ops = 'string?', through = 'string?', opaque = 'string?', reuse = 'string?', cap = 'string?', suite = 'string?', plant = 'string?' },
+    params = { ops = 'string?', through = 'string?', opaque = 'string?', reuse = 'string?', cap = 'string?', suite = 'string?', plant = 'string?', static = 'string?', groups = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end

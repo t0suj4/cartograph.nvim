@@ -1250,6 +1250,48 @@ test('mix: error(msg, LEVEL) in a static run is prefixed as Lua would — level 
     eq('orig.lua:105: bad 7!', r('!'), text)
 end)
 
+test('mix: a table BUILT BY STORES stays static — a fresh local stored into at depth 1, everything static; frozen once residual code sees it; never a host table (CART-1502)', function ()
+    ready()
+    -- (built in a static loop, read statically: it folds — no table in the residual)
+    local src = 'local function f(x)\n  local t = {}\n  for i = 1, 3 do t[i] = i * 2 end\n  return t[2] + #t + x\nend\n'
+    local r, text = residual(src, 'f', { 'D' }, {})
+    eq(original(src, 'f')(1), r(1))
+    ok(not text:find('{', 1, true), 'folded: no table built at run time\n' .. text)
+    -- (a store under DYNAMIC control keeps it dynamic — the residual builds it)
+    local src2 = 'local function f(x)\n  local t = {}\n  if x then t[1] = 1 end\n  return #t\nend\n'
+    local r2 = residual(src2, 'f', { 'D' }, {})
+    eq(1, r2(true)); eq(0, r2(false))
+    -- (residual code was handed the table — x(t) — so a later static store would change what it holds: refused)
+    local okf, ef = pcall(MX.mix, assert(R.read('local function f(x)\n  local t = {}\n  t[1] = 1\n  x(t)\n  t[2] = 2\n  return #t\nend\n', 'lua')), 'f', { 'D' }, {})
+    eq(false, okf)
+    ok(MX.describe(ef):find('a static table changed after residual code saw it', 1, true), MX.describe(ef))
+    -- (depth 2 is never a static store: `t.a` may be a HOST table — the host's data is not touched while specializing)
+    local host = {}
+    local G = { h = host }
+    local text3, _, pool3 = MX.mix(assert(R.read('local function f(x)\n  local t = { a = G.h }\n  t.a.b = 1\n  return x\nend\n', 'lua')), 'f', { 'D' }, {}, { globals = { ['G.h'] = host } })
+    eq(nil, host.b, 'no store into the host table at specialization time')
+    local f3 = assert(load(text3, 'r', 't', setmetatable({ MIXK = pool3, G = G }, { __index = _G })))()
+    eq(5, f3(5)); eq(1, host.b, 'the store happens at run time')
+end)
+
+test('mix: a failing STATIC computation where code runs only CONDITIONALLY raises only if reached — `and`/`or`\'s right operand, a later elseif, a static for-in over a non-table (CART-1502)', function ()
+    ready()
+    -- (e is a static NUMBER: `e.o` fails, but `x and …` never evaluates it when x is false)
+    local src = 'local function f(x, e)\n  return x and e.o\nend\n'
+    local r = residual(src, 'f', { 'D', 'S' }, { 5 })
+    eq(false, r(false))
+    ok(not pcall(r, true), 'and raises when x lets it')
+    local src2 = 'local function f(x, e)\n  if x == 1 then return 1 elseif e.o then return 2 end\n  return 3\nend\n'
+    local r2 = residual(src2, 'f', { 'D', 'S' }, { 5 })
+    eq(1, r2(1))
+    ok(not pcall(r2, 2), 'the elseif raises when reached')
+    local src3 = 'local function f(x, s)\n  if x then return 0 end\n  for k in pairs(s) do end\n  return 1\nend\n'
+    local r3 = residual(src3, 'f', { 'D', 'S' }, { 'not a table' })
+    eq(0, r3(true))
+    local ok3, e3 = pcall(r3, false)
+    eq(false, ok3); ok(tostring(e3):find("bad argument #1 to 'pairs'", 1, true), tostring(e3))
+end)
+
 test('mix: a store through a call stands when the callee returns a FRESH table on every path — `mk(x).k = x`; through an identity or a path that falls off, refused by name (CART-1520, CART-1509)', function ()
     ready()
     for _, src in ipairs({ 'local function mk(x) return { x } end\nlocal function f(x)\n  mk(x).k = x\n  return x + 1\nend\n',
