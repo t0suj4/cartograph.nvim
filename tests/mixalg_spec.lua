@@ -396,6 +396,12 @@ test('mixalg: THROUGH an `M.x` ALIAS — core.lua\'s `M.kv_kind = kv_kind`, call
     local vt, _, _, _, rep, vp = MA.program(key, nil, { snapshot = true, through = true, opaque = OPQ,
         decide = function (kind, ctx) if kind == 'follow' and ctx.target == 'core.lua::kv_kind' then return false end end })
     ok(vt:find('M.kv_kind(', 1, true) and vp['M.kv_kind'] == A.kv_kind, 'vetoed: a primitive by its path')
+    -- kept OPAQUE — by the alias's path or by its definition's key — it is a primitive by its path too, never a free name
+    for _, o in ipairs({ 'M.kv_kind', 'core.lua::kv_kind' }) do
+        local oq = vim.deepcopy(OPQ); oq[o] = true
+        local ot, oorder, _, _, _, op = MA.program(key, nil, { snapshot = true, through = true, opaque = oq })
+        ok(ot:find('M.kv_kind(', 1, true) and op['M.kv_kind'] == A.kv_kind and not vim.tbl_contains(oorder, 'core.lua::kv_kind'), o)
+    end
     ok(#rep.decisions > 0, 'the follow was asked')
     -- end to end: the closure lowered, specialized all-dynamic, run against the derivation (kv_template's `member(o, …)`
     -- fills a table through a LAMBDA's parameter: kept static, every object came out empty — CART-1503)

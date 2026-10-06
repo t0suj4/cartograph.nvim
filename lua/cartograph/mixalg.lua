@@ -336,14 +336,17 @@ function M.program(root, files, opts)
     -- `M.kv_kind` from the part file kvterm.lua — is that definition, found by its function object as `through` finds a
     -- captured alias -> the definition's key, or nil (not loaded, not a function, kept opaque, or a vetoed follow)
     local function m_alias(cap, d, t)
-        if not opts.through or (opts.opaque and opts.opaque[t]) then return nil end
+        if not opts.through then return nil end
         local okA, Acore = pcall(require, 'cartograph.algebra.core')
         local fv = okA and Acore[t:match('^M%.([%w_]+)$')]
         if type(fv) ~= 'function' then return nil end
+        -- (not followed — kept OPAQUE by its path or its definition's key, a function no definition of these files is,
+        -- or a VETOED follow — it is a PRIMITIVE by its path: the call still reaches it. Found by the mutation campaign:
+        -- an opaque alias was left a free name, which mix refuses as reaching no value)
+        if opts.opaque and opts.opaque[t] then prims[t] = fv; return nil end
         if path['core.lua'] then ensure_loaded(vim.fn.fnamemodify(path['core.lua'], ':p')) end
         local k3 = fn_key(fv)
-        if not k3 or (opts.opaque and opts.opaque[k3]) then return nil end
-        if not follow_ok(cap, d, k3) then prims[t] = fv; return nil end -- (vetoed: a primitive by its path)
+        if not k3 or (opts.opaque and opts.opaque[k3]) or not follow_ok(cap, d, k3) then prims[t] = fv; return nil end
         return k3
     end
     -- THE CLOSURE: calls and references-as-values (`local with_cursor = M.with_cursor`), and with opts.through the
