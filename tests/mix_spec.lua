@@ -1108,6 +1108,86 @@ test('mix: a table a CALLEE\'s closure stores into is dynamic in the CALLER too 
     eq(want('a'), r('a')); eq(want('a'), r('a')); eq(want('b'), r('b'))
 end)
 
+test('mix: a table MUTATED by a primitive or by a callee storing into its parameter is dynamic in the caller — `local acc = {}; fill(acc, x); return #acc` counts what was filled (CART-1503)', function ()
+    ready()
+    local CASES = {
+        outparam = 'local function fill(out, x) out[#out + 1] = x end\nlocal function f(x)\n  local acc = {}\n  fill(acc, x)\n  return #acc\nend\n',
+        guarded = 'local function fill(out, x) if x > 0 then out[#out + 1] = x end end\nlocal function f(x)\n  local acc = {}\n  fill(acc, x)\n  return #acc\nend\n',
+        insert = 'local function f(x)\n  local acc = {}\n  table.insert(acc, x)\n  return #acc\nend\n',
+        callee_insert = 'local function fill(out, x) table.insert(out, x) end\nlocal function f(x)\n  local acc = {}\n  fill(acc, x)\n  return #acc\nend\n',
+        literal = 'local function fill(out, x) out[#out + 1] = x; return #out end\nlocal function f(x) return fill({}, x) end\n',
+    }
+    for name, src in pairs(CASES) do
+        local want, r = original(src, 'f'), residual(src, 'f', { 'D' }, {})
+        -- (twice: a table lifted into the constant pool would keep growing across runs)
+        eq(want(7), r(7), name); eq(want(-1), r(-1), name); eq(want(7), r(7), name)
+    end
+end)
+
+test('mix: the decision hook\'s DATA kinds — `known` (a known global vetoed is read at run time; one the program stores into is dynamic by default), `pool` (a pooled table shared or copied), `dynamic` (a function\'s locals made dynamic: the safe bisection probe) (CART-1501)', function ()
+    ready()
+    local function run(src, fname, division, statics, opts, G)
+        local text, st, pool = MX.mix(assert(R.read(src, 'lua')), fname, division, statics, opts)
+        return assert(load(text, 'r', 't', setmetatable({ MIXK = pool, G = G }, { __index = _G })))(), text, st
+    end
+    local function find(st, kind) for _, d in ipairs(st.decisions) do if d.kind == kind then return d end end end
+    -- 'known': static by default (folded); vetoed, the residual reads it by path — and so does a helper that reads it,
+    -- specialized instead of run on its static arguments
+    local K = 'local function get() return G.n end\nlocal function f(x) return get() + G.n + x end\n'
+    local G = { n = 1 }
+    local f0, t0, s0 = run(K, 'f', { 'D' }, {}, { globals = { ['G.n'] = 1 } }, G)
+    ok(not t0:find('G.n', 1, true), 'folded\n' .. t0)
+    eq(true, find(s0, 'known').default); eq('G.n', find(s0, 'known').ctx.name)
+    eq(3, f0(1))
+    local f1, t1 = run(K, 'f', { 'D' }, {}, { globals = { ['G.n'] = 1 }, decide = function (kind) if kind == 'known' then return false end end }, G)
+    ok(t1:find('G.n', 1, true), 'read at run time\n' .. t1)
+    G.n = 5
+    eq(11, f1(1), 'the value at run time, not at specialization')
+    -- … and so does a reader reached as a VALUE — a function, a lambda — called on static arguments
+    local veto = function (kind) if kind == 'known' then return false end end
+    for name, src in pairs({ fnvalue = 'local function get() return G.n end\nlocal function f(x)\n  local g = get\n  return g() + x\nend\n',
+        lambda = 'local function f(x)\n  local g = function () return G.n end\n  return g() + x\nend\n' }) do
+        local fv = run(src, 'f', { 'D' }, {}, { globals = { ['G.n'] = 1 }, decide = veto }, G)
+        eq(6, fv(1), name)
+    end
+    -- a vetoed known FUNCTION is still a callee the residual can reach (by its path)
+    local Gf = { twice = function (n) return 2 * n end }
+    local fc, tc = run('local function f(x) return G.twice(x) end\n', 'f', { 'D' }, {}, { globals = { ['G.twice'] = Gf.twice }, decide = veto }, Gf)
+    eq(14, fc(7), tc)
+    -- a known the program STORES INTO is mutable state: dynamic by default, and the store reaches the real table
+    local W = 'local function f(x)\n  if x then G.t[x] = true end\n  return x\nend\n'
+    local tbl = {}
+    local fw, _, sw = run(W, 'f', { 'D' }, {}, { globals = { ['G.t'] = tbl } }, { t = tbl })
+    eq(false, find(sw, 'known').default); eq(true, find(sw, 'known').ctx.stored)
+    fw('a')
+    eq(true, tbl.a)
+    -- answered static anyway, a store at a STATIC place still targets the table's path, never its value lifted
+    -- (`nil = true`: termgraph.lua's `if M.FREEZE then M.OBSERVED[u] = true end`)
+    local WS = 'local function f(x)\n  local k = "seen"\n  if x then G.t[k] = true end\n  return x\nend\n'
+    local fs, ts = run(WS, 'f', { 'D' }, {}, { globals = { ['G.t'] = tbl }, decide = function (kind) if kind == 'known' then return true end end }, { t = tbl })
+    fs('b')
+    eq(true, tbl.seen, ts)
+    -- 'pool': a static table in the residual is SHARED by default; answered 'copy', each read is a fresh deep copy
+    local P = 'local function f(t, x) return t[x] end\n'
+    local fp0, tp0, sp0 = run(P, 'f', { 'S', 'D' }, { { 'a', 'b' } }, { decide = function () end })
+    eq('share', find(sp0, 'pool').default); ok(find(sp0, 'pool').ctx.shape, 'the context names the shape')
+    ok(not tp0:find('deepcopy', 1, true), tp0)
+    local fp1, tp1 = run(P, 'f', { 'S', 'D' }, { { 'a', 'b' } }, { decide = function (kind) if kind == 'pool' then return 'copy' end end })
+    ok(tp1:find('vim.deepcopy(MIXK[1])', 1, true), tp1)
+    eq(fp0(2), fp1(2))
+    -- 'dynamic' (asked only of a hook): default false; true = every local of the function dynamic, a set = those named;
+    -- a local bound to a closure is never offered
+    local Dy = 'local function f(x)\n  local k = 2\n  local h = function (y) return y end\n  return h(k * x)\nend\n'
+    local fd0, td0, sd0 = run(Dy, 'f', { 'D' }, {}, { decide = function () end })
+    eq(false, find(sd0, 'dynamic').default); eq({ 'k' }, find(sd0, 'dynamic').ctx.locals)
+    ok(not td0:find('local k', 1, true), 'k folded by default\n' .. td0)
+    for _, answer in ipairs({ true, { k = true } }) do
+        local fd1, td1 = run(Dy, 'f', { 'D' }, {}, { decide = function (kind) if kind == 'dynamic' then return answer end end })
+        ok(td1:find('local k', 1, true), 'k a residual local\n' .. td1)
+        eq(fd0(3), fd1(3))
+    end
+end)
+
 test('mix: a SINGLE-VALUED call as the last argument fills one parameter and leaves the rest nil — a named function or a known closure; a static counter left NIL then defaulted generalizes (CART-1500)', function ()
     ready()
     -- (rung 3: `g(one(x))` with g taking three parameters — one returns one value on every path)

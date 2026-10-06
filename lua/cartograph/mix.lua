@@ -71,6 +71,8 @@ end
 M._text = text
 
 local lower_expr, lower_block
+-- the primitives that mutate their first argument (mix.EFFECT's table half)
+local MUTATES = { ['table.insert'] = true, ['table.remove'] = true, ['table.sort'] = true }
 
 -- scopes: a chain of { names = { name -> id }, up, fnb = the lambda whose parameters it holds, loop = a loop's scope }.
 -- -> id, the number of lambda boundaries crossed (each crossed lambda records the id as FREE)
@@ -243,7 +245,16 @@ function lower_expr(t, cx, scope)
             args = fixed
         end
         if f.op == 'fn' then return { op = 'call', fn = f.name, args = args } end
-        if f.op == 'global' then return { op = 'prim', name = f.name, args = args } end
+        if f.op == 'global' then
+            -- (a primitive that MUTATES its first argument makes the variable that table is rooted in FORCED dynamic,
+            -- as a store into it does: never computed early, so a static table would stay as it was — CART-1503)
+            if MUTATES[f.name] and args[1] then
+                local x = args[1]
+                for _ = 1, 1000 do if x.op ~= 'index' then break end; x = x.obj end
+                if x.op == 'var' and x.id then cx.forced[x.id] = true end
+            end
+            return { op = 'prim', name = f.name, args = args }
+        end
         return { op = 'callv', f = f, args = args } -- (a call through a value: a closure)
     end
     if k == 'table_constructor' then
@@ -306,6 +317,10 @@ local function note_write(v, root, cx, scope, writes)
             if cx.loopvar[id] then refuse('a closure assigning the captured loop variable `' .. text(root) .. '` (rung 3: a loop variable is not boxed)') end
             cx.boxed[id] = true
         else cx.forced[id] = true end
+    elseif id and root ~= v and cx.isparam[id] then
+        -- (a store into the function's OWN PARAMETER — an out-parameter, `out[#out + 1] = x` — forces it: the caller's
+        -- table is the same one at run time, so FORCED ACROSS CALLS makes the caller's variable dynamic — CART-1503)
+        cx.forced[id] = true
     elseif id and root == v then
         -- (when: its tick, or LATE when a loop nested in the variable's scope repeats it — a later round
         -- of that loop runs after a capture written above it)
@@ -897,6 +912,14 @@ M.CONSTS = CONSTS
 -- static values to the evaluator; a host value of them reaching dynamic code is residualized as its PATH, and the
 -- residual chunk is loaded with those globals in its environment
 local KNOWN = {}
+-- known globals the 'known' decision VETOED: read at run time by their path (the residual environment still holds them)
+local DYNG = {}
+-- what READS one of them, transitively (a program function by name, a lambda by its IR node): never RUN on static
+-- arguments — the run would read a value only the residual has — so a call of it is specialized, a value of it is C
+local DIRTY = {}
+-- locals the 'dynamic' decision made DYNAMIC (by id): seeded D before every binding-time fixpoint. More dynamic is
+-- always sound, so it is the safe probe — a miscompile that vanishes when a variable is dynamic is about its static value
+local DYNV = {}
 -- the PROGRAM'S OWN PRIMITIVES of the current specialization (opts.prims, CART-1372 rung 5): { [path] = function } —
 -- the function fields of a known table the closure calls (`derive__B.kinds`: the basis), opaque to mix as any library
 -- function is. Each is an EFFECT unless opts.pure names it: never computed early, its result dynamic, called by its
@@ -911,7 +934,7 @@ local function reachable(name)
     local prefix = ''
     for part in name:gmatch('[^.]+') do
         prefix = prefix == '' and part or (prefix .. '.' .. part)
-        if KNOWN[prefix] ~= nil then return true end
+        if KNOWN[prefix] ~= nil or DYNG[prefix] then return true end
     end
     local v = _G
     for part in name:gmatch('[^.]+') do
@@ -922,7 +945,7 @@ local function reachable(name)
 end
 -- the per-specialization environment (specialize, and bta called on its own)
 local function set_env(opts)
-    KNOWN, XPRIMS, XPURE = opts.globals or {}, opts.prims or {}, opts.pure or {}
+    KNOWN, XPRIMS, XPURE, DYNG, DIRTY, DYNV = opts.globals or {}, opts.prims or {}, opts.pure or {}, {}, {}, {}
 end
 -- ASSUMPTIONS of the current specialization (opts.assume, CART-1463): { [field] = { value = v } } — a read `x.field` of a
 -- DYNAMIC variable x is taken to be v: STATIC, so the code it guards folds away; a residual GUARD before its statement
@@ -1300,9 +1323,10 @@ local function bt_expr(e, bt)
     local op = e.op
     if op == 'num' or op == 'str' or op == 'bool' or op == 'nil' then return S end
     if op == 'global' and (CONSTS[e.name] ~= nil or KNOWN[e.name] ~= nil) then return S end
-    if op == 'fn' then return S end
+    if op == 'fn' then return DIRTY[e.name] and C or S end
     if op == 'var' then return bt[e.id] or S end
     if op == 'lambda' then
+        if DIRTY[e] then return C end
         for _, id in ipairs(e.free) do if (bt[id] or S) ~= S then return C end end
         return S
     end
@@ -1322,6 +1346,7 @@ local function bt_expr(e, bt)
         local r = S
         for _, a in ipairs(e.args) do r = join(r, bt_expr(a, bt)) end
         if op == 'prim' and EFFECT[e.name] then return D end -- (a mutation or a raise: never computed early)
+        if op == 'call' and DIRTY[e.fn] then return D end -- (it reads a global the residual reads: never run early)
         if op == 'prim' and XPRIMS[e.name] and not XPURE[e.name] then return D end -- (the program's own, not proven pure)
         return opnd(r)
     end
@@ -1439,6 +1464,7 @@ function M.bta(prog, fname, division, env)
             refuse('the static parameter `' .. tostring(prog.names[id]) .. '` is stored into by a closure (a static table cannot change at run time)')
         end
     end
+    for id in pairs(DYNV) do if bt[id] == nil then bt[id] = D end end
     return fixpoint(f.body, bt)
 end
 
@@ -1450,6 +1476,7 @@ function M.bta_lambda(lam, division, freebt, forced)
         bt[id] = division[i] or S
         if forced and forced[id] and bt[id] ~= D then refuse('a static closure argument stored into by a closure (rung 3)') end
     end
+    for id in pairs(DYNV) do if bt[id] == nil then bt[id] = D end end
     return fixpoint(lam.body, bt)
 end
 
@@ -1619,6 +1646,11 @@ function M.specialize(prog, fname, division, statics, opts)
     --                 the join's holes; false = refuse)
     --   'grow'        a continuation that kept growing, retried with its closure arguments dynamic (default true;
     --                 false = refuse)
+    --   'single'      an expanding last argument taken as ONE value (default: true when proven, else false = refuse)
+    --   'pool'        a pooled table 'share'd (default) or 'copy'd per read
+    --   'known'       a known global static (default, unless the program stores into it) or read at run time
+    --   'dynamic'     (asked only of a hook) a function's locals made dynamic: true | { [name] = true }; default false
+    -- and in lowering, 'sra' (lower's opts.decide, prog.decisions); mixalg's through mode adds 'follow'
     -- ctx: { fn, division, at (the source position, through the line map), chain (the active calls, innermost first) }
     -- plus the kind's own fields. Policies over this hook are later work.
     res.decisions = {}
@@ -1644,6 +1676,104 @@ function M.specialize(prog, fname, division, statics, opts)
             at = fr and fr.at and prog.where and prog.where(fr.at) or (fr and fr.at), chain = chain }
         for k, v in pairs(extra or {}) do c[k] = v end
         return c
+    end
+    -- ('known': each KNOWN global — opts.globals — is STATIC by default; answered false it is read at run time by its
+    -- path, as any global. A probe for a "known" that is really mutable state. Once per name, before any binding time)
+    if next(KNOWN) then
+        local kept = {}
+        local names = {}
+        for name in pairs(KNOWN) do names[#names + 1] = name end
+        table.sort(names)
+        -- (the DEFAULT is derived: a known the program STORES INTO — `M.OBSERVED[u] = true`, `table.insert(M.list, x)`,
+        -- at any depth under it or over it — is mutable state, read at run time; every other one is static)
+        local stored = {}
+        local function root_global(t)
+            for _ = 1, 1000 do
+                if type(t) ~= 'table' then return nil end
+                if t.op == 'global' then return t.name end
+                if t.op ~= 'index' then return nil end
+                t = t.obj
+            end
+        end
+        local function scan(x, seen)
+            if type(x) ~= 'table' or seen[x] then return end
+            seen[x] = true
+            local r = (x.op == 'assign' and x.target and x.target.op == 'index' and root_global(x.target))
+                or (x.op == 'prim' and EFFECT[x.name] and x.args and root_global(x.args[1]))
+            if r then stored[#stored + 1] = r end
+            for _, v in pairs(x) do if type(v) == 'table' then scan(v, seen) end end
+        end
+        for _, f in pairs(prog.funcs) do scan(f.body, {}) end
+        local function mutated(name)
+            for _, r in ipairs(stored) do
+                if r == name or r:sub(1, #name + 1) == name .. '.' or name:sub(1, #r + 1) == r .. '.' then return true end
+            end
+            return false
+        end
+        for _, name in ipairs(names) do
+            if decide('known', { name = name, stored = mutated(name) or nil }, not mutated(name)) then kept[name] = KNOWN[name]
+            else DYNG[name] = true end
+        end
+        KNOWN = kept
+        if next(DYNG) then
+            local function dyn(name)
+                local prefix = ''
+                for part in name:gmatch('[^.]+') do
+                    prefix = prefix == '' and part or (prefix .. '.' .. part)
+                    if DYNG[prefix] then return true end
+                end
+                return false
+            end
+            -- does x's subtree read a vetoed global or reach a dirty function? Marks every dirty lambda on the way
+            local function walk(x, seen)
+                if type(x) ~= 'table' or seen[x] then return DIRTY[x] or false end
+                seen[x] = true
+                local d = (x.op == 'global' and type(x.name) == 'string' and dyn(x.name))
+                    or (x.op == 'call' and DIRTY[x.fn]) or (x.op == 'fn' and DIRTY[x.name]) or false
+                for _, v in pairs(x) do if type(v) == 'table' and walk(v, seen) then d = true end end
+                if d and x.op == 'lambda' then DIRTY[x] = true end
+                return d
+            end
+            local changed = true
+            for _ = 1, 100 do
+                if not changed then break end
+                changed = false
+                for name, f in pairs(prog.funcs) do
+                    if not DIRTY[name] and walk(f.body, {}) then DIRTY[name] = true; changed = true end
+                end
+            end
+        end
+    end
+    -- ('dynamic': per program function, its LOCALS — every `local` it declares, in its closures too — made dynamic.
+    -- Default false (the analysis decides); true = all of them, a { [name] = true } set = those. Never unsound: the
+    -- probe that bisects a miscompile to the variable whose static value causes it)
+    if opts.decide then
+        local fnames = {}
+        for name in pairs(prog.funcs) do fnames[#fnames + 1] = name end
+        table.sort(fnames)
+        for _, name in ipairs(fnames) do
+            -- (a local bound to a CLOSURE — `local function walk` — is not offered: a closure is never a dynamic value)
+            local all, closure, seen = {}, {}, {}
+            local function locals(x)
+                if type(x) ~= 'table' or seen[x] then return end
+                seen[x] = true
+                if x.op == 'local' and x.id then all[#all + 1] = x.id; if x.e and x.e.op == 'lambda' then closure[x.id] = true end end
+                if x.op == 'localm' and x.ids then for _, id in ipairs(x.ids) do all[#all + 1] = id end end
+                if x.op == 'assign' and x.target and x.target.op == 'var' and x.e and x.e.op == 'lambda' then closure[x.target.id] = true end
+                for _, v in pairs(x) do if type(v) == 'table' then locals(v) end end
+            end
+            locals(prog.funcs[name].body)
+            local ids = {}
+            for _, id in ipairs(all) do if not closure[id] then ids[#ids + 1] = id end end
+            if #ids > 0 then
+                local lnames = {}
+                for i, id in ipairs(ids) do lnames[i] = tostring(prog.names[id]) end
+                local ch = decide('dynamic', { fn = name, locals = lnames }, false)
+                for _, id in ipairs(ids) do
+                    if ch == true or (type(ch) == 'table' and ch[tostring(prog.names[id])]) then DYNV[id] = true end
+                end
+            end
+        end
     end
     -- (the 'fold' decision is made once per primitive, before any binding time is computed)
     if next(XPURE) then
@@ -1793,10 +1923,26 @@ function M.specialize(prog, fname, division, statics, opts)
     -- sharing kept. Only data the program never stores into gets here (a table stored into is dynamic)
     local pool, poolix = {}, {}
     res.pool = pool
+    -- (the DECISION HOOK, CART-1501: 'pool' — a static TABLE reaching dynamic code is SHARED by reference (default
+    -- 'share': one object for every run) or COPIED per evaluation ('copy': vim.deepcopy of it). A probe for a residual
+    -- that mutates specialization-time data: if flipping to 'copy' changes an answer, a pool table was written. Asked
+    -- once per pool entry; ctx.shape is a short summary of the table)
+    local pooldec = {}
+    local function shape_of(v)
+        local ks = {}
+        for k in pairs(v) do if #ks < 6 then ks[#ks + 1] = tostring(k) end end
+        table.sort(ks)
+        return tostring(v.k or '') .. '#' .. #v .. '{' .. table.concat(ks, ',') .. '}'
+    end
     local function constref(v)
         local i = poolix[v]
         if not i then i = #pool + 1; pool[i] = v; poolix[v] = i end
-        return { op = 'index', obj = { op = 'gref', name = 'MIXK' }, key = { op = 'num', v = i } }
+        local ref = { op = 'index', obj = { op = 'gref', name = 'MIXK' }, key = { op = 'num', v = i } }
+        if type(v) == 'table' then
+            if pooldec[i] == nil then pooldec[i] = decide('pool', { shape = shape_of(v), index = i }, 'share') end
+            if pooldec[i] == 'copy' then return { op = 'prim', name = 'vim.deepcopy', args = { ref } } end
+        end
+        return ref
     end
     -- GENERALIZE: a parameter static at the call (division S / C) that the body makes DYNAMIC (`iend = iend or #ik`)
     -- starts the residual body as a local holding its lifted value
@@ -2137,7 +2283,9 @@ function M.specialize(prog, fname, division, statics, opts)
                 division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
                 nargs = i
             elseif expands then refuse('the last argument of a call expands several dynamic values into its parameters (rung 3)')
-            elseif b == D or (force and force[i]) then division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
+            elseif b == D or (force and force[i]) or (prog.forced and prog.forced[params[i]]) then
+                -- (a FORCED parameter — stored into, CART-1503 — is always dynamic: a static argument is built at run time)
+                division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
             else division[i] = b; svals[i] = sval(a, X) end
         end
         for i = nargs + 1, #params do -- (a missing argument is a static nil)
@@ -2312,6 +2460,7 @@ function M.specialize(prog, fname, division, statics, opts)
             end
             return apply_spec({ kind = 'lam', c = c }, e.args, X)
         end
+        if op == 'global' and DYNG[e.name] then return { op = 'gref', name = e.name } end
         if op == 'global' then refuse('the global `' .. tostring(e.name) .. '` (only the language\'s constants, the primitive table and opts.globals are known)') end
         refuse('residualizing the IR op ' .. tostring(op))
     end
@@ -2360,6 +2509,11 @@ function M.specialize(prog, fname, division, statics, opts)
                         if not nm then refuse('no residual name for `' .. tostring(prog.names[s.target.id]) .. '`') end
                         out[#out + 1] = { op = 'assign', target = { op = 'var', name = nm }, e = rexpr(s.e, X) }
                     end
+                elseif s.target.op == 'index' and bt_expr(s.target, bt) ~= D then
+                    -- (a store into a STATIC place — a known global's table, `M.OBSERVED[u] = true` — happens at run time
+                    -- into the same table: the target is its PATH, never its current value lifted)
+                    out[#out + 1] = { op = 'assign', target = { op = 'index', obj = rpath(s.target.obj, X), key = rexpr(s.target.key, X) },
+                        e = rexpr(s.e, X) }
                 else
                     out[#out + 1] = { op = 'assign', target = rexpr(s.target, X), e = rexpr(s.e, X) }
                 end
