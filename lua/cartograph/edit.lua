@@ -34,8 +34,15 @@ local function count(hay, needle)
     end
 end
 
---- classify `text` (nil = the file is absent) against the transition -> state, why
-function M.classify(text, before, after)
+--- classify `text` (nil = the file is absent) against the transition -> state, why. n (default 1): the number of sites
+--- `before` must occur at — every one of them is replaced (CART-1486: the same lines twice in one file, link and relink)
+function M.classify(text, before, after, n)
+    n = n or 1
+    -- (a count off from n: exact-once asks for context, exact-n names the count it expected)
+    local function many(what, k)
+        if n == 1 then return ('the %s %d times — add context so the site is unique'):format(what, k) end
+        return ('the %s %d times, count = %d expected'):format(what, k, n)
+    end
     if before == '' then
         if text == nil then return 'pending' end
         if text == after then return 'done' end
@@ -45,41 +52,49 @@ function M.classify(text, before, after)
     local nb, na = count(text, before), count(text, after)
     local a_has_b, b_has_a = after:find(before, 1, true) ~= nil, before:find(after, 1, true) ~= nil
     if after == '' then -- a pure deletion of `before`
-        if nb == 1 then return 'pending' end
+        if nb == n then return 'pending' end
         if nb == 0 then return 'done' end
-        return 'drifted', ('the text to delete occurs %d times — add context so the site is unique'):format(nb)
+        return 'drifted', many('text to delete occurs', nb)
     end
     if a_has_b then
         -- INSERT / APPEND: `before` survives inside `after`, so `after` is the witness of done
-        if na == 1 then return 'done' end
-        if na == 0 and nb == 1 then return 'pending' end
-        if na > 1 then return 'drifted', ('the result already occurs %d times — add context so the site is unique'):format(na) end
-        return 'drifted', nb == 0 and 'neither the text to edit nor its result is there'
-            or ('the text to edit occurs %d times — add context so the site is unique'):format(nb)
+        if na == n then return 'done' end
+        if na == 0 and nb == n then return 'pending' end
+        if na > n then return 'drifted', many('result already occurs', na) end
+        return 'drifted', nb == 0 and 'neither the text to edit nor its result is there' or many('text to edit occurs', nb)
     end
     if b_has_a then
         -- DELETE-PART: `after` is present in both states, so `before` decides
-        if nb == 1 then return 'pending' end
-        if nb == 0 and na >= 1 then return 'done' end
-        return 'drifted', ('the text to edit occurs %d times — add context so the site is unique'):format(nb)
+        if nb == n then return 'pending' end
+        if nb == 0 and na >= n then return 'done' end
+        return 'drifted', many('text to edit occurs', nb)
     end
-    if nb == 1 and na == 0 then return 'pending' end
-    if nb == 0 and na == 1 then return 'done' end
+    if nb == n and na == 0 then return 'pending' end
+    if nb == 0 and na == n then return 'done' end
     if nb == 0 and na == 0 then return 'drifted', 'neither the text to edit nor its result is there — the file moved on' end
     if nb >= 1 and na >= 1 then
         return 'drifted', 'both the text to edit and its result occur — a coincidental match elsewhere, or a half-applied edit: add context so the site is unique'
     end
-    return 'drifted', ('the %s occurs %d times — add context so the site is unique'):format(nb > 1 and 'text to edit' or 'result', math.max(nb, na))
+    return 'drifted', many(nb ~= n and nb > 0 and 'text to edit occurs' or 'result occurs', nb > 0 and nb or na)
 end
 
 --- apply the transition to `text` (the classification is re-run on it) -> new text | text unchanged when done
-function M.apply_to(text, before, after)
-    local state, why = M.classify(text, before, after)
+function M.apply_to(text, before, after, n)
+    n = n or 1
+    local state, why = M.classify(text, before, after, n)
     if state == 'done' then return text end
     if state ~= 'pending' then error(why or 'drifted', 0) end
     if before == '' then return after end
-    local s, e = text:find(before, 1, true)
-    return text:sub(1, s - 1) .. after .. text:sub(e + 1)
+    -- (every one of the n sites, left to right — the classification counted exactly n, without overlap)
+    local out, i = {}, 1
+    for _ = 1, n do
+        local s, e = text:find(before, i, true)
+        out[#out + 1] = text:sub(i, s - 1)
+        out[#out + 1] = after
+        i = e + 1
+    end
+    out[#out + 1] = text:sub(i)
+    return table.concat(out)
 end
 
 local function rel_of(root, file)
@@ -102,6 +117,10 @@ function M.plan(store, args)
         return nil, 'an edit needs `before` and `after` text (before = \'\' creates the file)', 'ill-posed'
     end
     if args.before == args.after then return nil, 'before and after are the same text: the edit changes nothing', 'ill-posed' end
+    -- (count: the anchor occurs at EXACTLY that many sites, every one replaced — CART-1486; default 1, exact-once)
+    local sites = args.count == nil and 1 or tonumber(args.count)
+    if not sites or sites < 1 or sites % 1 ~= 0 then return nil, ('`count` must be a whole number of sites, not %s'):format(tostring(args.count)), 'ill-posed' end
+    if sites > 1 and args.before == '' then return nil, 'a create has one site: `count` does not apply', 'ill-posed' end
     local text = txn.read_file(root, rel)
     -- ★ WITHIN ONE FUNCTION (CART-1176, edit-in): `within` = a durable ref (or a node id) — the transition is judged
     -- and applied on that node's own source SLICE only, so the anchor must be unique inside the function, not in the
@@ -121,11 +140,11 @@ function M.plan(store, args)
             return offset(sl, sc), offset(el, ec)
         end
         local s0, e0 = slice_of(text)
-        local state, why = M.classify(text:sub(s0 + 1, e0), args.before, args.after)
+        local state, why = M.classify(text:sub(s0 + 1, e0), args.before, args.after, sites)
         if state == 'done' then return nil, ('%s already holds this edit'):format(tostring(n.name)), 'empty' end
         if state ~= 'pending' then return nil, ('%s: %s'):format(tostring(n.name), tostring(why)), 'stale' end
     else
-        local state, why = M.classify(text, args.before, args.after)
+        local state, why = M.classify(text, args.before, args.after, sites)
         if state == 'done' then return nil, ('%s already holds this edit'):format(rel), 'empty' end
         if state ~= 'pending' then return nil, ('%s: %s'):format(rel, tostring(why)), 'stale' end
     end
@@ -135,11 +154,11 @@ function M.plan(store, args)
         guards = { 'parses' },
         generation = store.generation,
         touched = { rel }, creates = creates, stamps = { [rel] = txn.disk_stamp(root, rel) }, refspecs = {},
-        rel = rel, before_text = args.before, after_text = args.after,
+        rel = rel, before_text = args.before, after_text = args.after, sites = sites,
         -- the text is SUPPLIED: no behavioural claim
         preserves = 'none', preserves_why = 'the edit applies supplied text; nothing checks what it means',
         hazards = {},
-        desc = ('edit %s: %d -> %d bytes at one site%s'):format(rel, #args.before, #args.after, creates and ' (create)' or ''),
+        desc = ('edit %s: %d -> %d bytes at %s%s'):format(rel, #args.before, #args.after, sites == 1 and 'one site' or (sites .. ' sites'), creates and ' (create)' or ''),
     }
     -- ★ A GATED EDIT (CART-1444): `decide = { kind, reason, evidence? }` makes the step a DECISION — it stops until the
     -- run accepts `kind` (or a remembered / signed answer does). For a write tactic whose text embodies a choice the
@@ -160,9 +179,9 @@ function M.plan(store, args)
                 -- re-sliced on the text the stage sees; the function's range is the graph's (a stale range refuses at
                 -- apply through the stamp check)
                 local s0, e0 = slice_of(t)
-                return t:sub(1, s0) .. M.apply_to(t:sub(s0 + 1, e0), p.before_text, p.after_text) .. t:sub(e0 + 1)
+                return t:sub(1, s0) .. M.apply_to(t:sub(s0 + 1, e0), p.before_text, p.after_text, p.sites) .. t:sub(e0 + 1)
             end
-            return M.apply_to(t, p.before_text, p.after_text)
+            return M.apply_to(t, p.before_text, p.after_text, p.sites)
         end
     end)
 end

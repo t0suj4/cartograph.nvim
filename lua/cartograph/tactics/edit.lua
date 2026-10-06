@@ -9,9 +9,9 @@ return {
     name = 'edit',
     kind = 'write',
     tags = { 'code' },
-    summary = 'the ground edit: file = the key, before = the text at the one site (\'\' creates), after = its replacement; exact-once, idempotent, journaled',
-    params = { file = 'string', before = 'string', after = 'string' },
-    build = function (p) return T.step('edit', { file = p.file, before = p.before, after = p.after }) end,
+    summary = 'the ground edit: file = the key, before = the text at the one site (\'\' creates), after = its replacement; exact-once, idempotent, journaled; count = N: the text occurs at exactly N sites and every one is replaced',
+    params = { file = 'string', before = 'string', after = 'string', count = 'string?' },
+    build = function (p) return T.step('edit', { file = p.file, before = p.before, after = p.after, count = p.count }) end,
     examples = {
         {
             name = 'one site edited through the journal; the re-run is empty',
@@ -41,6 +41,34 @@ return {
             expect = { status = 'done', applied = 1, check = function (root)
                 local s = io.open(root .. '/notes.md'):read('a')
                 return s == '# Notes\n\n- one\n- two\n', s
+            end },
+        },
+        {
+            -- (CART-1486: the same lines twice in one file — treesitter.lua's link and relink — were hand-patched)
+            name = 'count = 2: the text occurs at exactly two sites and BOTH are replaced; the re-run is empty',
+            files = { ['m.lua'] = 'local function a() local x = 1; return x end\nlocal function b() local x = 1; return x end\nreturn a() + b()\n' },
+            params = { file = 'm.lua', before = 'local x = 1', after = 'local x = 2', count = '2' },
+            expect = { status = 'done', applied = 1, check = function (root)
+                local s = io.open(root .. '/m.lua'):read('a')
+                return s == 'local function a() local x = 2; return x end\nlocal function b() local x = 2; return x end\nreturn a() + b()\n', s
+            end },
+        },
+        {
+            name = 'count = 2 on an INSERT (the result contains the text): both sites, each once',
+            files = { ['m.lua'] = 'local function a(x) return x end\nlocal function b(x) return x end\nreturn a(1) + b(2)\n' },
+            params = { file = 'm.lua', before = 'return x end', after = 'x = x + 1; return x end', count = '2' },
+            expect = { status = 'done', applied = 1, check = function (root)
+                local s = io.open(root .. '/m.lua'):read('a')
+                return s == 'local function a(x) x = x + 1; return x end\nlocal function b(x) x = x + 1; return x end\nreturn a(1) + b(2)\n', s
+            end },
+        },
+        {
+            name = 'a count that does not match the sites is REFUSED by name — nothing is written',
+            files = { ['m.lua'] = 'local function a() local x = 1; return x end\nlocal function b() local x = 1; return x end\nreturn a() + b()\n' },
+            params = { file = 'm.lua', before = 'local x = 1', after = 'local x = 2', count = '3' },
+            expect = { applied = 0, check = function (root, r)
+                local s = io.open(root .. '/m.lua'):read('a')
+                return s:find('local x = 2', 1, true) == nil, s
             end },
         },
         {

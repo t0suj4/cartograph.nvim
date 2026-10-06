@@ -34,6 +34,23 @@ test('edit.classify: pending / done / drifted — and CONTAINMENT decides which 
     local s4 = E.classify(nil, 'a = 1', 'a = 9'); eq('drifted', s4)
 end)
 
+test('edit.classify with a COUNT (CART-1486): exactly n sites pending, all n replaced, the result done — for a replacement, an insert and a deletion; a count off either way is drifted by its number', function ()
+    local function check(text, before, after)
+        eq('pending', E.classify(text, before, after, 2))
+        local out = E.apply_to(text, before, after, 2)
+        eq('done', (E.classify(out, before, after, 2)), out)
+        eq(out, E.apply_to(out, before, after, 2), 'applying again changes nothing')
+        local s1, w1 = E.classify(text, before, after, 3)
+        eq('drifted', s1); ok(w1:find('count = 3 expected', 1, true), w1)
+        local s2 = E.classify(text, before, after, 1)
+        eq('drifted', s2)
+        return out
+    end
+    eq('a = 2\nb = 2\n', check('a = 1\nb = 1\n', '= 1', '= 2'))
+    eq('f(x) -- seam\ng(x) -- seam\n', check('f(x)\ng(x)\n', '(x)', '(x) -- seam'))
+    eq('f\ng\n', check('f(x)\ng(x)\n', '(x)', ''))
+end)
+
 test('edit through the runner: applied once, the RE-RUN is empty and writes nothing; a drifted file is refused by name', function ()
     if not ready() then skip 'no lua parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
