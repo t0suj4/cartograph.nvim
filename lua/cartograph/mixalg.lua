@@ -379,10 +379,9 @@ function M.program(root, files, opts)
         if v == nil then return 'nil' end
         if type(v) == 'boolean' then return tostring(v) end
         if type(v) == 'number' then
-            -- (the three numbers with no numeral: written as expressions mix folds — math.huge is a language constant)
-            if v ~= v then return '(0/0)' end
-            if v == math.huge then return 'math.huge' end
-            if v == -math.huge then return '(-math.huge)' end
+            -- (±inf and NaN have no numeral, and how to spell them is the TARGET's choice — mix's lift and printer
+            -- make it: such a value is carried as a KNOWN below, never spelled here)
+            if v ~= v or v == math.huge or v == -math.huge then return nil end
             return math.floor(v) == v and string.format('%d', v) or string.format('%.17g', v)
         end
         if type(v) == 'string' then return (string.format('%q', v):gsub('\\\n', '\\n')) end
@@ -469,6 +468,10 @@ function M.program(root, files, opts)
                                 if lit and (pt == 'dot_index_expression' or pt == 'method_index_expression'
                                     or pt == 'bracket_index_expression' or pt == 'function_call') then lit = '(' .. lit .. ')' end
                                 if lit then target = lit
+                                elseif type(v) == 'number' then
+                                    -- (a number with no literal — ±inf, NaN: a known global, its value lifted by mix)
+                                    target = mangle(d.file .. '::' .. t)
+                                    knowns[target] = v
                                 elseif type(v) == 'table' then
                                     target = mangle(d.file .. '::' .. t)
                                     knowns[target] = v

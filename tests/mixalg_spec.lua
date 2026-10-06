@@ -368,7 +368,7 @@ test('mixalg: THROUGH THE BASIS — a captured table\'s field or a captured alia
     if not okall then error(err, 0) end
 end)
 
-test('mixalg: the assembler\'s EDGES — every scalar a literal (nil, false, a float, ±inf, NaN; parenthesized as an object), an opaque `M.x` left a call, a written table followed only from a snapshot, a missing root refused by name (CART-1506)', function ()
+test('mixalg: the assembler\'s EDGES — a scalar a literal (nil, false, a float; parenthesized as an object), ±inf and NaN KNOWNS (their spelling is the target\'s), an opaque `M.x` left a call, a written table followed only from a snapshot, a missing root refused by name (CART-1506)', function ()
     ready()
     local dir = vim.fn.tempname()
     vim.fn.mkdir(dir .. '/lua/mxk1506', 'p')
@@ -412,15 +412,17 @@ test('mixalg: the assembler\'s EDGES — every scalar a literal (nil, false, a f
     local okall, err = pcall(function ()
         local fix = require('mxk1506.fix')
         -- every scalar is a literal that adds no line; an object position is parenthesized
-        local lt, _, _, _, lr = MA.program('M.lit', { path })
-        for _, want in ipairs({ 'tostring(nil)', 'tostring(false)', '0.10000000000000001', 'tostring(math.huge)', 'tostring((-math.huge))',
-            '((0/0) ~= (0/0))', '("ab"):upper()', '("ab").len' }) do
+        local lt, _, _, lk, lr = MA.program('M.lit', { path })
+        for _, want in ipairs({ 'tostring(nil)', 'tostring(false)', '0.10000000000000001', '("ab"):upper()', '("ab").len' }) do
             ok(lt:find(want, 1, true), want .. '\n' .. lt)
         end
+        -- (±inf and NaN have no literal, and their spelling is the TARGET's: carried as KNOWNS, never written here)
+        ok(not lt:find('huge', 1, true) and not lt:find('0/0', 1, true), lt)
+        eq(math.huge, lk.fix__BIG); eq(-math.huge, lk.fix__NEG); ok(lk.fix__NAN ~= lk.fix__NAN, 'NaN carried')
         eq({}, lr.free)
         local lp = MX.lower(assert(R.read(lt, 'lua')))
-        local lres = MX.specialize(lp, 'M_lit', { 'D' }, {}, { budget = 2e5 })
-        eq(fix.lit('x'), assert(load(MX.print(lres, lp.where), 'r', 't', F.env(lres.pool, {})))()('x'))
+        local lres = MX.specialize(lp, 'M_lit', { 'D' }, {}, { budget = 2e5, globals = lk })
+        eq(fix.lit('x'), assert(load(MX.print(lres, lp.where), 'r', 't', F.env(lres.pool, lk)))()('x'))
         -- an OPAQUE `M.x` is not followed: the call stays, its definition is not in the closure
         local ct, corder = MA.program('M.call', { path }, { opaque = { ['M.dbl'] = true } })
         ok(ct:find('M.dbl(a)', 1, true) and ct:find('M_inc(a)', 1, true), ct)
