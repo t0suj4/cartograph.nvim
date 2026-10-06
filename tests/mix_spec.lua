@@ -1250,6 +1250,21 @@ test('mix: error(msg, LEVEL) in a static run is prefixed as Lua would — level 
     eq('orig.lua:105: bad 7!', r('!'), text)
 end)
 
+test('mix: a store through a call stands when the callee returns a FRESH table on every path — `mk(x).k = x`; through an identity or a path that falls off, refused by name (CART-1520, CART-1509)', function ()
+    ready()
+    for _, src in ipairs({ 'local function mk(x) return { x } end\nlocal function f(x)\n  mk(x).k = x\n  return x + 1\nend\n',
+        'local function mk() return {} end\nlocal function f(x)\n  mk().k = x\n  return x + 1\nend\n' }) do
+        local want, r = original(src, 'f'), residual(src, 'f', { 'D' }, {})
+        eq(want(3), r(3)); eq(want(4), r(4))
+    end
+    for name, src in pairs({ id = 'local function id(t) return t end\nlocal function f(d)\n  local t = {}\n  id(t).x = d\n  return t.x\nend\n',
+        falls = 'local function mk(c) if c then return {} end end\nlocal function f(x)\n  mk(x).k = x\n  return x\nend\n' }) do
+        local okm, e = pcall(MX.mix, assert(R.read(src, 'lua')), 'f', { 'D' }, {})
+        eq(false, okm, name)
+        ok(MX.describe(e):find('a store into a table reached through', 1, true), name .. ': ' .. MX.describe(e))
+    end
+end)
+
 test('mix: an UNROLLED loop whose value variable the body makes dynamic declares it per iteration — for-in and a generic for (CART-1519)', function ()
     ready()
     local function same(src, statics, args)

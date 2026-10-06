@@ -370,7 +370,14 @@ local function lower_stmt(t, cx, scope, out)
             -- analysis cannot name: no variable is marked written, and a static `t` would fold its old field. Refused
             -- by name — CART-1509: it computed nil where Lua gives 5)
             if not root and targets[i].op == 'index' then
-                refuse('a store into a table reached through ' .. text(named(v)[1]) .. ' (not a variable: the table it writes is unknown)')
+                -- (unless the call returns a FRESH table on every path — `mk(x).k = v` writes a table nothing else
+                -- holds: checked once every function is lowered, CART-1520. One target only, the call's own field)
+                local base = targets[i].obj
+                if #vars == 1 and base.op == 'call' and base.fn then
+                    cx.freshcheck[#cx.freshcheck + 1] = { fn = base.fn, text = text(named(v)[1]) }
+                else
+                    refuse('a store into a table reached through ' .. text(named(v)[1]) .. ' (not a variable: the table it writes is unknown)')
+                end
             end
             -- (a GLOBAL target — `derive__WF_PATH = …`, `G.t.seen = …` — only as the one target of one value: it is
             -- residualized as a store by its path, and what writes it is never run early — CART-1504)
@@ -608,7 +615,7 @@ end
 function M.lower(term, opts)
     local cx = { decide = opts and opts.decide, decisions = {}, -- (the decision hook in LOWERING too: 'sra', CART-1501)
         funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect, isparam = {}, boxed = {}, forced = {},
-        pinned = {}, pinfirst = {}, assigned = {}, loopvar = {}, tick = 0, vararg = {}, packfix = {} }
+        pinned = {}, pinfirst = {}, assigned = {}, loopvar = {}, tick = 0, vararg = {}, packfix = {}, freshcheck = {} }
     -- LINES (CART-1459): every node's FIRST LINE — the reader is lossless, its lits ARE the source, so counting their
     -- newlines in order places every node. Statements and lambdas carry it as `at` (bookkeeping: the algebra does not
     -- see it). opts.lines maps a line of THIS text to where it came from ({ src, line }: an assembled program's
@@ -722,6 +729,24 @@ function M.lower(term, opts)
     local stale = {}
     for id, name in pairs(cx.pinned) do
         if (cx.assigned[id] or 0) > cx.pinfirst[id] and not cx.boxed[id] then stale[#stale + 1] = name end
+    end
+    -- A STORE THROUGH A CALL (CART-1520) stands only when the callee returns a FRESH table on every path: every return
+    -- (its closures' aside) is one table constructor, and the body ends in one — otherwise CART-1509's refusal
+    for _, fc in ipairs(cx.freshcheck) do
+        local f = cx.funcs[fc.fn]
+        local fresh = f ~= nil and #f.body > 0 and f.body[#f.body].op == 'ret'
+        local function rets(x, seen)
+            if not fresh or type(x) ~= 'table' or seen[x] or x.op == 'lambda' then return end
+            seen[x] = true
+            if x.op == 'ret' and not (#x.es == 1 and x.es[1].op == 'table') then fresh = false; return end
+            for _, c in pairs(x) do rets(c, seen) end
+        end
+        if f then rets(f.body, {}) end
+        if not fresh then
+            local why = 'a store into a table reached through ' .. fc.text .. ' (not a variable: the table it writes is unknown)'
+            if not cx.collect then refuse(why) end
+            cx.collect[#cx.collect + 1] = { why = why, text = fc.text }
+        end
     end
     table.sort(stale)
     for _, name in ipairs(stale) do
