@@ -2686,8 +2686,16 @@ function M.specialize(prog, fname, division, statics, opts)
                     for k, v in it(sval(s.e, X)) do
                         spend(10)
                         env[s.kid] = k
-                        if s.vid then env[s.vid] = v end
+                        -- (a value variable the body assigns under dynamic control is DYNAMIC though the loop unrolls:
+                        -- each iteration declares it, its static value lifted — CART-1519: "no residual name for `v`")
+                        local pre
+                        if s.vid and bt[s.vid] == D then
+                            local nm = rname(s.vid, X)
+                            env[s.vid] = DYN; X.ren[s.vid] = nm
+                            pre = { op = 'local', name = nm, e = lift(v, X) }
+                        elseif s.vid then env[s.vid] = v end
                         local body, d = loop_body(s.body, X)
+                        if pre then table.insert(body, 1, pre) end
                         if #body > 0 then seq[#seq + 1] = { op = 'do', body = body } end
                         if d then done = d; break end
                     end
@@ -2710,8 +2718,17 @@ function M.specialize(prog, fname, division, statics, opts)
                         if rs[1] == nil then break end
                         ctrl = rs[1]
                         spend(10)
-                        for i, id in ipairs(s.ids) do env[id] = rs[i] end
+                        -- (a loop variable the body makes dynamic is declared per iteration, as for-in's value — CART-1519)
+                        local pre = {}
+                        for i, id in ipairs(s.ids) do
+                            if i > 1 and bt[id] == D then
+                                local nm = rname(id, X)
+                                env[id] = DYN; X.ren[id] = nm
+                                pre[#pre + 1] = { op = 'local', name = nm, e = lift(rs[i], X) }
+                            else env[id] = rs[i] end
+                        end
                         local body, d = loop_body(s.body, X)
+                        for j = #pre, 1, -1 do table.insert(body, 1, pre[j]) end
                         if #body > 0 then seq[#seq + 1] = { op = 'do', body = body } end
                         if d then done = d; break end
                     end

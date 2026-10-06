@@ -1250,6 +1250,18 @@ test('mix: error(msg, LEVEL) in a static run is prefixed as Lua would — level 
     eq('orig.lua:105: bad 7!', r('!'), text)
 end)
 
+test('mix: an UNROLLED loop whose value variable the body makes dynamic declares it per iteration — for-in and a generic for (CART-1519)', function ()
+    ready()
+    local function same(src, statics, args)
+        local want, r = original(src, 'f'), residual(src, 'f', { 'S', 'D' }, statics)
+        for _, a in ipairs(args) do eq(want(statics[1], unpack(a)), r(unpack(a)), vim.inspect(a)) end
+    end
+    same('local function f(t, x)\n  for k, v in pairs(t) do\n    x = x + v\n    if x > 100 then v = 0 end\n    x = x + v\n  end\n  return x\nend\n',
+        { { 5, 60 } }, { { 1 }, { 50 } })
+    same('local function f(s, x)\n  for a, b in s:gmatch("(%a)(%d)") do\n    if x > 3 then b = "0" end\n    x = x + tonumber(b)\n  end\n  return x\nend\n',
+        { 'a1b2c3' }, { { 0 }, { 5 } })
+end)
+
 test('mix: a HOST call\'s results are all counted — trailing nils, and more than 8 (`{ unpack(t) }` of 10 folded to 8 elements), CART-1511', function ()
     ready()
     local src = 'local function f(x)\n  local t = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }\n  local p = { unpack(t) }\n  return #p + x\nend\n'
