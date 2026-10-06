@@ -23,6 +23,12 @@ test('build_symtab: exact keys mirror build_index for real defs', function ()
     eq(nil, st.exact['M'])   -- module excluded
 end)
 
+test('build_symtab: an ANONYMOUS fn (`M.mk#ret`, a returned closure) is not indexed by name — as link leaves it out (CART-1490)', function ()
+    local st = ts.build_symtab({ { id = 'r', kind = 'function', file = 'w.lua', name = 'M.mk#ret', anon = true } })
+    eq(nil, st.exact['M.mk#ret']); eq(nil, st.tail['ret'])
+    eq('r', st.node_index['r'].id, 'still found by id')
+end)
+
 test('build_symtab: altkeys are indexed', function ()
     local st = ts.build_symtab(nodes())
     eq('b', st.exact['B#g'][1].id)

@@ -126,3 +126,35 @@ test('method call and bare call: an INCREMENTAL refresh decides the same way —
     eq(nil, by['fd:shut'].to); eq('blocked', by['fd:shut'].refused)
     eq(nil, by.tonumber.to); eq(nil, by.tonumber.refused)
 end)
+
+test('an ANONYMOUS fn is never a call target by name — not at extract (link), not after a refresh (relink): a returned closure `M.mk#ret` does not join the tail `ret` of `syn.ret(…)` (CART-1490)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local store = require 'cartograph.store'
+    local files = {
+        ['a.lua'] = 'local M = {}\nfunction M.ret(x) return x end\nreturn M\n',
+        ['b.lua'] = 'local M = {}\nfunction M.ret(x) return x end\nreturn M\n',
+        ['w.lua'] = 'local M = {}\nfunction M.mk() return function () return 1 end end\nfunction M.mk2() return function () return 2 end end\nreturn M\n',
+        ['use.lua'] = 'local M = {}\nfunction M.go(x)\n  local syn = obtain()\n  return syn.ret(x)\nend\nreturn M\n',
+    }
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for rel, src in pairs(files) do local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(src); fd:close() end
+    store.ingest(ts.extract(root))
+    local function syn_ret()
+        local cv = require('cartograph.callview').of(store.data)
+        for i = 1, cv.n do
+            if cv.get(i, 'full') == 'syn.ret' then
+                local r = cv.get(i, 'refused')
+                return { to = cv.get(i, 'to'), rule = type(r) == 'table' and r.rule or r, cands = type(r) == 'table' and r.cands and #r.cands or 0 }
+            end
+        end
+    end
+    local link = syn_ret()
+    local anon = 0
+    for _, n in ipairs(store.data.nodes) do if n.anon then anon = anon + 1 end end
+    eq(2, anon, 'the two returned closures are marked anonymous')
+    eq(2, link.cands, 'link: the two named M.ret, no closure')
+    assert(require('cartograph.refresh').files({ 'use.lua' }))
+    local relink = syn_ret()
+    vim.fn.delete(root, 'rf')
+    eq(link, relink, 'relink decides as link did')
+end)

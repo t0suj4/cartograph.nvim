@@ -7119,6 +7119,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- @langs-ok js/ts `arrow_function` — the B3 this-typing walk is a JS-family concern
                     arrow = defn:type() == 'arrow_function' or nil,
                     cbarg = isfield or nil,
+                    -- an ANONYMOUS fn (aname: a callback, a returned closure `X#ret`) is never a call target BY NAME: link
+                    -- leaves it out of exact/tail, and the mark makes relink's index do the same (CART-1490: 148 `X#ret`
+                    -- nodes under the tail `ret` answered `syn.ret(…)` after a refresh, 2 same-file cands at extract)
+                    anon = aname and true or nil,
                     -- a framework INVOKES this member (annotation/decorator).
                     -- Liveness reads it beside `cbarg`; resolution must not
                     -- (CART-0703). ★ This is a node FLAG standing in for a
@@ -9567,7 +9571,8 @@ local function build_index(nodes)
         node_index[n.id] = n
         if (n.kind == 'function' or n.kind == 'method') and not n.torn
             and not n.override
-            and not n.decl then -- a prototype declaration is not a call target
+            and not n.decl -- a prototype declaration is not a call target
+            and not n.anon then -- nor an anonymous fn (CART-1490: link leaves it out too)
             exact[n.name] = exact[n.name] or {}
             table.insert(exact[n.name], n)
             local tl = n.name:match('([%w_]+)$')
@@ -9638,7 +9643,7 @@ local function build_symtab(nodes)
             params = n.params, locals = n.locals, dfdef = dfdef }
         node_index[n.id] = stub
         if (n.kind == 'function' or n.kind == 'method') and not n.torn and not n.decl
-            and not n.override then
+            and not n.override and not n.anon then
             exact[n.name] = exact[n.name] or {}
             table.insert(exact[n.name], stub)
             local tl = n.name:match('([%w_]+)$')
