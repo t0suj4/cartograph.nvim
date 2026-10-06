@@ -212,7 +212,12 @@ function M.join(T1, T2, opts)
         for _, c in ipairs(t.kids or {}) do holes_in(c, out) end
         return out
     end
-    local ids = {} -- (the TERM relation's hash memo for this join — CART-1401)
+    -- (the TERM relation's ids for this join — CART-1401 — in an ID SCOPE: exact small integers, interned per distinct
+    -- subterm, where a plain memo hashed every one with sha256; the ids only key this join's memo, so the scope is all
+    -- they need — CART-1522: content_id was 13% of the compiled match)
+    -- (the scope M.id_scope() builds, without its WEAK node memo — this one dies with the join — so the specializer,
+    -- which takes no metatables, compiles it; a constructor, so each call of the compiled join gets its own)
+    local ids = { id_scope = true, intern = {}, n = 0, nodes = {} }
     local function fresh(a, b, hedge)
         local k = (hedge and 'H' or 'T') .. '\1' .. M.content_id(a, ids) .. '\1' .. M.content_id(b, ids)
         -- LINEAR VARIANT (survey §2): no hole twice
