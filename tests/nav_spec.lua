@@ -173,7 +173,9 @@ test('nav: with sync_on_ascend = false, ascend defers the resync (peek up)', fun
     -- move off the landing row -> the def pane commits to the caller
     pcall(vim.api.nvim_win_set_cursor, wsym, { 2, 0 })
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
-    vim.wait(150)
+    -- (wait on the CONDITION, not a fixed 150 ms — the resync is scheduled, and a loaded machine ran past the fixed
+    -- delay twice in full-suite runs: CART-1492)
+    vim.wait(3000, function () return store.focused == 'caller' and source.cur and source.cur.name == 'M.caller' end, 10)
     eq('caller', store.focused)
     eq('M.caller', source.cur and source.cur.name)
     ok(symbols._resync == nil, 'resync consumed')
