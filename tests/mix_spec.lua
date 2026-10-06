@@ -1047,6 +1047,21 @@ test('mix: a table a CALLEE\'s closure stores into is dynamic in the CALLER too 
     eq(want('a'), r('a')); eq(want('a'), r('a')); eq(want('b'), r('b'))
 end)
 
+test('mix: a SINGLE-VALUED call as the last argument fills one parameter and leaves the rest nil — a named function or a known closure; a static counter left NIL then defaulted generalizes (CART-1500)', function ()
+    ready()
+    -- (rung 3: `g(one(x))` with g taking three parameters — one returns one value on every path)
+    local SRC = 'local function one(x) return x + 1 end\nlocal function g(a, b, c) if b == nil and c == nil then return a end return -1 end\n'
+        .. 'local function f(x)\n  local h = function (y) return y * 2 end\n  return g(one(x)) + g(h(x))\nend\n'
+    local want = original(SRC, 'f')
+    local r = residual(SRC, 'f', { 'D' }, {})
+    for _, x in ipairs({ 0, 3, -2 }) do eq(want(x), r(x)) end
+    -- (the whistle: `walk(t)` leaves n NIL, `n = n or 1` defaults it, then n grows 2, 3, … over a DYNAMIC list — nil
+    -- embeds every value, so the index is generalized instead of the depth refusing)
+    local W = 'local function walk(t, n)\n  n = n or 1\n  if n > #t then return 0 end\n  return t[n] + walk(t, n + 1)\nend\nlocal function f(t) return walk(t) end\n'
+    local wr = residual(W, 'f', { 'D' }, {})
+    eq(original(W, 'f')({ 1, 2, 3 }), wr({ 1, 2, 3 })); eq(0, wr({}))
+end)
+
 test('mix: the FORWARD-DECLARED recursive local — `local build; function build(…)` — is the assignment of a lambda to that local: specialized static it folds, dynamic it recurses; a global target still refuses (CART-1373)', function ()
     ready()
     local SRC = 'local function f(n)\n  local build\n  function build(k) if k <= 0 then return 0 end return k + build(k - 1) end\n  return build(n)\nend\n'

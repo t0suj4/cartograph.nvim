@@ -648,8 +648,10 @@ function M.lower(term, opts)
     -- SINGLE-VALUED program functions (greatest fixpoint): every `return` yields one expression that does not expand,
     -- or a call of a single-valued function. A vararg call whose last argument is such a call packs it as ONE value
     -- (`M.node('text', M.lit(s))`); any other expanding call there refuses — it would have to be evaluated twice
-    if #cx.packfix > 0 then
-        local single = {}
+    -- (computed always and kept on the program: a call whose last argument is a single-valued call fills ONE parameter
+    -- and leaves the rest nil — the specializer's rung 3 for an expanding dynamic argument, CART-1500)
+    local single = {}
+    do
         for name in pairs(cx.funcs) do single[name] = true end
         local function rets(stmts, out)
             for _, s in ipairs(stmts or {}) do
@@ -731,7 +733,8 @@ function M.lower(term, opts)
     for _, f in pairs(cx.funcs) do f.body = M.sra(f.body, cx) end
     -- BOXES: every boxed variable's declaration holds { v }, every read is v[1], every write a store into it
     for _, f in pairs(cx.funcs) do f.body = M.box(f.body, cx.boxed, cx.forced) end
-    return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra, where = cx.where }
+    return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra, where = cx.where,
+        single = single }
 end
 
 -- ── SRA: SCALAR REPLACEMENT OF A LOCAL RECORD (CART-1331 rung 4a) ──────────────────────────────────────────────────
@@ -1556,7 +1559,12 @@ function M.embeds(a, b, memo, charge)
     if row[b] ~= nil then return row[b] end
     if charge then charge() end
     local r = false
-    if a.k == 'lit' and b.k == 'lit' then
+    if a.k == 'nil' then
+        -- (a static NIL embeds every value: an argument left out — `put(t, path, sub)`, then `i = i or 1` — is the
+        -- bottom the recursion grows from; comparing nil with 2 kept M.put's static index from ever generalizing,
+        -- CART-1500)
+        r = true
+    elseif a.k == 'lit' and b.k == 'lit' then
         local ta = type(a.v)
         r = ta == type(b.v) and (ta == 'number' or ta == 'string' or a.v == b.v)
     elseif b.k == 'hole' then r = a.k == 'hole' -- (every dynamic value is one symbol; a hole has no kids to dive into)
@@ -2017,6 +2025,33 @@ function M.specialize(prog, fname, division, statics, opts)
     local call_spec, dispatch
     -- a call of T with argument expressions argexprs, in X -> residual expression. force: parameters made DYNAMIC
     -- whatever their argument (a generalization), its static value lifted
+    -- is `a` a call THROUGH A KNOWN CLOSURE whose body returns one value on every path (one expression, not expanding,
+    -- or a call of a single-valued program function)? Memoized per lambda
+    local lam_single = {}
+    local function single_callv(a, X)
+        if a.op ~= 'callv' or bt_expr(a.f, X.bt) == D then return false end
+        local okv, v = pcall(sval, a.f, X)
+        local c = okv and type(v) == 'function' and R.clos[v]
+        if not c then return false end
+        local lam = c.lam
+        if lam_single[lam] == nil then
+            local yes, any = true, false
+            local function walk(stmts)
+                for _, s in ipairs(stmts or {}) do
+                    if s.op == 'ret' then
+                        any = true
+                        local e = s.es[1]
+                        if #s.es ~= 1 or (M.MULTI[e.op] and not (e.op == 'call' and prog.single and prog.single[e.fn])) then yes = false end
+                    end
+                    for _, k in ipairs({ 'body', 'els' }) do if type(s[k]) == 'table' then walk(s[k]) end end
+                    for _, cl in ipairs(s.clauses or {}) do walk(cl.body) end
+                end
+            end
+            walk(lam.body)
+            lam_single[lam] = yes and any
+        end
+        return lam_single[lam]
+    end
     local function apply_spec(T, argexprs, X, force)
         local params = t_params(T)
         local division, svals, dargs = {}, {}, {}
@@ -2033,6 +2068,11 @@ function M.specialize(prog, fname, division, statics, opts)
                     else division[p] = S; svals[p] = vs[j] end
                 end
                 nargs = i - 1 + math.max(vs.n, 1)
+            elseif expands and ((a.op == 'call' and prog.single and prog.single[a.fn]) or single_callv(a, X)) then
+                -- (a SINGLE-VALUED call last: one dynamic value, the remaining parameters nil — `M.rep(M.join_domain(…))`,
+                -- `M.rep(elem_summary(…))` through a known closure; CART-1500)
+                division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
+                nargs = i
             elseif expands then refuse('the last argument of a call expands several dynamic values into its parameters (rung 3)')
             elseif b == D or (force and force[i]) then division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
             else division[i] = b; svals[i] = sval(a, X) end
