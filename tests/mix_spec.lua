@@ -1250,6 +1250,20 @@ test('mix: error(msg, LEVEL) in a static run is prefixed as Lua would — level 
     eq('orig.lua:105: bad 7!', r('!'), text)
 end)
 
+test('mix: a STATIC CALL producing a table that will be MUTATED is called at run time — each run its own table, never the pool\'s one: a forced local, an assignment to it, a forced parameter\'s argument (CART-1523)', function ()
+    ready()
+    local MK = 'local function mk() return {} end\n'
+    for name, src in pairs({
+        init = MK .. 'local function f(x)\n  local acc = mk()\n  table.insert(acc, x)\n  return #acc\nend\n',
+        assign = MK .. 'local function f(x)\n  local acc\n  acc = mk()\n  table.insert(acc, x)\n  return #acc\nend\n',
+        param = MK .. 'local function fill(out, x)\n  out[#out + 1] = x\n  return #out\nend\nlocal function f(x) return fill(mk(), x) end\n',
+    }) do
+        local want, r = original(src, 'f'), residual(src, 'f', { 'D' }, {})
+        -- (three runs: a pooled table would answer 1, 2, 3)
+        eq(want(5), r(5), name); eq(want(5), r(5), name); eq(want(5), r(5), name)
+    end
+end)
+
 test('mix: a table BUILT BY STORES stays static — a fresh local stored into at depth 1, everything static; frozen once residual code sees it; never a host table (CART-1502)', function ()
     ready()
     -- (built in a static loop, read statically: it folds — no table in the residual)

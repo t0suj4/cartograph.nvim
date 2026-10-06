@@ -2010,7 +2010,7 @@ function M.specialize(prog, fname, division, statics, opts)
         return X
     end
 
-    local spec_block, rexpr, rexpr_guarded, lift, dnames, table_rest
+    local spec_block, rexpr, rexpr_guarded, rexpr_mut, lift, dnames, table_rest
     -- a loop body specialized inside its own ITERATION SCOPE
     local function loop_body(stmts, X)
         local n = #iters
@@ -2418,7 +2418,8 @@ function M.specialize(prog, fname, division, statics, opts)
             elseif expands then refuse('the last argument of a call expands several dynamic values into its parameters (rung 3)')
             elseif b == D or (force and force[i]) or (prog.forced and prog.forced[params[i]]) then
                 -- (a FORCED parameter — stored into, CART-1503 — is always dynamic: a static argument is built at run time)
-                division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
+                division[i] = D
+                dargs[#dargs + 1] = (prog.forced and prog.forced[params[i]] and b ~= D and rexpr_mut or rexpr)(a, X)
             else division[i] = b; svals[i] = sval(a, X) end
         end
         for i = nargs + 1, #params do -- (a missing argument is a static nil)
@@ -2548,6 +2549,25 @@ function M.specialize(prog, fname, division, statics, opts)
         end
         error(r, 0)
     end
+    -- a residual expression for e where its value will be MUTATED at run time — a forced variable's initializer or new
+    -- value, a forced parameter's argument: a STATIC call producing a table is SPECIALIZED, not computed, so each run
+    -- gets its own table as in Lua; computed, it was the pool's one table, shared by every run (CART-1523:
+    -- `local acc = mk(); table.insert(acc, x)` gave 1, 2, 3)
+    function rexpr_mut(e, X)
+        if bt_expr(e, X.bt) ~= D and (e.op == 'call' or e.op == 'callv' or e.op == 'prim' or e.op == 'method')
+            and type(sval(e, X)) == 'table' then
+            if e.op == 'call' then return apply_spec({ kind = 'fn', name = e.fn, f = prog.funcs[e.fn] }, e.args, X) end
+            if e.op == 'callv' then
+                local c = R.clos[sval(e.f, X)]
+                if c then return apply_spec({ kind = 'lam', c = c }, e.args, X) end
+            end
+            local args = {}
+            for i, a in ipairs(e.args) do args[i] = rexpr(a, X) end
+            if e.op == 'prim' then return { op = 'prim', name = e.name, args = args } end
+            if e.op == 'method' then return { op = 'method', obj = rexpr(e.obj, X), m = e.m, args = args } end
+        end
+        return rexpr(e, X)
+    end
     -- a residual expression for e in X; a static e (or a closure) is computed and lifted
     function rexpr(e, X)
         spend()
@@ -2653,7 +2673,7 @@ function M.specialize(prog, fname, division, statics, opts)
             if op == 'local' then
                 if bt[s.id] ~= D then env[s.id] = sval(s.e, X) -- (S: its value; C: the closure)
                 else
-                    local e = rexpr(s.e, X)
+                    local e = (s.forced and rexpr_mut or rexpr)(s.e, X)
                     env[s.id] = DYN
                     X.ren[s.id] = rname(s.id, X)
                     out[#out + 1] = { op = 'local', name = rname(s.id, X), e = e }
@@ -2664,7 +2684,8 @@ function M.specialize(prog, fname, division, statics, opts)
                     else
                         local nm = X.ren[s.target.id]
                         if not nm then refuse('no residual name for `' .. tostring(prog.names[s.target.id]) .. '`') end
-                        out[#out + 1] = { op = 'assign', target = { op = 'var', name = nm }, e = rexpr(s.e, X) }
+                        out[#out + 1] = { op = 'assign', target = { op = 'var', name = nm },
+                            e = (prog.forced and prog.forced[s.target.id] and rexpr_mut or rexpr)(s.e, X) }
                     end
                 elseif s.target.op == 'global' then
                     -- (a store to a GLOBAL by its path, CART-1504: always at run time — the global is dynamic, its writer
