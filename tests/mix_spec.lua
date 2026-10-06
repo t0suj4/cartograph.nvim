@@ -1198,6 +1198,32 @@ test('mix: the decision hook\'s DATA kinds — `known` (a known global vetoed is
     end
 end)
 
+test('mix: a STORE TO A GLOBAL — a lazy file-level constant (`WF = WF or …`, derive.lua\'s WF_PATH), a field under a known (`G.t.seen = x`), a host global — lowers, is residualized by its path, and its writer is never run early (CART-1504)', function ()
+    ready()
+    local function run(src, globals, env)
+        local text, _, pool = MX.mix(assert(R.read(src, 'lua')), 'f', { 'D' }, {}, { globals = globals })
+        local e = setmetatable({ MIXK = pool }, { __index = _G })
+        for k, v in pairs(env or {}) do e[k] = v end
+        return assert(load(text, 'r', 't', e))(), text, e
+    end
+    -- the lazy constant: known (a snapshot), stored into, so dynamic; its writer `get` is specialized, not run on ()
+    local f1, t1, e1 = run('local function get()\n  WF = WF or 10\n  return WF\nend\nlocal function f(x) return get() + x end\n', { WF = 5 }, { WF = 5 })
+    eq(7, f1(2)); eq(8, f1(3))
+    ok(t1:find('WF = (WF or 10)', 1, true), t1)
+    e1.WF = nil
+    eq(12, f1(2), 'the lazy default, at run time')
+    -- a field under a known table: the read of the field is by path too
+    local G = { t = {} }
+    local f2 = run('local function f(x)\n  if x then G.t.seen = x end\n  return G.t.seen\nend\n', { ['G.t'] = G.t }, { G = G })
+    eq(2, f2(2)); eq(2, G.t.seen); eq(2, f2(false))
+    -- a host global — written by a helper called on STATIC arguments, which must not run at specialization time
+    local f3, _, e3 = run('local function mark(v) LAST = v end\nlocal function f(x)\n  mark(1)\n  return x\nend\n', {})
+    eq(4, f3(4)); eq(1, e3.LAST)
+    -- still refused: several targets, and a read of a global nothing names
+    ok(not pcall(MX.mix, assert(R.read('local function f(x)\n  A, B = x, x\n  return x\nend\n', 'lua')), 'f', { 'D' }, {}), 'two global targets')
+    ok(not pcall(MX.mix, assert(R.read('local function f(x)\n  WF = WF or 10\n  return WF + x\nend\n', 'lua')), 'f', { 'D' }, {}), 'an unknown global read')
+end)
+
 test('mix: a SINGLE-VALUED call as the last argument fills one parameter and leaves the rest nil — a named function or a known closure; a static counter left NIL then defaulted generalizes (CART-1500)', function ()
     ready()
     -- (rung 3: `g(one(x))` with g taking three parameters — one returns one value on every path)

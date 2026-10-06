@@ -365,7 +365,12 @@ local function lower_stmt(t, cx, scope, out)
             local root = target_root(v)
             if root then note_write(v, root, cx, scope, writes) end
             targets[i] = lower_expr(v, cx, scope)
-            if targets[i].op ~= 'var' and targets[i].op ~= 'index' then refuse('an assignment to ' .. text(v)) end
+            -- (a GLOBAL target — `derive__WF_PATH = …`, `G.t.seen = …` — only as the one target of one value: it is
+            -- residualized as a store by its path, and what writes it is never run early — CART-1504)
+            local single = #vars == 1 and #named(parts[2]) == 1
+            if targets[i].op ~= 'var' and targets[i].op ~= 'index' and not (targets[i].op == 'global' and single) then
+                refuse('an assignment to ' .. text(v))
+            end
         end
         local es = {}
         for i, e in ipairs(exprs) do es[i] = lower_expr(e, cx, scope) end
@@ -933,6 +938,15 @@ local DIRTY = {}
 -- locals the 'dynamic' decision made DYNAMIC (by id): seeded D before every binding-time fixpoint. More dynamic is
 -- always sound, so it is the safe probe — a miscompile that vanishes when a variable is dynamic is about its static value
 local DYNV = {}
+-- is a global's path a vetoed known or a field under one (`G.t.seen` under `G.t`)?
+local function under_dyng(name)
+    local prefix = ''
+    for part in tostring(name):gmatch('[^.]+') do
+        prefix = prefix == '' and part or (prefix .. '.' .. part)
+        if DYNG[prefix] then return true end
+    end
+    return false
+end
 -- the PROGRAM'S OWN PRIMITIVES of the current specialization (opts.prims, CART-1372 rung 5): { [path] = function } —
 -- the function fields of a known table the closure calls (`derive__B.kinds`: the basis), opaque to mix as any library
 -- function is. Each is an EFFECT unless opts.pure names it: never computed early, its result dynamic, called by its
@@ -1692,31 +1706,32 @@ function M.specialize(prog, fname, division, statics, opts)
     end
     -- ('known': each KNOWN global — opts.globals — is STATIC by default; answered false it is read at run time by its
     -- path, as any global. A probe for a "known" that is really mutable state. Once per name, before any binding time)
+    -- (the DEFAULT is derived: a known the program STORES INTO — `M.OBSERVED[u] = true`, `table.insert(M.list, x)`,
+    -- `WF_PATH = …` — at any depth under it or over it — is mutable state, read at run time; every other one is static)
+    local stored, gstore = {}, false
+    local function root_global(t)
+        for _ = 1, 1000 do
+            if type(t) ~= 'table' then return nil end
+            if t.op == 'global' then return t.name end
+            if t.op ~= 'index' then return nil end
+            t = t.obj
+        end
+    end
+    local function scan(x, seen)
+        if type(x) ~= 'table' or seen[x] then return end
+        seen[x] = true
+        if x.op == 'assign' and x.target and x.target.op == 'global' then gstore = true end
+        local r = (x.op == 'assign' and x.target and (x.target.op == 'index' or x.target.op == 'global') and root_global(x.target))
+            or (x.op == 'prim' and EFFECT[x.name] and x.args and root_global(x.args[1]))
+        if r then stored[#stored + 1] = r end
+        for _, v in pairs(x) do if type(v) == 'table' then scan(v, seen) end end
+    end
+    for _, f in pairs(prog.funcs) do scan(f.body, {}) end
     if next(KNOWN) then
         local kept = {}
         local names = {}
         for name in pairs(KNOWN) do names[#names + 1] = name end
         table.sort(names)
-        -- (the DEFAULT is derived: a known the program STORES INTO — `M.OBSERVED[u] = true`, `table.insert(M.list, x)`,
-        -- at any depth under it or over it — is mutable state, read at run time; every other one is static)
-        local stored = {}
-        local function root_global(t)
-            for _ = 1, 1000 do
-                if type(t) ~= 'table' then return nil end
-                if t.op == 'global' then return t.name end
-                if t.op ~= 'index' then return nil end
-                t = t.obj
-            end
-        end
-        local function scan(x, seen)
-            if type(x) ~= 'table' or seen[x] then return end
-            seen[x] = true
-            local r = (x.op == 'assign' and x.target and x.target.op == 'index' and root_global(x.target))
-                or (x.op == 'prim' and EFFECT[x.name] and x.args and root_global(x.args[1]))
-            if r then stored[#stored + 1] = r end
-            for _, v in pairs(x) do if type(v) == 'table' then scan(v, seen) end end
-        end
-        for _, f in pairs(prog.funcs) do scan(f.body, {}) end
         local function mutated(name)
             for _, r in ipairs(stored) do
                 if r == name or r:sub(1, #name + 1) == name .. '.' or name:sub(1, #r + 1) == r .. '.' then return true end
@@ -1728,32 +1743,26 @@ function M.specialize(prog, fname, division, statics, opts)
             else DYNG[name] = true end
         end
         KNOWN = kept
-        if next(DYNG) then
-            local function dyn(name)
-                local prefix = ''
-                for part in name:gmatch('[^.]+') do
-                    prefix = prefix == '' and part or (prefix .. '.' .. part)
-                    if DYNG[prefix] then return true end
-                end
-                return false
-            end
-            -- does x's subtree read a vetoed global or reach a dirty function? Marks every dirty lambda on the way
-            local function walk(x, seen)
-                if type(x) ~= 'table' or seen[x] then return DIRTY[x] or false end
-                seen[x] = true
-                local d = (x.op == 'global' and type(x.name) == 'string' and dyn(x.name))
-                    or (x.op == 'call' and DIRTY[x.fn]) or (x.op == 'fn' and DIRTY[x.name]) or false
-                for _, v in pairs(x) do if type(v) == 'table' and walk(v, seen) then d = true end end
-                if d and x.op == 'lambda' then DIRTY[x] = true end
-                return d
-            end
-            local changed = true
-            for _ = 1, 100 do
-                if not changed then break end
-                changed = false
-                for name, f in pairs(prog.funcs) do
-                    if not DIRTY[name] and walk(f.body, {}) then DIRTY[name] = true; changed = true end
-                end
+    end
+    -- DIRTY: what reads a vetoed known or WRITES a global (`derive__WF_PATH = …`) is never run on static arguments
+    if next(DYNG) or gstore then
+        -- does x's subtree read a vetoed global, write a global, or reach a dirty function? Marks every dirty lambda
+        local function walk(x, seen)
+            if type(x) ~= 'table' or seen[x] then return DIRTY[x] or false end
+            seen[x] = true
+            local d = (x.op == 'global' and type(x.name) == 'string' and under_dyng(x.name))
+                or (x.op == 'assign' and x.target and x.target.op == 'global')
+                or (x.op == 'call' and DIRTY[x.fn]) or (x.op == 'fn' and DIRTY[x.name]) or false
+            for _, v in pairs(x) do if type(v) == 'table' and walk(v, seen) then d = true end end
+            if d and x.op == 'lambda' then DIRTY[x] = true end
+            return d
+        end
+        local changed = true
+        for _ = 1, 100 do
+            if not changed then break end
+            changed = false
+            for name, f in pairs(prog.funcs) do
+                if not DIRTY[name] and walk(f.body, {}) then DIRTY[name] = true; changed = true end
             end
         end
     end
@@ -2476,7 +2485,7 @@ function M.specialize(prog, fname, division, statics, opts)
             end
             return apply_spec({ kind = 'lam', c = c }, e.args, X)
         end
-        if op == 'global' and DYNG[e.name] then return { op = 'gref', name = e.name } end
+        if op == 'global' and under_dyng(e.name) then return { op = 'gref', name = e.name } end
         if op == 'global' then refuse('the global `' .. tostring(e.name) .. '` (only the language\'s constants, the primitive table and opts.globals are known)') end
         refuse('residualizing the IR op ' .. tostring(op))
     end
@@ -2525,6 +2534,10 @@ function M.specialize(prog, fname, division, statics, opts)
                         if not nm then refuse('no residual name for `' .. tostring(prog.names[s.target.id]) .. '`') end
                         out[#out + 1] = { op = 'assign', target = { op = 'var', name = nm }, e = rexpr(s.e, X) }
                     end
+                elseif s.target.op == 'global' then
+                    -- (a store to a GLOBAL by its path, CART-1504: always at run time — the global is dynamic, its writer
+                    -- never run early)
+                    out[#out + 1] = { op = 'assign', target = { op = 'gref', name = s.target.name }, e = rexpr(s.e, X) }
                 elseif s.target.op == 'index' and bt_expr(s.target, bt) ~= D then
                     -- (a store into a STATIC place — a known global's table, `M.OBSERVED[u] = true` — happens at run time
                     -- into the same table: the target is its PATH, never its current value lifted)
