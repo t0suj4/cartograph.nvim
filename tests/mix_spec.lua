@@ -740,7 +740,7 @@ test('mix: a closure reaching a DYNAMIC call is LIFTED — a residual function, 
                 eq(w2(n, g, x), r2(g, x), ('wrap2(%d, g, %d)'):format(n, x))
             end
         end
-        ok(t1:find('function %(y_%d+%)') and t2:find('function %(y_%d+%)'), 'a residual function expression\n' .. t1 .. t2)
+        ok(t1:find('function %(y_%d+l%d+%)') and t2:find('function %(y_%d+l%d+%)'), 'a residual function expression (its parameter named fresh per lift, CART-1517)\n' .. t1 .. t2)
         gone(t1, { 'n' }); gone(t2, { 'n' })
         ok(t2:find('x_%d+%)'), 'the dynamic free x is referenced inside the lifted function\n' .. t2)
     end

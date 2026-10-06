@@ -1336,6 +1336,6 @@ end
     eq(111, original(src, 'f')(1)(10)(100)())
     local r, text = mixed(src, 'f', { 'D' })
     local got = r(1)(10)(100)()
-    if got == 201 then skip('CART-1517 open: a lifted lambda\'s parameters are named rname(id), the same at every nesting') end
+    -- (CART-1517 fixed: a lifted lambda's binders carry the lift's suffix — a 201 is a regression, not a skip)
     eq(111, got, text)
 end)

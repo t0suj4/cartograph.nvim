@@ -1816,7 +1816,10 @@ function M.specialize(prog, fname, division, statics, opts)
         used = used + (n or 1)
         if used > budget then refuse('the unfold budget (' .. budget .. ')') end
     end
-    local function rname(id) return prog.names[id] .. '_' .. id end
+    -- (a name declared in a LIFTED closure's context carries that lift's suffix: lifted inside a copy of itself, the
+    -- same lambda's binders would shadow the outer copy's — whose names its body reads, CART-1517)
+    local lifts = 0
+    local function rname(id, X) return prog.names[id] .. '_' .. id .. (X and X.sfx or '') end
     -- STATIC computation: the interpreter over the ORIGINAL program (a static call runs the function itself). A closure
     -- made by a static computation directly in a specialization (depth 0) records, from that specialization, which
     -- of its free variables are dynamic and their residual names there
@@ -1979,8 +1982,8 @@ function M.specialize(prog, fname, division, statics, opts)
             if division[i] ~= D and X.bt[id] == D then
                 local e = lift(X.env[id], X)
                 X.env[id] = DYN
-                X.ren[id] = rname(id)
-                pro[#pro + 1] = { op = 'local', name = rname(id), e = e }
+                X.ren[id] = rname(id, X)
+                pro[#pro + 1] = { op = 'local', name = rname(id, X), e = e }
             end
         end
         return pro
@@ -2014,7 +2017,9 @@ function M.specialize(prog, fname, division, statics, opts)
             enter('lifted closure')
             local X2 = context(T, division, X.frame)
             local params = {}
-            for i, id in ipairs(c.lam.params) do X2.env[id] = DYN; X2.ren[id] = rname(id); params[i] = rname(id) end
+            lifts = lifts + 1
+            X2.sfx = 'l' .. lifts
+            for i, id in ipairs(c.lam.params) do X2.env[id] = DYN; X2.ren[id] = rname(id, X2); params[i] = rname(id, X2) end
             local body = spec_block(c.lam.body, X2)
             depth = depth - 1
             return { op = 'lambda', params = params, body = body }
@@ -2547,8 +2552,8 @@ function M.specialize(prog, fname, division, statics, opts)
                 else
                     local e = rexpr(s.e, X)
                     env[s.id] = DYN
-                    X.ren[s.id] = rname(s.id)
-                    out[#out + 1] = { op = 'local', name = rname(s.id), e = e }
+                    X.ren[s.id] = rname(s.id, X)
+                    out[#out + 1] = { op = 'local', name = rname(s.id, X), e = e }
                 end
             elseif op == 'assign' then
                 if s.target.op == 'var' then
@@ -2578,7 +2583,7 @@ function M.specialize(prog, fname, division, statics, opts)
                 elseif all_d then
                     local es = rexprs(s.es, X)
                     local names = {}
-                    for i, id in ipairs(s.ids) do names[i] = rname(id); env[id] = DYN; X.ren[id] = names[i] end
+                    for i, id in ipairs(s.ids) do names[i] = rname(id, X); env[id] = DYN; X.ren[id] = names[i] end
                     out[#out + 1] = { op = 'localm', names = names, es = es }
                 else refuse('a declaration of several values mixing static and dynamic ones (rung 3)') end
             elseif op == 'assignm' then
@@ -2656,8 +2661,8 @@ function M.specialize(prog, fname, division, statics, opts)
                 else
                     local from, to, step = rexpr(s.from, X), rexpr(s.to, X), rexpr(s.step, X)
                     env[s.id] = DYN
-                    X.ren[s.id] = rname(s.id)
-                    out[#out + 1] = { op = 'fornum', name = rname(s.id), from = from, to = to, step = step, body = (loop_body(s.body, X)) }
+                    X.ren[s.id] = rname(s.id, X)
+                    out[#out + 1] = { op = 'fornum', name = rname(s.id, X), from = from, to = to, step = step, body = (loop_body(s.body, X)) }
                 end
             elseif op == 'forin' then
                 if bt[s.kid] == S then -- UNROLL (pairs: in the order this host iterates — order-sensitive programs are not gated)
@@ -2675,10 +2680,10 @@ function M.specialize(prog, fname, division, statics, opts)
                 else
                     local e = rexpr(s.e, X)
                     env[s.kid] = DYN
-                    X.ren[s.kid] = rname(s.kid)
-                    if s.vid then env[s.vid] = DYN; X.ren[s.vid] = rname(s.vid) end
-                    out[#out + 1] = { op = 'forin', kind = s.kind, e = e, kname = rname(s.kid),
-                        vname = s.vid and rname(s.vid) or nil, body = (loop_body(s.body, X)) }
+                    X.ren[s.kid] = rname(s.kid, X)
+                    if s.vid then env[s.vid] = DYN; X.ren[s.vid] = rname(s.vid, X) end
+                    out[#out + 1] = { op = 'forin', kind = s.kind, e = e, kname = rname(s.kid, X),
+                        vname = s.vid and rname(s.vid, X) or nil, body = (loop_body(s.body, X)) }
                 end
             elseif op == 'forgen' then
                 if bt[s.ids[1]] == S then -- UNROLL: the iterator, its state and control are static (gmatch over a known string)
@@ -2699,7 +2704,7 @@ function M.specialize(prog, fname, division, statics, opts)
                 end
                 local es = rexprs(s.es, X)
                 local names = {}
-                for i, id in ipairs(s.ids) do env[id] = DYN; X.ren[id] = rname(id); names[i] = rname(id) end
+                for i, id in ipairs(s.ids) do env[id] = DYN; X.ren[id] = rname(id, X); names[i] = rname(id, X) end
                 out[#out + 1] = { op = 'forgen', names = names, es = es, body = (loop_body(s.body, X)) }
             elseif op == 'while' or op == 'repeat' then
                 if opnd(bt_expr(s.cond, bt)) == S and bt[s] ~= D then -- UNROLL (the budget bounds a loop that never ends)
