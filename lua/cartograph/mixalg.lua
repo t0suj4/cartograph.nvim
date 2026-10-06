@@ -379,7 +379,10 @@ function M.program(root, files, opts)
         if v == nil then return 'nil' end
         if type(v) == 'boolean' then return tostring(v) end
         if type(v) == 'number' then
-            if v ~= v or v == math.huge or v == -math.huge then return nil end
+            -- (the three numbers with no numeral: written as expressions mix folds — math.huge is a language constant)
+            if v ~= v then return '(0/0)' end
+            if v == math.huge then return 'math.huge' end
+            if v == -math.huge then return '(-math.huge)' end
             return math.floor(v) == v and string.format('%d', v) or string.format('%.17g', v)
         end
         if type(v) == 'string' then return (string.format('%q', v):gsub('\\\n', '\\n')) end
@@ -485,7 +488,10 @@ function M.program(root, files, opts)
                                         end
                                     end
                                 end
-                                if target then note(w and 'snapshots' or 'known', d.file .. '::' .. t) end
+                                -- (a value that is neither a literal nor a table — a coroutine, userdata — is not carried:
+                                -- reported FREE, never silently left a bare name)
+                                if target then note(w and 'snapshots' or 'known', d.file .. '::' .. t)
+                                else note('free', d.file .. '::' .. t) end
                             else note('free', d.file .. '::' .. t) end
                         end
                     end

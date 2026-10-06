@@ -368,6 +368,121 @@ test('mixalg: THROUGH THE BASIS — a captured table\'s field or a captured alia
     if not okall then error(err, 0) end
 end)
 
+test('mixalg: the assembler\'s EDGES — every scalar a literal (nil, false, a float, ±inf, NaN; parenthesized as an object), an opaque `M.x` left a call, a written table followed only from a snapshot, a missing root refused by name (CART-1506)', function ()
+    ready()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir .. '/lua/mxk1506', 'p')
+    local path = dir .. '/lua/mxk1506/fix.lua'
+    local fd = assert(io.open(path, 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local NIL = nil',
+        'local NO = false',
+        'local TENTH = 0.1',
+        'local BIG = math.huge',
+        'local NEG = -math.huge',
+        'local NAN = 0 / 0',
+        'local S = "ab"',
+        'function M.lit(a) return tostring(NIL) .. tostring(NO) .. TENTH .. tostring(BIG) .. tostring(NEG) .. tostring(NAN ~= NAN) .. S:upper() .. tostring(S.len ~= nil) .. a end',
+        'function M.inc(x) return x + 1 end',
+        'function M.dbl(x) return x * 2 end',
+        'function M.call(a) return M.inc(a) + M.dbl(a) end',
+        'local W = { inc = M.inc }',
+        'function M.rewire() W = { inc = M.dbl } end',
+        'function M.w(a) return W.inc(a) end',
+        'local CO = coroutine.create(function () end)',
+        'function M.co(a) return type(CO) .. a end',
+        'local function helper2(x) return x * 10 end',
+        'function M.shadow(a) local helper2 = a + 1; return helper2 end',
+        '-- (a comment line: a header mapped one line too high lands here, never on a one-line definition)',
+        'function M.multi(a,',
+        '    b)',
+        '  local s = a',
+        '  return s + b',
+        'end',
+        'function M.after(a)',
+        '  return M.multi(a,',
+        '    1) + M.inc(a)',
+        'end',
+        'return M', '' }, '\n'))
+    fd:close()
+    local saved = package.path
+    package.path = dir .. '/lua/?.lua;' .. package.path
+    local MX, F = require 'cartograph.mix', require 'cartograph.mixfn'
+    local okall, err = pcall(function ()
+        local fix = require('mxk1506.fix')
+        -- every scalar is a literal that adds no line; an object position is parenthesized
+        local lt, _, _, _, lr = MA.program('M.lit', { path })
+        for _, want in ipairs({ 'tostring(nil)', 'tostring(false)', '0.10000000000000001', 'tostring(math.huge)', 'tostring((-math.huge))',
+            '((0/0) ~= (0/0))', '("ab"):upper()', '("ab").len' }) do
+            ok(lt:find(want, 1, true), want .. '\n' .. lt)
+        end
+        eq({}, lr.free)
+        local lp = MX.lower(assert(R.read(lt, 'lua')))
+        local lres = MX.specialize(lp, 'M_lit', { 'D' }, {}, { budget = 2e5 })
+        eq(fix.lit('x'), assert(load(MX.print(lres, lp.where), 'r', 't', F.env(lres.pool, {})))()('x'))
+        -- an OPAQUE `M.x` is not followed: the call stays, its definition is not in the closure
+        local ct, corder = MA.program('M.call', { path }, { opaque = { ['M.dbl'] = true } })
+        ok(ct:find('M.dbl(a)', 1, true) and ct:find('M_inc(a)', 1, true), ct)
+        ok(vim.tbl_contains(corder, 'M.inc') and not vim.tbl_contains(corder, 'M.dbl'), table.concat(corder, ' '))
+        -- a WRITTEN table is free without a snapshot — through mode too — and followed from one
+        fix.rewire()
+        local _, worder, _, _, wr = MA.program('M.w', { path }, { through = true })
+        ok(vim.tbl_contains(wr.free, 'fix.lua::W') and not vim.tbl_contains(worder, 'M.dbl'), vim.inspect(wr))
+        local st, sorder = MA.program('M.w', { path }, { through = true, snapshot = true })
+        ok(vim.tbl_contains(sorder, 'M.dbl') and st:find('M_dbl(a)', 1, true), 'the snapshot\'s value — rewired to M.dbl — followed\n' .. st)
+        -- a value that is neither a literal nor a table (a coroutine) is not carried — and REPORTED free, not left silent
+        local _, _, _, _, cr = MA.program('M.co', { path })
+        eq({ 'fix.lua::CO' }, cr.free)
+        -- the LINE MAP, exactly: every line of every definition — a parameter list over two lines, a body after it, the
+        -- next definition — maps to the source line holding the same text, names aside (identifiers normalized)
+        local at, aorder, alines = MA.program('M.after', { path })
+        eq(3, #aorder)
+        local src = vim.split(io.open(path):read('a'), '\n')
+        local function norm(s) return (s:gsub('^%s*local%s+function', 'function'):gsub('[%a_][%w_.:]*', 'x'):gsub('%s', '')) end
+        local mapped = 0
+        for l, line in ipairs(vim.split(at, '\n')) do
+            if line:match('%S') and line ~= 'end' then
+                local m = alines[l]
+                ok(m and m.src:match('fix%.lua$'), ('line %d unmapped: %s'):format(l, line))
+                -- (EQUAL — but a ONE-LINE definition's header and body are two assembled lines of one source line: there,
+                -- contained in it)
+                local o = src[m.line] or ''
+                local oneline = o:match('^%s*function .*end%s*$') ~= nil
+                ok(norm(o) == norm(line) or (oneline and norm(o):find(norm(line), 1, true)), ('line %d -> %d: %s | %s'):format(l, m.line, line, o))
+                mapped = mapped + 1
+            end
+        end
+        eq(9, mapped)
+        -- a PART FILE calling core's local DIRECTLY through the installer's tables — `SHARED.helper(a)`, `PARTS.helper(a)`
+        -- (today's parts only alias them at file level) — reaches core.lua's definition
+        local pdir = dir .. '/parts'
+        vim.fn.mkdir(pdir, 'p')
+        local cf = assert(io.open(pdir .. '/core.lua', 'w'))
+        cf:write('local M = {}\nlocal function helper(a) return a + 1 end\nreturn M\n'); cf:close()
+        -- (two part files: one text holding `SHARED.helper` would let the file-level ALIAS rule answer for both)
+        local pf = assert(io.open(pdir .. '/part.lua', 'w'))
+        pf:write('return function (M, SHARED)\n  function M.p(a) return SHARED.helper(a) end\nend\n'); pf:close()
+        local qf = assert(io.open(pdir .. '/part2.lua', 'w'))
+        qf:write('return function (M, PARTS)\n  function M.q(a) return PARTS.helper(a) end\nend\n'); qf:close()
+        for _, root in ipairs({ 'M.p', 'M.q' }) do
+            local pt, porder = MA.program(root, { pdir .. '/core.lua', pdir .. '/part.lua', pdir .. '/part2.lua' })
+            ok(vim.tbl_contains(porder, 'core.lua::helper') and pt:find(MA.mangle('core.lua::helper') .. '(a)', 1, true), root .. '\n' .. pt)
+        end
+        -- a LOCAL shadowing a file-level function of the same name is the local (the scope graph's link decides): not
+        -- rewritten to the function, and the function not in the closure
+        local sht, shorder = MA.program('M.shadow', { path })
+        ok(not vim.tbl_contains(shorder, 'fix.lua::helper2') and not sht:find(MA.mangle('fix.lua::helper2'), 1, true), sht)
+        -- a root that is no definition: refused by name
+        local okn, en = pcall(MA.program, 'M.nope', { path })
+        eq(false, okn); ok(tostring(en):find('no definition M.nope', 1, true), tostring(en))
+    end)
+    package.path = saved
+    package.loaded['mxk1506.fix'] = nil
+    vim.fn.delete(dir, 'rf')
+    if not okall then error(err, 0) end
+end)
+
 test('mixalg: THROUGH THE BASIS on the real derivation — D.match follows its basis into the algebra (join and beyond), lowers with nothing refused, and carries the algebra DATA it reads (M.OBSERVED) as a known (CART-1500)', function ()
     ready()
     require('cartograph.algebra.derive').apply_to(A, '')
