@@ -1237,6 +1237,14 @@ test('mix: a STORE TO A GLOBAL — a lazy file-level constant (`WF = WF or …`,
     ok(not pcall(MX.mix, assert(R.read('local function f(x)\n  WF = WF or 10\n  return WF + x\nend\n', 'lua')), 'f', { 'D' }, {}), 'an unknown global read')
 end)
 
+test('mix: a HOST call\'s results are all counted — trailing nils, and more than 8 (`{ unpack(t) }` of 10 folded to 8 elements), CART-1511', function ()
+    ready()
+    local src = 'local function f(x)\n  local t = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }\n  local p = { unpack(t) }\n  return #p + x\nend\n'
+    eq(11, residual(src, 'f', { 'D' }, {})(1))
+    local src2 = 'local function v(a, ...) return select("#", ...) end\nlocal function f(x) return v(x, nil) end\n'
+    eq(1, residual(src2, 'f', { 'D' }, {})(5))
+end)
+
 test('mix: three CAUTIOUS REFUSALS replaced by sound answers — a recursion that oscillates (no embedding) and a static cons list nested past 20 are generalized; a declaration of several values made dynamic in part is dynamic in whole (CART-1506)', function ()
     ready()
     local function same(src, division, args)

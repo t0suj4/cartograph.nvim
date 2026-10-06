@@ -1058,14 +1058,12 @@ M._breaks = breaks
 local MULTI = { call = true, callv = true, prim = true, method = true }
 M.MULTI = MULTI
 
--- a host function's results as a list (up to 8: no varargs in S, so trailing nils are not counted)
+-- a host function's results as a list, EVERY one counted — trailing nils too, any number (CART-1511: `v(x, nil)` lost
+-- its nil, select('#', …) read 0). The counting needs varargs, which mix itself does not use: mixfn.host_call does it
+local HOSTCALL
 local function host(f, a)
-    local r1, r2, r3, r4, r5, r6, r7, r8 = f(unpack(a, 1, a.n or #a))
-    local r = { r1, r2, r3, r4, r5, r6, r7, r8 }
-    local n = 0
-    for i = 1, 8 do if r[i] ~= nil then n = i end end
-    r.n = n
-    return r
+    HOSTCALL = HOSTCALL or require('cartograph.mixfn').host_call
+    return HOSTCALL(f, a)
 end
 
 function M.evaluator(prog, budget)

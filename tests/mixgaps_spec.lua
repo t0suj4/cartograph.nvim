@@ -1270,7 +1270,7 @@ test('BUG CART-1511: a host call keeps its trailing nils — `v(x, nil)` passes 
     eq(1, original(src, 'f')(1))
     local r, text = mixed(src, 'f', { 'D' })
     local got = r(1)
-    if got == 0 then skip('CART-1511 open: host() sets n to the last non-nil result') end
+    -- (CART-1511 fixed: host results are counted with their trailing nils — a 0 is a regression, not a skip)
     eq(1, got, text)
 end)
 

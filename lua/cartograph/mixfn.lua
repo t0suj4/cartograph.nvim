@@ -8,6 +8,12 @@ local M = {}
 
 local MX = function () return require 'cartograph.mix' end
 
+--- a HOST function called with the argument list `a` ({ n = …, … }) -> its results as a list, EVERY one counted —
+--- trailing nils included (mix's evaluator calls it: the counting needs varargs, and mix itself stays inside S without
+--- them — CART-1511: `v(x, nil)` passed no extra value)
+local function pack(...) return { n = select('#', ...), ... } end
+function M.host_call(f, a) return pack(f(unpack(a, 1, a.n or #a))) end
+
 --- ★ WITH ITS CALL CONE first (mixalg.program over the function's own file: its `M.x` and file-local helpers assembled
 --- in, so a helper is code, not a free name) — and ALONE when the cone does not lower (a helper outside S) or the
 --- function is a method (the assembly takes a header's written parameters: `self` is implicit).
