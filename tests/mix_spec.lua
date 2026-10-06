@@ -1116,12 +1116,22 @@ test('mix: a table MUTATED by a primitive or by a callee storing into its parame
         insert = 'local function f(x)\n  local acc = {}\n  table.insert(acc, x)\n  return #acc\nend\n',
         callee_insert = 'local function fill(out, x) table.insert(out, x) end\nlocal function f(x)\n  local acc = {}\n  fill(acc, x)\n  return #acc\nend\n',
         literal = 'local function fill(out, x) out[#out + 1] = x; return #out end\nlocal function f(x) return fill({}, x) end\n',
+        -- (a LAMBDA filling its parameter, called through its local: kvterm.lua's `member(o, key, …)`)
+        lambda = 'local function f(x)\n  local function member(o, k) o[k] = x end\n  local o = {}\n  member(o, 1)\n  return #o\nend\n',
+        -- (a forced parameter LEFT OUT: content_id(v) with its memo defaulted, summaries.lua:97)
+        missing = 'local function note(k, memo)\n  memo = memo or {}\n  local function set() memo[k] = 1 end\n  set()\n  return memo[k]\nend\nlocal function f(x) return note(x) end\n',
     }
     for name, src in pairs(CASES) do
         local want, r = original(src, 'f'), residual(src, 'f', { 'D' }, {})
         -- (twice: a table lifted into the constant pool would keep growing across runs)
         eq(want(7), r(7), name); eq(want(-1), r(-1), name); eq(want(7), r(7), name)
     end
+    -- a STATIC CALL'S table expanding into a stored-into parameter is REFUSED: lifted, it would be the pool's one shared
+    -- table, and the callee's stores would accumulate across runs (8, then 9)
+    local X = 'local function pair() return {}, 1 end\nlocal function fill(x, out, y) out[#out + 1] = y; return #out + x end\nlocal function f(x) return fill(x, pair()) end\n'
+    local okx, e = pcall(MX.mix, assert(R.read(X, 'lua')), 'f', { 'D' }, {})
+    eq(false, okx)
+    ok(MX.describe(e):find('static parameter `out` is stored into', 1, true), MX.describe(e))
 end)
 
 test('mix: the decision hook\'s DATA kinds — `known` (a known global vetoed is read at run time; one the program stores into is dynamic by default), `pool` (a pooled table shared or copied), `dynamic` (a function\'s locals made dynamic: the safe bisection probe) (CART-1501)', function ()

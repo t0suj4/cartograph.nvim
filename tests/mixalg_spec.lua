@@ -382,6 +382,52 @@ test('mixalg: THROUGH THE BASIS on the real derivation — D.match follows its b
     eq({}, vim.tbl_map(function (g) return g.why end, got))
 end)
 
+test('mixalg: THROUGH an `M.x` ALIAS — core.lua\'s `M.kv_kind = kv_kind`, called as M.kv_kind from the part file kvterm.lua, is that definition (a vetoed follow keeps it a primitive); the residual of D.kv_generalize equals the derivation (CART-1501, CART-1503)', function ()
+    ready()
+    local MX, F = require 'cartograph.mix', require 'cartograph.mixfn'
+    local D = require('cartograph.algebra.derive')
+    D.apply_to(A, '')
+    local key = 'derive.lua::D.kv_generalize'
+    -- (match and its kin kept opaque, as the acceptance harness keeps them: followed, M.match outruns the unfold budget)
+    local OPQ = { ['M.admits'] = true, ['M.admits_slice'] = true, ['M.match'] = true, ['M.entails'] = true }
+    local text, order, lines, knowns, _, prims = MA.program(key, nil, { snapshot = true, through = true, opaque = OPQ })
+    ok(vim.tbl_contains(order, 'core.lua::kv_kind'), 'the alias followed to its definition: ' .. table.concat(order, ' '))
+    ok(not text:find('M.kv_kind(', 1, true), 'no call of the alias left')
+    local vt, _, _, _, rep, vp = MA.program(key, nil, { snapshot = true, through = true, opaque = OPQ,
+        decide = function (kind, ctx) if kind == 'follow' and ctx.target == 'core.lua::kv_kind' then return false end end })
+    ok(vt:find('M.kv_kind(', 1, true) and vp['M.kv_kind'] == A.kv_kind, 'vetoed: a primitive by its path')
+    ok(#rep.decisions > 0, 'the follow was asked')
+    -- end to end: the closure lowered, specialized all-dynamic, run against the derivation (kv_template's `member(o, …)`
+    -- fills a table through a LAMBDA's parameter: kept static, every object came out empty — CART-1503)
+    local prog = MX.lower(assert(R.read(text, 'lua')), { lines = lines })
+    local entry = MA.mangle(key)
+    local div = {}
+    for i = 1, #prog.funcs[entry].params do div[i] = 'D' end
+    local G = { ['M.grammars'] = A.grammars }
+    for k, v in pairs(knowns) do G[k] = v end
+    local res = MX.specialize(prog, entry, div, {}, { budget = 5e6, globals = G, prims = prims })
+    local env = {}
+    for k, v in pairs(G) do env[k] = v end
+    for k, v in pairs(prims) do if env[k] == nil then env[k] = v end end
+    for k in pairs(OPQ) do if env[k] == nil then env[k] = A[k:sub(3)] end end
+    local f = assert(load(MX.print(res, prog.where), 'r', 't', F.env(res.pool, env)))()
+    local function obj(t, keys) return { o = t, keys = keys } end
+    local function inst(n, v)
+        return obj({ name = 'svc' .. n, port = n, tags = { a = { obj({ name = 'x', v = v }, { 'name', 'v' }) } } }, { 'name', 'port', 'tags' })
+    end
+    local function nofn(v, seen)
+        seen = seen or {}
+        if type(v) == 'function' then return 'fn' end
+        if type(v) ~= 'table' then return v end
+        if seen[v] then return seen[v] end
+        local o = {}; seen[v] = o
+        for k, x in pairs(v) do o[k] = nofn(x, seen) end
+        return o
+    end
+    local is = { inst(1, 1), inst(2, 2), inst(3, 2) }
+    eq(nofn(D.kv_generalize(vim.deepcopy(is))), nofn(f(vim.deepcopy(is))))
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')

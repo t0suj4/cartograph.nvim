@@ -259,8 +259,37 @@ function M.program(root, files, opts)
         if not fobj[fk] then ensure_loaded(vim.fn.fnamemodify(path[d.file], ':p')) end
         return fobj[fk]
     end
-    local key_of_fn
+    local key_of_fn, key_of_n
+    local prims = {} -- (the program's own primitives, by path: opaque definitions, vetoed follows)
     local decisions, follow_memo = {}, {} -- (the decision hook's log and per-site answers, CART-1501)
+    -- the definition whose loaded function object is fv -> its key, or nil (rebuilt when more objects were loaded since)
+    local function fn_key(fv)
+        local n = 0
+        for _ in pairs(fobj) do n = n + 1 end
+        if not key_of_fn or key_of_n ~= n then
+            key_of_fn, key_of_n = {}, n
+            for k2, d2 in pairs(defs) do
+                local o2 = fobj[fkey_of(d2)]
+                if o2 then key_of_fn[o2] = k2 end
+            end
+        end
+        return key_of_fn[fv]
+    end
+    -- (the DECISION HOOK, CART-1501: 'follow' — default true; false keeps this site a primitive call. Asked once per
+    -- site: the closure walk and the assembly both come here)
+    local function follow_ok(cap, d, k3)
+        local sk = d.file .. ':' .. cap:id()
+        if follow_memo[sk] == nil then
+            local choice = true
+            if opts.decide then
+                local c = opts.decide('follow', { from = d.file, name = tx(cap, d.src), target = k3 }, true)
+                if c ~= nil then choice = c end
+            end
+            decisions[#decisions + 1] = { kind = 'follow', ctx = { from = d.file, name = tx(cap, d.src), target = k3 }, default = true, choice = choice }
+            follow_memo[sk] = choice and true or false
+        end
+        return follow_memo[sk]
+    end
     -- THROUGH THE BASIS (opts.through, CART-1500): `B.join` where B is a captured table whose field IS a definition of
     -- these files (the derivations' basis is the algebra's own functions) is that definition — followed into the
     -- closure and rewritten to its mangled name, so mix specializes it with the rest instead of calling it opaque.
@@ -298,30 +327,23 @@ function M.program(root, files, opts)
             fv = v
         end
         if type(fv) ~= 'function' then return nil end
-        if not key_of_fn then
-            key_of_fn = {}
-            for k2, d2 in pairs(defs) do
-                local o2 = fobj[fkey_of(d2)]
-                if o2 then key_of_fn[o2] = k2 end
-            end
-        end
-        local k3 = key_of_fn[fv]
+        local k3 = fn_key(fv)
         if k3 and opts.opaque and opts.opaque[k3] then return nil end -- (kept a primitive)
-        -- (the DECISION HOOK, CART-1501: 'follow' — default true; false keeps this site a primitive call. Asked once per
-        -- site: the closure walk and the assembly both come here)
-        if k3 then
-            local sk = d.file .. ':' .. cap:id()
-            if follow_memo[sk] == nil then
-                local choice = true
-                if opts.decide then
-                    local c = opts.decide('follow', { from = d.file, name = tx(cap, d.src), target = k3 }, true)
-                    if c ~= nil then choice = c end
-                end
-                decisions[#decisions + 1] = { kind = 'follow', ctx = { from = d.file, name = tx(cap, d.src), target = k3 }, default = true, choice = choice }
-                follow_memo[sk] = choice and true or false
-            end
-            if not follow_memo[sk] then return nil end
-        end
+        if k3 and not follow_ok(cap, d, k3) then return nil end
+        return k3
+    end
+    -- an `M.x` that is no definition of its own but an ALIAS of one — core.lua's `M.kv_kind = kv_kind`, called as
+    -- `M.kv_kind` from the part file kvterm.lua — is that definition, found by its function object as `through` finds a
+    -- captured alias -> the definition's key, or nil (not loaded, not a function, kept opaque, or a vetoed follow)
+    local function m_alias(cap, d, t)
+        if not opts.through or (opts.opaque and opts.opaque[t]) then return nil end
+        local okA, Acore = pcall(require, 'cartograph.algebra.core')
+        local fv = okA and Acore[t:match('^M%.([%w_]+)$')]
+        if type(fv) ~= 'function' then return nil end
+        if path['core.lua'] then ensure_loaded(vim.fn.fnamemodify(path['core.lua'], ':p')) end
+        local k3 = fn_key(fv)
+        if not k3 or (opts.opaque and opts.opaque[k3]) then return nil end
+        if not follow_ok(cap, d, k3) then prims[t] = fv; return nil end -- (vetoed: a primitive by its path)
         return k3
     end
     -- THE CLOSURE: calls and references-as-values (`local with_cursor = M.with_cursor`), and with opts.through the
@@ -338,11 +360,15 @@ function M.program(root, files, opts)
             for _, c in rq:iter_captures(d.node, d.src, 0, -1) do
                 local r = (c:type() ~= 'identifier' or outer_ref(c, d)) and resolve(tx(c, d.src), d.file)
                 if not r then r = through(c, d) end
+                if not r and c:type() == 'dot_index_expression' then
+                    local t = tx(c, d.src)
+                    if t:match('^M%.[%w_]+$') and not defs[t] then r = m_alias(c, d, t) end
+                end
                 if r and not seen[r] then todo[#todo + 1] = r end
             end
         end
     end
-    local knowns, prims, report = {}, {}, { known = {}, snapshots = {}, free = {} }
+    local knowns, report = {}, { known = {}, snapshots = {}, free = {} }
     local noted = {}
     local function note(list, nm) if not noted[list .. nm] then noted[list .. nm] = true; table.insert(report[list], nm) end end
     -- a scalar as a Lua literal that adds NO line (the line map counts the original's lines one to one)
@@ -397,6 +423,10 @@ function M.program(root, files, opts)
                     if t:match('^SHARED%.([%w_]+)$') and defs['core.lua::' .. t:match('%.([%w_]+)$')] then target = mangle('core.lua::' .. t:match('%.([%w_]+)$')) end
                     if not target and defs[d.file .. '::' .. t] then target = mangle(d.file .. '::' .. t) end
                     if not target then local th = through(cap, d); if th then target = mangle(th) end end -- (CART-1500)
+                    if not target and t:match('^M%.[%w_]+$') and not defs[t] then
+                        local ka = m_alias(cap, d, t)
+                        if ka then target = mangle(ka) end
+                    end
                     -- (through: an algebra DATA field the followed code reads — `M.OBSERVED`, `M.grammars` — is a KNOWN
                     -- global by its dotted name, as compile_match passes M.grammars)
                     if not target and opts.through and t:match('^M%.[%w_]+$') and knowns[t] == nil then

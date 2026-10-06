@@ -723,11 +723,24 @@ function M.lower(term, opts)
     -- derivation followed through the basis). To a fixpoint over every direct call.
     do
         local changed = true
+        -- (and a call THROUGH A LOCAL bound to a lambda — `local function member(o, …) o[key] = … end` called as
+        -- `member(o, …)`, kvterm.lua's kv_template: the lambda's parameters, CART-1503)
+        local lamof, lseen = {}, {}
+        local function lambdas(x)
+            if type(x) ~= 'table' or lseen[x] then return end
+            lseen[x] = true
+            if x.op == 'local' and x.id and x.e and x.e.op == 'lambda' then lamof[x.id] = x.e end
+            if x.op == 'assign' and x.target and x.target.op == 'var' and x.target.id and x.e and x.e.op == 'lambda' then lamof[x.target.id] = x.e end
+            for _, v in pairs(x) do if type(v) == 'table' then lambdas(v) end end
+        end
+        for _, f in pairs(cx.funcs) do lambdas(f.body) end
         local function walk(x, seen)
             if type(x) ~= 'table' or seen[x] then return end
             seen[x] = true
-            if x.op == 'call' and x.fn and cx.funcs[x.fn] and x.args then
-                local ps = cx.funcs[x.fn].params or {}
+            local ps
+            if x.op == 'call' and x.fn and cx.funcs[x.fn] and x.args then ps = cx.funcs[x.fn].params or {} end
+            if x.op == 'callv' and x.f and x.f.op == 'var' and lamof[x.f.id] and x.args then ps = lamof[x.f.id].params or {} end
+            if ps then
                 for i, a in ipairs(x.args) do
                     local pid = ps[i]
                     if pid and cx.forced[pid] and type(a) == 'table' and a.op == 'var' and a.id and not cx.forced[a.id] then
@@ -1461,7 +1474,7 @@ function M.bta(prog, fname, division, env)
     for i, id in ipairs(f.params) do
         bt[id] = division[i]
         if prog.forced and prog.forced[id] and division[i] ~= D then
-            refuse('the static parameter `' .. tostring(prog.names[id]) .. '` is stored into by a closure (a static table cannot change at run time)')
+            refuse('the static parameter `' .. tostring(prog.names[id]) .. '` is stored into — by its function, a closure or a callee (a static table cannot change at run time)')
         end
     end
     for id in pairs(DYNV) do if bt[id] == nil then bt[id] = D end end
@@ -2266,6 +2279,8 @@ function M.specialize(prog, fname, division, statics, opts)
                 local vs = svalm(a, X)
                 for j = 1, math.max(vs.n, 1) do
                     local p = i + j - 1
+                    -- (a FORCED parameter is NOT made dynamic here: the value is a static call's, and lifting a table puts
+                    -- it in the shared pool — the callee's stores would accumulate across runs. The bta refuses it by name)
                     if force and force[p] then division[p] = D; dargs[#dargs + 1] = lift(vs[j], X)
                     else division[p] = S; svals[p] = vs[j] end
                 end
@@ -2289,7 +2304,8 @@ function M.specialize(prog, fname, division, statics, opts)
             else division[i] = b; svals[i] = sval(a, X) end
         end
         for i = nargs + 1, #params do -- (a missing argument is a static nil)
-            if force and force[i] then division[i] = D; dargs[#dargs + 1] = { op = 'nil' } else division[i] = S end
+            if (force and force[i]) or (prog.forced and prog.forced[params[i]]) then division[i] = D; dargs[#dargs + 1] = { op = 'nil' }
+            else division[i] = S end
         end
         local g = group(T)
         if not force then
