@@ -1076,6 +1076,26 @@ test('mix: THE DECISION HOOK — every decision is logged; a hook answering nil 
     local tq, sq = MX.mix(assert(R.read(P, 'lua')), 'f', { 'D' }, {}, { prims = prims, pure = { twice = true }, decide = function (kind) if kind == 'fold' then return false end end })
     ok(tq:find('twice(3)', 1, true), 'not folded\n' .. tq)
     eq('twice', sq.decisions[1].ctx.prim)
+    -- 'sra' (in LOWERING: lower's opts.decide, prog.decisions): a non-escaping record is its fields by default; kept a
+    -- table when the hook says no — the residual builds it
+    local Q = 'local function f(x)\n  local p = { a = 1, b = 2 }\n  p.a = p.a + x\n  return p.a + p.b\nend\n'
+    local pd = MX.lower(assert(R.read(Q, 'lua')), { decide = function (kind) if kind == 'sra' then return false end end })
+    eq('sra', pd.decisions[1].kind); eq(false, pd.decisions[1].choice)
+    local p0 = MX.lower(assert(R.read(Q, 'lua')))
+    ok(p0.sra.replaced >= 1 and pd.sra.replaced == 0, ('replaced %d by default, %d vetoed'):format(p0.sra.replaced, pd.sra.replaced))
+    local rd = MX.specialize(pd, 'f', { 'D' }, {})
+    local fd = assert(load(MX.print(rd, pd.where), 'r', 't', setmetatable({ MIXK = rd.pool }, { __index = _G })))()
+    eq(original(Q, 'f')(5), fd(5))
+    -- 'single' — a REFUSAL ASKED AS A QUESTION: a primitive call as the expanding last argument refuses by default;
+    -- answered yes, it fills one parameter
+    local E = 'local function g(a, b) if b == nil then return a end return -1 end\nlocal function f(x) return g(string.upper(x)) end\n'
+    ok(not pcall(MX.mix, assert(R.read(E, 'lua')), 'f', { 'D' }, {}), 'refused by default')
+    local te, se = MX.mix(assert(R.read(E, 'lua')), 'f', { 'D' }, {}, { decide = function (kind) if kind == 'single' then return true end end })
+    local fe = assert(load(te, 'r', 't', setmetatable({ MIXK = {} }, { __index = _G })))()
+    eq('AB', fe('ab'))
+    local sg
+    for _, d in ipairs(se.decisions) do if d.kind == 'single' then sg = d end end
+    eq(false, sg.default); eq(true, sg.choice)
 end)
 
 test('mix: a table a CALLEE\'s closure stores into is dynamic in the CALLER too — `local ids = {}` handed to it is allocated per run, never a shared constant (CART-1500)', function ()

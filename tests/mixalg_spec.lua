@@ -349,6 +349,11 @@ test('mixalg: THROUGH THE BASIS — a captured table\'s field or a captured alia
             if kind == 'follow' and ctx.name == 'B.inc' then return false end end })
         ok(hk:find('fix__B.inc(', 1, true) and hk:find('M_dbl(a)', 1, true) and hk:find('M_inc(a)', 1, true),
             'B.inc left a primitive at that site only; the alias still follows\n' .. hk)
+        -- (a vetoed ALIAS stays callable: a primitive under its own mangled name, its function value carried)
+        local ha, _, _, _, _, hp = MA.program('M.use', { path }, { through = true, decide = function (kind, ctx)
+            if kind == 'follow' and ctx.name == 'inc2' then return false end end })
+        ok(ha:find('fix__inc2(a)', 1, true), 'the alias, a primitive\n' .. ha)
+        ok(type(hp['fix__inc2']) == 'function', 'its value carried')
         -- (and the followed program specializes and equals the original)
         local MX = require 'cartograph.mix'
         local p2 = MX.lower(assert(R.read(thr, 'lua')))

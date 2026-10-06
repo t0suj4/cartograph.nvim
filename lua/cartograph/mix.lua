@@ -579,7 +579,8 @@ end
 --- names = { id -> source name } }. opts.collect = {}: the CENSUS — every refused statement recorded there as
 --- { why, text } and skipped, instead of the first one refusing the whole program
 function M.lower(term, opts)
-    local cx = { funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect, isparam = {}, boxed = {}, forced = {},
+    local cx = { decide = opts and opts.decide, decisions = {}, -- (the decision hook in LOWERING too: 'sra', CART-1501)
+        funcs = {}, names = {}, nid = 0, nlam = 0, collect = opts and opts.collect, isparam = {}, boxed = {}, forced = {},
         pinned = {}, pinfirst = {}, assigned = {}, loopvar = {}, tick = 0, vararg = {}, packfix = {} }
     -- LINES (CART-1459): every node's FIRST LINE — the reader is lossless, its lits ARE the source, so counting their
     -- newlines in order places every node. Statements and lambdas carry it as `at` (bookkeeping: the algebra does not
@@ -734,7 +735,7 @@ function M.lower(term, opts)
     -- BOXES: every boxed variable's declaration holds { v }, every read is v[1], every write a store into it
     for _, f in pairs(cx.funcs) do f.body = M.box(f.body, cx.boxed, cx.forced) end
     return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra, where = cx.where,
-        single = single }
+        single = single, decisions = cx.decisions }
 end
 
 -- ── SRA: SCALAR REPLACEMENT OF A LOCAL RECORD (CART-1331 rung 4a) ──────────────────────────────────────────────────
@@ -812,6 +813,15 @@ function M.sra(body, cx)
         for _, c in ipairs(n.kids or {}) do use(c) end
     end
     use(t)
+    -- (the DECISION HOOK, CART-1501: 'sra' — replace this record by its fields? default true; asked through lower's
+    -- opts.decide, logged in cx.decisions)
+    if cx.decide then
+        for id in pairs(cand) do
+            local c = cx.decide('sra', { var = tostring(cx.names[id]) }, true)
+            cx.decisions[#cx.decisions + 1] = { kind = 'sra', ctx = { var = tostring(cx.names[id]) }, default = true, choice = c == nil or c }
+            if c == false then cand[id] = nil end
+        end
+    end
     if next(cand) == nil then return body end
     -- (3) REWRITE: one local per field; `t.k` -> that local; the declaration -> the fields' declarations, in order
     for id, c in pairs(cand) do
@@ -2114,9 +2124,16 @@ function M.specialize(prog, fname, division, statics, opts)
                     else division[p] = S; svals[p] = vs[j] end
                 end
                 nargs = i - 1 + math.max(vs.n, 1)
-            elseif expands and ((a.op == 'call' and prog.single and prog.single[a.fn]) or single_callv(a, X)) then
+            elseif expands and ((a.op == 'call' and prog.single and prog.single[a.fn]) or single_callv(a, X))
+                and decide('single', { fn = X.frame and X.frame.g, callee = a.fn or (a.f and (a.f.name or a.f.op)) or a.op, proven = true }, true) then
                 -- (a SINGLE-VALUED call last: one dynamic value, the remaining parameters nil — `M.rep(M.join_domain(…))`,
                 -- `M.rep(elem_summary(…))` through a known closure; CART-1500)
+                division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
+                nargs = i
+            elseif expands and decide('single', ctx_of(X.frame and { g = X.frame.g, division = X.frame.division, at = a.at or X.frame.at, parent = X.frame.parent } or nil,
+                { callee = a.fn or a.name or (a.f and (a.f.name or a.f.op)) or a.op }), false) then
+                -- (a REFUSAL ASKED AS A QUESTION, CART-1501: 'single' — treat this expanding call as one value, the
+                -- remaining parameters nil? Default no, unless proven above; a hook may answer yes for a primitive)
                 division[i] = D; dargs[#dargs + 1] = rexpr(a, X)
                 nargs = i
             elseif expands then refuse('the last argument of a call expands several dynamic values into its parameters (rung 3)')

@@ -411,7 +411,13 @@ function M.program(root, files, opts)
                         and outer_ref(cap, d) then
                         local r = resolve(t, d.file)
                         local th = not r and through(cap, d) -- (CART-1500: a captured alias of a definition)
+                        local vetoed = not r and not th and follow_memo[d.file .. ':' .. cap:id()] == false
                         if th then target = mangle(th)
+                        elseif vetoed then
+                            -- (a FOLLOW the hook vetoed on an alias, CART-1501: the alias stays a primitive under its own
+                            -- mangled name — its function value carried, so the call still reaches something)
+                            target = mangle(d.file .. '::' .. t)
+                            prims[target] = uv and uv[t] and uv[t].v
                         elseif r and not r:match('^M') then target = mangle(r)
                         elseif not r and uv and uv[t] and not (modtab[d.file] and modtab[d.file][t])
                             and t ~= 'M' and t ~= 'SHARED' and t ~= 'PARTS' then -- (the algebra's own tables: mix knows M.x by name)
