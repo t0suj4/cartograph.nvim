@@ -794,14 +794,15 @@ test('C C3 DECISION CTX: the decision hook\'s ctx — fn, division, at, chain, s
         .. 'local function f(x) return g(x, function (y) return y end) end\n'
     _, text, stats = mixed(GK, 'f', { 'D' }, {}, { depth = 8 })
     eq({ 'g', 'g', 'g', 'g', 'g', 'g', 'g', 'f' }, decisions(stats, 'grow')[1].ctx.chain, text)
-    -- e. 'generalize': both configurations, when the whistle refuses and when it generalizes
+    -- e. 'generalize': both configurations are in the context (this oscillating recursion was REFUSED by the whistle
+    -- until the embedding requirement went, CART-1506's investigation: it is generalized now — `n` and `b`)
     local W = 'local function walk(t, n, b)\n if n > #t then return 0 end\n return t[n] + walk(t, n + 1, not b)\nend\nlocal function f(t) return walk(t, 1, true) end\n'
     local seen = {}
     pcall(MX.mix, assert(R.read(W, 'lua')), 'f', { 'D' }, {}, { decide = function (kind, ctx, def)
         if kind == 'generalize' then seen[#seen + 1] = { ctx.configs and ctx.configs.ancestor ~= nil, ctx.configs and ctx.configs.candidate ~= nil, def } end
     end })
     ok(#seen > 0, 'a generalize decision was offered')
-    for _, s in ipairs(seen) do eq({ true, true, false }, s) end
+    for _, s in ipairs(seen) do eq({ true, true, { [2] = true, [3] = true } }, s) end
     _, text, stats = mixed(GK, 'f', { 'D' })
     d = decisions(stats, 'generalize')
     ok(#d > 0, 'generalize decisions\n' .. text)

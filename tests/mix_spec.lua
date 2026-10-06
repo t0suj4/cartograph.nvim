@@ -1237,6 +1237,23 @@ test('mix: a STORE TO A GLOBAL — a lazy file-level constant (`WF = WF or …`,
     ok(not pcall(MX.mix, assert(R.read('local function f(x)\n  WF = WF or 10\n  return WF + x\nend\n', 'lua')), 'f', { 'D' }, {}), 'an unknown global read')
 end)
 
+test('mix: three CAUTIOUS REFUSALS replaced by sound answers — a recursion that oscillates (no embedding) and a static cons list nested past 20 are generalized; a declaration of several values made dynamic in part is dynamic in whole (CART-1506)', function ()
+    ready()
+    local function same(src, division, args)
+        local want, r = original(src, 'f'), residual(src, 'f', division, {})
+        for _, a in ipairs(args) do eq(want(unpack(a)), r(unpack(a)), vim.inspect(a)) end
+    end
+    -- (no embedding: `b` flips true/false every step, so no call embeds its ancestor; it ran past the depth)
+    same('local function walk(t, n, b)\n  if n > #t then return 0 end\n  local v = b and t[n] or -t[n]\n  return v + walk(t, n + 1, not b)\nend\nlocal function f(t) return walk(t, 1, true) end\n',
+        { 'D' }, { { { 1, 2, 3 } }, { { 5 } }, { {} } })
+    -- (a cons list one deeper each step: the configuration key cannot form past 20 before the depth is reached)
+    same('local function len(c) if c == nil then return 0 end return 1 + len(c[2]) end\nlocal function walk(x, k, acc)\n  if k > 0 then return walk(x, k - 1, { k, acc }) end\n  return len(acc) + x\nend\nlocal function f(x) return walk(x, 30, nil) end\n',
+        { 'D' }, { { 5 }, { 0 } })
+    -- (`a` static by its value, `b` dynamic by a later assignment: both dynamic — and `a` still bounds a loop)
+    same('local function two() return 1, 2 end\nlocal function f(x)\n  local a, b = two()\n  if x then b = 4 end\n  local t = {}\n  for i = 1, a + 1 do t[i] = i end\n  return #t + b\nend\n',
+        { 'D' }, { { true }, { false } })
+end)
+
 test('mix: the WHISTLE compares at the candidate\'s binding times — a recursion whose accumulator turns dynamic after the first call (DSS, then DDS) still generalizes its growing static path; a NESTED fresh start is reused only eagerly, or where the `reuse` decision says so (CART-1505, CART-1501)', function ()
     ready()
     local EXT = 'local function extend(p, e)\n  local q = {}\n  for i, x in ipairs(p) do q[i] = x end\n  q[#q + 1] = e\n  return q\nend\n'

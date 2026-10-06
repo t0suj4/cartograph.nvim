@@ -1415,10 +1415,15 @@ local function bt_block(stmts, bt, ctrl, loop)
         local op = s.op
         if op == 'local' then set(s.id, s.forced and D or bt_expr(s.e, bt))
         elseif op == 'localm' then
+            -- (one declaration, one binding time: a value of it made dynamic later makes them all dynamic — more dynamic
+            -- is sound, and a declaration mixing static and dynamic values has no residual form)
+            local anyd = false
             for i, id in ipairs(s.ids) do
                 local e = s.es[math.min(i, #s.es)]
                 set(id, s.forced and D or (e and bt_expr(e, bt) or S))
+                if bt[id] == D then anyd = true end
             end
+            if anyd then for _, id in ipairs(s.ids) do set(id, D) end end
         elseif op == 'assignm' then
             for i, t in ipairs(s.targets) do
                 local e = s.es[math.min(i, #s.es)]
@@ -2191,7 +2196,10 @@ function M.specialize(prog, fname, division, statics, opts)
         for i = 1, #anc.division do adiv[i] = fr.division[i] == D and D or anc.division[i] end
         local ta = M.config_term(fr.g, adiv, anc.svals, R.clos)
         local tb = M.config_term(fr.g, fr.division, fr.svals, R.clos)
-        if not ta or not tb or #ta.kids ~= #tb.kids or not M.embeds(ta, tb, {}, spend) then return nil, ta, tb end
+        -- (no EMBEDDING is required: the whistle is asked only once a recursion ran past the depth, so the "when" is
+        -- decided; generalizing the positions that differ is sound whether fr grew from anc or oscillates — a boolean
+        -- flipped every step never embeds, and refusing it left no program at all)
+        if not ta or not tb or #ta.kids ~= #tb.kids then return nil, ta, tb end
         local j = require('cartograph.algebra').load().join(ta, tb)
         local body = j and j.template.body
         if not body or body.k ~= fr.g then return nil, ta, tb end
@@ -2381,7 +2389,9 @@ function M.specialize(prog, fname, division, statics, opts)
         if ok then return r end
         depth = d0
         cut_iters(ni)
-        if not (type(r) == 'table' and r.refusal and r.refusal:find('specialization depth', 1, true)) then error(r, 0) end
+        -- (a static value nested past 20 is the same growth reaching the configuration KEY first — a cons list built
+        -- per step: generalized like the depth; the grow retry already reads it so for closures)
+        if not (type(r) == 'table' and r.refusal and (r.refusal:find('specialization depth', 1, true) or r.refusal:find('nested deeper than', 1, true))) then error(r, 0) end
         local f2, ta, tb = generalization(anc, fr)
         -- (ctx.configs: the two CONFIGURATIONS the whistle compared — the ancestor's at the candidate's binding times,
         -- and the candidate's — as terms, nil where one could not be formed)
