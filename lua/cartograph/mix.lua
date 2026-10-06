@@ -2774,7 +2774,30 @@ function M.specialize(prog, fname, division, statics, opts)
     local root = { g = fname, division = division, svals = statics, at = prog.funcs[fname] and prog.funcs[fname].at }
     local entry = point({ kind = 'fn', name = fname, f = prog.funcs[fname] }, division, statics, root)
     res.entry = entry
-    return res, { unfold_steps = used, functions = #res.order }
+    -- DEAD RESIDUAL FUNCTIONS: a program point no reachable one refers to any more — a call site that later took a
+    -- reused generalization (opts.reuse = 'eager') leaves the variant it called before behind — is dropped. Reachability
+    -- from the entry; ANY string naming a residual function counts as a reference (over-keeps, never drops a live one)
+    local live, todo = { [entry] = true }, { entry }
+    local function refs(x, seen)
+        if seen[x] then return end
+        seen[x] = true
+        for _, v in pairs(x) do
+            if type(v) == 'string' then
+                if res.funcs[v] and not live[v] then live[v] = true; todo[#todo + 1] = v end
+            elseif type(v) == 'table' then refs(v, seen) end
+        end
+    end
+    for _ = 1, 1e6 do
+        local nm = table.remove(todo)
+        if not nm then break end
+        if res.funcs[nm] then refs(res.funcs[nm], {}) end
+    end
+    local kept, dropped = {}, 0
+    for _, nm in ipairs(res.order) do
+        if live[nm] then kept[#kept + 1] = nm else res.funcs[nm] = nil; dropped = dropped + 1 end
+    end
+    res.order = kept
+    return res, { unfold_steps = used, functions = #res.order, dead_dropped = dropped }
 end
 
 -- ── residual IR helpers ────────────────────────────────────────────────────────────────────────────────────────────

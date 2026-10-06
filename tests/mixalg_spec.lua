@@ -551,6 +551,29 @@ test('mixalg: THROUGH an `M.x` ALIAS — core.lua\'s `M.kv_kind = kv_kind`, call
     eq(nofn(D.kv_generalize(vim.deepcopy(is))), nofn(f(vim.deepcopy(is))))
 end)
 
+test('mixalg: DEAD RESIDUAL FUNCTIONS are dropped — under eager reuse D.values_at\'s call site takes the generalized M.put and the variant it called before is left unreferenced; every function kept is reachable from the entry (CART-1507)', function ()
+    ready()
+    local MX = require 'cartograph.mix'
+    local D = require('cartograph.algebra.derive')
+    D.apply_to(A, '')
+    local OPQ = { ['M.admits'] = true, ['M.admits_slice'] = true, ['M.match'] = true, ['M.entails'] = true }
+    local key = 'derive.lua::D.values_at'
+    local text, _, lines, knowns, _, prims = MA.program(key, nil, { snapshot = true, through = true, opaque = OPQ })
+    local prog = MX.lower(assert(R.read(text, 'lua')), { lines = lines })
+    local entry = MA.mangle(key)
+    local div = {}
+    for i = 1, #prog.funcs[entry].params do div[i] = 'D' end
+    local G = { ['M.grammars'] = A.grammars }
+    for k, v in pairs(knowns) do G[k] = v end
+    local res, st = MX.specialize(prog, entry, div, {}, { budget = 5e6, globals = G, prims = prims, reuse = 'eager' })
+    ok(st.dead_dropped >= 1, 'a dead variant dropped: ' .. tostring(st.dead_dropped))
+    local out = MX.print(res, prog.where)
+    for _, nm in ipairs(res.order) do
+        local _, uses = out:gsub('%f[%w_]' .. nm .. '%f[^%w_]', '')
+        ok(nm == res.entry or uses > 2, nm .. ' is referenced beyond its own declaration')
+    end
+end)
+
 test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error — transplant crashed lowering on an empty block before CART-1335', function ()
     ready()
     local text = MA.program('M.transplant')
