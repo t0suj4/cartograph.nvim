@@ -1224,6 +1224,33 @@ test('mix: a STORE TO A GLOBAL — a lazy file-level constant (`WF = WF or …`,
     ok(not pcall(MX.mix, assert(R.read('local function f(x)\n  WF = WF or 10\n  return WF + x\nend\n', 'lua')), 'f', { 'D' }, {}), 'an unknown global read')
 end)
 
+test('mix: the WHISTLE compares at the candidate\'s binding times — a recursion whose accumulator turns dynamic after the first call (DSS, then DDS) still generalizes its growing static path; a NESTED fresh start is reused only eagerly, or where the `reuse` decision says so (CART-1505, CART-1501)', function ()
+    ready()
+    local EXT = 'local function extend(p, e)\n  local q = {}\n  for i, x in ipairs(p) do q[i] = x end\n  q[#q + 1] = e\n  return q\nend\n'
+    -- (D.resolve's scope walk: `walk(S, seen, path)` — the first call static in all but S, every recursive one dynamic in
+    -- `seen` too, the path one longer each level)
+    local GROW = EXT .. 'local function walk(n, acc, path)\n  if n > 0 then return walk(n - 1, acc + n, extend(path, "P")) end\n  return acc + #path\nend\nlocal function f(n) return walk(n, 0, {}) end\n'
+    local _, sg = MX.mix(assert(R.read(GROW, 'lua')), 'f', { 'D' }, {}, { decide = function () end })
+    local gd
+    for _, d in ipairs(sg.decisions) do if d.kind == 'generalize' then gd = d end end
+    eq('DSS', gd.ctx.ancestor); eq({ [3] = true }, gd.default)
+    eq('hole', gd.ctx.configs.ancestor.kids[2].k, 'the ancestor compared with acc dynamic, as the candidate has it')
+    eq(original(GROW, 'f')(5), residual(GROW, 'f', { 'D' }, {})(5))
+    -- a FRESH START nested inside (a walk begun again by a callee — D.resolve's rule I): refused by default, specialized
+    -- when the recorded generalization is reused — eagerly, or per call through the hook
+    local NEST = EXT .. 'local function f(n)\n  local function walk(m, acc, path)\n    if m > 0 then\n      local r = walk(m - 1, acc + m, extend(path, "P"))\n'
+        .. '      if m > 2 then r = r + f(m - 2) end\n      return r\n    end\n    return acc + #path\n  end\n  return walk(n, 0, {})\nend\n'
+    local want = original(NEST, 'f')(5)
+    ok(not pcall(MX.mix, assert(R.read(NEST, 'lua')), 'f', { 'D' }, {}), 'refused by default')
+    for _, o in ipairs({ { reuse = 'eager' }, { decide = function (kind) if kind == 'reuse' then return true end end } }) do
+        local text, st, pool = MX.mix(assert(R.read(NEST, 'lua')), 'f', { 'D' }, {}, o)
+        eq(want, assert(load(text, 'r', 't', setmetatable({ MIXK = pool }, { __index = _G })))()(5))
+        local rd
+        for _, d in ipairs(st.decisions) do if d.kind == 'reuse' then rd = d end end
+        ok(rd and rd.choice == true and rd.default == (o.reuse == 'eager'), vim.inspect(rd))
+    end
+end)
+
 test('mix: a SINGLE-VALUED call as the last argument fills one parameter and leaves the rest nil — a named function or a known closure; a static counter left NIL then defaulted generalizes (CART-1500)', function ()
     ready()
     -- (rung 3: `g(one(x))` with g taking three parameters — one returns one value on every path)

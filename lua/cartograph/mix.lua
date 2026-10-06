@@ -2184,22 +2184,27 @@ function M.specialize(prog, fname, division, statics, opts)
         return false
     end
     local function generalization(anc, fr)
-        local ta = M.config_term(fr.g, anc.division, anc.svals, R.clos)
+        -- (the ancestor is compared at the candidate's binding times: a position dynamic in the candidate is dynamic in
+        -- the ancestor's configuration too — `walk(S, seen, path)` started with `seen` static and stored into it, so
+        -- every recursive call is D where the first was S; that is no growth, only the static rest is — CART-1505)
+        local adiv = {}
+        for i = 1, #anc.division do adiv[i] = fr.division[i] == D and D or anc.division[i] end
+        local ta = M.config_term(fr.g, adiv, anc.svals, R.clos)
         local tb = M.config_term(fr.g, fr.division, fr.svals, R.clos)
-        if not ta or not tb or #ta.kids ~= #tb.kids or not M.embeds(ta, tb, {}, spend) then return nil end
+        if not ta or not tb or #ta.kids ~= #tb.kids or not M.embeds(ta, tb, {}, spend) then return nil, ta, tb end
         local j = require('cartograph.algebra').load().join(ta, tb)
         local body = j and j.template.body
-        if not body or body.k ~= fr.g then return nil end
+        if not body or body.k ~= fr.g then return nil, ta, tb end
         local force, any = {}, false
         for i = 1, #tb.kids do
             if fr.division[i] ~= D and has_hole(body.kids[i]) then
-                if type(fr.svals[i]) == 'function' then return nil end
+                if type(fr.svals[i]) == 'function' then return nil, ta, tb end
                 force[i] = true
                 any = true
             end
         end
-        if any then return force end
-        return nil
+        if any then return force, ta, tb end
+        return nil, ta, tb
     end
 
     -- THE GENERALIZED CONFIGURATIONS, per function: { template, force } — the configuration a generalization retried
@@ -2223,7 +2228,10 @@ function M.specialize(prog, fname, division, statics, opts)
     -- generalized function is specialized with all of them dynamic, whichever made them so) | nil
     local function eager_force(g, division, svals)
         local l = general[g]
-        if opts.reuse ~= 'eager' or not l then return nil end
+        -- ('reuse', CART-1501: a call that IS an instance of a recorded generalization — default: opts.reuse == 'eager';
+        -- a hook may answer per call, so the eager policy can be tried at one site. Matching is computed only when it
+        -- can matter: eager on, or a hook to ask)
+        if not l or (opts.reuse ~= 'eager' and not opts.decide) then return nil end
         local t = M.config_term(g, division, svals, R.clos)
         if not t then return nil end
         local A = require('cartograph.algebra').load()
@@ -2232,6 +2240,9 @@ function M.specialize(prog, fname, division, statics, opts)
             if A.instance_of(mine, e.template) then
                 local f = {}
                 for i, kid in ipairs(e.template.body.kids) do if kid.k == 'hole' and division[i] ~= D then f[i] = true end end
+                if next(f) and not decide('reuse', { fn = g, division = table.concat(division, ''), force = f }, opts.reuse == 'eager') then
+                    return nil
+                end
                 return f
             end
         end
@@ -2371,8 +2382,11 @@ function M.specialize(prog, fname, division, statics, opts)
         depth = d0
         cut_iters(ni)
         if not (type(r) == 'table' and r.refusal and r.refusal:find('specialization depth', 1, true)) then error(r, 0) end
-        local f2 = generalization(anc, fr)
-        f2 = decide('generalize', ctx_of(fr, { refusal = r.refusal, ancestor = anc.division and table.concat(anc.division, '') }), f2 or false)
+        local f2, ta, tb = generalization(anc, fr)
+        -- (ctx.configs: the two CONFIGURATIONS the whistle compared — the ancestor's at the candidate's binding times,
+        -- and the candidate's — as terms, nil where one could not be formed)
+        f2 = decide('generalize', ctx_of(fr, { refusal = r.refusal, ancestor = anc.division and table.concat(anc.division, ''),
+            configs = { ancestor = ta, candidate = tb } }), f2 or false)
         if not f2 then error(r, 0) end
         rollback(no, nm)
         record_general(fr, f2)
