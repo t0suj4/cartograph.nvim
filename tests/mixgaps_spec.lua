@@ -1314,7 +1314,7 @@ test('BUG CART-1515: an error a static pcall catches carries no mix.lua line —
     eq('bad 7!', original(src, 'f')(7, '!'))
     local r, text = mixed(src, 'f', { 'S', 'D' }, { 7 }, { lines = lines })
     local got = r('!')
-    if got:find('mix.lua', 1, true) then skip('CART-1515 open: eval_multi maps level nil/1 only, level 2 raises from mix.lua\'s own frame') end
+    -- (CART-1515 fixed: positions come from the line map or none — mix.lua in the message is a regression)
     eq('bad 7!', got, text)
     -- (no line map: whatever the position, never mix.lua's own)
     local src2 = 'local function bad(x)\n    error("bad " .. x)\nend\nlocal function f(x, d)\n    local ok, why = pcall(bad, x)\n    return why .. d\nend\n'

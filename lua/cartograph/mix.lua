@@ -1067,13 +1067,17 @@ local function host(f, a)
 end
 
 function M.evaluator(prog, budget)
-    local R = { steps = 0, budget = budget or 1e7, depth = 0, clos = {}, on_closure = nil }
+    -- (calls: one entry per activation — the position it was CALLED from, or false when a host function entered it
+    -- (pcall calling a closure): what `error(msg, level)` prefixes, as Lua would — CART-1515)
+    local R = { steps = 0, budget = budget or 1e7, depth = 0, clos = {}, on_closure = nil, calls = {} }
     local exec_block, apply, eval, eval_multi, evals, callf
     -- (one activation deeper; the depth restored on a refusal too)
-    local function deeper(stmts, env)
+    local function deeper(stmts, env, site)
         R.depth = R.depth + 1
         local at0 = R.at
+        R.calls[#R.calls + 1] = site or false
         local ok, done, v = pcall(exec_block, stmts, env)
+        R.calls[#R.calls] = nil
         R.depth = R.depth - 1
         if not ok then error(done, 0) end -- (R.at stays the INNERMOST statement: where the error happened)
         R.at = at0
@@ -1093,16 +1097,16 @@ function M.evaluator(prog, budget)
         return function (a, b, d, e, f, g, h, i) return apply(c, { a, b, d, e, f, g, h, i }) end
     end
     -- a closure applied -> the list of its results
-    local function applyl(c, args)
+    local function applyl(c, args, site)
         local fenv = {}
         for _, id in ipairs(c.lam.free) do fenv[id] = M.cval(c, id) end
         for i, id in ipairs(c.lam.params) do fenv[id] = args[i] end
-        local _, vs = deeper(c.lam.body, fenv)
+        local _, vs = deeper(c.lam.body, fenv, site)
         return vs or { n = 0 }
     end
     -- (the Lua function a host primitive calls: every result handed back)
     function apply(c, args)
-        local vs = applyl(c, args)
+        local vs = applyl(c, args, false)
         return unpack(vs, 1, vs.n)
     end
     -- a TOP-LEVEL FUNCTION used as a value: a closure with no free variables over a lambda that stands for it (one
@@ -1138,7 +1142,7 @@ function M.evaluator(prog, budget)
     -- a host primitive returned — gmatch's)
     function callf(f, args)
         local c = R.clos[f]
-        if c then return applyl(c, args) end
+        if c then return applyl(c, args, R.at) end
         if type(f) == 'function' then return host(f, args) end
         refuse('a call of a ' .. type(f) .. ' value')
     end
@@ -1152,7 +1156,7 @@ function M.evaluator(prog, budget)
             local a = evals(e.args, env)
             local fenv = {}
             for i, id in ipairs(f.params) do fenv[id] = a[i] end
-            local _, vs = deeper(f.body, fenv)
+            local _, vs = deeper(f.body, fenv, R.at)
             return vs or { n = 0 }
         end
         if op == 'callv' then
@@ -1160,18 +1164,24 @@ function M.evaluator(prog, budget)
             local a = evals(e.args, env)
             local c = R.clos[f]
             if not c then refuse('a call through a ' .. type(f) .. ' value that is no closure of the program') end
-            return applyl(c, a)
+            return applyl(c, a, R.at)
         end
         if op == 'prim' then
             local p = PRIMS[e.name] or XPRIMS[e.name]
             if not p then refuse('the primitive ' .. e.name .. ' (not in the table)') end
-            -- (an `error(msg)` at the default level is prefixed with the position of its call — the ORIGINAL's, from
-            -- the program's line map, never this evaluator's own line in mix.lua: CART-1458)
-            if e.name == 'error' and prog.where then
+            -- (an `error(msg, level)` is prefixed as Lua would — the ORIGINAL's position from the program's line map:
+            -- level 1 this call, level k the call site k-1 activations up, none for a frame a host function entered
+            -- (pcall) or with no line map — never this evaluator's own line in mix.lua: CART-1458, CART-1515)
+            if e.name == 'error' then
                 local a = evals(e.args, env)
-                local w = prog.where(R.at)
-                if w and type(a[1]) == 'string' and (a[2] == nil or a[2] == 1) then error(w .. ': ' .. a[1], 0) end
-                error(a[1], a[2] == nil and 1 or a[2])
+                local lvl = a[2] == nil and 1 or a[2]
+                if type(a[1]) == 'string' and type(lvl) == 'number' and lvl >= 1 then
+                    local at = R.at
+                    if lvl > 1 then at = R.calls[#R.calls - (lvl - 2)] end
+                    local w = at and prog.where and prog.where(at)
+                    error((w and (w .. ': ') or '') .. a[1], 0)
+                end
+                error(a[1], 0)
             end
             local vs = host(p, evals(e.args, env))
             -- (a static pcall must not swallow mix's own refusal: re-raised, never a value)
@@ -1187,7 +1197,7 @@ function M.evaluator(prog, budget)
             if type(o) == 'string' then f = string[e.m]
             elseif type(o) == 'table' then f = o[e.m] end
             local c = f and R.clos[f]
-            if c then return applyl(c, args) end
+            if c then return applyl(c, args, R.at) end
             if type(o) == 'string' and type(f) == 'function' then return host(f, args) end
             refuse('the method `' .. tostring(e.m) .. '` of a ' .. type(o))
         end

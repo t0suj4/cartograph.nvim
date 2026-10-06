@@ -1237,6 +1237,19 @@ test('mix: a STORE TO A GLOBAL — a lazy file-level constant (`WF = WF or …`,
     ok(not pcall(MX.mix, assert(R.read('local function f(x)\n  WF = WF or 10\n  return WF + x\nend\n', 'lua')), 'f', { 'D' }, {}), 'an unknown global read')
 end)
 
+test('mix: error(msg, LEVEL) in a static run is prefixed as Lua would — level 2 names the CALL SITE through the line map when a Lua function called, nothing when pcall did; never mix.lua (CART-1515)', function ()
+    ready()
+    local lines = {}
+    for n = 1, 20 do lines[n] = { src = 'orig.lua', line = 100 + n } end
+    local src = 'local function bad(x)\n    error("bad " .. x, 2)\nend\nlocal function mid(x)\n    bad(x)\nend\nlocal function f(x, d)\n    local ok, why = pcall(mid, x)\n    return why .. d\nend\n'
+    -- (Lua: level 2 is mid, at its call of bad — line 5)
+    local want = original(src, 'f')(7, '!')
+    eq('5: bad 7!', want:match(':(%d+: bad 7!)$'))
+    local text = MX.mix(assert(R.read(src, 'lua')), 'f', { 'S', 'D' }, { 7 }, { lines = lines })
+    local r = assert(load(text, 'r', 't', setmetatable({}, { __index = _G })))()
+    eq('orig.lua:105: bad 7!', r('!'), text)
+end)
+
 test('mix: a HOST call\'s results are all counted — trailing nils, and more than 8 (`{ unpack(t) }` of 10 folded to 8 elements), CART-1511', function ()
     ready()
     local src = 'local function f(x)\n  local t = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }\n  local p = { unpack(t) }\n  return #p + x\nend\n'
