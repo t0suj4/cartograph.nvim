@@ -277,6 +277,9 @@ test('fixpoint: an AMBIGUOUS call is the JOIN of its candidates — a candidate\
     eq(true, sums[by.quiet.id].jp)
     eq('pure~', effects.purity(store, by.relay.id), 'the premise travels through a resolved call')
     eq('pure~', effects.purity(store, by.second.id), 'and so does the method~ tier')
+    for _, x in ipairs(store.data.calls) do
+        if x.to == by.first.id then eq('unknown', (effects.calls_commute(store, x, x)), 'nor does commute decide on the method~ tier (CART-1546)') end
+    end
     ok(sums[by.crowd.id].h and sums[by.crowd.id].h[1]:find('refused (ambiguous)', 1, true), 'a cut candidate list keeps the hedge')
     eq(nil, sums[by.crowd.id].jp)
     -- (commute on the premise: not decided)

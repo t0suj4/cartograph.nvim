@@ -870,9 +870,13 @@ function M.calls_commute(store, c1, c2)
         table.sort(conflicts)
         return 'conflict', table.concat(conflicts, ', ')
     end
-    -- (a conflict found under the join premise is one; a clean answer resting on it is not decided)
+    -- (a conflict found under a premise is one; a clean answer resting on one is not decided — the join's, or the
+    -- method~ tier's: a builtin matched by NAME, `s:gsub`, is a user table's own method when the receiver is one)
     if s1.jp or s2.jp then
         return 'unknown', 'an ambiguous call joined over its candidates: the target is assumed to be one of them'
+    end
+    if s1.mh or s2.mh then
+        return 'unknown', 'a method matched to a builtin by name: the receiver is assumed to be the builtin\'s'
     end
     return 'commute', 'write-write clean (reads not modeled)'
 end
