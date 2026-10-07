@@ -192,9 +192,16 @@ end
 --- mkdir -p that survives a RACE (CART-1410): two processes creating one directory at once — the parallel suite's workers
 --- share a state dir — make the loser's vim.fn.mkdir raise E739 although the directory now exists; only a directory that
 --- is still missing afterwards is an error
+--- ⚠ The race can be on an INTERMEDIATE directory: the loser's mkdir -p raises there and never makes the leaf, so a
+--- failure is retried — the intermediate now exists — before it is an error (CART-1529)
 function M.mkdir(dir)
-    local ok, err = pcall(vim.fn.mkdir, dir, 'p')
-    if not ok and vim.fn.isdirectory(dir) == 0 then error(err, 0) end
+    local err
+    for _ = 1, 4 do
+        local ok, e = pcall(vim.fn.mkdir, dir, 'p')
+        if ok or vim.fn.isdirectory(dir) == 1 then return end
+        err = e
+    end
+    error(err, 0)
 end
 
 function M.value(v)

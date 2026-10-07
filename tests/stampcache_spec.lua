@@ -120,3 +120,24 @@ test('stampcache.blob: a whole value per key — 64-bit words and NUL bytes come
     eq({ nil, false }, { S.get(key) }, 'a blob that does not decode is a miss, not an error')
     vim.fn.delete(SC.root_dir() .. '/spec-blob', 'rf')
 end)
+
+-- a worker that loses the race on an INTERMEDIATE directory gets E739 there and no leaf (CART-1529): the loss is retried
+test('stampcache: mkdir survives losing the race on an intermediate directory — the leaf is made', function ()
+    local base = vim.fn.tempname()
+    local leaf = base .. '/mid/leaf'
+    local real, calls = vim.fn.mkdir, 0
+    vim.fn.mkdir = function (d, flags)
+        calls = calls + 1
+        if calls == 1 then -- (the other worker made `mid` first: this mkdir -p stops there)
+            real(base .. '/mid', 'p')
+            error('Vim:E739: Cannot create directory ' .. base .. '/mid: file already exists')
+        end
+        return real(d, flags)
+    end
+    local fine, err = pcall(SC.mkdir, leaf)
+    vim.fn.mkdir = real
+    ok(fine, tostring(err))
+    eq(1, vim.fn.isdirectory(leaf), 'the leaf exists')
+    eq(2, calls, 'one retry')
+    vim.fn.delete(base, 'rf')
+end)
