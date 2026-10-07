@@ -801,21 +801,9 @@ function M.lower(term, opts)
     for _, f in pairs(cx.funcs) do f.body = M.box(f.body, cx.boxed, cx.forced) end
     -- FRESH ROOTS (CART-1502): locals declared with a table CONSTRUCTOR and never assigned again — not a parameter,
     -- not forced, not boxed. A store `r[k] = v` into one with everything static is done at specialization time (the
-    -- table is mix's own, never a host object or a caller's), so a table BUILT by stores can stay static
-    local initt, reassigned = {}, {}
-    local function fresh_walk(x, seen)
-        if type(x) ~= 'table' or seen[x] then return end
-        seen[x] = true
-        if x.op == 'local' and x.id and x.e and x.e.op == 'table' and not x.forced then initt[x.id] = true end
-        if x.op == 'assign' and x.target and x.target.op == 'var' then reassigned[x.target.id] = true end
-        if x.op == 'assignm' then for _, t in ipairs(x.targets or {}) do if t.op == 'var' then reassigned[t.id] = true end end end
-        for _, c in pairs(x) do fresh_walk(c, seen) end
-    end
-    for _, f in pairs(cx.funcs) do fresh_walk(f.body, {}) end
-    local freshroot = {}
-    for id in pairs(initt) do
-        if not reassigned[id] and not cx.forced[id] and not cx.boxed[id] and not cx.isparam[id] then freshroot[id] = true end
-    end
+    -- table is mix's own, never a host object or a caller's), so a table BUILT by stores can stay static.
+    -- DERIVED (CART-1524): the final IR's facts and mix's forced / boxed sets, through mixproj's rules
+    local freshroot = require('cartograph.mixproj').fresh(cx.funcs, cx.forced, cx.boxed)
     return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra, where = cx.where,
         single = single, decisions = cx.decisions, freshroot = freshroot }
 end
