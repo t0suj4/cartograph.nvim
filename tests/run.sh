@@ -3,6 +3,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# ── GIT ISOLATION (CART-1530) ───────────────────────────────────────────────
+# `git commit <paths>` runs the pre-commit hook with GIT_INDEX_FILE at a TEMPORARY index of this repo; a spec that
+# runs git inside its own temp repo would read cartograph's index through it (oraclejoin, replay failed only there).
+# Specs find their repository from their cwd.
+unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
+
 # ── STATE ISOLATION (CART-0644) ─────────────────────────────────────────────
 # The suite exercises write verbs against `vim.fn.tempname()` roots, and three
 # modules persist per-root records under `stdpath('state')`: the txn JOURNAL
