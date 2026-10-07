@@ -247,3 +247,52 @@ test('fixpoint: REBINDING a parameter (`t = t.kids[i]`) is no write through it â
     eq('writes', effects.purity(store, by.poke.id), 'a field store into a parameter')
     eq('writes', effects.purity(store, by.poke2.id), 'an index store into a parameter')
 end)
+
+local AMB = {
+    'local log = {}',
+    'local A, B, C, D = {}, {}, {}, {}',
+    'function A:go() return 1 end',
+    'function B:go() log.n = 1 end',
+    'function C:peek() return 1 end',
+    'function D:peek() return 2 end',
+    'local function either(o) return o:go() end',   -- ambiguous: A:go, B:go
+    'local function quiet(o) return o:peek() end',  -- ambiguous: C:peek, D:peek
+    'local function relay(o) return quiet(o) end',  -- resolved, onto a joined summary
+    'local function first(s) return s:gsub("a", "b") end', -- the method~ tier
+    'local function second(s) return first(s) end', -- resolved, onto it
+}
+for i = 1, 9 do AMB[#AMB + 1] = ('local T%d = {} function T%d:many() return %d end'):format(i, i, i) end
+AMB[#AMB + 1] = 'local function crowd(o) return o:many() end' -- 9 candidates: the refusal keeps 8, the list is not whole
+AMB[#AMB + 1] = 'return { either, quiet, relay, second, crowd }'
+
+test('fixpoint: an AMBIGUOUS call is the JOIN of its candidates â€” a candidate\'s write is the call\'s, an all-pure join stays ~ under its premise, a cut list keeps the hedge; the tiers travel through a resolved call', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat(AMB, '\n'))))
+    local by = byname()
+    local sums = effects.summaries(store)
+    eq('writes~', effects.purity(store, by.either.id), 'B:go writes log: the call may')
+    ok(sums[by.either.id].w[by.log.id .. '\31n'], 'the write is log.n')
+    eq('pure~', effects.purity(store, by.quiet.id), 'every candidate pure: pure under the premise, never plain pure')
+    eq(nil, sums[by.quiet.id].h, 'no hedge: the premise is what is left')
+    eq(true, sums[by.quiet.id].jp)
+    eq('pure~', effects.purity(store, by.relay.id), 'the premise travels through a resolved call')
+    eq('pure~', effects.purity(store, by.second.id), 'and so does the method~ tier')
+    ok(sums[by.crowd.id].h and sums[by.crowd.id].h[1]:find('refused (ambiguous)', 1, true), 'a cut candidate list keeps the hedge')
+    eq(nil, sums[by.crowd.id].jp)
+    -- (commute on the premise: not decided)
+    local c
+    for _, x in ipairs(store.data.calls) do if x.to == by.quiet.id then c = x end end
+    local v, why = effects.calls_commute(store, c, c)
+    eq('unknown', v, why)
+    -- the other side: the join off, the hedge is back and the write is not found
+    effects.JOIN.ambiguous = nil
+    store._fx = nil
+    local ok2, err = pcall(function ()
+        local off = effects.summaries(store)
+        ok(off[by.quiet.id].h and off[by.quiet.id].h[1]:find('refused (ambiguous)', 1, true), 'hedged without the join')
+        eq(nil, off[by.either.id].w[by.log.id .. '\31n'], 'and the write is not seen')
+    end)
+    effects.JOIN.ambiguous = true
+    store._fx = nil
+    assert(ok2, err)
+end)

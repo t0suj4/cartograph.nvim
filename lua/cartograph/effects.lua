@@ -264,6 +264,32 @@ end
 --   over   true when the write-set blew the cap (coarsened to "many")
 -- Purity: 'pure' (no w, no pwx, no h) / 'pure~' / 'writes' / 'writes~'.
 
+-- the refusal rules whose candidate lists a call's effect is JOINED over (each a premise: the target is one of them).
+-- `ambiguous`: several in-tree definitions fit; `blocked` — the candidates sit across a scope fence — is a different
+-- premise and stays off unless asked for
+M.JOIN = { ambiguous = true }
+local JOIN_ROUNDS = 30 -- passes toward the join's fixpoint (cartograph needs 9, CART-1542)
+
+-- what a pass hands the next — everything `take` reads off a summary — as one string, to compare two passes by
+local function keys_of(t)
+    local ks = {}
+    for k, v in pairs(t or {}) do ks[#ks + 1] = tostring(k) .. '=' .. tostring(v == true or (type(v) == 'table' and '') or v) end
+    table.sort(ks)
+    return table.concat(ks, ',')
+end
+local function signature(sums, ids)
+    local out, seen = {}, {}
+    for _, id in ipairs(ids) do
+        local s = sums[id]
+        if s and not seen[s] then
+            seen[s] = true
+            out[#out + 1] = table.concat({ id, s.nk, tostring(s.over), tostring(s.mh), tostring(s.nd), tostring(s.jp),
+                s.h and s.h[1] or '', keys_of(s.w), keys_of(s.gpk), keys_of(s.pwx), keys_of(s.cpo) }, '\0')
+        end
+    end
+    return table.concat(out, '\n')
+end
+
 local CAP = 200   -- write-set keys per summary before honest coarsening
 local HCAP = 4    -- hedges kept per summary
 
@@ -459,199 +485,249 @@ function M.summaries(store)
         end })
     end
     local con = scc.condense(adj, ids)
-    local sums = {}
-    for ci = 1, con.n do
-        local members = con.members[ci]
-        local sum = { w = {}, nk = 0 }
-        -- DIRECT effects of every member
-        for _, fid in ipairs(members) do
-            local fnode = store.node(fid)
-            for _, u in ipairs(store.topo():var_uses_detail(fid)) do
-                if u.rw and u.rw >= 2 then
-                    if u.gp then
-                        -- gp is var-level: one dischargeable key
-                        local key = u.to .. '\31'
-                        s_add(sum, key, u.gw or 1)
-                        sum.gpk = sum.gpk or {}
-                        sum.gpk[key] = u.gp
-                    elseif u.flds then
-                        for f, packed in pairs(u.flds) do
-                            if packed % 4 >= 2 then
-                                local g = (packed - packed % 4) / 4
-                                s_add(sum, u.to .. '\31' .. f, g == 0 and 1 or g)
-                            end
-                        end
-                    else
-                        s_add(sum, u.to .. '\31', u.gw or 1)
-                    end
-                end
-            end
-            if fnode and fnode.pw then
-                sum.pwx = sum.pwx or {}
-                for _, pi in ipairs(fnode.pw) do sum.pwx[pi] = true end
-            end
-        end
-        -- CALL inheritance (external callees are already summarized:
-        -- Tarjan emission order is callees-first)
-        local intra = {} -- (calls between members: their pending pairs are substituted once the summary is whole)
-        local function member(id) return con.comp[id] == ci end
-        for _, fid in ipairs(members) do
-            local caller = store.node(fid)
-            local file = caller and caller.file
-            for _, c in ipairs(store.topo():sites(fid)) do
-                local to = callrec.to(c)
-                if to and con.comp[to] == ci then
-                    -- intra-SCC: members share this summary already
-                    intra[#intra + 1] = { c = c, caller = caller, to = to }
-                elseif to and sums[to] then
-                    local cs = sums[to]
-                    if cs.over then sum.over = true end
-                    if cs.h then s_hedge(sum, cs.h[1]) end
-                    for key, tier in pairs(cs.w) do
-                        local gp = cs.gpk and cs.gpk[key]
-                        if gp then
-                            local tn = store.node(to)
-                            local v = M.verdict(
-                                { rw = 2, gw = tier, gp = gp }, c,
-                                tn and tn.file)
-                            if v ~= 'skips' then
-                                s_add(sum, key, VERDICT_TIER[v] or tier)
+    -- ONE pass over the condensation, callees first. A JOINED call's candidates are no call edges (ordering by them
+    -- would merge every cycle through an ambiguous name into one component — 1674 functions sharing a summary on
+    -- this repo), so a candidate may not be summarized yet when its call is reached: the pass takes the PREVIOUS
+    -- pass's summary (nothing in the first) and marks itself STALE, and passes repeat to the least fixpoint — the
+    -- summaries a pass reads equal the ones it writes. Every effect only grows from pass to pass (union, from
+    -- nothing). Past JOIN_ROUNDS a last pass hedges such a join instead: never an answer that is not a fixpoint
+    local sums, stale
+    local function pass(prev)
+        sums, stale = {}, false
+        for ci = 1, con.n do
+            local members = con.members[ci]
+            local sum = { w = {}, nk = 0 }
+            -- DIRECT effects of every member
+            for _, fid in ipairs(members) do
+                local fnode = store.node(fid)
+                for _, u in ipairs(store.topo():var_uses_detail(fid)) do
+                    if u.rw and u.rw >= 2 then
+                        if u.gp then
+                            -- gp is var-level: one dischargeable key
+                            local key = u.to .. '\31'
+                            s_add(sum, key, u.gw or 1)
+                            sum.gpk = sum.gpk or {}
+                            sum.gpk[key] = u.gp
+                        elseif u.flds then
+                            for f, packed in pairs(u.flds) do
+                                if packed % 4 >= 2 then
+                                    local g = (packed - packed % 4) / 4
+                                    s_add(sum, u.to .. '\31' .. f, g == 0 and 1 or g)
+                                end
                             end
                         else
-                            s_add(sum, key, tier)
+                            s_add(sum, u.to .. '\31', u.gw or 1)
                         end
                     end
-                    -- the callee mutates its params: what did WE pass?
-                    local tn = store.node(to)
-                    if cs.pwx then
-                        for pi in pairs(cs.pwx) do
-                            local kind, x = arg_target(store, c, pi, caller)
-                            if kind == 'var' then
-                                s_add(sum, x .. '\31', 1)
-                            elseif kind == 'param' then
-                                sum.pwx = sum.pwx or {}
-                                sum.pwx[x] = true
-                            elseif kind == 'opaque' then
-                                s_hedge(sum, ('param-mutation via opaque arg -> %s @%s:%d')
-                                    :format(tn and tn.name or to, callrec.file(c) or '?', callrec.line(c) or 0))
+                end
+                if fnode and fnode.pw then
+                    sum.pwx = sum.pwx or {}
+                    for _, pi in ipairs(fnode.pw) do sum.pwx[pi] = true end
+                end
+            end
+            -- CALL inheritance (external callees are already summarized:
+            -- Tarjan emission order is callees-first)
+            local intra = {} -- (calls between members: their pending pairs are substituted once the summary is whole)
+            local function member(id) return con.comp[id] == ci end
+            -- callee `to`'s summary, taken at call `c` of `caller`: its writes (a gp write discharged per site), the params
+            -- it mutates mapped to what WE passed, its pending pairs substituted, and its TIERS — over, the hedge, the
+            -- name-matched method tier, nondet, the join premise — travel with it
+            local function take(c, caller, to, cs)
+                cs = cs or sums[to]
+                if cs.mh then sum.mh = true end
+                if cs.nd then sum.nd = true end
+                if cs.jp then sum.jp = true end
+                if cs.over then sum.over = true end
+                if cs.h then s_hedge(sum, cs.h[1]) end
+                for key, tier in pairs(cs.w) do
+                    local gp = cs.gpk and cs.gpk[key]
+                    if gp then
+                        local tn = store.node(to)
+                        local v = M.verdict(
+                            { rw = 2, gw = tier, gp = gp }, c,
+                            tn and tn.file)
+                        if v ~= 'skips' then
+                            s_add(sum, key, VERDICT_TIER[v] or tier)
+                        end
+                    else
+                        s_add(sum, key, tier)
+                    end
+                end
+                -- the callee mutates its params: what did WE pass?
+                local tn = store.node(to)
+                if cs.pwx then
+                    for pi in pairs(cs.pwx) do
+                        local kind, x = arg_target(store, c, pi, caller)
+                        if kind == 'var' then
+                            s_add(sum, x .. '\31', 1)
+                        elseif kind == 'param' then
+                            sum.pwx = sum.pwx or {}
+                            sum.pwx[x] = true
+                        elseif kind == 'opaque' then
+                            s_hedge(sum, ('param-mutation via opaque arg -> %s @%s:%d')
+                                :format(tn and tn.name or to, callrec.file(c) or '?', callrec.line(c) or 0))
+                        end
+                    end
+                end
+                -- the callee calls ITS parameter j: what did WE pass there? (an outer owner's pair travels on)
+                for _, p in pairs(cs.cpo or {}) do
+                    if p.owner == to then subst(store, sums, sum, c, caller, p.j, tn and tn.name or to, member)
+                    else cp_add(sum, p.owner, p.j) end
+                end
+            end
+            -- an AMBIGUOUS call's effect, when the resolver kept every candidate: the JOIN of theirs (a may-analysis — a
+            -- write any candidate makes is one the call may make). It rests on a PREMISE, that the target is one of them
+            -- (a receiver the tree does not define — a vim handle's :close() — breaks it): the summary carries `jp`, which
+            -- purity renders `~` and calls_commute will not decide on. A candidate not summarized yet (no call edge
+            -- orders it first) keeps the hedge; a candidate in this component adds nothing it does not already share
+            local function join(c, caller, r)
+                if not (M.JOIN[r.rule] and r.cands and r.n and #r.cands == r.n) then return false end
+                local whole = true
+                for _, id in ipairs(r.cands) do
+                    if member(id) then intra[#intra + 1] = { c = c, caller = caller, to = id } -- (its effects are this component's own; its pending pairs are substituted with the rest)
+                    elseif sums[id] then take(c, caller, id)
+                    elseif prev then -- (not summarized yet in this pass: the previous pass's, or nothing in the first)
+                        stale = true
+                        if prev[id] then take(c, caller, id, prev[id]) end
+                    else whole = false end
+                end
+                if whole then sum.jp = true end
+                M.join_stats[whole and 'whole' or 'cut'] = M.join_stats[whole and 'whole' or 'cut'] + 1
+                return whole
+            end
+            for _, fid in ipairs(members) do
+                local caller = store.node(fid)
+                local file = caller and caller.file
+                for _, c in ipairs(store.topo():sites(fid)) do
+                    local to = callrec.to(c)
+                    if to and con.comp[to] == ci then
+                        -- intra-SCC: members share this summary already
+                        intra[#intra + 1] = { c = c, caller = caller, to = to }
+                    elseif to and sums[to] then
+                        take(c, caller, to)
+                    elseif to then
+                        s_hedge(sum, ('callee outside the fn graph: %s'):format(to))
+                    else
+                        local lang = file and (file:match('%.lua$') and 'lua'
+                            or file:match('%.php$') and 'php')
+                        local bname = callrec.full(c) or callrec.callee(c)
+                        local sig, grade
+                        if lang and bname then
+                            -- (explicit call: and/or would truncate the
+                            -- second return — the grade)
+                            sig, grade = M.sig_of(lang, bname, callrec.method(c))
+                        end
+                        local asserted
+                        if not sig and bname then
+                            local ue = require('cartograph.config').effects
+                            sig = ue and ue[bname] or nil
+                            asserted = sig ~= nil
+                        end
+                        if sig then
+                            -- apply the contract, at its honesty grade
+                            if asserted then
+                                s_hedge(sum, ('asserted contract: %s'):format(bname))
+                            elseif grade == 'method~' then
+                                sum.mh = true -- name-matched method tier (~)
                             end
-                        end
-                    end
-                    -- the callee calls ITS parameter j: what did WE pass there? (an outer owner's pair travels on)
-                    for _, p in pairs(cs.cpo or {}) do
-                        if p.owner == to then subst(store, sums, sum, c, caller, p.j, tn and tn.name or to, member)
-                        else cp_add(sum, p.owner, p.j) end
-                    end
-                elseif to then
-                    s_hedge(sum, ('callee outside the fn graph: %s'):format(to))
-                else
-                    local lang = file and (file:match('%.lua$') and 'lua'
-                        or file:match('%.php$') and 'php')
-                    local bname = callrec.full(c) or callrec.callee(c)
-                    local sig, grade
-                    if lang and bname then
-                        -- (explicit call: and/or would truncate the
-                        -- second return — the grade)
-                        sig, grade = M.sig_of(lang, bname, callrec.method(c))
-                    end
-                    local asserted
-                    if not sig and bname then
-                        local ue = require('cartograph.config').effects
-                        sig = ue and ue[bname] or nil
-                        asserted = sig ~= nil
-                    end
-                    if sig then
-                        -- apply the contract, at its honesty grade
-                        if asserted then
-                            s_hedge(sum, ('asserted contract: %s'):format(bname))
-                        elseif grade == 'method~' then
-                            sum.mh = true -- name-matched method tier (~)
-                        end
-                        if sig.io then s_add(sum, IOKEY, 1) end
-                        if sig.nondet then sum.nd = true end
-                        for _, ai in ipairs(sig.w or {}) do
-                            local kind, x = arg_target(store, c, ai, caller)
-                            if kind == 'var' then
-                                s_add(sum, x .. '\31', 1)
-                            elseif kind == 'param' then
-                                sum.pwx = sum.pwx or {}
-                                sum.pwx[x] = true
-                            elseif kind == 'opaque' then
-                                s_hedge(sum, ('%s on opaque arg @%s:%d')
-                                    :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
+                            if sig.io then s_add(sum, IOKEY, 1) end
+                            if sig.nondet then sum.nd = true end
+                            for _, ai in ipairs(sig.w or {}) do
+                                local kind, x = arg_target(store, c, ai, caller)
+                                if kind == 'var' then
+                                    s_add(sum, x .. '\31', 1)
+                                elseif kind == 'param' then
+                                    sum.pwx = sum.pwx or {}
+                                    sum.pwx[x] = true
+                                elseif kind == 'opaque' then
+                                    s_hedge(sum, ('%s on opaque arg @%s:%d')
+                                        :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
+                                end
                             end
-                        end
-                        -- HIGHER-ORDER: the passed fn's summary is this
-                        -- call's effect. a.to = the callback upgrade's
-                        -- resolved target (resolution already did the work)
-                        for _, ai in ipairs(sig.calls or {}) do
-                            local a = argv.at(c, ai)
-                            local target = a and a.to
-                            if not target and a
-                                and (a.k == 'local' or a.k == 'callable')
-                                and a.name then
-                                for _, fn2 in ipairs(store.by_file[callrec.file(c)] or {}) do
-                                    if (fn2.kind == 'function' or fn2.kind == 'method')
-                                        and fn2.name == a.name then
-                                        target = fn2.id
-                                        break
+                            -- HIGHER-ORDER: the passed fn's summary is this
+                            -- call's effect. a.to = the callback upgrade's
+                            -- resolved target (resolution already did the work)
+                            for _, ai in ipairs(sig.calls or {}) do
+                                local a = argv.at(c, ai)
+                                local target = a and a.to
+                                if not target and a
+                                    and (a.k == 'local' or a.k == 'callable')
+                                    and a.name then
+                                    for _, fn2 in ipairs(store.by_file[callrec.file(c)] or {}) do
+                                        if (fn2.kind == 'function' or fn2.kind == 'method')
+                                            and fn2.name == a.name then
+                                            target = fn2.id
+                                            break
+                                        end
                                     end
                                 end
-                            end
-                            local ts2 = target and sums[target]
-                            if ts2 then
-                                if ts2.over then sum.over = true end
-                                if ts2.h then s_hedge(sum, ts2.h[1]) end
-                                if ts2.nd then sum.nd = true end
-                                for key, tier in pairs(ts2.w) do
-                                    s_add(sum, key, tier)
+                                local ts2 = target and sums[target]
+                                if ts2 then
+                                    if ts2.over then sum.over = true end
+                                    if ts2.h then s_hedge(sum, ts2.h[1]) end
+                                    if ts2.nd then sum.nd = true end
+                                    for key, tier in pairs(ts2.w) do
+                                        s_add(sum, key, tier)
+                                    end
+                                    if ts2.pwx then
+                                        s_hedge(sum, ('callback %s mutates its params @%s:%d')
+                                            :format(a.name or '?', callrec.file(c) or '?', callrec.line(c) or 0))
+                                    end
+                                    -- (a callback calling a parameter of an enclosing function: still pending here)
+                                    for _, p in pairs(ts2.cpo or {}) do cp_add(sum, p.owner, p.j) end
+                                elseif a then
+                                    s_hedge(sum, ('%s: callback effects unknown @%s:%d')
+                                        :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
                                 end
-                                if ts2.pwx then
-                                    s_hedge(sum, ('callback %s mutates its params @%s:%d')
-                                        :format(a.name or '?', callrec.file(c) or '?', callrec.line(c) or 0))
-                                end
-                                -- (a callback calling a parameter of an enclosing function: still pending here)
-                                for _, p in pairs(ts2.cpo or {}) do cp_add(sum, p.owner, p.j) end
-                            elseif a then
-                                s_hedge(sum, ('%s: callback effects unknown @%s:%d')
-                                    :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
                             end
+                            -- sig.pure / sig.reads / sig.returns_arg: no hedge,
+                            -- no effect (reads/aliasing land with their consumers)
+                        elseif c.refused and c.refused.rule == 'higher-order' and c.refused.owner and c.refused.param then
+                            cp_add(sum, c.refused.owner, c.refused.param) -- (a call through a parameter: pending, CART-1495)
+                        elseif c.refused and join(c, caller, c.refused) then
+                            -- (every candidate taken: the call's effect is their join, under the premise `jp`)
+                        elseif c.refused then
+                            s_hedge(sum, ('refused (%s): %s @%s:%d'):format(
+                                c.refused.rule or '?', bname or '?',
+                                callrec.file(c) or '?', callrec.line(c) or 0))
+                        elseif not c.dynamic and bname then
+                            s_hedge(sum, ('unresolved: %s @%s:%d'):format(
+                                bname, callrec.file(c) or '?', callrec.line(c) or 0))
+                        else
+                            s_hedge(sum, ('dynamic call @%s:%d'):format(
+                                callrec.file(c) or '?', callrec.line(c) or 0))
                         end
-                        -- sig.pure / sig.reads / sig.returns_arg: no hedge,
-                        -- no effect (reads/aliasing land with their consumers)
-                    elseif c.refused and c.refused.rule == 'higher-order' and c.refused.owner and c.refused.param then
-                        cp_add(sum, c.refused.owner, c.refused.param) -- (a call through a parameter: pending, CART-1495)
-                    elseif c.refused then
-                        s_hedge(sum, ('refused (%s): %s @%s:%d'):format(
-                            c.refused.rule or '?', bname or '?',
-                            callrec.file(c) or '?', callrec.line(c) or 0))
-                    elseif not c.dynamic and bname then
-                        s_hedge(sum, ('unresolved: %s @%s:%d'):format(
-                            bname, callrec.file(c) or '?', callrec.line(c) or 0))
-                    else
-                        s_hedge(sum, ('dynamic call @%s:%d'):format(
-                            callrec.file(c) or '?', callrec.line(c) or 0))
                     end
                 end
             end
-        end
-        -- a member calling a member: substitute its pending pairs, until no new pair appears
-        local done = {}
-        for _ = 1, 50 do
-            local todo = {}
-            for _, x in ipairs(intra) do
-                for key, p in pairs(sum.cpo or {}) do
-                    if p.owner == x.to and not done[x] then done[x] = {} end
-                    if p.owner == x.to and not done[x][key] then done[x][key] = true; todo[#todo + 1] = { x = x, p = p } end
+            -- a member calling a member: substitute its pending pairs, until no new pair appears
+            local done = {}
+            for _ = 1, 50 do
+                local todo = {}
+                for _, x in ipairs(intra) do
+                    for key, p in pairs(sum.cpo or {}) do
+                        if p.owner == x.to and not done[x] then done[x] = {} end
+                        if p.owner == x.to and not done[x][key] then done[x][key] = true; todo[#todo + 1] = { x = x, p = p } end
+                    end
+                end
+                if #todo == 0 then break end
+                for _, t in ipairs(todo) do
+                    local tn = store.node(t.x.to)
+                    subst(store, sums, sum, t.x.c, t.x.caller, t.p.j, tn and tn.name or t.x.to, member)
                 end
             end
-            if #todo == 0 then break end
-            for _, t in ipairs(todo) do
-                local tn = store.node(t.x.to)
-                subst(store, sums, sum, t.x.c, t.x.caller, t.p.j, tn and tn.name or t.x.to, member)
-            end
+            for _, fid in ipairs(members) do sums[fid] = sum end
         end
-        for _, fid in ipairs(members) do sums[fid] = sum end
+    end
+    local prev, sig = {}, nil
+    M.join_stats = { rounds = 0 }
+    for round = 1, JOIN_ROUNDS + 1 do
+        M.join_stats = { rounds = round, whole = 0, cut = 0 }
+        pass(round <= JOIN_ROUNDS and prev or nil)
+        if not stale then break end
+        local s = signature(sums, ids)
+        if s == sig then break end
+        sig, prev = s, sums
     end
     store._fx, store._fxgen = sums, store.generation
     return sums
@@ -724,7 +800,7 @@ function M.purity(store, fid)
         end
     end
     local world = sum.w[IOKEY] ~= nil
-    local hedged = sum.h ~= nil or sum.over or sum.mh
+    local hedged = sum.h ~= nil or sum.over or sum.mh or sum.jp
         or (sum.cpo ~= nil and next(sum.cpo) ~= nil) -- (calls a function it is handed: as pure as that, CART-1495)
     local base = wmod and 'writes' or world and 'io' or 'pure'
     return hedged and (base .. '~') or base
@@ -772,6 +848,10 @@ function M.calls_commute(store, c1, c2)
     if #conflicts > 0 then
         table.sort(conflicts)
         return 'conflict', table.concat(conflicts, ', ')
+    end
+    -- (a conflict found under the join premise is one; a clean answer resting on it is not decided)
+    if s1.jp or s2.jp then
+        return 'unknown', 'an ambiguous call joined over its candidates: the target is assumed to be one of them'
     end
     return 'commute', 'write-write clean (reads not modeled)'
 end
