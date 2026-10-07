@@ -145,6 +145,29 @@ describe('generalize: the lgg over a pair, and the pair shape', function()
         assert.is_true(A.instance_of(g.template, widest))
         assert.is_false(A.instance_of(widest, g.template))
     end)
+
+    -- (CART-1540: the re-derivation seeded its fold with instance 1 MADE A TEMPLATE, so an instance's hole became a
+    -- template hole with no value — values[1] nil; the derived generalize raised interpreted and dropped instance 1
+    -- compiled. Found by derive-accept's derived client; DERIVE=generalize runs this too)
+    it('a HOLE inside an instance is a term like any other: shared it stays, differing it is a value, every instance keeps its values', function()
+        local function shown(g, n)
+            local vs = {}
+            for i = 1, n do
+                local ks = {}
+                for k in pairs(g.values[i] or {}) do ks[#ks + 1] = k end
+                table.sort(ks)
+                local p = {}
+                for _, k in ipairs(ks) do p[#p + 1] = k .. '=' .. A.show(g.values[i][k]) end
+                vs[i] = '{' .. table.concat(p, ',') .. '}'
+            end
+            return A.show(g.template.body) .. ' ' .. table.concat(vs, ' ')
+        end
+        assert.equals('(call ?h1...) {h1=(seq ?x 2 3)} {h1=(seq (seq) 4 5 6 7)}',
+            shown(A.generalize { node('call', hole 'x', lit(2), lit(3)), node('call', seq {}, lit(4), lit(5), lit(6), lit(7)) }, 2))
+        assert.equals('(f ?x ?h1) {h1=1} {h1=2}', shown(A.generalize { node('f', hole 'x', lit(1)), node('f', hole 'x', lit(2)) }, 2))
+        assert.equals('(f ?h1) {h1=?x} {h1=?y}', shown(A.generalize { node('f', hole 'x'), node('f', hole 'y') }, 2))
+        assert.equals('(f ?h1 1) {h1=?xs...} {h1=9}', shown(A.generalize { node('f', hole('xs', true), lit(1)), node('f', lit(9), lit(1)) }, 2))
+    end)
 end)
 
 describe('the generality order', function()

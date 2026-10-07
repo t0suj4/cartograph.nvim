@@ -1026,18 +1026,59 @@ function D.generalize(instances, opts)
     opts = opts or {}
     local env = opts.env or { defs = {} }
     env.defs = env.defs or {}
-    local T = B.template(B.copy(instances[1]))
+    -- ★ A HOLE INSIDE AN INSTANCE IS A TERM (CART-1540). The fold seeds T with instance 1 made a template, which would
+    -- make instance 1's holes TEMPLATE holes with no value — values[1] then nil, and `#values` a border ambiguity (the
+    -- derivation raised interpreted and dropped instance 1 compiled, native was right). So the fold sees each instance
+    -- hole QUOTED — a literal no instance holds, the same literal for the same hole, so `?x` and `?y` stay apart — and
+    -- the values and the body are unquoted after it: native's lgg treats such a hole as any other subterm
+    -- (the quoted hole is a LITERAL — an atom the fold cannot look inside, equal exactly when the holes are: its value
+    -- names the hole in a per-call registry keyed by its canonical show)
+    local QP, reg, ids = '\0hole#', {}, {}
+    local function quote(t)
+        if type(t) ~= 'table' then return t end
+        if t.k == 'hole' then
+            local key = B.show(t)
+            if not ids[key] then reg[#reg + 1] = B.copy(t); ids[key] = #reg end
+            return B.lit(QP .. ids[key])
+        end
+        if not t.kids then return t end
+        local c = {}
+        for k, v in pairs(t) do c[k] = v end
+        c.kids = {}
+        for i, x in ipairs(t.kids) do c.kids[i] = quote(x) end
+        return c
+    end
+    local function unquote(t)
+        if type(t) ~= 'table' then return t end
+        if t.k == 'lit' and type(t.v) == 'string' and t.v:sub(1, #QP) == QP then return B.copy(reg[tonumber(t.v:sub(#QP + 1))]) end
+        if not t.kids then return t end
+        local c = {}
+        for k, v in pairs(t) do c[k] = v end
+        c.kids = {}
+        for i, x in ipairs(t.kids) do c.kids[i] = unquote(x) end
+        return c
+    end
+    local quoted = {}
+    for i, x in ipairs(instances) do quoted[i] = quote(x) end
+    local T = B.template(quoted[1])
     local values = { {} }
     local defs_before = {}
     for k in pairs(env.defs) do defs_before[k] = true end
-    for k = 2, #instances do
-        local r, why = B.join(T, instances[k], { prefix = opts.prefix or 'h', env = env,
+    for k = 2, #quoted do
+        local r, why = B.join(T, quoted[k], { prefix = opts.prefix or 'h', env = env,
             linear = opts.linear, grammars = opts.grammars, positional = opts.positional, align = opts.align })
         if not r then error('generalize via join: ' .. why) end
         for i = 1, k - 1 do values[i] = r.left(values[i]) end
         values[k] = r.right({})
         T = r.template
     end
+    T = B.template(unquote(T.body), T.holes)
+    for i = 1, #values do for h, v in pairs(values[i]) do values[i][h] = unquote(v) end end
+    -- (a hole the body still holds AFTER the fold is one every instance holds there — GIVEN by the instances, not
+    -- minted: the passes below that regroup or rename the minted holes leave it as it is, as native's lgg does)
+    local given = {}
+    for _, hn in ipairs(reg) do given[hn.h] = true end
+    for h in pairs(given) do if values[1] and values[1][h] ~= nil then given[h] = nil end end
     -- ★ A MEMBER THAT LACKS AN OPTIONAL PAIR OWES NO VALUE UNDER IT (CART-1395). The fold is pairwise: when a later
     -- member's value differs under a pair an EARLIER member lacks, the join that mints the value hole fills every
     -- earlier member from the template's constant — so {a=1} read "x" under b, beside {a=1,b='x'} and {a=1,b='y'},
@@ -1109,7 +1150,7 @@ function D.generalize(instances, opts)
         local sites = {} -- { h, path, presence, col } in preorder of the body
         for _, pos in ipairs(B.positions(T.body)) do
             local n = pos.node
-            if is_hole(n) then sites[#sites + 1] = { h = n.h, path = pos.path, col = col(pos.path, false) } end
+            if is_hole(n) and not given[n.h] then sites[#sites + 1] = { h = n.h, path = pos.path, col = col(pos.path, false) } end
             if type(n) == 'table' and n.opt then sites[#sites + 1] = { h = n.opt, path = pos.path, presence = true, col = col(pos.path, true) } end
         end
         local groups = {}
@@ -1273,7 +1314,8 @@ function D.generalize(instances, opts)
         local function walk(t)
             if type(t) ~= 'table' then return end
             if is_hole(t) then
-                if not map[t.h] then n = n + 1; map[t.h] = prefix .. n end
+                -- (a hole the instances GIVE keeps its name: only the minted ones are numbered — CART-1540)
+                if not map[t.h] and not given[t.h] then n = n + 1; map[t.h] = prefix .. n end
                 return
             end
             for _, c in ipairs(t.kids or {}) do walk(c) end
