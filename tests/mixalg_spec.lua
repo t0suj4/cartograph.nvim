@@ -600,3 +600,45 @@ test('mixalg: a closure mix cannot lower is REFUSED by name, never a Lua error â
     local okl, e = pcall(require('cartograph.mix').lower, assert(R.read(text, 'lua')), { collect = got })
     ok(okl or (type(e) == 'table' and e.refusal ~= nil), 'a refusal or a lowering, not ' .. tostring(e))
 end)
+
+-- ONE LOWERING SERVES EVERY COMPILE (CART-1532): compile_match lowers the match closure once per process â€” sound only
+-- because specialize leaves the program it is given UNCHANGED, so that premise is pinned beside the cache
+test('mixalg: compile_match lowers the match closure ONCE, and a compile leaves the lowered program unchanged', function ()
+    ready()
+    local MX = require 'cartograph.mix'
+    local some = {}
+    for _, r in ipairs(rules.all()) do if #some < 3 then some[#some + 1] = r end end
+    MA.compile_match(some[1].lhs) -- (the first compile lowers, if no earlier test did)
+    local lower, n = MX.lower, 0
+    MX.lower = function (...) n = n + 1; return lower(...) end
+    local fine, err = pcall(function ()
+        for _, r in ipairs(some) do
+            local m = MA.compile_match(r.lhs)
+            eq(A.match(r.lhs, r.lhs.body), m(r.lhs.body), r.lua .. ': the cached lowering compiles a matcher equal to A.match')
+        end
+    end)
+    MX.lower = lower
+    assert(fine, err)
+    eq(0, n, 'no compile after the first lowers again')
+    -- the premise: a specialization of the lowered program does not modify it
+    local text, _, lines, _, _, prims = MA.program('M.match')
+    local prog = MX.lower(assert(R.read(text, 'lua')), { lines = lines })
+    local function snap(v)
+        local seen, out = {}, {}
+        local function go(x)
+            if type(x) ~= 'table' then out[#out + 1] = type(x) == 'function' and 'fn' or tostring(x); return end
+            if seen[x] then out[#out + 1] = '@'; return end
+            seen[x] = true
+            local ks = vim.tbl_keys(x)
+            table.sort(ks, function (a, b) return tostring(a) < tostring(b) end)
+            for _, k in ipairs(ks) do out[#out + 1] = tostring(k); go(x[k]) end
+        end
+        go(v)
+        return table.concat(out, ' ')
+    end
+    local before = snap(prog)
+    for _, r in ipairs(some) do
+        MX.specialize(prog, 'M_match', { 'S', 'D', 'S' }, { r.lhs, nil, nil }, { budget = 5e6, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, prims = prims })
+    end
+    eq(before, snap(prog), 'specialize leaves the program it was given as it was')
+end)

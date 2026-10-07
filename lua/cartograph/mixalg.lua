@@ -569,6 +569,10 @@ function M.program(root, files, opts)
 end
 
 local term_cache
+-- the LOWERED match closure, once per term (CART-1532): every compile lowered the same term again (~40-55 ms each, the
+-- whole of a small compile's lowering). specialize does not modify the program it is given — measured: a structural
+-- snapshot of the lowered closure unchanged across all 33 luajs rule templates' compiles — so one lowering serves all
+local prog_cache, prog_term
 -- ★ SPECULATION (CART-1463): the DEOPTIMIZATION a compiled matcher raises when an assumption it was compiled under
 -- (opts.assume, see cartograph.mix) fails at run time — the caller then runs the ORIGINAL. A deopt is also FLAGGED: a
 -- residual `pcall` (key computations keep the original's) would otherwise swallow it and answer from a wrong branch
@@ -601,9 +605,13 @@ function M.compile_match(T, opts)
     local A = require('cartograph.algebra').load()
     if not term_cache then term_cache = assert(require('cartograph.algebraread').read((M.program('M.match')), 'lua')) end
     local _, _, lines, _, _, prims = M.program('M.match')
-    local text, stats, pool, map = MX.mix(term_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, opts.env },
+    if prog_term ~= term_cache then prog_cache, prog_term = MX.lower(term_cache, { lines = lines }), term_cache end
+    local res, stats = MX.specialize(prog_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, opts.env },
         { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, assume = opts.assume,
           prims = prims })
+    local text, map = MX.print(res, prog_cache.where)
+    stats.decisions = res.decisions -- (as MX.mix reports them, CART-1501)
+    local pool = res.pool
     -- (map: residual line -> the algebra's src:line — MX.translate turns an error of this code into the source's terms)
     return served(text, pool), text, stats, pool, map
 end
