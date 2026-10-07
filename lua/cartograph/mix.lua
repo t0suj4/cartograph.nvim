@@ -246,13 +246,8 @@ function lower_expr(t, cx, scope)
         end
         if f.op == 'fn' then return { op = 'call', fn = f.name, args = args } end
         if f.op == 'global' then
-            -- (a primitive that MUTATES its first argument makes the variable that table is rooted in FORCED dynamic,
-            -- as a store into it does: never computed early, so a static table would stay as it was — CART-1503)
-            if MUTATES[f.name] and args[1] then
-                local x = args[1]
-                for _ = 1, 1000 do if x.op ~= 'index' then break end; x = x.obj end
-                if x.op == 'var' and x.id then cx.forced[x.id] = true end
-            end
+            -- (a primitive that MUTATES its first argument forces the variable its table is rooted in, as a store does
+            -- — CART-1503: DERIVED from the `mutate` facts, mixproj, CART-1524)
             return { op = 'prim', name = f.name, args = args }
         end
         return { op = 'callv', f = f, args = args } -- (a call through a value: a closure)
@@ -312,16 +307,13 @@ local function note_write(v, root, cx, scope, writes)
     if id and crossed > 0 then
         -- ASSIGNMENT CONVERSION: a closure assigning a variable it captured makes that variable a BOX (one
         -- shared cell, whichever residual function the closure ends up in); a closure storing into a
-        -- captured table makes that table dynamic (it is shared by reference)
+        -- captured table makes that table dynamic (it is shared by reference — FORCED, derived from the `store`
+        -- facts, as a store into the function's OWN PARAMETER is: mixproj, CART-1503 / CART-1524)
         if root == v then
             if cx.isparam[id] then refuse('a closure assigning the captured parameter `' .. text(root) .. '` (rung 3: a parameter is not boxed)') end
             if cx.loopvar[id] then refuse('a closure assigning the captured loop variable `' .. text(root) .. '` (rung 3: a loop variable is not boxed)') end
             cx.boxed[id] = true
-        else cx.forced[id] = true end
-    elseif id and root ~= v and cx.isparam[id] then
-        -- (a store into the function's OWN PARAMETER — an out-parameter, `out[#out + 1] = x` — forces it: the caller's
-        -- table is the same one at run time, so FORCED ACROSS CALLS makes the caller's variable dynamic — CART-1503)
-        cx.forced[id] = true
+        end
     elseif id and root == v then
         -- (when: its tick, or LATE when a loop nested in the variable's scope repeats it — a later round
         -- of that loop runs after a capture written above it)
@@ -759,8 +751,9 @@ function M.lower(term, opts)
     -- `content_id(a, ids)` reaches a forced parameter and the specialization is refused (join.lua:217, the first
     -- derivation followed through the basis). Through a direct call, and a call THROUGH A LOCAL bound to a lambda
     -- (`local function member(o, …) o[key] = … end` called as `member(o, …)`, kvterm.lua's kv_template, CART-1503).
-    -- DERIVED (CART-1524): mixproj's forced rules over the lowered IR's facts, to their fixpoint (a cap RAISES)
-    for id in pairs(require('cartograph.mixproj').forced(cx.funcs, { mutates = MUTATES })) do cx.forced[id] = true end
+    -- DERIVED (CART-1524): mixproj's forced rules over the lowered IR's facts, to their fixpoint (a cap RAISES) — the
+    -- whole set: a captured store, an own-parameter store, a mutating primitive's root, and across calls
+    cx.forced = require('cartograph.mixproj').forced(cx.funcs, { mutates = MUTATES })
     -- RECORDS: a local table that never escapes is its fields, one local each (SRA, CART-1331 rung 4a)
     cx.sra = { candidates = 0, replaced = 0, escapes = {} }
     for _, f in pairs(cx.funcs) do f.body = M.sra(f.body, cx) end
