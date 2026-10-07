@@ -296,3 +296,30 @@ test('fixpoint: an AMBIGUOUS call is the JOIN of its candidates — a candidate\
     store._fx = nil
     assert(ok2, err)
 end)
+
+test('fixpoint: a join whose candidate is summarized LATER repeats the pass to the fixpoint, and a later pass recomputes only what read a changed summary (CART-1544)', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local log = {}',
+        'local A1, B1, B2, C1, C2, K1, K2 = {}, {}, {}, {}, {}, {}, {}',
+        -- (each call ambiguous, each candidate summarized AFTER its caller: no call edge orders a join)
+        'function A1:go(o) return o:mid() end',
+        'function B1:mid(o) return o:fin() end',
+        'function B2:mid() return 1 end',
+        'function C1:fin() log.n = 1 end',
+        'function C2:fin() return 2 end',
+        'function A1:steady(o) return o:calm() end',      -- recomputed in pass 2, to the SAME summary
+        'function K1:calm() return 1 end',
+        'function K2:calm() return 2 end',
+        'local function y(o) return A1.steady(A1, o) end', -- reads only that: reused
+        'return { A1, B1, B2, C1, C2, K1, K2, y }' }, '\n'))))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do local k = n.id:match('::(.-)@'); if k then by[k] = n end end
+    eq('writes~', effects.purity(store, by['A1:go'].id), 'C1:fin writes log, two ambiguous hops and two passes away')
+    eq('pure~', effects.purity(store, by.y.id))
+    local js = effects.join_stats
+    eq(4, js.rounds, 'B1:mid changes in pass 2, A1:go in pass 3, pass 4 changes nothing')
+    -- pass 1 all 9; pass 2 the three joins (A1:go, B1:mid, A1:steady — y reads A1:steady, unchanged, so y is reused);
+    -- pass 3 A1:go alone (B1:mid changed); pass 4 nothing
+    eq(13, js.computed, 'only what read a changed summary is recomputed')
+end)

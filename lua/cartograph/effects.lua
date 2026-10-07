@@ -277,17 +277,9 @@ local function keys_of(t)
     table.sort(ks)
     return table.concat(ks, ',')
 end
-local function signature(sums, ids)
-    local out, seen = {}, {}
-    for _, id in ipairs(ids) do
-        local s = sums[id]
-        if s and not seen[s] then
-            seen[s] = true
-            out[#out + 1] = table.concat({ id, s.nk, tostring(s.over), tostring(s.mh), tostring(s.nd), tostring(s.jp),
-                s.h and s.h[1] or '', keys_of(s.w), keys_of(s.gpk), keys_of(s.pwx), keys_of(s.cpo) }, '\0')
-        end
-    end
-    return table.concat(out, '\n')
+local function signature(s)
+    return table.concat({ s.nk, tostring(s.over), tostring(s.mh), tostring(s.nd), tostring(s.jp),
+        s.h and s.h[1] or '', keys_of(s.w), keys_of(s.gpk), keys_of(s.pwx), keys_of(s.cpo) }, '\0')
 end
 
 local CAP = 200   -- write-set keys per summary before honest coarsening
@@ -490,12 +482,37 @@ function M.summaries(store)
     -- this repo), so a candidate may not be summarized yet when its call is reached: the pass takes the PREVIOUS
     -- pass's summary (nothing in the first) and marks itself STALE, and passes repeat to the least fixpoint — the
     -- summaries a pass reads equal the ones it writes. Every effect only grows from pass to pass (union, from
-    -- nothing). Past JOIN_ROUNDS a last pass hedges such a join instead: never an answer that is not a fixpoint
-    local sums, stale
+    -- nothing). Past JOIN_ROUNDS a last pass hedges such a join instead: never an answer that is not a fixpoint.
+    -- A later pass RECOMPUTES only a component that read a summary which is not the one it read last time (CART-1544):
+    -- reads go through a view that records them, and a recomputed summary equal to its previous one keeps that
+    -- object, so an unchanged component stays unchanged for everything that reads it. The fixpoint is the pass
+    -- that recomputes nothing into something new
+    local sums, stale, changed, computed
+    local deps = {} -- component -> { [id] = the summary it read, the previous pass's for a join; false: none }
     local function pass(prev)
-        sums, stale = {}, false
+        local real, reads = {}, nil
+        sums = setmetatable({}, { __newindex = real, __index = function (_, k)
+            local v = real[k]
+            if reads then reads[k] = v or (prev and prev[k]) or false end
+            return v
+        end })
+        stale, changed, computed = false, 0, 0
         for ci = 1, con.n do
             local members = con.members[ci]
+            local was = prev and prev[members[1]]
+            local dep = was and deps[ci]
+            if dep then
+                for x, v in pairs(dep) do
+                    if (real[x] or prev[x] or false) ~= v then dep = nil; break end
+                end
+                if dep then -- (every summary it read is the one it read last time: so is its own)
+                    for _, fid in ipairs(members) do real[fid] = was end
+                    goto reused
+                end
+            end
+            reads = {}
+            deps[ci] = reads
+            computed = computed + 1
             local sum = { w = {}, nk = 0 }
             -- DIRECT effects of every member
             for _, fid in ipairs(members) do
@@ -716,19 +733,23 @@ function M.summaries(store)
                     subst(store, sums, sum, t.x.c, t.x.caller, t.p.j, tn and tn.name or t.x.to, member)
                 end
             end
-            for _, fid in ipairs(members) do sums[fid] = sum end
+            reads = nil
+            if was and signature(sum) == signature(was) then sum = was else changed = changed + 1 end
+            for _, fid in ipairs(members) do real[fid] = sum end
+            ::reused::
         end
+        return real
     end
-    local prev, sig = {}, nil
-    M.join_stats = { rounds = 0 }
+    local prev = {}
+    M.join_stats = { rounds = 0, computed = 0 }
     for round = 1, JOIN_ROUNDS + 1 do
-        M.join_stats = { rounds = round, whole = 0, cut = 0 }
-        pass(round <= JOIN_ROUNDS and prev or nil)
-        if not stale then break end
-        local s = signature(sums, ids)
-        if s == sig then break end
-        sig, prev = s, sums
+        local js = M.join_stats
+        M.join_stats = { rounds = round, whole = 0, cut = 0, computed = js.computed }
+        prev = pass(round <= JOIN_ROUNDS and prev or nil)
+        M.join_stats.computed = M.join_stats.computed + computed
+        if not stale or (round > 1 and changed == 0) then break end
     end
+    sums = prev
     store._fx, store._fxgen = sums, store.generation
     return sums
 end
