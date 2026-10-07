@@ -9,7 +9,8 @@
 --            variant = '<git ref>' (nil: the working tree), instruments = { inst… } }
 --   inst = { name, kind, … }:
 --     tactic : tactic = '<toolbelt entry>', params = { k = v }, expect = 'holds' | 'fails'   (in the variant), or
---              compare = '<Lua pattern>' — run in both trees, pass when the claim line's capture is the same (no regression)
+--              compare = '<Lua pattern>' — run in both trees, pass when the claim line's capture is the same (no regression),
+--              or with better = { 'up' | 'down'… } when each captured number moved only its way
 --     specs  : specs = { '<spec basename>'… }                                              (in the variant)
 --     check  : file = '<throwaway>' | tactic = '<entry>', params, pattern = '<Lua pattern>' — passes when the output has it
 --     join   : file = '<throwaway>', params — run in BOTH trees; its `ROW\t<key>\t<value>` lines are joined by key, and
@@ -79,7 +80,19 @@ function RUN.tactic(inst, trees, env)
         local _, bwhy = M.verdict('\n' .. env.exec(trees.baseline, toolbelt(inst)))
         local cb, cv = tostring(bwhy or ''):match(inst.compare), tostring(why or ''):match(inst.compare)
         if not cb or not cv then return { pass = false, detail = ('the compare pattern matched baseline %s / variant %s'):format(tostring(cb), tostring(cv)) } end
-        return { pass = cb == cv, baseline = cb, variant = cv, detail = cb == cv and ('as the baseline: ' .. cv) or ('baseline ' .. cb .. ' -> variant ' .. cv) }
+        if cb == cv then return { pass = true, baseline = cb, variant = cv, detail = 'as the baseline: ' .. cv } end
+        -- better = { 'up' | 'down'… }: the capture's NUMBERS, in order, may each move only that way (an improvement passes)
+        local pass = false
+        if inst.better then
+            local nb, nv = {}, {}
+            for x in cb:gmatch('%-?[%d.]+') do nb[#nb + 1] = tonumber(x) end
+            for x in cv:gmatch('%-?[%d.]+') do nv[#nv + 1] = tonumber(x) end
+            pass = #nb == #inst.better and #nv == #nb
+            for i, dir in ipairs(inst.better) do
+                if pass and ((dir == 'up' and nv[i] < nb[i]) or (dir == 'down' and nv[i] > nb[i])) then pass = false end
+            end
+        end
+        return { pass = pass, baseline = cb, variant = cv, detail = ('baseline %s -> variant %s%s'):format(cb, cv, pass and ' (no worse)' or '') }
     end
     local want = (inst.expect or 'holds') == 'holds'
     return { pass = holds ~= nil and holds == want, detail = (holds == nil and 'no verdict: ' or '') .. tostring(why) }

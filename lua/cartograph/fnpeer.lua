@@ -61,7 +61,7 @@ local function is_values(v) -- a map hole -> term
     return true
 end
 --- the ROLE of each argument of a sample: 'template' (a record with body and holes), 'term' (a node), 'terms' (a
---- list of nodes), 'family' ({ template, values = { hole -> term }… }), 'fixed' (passed back as sampled)
+--- list of nodes), 'values' ({ hole -> term }), 'family' ({ template, values = { hole -> term }… }), 'fixed' (as sampled)
 function M.roles(args)
     local r = {}
     for i = 1, args.n or #args do
@@ -69,6 +69,7 @@ function M.roles(args)
         if is_template(v) then r[i] = 'template'
         elseif is_term(v) then r[i] = 'term'
         elseif type(v) == 'table' and #v > 0 and (function () for _, x in ipairs(v) do if not is_term(x) then return false end end return true end)() then r[i] = 'terms'
+        elseif is_values(v) then r[i] = 'values'
         elseif type(v) == 'table' and is_template(v.template) and type(v.values) == 'table'
             and (function () for _, x in ipairs(v.values) do if not is_values(x) then return false end end return true end)() then r[i] = 'family'
         else r[i] = 'fixed' end
@@ -81,6 +82,11 @@ local function enc_arg(role, v)
     if role == 'template' then return { k = 'template', kids = { M.encode(v.body) } } end
     if role == 'term' then return M.encode(v) end
     if role == 'terms' then local kids = {}; for i, x in ipairs(v) do kids[i] = M.encode(x) end; return { k = 'terms', kids = kids } end
+    if role == 'values' then
+        local pairs_ = {}
+        for _, h in ipairs(sorted(v)) do pairs_[#pairs_ + 1] = { k = 'pair', kids = { { k = 'hkey', v = h }, M.encode(v[h]) } } end
+        return { k = 'vals', kids = pairs_ }
+    end
     if role == 'family' then
         local vs = {}
         for i, V in ipairs(v.values) do
@@ -183,6 +189,7 @@ function M.decode_args(A, meta, request)
         if role == 'template' then args[i] = template_of(kid, s[i])
         elseif role == 'term' then args[i] = M.decode(kid)
         elseif role == 'terms' then args[i] = {}; for j, x in ipairs(kid.kids) do args[i][j] = M.decode(x) end
+        elseif role == 'values' then args[i] = {}; for _, pr in ipairs(kid.kids) do args[i][pr.kids[1].v] = M.decode(pr.kids[2]) end
         elseif role == 'family' then
             local F = vim.deepcopy(s[i])
             F.template = template_of(kid.kids[1], s[i].template)

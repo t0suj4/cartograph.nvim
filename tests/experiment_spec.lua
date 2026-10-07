@@ -83,6 +83,13 @@ test('experiment: a tactic with compare = <pattern> is NO REGRESSION — the sam
         fake(function (dir) return out(dir == '/repo' and '26 agree, 1 differ, 6 no sample, 1 refused' or '27 agree, 0 differ, 6 no sample, 1 refused') end))
     eq(false, worse.rows[1].pass)
     eq('baseline 27 agree, 0 differ, 6 no sample, 1 refused -> variant 26 agree, 1 differ, 6 no sample, 1 refused', worse.rows[1].detail)
+    local B = { 'up', 'down', 'down', 'down' }
+    local better = X.run({ baseline = 'HEAD', instruments = { { kind = 'tactic', tactic = 'derive-accept', compare = P, better = B } } },
+        fake(function (dir) return out(dir == '/repo' and '33 agree, 0 differ, 0 no sample, 1 refused' or '27 agree, 0 differ, 6 no sample, 1 refused') end))
+    eq(true, better.rows[1].pass, 'an improvement passes under better: ' .. better.rows[1].detail)
+    local mixed = X.run({ baseline = 'HEAD', instruments = { { kind = 'tactic', tactic = 'derive-accept', compare = P, better = B } } },
+        fake(function (dir) return out(dir == '/repo' and '33 agree, 1 differ, 0 no sample, 1 refused' or '27 agree, 0 differ, 6 no sample, 1 refused') end))
+    eq(false, mixed.rows[1].pass, 'one number moving the wrong way fails')
     local nobase = X.run({ instruments = { { kind = 'tactic', tactic = 'derive-accept', compare = P } } }, fake(function () return out('1 agree, 0 differ, 0 no sample, 0 refused') end))
     eq(false, nobase.rows[1].pass, 'compare needs a baseline')
 end)

@@ -73,6 +73,59 @@ local function tap(A, D, suite, cap)
     return samples
 end
 
+-- SYNTHESIZED SAMPLES for an operator the suite never calls (CART-1538): its arguments made from OTHER operators'
+-- sampled calls and NATIVE results — one operator's reply is another's request, peergen's premise. Only for operators
+-- with no sample; native results only (the derivations are not consulted); a fixed order (D.OPERATORS).
+--   diff_regions(a, b, path, out)  pairs of sampled terms        unit(T, h) / admits_template(T, h, T2)  a sampled
+--   extract_call(X, V) / extract_call_of(X, t)  native extract's record over extract's samples, its call's term
+--   kv_eq(x, y)  pairs of kv_generalize's records                template with one of its own holes
+local function synthesize(A, D, samples, cap)
+    local made = {}
+    local function is_template(v) return type(v) == 'table' and type(v.body) == 'table' and type(v.holes) == 'table' end
+    local function is_term(v) return type(v) == 'table' and type(v.k) == 'string' end
+    local function add(op, args)
+        if #(samples[op] or {}) > 0 and not made[op] then return end -- (a sampled operator keeps its own)
+        samples[op] = samples[op] or {}
+        if #samples[op] < cap then samples[op][#samples[op] + 1] = args; made[op] = (made[op] or 0) + 1 end
+    end
+    local templates, terms = {}, {}
+    for _, op in ipairs(D.OPERATORS) do
+        for _, a in ipairs(samples[op] or {}) do
+            for i = 1, a.n or #a do
+                local v = a[i]
+                if is_template(v) and #templates < 40 then templates[#templates + 1] = v
+                elseif is_term(v) and #terms < 40 then terms[#terms + 1] = v end
+            end
+        end
+    end
+    local function first_hole(T) local hs = {}; for h in pairs(T.holes) do hs[#hs + 1] = h end; table.sort(hs); return hs[1] end
+    for i = 1, #terms - 1 do add('diff_regions', { n = 4, terms[i], terms[i + 1], {}, {} }) end
+    for i, T in ipairs(templates) do
+        local h = first_hole(T)
+        if h then
+            add('unit', { n = 2, T, h })
+            add('admits_template', { n = 4, T, h, templates[i % #templates + 1] })
+        end
+    end
+    for _, a in ipairs(samples.extract or {}) do
+        local okx, X = pcall(A.extract, unpack(vim.deepcopy(a), 1, a.n))
+        if okx and type(X) == 'table' and X.params then
+            local V = {}
+            for _, pr in ipairs(X.params) do V[pr.hole] = A.lit(1) end
+            add('extract_call', { n = 3, X, V })
+            local okc, r = pcall(A.extract_call, X, V)
+            if okc and type(r) == 'table' and r.ok then add('extract_call_of', { n = 3, X, r.term }) end
+        end
+    end
+    for _, a in ipairs(samples.kv_generalize or {}) do
+        local recs = a[1]
+        if type(recs) == 'table' then
+            for i = 1, #recs do add('kv_eq', { n = 2, recs[i], recs[i % #recs + 1] }); add('kv_eq', { n = 2, recs[i], vim.deepcopy(recs[i]) }) end
+        end
+    end
+    return made
+end
+
 local function measure(_, p)
     local MA, MX, F = require 'cartograph.mixalg', require 'cartograph.mix', require 'cartograph.mixfn'
     local R = require 'cartograph.algebraread'
@@ -85,6 +138,7 @@ local function measure(_, p)
     local suite = p.suite or (repo_of_toolbelt() .. '/tests/vendor/algebra_spec.lua')
     local samples, why = tap(A, D, suite, tonumber(p.cap or 12))
     if not samples then return { error = why } end
+    local synthesized = synthesize(A, D, samples, tonumber(p.cap or 12))
     local through = p.through == '1' or p.through == 'true'
     local opaque
     if through then
@@ -96,7 +150,14 @@ local function measure(_, p)
     local function same_result(w, g)
         if w[1] and g[1] then
             local okd, d = pcall(vim.deep_equal, nofn({ unpack(w, 2, 4) }), nofn({ unpack(g, 2, 4) }))
-            return okd and d
+            if not (okd and d) then return false end
+            -- (and what the call did to its ARGUMENTS — diff_regions answers into `out`; CART-1538)
+            if w.after and g.after then
+                local from = math.max(w.from or 1, g.from or 1)
+                local okw, dw = pcall(vim.deep_equal, nofn({ unpack(w.after, from, w.after.n) }), nofn({ unpack(g.after, from, g.after.n) }))
+                return okw and dw
+            end
+            return true
         end
         return (not w[1]) and (not g[1])
     end
@@ -105,7 +166,7 @@ local function measure(_, p)
     local okall, eall = pcall(function ()
         for _, op in ipairs(ops) do
             local key = 'derive.lua::D.' .. op
-            local row = { op = op, samples = #(samples[op] or {}) }
+            local row = { op = op, samples = #(samples[op] or {}), synthesized = synthesized[op] }
             local okp, text, _, lines, knowns, _, prims = pcall(MA.program, key, nil, { snapshot = true, through = through or nil, opaque = opaque })
             local prog, entry, G
             if not okp then row.refused = 'assemble: ' .. tostring(text)
@@ -187,6 +248,7 @@ local function measure(_, p)
                     local c = vim.deepcopy(a)
                     local r = { pcall(f, unpack(c, rest and 2 or 1, c.n)) }
                     debug.sethook()
+                    r.after, r.from = c, rest and 2 or 1 -- (the arguments AFTER the call: an operator's side effect is a result too)
                     return r
                 end
                 local agree, w1 = 0, nil
@@ -316,7 +378,7 @@ local function measure(_, p)
     if not okall then return { error = tostring(eall), rows = rows } end
     local bytes, fns = 0, 0
     for _, r in ipairs(rows) do bytes, fns = bytes + (r.bytes or 0), fns + (r.functions or 0) end
-    return { rows = rows, tally = tally, bytes = bytes, functions = fns, through = through, reuse = p.reuse or 'lazy', control = control }
+    return { rows = rows, tally = tally, bytes = bytes, functions = fns, through = through, reuse = p.reuse or 'lazy', control = control, synthesized = synthesized }
 end
 
 local E = {
@@ -409,9 +471,14 @@ E.examples = {
         end },
     },
     {
-        name = 'an operator the suite never calls has NO SAMPLE — and a run that compared nothing does not hold',
-        files = { ['mini_spec.lua'] = MINI }, params = mini({ ops = 'unit' }),
+        name = 'an operator the suite never calls and no other sample can feed has NO SAMPLE — and a run that compared nothing does not hold',
+        files = { ['mini_spec.lua'] = MINI }, params = mini({ ops = 'kv_eq' }),
         expect = { holds = false, check = function (v) return v.rows[1].class == 'nosample' and v.tally.agree == 0, vim.inspect(v.rows[1]) end },
+    },
+    {
+        name = 'an operator the suite never calls is SYNTHESIZED from other samples (unit: a sampled template and one of its holes)',
+        files = { ['mini_spec.lua'] = MINI }, params = mini({ ops = 'unit' }),
+        expect = { holds = true, check = function (v) local r = v.rows[1]; return r.class == 'agree' and (r.synthesized or 0) > 0 and r.agree == r.samples, vim.inspect(r) end },
     },
     {
         name = 'an operator with NO derivation is refused by name before anything runs',
