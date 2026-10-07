@@ -300,6 +300,21 @@ test('fixpoint: an AMBIGUOUS call is the JOIN of its candidates — a candidate\
     assert(ok2, err)
 end)
 
+test('fixpoint: a TABLE CONSTRUCTOR argument is fresh — setmetatable({}, mt) writes nothing outside; a table that came from elsewhere still hedges (CART-1547)', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local mt = { __index = {} }',
+        'local function mk() return setmetatable({}, mt) end',
+        'local function mk2() return setmetatable({ n = 1 }, mt) end',
+        'local function wrap(f) return setmetatable(f(), mt) end',
+        'return { mk, mk2, wrap }' }, '\n'))))
+    local by = byname()
+    eq('pure', effects.purity(store, by.mk.id), 'an empty constructor')
+    eq('pure', effects.purity(store, by.mk2.id), 'a constructor with fields')
+    local h = effects.summaries(store)[by.wrap.id].h
+    ok(h and h[1]:find('setmetatable on opaque arg', 1, true), 'a call result may be anyone\'s table: ' .. vim.inspect(h))
+end)
+
 test('fixpoint: a join whose candidate is summarized LATER repeats the pass to the fixpoint, and a later pass recomputes only what read a changed summary (CART-1544)', function ()
     if not ready() then skip 'no lua parser' end
     store.ingest(ts.extract(mkroot(table.concat({

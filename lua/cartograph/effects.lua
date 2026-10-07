@@ -353,6 +353,7 @@ local function arg_target(store, c, i, caller)
         -- it MAY alias module state; the caller hedges (no alias analysis)
     end
     if a.k == 'scalar' or a.k == 'lit' then return 'value' end -- immutable
+    if a.k == 'ctor' then return 'fresh' end -- (`{ … }`: made by the argument list, CART-1547)
     return 'opaque'
 end
 

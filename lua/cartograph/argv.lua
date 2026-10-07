@@ -27,10 +27,12 @@ local M = {}
 -- unknowable (erlang's `?NS_MAM_2` expands in a library that is not in the tree)
 -- while its NAME is right there in the syntax, and a named key can be linked,
 -- counted and refused where an opaque `expr` can do none of those (CART-0812).
+-- `ctor` (10, appended likewise) is a table CONSTRUCTOR — `setmetatable({}, mt)`: a table the argument list makes,
+-- fresh, which effects tells from an `expr` that may alias module state (CART-1547).
 M.K = { lit = 1, concat = 2, ['local'] = 3, func = 4, callable = 5,
-    expr = 6, spread = 7, scalar = 8, macro = 9 }
+    expr = 6, spread = 7, scalar = 8, macro = 9, ctor = 10 }
 M.KNAME = { [0] = nil, 'lit', 'concat', 'local', 'func', 'callable',
-    'expr', 'spread', 'scalar', 'macro' }
+    'expr', 'spread', 'scalar', 'macro', 'ctor' }
 
 -- ── dual-mode accessor ───────────────────────────────────────────────────
 -- number of args on call `c`

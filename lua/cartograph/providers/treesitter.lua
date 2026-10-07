@@ -8260,6 +8260,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                                     :gsub('^["\']', ''):gsub('["\']$', '')
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'concat', prefix = pre }
+                            elseif t == 'table_constructor' then
+                                -- `{ … }` — a table this call's argument list MAKES: fresh, so a write into it (setmetatable's) is
+                                -- the call's own business, never module state (CART-1547)
+                                args[#args + 1] = ''
+                                argv[#argv + 1] = { k = 'ctor' }
                             else
                                 local cname = callable_arg(a, src)
                                 args[#args + 1] = ''
