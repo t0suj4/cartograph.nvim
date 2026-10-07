@@ -12,6 +12,12 @@
 -- COVERAGE (CART-1538): each row also carries how much of its RESIDUAL the tapped samples ran — statement lines and
 -- branch arms (an arm counts when its first statement ran, recorded by the guard's line hook) — and the claim line says
 -- it: measured 2026-10-07, 21.0% of lines and 14.5% of arms, so "agree" is about the paths the suite happens to reach.
+-- THE DERIVED CLIENT (fuzz = N [points = 8] [keep = 0.4] [seed = 1538], CART-1538): each operator's case split (the term kinds
+-- its code compares against) turned into a peergen model by fnpeer, the generated client driving the derivation
+-- interpreted and its residual with N seeded inputs; rows carry `fuzz` = { inputs, ok_same, ok_differ, err_same,
+-- err_diffmsg, mixed, budget, decode } and an ok/ok difference, a mixed outcome or a message difference (modulo position
+-- and a residual local's name) makes the row DIFFER. Measured 2026-10-07 (120 inputs): arms 14.5% -> 21.5%; on planted
+-- RESIDUAL mutants it killed 22 the samples missed out of 160 (match: 15 vs 6); it found CART-1540.
 -- CLAIM: no operator differs, none is refused, at least one was compared — and the CONTROL held: two of a derivation's
 -- own results that differ compared as different (a dead comparison would call every residual right).
 local function repo_of_toolbelt()
@@ -198,6 +204,76 @@ local function measure(_, p)
                 end
                 row.agree = agree
                 row.class = agree == row.samples and 'agree' or 'differ'
+                -- ── THE DERIVED CLIENT (fuzz = N, CART-1538): the operator's own case split -> fnpeer's peergen model ->
+                -- a generated client, driven over two transports (the derivation interpreted, its residual) with N seeded
+                -- inputs: each hole the sampled subterm (keep) or a minimal term of a kind the code compares against ──
+                row.hit_base = {}
+                for l in pairs(row.hit) do row.hit_base[l] = true end
+                local nfuzz = tonumber(p.fuzz or 0)
+                if nfuzz > 0 and cases[1] and cases[1].f and not cases[1].rest then
+                    local FP, PG = require 'cartograph.fnpeer', require 'cartograph.peergen'
+                    local vocab, seen = {}, {}
+                    local function walk(x) -- (the KINDS the code compares against, `x.k == 'lit'`, off its lowered IR)
+                        if type(x) ~= 'table' or seen[x] then return end
+                        seen[x] = true
+                        if x.op == 'bin' and (x.o == '==' or x.o == '~=') then
+                            for _, pr in ipairs({ { x.l, x.r }, { x.r, x.l } }) do
+                                local fe, lit = pr[1], pr[2]
+                                if type(fe) == 'table' and fe.op == 'index' and fe.key and fe.key.op == 'str' and fe.key.v == 'k' and lit and lit.op == 'str' then vocab[lit.v] = true end
+                            end
+                        end
+                        for _, c in pairs(x) do walk(c) end
+                    end
+                    for _, fn in pairs(prog.funcs) do walk(fn.body) end
+                    local Lt, Ht, Nt = A.lit, A.hole, A.node
+                    local CANDS = { Lt(1), Lt('a'), Lt(true), Ht('x'), Ht('xs', true), A.ctx('C', { Ht('y') }), Nt('f'), Nt('f', Lt(1)),
+                        A.seq({}), A.seq({ Lt(2) }), A.name('n'), A.absent(), A.present(), A.cursor(), { k = 'noval' },
+                        A.keyed('obj', { Nt('pair', Lt('a'), Lt(1)) }), { k = 'embed', g = 'lua', kids = { Nt('x') } } }
+                    local model, meta = FP.model(op, samples[op], { vocab = vocab, points = tonumber(p.points or 8) })
+                    local tr = {}
+                    local client = assert(load(PG.generate(model), 'fnpeer:' .. op))().new({ exchange = function (req, o)
+                        local okd, a = pcall(FP.decode_args, A, meta[o.name], req)
+                        if not okd then tr.last = { false, 'decode: ' .. tostring(a) } else tr.last = guarded(tr.fn, a, false, tr.cov) end
+                        return { k = 'reply' }
+                    end })
+                    -- (a message compares modulo its POSITION and a residual local's fresh name: CART-1539)
+                    local function norm(m)
+                        m = tostring(m)
+                        for _ = 1, 4 do m = m:gsub('^%[string "[^"]*"%]:%d+: ', ''):gsub('^[^%s:]*:%d+: ', '') end
+                        return (m:gsub("(local '[%w_]-)_%d+'", "%1'"))
+                    end
+                    local live = {}
+                    for _, o in ipairs(model.operations) do if #o.params > 0 then live[#live + 1] = o end end
+                    math.randomseed(tonumber(p.seed or 1538) + #rows)
+                    local keep = tonumber(p.keep or 0.4)
+                    local fz = { inputs = 0, ok_same = 0, ok_differ = 0, err_same = 0, err_diffmsg = 0, mixed = 0, budget = 0, decode = 0 }
+                    for k = 1, (#live > 0 and nfuzz or 0) do
+                        local o = live[(k - 1) % #live + 1]
+                        local args = {}
+                        for _, h in ipairs(o.params) do
+                            if math.random() < keep then args[h] = meta[o.name].orig[h] else args[h] = FP.encode(CANDS[math.random(#CANDS)]) end
+                        end
+                        tr.fn, tr.cov = D[op], false
+                        client[o.name](args); local w = tr.last
+                        tr.fn, tr.cov = cases[1].f, true
+                        client[o.name](args); local g = tr.last
+                        fz.inputs = fz.inputs + 1
+                        local cls
+                        local function has(r, pat) return (not r[1]) and tostring(r[2]):find(pat) ~= nil end
+                        if has(w, '^decode: ') or has(g, '^decode: ') then cls = 'decode' -- (the adapter failed: no verdict)
+                        elseif has(w, 'GUARD') or has(g, 'GUARD') then cls = 'budget'
+                        elseif w[1] and g[1] then cls = same_result(w, g) and 'ok_same' or 'ok_differ'
+                        elseif (not w[1]) and (not g[1]) then cls = norm(w[2]) == norm(g[2]) and 'err_same' or 'err_diffmsg'
+                        else cls = 'mixed' end
+                        fz[cls] = fz[cls] + 1
+                        if (cls == 'ok_differ' or cls == 'mixed' or cls == 'err_diffmsg') and not fz.first then
+                            fz.first = ('%s %s: want %s / got %s'):format(cls, o.name, vim.inspect(nofn(w), { depth = 2 }):sub(1, 100),
+                                vim.inspect(nofn(g), { depth = 2 }):sub(1, 100)):gsub('%s+', ' ')
+                        end
+                    end
+                    row.fuzz = fz
+                    if fz.ok_differ + fz.mixed + fz.err_diffmsg > 0 then row.class = 'differ'; row.first = row.first or ('fuzz ' .. fz.first) end
+                end
             end
             -- COVERAGE of the residual by the tapped samples: statement lines and branch ARMS (if / elseif / else bodies,
             -- loop bodies — an arm is covered when its first statement ran)
@@ -226,9 +302,11 @@ local function measure(_, p)
                 local nl, hl, na, ha = 0, 0, #arms, 0
                 for l in pairs(lines) do nl = nl + 1; if row.hit[l] then hl = hl + 1 end end
                 for _, l in ipairs(arms) do if row.hit[l] then ha = ha + 1 end end
-                row.cov = { lines = nl, lines_hit = hl, arms = na, arms_hit = ha }
+                local hb = 0
+                for _, l in ipairs(arms) do if (row.hit_base or row.hit)[l] then hb = hb + 1 end end
+                row.cov = { lines = nl, lines_hit = hl, arms = na, arms_hit = ha, arms_samples = hb }
             end
-            row.text, row.hit = nil, nil
+            row.text, row.hit, row.hit_base = nil, nil, nil
             tally[row.class] = tally[row.class] + 1
             rows[#rows + 1] = row
         end
@@ -247,15 +325,20 @@ local E = {
     tags = { 'accept', 'algebra' },
     measures = 'CART-1483',
     summary = 'does every algebra derivation, COMPILED by mix (all-dynamic), agree with itself interpreted on the arguments a real suite passes? ops = a,b (default all), through = 1 (follow the basis), opaque = M.x,… (through: kept primitives), reuse = eager, cap = samples per op (12), suite = the spec to tap (default the vendored donor suite), plant = op (a planted difference: the negative control); rows carry residual bytes / functions',
-    params = { ops = 'string?', through = 'string?', opaque = 'string?', reuse = 'string?', cap = 'string?', suite = 'string?', plant = 'string?', static = 'string?', groups = 'string?' },
+    params = { ops = 'string?', through = 'string?', opaque = 'string?', reuse = 'string?', cap = 'string?', suite = 'string?', plant = 'string?', static = 'string?', groups = 'string?',
+        fuzz = 'string?', points = 'string?', keep = 'string?', seed = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
         local t = v.tally
-        local cl, ch, ca, cha = 0, 0, 0, 0
-        for _, r in ipairs(v.rows) do if r.cov then cl, ch, ca, cha = cl + r.cov.lines, ch + r.cov.lines_hit, ca + r.cov.arms, cha + r.cov.arms_hit end end
+        local cl, ch, ca, cha, cas, fi = 0, 0, 0, 0, 0, 0
+        for _, r in ipairs(v.rows) do
+            if r.cov then cl, ch, ca, cha, cas = cl + r.cov.lines, ch + r.cov.lines_hit, ca + r.cov.arms, cha + r.cov.arms_hit, cas + (r.cov.arms_samples or r.cov.arms_hit) end
+            if r.fuzz then fi = fi + r.fuzz.inputs end
+        end
         local head = ('%d agree, %d differ, %d no sample, %d refused (%s, %s; %d bytes in %d functions; the samples ran %.1f%% of residual lines, %.1f%% of branch arms)'):format(t.agree, t.differ,
             t.nosample, t.refused, v.through and 'through' or 'plain', v.reuse, v.bytes, v.functions, 100 * ch / math.max(1, cl), 100 * cha / math.max(1, ca))
+            .. (fi > 0 and ('; the derived client sent %d inputs, arms %.1f%% from the samples alone'):format(fi, 100 * cas / math.max(1, ca)) or '')
         if t.differ > 0 or t.refused > 0 then
             for _, r in ipairs(v.rows) do
                 if r.class == 'differ' then return false, head .. ' — first: ' .. r.op .. ' ' .. tostring(r.first) end
@@ -306,6 +389,23 @@ E.examples = {
         expect = { holds = false, check = function (v)
             local r = v.rows[1]
             return r.class == 'differ' and r.agree == 0 and v.tally.differ == 1 and (r.first or ''):find('__planted', 1, true) ~= nil, vim.inspect(r)
+        end },
+    },
+    {
+        name = 'the DERIVED CLIENT (fuzz = N): the operator\'s case split drives both implementations with N more inputs, and they agree',
+        files = { ['mini_spec.lua'] = MINI }, params = mini({ ops = 'sites', fuzz = '12' }),
+        expect = { holds = true, check = function (v)
+            local r = v.rows[1]
+            return r.class == 'agree' and r.fuzz ~= nil and r.fuzz.inputs == 12 and r.fuzz.ok_differ == 0 and r.fuzz.mixed == 0
+                and r.fuzz.decode == 0 and r.cov.arms_samples <= r.cov.arms_hit, vim.inspect(r)
+        end },
+    },
+    {
+        name = 'a PLANTED difference is found by the derived client\'s inputs too',
+        files = { ['mini_spec.lua'] = MINI }, params = mini({ ops = 'sites', fuzz = '12', plant = 'sites' }),
+        expect = { holds = false, check = function (v)
+            local r = v.rows[1]
+            return r.class == 'differ' and r.fuzz.ok_differ == r.fuzz.inputs and r.fuzz.inputs > 0, vim.inspect(r)
         end },
     },
     {
