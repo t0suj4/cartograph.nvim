@@ -97,6 +97,18 @@ local function ser(t, out)
     if t.lk ~= nil then out[#out + 1] = ',lk=' .. ('%q'):format(tostring(t.lk)) end
     if t.h ~= nil then out[#out + 1] = ',h=' .. ('%q'):format(tostring(t.h)) end
     if t.rep then out[#out + 1] = ',rep=true' end
+    -- (every OTHER scalar field too, sorted — an algebra term's marks: ctx, opt, align, key, g, n… A protocol's terms
+    -- carry none, so their output is unchanged; a template argument round-trips: fnpeer, CART-1538)
+    local extra = {}
+    for key, v in pairs(t) do
+        if key ~= 'k' and key ~= 'v' and key ~= 'lk' and key ~= 'h' and key ~= 'rep' and key ~= 'kids' and type(key) == 'string'
+            and (type(v) == 'string' or type(v) == 'number' or type(v) == 'boolean') then extra[#extra + 1] = key end
+    end
+    table.sort(extra)
+    for _, key in ipairs(extra) do
+        local v = t[key]
+        out[#out + 1] = ',[' .. ('%q'):format(key) .. ']=' .. (type(v) == 'string' and ('%q'):format(v) or tostring(v))
+    end
     if t.kids and #t.kids > 0 then
         out[#out + 1] = ',kids={'
         for i, c in ipairs(t.kids) do
