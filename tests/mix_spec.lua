@@ -1388,12 +1388,18 @@ test('mix: the WHISTLE compares at the candidate\'s binding times — a recursio
     eq('DSS', gd.ctx.ancestor); eq({ [3] = true }, gd.default)
     eq('hole', gd.ctx.configs.ancestor.kids[2].k, 'the ancestor compared with acc dynamic, as the candidate has it')
     eq(original(GROW, 'f')(5), residual(GROW, 'f', { 'D' }, {})(5))
-    -- a FRESH START nested inside (a walk begun again by a callee — D.resolve's rule I): refused by default, specialized
-    -- when the recorded generalization is reused — eagerly, or per call through the hook
+    -- a FRESH START nested inside (a walk begun again by a callee — D.resolve's rule I): refused STRICTLY LAZY,
+    -- specialized when the recorded generalization is reused — eagerly, per call through the hook, or by DEFAULT through
+    -- the fallback (lazy, then eager on a depth refusal: CART-1507 option b)
     local NEST = EXT .. 'local function f(n)\n  local function walk(m, acc, path)\n    if m > 0 then\n      local r = walk(m - 1, acc + m, extend(path, "P"))\n'
         .. '      if m > 2 then r = r + f(m - 2) end\n      return r\n    end\n    return acc + #path\n  end\n  return walk(n, 0, {})\nend\n'
     local want = original(NEST, 'f')(5)
-    ok(not pcall(MX.mix, assert(R.read(NEST, 'lua')), 'f', { 'D' }, {}), 'refused by default')
+    ok(not pcall(MX.mix, assert(R.read(NEST, 'lua')), 'f', { 'D' }, {}, { reuse = 'lazy' }), 'refused strictly lazy')
+    local dtext, dst, dpool = MX.mix(assert(R.read(NEST, 'lua')), 'f', { 'D' }, {})
+    eq(want, assert(load(dtext, 'r', 't', setmetatable({ MIXK = dpool }, { __index = _G })))()(5), 'by default, through the fallback')
+    ok(tostring(dst.reuse_fallback):find('specialization depth', 1, true), 'and the stats say the retry ran: ' .. tostring(dst.reuse_fallback))
+    local _, gst = MX.mix(assert(R.read(GROW, 'lua')), 'f', { 'D' }, {})
+    eq(nil, gst.reuse_fallback, 'a specialization lazy completes never retries')
     for _, o in ipairs({ { reuse = 'eager' }, { decide = function (kind) if kind == 'reuse' then return true end end } }) do
         local text, st, pool = MX.mix(assert(R.read(NEST, 'lua')), 'f', { 'D' }, {}, o)
         eq(want, assert(load(text, 'r', 't', setmetatable({ MIXK = pool }, { __index = _G })))()(5))
@@ -1530,5 +1536,22 @@ end
     local _, reads = text:gsub('or MIXK%[%d+%]', '')
     eq(3, reads, 'the ipairs, pairs and # operands take the pooled table\n' .. text)
     ok(text:find('or {  }', 1, true), 'the written one is still built per call\n' .. text)
+end)
+
+-- (CART-1505: `B.best(wf, B.lex_order(…))` — a primitive call LAST, the callee taking more parameters: refused unless
+-- the primitive is proven single-valued (opts.single_prims, mixalg reads it off the source); and a function returning
+-- such a primitive's value is single-valued too, so `D.match(T, path_term(p))` specializes)
+test('mix: an expanding last argument that calls a PROVEN single-valued primitive fills one parameter; unproven it is still refused', function ()
+    ready()
+    local src = 'local function take(a, b, c) if c == nil then return a + b end return -1 end\n'
+        .. 'local function wrap(x) return G.one(x) end\nlocal function f(x) return take(x, G.one(x)) + take(x, wrap(x)) end\n'
+    local G = { prims = { ['G.one'] = function (x) return x * 10 end } }
+    local function mixed(opts)
+        local text, _, pool = MX.mix(assert(R.read(src, 'lua')), 'f', { 'D' }, {}, opts)
+        return assert(load(text, 'r', 't', setmetatable({ MIXK = pool, G = { one = G.prims['G.one'] } }, { __index = _G })))()
+    end
+    ok(not pcall(mixed, { prims = G.prims }), 'unproven: refused')
+    local r = mixed({ prims = G.prims, single_prims = { ['G.one'] = true } })
+    eq(2 * (3 + 30), r(3), 'proven: one value, the rest nil — through the primitive and through a function returning it')
 end)
 

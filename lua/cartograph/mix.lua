@@ -677,32 +677,8 @@ function M.lower(term, opts)
     -- (`M.node('text', M.lit(s))`); any other expanding call there refuses — it would have to be evaluated twice
     -- (computed always and kept on the program: a call whose last argument is a single-valued call fills ONE parameter
     -- and leaves the rest nil — the specializer's rung 3 for an expanding dynamic argument, CART-1500)
-    local single = {}
+    local single = M.singles(cx.funcs)
     do
-        for name in pairs(cx.funcs) do single[name] = true end
-        local function rets(stmts, out)
-            for _, s in ipairs(stmts or {}) do
-                if s.op == 'ret' then out[#out + 1] = s end
-                for _, k in ipairs({ 'body', 'els' }) do if type(s[k]) == 'table' then rets(s[k], out) end end
-                for _, c in ipairs(s.clauses or {}) do rets(c.body, out) end
-            end
-            return out
-        end
-        for _ = 1, 1000 do
-            local changed = false
-            for name, f in pairs(cx.funcs) do
-                if single[name] then
-                    local rs = rets(f.body, {})
-                    local ok1 = #rs > 0
-                    for _, r in ipairs(rs) do
-                        local e = r.es[1]
-                        if #r.es ~= 1 or (M.MULTI[e.op] and not (e.op == 'call' and single[e.fn])) then ok1 = false end
-                    end
-                    if not ok1 then single[name] = false; changed = true end
-                end
-            end
-            if not changed then break end
-        end
         for _, fx in ipairs(cx.packfix) do
             if not single[fx.last.fn] then
                 local why = 'a call of the vararg function ' .. fx.callee .. ' whose last argument (' .. fx.last.fn .. ') may return several values'
@@ -766,6 +742,39 @@ function M.lower(term, opts)
     local freshroot = require('cartograph.mixproj').fresh(cx.funcs, cx.forced, cx.boxed)
     return { funcs = cx.funcs, names = cx.names, forced = cx.forced, boxed = cx.boxed, sra = cx.sra, where = cx.where,
         single = single, decisions = cx.decisions, freshroot = freshroot }
+end
+
+--- the SINGLE-VALUED functions of a program: every return one expression, which is no multi-valued form unless a call
+--- of a single-valued function or of a primitive in `xsingle` (one PROVEN single-valued from its source: mixalg,
+--- CART-1505) -> { name -> bool }. lower computes it with no primitives; specialize again with the program's
+function M.singles(funcs, xsingle)
+    xsingle = xsingle or {}
+    local single = {}
+    for name in pairs(funcs) do single[name] = true end
+    local function rets(stmts, out)
+        for _, s in ipairs(stmts or {}) do
+            if s.op == 'ret' then out[#out + 1] = s end
+            for _, k in ipairs({ 'body', 'els' }) do if type(s[k]) == 'table' then rets(s[k], out) end end
+            for _, c in ipairs(s.clauses or {}) do rets(c.body, out) end
+        end
+        return out
+    end
+    for _ = 1, 1000 do
+        local changed = false
+        for name, f in pairs(funcs) do
+            if single[name] and type(f) == 'table' then
+                local rs = rets(f.body, {})
+                local ok1 = #rs > 0
+                for _, r in ipairs(rs) do
+                    local e = r.es[1]
+                    if #r.es ~= 1 or (M.MULTI[e.op] and not ((e.op == 'call' and single[e.fn]) or (e.op == 'prim' and xsingle[e.name]))) then ok1 = false end
+                end
+                if not ok1 then single[name] = false; changed = true end
+            end
+        end
+        if not changed then break end
+    end
+    return single
 end
 
 -- ── SRA: SCALAR REPLACEMENT OF A LOCAL RECORD (CART-1331 rung 4a) ──────────────────────────────────────────────────
@@ -956,7 +965,7 @@ end
 -- function is. Each is an EFFECT unless opts.pure names it: never computed early, its result dynamic, called by its
 -- path in the residual (sound with no facts about it). A PURE one (opts.pure[path] = true — proven, never assumed) is
 -- computed on static arguments as the table above is
-local XPRIMS, XPURE = {}, {}
+local XPRIMS, XPURE, XSINGLE = {}, {}, {}
 -- does a CALLED global's name reach a value where the residual runs — a primitive, a known global (or a field under
 -- one), a host global? A name reaching nothing (a captured local the assembler did not carry, CART-1372) would be a
 -- call of nil at run time, so the residualizer refuses it by name instead
@@ -985,6 +994,7 @@ local function ERRAT(where, m)
 end
 local function set_env(opts)
     KNOWN, XPRIMS, XPURE, DYNG, DIRTY, DYNV = opts.globals or {}, opts.prims or {}, opts.pure or {}, {}, {}, {}
+    XSINGLE = opts.single_prims or {} -- (the program's primitives PROVEN single-valued from their source: mixalg, CART-1505)
     HOSTIX, HOSTN = {}, 0
 end
 -- ASSUMPTIONS of the current specialization (opts.assume, CART-1463): { [field] = { value = v } } — a read `x.field` of a
@@ -1698,9 +1708,31 @@ end
 
 --- specialize prog's `fname` to the static values of the S parameters -> residual program { funcs = { name -> { name,
 --- params = { rname … }, body } }, entry }, stats. opts: budget (unfold steps), name (the entry's residual name)
+local specialize_once
+-- ★ LAZY, THEN EAGER ON A DEPTH REFUSAL (CART-1507 option b, CART-1505): with no reuse policy given, a specialization
+-- that refuses on the DEPTH — a static value that never repeats — runs once more with reuse = 'eager', which reuses a
+-- recorded generalization at a nested fresh start (D.resolve's rule I). Everywhere lazy succeeds the output is today's,
+-- byte for byte; it only adds a residual where lazy had none (USER 2026-10-03: lazy by default; 2026-10-06: eager vs
+-- lazy is mostly a code-size decision — and a refusal is no code at all). reuse = 'lazy' keeps the strict refusal;
+-- stats.reuse_fallback says the retry ran
 function M.specialize(prog, fname, division, statics, opts)
     opts = opts or {}
+    local ok, res, stats = pcall(specialize_once, prog, fname, division, statics, opts)
+    if ok then return res, stats end
+    local depth = type(res) == 'table' and type(res.refusal) == 'string' and res.refusal:find('specialization depth', 1, true)
+    if not depth or opts.reuse ~= nil then error(res, 0) end
+    local o2 = {}
+    for k, v in pairs(opts) do o2[k] = v end
+    o2.reuse = 'eager'
+    local res2, stats2 = specialize_once(prog, fname, division, statics, o2)
+    stats2.reuse_fallback = res.refusal
+    return res2, stats2
+end
+function specialize_once(prog, fname, division, statics, opts)
+    opts = opts or {}
     set_env(opts)
+    -- (the single-valued functions again, now that the primitives proven single-valued are known — CART-1505)
+    local SINGLE = next(XSINGLE) and M.singles(prog.funcs, XSINGLE) or prog.single or {}
     FRESHROOT = prog.freshroot or {}
     ASSUME = opts.assume or {}
     local budget = opts.budget or 100000
@@ -2356,7 +2388,7 @@ function M.specialize(prog, fname, division, statics, opts)
                     if s.op == 'ret' then
                         any = true
                         local e = s.es[1]
-                        if #s.es ~= 1 or (M.MULTI[e.op] and not (e.op == 'call' and prog.single and prog.single[e.fn])) then yes = false end
+                        if #s.es ~= 1 or (M.MULTI[e.op] and not ((e.op == 'call' and SINGLE[e.fn]) or (e.op == 'prim' and XSINGLE[e.name]))) then yes = false end
                     end
                     for _, k in ipairs({ 'body', 'els' }) do if type(s[k]) == 'table' then walk(s[k]) end end
                     for _, cl in ipairs(s.clauses or {}) do walk(cl.body) end
@@ -2385,7 +2417,7 @@ function M.specialize(prog, fname, division, statics, opts)
                     else division[p] = S; svals[p] = vs[j] end
                 end
                 nargs = i - 1 + math.max(vs.n, 1)
-            elseif expands and ((a.op == 'call' and prog.single and prog.single[a.fn]) or single_callv(a, X))
+            elseif expands and ((a.op == 'call' and SINGLE[a.fn]) or single_callv(a, X) or (a.op == 'prim' and XSINGLE[a.name]))
                 and decide('single', { fn = X.frame and X.frame.g, callee = a.fn or (a.f and (a.f.name or a.f.op)) or a.op, proven = true }, true) then
                 -- (a SINGLE-VALUED call last: one dynamic value, the remaining parameters nil — `M.rep(M.join_domain(…))`,
                 -- `M.rep(elem_summary(…))` through a known closure; CART-1500)

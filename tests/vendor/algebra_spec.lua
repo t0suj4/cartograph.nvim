@@ -1795,6 +1795,17 @@ describe('value migration: the family follows an edit (reads T and V, never I)',
 end)
 
 describe('instantiate by editing, propagate by commitment (classify / propagate)', function()
+    -- (CART-1538: the derived diff_regions listed the regions in a hole map's pairs() order, the interpreted and the
+    -- compiled derivation differently; native lists them in PREORDER, and DERIVE=diff_regions runs this too)
+    it('diff_regions lists the changed regions in PREORDER, left to right', function()
+        local a = node('f', lit(1), node('g', lit(2), lit(3)), lit(4), node('h', lit(5)), lit(6), lit(7))
+        local b = node('f', lit(9), node('g', lit(2), lit(8)), lit(0), node('h', lit(-5)), lit(66), lit(77))
+        local out = {}
+        A.diff_regions(a, b, {}, out)
+        local shown = {}
+        for i, p in ipairs(out) do shown[i] = table.concat(p, '.') end
+        assert.same({ '1', '2.2', '3', '4.1', '5', '6' }, shown)
+    end)
     local T = A.template(call('register', hole 'key', hole 'fn'))
     local Is = {
         call('register', lit 'on_tick', name 'tick'),

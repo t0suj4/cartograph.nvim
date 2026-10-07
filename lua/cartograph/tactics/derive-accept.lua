@@ -167,7 +167,7 @@ local function measure(_, p)
         for _, op in ipairs(ops) do
             local key = 'derive.lua::D.' .. op
             local row = { op = op, samples = #(samples[op] or {}), synthesized = synthesized[op] }
-            local okp, text, _, lines, knowns, _, prims = pcall(MA.program, key, nil, { snapshot = true, through = through or nil, opaque = opaque })
+            local okp, text, _, lines, knowns, mreport, prims = pcall(MA.program, key, nil, { snapshot = true, through = through or nil, opaque = opaque })
             local prog, entry, G
             if not okp then row.refused = 'assemble: ' .. tostring(text)
             else
@@ -181,7 +181,8 @@ local function measure(_, p)
             end
             -- one residual for a division and its statics -> the residual function | nil, why
             local function build(div, statics)
-                local oks, res, st = pcall(MX.specialize, prog, entry, div, statics, { budget = 5e6, globals = G, prims = prims, reuse = p.reuse })
+                local oks, res, st = pcall(MX.specialize, prog, entry, div, statics, { budget = 5e6, globals = G, prims = prims, reuse = p.reuse,
+                    single_prims = mreport and mreport.single_prims })
                 if not oks then return nil, 'specialize: ' .. MX.describe(res) end
                 local out = MX.print(res, prog.where)
                 row.text = out

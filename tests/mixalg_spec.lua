@@ -642,3 +642,21 @@ test('mixalg: compile_match lowers the match closure ONCE, and a compile leaves 
     end
     eq(before, snap(prog), 'specialize leaves the program it was given as it was')
 end)
+
+-- (CART-1505: a primitive is opaque to mix, so a call of it LAST in an argument list might expand into several
+-- parameters; its own text may prove it single-valued — never assumed)
+test('mixalg: single_valued reads a primitive\'s own source — one expression per return, no call: proven; a call, two values or C: not', function ()
+    ready()
+    eq(true, MA.single_valued(A.lex_order), 'lex_order returns a function literal')
+    eq(true, MA.single_valued(A.node), 'node returns a table constructor')
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
+    local fd = io.open(dir .. '/m.lua', 'w')
+    fd:write('local M = {}\nfunction M.two() return 1, 2 end\nfunction M.callret(x) return M.two(x) end\nfunction M.vararg(...) return ... end\n'
+        .. 'function M.one(x)\n  local f = function () return 1, 2 end\n  if x then return x end\n  return 0\nend\nreturn M\n')
+    fd:close()
+    local m = dofile(dir .. '/m.lua')
+    eq(nil, MA.single_valued(m.two)); eq(nil, MA.single_valued(m.callret)); eq(nil, MA.single_valued(m.vararg))
+    eq(true, MA.single_valued(m.one), 'a nested function\'s returns are its own')
+    eq(nil, MA.single_valued(string.format), 'a C function is unknown')
+    vim.fn.delete(dir, 'rf')
+end)

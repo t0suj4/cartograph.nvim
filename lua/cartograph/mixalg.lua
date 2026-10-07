@@ -85,6 +85,62 @@ end
 -- invisible to its callers and opaque to mix, which knows no file-local state: the call stays a primitive by its path
 -- (an effect to mix — pure is proven, never assumed) and the residual's environment carries the function.
 M.ALWAYS_OPAQUE = { ['M.kid_by_key'] = true }
+-- ★ A SINGLE-VALUED PRIMITIVE, PROVEN FROM ITS SOURCE (CART-1505): a primitive is opaque to mix, so a call of it last in
+-- an argument list may expand into several parameters, and mix refuses it ("rung 3") — `B.best(wf, B.lex_order(…))` in
+-- D.resolve. The function's own text says more: every `return` outside a nested function has ONE expression and it is
+-- no call and no `...` -> exactly one value (or none: nil). Read off the definition the function value points at
+-- (debug.getinfo); a C function, or one whose text does not parse, is unknown (nil) — never assumed
+local single_memo = setmetatable({}, { __mode = 'k' })
+function M.single_valued(fv)
+    if type(fv) ~= 'function' then return nil end
+    if single_memo[fv] ~= nil then return single_memo[fv] or nil end
+    local info = debug.getinfo(fv, 'S')
+    local verdict = false
+    local path = info and info.source and info.source:match('^@(.*)$')
+    if path and info.linedefined and info.linedefined > 0 then
+        local fd = io.open(path)
+        if fd then
+            local all = {}
+            for l in fd:lines() do all[#all + 1] = l end
+            fd:close()
+            local text = table.concat(all, '\n', info.linedefined, math.min(#all, info.lastlinedefined))
+            local okp, parser = pcall(vim.treesitter.get_string_parser, text, 'lua')
+            local root = okp and parser:parse()[1]:root()
+            local fn
+            if root then
+                local tsutil = require 'cartograph.spec.tsutil' -- (indexed child iteration, CART-1453)
+                for _, c in tsutil.inext, root, -1 do
+                    if c:type() == 'function_declaration' or c:type() == 'variable_declaration' or c:type() == 'assignment_statement' then fn = fn or c end
+                end
+            end
+            if fn then
+                local ok1 = true
+                local function walk(n, top)
+                    local ty = n:type()
+                    if not top and (ty == 'function_definition' or ty == 'function_declaration') then return end
+                    if ty == 'return_statement' then
+                        local list = n:named_child(0)
+                        local count = list and list:named_child_count() or 0
+                        if count > 1 then ok1 = false end
+                        if count == 1 then
+                            local e = list:named_child(0)
+                            if e:type() == 'function_call' or e:type() == 'vararg_expression' then ok1 = false end
+                        end
+                    end
+                    for i = 0, n:named_child_count() - 1 do walk(n:named_child(i), false) end
+                end
+                -- (the definition's own body: the function node is the first function in the text, entered as `top`)
+                local body
+                local function find(n) if body then return end; local ty = n:type(); if ty == 'function_declaration' or ty == 'function_definition' then body = n; return end; for i = 0, n:named_child_count() - 1 do find(n:named_child(i)) end end
+                find(fn)
+                if body then walk(body, true); verdict = ok1 end
+            end
+        end
+    end
+    single_memo[fv] = verdict
+    return verdict or nil
+end
+
 function M.program(root, files, opts)
     root = root or 'M.match'
     opts = opts or {}
@@ -564,6 +620,8 @@ function M.program(root, files, opts)
     end
     local text = table.concat(chunks, '\n')
     report.decisions = decisions
+    report.single_prims = {}
+    for path, fv in pairs(prims) do if M.single_valued(fv) then report.single_prims[path] = true end end
     if not opts.decide then cache[ckey] = { text = text, order = order, lines = lines, knowns = knowns, report = report, prims = prims } end
     return text, order, lines, knowns, report, prims
 end
@@ -604,11 +662,11 @@ function M.compile_match(T, opts)
     local MX = require 'cartograph.mix'
     local A = require('cartograph.algebra').load()
     if not term_cache then term_cache = assert(require('cartograph.algebraread').read((M.program('M.match')), 'lua')) end
-    local _, _, lines, _, _, prims = M.program('M.match')
+    local _, _, lines, _, mreport, prims = M.program('M.match')
     if prog_term ~= term_cache then prog_cache, prog_term = MX.lower(term_cache, { lines = lines }), term_cache end
     local res, stats = MX.specialize(prog_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, opts.env },
         { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, assume = opts.assume,
-          prims = prims })
+          prims = prims, single_prims = mreport and mreport.single_prims })
     local text, map = MX.print(res, prog_cache.where)
     stats.decisions = res.decisions -- (as MX.mix reports them, CART-1501)
     local pool = res.pool

@@ -918,9 +918,18 @@ function D.diff_regions(a, b, path, out)
     -- the classify diff is the FIXED-ARITY lgg: join under the 'none' rigidity (no hedge holes)
     local r = B.join(B.template(a), b, { align = 'none', positional = true })
     if not r then out[#out + 1] = path; return end
+    -- (in PREORDER, as native diff_regions emits them: the sites come from a hole MAP, whose pairs() order is the
+    -- table's — the interpreted and the compiled derivation listed the same regions in different orders, CART-1538's
+    -- derived client caught it; a region is never a prefix of another, so lexicographic path order IS preorder)
+    local found = {}
     for _, e in pairs(D.sites(r.template)) do
-        for _, s in ipairs(e.sites) do out[#out + 1] = cat(path, s.path) end
+        for _, s in ipairs(e.sites) do found[#found + 1] = s.path end
     end
+    table.sort(found, function (p, q)
+        for i = 1, math.min(#p, #q) do if p[i] ~= q[i] then return p[i] < q[i] end end
+        return #p < #q
+    end)
+    for _, p in ipairs(found) do out[#out + 1] = cat(path, p) end
 end
 
 -- ── composition and the edits, through put ─────────────────────────────────────
