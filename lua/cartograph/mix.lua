@@ -975,8 +975,12 @@ local function reachable(name)
     return v ~= nil
 end
 -- the per-specialization environment (specialize, and bta called on its own)
+-- the HOST FUNCTIONS among the current specialization's static values, numbered as met (CART-1535): a memo key names
+-- one by its number — identity, as a closure is named by its lambda and free values. Reset per specialization
+local HOSTIX, HOSTN = {}, 0
 local function set_env(opts)
     KNOWN, XPRIMS, XPURE, DYNG, DIRTY, DYNV = opts.globals or {}, opts.prims or {}, opts.pure or {}, {}, {}, {}
+    HOSTIX, HOSTN = {}, 0
 end
 -- ASSUMPTIONS of the current specialization (opts.assume, CART-1463): { [field] = { value = v } } — a read `x.field` of a
 -- DYNAMIC variable x is taken to be v: STATIC, so the code it guards folds away; a residual GUARD before its statement
@@ -1470,16 +1474,21 @@ local function bt_block(stmts, bt, ctrl, loop)
         elseif op == 'break' then
             if ctrl == D and loop then loop.dyn = true end
         elseif op == 'fornum' or op == 'forin' or op == 'while' or op == 'repeat' or op == 'forgen' then
-            local b
-            if op == 'fornum' then b = join(ctrl, opnd(join(bt_expr(s.from, bt), join(bt_expr(s.to, bt), bt_expr(s.step, bt)))))
-            elseif op == 'forin' then b = join(ctrl, opnd(bt_expr(s.e, bt)))
+            -- (a FOR loop's variables are LOCAL to its body: under dynamic control they are still static when what they
+            -- range over is — the loop unrolls inside the residual region, each copy with its own values. Dynamic
+            -- control reaches the BODY (b below), where a store to an outer variable must see it — CART-1535: the
+            -- rule engine's loops over its static rules sat inside its dynamic round loop and stayed residual)
+            local b, vb
+            if op == 'fornum' then vb = opnd(join(bt_expr(s.from, bt), join(bt_expr(s.to, bt), bt_expr(s.step, bt))))
+            elseif op == 'forin' then vb = opnd(bt_expr(s.e, bt))
             elseif op == 'forgen' then
-                b = ctrl
-                for _, e in ipairs(s.es) do b = join(b, opnd(bt_expr(e, bt))) end
-            else b = join(ctrl, opnd(bt_expr(s.cond, bt))) end
-            if op == 'fornum' then set(s.id, b)
-            elseif op == 'forin' then set(s.kid, b); if s.vid then set(s.vid, b) end
-            elseif op == 'forgen' then for _, id in ipairs(s.ids) do set(id, b) end end
+                vb = S
+                for _, e in ipairs(s.es) do vb = join(vb, opnd(bt_expr(e, bt))) end
+            end
+            if vb then b = join(ctrl, vb) else b = join(ctrl, opnd(bt_expr(s.cond, bt))) end
+            if op == 'fornum' then set(s.id, vb)
+            elseif op == 'forin' then set(s.kid, vb); if s.vid then set(s.vid, vb) end
+            elseif op == 'forgen' then for _, id in ipairs(s.ids) do set(id, vb) end end
             -- CONGRUENCE OF A BREAK: once a break runs under dynamic control, which iteration is the last is dynamic —
             -- every store in the body is under dynamic control (the code after the loop sees one of several exits).
             -- The loop itself is marked (bt[s] = D): a static condition still cannot unroll it
@@ -1551,7 +1560,12 @@ local function serialize(v, depth, clos, seen, intable)
     end
     if ty == 'function' then
         local c = clos and clos[v]
-        if not c then refuse('a static value of type function that is no closure of the program') end
+        if not c then
+            -- (a HOST function — the algebra's, a library's: opaque, so its identity is its key — CART-1535)
+            local n = HOSTIX[v]
+            if not n then HOSTN = HOSTN + 1; n = HOSTN; HOSTIX[v] = n end
+            return 'host#' .. n
+        end
         seen = seen or {}
         if seen[c] then return 'λ' .. c.lam.id .. '@' end
         seen[c] = true
@@ -2042,7 +2056,9 @@ function M.specialize(prog, fname, division, statics, opts)
         if ty == 'nil' then return { op = 'nil' } end
         if ty == 'function' then
             local c = R.clos[v]
-            if not c then refuse('a static host function reaches dynamic code') end
+            -- (a HOST function reaching dynamic code is REFERENCED from the pool, as a table is — opaque, its calls
+            -- effects: CART-1535)
+            if not c then return constref(v) end
             -- LIFT: the body specialized with every parameter dynamic
             local T = { kind = 'lam', c = c }
             local division = {}

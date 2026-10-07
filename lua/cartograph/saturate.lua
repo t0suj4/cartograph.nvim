@@ -13,7 +13,8 @@
 -- earlier stratum, and every hole of it (and of the head) is bound by the body.
 -- ⚠ A stratum that does not converge within opts.rounds RAISES — a cap is never a silent answer (CART-1527).
 local M = {}
-local unpack = table.unpack or unpack
+-- (no `unpack` alias and no metatable in the engine: mix specializes it to a rule set — CART-1535 — and knows the
+-- global `unpack`, not a file-local value)
 
 local function holes_of(t, out)
     out = out or {}
@@ -23,6 +24,11 @@ local function holes_of(t, out)
     return out
 end
 local function sorted_keys(s) local r = {}; for k in pairs(s) do r[#r + 1] = k end; table.sort(r); return r end
+-- a FLAT atom: every kid a literal or a plain hole — its ground instance is the term former over the bound values
+local function flat_atom(atom)
+    for _, arg in ipairs(atom.kids or {}) do if arg.k ~= 'lit' and (arg.k ~= 'hole' or arg.rep or arg.ctx) then return false end end
+    return true
+end
 
 --- rules -> the compiled rule set, or raises naming the unsafe / unstratified rule
 function M.compile(A, rules)
@@ -107,7 +113,8 @@ function M.compile(A, rules)
             end
             cr.plan[j] = plans
         end
-        for i, n in ipairs(r.absent or {}) do cr.neg_t[i] = { t = A.template(n), h = sorted_keys(holes_of(n)), atom = n } end
+        for i, n in ipairs(r.absent or {}) do cr.neg_t[i] = { t = A.template(n), h = sorted_keys(holes_of(n)), atom = n, flat = flat_atom(n) } end
+        cr.head_flat = flat_atom(r.head)
         C.rules[#C.rules + 1] = cr
         if not C.strata[r.stratum] then C.strata[r.stratum] = {} end
         table.insert(C.strata[r.stratum], cr)
@@ -133,7 +140,7 @@ function M.run(C, facts, opts)
     local idx = {} -- sig (kind:positions) -> { pos, kind, groups = { key -> list } }, kept current by add
     local idx_of = {} -- kind -> { idx entries over it }
     local stats = { rounds = 0, matches = 0, lookups = 0 }
-    local argkey = setmetatable({}, { __mode = 'k' })
+    local argkey = {} -- (one run's: freed with it)
     local function show_arg(t) local s = argkey[t]; if not s then s = A.show(t); argkey[t] = s end; return s end
     local function group_key(f, pos)
         local parts = {}
@@ -176,15 +183,8 @@ function M.run(C, facts, opts)
     local function pick(V, hs) local o = {}; for _, h in ipairs(hs) do o[h] = V[h] end; return o end
     -- the ground instance of a head or negated atom under b: a FLAT atom is its kind over the bound values (the term
     -- former itself); anything else is apply's substitution (compile proved every hole bound — no domain to check)
-    local flat_atom = setmetatable({}, { __mode = 'k' })
-    local function ground(atom, t, hs, b)
-        local fl = flat_atom[atom]
-        if fl == nil then
-            fl = true
-            for _, arg in ipairs(atom.kids or {}) do if arg.k ~= 'lit' and (arg.k ~= 'hole' or arg.rep or arg.ctx) then fl = false end end
-            flat_atom[atom] = fl
-        end
-        if not fl then return A.apply(t, pick(b, hs)).body end
+    local function ground(atom, t, hs, b, flat)
+        if not flat then return A.apply(t, pick(b, hs)).body end
         local kids = {}
         for i, arg in ipairs(atom.kids or {}) do kids[i] = arg.k == 'hole' and b[arg.h] or arg end
         return A.node(atom.k, unpack(kids))
@@ -252,9 +252,9 @@ function M.run(C, facts, opts)
             for _, cr in ipairs(rules) do
                 local function out(b)
                     for _, n in ipairs(cr.neg_t) do
-                        if has(ground(n.atom, n.t, n.h, b)) then return end
+                        if has(ground(n.atom, n.t, n.h, b, n.flat)) then return end
                     end
-                    local term = ground(cr.src.head, cr.head_t, cr.head_h, b)
+                    local term = ground(cr.src.head, cr.head_t, cr.head_h, b, cr.head_flat)
                     local k = A.show(term)
                     stats.lookups = stats.lookups + 1
                     if not pending[k] and not have[k] then pending[k] = true; fresh[#fresh + 1] = { k, term } end

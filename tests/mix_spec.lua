@@ -1439,3 +1439,27 @@ test('mix: mix itself stays INSIDE S — no while / repeat / goto / varargs / me
     walk(root)
     eq({}, bad)
 end)
+
+-- A FOR LOOP'S VARIABLES are local to its body: under DYNAMIC control (inside a dynamic while) a loop over a static table
+-- or a static range still UNROLLS — each residual round runs the unrolled copy; the body's stores to an outer variable
+-- stay dynamic (CART-1535: the rule engine's loops over its static rules sat inside its dynamic round loop)
+test('mix: a for loop over static values UNROLLS under dynamic control; its body\'s outer stores stay dynamic', function ()
+    ready()
+    local src = [[
+local function f(n)
+    local out, i = 0, 0
+    while i < n do
+        for _, k in ipairs({ 10, 20 }) do out = out + k end
+        for j = 1, 3 do out = out + j end
+        i = i + 1
+    end
+    return out
+end
+]]
+    local r, text = residual(src, 'f', { 'D' }, {})
+    for _, n in ipairs({ 0, 1, 3 }) do eq(original(src, 'f')(n), r(n), text) end
+    ok(not text:find('ipairs', 1, true), 'the static table is iterated at specialization time\n' .. text)
+    ok(not text:find('for j_', 1, true), 'the static range is unrolled\n' .. text)
+    ok(text:find('while', 1, true), 'the dynamic loop stays\n' .. text)
+end)
+

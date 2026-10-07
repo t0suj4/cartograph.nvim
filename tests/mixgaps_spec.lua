@@ -829,7 +829,13 @@ test('C C4 STATIC VALUES REACHING DYNAMIC CODE: NaN lifted, a table pooled once,
     eq('AB', r('ab'), text); ok(text:find('MIXK[1](x', 1, true), text)
     r, text = mixed('local function f(x)\n local g = G.up\n return g, x\nend\n', 'f', { 'D' }, {}, G1)
     eq(string.upper, (r(3)), text); ok(text:find('MIXK[1]', 1, true), text)
-    refuses('a static host function reaches dynamic code', 'local function g() return G.up end\nlocal function f(x) return g() end\n', 'f', { 'D' }, {}, G1)
+    -- (a static host function reaching dynamic code by NO path is referenced from the POOL, as a table is — CART-1535)
+    r, text = mixed('local function g() return G.up end\nlocal function f(x) return g() end\n', 'f', { 'D' }, {}, G1)
+    eq(string.upper, (r(3)), text); ok(text:find('MIXK[1]', 1, true), 'the pooled host function\n' .. text)
+    -- (and a static ARGUMENT holding one — a record of host functions, the rule engine's algebra table — is a memo key:
+    -- the function is named by its identity, `host#n`, and called through the pool)
+    r, text = mixed('local function f(t, x) return t.up(x) .. t.up(x) end\n', 'f', { 'S', 'D' }, { { up = string.upper } })
+    eq('ABAB', r('ab'), text); ok(text:find('MIXK[', 1, true), text)
     refuses('a static userdata reaches dynamic code', 'local function f(x) return G.h, x end\n', 'f', { 'D' }, {}, { globals = { ['G.h'] = io.stdout } })
     with_globals({ 'G' }, function ()
         _G.G = { t = { 'a', 'b', sub = { 'c', 'd' } } }
