@@ -3,19 +3,17 @@
 --   nvim --headless -u NONE -l tools/toolbelt.lua run experiment - decl=@tools/experiments/mix-battery.lua
 -- Instruments run as their own processes with their cwd in each tree; a relative instrument file is the variant's (both
 -- sides run the same instrument). ~40 min on this machine.
--- (derive-accept's claim fails while any op is refused — resolve is, since CART-1505 — so the gate is NO REGRESSION:
--- the same tally as the baseline)
-local TALLY = '(%d+ agree, %d+ differ, %d+ no sample, %d+ refused)'
-local BETTER = { 'up', 'down', 'down', 'down' } -- (more agree, fewer of the rest: an improvement passes)
+-- (derive-accept HOLDS since 2026-10-07 — 34 agree, 0 differ, 0 no sample, 0 refused — so each of its gates is the
+-- claim itself; before resolve specialized they were no-regression: compare = '(%d+ agree, …)', better = { 'up', … })
 return {
     name = 'mix-battery',
     baseline = 'HEAD',
     instruments = {
         { name = 'mix + algebra specs', kind = 'specs', specs = { 'mix_spec', 'mixgaps_spec', 'mixalg_spec', 'compiledverb_spec',
             'saturate_spec', 'mixproj_spec', 'algebra_spec', 'algebradonor_spec', 'kvterm_spec', 'fnpeer_spec' } },
-        { name = 'derive-accept plain', kind = 'tactic', tactic = 'derive-accept', compare = TALLY, better = BETTER },
-        { name = 'derive-accept through', kind = 'tactic', tactic = 'derive-accept', params = { through = 1 }, compare = TALLY, better = BETTER },
-        { name = 'derive-accept + the derived client', kind = 'tactic', tactic = 'derive-accept', params = { fuzz = 120 }, compare = TALLY, better = BETTER },
+        { name = 'derive-accept plain', kind = 'tactic', tactic = 'derive-accept', expect = 'holds' },
+        { name = 'derive-accept through', kind = 'tactic', tactic = 'derive-accept', params = { through = 1 }, expect = 'holds' },
+        { name = 'derive-accept + the derived client', kind = 'tactic', tactic = 'derive-accept', params = { fuzz = 120 }, expect = 'holds' },
         { name = 'compiled matchers equal A.match', kind = 'check', file = 'tools/experiments/instruments/cmreg.lua', pattern = '0 refused;.*, 0 differ;' },
         { name = "mix's sets unchanged (row join)", kind = 'join', file = 'tools/experiments/instruments/lowersets.lua' },
         { name = 'compile time (33 matchers)', kind = 'ab', file = 'tools/experiments/instruments/cmreg.lua', extract = 'compile ([%d.]+) s', runs = 5, bound = 1.10 },
