@@ -196,7 +196,8 @@ end
 -- ★ A KEY STEP IS A LOOKUP, and costs one past KEYMAP_MIN kids (CART-1528): a weak node -> { key -> first index } map,
 -- rebuilt when the kid TABLE or its length changed, and a hit re-checked against its kid. Terms are values (EGAL,
 -- CART-1403), so the map is an OBSERVATION like content_id: under FREEZE it marks the node, and set_at — the in-place
--- mutator that keeps the length — drops it. (A keyed node is the fact set / join index of a rule engine, CART-1525.)
+-- mutator that keeps the length — drops it. (A keyed node can be a fact set or a join index: CART-1525 measured the rule
+-- engine that way; the shipped engine keeps its own maps, as cheaper per round.)
 local KEYMAP, KEYMAP_MIN = setmetatable({}, { __mode = 'k' }), 16
 M.KEYMAP = KEYMAP
 function M.kid_by_key(t, key)
