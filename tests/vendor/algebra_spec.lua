@@ -5207,6 +5207,23 @@ describe('matching with context variables (CTXMATCH.md; Kutsia WWV\'05 slides, B
         assert.equals(1, #A.match_all(A.template(f(hole 'y')), f(a)).all)
     end)
 
+    it('a step budget that runs out is TRUNCATED: a refusal with the partial list, never ok (CART-1527)', function()
+        local K = A.template(seq { A.ctx('C', { f(xs) }) })
+        local I = seq { g(f(a, b), h(f(a), f())) }
+        -- within the budget: every matcher, and no flag
+        local full = A.match_all(K, I)
+        assert.is_true(full.ok); assert.equals(3, #full.all); assert.is_nil(full.truncated)
+        -- past it: the list is a prefix, so the answer is a refusal by name — the same as the derived match's
+        local cut = A.match_all(K, I, { cap = 3 })
+        assert.is_true(cut.truncated); assert.is_false(cut.ok)
+        assert.is_true(#cut.all < 3)
+        assert.matches('budget', cut.refusal.why)
+        -- the single matcher: "no match" past the budget is UNKNOWN, and says so
+        local one = A.match(K, I, { cap = 1 })
+        assert.is_false(one.ok); assert.is_true(one.truncated)
+        assert.is_nil(A.match(K, I).truncated)
+    end)
+
     it('BK hedge contexts are wider than Kutsia\'s term contexts: siblings, a top-level cursor, and a context that wraps nothing', function()
         -- the cursor at the top level with siblings on both sides: X ↦ (b ◦ d)
         local T = A.template(seq { X(c) })

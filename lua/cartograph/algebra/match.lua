@@ -273,15 +273,22 @@ function M.match(T, I, env)
         -- search backtracks through every alternative (finitary: a ground instance has finitely many)
         local all = {}
         go(T.body, I, {}, { V = {}, S = {} }, function(st) all[#all + 1] = { values = st.V, sites = st.S }; return nil end)
+        -- (truncated: the budget ran out, so `all` is a PREFIX of the solutions — a refusal like the derived match's,
+        -- never ok: the order the search met them in decided which ones are here, CART-1527)
+        if steps > cap then
+            return { ok = false, all = all, steps = steps, truncated = true, refusal = { at = 'root', why = 'matching budget exceeded (hedge and context matching are NP-complete)' } }
+        end
         return { ok = #all > 0, all = all, steps = steps, refusal = #all == 0 and refusal or nil }
     end
     local st = go(T.body, I, {}, { V = {}, S = {} }, function(st) return st end)
     if st then return { ok = true, values = st.V, sites = st.S, steps = steps, provenance = M.observed(st.V, st.S) } end
-    return { ok = false, refusal = refusal, values = {}, sites = {}, steps = steps }
+    -- (truncated: "no match" is UNKNOWN, not false — under lazy_refusal the budget's refusal is not recorded either)
+    return { ok = false, refusal = refusal, values = {}, sites = {}, steps = steps, truncated = steps > cap or nil }
 end
 
 --- every matcher of T against I (a minimal complete set: with a ground instance every
---- matcher is ground, so the set is the distinct solutions). Returns { ok, all = {{values, sites}..}, steps }.
+--- matcher is ground, so the set is the distinct solutions). Returns { ok, all = {{values, sites}..}, steps }, and
+--- `truncated = true` when the step budget ran out: `all` is then INCOMPLETE and a caller needing every solution refuses.
 function M.match_all(T, I, env)
     env = env or {}
     return M.match(T, I, { defs = env.defs, self = env.self, hole_domains = env.hole_domains, cap = env.cap, collect = true })

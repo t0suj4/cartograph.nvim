@@ -900,7 +900,7 @@ function D.match(T, I, env)
             if not seen[kv] then seen[kv] = true; all[#all + 1] = { values = r.values, sites = r.sites } end
             return nil -- every matcher: keep searching
         end)
-        if res == BUDGET then return { ok = false, all = all, steps = counter.n, refusal = { at = 'root', why = 'matching budget exceeded (hedge and context matching are NP-complete)' } } end
+        if res == BUDGET then return { ok = false, all = all, steps = counter.n, truncated = true, refusal = { at = 'root', why = 'matching budget exceeded (hedge and context matching are NP-complete)' } } end
         return { ok = #all > 0, all = all, steps = counter.n, refusal = #all == 0 and last_refusal or nil }
     end
     local t_start = SLOW and os.clock()
@@ -908,7 +908,7 @@ function D.match(T, I, env)
     if t_start and os.clock() - t_start > SLOW then
         io.stderr:write(('SLOW %.1fs steps %d ok %s\n    T = %s\n    I = %s\n'):format(os.clock() - t_start, counter.n, tostring(res and res ~= BUDGET and true or false), B.show(T.body):sub(1, 150), B.show(I):sub(1, 150)))
     end
-    if res == BUDGET then return { ok = false, refusal = { at = 'root', why = 'matching budget exceeded (hedge and context matching are NP-complete)' }, values = {}, sites = {}, steps = counter.n } end
+    if res == BUDGET then return { ok = false, refusal = { at = 'root', why = 'matching budget exceeded (hedge and context matching are NP-complete)' }, values = {}, sites = {}, steps = counter.n, truncated = true } end
     if res then res.steps = counter.n; return res end
     return { ok = false, refusal = last_refusal or { at = 'root', why = 'no match' }, values = {}, sites = {}, steps = counter.n }
 end
