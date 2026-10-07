@@ -119,7 +119,7 @@ local function measure(_, p)
                 local K = {}
                 for k, v in pairs(G) do K[k] = v end
                 for k in pairs(opaque or {}) do K[k] = A[k:sub(3)] end
-                local okf, f = pcall(function () return assert(load(out, 'residual', 't', F.env(res.pool, K)))() end)
+                local okf, f = pcall(function () return assert(load(out, 'residual', 't', F.env(res.pool, K, nil, prims)))() end)
                 if not okf then return nil, 'load: ' .. tostring(f) end
                 -- (a PLANTED difference — the tool's own negative control: this operator's compiled result gets one
                 -- field more, so a run that still calls it right has a dead comparison or a dead tally)

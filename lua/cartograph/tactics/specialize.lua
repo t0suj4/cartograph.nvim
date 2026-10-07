@@ -35,7 +35,7 @@ local function measure(store, p)
     local oks, res, stats = pcall(MX.specialize, prog, entry, division, svals, { budget = tonumber(p.budget or 2e6), globals = how.knowns, prims = how.prims })
     if not oks then return { error = 'mix refused: ' .. F.why(res), refused = true } end
     local text, map = MX.print(res, prog.where)
-    local okl, f = pcall(function () return assert(load(text, 'residual', 't', F.env(res.pool, how.knowns)))() end)
+    local okl, f = pcall(function () return assert(load(text, 'residual', 't', F.env(res.pool, how.knowns, nil, how.prims)))() end)
     if not okl then return { error = 'the residual does not load: ' .. tostring(f), text = text } end
     local rows, ok = {}, true
     for si, d in ipairs(samples) do

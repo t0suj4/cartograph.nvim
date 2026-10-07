@@ -81,9 +81,21 @@ end
 --- (CART-1372 rung 5): returned in `prims` ({ [path] = function }) for mix's opts.prims — an effect to mix unless
 --- proven pure (opts.pure).
 --- -> text, order, lines, knowns, report { known = { name }, snapshots = { name }, free = { name } }, prims
+-- ALWAYS OPAQUE: a definition that holds a CACHE in a file-local table (kid_by_key's key map, CART-1528). The cache is
+-- invisible to its callers and opaque to mix, which knows no file-local state: the call stays a primitive by its path
+-- (an effect to mix — pure is proven, never assumed) and the residual's environment carries the function.
+M.ALWAYS_OPAQUE = { ['M.kid_by_key'] = true }
 function M.program(root, files, opts)
     root = root or 'M.match'
     opts = opts or {}
+    do
+        local o, op = {}, {}
+        for k, v in pairs(opts) do o[k] = v end
+        for k in pairs(M.ALWAYS_OPAQUE) do op[k] = true end
+        for k in pairs(opts.opaque or {}) do op[k] = true end
+        o.opaque = op
+        opts = o
+    end
     local ckey = root .. (files and ('\0' .. table.concat(files, '\0')) or '') .. (opts.snapshot and '\0snap' or '')
         .. (opts.through and '\0through' or '')
         .. (opts.opaque and ('\0opaque:' .. table.concat((function () local t = vim.tbl_keys(opts.opaque); table.sort(t); return t end)(), ',')) or '')
@@ -565,7 +577,9 @@ M.DEOPT = setmetatable({}, { __tostring = function () return 'mixalg: an assumpt
 local function served(text, pool)
     local A = require('cartograph.algebra').load()
     local flag = { up = false }
-    local env = setmetatable({ MIXK = pool, M = { grammars = A.grammars },
+    local Menv = { grammars = A.grammars }
+    for path in pairs(M.ALWAYS_OPAQUE) do Menv[path:match('^M%.(.*)$')] = A[path:match('^M%.(.*)$')] end
+    local env = setmetatable({ MIXK = pool, M = Menv,
         MIXDEOPT = function () flag.up = true; error(M.DEOPT, 0) end }, { __index = _G })
     local m = assert(load(text, 'mixalg.match', 't', env))()
     return function (I)
@@ -586,9 +600,10 @@ function M.compile_match(T, opts)
     local MX = require 'cartograph.mix'
     local A = require('cartograph.algebra').load()
     if not term_cache then term_cache = assert(require('cartograph.algebraread').read((M.program('M.match')), 'lua')) end
-    local _, _, lines = M.program('M.match')
+    local _, _, lines, _, _, prims = M.program('M.match')
     local text, stats, pool, map = MX.mix(term_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, opts.env },
-        { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, assume = opts.assume })
+        { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, assume = opts.assume,
+          prims = prims })
     -- (map: residual line -> the algebra's src:line — MX.translate turns an error of this code into the source's terms)
     return served(text, pool), text, stats, pool, map
 end

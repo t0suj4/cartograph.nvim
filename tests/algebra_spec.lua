@@ -584,6 +584,41 @@ test('algebra seam: anti_unify RAISES when the algebra is unavailable', function
     ok(tostring(err):find('not available', 1, true), 'and says why: ' .. tostring(err))
 end)
 
+-- A KEY STEP IS A LOOKUP (CART-1528): a keyed node is a fact set / join index (CART-1525), and kid_by_key scanned
+test('algebra seam: a key step on a large keyed node is a lookup, and stays right after an in-place edit', function ()
+    local A = need()
+    local N = 5000
+    local kids = {}
+    for i = 1, N do kids[i] = A.node('pair', A.lit('k' .. i), A.lit(i)) end
+    local db = A.keyed('db', kids)
+    -- every key found at its kid, a missing key absent
+    for _, i in ipairs({ 1, 17, 2500, N }) do
+        local kid, at = A.kid_by_key(db, 'k' .. i)
+        eq(i, kid.kids[2].v, 'k' .. i .. ' finds its kid'); ok(db.kids[at] == kid, 'and its index')
+    end
+    eq(nil, A.kid_by_key(db, 'nope'), 'a missing key is absent')
+    eq(N, A.locate_at(db, { 'k' .. N, 2 }).v, 'at() takes the key step through it')
+    -- the cost: N lookups on N kids — a scan per lookup is N^2/2 key_of calls (12.5M here)
+    local key_of, calls = A.key_of, 0
+    A.key_of = function (...) calls = calls + 1; return key_of(...) end
+    local fresh = A.keyed('db', kids)
+    for i = 1, N do A.kid_by_key(fresh, 'k' .. i) end
+    A.key_of = key_of
+    ok(calls <= 3 * N, ('N lookups cost %d key_of calls, not ~N^2/2'):format(calls))
+    -- an owned term edited in place past set_at: a stale HIT is re-checked, never returned
+    local own = A.keyed('own', vim.deepcopy(kids))
+    eq(5, A.kid_by_key(own, 'k5').kids[2].v)
+    own.kids[5] = A.node('pair', A.lit('moved'), A.lit(-5))
+    eq(nil, A.kid_by_key(own, 'k5'), 'the replaced key is gone')
+    eq(-5, A.kid_by_key(own, 'moved').kids[2].v, 'and the new one found')
+    -- the in-place mutator (set_at, under rewrite) resolves its key step through the map, THEN writes: a new key at
+    -- the same index must be found — a stale MISS is the one a re-check cannot catch
+    local T = A.template(A.keyed('own2', vim.deepcopy(kids)))
+    local T2 = assert(A.rewrite(T, { 'k9' }, A.node('pair', A.lit('nine'), A.lit(99))))
+    eq(99, A.kid_by_key(T2.body, 'nine').kids[2].v, 'rewrite: the new key is found')
+    eq(nil, A.kid_by_key(T2.body, 'k9'), 'and the old one is gone')
+end)
+
 -- node takes kids as ARGUMENTS, seq as ONE LIST: seq(a, b, c) made hole `a` the kid table, and match then answered ok
 -- with no bindings on a matching AND a non-matching instance (CART-1526) — the constructor refuses it by name
 test('algebra seam: seq refuses terms as arguments; a list is a sequence', function ()

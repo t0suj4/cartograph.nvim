@@ -78,10 +78,18 @@ end
 --- the ENVIRONMENT a residual loads in: the constant pool as MIXK, every KNOWN global (opts.globals — mixalg.program's
 --- `knowns`) at its dotted path, the rest of _G behind them. A known reaching dynamic code is residualized as its PATH
 --- (`fix__RULES[a]`), so a residual loaded without its knowns reads nil (CART-1374). A path whose root is already set
---- (`x.f` when `x` is known) is the root's own field and is not written over.
-function M.env(pool, globals, extra)
+--- (`x.f` when `x` is known) is the root's own field and is not written over. `prims` (mix's opts.prims — the program's
+--- own primitives, e.g. mixalg's ALWAYS_OPAQUE) are placed the same way: the residual CALLS them by their path, so a
+--- residual loaded without them calls nil (CART-1528).
+function M.env(pool, globals, extra, prims)
     local env = { MIXK = pool }
     for k, v in pairs(extra or {}) do env[k] = v end
+    if prims then
+        local all = {}
+        for k, v in pairs(globals or {}) do all[k] = v end
+        for k, v in pairs(prims) do if all[k] == nil then all[k] = v end end
+        globals = all
+    end
     local keys = vim.tbl_keys(globals or {})
     table.sort(keys, function (a, b) local na, nb = select(2, a:gsub('%.', '')), select(2, b:gsub('%.', '')); if na ~= nb then return na < nb end return a < b end)
     for _, path in ipairs(keys) do

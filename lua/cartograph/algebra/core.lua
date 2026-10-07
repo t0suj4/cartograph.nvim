@@ -193,8 +193,31 @@ function M.keyed(k, kids, opts)
     return t
 end
 --- the kid of a keyed node under a key, and its index
+-- ★ A KEY STEP IS A LOOKUP, and costs one past KEYMAP_MIN kids (CART-1528): a weak node -> { key -> first index } map,
+-- rebuilt when the kid TABLE or its length changed, and a hit re-checked against its kid. Terms are values (EGAL,
+-- CART-1403), so the map is an OBSERVATION like content_id: under FREEZE it marks the node, and set_at — the in-place
+-- mutator that keeps the length — drops it. (A keyed node is the fact set / join index of a rule engine, CART-1525.)
+local KEYMAP, KEYMAP_MIN = setmetatable({}, { __mode = 'k' }), 16
+M.KEYMAP = KEYMAP
 function M.kid_by_key(t, key)
-    for i, kid in ipairs(t.kids or {}) do if M.key_of(t, kid) == key then return kid, i end end
+    local kids = t.kids or {}
+    if #kids >= KEYMAP_MIN then
+        local m = KEYMAP[t]
+        if not m or m.kids ~= kids or m.n ~= #kids then
+            m = { kids = kids, n = #kids, at = {} }
+            for i, kid in ipairs(kids) do
+                local k = M.key_of(t, kid)
+                if k ~= nil and m.at[k] == nil then m.at[k] = i end
+            end
+            KEYMAP[t] = m
+            if M.FREEZE then M.OBSERVED[t] = true end
+        end
+        local i = m.at[key]
+        if i == nil then return nil end
+        if M.key_of(t, kids[i]) == key then return kids[i], i end
+        KEYMAP[t] = nil -- a stale hit (an owned term edited in place past set_at): the scan below is the answer
+    end
+    for i, kid in ipairs(kids) do if M.key_of(t, kid) == key then return kid, i end end
     return nil
 end
 --- the path step to kid i of t: the key for a keyed node, the index otherwise
@@ -825,6 +848,7 @@ local function set_at(root, path, node)
         last = i
     end
     parent.kids[last] = node
+    M.KEYMAP[parent] = nil -- AFTER the write: the key step above built the map, and this kid's key may have changed
     return root
 end
 
