@@ -8,6 +8,9 @@
 return {
     name = 'mix-battery',
     baseline = 'HEAD',
+    -- CONDITIONS (CART-1537): cost is the target's — measured 2026-10-07, one engine ranked differently with the JIT on
+    -- and off — so the timings run under both; correctness runs under the first
+    conditions = { { name = 'jit' }, { name = 'nojit', nvim = { '--cmd', 'lua jit.off()' } } },
     instruments = {
         { name = 'mix + algebra specs', kind = 'specs', specs = { 'mix_spec', 'mixgaps_spec', 'mixalg_spec', 'compiledverb_spec',
             'saturate_spec', 'mixproj_spec', 'algebra_spec', 'algebradonor_spec', 'kvterm_spec', 'fnpeer_spec' } },
@@ -16,7 +19,7 @@ return {
         { name = 'derive-accept + the derived client', kind = 'tactic', tactic = 'derive-accept', params = { fuzz = 120 }, expect = 'holds' },
         { name = 'compiled matchers equal A.match', kind = 'check', file = 'tools/experiments/instruments/cmreg.lua', pattern = '0 refused;.*, 0 differ;' },
         { name = "mix's sets unchanged (row join)", kind = 'join', file = 'tools/experiments/instruments/lowersets.lua' },
-        { name = 'compile time (33 matchers)', kind = 'ab', file = 'tools/experiments/instruments/cmreg.lua', extract = 'compile ([%d.]+) s', runs = 5, bound = 1.10 },
-        { name = 'lowering time (derivations)', kind = 'ab', file = 'tools/experiments/instruments/lowertime.lua', extract = 'derivations%(%d+%) ([%d.]+) ms', runs = 5, bound = 1.15 },
+        { name = 'compile time (33 matchers)', kind = 'ab', file = 'tools/experiments/instruments/cmreg.lua', extract = 'compile ([%d.]+) s', runs = 5, bound = 1.10, conditions = 'all' },
+        { name = 'lowering time (derivations)', kind = 'ab', file = 'tools/experiments/instruments/lowertime.lua', extract = 'derivations%(%d+%) ([%d.]+) ms', runs = 5, bound = 1.15, conditions = 'all' },
     },
 }

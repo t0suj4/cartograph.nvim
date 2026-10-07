@@ -18,6 +18,13 @@
 --     ab     : file = '<throwaway>' | tactic = '<entry>', params, extract = '<Lua pattern capturing a number>', runs = 5,
 --              bound = 1.10 — FRESH PROCESS per run, baseline and variant INTERLEAVED, MEDIAN per side; pass = variant
 --              median <= baseline median x bound (higher_is_better = true flips it)
+--   CONDITIONS (decl.conditions = { { name, nvim = { argv… }, vars = { NAME = value } }… }, CART-1537): the same
+--     instrument under several conditions of the run — `nvim` arguments go right after `nvim` (e.g. { '--cmd',
+--     'lua jit.off()' }: the JIT off before the script loads), `vars` into the environment. An instrument runs under
+--     `conditions = { names… } | 'all'`, by default the FIRST condition only; one row per instrument and condition, and an
+--     A/B compares baseline and variant under the SAME condition (cost is the target's: the ranking may differ). A specs
+--     instrument runs tests/run.sh, which starts nvim itself: a condition's `nvim` arguments do not reach it (refused
+--     by name), its `vars` do.
 --   the DECISION: accept when every instrument passes.
 -- THE ENVIRONMENT (injected, so the logic is testable without processes)
 --   env = { root = '<repo>', exec = function (dir, argv, vars) -> output, code,
@@ -42,9 +49,12 @@ local function kv_args(params)
     for _, k in ipairs(ks) do out[#out + 1] = k .. '=' .. tostring(params[k]) end
     return out
 end
--- the toolbelt invocation of an entry or a throwaway file, in a tree (its OWN toolbelt: the tree's code is what runs)
-local function toolbelt(inst)
-    local argv = { 'nvim', '--headless', '-u', 'NONE', '-l', 'tools/toolbelt.lua', 'run', inst.file and ('@' .. inst.file) or inst.tactic, '-' }
+-- the toolbelt invocation of an entry or a throwaway file, in a tree (its OWN toolbelt: the tree's code is what runs),
+-- under a condition (its nvim arguments right after `nvim`)
+local function toolbelt(inst, cond)
+    local argv = { 'nvim' }
+    for _, a in ipairs(cond and cond.nvim or {}) do argv[#argv + 1] = a end
+    for _, a in ipairs({ '--headless', '-u', 'NONE', '-l', 'tools/toolbelt.lua', 'run', inst.file and ('@' .. inst.file) or inst.tactic, '-' }) do argv[#argv + 1] = a end
     for _, a in ipairs(kv_args(inst.params)) do argv[#argv + 1] = a end
     return argv
 end
@@ -69,15 +79,15 @@ local function rows_of(out)
 end
 
 local RUN = {}
-function RUN.tactic(inst, trees, env)
-    local out = env.exec(trees.variant, toolbelt(inst))
+function RUN.tactic(inst, trees, env, cond)
+    local out = env.exec(trees.variant, toolbelt(inst, cond), cond and cond.vars)
     local holds, why = M.verdict('\n' .. out)
     -- compare = '<pattern>': NO REGRESSION instead of a verdict — the tactic runs in the baseline too, and the variant
     -- passes when the pattern's capture is the SAME on both sides (a claim the baseline already fails, e.g. a known
     -- refusal, is no reason to reject a change that leaves it as it was)
     if inst.compare then
         if not trees.baseline then return { pass = false, detail = 'compare needs a baseline' } end
-        local _, bwhy = M.verdict('\n' .. env.exec(trees.baseline, toolbelt(inst)))
+        local _, bwhy = M.verdict('\n' .. env.exec(trees.baseline, toolbelt(inst, cond), cond and cond.vars))
         local cb, cv = tostring(bwhy or ''):match(inst.compare), tostring(why or ''):match(inst.compare)
         if not cb or not cv then return { pass = false, detail = ('the compare pattern matched baseline %s / variant %s'):format(tostring(cb), tostring(cv)) } end
         if cb == cv then return { pass = true, baseline = cb, variant = cv, detail = 'as the baseline: ' .. cv } end
@@ -97,21 +107,24 @@ function RUN.tactic(inst, trees, env)
     local want = (inst.expect or 'holds') == 'holds'
     return { pass = holds ~= nil and holds == want, detail = (holds == nil and 'no verdict: ' or '') .. tostring(why) }
 end
-function RUN.specs(inst, trees, env)
-    local out = env.exec(trees.variant, { 'bash', 'tests/run.sh' }, { SPEC = table.concat(inst.specs, ',') })
+function RUN.specs(inst, trees, env, cond)
+    if cond and cond.nvim and #cond.nvim > 0 then return { pass = false, detail = 'condition ' .. tostring(cond.name) .. ': its nvim arguments cannot reach tests/run.sh' } end
+    local vars = { SPEC = table.concat(inst.specs, ',') }
+    for k, v in pairs(cond and cond.vars or {}) do vars[k] = v end
+    local out = env.exec(trees.variant, { 'bash', 'tests/run.sh' }, vars)
     local p, f, s = out:match('(%d+) passed, (%d+) failed, (%d+) skipped')
     p, f = tonumber(p), tonumber(f)
     return { pass = p ~= nil and f == 0 and p > 0, detail = p and ('%d passed, %d failed, %s skipped'):format(p, f, s) or 'no summary line' }
 end
-function RUN.check(inst, trees, env)
-    local out = env.exec(trees.variant, toolbelt(inst))
+function RUN.check(inst, trees, env, cond)
+    local out = env.exec(trees.variant, toolbelt(inst, cond), cond and cond.vars)
     local hit = out:match(inst.pattern)
     return { pass = hit ~= nil, detail = hit and ('matched ' .. inst.pattern) or ('no match for ' .. inst.pattern .. ': ' .. (out:match('[^\n]*\n?$') or ''):sub(1, 160)) }
 end
-function RUN.join(inst, trees, env)
+function RUN.join(inst, trees, env, cond)
     if not trees.baseline then return { pass = false, detail = 'a join needs a baseline' } end
-    local a, na = rows_of('\n' .. env.exec(trees.baseline, toolbelt(inst)))
-    local b, nb = rows_of('\n' .. env.exec(trees.variant, toolbelt(inst)))
+    local a, na = rows_of('\n' .. env.exec(trees.baseline, toolbelt(inst, cond), cond and cond.vars))
+    local b, nb = rows_of('\n' .. env.exec(trees.variant, toolbelt(inst, cond), cond and cond.vars))
     local joined, differ, only_a, only_b, first = 0, 0, 0, 0, nil
     local ks = {}
     for k in pairs(a) do ks[#ks + 1] = k end
@@ -128,12 +141,12 @@ function RUN.join(inst, trees, env)
         detail = ('%d rows joined, %d differ, %d / %d on one side only%s'):format(joined, differ, only_a, only_b,
             joined == 0 and (' — NOTHING JOINED (%d / %d rows)'):format(na, nb) or (first and (', first ' .. first) or '')) }
 end
-function RUN.ab(inst, trees, env)
+function RUN.ab(inst, trees, env, cond)
     if not trees.baseline then return { pass = false, detail = 'an A/B needs a baseline' } end
     local runs, base, var = inst.runs or 5, {}, {}
     for _ = 1, runs do
         for _, side in ipairs({ 'baseline', 'variant' }) do -- (INTERLEAVED: a drift of the machine hits both sides)
-            local out = env.exec(trees[side], toolbelt(inst))
+            local out = env.exec(trees[side], toolbelt(inst, cond), cond and cond.vars)
             local x = tonumber(out:match(inst.extract))
             if x then table.insert(side == 'baseline' and base or var, x) end
         end
@@ -162,14 +175,26 @@ function M.run(decl, env)
             -- baseline predates it — the instrument measures each tree's code, it is not that code)
             if inst.file and inst.file:sub(1, 1) ~= '/' then inst = vim.deepcopy(inst); inst.file = env.root .. '/' .. inst.file end
             local run = RUN[inst.kind]
-            local r
-            if not run then r = { pass = false, detail = 'no instrument kind ' .. tostring(inst.kind) }
-            else
-                local okr, rr = pcall(run, inst, trees, env)
-                r = okr and rr or { pass = false, detail = 'the instrument raised: ' .. tostring(rr) }
+            local conds, all = {}, decl.conditions or { { name = 'default' } }
+            if inst.conditions == 'all' then conds = all
+            elseif type(inst.conditions) == 'table' then
+                for _, nm in ipairs(inst.conditions) do
+                    local c
+                    for _, x in ipairs(all) do if x.name == nm then c = x end end
+                    conds[#conds + 1] = c or { name = nm, missing = true }
+                end
+            else conds = { all[1] } end
+            for _, cond in ipairs(conds) do
+                local r
+                if not run then r = { pass = false, detail = 'no instrument kind ' .. tostring(inst.kind) }
+                elseif cond.missing then r = { pass = false, detail = 'no condition ' .. tostring(cond.name) .. ' declared' }
+                else
+                    local okr, rr = pcall(run, inst, trees, env, cond)
+                    r = okr and rr or { pass = false, detail = 'the instrument raised: ' .. tostring(rr) }
+                end
+                r.name, r.kind, r.condition = (inst.name or inst.kind) .. (#all > 1 and (' [' .. tostring(cond.name) .. ']') or ''), inst.kind, cond.name
+                rows[#rows + 1] = r
             end
-            r.name, r.kind = inst.name or inst.kind, inst.kind
-            rows[#rows + 1] = r
         end
         local accept = #rows > 0
         for _, r in ipairs(rows) do if not r.pass then accept = false end end

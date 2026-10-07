@@ -93,3 +93,32 @@ test('experiment: a tactic with compare = <pattern> is NO REGRESSION — the sam
     local nobase = X.run({ instruments = { { kind = 'tactic', tactic = 'derive-accept', compare = P } } }, fake(function () return out('1 agree, 0 differ, 0 no sample, 0 refused') end))
     eq(false, nobase.rows[1].pass, 'compare needs a baseline')
 end)
+
+test('experiment: CONDITIONS — an instrument runs under each it names, its nvim arguments right after nvim, the A/B within one condition', function ()
+    local C = { { name = 'jit' }, { name = 'nojit', nvim = { '--cmd', 'lua jit.off()' }, vars = { X = '1' } } }
+    -- (the fake answers 10 / 20 ms under the JIT, 30 / 33 ms without it: the variant is slower only with the JIT)
+    local env = fake(function (dir, argv)
+        local nojit = table.concat(argv, ' '):find('jit.off', 1, true)
+        if dir == '/wt/HEAD' then return nojit and 'x 30 ms' or 'x 10 ms' end
+        return nojit and 'x 33 ms' or 'x 20 ms'
+    end)
+    local r = X.run({ baseline = 'HEAD', conditions = C, instruments = {
+        { name = 't', kind = 'ab', file = '/abs/t.lua', extract = 'x ([%d.]+) ms', runs = 1, bound = 1.15, conditions = 'all' } } }, env)
+    eq({ 't [jit]', 't [nojit]' }, { r.rows[1].name, r.rows[2].name })
+    eq({ false, true }, { r.rows[1].pass, r.rows[2].pass }, 'x2 fails under the JIT, x1.1 passes without it')
+    eq({ 10, 20, 30, 33 }, { r.rows[1].baseline, r.rows[1].variant, r.rows[2].baseline, r.rows[2].variant })
+    local nj
+    for _, c in ipairs(env.calls) do if c.argv:find('jit.off', 1, true) then nj = c end end
+    ok(nj.argv:find('^nvim %-%-cmd lua jit%.off%(%) %-%-headless'), 'the arguments right after nvim: ' .. nj.argv)
+    eq('1', nj.vars.X, 'and the condition\'s variables')
+    -- (by default the FIRST condition only; a spec under a condition with nvim arguments is refused by name; an
+    -- undeclared condition fails its row)
+    local r2 = X.run({ conditions = C, instruments = {
+        { name = 'd', kind = 'tactic', tactic = 'x', expect = 'fails' },
+        { name = 's', kind = 'specs', specs = { 'a_spec' }, conditions = { 'nojit' } },
+        { name = 'm', kind = 'tactic', tactic = 'x', conditions = { 'nope' } } } }, fake(function () return '{\n  holds = false,\n  why = "w",\n' end))
+    eq({ 'd [jit]', 's [nojit]', 'm [nope]' }, { r2.rows[1].name, r2.rows[2].name, r2.rows[3].name })
+    eq({ true, false, false }, { r2.rows[1].pass, r2.rows[2].pass, r2.rows[3].pass })
+    ok(r2.rows[2].detail:find('cannot reach tests/run.sh', 1, true), r2.rows[2].detail)
+    ok(r2.rows[3].detail:find('no condition nope', 1, true), r2.rows[3].detail)
+end)
