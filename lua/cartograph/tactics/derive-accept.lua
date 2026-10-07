@@ -9,6 +9,9 @@
 -- 5e7 VM instructions is aborted (a LOOPING residual is a finding, not a hang).
 -- ⚠ It binds the derivations into the shared algebra table and turns the JIT off for the instruction guard while it
 -- runs; both are restored, on error too.
+-- COVERAGE (CART-1538): each row also carries how much of its RESIDUAL the tapped samples ran — statement lines and
+-- branch arms (an arm counts when its first statement ran, recorded by the guard's line hook) — and the claim line says
+-- it: measured 2026-10-07, 21.0% of lines and 14.5% of arms, so "agree" is about the paths the suite happens to reach.
 -- CLAIM: no operator differs, none is refused, at least one was compared — and the CONTROL held: two of a derivation's
 -- own results that differ compared as different (a dead comparison would call every residual right).
 local function repo_of_toolbelt()
@@ -114,12 +117,13 @@ local function measure(_, p)
                 local oks, res, st = pcall(MX.specialize, prog, entry, div, statics, { budget = 5e6, globals = G, prims = prims, reuse = p.reuse })
                 if not oks then return nil, 'specialize: ' .. MX.describe(res) end
                 local out = MX.print(res, prog.where)
+                row.text = out
                 row.bytes, row.functions = (row.bytes or 0) + #out, (row.functions or 0) + #res.order
                 row.dead_dropped = (row.dead_dropped or 0) + (st.dead_dropped or 0)
                 local K = {}
                 for k, v in pairs(G) do K[k] = v end
                 for k in pairs(opaque or {}) do K[k] = A[k:sub(3)] end
-                local okf, f = pcall(function () return assert(load(out, 'residual', 't', F.env(res.pool, K, nil, prims)))() end)
+                local okf, f = pcall(function () return assert(load(out, 'residual:' .. op, 't', F.env(res.pool, K, nil, prims)))() end)
                 if not okf then return nil, 'load: ' .. tostring(f) end
                 -- (a PLANTED difference — the tool's own negative control: this operator's compiled result gets one
                 -- field more, so a run that still calls it right has a dead comparison or a dead tally)
@@ -165,8 +169,15 @@ local function measure(_, p)
             if row.refused then row.class = 'refused'
             elseif row.samples == 0 then row.class = 'nosample'
             else
-                local function guarded(f, a, rest)
-                    debug.sethook(function () error('GUARD: instruction budget', 0) end, '', 5e7)
+                row.hit = {}
+                local function guarded(f, a, rest, cov)
+                    if cov then
+                        local src = 'residual:' .. op
+                        debug.sethook(function (ev, line)
+                            if ev == 'count' then error('GUARD: instruction budget', 0) end
+                            if debug.getinfo(2, 'S').source == src then row.hit[line] = true end
+                        end, 'l', 5e7)
+                    else debug.sethook(function () error('GUARD: instruction budget', 0) end, '', 5e7) end
                     local c = vim.deepcopy(a)
                     local r = { pcall(f, unpack(c, rest and 2 or 1, c.n)) }
                     debug.sethook()
@@ -174,7 +185,7 @@ local function measure(_, p)
                 end
                 local agree, w1 = 0, nil
                 for i, cs in ipairs(cases) do
-                    local w, g = guarded(D[op], cs.a), guarded(cs.f, cs.a, cs.rest)
+                    local w, g = guarded(D[op], cs.a), guarded(cs.f, cs.a, cs.rest, true)
                     local same = same_result(w, g)
                     -- (the CONTROL: two of the derivation's own results that differ must compare as different — a dead
                     -- comparison would call every residual right)
@@ -188,6 +199,36 @@ local function measure(_, p)
                 row.agree = agree
                 row.class = agree == row.samples and 'agree' or 'differ'
             end
+            -- COVERAGE of the residual by the tapped samples: statement lines and branch ARMS (if / elseif / else bodies,
+            -- loop bodies — an arm is covered when its first statement ran)
+            if row.text and row.class ~= 'refused' then
+                local tsutil = require 'cartograph.spec.tsutil' -- (indexed child iteration, CART-1453)
+                local root = vim.treesitter.get_string_parser(row.text, 'lua'):parse()[1]:root()
+                local STMT = { variable_declaration = true, assignment_statement = true, function_call = true, return_statement = true,
+                    if_statement = true, for_statement = true, while_statement = true, repeat_statement = true, do_statement = true, break_statement = true }
+                local lines, arms = {}, {}
+                local function first_stmt(block)
+                    for _, c in tsutil.inext, block, -1 do if c:named() and STMT[c:type()] then return c:start() + 1 end end
+                end
+                local function walk(n, parent_is_stmt)
+                    local ty = n:type()
+                    if STMT[ty] and not (ty == 'function_call' and parent_is_stmt) then lines[n:start() + 1] = true end
+                    if ty == 'block' then
+                        local par = n:parent() and n:parent():type()
+                        if par == 'if_statement' or par == 'elseif_statement' or par == 'else_statement' or par == 'for_statement'
+                            or par == 'while_statement' or par == 'repeat_statement' then
+                            local l = first_stmt(n); if l then arms[#arms + 1] = l end
+                        end
+                    end
+                    for _, c in tsutil.inext, n, -1 do if c:named() then walk(c, STMT[ty] or false) end end
+                end
+                walk(root, false)
+                local nl, hl, na, ha = 0, 0, #arms, 0
+                for l in pairs(lines) do nl = nl + 1; if row.hit[l] then hl = hl + 1 end end
+                for _, l in ipairs(arms) do if row.hit[l] then ha = ha + 1 end end
+                row.cov = { lines = nl, lines_hit = hl, arms = na, arms_hit = ha }
+            end
+            row.text, row.hit = nil, nil
             tally[row.class] = tally[row.class] + 1
             rows[#rows + 1] = row
         end
@@ -211,8 +252,10 @@ local E = {
     claim = function (v)
         if v.error then return false, v.error end
         local t = v.tally
-        local head = ('%d agree, %d differ, %d no sample, %d refused (%s, %s; %d bytes in %d functions)'):format(t.agree, t.differ,
-            t.nosample, t.refused, v.through and 'through' or 'plain', v.reuse, v.bytes, v.functions)
+        local cl, ch, ca, cha = 0, 0, 0, 0
+        for _, r in ipairs(v.rows) do if r.cov then cl, ch, ca, cha = cl + r.cov.lines, ch + r.cov.lines_hit, ca + r.cov.arms, cha + r.cov.arms_hit end end
+        local head = ('%d agree, %d differ, %d no sample, %d refused (%s, %s; %d bytes in %d functions; the samples ran %.1f%% of residual lines, %.1f%% of branch arms)'):format(t.agree, t.differ,
+            t.nosample, t.refused, v.through and 'through' or 'plain', v.reuse, v.bytes, v.functions, 100 * ch / math.max(1, cl), 100 * cha / math.max(1, ca))
         if t.differ > 0 or t.refused > 0 then
             for _, r in ipairs(v.rows) do
                 if r.class == 'differ' then return false, head .. ' — first: ' .. r.op .. ' ' .. tostring(r.first) end
@@ -247,7 +290,9 @@ E.examples = {
         expect = { holds = true, check = function (v)
             local r = v.rows[1]
             -- (at least the two direct calls: `sites` is reached through other operators the suite calls too)
-            return r.class == 'agree' and r.samples >= 2 and r.agree == r.samples and r.bytes > 0 and r.functions > 0, vim.inspect(r)
+            -- (and its COVERAGE: the samples ran some of the residual's lines, never more than it has — CART-1538)
+            return r.class == 'agree' and r.samples >= 2 and r.agree == r.samples and r.bytes > 0 and r.functions > 0
+                and r.cov ~= nil and r.cov.lines_hit > 0 and r.cov.lines_hit <= r.cov.lines and r.cov.arms_hit <= r.cov.arms, vim.inspect(r)
         end },
     },
     {
