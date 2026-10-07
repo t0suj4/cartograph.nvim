@@ -2180,6 +2180,11 @@ function M.specialize(prog, fname, division, statics, opts)
     -- residual function takes as parameters under fresh names
     local function point(T, division, svals, frame)
         local extra_args, extra_params = {}, {}
+        -- (ONE PARAMETER PER CALLER VARIABLE, not per capture: closures capturing the same dynamic variable of the caller
+        -- share it — the extra arguments are plain reads, all after the call's own, so the copies held one value. 43% of
+        -- a derivation residual's parameters were such copies, CART-1536. Which captures share is part of the KEY: a
+        -- closure's key marks a dynamic free variable only as dynamic, and another site may alias differently)
+        local argix, alias, pix = {}, {}, {}
         local cloned, nc = {}, 0
         local function clone(c)
             if cloned[c] then return cloned[c] end
@@ -2190,10 +2195,17 @@ function M.specialize(prog, fname, division, statics, opts)
             for _, id in ipairs(c.lam.free) do
                 local b = c.bt[id] or S
                 if b == D then
-                    nc = nc + 1
-                    local nm = rname(id) .. 'c' .. nc
-                    extra_args[#extra_args + 1] = { op = 'var', name = c.dfree[id] }
-                    extra_params[#extra_params + 1] = nm
+                    local an = c.dfree[id]
+                    local nm = an ~= nil and argix[an] or nil
+                    if not nm then
+                        nc = nc + 1
+                        nm = rname(id) .. 'c' .. nc
+                        if an ~= nil then argix[an] = nm end
+                        extra_args[#extra_args + 1] = { op = 'var', name = an }
+                        extra_params[#extra_params + 1] = nm
+                        pix[nm] = #extra_params
+                    end
+                    alias[#alias + 1] = pix[nm] -- (each capture's parameter, in capture order: the sharing pattern)
                     dfree[id] = nm
                     env[id] = DYN
                 elseif b == C and R.clos[M.cval(c, id)] then env[id] = clone(R.clos[M.cval(c, id)]).fn
@@ -2211,6 +2223,7 @@ function M.specialize(prog, fname, division, statics, opts)
             if c then csvals[i] = clone(c).fn else csvals[i] = v end
         end
         local key = t_key(T) .. ':' .. table.concat(division, '') .. ':' .. args_key(svals, #division, R.clos)
+            .. ':' .. table.concat(alias, ',')
         local name = memo[key]
         if name then return name, extra_args end
         counter = counter + 1

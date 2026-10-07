@@ -1463,3 +1463,28 @@ end
     ok(text:find('while', 1, true), 'the dynamic loop stays\n' .. text)
 end)
 
+-- ONE PARAMETER PER CALLER VARIABLE (CART-1536): closures capturing the same dynamic variable reach a program point
+-- through ONE extra parameter, not one per capture (43% of a derivation residual's parameters were such copies)
+test('mix: two closures capturing the same dynamic variable share ONE parameter of the program point', function ()
+    ready()
+    local src = [[
+local function apply2(f, g, x)
+    local s = f(x)
+    for i = 1, x do s = s + g(i) end
+    return s
+end
+local function main(a, b)
+    local h = function (v) return v * a end
+    local k = function (v) return v - a end
+    local m = function (v) return v + b end
+    return apply2(h, k, 3), apply2(h, m, 2)
+end
+]]
+    local r, text = residual(src, 'main', { 'D', 'D' }, {})
+    for _, ab in ipairs({ { 1, 2 }, { 5, -3 }, { 0, 7 } }) do eq({ original(src, 'main')(ab[1], ab[2]) }, { r(ab[1], ab[2]) }, text) end
+    local shared = text:match('return (apply2_%d+)%(a_%d+%), ')
+    ok(shared, 'h and k (both capturing a) pass a ONCE\n' .. text)
+    ok(text:find('function ' .. shared .. '%([%w_]+%)'), 'and its point takes one parameter\n' .. text)
+    ok(text:find('apply2_%d+%(a_%d+, b_%d+%)'), 'h and m capture two variables: two parameters\n' .. text)
+end)
+
