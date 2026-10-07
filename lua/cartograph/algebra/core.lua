@@ -52,7 +52,14 @@ local unpack = table.unpack or unpack
 function M.lit(v) return { k = 'lit', v = v } end
 function M.name(n) return { k = 'name', n = n } end
 function M.node(k, ...) return { k = k, kids = { ... } } end
-function M.seq(list) return { k = 'seq', kids = list } end
+--- a sequence of terms from ONE list. ⚠ node takes its kids as arguments, seq as a list: seq(a, b, c) would make hole
+--- `a` the kid table and match it vacuously (ok, no bindings — CART-1526), so a term or a second argument is refused.
+function M.seq(list, extra)
+    if extra ~= nil or (type(list) == 'table' and list.k ~= nil) then
+        error('seq takes ONE list of terms, not terms as arguments (node(k, ...) takes those)', 2)
+    end
+    return { k = 'seq', kids = list }
+end
 function M.hole(h, rep) return { k = 'hole', h = h, rep = rep or nil } end
 --- a CONTEXT hole (Baumgartner & Kutsia 2014): a hole APPLIED to a hedge. Its value is a
 --- hedge containing exactly one cursor; instantiation plugs the applied hedge there.

@@ -583,3 +583,19 @@ test('algebra seam: anti_unify RAISES when the algebra is unavailable', function
     eq(false, fine, 'it raises')
     ok(tostring(err):find('not available', 1, true), 'and says why: ' .. tostring(err))
 end)
+
+-- node takes kids as ARGUMENTS, seq as ONE LIST: seq(a, b, c) made hole `a` the kid table, and match then answered ok
+-- with no bindings on a matching AND a non-matching instance (CART-1526) — the constructor refuses it by name
+test('algebra seam: seq refuses terms as arguments; a list is a sequence', function ()
+    local A = need()
+    local a, b = A.node('a'), A.node('b')
+    local fine, err = pcall(A.seq, a, b)
+    eq(false, fine, 'seq(a, b) raises')
+    ok(tostring(err):find('ONE list', 1, true), 'and says why: ' .. tostring(err))
+    eq(false, (pcall(A.seq, a)), 'seq(term) raises too')
+    eq('(seq (a) (b))', A.show(A.seq({ a, b })), 'seq({ a, b }) is the sequence')
+    -- and the vacuous match it prevented: a list template matches only what it says
+    local T = A.template(A.seq({ A.hole('xs', true), A.node('m', A.hole('r')), A.hole('ys', true) }))
+    eq(false, A.match(T, A.seq({ a, b })).ok, 'no m: no match')
+    ok(A.match(T, A.seq({ a, A.node('m', A.lit(1)) })).values.r ~= nil, 'an m binds r')
+end)
