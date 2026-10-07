@@ -260,10 +260,13 @@ local AMB = {
     'local function relay(o) return quiet(o) end',  -- resolved, onto a joined summary
     'local function first(s) return s:gsub("a", "b") end', -- the method~ tier
     'local function second(s) return first(s) end', -- resolved, onto it
+    'local function viacb(o) return pcall(function () return o:peek() end) end', -- a CALLBACK onto a join (CART-1558)
+    'local function apply(f, x) return f(x) end',
+    'local function viasub(o) return apply(function () return o:peek() end, 1) end', -- a SUBSTITUTED pair onto a join
 }
 for i = 1, 9 do AMB[#AMB + 1] = ('local T%d = {} function T%d:many() return %d end'):format(i, i, i) end
 AMB[#AMB + 1] = 'local function crowd(o) return o:many() end' -- 9 candidates: the refusal keeps 8, the list is not whole
-AMB[#AMB + 1] = 'return { either, quiet, relay, second, crowd }'
+AMB[#AMB + 1] = 'return { either, quiet, relay, second, crowd, viacb, viasub }'
 
 test('fixpoint: an AMBIGUOUS call is the JOIN of its candidates — a candidate\'s write is the call\'s, an all-pure join stays ~ under its premise, a cut list keeps the hedge; the tiers travel through a resolved call', function ()
     if not ready() then skip 'no lua parser' end
@@ -277,6 +280,14 @@ test('fixpoint: an AMBIGUOUS call is the JOIN of its candidates — a candidate\
     eq(true, sums[by.quiet.id].jp)
     eq('pure~', effects.purity(store, by.relay.id), 'the premise travels through a resolved call')
     eq('pure~', effects.purity(store, by.second.id), 'and so does the method~ tier')
+    eq('pure~', effects.purity(store, by.viacb.id), 'through a callback (CART-1558)')
+    eq('pure~', effects.purity(store, by.viasub.id), 'through a substituted pending pair (CART-1558)')
+    for _, x in ipairs(store.data.calls) do
+        if x.to == by.quiet.id then
+            local slice = effects.call_effects(store, x)
+            ok(slice.hedges and vim.tbl_contains(slice.hedges, 'an ambiguous call joined over its candidates'), 'a call slice carries the premise: ' .. vim.inspect(slice.hedges))
+        end
+    end
     for _, x in ipairs(store.data.calls) do
         if x.to == by.first.id then eq('unknown', (effects.calls_commute(store, x, x)), 'nor does commute decide on the method~ tier (CART-1546)') end
     end
@@ -313,6 +324,23 @@ test('fixpoint: a TABLE CONSTRUCTOR argument is fresh — setmetatable({}, mt) w
     eq('pure', effects.purity(store, by.mk2.id), 'a constructor with fields')
     local h = effects.summaries(store)[by.wrap.id].h
     ok(h and h[1]:find('setmetatable on opaque arg', 1, true), 'a call result may be anyone\'s table: ' .. vim.inspect(h))
+end)
+
+test('fixpoint: an OVERFLOWED write set keeps no keys — which 200 survived would depend on arrival order (CART-1545) — and a caller inheriting it drops the keys it had made itself', function ()
+    if not ready() then skip 'no lua parser' end
+    local src = { 'local S, T = {}, {}', 'local function many()' }
+    for i = 1, 201 do src[#src + 1] = ('    S.f%d = 1'):format(i) end
+    src[#src + 1] = 'end'
+    src[#src + 1] = 'local function caller() T.own = 1; many() end'
+    src[#src + 1] = 'return { many, caller }'
+    store.ingest(ts.extract(mkroot(table.concat(src, '\n'))))
+    local by = byname()
+    local sums = effects.summaries(store)
+    eq(true, sums[by.many.id].over)
+    eq({}, sums[by.many.id].w, 'no surviving keys')
+    eq('writes~', effects.purity(store, by.many.id), 'still many writes')
+    eq(true, sums[by.caller.id].over)
+    eq({}, sums[by.caller.id].w, 'its own T.own went with the overflow')
 end)
 
 test('fixpoint: a join whose candidate is summarized LATER repeats the pass to the fixpoint, and a later pass recomputes only what read a changed summary (CART-1544)', function ()

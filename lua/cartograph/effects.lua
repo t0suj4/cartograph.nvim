@@ -377,11 +377,20 @@ local function cp_add(sum, owner, j)
     sum.cpo = sum.cpo or {}
     sum.cpo[owner .. '\0' .. j] = { owner = owner, j = j }
 end
--- a callee or callback summary folded into `sum`
-local function inherit(sum, ts)
+-- the TIERS a summary hands whatever folds it in, beside its writes: the overflow, its first hedge, the name-matched
+-- method tier, nondet, the join premise. EVERY path folding one summary into another goes through here — a resolved
+-- callee, a callback, a substituted pair — because each path that copied them by hand dropped some (CART-1543,
+-- CART-1558: oracle.lua's `stop` read plain pure over a joined pcall callback)
+local function tiers(sum, ts)
     if ts.over then sum.over = true end
     if ts.h then s_hedge(sum, ts.h[1]) end
+    if ts.mh then sum.mh = true end
     if ts.nd then sum.nd = true end
+    if ts.jp then sum.jp = true end
+end
+-- a callee or callback summary folded into `sum`
+local function inherit(sum, ts)
+    tiers(sum, ts)
     for key, tier in pairs(ts.w) do s_add(sum, key, tier) end
     if ts.pwx then s_hedge(sum, 'a function handed in as an argument mutates its params') end
     for k, p in pairs(ts.cpo or {}) do sum.cpo = sum.cpo or {}; sum.cpo[k] = p end
@@ -552,11 +561,7 @@ function M.summaries(store)
             -- name-matched method tier, nondet, the join premise — travel with it
             local function take(c, caller, to, cs)
                 cs = cs or sums[to]
-                if cs.mh then sum.mh = true end
-                if cs.nd then sum.nd = true end
-                if cs.jp then sum.jp = true end
-                if cs.over then sum.over = true end
-                if cs.h then s_hedge(sum, cs.h[1]) end
+                tiers(sum, cs)
                 for key, tier in pairs(cs.w) do
                     local gp = cs.gpk and cs.gpk[key]
                     if gp then
@@ -681,9 +686,7 @@ function M.summaries(store)
                                 end
                                 local ts2 = target and sums[target]
                                 if ts2 then
-                                    if ts2.over then sum.over = true end
-                                    if ts2.h then s_hedge(sum, ts2.h[1]) end
-                                    if ts2.nd then sum.nd = true end
+                                    tiers(sum, ts2)
                                     for key, tier in pairs(ts2.w) do
                                         s_add(sum, key, tier)
                                     end
@@ -735,6 +738,11 @@ function M.summaries(store)
                 end
             end
             reads = nil
+            -- an OVERFLOWED summary is "many writes" and keeps NO keys: which CAP of them survived would depend on the
+            -- order they arrived in (`pairs` over a callee's set), and a summary that differed run to run made the
+            -- join's fixpoint nondeterministic — 109 of cartograph's, CART-1545. purity reads `over` as writes,
+            -- calls_commute as unknown
+            if sum.over then sum.w, sum.nk, sum.gpk = {}, 0, nil end
             if was and signature(sum) == signature(was) then sum = was else changed = changed + 1 end
             for _, fid in ipairs(members) do real[fid] = sum end
             ::reused::
@@ -745,9 +753,10 @@ function M.summaries(store)
     M.join_stats = { rounds = 0, computed = 0 }
     for round = 1, JOIN_ROUNDS + 1 do
         local js = M.join_stats
-        M.join_stats = { rounds = round, whole = 0, cut = 0, computed = js.computed }
+        M.join_stats = { rounds = round, whole = 0, cut = 0, computed = js.computed, changed = js.changed or {} }
         prev = pass(round <= JOIN_ROUNDS and prev or nil)
         M.join_stats.computed = M.join_stats.computed + computed
+        M.join_stats.changed[round] = changed -- (components recomputed into something new, per pass: a tail or a cycle)
         if not stale or (round > 1 and changed == 0) then break end
     end
     sums = prev
@@ -774,6 +783,9 @@ function M.call_effects(store, c, caller_file)
         end
         if cs.over then hedge('write-set overflow in callee') end
         if cs.h then hedge(cs.h[1]) end
+        -- (the summary's PREMISES are hedges of this slice too, CART-1558)
+        if cs.mh then hedge('a method matched to a builtin by name') end
+        if cs.jp then hedge('an ambiguous call joined over its candidates') end
         local tn = store.node(to)
         for key, tier in pairs(cs.w) do
             local gp = cs.gpk and cs.gpk[key]
