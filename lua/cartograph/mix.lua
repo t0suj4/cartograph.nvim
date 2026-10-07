@@ -2526,6 +2526,18 @@ function M.specialize(prog, fname, division, statics, opts)
         end
         error(r, 0)
     end
+    -- a residual expression for e where its value is only READ — iterated (ipairs / pairs / next, a for-in), or measured
+    -- (`#`): `x or {}` with a dynamic x takes ONE frozen empty table from the pool instead of a fresh one per nil (CART-1536:
+    -- 494 of 1,007 such sites in the derivation residuals were direct read-only uses)
+    local empty_t
+    local function rexpr_read(e, X)
+        if e.op == 'bin' and e.o == 'or' and e.r.op == 'table' and #e.r.fields == 0 and not e.r.rest
+            and bt_expr(e.l, X.bt) == D then
+            if not empty_t then empty_t = {} end
+            return { op = 'bin', o = 'or', l = rexpr(e.l, X), r = constref(empty_t) }
+        end
+        return rexpr(e, X)
+    end
     -- a residual expression for e where its value will be MUTATED at run time — a forced variable's initializer or new
     -- value, a forced parameter's argument: a STATIC call producing a table is SPECIALIZED, not computed, so each run
     -- gets its own table as in Lua; computed, it was the pool's one table, shared by every run (CART-1523:
@@ -2578,7 +2590,7 @@ function M.specialize(prog, fname, division, statics, opts)
             if e.o == 'and' or e.o == 'or' then return { op = 'bin', o = e.o, l = rexpr(e.l, X), r = rexpr_guarded(e.r, X) } end
             return { op = 'bin', o = e.o, l = rexpr(e.l, X), r = rexpr(e.r, X) }
         end
-        if op == 'un' then return { op = 'un', o = e.o, e = rexpr(e.e, X) } end
+        if op == 'un' then return { op = 'un', o = e.o, e = (e.o == '#' and rexpr_read or rexpr)(e.e, X) } end
         if op == 'index' then return { op = 'index', obj = rexpr(e.obj, X), key = rexpr(e.key, X) } end
         if op == 'table' then
             local fields = {}
@@ -2590,7 +2602,8 @@ function M.specialize(prog, fname, division, statics, opts)
                 refuse('a residual call of `' .. e.name .. '`, which reaches no value (a primitive, a known global, a host global) — a free name the program did not carry')
             end
             local args = {}
-            for i, a in ipairs(e.args) do args[i] = rexpr(a, X) end
+            local ro = e.name == 'ipairs' or e.name == 'pairs' or e.name == 'next'
+            for i, a in ipairs(e.args) do args[i] = (ro and i == 1 and rexpr_read or rexpr)(a, X) end
             return { op = 'prim', name = e.name, args = args }
         end
         if op == 'method' then
@@ -2798,7 +2811,7 @@ function M.specialize(prog, fname, division, statics, opts)
                     end
                     return unrolled(s, seq, done)
                 else
-                    local e = rexpr(s.e, X)
+                    local e = rexpr_read(s.e, X)
                     env[s.kid] = DYN
                     X.ren[s.kid] = rname(s.kid, X)
                     if s.vid then env[s.vid] = DYN; X.ren[s.vid] = rname(s.vid, X) end

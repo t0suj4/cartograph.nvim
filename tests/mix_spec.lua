@@ -1488,3 +1488,29 @@ end
     ok(text:find('apply2_%d+%(a_%d+, b_%d+%)'), 'h and m capture two variables: two parameters\n' .. text)
 end)
 
+-- `x or {}` ONLY READ — iterated or measured — shares one frozen empty table from the pool; a MUTATED one stays fresh
+-- per call (CART-1536)
+test('mix: `x or {}` that is only read shares a pooled empty table; one that is written stays a fresh table', function ()
+    ready()
+    local src = [[
+local function f(t, u)
+    local n = 0
+    for _, x in ipairs(t or {}) do n = n + x end
+    for k in pairs(u or {}) do n = n + 1 end
+    n = n + #(t or {})
+    local l = u or {}
+    l.hits = (l.hits or 0) + 1
+    return n, l.hits
+end
+]]
+    local r, text = residual(src, 'f', { 'D', 'D' }, {})
+    -- (fresh inputs per call: f writes into u when u is given)
+    local cases = { function () return nil, nil end, function () return { 1, 2 }, nil end,
+        function () return nil, { x = 1 } end, function () return { 5 }, { a = 1, b = 2 } end }
+    for _, c in ipairs(cases) do eq({ original(src, 'f')(c()) }, { r(c()) }, text) end
+    eq({ 0, 1 }, { r(nil, nil) }, 'a second call starts its written table afresh\n' .. text)
+    local _, reads = text:gsub('or MIXK%[%d+%]', '')
+    eq(3, reads, 'the ipairs, pairs and # operands take the pooled table\n' .. text)
+    ok(text:find('or {  }', 1, true), 'the written one is still built per call\n' .. text)
+end)
+
