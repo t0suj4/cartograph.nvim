@@ -8260,6 +8260,14 @@ local MATCH_OPTS = { match_limit = 65536 }
                                     :gsub('^["\']', ''):gsub('["\']$', '')
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'concat', prefix = pre }
+                            elseif (t == 'dot_index_expression' or t == 'bracket_index_expression') and tsutil.lua_field_root(a, src) then
+                                -- a FIELD PATH rooted in a name — `w.order`, `S[k].x`: its root and first field, so a
+                                -- builtin that mutates the argument writes that name's field (CART-1560; the helper
+                                -- lives in tsutil because this function is at LuaJIT's 60-upvalue limit)
+                                -- (`name` = 'root.first', never `v`: argv.str reads v as a LITERAL of any kind)
+                                local root, first = tsutil.lua_field_root(a, src)
+                                args[#args + 1] = ''
+                                argv[#argv + 1] = { k = 'field', name = first and (root .. '.' .. first) or root }
                             elseif t == 'table_constructor' then
                                 -- `{ … }` — a table this call's argument list MAKES: fresh, so a write into it (setmetatable's) is
                                 -- the call's own business, never module state (CART-1547)

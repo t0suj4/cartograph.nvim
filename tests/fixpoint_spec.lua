@@ -343,6 +343,26 @@ test('fixpoint: an OVERFLOWED write set keeps no keys — which 200 survived wou
     eq({}, sums[by.caller.id].w, 'its own T.own went with the overflow')
 end)
 
+test('fixpoint: a builtin mutating a FIELD PATH writes what the direct store writes — the root var\'s first field, the root param — and a field of a local stays hedged (CART-1560)', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local S = { list = {} }',
+        'local function direct() S.list[#S.list + 1] = 1 end',
+        'local function viains() table.insert(S.list, 1) end',
+        'local function deep() table.sort(S.list.inner) end',
+        'local function pdirect(p) p.list[1] = 1 end',
+        'local function pins(p) table.insert(p.list, 1) end',
+        'local function loc() local w = {}; table.insert(w.order, 1); return w end', -- (w FRESH: its field still is not)
+        'return { direct, viains, deep, pdirect, pins, loc }' }, '\n'))))
+    local by = byname()
+    local sums = effects.summaries(store)
+    eq(sums[by.direct.id].w, sums[by.viains.id].w, 'table.insert(S.list) is the write S.list[i] = x records')
+    eq(sums[by.direct.id].w, sums[by.deep.id].w, 'a deeper path lands in the first field')
+    eq('writes', effects.purity(store, by.viains.id))
+    eq(sums[by.pdirect.id].pwx, sums[by.pins.id].pwx, 'a field of a param mutates the param')
+    eq('pure~', effects.purity(store, by.loc.id), 'a field of a local may hold anyone\'s table (w.order = p)')
+end)
+
 test('fixpoint: a join whose candidate is summarized LATER repeats the pass to the fixpoint, and a later pass recomputes only what read a changed summary (CART-1544)', function ()
     if not ready() then skip 'no lua parser' end
     store.ingest(ts.extract(mkroot(table.concat({

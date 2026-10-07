@@ -332,23 +332,29 @@ end
 local function arg_target(store, c, i, caller)
     local a = argv.at(c, i)
     if not a then return 'opaque' end
-    if a.k == 'local' and a.name then
+    -- a LOCAL names the table itself; a FIELD path (`w.order`, `S[k].x`, CART-1560) names a table REACHABLE from its
+    -- root, so the write lands in the root's first field (`S.list[i] = x` is recorded the same way by the extractor,
+    -- with the same blind spot: no alias analysis; a bracket or unknown first field is the root's whole '' key)
+    local name, field = a.name, ''
+    if a.k == 'field' and name then name, field = name:match('^([^.]+)%.?(.*)$') end -- ('root.first')
+    if (a.k == 'local' or a.k == 'field') and name then
         for _, n in ipairs(store.by_file[callrec.file(c)] or {}) do
-            if n.kind == 'var' and n.name == a.name then
-                return 'var', n.id
+            if n.kind == 'var' and n.name == name then
+                return 'var', n.id .. '\31' .. field
             end
         end
         local ps = caller and caller.params
         if ps then
             for pi = 1, #ps do
-                if ps[pi] == a.name then return 'param', pi end
+                if ps[pi] == name then return 'param', pi end
             end
         end
         -- a FRESH local (CART-1494): every definition of it in this function reads nothing — `local out = {}` — so it
         -- holds a table made by this call (or an immutable literal) and a write into it is the call's own business.
         -- It can still ESCAPE (stored into module state, handed to a storing callee), but that store is a write of
         -- its own and recorded as one. core's M.keys sorting its own `out` made eq, show and 7 more basis fns `~`.
-        if caller and fresh_local(caller, a.name) then return 'fresh' end
+        -- (never for a FIELD of one: `w.order = p` stores the caller's table into a fresh `w` without defining `w`)
+        if a.k == 'local' and caller and fresh_local(caller, a.name) then return 'fresh' end
         return 'opaque' -- a plain local: mutation invisible outside — but
         -- it MAY alias module state; the caller hedges (no alias analysis)
     end
@@ -582,7 +588,7 @@ function M.summaries(store)
                     for pi in pairs(cs.pwx) do
                         local kind, x = arg_target(store, c, pi, caller)
                         if kind == 'var' then
-                            s_add(sum, x .. '\31', 1)
+                            s_add(sum, x, 1)
                         elseif kind == 'param' then
                             sum.pwx = sum.pwx or {}
                             sum.pwx[x] = true
@@ -658,7 +664,7 @@ function M.summaries(store)
                             for _, ai in ipairs(sig.w or {}) do
                                 local kind, x = arg_target(store, c, ai, caller)
                                 if kind == 'var' then
-                                    s_add(sum, x .. '\31', 1)
+                                    s_add(sum, x, 1)
                                 elseif kind == 'param' then
                                     sum.pwx = sum.pwx or {}
                                     sum.pwx[x] = true

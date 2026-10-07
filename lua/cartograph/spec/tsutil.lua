@@ -107,6 +107,20 @@ end
 -- STATELESS iterator (zero alloc), same sequence as iter_children (ALL
 -- children, anonymous tokens included — existing named()/type() guards
 -- filter):  for _, c in tsutil.inext, node, -1 do ... end
+-- a Lua index path's ROOT name and FIRST field: `S.list.inner` -> 'S', 'list'; `S[k].x` -> 'S', nil (a bracket is no
+-- known field); rooted in a call or a parenthesis -> nil (CART-1560: the extractor's `field` argument kind)
+function M.lua_field_root(a, src)
+    local n = a
+    while n and (n:type() == 'dot_index_expression' or n:type() == 'bracket_index_expression') do
+        local tbl = n:field('table')[1]
+        if tbl and tbl:type() == 'identifier' then
+            local f = n:type() == 'dot_index_expression' and n:field('field')[1] or nil
+            return M.node_text(tbl, src), f and M.node_text(f, src) or nil
+        end
+        n = tbl
+    end
+end
+
 function M.inext(n, i)
     i = i + 1
     local c = n:child(i)
