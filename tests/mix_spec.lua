@@ -414,6 +414,24 @@ test('mix: with a LINE MAP, an error the evaluator raises carries the ORIGINAL\'
     ok(tostring(err):find('^orig%.lua:103: '), tostring(err))
 end)
 
+-- (CART-1539: the RESIDUAL's own error(msg) — raised at run time, not by the evaluator — names the original's position
+-- too; a table message stays the table, as Lua leaves it; a level above 1 names a caller frame and is left as it is)
+test('mix: with a LINE MAP, an error the RESIDUAL raises at run time carries the ORIGINAL\'s position; a table message is untouched', function ()
+    ready()
+    local lines = {}
+    for n = 1, 20 do lines[n] = { src = 'orig.lua', line = 100 + n } end
+    local src = 'local function f(x)\n    if x > 1 then error("big " .. x) end\n    if x < 0 then error({ code = x }) end\n    if x == 0 then error("up", 2) end\n    return x\nend\n'
+    local text, _, pool = MX.mix(assert(R.read(src, 'lua')), 'f', { 'D' }, {}, { lines = lines })
+    local r = assert(load(text, 'f', 't', setmetatable({ MIXK = pool }, { __index = _G })))()
+    eq(1, r(1))
+    local ok1, e1 = pcall(r, 5)
+    eq({ false, 'orig.lua:102: big 5' }, { ok1, e1 }, 'the ORIGINAL\'s position, not the residual chunk\'s\n' .. text)
+    local ok2, e2 = pcall(r, -3)
+    eq(false, ok2); eq({ code = -3 }, e2, 'a table message is the table')
+    local ok3, e3 = pcall(r, 0)
+    eq(false, ok3); eq(nil, tostring(e3):find('orig.lua', 1, true), 'level 2 is left to Lua: ' .. tostring(e3))
+end)
+
 test('mix: a COMMENT is trivia anywhere — between a table\'s fields, a call\'s arguments', function ()
     ready()
     local src = 'local function f(x)\n    local t = {\n        -- one\n        x,\n        -- two\n        x + 1,\n    }\n    return math.max(\n        -- a\n        t[1], t[2]\n    )\nend\n'

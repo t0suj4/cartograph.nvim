@@ -978,6 +978,11 @@ end
 -- the HOST FUNCTIONS among the current specialization's static values, numbered as met (CART-1535): a memo key names
 -- one by its number — identity, as a closure is named by its lambda and free values. Reset per specialization
 local HOSTIX, HOSTN = {}, 0
+-- the residual error()'s message at the ORIGINAL position: what Lua's error(m, 1) would make of m there (CART-1539)
+local function ERRAT(where, m)
+    if type(m) == 'string' or type(m) == 'number' then return where .. ': ' .. m end
+    return m
+end
 local function set_env(opts)
     KNOWN, XPRIMS, XPURE, DYNG, DIRTY, DYNV = opts.globals or {}, opts.prims or {}, opts.pure or {}, {}, {}, {}
     HOSTIX, HOSTN = {}, 0
@@ -2600,6 +2605,17 @@ function M.specialize(prog, fname, division, statics, opts)
         if op == 'prim' then
             if not reachable(e.name) then
                 refuse('a residual call of `' .. e.name .. '`, which reaches no value (a primitive, a known global, a host global) — a free name the program did not carry')
+            end
+            -- (a residual `error(msg)` at level 1 names the ORIGINAL's position, as the static one does (CART-1458): Lua
+            -- would prefix the residual chunk's line; the position is prefixed now, from the line map, and the level made 0.
+            -- Only a string or number message is prefixed, as Lua does — decided at run time by a pooled helper. A level
+            -- above 1 names a caller frame, which the residual's frames are not: left as it is — CART-1539)
+            if e.name == 'error' and R.at and prog.where and (e.args[2] == nil or (e.args[2].op == 'num' and e.args[2].v == 1)) then
+                local w = prog.where(R.at)
+                if w then
+                    local msg = e.args[1] and rexpr(e.args[1], X) or { op = 'nil' }
+                    return { op = 'prim', name = 'error', args = { { op = 'callv', f = constref(ERRAT), args = { { op = 'str', v = w }, msg } }, { op = 'num', v = 0 } } }
+                end
             end
             local args = {}
             local ro = e.name == 'ipairs' or e.name == 'pairs' or e.name == 'next'
