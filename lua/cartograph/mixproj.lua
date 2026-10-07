@@ -15,6 +15,7 @@
 --   lamlocal(x, lam)       the local x is bound to the lambda `lam`
 -- ⚠ The fact set is a SET, emitted in canonical order: no pairs() order reaches the rules (CART-1527's lesson).
 local M = {}
+local unpack = table.unpack or unpack
 
 local function load_A() return require('cartograph.algebra').load() end
 
@@ -22,10 +23,21 @@ local function load_A() return require('cartograph.algebra').load() end
 --- opts.mutates: the primitives that mutate their first argument (mix's MUTATES); opts.kinds: only these kinds
 function M.facts(funcs, opts)
     local A = load_A()
-    local L = A.lit
     local kinds, mutates = opts and opts.kinds, opts and opts.mutates or {}
     local facts = {}
-    local function fact(k, ...) if not kinds or kinds[k] then facts[#facts + 1] = A.node(k, ...) end end
+    -- (a fact's values are literals, one per value: terms are values, so sharing them is compression — and a fact of
+    -- an unwanted kind builds nothing)
+    local lits = {}
+    local function fact(k, ...)
+        if kinds and not kinds[k] then return end
+        local kids = {}
+        for i = 1, select('#', ...) do
+            local v = select(i, ...)
+            local l = lits[v]; if not l then l = A.lit(v); lits[v] = l end
+            kids[i] = l
+        end
+        facts[#facts + 1] = A.node(k, unpack(kids))
+    end
     local function root(t)
         for _ = 1, 10000 do
             if type(t) ~= 'table' then return nil end
@@ -41,48 +53,48 @@ function M.facts(funcs, opts)
         if x.op == 'lambda' then
             local me, fr = 'λ' .. tostring(x.id), {}
             for _, id in ipairs(x.free or {}) do fr[id] = true end
-            for i, id in ipairs(x.params or {}) do fact('param', L(me), L(id), L(i)) end
-            for _, c in pairs(x) do walk(c, me, fr, seen) end
+            for i, id in ipairs(x.params or {}) do fact('param', me, id, i) end
+            for _, c in pairs(x) do if type(c) == 'table' then walk(c, me, fr, seen) end end
             return
         end
         if x.op == 'local' and x.id then
-            if x.e and x.e.op == 'table' then fact('alloc', L(owner), L(x.id)) end
+            if x.e and x.e.op == 'table' then fact('alloc', owner, x.id) end
             if x.e and x.e.op == 'lambda' then lamof[x.id] = x.e end
         end
         if x.op == 'assign' or x.op == 'assignm' then
             for _, t in ipairs(x.op == 'assign' and { x.target } or x.targets or {}) do
                 if t.op == 'var' then
-                    fact('assignvar', L(owner), L(t.id), L(free[t.id] == true))
+                    fact('assignvar', owner, t.id, free[t.id] == true)
                     if x.op == 'assign' and x.e and x.e.op == 'lambda' then lamof[t.id] = x.e end
                 else
                     local r = root(t)
-                    if r then fact('store', L(owner), L(r), L(free[r] == true)) end
+                    if r then fact('store', owner, r, free[r] == true) end
                 end
             end
         end
-        if x.op == 'prim' and mutates[x.name] and x.args and root(x.args[1]) then fact('mutate', L(root(x.args[1]))) end
+        if x.op == 'prim' and mutates[x.name] and x.args and root(x.args[1]) then fact('mutate', root(x.args[1])) end
         if x.op == 'call' and x.fn and x.args then
-            for i, a in ipairs(x.args) do if type(a) == 'table' and a.op == 'var' then fact('callarg', L(x.fn), L(i), L(a.id)) end end
+            for i, a in ipairs(x.args) do if type(a) == 'table' and a.op == 'var' then fact('callarg', x.fn, i, a.id) end end
         end
         if x.op == 'callv' and x.f and x.f.op == 'var' and x.args then
-            for i, a in ipairs(x.args) do if type(a) == 'table' and a.op == 'var' then fact('callvarg', L(x.f.id), L(i), L(a.id)) end end
+            for i, a in ipairs(x.args) do if type(a) == 'table' and a.op == 'var' then fact('callvarg', x.f.id, i, a.id) end end
         end
         -- (pairs order is harmless HERE: the IR is a tree, so a node has one owner whatever the order, and the engine
         -- sorts the facts by key before any rule reads them)
-        for _, c in pairs(x) do walk(c, owner, free, seen) end
+        for _, c in pairs(x) do if type(c) == 'table' then walk(c, owner, free, seen) end end
     end
     local names = {}
     for name, f in pairs(funcs) do if type(f) == 'table' then names[#names + 1] = name end end
     table.sort(names)
     for _, name in ipairs(names) do
         local f = funcs[name]
-        for i, id in ipairs(f.params or {}) do fact('param', L(name), L(id), L(i)) end
+        for i, id in ipairs(f.params or {}) do fact('param', name, id, i) end
         walk(f.body, name, {}, {})
     end
     local ls = {}
     for v in pairs(lamof) do ls[#ls + 1] = v end
     table.sort(ls, function (a, b) return tostring(a) < tostring(b) end)
-    for _, v in ipairs(ls) do fact('lamlocal', L(v), L('λ' .. tostring(lamof[v].id))) end
+    for _, v in ipairs(ls) do fact('lamlocal', v, 'λ' .. tostring(lamof[v].id)) end
     return facts
 end
 
@@ -131,14 +143,14 @@ function M.fresh(funcs, forced, boxed)
     for _, s in ipairs({ { 'forced', forced }, { 'boxed', boxed } }) do
         for id in pairs(s[2] or {}) do facts[#facts + 1] = A.node(s[1], A.lit(id)) end
     end
-    return ids(require('cartograph.saturate').run(rule_set('fresh'), facts), 'fresh')
+    return ids(require('cartograph.saturate').run(rule_set('fresh'), facts, { list = false }), 'fresh')
 end
 
 --- the FORCED variables of the lowered functions -> { id -> true }. opts.mutates: mix's MUTATES
 function M.forced(funcs, opts)
     local facts = M.facts(funcs, { mutates = opts and opts.mutates,
         kinds = { param = true, store = true, mutate = true, callarg = true, callvarg = true, lamlocal = true } })
-    return ids(require('cartograph.saturate').run(rule_set('forced'), facts), 'forced')
+    return ids(require('cartograph.saturate').run(rule_set('forced'), facts, { list = false }), 'forced')
 end
 
 return M

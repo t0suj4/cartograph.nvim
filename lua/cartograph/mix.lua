@@ -757,43 +757,10 @@ function M.lower(term, opts)
     -- FORCED ACROSS CALLS (CART-1500): a callee's parameter that a closure stores into is forced dynamic; the variable a
     -- CALLER passes there must be too — the same table at run time. Otherwise a static `local ids = {}` handed to
     -- `content_id(a, ids)` reaches a forced parameter and the specialization is refused (join.lua:217, the first
-    -- derivation followed through the basis). To a fixpoint over every direct call.
-    do
-        local changed = true
-        -- (and a call THROUGH A LOCAL bound to a lambda — `local function member(o, …) o[key] = … end` called as
-        -- `member(o, …)`, kvterm.lua's kv_template: the lambda's parameters, CART-1503)
-        local lamof, lseen = {}, {}
-        local function lambdas(x)
-            if type(x) ~= 'table' or lseen[x] then return end
-            lseen[x] = true
-            if x.op == 'local' and x.id and x.e and x.e.op == 'lambda' then lamof[x.id] = x.e end
-            if x.op == 'assign' and x.target and x.target.op == 'var' and x.target.id and x.e and x.e.op == 'lambda' then lamof[x.target.id] = x.e end
-            for _, v in pairs(x) do if type(v) == 'table' then lambdas(v) end end
-        end
-        for _, f in pairs(cx.funcs) do lambdas(f.body) end
-        local function walk(x, seen)
-            if type(x) ~= 'table' or seen[x] then return end
-            seen[x] = true
-            local ps
-            if x.op == 'call' and x.fn and cx.funcs[x.fn] and x.args then ps = cx.funcs[x.fn].params or {} end
-            if x.op == 'callv' and x.f and x.f.op == 'var' and lamof[x.f.id] and x.args then ps = lamof[x.f.id].params or {} end
-            if ps then
-                for i, a in ipairs(x.args) do
-                    local pid = ps[i]
-                    if pid and cx.forced[pid] and type(a) == 'table' and a.op == 'var' and a.id and not cx.forced[a.id] then
-                        cx.forced[a.id] = true
-                        changed = true
-                    end
-                end
-            end
-            for _, v in pairs(x) do if type(v) == 'table' then walk(v, seen) end end
-        end
-        for _ = 1, 50 do
-            if not changed then break end
-            changed = false
-            for _, f in pairs(cx.funcs) do walk(f.body, {}) end
-        end
-    end
+    -- derivation followed through the basis). Through a direct call, and a call THROUGH A LOCAL bound to a lambda
+    -- (`local function member(o, …) o[key] = … end` called as `member(o, …)`, kvterm.lua's kv_template, CART-1503).
+    -- DERIVED (CART-1524): mixproj's forced rules over the lowered IR's facts, to their fixpoint (a cap RAISES)
+    for id in pairs(require('cartograph.mixproj').forced(cx.funcs, { mutates = MUTATES })) do cx.forced[id] = true end
     -- RECORDS: a local table that never escapes is its fields, one local each (SRA, CART-1331 rung 4a)
     cx.sra = { candidates = 0, replaced = 0, escapes = {} }
     for _, f in pairs(cx.funcs) do f.body = M.sra(f.body, cx) end
