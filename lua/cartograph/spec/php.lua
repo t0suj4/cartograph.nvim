@@ -38,8 +38,8 @@ local function php_is_write(c, n)
             or pt == 'augmented_assignment_expression'
             or pt == 'reference_assignment_expression' then
             return p:named_child(0) == cur
-        elseif pt == 'update_expression' then -- $x++ / --$x
-            return true
+        elseif pt == 'update_expression' then -- $x++ / --$x (a READ when its value is used, CART-1595)
+            return true, nil, tsutil.update_reads(p)
         elseif pt == 'unset_statement' then
             return true
         elseif pt == 'by_ref' then            -- foreach ($a as &$v): $v aliases

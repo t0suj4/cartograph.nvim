@@ -321,6 +321,17 @@ end
 --- neither of which is a write: that is what keeps set-once reachable, and the
 --- initializer-less form is CART-0537's case one language over (`extern int x;` in
 --- a header, where headers hold MORE vars than sources on this corpus).
+-- ★ AN UPDATE EXPRESSION READS ITS TARGET WHEN ITS VALUE IS USED (CART-1595): `'runs ' + count++` reads count; a
+-- bare `count++;`, a for-loop update or a comma sequence discards the value, the honest dead-state shape. The
+-- holders that DISCARD, as a cross-grammar union (js / java / c / c++ / php).
+local UPDATE_DISCARD = { expression_statement = true, for_statement = true, sequence_expression = true,
+    comma_expression = true }
+--- is_write's READS answer for an update_expression `u` (the third value, see spec/contract.lua)
+function M.update_reads(u)
+    local h = u:parent()
+    return h ~= nil and not UPDATE_DISCARD[h:type()]
+end
+
 function M.cfamily_is_write(c, n)
     local cur, p = c, n
     while p do
@@ -345,7 +356,7 @@ function M.cfamily_is_write(c, n)
     if pt == 'assignment_expression' then
         return p:named_child(0) == cur -- one node type for `=` and `+=`
     elseif pt == 'update_expression' then
-        return true -- g++ / --g
+        return true, nil, M.update_reads(p) -- g++ / --g (and a READ when its value is used, CART-1595)
     end
     return false
 end

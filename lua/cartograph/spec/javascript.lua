@@ -62,7 +62,7 @@ local function js_is_write(c, n)
     if pt == 'assignment_expression' or pt == 'augmented_assignment_expression' then
         return p:named_child(0) == cur -- js spells `=` and `+=` as DIFFERENT types
     elseif pt == 'update_expression' then
-        return true -- g++ / --g
+        return true, nil, tsutil.update_reads(p) -- g++ / --g (and a READ when its value is used, CART-1595)
     end
     -- variable_declarator (let/const/var, incl. destructuring) BINDS
     return false

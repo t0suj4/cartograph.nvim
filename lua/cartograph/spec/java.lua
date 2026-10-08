@@ -741,7 +741,7 @@ local function java_is_write(c, n, src)
     if pt == 'assignment_expression' then
         return p:named_child(0) == cur -- child 0 is the target, `+=` included
     elseif pt == 'update_expression' then
-        return true -- g++ / --g, both spelled the same node
+        return true, nil, tsutil.update_reads(p) -- g++ / --g, both spelled the same node (a READ when used, CART-1595)
     end
     -- variable_declarator (a local OR a field declaration) BINDS a name and
     -- writes nothing, which is what keeps `set-once` reachable; everything else

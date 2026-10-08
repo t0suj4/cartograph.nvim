@@ -387,6 +387,41 @@ test('guards: rust memo CALLS — get_or_init, get_or_insert_with, entry(k).or_i
     eq(nil, gw_of(data, 'init', 'INI'), 'entry(k) as the value of a struct field NAMED or_insert: not a method chain')
 end)
 
+-- ⚠ AN UPDATE USED AS A VALUE READS (CART-1595): `'runs ' + count++` read as a write only, so angular's
+-- changeDetectionRuns was dead state; a bare `count++;` / a for update discards the value and stays a write.
+test('write axis: x++ used as a VALUE reads x; a bare x++; and a for-update do not (js, java, c, php) (CART-1595)', function ()
+    local cases = {
+        { 'javascript', 'u.js', { 'let used = 0;', 'let bare = 0;', 'let loop = 0;', 'let sq = 0;',
+            'function f() { return "runs " + used++; }', 'function g() { bare++; }',
+            'function h(n) { for (let i = 0; i < n; loop++) { i++; } }', 'function s() { for (;;sq++, sq++) {} }' },
+            { f = 'used', g = 'bare', h = 'loop', s = 'sq' } },
+        { 'java', 'U.java', { 'class U {', '    static int used; static int bare;',
+            '    static String f() { return "runs " + used++; }', '    static void g() { bare++; }', '}' },
+            { ['U::f'] = 'used', ['U::g'] = 'bare' } },
+        { 'c', 'u.c', { 'int used; int bare; int cm;', 'int f(void) { return used++; }', 'void g(void) { bare++; }',
+            'void k(void) { for (;; cm++, cm++) {} }' }, { f = 'used', g = 'bare', k = 'cm' } },
+    }
+    local want = { f = 3, ['U::f'] = 3, g = 2, ['U::g'] = 2, h = 2, s = 2, k = 2 }
+    for _, cs in ipairs(cases) do
+        if ready(cs[1]) then
+            local data = ts.extract(mkroot(cs[2], table.concat(cs[3], '\n')))
+            for fn, var in pairs(cs[4]) do
+                local e = edge_of(data, fn, var)
+                eq(want[fn], e and e.rw, cs[1] .. ' ' .. fn .. ' > ' .. var)
+            end
+        end
+    end
+    if ready('php') then -- (file scope: inside a function `global $x;` already reads)
+        local data = ts.extract(mkroot('u.php', '<?php\n$used = 0;\necho $used++;\n$bare = 0;\n$bare++;\n'))
+        local rw = {}
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'use' then for _, n in ipairs(data.nodes) do if n.id == e.to then rw[n.name] = e.rw end end end
+        end
+        eq(3, rw['$used'] or rw.used, 'php: echo $x++ reads: ' .. vim.inspect(rw))
+        eq(2, rw['$bare'] or rw.bare, 'php: a bare $x++; does not')
+    end
+end)
+
 test('guards: reads carry no gw; no classifier means absent', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = mkroot('m.lua', table.concat({
