@@ -380,7 +380,114 @@ local function ruby_ctor_binds(tsroot, src, finders)
     return out
 end
 
+-- ── THE WRITE AXIS (CART-1584) ────────────────────────────────────────────────────────────────────────────────────
+-- IS THIS MENTION A WRITE? ruby's targets: `x = v`, `@x ||= v`, `a, b = …` (a left_assignment_list), `h[k] = v` (the
+-- element_reference's object writes, as lua's `t[k]`), and a SETTER `obj.attr = v` (a call whose receiver rides the
+-- chain). Declared as a pair with write_gate (the prefilter): without it the classifier never runs (CART-0532).
+local function ruby_is_write(c, n)
+    local cur, p = c, n
+    while p do
+        local pt = p:type()
+        if pt == 'element_reference' and p:named_child(0) == cur then cur, p = p, p:parent()
+        elseif pt == 'call' and p:field('receiver')[1] == cur then cur, p = p, p:parent()
+        else break end
+    end
+    if p and p:type() == 'left_assignment_list' then cur, p = p, p:parent() end
+    if not p then return false end
+    local pt = p:type()
+    return (pt == 'assignment' or pt == 'operator_assignment') and p:field('left')[1] == cur
+end
+
+-- ── THE GUARD GRAMMAR (CART-1584) ─────────────────────────────────────────────────────────────────────────────────
+-- ruby's memos: `@x ||= v` (the commonest idiom of the language), `@y = … if @y.nil?`, `@h[k] = … unless
+-- @h.key?(k)`, `if !@n`. `unless` and `until` INVERT the condition — their body is the else arm of it, their own
+-- `else` a then arm — and a MODIFIER puts its body before the condition, so `cond_of` / `arm` say which is which. A
+-- block does not rebind self but may run later: it stops the guard search (a write in it is unguarded).
+local chain_eq, optext_is, unparen = tsutil.chain_eq, tsutil.optext_is, tsutil.unparen
+local RB_MEMBER = { ['key?'] = true, ['has_key?'] = true, ['include?'] = true, ['member?'] = true }
+-- `r.m` / `r.m(a)` -> receiver, method name, the single argument (nil when none)
+local function rb_call(n, src)
+    if n:type() ~= 'call' then return nil end
+    local r, m = n:field('receiver')[1], n:field('method')[1]
+    if not (r and m) then return nil end
+    local args = n:field('arguments')[1]
+    local a = args and args:named_child_count() == 1 and args:named_child(0) or nil
+    return r, node_text(m, src), a, args
+end
+local function rb_member_chain(n, src, chain) -- `h.key?(k)` names `h[k]`
+    local r, m, a = rb_call(n, src)
+    return r ~= nil and a ~= nil and RB_MEMBER[m] and chain == node_text(r, src) .. '[' .. node_text(a, src) .. ']'
+end
+local function rb_negated(n) -- `!x` / `not x` -> x
+    if n:type() ~= 'unary' then return nil end
+    local op = n:child(0)
+    if op and not op:named() and (op:type() == '!' or op:type() == 'not') then return unparen(n:named_child(0)) end
+    return nil
+end
+local function rb_nil_operand(n, ops)
+    if n:type() ~= 'binary' or not optext_is(n, nil, ops) then return nil end
+    local a, b = unparen(n:named_child(0)), unparen(n:named_child(1))
+    if b and b:type() == 'nil' then return a end
+    if a and a:type() == 'nil' then return b end
+    return nil
+end
+local RB_INVERTED = { unless = true, unless_modifier = true, ['until'] = true, until_modifier = true }
+local RUBY_GUARDS = {
+    cond = { ['if'] = true, unless = true, elsif = true, if_modifier = true, unless_modifier = true, ['while'] = true,
+        ['until'] = true, while_modifier = true, until_modifier = true, conditional = true },
+    cond_of = function (p) return p:field('condition')[1] end,
+    arm = function (p, node)
+        local pt = p:type()
+        if RB_INVERTED[pt] then
+            if p:field('alternative')[1] == node then return 'then' end -- (`unless c … else <here>`: c holds)
+            return 'else'                                                -- (the body: c failed)
+        end
+        if p:field('alternative')[1] == node then return node:type() == 'elsif' and 'elseif' or 'else' end
+        return nil
+    end,
+    else_t = 'else', elseif_t = 'elsif',
+    fn = { method = true, singleton_method = true, lambda = true, block = true, do_block = true },
+    binop = 'binary', andops = { ['&&'] = true, ['and'] = true },
+    negop = 'unary', negtok = '!', pfield = 'parameters',
+    pw_refsem = true,
+    abs_test = function (n, src, chain)
+        local r, m, a = rb_call(n, src)
+        if r and m == 'nil?' and a == nil then return chain_eq(unparen(r), src, chain) end
+        local x = rb_nil_operand(n, { ['=='] = true })
+        if x then return chain_eq(x, src, chain) end
+        local y = rb_negated(n)
+        if y then return chain_eq(y, src, chain) or rb_member_chain(y, src, chain) end
+        return false
+    end,
+    presence = function (cond, src, chain)
+        cond = unparen(cond)
+        if cond == nil then return false end
+        if chain_eq(cond, src, chain) then return true end
+        local x = rb_nil_operand(cond, { ['!='] = true })
+        if x then return chain_eq(x, src, chain) end
+        return rb_member_chain(cond, src, chain)
+    end,
+    -- `X ||= v` / `X = X || v`
+    rhs_setonce = function (top, src, chain)
+        local p = top:parent()
+        if not p then return false end
+        if p:type() == 'operator_assignment' and p:field('left')[1] == top and optext_is(p, src, { ['||='] = true }) then return true end
+        if p:type() == 'assignment' and p:field('left')[1] == top then
+            local rhs = unparen(p:field('right')[1])
+            if rhs and rhs:type() == 'binary' and optext_is(rhs, src, { ['||'] = true, ['or'] = true }) then
+                local l = unparen(rhs:named_child(0))
+                return l ~= nil and chain_eq(l, src, chain())
+            end
+        end
+        return false
+    end,
+}
+
 return {
+    is_write = ruby_is_write,
+    write_gate = { assignment = true, operator_assignment = true, element_reference = true, call = true,
+        left_assignment_list = true },
+    guards = RUBY_GUARDS,
     -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
     -- CALLEE NAME, as a field name or a named-child index. Replaces a
     -- hardcoded four-name or-chain inline in the provider that php, java,

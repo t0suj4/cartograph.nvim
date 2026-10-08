@@ -207,13 +207,16 @@ test('writeaxis: a language with a member form and a write classifier captures F
     end
     -- and the gate is INERT without the classifier, which is why widening it
     -- alone measured zero before v147: the attachment site is inside `if wmode`.
-    -- WHAT IS LEFT, and each for a reason rather than an oversight: ruby, whose
-    -- corpora hold ONE var node in total; haskell, which declares no vars query;
-    -- zig, which declares none either — a correct zig classifier was built,
-    -- measured to fire zero times, and reverted (CART-0538).
-    for _, lang in ipairs({ 'ruby', 'haskell', 'zig' }) do
+    -- WHAT IS LEFT, and each for a reason rather than an oversight: haskell, which
+    -- declares no vars query; zig, which declares none either — a correct zig
+    -- classifier was built, measured to fire zero times, and reverted (CART-0538).
+    -- (ruby was left for its corpora's ONE var node in total; its INSTANCE
+    -- variables are the population now — `@x ||= v`, 1337 sites in discourse — so
+    -- it declares the pair for cartograph.fieldstate, CART-1584)
+    for _, lang in ipairs({ 'haskell', 'zig' }) do
         eq(nil, ts.spec[lang].is_write)
     end
+    ok(ts.spec.ruby.is_write and ts.spec.ruby.write_gate, 'ruby declares the pair')
 end)
 
 -- ★ BRACKET KEYS, and the fabrication that nearly shipped (CART-0533). Generalising

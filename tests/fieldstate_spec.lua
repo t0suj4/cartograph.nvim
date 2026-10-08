@@ -56,6 +56,34 @@ test('fieldstate: python / javascript / lua — per-class fields, rw, and the in
     eq({ rw = 2, gw = 1 }, got['T:put -> T.value'], 'lua: a plain write')
 end)
 
+test('fieldstate: ruby — `@x` is the field of its class; ||=, nil?, unless (inverted), key? membership and modifiers are set-once; || and the inverted else arm are not (CART-1584)', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local got = fields_of(ts.extract(mkroot('k.rb', table.concat({
+        'class K',
+        '  def a; @x ||= compute; end',
+        '  def b; if @y.nil?; @y = 1; end; end',
+        '  def c(k); @h[k] = 1 unless @h.key?(k); end',
+        '  def g; unless @q; @q = 5; end; end',
+        '  def c2(k); if !@g.key?(k); @g[k] = 1; end; end',       -- (the negated membership)
+        '  def n; @n = 4 if !@n; end',
+        '  def d(v); @value = v; end',
+        '  def e(z); if @m || z; @m = 2; end; end',
+        '  def f; unless @p; @p = 3; else; @p = 4; end; end', -- (the else of `unless @p` runs when @p IS set: it overwrites)
+        '  def blk; [1].each { |i| @t = i }; end',            -- a block does not rebind self: still K's field
+        'end',
+    }, '\n'))))
+    eq(3, got['K#a -> K.x'].gw, '@x ||= v')
+    eq(3, got['K#b -> K.y'].gw, 'if @y.nil?')
+    eq(3, got['K#c -> K.h'].gw, '@h[k] = … unless @h.key?(k)')
+    eq(3, got['K#g -> K.q'].gw, 'unless @q: the body runs when @q is unset')
+    eq(3, got['K#c2 -> K.g'].gw, 'if !@g.key?(k)')
+    eq(3, got['K#n -> K.n'].gw, '@n = … if !@n')
+    eq(1, got['K#d -> K.value'].gw, 'a plain write')
+    eq(2, got['K#e -> K.m'].gw, '|| must NOT claim set-once')
+    eq(2, got['K#f -> K.p'].gw, 'the else arm of unless overwrites: guarded, not set-once')
+    ok(got['K#blk -> K.t'], 'a write inside a block is the method\'s receiver field')
+end)
+
 test('fieldstate: a lua colon method writing self is no longer PURE to effects (its self is implicit, no parameter)', function ()
     if not ready('lua') then skip 'no lua parser' end
     local store = require 'cartograph.store'

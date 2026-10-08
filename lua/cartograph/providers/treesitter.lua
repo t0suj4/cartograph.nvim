@@ -425,7 +425,8 @@ local IDXC = { dot_index_expression = true, bracket_index_expression = true,
     attribute = true, subscript = true, -- (python `o.p` / `t[k]`, CART-1574)
     field_expression = true, -- (c / c++ `s.f` / `p->f`, CART-1576)
     selector_expression = true, index_expression = true, -- (go `s.f` / `m[k]`, CART-1579)
-    field_access = true, array_access = true } -- (java `this.f` / `a[i]`, CART-1583)
+    field_access = true, array_access = true, -- (java `this.f` / `a[i]`, CART-1583)
+    element_reference = true } -- (ruby `@h[k]`, CART-1584)
 
 -- the written chain's top node (same climb as is_write; bracket KEYS stop it)
 local function chain_top(c, n)
@@ -665,6 +666,8 @@ local function guard_class(c, n, src, G)
                     if G.presence(cond, src, ch()) then return 2 end
                     negcond = negcond or cond
                 elseif arm ~= 'elseif' and at ~= G.elseif_t then
+                    -- (an arm 'then' — runs when the condition HOLDS though its node type reads as an else, ruby's
+                    -- `unless … else`, CART-1584 — lands here: only the branch above had to be kept from it)
                     if conj_abs(G, cond, src, ch()) then return 2 end
                     if G.alias_of then
                         local al = aliases_before(G, p, src, ch)

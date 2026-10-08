@@ -10,7 +10,7 @@
 -- only where the language binds it — a closure nested in a method has no receiver of its own (missed, never guessed).
 -- Every node type is DATA in the language's own table (the language fence: a comparison names one grammar's type).
 --
--- @langs lua python javascript typescript tsx
+-- @langs lua python javascript typescript tsx ruby
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 
@@ -46,6 +46,14 @@ local LANGS = {
         class = 'fn_name', calls = { function_call = 'name' },
     },
 }
+-- ruby: the receiver is IMPLICIT — `@x` is the field itself (CART-1584), inside a method of a class or module; a block
+-- does not rebind self, so it is no stop
+LANGS.ruby = {
+    recv = 'ivar', ivar = { instance_variable = true }, ident = { identifier = true },
+    stop = { method = true, singleton_method = true }, method = { method = true },
+    through = {}, body = { body_statement = true }, class = 'parent', class_types = { class = true, module = true },
+    member = {}, calls = {},
+}
 LANGS.typescript = LANGS.javascript
 LANGS.tsx = LANGS.javascript
 M.LANGS = LANGS
@@ -67,7 +75,8 @@ end
 -- is `n` a receiver mention? -> the method's tree node and the class name | nil
 local function receiver(L, n, src)
     local t = n:type()
-    if L.recv == 'node' then if not L.recv_type[t] then return nil end
+    if L.recv == 'ivar' then if not L.ivar[t] then return nil end
+    elseif L.recv == 'node' then if not L.recv_type[t] then return nil end
     elseif not L.ident[t] then return nil
     elseif L.recv == 'name' and node_text(n, src) ~= L.recv_name then return nil end
     local fn = n:parent()
@@ -102,7 +111,10 @@ function M.collect(lang, tsroot, src)
     local out = {}
     local function walk(n)
         local p = n:parent()
-        if p then
+        if p and L.ivar and L.ivar[n:type()] then -- (`@x`: the mention is the field)
+            local fn, cls = receiver(L, n, src)
+            if fn and cls then out[#out + 1] = { class = cls, field = (node_text(n, src):gsub('^@', '')), fn = fn, node = n, parent = p } end
+        elseif p then
             local fld_field = L.member[p:type()]
             -- (`this.build()` / `self.helper(x)` CALLS a method: the member is a callee, not a field — it had minted a
             -- `Panel.build` field shadowing the method)
