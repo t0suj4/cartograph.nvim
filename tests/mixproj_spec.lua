@@ -46,6 +46,25 @@ test('mixproj: the rules see the facts — the same program without the reassign
     eq({ 's', 'u' }, names(prog, prog.freshroot))
 end)
 
+test('mixproj: the mutating primitives are the effects REGISTRY\'s — rawset and setmetatable force the table they are handed, as table.insert does (CART-1553)', function ()
+    ready()
+    local prog = MX.lower(assert(R.read(table.concat({
+        'local function f(k)',
+        '    local a = {}',
+        '    rawset(a, k, 1)',
+        '    local b = {}',
+        '    setmetatable(b, {})',
+        '    local c = {}',
+        '    c.x = 1',
+        '    return a, b, c',
+        'end' }, '\n'), 'lua')))
+    local forced = names(prog, prog.forced)
+    ok(vim.tbl_contains(forced, 'a'), 'rawset forces a: ' .. table.concat(forced, ' '))
+    ok(vim.tbl_contains(forced, 'b'), 'setmetatable forces b: ' .. table.concat(forced, ' '))
+    eq(false, vim.tbl_contains(forced, 'c'), 'a plain store into a fresh local does not')
+    eq(true, MX.EFFECT.error and MX.EFFECT.assert and true, 'a RAISE is never computed early (the registry\'s `raises`)')
+end)
+
 test('mixproj: the projection is a SET in canonical order — two runs, the same facts', function ()
     ready()
     local prog = MX.lower(assert(R.read(SRC, 'lua')))

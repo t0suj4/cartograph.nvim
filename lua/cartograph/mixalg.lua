@@ -309,9 +309,9 @@ function M.program(root, files, opts)
     local written_memo = {}
     -- is file-level `name` WRITTEN anywhere in its file? An ASSIGNMENT whose target is ROOTED in it — `T = …`, `T.a.b = …`,
     -- `T[k].x = …`, at any depth (its declaration `local T = …` is none) — or a MUTATING PRIMITIVE whose first argument is
-    -- (table.insert / remove / sort, rawset). From the syntax tree (CART-1481: a line regex missed `T.a.b =` and the
-    -- primitives). Syntactic: a callee that mutates it elsewhere, or `T:m()`, is unseen
-    local MUTATES = { ['table.insert'] = true, ['table.remove'] = true, ['table.sort'] = true, rawset = true }
+    -- (mix.MUTATES: derived from the effects signature registry, CART-1553). From the syntax tree (CART-1481: a line
+    -- regex missed `T.a.b =` and the primitives). Syntactic: a callee that mutates it elsewhere, or `T:m()`, is unseen
+    local MUTATES = require('cartograph.mix').MUTATES
     local wq = vim.treesitter.query.parse('lua', '[(assignment_statement (variable_list) @vl) (function_call) @call]')
     local function written(file, name)
         local key = file .. '\0' .. name

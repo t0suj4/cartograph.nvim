@@ -63,7 +63,9 @@ M.SIGS = {
             -- language core
             pairs = P, ipairs = P, next = P, type = P, tostring = P,
             tonumber = P, select = P, rawget = P, rawequal = P, rawlen = P,
-            unpack = P, error = P, assert = P, getmetatable = P,
+            unpack = P, getmetatable = P,
+            -- (no write, but a RAISE: a consumer that runs calls early — mix's evaluator — must not, CART-1553)
+            error = { pure = true, raises = true }, assert = { pure = true, raises = true },
             rawset = { w = { 1 } }, setmetatable = { w = { 1 }, returns_arg = 1 },
             pcall = { calls = { 1 } }, xpcall = { calls = { 1 } },
             print = IO, require = IO, collectgarbage = IO,
@@ -72,7 +74,8 @@ M.SIGS = {
             ['os.getenv'] = ND,
             ['table.insert'] = { w = { 1 } }, ['table.remove'] = { w = { 1 } },
             ['table.sort'] = { w = { 1 }, calls = { 2 } },
-            ['table.move'] = { w = { 5 } }, ['table.concat'] = P,
+            -- (table.move(a1, f, e, t [, a2]) writes a2, or a1 when a2 is absent: both, the sound over-approximation, CART-1551)
+            ['table.move'] = { w = { 1, 5 } }, ['table.concat'] = P,
             ['table.unpack'] = P,
             ['string.gsub'] = { calls = { 3 } }, -- repl may be a fn; strings/tables pure
             ['coroutine.wrap'] = { calls = { 1 } },

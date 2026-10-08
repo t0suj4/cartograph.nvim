@@ -71,8 +71,13 @@ end
 M._text = text
 
 local lower_expr, lower_block
--- the primitives that mutate their first argument (mix.EFFECT's table half)
-local MUTATES = { ['table.insert'] = true, ['table.remove'] = true, ['table.sort'] = true }
+-- the primitives that MUTATE their first argument — DERIVED from the effects signature registry (every Lua builtin whose
+-- signature writes argument 1), never a list of mix's own: two private copies had drifted apart (CART-1550, CART-1553)
+local MUTATES = {}
+for name, sig in pairs(require('cartograph.effects').SIGS.lua.exact) do
+    for _, i in ipairs(sig.w or {}) do if i == 1 then MUTATES[name] = true end end
+end
+M.MUTATES = MUTATES
 
 -- scopes: a chain of { names = { name -> id }, up, fnb = the lambda whose parameters it holds, loop = a loop's scope }.
 -- -> id, the number of lambda boundaries crossed (each crossed lambda records the id as FREE)
@@ -931,8 +936,14 @@ local PRIMS = {
     ['table.insert'] = table.insert, ['table.remove'] = table.remove, ['table.sort'] = table.sort, ['table.concat'] = table.concat,
 }
 M.PRIMS = PRIMS
--- primitives NEVER computed early: they mutate a table, or raise (an error is the residual program's, not mix's)
-local EFFECT = { ['table.insert'] = true, ['table.remove'] = true, ['table.sort'] = true, error = true, assert = true }
+-- primitives NEVER computed early: they mutate a table, touch the world, are nondeterministic, or raise (an error is
+-- the residual program's, not mix's) — DERIVED from the effects signature registry; a primitive it does not know is
+-- one (CART-1553)
+local EFFECT = {}
+for name in pairs(PRIMS) do
+    local sig = require('cartograph.effects').sig_of('lua', name)
+    if not sig or sig.w or sig.io or sig.nondet or sig.raises then EFFECT[name] = true end
+end
 M.EFFECT = EFFECT
 -- global VALUES (not calls) that are constants of the language
 local CONSTS = { ['math.huge'] = math.huge, ['math.pi'] = math.pi }
