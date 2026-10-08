@@ -127,6 +127,39 @@ test('guards: php isset/empty/coalesce forms and the || trap', function ()
     eq(2, gw_of(data, 'ortrap', 'g'), '|| must NOT claim set-once')
 end)
 
+test('guards: javascript / typescript — ??= ||= and the coalesce forms, !X / == null / typeof, else arms; || and other-field traps (CART-1573)', function ()
+    for _, case in ipairs({ { 'javascript', 'm.js' }, { 'typescript', 'm.ts' } }) do
+        if not ready(case[1]) then skip('no ' .. case[1] .. ' parser') end
+        local root = mkroot(case[2], table.concat({
+            'let t = {};', 'let memo = {};', 'let cfg = {};', 'let c2 = {};', 'let reg = {};', 'let acc = {};', 'let ty = {};',
+            'let mix = {};', 'let oth = {};',
+            'function bare() { t.x = 1; }',                                   -- unguarded
+            'function once() { if (!t.y) { t.y = 1; } }',
+            'function oncenull(k) { if (memo[k] == null) { memo[k] = 2; } }',
+            'function nullish(k) { cfg[k] ??= 3; }',
+            'function orassign() { c2.v ||= 4; }',
+            'function coalesce() { reg.h = reg.h ?? 5; }',
+            'function elsearm() { if (acc.v !== undefined) { use(acc.v); } else { acc.v = 6; } }',
+            'function typeofc() { if (typeof ty.q === "undefined") { ty.q = 7; } }',
+            -- soundness traps: guarded, but NOT set-once
+            'function ortrap(z) { if (!mix.a || z) { mix.a = 8; } }',
+            'function otherfield() { if (!oth.a) { oth.b = 9; } }',
+        }, '\n'))
+        local data = ts.extract(root)
+        local how = case[1] .. ': '
+        eq(1, gw_of(data, 'bare', 't') == 1 and 1 or gw_of(data, 'bare', 't'), how .. 'bare: unguarded')
+        eq(3, gw_of(data, 'once', 't'), how .. '!X: set-once')
+        eq(3, gw_of(data, 'oncenull', 'memo'), how .. 'X == null: set-once')
+        eq(3, gw_of(data, 'nullish', 'cfg'), how .. '??=: set-once')
+        eq(3, gw_of(data, 'orassign', 'c2'), how .. '||=: set-once (the memo idiom)')
+        eq(3, gw_of(data, 'coalesce', 'reg'), how .. 'X = X ?? v: set-once')
+        eq(3, gw_of(data, 'elsearm', 'acc'), how .. 'else arm of !== undefined: set-once')
+        eq(3, gw_of(data, 'typeofc', 'ty'), how .. "typeof X === 'undefined': set-once")
+        eq(2, gw_of(data, 'ortrap', 'mix'), how .. '|| must NOT claim set-once')
+        eq(2, gw_of(data, 'otherfield', 'oth'), how .. 'a test of ANOTHER field is a guard, not set-once')
+    end
+end)
+
 test('guards: reads carry no gw; no classifier means absent', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = mkroot('m.lua', table.concat({

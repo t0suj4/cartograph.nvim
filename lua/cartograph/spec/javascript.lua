@@ -140,9 +140,86 @@ local function build_js_ret_map(tsroot, src)
     return map
 end
 
+-- ── THE GUARD GRAMMAR (CART-1573) ─────────────────────────────────────────────────────────────────────────────────
+-- What providers/treesitter.lua guard_class needs to say a write is GUARDED (some enclosing condition) or SET-ONCE
+-- (it cannot overwrite: an absence test of the same chain through `&&`, the else arm of a presence test, or a memo
+-- idiom). Without it every js / ts / tsx write was class 0 — `cache[k] ??= build(k)` an unguarded overwrite, so two
+-- memo calls never commuted. `||=` / `X = X || v` count as the memo idiom with the caveat lua's `X = X or v` carries:
+-- a stored FALSY value is overwritten; `??=` is exact.
+local chain_eq, optext_is, unparen = tsutil.chain_eq, tsutil.optext_is, tsutil.unparen
+local function js_absent_literal(n) local t = n and n:type(); return t == 'null' or t == 'undefined' end
+local JS_GUARDS = {
+    cond = { if_statement = true, while_statement = true, ternary_expression = true },
+    else_t = 'else_clause', -- (`else if` is an else_clause holding an if_statement: its arm still runs only when the
+                            -- outer condition failed, so no elseif type of its own)
+    fn = FN_TYPES,
+    binop = 'binary_expression', andops = { ['&&'] = true },
+    negop = 'unary_expression', negtok = '!', pfield = 'parameters',
+    pw_refsem = true, -- objects are reference-typed: a store into a param mutates the caller's
+    -- `!X` / `X == null` / `X === undefined` / `null === X` / `typeof X === 'undefined'`, X the written chain
+    abs_test = function (n, src, chain)
+        local t = n:type()
+        if t == 'unary_expression' then
+            local op = n:child(0)
+            if op and not op:named() and op:type() == '!' then
+                local x = unparen(n:named_child(0))
+                return x ~= nil and chain_eq(x, src, chain)
+            end
+        elseif t == 'binary_expression' and optext_is(n, src, { ['=='] = true, ['==='] = true }) then
+            local a, b = unparen(n:named_child(0)), unparen(n:named_child(1))
+            if a and b then
+                if js_absent_literal(a) then return chain_eq(b, src, chain) end
+                if js_absent_literal(b) then return chain_eq(a, src, chain) end
+                -- typeof X === 'undefined'
+                for _, pair in ipairs({ { a, b }, { b, a } }) do
+                    local ty, s = pair[1], pair[2]
+                    if ty:type() == 'unary_expression' and ty:child(0) and ty:child(0):type() == 'typeof'
+                        and s:type() == 'string' and node_text(s, src):match('^["\']undefined["\']$') then
+                        local x = unparen(ty:named_child(0))
+                        return x ~= nil and chain_eq(x, src, chain)
+                    end
+                end
+            end
+        end
+        return false
+    end,
+    -- the else arm of `if (X)` / `if (X != null)` / `if (X !== undefined)`
+    presence = function (cond, src, chain)
+        cond = unparen(cond)
+        if cond == nil then return false end
+        if chain_eq(cond, src, chain) then return true end
+        if cond:type() == 'binary_expression' and optext_is(cond, src, { ['!='] = true, ['!=='] = true }) then
+            local a, b = unparen(cond:named_child(0)), unparen(cond:named_child(1))
+            if a and b then
+                if js_absent_literal(a) then return chain_eq(b, src, chain) end
+                if js_absent_literal(b) then return chain_eq(a, src, chain) end
+            end
+        end
+        return false
+    end,
+    -- `X ??= v` / `X ||= v` / `X = X ?? v` / `X = X || v`
+    rhs_setonce = function (top, src, chain)
+        local p = top:parent()
+        if not p then return false end
+        local pt = p:type()
+        if pt == 'augmented_assignment_expression' and p:field('left')[1] == top
+            and optext_is(p, src, { ['??='] = true, ['||='] = true }) then
+            return true
+        end
+        if pt == 'assignment_expression' and p:field('left')[1] == top then
+            local rhs = unparen(p:field('right')[1])
+            if rhs and rhs:type() == 'binary_expression' and optext_is(rhs, src, { ['??'] = true, ['||'] = true }) then
+                local l = unparen(rhs:named_child(0))
+                return l ~= nil and chain_eq(l, src, chain())
+            end
+        end
+        return false
+    end,
+}
 
 return {
     is_write = js_is_write,
+    guards = JS_GUARDS,
     -- the PREFILTER: every immediate parent type a write mention can have.
     -- Without it the classifier is never invoked (v147 shipped that mistake).
     write_gate = { assignment_expression = true,

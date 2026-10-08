@@ -420,7 +420,8 @@ local SCALAR_LIT = { ['true'] = true, ['false'] = true, ['nil'] = true,
 
 local IDXC = { dot_index_expression = true, bracket_index_expression = true,
     subscript_expression = true, member_access_expression = true,
-    variable_name = true }
+    variable_name = true,
+    member_expression = true } -- (js / ts / tsx `o.p`: without it `t.y = 1` chained as `t`, and `if (!t.y)` never matched, CART-1573)
 
 -- the written chain's top node (same climb as is_write; bracket KEYS stop it)
 local function chain_top(c, n)
