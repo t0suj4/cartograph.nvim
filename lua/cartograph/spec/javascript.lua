@@ -246,8 +246,31 @@ end
 local function js_loopvars(node, src, out) -- `for (const k of xs)` binds k; `for (k of xs)` writes an outer k
     if node:field('kind')[1] then js_pattern_names(node:field('left')[1], src, out) end
 end
+-- `require('./p')` / `require('./p').x` — the one initializer whose binding the cross-file join gets RIGHT today: a
+-- `const {f} = require('./p')` mention reaches p's f only through it, no import edge resolves a value mention
+local function js_require_init(v, src)
+    while v and v:type() == 'member_expression' do v = v:field('object')[1] end
+    if not (v and v:type() == 'call_expression') then return false end
+    local f = v:field('function')[1]
+    return f ~= nil and f:type() == 'identifier' and node_text(f, src) == 'require'
+end
+local function js_locals(node, src, out) -- `const x = …` / `let {a, b: c} = …` / `var x`, visible from their row
+    for _, st in tsutil.inext, node, -1 do
+        local t = st:type()
+        if t == 'lexical_declaration' or t == 'variable_declaration' then
+            local row, names = select(1, st:range()), {}
+            for _, d in tsutil.inext, st, -1 do
+                if d:type() == 'variable_declarator' and not js_require_init(d:field('value')[1], src) then
+                    js_pattern_names(d:field('name')[1], src, names)
+                end
+            end
+            for nm in pairs(names) do out[nm] = { row = row } end
+        end
+    end
+end
 local JS_LEXICAL_SCOPES = { catch_clause = { kind = 'param', harvest = js_params },
-    for_in_statement = { kind = 'local', harvest = js_loopvars } }
+    for_in_statement = { kind = 'local', harvest = js_loopvars },
+    program = { kind = 'module', harvest = js_locals }, statement_block = { kind = 'local', harvest = js_locals } }
 for t in pairs(FN_TYPES) do JS_LEXICAL_SCOPES[t] = { kind = 'param', harvest = js_params } end
 
 return {

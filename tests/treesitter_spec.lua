@@ -5852,3 +5852,42 @@ test('use edges: a javascript SHORTHAND property reads its var and registers its
     ok(regs.init, 'module.exports = { init } registers init: ' .. vim.inspect(regs))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ⚠ A JS LOCAL IS BOUND, EXCEPT ONE THAT HOLDS A require() (CART-1594): `const labs = …`, `const {icon} = site`
+-- joined same-named functions in other files (395 fabricated refs / regs on ghost server); a `const {f} =
+-- require('./p')` mention reaches p's f only through that join, so a require initializer leaves its names free.
+test('refs: a javascript LOCAL never links across files — unless it holds a require() (CART-1594)', function ()
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local root = mkroot('a.js', table.concat({
+        'function labs() { return 1; }', 'function icon() { return 2; }', 'function blk() { return 3; }',
+        'function req() { return 4; }', 'function reqm() { return 5; }', 'function late() { return 6; }',
+        'function vvv() { return 7; }',
+        'module.exports = { labs, icon, blk, req, reqm, late, vvv };',
+    }, '\n'))
+    local fd = assert(io.open(root .. '/b.js', 'w'))
+    fd:write(table.concat({
+        'const labs = makeLabs();',
+        'var vvv = 1;', 'function h() { return vvv; }',
+        'const { req } = require("./a");',
+        'const reqm = require("./a").reqm;',
+        'function f(site) { const { icon } = site; if (site.x) { let blk = 1; use(blk); } return [labs, icon, req, reqm, late]; }',
+        'function g() { return late; }',
+        'const late = 0;',
+        'module.exports = { f, g };',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        if (e.kind == 'ref' or e.kind == 'reg') and byid[e.to] and byid[e.to].file == 'a.js' and (byid[e.from] or { file = e.from }).file == 'b.js' then
+            refs[byid[e.to].name] = true
+        end
+    end
+    for _, nm in ipairs({ 'labs', 'icon', 'blk', 'vvv' }) do
+        ok(not refs[nm], 'a bound local ' .. nm .. ' is not a.js\'s function: ' .. vim.inspect(refs))
+    end
+    ok(refs.req and refs.reqm, 'a require-held local still reaches its module\'s function: ' .. vim.inspect(refs))
+    ok(refs.late, 'a mention ABOVE its declaration is not bound by it (visible from its row): ' .. vim.inspect(refs))
+    vim.fn.delete(root, 'rf')
+end)
