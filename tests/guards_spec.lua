@@ -422,6 +422,28 @@ test('write axis: x++ used as a VALUE reads x; a bare x++; and a for-update do n
     end
 end)
 
+-- ⚠ A STRING KEY NAMES ITS FIELD BY ITS CONTENT (CART-1596): python spells a string string_start / string_content /
+-- string_end, and the first named child — the QUOTE — was taken for the field name.
+test('fields: a string bracket key names its CONTENT — python quotes, escapes and f-strings (CART-1596)', function ()
+    if ready('python') then
+        local data = ts.extract(mkroot('m.py', table.concat({
+            '_tab = {}', '_esc = {}', '_fs = {}',
+            'def put(k):', "    _tab['x'] = k", "    _esc['a\\nb'] = k", "    _fs[f'a{k}'] = k",
+        }, '\n')))
+        eq({ x = 2 + 4 }, flds_of(data, 'put', '_tab'), 'python: the content, not the quote')
+        eq({ ['[]'] = 2 + 4 }, flds_of(data, 'put', '_esc'), 'an escape is no plain name: dynamic')
+        eq({ ['[]'] = 2 + 4 }, flds_of(data, 'put', '_fs'), 'an f-string interpolates: dynamic')
+    end
+    local lua = ts.extract(mkroot('m.lua', "local t = {}\nlocal function put(v) t['k'] = v end\nreturn put\n"))
+    eq({ k = 2 + 4 }, flds_of(lua, 'put', 't'), 'lua: unchanged')
+    if ready('javascript') then
+        local js = ts.extract(mkroot('m.js', "const t = {};\nfunction put(v) { t['k'] = v; }\nmodule.exports = put;\n"))
+        eq({ k = 2 + 4 }, flds_of(js, 'put', 't'), 'javascript: unchanged')
+        local js2 = ts.extract(mkroot('n.js', "const u = {};\nfunction put(v) { u['a\\nb'] = v; }\nmodule.exports = put;\n"))
+        eq({ ['[]'] = 2 + 4 }, flds_of(js2, 'put', 'u'), 'javascript: an escape splits the fragments — dynamic')
+    end
+end)
+
 test('guards: reads carry no gw; no classifier means absent', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = mkroot('m.lua', table.concat({

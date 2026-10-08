@@ -530,7 +530,6 @@ local function mention_field(c, n, src, mempos, idxpos)
         -- `string_literal`, `interpreted_string_literal`. A miss costs '[]' — the
         -- honest dynamic answer — never a wrong field name.
         if key and key:type():find('string', 1, true) then
-            local inner = key:named_child(0)
             -- ★ NO FALLBACK TO THE NODE'S OWN TEXT. An EMPTY string literal has no
             -- content child, and `node_text` would hand back the quotes — a
             -- fabricated field name. Worse, the un-quoted reading is the empty
@@ -539,7 +538,22 @@ local function mention_field(c, n, src, mempos, idxpos)
             -- this change exists to remove. Caught by ONE changed edge on the lua
             -- control (Skillet's AceComm `del(t)` does `t[''] = nil`), visible
             -- only because CART-0531 put the field count in the signature.
-            if inner then return node_text(inner, src) end
+            -- ★ AND THE CONTENT, NOT THE FIRST NAMED CHILD (CART-1596): python spells a string string_start /
+            -- string_content / string_end, so `_tab['x']` named its field `'`. The one child whose type says
+            -- content / fragment is the name; an escape or a second piece (`'a\\nb'`, an f-string's
+            -- interpolation) is no plain name — '[]', the honest coarse answer.
+            local one
+            for i = 0, key:named_child_count() - 1 do
+                local ch = key:named_child(i)
+                local ct = ch:type()
+                if ct:find('content', 1, true) or ct:find('fragment', 1, true) then
+                    one = ch -- (a second piece is always split off by an escape / interpolation: the arm below)
+                elseif not (ct:find('start', 1, true) or ct:find('end', 1, true)) then
+                    one = false break
+                end
+            end
+            -- (python nests the escape INSIDE string_content: a content node with any named child is no plain name)
+            if one and one:named_child_count() == 0 then return node_text(one, src) end
         end
         return '[]'
     end
