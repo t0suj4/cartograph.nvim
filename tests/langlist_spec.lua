@@ -57,7 +57,8 @@ test('the PROFILE TYPES A RECEIVER: a member only TSNode has makes `n` a TSNode,
     put('lua/ir.lua', 'local S = {}\nlocal Mod, P = {}, {}\nfunction Mod:type() S.t = 1 end\nfunction P:type() return 2 end\n'
         .. 'function Mod:frob() end\nfunction P:frob() end\nfunction Mod:child_count() return 0 end\n'
         .. 'local Band, Client = {}, {}\nfunction Band:named() return true end\nfunction Client:close() S.c = 1 end\nfunction Client:call() end\n'
-        .. 'local Other = {}\nfunction Other:close() end\nfunction Other:call() end\nreturn { Mod, P, Band, Client, Other }')
+        .. 'local Other = {}\nfunction Other:close() end\nfunction Other:call() end\n'
+        .. 'local Both = {}\nfunction Both:named() end\nfunction Both:child_count() end\nreturn { Mod, P, Band, Client, Other, Both }')
     put('lua/m.lua', table.concat({
         'local function typed(n)',
         '    local c = n:named_child(0)',   -- only TSNode declares named_child, and no Lua file here defines it
@@ -79,6 +80,9 @@ test('the PROFILE TYPES A RECEIVER: a member only TSNode has makes `n` a TSNode,
         '    f:write("x")',
         '    return f:close()',             -- the BASE profile\'s file has write AND close; no project class has both
         'end',
+        'local function twin(v)',
+        '    if v:named() then return v:child_count() end', -- TSNode has both — and so does ir.lua's Both: no answer
+        'end',
         'local function untyped(x)',
         '    return x:type()',              -- nothing else called on x
         'end',
@@ -87,13 +91,27 @@ test('the PROFILE TYPES A RECEIVER: a member only TSNode has makes `n` a TSNode,
         '    local b = y:included_ranges()', -- … and TSTree's: two types, no answer
         '    return a, b, y:type()',
         'end',
-        'return { typed, owned, duck, proj, fh, untyped, torn }' }, '\n'))
+        'return { typed, owned, duck, proj, fh, twin, untyped, torn }' }, '\n'))
     local data = ts.extract(root)
     eq('nvim', data.profile, 'the plugin shape activates the nvim profile')
+    local function collect(calls)
+        local g = {}
+        for _, c in ipairs(calls) do
+            if c.file == 'lua/m.lua' and (c.callee == 'type' or c.callee == 'frob' or c.callee == 'close' or c.callee == 'child_count') then g[tostring(c.full)] = c end
+        end
+        return g
+    end
+    local got = collect(data.calls)
+    -- (an INCREMENTAL refresh of m.lua alone answers the same: the competitors live in ir.lua, which it does not
+    -- touch — the pass reads the whole graph, refresh-parity's step 13)
+    local store = require 'cartograph.store'
+    store.ingest(data)
+    put('lua/m.lua', (io.open(root .. '/lua/m.lua'):read('a') .. '\n'))
+    assert(require('cartograph.refresh').files({ 'lua/m.lua' }, { incremental = true }))
+    local again = collect(store.data.calls)
     vim.fn.delete(root, 'rf')
-    local got = {}
-    for _, c in ipairs(data.calls) do
-        if c.file == 'lua/m.lua' and (c.callee == 'type' or c.callee == 'frob' or c.callee == 'close') then got[tostring(c.full)] = c end
+    for k, c in pairs(got) do
+        eq(vim.inspect({ c.refused and c.refused.rule, c.ext and c.ext.why }), vim.inspect({ again[k] and again[k].refused and again[k].refused.rule, again[k] and again[k].ext and again[k].ext.why }), 'refresh answers ' .. k .. ' as the extraction did')
     end
     eq('typed-receiver', got['n:type'] and got['n:type'].ext and got['n:type'].ext.why, vim.inspect(got['n:type']))
     eq('TSNode', got['n:type'].ext.type)
@@ -105,6 +123,7 @@ test('the PROFILE TYPES A RECEIVER: a member only TSNode has makes `n` a TSNode,
     eq('TSNode', got['w:type'] and got['w:type'].ext and got['w:type'].ext.type, 'STRUCTURE: the one type with named AND type')
     eq('ambiguous', got['k:close'] and got['k:close'].refused and got['k:close'].refused.rule, 'two project classes fit: the join stands')
     eq('file', got['f:close'] and got['f:close'].ext and got['f:close'].ext.type, 'the base profile types a file handle: ' .. vim.inspect(got['f:close']))
+    eq('ambiguous', got['v:child_count'] and got['v:child_count'].refused and got['v:child_count'].refused.rule, 'a PROJECT class fits too (Both): no answer')
 end)
 
 test('langlist: a list that GREW is filtered again (a minted node appended after the first call)', function ()

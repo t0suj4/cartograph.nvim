@@ -4347,7 +4347,9 @@ local RESOLVE_PASSES = {
     { name = 'std_alias', run = function (x)
         return resolve_std_alias(x.cv, x.data.stdaliases) end },
     -- DISPOSITION too: a receiver the profile types withdraws the wrong join of its other members (CART-1570)
-    { name = 'typed_receiver', run = function (x)
+    -- (WHOLE: the project's classes compete for every receiver, so a subset — ts.relink's early cutoff — saw fewer
+    -- competitors and typed `tree:root()` the full graph leaves refused: refresh-parity's step 13, CART-1571)
+    { name = 'typed_receiver', whole = true, run = function (x)
         return resolve_receiver_type(x.cv, x.data, x.exact, x.tail) end },
 }
 M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
