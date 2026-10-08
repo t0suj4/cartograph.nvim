@@ -5762,3 +5762,25 @@ test('use edges: a same-line callback does not claim the mentions before it (CAR
     ok(inner, 'a mention INSIDE the callback is still the callback\'s: ' .. vim.inspect(uses))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ⚠ THE CROSS-FILE UNIQUE VAR NEVER CROSSES LANGUAGES (CART-1587): a free lua name matched a javascript module var by
+-- NAME — 1007 of 8159 use edges on lua/cartograph pointed into luajs/pack.js.
+test('use edges: a free name links the unique var of its OWN language only (CART-1587)', function ()
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local root = mkroot('m.lua', table.concat({
+        'local function f() return path, cfg end',
+        'return f',
+    }, '\n'))
+    local function put(rel, text) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close() end
+    put('p.js', 'var path = require("path");\nmodule.exports = path;\n')
+    put('g.lua', 'cfg = {}\nreturn cfg\n')
+    local data = ts.extract(root)
+    local byid, uses = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'use' and byid[e.from] and byid[e.to] then uses[byid[e.from].name .. '>' .. byid[e.to].file .. ':' .. byid[e.to].name] = true end
+    end
+    ok(not uses['f>p.js:path'], 'no lua mention reaches a javascript var: ' .. vim.inspect(uses))
+    ok(uses['f>g.lua:cfg'], 'a lua global in another lua file still links: ' .. vim.inspect(uses))
+    vim.fn.delete(root, 'rf')
+end)

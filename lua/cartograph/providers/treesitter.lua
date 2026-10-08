@@ -6039,12 +6039,16 @@ local function reduce_mentions(file, buf, L)
             end
             -- (never to a FILE-LOCAL var, CART-1473: lua's `local x` in one file is not the `x` a free mention in
             -- another file names — it read as a global write rebinding approvals.lua's `verified`)
-            if not var and #cands == 1 and not cands[1].vlocal
-                and not (L.scopes and L.scopes[cands[1].file]
+            -- (and never across LANGUAGES, CART-1587: the unique candidate is unique among the mention's OWN
+            -- language's vars — 1007 of 8159 use edges on lua/cartograph linked a free lua name to a var of
+            -- luajs/pack.js, the partition CART-1568 gave the call join)
+            local xc = not var and M._lang_list(cands, M.lang_of(file))
+            if xc and #xc == 1 and not xc[1].vlocal
+                and not (L.scopes and L.scopes[xc[1].file]
                     ~= L.scopes[file]) then
                 -- the cross-file unique fallback only for FREE names:
                 -- bound never crosses the file boundary
-                if not (scoped and bound) then var = cands[1] end
+                if not (scoped and bound) then var = xc[1] end
             end
             -- A MENTION ON *ANY* SAME-FILE HOMONYM'S DEF LINE IS NOT A USE.
             -- The skip used to name only the RESOLVED candidate's line, which
