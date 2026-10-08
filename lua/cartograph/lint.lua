@@ -1208,6 +1208,9 @@ M.ENTRY_POINTS = {
     -- so no promise rule is clipped and "no findings in x.lua" stays corpus-closed.
     { at = 'lua/cartograph/agent.lua',          supplies = 'corpus',
       natural = 'corpus; a `file` argument filters the OUTPUT, it does not scope the run' },
+    -- the lint REGRESSION GATE (CART-1561): every finding over a tree as join rows, two trees compared
+    { at = 'tools/experiments/instruments/lintrows.lua', supplies = 'corpus',
+      natural = 'corpus — a whole-tree comparison, by design' },
     { at = 'tools/annotcensus.lua',             supplies = 'corpus',
       natural = 'corpus; passes `only`, a RULE filter and not a scope' },
     { at = 'tools/guards.lua',                  supplies = 'corpus',

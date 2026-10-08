@@ -1257,6 +1257,18 @@ test('greenspun: funcall tables and evals are surfaced', function ()
     eq(1, #g.evals(data))
 end)
 
+test('greenspun: a suggestion and an example are CANONICAL — the smallest of equals, never the first in pairs order (CART-1561)', function ()
+    local g = require 'cartograph.greenspun'
+    -- (several sets: which key pairs visits first depends on how a table was built — `xq` and `mz` start at `xqs`
+    -- and `mzx` — so at least one of them has its smallest key late)
+    for _, pre in ipairs({ 'aa', 'xq', 'mz', 'on_' }) do
+        local set = {}
+        for c = string.byte('a'), string.byte('z') do set[pre .. string.char(c)] = true end -- 26 keys, all 1 edit from pre..'1'
+        eq(pre .. 'a', g._nearest(pre .. '1', set), pre .. ': the smallest of 26 equally near keys')
+        eq(pre .. 'a', g._first_key(set), pre .. ': the smallest key, whatever pairs visits first')
+    end
+end)
+
 test('registry-audit: auto-configured, names the typo', function ()
     if not has_parser('lua') then skip 'no lua parser' end
     store.ingest(ts.extract(vim.fn.getcwd() .. '/tests/fixtures/listener'))
@@ -1372,6 +1384,24 @@ test('schema-mirror: shared vocabularies report their divergence', function ()
     ok(fs[1].message:match('states %(keys%) ~ labels %(keys%)'), fs[1].message)
     ok(fs[1].message:match('retry'), 'left divergence named')
     ok(fs[1].message:match('abort'), 'right divergence named')
+end)
+
+test('schema-mirror: a family lists its members in a CANONICAL order — file, line, label — not the pairs order of a var\'s data (CART-1561)', function ()
+    local g = require 'cartograph.greenspun'
+    local core = { 'alpha', 'beta', 'gamma', 'delta' }
+    local function with(x) local t = { unpack(core) }; t[#t + 1] = x; return t end
+    local R = { id = 'a.lua::var:R@3', kind = 'var', name = 'R', file = 'a.lua', range = { start = { line = 3, char = 0 }, ['end'] = { line = 9, char = 0 } }, data = {} }
+    for _, k in ipairs({ 'zz', 'mm', 'aa', 'qq', 'cc', 'xx' }) do R.data[k] = with(k) end -- six members in ONE var
+    -- (members of one var never pair with each other: they join the family through another var)
+    local D = { id = 'b.lua::var:D@1', kind = 'var', name = 'D', file = 'b.lua', range = { start = { line = 1, char = 0 }, ['end'] = { line = 2, char = 0 } }, data = with('dd') }
+    local m = g.mirrors({ nodes = { R, D } })
+    ok(#m >= 1, 'a family: ' .. vim.inspect(m))
+    local labels = m[1].members
+    eq('D (values)', labels[#labels], 'b.lua after a.lua')
+    local rest = { unpack(labels, 1, #labels - 1) }
+    local sorted = vim.deepcopy(rest)
+    table.sort(sorted)
+    eq(sorted, rest, 'same file and line: by label')
 end)
 
 test('vtables: C initializer arrays are browsable funcall tables', function ()

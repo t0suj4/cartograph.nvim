@@ -131,17 +131,28 @@ end
 -- the bounded edit distance lives in cartograph.near (one copy for every did-you-mean)
 local editdist = require('cartograph.near').dist
 
+-- a set's SMALLEST key: the example a finding quotes (`next` answered in pairs order, so two runs over one tree
+-- quoted different keys, CART-1561)
+local function first_key(t)
+    local best
+    for k in pairs(t or {}) do if best == nil or tostring(k) < tostring(best) then best = k end end
+    return best
+end
+
 local function nearest(key, set)
     local cap = #key >= 5 and 2 or 1
     local best, bestd
     for k in pairs(set) do
         if k ~= key then
             local d = editdist(key, k, cap)
-            if d <= cap and (not bestd or d < bestd) then best, bestd = k, d end
+            -- (equal distances: the SMALLEST key — pairs order made the suggestion differ run to run, CART-1561)
+            if d <= cap and (not bestd or d < bestd or (d == bestd and k < best)) then best, bestd = k, d end
         end
     end
     return best
 end
+
+M._nearest, M._first_key = nearest, first_key -- (for the spec: both are canonical, CART-1561)
 
 -- logical arg positions where most sites carry a nonempty literal;
 -- first return = the most-covered one, second = all candidates
@@ -439,12 +450,12 @@ function M.registries(data, opts)
             if nkeys >= 3 then
                 report[#report + 1] = { kind = 'registry', verb = verb,
                     imports = iverbs, sites = ex.sites, keys = nkeys,
-                    example = next(ex.keys) }
+                    example = first_key(ex.keys) }
             end
         elseif ex.sites >= 3 and nkeys >= 3 then
             report[#report + 1] = { kind = 'registry', verb = verb,
                 imports = {}, sites = ex.sites, keys = nkeys,
-                example = next(ex.keys) }
+                example = first_key(ex.keys) }
         end
     end
     -- ★ AND THE LISTS THEMSELVES ARE HASH-ORDERED: both loops above append while
@@ -1141,7 +1152,16 @@ function M.mirrors(data, opts)
     local out = {}
     for _, members in pairs(families) do
         if #members >= 2 then
-            table.sort(members)
+            -- (by what each member IS — file, line, label — never by its index: the index follows `pairs` over a
+            -- var's data, and two runs over one tree listed REFUSAL_RANK.cpp / .java in either order, CART-1561)
+            table.sort(members, function (a, b)
+                local x, y = sets[a], sets[b]
+                if x.node.file ~= y.node.file then return x.node.file < y.node.file end
+                local lx, ly = atr.sl(x.node.range), atr.sl(y.node.range)
+                if lx ~= ly then return lx < ly end
+                if x.label ~= y.label then return x.label < y.label end
+                return a < b
+            end)
             -- the family CORE is the intersection of all member sets;
             -- each member's extras are its divergence from the core
             local core = {}
@@ -1310,7 +1330,7 @@ function M.factories(data, opts)
                 end
                 if n >= min_keys and strict / n >= 0.8 then
                     out[#out + 1] = { verb = verb, sites = #calls, keys = n,
-                        example = next(keys) }
+                        example = first_key(keys) }
                 end
             end
         end
