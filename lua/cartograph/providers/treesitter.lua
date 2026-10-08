@@ -5878,9 +5878,11 @@ local function reduce_mentions(file, buf, L)
     local fnrefs = buf.fnrefs
     local names = buf.names
     local at_line -- built on the first query (innermost_index; a file may ask none)
-    local function fn_at(line)
-        at_line = at_line or innermost_index(ranges, false)
-        local best = at_line(line)
+    -- (COLUMN-aware, as the call sites' fn_at is since CART-0813: a callback opened on the mention's line contains
+    -- only what follows its start — `cache.computeIfAbsent(k, x -> 1)` reads cache in the METHOD, CART-1586)
+    local function fn_at(line, col)
+        at_line = at_line or innermost_index(ranges, true)
+        local best = at_line(line, col)
         return best and best.id
     end
     local useEdge, regEdge = {}, {}
@@ -5950,7 +5952,7 @@ local function reduce_mentions(file, buf, L)
             -- crosses the file boundary
             if u and scoped and u.file ~= file and bound then u = nil end
             if u and not (u.file == file and sr == u.line) then
-                local from = fn_at(sr)
+                local from = fn_at(sr, sc)
                 local at = { start = { line = sr, char = sc },
                     ['end'] = { line = er, char = ec } }
                 if from then
@@ -6058,7 +6060,7 @@ local function reduce_mentions(file, buf, L)
                 -- path, so `from` stays a resolvable node id either way.
                 -- (The `do` is what the `if from then` guard became: `from`
                 -- can no longer be nil, and the block still scopes k/e.)
-                local from = fn_at(sr) or file
+                local from = fn_at(sr, sc) or file
                 do
                     local k = from .. '\31' .. var.id
                     local e = useEdge[k]

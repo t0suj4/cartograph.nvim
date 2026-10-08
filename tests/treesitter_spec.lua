@@ -5738,3 +5738,27 @@ test('treesitter: a lua `local` module var is never the cross-file target of a f
     ok(cross, 'a GLOBAL is still linked across files: ' .. vim.inspect(g))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ⚠ USE EDGES ARE COLUMN-AWARE (CART-1586): a callback opened on the mention's line contains only what follows its
+-- start, the rule CART-0813 gave the call sites. Line-granular, `run(t, function() … end)` read `t` in the callback.
+test('use edges: a same-line callback does not claim the mentions before it (CART-1586)', function ()
+    local root = mkroot('m.lua', table.concat({
+        'local t = {}',
+        'local u = {}',
+        'local function f() return run(t, function() return 1 end) end',
+        'local function g() return run(function() return u end) end',
+        'return { f, g }',
+    }, '\n'))
+    local data = ts.extract(root)
+    local byid, uses = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'use' and byid[e.from] and byid[e.to] then uses[byid[e.from].name .. '>' .. byid[e.to].name] = true end
+    end
+    ok(uses['f>t'], 'the mention BEFORE the callback is the enclosing fn\'s: ' .. vim.inspect(uses))
+    for k in pairs(uses) do ok(not k:match('>t$') or k == 'f>t', 'no other owner of t: ' .. k) end
+    local inner = false
+    for k in pairs(uses) do if k:match('>u$') and k ~= 'g>u' then inner = true end end
+    ok(inner, 'a mention INSIDE the callback is still the callback\'s: ' .. vim.inspect(uses))
+    vim.fn.delete(root, 'rf')
+end)
