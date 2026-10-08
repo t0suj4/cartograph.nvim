@@ -383,6 +383,50 @@ test('fixpoint: a BUILTIN or a module function handed to pcall BY NAME is its si
     eq('pure~', effects.purity(store, byname().inner.id), 'a local named require')
 end)
 
+test('fixpoint: STRUCTURE narrows the join — the owner must declare every member called on the receiver; a colon call reaches only a method; a receiver that names or binds its module is that module; an external profile type that fits refuses the join (CART-1572)', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/plugin', 'p'); vim.fn.mkdir(root .. '/lua', 'p') -- (the nvim-plugin shape: the nvim profile is active)
+    local function put(rel, text) local f = assert(io.open(root .. '/' .. rel, 'w')); f:write(text); f:close() end
+    put('plugin/x.lua', '')
+    put('lua/real.lua', 'local M = {}\nlocal R = {}\nfunction M.node() return 1 end\nfunction M.topo() return 2 end\nfunction M.f() return 3 end\nreturn M')
+    put('lua/fake.lua', table.concat({ 'local M = {}', 'local F = {}',
+        'function M.node() F.n = 1 end',         -- no topo: cannot be the `store` that also answers topo
+        'function M.f() F.f = 1 end',            -- not the module `require("real")` names
+        'function M.sites(x) F.s = 1 end',       -- no self: no colon call reaches it
+        'local P = {}',
+        'function P:type() F.t = 1 end',         -- a project `type` — but TSNode fits `x:type()` too',
+        'local Q = {}',
+        'function Q:type() F.q = 1 end',
+        'return { M, P, Q }' }, '\n'))
+    put('lua/more.lua', 'local M = {}\nlocal G = {}\nfunction M.sites(x) G.s = 1 end\nfunction M.node() G.n = 1 end\nfunction M.f() G.f = 1 end\nreturn M')
+    -- (a module whose members are no function definitions — re-exports: the resolver links nothing, the join would take
+    -- fake's and more's)
+    -- (at the ROOT, required as `x.real2`: a path the resolver cannot map to it, so it refuses with candidates —
+    -- as cartograph's own require('cartograph.callrec') reaches callrec.lua only by its suffix)
+    put('real2.lua', 'local M = {}\nM.f = rawget(_G, "f")\nM.node = rawget(_G, "n")\nreturn M')
+    put('lua/m.lua', table.concat({
+        'local real = require("real")',
+        'local function a(store) local n = store.node(1); return n, store.topo() end',
+        'local function b(t) return t:sites() end',
+        'local function c() return require("x.real2").f() end',
+        'local function a2(store) return store.node(1), store.topo() end',
+        'local function d() local r2 = require("x.real2"); return r2.node() end', -- (bound INSIDE the function: the resolver does not see it, the join would)
+        'local function e(x) return x:type() end',
+        'return { a, a2, b, c, d, e }' }, '\n'))
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do if n.file == 'lua/m.lua' then by[n.name] = n end end
+    local sums = effects.summaries(store)
+    for _, name in ipairs({ 'a', 'a2', 'b', 'c', 'd', 'e' }) do
+        local s = sums[by[name].id]
+        local wrote = {}
+        for k in pairs(s.w) do if k:find('fake.lua', 1, true) or k:find('more.lua', 1, true) then wrote[#wrote + 1] = k end end
+        eq({}, wrote, name .. ' joins no impossible candidate: ' .. vim.inspect(s.h))
+    end
+    vim.fn.delete(root, 'rf') -- (only now: effects reads the files' bindings)
+end)
+
 test('fixpoint: a join whose candidate is summarized LATER repeats the pass to the fixpoint, and a later pass recomputes only what read a changed summary (CART-1544)', function ()
     if not ready() then skip 'no lua parser' end
     store.ingest(ts.extract(mkroot(table.concat({

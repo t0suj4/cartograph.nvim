@@ -452,6 +452,164 @@ local function subst(store, sums, sum, c, caller, j, tname, member)
         :format(j, tname, callrec.file(c) or '?', callrec.line(c) or 0))
 end
 
+-- ── STRUCTURE NARROWS THE JOIN (CART-1572) ─────────────────────────────────────────────────────────────────────────
+-- The members a function calls on one receiver name (`store.node(id)`, `store.topo()`) are evidence of what the
+-- receiver holds: a joined candidate whose OWNER — the module or class its name is a member of — does not declare
+-- every one of them cannot be the target. `store.node` joined store.lua's M.node, algebra/core's M.node and cinterp's
+-- C.node; with `store.topo` beside it only store.lua's M fits. The same premise the join already rests on (`jp`), made
+-- tighter; a receiver no candidate's owner fits keeps the hedge.
+local struct_memo = setmetatable({}, { __mode = 'k' })
+local function owner_of(id) -- 'file::Owner.m@l' / 'file::Owner:m@l' -> 'file::Owner', 'm'
+    local file, name = tostring(id):match('^(.-)::(.-)@%d+$')
+    local owner, m = nil, nil
+    if name then owner, m = name:match('^(.+)[.:]([%w_]+)$') end
+    if owner then return file .. '::' .. owner, m end
+end
+local function structure(store)
+    local s = struct_memo[store]
+    if s and s.gen == store.generation then return s end
+    s = { gen = store.generation, owners = {}, recv = {} }
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            local ok, m = owner_of(n.id)
+            if ok then s.owners[ok] = s.owners[ok] or {}; s.owners[ok][m] = true end
+        end
+    end
+    struct_memo[store] = s
+    return s
+end
+-- the receiver name of call `c` (`r.m` / `r:m`, r a plain name) and the members `caller` calls on it
+local function receiver_members(store, c, caller)
+    local r = tostring(callrec.full(c) or ''):match('^([%a_][%w_]*)[.:][%w_]+$')
+    if not (r and caller) then return nil end
+    local s = structure(store)
+    local per = s.recv[caller.id]
+    if not per then
+        per = {}
+        for _, x in ipairs(store.topo():sites(caller.id)) do
+            local rx, mx = tostring(callrec.full(x) or ''):match('^([%a_][%w_]*)[.:]([%w_]+)$')
+            if rx then per[rx] = per[rx] or {}; per[rx][mx] = true end
+        end
+        s.recv[caller.id] = per
+    end
+    return per[r], s
+end
+-- the METHOD sets of the store's active profile and its language's base profile (luajit's string, file): `T -> {m}`
+local function profile_methods(store, s)
+    if s.pmeth ~= nil then return s.pmeth or nil end
+    local P = require 'cartograph.spec.profile'
+    local prof = store.data.profile and P.load(store.data.profile)
+    local out = false
+    if prof and prof.sigs then
+        out = {}
+        local function add(sigs)
+            for key, sig in pairs(sigs or {}) do
+                local ty, m = tostring(key):match('^(.-)#(.+)$')
+                if ty and type(sig) == 'table' and sig.method then out[ty] = out[ty] or {}; out[ty][m] = true end
+            end
+        end
+        add(prof.sigs)
+        local base = P.base_for(prof.lang)
+        if base and base ~= store.data.profile then local bp = P.load(base); add(bp and bp.sigs) end
+    end
+    s.pmeth = out
+    return out or nil
+end
+-- a Lua file's TOP-LEVEL table bindings: name -> the module path it requires (`local x = require 'a.b'`), or true
+-- for a table the file makes itself (`local M = {}`). Read once per file from its `local` lines; a name bound to
+-- anything else, or bound twice in DISAGREEING ways, is no binding (CART-1572)
+local bind_memo = setmetatable({}, { __mode = 'k' })
+function M._file_bindings(store, file)
+    local per = bind_memo[store]
+    if not per or per.gen ~= store.generation then per = { gen = store.generation }; bind_memo[store] = per end
+    if per[file] then return per[file] end
+    local out, seen = {}, {}
+    local path = file and (store.data.root or '') .. '/' .. file
+    local f = path and io.open(path)
+    if f then
+        for line in f:lines() do
+            -- (at ANY depth: `local P = require 'cartograph.helmprov'` inside a function binds P too — so long as every
+            -- binding of the name in the file AGREES; two that differ are no binding)
+            local function bind(name, v)
+                if seen[name] ~= nil and seen[name] ~= v then v = false end
+                seen[name] = v
+                out[name] = v or nil
+            end
+            -- (a `require` binding ANYWHERE on a line — a one-line function binds mid-line; any other `local x =` that
+            -- starts a line is a binding to something else, which unbinds the name)
+            local hit = false
+            for name, mod in line:gmatch('local%s+([%a_][%w_]*)%s*=%s*require%s*%(?%s*[\'"]([^\'"]+)[\'"]%s*%)?') do bind(name, mod); hit = true end
+            if not hit then
+                local name, rest = line:match('^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$')
+                if name then bind(name, rest:match('^{%s*}$') and true or false) end
+            end
+        end
+        f:close()
+    end
+    per[file] = out
+    return out
+end
+--- the candidates of a joined call that STRUCTURE admits (all of them when the call has no plain receiver). A METHOD
+--- call whose receiver an EXTERNAL profile type also fits (`x:type()` alone: TSNode as much as ir.lua's P) admits
+--- none: the join's premise — the target is one of the project's candidates — is then a guess, and P:type's memo
+--- write (ir.lua's ITYPE) had flooded hundreds of summaries through it
+function M.structural_cands(store, c, caller, cands)
+    local full = tostring(callrec.full(c) or '')
+    -- a COLON call passes its receiver as self: only a method — `T:f`, or a first parameter `self` — can be its target
+    -- (the resolver's own rule for one candidate, CART-1491; `store.topo():sites()` had joined three modules' M.sites)
+    if callrec.method(c) then
+        local ts = require('cartograph.providers.treesitter')
+        local keep = {}
+        for _, id in ipairs(cands) do local n = store.node(id); if n and ts._takes_self(n) then keep[#keep + 1] = id end end
+        cands = keep
+        if #cands == 0 then return cands end
+    end
+    -- a receiver that NAMES its module — `require('cartograph.parseview').view` — is that module: a candidate in
+    -- another file is none (it had joined rescols / edgecols / nodecols's M.view). So is a receiver its file BINDS at
+    -- the top level: `local callrec = require 'cartograph.callrec'` (callrec.file had joined refresh.lua's M.file),
+    -- or `local M = {}` — the file's own table (M.match had joined every other file's M.match)
+    local mod = full:match('^require%s*%(?%s*[\'"]([^\'"]+)[\'"]%s*%)?[.:]')
+    local own
+    if not mod then
+        local r = full:match('^([%a_][%w_]*)[.:]')
+        local b = r and M._file_bindings(store, callrec.file(c))[r]
+        if b == true then own = callrec.file(c) elseif b then mod = b end
+    end
+    if own then
+        local keep = {}
+        for _, id in ipairs(cands) do if tostring(id):sub(1, #own + 2) == own .. '::' then keep[#keep + 1] = id end end
+        return keep
+    end
+    if mod then
+        local tail = mod:gsub('%.', '/')
+        local keep = {}
+        for _, id in ipairs(cands) do
+            local f = tostring(id):match('^(.-)%.lua::') or ''
+            local g = f:gsub('/init$', '')
+            if g ~= '' and (tail == g or tail:sub(-#g - 1) == '/' .. g) then keep[#keep + 1] = id end
+        end
+        return keep
+    end
+    local called, s = receiver_members(store, c, caller)
+    if not called then return cands end
+    if callrec.method(c) then
+        for _, ms in pairs(profile_methods(store, s) or {}) do
+            local all = true
+            for m in pairs(called) do if not ms[m] then all = false; break end end
+            if all then return {} end
+        end
+    end
+    local out = {}
+    for _, id in ipairs(cands) do
+        local ok = owner_of(id)
+        local ms = ok and s.owners[ok]
+        local all = ms ~= nil
+        if all then for m in pairs(called) do if not ms[m] then all = false; break end end end
+        if all then out[#out + 1] = id end
+    end
+    return out
+end
+
 -- does the name `root` reach a GLOBAL at call `c` — no module var of the file, no parameter or local of the caller or
 -- of any function enclosing it defines it? Only then may a builtin's signature describe it (a `local require = …`
 -- is anyone's function)
@@ -649,8 +807,10 @@ function M.summaries(store)
             -- orders it first) keeps the hedge; a candidate in this component adds nothing it does not already share
             local function join(c, caller, r)
                 if not (M.JOIN[r.rule] and r.cands and r.n and #r.cands == r.n) then return false end
+                local cands = M.structural_cands(store, c, caller, r.cands)
+                if #cands == 0 then return false end -- (no candidate's owner declares what is called on the receiver)
                 local whole = true
-                for _, id in ipairs(r.cands) do
+                for _, id in ipairs(cands) do
                     if member(id) then intra[#intra + 1] = { c = c, caller = caller, to = id } -- (its effects are this component's own; its pending pairs are substituted with the rest)
                     elseif sums[id] then take(c, caller, id)
                     elseif prev then -- (not summarized yet in this pass: the previous pass's, or nothing in the first)
