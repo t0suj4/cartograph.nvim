@@ -3319,4 +3319,37 @@ function M.mix(term, fname, division, statics, opts)
     return text, stats, res.pool, map
 end
 
+-- ── THE TARGET'S POLICY for mix's own phases (CART-1541) ──────────────────────────────────────────────────────────────
+-- Lowering and specialization are recursive, polymorphic tree walks: LuaJIT's weakest shape. Measured 2026-10-08: every
+-- node-kind path compiles its own trace (~9600 a pass against the default cap of 1000), the cache flushes ~9 times a
+-- pass, and the top aborts are `return to lower frame` in lower_expr / text / named / rets — warm lowering ran ~1200 ms
+-- under the JIT against ~840 interpreted. So these phases run INTERPRETED; the JIT is restored on the way out (an error
+-- included, nested phases counted), and the residuals mix produces — hot, straight-line code — keep it.
+-- M.PHASE_JIT = true runs the phases under the JIT like everything else.
+-- (written inside S, as all of mix: fixed arities — lower returns prog, specialize res and stats — no varargs)
+M.PHASE_JIT = false
+local phase_depth = 0
+local function jit_on() return jit ~= nil and jit.status ~= nil and jit.status() end
+local lower_jit, specialize_jit = M.lower, M.specialize
+function M.lower(term, opts)
+    if M.PHASE_JIT or phase_depth > 0 or not jit_on() then return lower_jit(term, opts) end
+    phase_depth = phase_depth + 1
+    jit.off()
+    local ok, prog = pcall(lower_jit, term, opts)
+    phase_depth = phase_depth - 1
+    jit.on()
+    if not ok then error(prog, 0) end
+    return prog
+end
+function M.specialize(prog, fname, division, statics, opts)
+    if M.PHASE_JIT or phase_depth > 0 or not jit_on() then return specialize_jit(prog, fname, division, statics, opts) end
+    phase_depth = phase_depth + 1
+    jit.off()
+    local ok, res, stats = pcall(specialize_jit, prog, fname, division, statics, opts)
+    phase_depth = phase_depth - 1
+    jit.on()
+    if not ok then error(res, 0) end
+    return res, stats
+end
+
 return M
