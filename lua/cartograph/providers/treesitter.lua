@@ -423,7 +423,8 @@ local IDXC = { dot_index_expression = true, bracket_index_expression = true,
     variable_name = true,
     member_expression = true, -- (js / ts / tsx `o.p`: without it `t.y = 1` chained as `t`, and `if (!t.y)` never matched, CART-1573)
     attribute = true, subscript = true, -- (python `o.p` / `t[k]`, CART-1574)
-    field_expression = true } -- (c / c++ `s.f` / `p->f`, CART-1576)
+    field_expression = true, -- (c / c++ `s.f` / `p->f`, CART-1576)
+    selector_expression = true, index_expression = true } -- (go `s.f` / `m[k]`, CART-1579)
 
 -- the written chain's top node (same climb as is_write; bracket KEYS stop it)
 local function chain_top(c, n)
@@ -650,14 +651,19 @@ local function guard_class(c, n, src, G)
             -- the condition is the first named child in both grammars
             -- (field() allocates a result table per call — this loop is
             -- per-write × per-ancestor, measured hot)
-            local cond = p:named_child(0)
-            if cond and node ~= cond then
+            -- (a grammar whose `if` may start with an INITIALIZER, or whose arms are told apart by FIELD and not by
+            -- node type — go: `if v, ok := m[k]; !ok {` / `} else {` as a bare block — declares cond_of / arm, CART-1579)
+            local cond = G.cond_of and G.cond_of(p) or p:named_child(0)
+            local arm = G.arm and G.arm(p, node)
+            if arm == 'init' then
+                -- (an initializer runs unconditionally: no guard of this `if` covers it)
+            elseif cond and node ~= cond then
                 class = 1
                 local at = node:type()
-                if at == G.else_t then
+                if arm == 'else' or (arm == nil and at == G.else_t) then
                     if G.presence(cond, src, ch()) then return 2 end
                     negcond = negcond or cond
-                elseif at ~= G.elseif_t then
+                elseif arm ~= 'elseif' and at ~= G.elseif_t then
                     if conj_abs(G, cond, src, ch()) then return 2 end
                     if G.alias_of then
                         local al = aliases_before(G, p, src, ch)

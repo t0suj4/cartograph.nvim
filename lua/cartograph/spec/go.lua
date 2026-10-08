@@ -63,6 +63,71 @@ local function go_is_write(c, n)
     return false
 end
 
+-- ── THE GUARD GRAMMAR (CART-1579) ─────────────────────────────────────────────────────────────────────────────────
+-- go's lazy initialisation: `if cache == nil { cache = … }`, the COMMA-OK memo `if _, ok := m[k]; !ok { m[k] = … }`
+-- (`!ok` is the absence of `m[k]`, read through the `if`'s initializer), and the else arm of `if x != nil` / `ok`.
+-- go's `if` has no else node — both arms are blocks, told apart by FIELD — and its first child may be the
+-- initializer: `cond_of` and `arm` say which is which.
+local chain_eq, optext_is, unparen = tsutil.chain_eq, tsutil.optext_is, tsutil.unparen
+-- the chain an `ok` of the comma-ok form `v, ok := X` / `_, ok := X` in this `if`'s initializer stands for -> X's text
+local function go_ok_chain(ifnode, okname, src)
+    local init = ifnode and ifnode:field('initializer')[1]
+    if not (init and init:type() == 'short_var_declaration') then return nil end
+    local l, r = init:field('left')[1], init:field('right')[1]
+    if not (l and r and l:named_child_count() == 2 and r:named_child_count() == 1) then return nil end
+    if node_text(l:named_child(1), src) ~= okname then return nil end
+    local x = r:named_child(0)
+    if x and (x:type() == 'index_expression' or x:type() == 'type_assertion_expression') then return node_text(x, src) end
+    return nil
+end
+local function go_if_of(n) -- the `if` a condition belongs to
+    local p = n:parent()
+    while p and p:type() ~= 'if_statement' do
+        if p:type() == 'block' then return nil end
+        p = p:parent()
+    end
+    return p
+end
+local function go_nil_operand(n, ops)
+    if n:type() ~= 'binary_expression' or not optext_is(n, nil, ops) then return nil end
+    local a, b = unparen(n:named_child(0)), unparen(n:named_child(1))
+    if b and b:type() == 'nil' then return a end
+    if a and a:type() == 'nil' then return b end
+    return nil
+end
+local GO_GUARDS = {
+    cond = { if_statement = true },
+    cond_of = function (p) return p:field('condition')[1] end,
+    arm = function (p, node)
+        if p:field('initializer')[1] == node then return 'init' end
+        if p:field('alternative')[1] == node then return node:type() == 'if_statement' and 'elseif' or 'else' end
+        return nil
+    end,
+    fn = { function_declaration = true, method_declaration = true, func_literal = true },
+    binop = 'binary_expression', andops = { ['&&'] = true },
+    negop = 'unary_expression', negtok = '!', pfield = 'parameters',
+    pw_refsem = true, -- maps, slices and pointers are reference-typed
+    abs_test = function (n, src, chain)
+        local x = go_nil_operand(n, { ['=='] = true })
+        if x then return chain_eq(x, src, chain) end
+        if n:type() == 'unary_expression' and n:child(0) and n:child(0):type() == '!' then
+            local ok = unparen(n:named_child(0))
+            if ok and ok:type() == 'identifier' then return go_ok_chain(go_if_of(n), node_text(ok, src), src) == chain end
+        end
+        return false
+    end,
+    presence = function (cond, src, chain)
+        cond = unparen(cond)
+        if cond == nil then return false end
+        if chain_eq(cond, src, chain) then return true end
+        local x = go_nil_operand(cond, { ['!='] = true })
+        if x then return chain_eq(x, src, chain) end
+        if cond:type() == 'identifier' then return go_ok_chain(go_if_of(cond), node_text(cond, src), src) == chain end
+        return false
+    end,
+    rhs_setonce = function () return false end,
+}
+
 return {
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
@@ -79,6 +144,7 @@ return {
         index_expression = 'operand', -- s[i] · m["k"]
     },
     is_write = go_is_write,
+    guards = GO_GUARDS,
     -- the PREFILTER, and it is not optional: without it collect_mentions never
     -- calls the classifier at all (see python.lua's note). Every immediate
     -- parent type a go write mention can have.
@@ -123,6 +189,8 @@ return {
         vars = [=[
             (source_file (var_declaration (var_spec
                 name: (identifier) @vname value: (_) @value) @vdef))
+            (source_file (var_declaration (var_spec
+                name: (identifier) @vname type: (_) .) @vdef))
             (source_file (const_declaration (const_spec
                 name: (identifier) @vname value: (_) @value) @vdef))
         ]=],

@@ -210,6 +210,33 @@ test('guards: c / c++ — !g, == NULL / nullptr, else arms of presence tests; ||
     end
 end)
 
+test('guards: go — == nil, the comma-ok memo, else arms by FIELD; else-if, ||, other-field and initializer traps (CART-1579)', function ()
+    if not ready('go') then skip 'no go parser' end
+    local root = mkroot('m.go', table.concat({
+        'package m',
+        'var t int', 'var memo map[string]int', 'var memo2 map[string]int', 'var reg *C', 'var cfg *C', 'var mix *C', 'var oth *C', 'var t3 int',
+        'func bare() { t = 1 }',
+        'func once() { if memo == nil { memo = make(map[string]int) } }',
+        'func commaok(k string) { if _, ok := memo2[k]; !ok { memo2[k] = 2 } }',
+        'func elsearm() { if reg != nil { use(reg) } else { reg = new(C) } }',
+        -- traps: guarded, but NOT set-once
+        'func elseif(z bool) { if cfg != nil { use(cfg) } else if z { cfg = new(C) } }', -- (an else-if arm never claims set-once, as in lua)
+        'func ortrap(z bool) { if mix == nil || z { mix = new(C) } }',
+        'func otherfield() { if oth.a == nil { oth.b = new(C) } }',
+        -- an initializer runs unconditionally
+        'func initw() { if t3 = 5; t3 > 0 { use(1) } }',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(1, gw_of(data, 'bare', 't'), 'bare: unguarded')
+    eq(3, gw_of(data, 'once', 'memo'), '== nil: set-once')
+    eq(3, gw_of(data, 'commaok', 'memo2'), 'the comma-ok memo: set-once')
+    eq(3, gw_of(data, 'elsearm', 'reg'), 'else arm (a bare block, by field) of != nil: set-once')
+    eq(2, gw_of(data, 'elseif', 'cfg'), 'an else-if arm is guarded, never set-once')
+    eq(2, gw_of(data, 'ortrap', 'mix'), '|| must NOT claim set-once')
+    eq(2, gw_of(data, 'otherfield', 'oth'), 'a test of ANOTHER field is a guard, not set-once')
+    eq(1, gw_of(data, 'initw', 't3'), 'an `if` initializer is unconditional')
+end)
+
 test('guards: reads carry no gw; no classifier means absent', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = mkroot('m.lua', table.concat({
