@@ -261,6 +261,32 @@ test('guards: rust — is_none() / == None / !X, else arms of is_some() / != Non
     eq(2, gw_of(data, 'otherfield', 'OTH'), 'a test of ANOTHER field is a guard, not set-once')
 end)
 
+test('guards: java — == null on a field or this.f, !X, else arms by FIELD; else-if, || and other-field traps (CART-1583)', function ()
+    if not ready('java') then skip 'no java parser' end
+    local root = mkroot('K.java', table.concat({
+        'class K {',
+        '    static int t; Object memo; Object cfg; Object reg; boolean ready; Object st; Object mix; Object oth; Object oth2;',
+        '    void bare() { t = 1; }',
+        '    void once() { if (memo == null) { memo = new Object(); } }',
+        '    void thisnull() { if (this.cfg == null) { this.cfg = new Object(); } }',
+        '    void elsearm() { if (reg != null) { use(reg); } else { reg = new Object(); } }',
+        '    void notready() { if (!ready) { ready = true; } }',
+        '    void elseif(boolean z) { if (st != null) { use(st); } else if (z) { st = new Object(); } }',
+        '    void ortrap(boolean z) { if (mix == null || z) { mix = new Object(); } }',
+        '    void otherfield() { if (oth2 == null) { oth = new Object(); } }',
+        '}',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(1, gw_of(data, 'K::bare', 't'), 'bare: unguarded')
+    eq(3, gw_of(data, 'K::once', 'memo'), '== null: set-once')
+    eq(3, gw_of(data, 'K::thisnull', 'cfg'), 'this.f == null: set-once')
+    eq(3, gw_of(data, 'K::elsearm', 'reg'), 'else arm (a bare block, by field) of != null: set-once')
+    eq(3, gw_of(data, 'K::notready', 'ready'), '!X: set-once')
+    eq(2, gw_of(data, 'K::elseif', 'st'), 'an else-if arm is guarded, never set-once')
+    eq(2, gw_of(data, 'K::ortrap', 'mix'), '|| must NOT claim set-once')
+    eq(2, gw_of(data, 'K::otherfield', 'oth'), 'a test of ANOTHER field is a guard, not set-once')
+end)
+
 test('guards: reads carry no gw; no classifier means absent', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = mkroot('m.lua', table.concat({

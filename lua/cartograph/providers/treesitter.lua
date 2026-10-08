@@ -424,7 +424,8 @@ local IDXC = { dot_index_expression = true, bracket_index_expression = true,
     member_expression = true, -- (js / ts / tsx `o.p`: without it `t.y = 1` chained as `t`, and `if (!t.y)` never matched, CART-1573)
     attribute = true, subscript = true, -- (python `o.p` / `t[k]`, CART-1574)
     field_expression = true, -- (c / c++ `s.f` / `p->f`, CART-1576)
-    selector_expression = true, index_expression = true } -- (go `s.f` / `m[k]`, CART-1579)
+    selector_expression = true, index_expression = true, -- (go `s.f` / `m[k]`, CART-1579)
+    field_access = true, array_access = true } -- (java `this.f` / `a[i]`, CART-1583)
 
 -- the written chain's top node (same climb as is_write; bracket KEYS stop it)
 local function chain_top(c, n)

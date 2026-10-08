@@ -738,6 +738,48 @@ local function java_is_write(c, n)
     return false
 end
 
+-- ── THE GUARD GRAMMAR (CART-1583) ─────────────────────────────────────────────────────────────────────────────────
+-- java's lazy initialisation: `if (cache == null) { cache = … }` / `if (this.f == null)`, `if (!ready)`, and the else
+-- arm of `if (x != null)` / `if (x)`. java's if has no else node — the alternative is a bare statement, told apart
+-- by FIELD (go's `arm` hook) — and an `else if` arm never claims set-once.
+local chain_eq, optext_is, unparen = tsutil.chain_eq, tsutil.optext_is, tsutil.unparen
+local function java_null_operand(n, ops)
+    if n:type() ~= 'binary_expression' or not optext_is(n, nil, ops) then return nil end
+    local a, b = unparen(n:named_child(0)), unparen(n:named_child(1))
+    if b and b:type() == 'null_literal' then return a end
+    if a and a:type() == 'null_literal' then return b end
+    return nil
+end
+local JAVA_GUARDS = {
+    cond = { if_statement = true, while_statement = true, ternary_expression = true },
+    arm = function (p, node)
+        if p:type() ~= 'if_statement' then return nil end
+        if p:field('alternative')[1] == node then return node:type() == 'if_statement' and 'elseif' or 'else' end
+        return nil
+    end,
+    fn = { method_declaration = true, constructor_declaration = true, lambda_expression = true },
+    binop = 'binary_expression', andops = { ['&&'] = true },
+    negop = 'unary_expression', negtok = '!', pfield = 'parameters',
+    pw_refsem = true, -- objects are reference-typed
+    abs_test = function (n, src, chain)
+        local x = java_null_operand(n, { ['=='] = true })
+        if x then return chain_eq(x, src, chain) end
+        if n:type() == 'unary_expression' and n:child(0) and n:child(0):type() == '!' then
+            local y = unparen(n:named_child(0))
+            return y ~= nil and chain_eq(y, src, chain)
+        end
+        return false
+    end,
+    presence = function (cond, src, chain)
+        cond = unparen(cond)
+        if cond == nil then return false end
+        if chain_eq(cond, src, chain) then return true end
+        local x = java_null_operand(cond, { ['!='] = true })
+        return x ~= nil and chain_eq(x, src, chain)
+    end,
+    rhs_setonce = function () return false end,
+}
+
 return {
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
@@ -754,6 +796,7 @@ return {
         array_access = 'array', -- a[i]
     },
     is_write = java_is_write,
+    guards = JAVA_GUARDS,
     -- the PREFILTER: every immediate parent type a java write mention can have.
     -- Without it the classifier above is never invoked (see the note on it).
     write_gate = { assignment_expression = true, field_access = true,
