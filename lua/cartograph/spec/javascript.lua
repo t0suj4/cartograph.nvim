@@ -278,6 +278,9 @@ return {
     -- the MENTION node types: an object literal's SHORTHAND `{storagePath, writeDisabled}` means `{writeDisabled:
     -- writeDisabled}`, a READ — df_ids has carried it since CART-0418, the use axis had not (CART-1593)
     mention_types = { identifier = true, shorthand_property_identifier = true },
+    -- a function VALUE in an object literal is a registry entry, invoked through the object: `make({ getTimezone:
+    -- () => … })`, `{ m() {} }` — never a bare same-file call target, and alive by the object (CART-1592)
+    field_fn_cbarg = { pair = true, object = true },
     is_write = js_is_write,
     guards = JS_GUARDS,
     -- the PREFILTER: every immediate parent type a write mention can have.

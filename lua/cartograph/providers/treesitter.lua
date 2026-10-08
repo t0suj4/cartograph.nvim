@@ -7182,10 +7182,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local wantesc = exp == false and not aname
                 local esc
                 if wantesc and not escpend then esc = escapes_file(name) end
-                local isfield = aname and true
-                    or (spec.field_fn_cbarg
-                        -- @langs-ok lua/haskell/odin `field` — the callback-arg field shape this spec hook needs
-                        and namen:parent() and namen:parent():type() == 'field')
+                -- (`field_fn_cbarg`: the node types whose function VALUE is a registry entry — lua's table `field`, js's
+                -- `pair` and object-literal method, CART-1592 —, asked of the definition's container)
+                local ffc, dpar = spec.field_fn_cbarg, defn:parent()
+                local isfield = aname and true or (ffc and dpar and ffc[dpar:type()] == true)
                 if spec.cbarg_within and not isfield then
                     local a = defn:parent()
                     while a do

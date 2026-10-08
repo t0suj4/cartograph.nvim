@@ -860,7 +860,7 @@ return {
     ]],
     -- a function VALUE in a table field is registry-style: invoked
     -- through the table, invisible to a name graph
-    field_fn_cbarg = true,
+    field_fn_cbarg = { field = true },
     calls = [[ (function_call name: (_) @name) @call ]],
     -- OO inheritance/instancing via metatables: `setmetatable(X, {__index =
     -- P})` makes X's `:method` dispatch fall through to P (and P's own

@@ -5891,3 +5891,51 @@ test('refs: a javascript LOCAL never links across files — unless it holds a re
     ok(refs.late, 'a mention ABOVE its declaration is not bound by it (visible from its row): ' .. vim.inspect(refs))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ⚠ AN OBJECT-LITERAL FUNCTION IS A REGISTRY ENTRY (CART-1592), as lua's table field always was: invoked through its
+-- object, never a bare same-file call target. Unmarked, ghost's injected `getTimezone: () => …` read as dead and
+-- `getPostUrl: post => getPostUrl(post)` resolved its own body's call to ITSELF.
+test('defs: a javascript object-literal function is cbarg — alive by its object, not a bare call target (CART-1592)', function ()
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local root = mkroot('o.js', table.concat({
+        'function getPostUrl(post) { return post.url; }',
+        'function make() {',
+        '    return build({',
+        '        getPostUrl: post => getPostUrl(post),',
+        '        isEnabled: function () { return true; },',
+        '        lookup() { return 1; },',
+        '    });',
+        '}',
+        'class K { method() { return 2; } }',
+        'module.exports = { make, K };',
+    }, '\n'))
+    local data = ts.extract(root)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do if n.kind == 'function' or n.kind == 'method' then byname[n.name .. '@' .. n.order] = n end end
+    ok(byname['getPostUrl@3'] and byname['getPostUrl@3'].cbarg, 'a pair arrow is cbarg: ' .. vim.inspect(vim.tbl_keys(byname)))
+    ok(byname['isEnabled@4'] and byname['isEnabled@4'].cbarg, 'a pair function expression is cbarg')
+    ok(byname['lookup@5'] and byname['lookup@5'].cbarg, 'an object-literal METHOD is cbarg')
+    local km
+    for k, n in pairs(byname) do if k:match('method@8$') then km = n end end
+    ok(km and not km.cbarg, 'a CLASS method is not: ' .. vim.inspect(vim.tbl_keys(byname)))
+    local callee
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname['getPostUrl@3'].id then callee = e.to end
+    end
+    eq(byname['getPostUrl@0'].id, callee, 'the pair\'s body calls the MODULE function, not itself')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('defs: a lua table-FIELD function is cbarg; a local function is not (the field_fn_cbarg set, CART-1592)', function ()
+    local root = mkroot('t.lua', table.concat({
+        'local function plain() return 1 end',
+        'local tbl = { handler = function() return 2 end }',
+        'return { plain = plain, tbl = tbl }',
+    }, '\n'))
+    local data = ts.extract(root)
+    local by = {}
+    for _, n in ipairs(data.nodes) do by[n.name] = n end
+    ok(by.handler and by.handler.cbarg, 'a table-field function is cbarg')
+    ok(by.plain and not by.plain.cbarg, 'a local function is not')
+    vim.fn.delete(root, 'rf')
+end)
