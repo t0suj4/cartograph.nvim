@@ -4165,6 +4165,65 @@ local function resolve_installer(cv, edges, exact, addref, node_index, fieldalia
     return n
 end
 
+-- ★ THE PROFILE TYPES A RECEIVER (CART-1570, user 2026-10-08: "use a profile to make some callees known"). Within one
+-- function, the methods called on one receiver name are evidence of its type: a member that exactly ONE type of the
+-- active L2 profile declares, and that the language's own code never defines (`named_child`: TSNode's, and no Lua
+-- file names it), types the receiver. Every still-REFUSED call on it whose member that type declares (`n:type()`, a
+-- name ir.lua also defines) is then that type's member — EXTERNAL, typed-receiver, `inferred` (the member is the
+-- profile's, the receiver is a hedge: a name rebound to another type in the same function breaks it). Two uniquely
+-- owned members naming DIFFERENT types type nothing. A DISPOSITION: no edge is added, a wrong join is withdrawn.
+local function resolve_receiver_type(cv, data, exact, tail)
+    local prof = data.profile and require('cartograph.spec.profile').load(data.profile)
+    if not (prof and prof.sigs and prof.lang) then return 0 end
+    local owners = {} -- member -> { n = owner count, one = an owner }
+    for key in pairs(prof.sigs) do
+        local ty, m = tostring(key):match('^(.-)#(.+)$')
+        if ty then
+            local o = owners[m]
+            if not o then o = { n = 0, set = {} }; owners[m] = o end
+            if not o.set[ty] then o.set[ty] = true; o.n = o.n + 1; o.one = ty end
+        end
+    end
+    local cget, cset = cv.get, cv.set
+    local groups = {}
+    for i = 1, cv.n do
+        local file = cget(i, 'file')
+        if cget(i, 'method') and file and elang_for(file) == prof.lang then
+            local r = tostring(cget(i, 'full') or ''):match('^([%a_][%w_]*):')
+            local fn = cget(i, 'fn')
+            if r and fn then
+                local k = fn .. '\0' .. r
+                local g = groups[k]
+                if not g then g = {}; groups[k] = g end
+                g[#g + 1] = i
+            end
+        end
+    end
+    local n = 0
+    for _, g in pairs(groups) do
+        local ty, conflict
+        for _, i in ipairs(g) do
+            local m = cget(i, 'callee')
+            local o = m and owners[m]
+            if o and o.n == 1 and not M._lang_any(exact[m], prof.lang) and not M._lang_any(tail[m], prof.lang) then
+                if ty and ty ~= o.one then conflict = true end
+                ty = ty or o.one
+            end
+        end
+        if ty and not conflict then
+            for _, i in ipairs(g) do
+                local m = cget(i, 'callee')
+                if m and prof.sigs[ty .. '#' .. m] and cget(i, 'refused') and not cget(i, 'to') then
+                    cset(i, 'refused', nil)
+                    cset(i, 'ext', { disp = 'external', why = 'typed-receiver', inferred = true, type = ty })
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+
 local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
@@ -4241,6 +4300,9 @@ local RESOLVE_PASSES = {
     -- unresolved. Last, so it only speaks for genuine no-defs / refusals.
     { name = 'std_alias', run = function (x)
         return resolve_std_alias(x.cv, x.data.stdaliases) end },
+    -- DISPOSITION too: a receiver the profile types withdraws the wrong join of its other members (CART-1570)
+    { name = 'typed_receiver', run = function (x)
+        return resolve_receiver_type(x.cv, x.data, x.exact, x.tail) end },
 }
 M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 

@@ -47,6 +47,49 @@ test('langlist: a call whose only candidates are in ANOTHER language has none �
     vim.fn.delete(root, 'rf')
 end)
 
+test('the PROFILE TYPES A RECEIVER: a member only TSNode has makes `n` a TSNode, so `n:type()` is TSNode#type, not a join over the project\'s own `type` methods; no unique member, or two naming different types, types nothing (CART-1570)', function ()
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    -- (an nvim-PLUGIN layout: the shape that activates the nvim profile — it is no environment to override with)
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/plugin', 'p'); vim.fn.mkdir(root .. '/lua', 'p')
+    local function put(rel, text) local f = assert(io.open(root .. '/' .. rel, 'w')); f:write(text); f:close() end
+    put('plugin/x.lua', '')
+    put('lua/ir.lua', 'local S = {}\nlocal Mod, P = {}, {}\nfunction Mod:type() S.t = 1 end\nfunction P:type() return 2 end\n'
+        .. 'function Mod:frob() end\nfunction P:frob() end\nfunction Mod:child_count() return 0 end\nreturn { Mod, P }')
+    put('lua/m.lua', table.concat({
+        'local function typed(n)',
+        '    local c = n:named_child(0)',   -- only TSNode declares named_child, and no Lua file here defines it
+        '    return c, n:type(), n:frob()', -- (frob: no member of TSNode — its join stands)
+        'end',
+        'local function owned(z)',
+        '    local k = z:child_count()',    -- TSNode's only — but THIS project defines a child_count: no evidence
+        '    return k, z:type()',
+        'end',
+        'local function untyped(x)',
+        '    return x:type()',              -- nothing else called on x
+        'end',
+        'local function torn(y)',
+        '    local a = y:named_child(0)',   -- TSNode's …
+        '    local b = y:included_ranges()', -- … and TSTree's: two types, no answer
+        '    return a, b, y:type()',
+        'end',
+        'return { typed, owned, untyped, torn }' }, '\n'))
+    local data = ts.extract(root)
+    eq('nvim', data.profile, 'the plugin shape activates the nvim profile')
+    vim.fn.delete(root, 'rf')
+    local got = {}
+    for _, c in ipairs(data.calls) do
+        if c.file == 'lua/m.lua' and (c.callee == 'type' or c.callee == 'frob') then got[tostring(c.full)] = c end
+    end
+    eq('typed-receiver', got['n:type'] and got['n:type'].ext and got['n:type'].ext.why, vim.inspect(got['n:type']))
+    eq('TSNode', got['n:type'].ext.type)
+    eq(nil, got['n:type'].refused)
+    eq('ambiguous', got['x:type'] and got['x:type'].refused and got['x:type'].refused.rule, 'no evidence: the join stands')
+    eq('ambiguous', got['y:type'] and got['y:type'].refused and got['y:type'].refused.rule, 'two types: no answer')
+    eq('ambiguous', got['z:type'] and got['z:type'].refused and got['z:type'].refused.rule, 'a member the project defines is no evidence')
+    eq('ambiguous', got['n:frob'] and got['n:frob'].refused and got['n:frob'].refused.rule, 'a typed receiver keeps the join of a member its type lacks')
+end)
+
 test('langlist: a list that GREW is filtered again (a minted node appended after the first call)', function ()
     local list = { { id = 1, file = 'a/X.java' } }
     eq(1, #ts._lang_list(list, 'java'))
