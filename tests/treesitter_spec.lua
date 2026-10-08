@@ -5784,3 +5784,46 @@ test('use edges: a free name links the unique var of its OWN language only (CART
     ok(uses['f>g.lua:cfg'], 'a lua global in another lua file still links: ' .. vim.inspect(uses))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ⚠ A JS PARAMETER IS BOUND (CART-1589): js declared no scope model, so the cross-file unique join claimed every
+-- param — ghost's `addColumn(t, c, transaction = db.knex)` read `transaction.schema` as a ref to models/base's method.
+test('refs: a javascript PARAMETER never links across files to a homonym (CART-1589)', function ()
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local root = mkroot('a.js', table.concat({
+        'function token() { return 1; }', 'function tNode() { return 2; }', 'function pred() { return 3; }',
+        'function err() { return 4; }', 'function key() { return 5; }', 'function loose() { return 6; }',
+        'function free() { return 7; }', 'function free2() { return 8; }',
+        'function shp() { return 9; }', 'function caught() { return 10; }',
+        'module.exports = { token, tNode, pred, err, key, loose, free, free2, shp, caught };',
+    }, '\n'))
+    local fd = assert(io.open(root .. '/b.js', 'w'))
+    fd:write(table.concat({
+        'function plain(token) { return token.id; }',
+        'function dflt(x, tNode = null) { return tNode.parent; }',
+        'function destr({ shp, b: pred }, [, ...err]) { return [shp.x, pred.ok, err.length]; }',
+        'const arrow = key => key.name;',
+        'function loops(xs) { for (const loose of xs) { use(loose.v); } try { run(); } catch (caught) { use(caught.message); } return free.x; }',
+        'function outer(xs) { for (free2 of xs) { use(free2.v); } }',
+        'module.exports = { plain, dflt, destr, arrow, loops };',
+    }, '\n'))
+    fd:close()
+    -- (ts wraps a param: required_parameter / optional_parameter carry it in `pattern`)
+    fd = assert(io.open(root .. '/d.ts', 'w'))
+    fd:write('export function svc() { return 1; }\nexport function opt() { return 2; }\n')
+    fd:close()
+    fd = assert(io.open(root .. '/c.ts', 'w'))
+    fd:write('export function tsf(svc: S, opt?: T) { return [svc.x, opt.y]; }\n')
+    fd:close()
+    local data = ts.extract(root)
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and byid[e.from] and byid[e.to] and (byid[e.from].file == 'b.js' or byid[e.from].file == 'c.ts') then refs[byid[e.to].name] = true end
+    end
+    for _, nm in ipairs({ 'token', 'tNode', 'pred', 'err', 'key', 'loose', 'shp', 'caught', 'svc', 'opt' }) do
+        ok(not refs[nm], 'a bound ' .. nm .. ' is not a.js\'s function: ' .. vim.inspect(refs))
+    end
+    ok(refs.free, 'a FREE name still links across files (the control): ' .. vim.inspect(refs))
+    ok(refs.free2, '`for (k of xs)` with no const / let binds nothing: k stays free: ' .. vim.inspect(refs))
+    vim.fn.delete(root, 'rf')
+end)

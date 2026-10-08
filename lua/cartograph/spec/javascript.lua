@@ -217,7 +217,41 @@ local JS_GUARDS = {
     end,
 }
 
+-- ── LEXICAL SCOPES, PARAMETERS ONLY (CART-1589) ───────────────────────────────────────────────────────────────────
+-- A PARAMETER is BOUND in its function, so the cross-file unique-name join must not claim it: ghost's
+-- `function addColumn(tableName, column, transaction = db.knex)` linked `transaction.schema` to models/base's method
+-- `transaction`, 21 refs from one file, because js declared no scope model and no mention was ever MF_BOUND. Only the
+-- binders that can never be a cross-file reference are harvested — params, `catch (e)`, `for (const k of xs)` — and
+-- NOT module / block locals: `const parse = require('./parse')` reaches parse.js through that very join today.
+-- Destructuring binds every leaf name (`{x, y: z, w = 2}`, `[p, ...q]`); ts wraps a param in required_parameter /
+-- optional_parameter (`pattern`), and `this: C` binds nothing.
+local function js_pattern_names(p, src, out)
+    if not p then return end
+    local t = p:type()
+    if t == 'identifier' or t == 'shorthand_property_identifier_pattern' then out[node_text(p, src)] = {}
+    elseif t == 'assignment_pattern' or t == 'object_assignment_pattern' then js_pattern_names(p:field('left')[1], src, out)
+    elseif t == 'pair_pattern' then js_pattern_names(p:field('value')[1], src, out)
+    elseif t == 'required_parameter' or t == 'optional_parameter' then js_pattern_names(p:field('pattern')[1], src, out)
+    elseif t == 'rest_pattern' or t == 'object_pattern' or t == 'array_pattern' then
+        for _, c in tsutil.inext, p, -1 do if c:named() then js_pattern_names(c, src, out) end end
+    end
+end
+local function js_params(node, src, out)
+    local ps = node:field('parameters')[1]
+    if ps then
+        for _, c in tsutil.inext, ps, -1 do if c:named() then js_pattern_names(c, src, out) end end
+    end
+    js_pattern_names(node:field('parameter')[1], src, out) -- `v => v` (an arrow's lone param), `catch (e)`
+end
+local function js_loopvars(node, src, out) -- `for (const k of xs)` binds k; `for (k of xs)` writes an outer k
+    if node:field('kind')[1] then js_pattern_names(node:field('left')[1], src, out) end
+end
+local JS_LEXICAL_SCOPES = { catch_clause = { kind = 'param', harvest = js_params },
+    for_in_statement = { kind = 'local', harvest = js_loopvars } }
+for t in pairs(FN_TYPES) do JS_LEXICAL_SCOPES[t] = { kind = 'param', harvest = js_params } end
+
 return {
+    lexical_scopes = JS_LEXICAL_SCOPES, -- params only, CART-1589
     is_write = js_is_write,
     guards = JS_GUARDS,
     -- the PREFILTER: every immediate parent type a write mention can have.
