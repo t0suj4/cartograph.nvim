@@ -5827,3 +5827,28 @@ test('refs: a javascript PARAMETER never links across files to a homonym (CART-1
     ok(refs.free2, '`for (k of xs)` with no const / let binds nothing: k stays free: ' .. vim.inspect(refs))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ⚠ A SHORTHAND PROPERTY IS A READ (CART-1593): `{storagePath, writeDisabled}` means `{writeDisabled: writeDisabled}`.
+-- df_ids carried it since CART-0418; the use axis did not, so ghost's url/index.js read as dead state and
+-- `module.exports = { init }` referenced nothing.
+test('use edges: a javascript SHORTHAND property reads its var and registers its function (CART-1593)', function ()
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local root = mkroot('u.js', table.concat({
+        'let writeDisabled = false;',
+        'function disable() { writeDisabled = true; }',
+        'function make() { return new Cache({ storagePath: 1, writeDisabled }); }',
+        'function init() { return 1; }',
+        'module.exports = { init, disable, make };',
+    }, '\n'))
+    local data = ts.extract(root)
+    local byid, uses, regs = {}, {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local f, t = byid[e.from] or { name = e.from }, byid[e.to]
+        if t and e.kind == 'use' then uses[f.name .. '>' .. t.name] = e.rw end
+        if t and e.kind == 'reg' then regs[t.name] = true end
+    end
+    eq(1, uses['make>writeDisabled'], 'the shorthand is a READ of the var: ' .. vim.inspect(uses))
+    ok(regs.init, 'module.exports = { init } registers init: ' .. vim.inspect(regs))
+    vim.fn.delete(root, 'rf')
+end)

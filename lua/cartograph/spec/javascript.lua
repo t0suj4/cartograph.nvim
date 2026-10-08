@@ -252,6 +252,9 @@ for t in pairs(FN_TYPES) do JS_LEXICAL_SCOPES[t] = { kind = 'param', harvest = j
 
 return {
     lexical_scopes = JS_LEXICAL_SCOPES, -- params only, CART-1589
+    -- the MENTION node types: an object literal's SHORTHAND `{storagePath, writeDisabled}` means `{writeDisabled:
+    -- writeDisabled}`, a READ — df_ids has carried it since CART-0418, the use axis had not (CART-1593)
+    mention_types = { identifier = true, shorthand_property_identifier = true },
     is_write = js_is_write,
     guards = JS_GUARDS,
     -- the PREFILTER: every immediate parent type a write mention can have.
