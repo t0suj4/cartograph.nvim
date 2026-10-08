@@ -4173,15 +4173,45 @@ end
 -- profile's, the receiver is a hedge: a name rebound to another type in the same function breaks it). Two uniquely
 -- owned members naming DIFFERENT types type nothing. A DISPOSITION: no edge is added, a wrong join is withdrawn.
 local function resolve_receiver_type(cv, data, exact, tail)
-    local prof = data.profile and require('cartograph.spec.profile').load(data.profile)
+    local P = require 'cartograph.spec.profile'
+    local prof = data.profile and P.load(data.profile)
     if not (prof and prof.sigs and prof.lang) then return 0 end
-    local owners = {} -- member -> { n = owner count, one = an owner }
-    for key in pairs(prof.sigs) do
-        local ty, m = tostring(key):match('^(.-)#(.+)$')
-        if ty then
-            local o = owners[m]
-            if not o then o = { n = 0, set = {} }; owners[m] = o end
-            if not o.set[ty] then o.set[ty] = true; o.n = o.n + 1; o.one = ty end
+    -- every TYPE a receiver could be: the profile's, its language's BASE profile's (luajit: string, file — a file
+    -- handle is never mistyped as an nvim type for want of the competitor), and the project's own classes
+    local members = {} -- type key -> { [member] = true }; profile types as `profile:<T>`
+    local owners = {} -- member -> { n = owner count, one = an owner } over the profile types
+    local function add_profile(sigs)
+        for key, sig in pairs(sigs or {}) do
+            local ty, m = tostring(key):match('^(.-)#(.+)$')
+            -- (a METHOD only: a colon call reaches nothing else — `io#write` is the io namespace's function, and as a
+            -- member it made `f:write(); f:close()` fit both `file` and `io`)
+            if ty and type(sig) == 'table' and sig.method then
+                local mk = 'profile:' .. ty
+                members[mk] = members[mk] or {}
+                members[mk][m] = true
+                local o = owners[m]
+                if not o then o = { n = 0, set = {} }; owners[m] = o end
+                if not o.set[ty] then o.set[ty] = true; o.n = o.n + 1; o.one = ty end
+            end
+        end
+    end
+    add_profile(prof.sigs)
+    local base = P.base_for(prof.lang)
+    if base and base ~= data.profile then local bp = P.load(base); add_profile(bp and bp.sigs) end
+    for _, nd in ipairs(data.nodes or {}) do
+        if (nd.kind == 'function' or nd.kind == 'method') and nd.file and elang_for(nd.file) == prof.lang then
+            local owner, m = tostring(nd.name):match('^(.+):([%w_]+)$')
+            if not owner then
+                local o2, m2 = tostring(nd.name):match('^(.+)%.([%w_]+)$')
+                local p1 = type(nd.params) == 'table' and nd.params[1]
+                if type(p1) == 'table' then p1 = p1.name end
+                if o2 and p1 == 'self' then owner, m = o2, m2 end
+            end
+            if owner then
+                local tk = nd.file .. '::' .. owner
+                members[tk] = members[tk] or {}
+                members[tk][m] = true
+            end
         end
     end
     local cget, cset = cv.get, cv.set
@@ -4201,19 +4231,35 @@ local function resolve_receiver_type(cv, data, exact, tail)
     end
     local n = 0
     for _, g in pairs(groups) do
+        -- (1) a UNIQUELY OWNED member the language's code never defines names the type
         local ty, conflict
+        local called = {}
         for _, i in ipairs(g) do
             local m = cget(i, 'callee')
+            if m then called[m] = true end
             local o = m and owners[m]
             if o and o.n == 1 and not M._lang_any(exact[m], prof.lang) and not M._lang_any(tail[m], prof.lang) then
                 if ty and ty ~= o.one then conflict = true end
                 ty = ty or o.one
             end
         end
-        if ty and not conflict then
+        if conflict then ty = nil end
+        -- (2) else STRUCTURE: the ONE type — profile or project — declaring every member called on the receiver
+        -- (`node:type()` + `node:named()`: TSNode; ir.lua's Mod has no `named`, band's Band no `type`). Only a
+        -- PROFILE type answers here: typing a receiver as a project class would add an edge, not withdraw one
+        if not ty and not conflict then
+            local fit, nfit = nil, 0
+            for tk, ms in pairs(members) do
+                local all = true
+                for m in pairs(called) do if not ms[m] then all = false; break end end
+                if all then nfit = nfit + 1; fit = tk; if nfit > 1 then break end end
+            end
+            if nfit == 1 then ty = fit:match('^profile:(.+)$') end
+        end
+        if ty then
             for _, i in ipairs(g) do
                 local m = cget(i, 'callee')
-                if m and prof.sigs[ty .. '#' .. m] and cget(i, 'refused') and not cget(i, 'to') then
+                if m and members['profile:' .. ty][m] and cget(i, 'refused') and not cget(i, 'to') then
                     cset(i, 'refused', nil)
                     cset(i, 'ext', { disp = 'external', why = 'typed-receiver', inferred = true, type = ty })
                     n = n + 1
