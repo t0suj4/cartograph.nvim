@@ -210,10 +210,13 @@ function M.fields(store, id, cache)
                     if c then
                         local f = field_of(c, src)
                         local n = c:parent()
-                        local w = n and spec.is_write(c, n)
+                        local w, wf, wr
+                        if n then w, wf, wr = spec.is_write(c, n, src) end
+                        f = wf or f -- (a memo call names the field it writes: a dynamic key, CART-1585)
                         if not f then
                             if w then whole.nw = whole.nw + 1; whole.writers[u.from] = true
                             else whole.nr = whole.nr + 1 end
+                            if w and wr then whole.nr = whole.nr + 1 end -- (a memo call reads the slot it tests)
                         else
                             local rec = fields[f]
                             if not rec then
@@ -227,6 +230,7 @@ function M.fields(store, id, cache)
                                     and ts.guard_class(c, n, src, spec.guards) + 1
                                     or 1
                                 if not rec.gw or g < rec.gw then rec.gw = g end
+                                if wr then rec.nr = rec.nr + 1 end -- (a memo call returns the slot: it reads too)
                             else
                                 rec.nr = rec.nr + 1
                             end

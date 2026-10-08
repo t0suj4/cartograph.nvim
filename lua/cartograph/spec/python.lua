@@ -20,7 +20,16 @@ local inext = tsutil.inext
 -- member-access wrappers that a write chain may pass through, then ask what the
 -- top sits in. EVERY FORM BELOW WAS PARSED, not recalled — python spells its
 -- targets with five different node types and two of them are wrappers.
-local function python_is_write(c, n)
+-- MEMO CALLS (CART-1585): `d.setdefault(k, v)` writes d, and only an ABSENT key — set-once by the method's contract.
+-- `fn` is the call's callee chain `X.setdefault`, X the receiver.
+local PY_MEMO = { setdefault = true }
+local function py_memo_call(p, fn, src)
+    -- (an attribute whose parent is a call IS its callee: the arguments sit in an argument_list)
+    if not (src and p and p:type() == 'call' and fn:type() == 'attribute') then return false end
+    local nm = fn:field('attribute')[1]
+    return nm ~= nil and PY_MEMO[node_text(nm, src)] == true
+end
+local function python_is_write(c, n, src)
     local cur, p = c, n
     while p do
         local pt = p:type()
@@ -43,6 +52,8 @@ local function python_is_write(c, n)
     end
     if not p then return false end
     local pt = p:type()
+    -- (the receiver IS the mention: a dynamic key of it, `'[]'` — the capture would name `setdefault` the field)
+    if py_memo_call(p, cur, src) then return true, cur:field('object')[1] == c and '[]' or nil, true end -- (and READS: it tests the key)
     if pt == 'assignment' or pt == 'augmented_assignment' then
         -- child 0 is the target; `y: int = 2` inserts a `type` child AFTER it,
         -- so the index is stable across the annotated form
@@ -107,9 +118,10 @@ local PY_GUARDS = {
         if x then return chain_eq(x, src, chain) end
         return py_member_chain(cond, { ['in'] = true }, src, chain)
     end,
-    -- `x = x or v`
+    -- `x = x or v`, and the memo call `d.setdefault(k, v)` (CART-1585)
     rhs_setonce = function (top, src, chain)
         local p = top:parent()
+        if py_memo_call(p, top, src) then return true end
         if not (p and p:type() == 'assignment' and p:field('left')[1] == top) then return false end
         local rhs = unparen(p:field('right')[1])
         if not (rhs and rhs:type() == 'boolean_operator' and optext_is(rhs, src, { ['or'] = true })) then return false end

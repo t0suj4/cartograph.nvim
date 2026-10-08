@@ -22,7 +22,17 @@ local node_text = tsutil.node_text
 -- EVERY FORM PARSED, including the two anonymous operators: a `range_clause`
 -- carries `:=` (binds) or `=` (writes) as an UNNAMED child, so the node types
 -- alone cannot tell those two apart.
-local function go_is_write(c, n)
+-- MEMO CALLS (CART-1585): `m.LoadOrStore(k, v)` (sync.Map) writes m, and only an ABSENT key — set-once by the method's
+-- contract. `once.Do(f)` is the same contract, and stays out: `Do` names http.Client's request too, and no receiver
+-- type is known here. `fn` is the call's callee chain `X.LoadOrStore`, X the receiver.
+local GO_MEMO = { LoadOrStore = true }
+local function go_memo_call(p, fn, src)
+    -- (a selector whose parent is a call IS its callee: the arguments sit in an argument_list)
+    if not (src and p and p:type() == 'call_expression' and fn:type() == 'selector_expression') then return false end
+    local nm = fn:field('field')[1]
+    return nm ~= nil and GO_MEMO[node_text(nm, src)] == true
+end
+local function go_is_write(c, n, src)
     local cur, p = c, n
     while p do
         local pt = p:type()
@@ -44,6 +54,8 @@ local function go_is_write(c, n)
     end
     if not p then return false end
     local pt = p:type()
+    -- (the receiver IS the mention: a dynamic key of it, `'[]'` — the capture would name `LoadOrStore` the field)
+    if go_memo_call(p, cur, src) then return true, cur:field('operand')[1] == c and '[]' or nil, true end -- (and READS: it tests the key)
     if pt == 'assignment_statement' then
         -- child 0 is the LEFT expression_list; arriving here from the right one
         -- fails this test, which is what makes `a, b = b, a` read correctly
@@ -125,7 +137,8 @@ local GO_GUARDS = {
         if cond:type() == 'identifier' then return go_ok_chain(go_if_of(cond), node_text(cond, src), src) == chain end
         return false
     end,
-    rhs_setonce = function () return false end,
+    -- the memo call `m.LoadOrStore(k, v)` (CART-1585)
+    rhs_setonce = function (top, src) return go_memo_call(top:parent(), top, src) end,
 }
 
 return {

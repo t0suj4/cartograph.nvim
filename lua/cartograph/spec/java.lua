@@ -709,7 +709,17 @@ end
 -- `wmode` is `spec.is_write ~= nil` the axis still switched on and reported every
 -- mention as a READ. atlas then minted `const` over a write pass that had not
 -- run. tests/pywrite_spec fences the pair now; this comment is the other half.
-local function java_is_write(c, n)
+-- MEMO CALLS (CART-1585): a write of their receiver that fills an ABSENT key only — set-once by the method's contract
+local JAVA_MEMO = { computeIfAbsent = true, putIfAbsent = true }
+local function java_memo_call(p, cur, src)
+    if not (src and p and p:type() == 'method_invocation' and p:field('object')[1] == cur) then return false end
+    local nm = p:field('name')[1]
+    return nm ~= nil and JAVA_MEMO[node_text(nm, src)] == true
+end
+local function java_is_write(c, n, src)
+    -- (the node whose VALUE is the mention: `m2` in `this.m2` is that field_access — a memo call on it writes a
+    -- dynamic key of m2 itself, `'[]'`, where `cfg.cache.putIfAbsent` writes cfg's field `cache`)
+    local own = (n:type() == 'field_access' and n:field('field')[1] == c) and n or c
     local cur, p = c, n
     while p do
         local pt = p:type()
@@ -727,6 +737,7 @@ local function java_is_write(c, n)
     end
     if not p then return false end
     local pt = p:type()
+    if java_memo_call(p, cur, src) then return true, cur == own and '[]' or nil, true end -- (`cache.computeIfAbsent(k, f)` writes cache, and READS it: the call tests the key)
     if pt == 'assignment_expression' then
         return p:named_child(0) == cur -- child 0 is the target, `+=` included
     elseif pt == 'update_expression' then
@@ -777,7 +788,8 @@ local JAVA_GUARDS = {
         local x = java_null_operand(cond, { ['!='] = true })
         return x ~= nil and chain_eq(x, src, chain)
     end,
-    rhs_setonce = function () return false end,
+    -- the memo CALL: `cache.computeIfAbsent(k, f)` / `putIfAbsent` fills an absent key only (CART-1585)
+    rhs_setonce = function (top, src) return java_memo_call(top:parent(), top, src) end,
 }
 
 return {
@@ -800,7 +812,8 @@ return {
     -- the PREFILTER: every immediate parent type a java write mention can have.
     -- Without it the classifier above is never invoked (see the note on it).
     write_gate = { assignment_expression = true, field_access = true,
-        array_access = true, update_expression = true },
+        array_access = true, update_expression = true,
+        method_invocation = true }, -- (the receiver of a memo call, CART-1585)
     -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
     -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
     -- `call_positions`, and read for the opposite purpose: a mention here must

@@ -1083,7 +1083,11 @@ function M._mint_fields(file, lang, tsroot, src, spec, data, uid)
                 fields[key] = fnode
                 data.nodes[#data.nodes + 1] = fnode
             end
-            local write = spec.write_gate[r.parent:type()] and spec.is_write(r.node, r.parent) and true or false
+            local write, reads = false, nil
+            if spec.write_gate[r.parent:type()] then
+                local w, _, rd = spec.is_write(r.node, r.parent, src)
+                write, reads = w and true or false, rd -- (reads: a memo call tests its slot too, CART-1585)
+            end
             local k = from .. '\31' .. fnode.id
             local e = edges[k]
             if not e then
@@ -1092,7 +1096,7 @@ function M._mint_fields(file, lang, tsroot, src, spec, data, uid)
                 data.edges[#data.edges + 1] = e
             end
             e.at[#e.at + 1] = pos_of(r.node)
-            local mode = write and 2 or 1
+            local mode = write and (reads and 3 or 2) or 1
             if e.rw ~= mode and e.rw ~= 3 then e.rw = e.rw and 3 or mode end
             if write then
                 local g = (G and guard_class(r.node, r.parent, src, G) or 0) + 1
@@ -5639,15 +5643,25 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                     + (callee and MF_CALLEE or 0) + (bound and MF_BOUND or 0)
                 local simple = er == sr and ec == sc + #name
                 if not simple then flags = flags + MF_RANGE end
-                local iswrite = wgate and wgate[nt] and is_write(c, n)
+                -- (src: a memo CALL is a write by its method's name; its second answer is the field it writes, `'[]'`
+                -- for `cache.computeIfAbsent(k, f)` — a dynamic key, where the capture below says '' or the method's
+                -- own name; its third, that the occurrence READS too — the call returns the slot's value, so the
+                -- memo is no dead state, CART-1585)
+                local iswrite, wfld, wread
+                if wgate and wgate[nt] then iswrite, wfld, wread = is_write(c, n, src) end
                 if iswrite then flags = flags + MF_WRITE end
                 nm = nm + 1
+                if wread and iswrite then -- (bare ordinals, as buf.mem: the flag byte has no bit left)
+                    local l = buf.rdw
+                    if not l then l = {}; buf.rdw = l end
+                    l[#l + 1] = nm
+                end
                 -- FIELD CAPTURE: which field does this mention access —
                 -- ships as (ordinal, name-id) pairs; the reduce aggregates
                 -- per use edge (e.flds). Gated on the parent type: zero
                 -- cost for plain mentions.
-                if FLDGATE[nt] then
-                    local fname = mention_field(c, n, src, mempos, idxpos)
+                if wfld or FLDGATE[nt] then
+                    local fname = wfld or mention_field(c, n, src, mempos, idxpos)
                     if fname then
                         local fidx = nidx[fname]
                         if not fidx then
@@ -5902,6 +5916,11 @@ local function reduce_mentions(file, buf, L)
         fldmap = {}
         for i = 1, #buf.fld, 2 do fldmap[buf.fld[i]] = buf.fld[i + 1] end
     end
+    local rdwset -- the occurrences that write AND read (a memo call, CART-1585)
+    if buf.rdw then
+        rdwset = {}
+        for _, o in ipairs(buf.rdw) do rdwset[o] = true end
+    end
     local ord = 0
     local m = buf.m
     local i, len = 1, #m
@@ -6080,7 +6099,7 @@ local function reduce_mentions(file, buf, L)
                         if not fl then fl = {}; e.flds = fl end
                         local cur = fl[fname] or 0
                         local prevrw = cur % 4
-                        local rwb = write and 2 or 1
+                        local rwb = write and (rdwset and rdwset[ord] and 3 or 2) or 1
                         if prevrw ~= rwb and prevrw ~= 3 then
                             prevrw = prevrw == 0 and rwb or 3
                         end
@@ -6095,7 +6114,7 @@ local function reduce_mentions(file, buf, L)
                     -- edge's occurrences — only where a classifier ran
                     -- (buf.wmode); elsewhere mode stays ABSENT, never "read"
                     if wmode then
-                        local mode = write and 2 or 1
+                        local mode = write and (rdwset and rdwset[ord] and 3 or 2) or 1
                         if e.rw ~= mode and e.rw ~= 3 then
                             e.rw = e.rw and 3 or mode
                         end

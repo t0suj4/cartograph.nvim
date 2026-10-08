@@ -10,7 +10,27 @@
 -- classifier without its gate, so it was never called, and because `wmode` is
 -- `spec.is_write ~= nil` the axis switched on anyway and reported everything as a
 -- READ — atlas then minted `const` over a write pass that had not run.
-local function rust_is_write(c, n)
+-- MEMO CALLS (CART-1585): a write of their receiver that fills an ABSENT slot only — set-once by the method's contract:
+-- `CELL.get_or_init(f)` (OnceCell / OnceLock), `opt.get_or_insert_with(f)` (Option), and the entry API's
+-- `m.entry(k).or_insert(v)` / `or_insert_with` / `or_default` — `entry(k).and_modify(..)` updates a PRESENT key and
+-- stays out. `fn` is the call's callee chain `X.method`, X the receiver.
+local RS_MEMO = { get_or_init = true, get_or_try_init = true, get_or_insert = true, get_or_insert_with = true }
+local RS_OR_INSERT = { or_insert = true, or_insert_with = true, or_insert_with_key = true, or_default = true }
+local function rs_memo_call(p, fn, src)
+    -- (a field_expression whose parent is a call IS its callee, and a call under a field_expression IS its value:
+    -- the arguments sit in their own node)
+    if not (src and p and p:type() == 'call_expression' and fn:type() == 'field_expression') then return false end
+    local text = require('cartograph.spec.tsutil').node_text
+    local nm = fn:field('field')[1]
+    nm = nm and text(nm, src)
+    if RS_MEMO[nm] then return true end
+    if nm ~= 'entry' then return false end
+    local f2 = p:parent() -- `X.entry(k)` is the VALUE of `.or_insert`, whose parent is the call
+    if not (f2 and f2:type() == 'field_expression') then return false end
+    local m2 = f2:field('field')[1] -- (and `.or_insert` is called: an uncalled method is no rust value)
+    return m2 ~= nil and RS_OR_INSERT[text(m2, src)] == true
+end
+local function rust_is_write(c, n, src)
     local cur, p = c, n
     while p do
         local pt = p:type()
@@ -30,6 +50,8 @@ local function rust_is_write(c, n)
     end
     if not p then return false end
     local pt = p:type()
+    -- (the receiver IS the mention: its slot, `'[]'` — the capture would name the method the field)
+    if rs_memo_call(p, cur, src) then return true, cur:field('value')[1] == c and '[]' or nil, true end -- (and READS: it tests the slot)
     if pt == 'assignment_expression' or pt == 'compound_assignment_expr' then
         -- rust spells `=` and `+=` as DIFFERENT node types, unlike go and java
         return p:named_child(0) == cur
@@ -86,7 +108,8 @@ local RUST_GUARDS = {
         local x = rs_method_on(cond, { is_some = true }, src) or rs_none_operand(cond, { ['!='] = true }, src)
         return x ~= nil and chain_eq(unparen(x), src, chain)
     end,
-    rhs_setonce = function () return false end,
+    -- the memo call: `CELL.get_or_init(f)`, `m.entry(k).or_insert(v)` (CART-1585)
+    rhs_setonce = function (top, src) return rs_memo_call(top:parent(), top, src) end,
 }
 
 return {

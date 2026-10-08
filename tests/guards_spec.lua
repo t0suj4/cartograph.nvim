@@ -24,6 +24,16 @@ local function gw_of(data, fn_name, var_name)
     end
     return nil
 end
+-- the FIELD a memo call writes: a dynamic key of its receiver ('[]'), never the method's own name nor the whole var
+local function edge_of(data, fn_name, var_name)
+    local byid = {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local f, v = byid[e.from], byid[e.to]
+        if e.kind == 'use' and f and v and f.name == fn_name and v.name == var_name then return e end
+    end
+end
+local function flds_of(data, fn_name, var_name) return (edge_of(data, fn_name, var_name) or {}).flds end
 
 test('guards: lua set-once forms, hedges, and soundness traps', function ()
     if not ready('lua') then skip 'no lua parser' end
@@ -285,6 +295,96 @@ test('guards: java — == null on a field or this.f, !X, else arms by FIELD; els
     eq(2, gw_of(data, 'K::elseif', 'st'), 'an else-if arm is guarded, never set-once')
     eq(2, gw_of(data, 'K::ortrap', 'mix'), '|| must NOT claim set-once')
     eq(2, gw_of(data, 'K::otherfield', 'oth'), 'a test of ANOTHER field is a guard, not set-once')
+end)
+
+test('guards: java memo CALLS — computeIfAbsent / putIfAbsent write their receiver set-once; put / get do not (CART-1585)', function ()
+    if not ready('java') then skip 'no java parser' end
+    local root = mkroot('M.java', table.concat({
+        'import java.util.*;',
+        'class M {',
+        '    Map<String, Integer> cache; Map<String, Integer> m2; Map<String, Integer> plain; Map<String, Integer> rd; Map<String, Integer> mx;',
+        '    int putIfAbsent; Map<String, Integer> oth;',
+        '    void namepos(String k) { oth.putIfAbsent(k, 5); }',
+        '    int memo(String k) { return cache.computeIfAbsent(k, x -> 1); }',
+        '    void thisput(String k) { this.m2.putIfAbsent(k, 2); }',
+        '    void bare(String k) { plain.put(k, 3); }',
+        '    void mixed(String k) { mx = null; mx.putIfAbsent(k, 4); }',
+        '    int reader(String k) { return rd.get(k); }',
+        '}',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(3, gw_of(data, 'M::memo', 'cache'), 'computeIfAbsent: a set-once write of its receiver')
+    eq(3, gw_of(data, 'M::thisput', 'm2'), 'this.f.putIfAbsent: set-once')
+    eq({ ['[]'] = 3 + 3 * 4 }, flds_of(data, 'M::memo', 'cache'), 'a dynamic key of cache — not a whole-var rebind (\'\')')
+    eq({ ['[]'] = 3 + 3 * 4 }, flds_of(data, 'M::thisput', 'm2'), 'this.m2 is m2 itself: a dynamic key of it')
+    eq(nil, gw_of(data, 'M::bare', 'plain'), 'put is not a memo call: a read on this axis (a mutator call is no write)')
+    eq(1, gw_of(data, 'M::mixed', 'mx'), 'a plain assignment beside a memo call: the MIN over writes is unguarded')
+    eq(nil, gw_of(data, 'M::reader', 'rd'), 'get is a read: no gw')
+    eq(nil, gw_of(data, 'M::namepos', 'putIfAbsent'), 'a field NAMED like the method, in the method-name position: not its receiver')
+end)
+
+test('guards: python memo CALLS — d.setdefault writes d set-once at a dynamic key; a nested receiver keeps its field (CART-1585)', function ()
+    if not ready('python') then skip 'no python parser' end
+    local root = mkroot('m.py', table.concat({
+        '_cache = {}', '_cfg = {}', '_plain = {}', '_mx = {}',
+        'def memo(k):', '    return _cache.setdefault(k, k * 2)',
+        'def nested(k):', '    _cfg.sub.setdefault(k, [])',
+        'def bare(k):', '    _plain.get(k)',
+        'def mixed(k):', '    _mx[k] = 1', '    _mx.setdefault(k, 2)',
+        'class C:', '    def m(self, k):', '        return self._memo.setdefault(k, 1)',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(3, gw_of(data, 'memo', '_cache'), 'setdefault: a set-once write of its receiver')
+    eq({ ['[]'] = 3 + 3 * 4 }, flds_of(data, 'memo', '_cache'), 'at a DYNAMIC key, not the field `setdefault`')
+    eq({ sub = 3 + 3 * 4 }, flds_of(data, 'nested', '_cfg'), '_cfg.sub.setdefault writes the field sub')
+    eq(nil, gw_of(data, 'bare', '_plain'), 'get is a read')
+    eq(1, gw_of(data, 'mixed', '_mx'), 'an unguarded store beside the memo call: MIN over writes')
+    eq(3, gw_of(data, 'C.m', 'C._memo'), 'an instance field: self._memo.setdefault is set-once')
+    eq(3, edge_of(data, 'memo', '_cache').rw, 'a memo call READS too (it tests the key, returns the slot): never dead state')
+    eq(3, edge_of(data, 'C.m', 'C._memo').rw, '...and so does an instance field\'s')
+end)
+
+test('guards: go memo CALLS — m.LoadOrStore writes m set-once at a dynamic key; Load reads (CART-1585)', function ()
+    if not ready('go') then skip 'no go parser' end
+    local root = mkroot('m.go', table.concat({
+        'package m', 'import "sync"',
+        'var cache sync.Map', 'var cfg struct{ sub sync.Map }', 'var plain sync.Map',
+        'func memo(k string) any {', '\tv, _ := cache.LoadOrStore(k, 1)', '\treturn v', '}',
+        'func nested(k string) {', '\tcfg.sub.LoadOrStore(k, 2)', '}',
+        'func bare(k string) {', '\tplain.Load(k)', '}',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(3, gw_of(data, 'memo', 'cache'), 'LoadOrStore: a set-once write of its receiver')
+    eq({ ['[]'] = 3 + 3 * 4 }, flds_of(data, 'memo', 'cache'), 'at a DYNAMIC key, not the field `LoadOrStore`')
+    eq({ sub = 3 + 3 * 4 }, flds_of(data, 'nested', 'cfg'), 'cfg.sub.LoadOrStore writes the field sub')
+    eq(nil, gw_of(data, 'bare', 'plain'), 'Load is a read')
+end)
+
+test('guards: rust memo CALLS — get_or_init, get_or_insert_with, entry(k).or_insert are set-once; and_modify is not (CART-1585)', function ()
+    if not ready('rust') then skip 'no rust parser' end
+    local root = mkroot('m.rs', table.concat({
+        'use std::sync::OnceLock;',
+        'static CELL: OnceLock<u32> = OnceLock::new();',
+        'static mut MAP: Option<HashMap<u32, u32>> = None;',
+        'static mut CFG: Cfg = Cfg { sub: None };',
+        'static mut UPD: Option<HashMap<u32, u32>> = None;',
+        'fn memo() -> u32 {', '    *CELL.get_or_init(|| 1)', '}',
+        'fn entry(k: u32) {', '    unsafe { MAP.entry(k).or_insert(2); }', '}',
+        'fn nested() {', '    unsafe { CFG.sub.get_or_insert_with(|| 3); }', '}',
+        'fn modify(k: u32) {', '    unsafe { UPD.entry(k).and_modify(|v| *v += 1).or_insert(0); }', '}',
+        'static mut OTH: Option<HashMap<u32, u32>> = None;',
+        'fn other(k: u32) {', '    unsafe { OTH.get_mut(k).or_insert(0); }', '}',
+        'static mut INI: Option<HashMap<u32, u32>> = None;',
+        'fn init(k: u32) -> W {', '    unsafe { W { or_insert: INI.entry(k) } }', '}',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(3, gw_of(data, 'memo', 'CELL'), 'get_or_init: a set-once write of the cell')
+    eq({ ['[]'] = 3 + 3 * 4 }, flds_of(data, 'memo', 'CELL'), 'its slot, not the field `get_or_init`')
+    eq(3, gw_of(data, 'entry', 'MAP'), 'entry(k).or_insert: set-once')
+    eq({ sub = 3 + 3 * 4 }, flds_of(data, 'nested', 'CFG'), 'CFG.sub.get_or_insert_with writes the field sub')
+    eq(nil, gw_of(data, 'modify', 'UPD'), 'entry(k).and_modify(..) updates a PRESENT key: not a memo call')
+    eq(nil, gw_of(data, 'other', 'OTH'), 'or_insert after a method that is not entry: not a memo call')
+    eq(nil, gw_of(data, 'init', 'INI'), 'entry(k) as the value of a struct field NAMED or_insert: not a method chain')
 end)
 
 test('guards: reads carry no gw; no classifier means absent', function ()

@@ -136,6 +136,37 @@ test('atlas fields: a whole-var write hedges every field claim', function ()
     ok(fa.fields.a.hedged, '...and hedges the per-field claim')
 end)
 
+test('atlas fields: a memo CALL writes a dynamic key, never a whole-var rebind (CART-1585)', function ()
+    if not parser_available('python') then skip 'no python parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.py', 'w'))
+    fd:write(table.concat({
+        '_cache = {}',
+        '_cfg = {}',
+        'def memo(k):',
+        '    return _cache.setdefault(k, k * 2)',
+        'def nested(k):',
+        '    _cfg.sub.setdefault(k, [])',
+    }, '\n'))
+    fd:close()
+    store.ingest(require('cartograph.providers.treesitter').extract(root))
+    local vid
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'var' and n.name == '_cache' then vid = n.id end
+    end
+    local fa = atlas.fields(store, vid)
+    eq(0, fa.whole.nw, 'no rebind of _cache')
+    eq(1, fa.fields['[]'] and fa.fields['[]'].nw, 'one write at a dynamic key')
+    eq(1, fa.fields['[]'].nr, '...that READS it too: the call tests the key')
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'var' and n.name == '_cfg' then vid = n.id end
+    end
+    local fc = atlas.fields(store, vid) -- (python has no field_of form: the write lands in the whole bucket)
+    eq({ 1, 1 }, { fc.whole.nw, fc.whole.nr }, 'a memo call on a sub-object: one write, one read')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ── ABSENCE IS NOT EVIDENCE (CART-0478) ─────────────────────────────────────
 test('atlas: no use edge at all is UNOBSERVED, never const', function ()
     -- `nw == 0 -> const` was tested before any evidence check, so a var with

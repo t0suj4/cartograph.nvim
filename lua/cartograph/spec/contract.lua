@@ -249,6 +249,10 @@ M.SLOTS = {
     -- so a var carries nil, which means "never asked" and must never be read as
     -- yes. Absent = a derived name is NOT resolved in this language.
     global_scope_vars = 'ANALYSIS',
+    -- is_write(c, n, src) -> write[, field[, reads]]: the optional FIELD names what a write reaches when the mention's
+    -- own position cannot — a memo CALL (`cache.computeIfAbsent(k, f)`) writes a dynamic key, '[]', where the capture
+    -- would say '' (a rebind) or the method's name —; READS says the one occurrence also reads (the memo call tests
+    -- its key and returns the slot: rw 3, never dead state) (CART-1585)
     is_write = 'ANALYSIS', write_gate = 'ANALYSIS', guards = 'ANALYSIS',
     module_effects = 'ANALYSIS', dataflow = 'ANALYSIS', regime = 'ANALYSIS',
     -- EXTRA CONTROL NODES, per language (CART-0363). flow's CTRL/PRELOOP are one
