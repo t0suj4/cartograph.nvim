@@ -1758,6 +1758,9 @@ function M._join_lang_ok(n, clang, dotted)
     return CLINK[n.name] == true
 end
 local LANG_LISTS = setmetatable({}, { __mode = 'k' })
+-- does `list` hold a definition joinable from language `clang`? (the unique-owner rung's "the project never names it":
+-- a JS re-implementation of `named_child` is no Lua name, CART-1568)
+function M._lang_any(list, clang) return list ~= nil and #M._lang_list(list, clang) > 0 end
 function M._lang_list(list, clang)
     local e = LANG_LISTS[list]
     if not e or e.n ~= #list then
@@ -8781,6 +8784,10 @@ local MATCH_OPTS = { match_limit = 65536 }
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil, nil, nil, EXT.vocab end
         local cands = exact[name]
+        -- (a name never crosses LANGUAGES — the fit below refuses every foreign candidate — so a list of only foreign
+        -- ones is NO candidate at all: luajs/pack.js re-implements `sub`, `gsub`, `parent`, `named_child` in JS, and
+        -- 2458 Lua calls were refused `blocked` on them instead of reaching the profile's rungs, CART-1568)
+        if cands then cands = M._lang_list(cands, clang); if #cands == 0 then cands = nil end end
         -- (a project def UNDER A STDLIB PREFIX — `table.sort = function …` inside a tactic — is a RUNTIME OVERRIDE: a
         -- call in another file reaches the builtin unless that code has run, so only its own file binds to it. Through
         -- this tier core's `table.sort` had reached sort-ties.lua's override, and every basis fn that sorts read
@@ -8834,7 +8841,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             --     corpus's own index, which is why this decision cannot live in
             --     the profile.
             local tn = prof and name:match('([%w_%-]+)$')
-            if tn and prof.uniq_member and not tail[tn] and not exact[tn]
+            if tn and prof.uniq_member and not M._lang_any(tail[tn], clang) and not M._lang_any(exact[tn], clang)
                 and prof.uniq_member(tn) then
                 return nil, nil, nil, EXT.stdlib_uniq
             end
@@ -8980,6 +8987,9 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- refused ~3,100 more as ambiguous (CART-1487). The exact tier above already tried the bare definitions, so
         -- the call falls through to the profile / nodef disposition)
         if tc and spec and spec.bare_calls_bind_bare and not name:find('[%.:]') and not name:find('->', 1, true) then tc = nil end
+        -- (and a tail list of only FOREIGN definitions is none: admits() refuses each, and the call was refused `blocked`
+        -- on luajs/pack.js's JS STRING.sub instead of reaching the profile / nodef disposition — 2423 Lua calls, CART-1568)
+        if tc then tc = M._lang_list(tc, clang); if #tc == 0 then tc = nil end end
         if tc then
             local sc = scope_of(file)
             local dotted = name:find('.', 1, true) ~= nil
@@ -9815,6 +9825,10 @@ function M.relink(data, touched, opts)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil, nil, nil, EXT.vocab end
         local cands = exact[name]
+        -- (a name never crosses LANGUAGES — the fit below refuses every foreign candidate — so a list of only foreign
+        -- ones is NO candidate at all: luajs/pack.js re-implements `sub`, `gsub`, `parent`, `named_child` in JS, and
+        -- 2458 Lua calls were refused `blocked` on them instead of reaching the profile's rungs, CART-1568)
+        if cands then cands = M._lang_list(cands, clang); if #cands == 0 then cands = nil end end
         -- (a project def UNDER A STDLIB PREFIX — `table.sort = function …` inside a tactic — is a RUNTIME OVERRIDE: a
         -- call in another file reaches the builtin unless that code has run, so only its own file binds to it. Through
         -- this tier core's `table.sort` had reached sort-ties.lua's override, and every basis fn that sorts read
@@ -9868,7 +9882,7 @@ function M.relink(data, touched, opts)
             --     corpus's own index, which is why this decision cannot live in
             --     the profile.
             local tn = prof and name:match('([%w_%-]+)$')
-            if tn and prof.uniq_member and not tail[tn] and not exact[tn]
+            if tn and prof.uniq_member and not M._lang_any(tail[tn], clang) and not M._lang_any(exact[tn], clang)
                 and prof.uniq_member(tn) then
                 return nil, nil, nil, EXT.stdlib_uniq
             end
@@ -9994,6 +10008,9 @@ function M.relink(data, touched, opts)
         -- refused ~3,100 more as ambiguous (CART-1487). The exact tier above already tried the bare definitions, so
         -- the call falls through to the profile / nodef disposition)
         if tc and spec and spec.bare_calls_bind_bare and not name:find('[%.:]') and not name:find('->', 1, true) then tc = nil end
+        -- (and a tail list of only FOREIGN definitions is none: admits() refuses each, and the call was refused `blocked`
+        -- on luajs/pack.js's JS STRING.sub instead of reaching the profile / nodef disposition — 2423 Lua calls, CART-1568)
+        if tc then tc = M._lang_list(tc, clang); if #tc == 0 then tc = nil end end
         if tc then
             local sc = scope_of(file)
             local dotted = name:find('.', 1, true) ~= nil
