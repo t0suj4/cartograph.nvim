@@ -1048,6 +1048,56 @@ local function pos_of(n)
     return { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } }
 end
 
+-- ★ INSTANCE STATE ON THE WRITE AXIS (CART-1575): a method's reads and writes through its RECEIVER (`self.f`, `this.f`)
+-- become `use` edges to one `field` node per (file, class, field) — rw from the language's own is_write, the guard
+-- class from guard_class (so `if self._cache is None: self._cache = …` is SET-ONCE like a module memo). The records
+-- come from cartograph.fieldstate (which binds the receiver only where the language does). File-local facts, minted in
+-- the definition pass, so the parallel audit keeps them (only killed `ref` pairs are dropped). A `field` node is no
+-- `var`: every census and lint over module variables is unchanged by it.
+function M._mint_fields(file, lang, tsroot, src, spec, data, uid)
+    local FS = require 'cartograph.fieldstate'
+    if not (FS.LANGS[lang] and spec and spec.is_write and spec.write_gate) then return end
+    local recs = FS.collect(lang, tsroot, src)
+    if #recs == 0 then return end
+    local fn_id = {} -- the minted functions of this file, by where their node starts
+    for _, n in ipairs(data.nodes) do
+        if n.file == file and (n.kind == 'function' or n.kind == 'method') and type(n.range) == 'table' and n.range.start then
+            fn_id[n.range.start.line .. ':' .. n.range.start.char] = n.id
+        end
+    end
+    local fields, edges, G = {}, {}, spec.guards
+    for _, r in ipairs(recs) do
+        local fsr, fsc = r.fn:range()
+        local from = fn_id[fsr .. ':' .. fsc]
+        if from then
+            local key = r.class .. '.' .. r.field
+            local fnode = fields[key]
+            if not fnode then
+                local fp = pos_of(r.parent)
+                fnode = { id = uid(('%s::field:%s@%d'):format(file, key, fp.start.line)), name = key, kind = 'field',
+                    file = file, range = fp, order = fp.start.line }
+                fields[key] = fnode
+                data.nodes[#data.nodes + 1] = fnode
+            end
+            local write = spec.write_gate[r.parent:type()] and spec.is_write(r.node, r.parent) and true or false
+            local k = from .. '\31' .. fnode.id
+            local e = edges[k]
+            if not e then
+                e = { from = from, to = fnode.id, kind = 'use', at = {} }
+                edges[k] = e
+                data.edges[#data.edges + 1] = e
+            end
+            e.at[#e.at + 1] = pos_of(r.node)
+            local mode = write and 2 or 1
+            if e.rw ~= mode and e.rw ~= 3 then e.rw = e.rw and 3 or mode end
+            if write then
+                local g = (G and guard_class(r.node, r.parent, src, G) or 0) + 1
+                if not e.gw or g < e.gw then e.gw = g end
+            end
+        end
+    end
+end
+
 local function cap_node(ns)
     if type(ns) == 'table' and ns[1] ~= nil then return ns[#ns] end
     return ns
@@ -7723,6 +7773,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                 end
             end
         end
+        -- instance state: receiver-field reads and writes as `field` nodes + `use` edges (CART-1575)
+        M._mint_fields(file, lang, tsroot, src, spec, data, uid)
         -- R4 ancestor edges (ruby inheritance + mixins): collected corpus-wide
         -- (classes reopen), consumed by resolve_ruby_ancestors.
         if spec.scan_ancestors then
