@@ -237,6 +237,30 @@ test('guards: go — == nil, the comma-ok memo, else arms by FIELD; else-if, ||,
     eq(1, gw_of(data, 'initw', 't3'), 'an `if` initializer is unconditional')
 end)
 
+test('guards: rust — is_none() / == None / !X, else arms of is_some() / != None; || and other-field traps (CART-1582)', function ()
+    if not ready('rust') then skip 'no rust parser' end
+    local root = mkroot('m.rs', table.concat({
+        'static mut T: i32 = 0;', 'static mut MEMO: Option<i32> = None;', 'static mut CFG: Option<i32> = None;',
+        'static mut REG: Option<i32> = None;', 'static mut FLAG: bool = false;', 'static mut MIX: Option<i32> = None;',
+        'static mut OTH: S = S { a: None, b: None };',
+        'fn bare() { unsafe { T = 1; } }',
+        'fn once() { unsafe { if MEMO.is_none() { MEMO = Some(1); } } }',
+        'fn eqnone() { unsafe { if CFG == None { CFG = Some(2); } } }',
+        'fn elsearm() { unsafe { if REG.is_some() { use_it(); } else { REG = Some(3); } } }',
+        'fn notflag() { unsafe { if !FLAG { FLAG = true; } } }',
+        'fn ortrap(z: bool) { unsafe { if MIX.is_none() || z { MIX = Some(4); } } }',
+        'fn otherfield() { unsafe { if OTH.a.is_none() { OTH.b = Some(5); } } }',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(1, gw_of(data, 'bare', 'T'), 'bare: unguarded')
+    eq(3, gw_of(data, 'once', 'MEMO'), 'is_none(): set-once')
+    eq(3, gw_of(data, 'eqnone', 'CFG'), '== None: set-once')
+    eq(3, gw_of(data, 'elsearm', 'REG'), 'else arm of is_some(): set-once')
+    eq(3, gw_of(data, 'notflag', 'FLAG'), '!X: set-once')
+    eq(2, gw_of(data, 'ortrap', 'MIX'), '|| must NOT claim set-once')
+    eq(2, gw_of(data, 'otherfield', 'OTH'), 'a test of ANOTHER field is a guard, not set-once')
+end)
+
 test('guards: reads carry no gw; no classifier means absent', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = mkroot('m.lua', table.concat({

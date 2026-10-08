@@ -43,7 +43,54 @@ local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 local inext = tsutil.inext
 
+-- ── THE GUARD GRAMMAR (CART-1582) ─────────────────────────────────────────────────────────────────────────────────
+-- rust's lazy initialisation: `if X.is_none() { X = Some(..) }`, `if X == None`, `if !X`, and the else arm of
+-- `if X.is_some()` / `if X != None` / `if X`. `None` is an identifier to the grammar. Module state is rare in rust
+-- (`static mut`, unsafe) — its memos live in struct fields, which the write axis does not model (CART-1575).
+local chain_eq, optext_is, unparen = tsutil.chain_eq, tsutil.optext_is, tsutil.unparen
+-- `X.<method>()` with no arguments -> X, when method is one of `names`
+local function rs_method_on(n, names, src)
+    if n:type() ~= 'call_expression' then return nil end
+    local f, args = n:field('function')[1], n:field('arguments')[1]
+    if not (f and f:type() == 'field_expression' and args and args:named_child_count() == 0) then return nil end
+    local m = f:field('field')[1]
+    if not (m and names[node_text(m, src)]) then return nil end
+    return f:field('value')[1]
+end
+local function rs_none_operand(n, ops, src)
+    if n:type() ~= 'binary_expression' or not optext_is(n, nil, ops) then return nil end
+    local a, b = unparen(n:named_child(0)), unparen(n:named_child(1))
+    if b and node_text(b, src) == 'None' then return a end
+    if a and node_text(a, src) == 'None' then return b end
+    return nil
+end
+local RUST_GUARDS = {
+    cond = { if_expression = true, while_expression = true },
+    else_t = 'else_clause',
+    fn = { function_item = true, closure_expression = true },
+    binop = 'binary_expression', andops = { ['&&'] = true },
+    negop = 'unary_expression', negtok = '!', pfield = 'parameters',
+    abs_test = function (n, src, chain)
+        local x = rs_method_on(n, { is_none = true }, src) or rs_none_operand(n, { ['=='] = true }, src)
+        if x then return chain_eq(unparen(x), src, chain) end
+        if n:type() == 'unary_expression' and n:child(0) and n:child(0):type() == '!' then
+            local y = unparen(n:named_child(0))
+            return y ~= nil and chain_eq(y, src, chain)
+        end
+        return false
+    end,
+    presence = function (cond, src, chain)
+        cond = unparen(cond)
+        if cond == nil then return false end
+        if chain_eq(cond, src, chain) then return true end
+        local x = rs_method_on(cond, { is_some = true }, src) or rs_none_operand(cond, { ['!='] = true }, src)
+        return x ~= nil and chain_eq(unparen(x), src, chain)
+    end,
+    rhs_setonce = function () return false end,
+}
+
 return {
+    guards = RUST_GUARDS,
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not
