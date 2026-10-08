@@ -61,7 +61,65 @@ local function python_is_write(c, n)
     return false
 end
 
+-- ── THE GUARD GRAMMAR (CART-1574) ─────────────────────────────────────────────────────────────────────────────────
+-- What providers/treesitter.lua guard_class needs to call a write GUARDED or SET-ONCE. python's memo spellings:
+-- `if x is None: x = …`, `if not x: x = …`, `if k not in cache: cache[k] = …` — a MEMBERSHIP test, whose chain
+-- `cache[k]` is never spelled in the condition, so it is rebuilt from the operands —, the else arm of `if x:` /
+-- `if x is not None:` / `if k in cache:`, and `x = x or v` (the `or` caveat of lua's idiom: a stored falsy value is
+-- overwritten).
+local chain_eq, optext_is, unparen = tsutil.chain_eq, tsutil.optext_is, tsutil.unparen
+-- is `n` (a comparison) `L <op> R` with R the absence literal None -> L, or `L <op> None`?
+local function py_against_none(n, ops)
+    if n:type() ~= 'comparison_operator' or not optext_is(n, nil, ops) or n:named_child_count() ~= 2 then return nil end
+    local a, b = unparen(n:named_child(0)), unparen(n:named_child(1))
+    if b and b:type() == 'none' then return a end
+    if a and a:type() == 'none' then return b end
+    return nil
+end
+-- `k <op> c` (`in` / `not in`) whose subscript `c[k]` is the written chain
+local function py_member_chain(n, ops, src, chain)
+    if n:type() ~= 'comparison_operator' or not optext_is(n, nil, ops) or n:named_child_count() ~= 2 then return false end
+    local k, c = n:named_child(0), n:named_child(1)
+    return chain == node_text(c, src) .. '[' .. node_text(k, src) .. ']'
+end
+local PY_GUARDS = {
+    cond = { if_statement = true, elif_clause = true, while_statement = true },
+    else_t = 'else_clause', elseif_t = 'elif_clause',
+    fn = { function_definition = true, lambda = true },
+    binop = 'boolean_operator', andops = { ['and'] = true },
+    negop = 'not_operator', negtok = 'not', pfield = 'parameters',
+    pw_refsem = true, -- objects are reference-typed: a store into a param mutates the caller's
+    abs_test = function (n, src, chain)
+        local t = n:type()
+        if t == 'not_operator' then
+            local x = unparen(n:named_child(0))
+            return x ~= nil and chain_eq(x, src, chain)
+        end
+        local x = py_against_none(n, { ['is'] = true, ['=='] = true })
+        if x then return chain_eq(x, src, chain) end
+        return py_member_chain(n, { ['not in'] = true }, src, chain)
+    end,
+    presence = function (cond, src, chain)
+        cond = unparen(cond)
+        if cond == nil then return false end
+        if chain_eq(cond, src, chain) then return true end
+        local x = py_against_none(cond, { ['is not'] = true, ['!='] = true })
+        if x then return chain_eq(x, src, chain) end
+        return py_member_chain(cond, { ['in'] = true }, src, chain)
+    end,
+    -- `x = x or v`
+    rhs_setonce = function (top, src, chain)
+        local p = top:parent()
+        if not (p and p:type() == 'assignment' and p:field('left')[1] == top) then return false end
+        local rhs = unparen(p:field('right')[1])
+        if not (rhs and rhs:type() == 'boolean_operator' and optext_is(rhs, src, { ['or'] = true })) then return false end
+        local l = unparen(rhs:named_child(0))
+        return l ~= nil and chain_eq(l, src, chain())
+    end,
+}
+
 return {
+    guards = PY_GUARDS,
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not

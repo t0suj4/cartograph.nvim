@@ -160,6 +160,31 @@ test('guards: javascript / typescript — ??= ||= and the coalesce forms, !X / =
     end
 end)
 
+test('guards: python — is None / not / `k not in c` / else arms / `x = x or v`; `or` and other-field traps (CART-1574)', function ()
+    if not ready('python') then skip 'no python parser' end
+    local root = mkroot('m.py', table.concat({
+        't = {}', 'memo = {}', 'cache = {}', 'cfg = {}', 'reg = {}', 'acc = {}', 'mix = {}', 'oth = {}', 'st = Box()',
+        'def bare():\n    t["x"] = 1',
+        'def once(k):\n    if memo.get(k) is None:\n        pass\n    if not st.ready:\n        st.ready = 1',
+        'def member(k):\n    if k not in cache:\n        cache[k] = 2',
+        'def isnone():\n    if cfg.opt is None:\n        cfg.opt = 3',
+        'def elsearm(k):\n    if k in reg:\n        use(reg[k])\n    else:\n        reg[k] = 4',
+        'def idiom():\n    acc.v = acc.v or 5',
+        -- soundness traps: guarded, but NOT set-once
+        'def ortrap(z):\n    if not mix.a or z:\n        mix.a = 6',
+        'def otherfield():\n    if oth.a is None:\n        oth.b = 7',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(1, gw_of(data, 'bare', 't'), 'bare: unguarded')
+    eq(3, gw_of(data, 'once', 'st'), 'not X: set-once')
+    eq(3, gw_of(data, 'member', 'cache'), 'k not in c: set-once on c[k]')
+    eq(3, gw_of(data, 'isnone', 'cfg'), 'X is None: set-once')
+    eq(3, gw_of(data, 'elsearm', 'reg'), 'else arm of `k in reg`: set-once')
+    eq(3, gw_of(data, 'idiom', 'acc'), 'x = x or v: set-once')
+    eq(2, gw_of(data, 'ortrap', 'mix'), '`or` must NOT claim set-once')
+    eq(2, gw_of(data, 'otherfield', 'oth'), 'a test of ANOTHER field is a guard, not set-once')
+end)
+
 test('guards: reads carry no gw; no classifier means absent', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = mkroot('m.lua', table.concat({
