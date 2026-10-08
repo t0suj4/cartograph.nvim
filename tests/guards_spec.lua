@@ -185,6 +185,31 @@ test('guards: python — is None / not / `k not in c` / else arms / `x = x or v`
     eq(2, gw_of(data, 'otherfield', 'oth'), 'a test of ANOTHER field is a guard, not set-once')
 end)
 
+test('guards: c / c++ — !g, == NULL / nullptr, else arms of presence tests; || and other-field traps (CART-1576)', function ()
+    for _, case in ipairs({ { 'c', 'm.c', 'NULL' }, { 'cpp', 'm.cpp', 'nullptr' } }) do
+        if not ready(case[1]) then skip('no ' .. case[1] .. ' parser') end
+        local null = case[3]
+        local root = mkroot(case[2], table.concat({
+            'struct S { int *x; int *a; int *b; };',
+            'static int t;', 'static int *memo;', 'static struct S *s;', 'static int *reg;', 'static int *mix;', 'static struct S *oth;',
+            'void bare(void) { t = 1; }',
+            'void once(void) { if (!memo) { memo = alloc(); } }',
+            'void isnull(void) { if (s->x == ' .. null .. ') { s->x = alloc(); } }',
+            'void elsearm(void) { if (reg != ' .. null .. ') { use(reg); } else { reg = alloc(); } }',
+            'void ortrap(int z) { if (!mix || z) { mix = alloc(); } }',
+            'void otherfield(void) { if (!oth->a) { oth->b = alloc(); } }',
+        }, '\n'))
+        local data = ts.extract(root)
+        local how = case[1] .. ': '
+        eq(1, gw_of(data, 'bare', 't'), how .. 'bare: unguarded')
+        eq(3, gw_of(data, 'once', 'memo'), how .. '!g: set-once')
+        eq(3, gw_of(data, 'isnull', 's'), how .. '== ' .. null .. ': set-once')
+        eq(3, gw_of(data, 'elsearm', 'reg'), how .. 'else arm of != ' .. null .. ': set-once')
+        eq(2, gw_of(data, 'ortrap', 'mix'), how .. '|| must NOT claim set-once')
+        eq(2, gw_of(data, 'otherfield', 'oth'), how .. 'a test of ANOTHER field is a guard, not set-once')
+    end
+end)
+
 test('guards: reads carry no gw; no classifier means absent', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = mkroot('m.lua', table.concat({

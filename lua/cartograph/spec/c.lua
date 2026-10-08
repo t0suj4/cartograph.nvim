@@ -11,6 +11,7 @@ return {
     flocal = tsutil.c_file_local, -- `static` / source-file macro: invisible outside its file (CART-1081)
     torn_context = tsutil.c_torn_context, -- tear by damaged CONTEXT, not by position after an error (CART-1084)
     is_write = tsutil.cfamily_is_write,
+    guards = tsutil.CFAMILY_GUARDS, -- (CART-1576)
     -- the PREFILTER: every immediate parent type a write mention can have here.
     -- Without it the classifier is never invoked (v147 shipped that mistake).
     write_gate = { assignment_expression = true, update_expression = true,
@@ -90,6 +91,9 @@ return {
                 declarator: (array_declarator declarator: (identifier) @vname)
                 value: (_) @value)) @vdef
             (declaration declarator: (identifier) @vname) @vdef
+            (declaration declarator: (pointer_declarator declarator: (identifier) @vname)) @vdef
+            (declaration declarator: (init_declarator
+                declarator: (pointer_declarator declarator: (identifier) @vname) value: (_) @value)) @vdef
         ]],
         litdata_types = { initializer_list = true },
         -- a header's INTERFACE: prototypes (decl), macros (fn-like + object),

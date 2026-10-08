@@ -352,8 +352,53 @@ end
 
 -- descend through parenthesized wrappers to the inner expression
 function M.unparen(n)
-    while n and n:type() == 'parenthesized_expression' do n = n:named_child(0) end
+    -- (and c++'s `condition_clause`: `if (x)` wraps its condition in one, CART-1576 — a node no other grammar has)
+    while n and (n:type() == 'parenthesized_expression' or n:type() == 'condition_clause') do n = n:named_child(0) end
     return n
 end
+
+-- ── THE C-FAMILY GUARD GRAMMAR (CART-1576), shared by c and c++ ──────────────────────────────────────────────────────
+-- Lazy initialisation of globals and statics: `if (!g) g = …`, `if (p == NULL)` / `== nullptr` / `NULL == p`, the
+-- else arm of `if (p)` / `if (p != NULL)`. `x == 0` is NOT an absence test: for an integer it is a value. C keeps
+-- its parameters under the declarator, so param_map reads none (no pw / gp yet) — the guard classes do not need them.
+local function c_is_null(n) return n ~= nil and n:type() == 'null' end
+M.CFAMILY_GUARDS = {
+    cond = { if_statement = true, while_statement = true, conditional_expression = true },
+    else_t = 'else_clause',
+    fn = { function_definition = true, lambda_expression = true },
+    binop = 'binary_expression', andops = { ['&&'] = true, ['and'] = true },
+    negop = 'unary_expression', negtok = '!', pfield = 'parameters',
+    abs_test = function (n, src, chain)
+        local t = n:type()
+        if t == 'unary_expression' then
+            local op = n:child(0)
+            if op and not op:named() and (op:type() == '!' or op:type() == 'not') then
+                local x = M.unparen(n:named_child(0))
+                return x ~= nil and M.chain_eq(x, src, chain)
+            end
+        elseif t == 'binary_expression' and M.optext_is(n, src, { ['=='] = true }) then
+            local a, b = M.unparen(n:named_child(0)), M.unparen(n:named_child(1))
+            if a and b then
+                if c_is_null(a) then return M.chain_eq(b, src, chain) end
+                if c_is_null(b) then return M.chain_eq(a, src, chain) end
+            end
+        end
+        return false
+    end,
+    presence = function (cond, src, chain)
+        cond = M.unparen(cond)
+        if cond == nil then return false end
+        if M.chain_eq(cond, src, chain) then return true end
+        if cond:type() == 'binary_expression' and M.optext_is(cond, src, { ['!='] = true }) then
+            local a, b = M.unparen(cond:named_child(0)), M.unparen(cond:named_child(1))
+            if a and b then
+                if c_is_null(a) then return M.chain_eq(b, src, chain) end
+                if c_is_null(b) then return M.chain_eq(a, src, chain) end
+            end
+        end
+        return false
+    end,
+    rhs_setonce = function () return false end, -- (no memo idiom in the language)
+}
 
 return M
