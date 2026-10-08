@@ -21,5 +21,9 @@ return {
         { name = "mix's sets unchanged (row join)", kind = 'join', file = 'tools/experiments/instruments/lowersets.lua' },
         { name = 'compile time (33 matchers)', kind = 'ab', file = 'tools/experiments/instruments/cmreg.lua', extract = 'compile ([%d.]+) s', runs = 5, bound = 1.10, conditions = 'all' },
         { name = 'lowering time (derivations)', kind = 'ab', file = 'tools/experiments/instruments/lowertime.lua', extract = 'derivations%(%d+%) ([%d.]+) ms', runs = 5, bound = 1.15, conditions = 'all' },
+        -- the WARM condition (CART-1541): the same work repeated in one process, the median after the first pass —
+        -- what a long-running process pays (measured 2026-10-08: the default JIT flushes its trace cache ~9 times a
+        -- pass here, so warm is no better than the interpreter)
+        { name = 'lowering time, warm', kind = 'ab', file = 'tools/experiments/instruments/lowertime.lua', params = { rep = 6 }, extract = 'TL warm ([%d.]+) ms', runs = 5, bound = 1.15, conditions = 'all' },
     },
 }
