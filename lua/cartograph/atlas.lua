@@ -18,11 +18,7 @@
 --
 -- Pure consumer: no extraction change, every fact already in the graph.
 
--- @langs lua php javascript python typescript tsx
--- NOT a lua module despite the neighbours: `field_of` reads php's `variable_name`
--- wrapper and pairs `dot_index_expression`/`member_access_expression` and
--- `bracket_index_expression`/`subscript_expression` as or-groups — it was written
--- polyglot and nothing said so (the spec/javascript.lua precedent, CART-0304).
+-- @langs any — `field_of` asks each language's spec (member / index positions), CART-1591
 local M = {}
 
 M.LABELS = { 'const', 'dead', 'set-once', 'single-writer', 'multi-writer',
@@ -140,28 +136,13 @@ local function ext_spec(file)
     end
 end
 
--- the immediate field of a base-var occurrence, or nil for a whole-var use
-local function field_of(c, src)
-    local p = c:parent()
-    -- @langs-ok php's `$x` wrapper; a no-op peel on every other declared grammar
-    if p and p:type() == 'variable_name' then c = p; p = p:parent() end -- php $x
-    if not p then return nil end
-    local t = p:type()
-    if t == 'dot_index_expression' or t == 'member_access_expression' then
-        if p:named_child(0) ~= c then return nil end
-        local f = p:named_child(1)
-        return f and vim.treesitter.get_node_text(f, src) or '[]'
-    end
-    if t == 'bracket_index_expression' or t == 'subscript_expression' then
-        if p:named_child(0) ~= c then return nil end
-        local k = p:named_child(1)
-        if k and k:type() == 'string' then
-            local inner = k:named_child(0)
-            if inner then return vim.treesitter.get_node_text(inner, src) end
-        end
-        return '[]' -- computed key: one bucket, honestly coarse
-    end
-    return nil
+-- the immediate field of a base-var occurrence, or nil for a whole-var use: the SAME accessor the use edges' flds
+-- come from (providers/treesitter.lua mention_field over the spec's member / index positions). atlas kept its own
+-- lua / php list, so a python / js / java / go / rust field write landed in the WHOLE bucket — read as a rebind that
+-- hedges every field claim — while e.flds named the field (CART-1591)
+local function field_of(c, n, src, spec)
+    if not n then return nil end
+    return require('cartograph.providers.treesitter')._mention_field(c, n, src, spec.member_positions, spec.index_positions)
 end
 
 --- Per-field classification of one var. `cache` (optional) shares parsed
@@ -208,8 +189,8 @@ function M.fields(store, id, cache)
                     local sl, sc = atr.sl(r), atr.sc(r)
                     local c = root:named_descendant_for_range(sl, sc, sl, sc + 1)
                     if c then
-                        local f = field_of(c, src)
                         local n = c:parent()
+                        local f = field_of(c, n, src, spec)
                         local w, wf, wr
                         if n then w, wf, wr = spec.is_write(c, n, src) end
                         f = wf or f -- (a memo call names the field it writes: a dynamic key, CART-1585)

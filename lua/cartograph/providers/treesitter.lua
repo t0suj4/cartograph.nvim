@@ -1150,6 +1150,7 @@ local function pair_value(vnamen, valn)
     return items(vp)[idx]
 end
 M._pair_value = pair_value
+M._mention_field = mention_field -- (atlas.fields asks the SAME accessor as the use edges' flds, CART-1591)
 
 -- The raw-parser rider (fusion Stage C): the extract hot loop parses via
 -- a REUSED raw TSParser per language — LanguageTree construction

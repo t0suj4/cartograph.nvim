@@ -148,6 +148,9 @@ test('atlas fields: a memo CALL writes a dynamic key, never a whole-var rebind (
         '    return _cache.setdefault(k, k * 2)',
         'def nested(k):',
         '    _cfg.sub.setdefault(k, [])',
+        '_tab = {}',
+        'def put(k):',
+        "    _tab['x'] = k",
     }, '\n'))
     fd:close()
     store.ingest(require('cartograph.providers.treesitter').extract(root))
@@ -162,10 +165,16 @@ test('atlas fields: a memo CALL writes a dynamic key, never a whole-var rebind (
     for _, n in ipairs(store.data.nodes) do
         if n.kind == 'var' and n.name == '_cfg' then vid = n.id end
     end
-    -- (python has no field_of form, so the write lands in the WHOLE bucket where the use edge's flds say `sub` — a
-    -- disagreement this pins only for its read count, CART-1591)
+    -- (the field the use edge's flds name — `sub` —, never the whole bucket: atlas asks the same accessor, CART-1591)
     local fc = atlas.fields(store, vid)
-    eq({ 1, 1 }, { fc.whole.nw, fc.whole.nr }, 'a memo call on a sub-object: one write, one read')
+    eq({ 0, 0 }, { fc.whole.nw, fc.whole.nr }, 'no whole-var access: _cfg is never rebound')
+    eq({ 1, 1 }, { fc.fields.sub and fc.fields.sub.nw, fc.fields.sub and fc.fields.sub.nr },
+        'a memo call on a sub-object: one write, one read, of the field sub')
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'var' and n.name == '_tab' then vid = n.id end
+    end
+    local ft = atlas.fields(store, vid)
+    eq(1, ft.fields.x and ft.fields.x.nw, 'a STRING bracket key names its field (the index positions)')
     vim.fn.delete(root, 'rf')
 end)
 
