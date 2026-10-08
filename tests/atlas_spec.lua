@@ -162,7 +162,9 @@ test('atlas fields: a memo CALL writes a dynamic key, never a whole-var rebind (
     for _, n in ipairs(store.data.nodes) do
         if n.kind == 'var' and n.name == '_cfg' then vid = n.id end
     end
-    local fc = atlas.fields(store, vid) -- (python has no field_of form: the write lands in the whole bucket)
+    -- (python has no field_of form, so the write lands in the WHOLE bucket where the use edge's flds say `sub` — a
+    -- disagreement this pins only for its read count, CART-1591)
+    local fc = atlas.fields(store, vid)
     eq({ 1, 1 }, { fc.whole.nw, fc.whole.nr }, 'a memo call on a sub-object: one write, one read')
     vim.fn.delete(root, 'rf')
 end)
