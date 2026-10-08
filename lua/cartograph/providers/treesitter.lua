@@ -1479,6 +1479,15 @@ end
 -- track for the JS family). Opt-in via spec.local_decls; walks the body but STOPS
 -- at nested fns (their bindings are their own scope, not this one's).
 local function fn_locals(def, spec, src)
+    -- (a language whose binders are not declarations — python's `x = …` / for / with targets — answers through its
+    -- own hook: the names its scope model binds, CART-1597)
+    if spec.fn_locals then
+        local t, out = {}, {}
+        spec.fn_locals(def, src, t)
+        for nm in pairs(t) do out[#out + 1] = nm end
+        table.sort(out)
+        return out[1] and out or nil
+    end
     if not spec.local_decls then return nil end
     local body = spec.body_field and def:field(spec.body_field)[1]
     local out, seen = {}, {}

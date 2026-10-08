@@ -59,6 +59,9 @@ M.SLOTS = {
     -- node list expr.bound_names reads), and the rename collided with it silently: lua's table constructor kept the
     -- later key and 19 tests failed. A rename meant to END a collision has to check its target is free.
     scope = 'SCOPE&KEY', lexical_scopes = 'SCOPE&KEY',
+    -- fn_locals(def, src, out): the names a function body binds where they are not DECLARATIONS (python), for the
+    -- call-argument shadow gate's fn.locals — beside local_decls, which reads declaration node types (CART-1597)
+    fn_locals = 'SCOPE&KEY',
     qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY',
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing

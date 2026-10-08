@@ -5926,6 +5926,55 @@ test('defs: a javascript object-literal function is cbarg — alive by its objec
     vim.fn.delete(root, 'rf')
 end)
 
+-- ⚠ A PYTHON LOCAL / PARAM IS BOUND, FUNCTION-WIDE (CART-1597): python declared no scope model, so a method's own
+-- `_data` joined another file's module var. Python's rule: params + every name the body assigns, minus global.
+test('refs: a python param or local never links across files; a global or an import stays free (CART-1597)', function ()
+    if not has_parser('python') then skip 'no python parser' end
+    local names = { 'paa', 'pdd', 'ptt', 'ptd', 'pargs', 'pkw', 'targs', 'tkw', 'laa', 'lt1', 'lt2', 'laug', 'lfor', 'lwith', 'lexc',
+        'lwal', 'lnest', 'lcomp', 'llam', 'gfree', 'imp', 'ctrl', 'nloc' }
+    local defs = {}
+    for _, nm in ipairs(names) do defs[#defs + 1] = 'def ' .. nm .. '(): return 1' end
+    local root = mkroot('a.py', table.concat(defs, '\n'))
+    local fd = assert(io.open(root .. '/b.py', 'w'))
+    fd:write(table.concat({
+        'def f(paa, pdd=1, ptt: int = 0, *pargs, ptd: str = "", **pkw):',
+        '    _ = [paa.v, pdd.v, ptt.v, ptd.v, pargs.v, pkw.v]', -- (bare mentions: the scope model, not the arg gate)
+        '    _ = [laa.v, lt1.v, lt2.v, laug.v, lfor.v, lwith.v, lexc.v, lwal.v, lnest.v, gfree.v, imp.v, ctrl.v]',
+        '    use(paa, pdd, ptt, ptd, pargs, pkw, laa, lt1, laug, lfor, lwith, lexc, lwal, gfree, imp, ctrl)',
+        '    laa = 1',
+        '    lt1, (lt2, _) = g()',
+        '    laug += 1',
+        '    for lfor in xs: pass',
+        '    with open(p) as lwith: pass',
+        '    try: pass',
+        '    except E as lexc: pass',
+        '    if (lwal := 3): pass',
+        '    def lnest(): pass',
+        '    global gfree',
+        '    gfree = 2', -- (assigned, and still the module's: global wins)
+        '    import imp',
+        '    return [lcomp for lcomp in xs], (lambda llam: llam)',
+        'def tw(*targs: int, **tkw: str):', '    return [targs.v, tkw.v]',
+        'def outer():', '    def inner():', '        nloc = 1', '    return nloc.v', -- (a NESTED def's local is not the outer's)
+        'def h(t):',
+        '    return [lcomp.x for lcomp in t], (lambda llam: llam.y)',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        if (e.kind == 'ref' or e.kind == 'reg') and byid[e.to] and byid[e.to].file == 'a.py' and (byid[e.from] or { file = e.from }).file == 'b.py' then
+            refs[byid[e.to].name] = true
+        end
+    end
+    for _, nm in ipairs(names) do
+        local free = nm == 'gfree' or nm == 'imp' or nm == 'ctrl' or nm == 'nloc'
+        eq(free, refs[nm] == true, nm .. (free and ' is FREE: it links' or ' is BOUND: no cross-file link') .. ' ' .. vim.inspect(refs))
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('defs: a lua table-FIELD function is cbarg; a local function is not (the field_fn_cbarg set, CART-1592)', function ()
     local root = mkroot('t.lua', table.concat({
         'local function plain() return 1 end',

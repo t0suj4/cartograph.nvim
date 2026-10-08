@@ -130,7 +130,77 @@ local PY_GUARDS = {
     end,
 }
 
+-- ── LEXICAL SCOPES (CART-1597) ────────────────────────────────────────────────────────────────────────────────────
+-- python declared no scope model, so no mention was ever MF_BOUND and the cross-file unique join claimed every local:
+-- community.general's RedfishUtils.get_logs read its own `_data` as _django.py's module var. A function's scope is
+-- python's: its params AND every name its body assigns ANYWHERE (`x = …`, `x += …`, a for / with / except target, a
+-- walrus) — function-wide, whatever the row —, minus `global` / `nonlocal` names; a nested def / class / lambda /
+-- comprehension is its own scope. Module level binds nothing: an assignment there IS the module var. An `import`
+-- inside a function stays free (the require exemption, CART-1594: the join gets that one right).
+local PY_OWN_SCOPE = { function_definition = true, class_definition = true, lambda = true,
+    list_comprehension = true, set_comprehension = true, dictionary_comprehension = true, generator_expression = true }
+local function py_target_names(t, src, out)
+    if not t then return end
+    local ty = t:type()
+    if ty == 'identifier' then out[node_text(t, src)] = {}
+    elseif ty == 'pattern_list' or ty == 'tuple_pattern' or ty == 'list_pattern' or ty == 'list_splat_pattern'
+        or ty == 'dictionary_splat_pattern' or ty == 'as_pattern_target' then
+        for _, c in inext, t, -1 do if c:named() then py_target_names(c, src, out) end end
+    end -- (an attribute / subscript target binds nothing: it stores into an object)
+end
+local function py_params(node, src, out)
+    local ps = node:field('parameters')[1]
+    if not ps then return end
+    for _, c in inext, ps, -1 do
+        local t = c:type()
+        if t == 'identifier' then out[node_text(c, src)] = {}
+        elseif t == 'default_parameter' or t == 'typed_default_parameter' then py_target_names(c:field('name')[1], src, out)
+        elseif t == 'typed_parameter' then py_target_names(c:named_child(0), src, out) -- (`x: T`, `*a: T`)
+        elseif t == 'list_splat_pattern' or t == 'dictionary_splat_pattern' then py_target_names(c, src, out)
+        end
+    end
+end
+local function py_fn_scope(node, src, out)
+    py_params(node, src, out)
+    if node:type() == 'lambda' then return end
+    local glob = {}
+    local function walk(n)
+        for _, c in inext, n, -1 do
+            local t = c:type()
+            if PY_OWN_SCOPE[t] then
+                -- (a nested `def g():` binds g here too, but mints g as a same-file def: the name is never the
+                -- cross-file unique, so binding it would change nothing — and it IS the function an argument names)
+            else
+                if t == 'assignment' or t == 'augmented_assignment' or t == 'for_statement' then
+                    py_target_names(c:field('left')[1], src, out)
+                elseif t == 'as_pattern_target' then py_target_names(c, src, out)
+                elseif t == 'named_expression' then py_target_names(c:field('name')[1], src, out)
+                elseif t == 'global_statement' or t == 'nonlocal_statement' then
+                    for _, g in inext, c, -1 do if g:type() == 'identifier' then glob[node_text(g, src)] = true end end
+                end
+                walk(c)
+            end
+        end
+    end
+    walk(node:field('body')[1] or node)
+    for g in pairs(glob) do out[g] = nil end
+end
+local function py_comp_scope(node, src, out) -- `[k for k in xs]`: the for_in_clause targets
+    for _, c in inext, node, -1 do
+        if c:type() == 'for_in_clause' then py_target_names(c:field('left')[1], src, out) end
+    end
+end
+local PY_LEXICAL_SCOPES = {
+    function_definition = { kind = 'param', harvest = py_fn_scope }, lambda = { kind = 'param', harvest = py_fn_scope },
+    list_comprehension = { kind = 'local', harvest = py_comp_scope }, set_comprehension = { kind = 'local', harvest = py_comp_scope },
+    dictionary_comprehension = { kind = 'local', harvest = py_comp_scope },
+    generator_expression = { kind = 'local', harvest = py_comp_scope },
+}
+
 return {
+    lexical_scopes = PY_LEXICAL_SCOPES, -- CART-1597
+    -- the call-argument gate's local binders (fn.locals): the same scope — df tracks only a plain `x = …` (CART-1597)
+    fn_locals = py_fn_scope,
     guards = PY_GUARDS,
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
