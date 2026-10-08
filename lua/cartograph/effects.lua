@@ -336,7 +336,7 @@ local function arg_target(store, c, i, caller)
     -- root, so the write lands in the root's first field (`S.list[i] = x` is recorded the same way by the extractor,
     -- with the same blind spot: no alias analysis; a bracket or unknown first field is the root's whole '' key)
     local name, field = a.name, ''
-    if a.k == 'field' and name then name, field = name:match('^([^.]+)%.?(.*)$') end -- ('root.first')
+    if a.k == 'field' and name then name, field = name:match('^([^.]+)%.?([^.]*)') end -- ('root.first.…')
     if (a.k == 'local' or a.k == 'field') and name then
         for _, n in ipairs(store.by_file[callrec.file(c)] or {}) do
             if n.kind == 'var' and n.name == name then
@@ -447,6 +447,41 @@ local function subst(store, sums, sum, c, caller, j, tname, member)
     if ts then inherit(sum, ts); return end
     s_hedge(sum, ('calls parameter %d of %s with an unknown function @%s:%d')
         :format(j, tname, callrec.file(c) or '?', callrec.line(c) or 0))
+end
+
+-- does the name `root` reach a GLOBAL at call `c` — no module var of the file, no parameter or local of the caller or
+-- of any function enclosing it defines it? Only then may a builtin's signature describe it (a `local require = …`
+-- is anyone's function)
+local function global_root(store, c, caller, root)
+    local fns = store.by_file[callrec.file(c)] or {}
+    for _, n in ipairs(fns) do
+        if n.kind == 'var' and n.name == root then return false end
+    end
+    if not caller then return true end
+    local at = require 'cartograph.at'
+    local cs, ce = caller.range and at.sl(caller.range), caller.range and at.el(caller.range)
+    for _, f in ipairs(fns) do
+        if (f.kind == 'function' or f.kind == 'method') and (f == caller
+            or (cs and f.range and at.sl(f.range) <= cs and ce <= at.el(f.range))) then
+            for _, p in ipairs(f.params or {}) do if p == root then return false end end
+            local ok, stmts = pcall(require('cartograph.df').stmts, f)
+            for _, st in ipairs(ok and stmts or {}) do
+                for _, d in ipairs(st.def or {}) do if d == root then return false end end
+            end
+        end
+    end
+    return true
+end
+-- a BUILTIN handed to a higher-order call by NAME (`pcall(require, m)`, `pcall(vim.fn.x, …)`): when its root is a
+-- global and its signature writes and calls no argument, its io / nondet are the call's — true when applied
+local function builtin_callback(store, c, caller, a, lang, sum)
+    if not (lang and a.name and (a.k == 'local' or a.k == 'field')) then return false end
+    if not global_root(store, c, caller, a.name:match('^[^.]+')) then return false end
+    local s2 = M.sig_of(lang, a.name)
+    if not s2 or s2.w or s2.calls then return false end
+    if s2.io then s_add(sum, IOKEY, 1) end
+    if s2.nondet then sum.nd = true end
+    return true
 end
 
 --- Compute (and cache per graph generation) every fn's write summary.
@@ -680,7 +715,7 @@ function M.summaries(store)
                                 local a = argv.at(c, ai)
                                 local target = a and a.to
                                 if not target and a
-                                    and (a.k == 'local' or a.k == 'callable')
+                                    and (a.k == 'local' or a.k == 'callable' or a.k == 'field')
                                     and a.name then
                                     for _, fn2 in ipairs(store.by_file[callrec.file(c)] or {}) do
                                         if (fn2.kind == 'function' or fn2.kind == 'method')
@@ -702,6 +737,9 @@ function M.summaries(store)
                                     end
                                     -- (a callback calling a parameter of an enclosing function: still pending here)
                                     for _, p in pairs(ts2.cpo or {}) do cp_add(sum, p.owner, p.j) end
+                                elseif a and builtin_callback(store, c, caller, a, lang, sum) then
+                                    -- (a BUILTIN passed by name — `pcall(require, m)`, `pcall(vim.fn.x, …)`: its
+                                    -- signature, CART-1563)
                                 elseif a then
                                     s_hedge(sum, ('%s: callback effects unknown @%s:%d')
                                         :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))

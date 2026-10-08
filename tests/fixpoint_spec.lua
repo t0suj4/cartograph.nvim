@@ -363,6 +363,26 @@ test('fixpoint: a builtin mutating a FIELD PATH writes what the direct store wri
     eq('pure~', effects.purity(store, by.loc.id), 'a field of a local may hold anyone\'s table (w.order = p)')
 end)
 
+test('fixpoint: a BUILTIN or a module function handed to pcall BY NAME is its signature or summary; a shadowed name is anyone\'s function (CART-1563)', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local M, S = {}, {}',
+        'function M.helper() S.n = 1 end',
+        'local function req(m) return pcall(require, m) end',
+        'local function fmt(x) return pcall(string.format, "%d", x) end',
+        'local function viahelper() return pcall(M.helper) end',
+        'local function shadow(require, m) return pcall(require, m) end',
+        'return { M, req, fmt, viahelper, shadow }' }, '\n'))))
+    local by = byname()
+    eq('io', effects.purity(store, by.req.id), 'require is io')
+    eq('pure', effects.purity(store, by.fmt.id), 'string.format is pure')
+    eq('writes', effects.purity(store, by.viahelper.id), 'M.helper writes S.n')
+    eq('pure~', effects.purity(store, by.shadow.id), 'a parameter named require')
+    -- (a LOCAL named require, alone in its file: the by-name lookup is file-wide and scope-blind, CART-1562)
+    store.ingest(ts.extract(mkroot('local function inner(m) local t = {}; local require = t.f; return pcall(require, m) end\nreturn inner')))
+    eq('pure~', effects.purity(store, byname().inner.id), 'a local named require')
+end)
+
 test('fixpoint: a join whose candidate is summarized LATER repeats the pass to the fixpoint, and a later pass recomputes only what read a changed summary (CART-1544)', function ()
     if not ready() then skip 'no lua parser' end
     store.ingest(ts.extract(mkroot(table.concat({

@@ -29,8 +29,8 @@ local M = {}
 -- counted and refused where an opaque `expr` can do none of those (CART-0812).
 -- `ctor` (10, appended likewise) is a table CONSTRUCTOR — `setmetatable({}, mt)`: a table the argument list makes,
 -- fresh, which effects tells from an `expr` that may alias module state (CART-1547).
--- `field` (11) is a Lua index path rooted in a name — `w.order`: `name` = 'root.first' (the root alone after a
--- bracket; never `v`, which argv.str reads as a literal) — so a builtin mutating it writes that name's field (CART-1560).
+-- `field` (11) is a Lua index path rooted in a name — `w.order`: `name` = the dotted path from the root, up to
+-- a bracket (`S.list.inner`; never `v`, which argv.str reads as a literal) — so a builtin mutating it writes that name's field (CART-1560).
 M.K = { lit = 1, concat = 2, ['local'] = 3, func = 4, callable = 5,
     expr = 6, spread = 7, scalar = 8, macro = 9, ctor = 10, field = 11 }
 M.KNAME = { [0] = nil, 'lit', 'concat', 'local', 'func', 'callable',

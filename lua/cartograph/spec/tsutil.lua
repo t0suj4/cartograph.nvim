@@ -107,18 +107,27 @@ end
 -- STATELESS iterator (zero alloc), same sequence as iter_children (ALL
 -- children, anonymous tokens included — existing named()/type() guards
 -- filter):  for _, c in tsutil.inext, node, -1 do ... end
--- a Lua index path's ROOT name and FIRST field: `S.list.inner` -> 'S', 'list'; `S[k].x` -> 'S', nil (a bracket is no
+-- a Lua index path's ROOT name, FIRST field and dotted PATH: `S.list.inner` -> 'S', 'list', 'S.list.inner'; `S[k].x` -> 'S', nil, 'S' (a bracket is no
 -- known field); rooted in a call or a parenthesis -> nil (CART-1560: the extractor's `field` argument kind)
 function M.lua_field_root(a, src)
-    local n = a
+    local chain, n = {}, a
     while n and (n:type() == 'dot_index_expression' or n:type() == 'bracket_index_expression') do
-        local tbl = n:field('table')[1]
-        if tbl and tbl:type() == 'identifier' then
-            local f = n:type() == 'dot_index_expression' and n:field('field')[1] or nil
-            return M.node_text(tbl, src), f and M.node_text(f, src) or nil
-        end
-        n = tbl
+        chain[#chain + 1] = n
+        n = n:field('table')[1]
     end
+    if not (n and n:type() == 'identifier') then return nil end
+    -- (and the DOTTED PATH from the root up to the first bracket: `vim.treesitter.get_parser`, `S.a` of `S.a[k].b` —
+    -- a function passed by reference is named by it, CART-1563)
+    local root = M.node_text(n, src)
+    local path, first = root, nil
+    for i = #chain, 1, -1 do
+        local f = chain[i]:type() == 'dot_index_expression' and chain[i]:field('field')[1]
+        if not f then break end
+        local seg = M.node_text(f, src)
+        first = first or seg
+        path = path .. '.' .. seg
+    end
+    return root, first, path
 end
 
 function M.inext(n, i)
