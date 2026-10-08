@@ -141,7 +141,97 @@ local GO_GUARDS = {
     rhs_setonce = function (top, src) return go_memo_call(top:parent(), top, src) end,
 }
 
+-- ── LEXICAL SCOPES (CART-1598) ────────────────────────────────────────────────────────────────────────────────────
+-- go declared no scope model, so the cross-file unique join claimed every param and local (the CART-1589 / 1597
+-- class). A function binds its receiver, params and NAMED results; a block binds its `:=` / `var` / `const` from the
+-- declaring row (go 0.12 wraps a block's statements in a statement_list); an `if` / `for` / `switch` binds its
+-- initializer, a range `:=` and a type switch's alias. A package-level name binds nothing — it IS the package's,
+-- shared by every file of it.
+local function go_idents(n, src, out, row)
+    for _, c in tsutil.inext, n, -1 do
+        if c:type() == 'identifier' then out[node_text(c, src)] = { row = row } end
+    end
+end
+local function go_params(node, src, out)
+    for _, f in ipairs({ 'receiver', 'parameters', 'result' }) do
+        local pl = node:field(f)[1]
+        if pl and pl:type() == 'parameter_list' then
+            for _, d in tsutil.inext, pl, -1 do
+                for _, nm in ipairs(d:field('name')) do out[node_text(nm, src)] = {} end
+            end
+        end
+    end
+end
+local function go_decl(st, src, out, row) -- one statement's own declarations
+    local t = st:type()
+    if t == 'short_var_declaration' then
+        local l = st:field('left')[1]
+        if l then go_idents(l, src, out, row) end
+    elseif t == 'var_declaration' or t == 'const_declaration' then
+        local function specs(n)
+            for _, s in tsutil.inext, n, -1 do
+                local st2 = s:type()
+                if st2 == 'var_spec' or st2 == 'const_spec' then
+                    for _, nm in ipairs(s:field('name')) do out[node_text(nm, src)] = { row = row } end
+                elseif st2 == 'var_spec_list' then specs(s) end
+            end
+        end
+        specs(st)
+    end
+end
+local function go_block(node, src, out)
+    for _, c in tsutil.inext, node, -1 do
+        if c:type() == 'statement_list' then
+            for _, s in tsutil.inext, c, -1 do go_decl(s, src, out, (select(1, s:range()))) end
+        else go_decl(c, src, out, (select(1, c:range()))) end
+    end
+end
+local function go_ctrl(node, src, out)
+    local init = node:field('initializer')[1]
+    if init then go_decl(init, src, out) end
+    for _, c in tsutil.inext, node, -1 do
+        local t = c:type()
+        if t == 'range_clause' then
+            local def = false
+            for _, k in tsutil.inext, c, -1 do if not k:named() and k:type() == ':=' then def = true end end
+            local l = c:field('left')[1]
+            if def and l then go_idents(l, src, out) end
+        elseif t == 'for_clause' then
+            local fi = c:field('initializer')[1]
+            if fi then go_decl(fi, src, out) end
+        end
+    end
+    local alias = node:field('alias')[1]
+    if alias then go_idents(alias, src, out) end
+end
+local GO_LEXICAL_SCOPES = {
+    function_declaration = { kind = 'param', harvest = go_params },
+    method_declaration = { kind = 'param', harvest = go_params },
+    func_literal = { kind = 'param', harvest = go_params },
+    block = { kind = 'local', harvest = go_block },
+    if_statement = { kind = 'local', harvest = go_ctrl }, for_statement = { kind = 'local', harvest = go_ctrl },
+    expression_switch_statement = { kind = 'local', harvest = go_ctrl },
+    type_switch_statement = { kind = 'local', harvest = go_ctrl },
+}
+-- the call-argument gate's local binders (fn.locals, CART-1597's hook): every binder of the body, a func_literal's
+-- INCLUDED — `f := func(p int) { use(p) }` mints no node of its own, so its calls are the enclosing function's (an
+-- over-wide set only REFUSES a by-name link: the safe direction)
+local function go_fn_locals(def, src, out)
+    local function walk(n)
+        for _, c in tsutil.inext, n, -1 do
+            local e = GO_LEXICAL_SCOPES[c:type()]
+            if e then e.harvest(c, src, out) end
+            walk(c)
+        end
+    end
+    go_params(def, src, out) -- (the receiver and named results: fn.params holds only the parameter list)
+    local body = def:field('body')[1]
+    if body then walk(body); go_block(body, src, out) end
+end
+
 return {
+    lexical_scopes = GO_LEXICAL_SCOPES, -- CART-1598
+    fn_locals = go_fn_locals,
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not

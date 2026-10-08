@@ -5975,6 +5975,53 @@ test('refs: a python param or local never links across files; a global or an imp
     vim.fn.delete(root, 'rf')
 end)
 
+-- ⚠ A GO PARAM OR LOCAL IS BOUND (CART-1598): go declared no scope model either.
+test('refs: a go param, receiver or local never links across files; range = and a name above its := stay free (CART-1598)', function ()
+    if not has_parser('go') then skip 'no go parser' end
+    local bound = { 'recv', 'parm', 'parm2', 'vari', 'resn', 'shrt', 'vdec', 'cdec', 'rngv', 'ifin', 'tsal', 'forc', 'litp',
+        'inlt', 'vgrp' }
+    local free = { 'rngw', 'ctrl' }
+    local defs = { 'package m', 'var late = 0', 'var litv = 0' } -- (go mints no fn-ref for a bare value mention: the row rule shows on a VAR)
+    for _, l in ipairs({ bound, free }) do for _, nm in ipairs(l) do defs[#defs + 1] = 'func ' .. nm .. '() int { return 1 }' end end
+    local root = mkroot('a.go', table.concat(defs, '\n'))
+    local fd = assert(io.open(root .. '/b.go', 'w'))
+    fd:write(table.concat({
+        'package m',
+        'func (recv *S) M(parm, parm2 int, vari ...int) (resn int) {',
+        '\t_ = late', -- (a bare mention: the row rule is the scope stack's; fn_locals, the arg gate's, is function-wide)
+        '\tshrt := 1',
+        '\tvar vdec = 2',
+        '\tvar (', '\t\tvgrp = 5', '\t)',
+        '\tconst cdec = 3',
+        '\tlate := 4',
+        '\tfor _, rngv := range xs { use(rngv) }',
+        '\tfor rngw = range xs { use(rngw) }',
+        '\tif ifin, ok := m[k]; ok { use(ifin) }',
+        '\tswitch tsal := v.(type) { case int: use(tsal) }',
+        '\tfor forc := 0; forc < 3; forc++ { use(forc) }',
+        '\tf := func(litp int, litv int) int { inlt := 1; use(litp, inlt); return litv }',
+        '\tuse(recv, parm, parm2, vari, resn, shrt, vdec, cdec, f, ctrl)',
+        '\tuse(vgrp)',
+        '\treturn 0',
+        '}',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        if (e.kind == 'ref' or e.kind == 'reg') and byid[e.to] and byid[e.to].file == 'a.go' and (byid[e.from] or { file = e.from }).file == 'b.go' then
+            refs[byid[e.to].name] = true
+        end
+        if e.kind == 'use' and byid[e.to] and byid[e.to].file == 'a.go' then refs['var:' .. byid[e.to].name] = true end
+    end
+    for _, nm in ipairs(bound) do ok(not refs[nm], nm .. ' is BOUND: no cross-file link ' .. vim.inspect(refs)) end
+    for _, nm in ipairs(free) do ok(refs[nm], nm .. ' is FREE: it links ' .. vim.inspect(refs)) end
+    ok(refs['var:late'], 'a mention ABOVE its := reads the package var (visible from its row): ' .. vim.inspect(refs))
+    ok(not refs['var:litv'], 'a func literal\'s PARAM is bound in it: ' .. vim.inspect(refs))
+    vim.fn.delete(root, 'rf')
+end)
+
 test('defs: a lua table-FIELD function is cbarg; a local function is not (the field_fn_cbarg set, CART-1592)', function ()
     local root = mkroot('t.lua', table.concat({
         'local function plain() return 1 end',
