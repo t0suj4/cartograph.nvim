@@ -73,3 +73,36 @@ test('guards: require cycles reported with the load-time hedge', function ()
     ok(fs[1].message:find('2 modules', 1, true))
     ok(fs[1].message:find('lazy requires break it', 1, true), 'the hedge is spoken')
 end)
+
+-- ⚠ A LAZY NAMESPACE IS A MODULE BINDING (CART-1619): nvim-dap's `local lazy = setmetatable({}, { __index =
+-- function (_, key) return require('dap.' .. key) end })` makes `lazy.utils` the module dap.utils; its calls resolved
+-- only by tail guess (lazy.utils.notify refused ambiguous beside another module's notify). A lazy require loads on
+-- first use, so a cycle through it is no load-time cycle
+test('guards: a LAZY NAMESPACE (__index requiring prefix .. key) binds N.k to its module, and closes no require cycle', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/dap', 'p')
+    write(root, 'dap.lua', table.concat({
+        "local lazy = setmetatable({}, { __index = function (_, key) return require('dap.' .. key) end })",
+        -- (a FIXED module under a computed name is no namespace: the concatenation's tail is not the key)
+        "local NAME = 'ui'",
+        "local cfg = setmetatable({}, { __index = function (_, k) return require('dap.' .. NAME)[k] end })",
+        "local M = {}",
+        "function M.run() lazy.utils.notify('x'); cfg.utils.notify('y'); return lazy.ui:pick() end",
+        "return M",
+    }, '\n'))
+    write(root, 'dap/utils.lua', "local dap = require('dap')\nlocal M = {}\nfunction M.notify(m) return dap, m end\nreturn M")
+    write(root, 'dap/ui.lua', "local M = {}\nfunction M:pick() return self end\nfunction M.notify(m) return m end\nreturn M")
+    store.ingest(ts.extract(root))
+    local lz = {}
+    for _, e in ipairs(store.data.edges) do if e.kind == 'import' and e.lazy then lz[e.bind] = e.to end end
+    eq('dap/utils.lua', lz['lazy.utils'], 'N.k is the module prefix .. k')
+    eq('dap/ui.lua', lz['lazy.ui'])
+    eq(nil, lz['cfg.utils'], 'require(prefix .. <not the key>) makes no namespace')
+    local cv = require('cartograph.callview').of(store.data)
+    local to = {}
+    for i = 1, cv.n do to[cv.get(i, 'full') or i] = cv.get(i, 'to') end
+    ok(tostring(to['lazy.utils.notify']):match('^dap/utils%.lua::M%.notify'), 'the bound module answers an ambiguous tail')
+    ok(tostring(to['lazy.ui:pick']):match('^dap/ui%.lua::'), 'a method call through it too')
+    eq(0, #lint.run(store, { only = { ['require-cycle'] = true } }), 'dap -> utils is lazy: no load-time cycle')
+end)

@@ -779,6 +779,78 @@ local function toc_scope(file, _, root)
     return hit and seg or ''
 end
 
+-- LAZY NAMESPACES (CART-1619): a table whose __index requires `<prefix> .. key` IS a module namespace — nvim-dap's
+-- `local lazy = setmetatable({}, { __index = function (_, key) return require('dap.' .. key) end })`, conform's
+-- `return setmetatable(M, { __index = function (_, k) return require('conform.formatters.' .. k) end })`. Each `N.k`
+-- the file names is `require('<prefix>k')`: an import edge bound to `N.k` (lazy: it loads on first use, so it closes no
+-- load-time cycle), which resolve_module_alias answers `N.k.member()` through. Derived from the __index body itself
+local function lua_lazy_imports(tsroot, src)
+    if not (src:find('__index', 1, true) and src:find('require', 1, true)) then return {} end
+    local function named(n, i) return n and n:named_child(i) end
+    -- the literal prefix of `require('<prefix>' .. key)` anywhere in the __index body -> prefix | nil
+    local function prefix_in(n, key)
+        if n:type() == 'function_call' then
+            local nm, ra = n:field('name')[1], n:field('arguments')[1]
+            local b = nm and node_text(nm, src) == 'require' and ra and ra:named_child_count() == 1 and named(ra, 0)
+            local op = b and b:type() == 'binary_expression' and b:child(1)
+            if op and op:type() == '..' then
+                local l, r = b:field('left')[1], b:field('right')[1]
+                local c = l and l:type() == 'string' and l:field('content')[1]
+                if c and r and r:type() == 'identifier' and node_text(r, src) == key then return node_text(c, src) end
+            end
+        end
+        for _, c in inext, n, -1 do
+            local p = prefix_in(c, key)
+            if p then return p end
+        end
+    end
+    -- the namespace a `setmetatable(T, { __index = … })` call makes -> name, prefix | nil
+    local function lazy_ns(call)
+        local args = call:field('arguments')[1]
+        local a1, a2 = named(args, 0), named(args, 1)
+        if not (a2 and a2:type() == 'table_constructor') then return nil end
+        for _, f in inext, a2, -1 do
+            local fname, fv = f:type() == 'field' and f:field('name')[1], f:type() == 'field' and f:field('value')[1]
+            if fname and node_text(fname, src) == '__index' and fv and fv:type() == 'function_definition' then
+                local key = named(fv:field('parameters')[1], 1)
+                local prefix = key and key:type() == 'identifier' and prefix_in(fv, node_text(key, src))
+                if not prefix then return nil end
+                if a1 and a1:type() == 'identifier' then return node_text(a1, src), prefix end
+                -- `local N = setmetatable({…}, …)`: a single-name assignment
+                local el = call:parent()
+                local as = el and el:type() == 'expression_list' and el:parent()
+                local vl = as and as:type() == 'assignment_statement' and named(as, 0)
+                local v = vl and vl:type() == 'variable_list' and vl:named_child_count() == 1 and named(vl, 0)
+                if v and v:type() == 'identifier' and el:named_child_count() == 1 then return node_text(v, src), prefix end
+                return nil
+            end
+        end
+    end
+    local ns, uses = {}, {}
+    local function walk(n, pass)
+        local t = n:type()
+        if pass == 1 and t == 'function_call' then
+            local nm = n:field('name')[1]
+            if nm and node_text(nm, src) == 'setmetatable' then
+                local name, prefix = lazy_ns(n)
+                if name then ns[name] = prefix end
+            end
+        elseif pass == 2 and t == 'dot_index_expression' then
+            local tb, fd = n:field('table')[1], n:field('field')[1]
+            local name = tb and tb:type() == 'identifier' and node_text(tb, src)
+            if name and ns[name] and fd then uses[name .. '.' .. node_text(fd, src)] = ns[name] .. node_text(fd, src) end
+        end
+        for _, c in inext, n, -1 do walk(c, pass) end
+    end
+    walk(tsroot, 1)
+    if not next(ns) then return {} end
+    walk(tsroot, 2)
+    local out = {}
+    for alias, path in pairs(uses) do out[#out + 1] = { path = path, alias = alias, lazy = true } end
+    table.sort(out, function (a, b) return a.alias < b.alias end)
+    return out
+end
+
 -- a LuaLS DECLARATION file (CART-1615): a `---@meta` tag in the leading comments (`--- @meta _` is the same tag) says
 -- the file only declares what is implemented elsewhere — vim/_meta/api.gen.lua is `function vim.api.x(a, b) end` per
 -- native function. The tag also silences diagnostics on REAL code (nvim-treesitter's vendored async.lua is 740 lines
@@ -1460,6 +1532,8 @@ return {
     colon_calls_pass_self = true,
     -- a function that only DECLARES (an empty body in a `---@meta` file): its effects are the native implementation's
     declaration = lua_declaration,
+    -- a table whose __index requires `<prefix> .. key` is a module namespace (CART-1619)
+    scan_imports = lua_lazy_imports,
     -- stdlib receivers must not tail-match a project def: string.format
     -- would otherwise link to the one module that defines M.format
     stdlib_prefixes = { 'string.', 'table.', 'math.', 'os.', 'io.',

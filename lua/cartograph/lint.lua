@@ -818,9 +818,16 @@ end
 local function cycle_findings(store)
     local scc = require 'cartograph.scc'
     local ids, adj = {}, {}
+    -- (a LAZY require — a namespace's __index, CART-1619 — loads on first use: it closes no load-time cycle)
+    local eager = {}
+    for to, ins in pairs(store.imports_in) do
+        for _, r in ipairs(ins) do if not r.lazy then eager[r.from .. '\0' .. to] = true end end
+    end
     for f, tos in pairs(store.imports_out) do
         ids[#ids + 1] = f
-        adj[f] = tos
+        local keep = {}
+        for _, to in ipairs(tos) do if eager[f .. '\0' .. to] then keep[#keep + 1] = to end end
+        adj[f] = keep
     end
     table.sort(ids)
     local con = scc.condense(adj, ids)

@@ -106,7 +106,7 @@ local function idx_edge(T, e)
         -- TRI-STATE and nil means "this language's syntax does not discriminate".
         table.insert(T.imports_in[e.to], { from = e.from,
             sideeffect = e.sideeffect == true,
-            once = e.once, soft = e.soft, site = e.site })
+            once = e.once, soft = e.soft, site = e.site, lazy = e.lazy })
         T.imports_out[e.from] = T.imports_out[e.from] or {}
         table.insert(T.imports_out[e.from], e.to)
     elseif e.kind == 'use' then

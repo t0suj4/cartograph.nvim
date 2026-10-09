@@ -2705,6 +2705,11 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
             if cfull then
                 recv, member, mar = cfull:match('^([%w_]+)[.:]([%w_]+)/(%d+)$')
                 if not recv then recv, member = cfull:match('^([%w_]+)[.:]([%w_]+)$') end
+                -- (a LAZY NAMESPACE binds TWO segments, `lazy.utils` -> dap/utils.lua, CART-1619)
+                if not recv and amap[cfile] then
+                    local r2, m2 = cfull:match('^([%w_]+%.[%w_]+)[.:]([%w_]+)$')
+                    if r2 and amap[cfile][r2] then recv, member = r2, m2 end
+                end
             end
             -- fallback: the receiver preserved separately (zig field calls key
             -- only the member into `full`, but recv_local kept the object) — so
@@ -8962,7 +8967,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local target = spec.resolve_import(imp.path, importable, file, root)
                 if target and target ~= file then
                     edges[#edges + 1] = { from = file, to = target,
-                        kind = 'import', bind = imp.alias, inferred = true }
+                        kind = 'import', bind = imp.alias, inferred = true, lazy = imp.lazy }
                 end
             end
         end
