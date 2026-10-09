@@ -483,7 +483,59 @@ local RUBY_GUARDS = {
     end,
 }
 
+-- ── LEXICAL SCOPES (CART-1598, ruby) ──────────────────────────────────────────────────────────────────────────────
+-- ruby declared no scope model, so the cross-file unique join claimed every param and local. A method binds its
+-- params and every local its body assigns (`x = …`, `a, b = …`, `x += …`, a for / rescue variable) — FROM THE
+-- ASSIGNING ROW: before it a bare `x` is a method call —; a block / lambda binds its params. No fn_locals: a local
+-- is never CALLED as `x(…)` in ruby (that is always a method), so the callee gate has nothing to shadow.
+local function rb_names(n, src, out, row)
+    if not n then return end
+    local t = n:type()
+    if t == 'identifier' then
+        local nm = node_text(n, src)
+        local b = out[nm]
+        if not b or (b.row and row and row < b.row) then out[nm] = { row = row } end -- (the FIRST assignment)
+    elseif t == 'left_assignment_list' or t == 'destructured_parameter' or t == 'destructured_left_assignment'
+        or t == 'rest_assignment' or t == 'exception_variable' then
+        for _, c in tsutil.inext, n, -1 do if c:named() then rb_names(c, src, out, row) end end
+    end
+end
+local function rb_params(node, src, out)
+    local ps = node:field('parameters')[1]
+    if not ps then return end
+    for _, c in tsutil.inext, ps, -1 do
+        local t = c:type()
+        if t == 'identifier' or t == 'destructured_parameter' then rb_names(c, src, out)
+        elseif c:named() then rb_names(c:field('name')[1], src, out) end -- (optional / splat / keyword / block params)
+    end
+end
+local function rb_method(node, src, out)
+    rb_params(node, src, out)
+    local function walk(n)
+        for _, c in tsutil.inext, n, -1 do
+            local t = c:type()
+            if t == 'method' or t == 'singleton_method' or t == 'class' or t == 'module' then
+                -- (a nested def / class is its own scope)
+            else
+                local row = select(1, c:range())
+                if t == 'assignment' or t == 'operator_assignment' then rb_names(c:field('left')[1], src, out, row)
+                elseif t == 'for' then rb_names(c:field('pattern')[1], src, out, row)
+                elseif t == 'exception_variable' then rb_names(c, src, out, row) end
+                walk(c)
+            end
+        end
+    end
+    local body = node:field('body')[1]
+    if body then walk(body) end
+end
+local RUBY_LEXICAL_SCOPES = {
+    method = { kind = 'param', harvest = rb_method }, singleton_method = { kind = 'param', harvest = rb_method },
+    block = { kind = 'param', harvest = rb_params }, do_block = { kind = 'param', harvest = rb_params },
+    lambda = { kind = 'param', harvest = rb_params },
+}
+
 return {
+    lexical_scopes = RUBY_LEXICAL_SCOPES, -- CART-1598
     is_write = ruby_is_write,
     write_gate = { assignment = true, operator_assignment = true, element_reference = true, call = true,
         left_assignment_list = true },

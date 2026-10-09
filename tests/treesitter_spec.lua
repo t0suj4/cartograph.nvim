@@ -6143,6 +6143,41 @@ test('refs: a c / c++ param or local never links across files; a file-scope glob
     end
 end)
 
+-- ⚠ A RUBY PARAM OR LOCAL IS BOUND (CART-1598): discourse's `categories = …` passed on read as Site#categories (a
+-- fabricated call cycle). Before its first assignment a bare name is a METHOD CALL: it stays free.
+test('refs: a ruby param, local or block param is no method of its name; a name before its assignment is (CART-1598)', function ()
+    if not has_parser('ruby') then skip 'no ruby parser' end
+    local bound = { 'parm', 'optp', 'splp', 'kwp', 'kwo', 'hsp', 'blkp', 'dsta', 'loca', 'mula', 'mulb', 'opa', 'forv',
+        'resv', 'bkp', 'lmp', 'twice', 'bda', 'bop' }
+    local free = { 'ctrl', 'early', 'nested' }
+    local defs = { 'class K' }
+    for _, l in ipairs({ bound, free }) do for _, nm in ipairs(l) do defs[#defs + 1] = '  def ' .. nm .. '; 1; end' end end
+    for _, l in ipairs({
+        '  def m(parm, optp = 1, *splp, kwp:, kwo: 2, **hsp, &blkp)',
+        '    eat(early)', '    early = 0',
+        '    loca = 1', '    mula, mulb = 2, 3', '    opa += 1',
+        '    for forv in xs do eat(forv) end',
+        '    begin; rescue StandardError => resv; eat(resv); end',
+        '    xs.each { |bkp| eat(bkp) }', '    l = ->(lmp) { eat(lmp) }',
+        '    twice = 1', '    eat(twice)', '    twice = 2', -- (bound from its FIRST assignment)
+        '    xs.each { |(bda, bdb), bop = 1| eat(bda, bop) }', -- (a block's destructured / optional params: no fn.params)
+        '    eat(parm, optp, splp, kwp, kwo, hsp, blkp, loca, mula, mulb, opa, ctrl)',
+        '    def inner; nested = 1; end', '    eat(nested)',
+        '  end',
+        '  def d((dsta, dstb)); eat(dsta); end',
+        'end',
+    }) do defs[#defs + 1] = l end
+    local data = ts.extract(mkroot('k.rb', table.concat(defs, '\n')))
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local f, t = byid[e.from], byid[e.to]
+        if e.kind == 'ref' and f and t and (f.name == 'K#m' or f.name == 'K#d') then refs[t.name:match('[#.](.*)$') or t.name] = true end
+    end
+    for _, nm in ipairs(bound) do ok(not refs[nm], nm .. ' is BOUND: not the method ' .. vim.inspect(refs)) end
+    for _, nm in ipairs(free) do ok(refs[nm], nm .. ' is a METHOD call here: it links ' .. vim.inspect(refs)) end
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.
