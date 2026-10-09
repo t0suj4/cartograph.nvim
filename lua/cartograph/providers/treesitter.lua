@@ -5537,6 +5537,9 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- a PACKAGE-QUALIFIED member (go's `htesting.IsTest`): the member is a field_identifier, no mention type, so the
     -- read of another package's var was invisible — declared per spec, resolved through the import binding (CART-1580)
     local qualmem = spec.qualified_member
+    -- a macro BODY is opaque text to the grammar (c's preproc_arg): its identifiers are no mentions, so a var read only
+    -- through `#define CUR (scm_i_current_thread)` read as dead state — its text is kept for the reduce (CART-1578)
+    local mtext = spec.macro_text
     local idxpos = spec.index_positions -- the BRACKET forms (CART-0533)
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
@@ -5694,6 +5697,20 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                         end
                     end
                 end
+            end
+            if mtext and mtext[ct] then
+                local l = buf.mtext
+                if not l then l = {}; buf.mtext = l end
+                local msr, msc = c:range()
+                -- (a function-like macro's PARAMETERS are its own names, no var: `#define X(a) (a + g)` reads g only)
+                local ps, pset = n:field('parameters')[1], ''
+                if ps then
+                    for _, pc in tsutil.inext, ps, -1 do
+                        if pc:named() then pset = pset .. ',' .. node_text(pc, src) end
+                    end
+                    pset = pset .. ','
+                end
+                l[#l + 1] = msr; l[#l + 1] = msc; l[#l + 1] = node_text(c, src); l[#l + 1] = pset
             end
             local qop -- (the qualifier's name when c is a qualified member: `pkg` of `pkg.Var`, CART-1580)
             if qualmem and not idt[ct] then
@@ -6289,6 +6306,50 @@ local function reduce_mentions(file, buf, L)
                             elseif gp ~= e.gp then e.gp = false end
                         end
                     end
+                end
+            end
+        end
+    end
+    -- MACRO-BODY READS (CART-1578): every identifier token of a macro body that names a var — the nearest same-file
+    -- one, else the unique one in the file's scope — is a READ, owned by the file (whoever expands the macro is not
+    -- known here; that the var is read is). Text is scanned, not parsed: a token that is no var names nothing.
+    if wmode and buf.mtext then
+        local mt = buf.mtext
+        for i = 1, #mt, 4 do
+            local row, col0, text, pset = mt[i], mt[i + 1], mt[i + 2], mt[i + 3]
+            local lrow, lcol = row, col0
+            local p = 1
+            for s, tok in text:gmatch('()([%a_][%w_]*)') do
+                -- (the token's position: rows and columns advance over the text before it)
+                local seg = text:sub(p, s - 1)
+                local nl = 0
+                for _ in seg:gmatch('\n') do nl = nl + 1 end
+                if nl > 0 then lrow = lrow + nl; lcol = #seg:match('[^\n]*$') else lcol = lcol + #seg end
+                p = s
+                local cands = not (pset ~= '' and pset:find(',' .. tok .. ',', 1, true)) and L.var_named[tok] or nil
+                local var
+                if cands then
+                    for _, v in ipairs(cands) do
+                        if v.file == file and (not var or v.line > var.line) and v.line <= lrow then var = v end
+                    end
+                    if not var and #cands == 1 and not cands[1].vlocal and M._same_family(cands[1].file, file)
+                        and not (L.scopes and L.scopes[cands[1].file] ~= L.scopes[file]) then var = cands[1] end
+                end
+                if var then
+                    local k = file .. '\31' .. var.id
+                    local e = useEdge[k]
+                    if not e then
+                        e = { from = file, to = var.id, kind = 'use', at = {} }
+                        useEdge[k] = e
+                        L.adduse(e)
+                    end
+                    e.at[#e.at + 1] = { start = { line = lrow, char = lcol }, ['end'] = { line = lrow, char = lcol + #tok } }
+                    if e.rw ~= 1 and e.rw ~= 3 then e.rw = e.rw and 3 or 1 end
+                    local fl = e.flds or {}
+                    e.flds = fl
+                    local cur = fl[''] or 0
+                    local prevrw = cur % 4
+                    if prevrw ~= 1 and prevrw ~= 3 then fl[''] = cur - prevrw + (prevrw == 0 and 1 or 3) end
                 end
             end
         end

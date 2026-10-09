@@ -6397,6 +6397,32 @@ test('refs: a def nested in another function is reachable by name only inside it
     ok(not again['load>require'], 'after relink: still not the other function\'s local: ' .. vim.inspect(again))
 end)
 
+-- ⚠ A MACRO BODY READS (CART-1578): `#define SCM_I_CURRENT_THREAD (scm_i_current_thread)` — the body is opaque text,
+-- so guile's thread-local read as "written but never read". And a function-like macro's PARAMETERS are its own names.
+test('use edges: a c macro body reads the vars it names; a macro parameter reads nothing (CART-1578)', function ()
+    if not has_parser('c') then skip 'no c parser' end
+    local root = mkroot('t.c', table.concat({
+        'int scm_cur;', 'int a;', 'int g;', 'int multi;',
+        '#define CUR (scm_cur)', '#define X(a) ((a) + g)', '#define M2 (1 + \\', '  multi)', -- (the body starts on the #define row; multi sits on the NEXT)
+        'void set(void) { scm_cur = 1; a = 2; g = 3; multi = 4; }',
+    }, '\n'))
+    local fd = assert(io.open(root .. '/u.c', 'w')); fd:write('int ext_g;\nvoid w(void) { ext_g = 1; }\n'); fd:close()
+    local fd2 = assert(io.open(root .. '/v.c', 'w')); fd2:write('#define E (ext_g)\nint q(void) { return E; }\n'); fd2:close()
+    local data = ts.extract(root)
+    local byid, rw, at = {}, {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local t = byid[e.to]
+        if e.kind == 'use' and t and (e.from == 't.c' or e.from == 'v.c') then rw[t.name] = e.rw; at[t.name] = e.at end
+    end
+    eq(1, rw.ext_g, 'a macro reads ANOTHER file\'s unique global: ' .. vim.inspect(rw))
+    eq(7, at.multi and at.multi[1] and at.multi[1].start.line, 'the continued body\'s token sits on ITS row')
+    eq(1, rw.scm_cur, 'the macro body READS scm_cur: ' .. vim.inspect(rw))
+    eq(1, rw.g, 'a function-like macro body reads g')
+    eq(1, rw.multi, 'a continued macro body too')
+    eq(nil, rw.a, 'its parameter `a` is no read of the var a')
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.

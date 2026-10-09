@@ -13,6 +13,7 @@ return {
     is_write = tsutil.cfamily_is_write,
     guards = tsutil.CFAMILY_GUARDS, -- (CART-1576)
     lexical_scopes = tsutil.CFAMILY_LEXICAL_SCOPES, fn_locals = tsutil.cfamily_fn_locals, -- (CART-1598)
+    macro_text = { preproc_arg = true }, -- (a macro body's identifiers read their vars, CART-1578)
     -- the PREFILTER: every immediate parent type a write mention can have here.
     -- Without it the classifier is never invoked (v147 shipped that mistake).
     write_gate = { assignment_expression = true, update_expression = true,
@@ -74,7 +75,8 @@ return {
     -- reads the DECLARED NAME. Same category as lua's `<const>`/`<close>` (CART-0234), which
     -- is why it belongs in this declared key and not in a base table: `storage_class_specifier`
     -- is a c/cpp node type and a name-keyed base set cannot say so.
-    binding_modifiers = { storage_class_specifier = true, type_qualifier = true },
+    binding_modifiers = { storage_class_specifier = true, type_qualifier = true,
+        preproc_params = true }, -- (a function-like macro's PARAMETERS declare its own names: they read no var, CART-1578)
         exts = { 'c', 'h' },
         functions = [[
             (function_definition
