@@ -85,8 +85,10 @@ function M.new()
                 if not blk_first then blk_first = i - 1 end
                 blk[#blk + 1] = l
             else
-                local owner, sep, member, params = l:match('^function%s+([%w_%.]+)([%.:])([%w_]+)%s*%(([^)]*)%)')
-                local bare = (not owner) and l:match('^function%s+([%w_]+)%s*%(')
+                -- (INDENTED too: nvim's shared.lua / editor.lua define vim.validate, vim.notify_once, vim.ringbuf … inside
+                -- a `do … end` block — 8 of 70 vim.* definitions were missing from the profile, CART-1616)
+                local owner, sep, member, params = l:match('^%s*function%s+([%w_%.]+)([%.:])([%w_]+)%s*%(([^)]*)%)')
+                local bare = (not owner) and l:match('^%s*function%s+([%w_]+)%s*%(')
                 if owner and opts.owner_of then owner = opts.owner_of(owner) end
                 if (owner or bare) and live then
                     local rows = annot.read_block(blk, blk_first or 0, TAG)

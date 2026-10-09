@@ -126,3 +126,22 @@ test('luajit: a member of ANOTHER Lua version is not served as this runtime\'s',
     end
     eq(nil, (prof.canon or {}).pack, 'and cannot sign a bare `pack` either')
 end)
+
+-- ⚠ AN INDENTED DEFINITION IS A DEFINITION (CART-1616): nvim's shared.lua / editor.lua define vim.validate,
+-- vim.notify_once, vim.ringbuf … inside a `do … end` block, and the line reader matched `^function` only — 8 of 70
+-- vim.* definitions were absent from nvim.mpack, vim.validate (187 calls in the runtime) among them
+test('metaread.each_function: an INDENTED definition (inside a do-block) is read with its annotations', function ()
+    local R = require('cartograph.metaread').new()
+    local got = {}
+    R:each_function({
+        'do',
+        '  --- @param name string',
+        '  --- @return boolean',
+        '  function vim.validate(name) end',
+        'end',
+        'function vim.top(x) end',
+    }, {}, function (f) got[f.key] = f end)
+    ok(got['vim#validate'], 'the indented def is read')
+    eq('string', got['vim#validate'] and got['vim#validate'].sig.params[1].type, 'with the annotation block above it')
+    ok(got['vim#top'], 'a column-0 def still is')
+end)
