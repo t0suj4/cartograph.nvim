@@ -576,3 +576,25 @@ test('effects: a call under `if <param>` / its else / ELSEIF arm is discharged w
     eq(3, tier, 'and through a caller whose argument leaves the guard undecided')
     ok(next(sums[by['M.caller_mixed'].id].w) ~= nil, 'a key written guarded AND unguarded is unguarded: a falsy argument still writes it')
 end)
+
+-- ⚠ A RECEIVER THE LANGUAGE ALREADY TYPED IS NOT A NAME MATCH (CART-1620's sizing): `('%s'):format(x)` is keyed
+-- string.format before resolution, yet effects looked a METHOD call up in the name-matched `~` tier only — 3258 calls
+-- on lua/cartograph read `mh`. And a literal at a callback position calls nothing (`s:gsub('a', '-')`)
+test('effects: a method call keyed string.* takes the stdlib contract exactly; a literal callback argument calls nothing', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local log = {}',
+        'local function fmt(x) return ("%s!"):format(x) end',
+        'local function dash(s) return (s .. ""):gsub("a", "-") end',
+        'local function record(m) log[#log + 1] = m; return m end',
+        'local function each(s) return (s .. ""):gsub("%w+", record) end',
+        'local function untyped(s) return s:match("x") end',
+        'return { fmt, dash, each, untyped }',
+    }, '\n'))))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do by[n.name] = n end
+    eq('pure', effects.purity(store, by.fmt.id), 'a typed receiver: string.format, exactly')
+    eq('pure', effects.purity(store, by.dash.id), 'a literal replacement calls nothing')
+    eq('writes', effects.purity(store, by.each.id), 'a function replacement is called: its writes are the call\'s')
+    eq('pure~', effects.purity(store, by.untyped.id), 'an untyped receiver keeps the name-matched tier')
+end)

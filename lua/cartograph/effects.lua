@@ -146,6 +146,17 @@ function M.sig_of(lang, name, is_method)
     local sl = M.SIGS[lang]
     if not sl or not name then return nil end
     if is_method then
+        -- ★ A RECEIVER TYPED BEFORE RESOLUTION: a method call keyed `owner.m` — no colon — was re-keyed by the
+        -- language's own typing (`('%s'):format(x)` / a local only ever a string: `string.format`, CART-1062 / 1150).
+        -- Its owner's contract answers EXACTLY, never the name-matched `~` tier: 3258 such calls on lua/cartograph had
+        -- read `mh`. The receiver is argument 1 of a method call's argv, so the contract's positions hold as written
+        if not name:find(':', 1, true) and name:find('.', 1, true) then
+            local sig = sl.exact[name]
+            if sig then return sig end
+            for p, ps in pairs(sl.prefix) do
+                if name:sub(1, #p) == p then return ps end
+            end
+        end
         -- method calls consult the METHOD tier first: an exact entry is a
         -- contract for the GLOBAL of that name (WoW's gsub alias), not for
         -- an arbitrary receiver — the ~ grade must not be laundered away
@@ -986,6 +997,9 @@ function M.summaries(store)
                                     end
                                     -- (a callback calling a parameter of an enclosing function: still pending here)
                                     for _, p in pairs(ts2.cpo or {}) do cp_add(sum, p.owner, p.j) end
+                                elseif a and (a.k == 'lit' or a.k == 'ctor') then
+                                    -- (a literal or a table constructor at a callback position is no function: nothing
+                                    -- is called — `s:gsub('%s', ' ')`, `s:gsub('%w', map)` with a constructor)
                                 elseif a and builtin_callback(store, c, caller, a, lang, sum) then
                                     -- (a BUILTIN passed by name — `pcall(require, m)`, `pcall(vim.fn.x, …)`: its
                                     -- signature, CART-1563)
