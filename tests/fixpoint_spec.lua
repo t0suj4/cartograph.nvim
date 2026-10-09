@@ -495,3 +495,37 @@ test('effects: a derived local handed to a callee that calls it is a call throug
     for _, n in ipairs(store.data.nodes) do by[n.name] = n end
     eq('pure', effects.purity(store, by.lit.id), 'a literal at the param: no call happens, no hedge')
 end)
+
+-- ⚠ A ---@meta STUB IS A DECLARATION, NOT THE CALLEE'S BODY (CART-1615): 832 runtime call edges land on
+-- vim/_meta/api.gen.lua's `function vim.api.x(a, b) end`, and the empty body read every caller pure. The tag alone is
+-- not the class — nvim-treesitter's vendored async.lua is real code under `---@meta …` — so only an EMPTY body declares
+test('effects: a call bound to a ---@meta stub is a call to what it declares — the declared name answers, never the empty body', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/vim/_meta', 'p')
+    local function put(f, t) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    put('vim/_meta/api.lua', table.concat({
+        '-- (a header comment may precede the tag)',
+        '--- @meta _',
+        'function vim.api.nvim_buf_set_lines(buffer, start) end',
+        'function vim.api.nvim_tagged_real(tbl) tbl.hit = true end',
+    }, '\n'))
+    put('paint.lua', table.concat({
+        'local api = vim.api',
+        'local function paint(buffer) api.nvim_buf_set_lines(buffer, 0) end',
+        'local function noop_stub(x) end',
+        'return { paint, noop_stub }',
+    }, '\n'))
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do by[n.name] = n end
+    ok(by['vim.api.nvim_buf_set_lines'].decl, 'an empty body in a ---@meta file declares')
+    ok(not by['vim.api.nvim_tagged_real'].decl, 'a body under the tag is code')
+    ok(not by.noop_stub.decl, 'an empty body outside a ---@meta file is a no-op, not a declaration')
+    local callrec = require 'cartograph.callrec'
+    local lk = store.topo():sites(by.paint.id)
+    eq(by['vim.api.nvim_buf_set_lines'].id, lk[1] and callrec.to(lk[1]), 'the call links to the declaration')
+    eq('io', effects.purity(store, by.paint.id), 'the declared name vim.api.* is IO — not the empty body pure')
+    eq('pure~', effects.purity(store, by['vim.api.nvim_buf_set_lines'].id), 'a declaration hedges its own effects')
+    eq('pure', effects.purity(store, by.noop_stub.id))
+end)

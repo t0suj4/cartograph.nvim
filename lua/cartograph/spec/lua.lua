@@ -779,6 +779,29 @@ local function toc_scope(file, _, root)
     return hit and seg or ''
 end
 
+-- a LuaLS DECLARATION file (CART-1615): a `---@meta` tag in the leading comments (`--- @meta _` is the same tag) says
+-- the file only declares what is implemented elsewhere — vim/_meta/api.gen.lua is `function vim.api.x(a, b) end` per
+-- native function. The tag also silences diagnostics on REAL code (nvim-treesitter's vendored async.lua is 740 lines
+-- under `---@meta nvim-treesitter.async …`), so a function DECLARES only where its body is empty as well
+local META_SRC, META_IS
+local function lua_meta_file(src)
+    if src ~= META_SRC then
+        local is, pos = false, 1
+        while pos <= #src do
+            local e = src:find('\n', pos, true) or #src + 1
+            local l = src:sub(pos, e - 1)
+            if l:match('^%-%-%-%s*@meta') then is = true; break end
+            if not (l:match('^%s*$') or l:match('^%s*%-%-')) then break end
+            pos = e + 1
+        end
+        META_SRC, META_IS = src, is
+    end
+    return META_IS
+end
+local function lua_declaration(defn, src)
+    return type(src) == 'string' and defn:field('body')[1] == nil and lua_meta_file(src) or false
+end
+
 return {
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
@@ -1435,6 +1458,8 @@ return {
     -- `x:f()` passes x as the first argument: its target is a method (`T:f` or a first parameter `self`), never a
     -- plain function of the same name (CART-1491)
     colon_calls_pass_self = true,
+    -- a function that only DECLARES (an empty body in a `---@meta` file): its effects are the native implementation's
+    declaration = lua_declaration,
     -- stdlib receivers must not tail-match a project def: string.format
     -- would otherwise link to the one module that defines M.format
     stdlib_prefixes = { 'string.', 'table.', 'math.', 'os.', 'io.',

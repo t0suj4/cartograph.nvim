@@ -738,6 +738,8 @@ function M.summaries(store)
             -- DIRECT effects of every member
             for _, fid in ipairs(members) do
                 local fnode = store.node(fid)
+                -- (a DECLARATION's own effects are its implementation's, which the tree does not hold, CART-1615)
+                if fnode and fnode.decl then s_hedge(sum, ('declaration only: %s'):format(fnode.name or fid)) end
                 for _, u in ipairs(store.topo():var_uses_detail(fid)) do
                     if u.rw and u.rw >= 2 then
                         if u.gp then
@@ -836,6 +838,11 @@ function M.summaries(store)
                 local file = caller and caller.file
                 for _, c in ipairs(store.topo():sites(fid)) do
                     local to = callrec.to(c)
+                    -- (a call to a DECLARATION — a `---@meta` stub — is a call to what it declares: its empty body is
+                    -- not that function's effects, so the signature registry or the unresolved hedge answers — under
+                    -- the DECLARED name, which resolution already canonicalized (`api.x` -> `vim.api.x`), CART-1615)
+                    local declname
+                    if to then local tn = store.node(to); if tn and tn.decl then declname, to = tn.name, nil end end
                     if to and con.comp[to] == ci then
                         -- intra-SCC: members share this summary already
                         intra[#intra + 1] = { c = c, caller = caller, to = to }
@@ -846,7 +853,7 @@ function M.summaries(store)
                     else
                         local lang = file and (file:match('%.lua$') and 'lua'
                             or file:match('%.php$') and 'php')
-                        local bname = callrec.full(c) or callrec.callee(c)
+                        local bname = declname or callrec.full(c) or callrec.callee(c)
                         local sig, grade
                         if lang and bname then
                             -- (explicit call: and/or would truncate the

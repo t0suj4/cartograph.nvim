@@ -7566,6 +7566,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                     cbarg = isfield or nil,
                     -- locals DERIVED from params (CART-1566): effects maps one handed to a mutating callee to its param
                     derived = not aname and M._derived_of(defn, src, spec.guards) or nil,
+                    -- a DECLARATION only (CART-1615): a call to it links (goto-declaration), but its empty body is not
+                    -- the callee's effects
+                    decl = spec.declaration and spec.declaration(defn, src) or nil,
                     -- an ANONYMOUS fn (aname: a callback, a returned closure `X#ret`) is never a call target BY NAME: link
                     -- leaves it out of exact/tail, and the mark makes relink's index do the same (CART-1490: 148 `X#ret`
                     -- nodes under the tail `ret` answered `syn.ret(…)` after a refresh, 2 same-file cands at extract)

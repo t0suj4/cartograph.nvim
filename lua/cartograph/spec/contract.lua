@@ -68,6 +68,9 @@ M.SLOTS = {
     qualified_member = 'SCOPE&KEY',
     -- macro_text: { node type = true } — opaque macro-body text whose identifier tokens READ the vars they name (CART-1578)
     macro_text = 'SCOPE&KEY',
+    -- declaration(def, src) -> bool: the def only DECLARES a function implemented elsewhere (a LuaLS `---@meta` stub,
+    -- CART-1615) — its body is not the callee's effects
+    declaration = 'SCOPE&KEY',
     qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY', qualified_external = 'SCOPE&KEY',
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
