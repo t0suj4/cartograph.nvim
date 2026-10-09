@@ -6086,22 +6086,51 @@ test('refs: a bound argument names only the def its binder declares (java lambda
         return out
     end
     if has_parser('java') then
-        local r = refs_of(ts.extract(mkroot('P.java', table.concat({
+        local jdata = ts.extract(mkroot('P.java', table.concat({
             'import java.util.function.Function;',
             'class P {',
             '    private static final Function<String, Integer> KEYF = v -> v.length();',
-            '    int run(java.util.List<String> xs) { InvocationHandler hnd = (p, m, a) -> null; use(hnd); return xs.stream().map(KEYF).count(); }',
+            '    @SuppressWarnings("x")', '    private static final Function<String, Integer> ANNF = v -> v.length();',
+            '    private static final Function<String, Integer> WRAPF =', '        v -> v.length();',
+            '    int run(java.util.List<String> xs) {',
+            '        Function<String, Integer> wrl =', '            v -> v.length();',
+            '        use(wrl);',
+            '        return xs.stream().map(KEYF).map(ANNF).map(WRAPF).count();',
+            '    }',
             '}',
-        }, '\n'))), 'P.java')
+        }, '\n')))
+        local r = refs_of(jdata, 'P.java')
         ok(r['P::KEYF'], 'a lambda-valued FIELD passed as an argument is that def: ' .. vim.inspect(r))
+        -- (the def starts INSIDE the declaration, not on its first row: an annotation, a wrap after `=`)
+        ok(r['P::ANNF'] and r['P::WRAPF'] and r['P::wrl'], 'annotated / wrapped lambda fields and a wrapped local: ' .. vim.inspect(r))
+        -- (and RELINK's mirror reads the same range: undo every upgrade, drop the refs, let relink decide)
+        for _, c in ipairs(jdata.calls) do
+            for _, a in ipairs(c.argv or {}) do if a.k == 'func' then a.k, a.to, a.up = 'local', nil, nil end end
+        end
+        local keep = {}
+        for _, e in ipairs(jdata.edges) do if e.kind ~= 'ref' then keep[#keep + 1] = e end end
+        jdata.edges = keep
+        ts.relink(jdata, {})
+        local r2 = refs_of(jdata, 'P.java')
+        ok(r2['P::ANNF'] and r2['P::WRAPF'], 'after relink: the annotated / wrapped lambda fields still link: ' .. vim.inspect(r2))
     end
     local lr = refs_of(ts.extract(mkroot('l.lua', table.concat({
         'local function cmpf(a, b) return a < b end',
         'local sortf = function (t) table.sort(t, cmpf) end',
-        'local function g(t) return pcall(sortf, t) end',
+        'local wrapf =', '    function (t) return t end',
+        'local function g(t) return pcall(sortf, t), pcall(wrapf, t) end',
         'return g',
     }, '\n'))), 'l.lua')
     ok(lr.cmpf and lr.sortf, 'lua: a local function / a local bound to a function is that def: ' .. vim.inspect(lr))
+    ok(lr.wrapf, 'lua: a function value wrapped onto the next row is still the def its local names: ' .. vim.inspect(lr))
+    if has_parser('typescript') then
+        -- (a bound argument is decided by its binder ALONE: the fn-chain gate's localdecl had refused a local arrow
+        -- its own def — angular's timer_scheduler `const callback = () => …; setTimeout(callback, …)`)
+        local tr = refs_of(ts.extract(mkroot('t.ts', table.concat({
+            'export class S {', '  sched() {', '    const cbk = () => { this.x = 1; };', '    setTimeout(cbk, 10);', '  }', '}',
+        }, '\n'))), 't.ts')
+        ok(tr.cbk, 'ts: a local arrow passed as an argument is its own def: ' .. vim.inspect(tr))
+    end
     if has_parser('go') then
         local gdata = ts.extract(mkroot('k.go', table.concat({
             'package m', 'type S struct{}', 'func (s *S) key(d string) string { return d }',

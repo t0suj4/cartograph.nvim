@@ -1159,11 +1159,13 @@ function M._bound_value(an, a)
     if not jvt_sm then return nil end
     local chain, k = jvt_sm.resolve(an, a)
     if k == 0 then return nil end
-    return chain[1].at or chain[1].row or -1
+    local b = chain[1]
+    return b.at or b.row or -1, b.ate -- (the declaration's first and last row: a def starting in it is the binder's)
 end
---- the callback upgrade's veto for a bound argument (above): every target but the def its binder declares
-function M._bound_veto(bound, t2, file)
-    return bound ~= nil and not (t2.file == file and t2.order == bound)
+--- the callback upgrade's veto for a bound argument (above): every target but a same-file def that STARTS inside the
+--- binder's declaration — an annotation, a wrapped `KEY =⏎ v -> …` keep the lambda off the declaration's first row
+function M._bound_veto(bound, bate, t2, file)
+    return bound ~= nil and not (t2.file == file and t2.order >= bound and t2.order <= (bate or bound))
 end -- (atlas.fields asks the SAME accessor as the use edges' flds, CART-1591)
 
 -- The raw-parser rider (fusion Stage C): the extract hot loop parses via
@@ -8484,8 +8486,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 local an = node_text(a, src)
                                 -- (BOUND at its own site — a param / local the scope model sees there: the callback upgrade
                                 -- joins it to no function by name but the def its binder declares, M._bound_value — CART-1598)
-                                argv[#argv + 1] = { k = 'local', name = an, l = select(1, a:range()),
-                                    bound = M._bound_value(an, a) }
+                                local bnd, bate = M._bound_value(an, a)
+                                argv[#argv + 1] = { k = 'local', name = an, l = select(1, a:range()), bound = bnd, bate = bate }
                             elseif t == 'function_definition' or t == 'lambda' then
                                 args[#args + 1] = ''
                                 local ar, ac = a:start()
@@ -9637,8 +9639,10 @@ local MATCH_OPTS = { match_limit = 65536 }
             if a.k == 'local' and a.name then
                 local t2, _ = resolve(a.name, p.file)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
-                    and not M._bound_veto(a.bound, t2, p.file) -- (bound at its site: never a function by name, CART-1598)
-                    and not M._arg_shadowed(a.name, p.call.fn and node_index[p.call.fn], parent_fn, t2, p.file) then
+                    -- (BOUND at its site: its binder alone decides — the def it declares, `const cb = () => …; f(cb)`, and
+                    -- nothing else; FREE: the fn-chain shadow gate, CART-1498 — CART-1598)
+                    and (a.bound ~= nil and not M._bound_veto(a.bound, a.bate, t2, p.file)
+                        or a.bound == nil and not M._arg_shadowed(a.name, p.call.fn and node_index[p.call.fn], parent_fn, t2, p.file)) then
                     a.k, a.to, a.up = 'func', t2.id, true
                     local from = p.call.fn
                     if from then
@@ -10483,8 +10487,8 @@ function M.relink(data, touched, opts)
             if ak == 'local' and aname then
                 local t2 = resolve(aname, cfile)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
-                    and not M._bound_veto(cv.aget(i, j, 'bound'), t2, cfile) -- (bound at its site, CART-1598)
-                    and not M._arg_shadowed(aname, cfn and node_index[cfn], parent_fn, t2, cfile) then -- (CART-1498)
+                    and (cv.aget(i, j, 'bound') ~= nil and not M._bound_veto(cv.aget(i, j, 'bound'), cv.aget(i, j, 'bate'), t2, cfile)
+                        or cv.aget(i, j, 'bound') == nil and not M._arg_shadowed(aname, cfn and node_index[cfn], parent_fn, t2, cfile)) then -- (CART-1498 / 1598)
                     cv.aset(i, j, 'k', 'func'); cv.aset(i, j, 'to', t2.id); cv.aset(i, j, 'up', true)
                     if touched then touched[cfile] = true end
                     local cline = cget(i, 'line')

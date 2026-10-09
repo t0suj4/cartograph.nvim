@@ -69,7 +69,7 @@ end
 -- outside this shape keeps its CALL raw (the accessor's dual mode serves the
 -- mix); the fold still collapses the tree-sitter majority (the 197MB win).
 local FOLDABLE = { k = true, name = true, v = true, prefix = true,
-    kw = true, to = true, l = true, up = true, bound = true } -- up / bound are read pre-fold (resolution), ignored
+    kw = true, to = true, l = true, up = true, bound = true, bate = true } -- up / bound are read pre-fold (resolution), ignored
 local function simple(a)
     if not M.K[a.k] then return false end -- unknown kind (param/call/field/…)
     for f in pairs(a) do if not FOLDABLE[f] then return false end end
