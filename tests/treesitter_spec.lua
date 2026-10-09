@@ -5785,6 +5785,16 @@ test('use edges: a free name links the unique var of its OWN language only (CART
         if e.kind == 'use' and byid[e.from] and byid[e.to] then uses[byid[e.from].name .. '>' .. byid[e.to].file .. ':' .. byid[e.to].name] = true end
     end
     ok(not uses['f>p.js:path'], 'no lua mention reaches a javascript var: ' .. vim.inspect(uses))
+    -- (nor a javascript FUNCTION: the mention path's unique-function fallback, CART-1604)
+    local fd2 = assert(io.open(root .. '/q.js', 'w')); fd2:write('function descr(x) { return x; }\nmodule.exports = { descr };\n'); fd2:close()
+    local fd3 = assert(io.open(root .. '/n.lua', 'w')); fd3:write('local function g() return { descr = descr } end\nreturn g\n'); fd3:close()
+    local d2 = ts.extract(root)
+    local by2, refs2 = {}, {}
+    for _, n in ipairs(d2.nodes) do by2[n.id] = n end
+    for _, e in ipairs(d2.edges) do
+        if (e.kind == 'ref' or e.kind == 'reg') and by2[e.to] and by2[e.to].file == 'q.js' and (by2[e.from] or { file = e.from }).file == 'n.lua' then refs2[#refs2 + 1] = e.to end
+    end
+    eq({}, refs2, 'no lua mention refs a javascript function')
     ok(uses['f>g.lua:cfg'], 'a lua global in another lua file still links: ' .. vim.inspect(uses))
     vim.fn.delete(root, 'rf')
 end)

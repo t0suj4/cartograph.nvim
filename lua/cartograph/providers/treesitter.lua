@@ -1880,6 +1880,8 @@ local LANG_LISTS = setmetatable({}, { __mode = 'k' })
 -- does `list` hold a definition joinable from language `clang`? (the unique-owner rung's "the project never names it":
 -- a JS re-implementation of `named_child` is no Lua name, CART-1568)
 function M._lang_any(list, clang) return list ~= nil and #M._lang_list(list, clang) > 0 end
+--- do two files share a linkage FAMILY (the partition _lang_list keys on)? — a name never joins across it (CART-1604)
+function M._same_family(fa, fb) return join_key(elang_for(fa)) == join_key(elang_for(fb)) end
 function M._lang_list(list, clang)
     local e = LANG_LISTS[list]
     if not e or e.n ~= #list then
@@ -6035,6 +6037,9 @@ local function reduce_mentions(file, buf, L)
             if u and L.scopes and L.scopes[u.file] ~= L.scopes[file] then
                 u = nil -- unique, but across a boundary
             end
+            -- (and never across LANGUAGES: a lua mention `desc` named luajs/pack.js's function, CART-1604 — the var
+            -- fallback's partition, CART-1587)
+            if u and u.file ~= file and not M._same_family(u.file, file) then u = nil end
             -- lexical-first (scope-model step 3): a BOUND name never
             -- crosses the file boundary
             if u and scoped and u.file ~= file and bound then u = nil end
