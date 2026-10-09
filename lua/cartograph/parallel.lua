@@ -700,7 +700,7 @@ function M.extract(root, o)
         -- with their chunks, so the id pass is a pure REDUCE against the
         -- parent-built global lookups — no re-parse worker fleet.
         s.phase = 2
-        local L = ts.lookups(acc.nodes, root)
+        local L = ts.lookups(acc.nodes, root, nil, acc.edges)
         L.fn_ranges = acc.fn_ranges
         ts.merge_idpass(acc, ts.mention_reduce(files, acc.mentions, L))
         finalize()

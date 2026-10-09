@@ -689,7 +689,7 @@ function M.materialize_file_idpass(rel)
     -- these identically). Mark it done so we do not re-parse it on every ask.
     if #ranges == 0 then M._idpass_materialized[rel] = true; return false end
     local ts = require 'cartograph.providers.treesitter'
-    local L = ts.lookups(M.data.nodes, M.data.root) -- COMPLETE: uniqueness is global
+    local L = ts.lookups(M.data.nodes, M.data.root, nil, M.data.edges) -- COMPLETE: uniqueness is global
     L.fn_ranges = { [rel] = ranges }
     ts.merge_idpass(M.data, ts.id_pass(M.data.root, { rel }, L, M.data.abs, require('cartograph.source').transport(M.data)), nil)
     -- the marks this just minted are RESOLUTION INPUT, so anything already resolved was

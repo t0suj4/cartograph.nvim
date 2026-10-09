@@ -62,6 +62,10 @@ M.SLOTS = {
     -- fn_locals(def, src, out): the names a function body binds where they are not DECLARATIONS (python), for the
     -- call-argument shadow gate's fn.locals — beside local_decls, which reads declaration node types (CART-1597)
     fn_locals = 'SCOPE&KEY',
+    -- qualified_member: parent node type -> { operand = field, member = field, operand_type = the bare-name node type }
+    -- — a member whose operand is an IMPORT
+    -- binding names that package's var (the import unit's files), CART-1580
+    qualified_member = 'SCOPE&KEY',
     qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY', qualified_external = 'SCOPE&KEY',
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing

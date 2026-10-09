@@ -432,7 +432,7 @@ function M.splice(data, rels, deleted, opts)
         end
     end
     if can_idpass and #idfiles > 0 then
-        local L = ts.lookups(data.nodes, data.root)
+        local L = ts.lookups(data.nodes, data.root, nil, data.edges)
         L.fn_ranges = franges
         -- ★ THROUGH THE GRAPH'S TRANSPORT (CART-1160): without it the id pass re-read the files from DISK, so an overlay
         -- world's `use` edges were derived from the OLD text against the NEW nodes (B.f moved to line 5, its use edge

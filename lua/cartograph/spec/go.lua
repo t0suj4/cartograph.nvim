@@ -253,6 +253,37 @@ local function go_qualify_call(calln, name, src, model)
     if not ty then return nil end
     return ty .. '.' .. node_text(fld, src)
 end
+local GO_DIR_FILES = setmetatable({}, { __mode = 'k' }) -- (files set -> { dir -> its first non-test .go file })
+-- an import path of THIS module, as a directory relative to the graph root: go.mod (found at or above root) names the
+-- module; the root may be a subtree of it (kubelet = k8s.io/kubernetes/pkg/kubelet). -> rel dir | nil (another module)
+local GO_MODS = {}
+local function go_module_rel(path, root)
+    if not root then return nil end
+    local m = GO_MODS[root]
+    if m == nil then
+        m = false
+        local dir, sub = root, ''
+        while dir and dir ~= '' and dir ~= '/' do
+            local fd = io.open(dir .. '/go.mod', 'r')
+            if fd then
+                local mod = fd:read('*a'):match('module%s+([^%s]+)')
+                fd:close()
+                if mod then m = { mod = mod, sub = sub } end
+                break
+            end
+            local parent, base = dir:match('^(.*)/([^/]+)$')
+            if not parent then break end
+            sub = sub == '' and base or (base .. '/' .. sub)
+            dir = parent
+        end
+        GO_MODS[root] = m
+    end
+    if not m then return nil end
+    local full = m.sub == '' and m.mod or (m.mod .. '/' .. m.sub)
+    if path == full then return '' end
+    if path:sub(1, #full + 1) == full .. '/' then return path:sub(#full + 2) end
+    return nil
+end
 local GO_LEXICAL_SCOPES = {
     function_declaration = { kind = 'param', harvest = go_params },
     method_declaration = { kind = 'param', harvest = go_params },
@@ -305,6 +336,9 @@ return {
     lexical_scopes = GO_LEXICAL_SCOPES, -- CART-1598
     fn_locals = go_fn_locals,
     qualify_call = go_qualify_call, -- (CART-1599)
+    -- a PACKAGE-QUALIFIED member `pkg.Var` (selector_expression: operand / field) reads the var of that name in the
+    -- package the file imports as pkg (CART-1580)
+    qualified_member = { selector_expression = { operand = 'operand', member = 'field', operand_type = 'identifier' } },
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not
@@ -442,7 +476,7 @@ return {
             local last = path:gsub('"', ''):match('([%w_]+)/?$')
             return last
         end,
-        resolve_import = function (path, files, _)
+        resolve_import = function (path, files, _, root)
             -- module-path imports: find the suffix that exists in-repo,
             -- resolving to the package dir's eponymous or first-known file
             path = path:gsub('"', '')
@@ -456,6 +490,21 @@ return {
                     if files[cand] then return cand end
                 end
             end
-            return nil
+            -- (no eponymous file: ANY non-test file of the package directory stands for it — hugo's htesting holds only
+            -- test_helpers.go, and `htesting.IsTest` read nothing; the import unit is the directory, CART-1580). Only
+            -- an import of THIS MODULE (go.mod's path is its prefix) is a directory here: a suffix match took kubelet's
+            -- `k8s.io/cri-client/pkg/logs` for its own logs/ and minted an import cycle go forbids.
+            local rel = go_module_rel(path, root)
+            if not rel then return nil end
+            local bydir = GO_DIR_FILES[files]
+            if not bydir then
+                bydir = {}
+                for f in pairs(files) do
+                    local d = f:match('^(.*)/[^/]*%.go$')
+                    if d and not f:match('_test%.go$') and (not bydir[d] or f < bydir[d]) then bydir[d] = f end
+                end
+                GO_DIR_FILES[files] = bydir
+            end
+            return bydir[rel]
         end,
 }

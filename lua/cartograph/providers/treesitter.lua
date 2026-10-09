@@ -5495,6 +5495,9 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- and its "free when not MF_WRITE" is no help here: the LHS of
     -- `private.Hook.X = X` is exactly a member name in write position).
     local mempos = spec.member_positions
+    -- a PACKAGE-QUALIFIED member (go's `htesting.IsTest`): the member is a field_identifier, no mention type, so the
+    -- read of another package's var was invisible — declared per spec, resolved through the import binding (CART-1580)
+    local qualmem = spec.qualified_member
     local idxpos = spec.index_positions -- the BRACKET forms (CART-0533)
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
@@ -5653,7 +5656,15 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                     end
                 end
             end
-            if idt[ct] and (cnamed or cnamed == nil and c:named()) then
+            local qop -- (the qualifier's name when c is a qualified member: `pkg` of `pkg.Var`, CART-1580)
+            if qualmem and not idt[ct] then
+                local qm = qualmem[nt]
+                if qm and n:field(qm.member)[1] == c then
+                    local op = n:field(qm.operand)[1]
+                    if op and op:type() == qm.operand_type then qop = node_text(op, src) end -- (a bare name: the spec's)
+                end
+            end
+            if (idt[ct] or qop) and (cnamed or cnamed == nil and c:named()) then
                 if name == nil then name = node_text(c, src) end
                 local sr, sc, er, ec = c:range()
                 -- THE CALLEE TEST, from the declaration. `callk` is a FIELD NAME
@@ -5742,6 +5753,12 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                         if not l then l = {}; buf.mem = l end
                         l[#l + 1] = nm
                     end
+                end
+                if qop then -- (ordinal + qualifier name: the reduce resolves it through the import binding)
+                    local l = buf.qual
+                    if not l then l = {}; buf.qual = l end
+                    l[#l + 1] = nm
+                    l[#l + 1] = qop
                 end
                 vput(parts, idx)
                 vput(parts, sr)
@@ -5981,6 +5998,11 @@ local function reduce_mentions(file, buf, L)
         memset = {}
         for _, o in ipairs(buf.mem) do memset[o] = true end
     end
+    local qualmap -- ordinal -> the qualifier's name, for a package-qualified member (CART-1580)
+    if buf.qual then
+        qualmap = {}
+        for i = 1, #buf.qual, 2 do qualmap[buf.qual[i]] = buf.qual[i + 1] end
+    end
     local fldmap
     if buf.fld then
         fldmap = {}
@@ -6023,6 +6045,21 @@ local function reduce_mentions(file, buf, L)
         local bound = flags % MF_SCOPED >= MF_BOUND
         local callee = flags % MF_BOUND >= MF_CALLEE
         local eligible = flags % MF_CALLEE >= MF_ELIGIBLE
+        -- (a QUALIFIED member `pkg.Var` names the var of that name in the package the file imports as pkg — the import
+        -- binding's directory, unique there — and nothing else: no fn-ref, no name join; a qualifier that is no import
+        -- (a struct value's field) names nothing. CART-1580)
+        local qualord = qualmap and qualmap[ord]
+        local qvar
+        if qualord then
+            local tgt = L.bind_of and L.bind_of[file] and L.bind_of[file][qualord]
+            local list = tgt and L.var_named[name]
+            if list then
+                local dir = tgt:match('^(.*)/[^/]*$') or ''
+                for _, v in ipairs(list) do -- (a package declares a var name once: the directory's is THE one)
+                    if (v.file:match('^(.*)/[^/]*$') or '') == dir then qvar = v end
+                end
+            end
+        end
         -- `not (memset and memset[ord])`: a MEMBER NAME has a receiver, and
         -- L.fn_unique is a corpus-wide index of BARE names — matching one against
         -- the other is not evidence, it is a coincidence of spelling. Measured
@@ -6083,7 +6120,8 @@ local function reduce_mentions(file, buf, L)
                 end
             end
         end
-        local cands = L.var_named[name]
+        local cands
+        if qualord then cands = qvar and { qvar } or nil else cands = L.var_named[name] end
         if cands then
             -- THE NEAREST SAME-FILE DECLARATION, not the first one in the list
             -- (CART-0505). One file can hold several vars of one name — java
@@ -6123,6 +6161,7 @@ local function reduce_mentions(file, buf, L)
                 -- bound never crosses the file boundary
                 if not (scoped and bound) then var = xc[1] end
             end
+            if qvar then var = qvar end -- (the import binding decided it, across the package boundary)
             -- A MENTION ON *ANY* SAME-FILE HOMONYM'S DEF LINE IS NOT A USE.
             -- The skip used to name only the RESOLVED candidate's line, which
             -- was enough while a file-scope mention was dropped anyway. It is
@@ -6312,7 +6351,8 @@ end
 ---@param nodes table
 ---@param root string
 ---@param narrow table|nil  { names = set, files = set } — nil = the whole corpus
-function M.lookups(nodes, root, narrow)
+--- (edges: the graph's IMPORT edges, for the import binding a qualified member resolves through — bind_of, CART-1580)
+function M.lookups(nodes, root, narrow, edges)
     local want = narrow and narrow.names or nil
     local count = {}
     for _, n in ipairs(nodes) do
@@ -6365,7 +6405,7 @@ function M.lookups(nodes, root, narrow)
         end
     end
     return { fn_unique = fn_unique, var_named = var_named,
-        scopes = any and scopes or nil }
+        scopes = any and scopes or nil, bind_of = edges and (M._binding_index(edges)) or nil }
 end
 
 --- Fold a standalone id-pass result into a graph: ref pairs dedup into
@@ -6809,6 +6849,7 @@ local function binding_index(edges)
     end
     return bind_of, reaches
 end
+M._binding_index = binding_index -- (M.lookups / the id pass read it: a qualified member's import binding, CART-1580)
 
 local function drop_overrides(nodes, edges, exact, tail)
     local bound = {}                    -- file -> local name -> imported file
@@ -9336,7 +9377,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                         -- trade ghost's 114 wrong edges for ~372 correct ones.
                         -- Anything the binding cannot reach at all is the bug this
                         -- guard exists for and is refused.
-                        fits = tgt ~= n.file and binding_reaches(tgt, n.file,
+                        -- (a DEEPER chain `pkg.Var.Method` is no direct case: the alias pass resolves `pkg.Member`, and the
+                        -- binding only says which package the receiver lives in — hugo's metadecoders.Default.Unmarshal…
+                        -- went blocked the moment its import resolved, CART-1580)
+                        local deep = name:match('^[%w_]+[%.:][%w_]+[%.:]') ~= nil
+                        fits = (deep or tgt ~= n.file) and binding_reaches(tgt, n.file,
                             spec and spec.import_unit == 'directory')
                     end
                 end
@@ -9791,6 +9836,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             var_named = var_named,
             fn_ranges = fnRanges,
             scopes = seq_any and seq_scopes or nil,
+            bind_of = (M._binding_index(edges)), -- (a qualified member's import binding, CART-1580)
             addref = addref,
             adduse = function (e) edges[#edges + 1] = e end,
             add_names = function (f, s) data.names[f] = s end,
@@ -10362,7 +10408,11 @@ function M.relink(data, touched, opts)
                         -- trade ghost's 114 wrong edges for ~372 correct ones.
                         -- Anything the binding cannot reach at all is the bug this
                         -- guard exists for and is refused.
-                        fits = tgt ~= n.file and binding_reaches(tgt, n.file,
+                        -- (a DEEPER chain `pkg.Var.Method` is no direct case: the alias pass resolves `pkg.Member`, and the
+                        -- binding only says which package the receiver lives in — hugo's metadecoders.Default.Unmarshal…
+                        -- went blocked the moment its import resolved, CART-1580)
+                        local deep = name:match('^[%w_]+[%.:][%w_]+[%.:]') ~= nil
+                        fits = (deep or tgt ~= n.file) and binding_reaches(tgt, n.file,
                             spec and spec.import_unit == 'directory')
                     end
                 end

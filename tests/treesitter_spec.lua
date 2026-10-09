@@ -6323,6 +6323,45 @@ test('defs: a python def under a dotted or called decorator is registered; a bar
     ok(reg.prop == false and reg.plain == false, 'a bare decorator / none: not registered ' .. vim.inspect(reg))
 end)
 
+-- ⚠ A PACKAGE-QUALIFIED READ IS A READ (CART-1580): `htesting.IsTest` named nothing — the member is no mention type —
+-- so hugo's IsTest read as dead state. It resolves through the import binding now; an import resolves to ANY file of
+-- its directory when no eponymous one exists, but only an import of THIS module (go.mod) — a suffix match took an
+-- external `k8s.io/cri-client/pkg/logs` for the repo's own logs/ and minted a cycle.
+test('use edges: go reads pkg.Var through the import binding; only this module\'s imports are directories (CART-1580)', function ()
+    if not has_parser('go') then skip 'no go parser' end
+    local root = vim.fn.tempname()
+    for _, d in ipairs({ 'htesting', 'app', 'logs', 'dec', 'other' }) do vim.fn.mkdir(root .. '/' .. d, 'p') end
+    local function put(rel, text) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close() end
+    put('go.mod', 'module example.com/m\n')
+    put('htesting/test_helpers.go', 'package htesting\n\nvar IsTest bool\nvar Other = 1\n')
+    put('logs/manager.go', 'package logs\n\nvar Level = 0\n')
+    put('other/o.go', 'package other\n\nvar IsTest = true\n') -- (a homonym in ANOTHER package: the binding's directory decides)
+    put('dec/decoder.go', 'package dec\n\ntype D struct{}\n\nvar Default = D{}\n\nfunc (d D) Unmarshal(s string) int { return 1 }\n')
+    put('app/a.go', table.concat({
+        'package app', '',
+        'import (', '\t"example.com/m/dec"', '\t"example.com/m/htesting"', '\t"other.org/cri/pkg/logs"', ')', '',
+        'func F() bool { cfg := struct{ IsTest bool }{}; _ = cfg.IsTest; return htesting.IsTest }',
+        'func G() { htesting.Other = 2 }',
+        'func H() int { return logs.Level }',
+        'func K() int { return dec.Default.Unmarshal("x") }',
+    }, '\n'))
+    local data = ts.extract(root)
+    local byid, uses, imports, refs = {}, {}, {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local f, t = byid[e.from] or { name = e.from }, byid[e.to]
+        if e.kind == 'use' and t then uses[f.name .. '>' .. t.file .. ':' .. t.name] = e.rw end
+        if e.kind == 'import' then imports[#imports + 1] = tostring(e.to) end
+        if e.kind == 'ref' and t then refs[f.name .. '>' .. t.name] = true end
+    end
+    eq(1, uses['F>htesting/test_helpers.go:IsTest'], 'a qualified READ of the package var: ' .. vim.inspect(uses))
+    eq(2, uses['G>htesting/test_helpers.go:Other'], 'a qualified WRITE')
+    ok(not uses['H>logs/manager.go:Level'], 'another MODULE\'s logs package is not the repo\'s logs/: ' .. vim.inspect(uses))
+    for _, to in ipairs(imports) do ok(to ~= 'logs/manager.go', 'no import of the external path resolves in-repo') end
+    ok(refs['K>D.Unmarshal'], 'pkg.Var.Method() reaches the method through the bound file: ' .. vim.inspect(refs))
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.
