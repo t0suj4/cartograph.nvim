@@ -1532,6 +1532,12 @@ return {
     colon_calls_pass_self = true,
     -- a function that only DECLARES (an empty body in a `---@meta` file): its effects are the native implementation's
     declaration = lua_declaration,
+    -- does the text COMPILE under the running LuaJIT (CART-1559): a parse accepts 61 upvalues, the compiler does not.
+    -- A shebang line is the interpreter's, not the chunk's
+    compiles = function (text)
+        local f, err = loadstring((text:gsub('^#![^\n]*', '')))
+        return f ~= nil, err
+    end,
     -- a table whose __index requires `<prefix> .. key` is a module namespace (CART-1619)
     scan_imports = lua_lazy_imports,
     -- stdlib receivers must not tail-match a project def: string.format

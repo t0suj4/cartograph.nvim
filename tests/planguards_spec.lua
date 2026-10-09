@@ -29,6 +29,33 @@ test('planguards: a clean edit PASSES', function ()
     eq(pg.PASS, rows[1].verdict)
 end)
 
+-- ★ THE PARSE IS NOT THE COMPILER, AND THE GUARD MUST OUTLIVE THE FILE IT GUARDS (CART-1559): an edit gave
+-- providers/treesitter.lua its 61st upvalue — it parsed, so the guard passed it; LuaJIT refused to load it, and since the
+-- guard itself required that provider, every later edit (the repair included) was refused until a git checkout
+test('planguards: an edit that PARSES but no longer COMPILES fails — and the guard runs when the provider cannot load', function ()
+    if not ready() then skip('no lua parser') end
+    local function upv(n)
+        local names, uses = {}, {}
+        for i = 1, n do names[i] = 'a' .. i; uses[i] = 'a' .. i end
+        return ('local %s = %s\nreturn function () return %s end\n')
+            :format(table.concat(names, ', '), table.concat(names, ', '), table.concat(uses, ' + '))
+    end
+    local rows = pg.GUARDS.parses(nil, nil, { ['m.lua'] = upv(59) }, { ['m.lua'] = upv(61) })
+    eq(pg.FAIL, rows[1].verdict, tostring(rows[1].why))
+    ok(tostring(rows[1].why):find('COMPILES', 1, true), 'it says the compiler refused: ' .. tostring(rows[1].why))
+    rows = pg.GUARDS.parses(nil, nil, { ['m.lua'] = upv(61) }, { ['m.lua'] = upv(62) })
+    eq(pg.PASS, rows[1].verdict, 'a file that did not compile before is no regression of the edit')
+    -- the provider unloadable: the guard still answers (a repairing edit must get through)
+    local saved = package.loaded['cartograph.providers.treesitter']
+    package.loaded['cartograph.providers.treesitter'] = nil
+    package.preload['cartograph.providers.treesitter'] = function () error('function at line 1 has more than 60 upvalues') end
+    local ok2, rows2 = pcall(pg.GUARDS.parses, nil, nil, { ['a.lua'] = 'local x = 1\n' }, { ['a.lua'] = 'local x = 2\n' })
+    package.preload['cartograph.providers.treesitter'] = nil
+    package.loaded['cartograph.providers.treesitter'] = saved
+    ok(ok2, 'the guard did not raise: ' .. tostring(rows2))
+    eq(pg.PASS, ok2 and rows2[1].verdict, 'and judged the edit by the path\'s own language')
+end)
+
 test('planguards: an edit that breaks the file FAILS, naming the file', function ()
     if not ready() then skip('no lua parser') end
     local rows = pg.GUARDS.parses(nil, nil,

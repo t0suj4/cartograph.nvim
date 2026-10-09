@@ -82,13 +82,29 @@ end
 ---
 --- ⚠ WHAT IT DOES NOT CLAIM: that the edit is CORRECT. A moved nested function
 --- parses perfectly and has lost its upvalues. This is rung 0.
+-- ★ THE GUARD MUST SURVIVE THE FILE IT GUARDS (CART-1559): an edit that left providers/treesitter.lua unloadable
+-- (LuaJIT's 60-upvalue limit) made the provider's require raise HERE, and every later edit — the repairing one included —
+-- was refused until a git checkout. When cartograph's own provider cannot load, the path's language is Neovim's filetype
+-- detection's
+local function lang_of_path(rel)
+    local okp, ts = pcall(require, 'cartograph.providers.treesitter')
+    if okp then return ts.parse_lang(rel) end
+    local ft = vim.filetype.match({ filename = rel })
+    return ft and vim.treesitter.language.get_lang(ft) or nil
+end
+-- does `text` COMPILE, where the language's spec can say (`spec.compiles`: Lua's loadstring) -> true | false, why | nil
+-- (a tree-sitter parse accepts what the compiler refuses: 61 upvalues, a goto into a local's scope — CART-1559)
+local function compiles(text, lang)
+    local oks, spec = pcall(require, 'cartograph.spec.' .. lang)
+    if not (oks and type(spec) == 'table' and spec.compiles) then return nil end
+    return spec.compiles(text)
+end
 M.GUARDS.parses = function (_, _, before, after)
-    local ts = require 'cartograph.providers.treesitter'
     local rows, rels = {}, {}
     for rel in pairs(after or {}) do rels[#rels + 1] = rel end
     table.sort(rels) -- a total order, or the report is not a fact
     for _, rel in ipairs(rels) do
-        local lang = ts.parse_lang(rel)
+        local lang = lang_of_path(rel)
         if not lang then
             rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel,
                 why = 'no parser is registered for this path' }
@@ -114,7 +130,14 @@ M.GUARDS.parses = function (_, _, before, after)
                     rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel,
                         why = ('the %s parser is unavailable here'):format(lang) }
                 else
-                    rows[#rows + 1] = { verdict = M.PASS, file = rel }
+                    -- (a file that compiled before must still compile: the parse is not the compiler)
+                    local cpost, cwhy = compiles(after[rel] or '', lang)
+                    if cpost == false and (pre == false or pre == nil or compiles(pre, lang) ~= false) then
+                        rows[#rows + 1] = { verdict = M.FAIL, file = rel,
+                            why = ('the edited file parses but no longer COMPILES as %s: %s'):format(lang, tostring(cwhy)) }
+                    else
+                        rows[#rows + 1] = { verdict = M.PASS, file = rel }
+                    end
                 end
             end
         end

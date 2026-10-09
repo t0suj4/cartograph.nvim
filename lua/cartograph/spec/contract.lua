@@ -71,6 +71,8 @@ M.SLOTS = {
     -- declaration(def, src) -> bool: the def only DECLARES a function implemented elsewhere (a LuaLS `---@meta` stub,
     -- CART-1615) — its body is not the callee's effects
     declaration = 'SCOPE&KEY',
+    -- compiles(text) -> ok, why: the language's own compiler accepts the text (planguards' parses guard, CART-1559)
+    compiles = 'SCOPE&KEY',
     qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY', qualified_external = 'SCOPE&KEY',
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
