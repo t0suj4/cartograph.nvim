@@ -6263,6 +6263,35 @@ test('refs: go qualifies a call on a typed receiver / param / local as Type.meth
     ok(not refs['viaUnknown>A.key'] and not refs['viaUnknown>B.key'], 'an interface-typed param names no struct: ' .. vim.inspect(refs))
 end)
 
+-- ⚠ RUST RECEIVER TYPING (CART-1599): `b.key()` was ambiguous between every type's `key`; a typed binder — a param
+-- `b: &B`, a `let` annotation, a struct literal, `T::new()` — now keys `B::key`. And rust's `::` is also a MODULE
+-- path: the java-born "a `Class::m` naming no project class is external" gate must not swallow `Self::m`.
+test('refs: rust qualifies a call on a typed param / let as Type::method; Self:: paths still resolve (CART-1599)', function ()
+    if not has_parser('rust') then skip 'no rust parser' end
+    local data = ts.extract(mkroot('a.rs', table.concat({
+        'struct A;', 'struct B;',
+        'impl A { fn key(&self) -> u32 { 1 } fn new() -> A { A } fn helper() -> u32 { 3 } fn usesself(&self) -> u32 { Self::helper() } }',
+        'impl B { fn key(&self) -> u32 { 2 } }',
+        'fn via_param(b: &B) -> u32 { b.key() }',
+        'fn via_lit() -> u32 { let a = A {}; a.key() }',
+        'fn via_new() -> u32 { let a = A::new(); a.key() }',
+        'fn via_ann() -> u32 { let b: B = make(); b.key() }',
+        'fn via_unknown(x: impl K) -> u32 { x.key() }',
+    }, '\n')))
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local f, t = byid[e.from], byid[e.to]
+        if e.kind == 'ref' and f and t then refs[f.name .. '>' .. t.name] = true end
+    end
+    ok(refs['via_param>B::key'], 'a typed param b: &B: B::key ' .. vim.inspect(refs))
+    ok(refs['via_lit>A::key'], 'a struct literal: A::key')
+    ok(refs['via_new>A::key'], 'T::new(): A::key')
+    ok(refs['via_ann>B::key'], 'a let annotation: B::key')
+    ok(not refs['via_unknown>A::key'] and not refs['via_unknown>B::key'], 'an impl-trait param names no struct')
+    ok(refs['A::usesself>A::helper'], 'Self::helper is a project call, not external: ' .. vim.inspect(refs))
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.

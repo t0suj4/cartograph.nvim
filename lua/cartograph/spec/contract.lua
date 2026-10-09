@@ -62,7 +62,7 @@ M.SLOTS = {
     -- fn_locals(def, src, out): the names a function body binds where they are not DECLARATIONS (python), for the
     -- call-argument shadow gate's fn.locals — beside local_decls, which reads declaration node types (CART-1597)
     fn_locals = 'SCOPE&KEY',
-    qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY',
+    qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY', qualified_external = 'SCOPE&KEY',
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
     exported_def = 'SCOPE&KEY',    -- visibility (pub/export) detection

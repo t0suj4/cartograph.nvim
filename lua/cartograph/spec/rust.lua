@@ -136,11 +136,45 @@ local function rs_pattern_names(p, src, out, row)
         end
     end
 end
+-- a binder's TYPE NAME (CART-1599, rust): `T`, `&T`, `&mut T`, `T<X>`, `path::T` -> "T" — rust's methods are minted
+-- `T::m`, so a typed `b: &B` lets `b.key()` qualify to B::key (rs_qualify_call below)
+local function rs_type_name(t, src)
+    while t do
+        local k = t:type()
+        if k == 'type_identifier' then return node_text(t, src) end
+        if k == 'reference_type' then t = t:field('type')[1]
+        elseif k == 'generic_type' then t = t:field('type')[1]
+        elseif k == 'scoped_type_identifier' then t = t:field('name')[1]
+        else return nil end
+    end
+end
+-- the type a let VALUE names right there: `T { … }`, `T::new(…)` / `T::default()` (a constructor returning Self)
+local RS_CTORS = { new = true, default = true }
+local function rs_value_type(v, src)
+    if not v then return nil end
+    local k = v:type()
+    if k == 'struct_expression' then return rs_type_name(v:field('name')[1], src) end
+    if k == 'call_expression' then
+        local f = v:field('function')[1]
+        if f and f:type() == 'scoped_identifier' then
+            local path, nm = f:field('path')[1], f:field('name')[1]
+            if path and nm and RS_CTORS[node_text(nm, src)] and path:type() == 'identifier' and node_text(path, src):match('^%u') then
+                return node_text(path, src)
+            end
+        end
+    end
+    return nil
+end
 local function rs_params(node, src, out)
     local ps = node:field('parameters')[1]
     if not ps then return end
     for _, c in inext, ps, -1 do
-        if c:type() == 'parameter' then rs_pattern_names(c:field('pattern')[1], src, out)
+        if c:type() == 'parameter' then
+            local pat = c:field('pattern')[1]
+            rs_pattern_names(pat, src, out)
+            if pat and pat:type() == 'identifier' and out[node_text(pat, src)] then
+                out[node_text(pat, src)].ty = rs_type_name(c:field('type')[1], src)
+            end
         elseif c:named() and c:type() ~= 'self_parameter' then rs_pattern_names(c, src, out) end -- (a closure's bare `mut cq`)
     end
 end
@@ -149,9 +183,12 @@ local function rs_block(node, src, out)
         if st:type() == 'let_declaration' then
             local sr, _, er = st:range()
             local t = {}
-            rs_pattern_names(st:field('pattern')[1], src, t, sr)
+            local pat = st:field('pattern')[1]
+            rs_pattern_names(pat, src, t, sr)
             local sb, eb = select(3, st:start()), select(3, st:end_())
-            for nm, b in pairs(t) do b.at, b.ate, b.ab, b.abe = sr, er, sb, eb; out[nm] = b end -- (its own initializer is not in scope)
+            local ty = pat and pat:type() == 'identifier'
+                and (rs_type_name(st:field('type')[1], src) or rs_value_type(st:field('value')[1], src)) or nil
+            for nm, b in pairs(t) do b.at, b.ate, b.ab, b.abe, b.ty = sr, er, sb, eb, ty; out[nm] = b end -- (its own initializer is not in scope)
         end
     end
 end
@@ -175,6 +212,19 @@ local function rs_lets(node, src, out) -- a `for` pattern, an `if let` / `while 
         elseif c:type() == 'let_chain' then for _, k in inext, c, -1 do conds(k) end end
     end
     conds(node:field('condition')[1])
+end
+-- RECEIVER TYPING (CART-1599): `x.m(…)` with x bound to a binder of a known type keys `T::m` — the name rust's method
+-- defs carry —; a receiver of unknown type keeps its spelling
+local function rs_qualify_call(calln, name, src, model)
+    if not model or calln:type() ~= 'call_expression' then return nil end
+    local f = calln:field('function')[1]
+    if not (f and f:type() == 'field_expression') then return nil end
+    local v, fld = f:field('value')[1], f:field('field')[1]
+    if not (v and fld and v:type() == 'identifier') then return nil end
+    local chain, k = model.resolve(node_text(v, src), calln)
+    local ty = k > 0 and chain[1].ty
+    if not ty then return nil end
+    return ty .. '::' .. node_text(fld, src)
 end
 local RUST_LEXICAL_SCOPES = {
     function_item = { kind = 'param', harvest = rs_params }, closure_expression = { kind = 'param', harvest = rs_params },
@@ -219,6 +269,9 @@ end
 return {
     lexical_scopes = RUST_LEXICAL_SCOPES, -- CART-1598
     fn_locals = rs_fn_locals,
+    qualify_call = rs_qualify_call, -- (CART-1599)
+    -- (rust's `::` is also a MODULE PATH: `Self::m` / `util::f` naming no project CLASS is not external, CART-1599)
+    qualified_external = false,
     guards = RUST_GUARDS,
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because

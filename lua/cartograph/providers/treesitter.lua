@@ -9231,7 +9231,8 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- extends or implements it, so no project method can be the target: external. The tail join below (every
         -- getScheme in the tree) answered a question the code had already answered. A PROJECT class without the
         -- method (inherited from a parent) keeps the old path, and so does any class a project class derives from.
-        if spec and spec.qualify_call then
+        -- (a language whose `::` is also a MODULE PATH — rust's `Self::m`, `util::f` — opts out: qualified_external = false)
+        if spec and spec.qualify_call and spec.qualified_external ~= false then
             local qcls = name:match('^([%w_$%.]+)::[%w_]+$') -- a dotted head is a FULLY qualified JDK class
             if qcls then
                 if not project_classes then
@@ -10256,7 +10257,8 @@ function M.relink(data, touched, opts)
         -- extends or implements it, so no project method can be the target: external. The tail join below (every
         -- getScheme in the tree) answered a question the code had already answered. A PROJECT class without the
         -- method (inherited from a parent) keeps the old path, and so does any class a project class derives from.
-        if spec and spec.qualify_call then
+        -- (a language whose `::` is also a MODULE PATH — rust's `Self::m`, `util::f` — opts out: qualified_external = false)
+        if spec and spec.qualify_call and spec.qualified_external ~= false then
             local qcls = name:match('^([%w_$%.]+)::[%w_]+$') -- a dotted head is a FULLY qualified JDK class
             if qcls then
                 if not project_classes then
