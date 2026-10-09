@@ -108,6 +108,43 @@ test('shadowing: a PARAMETER passed as an argument is the value handed in — ne
     eq(2, seen)
 end)
 
+-- ⚠ THE TREE MAY BE THE STDLIB ITSELF (CART-1614): inside $VIMRUNTIME every vim.* call was refused `prefix` (964 calls
+-- naming a def the runtime holds — vim.validate 187, vim.notify 58), because the override rule above binds a prefixed
+-- def only in its own file. A def at a file the active PROFILE names as its own source is the runtime's definition
+test('stdlib prefix: inside the RUNTIME\'s own tree a def the profile names as its source binds across files — an override elsewhere and a ---@meta stub still do not (CART-1614)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    for _, d in ipairs { 'plugin', 'lua/vim/_core', 'lua/vim/_meta', 'lua/myplug' } do vim.fn.mkdir(root .. '/' .. d, 'p') end
+    local function w(rel, s) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(s); fd:close() end
+    w('lua/vim/_core/editor.lua', 'function vim.deprecate(name) return name end\n')
+    w('lua/vim/_core/shared.lua', 'local function check() return vim.deprecate("x") end\nlocal function later(f) vim.schedule(f) end\nreturn { check, later }\n')
+    w('lua/vim/_meta/builtin.lua', '---@meta\nfunction vim.schedule(fn) end\n')
+    w('lua/myplug/init.lua', 'function vim.notify(msg) return msg end\n')
+    w('lua/myplug/use.lua', 'local function tell() return vim.notify("x") end\nreturn tell\n')
+    w('lua/myplug/patch.lua', 'function vim.deprecate(name) return name end\nlocal function quiet() return vim.deprecate("z") end\nreturn quiet\n')
+    local store = require 'cartograph.store'
+    store.ingest(ts.extract(root))
+    local function calls()
+        local cv = require('cartograph.callview').of(store.data)
+        local by = {}
+        for i = 1, cv.n do by[cv.get(i, 'file') .. ' ' .. cv.get(i, 'full')] = { to = cv.get(i, 'to'), ext = cv.get(i, 'ext') } end
+        return by
+    end
+    local function check(by, how)
+        ok(tostring(by['lua/vim/_core/shared.lua vim.deprecate'].to):match('^lua/vim/_core/editor%.lua::vim%.deprecate'),
+            how .. ': the runtime\'s own def answers')
+        eq(nil, by['lua/vim/_core/shared.lua vim.schedule'].to, how .. ': a ---@meta stub is no definition (CART-1615)')
+        eq(nil, by['lua/myplug/use.lua vim.notify'].to, how .. ': a plugin\'s override still binds only its own file (CART-1499)')
+        ok(tostring(by['lua/myplug/patch.lua vim.deprecate'].to):match('^lua/myplug/patch%.lua::'),
+            how .. ': in the overriding file the override answers, not the runtime\'s def')
+    end
+    check(calls(), 'extract')
+    w('lua/vim/_core/shared.lua', 'local function check() return vim.deprecate("y") end\nlocal function later(f) vim.schedule(f) end\nreturn { check, later }\n')
+    assert(require('cartograph.refresh').files({ 'lua/vim/_core/shared.lua' }, { incremental = true }))
+    check(calls(), 'relink')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('method call and bare call: an INCREMENTAL refresh decides the same way — the relink path is a second copy of the resolver (CART-1487, CART-1491)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local store = require 'cartograph.store'

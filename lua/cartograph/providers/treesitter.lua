@@ -1214,6 +1214,34 @@ function M._with_derived(fnnode, src, params, G)
     end
     return m or params
 end
+--- the candidates a call under a STDLIB PREFIX may bind (CART-1499, CART-1614). A def in the call's own file: a runtime
+--- OVERRIDE (`table.sort = function …` in a tactic) reaches only the file it runs in. Else a def the active PROFILE
+--- names as the runtime's own source: the tree IS the stdlib ($VIMRUNTIME's editor.lua defines vim.deprecate for
+--- shared.lua's 6 calls; 964 runtime calls were refused `prefix` on such a def). The test is the FILE, not the key: the
+--- profile's keys miss `vim.x = function` defs. Never a declaration stub (`decl`, CART-1615)
+local SIGFILES = setmetatable({}, { __mode = 'k' })
+function M._prefix_own(cands, file, spec)
+    local own = {}
+    for _, n in ipairs(cands) do if n.file == file then own[#own + 1] = n end end
+    -- (an own-file def AND the runtime's both stay: the resolver's same-file preference picks the override)
+    local prof = spec and spec._profile
+    if not (prof and prof.sigs) then return own end
+    local sf = SIGFILES[prof]
+    if not sf then
+        sf = {}
+        for _, sg in pairs(prof.sigs) do if sg.file then sf[sg.file] = true end end
+        SIGFILES[prof] = sf
+    end
+    for _, n in ipairs(cands) do
+        local f = not n.decl and n.file ~= file and n.file
+        -- (relative to the runtime's lua/ dir; the tree may be rooted above it: `lua/vim/_core/editor.lua`)
+        local hit = f and sf[f]
+        local s = f and not hit and f:find('/', 1, true)
+        while s and not hit do hit = sf[f:sub(s + 1)]; s = f:find('/', s + 1, true) end
+        if hit then own[#own + 1] = n end
+    end
+    return own
+end
 --- the derived locals ALONE, for the function node (effects' arg_target maps a handed-on derived local to its param)
 function M._derived_of(defn, src, G)
     if not (G and G.derived_locals) then return nil end
@@ -9263,8 +9291,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         if cands and spec and spec.stdlib_prefixes then
             for _, pre in ipairs(spec.stdlib_prefixes) do
                 if name:sub(1, #pre) == pre then
-                    local own = {}
-                    for _, n in ipairs(cands) do if n.file == file then own[#own + 1] = n end end
+                    local own = M._prefix_own(cands, file, spec)
                     if #own == 0 then return nil, nil, nil, EXT.prefix end
                     cands = own
                     break
@@ -10315,8 +10342,7 @@ function M.relink(data, touched, opts)
         if cands and spec and spec.stdlib_prefixes then
             for _, pre in ipairs(spec.stdlib_prefixes) do
                 if name:sub(1, #pre) == pre then
-                    local own = {}
-                    for _, n in ipairs(cands) do if n.file == file then own[#own + 1] = n end end
+                    local own = M._prefix_own(cands, file, spec)
                     if #own == 0 then return nil, nil, nil, EXT.prefix end
                     cands = own
                     break
