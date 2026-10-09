@@ -6288,6 +6288,22 @@ test('refs: a bound argument names only the def its binder declares (java lambda
     end
 end)
 
+-- ⚠ A MULTI-ASSIGNMENT'S FUNCTION IS ITS OWN NAME'S (CART-1601): the functions query matches every name with every
+-- value, and `rr, release = nil, function () end` minted the function as `rr` too (transport.lua's phantom).
+test('defs: a function in a multi-assignment is minted under its OWN name only (CART-1601)', function ()
+    local data = ts.extract(mkroot('m.lua', table.concat({
+        'local function f(whole)', '  local rr, release', '  if whole then rr, release = nil, function () end end',
+        '  return rr, release', 'end',
+        'local a, b = 1, function () return 2 end',
+        'local single = function () return 3 end',
+        'return f',
+    }, '\n')))
+    local names = {}
+    for _, n in ipairs(data.nodes) do if n.kind == 'function' then names[n.name] = true end end
+    ok(names.release and names.b and names.single, 'the function is its own name\'s: ' .. vim.inspect(names))
+    ok(not names.rr and not names.a, 'never another name\'s: ' .. vim.inspect(names))
+end)
+
 test('defs: a lua table-FIELD function is cbarg; a local function is not (the field_fn_cbarg set, CART-1592)', function ()
     local root = mkroot('t.lua', table.concat({
         'local function plain() return 1 end',

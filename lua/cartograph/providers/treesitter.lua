@@ -7815,7 +7815,15 @@ local MATCH_OPTS = { match_limit = 65536 }
                 elseif defn and catn then
                     handle_iface(defn, catn, cat)
                 elseif defn and namen then
-                    handle_fn(defn, namen)
+                    -- (the same cross-product as vars: `rr, release = nil, function () end` matches the function with
+                    -- EVERY name — it is only its OWN name's value, CART-1601)
+                    -- (asked only where the names and the values are SIBLING lists — an assignment's variable_list /
+                    -- expression_list —; a `function f()` holds its own name)
+                    local np, dp = namen:parent(), defn:parent()
+                    local lists = np and dp and np:id() ~= dp:id() and np:parent() and dp:parent()
+                        and np:parent():id() == dp:parent():id()
+                    local pv = lists and M._pair_value(namen, defn) or defn
+                    if pv and pv:id() == defn:id() then handle_fn(defn, namen) end
                 elseif adefn then
                     handle_anon_fn(adefn)
                 elseif rdefn then
