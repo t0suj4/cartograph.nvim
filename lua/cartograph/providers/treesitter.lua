@@ -1160,7 +1160,19 @@ function M._bound_value(an, a)
     local chain, k = jvt_sm.resolve(an, a)
     if k == 0 then return nil end
     local b = chain[1]
+    -- (a use INSIDE its binder's own declaration — `x := x()`, `let p = wrap(p)`, lua's `local x = x or {}` —
+    -- reads the OUTER binding: the new one's scope starts after it, CART-1602)
+    if b.ab and b.abe then -- (BYTES, not rows: `x := mk(); x()` on one line is a use AFTER the declaration)
+        local ub = select(3, a:start())
+        if ub >= b.ab and ub < b.abe then return nil end
+    end
     return b.at or b.row or -1, b.ate -- (the declaration's first and last row: a def starting in it is the binder's)
+end
+--- the bare CALL's veto (CART-1602): a callee bound at its site resolves to no function but the def its binder
+--- declares -> the fn-value refusal, or nil
+function M._callee_veto(target, cb, cbe, full, file)
+    if not (target and cb and not full) or not M._bound_veto(cb, cbe, target, file) then return nil end
+    return tsutil.refusal('fn-value', { target })
 end
 --- the callback upgrade's veto for a bound argument (above): every target but a same-file def that STARTS inside the
 --- binder's declaration — an annotation, a wrapped `KEY =⏎ v -> …` keep the lambda off the declaration's first row
@@ -8590,7 +8602,15 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if spec.chain_root then
                         chroot, chfield = spec.chain_root(calln, src)
                     end
-                    local c = { callee = callee, args = args, argv = argv,
+                    -- (a BARE callee BOUND at its site — a local / param the scope model sees there — is a call through
+                    -- that binding: no function of its name but the def the binder declares. Only where a bare call CAN
+                    -- go through a local — the languages declaring fn_locals; ruby / java / php call a method or a
+                    -- function by name, lua's forward declaration IS the later def — CART-1602)
+                    local cb, cbe
+                    if spec.fn_locals and not method and (full == nil or full == callee) and namen then
+                        cb, cbe = M._bound_value(callee, namen)
+                    end
+                    local c = { callee = callee, args = args, argv = argv, cb = cb, cbe = cbe,
                         file = file, line = sp.start.line, method = method,
                         full = full ~= callee and full or nil,
                         chainroot = chroot, chainfield = chfield,
@@ -9612,6 +9632,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if pick then target, inferred, refused = pick, false, nil end
                 end
                 local veto = M._method_veto(target, p.full or p.call.callee, p.file) -- (CART-1491)
+                    or M._callee_veto(target, p.call.cb, p.call.cbe, p.call.full, p.file) -- (CART-1602)
                 if veto then target, inferred, refused = nil, nil, veto end
             end
         end
@@ -10452,6 +10473,7 @@ function M.relink(data, touched, opts)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
                 local veto = M._method_veto(target, cfull or ccallee, cfile) -- (CART-1491)
+                    or M._callee_veto(target, cget(i, 'cb'), cget(i, 'cbe'), cfull, cfile) -- (CART-1602)
                 if veto then target, inferred, refused = nil, nil, veto end
             end
             if target then

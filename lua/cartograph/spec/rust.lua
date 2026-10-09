@@ -146,14 +146,32 @@ local function rs_params(node, src, out)
 end
 local function rs_block(node, src, out)
     for _, st in inext, node, -1 do
-        if st:type() == 'let_declaration' then rs_pattern_names(st:field('pattern')[1], src, out, (select(1, st:range()))) end
+        if st:type() == 'let_declaration' then
+            local sr, _, er = st:range()
+            local t = {}
+            rs_pattern_names(st:field('pattern')[1], src, t, sr)
+            local sb, eb = select(3, st:start()), select(3, st:end_())
+            for nm, b in pairs(t) do b.at, b.ate, b.ab, b.abe = sr, er, sb, eb; out[nm] = b end -- (its own initializer is not in scope)
+        end
     end
 end
+-- (a binder's OWN initializer is not in its scope: `if let Some(s) = s(cmd)` calls the outer s — cargo's
+-- suggested_script —, `for x in x.iter()` iterates the outer x: the binders carry that span as ab / abe, CART-1602)
+local function rs_bind_span(pattern, sb, eb, src, out)
+    local t = {}
+    rs_pattern_names(pattern, src, t)
+    for nm, b in pairs(t) do b.ab, b.abe = sb, eb; out[nm] = b end
+end
 local function rs_lets(node, src, out) -- a `for` pattern, an `if let` / `while let` condition (let chains too), a match arm
-    if node:type() == 'match_arm' or node:type() == 'for_expression' then rs_pattern_names(node:field('pattern')[1], src, out) return end
+    if node:type() == 'match_arm' then rs_pattern_names(node:field('pattern')[1], src, out) return end
+    if node:type() == 'for_expression' then
+        local body = node:field('body')[1]
+        rs_bind_span(node:field('pattern')[1], select(3, node:start()), body and select(3, body:start()) or select(3, node:end_()), src, out)
+        return
+    end
     local function conds(c)
         if not c then return end
-        if c:type() == 'let_condition' then rs_pattern_names(c:field('pattern')[1], src, out)
+        if c:type() == 'let_condition' then rs_bind_span(c:field('pattern')[1], select(3, c:start()), select(3, c:end_()), src, out)
         elseif c:type() == 'let_chain' then for _, k in inext, c, -1 do conds(k) end end
     end
     conds(node:field('condition')[1])

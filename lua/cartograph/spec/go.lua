@@ -147,9 +147,11 @@ local GO_GUARDS = {
 -- declaring row (go 0.12 wraps a block's statements in a statement_list); an `if` / `for` / `switch` binds its
 -- initializer, a range `:=` and a type switch's alias. A package-level name binds nothing — it IS the package's,
 -- shared by every file of it.
-local function go_idents(n, src, out, row)
+local function go_idents(n, src, out, row, decl) -- (decl's rows ride as at / ate: its own initializer is not in scope)
+    local sr, er, sb, eb
+    if decl then local s, _, e = decl:range(); sr, er = s, e; sb, eb = select(3, decl:start()), select(3, decl:end_()) end
     for _, c in tsutil.inext, n, -1 do
-        if c:type() == 'identifier' then out[node_text(c, src)] = { row = row } end
+        if c:type() == 'identifier' then out[node_text(c, src)] = { row = row, at = sr, ate = er, ab = sb, abe = eb } end
     end
 end
 local function go_params(node, src, out)
@@ -166,13 +168,15 @@ local function go_decl(st, src, out, row) -- one statement's own declarations
     local t = st:type()
     if t == 'short_var_declaration' then
         local l = st:field('left')[1]
-        if l then go_idents(l, src, out, row) end
+        if l then go_idents(l, src, out, row, st) end
     elseif t == 'var_declaration' or t == 'const_declaration' then
         local function specs(n)
             for _, s in tsutil.inext, n, -1 do
                 local st2 = s:type()
                 if st2 == 'var_spec' or st2 == 'const_spec' then
-                    for _, nm in ipairs(s:field('name')) do out[node_text(nm, src)] = { row = row } end
+                    local sr, _, er = s:range()
+                    local sb, eb = select(3, s:start()), select(3, s:end_())
+                    for _, nm in ipairs(s:field('name')) do out[node_text(nm, src)] = { row = row, at = sr, ate = er, ab = sb, abe = eb } end
                 elseif st2 == 'var_spec_list' then specs(s) end
             end
         end

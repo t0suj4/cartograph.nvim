@@ -453,9 +453,11 @@ local function c_param_name(d) -- a param may itself be a function pointer: `int
     return c_decl_name(d)
 end
 local function c_declaration(st, src, out, row)
+    local sr, _, er = st:range() -- (at / ate / ab / abe: a binder's own initializer is not in its scope, CART-1602)
+    local sb, eb = select(3, st:start()), select(3, st:end_())
     for _, d in ipairs(st:field('declarator')) do
         local id = c_decl_name(d)
-        if id then out[M.node_text(id, src)] = { row = row } end
+        if id then out[M.node_text(id, src)] = { row = row, at = sr, ate = er, ab = sb, abe = eb } end
     end
 end
 local function c_fn_declarator(node)

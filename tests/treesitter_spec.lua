@@ -5979,8 +5979,8 @@ end)
 test('refs: a go param, receiver or local never links across files; range = and a name above its := stay free (CART-1598)', function ()
     if not has_parser('go') then skip 'no go parser' end
     local bound = { 'recv', 'parm', 'parm2', 'vari', 'resn', 'shrt', 'vdec', 'cdec', 'rngv', 'ifin', 'tsal', 'forc', 'litp',
-        'inlt', 'vgrp', 'gcal', 'gcpr', 'glit' } -- (glit: declared in a func literal's body, called there) -- (gcal / gcpr: CALLED through a local / a literal's param)
-    local free = { 'rngw', 'ctrl', 'gself' } -- (gself: `gself := gself()` calls the OUTER gself)
+        'inlt', 'vgrp', 'gcal', 'gcpr', 'glit', 'gnest' } -- (glit: declared in a func literal's body, called there; gcal / gcpr: CALLED through a local / a literal's param; gnest: a NESTED block's)
+    local free = { 'rngw', 'ctrl', 'gself', 'gwrp' } -- (gself: `gself := gself()` calls the OUTER gself; gwrp: an argument inside its own declaration)
     local defs = { 'package m', 'var late = 0', 'var litv = 0' } -- (go mints no fn-ref for a bare value mention: the row rule shows on a VAR)
     for _, l in ipairs({ bound, free }) do for _, nm in ipairs(l) do defs[#defs + 1] = 'func ' .. nm .. '() int { return 1 }' end end
     local root = mkroot('a.go', table.concat(defs, '\n'))
@@ -6006,6 +6006,8 @@ test('refs: a go param, receiver or local never links across files; range = and 
         '\tgself := gself()', '\t_ = gself',
         '\th := func(gcpr func() int) int { return gcpr() }', '\t_ = h',
         '\trun(func() { glit := mk(); glit() })',
+        '\tif ok { gnest := mk(); gnest() }', -- (a NESTED block's binding, called in it: CART-1602's position-aware callee gate)
+        '\tgwrp := wrap(gwrp)', '\t_ = gwrp', -- (an argument INSIDE its binder's declaration reads the OUTER gwrp)
         '\treturn 0',
         '}',
     }, '\n'))
@@ -6022,6 +6024,15 @@ test('refs: a go param, receiver or local never links across files; range = and 
     for _, nm in ipairs(bound) do ok(not refs[nm], nm .. ' is BOUND: no cross-file link ' .. vim.inspect(refs)) end
     for _, nm in ipairs(free) do ok(refs[nm], nm .. ' is FREE: it links ' .. vim.inspect(refs)) end
     ok(refs['var:late'], 'a mention ABOVE its := reads the package var (visible from its row): ' .. vim.inspect(refs))
+    -- (RELINK re-resolves every call left without a target: it must read the same callee veto off the record)
+    ts.relink(data, {})
+    local after = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and byid[e.to] and byid[e.to].file == 'a.go' and (byid[e.from] or { file = e.from }).file == 'b.go' then
+            after[byid[e.to].name] = true
+        end
+    end
+    ok(not after.gnest and not after.gcal, 'after relink: a bound callee still calls its binding ' .. vim.inspect(after))
     ok(not refs['var:litv'], 'a func literal\'s PARAM is bound in it: ' .. vim.inspect(refs))
     vim.fn.delete(root, 'rf')
 end)
@@ -6032,8 +6043,8 @@ end)
 test('refs: a rust param, let, pattern or closure param never links across files; self-init and arm names do not shadow calls (CART-1598)', function ()
     if not has_parser('rust') then skip 'no rust parser' end
     local bound = { 'parm', 'tupa', 'tupb', 'letv', 'leta', 'letb', 'shfd', 'rnfd', 'forv', 'iflt', 'whlt', 'armv', 'capt', 'clsp', 'clsm', 'chna', 'chnb' }
-    local free = { 'ctrl', 'selfi', 'armc', 'MAXV' }
-    local callee_bound = { 'lcal', 'cpar', 'clet' } -- (CALLED through a binding: the call gate's fn_locals)
+    local free = { 'ctrl', 'selfi', 'armc', 'MAXV', 'slet', 'sfor' }
+    local callee_bound = { 'lcal', 'cpar', 'clet', 'armf' } -- (CALLED through a binding: the call gate's fn_locals / site)
     local defs = {}
     for _, l in ipairs({ bound, free, callee_bound }) do for _, nm in ipairs(l) do defs[#defs + 1] = 'pub fn ' .. nm .. '() -> u32 { 1 }' end end
     local root = mkroot('a.rs', table.concat(defs, '\n'))
@@ -6053,6 +6064,9 @@ test('refs: a rust param, let, pattern or closure param never links across files
         '    let lcal = mk(); lcal();',
         '    let g = |cpar: fn() -> u32| cpar();',
         '    let k = || { let clet = mk(); clet() };',
+        '    match o { Some(armf) => armf(), None => 0 };', -- (a match arm's binding, called in the arm: CART-1602)
+        '    if let Some(slet) = slet(1) { eat(slet); }', -- (the let's OWN condition calls the outer slet)
+        '    for sfor in sfor() { eat(sfor); }', -- (and a for's iterator)
         '    let f = |clsp: u32, mut clsm| clsp + clsm;',
         '    eat(parm, tupa, tupb, letv, leta, letb, shfd, rnfd, ctrl, f, clsp, clsm);',
         '    0',
@@ -6264,10 +6278,13 @@ test('refs: a bound argument names only the def its binder declares (java lambda
         'local sortf = function (t) table.sort(t, cmpf) end',
         'local wrapf =', '    function (t) return t end',
         'local function g(t) return pcall(sortf, t), pcall(wrapf, t) end',
-        'return g',
+        'local function lwrp(x) return x end',
+        'local function h() local lwrp = wrap(lwrp) return lwrp end', -- (inside its own declaration: the OUTER lwrp)
+        'return g, h',
     }, '\n'))), 'l.lua')
     ok(lr.cmpf and lr.sortf, 'lua: a local function / a local bound to a function is that def: ' .. vim.inspect(lr))
     ok(lr.wrapf, 'lua: a function value wrapped onto the next row is still the def its local names: ' .. vim.inspect(lr))
+    ok(lr.lwrp, 'lua: `local lwrp = wrap(lwrp)` passes the OUTER lwrp: ' .. vim.inspect(lr))
     if has_parser('typescript') then
         -- (a bound argument is decided by its binder ALONE: the fn-chain gate's localdecl had refused a local arrow
         -- its own def — angular's timer_scheduler `const callback = () => …; setTimeout(callback, …)`)
