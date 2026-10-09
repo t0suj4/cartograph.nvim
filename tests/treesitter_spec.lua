@@ -6178,6 +6178,46 @@ test('refs: a ruby param, local or block param is no method of its name; a name 
     for _, nm in ipairs(free) do ok(refs[nm], nm .. ' is a METHOD call here: it links ' .. vim.inspect(refs)) end
 end)
 
+-- ⚠ A PHP FUNCTION'S VARIABLES ARE ITS OWN (CART-1598): a param or local joined another file's file-scope var — a
+-- GLOBAL, which a php function sees only through `global`.
+test('use edges: a php param or local never reads another file\'s global; a `global` declaration does (CART-1598)', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local bound = { 'parm', 'dflt', 'varp', 'prom', 'loca', 'lsta', 'lstb', 'augm', 'fek', 'fev', 'errv', 'stav', 'clp',
+        'clu', 'arp', 'rdonly', 'gxo' } -- (rdonly: READ, never assigned — still the function's own undefined local)
+    local free = { 'glob', '_SERVER' } -- (a superglobal is global everywhere)
+    local g = { '<?php' }
+    for _, l in ipairs({ bound, free }) do for _, nm in ipairs(l) do g[#g + 1] = '$' .. nm .. ' = 0;' end end
+    local root = mkroot('a.php', table.concat(g, '\n'))
+    local fd = assert(io.open(root .. '/b.php', 'w'))
+    fd:write(table.concat({
+        '<?php',
+        'function f($parm, int $dflt = 1, ...$varp) {',
+        '  eat($parm, $dflt, $varp, $loca, $lsta, $lstb, $augm, $fek, $fev, $errv, $stav);',
+        '  $loca = 1; [$lsta, $lstb] = g(); $augm .= "x";',
+        '  foreach ($xs as $fek => $fev) {}',
+        '  try {} catch (E $errv) {}',
+        '  static $stav = 0;',
+        '  global $glob; eat($glob);',
+        '  eat($rdonly, $_SERVER, $gxo);',
+        '  $cg = function () { global $gxo; };', -- (a closure's global is ITS OWN: the outer $gxo stays local)
+        '  $c = function ($clp) use ($clu) { return eat($clp, $clu); };',
+        '  $d = fn($arp) => eat($arp);',
+        '}',
+        'class K { function __construct(private int $prom) { eat($prom); } }',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local byid, uses = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local f, t = byid[e.from] or { file = e.from }, byid[e.to]
+        if e.kind == 'use' and t and t.file == 'a.php' and f.file == 'b.php' then uses[t.name] = true end
+    end
+    for _, nm in ipairs(bound) do ok(not uses[nm], nm .. ' is the function\'s own: no read of a.php\'s global ' .. vim.inspect(uses)) end
+    for _, nm in ipairs(free) do ok(uses[nm], nm .. ' is declared global: it reads a.php\'s ' .. vim.inspect(uses)) end
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.

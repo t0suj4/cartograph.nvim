@@ -140,7 +140,62 @@ local PHP_GUARDS = {
     end,
 }
 
+-- ── LEXICAL SCOPES (CART-1598, php) ───────────────────────────────────────────────────────────────────────────────
+-- php declared no scope model, so a function's `$token` param or `$config` local joined another file's file-scope
+-- `$token` / `$config` — a GLOBAL, which a php function never sees without `global`. A function / method / closure
+-- binds its params and EVERY variable its body names (function-wide: php has no block scope and no implicit
+-- globals), minus its `global` names and the superglobals; an arrow fn only its params
+-- (it sees the enclosing scope). The binder is the variable's NAME, the mention php's spec declares.
+local function php_var(vn, src, out)
+    if vn and vn:type() == 'variable_name' then
+        local nm = vn:named_child(0)
+        if nm then out[node_text(nm, src)] = {} end
+    end
+end
+local function php_params(node, src, out)
+    local ps = node:field('parameters')[1]
+    if ps then
+        for _, p in tsutil.inext, ps, -1 do
+            if p:named() then php_var(p:field('name')[1], src, out) end
+        end
+    end
+end
+local PHP_OWN_SCOPE = { function_definition = true, method_declaration = true, anonymous_function = true,
+    arrow_function = true, class_declaration = true }
+-- EVERY variable a function's body names is its own — php has no implicit globals: an unassigned `$config` read in
+-- a function is an undefined LOCAL, never the file-scope `$config` — except its `global` names and the superglobals
+-- (`$_GET` …); a closure's `use ($x)` capture is named in its body too
+local function php_fn_scope(node, src, out)
+    php_params(node, src, out)
+    local glob = {}
+    local function walk(n)
+        for _, c in tsutil.inext, n, -1 do
+            local t = c:type()
+            if not PHP_OWN_SCOPE[t] then
+                if t == 'variable_name' then
+                    local nm = c:named_child(0)
+                    local s = nm and node_text(nm, src)
+                    if s and not s:match('^_%u') then out[s] = {} end -- (`$_GET` …: superglobal)
+                elseif t == 'global_declaration' then
+                    local g = {}
+                    for _, v in tsutil.inext, c, -1 do php_var(v, src, g) end
+                    for nm in pairs(g) do glob[nm] = true end
+                end
+                walk(c)
+            end
+        end
+    end
+    local body = node:field('body')[1]
+    if body then walk(body) end
+    for g in pairs(glob) do out[g] = nil end
+end
+local PHP_LEXICAL_SCOPES = {
+    function_definition = { kind = 'param', harvest = php_fn_scope }, method_declaration = { kind = 'param', harvest = php_fn_scope },
+    anonymous_function = { kind = 'param', harvest = php_fn_scope }, arrow_function = { kind = 'param', harvest = php_params },
+}
+
 return {
+    lexical_scopes = PHP_LEXICAL_SCOPES, -- CART-1598
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not
