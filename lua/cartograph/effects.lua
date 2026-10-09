@@ -94,6 +94,8 @@ M.SIGS = {
             ['vim.inspect'] = P, ['vim.deepcopy'] = P, ['vim.split'] = P,
             ['vim.tbl_'] = P, ['vim.startswith'] = P, ['vim.endswith'] = P,
             ['vim.treesitter.'] = P, -- parse allocates, mutates nothing of ours
+            -- TYPED receivers (CART-1621): a file handle's methods are the world's; a tree-sitter node's read its tree
+            ['file.'] = IO, ['TSNode.'] = P,
             ['vim.json.'] = P, ['vim.mpack.'] = P,
             -- game runtimes (the user's real targets)
             ['game.'] = IO, ['script.'] = IO, ['rendering.'] = IO, -- factorio
@@ -935,6 +937,13 @@ function M.summaries(store)
                         local lang = file and (file:match('%.lua$') and 'lua'
                             or file:match('%.php$') and 'php')
                         local bname = declname or callrec.full(c) or callrec.callee(c)
+                        -- (a receiver the resolver TYPED — by member evidence or by its one definition's declared
+                        -- return, CART-1570 / CART-1621 — is its type's: `fd:close()` on a file is file.close)
+                        local cext = c.ext
+                        if not declname and type(cext) == 'table' and cext.type
+                            and (cext.why == 'typed-receiver' or cext.why == 'typed-binding') and callrec.callee(c) then
+                            bname = cext.type .. '.' .. callrec.callee(c)
+                        end
                         local sig, grade
                         if lang and bname then
                             -- (explicit call: and/or would truncate the

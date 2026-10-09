@@ -186,6 +186,47 @@ local function assigned(vl, el, name, src)
     end
     return nil
 end
+-- every assignment and declaration in a scope, by the names they bind, read ONCE per scope: the per-declaration rescan
+-- of the whole declaring scope was quadratic in a big function body (measured CART-1621). name -> { { statement id,
+-- the value it assigns | false (none: a bare `local s`, a short list) } }. (It also fixed a pessimism: ANY bare
+-- `local x` in the scope, of any name, had failed every typing there — only one of THIS name does)
+local function scope_assigns(p, src, seen)
+    seen.amaps = seen.amaps or {}
+    local m = seen.amaps[p:id()]
+    if m then return m end
+    m = {}
+    local function put(nm, sid, e)
+        local l = m[nm]
+        if not l then l = {}; m[nm] = l end
+        l[#l + 1] = { sid, e or false }
+    end
+    local function record(vl, el, sid)
+        local exprs, k = {}, 0
+        for _, x in tsutil.inext, el or vl, -1 do if el and x:named() then k = k + 1; exprs[k] = x end end
+        local i = 0
+        for _, v in tsutil.inext, vl, -1 do
+            if v:named() then
+                i = i + 1
+                if v:type() == 'identifier' then put(node_text(v, src), sid, exprs[i]) end
+            end
+        end
+    end
+    local function walk(x)
+        local t = x:type()
+        if t == 'assignment_statement' and x:parent():type() ~= 'variable_declaration' then
+            record(x:named_child(0), x:named_child(1), x:id())
+        elseif t == 'variable_declaration' then
+            local a2 = x:named_child(0)
+            if a2 and a2:type() == 'assignment_statement' then record(a2:named_child(0), a2:named_child(1), x:id())
+            elseif a2 and a2:type() == 'identifier' then put(node_text(a2, src), x:id(), nil)
+            elseif a2 then record(a2, nil, x:id()) end
+        end
+        for _, y in tsutil.inext, x, -1 do walk(y) end
+    end
+    walk(p)
+    seen.amaps[p:id()] = m
+    return m
+end
 local function local_all(id, src, depth, seen, pred, tag)
     local name = node_text(id, src)
     local n = id
@@ -249,20 +290,10 @@ local function local_all(id, src, depth, seen, pred, tag)
                         seen[key] = false -- a cycle (s = s .. x) is decided by the other expressions
                         if not pred(e, src, depth + 1, seen) then return false end
                         local ok = true
-                        local function scan(x)
-                            if not ok then return end
-                            if x:type() == 'assignment_statement' and x:parent():type() ~= 'variable_declaration' then
-                                local r = assigned(x:named_child(0), x:named_child(1), name, src)
-                                if r == false or (r and not pred(r, src, depth + 1, seen)) then ok = false end
-                            elseif x:type() == 'variable_declaration' and x:id() ~= c:id() then
-                                local a2 = x:named_child(0)
-                                local r = a2 and a2:type() == 'assignment_statement'
-                                    and assigned(a2:named_child(0), a2:named_child(1), name, src)
-                                if r == false or (r and not pred(r, src, depth + 1, seen)) then ok = false end
-                            end
-                            for _, y in tsutil.inext, x, -1 do scan(y) end
+                        local cid = c:id()
+                        for _, r in ipairs(scope_assigns(p, src, seen)[name] or {}) do
+                            if r[1] ~= cid and (r[2] == false or not pred(r[2], src, depth + 1, seen)) then ok = false; break end
                         end
-                        scan(p)
                         seen[key] = ok
                         return ok
                     end

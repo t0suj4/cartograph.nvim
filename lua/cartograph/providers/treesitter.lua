@@ -4529,7 +4529,9 @@ local function resolve_receiver_type(cv, data, exact, tail)
         if ty then
             for _, i in ipairs(g) do
                 local m = cget(i, 'callee')
-                if m and members['profile:' .. ty][m] and cget(i, 'refused') and not cget(i, 'to') then
+                -- (a REFUSED call is withdrawn from its wrong join; an unresolved one, already external, carries the
+                -- type too — `n:parent()` has no project def, and a chain `local p = n:parent()` reads it, CART-1621)
+                if m and members['profile:' .. ty][m] and not cget(i, 'to') then
                     cset(i, 'refused', nil)
                     cset(i, 'ext', { disp = 'external', why = 'typed-receiver', inferred = true, type = ty })
                     n = n + 1
