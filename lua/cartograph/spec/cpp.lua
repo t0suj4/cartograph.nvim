@@ -61,6 +61,7 @@ return {
     torn_context = tsutil.c_torn_context, -- tear by damaged CONTEXT, not by position after an error (CART-1084)
     is_write = tsutil.cfamily_is_write,
     guards = tsutil.CFAMILY_GUARDS, -- (CART-1576)
+    lexical_scopes = tsutil.CFAMILY_LEXICAL_SCOPES, fn_locals = tsutil.cfamily_fn_locals, -- (CART-1598)
     -- the PREFILTER: every immediate parent type a write mention can have here.
     -- Without it the classifier is never invoked (v147 shipped that mistake).
     write_gate = { assignment_expression = true, update_expression = true,

@@ -426,4 +426,123 @@ M.CFAMILY_GUARDS = {
     rhs_setonce = function () return false end, -- (no memo idiom in the language)
 }
 
+-- ── C / C++ LEXICAL SCOPES (CART-1598) ────────────────────────────────────────────────────────────────────────────
+-- c / c++ declared no scope model, so the cross-file unique join claimed every param and local. A declarator names
+-- its identifier through pointer / array / reference / parenthesized / init wrappers; a function definition and a
+-- lambda bind their params, a compound statement its declarations from the declaring row (never a local PROTOTYPE,
+-- `int g(int);` — a function, not a variable), `for` / range-for / an if-while-switch condition_clause / a catch
+-- their own. A file-scope declaration binds nothing: it IS the global.
+local function c_decl_name(d)
+    while d do
+        local t = d:type()
+        if t == 'identifier' then return d end
+        if t == 'function_declarator' then
+            -- (a function POINTER `int (*fp)(int)` wraps its name in parentheses: a variable; a bare `int g(int)`
+            -- is a prototype, a function — not a binder)
+            d = d:field('declarator')[1]
+            if not (d and d:type() == 'parenthesized_declarator') then return nil end
+        elseif t ~= 'init_declarator' and t ~= 'pointer_declarator' and t ~= 'array_declarator'
+            and t ~= 'reference_declarator' and t ~= 'parenthesized_declarator' then return nil
+        else d = d:field('declarator')[1] or d:named_child(0) end
+    end
+end
+local function c_param_name(d) -- a param may itself be a function pointer: `int (*cb)(int)` (c_decl_name) or `int cb(int)`
+    if d and d:type() == 'function_declarator' and not (d:field('declarator')[1] and d:field('declarator')[1]:type() == 'parenthesized_declarator') then
+        d = d:field('declarator')[1]
+    end
+    return c_decl_name(d)
+end
+local function c_declaration(st, src, out, row)
+    for _, d in ipairs(st:field('declarator')) do
+        local id = c_decl_name(d)
+        if id then out[M.node_text(id, src)] = { row = row } end
+    end
+end
+local function c_fn_declarator(node)
+    local d = node:field('declarator')[1]
+    while d and d:type() ~= 'function_declarator' and d:type() ~= 'lambda_declarator' do
+        d = d:field('declarator')[1] -- (`int *f(…)`: the function_declarator sits under the pointer)
+    end
+    return d
+end
+local function c_param_list(pl, src, out)
+    for _, p in M.inext, pl, -1 do
+        local t = p:type()
+        if t == 'parameter_declaration' or t == 'optional_parameter_declaration' then
+            local id = c_param_name(p:field('declarator')[1])
+            if id then out[M.node_text(id, src)] = {} end
+        end
+    end
+end
+local function c_params(node, src, out)
+    local fd = c_fn_declarator(node)
+    local pl = fd and fd:field('parameters')[1]
+    if pl then c_param_list(pl, src, out) end
+end
+local function c_block(node, src, out)
+    for _, st in M.inext, node, -1 do
+        if st:type() == 'declaration' then c_declaration(st, src, out, (select(1, st:range()))) end
+    end
+end
+local function c_ctrl(node, src, out) -- for (int i…) / for (auto &e : xs) / if (int w = h(); w) / catch (E e)
+    local init = node:field('initializer')[1]
+    if init and init:type() == 'declaration' then c_declaration(init, src, out) end
+    if node:type() == 'for_range_loop' then
+        local id = c_decl_name(node:field('declarator')[1])
+        if id then out[M.node_text(id, src)] = {} end
+    end
+    local cc = node:field('condition')[1]
+    if cc and cc:type() == 'condition_clause' then
+        local is = cc:field('initializer')[1]
+        local d = is and is:named_child(0)
+        if d and d:type() == 'declaration' then c_declaration(d, src, out) end
+        local v = cc:field('value')[1]
+        if v and v:type() == 'declaration' then c_declaration(v, src, out) end
+    end
+    if node:type() == 'catch_clause' then
+        local pl = node:field('parameters')[1]
+        if pl then c_param_list(pl, src, out) end
+    end
+end
+M.CFAMILY_LEXICAL_SCOPES = {
+    function_definition = { kind = 'param', harvest = c_params }, lambda_expression = { kind = 'param', harvest = c_params },
+    compound_statement = { kind = 'local', harvest = c_block },
+    for_statement = { kind = 'local', harvest = c_ctrl }, for_range_loop = { kind = 'local', harvest = c_ctrl },
+    if_statement = { kind = 'local', harvest = c_ctrl }, while_statement = { kind = 'local', harvest = c_ctrl },
+    switch_statement = { kind = 'local', harvest = c_ctrl }, catch_clause = { kind = 'local', harvest = c_ctrl },
+}
+-- the CALLEE gate's binders (fn.locals, CART-1597's hook), narrowed as go / rust's (CART-1598): the top block's
+-- declarations (a function POINTER `int (*fp)(int) = f; fp(1)` calls the binding; self-init excluded) and a lambda's
+-- params and top block (it mints no node)
+function M.cfamily_fn_locals(def, src, out)
+    local function top(b)
+        for _, st in M.inext, b, -1 do
+            if st:type() == 'declaration' then
+                for _, d in ipairs(st:field('declarator')) do
+                    local id = c_decl_name(d)
+                    if id then
+                        local nm = M.node_text(id, src)
+                        local v = d:type() == 'init_declarator' and d:field('value')[1] or nil
+                        if not (v and M.mentions_of(v, src, { [nm] = true })) then out[nm] = {} end
+                    end
+                end
+            end
+        end
+    end
+    local body = def:field('body')[1]
+    if not body then return end
+    top(body)
+    local function lambdas(n)
+        for _, c in M.inext, n, -1 do
+            if c:type() == 'lambda_expression' then
+                c_params(c, src, out)
+                local lb = c:field('body')[1]
+                if lb then top(lb) end
+            end
+            lambdas(c)
+        end
+    end
+    lambdas(body)
+end
+
 return M

@@ -6073,6 +6073,76 @@ test('refs: a rust param, let, pattern or closure param never links across files
     vim.fn.delete(root, 'rf')
 end)
 
+-- ⚠ A C / C++ PARAM OR LOCAL IS BOUND (CART-1598): neither declared a scope model; guile's locals `type` / `buf`
+-- read vm-i-loader.c's globals, 7kaa's `x` / `y` OUNITAM.cpp's.
+test('refs: a c / c++ param or local never links across files; a file-scope global and a free name do (CART-1598)', function ()
+    local function run(lang, ext, body, bound, free)
+        if not has_parser(lang) then return end
+        local defs = {}
+        for _, l in ipairs({ bound, free }) do for _, nm in ipairs(l) do defs[#defs + 1] = 'int ' .. nm .. 'v = 0;' end end
+        local root = mkroot('a.' .. ext, table.concat(defs, '\n'))
+        local fd = assert(io.open(root .. '/b.' .. ext, 'w')); fd:write(body); fd:close()
+        local data = ts.extract(root)
+        local byid, uses = {}, {}
+        for _, n in ipairs(data.nodes) do byid[n.id] = n end
+        for _, e in ipairs(data.edges) do
+            local f, t = byid[e.from] or { file = e.from }, byid[e.to]
+            if e.kind == 'use' and t and t.file == 'a.' .. ext and f.file == 'b.' .. ext then uses[t.name] = true end
+        end
+        for _, nm in ipairs(bound) do ok(not uses[nm .. 'v'], lang .. ': ' .. nm .. 'v is BOUND ' .. vim.inspect(uses)) end
+        for _, nm in ipairs(free) do ok(uses[nm .. 'v'], lang .. ': ' .. nm .. 'v is FREE ' .. vim.inspect(uses)) end
+        vim.fn.delete(root, 'rf')
+    end
+    run('c', 'c', table.concat({
+        'int use(int);',
+        'int f(int parv, char *ptrv, int arrv[], int (*cbpv)(int)) {',
+        '    int locv = 1, *lpv, larv[3];',
+        '    for (int forv = 0; forv < 3; forv++) { int innv = forv; use(innv); }',
+        '    return use(parv) + *ptrv + arrv[0] + cbpv(1) + locv + *lpv + larv[0] + glov;',
+        '}',
+        'int *pf(int pptv) { use(pptv); return 0; }', -- (the function_declarator under a pointer: a pointer-returning fn)
+        'void ft(int ftpv(int)) { use(ftpv); }', -- (a function-TYPED param, no pointer: still a binder)
+    }, '\n'), { 'par', 'ptr', 'arr', 'cbp', 'loc', 'lp', 'lar', 'inn', 'for', 'ppt', 'ftp' }, { 'glo' })
+    run('cpp', 'cpp', table.concat({
+        'int use(int);',
+        'void g(std::vector<int> xs) {',
+        '    auto lam = [](int lmpv) { return lmpv; };',
+        '    for (auto &rngv : xs) { use(rngv); }',
+        '    if (int ifiv = use(1); ifiv) { use(ifiv); }',
+        '    while (int whlv = use(1)) { use(whlv); }',
+        '    auto dl = [](int odpv = 1) { return odpv; };',
+        '    try { use(1); } catch (Err &excv) { use(excv.code); }',
+        '    use(lam(1) + frev);',
+        '}',
+    }, '\n'), { 'lmp', 'rng', 'ifi', 'exc', 'whl', 'odp' }, { 'fre' })
+    -- the CALLEE gate: a function-pointer local is called, not a.c's function of its name; `int x = x(…)` calls x
+    if has_parser('cpp') then
+        local root = mkroot('a.cpp', 'int lfpc(int x) { return x; }\nint slfc(int x) { return x; }\nint lmlc(int x) { return x; }\nint lprt(int x) { return x; }\n')
+        local fd = assert(io.open(root .. '/b.cpp', 'w'))
+        fd:write(table.concat({
+            'int use(int);',
+            'void k() {',
+            '    int (*lfpc)(int) = use; lfpc(1);',
+            '    int slfc = slfc(2);',
+            '    int lprt(int); lprt(3);', -- (a local PROTOTYPE declares the function: it binds nothing)
+            '    auto q = [](int z) { int (*lmlc)(int) = use; return lmlc(z); };',
+            '}',
+        }, '\n'))
+        fd:close()
+        local data = ts.extract(root)
+        local byid, refs = {}, {}
+        for _, n in ipairs(data.nodes) do byid[n.id] = n end
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'ref' and byid[e.to] and byid[e.to].file == 'a.cpp' then refs[byid[e.to].name] = true end
+        end
+        ok(not refs.lfpc, 'a function-pointer LOCAL is what lfpc() calls: ' .. vim.inspect(refs))
+        ok(not refs.lmlc, '...a lambda body\'s too: ' .. vim.inspect(refs))
+        ok(refs.slfc, '`int slfc = slfc(2)` calls the OUTER slfc: ' .. vim.inspect(refs))
+        ok(refs.lprt, 'a local prototype is no binder: lprt() is a.cpp\'s: ' .. vim.inspect(refs))
+        vim.fn.delete(root, 'rf')
+    end
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.
