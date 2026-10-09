@@ -282,26 +282,45 @@ local function keys_of(t)
 end
 local function signature(s)
     return table.concat({ s.nk, tostring(s.over), tostring(s.mh), tostring(s.nd), tostring(s.jp),
-        s.h and s.h[1] or '', keys_of(s.w), keys_of(s.gpk), keys_of(s.pwx), keys_of(s.cpo) }, '\0')
+        s.h and s.h[1] or '', keys_of(s.w), keys_of(s.gpk), keys_of(s.pwx), keys_of(s.cpo),
+        s.gh and (s.gh[1][1] .. '=' .. s.gh[1][2] .. '/' .. #s.gh) or '' }, '\0')
 end
 
 local CAP = 200   -- write-set keys per summary before honest coarsening
 local HCAP = 4    -- hedges kept per summary
 
-local function s_add(sum, key, tier)
+-- the param predicate of the CALL SITE being taken (CART-1567): what a call under `if not validator` brings in fires
+-- only when that holds, so its keys carry the site's gp — set around one site's processing, nil otherwise
+local SITE_GP
+-- `gp` (±param): the write fires only under that predicate. A key added UNGUARDED, or under another predicate, is
+-- unguarded: it may fire either way (the order of the adds does not decide it)
+local function s_add(sum, key, tier, gp)
+    gp = gp or SITE_GP
     local w = sum.w
     local cur = w[key]
     if cur then
         if tier < cur then w[key] = tier end
+        local g = sum.gpk and sum.gpk[key]
+        if g and g ~= gp then sum.gpk[key] = nil end
     elseif sum.nk >= CAP then
         sum.over = true
     else
         sum.nk = sum.nk + 1
         w[key] = tier
+        if gp then sum.gpk = sum.gpk or {}; sum.gpk[key] = gp end
     end
 end
 
-local function s_hedge(sum, why)
+-- a hedge raised under the site's param predicate is GUARDED (gh: { why, ±param }): a caller whose argument decides the
+-- predicate false never meets it (vim.validate's deprecated table form, CART-1567)
+local function s_hedge(sum, why, gp)
+    gp = gp or SITE_GP
+    if gp then
+        local g = sum.gh
+        if not g then g = {}; sum.gh = g end
+        if #g < HCAP then g[#g + 1] = { why, gp } end
+        return
+    end
     local h = sum.h
     if not h then h = {}; sum.h = h end
     if #h < HCAP then h[#h + 1] = why end
@@ -395,9 +414,14 @@ end
 -- method tier, nondet, the join premise. EVERY path folding one summary into another goes through here — a resolved
 -- callee, a callback, a substituted pair — because each path that copied them by hand dropped some (CART-1543,
 -- CART-1558: oracle.lua's `stop` read plain pure over a joined pcall callback)
-local function tiers(sum, ts)
+-- `c` / `file`: the call site and the callee's file, when there is one — a guarded hedge is discharged there
+local function tiers(sum, ts, c, file)
     if ts.over then sum.over = true end
     if ts.h then s_hedge(sum, ts.h[1]) end
+    for _, x in ipairs(ts.gh or {}) do
+        if not c or M.verdict({ rw = 2, gw = 1, gp = x[2] }, c, file) ~= 'skips' then s_hedge(sum, x[1]) end
+        if not c then break end
+    end
     if ts.mh then sum.mh = true end
     if ts.nd then sum.nd = true end
     if ts.jp then sum.jp = true end
@@ -698,6 +722,45 @@ function M.summaries(store)
         end })
     end
     local con = scc.condense(adj, ids)
+    -- ★ A GUARDED EDGE INSIDE A CYCLE ORDERS NOTHING (CART-1567). vim.validate calls vim.deprecate only under `not
+    -- validator`, and vim.deprecate calls vim.validate back: one component, one SHARED summary, so deprecate's writes
+    -- reached every caller of validate whatever it passed. An edge whose every site is param-guarded (c.gp) and that
+    -- closes a cycle leaves the condensation: its callee may come later, and that site takes the previous pass's
+    -- summary like a joined candidate (`stale` → the least fixpoint). Each member then has its OWN summary, and the
+    -- guard is discharged at its callers
+    do
+        local guarded, open = {}, {}
+        for _, c in ipairs(store.data.calls or {}) do
+            local fn, to = callrec.fn(c), callrec.to(c)
+            if fn and to and con.comp[fn] and con.comp[fn] == con.comp[to] and fn ~= to then
+                local k = fn .. '\0' .. to
+                if c.gp then guarded[k] = true else open[k] = true end
+            end
+        end
+        local cut = {}
+        for k in pairs(guarded) do
+            if not open[k] then
+                local fn, to = k:match('^(.-)%z(.*)$')
+                local l = cut[fn]; if not l then l = {}; cut[fn] = l end
+                l[to] = true
+            end
+        end
+        if next(cut) then
+            local base, memo = adj, {}
+            adj = setmetatable({}, { __index = function (_, v)
+                if memo[v] ~= nil then return memo[v] or nil end
+                local u, x = base[v], cut[v]
+                local out = u
+                if u and x then
+                    out = {}
+                    for _, w in ipairs(u) do if not x[w] then out[#out + 1] = w end end
+                end
+                memo[v] = out or false
+                return out
+            end })
+            con = scc.condense(adj, ids)
+        end
+    end
     -- ONE pass over the condensation, callees first. A JOINED call's candidates are no call edges (ordering by them
     -- would merge every cycle through an ambiguous name into one component — 1674 functions sharing a summary on
     -- this repo), so a candidate may not be summarized yet when its call is reached: the pass takes the PREVIOUS
@@ -744,10 +807,7 @@ function M.summaries(store)
                     if u.rw and u.rw >= 2 then
                         if u.gp then
                             -- gp is var-level: one dischargeable key
-                            local key = u.to .. '\31'
-                            s_add(sum, key, u.gw or 1)
-                            sum.gpk = sum.gpk or {}
-                            sum.gpk[key] = u.gp
+                            s_add(sum, u.to .. '\31', u.gw or 1, u.gp)
                         elseif u.flds then
                             for f, packed in pairs(u.flds) do
                                 if packed % 4 >= 2 then
@@ -774,7 +834,7 @@ function M.summaries(store)
             -- name-matched method tier, nondet, the join premise — travel with it
             local function take(c, caller, to, cs)
                 cs = cs or sums[to]
-                tiers(sum, cs)
+                do local tn0 = store.node(to); tiers(sum, cs, c, tn0 and tn0.file) end
                 for key, tier in pairs(cs.w) do
                     local gp = cs.gpk and cs.gpk[key]
                     if gp then
@@ -783,7 +843,9 @@ function M.summaries(store)
                             { rw = 2, gw = tier, gp = gp }, c,
                             tn and tn.file)
                         if v ~= 'skips' then
-                            s_add(sum, key, VERDICT_TIER[v] or tier)
+                            -- (an undecided predicate makes a write CONDITIONAL: never stronger than it was — a set-once
+                            -- key under a guarded call stays set-once)
+                            s_add(sum, key, math.max(VERDICT_TIER[v] or tier, tier))
                         end
                     else
                         s_add(sum, key, tier)
@@ -837,6 +899,9 @@ function M.summaries(store)
                 local caller = store.node(fid)
                 local file = caller and caller.file
                 for _, c in ipairs(store.topo():sites(fid)) do
+                    -- (the site's param predicate, in THIS member's params: one member only — a shared summary's
+                    -- callers pass another member's arguments)
+                    SITE_GP = #members == 1 and c.gp or nil
                     local to = callrec.to(c)
                     -- (a call to a DECLARATION — a `---@meta` stub — is a call to what it declares: its empty body is
                     -- not that function's effects, so the signature registry or the unresolved hedge answers — under
@@ -848,6 +913,11 @@ function M.summaries(store)
                         intra[#intra + 1] = { c = c, caller = caller, to = to }
                     elseif to and sums[to] then
                         take(c, caller, to)
+                    elseif to and c.gp and prev then
+                        -- (a guarded edge cut from the cycle, its callee not summarized yet in this pass: the previous
+                        -- pass's, or nothing in the first — the least fixpoint, as for a joined candidate)
+                        stale = true
+                        if prev[to] then take(c, caller, to, prev[to]) end
                     elseif to then
                         s_hedge(sum, ('callee outside the fn graph: %s'):format(to))
                     else
@@ -944,6 +1014,7 @@ function M.summaries(store)
                     end
                 end
             end
+            SITE_GP = nil
             -- a member calling a member: substitute its pending pairs, until no new pair appears
             local done = {}
             for _ = 1, 50 do
@@ -1016,7 +1087,7 @@ function M.call_effects(store, c, caller_file)
                 local v = M.verdict({ rw = 2, gw = tier, gp = gp }, c,
                     tn and tn.file)
                 if v ~= 'skips' then
-                    out.w[key] = VERDICT_TIER[v] or tier
+                    out.w[key] = math.max(VERDICT_TIER[v] or tier, tier)
                 end
             else
                 out.w[key] = tier
@@ -1057,7 +1128,7 @@ function M.purity(store, fid)
         end
     end
     local world = sum.w[IOKEY] ~= nil
-    local hedged = sum.h ~= nil or sum.over or sum.mh or sum.jp
+    local hedged = sum.h ~= nil or sum.gh ~= nil or sum.over or sum.mh or sum.jp
         or (sum.cpo ~= nil and next(sum.cpo) ~= nil) -- (calls a function it is handed: as pure as that, CART-1495)
     local base = wmod and 'writes' or world and 'io' or 'pure'
     return hedged and (base .. '~') or base

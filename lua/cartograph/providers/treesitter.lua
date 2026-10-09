@@ -734,6 +734,34 @@ end
 -- and reruns the write/guard classifiers on live nodes)
 M.guard_class = guard_class
 
+--- the param predicate guarding a CALL (CART-1567): ±i when the call runs only if param i of its function `fn` is truthy
+--- (+) / falsy (−) — a then-arm whose condition is (a conjunction over) the param, or an else / ELSEIF arm of `if <param>`.
+--- vim.validate calls vim.deprecate only in `elseif type(name) == 'table'` after `if validator then`: −3, and every
+--- caller passing a validator never reaches it. The innermost such guard (one is enough: the call runs only under it)
+function M._call_gp(calln, src, G, fn)
+    local params
+    local node, p = calln, calln:parent()
+    while p and p ~= fn do
+        if G.cond[p:type()] then
+            local cond = G.cond_of and G.cond_of(p) or p:named_child(0)
+            local arm = G.arm and G.arm(p, node)
+            if arm ~= 'init' and cond and node ~= cond then
+                params = params or param_map(fn, src, G.pfield)
+                if not params then return nil end
+                local at = node:type()
+                if arm == 'else' or arm == 'elseif' or (arm == nil and (at == G.else_t or at == G.elseif_t)) then
+                    local i = params[node_text(tsutil.unparen(cond), src)]
+                    if i then return -i end
+                else
+                    local gp = param_conj(G, cond, src, params)
+                    if gp then return gp end
+                end
+            end
+        end
+        node, p = p, p:parent()
+    end
+end
+
 
 -- The RAILS overlay pack's def-emitters ([[cartograph-modular-specs]]): reuse
 -- the R3 def-emitter mechanism for ActiveRecord associations and `delegate`.
@@ -8896,6 +8924,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                         -- resolves same-file chains) is unchanged.
                         chainty = spec.chain_type and spec.chain_type(calln, src) or nil,
                         top = is_top or nil }
+                    -- (a call that runs only under a param predicate: effects discharge it per call site, CART-1567)
+                    if spec.guards and encl then c.gp = M._call_gp(calln, src, spec.guards, encl) end
                     calls[#calls + 1] = c
                     local indirect = (spec.indirect_calls or {})[callee]
                     indirect = indirect and args[indirect + (method and 1 or 0)]

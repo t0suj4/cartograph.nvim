@@ -529,3 +529,50 @@ test('effects: a call bound to a ---@meta stub is a call to what it declares —
     eq('pure~', effects.purity(store, by['vim.api.nvim_buf_set_lines'].id), 'a declaration hedges its own effects')
     eq('pure', effects.purity(store, by.noop_stub.id))
 end)
+
+-- ⚠ A CALL UNDER A PARAM PREDICATE IS DISCHARGED AT EACH CALL SITE (CART-1567): vim.validate calls vim.deprecate only in
+-- `elseif type(name) == 'table'` after `if validator then`, and deprecate calls validate back — one cycle, one shared
+-- summary, so every vim.split / vim.trim read `writes~` through deprecate's dedup memo. A call site carries its gp; a
+-- guarded edge that closes a cycle orders nothing, so each member keeps its own summary and its guard
+test('effects: a call under `if <param>` / its else / ELSEIF arm is discharged where the argument decides it — through a cycle too', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local M = {}',
+        'local seen, once = {}, nil',
+        'local function remember(k) seen[k] = true end',
+        'local function init() if not once then once = {} end end',
+        'function M.deprecate(name)',
+        '  M.validate("name", name, "string")',
+        '  remember(name)',
+        '  return unknown_logger(name)',
+        'end',
+        'function M.validate(name, value, validator)',
+        '  if validator then',
+        '    return type(value) == validator',
+        '  elseif type(name) == "table" then',
+        '    M.deprecate("old form")',
+        '  end',
+        'end',
+        'function M.split(s) M.validate("s", s, "string"); return s end',
+        'function M.old(t) M.validate({ s = { t, "string" } }); return t end',
+        'function M.maybe(f, x) if f then init() end; return x end',
+        'function M.outer(g) return M.maybe(g, 1) end',
+        'function M.mixed(f) if f then remember(1) end; remember(2) end',
+        'function M.caller_mixed() M.mixed(nil) end',
+        'return M',
+    }, '\n'))))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do by[n.name] = n end
+    eq('pure', effects.purity(store, by['M.split'].id), 'a validator is passed: the deprecated branch never runs — nor its hedge')
+    eq('writes~', effects.purity(store, by['M.old'].id), 'the table form reaches it')
+    eq('writes~', effects.purity(store, by['M.validate'].id), 'validate itself may')
+    local sums = effects.summaries(store)
+    local s = sums[by['M.maybe'].id]
+    local tier
+    for k, t in pairs(s.w) do if k:find('once', 1, true) then tier = t end end
+    eq(3, tier, 'a set-once write under an undecided guard stays set-once')
+    tier = nil
+    for k, t in pairs(sums[by['M.outer'].id].w) do if k:find('once', 1, true) then tier = t end end
+    eq(3, tier, 'and through a caller whose argument leaves the guard undecided')
+    ok(next(sums[by['M.caller_mixed'].id].w) ~= nil, 'a key written guarded AND unguarded is unguarded: a falsy argument still writes it')
+end)
