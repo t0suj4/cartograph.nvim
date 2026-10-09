@@ -329,6 +329,7 @@ local function fresh_local(fn, name)
     return m[name] == true
 end
 
+
 -- resolve a call argument to what a callee-side param write would hit:
 -- a same-file module var ('var'), the CALLER's own param ('param'), a local
 -- this call made ('fresh': no effect outside it), or nothing nameable ('opaque')
@@ -358,6 +359,10 @@ local function arg_target(store, c, i, caller)
         -- its own and recorded as one. core's M.keys sorting its own `out` made eq, show and 7 more basis fns `~`.
         -- (never for a FIELD of one: `w.order = p` stores the caller's table into a fresh `w` without defining `w`)
         if a.k == 'local' and caller and fresh_local(caller, a.name) then return 'fresh' end
+        -- a local DERIVED from a param (CART-1566): `local v = spec[2]` over `for _, spec in pairs(opt)` is part of opt —
+        -- the extractor's per-language derived_locals, carried on the function node
+        local dp = caller and caller.derived and caller.derived[name]
+        if dp then return 'param', dp end
         return 'opaque' -- a plain local: mutation invisible outside — but
         -- it MAY alias module state; the caller hedges (no alias analysis)
     end

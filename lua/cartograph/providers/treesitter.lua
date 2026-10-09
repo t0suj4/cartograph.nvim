@@ -705,6 +705,9 @@ local function guard_class(c, n, src, G)
     -- Name-matched to THIS fn's own params (~): closure writes to an
     -- outer fn's param are not attributed — a known honesty gap.
     local params = fnnode and param_map(fnnode, src, G.pfield)
+    -- (and the locals DERIVED from them — `for _, spec in pairs(opt) do local v = spec[2]; v.k = 1` mutates opt,
+    -- CART-1566 — per the language's own reading, memoized per function of this file)
+    if params and G.derived_locals then params = M._with_derived(fnnode, src, params, G) end
     local pw
     -- (a STORE into the param — `t.x = 1`, `t[k] = 1` —, never the param itself: `t = t.kids[i]` rebinds a local and
     -- writes nothing the caller holds; it made core's `at`, and so locate_at, read as 'writes')
@@ -1192,6 +1195,30 @@ function M._visible_from(id, ranges, line, col)
     local after = line > enc.s or (line == enc.s and col >= (enc.sc or 0))
     local before = line < enc.e or (line == enc.e and (enc.ec == nil or col < enc.ec))
     return after and before
+end
+--- a function's params plus the locals DERIVED from them (G.derived_locals, CART-1566), memoized per (file text,
+--- function node) — guard_class asks it once per WRITE
+local DERIVED_SRC, DERIVED_MEMO = nil, {}
+function M._with_derived(fnnode, src, params, G)
+    if DERIVED_SRC ~= src then DERIVED_SRC, DERIVED_MEMO = src, {} end
+    local k = fnnode:id()
+    local m = DERIVED_MEMO[k]
+    if m == nil then
+        local d = G.derived_locals(fnnode, src, params)
+        if d then
+            m = {}
+            for nm, i in pairs(params) do m[nm] = i end
+            for nm, i in pairs(d) do if m[nm] == nil then m[nm] = i end end
+        else m = false end
+        DERIVED_MEMO[k] = m
+    end
+    return m or params
+end
+--- the derived locals ALONE, for the function node (effects' arg_target maps a handed-on derived local to its param)
+function M._derived_of(defn, src, G)
+    if not (G and G.derived_locals) then return nil end
+    local pm = param_map(defn, src, G.pfield)
+    return pm and G.derived_locals(defn, src, pm) or nil
 end
 --- a def NESTED in another function is visible only inside it (CART-1562): `pcall(require, m)` in one function had
 --- upgraded to ANOTHER function's `local require = function () end`. -> true when t2's enclosing fn does not enclose
@@ -7537,6 +7564,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- @langs-ok js/ts `arrow_function` — the B3 this-typing walk is a JS-family concern
                     arrow = defn:type() == 'arrow_function' or nil,
                     cbarg = isfield or nil,
+                    -- locals DERIVED from params (CART-1566): effects maps one handed to a mutating callee to its param
+                    derived = not aname and M._derived_of(defn, src, spec.guards) or nil,
                     -- an ANONYMOUS fn (aname: a callback, a returned closure `X#ret`) is never a call target BY NAME: link
                     -- leaves it out of exact/tail, and the mark makes relink's index do the same (CART-1490: 148 `X#ret`
                     -- nodes under the tail `ret` answered `syn.ret(…)` after a refresh, 2 same-file cands at extract)

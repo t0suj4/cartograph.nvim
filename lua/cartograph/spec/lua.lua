@@ -476,6 +476,66 @@ local function lua_exit_target(stmt, src)
     return cond
 end
 
+-- the locals DERIVED from a function's params (CART-1566), in document order: `local v = X[k]` / `X.f` / `X.f[k]…` —
+-- an index chain rooted at a param or a derived local —, and the VALUE of `for k, v in pairs(X)` / `ipairs(X)` (a key
+-- is no table). A write through one is the param's mutation; one handed to a mutating callee is the param, not an
+-- opaque alias. -> { name -> param index } over pmap (the params' own map) | nil
+local LUA_ITERS = { pairs = true, ipairs = true }
+local function lua_chain_root(e)
+    while e and (e:type() == 'dot_index_expression' or e:type() == 'bracket_index_expression') do
+        e = e:field('table')[1]
+    end
+    return e and e:type() == 'identifier' and e or nil
+end
+local function lua_derived_locals(fn, src, pmap)
+    if not pmap then return nil end
+    local known, out = {}, nil
+    for k, v in pairs(pmap) do known[k] = v end
+    local function root_of(e) -- (a bare alias `local v = opt` too)
+        local r = e and (e:type() == 'identifier' and e
+            or (e:type() == 'dot_index_expression' or e:type() == 'bracket_index_expression') and lua_chain_root(e))
+        return r and known[node_text(r, src)]
+    end
+    local function walk(n)
+        for _, c in inext, n, -1 do
+            local t = c:type()
+            if t == 'function_definition' or t == 'function_declaration' then -- (a nested function: its own params)
+            else
+                if t == 'variable_declaration' or t == 'assignment_statement' then
+                    local a = t == 'variable_declaration' and c:named_child(0) or c
+                    if a and a:type() == 'assignment_statement' then
+                        local vl, el = a:named_child(0), a:named_child(1)
+                        for i = 0, (vl and vl:named_child_count() or 0) - 1 do
+                            local nm, val = vl:named_child(i), el and el:named_child(i)
+                            local pi = nm and nm:type() == 'identifier' and root_of(val)
+                            if pi then -- (`x = opt.y` aliases too: x now references part of opt)
+                                local s = node_text(nm, src)
+                                known[s] = pi; out = out or {}; out[s] = pi
+                            end
+                        end
+                    end
+                elseif t == 'for_generic_clause' then
+                    local vl, el = c:named_child(0), c:named_child(1)
+                    local call = el and el:named_child(0)
+                    local f = call and call:type() == 'function_call' and call:field('name')[1]
+                    local arg = f and LUA_ITERS[node_text(f, src)] and call:field('arguments')[1]
+                    local x = arg and arg:named_child(0)
+                    local pi = x and x:type() == 'identifier' and known[node_text(x, src)]
+                    local val = pi and vl and vl:named_child(1)
+                    if val and val:type() == 'identifier' then
+                        local s = node_text(val, src)
+                        known[s] = pi; out = out or {}; out[s] = pi
+                    end
+                end
+                walk(c)
+            end
+        end
+    end
+    local body = fn:field('body')[1]
+    if body then walk(body) end
+    return out
+end
+
 local LUA_GUARDS = {
     -- the early-exit memo guard (CART-1433): the BLOCK kinds whose earlier statements are scanned, an alias reader, the
     -- guard test (providers/treesitter.lua guard_class)
@@ -486,6 +546,7 @@ local LUA_GUARDS = {
     binop = 'binary_expression', andops = { ['and'] = true },
     negop = 'unary_expression', negtok = 'not', pfield = 'parameters',
     pw_refsem = true, -- tables are reference-typed: param writes escape
+    derived_locals = lua_derived_locals, -- (a write through a local derived from a param is the param's, CART-1566)
     -- `not X` / `X == nil` / `nil == X`, X the written chain
     -- (`aliases`: the `local v = X` names before the `if` — `local v = c[k]; if not v then … c[k] = v end`, CART-1433)
     abs_test = function (n, src, chain, aliases)

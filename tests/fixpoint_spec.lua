@@ -212,7 +212,10 @@ test('fixpoint: a FRESH local sorted with an INLINE comparator is the call\'s ow
         'return { a_sorted, b_alias }' }, '\n'))))
     local by = byname()
     eq('pure', effects.purity(store, by.a_sorted.id), 'a table this call made, sorted by a pure inline comparator')
-    eq('pure~', effects.purity(store, by.b_alias.id), 'a local bound to a parameter\'s field may alias the caller\'s table')
+    -- (since CART-1566 the alias is KNOWN: `out` is part of param t, so sorting it mutates the caller's table — no hedge)
+    eq('writes', effects.purity(store, by.b_alias.id), 'a local bound to a parameter\'s field IS the caller\'s table')
+    local s = effects.summaries(store)[by.b_alias.id]
+    ok(s.pwx and s.pwx[1], 'b_alias mutates param 1')
 end)
 
 test('fixpoint: a call through a PARAMETER is substituted at each call to its owner — a CPS walker handed pure continuations is pure; handed a writing one, it writes; left unsubstituted, it is hedged (CART-1495)', function ()
@@ -452,4 +455,27 @@ test('fixpoint: a join whose candidate is summarized LATER repeats the pass to t
     -- pass 1 all 9; pass 2 the three joins (A1:go, B1:mid, A1:steady — y reads A1:steady, unchanged, so y is reused);
     -- pass 3 A1:go alone (B1:mid changed); pass 4 nothing
     eq(13, js.computed, 'only what read a changed summary is recomputed')
+end)
+
+-- ⚠ A LOCAL DERIVED FROM A PARAM IS THE PARAM (CART-1566): `for _, spec in pairs(opt)` … `local v = spec[2]` — a
+-- write through v (or v handed to a mutating callee) mutates opt; it read pure / "via opaque arg".
+test('effects: a write through a local derived from a param is the param\'s mutation (pwx), direct or via a callee (CART-1566)', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local function mut(t) t.x = 1 end',
+        'local function viacallee(opt) for _, spec in pairs(opt) do local v = spec[2]; mut(v) end end',
+        'local function direct(opt) for _, spec in ipairs(opt) do local w = spec.a.b; w.k = 1 end end',
+        'local function alias(o) local v = o; v.k = 2 end',
+        'local function keyonly(opt) for k in pairs(opt) do local s = tostring(k) end end',
+        'local function plain(opt) local v = make(); v.k = 3; mut(v) end',
+        'return { mut, viacallee, direct, alias, keyonly, plain }',
+    }, '\n'))))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do by[n.name] = n end
+    local sums = effects.summaries(store)
+    for _, nm in ipairs({ 'viacallee', 'direct', 'alias' }) do
+        ok(sums[by[nm].id].pwx and sums[by[nm].id].pwx[1], nm .. ' mutates param 1 through a derived local')
+    end
+    ok(not (sums[by.keyonly.id].pwx and sums[by.keyonly.id].pwx[1]), 'a pairs KEY is no table of the param')
+    ok(not (sums[by.plain.id].pwx and sums[by.plain.id].pwx[1]), 'a local made by a call is not the param')
 end)
