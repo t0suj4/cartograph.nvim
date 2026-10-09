@@ -86,15 +86,46 @@ local function measure(_, p)
         local E = require 'cartograph.edit'
         local path = root .. '/' .. p.file
         local fd = io.open(path, 'rb'); local text = fd and fd:read('a'); if fd then fd:close() end
-        local state, why = E.classify(text, p.before, p.after)
-        if state ~= 'pending' then v.error = 'the mutation did not APPLY: ' .. tostring(why or state); return done() end
-        local new = E.apply_to(text, p.before, p.after)
+        -- ★ ONE COPY OF A DUPLICATED BLOCK (CART-1569): the resolver's link and relink copies are identical for 100+
+        -- lines, so "add context so the site is unique" has no answer — `site = N` mutates the N-th occurrence of the
+        -- text (left to right, non-overlapping), `site = all` every one; the result may occur elsewhere (the site is
+        -- named, not guessed)
+        local new, nsite = nil, p.site
+        if nsite ~= nil and nsite ~= 'all' then
+            nsite = tonumber(nsite)
+            if not nsite then v.error = 'site must be a number or `all`'; return done() end
+        end
+        if nsite then
+            local hits, at = {}, 1
+            for _ = 1, 100000 do
+                local s, e = text:find(p.before, at, true)
+                if not s then break end
+                hits[#hits + 1], at = s, e + 1
+            end
+            local pick = nsite == 'all' and hits or { hits[nsite] }
+            if #hits == 0 or #pick == 0 then
+                v.error = ('the mutation did not APPLY: site = %s, the text to edit occurs %d time(s)'):format(p.site, #hits)
+                return done()
+            end
+            local out, i = {}, 1
+            for _, s in ipairs(pick) do
+                out[#out + 1] = text:sub(i, s - 1); out[#out + 1] = p.after; i = s + #p.before
+            end
+            out[#out + 1] = text:sub(i)
+            new = table.concat(out)
+            v.site_of, v.nsites = ('site %s of %d'):format(p.site, #hits), #pick
+        else
+            local state, why = E.classify(text, p.before, p.after)
+            if state ~= 'pending' then v.error = 'the mutation did not APPLY: ' .. tostring(why or state); return done() end
+            new = E.apply_to(text, p.before, p.after)
+        end
         local parses = require('cartograph.planguards').GUARDS.parses(nil, nil, { [p.file] = text }, { [p.file] = new })
         for _, row in ipairs(parses or {}) do
             if row.verdict == require('cartograph.planguards').FAIL then v.error = 'the mutated file breaks a guard: ' .. tostring(row.why); return done() end
         end
         local wf = assert(io.open(path, 'wb')); wf:write(new); wf:close()
-        v.sites, v.rules = 1, { ('`%s` -> `%s` (ground)'):format(p.before, p.after) }
+        v.sites = v.nsites or 1
+        v.rules = { ('`%s` -> `%s` (ground%s)'):format(p.before, p.after, v.site_of and (', ' .. v.site_of) or '') }
         local mut, mwhy = SF.run(root, p.spec, limit, env)
         if not mut then v.error = 'mutated run: ' .. tostring(mwhy); return done() end
         v.mutated, v.caught = mut, mut.failed > 0
@@ -145,8 +176,8 @@ local E = {
     kind = 'discovery',
     tags = { 'accept', 'repo' },
     measures = 'CART-1174',
-    summary = 'does SPEC catch a mutation? file = the file to mutate, before/after = the mutation as an example (a chunk or an EXPRESSION), spec = the spec file name (e.g. tactic_spec); runs in a scratch COPY of repo (default: this cartograph), baseline first; keep = 1 keeps the copy; timeout = seconds per run (default 600): a mutant that HANGS is CAUGHT (timed out), its process group killed',
-    params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?', ground = 'string?', timeout = 'string?', env = 'list?' },
+    summary = 'does SPEC catch a mutation? file = the file to mutate, before/after = the mutation as an example (a chunk or an EXPRESSION), spec = the spec file name (e.g. tactic_spec); runs in a scratch COPY of repo (default: this cartograph), baseline first; keep = 1 keeps the copy; ground = 1 applies exactly the text written, at its one site — site = N its N-th occurrence, site = all every one (a duplicated block, CART-1569); timeout = seconds per run (default 600): a mutant that HANGS is CAUGHT (timed out), its process group killed',
+    params = { file = 'string', before = 'string', after = 'string', spec = 'string', repo = 'string?', keep = 'string?', ground = 'string?', site = 'string?', timeout = 'string?', env = 'list?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
@@ -208,6 +239,26 @@ E.examples = {
         end,
         expect = { holds = true, check = function (v) return v.sites == 1 and (v.rules[1] or ''):find('(ground)', 1, true) ~= nil,
             'sites ' .. tostring(v.sites) .. ' ' .. tostring(v.error) end },
+    },
+    {
+        -- CART-1569: ` > 0` occurs twice (`x > 0`, `#t > 0`) — no context makes one copy of a duplicated block unique;
+        -- `site = 2` mutates exactly the second, and only nonempty's check (the 4th) fails
+        name = 'GROUND `site = N` mutates exactly the N-th occurrence of a text that occurs more than once',
+        files = FX, params = function (store)
+            local p = params('guard_spec', ' > 0', ' >= 0')(store); p.ground, p.site = '1', '2'; return p
+        end,
+        expect = { holds = true, check = function (v)
+            local f = v.mutated and v.mutated.failures or {}
+            return v.sites == 1 and #f == 1 and f[1] == 'check 4' and (v.rules[1] or ''):find('site 2 of 2', 1, true) ~= nil,
+                'sites ' .. tostring(v.sites) .. ' failures ' .. vim.inspect(f) .. ' ' .. tostring(v.error)
+        end },
+    },
+    {
+        name = 'a GROUND `site` past the text\'s occurrences is refused by name',
+        files = FX, params = function (store)
+            local p = params('guard_spec', ' > 0', ' >= 0')(store); p.ground, p.site = '1', '3'; return p
+        end,
+        expect = { holds = false, check = function (v) return v.error and v.error:find('occurs 2 time', 1, true) ~= nil, tostring(v.error) end },
     },
     {
         name = 'a GROUND mutation whose result already occurs elsewhere is refused (drifted) — never applied at a guess',
