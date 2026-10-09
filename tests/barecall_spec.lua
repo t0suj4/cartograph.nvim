@@ -121,6 +121,12 @@ test('stdlib prefix: inside the RUNTIME\'s own tree a def the profile names as i
     w('lua/vim/_meta/builtin.lua', '---@meta\nfunction vim.schedule(fn) end\n')
     w('lua/myplug/init.lua', 'function vim.notify(msg) return msg end\n')
     w('lua/myplug/use.lua', 'local function tell() return vim.notify("x") end\nreturn tell\n')
+    -- (CART-1619: a lazy SUBMODULE's member — `vim.fs.joinpath` is vim/fs.lua's `M.joinpath`, where the profile puts it;
+    -- a plugin's own fs.lua is no such file)
+    w('lua/vim/fs.lua', 'local M = {}\nlocal H = {}\nfunction M.joinpath(a) return a end\nfunction M.basename(a) return a end\nfunction H.basename(a) return a end\nreturn M\n')
+    w('lua/vim/_meta/lpeg.lua', '---@meta\nlocal lpeg = {}\nfunction lpeg.match(p, s) end\n')
+    w('lua/myplug/fs.lua', 'local M = {}\nfunction M.normalize(a) return a end\nreturn M\n')
+    w('lua/myplug/walk.lua', 'local function go(p) return vim.fs.joinpath(p), vim.fs.normalize(p), vim.fs.basename(p), vim.lpeg.match(p, p) end\nreturn go\n')
     w('lua/myplug/patch.lua', 'function vim.deprecate(name) return name end\nlocal function quiet() return vim.deprecate("z") end\nreturn quiet\n')
     local store = require 'cartograph.store'
     store.ingest(ts.extract(root))
@@ -137,6 +143,11 @@ test('stdlib prefix: inside the RUNTIME\'s own tree a def the profile names as i
         eq(nil, by['lua/myplug/use.lua vim.notify'].to, how .. ': a plugin\'s override still binds only its own file (CART-1499)')
         ok(tostring(by['lua/myplug/patch.lua vim.deprecate'].to):match('^lua/myplug/patch%.lua::'),
             how .. ': in the overriding file the override answers, not the runtime\'s def')
+        ok(tostring(by['lua/myplug/walk.lua vim.fs.joinpath'].to):match('^lua/vim/fs%.lua::M%.joinpath'),
+            how .. ': a lazy submodule\'s member is the module file\'s def the profile names (CART-1619)')
+        eq(nil, by['lua/myplug/walk.lua vim.fs.normalize'].to, how .. ': not a same-tail def in another file')
+        eq(nil, by['lua/myplug/walk.lua vim.fs.basename'].to, how .. ': two defs of the tail in the module file: no guess')
+        eq(nil, by['lua/myplug/walk.lua vim.lpeg.match'].to, how .. ': nor a ---@meta stub at the file the profile names')
     end
     check(calls(), 'extract')
     w('lua/vim/_core/shared.lua', 'local function check() return vim.deprecate("y") end\nlocal function later(f) vim.schedule(f) end\nreturn { check, later }\n')

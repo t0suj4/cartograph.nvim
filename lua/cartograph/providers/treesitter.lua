@@ -1242,6 +1242,28 @@ function M._prefix_own(cands, file, spec)
     end
     return own
 end
+--- a stdlib-prefixed call with NO def of its exact name, inside the stdlib's own tree (CART-1619): the PROFILE names the
+--- file defining it (`vim.fs#joinpath` -> vim/fs.lua), where it is a module MEMBER (`M.joinpath`) — the runtime loads
+--- `vim.fs` lazily through vim's __index (`require('vim.' .. key)`), the same file the distiller keyed it by. The
+--- unique non-decl def of that tail in that file answers (hedged: the profile's claim); nil else. 309 runtime calls
+--- were refused `prefix` on such a member (vim.fs.joinpath 26, vim.fs.normalize 22, vim.treesitter.get_node_text 14)
+function M._prefix_profile_def(name, spec, tail)
+    local sigs = spec and spec._profile and spec._profile.sigs
+    if not sigs then return nil end
+    local owner, member = name:match('^(.+)%.([%w_]+)$')
+    local sg = owner and sigs[owner .. '#' .. member]
+    local sf = sg and sg.file
+    if not sf then return nil end
+    local fit
+    for _, n in ipairs(tail[member] or {}) do
+        local f = not n.decl and (n.kind == 'function' or n.kind == 'method') and n.file
+        if f and (f == sf or f:sub(-#sf - 1) == '/' .. sf) then
+            if fit and fit.id ~= n.id then return nil end
+            fit = n
+        end
+    end
+    return fit
+end
 --- the derived locals ALONE, for the function node (effects' arg_target maps a handed-on derived local to its param)
 function M._derived_of(defn, src, G)
     if not (G and G.derived_locals) then return nil end
@@ -9437,7 +9459,11 @@ local MATCH_OPTS = { match_limit = 65536 }
             return nil, nil, nil, EXT.exact
         end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
-            if name:sub(1, #pre) == pre then return nil, nil, nil, EXT.prefix end
+            if name:sub(1, #pre) == pre then
+                local pd = M._prefix_profile_def(name, spec, tail)
+                if pd then return pd, true end
+                return nil, nil, nil, EXT.prefix
+            end
         end
         -- literal-name languages never tail-match: a bash command names
         -- its function EXACTLY (slashes are just characters), so `split`
@@ -10468,7 +10494,11 @@ function M.relink(data, touched, opts)
             return nil, nil, nil, EXT.exact
         end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
-            if name:sub(1, #pre) == pre then return nil, nil, nil, EXT.prefix end
+            if name:sub(1, #pre) == pre then
+                local pd = M._prefix_profile_def(name, spec, tail)
+                if pd then return pd, true end
+                return nil, nil, nil, EXT.prefix
+            end
         end
         -- literal-name languages never tail-match: a bash command names
         -- its function EXACTLY (slashes are just characters), so `split`
