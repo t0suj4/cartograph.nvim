@@ -177,3 +177,32 @@ test('thin index: demand resolution is MONOTONE — never resolves what full dec
     eq({}, over)
     vim.fn.delete(root, 'rf')
 end)
+
+-- ⚠ THE MATERIALIZED ID PASS IS COLUMN-AWARE TOO (CART-1590): its function ranges carried no columns, so on a
+-- same-line callback a thin index attributed mentions where a full extract (CART-1586 / 1590) does not.
+test('thin index: a materialized id pass attributes same-line-callback mentions exactly as a full extract does', function ()
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local t = {}', 'local w = {}',
+        'local function f() return run(t, function() return 1 end) end',
+        'local function h() return run(function() return 1 end, w) end',
+        'return { f, h }',
+    }, '\n'))
+    fd:close()
+    local function uses(data)
+        local byid, out = {}, {}
+        for _, n in ipairs(data.nodes) do byid[n.id] = n end
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'use' and byid[e.to] then out[#out + 1] = ((byid[e.from] or {}).name or e.from) .. '>' .. byid[e.to].name end
+        end
+        table.sort(out)
+        return out
+    end
+    local full = uses(ts.extract(root))
+    store.ingest(ts.index_only(root))
+    store.materialize_file_idpass('m.lua')
+    eq(full, uses(store.data))
+    vim.fn.delete(root, 'rf')
+end)

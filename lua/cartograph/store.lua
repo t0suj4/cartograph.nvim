@@ -679,7 +679,9 @@ function M.materialize_file_idpass(rel)
     local ranges = {}
     for _, n in ipairs((M.data or {}).nodes or {}) do
         if n.file == rel and (n.kind == 'function' or n.kind == 'method') then
-            ranges[#ranges + 1] = { s = atr.sl(n.range), e = atr.el(n.range), id = n.id }
+            -- (the columns too: the use-edge attribution is column-aware, CART-1586 / 1590 — line-only ranges here
+            -- made a materialized id pass disagree with extract on every same-line callback)
+            ranges[#ranges + 1] = { s = atr.sl(n.range), sc = atr.sc(n.range), e = atr.el(n.range), ec = atr.ec(n.range), id = n.id }
         end
     end
     -- an fn-less file yields nothing and is not an error: mentions are attributed to an

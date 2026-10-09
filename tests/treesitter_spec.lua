@@ -5747,7 +5747,9 @@ test('use edges: a same-line callback does not claim the mentions before it (CAR
         'local u = {}',
         'local function f() return run(t, function() return 1 end) end',
         'local function g() return run(function() return u end) end',
-        'return { f, g }',
+        'local w = {}',
+        'local function h() return run(function() return 1 end, w) end', -- (AFTER the callback: CART-1590)
+        'return { f, g, h }',
     }, '\n'))
     local data = ts.extract(root)
     local byid, uses = {}, {}
@@ -5760,6 +5762,8 @@ test('use edges: a same-line callback does not claim the mentions before it (CAR
     local inner = false
     for k in pairs(uses) do if k:match('>u$') and k ~= 'g>u' then inner = true end end
     ok(inner, 'a mention INSIDE the callback is still the callback\'s: ' .. vim.inspect(uses))
+    ok(uses['h>w'], 'a mention AFTER a same-line callback is the enclosing fn\'s (the end column, CART-1590): ' .. vim.inspect(uses))
+    for k in pairs(uses) do ok(not k:match('>w$') or k == 'h>w', 'no other owner of w: ' .. k) end
     vim.fn.delete(root, 'rf')
 end)
 

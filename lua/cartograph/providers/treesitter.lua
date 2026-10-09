@@ -5878,24 +5878,40 @@ end
 --- on L contains L only when it opens at or before `col` (CART-0813), so those sit in `S[L]` and
 --- are decided per query. Pinned against the linear scan in tests/loopcost_spec.lua.
 local function innermost_index(ranges, col_aware)
-    local A, S = {}, {}
-    for _, r in ipairs(ranges) do
-        local from = r.s
+    local A, S, E, pos = {}, {}, {}, {}
+    for i, r in ipairs(ranges) do
+        pos[r] = i
+        local from, to = r.s, r.e
         if col_aware then
             local b = S[r.s] or {}; b[#b + 1] = r; S[r.s] = b
             from = r.s + 1
+            -- (and a range ENDING on a later line with an end column contains that line only BEFORE it: a mention
+            -- after a same-line callback — `run(function () … end, t)` — is not the callback's, CART-1590)
+            if r.ec and r.e > r.s then
+                local x = E[r.e] or {}; x[#x + 1] = r; E[r.e] = x
+                to = r.e - 1
+            end
         end
-        for L = from, r.e do
+        for L = from, to do
             local cur = A[L]
             if not cur or r.s >= cur.s then A[L] = r end
         end
     end
+    -- the scan's order: the LATEST start wins, a tie the LAST in list order
+    local function better(r, best) return not best or r.s > best.s or (r.s == best.s and pos[r] > pos[best]) end
     return function(line, col)
         local best = A[line]
         local b = S[line]
         if b then
             for _, r in ipairs(b) do
-                if (col == nil or (r.sc or 0) <= col) and (not best or r.s >= best.s) then best = r end
+                if (col == nil or (r.sc or 0) <= col)
+                    and (r.e > line or col == nil or r.ec == nil or col < r.ec) and better(r, best) then best = r end
+            end
+        end
+        local x = E[line]
+        if x then
+            for _, r in ipairs(x) do
+                if (col == nil or col < r.ec) and better(r, best) then best = r end
             end
         end
         return best
@@ -7444,7 +7460,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- closure on the call's own line, so every such registration was
                 -- attributed to its own argument — 7 self-loops on
                 -- bravest-new-world the moment lua closures became nodes.
-                table.insert(fnRanges[file], { s = sp.start.line, sc = sp.start.char,
+                table.insert(fnRanges[file], { s = sp.start.line, sc = sp.start.char, ec = sp['end'].char, -- (ec: CART-1590)
                     e = sp['end'].line, id = id })
                 if not torn and not aname then
                     exact[name] = exact[name] or {}

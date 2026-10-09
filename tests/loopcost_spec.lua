@@ -278,7 +278,7 @@ test('builtins: ★ a MAYBE-LOOP (over a call result nobody sized) is a hole —
     ok(maybe, loopcost.chain(f[1]))
 end)
 
-test('fn_at index: innermost_index answers exactly what the linear scan answered (random nested ranges, columns, ties)', function ()
+test('fn_at index: innermost_index answers exactly what the linear scan answered (random nested ranges, start and END columns, ties)', function ()
     local idx = ts._innermost_index
     ok(idx, 'treesitter exposes _innermost_index')
     -- the two scans it replaced, verbatim in behaviour
@@ -286,7 +286,9 @@ test('fn_at index: innermost_index answers exactly what the linear scan answered
         local best
         for _, r in ipairs(ranges) do
             local starts_before = r.s < line or (r.s == line and (col == nil or (r.sc or 0) <= col))
-            if starts_before and line <= r.e and (not best or r.s >= best.s) then best = r end
+            -- (and ENDS after it: on its end line a range with an end column holds only what is before it, CART-1590)
+            local ends_after = line < r.e or (line == r.e and (col == nil or r.ec == nil or col < r.ec))
+            if starts_before and ends_after and (not best or r.s >= best.s) then best = r end
         end
         return best
     end
@@ -307,7 +309,8 @@ test('fn_at index: innermost_index answers exactly what the linear scan answered
             local at = s
             while at < e and #ranges < 40 do
                 local len = math.random(0, math.max(0, math.floor((e - at) / 2)))
-                local r = { s = at, sc = math.random(0, 6), e = at + len, id = #ranges + 1 }
+                local r = { s = at, sc = math.random(0, 6), e = at + len, id = #ranges + 1,
+                    ec = math.random(0, 3) > 0 and math.random(0, 8) or nil } -- (an end column, sometimes none)
                 ranges[#ranges + 1] = r
                 if depth < 3 and len > 1 then gen(r.s, r.e, depth + 1) end
                 at = r.e + math.random(0, 2)
