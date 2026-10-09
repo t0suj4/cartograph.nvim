@@ -413,6 +413,10 @@ end
 -- defines it (a closure passing on a captured `k`) — the innermost ENCLOSING function's, by range in the same file
 local function param_of(store, caller, name)
     for pi, p in ipairs(caller.params or {}) do if p == name then return caller.id, pi end end
+    -- (a local DERIVED from a param — `spec[2]` over `for _, spec in pairs(opt)`, CART-1566 — calls what that param holds:
+    -- each caller says what it passed there — a literal, no call; its own table, the hedge)
+    local dp = caller.derived and caller.derived[name]
+    if dp then return caller.id, dp end
     local ok, stmts = pcall(require('cartograph.df').stmts, caller)
     for _, st in ipairs(ok and stmts or {}) do
         for _, d in ipairs(st.def or {}) do if d == name then return nil end end -- (a local of its own)

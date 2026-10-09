@@ -880,7 +880,9 @@ test('clangd demand session: focus resolves a function\'s callers, proven', func
     local got
     -- resolve ON DEMAND (as focusing would), instead of the whole graph
     clangd.resolve_focused(helper, function (edges) got = edges end)
-    ok(vim.wait(20000, function () return got ~= nil end, 100), 'demand resolution returned')
+    -- (the bound is a HANG detector, not a speed claim: vim.wait returns the moment clangd answers, and 20 s timed out
+    -- under a loaded machine 4 times — CART-1247; the other clangd waits here already allow 120 s)
+    ok(vim.wait(120000, function () return got ~= nil end, 100), 'demand resolution returned')
     if got then
         store.set_callers(helper.id, got) -- the splice the on_focus hook does
         local names = {}

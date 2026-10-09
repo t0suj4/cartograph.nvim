@@ -479,3 +479,19 @@ test('effects: a write through a local derived from a param is the param\'s muta
     ok(not (sums[by.keyonly.id].pwx and sums[by.keyonly.id].pwx[1]), 'a pairs KEY is no table of the param')
     ok(not (sums[by.plain.id].pwx and sums[by.plain.id].pwx[1]), 'a local made by a call is not the param')
 end)
+
+-- ⚠ A CALL THROUGH A DERIVED LOCAL IS A CALL THROUGH ITS PARAM (CART-1566 / 1567): vim.validate's table form hands
+-- `spec[2]` to is_valid, which CALLS it — "an unknown function" for every caller; the pair now moves to the param, and
+-- a caller passing a literal there calls nothing.
+test('effects: a derived local handed to a callee that calls it is a call through the param — a literal argument calls nothing', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local function callit(fn) return fn() end',
+        'local function each(opt) for _, spec in pairs(opt) do local v = spec[1]; callit(v) end end',
+        'local function lit() return each("x") end',
+        'return { each, lit }',
+    }, '\n'))))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do by[n.name] = n end
+    eq('pure', effects.purity(store, by.lit.id), 'a literal at the param: no call happens, no hedge')
+end)
