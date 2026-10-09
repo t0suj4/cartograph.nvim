@@ -311,7 +311,10 @@ return {
                 for _, c in inext, p, -1 do
                     if c:type() == 'decorator' then
                         local inner = c:named_child(0)
-                        if inner and inner:type() == 'call' then return true end
+                        -- (a CALL `@app.route('/')` or a DOTTED path `@register.simple_tag` / `@pytest.fixture` /
+                        -- `@name.setter` registers — a framework module's hook, or a setter run on assignment; a bare
+                        -- `@property` / `@staticmethod` only wraps, CART-0704)
+                        if inner and (inner:type() == 'call' or inner:type() == 'attribute') then return true end
                     end
                 end
             end

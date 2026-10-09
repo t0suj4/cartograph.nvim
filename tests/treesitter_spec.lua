@@ -6292,6 +6292,23 @@ test('refs: rust qualifies a call on a typed param / let as Type::method; Self::
     ok(refs['A::usesself>A::helper'], 'Self::helper is a project call, not external: ' .. vim.inspect(refs))
 end)
 
+-- ⚠ A DOTTED DECORATOR REGISTERS (CART-0704): only a CALL `@app.route('/')` marked a def registered, so django's
+-- `@register.simple_tag def shipping_charge` read dead; a bare `@property` / `@staticmethod` only wraps.
+test('defs: a python def under a dotted or called decorator is registered; a bare one is not (CART-0704)', function ()
+    if not has_parser('python') then skip 'no python parser' end
+    local data = ts.extract(mkroot('t.py', table.concat({
+        'from django import template', 'register = template.Library()',
+        '@register.simple_tag', 'def tag_fn(x):', '    return x',
+        '@app.route("/")', 'def view():', '    return 1',
+        '@property', 'def prop(self):', '    return 2',
+        'def plain():', '    return 3',
+    }, '\n')))
+    local reg = {}
+    for _, n in ipairs(data.nodes) do if n.kind == 'function' then reg[n.name] = n.registered or false end end
+    ok(reg.tag_fn and reg.view, 'dotted and called decorators register: ' .. vim.inspect(reg))
+    ok(reg.prop == false and reg.plain == false, 'a bare decorator / none: not registered ' .. vim.inspect(reg))
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.
