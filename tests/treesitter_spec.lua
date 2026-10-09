@@ -5979,8 +5979,8 @@ end)
 test('refs: a go param, receiver or local never links across files; range = and a name above its := stay free (CART-1598)', function ()
     if not has_parser('go') then skip 'no go parser' end
     local bound = { 'recv', 'parm', 'parm2', 'vari', 'resn', 'shrt', 'vdec', 'cdec', 'rngv', 'ifin', 'tsal', 'forc', 'litp',
-        'inlt', 'vgrp' }
-    local free = { 'rngw', 'ctrl' }
+        'inlt', 'vgrp', 'gcal', 'gcpr', 'glit' } -- (glit: declared in a func literal's body, called there) -- (gcal / gcpr: CALLED through a local / a literal's param)
+    local free = { 'rngw', 'ctrl', 'gself' } -- (gself: `gself := gself()` calls the OUTER gself)
     local defs = { 'package m', 'var late = 0', 'var litv = 0' } -- (go mints no fn-ref for a bare value mention: the row rule shows on a VAR)
     for _, l in ipairs({ bound, free }) do for _, nm in ipairs(l) do defs[#defs + 1] = 'func ' .. nm .. '() int { return 1 }' end end
     local root = mkroot('a.go', table.concat(defs, '\n'))
@@ -6002,6 +6002,10 @@ test('refs: a go param, receiver or local never links across files; range = and 
         '\tf := func(litp int, litv int) int { inlt := 1; use(litp, inlt); return litv }',
         '\tuse(recv, parm, parm2, vari, resn, shrt, vdec, cdec, f, ctrl)',
         '\tuse(vgrp)',
+        '\tgcal := mk()', '\tgcal()',
+        '\tgself := gself()', '\t_ = gself',
+        '\th := func(gcpr func() int) int { return gcpr() }', '\t_ = h',
+        '\trun(func() { glit := mk(); glit() })',
         '\treturn 0',
         '}',
     }, '\n'))
@@ -6020,6 +6024,94 @@ test('refs: a go param, receiver or local never links across files; range = and 
     ok(refs['var:late'], 'a mention ABOVE its := reads the package var (visible from its row): ' .. vim.inspect(refs))
     ok(not refs['var:litv'], 'a func literal\'s PARAM is bound in it: ' .. vim.inspect(refs))
     vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠ A RUST PARAM OR LOCAL IS BOUND (CART-1598): rust declared no scope model either. Two cargo shapes pin the
+-- call gate's narrowing: `let x = x()` calls the OUTER x, and a match arm's `Ok((registry, _))` does not refuse the
+-- call `registry(…)` it matches on.
+test('refs: a rust param, let, pattern or closure param never links across files; self-init and arm names do not shadow calls (CART-1598)', function ()
+    if not has_parser('rust') then skip 'no rust parser' end
+    local bound = { 'parm', 'tupa', 'tupb', 'letv', 'leta', 'letb', 'shfd', 'rnfd', 'forv', 'iflt', 'whlt', 'armv', 'capt', 'clsp', 'clsm', 'chna', 'chnb' }
+    local free = { 'ctrl', 'selfi', 'armc', 'MAXV' }
+    local callee_bound = { 'lcal', 'cpar', 'clet' } -- (CALLED through a binding: the call gate's fn_locals)
+    local defs = {}
+    for _, l in ipairs({ bound, free, callee_bound }) do for _, nm in ipairs(l) do defs[#defs + 1] = 'pub fn ' .. nm .. '() -> u32 { 1 }' end end
+    local root = mkroot('a.rs', table.concat(defs, '\n'))
+    local fd = assert(io.open(root .. '/b.rs', 'w'))
+    fd:write(table.concat({
+        'fn m(parm: u32, (tupa, tupb): (u32, u32)) -> u32 {',
+        '    let letv = 1;',
+        '    let (leta, Some(letb)) = g();',
+        '    let P { shfd, r: rnfd, .. } = p;',
+        '    for forv in xs { eat(forv); }',
+        '    if let Some(iflt) = o { eat(iflt); }',
+        '    while let Some(whlt) = it.next() { eat(whlt); }',
+        '    if let Some(chna) = o && let Some(chnb) = q { eat(chna); eat(chnb); }',
+        '    match armc(1) { Some(armv) => eat(armv), capt @ None => eat(capt) }',
+        '    let selfi = selfi();',
+        '    match v { MAXV => eat(MAXV), _ => 0 };', -- (a capitalised pattern is MATCHED, it binds nothing)
+        '    let lcal = mk(); lcal();',
+        '    let g = |cpar: fn() -> u32| cpar();',
+        '    let k = || { let clet = mk(); clet() };',
+        '    let f = |clsp: u32, mut clsm| clsp + clsm;',
+        '    eat(parm, tupa, tupb, letv, leta, letb, shfd, rnfd, ctrl, f, clsp, clsm);',
+        '    0',
+        '}',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and byid[e.to] and byid[e.to].file == 'a.rs' and (byid[e.from] or { file = e.from }).file == 'b.rs' then
+            refs[byid[e.to].name] = true
+        end
+    end
+    for _, nm in ipairs(bound) do ok(not refs[nm], nm .. ' is BOUND: no cross-file link ' .. vim.inspect(refs)) end
+    for _, nm in ipairs(free) do ok(refs[nm], nm .. ' links (free, or a CALL the binding does not shadow) ' .. vim.inspect(refs)) end
+    for _, nm in ipairs(callee_bound) do ok(not refs[nm], nm .. '() calls the BINDING, not a.rs\'s function ' .. vim.inspect(refs)) end
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
+-- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
+-- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.
+test('refs: a bound argument names only the def its binder declares (java lambda field, lua local function; go range var) (CART-1598)', function ()
+    local function refs_of(data, file)
+        local byid, out = {}, {}
+        for _, n in ipairs(data.nodes) do byid[n.id] = n end
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'ref' and byid[e.to] and (byid[e.from] or { file = e.from }).file == file then out[byid[e.to].name] = true end
+        end
+        return out
+    end
+    if has_parser('java') then
+        local r = refs_of(ts.extract(mkroot('P.java', table.concat({
+            'import java.util.function.Function;',
+            'class P {',
+            '    private static final Function<String, Integer> KEYF = v -> v.length();',
+            '    int run(java.util.List<String> xs) { InvocationHandler hnd = (p, m, a) -> null; use(hnd); return xs.stream().map(KEYF).count(); }',
+            '}',
+        }, '\n'))), 'P.java')
+        ok(r['P::KEYF'], 'a lambda-valued FIELD passed as an argument is that def: ' .. vim.inspect(r))
+    end
+    local lr = refs_of(ts.extract(mkroot('l.lua', table.concat({
+        'local function cmpf(a, b) return a < b end',
+        'local sortf = function (t) table.sort(t, cmpf) end',
+        'local function g(t) return pcall(sortf, t) end',
+        'return g',
+    }, '\n'))), 'l.lua')
+    ok(lr.cmpf and lr.sortf, 'lua: a local function / a local bound to a function is that def: ' .. vim.inspect(lr))
+    if has_parser('go') then
+        local gdata = ts.extract(mkroot('k.go', table.concat({
+            'package m', 'type S struct{}', 'func (s *S) key(d string) string { return d }',
+            'func (s *S) all(xs map[string]int) { for key, v := range xs { use(key, v) } }',
+        }, '\n')))
+        ok(not refs_of(gdata, 'k.go')['S.key'], 'go: a range var passed as an argument is not the method of its name')
+        -- (the RELINK mirror re-tries every `local` argument: it must read the same veto off the argv)
+        ts.relink(gdata, {})
+        ok(not refs_of(gdata, 'k.go')['S.key'], 'go, after relink: still not the method of its name')
+    end
 end)
 
 test('defs: a lua table-FIELD function is cbarg; a local function is not (the field_fn_cbarg set, CART-1592)', function ()

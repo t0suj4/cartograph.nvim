@@ -389,7 +389,9 @@ local function jvt_fields(node, src, out) -- name -> {ty}
             for _, d in inext, c, -1 do
                 if d:type() == 'variable_declarator' then
                     local nm = d:field('name')[1]
-                    if nm then out[node_text(nm, src)] = { ty = ty } end
+                    -- (`at`: the DECLARATION row — not `row`, a field is visible above it — so a lambda-valued field
+                    -- `Function<A, B> KEY = v -> …` is the def an argument KEY names, CART-1598)
+                    if nm then out[node_text(nm, src)] = { ty = ty, at = select(1, c:range()) } end
                 end
             end
         end

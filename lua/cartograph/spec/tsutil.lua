@@ -326,6 +326,20 @@ end
 -- holders that DISCARD, as a cross-grammar union (js / java / c / c++ / php).
 local UPDATE_DISCARD = { expression_statement = true, for_statement = true, sequence_expression = true,
     comma_expression = true }
+--- the names of `set` that a subtree mentions as a bare `identifier` -> { name = true } | nil (a binding's SELF-INIT:
+--- rust's `let x = x()`, go's `x := x()` call the OUTER x — the binding starts after its initializer, CART-1598)
+function M.mentions_of(node, src, set)
+    local hit
+    local function walk(n)
+        if n:type() == 'identifier' then
+            local t = M.node_text(n, src)
+            if set[t] then hit = hit or {}; hit[t] = true end
+        end
+        for _, c in M.inext, n, -1 do walk(c) end
+    end
+    if node then walk(node) end
+    return hit
+end
 --- is_write's READS answer for an update_expression `u` (the third value, see spec/contract.lua)
 function M.update_reads(u)
     local h = u:parent()

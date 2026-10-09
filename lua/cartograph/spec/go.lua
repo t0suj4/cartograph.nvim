@@ -213,20 +213,43 @@ local GO_LEXICAL_SCOPES = {
     expression_switch_statement = { kind = 'local', harvest = go_ctrl },
     type_switch_statement = { kind = 'local', harvest = go_ctrl },
 }
--- the call-argument gate's local binders (fn.locals, CART-1597's hook): every binder of the body, a func_literal's
--- INCLUDED — `f := func(p int) { use(p) }` mints no node of its own, so its calls are the enclosing function's (an
--- over-wide set only REFUSES a by-name link: the safe direction)
+-- the call-argument / callee gate's binders (fn.locals, CART-1597's hook). That gate is POSITION-BLIND — a name in
+-- fn.locals shadows every call of it in the function — so it gets only the binders visible across the body: the
+-- receiver, params and named results (fn.params holds only the parameter list), the TOP block's `:=` / `var` /
+-- `const` (not one whose initializer names itself: `x := x()` calls the outer x) and a func_literal's params
+-- (`f := func(p int) { use(p) }` mints no node: its calls are the enclosing fn's). A nested block's or a control
+-- statement's binder stays out (cargo's match-arm case, CART-1598 rust).
 local function go_fn_locals(def, src, out)
-    local function walk(n)
-        for _, c in tsutil.inext, n, -1 do
-            local e = GO_LEXICAL_SCOPES[c:type()]
-            if e then e.harvest(c, src, out) end
-            walk(c)
+    go_params(def, src, out)
+    local body = def:field('body')[1]
+    if not body then return end
+    local function top(st)
+        local names = {}
+        go_decl(st, src, names)
+        local val = st:field('right')[1] or st
+        if st:type() ~= 'short_var_declaration' then val = st end
+        local self = tsutil.mentions_of(st:type() == 'short_var_declaration' and st:field('right')[1] or nil, src, names) or {}
+        for nm in pairs(names) do if not self[nm] then out[nm] = {} end end
+    end
+    local function block(b)
+        for _, c in tsutil.inext, b, -1 do
+            if c:type() == 'statement_list' then for _, s in tsutil.inext, c, -1 do top(s) end else top(c) end
         end
     end
-    go_params(def, src, out) -- (the receiver and named results: fn.params holds only the parameter list)
-    local body = def:field('body')[1]
-    if body then walk(body); go_block(body, src, out) end
+    block(body)
+    -- (and a func_literal's params and TOP block: hugo's `c.Run(…, func(c) { matches := func(…); matches(…) })` —
+    -- the literal mints no node, so `matches(…)` is the enclosing fn's call, and it reached pageCacheEntry.matches)
+    local function lits(n)
+        for _, c in tsutil.inext, n, -1 do
+            if c:type() == 'func_literal' then
+                go_params(c, src, out)
+                local lb = c:field('body')[1]
+                if lb then block(lb) end
+            end
+            lits(c)
+        end
+    end
+    lits(body)
 end
 
 return {

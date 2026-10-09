@@ -1150,7 +1150,21 @@ local function pair_value(vnamen, valn)
     return items(vp)[idx]
 end
 M._pair_value = pair_value
-M._mention_field = mention_field -- (atlas.fields asks the SAME accessor as the use edges' flds, CART-1591)
+M._mention_field = mention_field
+--- is identifier `a` (named `an`) BOUND at its own site — the nearest binder the scope model sees there? -> that
+--- binder's DECLARATION ROW (-1 for a param: scope-wide), or nil when free. An argument bound so is that binding: the
+--- callback upgrade joins it to no function by name — except the same-file def that starts ON that row, which the
+--- binder IS (`local function f`, `local f = function`, java's `Function<A, B> KEY = v -> …`) (CART-1598)
+function M._bound_value(an, a)
+    if not jvt_sm then return nil end
+    local chain, k = jvt_sm.resolve(an, a)
+    if k == 0 then return nil end
+    return chain[1].at or chain[1].row or -1
+end
+--- the callback upgrade's veto for a bound argument (above): every target but the def its binder declares
+function M._bound_veto(bound, t2, file)
+    return bound ~= nil and not (t2.file == file and t2.order == bound)
+end -- (atlas.fields asks the SAME accessor as the use edges' flds, CART-1591)
 
 -- The raw-parser rider (fusion Stage C): the extract hot loop parses via
 -- a REUSED raw TSParser per language — LanguageTree construction
@@ -8401,7 +8415,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                             elseif ak == 'local' then
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'local', name = node_text(a, src),
-                                    l = select(1, a:range()) }
+                                    l = select(1, a:range()) } -- (erlang's var: no scope model, so never `bound`)
                             elseif t == 'list_splat' or t == 'dictionary_splat'
                                 or t == 'spread_element'
                                 or t == 'splat_argument'
@@ -8467,8 +8481,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 argv[#argv + 1] = { k = 'scalar', v = node_text(a, src) }
                             elseif t == 'identifier' then
                                 args[#args + 1] = ''
-                                argv[#argv + 1] = { k = 'local', name = node_text(a, src),
-                                    l = select(1, a:range()) }
+                                local an = node_text(a, src)
+                                -- (BOUND at its own site — a param / local the scope model sees there: the callback upgrade
+                                -- joins it to no function by name but the def its binder declares, M._bound_value — CART-1598)
+                                argv[#argv + 1] = { k = 'local', name = an, l = select(1, a:range()),
+                                    bound = M._bound_value(an, a) }
                             elseif t == 'function_definition' or t == 'lambda' then
                                 args[#args + 1] = ''
                                 local ar, ac = a:start()
@@ -9620,6 +9637,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             if a.k == 'local' and a.name then
                 local t2, _ = resolve(a.name, p.file)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
+                    and not M._bound_veto(a.bound, t2, p.file) -- (bound at its site: never a function by name, CART-1598)
                     and not M._arg_shadowed(a.name, p.call.fn and node_index[p.call.fn], parent_fn, t2, p.file) then
                     a.k, a.to, a.up = 'func', t2.id, true
                     local from = p.call.fn
@@ -10465,6 +10483,7 @@ function M.relink(data, touched, opts)
             if ak == 'local' and aname then
                 local t2 = resolve(aname, cfile)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
+                    and not M._bound_veto(cv.aget(i, j, 'bound'), t2, cfile) -- (bound at its site, CART-1598)
                     and not M._arg_shadowed(aname, cfn and node_index[cfn], parent_fn, t2, cfile) then -- (CART-1498)
                     cv.aset(i, j, 'k', 'func'); cv.aset(i, j, 'to', t2.id); cv.aset(i, j, 'up', true)
                     if touched then touched[cfile] = true end

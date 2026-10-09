@@ -112,7 +112,95 @@ local RUST_GUARDS = {
     rhs_setonce = function (top, src) return rs_memo_call(top:parent(), top, src) end,
 }
 
+-- ── LEXICAL SCOPES (CART-1598, rust) ──────────────────────────────────────────────────────────────────────────────
+-- rust declared no scope model, so the cross-file unique join claimed every param and local. A pattern binds its
+-- identifier leaves — never a tuple-struct / struct pattern's TYPE (`Some` in `Some(x)`), a scoped path or a field
+-- NAME (`P { r: rr }` binds rr; the shorthand `P { q }` binds q). A function / closure binds its params, a block its
+-- `let`s from the declaring row, and `for` / `if let` / `while let` / a match arm their patterns.
+local function rs_pattern_names(p, src, out, row)
+    if not p then return end
+    local t = p:type()
+    if t == 'identifier' or t == 'shorthand_field_identifier' then
+        -- (a CAPITALISED identifier in a pattern is a variant / const being MATCHED — `None`, `MAX` —, never a binding)
+        local nm = node_text(p, src)
+        if not nm:match('^%u') then out[nm] = { row = row } end
+    elseif t == 'field_pattern' then
+        local sub = p:field('pattern')[1]
+        if sub then rs_pattern_names(sub, src, out, row) else rs_pattern_names(p:field('name')[1], src, out, row) end
+    elseif t == 'tuple_pattern' or t == 'tuple_struct_pattern' or t == 'struct_pattern' or t == 'slice_pattern'
+        or t == 'ref_pattern' or t == 'mut_pattern' or t == 'or_pattern' or t == 'captured_pattern'
+        or t == 'match_pattern' or t == 'reference_pattern' then
+        -- (a tuple-struct pattern's TYPE `Some` is capitalised: the identifier arm above skips it)
+        for _, c in inext, p, -1 do
+            if c:named() then rs_pattern_names(c, src, out, row) end
+        end
+    end
+end
+local function rs_params(node, src, out)
+    local ps = node:field('parameters')[1]
+    if not ps then return end
+    for _, c in inext, ps, -1 do
+        if c:type() == 'parameter' then rs_pattern_names(c:field('pattern')[1], src, out)
+        elseif c:named() and c:type() ~= 'self_parameter' then rs_pattern_names(c, src, out) end -- (a closure's bare `mut cq`)
+    end
+end
+local function rs_block(node, src, out)
+    for _, st in inext, node, -1 do
+        if st:type() == 'let_declaration' then rs_pattern_names(st:field('pattern')[1], src, out, (select(1, st:range()))) end
+    end
+end
+local function rs_lets(node, src, out) -- a `for` pattern, an `if let` / `while let` condition (let chains too), a match arm
+    if node:type() == 'match_arm' or node:type() == 'for_expression' then rs_pattern_names(node:field('pattern')[1], src, out) return end
+    local function conds(c)
+        if not c then return end
+        if c:type() == 'let_condition' then rs_pattern_names(c:field('pattern')[1], src, out)
+        elseif c:type() == 'let_chain' then for _, k in inext, c, -1 do conds(k) end end
+    end
+    conds(node:field('condition')[1])
+end
+local RUST_LEXICAL_SCOPES = {
+    function_item = { kind = 'param', harvest = rs_params }, closure_expression = { kind = 'param', harvest = rs_params },
+    block = { kind = 'local', harvest = rs_block },
+    for_expression = { kind = 'local', harvest = rs_lets }, if_expression = { kind = 'local', harvest = rs_lets },
+    while_expression = { kind = 'local', harvest = rs_lets }, match_arm = { kind = 'local', harvest = rs_lets },
+}
+-- the call-argument / callee gate's binders (fn.locals). That gate is POSITION-BLIND — a name in fn.locals shadows
+-- every call of it anywhere in the function — so it gets only the binders visible across the body: the params, the
+-- TOP block's `let`s (not one whose initializer names itself: `let x = x()` calls the outer x) and a closure's
+-- params (a closure assigned to a `let` mints no node, its calls are the enclosing fn's). A nested block's, a match
+-- arm's, an `if let`'s binding stays out: cargo's `match registry(…) { Ok((registry, _)) => … }` had refused
+-- the call by the ARM's name.
+local function rs_fn_locals(def, src, out)
+    -- (the fn's OWN params reach the call gate through fn.params already: a param callee is 'higher-order')
+    local body = def:field('body')[1]
+    if not body then return end
+    local function lets(b)
+        for _, st in inext, b, -1 do
+            if st:type() == 'let_declaration' then
+                local names = {}
+                rs_pattern_names(st:field('pattern')[1], src, names)
+                local self = tsutil.mentions_of(st:field('value')[1], src, names) or {}
+                for nm in pairs(names) do if not self[nm] then out[nm] = {} end end
+            end
+        end
+    end
+    lets(body)
+    local function closures(n)
+        for _, c in inext, n, -1 do
+            if c:type() == 'closure_expression' then
+                rs_params(c, src, out)
+                local cb = c:field('body')[1] -- (and its TOP block's lets, as go's literal: the closure mints no node)
+                if cb and cb:type() == 'block' then lets(cb) end
+            end
+            closures(c)
+        end
+    end
+    closures(body)
+end
+
 return {
+    lexical_scopes = RUST_LEXICAL_SCOPES, -- CART-1598
+    fn_locals = rs_fn_locals,
     guards = RUST_GUARDS,
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
