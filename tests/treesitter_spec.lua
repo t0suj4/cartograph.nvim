@@ -6232,6 +6232,37 @@ test('use edges: a php param or local never reads another file\'s global; a `glo
     vim.fn.delete(root, 'rf')
 end)
 
+-- ⚠ GO RECEIVER TYPING (CART-1599): `s.key()` with s a `*scriptGroup` receiver was ambiguous between every type's
+-- `key`; a typed binder now keys `scriptGroup.key`. And a GENERIC type's methods were minted under the receiver
+-- VARIABLE (`(r *Tree[T]) Insert` -> `r.Insert`).
+test('refs: go qualifies a call on a typed receiver / param / local as Type.method; generic methods are Type.method (CART-1599)', function ()
+    if not has_parser('go') then skip 'no go parser' end
+    local root = mkroot('a.go', table.concat({
+        'package m',
+        'type A struct{}', 'type B struct{}', 'type G[T any] struct{}',
+        'func (a *A) key() int { return 1 }', 'func (b B) key() int { return 2 }',
+        'func (g *G[T]) put(x T) {}', 'func (g *G[T]) putLocked(x T) { g.put(x) }',
+        'func (a *A) self() int { return a.key() }',
+        'func viaParam(b B) int { return b.key() }',
+        'func viaVar() int { var v A; return v.key() }',
+        'func viaLit() int { l := &A{}; m := B{}; return l.key() + m.key() }',
+        'func viaUnknown(x Keyer) int { return x.key() }',
+    }, '\n'))
+    local data = ts.extract(root)
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local f, t = byid[e.from], byid[e.to]
+        if e.kind == 'ref' and f and t then refs[f.name .. '>' .. t.name] = true end
+    end
+    ok(refs['G.putLocked>G.put'], 'a generic method is G.put, and g.put() reaches it: ' .. vim.inspect(refs))
+    ok(refs['A.self>A.key'], 'the receiver a *A: a.key() is A.key')
+    ok(refs['viaParam>B.key'], 'a typed param b B: B.key')
+    ok(refs['viaVar>A.key'], '`var v A`: A.key')
+    ok(refs['viaLit>A.key'] and refs['viaLit>B.key'], '`l := &A{}` / `m := B{}`: their literal types')
+    ok(not refs['viaUnknown>A.key'] and not refs['viaUnknown>B.key'], 'an interface-typed param names no struct: ' .. vim.inspect(refs))
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.

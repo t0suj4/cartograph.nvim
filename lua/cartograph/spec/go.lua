@@ -154,12 +154,31 @@ local function go_idents(n, src, out, row, decl) -- (decl's rows ride as at / at
         if c:type() == 'identifier' then out[node_text(c, src)] = { row = row, at = sr, ate = er, ab = sb, abe = eb } end
     end
 end
+-- a binder's TYPE NAME (CART-1599): `T`, `*T`, `pkg.T`, `T[X]` -> "T" — go's methods are minted `T.m`, so a
+-- typed receiver `s *scriptGroup` lets `s.key()` qualify to scriptGroup.key (go_qualify_call below)
+local function go_type_name(t, src)
+    while t do
+        local k = t:type()
+        if k == 'type_identifier' then return node_text(t, src) end
+        if k == 'pointer_type' or k == 'parenthesized_type' then t = t:named_child(0)
+        elseif k == 'qualified_type' then t = t:field('name')[1]
+        elseif k == 'generic_type' then t = t:field('type')[1]
+        else return nil end
+    end
+end
+-- the type a short-var VALUE names right there: `T{…}`, `&T{…}` (anything else — a call — is unknown here)
+local function go_value_type(v, src)
+    if v and v:type() == 'unary_expression' then v = v:field('operand')[1] end
+    if v and v:type() == 'composite_literal' then return go_type_name(v:field('type')[1], src) end
+    return nil
+end
 local function go_params(node, src, out)
     for _, f in ipairs({ 'receiver', 'parameters', 'result' }) do
         local pl = node:field(f)[1]
         if pl and pl:type() == 'parameter_list' then
             for _, d in tsutil.inext, pl, -1 do
-                for _, nm in ipairs(d:field('name')) do out[node_text(nm, src)] = {} end
+                local ty = go_type_name(d:field('type')[1], src)
+                for _, nm in ipairs(d:field('name')) do out[node_text(nm, src)] = { ty = ty } end
             end
         end
     end
@@ -168,7 +187,17 @@ local function go_decl(st, src, out, row) -- one statement's own declarations
     local t = st:type()
     if t == 'short_var_declaration' then
         local l = st:field('left')[1]
-        if l then go_idents(l, src, out, row, st) end
+        if l then
+            go_idents(l, src, out, row, st)
+            local r, i = st:field('right')[1], 0 -- (pair each name with its value: `a, b := T{}, &U{}`)
+            for _, c in tsutil.inext, l, -1 do
+                if c:type() == 'identifier' then
+                    local b = out[node_text(c, src)]
+                    if b then b.ty = go_value_type(r and r:named_child(i), src) end
+                    i = i + 1
+                end
+            end
+        end
     elseif t == 'var_declaration' or t == 'const_declaration' then
         local function specs(n)
             for _, s in tsutil.inext, n, -1 do
@@ -176,7 +205,10 @@ local function go_decl(st, src, out, row) -- one statement's own declarations
                 if st2 == 'var_spec' or st2 == 'const_spec' then
                     local sr, _, er = s:range()
                     local sb, eb = select(3, s:start()), select(3, s:end_())
-                    for _, nm in ipairs(s:field('name')) do out[node_text(nm, src)] = { row = row, at = sr, ate = er, ab = sb, abe = eb } end
+                    local ty = go_type_name(s:field('type')[1], src) -- (`var x T`)
+                    for _, nm in ipairs(s:field('name')) do
+                        out[node_text(nm, src)] = { row = row, at = sr, ate = er, ab = sb, abe = eb, ty = ty }
+                    end
                 elseif st2 == 'var_spec_list' then specs(s) end
             end
         end
@@ -207,6 +239,19 @@ local function go_ctrl(node, src, out)
     end
     local alias = node:field('alias')[1]
     if alias then go_idents(alias, src, out) end
+end
+-- RECEIVER TYPING (CART-1599): `x.m(…)` with x bound to a binder of a known type keys `T.m` — the name go's method
+-- defs carry —; a receiver of unknown type keeps its spelling (and the name join's tails)
+local function go_qualify_call(calln, name, src, model)
+    if not model or calln:type() ~= 'call_expression' then return nil end
+    local f = calln:field('function')[1]
+    if not (f and f:type() == 'selector_expression') then return nil end
+    local op, fld = f:field('operand')[1], f:field('field')[1]
+    if not (op and fld and op:type() == 'identifier') then return nil end
+    local chain, k = model.resolve(node_text(op, src), calln)
+    local ty = k > 0 and chain[1].ty
+    if not ty then return nil end
+    return ty .. '.' .. node_text(fld, src)
 end
 local GO_LEXICAL_SCOPES = {
     function_declaration = { kind = 'param', harvest = go_params },
@@ -259,6 +304,7 @@ end
 return {
     lexical_scopes = GO_LEXICAL_SCOPES, -- CART-1598
     fn_locals = go_fn_locals,
+    qualify_call = go_qualify_call, -- (CART-1599)
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not
@@ -339,13 +385,11 @@ return {
         qualify = function (name, defn, src)
             if defn:type() ~= 'method_declaration' then return name end
             local recv = defn:field('receiver')[1]
-            if recv then
-                local t = node_text(recv, src)
-                    :match('%*?([%w_]+)%s*%)')
-                    or node_text(recv, src)
-                        :match('%*?([%w_]+)')
-                if t then return t .. '.' .. name end
-            end
+            -- (the receiver's TYPE from the tree: a text pattern read `(r *NodeShiftTree[T])` as `r` — every
+            -- method of a generic type was minted under its receiver VARIABLE, CART-1599)
+            local pd = recv and recv:named_child(0)
+            local t = pd and go_type_name(pd:field('type')[1], src)
+            if t then return t .. '.' .. name end
             return name
         end,
         -- func main + func init: runtime-invoked, never dead
