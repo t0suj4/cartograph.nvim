@@ -1168,6 +1168,45 @@ function M._bound_value(an, a)
     end
     return b.at or b.row or -1, b.ate -- (the declaration's first and last row: a def starting in it is the binder's)
 end
+--- the same rule from the fn RANGES alone (the id pass has no parent map): the innermost range strictly enclosing
+--- def `id`'s must contain the mention (line, col); a top-level def is visible everywhere in its file (CART-1562)
+local VIS_ENC = setmetatable({}, { __mode = 'k' }) -- ranges list -> { n = #ranges, [id] = enclosing range | false }
+function M._visible_from(id, ranges, line, col)
+    local memo = VIS_ENC[ranges]
+    if not memo or memo.n ~= #ranges then memo = { n = #ranges }; VIS_ENC[ranges] = memo end
+    local enc = memo[id]
+    if enc == nil then
+        local own
+        for _, r in ipairs(ranges) do if r.id == id then own = r break end end
+        enc = false
+        if own then
+            for _, r in ipairs(ranges) do
+                if r ~= own and (r.s < own.s or (r.s == own.s and (r.sc or 0) < (own.sc or 0)))
+                    and (r.e > own.e or (r.e == own.e and (r.ec == nil or own.ec == nil or r.ec >= own.ec)))
+                    and (not enc or r.s > enc.s or (r.s == enc.s and (r.sc or 0) > (enc.sc or 0))) then enc = r end
+            end
+        end
+        memo[id] = enc
+    end
+    if not enc then return true end
+    local after = line > enc.s or (line == enc.s and col >= (enc.sc or 0))
+    local before = line < enc.e or (line == enc.e and (enc.ec == nil or col < enc.ec))
+    return after and before
+end
+--- a def NESTED in another function is visible only inside it (CART-1562): `pcall(require, m)` in one function had
+--- upgraded to ANOTHER function's `local require = function () end`. -> true when t2's enclosing fn does not enclose
+--- the call's function fnid (a top-level t2, or one the call sits inside, is visible)
+function M._nested_unseen(t2, fnid, parent_fn)
+    local owner = parent_fn and t2 and parent_fn[t2.id]
+    if not owner then return false end
+    local f = fnid
+    while f do
+        if f == owner.id then return false end
+        local p = parent_fn[f]
+        f = p and p.id or nil
+    end
+    return true
+end
 --- the bare CALL's veto (CART-1602): a callee bound at its site resolves to no function but the def its binder
 --- declares -> the fn-value refusal, or nil
 function M._callee_veto(target, cb, cbe, full, file)
@@ -6080,6 +6119,9 @@ local function reduce_mentions(file, buf, L)
             -- lexical-first (scope-model step 3): a BOUND name never
             -- crosses the file boundary
             if u and scoped and u.file ~= file and bound then u = nil end
+            -- (a same-file def NESTED in another function is that function's: a mention outside it names no such fn —
+            -- `pcall(require, m)` had reached another function's `local require = function () end`, CART-1562)
+            if u and u.file == file and not M._visible_from(u.id, ranges, sr, sc) then u = nil end
             if u and not (u.file == file and sr == u.line) then
                 local from = fn_at(sr, sc)
                 local at = { start = { line = sr, char = sc },
@@ -9737,6 +9779,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
                     -- (BOUND at its site: its binder alone decides — the def it declares, `const cb = () => …; f(cb)`, and
                     -- nothing else; FREE: the fn-chain shadow gate, CART-1498 — CART-1598)
+                    and not M._nested_unseen(t2, p.call.fn, parent_fn) -- (another function's local def, CART-1562)
                     and (a.bound ~= nil and not M._bound_veto(a.bound, a.bate, t2, p.file)
                         or a.bound == nil and not M._arg_shadowed(a.name, p.call.fn and node_index[p.call.fn], parent_fn, t2, p.file)) then
                     a.k, a.to, a.up = 'func', t2.id, true
@@ -10590,6 +10633,7 @@ function M.relink(data, touched, opts)
             if ak == 'local' and aname then
                 local t2 = resolve(aname, cfile)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
+                    and not M._nested_unseen(t2, cfn, parent_fn) -- (another function's local def, CART-1562)
                     and (cv.aget(i, j, 'bound') ~= nil and not M._bound_veto(cv.aget(i, j, 'bound'), cv.aget(i, j, 'bate'), t2, cfile)
                         or cv.aget(i, j, 'bound') == nil and not M._arg_shadowed(aname, cfn and node_index[cfn], parent_fn, t2, cfile)) then -- (CART-1498 / 1598)
                     cv.aset(i, j, 'k', 'func'); cv.aset(i, j, 'to', t2.id); cv.aset(i, j, 'up', true)

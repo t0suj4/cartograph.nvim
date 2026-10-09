@@ -6362,6 +6362,41 @@ test('use edges: go reads pkg.Var through the import binding; only this module\'
     vim.fn.delete(root, 'rf')
 end)
 
+-- ⚠ A NESTED DEF IS ITS ENCLOSING FUNCTION'S (CART-1562): `pcall(require, m)` in one function reached ANOTHER
+-- function's `local require = function () end` — the same-file unique name, with no lexical containment.
+test('refs: a def nested in another function is reachable by name only inside it (CART-1562)', function ()
+    local data = ts.extract(mkroot('m.lua', table.concat({
+        'local function early() return pcall(helper) end', -- (BEFORE the enclosing function: outside it too)
+        'local function stub()', '  local require = function () return 1 end', '  return require()', 'end',
+        'local function load(m)', '  return pcall(require, m)', 'end',
+        'local function outer()', '  local function helper() return 2 end', '  return function () return helper end', 'end',
+        'local function top() return 3 end',
+        'local function usetop() return pcall(top) end',
+        'return { stub, load, outer, usetop }',
+    }, '\n')))
+    local byid, refs = {}, {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(data.edges) do
+        local f, t = byid[e.from], byid[e.to]
+        if e.kind == 'ref' and f and t then refs[f.name .. '>' .. t.name] = true end
+    end
+    ok(refs['stub>require'], 'inside its function the nested def is reachable: ' .. vim.inspect(refs))
+    ok(not refs['load>require'], 'outside it, the bare `require` is not that local: ' .. vim.inspect(refs))
+    local inner = false
+    for k in pairs(refs) do if k:match('>helper$') then inner = true end end
+    ok(inner, 'a closure INSIDE the enclosing function still reaches it')
+    ok(refs['usetop>top'], 'a top-level def is visible everywhere in its file')
+    ok(not refs['early>helper'], 'a mention ABOVE the enclosing function is outside it: ' .. vim.inspect(refs))
+    -- (RELINK re-tries every `local` argument: it must read the same containment)
+    ts.relink(data, {})
+    local again = {}
+    for _, e in ipairs(data.edges) do
+        local f, t = byid[e.from], byid[e.to]
+        if e.kind == 'ref' and f and t then again[f.name .. '>' .. t.name] = true end
+    end
+    ok(not again['load>require'], 'after relink: still not the other function\'s local: ' .. vim.inspect(again))
+end)
+
 -- ⚠ A BOUND ARGUMENT IS ITS BINDING (CART-1598): the callback upgrade joins it to no function by name — same file
 -- included (hugo's `for key, v := range …` passed `key` and reached the method TemplateStore.key) — but the def its
 -- binder DECLARES, which starts on the binder's own row: java's `Function<A, B> KEY = v -> …`, lua's local function.
