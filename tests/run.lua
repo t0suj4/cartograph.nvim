@@ -98,6 +98,45 @@ end
 local ROOT = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 function _G.repo(rel) return rel and (ROOT .. '/' .. rel) or ROOT end
 
+-- ── FLAKE FORENSICS (CART-1588) ───────────────────────────────────────────────
+-- A FLAKY assertion fails once in a full parallel run and never alone, so by the time anyone looks the process
+-- that knew why is gone. flake_dump(tag, state) writes a POST-MORTEM — not an OS core (the failure is a wrong
+-- VALUE, and an nvim core holds C frames, not the Lua tables that produced it) but the state that decides a
+-- replay: the caller's own state, this WORKER's spec list and every test it ran before this one IN ORDER (the
+-- suspect is state an earlier spec left behind), the JIT's status, the modules loaded, and the command that
+-- replays the exact sequence in one process. -> the dump's path. Lands in .git/flake-dumps/ (never committed;
+-- the worker's state home is a throwaway that dies with the run).
+_G.__run_log = {}
+function _G.flake_dump(tag, state)
+    -- (a git WORKTREE's .git is a file: there the dumps go to the user cache, which outlives the run too)
+    local dir = vim.fn.isdirectory(ROOT .. '/.git') == 1 and (ROOT .. '/.git/flake-dumps')
+        or (vim.fn.stdpath('cache') .. '/cartograph-flake-dumps')
+    vim.fn.mkdir(dir, 'p')
+    local loaded = {}
+    for k in pairs(package.loaded) do loaded[#loaded + 1] = tostring(k) end
+    table.sort(loaded)
+    local jit_ok, jit_st = pcall(function () return { require('jit').status() } end)
+    local spec = vim.env.SPEC
+    local dump = {
+        tag = tag, at = os.date('!%Y-%m-%dT%H:%M:%SZ'), pid = vim.uv.os_getpid(),
+        worker_specs = spec, jobs = vim.env.JOBS,
+        replay = ('SPEC=%s JOBS=1 bash tests/run.sh'):format(spec or '<whole suite: SPEC unset>'),
+        ran_before = vim.deepcopy(_G.__run_log), -- (every test this process started, the failing one LAST)
+        jit = jit_ok and jit_st or tostring(jit_st), jit_version = (jit and jit.version) or nil,
+        gc_kb = collectgarbage('count'), loaded = loaded,
+        state = state,
+    }
+    local path = ('%s/%s-%s-%d.lua'):format(dir, tag:gsub('[^%w_-]', '_'), os.date('!%Y%m%dT%H%M%S'), dump.pid)
+    local fd, err = io.open(path, 'w')
+    if not fd then -- (say so: a dump that silently failed reads as "no dump was needed")
+        io.stderr:write(('\n⚠ FLAKE DUMP (%s) NOT WRITTEN: %s\n'):format(tag, tostring(err)))
+        return nil
+    end
+    fd:write('return ', vim.inspect(dump), '\n'); fd:close()
+    io.stderr:write(('\n⚠ FLAKE DUMP (%s): %s\n'):format(tag, path))
+    return path
+end
+
 -- load every spec — or only $SPEC (comma list of basenames: the
 -- preflight's test-selection hook; the full suite still guards the push)
 local only
@@ -185,6 +224,7 @@ local pass, fail, skipped, pending = 0, 0, 0, 0
 print('')
 for _, t in ipairs(reg) do
     cover_spec = t.spec
+    _G.__run_log[#_G.__run_log + 1] = (t.spec or '?') .. ' :: ' .. t.name -- (flake_dump's ran_before)
     local t0 = times and vim.uv.hrtime()
     local good, err = pcall(t.fn)
     if times then

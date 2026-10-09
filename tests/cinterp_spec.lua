@@ -13,6 +13,8 @@ local function engine(src)
         for _, r in ipairs(s.returns) do l[#l + 1] = CI.key_of(CI.at(r.v, 'X@0')) end
         table.sort(l)
         return table.concat(l, ' | ')
+    end, A, function (f, args) -- (the analyzer and the raw run: a flake dump reads them, CART-1588)
+        return A.run(u.defs[f], args, {}, 1, { ['X@0'] = true }, false)
     end
 end
 
@@ -158,7 +160,7 @@ end)
 
 test('cinterp: a DOUBLE is its bits — a call\'s memo tells 1.5 from -1.5, a signed zero survives a call, +0 and -0 do not join into one (CART-1322 follow-up)', function ()
     if not ready() then skip 'no C parser' end
-    local _, ret = engine([[
+    local _, ret, A, runraw = engine([[
 static int sgn(double x) { return x < 0 ? -1 : 1; }
 int both(int c) { return sgn(1.5) * 10 + sgn(-1.5); }
 static int pos(double x) { return 1.0 / x > 0; }
@@ -168,7 +170,36 @@ int nan_self(int c) { double n = 0.0 / 0.0; return (n == n) * 10 + (n != n); }
 ]])
     eq('i9LL:32s', ret('both', { CI._int(0), n = 1 }), 'two calls with different doubles are two summaries')
     eq('i10LL:32s', ret('zeros', { CI._int(0), n = 1 }), '1/+0 > 0, 1/-0 < 0: the sign reaches the callee')
-    eq({ 'i1LL:32s', 'i0LL:32s', '?' }, { ret('joined', { CI._int(1), n = 1 }), ret('joined', { CI._int(0), n = 1 }), ret('joined', { n = 1 }) },
-        'an unknown condition over +0 / -0 is an unknown sign, not one of them')
+    -- ⚠ FLAKY ONCE IN A FULL PARALLEL RUN (CART-1588): the unknown-condition case answered the c = 1 result. When it
+    -- does, dump what decides a replay — the raw returns, the shared analyzer's memo, a FRESH analyzer's answer
+    -- (shared state vs nondeterminism) and the sign-of-zero probes at that moment — then fail as before.
+    local want = { 'i1LL:32s', 'i0LL:32s', '?' }
+    local got, raws = {}, {}
+    for i, args in ipairs({ { CI._int(1), n = 1 }, { CI._int(0), n = 1 }, { n = 1 } }) do
+        -- (ONE run per call, its key derived here exactly as ret derives it: a second run would perturb the memo
+        -- the dump means to capture)
+        local s = runraw('joined', args)
+        local l = {}
+        for _, r in ipairs(s.returns) do l[#l + 1] = CI.key_of(CI.at(r.v, 'X@0')) end
+        table.sort(l)
+        got[i], raws[i] = table.concat(l, ' | '), s
+    end
+    if not vim.deep_equal(want, got) then
+        local ffi = require 'ffi'
+        local d = ffi.new('double[1]'); local u64 = ffi.cast('uint64_t *', d)
+        local function bits(x) d[0] = x; return tostring(u64[0]) end
+        local memo = {}
+        for k in pairs(A.memo or {}) do memo[#memo + 1] = k end
+        table.sort(memo)
+        local _, fresh = engine([[int joined(int c) { double r = c ? 0.0 : -0.0; return 1.0 / r > 0; }]])
+        local again = { fresh('joined', { CI._int(1), n = 1 }), fresh('joined', { CI._int(0), n = 1 }), fresh('joined', { n = 1 }) }
+        local returns = {}
+        for i, s in ipairs(raws) do returns[i] = vim.inspect(s and s.returns, { depth = 6 }) end
+        flake_dump('cinterp-joined', {
+            want = want, got = got, fresh_analyzer = again, returns = returns, memo_keys = memo, steps = A.steps,
+            probes = { pos0 = bits(0.0), neg0 = bits(-0.0), inv_neg0 = tostring(1 / -0.0), inv_pos0 = tostring(1 / 0.0) },
+        })
+    end
+    eq(want, got, 'an unknown condition over +0 / -0 is an unknown sign, not one of them')
     eq('i1LL:32s', ret('nan_self', { CI._int(0), n = 1 }), 'NaN is not equal to itself (C), whatever the key says')
 end)
