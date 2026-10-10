@@ -413,8 +413,31 @@ local function build(store, opts)
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
         local fnstack = {}
         local expr, stmt
+        -- ★ THE ARRAY PART `#` (CART-1643): a key that is a NUMBER — a literal, `-x` / `#x`, arithmetic, a numeric-for or
+        -- ipairs index — is no field NAME, so what is stored there (a list built by `t[#t + 1] = x`, table.insert, a
+        -- positional constructor field) goes to `#`, which a named load `t.name` does not read; `[]` keeps the keys
+        -- we cannot type, which every load reads. On lua/cartograph `[]` was the commonest saturated hub (366): every
+        -- list built into a table poured into every field read of it. (An arithmetic metamethod that returns a string
+        -- would break the rule; none is assumed)
+        local numeric = {} -- ports of the numeric-for / ipairs index variables
+        local ARITH = { ['+'] = true, ['-'] = true, ['*'] = true, ['/'] = true, ['%'] = true, ['//'] = true, ['^'] = true }
+        local function isnum(k)
+            local kt = k:type()
+            if kt == 'number' then return true end
+            if kt == 'parenthesized_expression' then local x = k:named_child(0); return x ~= nil and isnum(x) end
+            if kt == 'unary_expression' then local op = txt(k):match('^%s*([#%-])'); return op ~= nil end
+            if kt == 'binary_expression' then
+                for _, x in tsutil.inext, k, -1 do if not x:named() then return ARITH[txt(x)] == true end end
+            end
+            if kt == 'identifier' then
+                for i = #scopes, 1, -1 do local p = scopes[i][txt(k)]; if p then return numeric[p] == true end end
+            end
+            return false
+        end
         local function keyname(k)
-            if k and k:type() == 'string' then local c = k:field('content')[1]; return c and txt(c) or '[]' end
+            if not k then return '#' end -- (a positional constructor field)
+            if k:type() == 'string' then local c = k:field('content')[1]; return c and txt(c) or '[]' end
+            if isnum(k) then return '#' end
             return '[]'
         end
         local function assign(target, v)
@@ -479,7 +502,7 @@ local function build(store, opts)
             end
             if fname == 'table.insert' and argn[1] then
                 local tp = expr(argn[1])
-                for j = 2, #argn do local v = expr(argn[j]); if j == #argn then storec(tp, '[]', v) end end
+                for j = 2, #argn do local v = expr(argn[j]); if j == #argn then storec(tp, '#', v) end end
                 return new()
             end
             local recvp, callee
@@ -606,12 +629,15 @@ local function build(store, opts)
                     local vl, el = cl:named_child(0), cl:named_child(1)
                     local it = el and el:named_child(0)
                     local vp, kp
+                    local fname_ipairs = false
                     if it and it:type() == 'function_call' then
                         local fname = it:field('name')[1] and txt(it:field('name')[1])
+                        fname_ipairs = fname == 'ipairs'
                         local a1 = it:field('arguments')[1] and it:field('arguments')[1]:named_child(0)
                         if (fname == 'ipairs' or fname == 'pairs') and a1 then
                             local tp = expr(a1)
-                            vp = field(tp, '[]')
+                            -- (ipairs walks the array part: `#` — a load of it also reads `[]`, the untyped keys)
+                            vp = field(tp, fname == 'ipairs' and '#' or '[]')
                             if fname == 'pairs' then kp = field(tp, '{k}') end
                         else expr(it) end
                     end
@@ -620,13 +646,19 @@ local function build(store, opts)
                         if v:named() then
                             i = i + 1
                             local p = declare(txt(v))
+                            if i == 1 and fname_ipairs then numeric[p] = true end
                             if i == 2 and vp then edge(vp, p) end
                             if i == 1 and kp then edge(kp, p) end
                         end
                     end
                 elseif cl then
                     for _, x in tsutil.inext, cl, -1 do
-                        if x:named() then if x:type() == 'identifier' then declare(txt(x)) else expr(x) end end
+                        if x:named() then
+                            if x:type() == 'identifier' then
+                                local p = declare(txt(x))
+                                if cl:type() == 'for_numeric_clause' then numeric[p] = true end
+                            else expr(x) end
+                        end
                     end
                 end
                 for _, x in tsutil.inext, n, -1 do if x:named() and x ~= cl then stmt(x) end end

@@ -492,3 +492,37 @@ test('flowtype: a non-partial answer is the same under every schedule and a bigg
     end
     ok(npartial > 0 and nwhole > 0, ('both kinds occur: %d partial, %d whole'):format(npartial, nwhole))
 end)
+
+-- ★ THE ARRAY PART `#` (CART-1643): what a NUMBER key stores (t[i] in a numeric for, t[#t + 1], table.insert, a
+-- positional constructor field) is no field NAME, so `t.handler` does not read it — while a key we cannot type (`t[k]`)
+-- may be any name, and still reaches every named load. On lua/cartograph `[]` had been the commonest saturated hub
+test('flowtype: a list built into a table does not reach its named fields; an untyped key still does', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.run(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.run(self) return 2 end\nreturn B\n',
+        ['main.lua'] = table.concat({
+            'local A, B = require "a", require "b"',
+            'local reg = { handler = A, B }',
+            'for i = 1, 3 do reg[i] = B end',
+            'reg[#reg + 1] = B; reg[#reg] = B',
+            'table.insert(reg, B)',
+            'local one = reg.handler:run()',
+            'local dyn = { handler = A }',
+            'local function put(k) dyn[k] = B end',
+            'put("handler")',
+            'local two = dyn.handler:run()',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v = {}
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'main.lua' and c.refused and c.at then v[atr.sl(c.at)] = R.verdict(c) end
+    end
+    vim.fn.delete(root, 'rf')
+    eq('exact', v[5] and v[5].kind, 'reg.handler:run() — the list of Bs is not the field: ' .. vim.inspect(v[5]))
+    ok(v[5] and tostring(v[5].targets[1]):match('A%.run'), vim.inspect(v[5] and v[5].targets))
+    ok(not (v[9] and v[9].kind == 'exact'), 'dyn[k] = B may write `handler`: no exact claim — ' .. vim.inspect(v[9]))
+end)
