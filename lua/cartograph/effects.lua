@@ -900,6 +900,7 @@ function M.summaries(store)
                 -- (BY FLOW, when asked: the function(s) that reach the receiver — possibly one the name join never
                 -- listed, at.lua's C.sl is bytecol's returned reader — instead of every same-named candidate)
                 local fv = FLOW and FLOW.verdict(c)
+                if fv and fv.partial then fv = nil end -- (a set the cap cut short is no claim: the name join decides)
                 local cands = (fv and fv.targets) or M.structural_cands(store, c, caller, r.cands)
                 if #cands == 0 then return false end -- (no candidate's owner declares what is called on the receiver)
                 local whole = true
@@ -954,6 +955,7 @@ function M.summaries(store)
                         -- (a receiver only a TYPE reaches by flow — a string — is that type's: the join is skipped,
                         -- under the flow premise ~)
                         local fvt = not declname and FLOW and c.refused and FLOW.verdict(c)
+                        if fvt and fvt.partial then fvt = nil end
                         if fvt and fvt.type and callrec.callee(c) then
                             bname = fvt.type .. '.' .. callrec.callee(c)
                             sum.jp = true

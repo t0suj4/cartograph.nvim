@@ -450,3 +450,45 @@ test('flowtype: adding an unrelated file moves no answer — and under the old s
     eq(0, moved(a, (answers(true))), 'the default schedule: nothing moves')
     ok(moved((answers(false, 'lifo')), (answers(true, 'lifo'))) > 0, 'the old stack order still moves an answer — the fixture is live')
 end)
+
+-- ★ PARTIAL (CART-1643): the stable schedule made a saturated port's leak REPRODUCIBLE, not whole — what it held went
+-- downstream, what came after was lost. An answer read through a port the cap may have left incomplete is `partial`;
+-- one that is not is a function of the graph: the same under every schedule, and the same with a bigger cap. Measured
+-- on arktype / lua/cartograph: every answer that varied by schedule was flagged (268 / 13), no unflagged answer changed
+-- at CAP 256 (283 / 445), while 192 / 150 flagged ones did
+test('flowtype: a non-partial answer is the same under every schedule and a bigger cap; what varies is flagged', function ()
+    if not parser_available('typescript') then skip 'no typescript parser' end
+    local FIX = vim.fn.getcwd() .. '/tests/fixtures/flowsched/ark/schema/shared/'
+    local files = {}
+    for _, f in ipairs({ 'errors.ts', 'traversal.ts' }) do files['ark/schema/shared/' .. f] = assert(io.open(FIX .. f)):read('a') end
+    local root = tree(files)
+    store.ingest(ts.extract(root))
+    local function rows(order)
+        local out = {}
+        for _, p in ipairs(flowtype.solve(store, { open = false, order = order }).probes) do
+            out[p.file .. ':' .. p.line .. ':' .. p.col] = { a = p.kind .. ' ' .. table.concat(p.targets, ','), partial = p.partial }
+        end
+        return out
+    end
+    local cap = flowtype.CAP
+    flowtype.CAP = 3 -- (a small cap: this fixture saturates at once)
+    local runs = {}
+    for _, o in ipairs({ 'desc', 'asc', 'lifo', 'fifo' }) do runs[o] = rows(o) end
+    flowtype.CAP = 64
+    local big = rows()
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    local npartial, nwhole = 0, 0
+    for k, x in pairs(runs.desc) do
+        if x.partial then npartial = npartial + 1 else nwhole = nwhole + 1 end
+        local varies = false
+        for _, o in ipairs({ 'asc', 'lifo', 'fifo' }) do
+            local y = runs[o][k]
+            if y and y.a ~= x.a then varies = true end
+            if y and not x.partial and not y.partial then eq(x.a, y.a, k .. ': non-partial under desc and ' .. o) end
+        end
+        if varies then ok(x.partial, k .. ' varies by schedule, so it is partial') end
+        if not x.partial and not x.a:match('^none') then eq(x.a, big[k] and big[k].a, k .. ': non-partial at CAP 3 holds at CAP 64') end
+    end
+    ok(npartial > 0 and nwhole > 0, ('both kinds occur: %d partial, %d whole'):format(npartial, nwhole))
+end)

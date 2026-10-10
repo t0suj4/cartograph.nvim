@@ -125,8 +125,13 @@ local function build(store, opts)
     -- DROPS OUT — its objects are not propagated — and a verdict is a claim over the flows kept, which every sampled
     -- verdict held. Consumers hedge it (~). Context sensitivity for such helpers is the real fix.)
     local spread = opts.spread == true
+    -- (ESCAPED: an object that reached a saturated port — from there it may go anywhere the solve no longer follows:
+    -- written through, called through. See PARTIAL below)
+    local escaped = {}
     local function settop(p)
         if top[p] then return end
+        local s = pts[p]
+        if type(s) == 'number' then escaped[s] = true elseif s then for o in pairs(s) do escaped[o] = true end end
         top[p] = true; pts[p] = nil; delta[p] = nil
         if spread then push(p) end
     end
@@ -146,7 +151,7 @@ local function build(store, opts)
         return s ~= nil and s[o] == true
     end
     local function addobj(p, o)
-        if top[p] then return end
+        if top[p] then escaped[o] = true; return end
         local s = pts[p]
         if s == nil then pts[p] = o; cnt[p] = 1
         elseif type(s) == 'number' then
@@ -712,6 +717,50 @@ local function build(store, opts)
         end
         solve()
     end
+    -- ★ PARTIAL: a set the cap made INCOMPLETE (CART-1643). A port past CAP drops out: what it held before has gone
+    -- downstream (an order-chosen part), what came after is lost — and a call through it never binds the functions it
+    -- did not hand on, so their parameters miss those arguments. Sorting the schedule made that part REPRODUCIBLE, not
+    -- whole. So every port whose set may be missing something is TAINTED, and an answer read through one is `partial`:
+    -- the saturated ports, and whatever a tainted port flows into — edges, a load's result (its base is incomplete), a
+    -- call's result (its callee is), filters, typed method returns, the loads of an object whose prototype port is
+    -- tainted. And what an ESCAPED object (one that reached a saturated port) may still receive where the solve no
+    -- longer follows it: its field f once a store with a tainted base writes f (or `[]`, which a Lua load also
+    -- reads), and — for a function — its parameters once a call's callee is tainted (which function it would reach is
+    -- what was lost).
+    local tainted, twork = {}, {}
+    local function taint(p) if p and not tainted[p] then tainted[p] = true; twork[#twork + 1] = p end end
+    local gf_of = {}
+    for _, gf in ipairs(gfilters) do local l = gf_of[gf[1]] or {}; gf_of[gf[1]] = l; l[#l + 1] = gf[2] end
+    local esc = {}
+    for o in pairs(escaped) do esc[#esc + 1] = o end
+    local field_hit, params_hit = {}, false
+    for p in pairs(top) do taint(p) end
+    while #twork > 0 do
+        local p = twork[#twork]; twork[#twork] = nil
+        for q in pairs(succ[p] or {}) do taint(q) end
+        for _, ld in ipairs(loads[p] or {}) do taint(ld[2]) end
+        for _, st in ipairs(stores[p] or {}) do
+            local f = st[1]
+            if not field_hit[f] then
+                field_hit[f] = true
+                for _, o in ipairs(esc) do local m = ofield[o]; if m and m[f] then taint(m[f]) end end
+            end
+        end
+        if calls[p] and not params_hit then
+            params_hit = true
+            for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end
+        end
+        for _, cl in ipairs(calls[p] or {}) do
+            if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
+        end
+        for _, fl in ipairs(filters[p] or {}) do taint(fl[1]) end
+        for _, d in ipairs(gf_of[p] or {}) do taint(d) end
+        for _, mf in ipairs(mflows[p] or {}) do taint(mf[2]) end
+        for _, t in ipairs(protos_rev[p] or {}) do
+            for o in each(t) do for _, ld in ipairs(olodes[o] or {}) do taint(ld[2]) end end
+        end
+    end
+    local partial_hit -- (set by targets: a field port it read was tainted)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
     local verdicts = {}
     local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0,
@@ -720,14 +769,17 @@ local function build(store, opts)
         if seen[o] then return false end
         seen[o] = true
         local p = ofield[o] and ofield[o][m]
+        if p and tainted[p] then partial_hit = true end
         if p and top[p] then return true end
         if p then for x in each(p) do out[x] = true end end
         local t = false
         for c in pairs(protos[o] or {}) do t = targets(c, m, out, seen) or t end
         return t
     end
+    stats.partial = 0
     for _, pr in ipairs(probes) do
         local kind, v
+        partial_hit = tainted[pr.recv] or false
         if top[pr.recv] or has(pr.recv, EXT) then kind = 'unknown'
         elseif pts[pr.recv] == nil then kind = 'none'
         else
@@ -767,12 +819,14 @@ local function build(store, opts)
             end
         end
         stats[kind] = (stats[kind] or 0) + 1
+        if v and partial_hit then v.partial = true; stats.partial = stats.partial + 1 end
         if v then verdicts[pr.c] = v end
     end
     -- (PROBES a language walker records itself — every Go method call: { file, line, col, member, recv } -> targets)
     local probe_out = {}
     for _, pr in ipairs(S.probes) do
         local kind, fns, unknown = nil, {}, top[pr.recv] or has(pr.recv, EXT)
+        partial_hit = tainted[pr.recv] or false
         if not unknown then
             local out = {}
             -- (a GUARD — `x instanceof C` around the call — keeps only the objects whose prototype chain holds one of
@@ -805,7 +859,7 @@ local function build(store, opts)
         end
         if unknown then kind = 'unknown' elseif #fns == 0 then kind = 'none' elseif #fns == 1 then kind = 'exact' else kind = 'set' end
         probe_out[#probe_out + 1] = { file = pr.file, line = pr.line, col = pr.col, member = pr.member, kind = kind, targets = fns,
-            guarded = pr.guard ~= nil }
+            guarded = pr.guard ~= nil, partial = partial_hit or nil }
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     return { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
