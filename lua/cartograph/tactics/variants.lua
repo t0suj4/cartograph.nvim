@@ -8,9 +8,11 @@
 --   rows     = function (variant, params) -> { [key] = value | { value, flag = true } }   runs in the variant's process
 --   claim    = 'same' (no row moves) | 'flagged' (a baseline row that moves — changes or disappears — is flagged
 --              there; a row the baseline does not have made no claim)   default 'same'
---   control  = the name of a variant that MUST move — the check is live (a dead comparison calls everything stable)
+--   control  = the name of a variant that MUST move — the check is live (a dead comparison calls everything stable);
+--              under `same` its moves are exempt, under `flagged` its violations still count
 --   repeat_  = N: the baseline computed in N processes (run-to-run determinism)   default 1
--- and root (the tree the rows are about), args (a list of `k=v`) and timeout (seconds per process, default 600):
+-- and root (the tree the rows are about), args (a list of `k=v`), repo (the code the processes load; default this
+-- cartograph) and timeout (seconds per process, default 600):
 -- decl / rows receive `params` = { root = root, k = v, ... }.
 -- CLAIM: per `claim`, no violation in any variant but the control, and the control moved.
 local function repo_of_toolbelt()
@@ -56,7 +58,8 @@ local function measure(_, p)
     vim.fn.mkdir(dir, 'p')
     local function put(name, text) local fd = assert(io.open(dir .. '/' .. name, 'w')); fd:write(text); fd:close(); return dir .. '/' .. name end
     local runner, declpath, ppath = put('runner.lua', RUNNER), put('decl.lua', p.decl), put('params.json', vim.json.encode(params))
-    local repo, timeout = repo_of_toolbelt(), tonumber(p.timeout or 600) * 1000
+    -- (repo: the CODE the variants run — default this cartograph; `mutant` points it at a mutated copy)
+    local repo, timeout = p.repo or repo_of_toolbelt(), tonumber(p.timeout or 600) * 1000
     local function rows_of(idx, tag)
         local outp = dir .. '/rows-' .. tag .. '.json'
         local r = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE', '--cmd', 'set rtp^=' .. repo, '-l', runner,
@@ -105,8 +108,10 @@ local function claim(v)
     local bad, ctl, parts = {}, nil, {}
     for _, r in ipairs(v.runs) do
         parts[#parts + 1] = ('%s moved %d (%d violating)'):format(r.name, r.moved, r.violations)
-        if r.name == v.control then ctl = r
-        elseif r.violations > 0 then bad[#bad + 1] = r.name .. ': ' .. table.concat(r.examples, '; ') end
+        -- (the control MUST move; under `same` moving is all a violation is, so it is exempt — under `flagged` it is not:
+        -- a bigger cap must move the partial answers AND leave the whole ones alone)
+        if r.name == v.control then ctl = r end
+        if r.violations > 0 and (r.name ~= v.control or v.claim == 'flagged') then bad[#bad + 1] = r.name .. ': ' .. table.concat(r.examples, '; ') end
     end
     local head = ('%d rows of %s; '):format(v.rows, v.baseline) .. table.concat(parts, ', ')
     if v.control and not ctl then return false, head .. ' — the control `' .. v.control .. '` is not a variant' end
@@ -127,6 +132,8 @@ local VANISHES = [[return { claim = 'flagged', variants = { 'a', 'b' },
     rows = function (v) local r = { x = 1 }; if v == 'a' then r.z = 'claim' end; return r end }]]
 local LIVE = [[return { variants = { 'a', 'b', 'shuffled' }, control = 'shuffled',
     rows = function (v) return { x = 1, y = v == 'shuffled' and 'moved' or 'two' } end }]]
+local CTLBAD = [[return { claim = 'flagged', variants = { 'a', 'big' }, control = 'big',
+    rows = function (v) return { x = v == 'big' and 2 or 1, y = { v == 'big' and 'grew' or 'part', flag = true } } end }]]
 local DEAD = [[return { variants = { 'a', 'b', 'shuffled' }, control = 'shuffled', rows = function () return { x = 1 } end }]]
 local PROCESS = [[return { variants = { 'set', 'read' }, rows = function (v)
     -- each variant in its OWN process: a global the first one sets is not there for the second
@@ -139,7 +146,7 @@ return {
     kind = 'discovery',
     tags = { 'gate', 'measure' },
     summary = 'compute the same rows under several variants, each in its own process, and diff them by key against the first: claim same (nothing moves) or flagged (what moves is flagged); a control variant must move; repeat_ = N recomputes the baseline in N processes',
-    params = { decl = 'string', root = 'string?', args = 'list?', timeout = 'number?' },
+    params = { decl = 'string', root = 'string?', args = 'list?', repo = 'string?', timeout = 'number?' },
     measure = measure,
     claim = claim,
     examples = {
@@ -177,6 +184,11 @@ return {
             name = 'a control that moves: the comparison is live, and the others still hold',
             params = { decl = LIVE },
             expect = { holds = true },
+        },
+        {
+            name = 'claim flagged: the control must move, and an UNFLAGGED row it moves still violates',
+            params = { decl = CTLBAD },
+            expect = { holds = false },
         },
         {
             name = 'a control that does NOT move: refused — the comparison could not have failed',
