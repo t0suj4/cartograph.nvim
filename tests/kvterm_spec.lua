@@ -102,3 +102,36 @@ test('kv lens: kv_generalize = generalize under the fixed-arity rigidity, decode
     ok(composed(fams.keyed).template.o.c.ka, 'a named list generalizes keyed')
     ok(composed(fams.family_keyedness).template.o.tasks.a, 'and stays positional when one member\'s element has no name')
 end)
+
+-- ★ A PLAIN LUA TABLE as a kv value (CART-1645): a PLAN (cartograph.tactic's terms) generalizes as a term — a FAMILY of
+-- plans of one kind gives a template whose holes are the decisions (which corpora), and an instance of it is a plan
+-- nobody wrote. Measured: two walker acceptances (five corpora / two) lifted, effect bound into the open hole, the
+-- generated plan ran to done (161 s, 3314 right, 0 wrong); a value outside a PINNED hole's domain is refused
+test('kv lens: a Lua table round-trips (keys sorted, the positional part under `[]`), and a plan family lifts to a template', function ()
+    local T = require('cartograph.tactic').T
+    local function plan(items)
+        return T.seq(T.each(items, T.use('oracle', { root = T.hole('root'), floor = T.hole('floor', '%s') })), T.use('variants', { root = '/x' }))
+    end
+    local p = plan({ { root = '/a', floor = 1 }, { root = '/b', floor = 2 } })
+    eq(p, A.kv_lua(A.term_kv(A.kv_term(A.lua_kv(p)))), 'the round trip: the same plan back')
+    -- (an object's keys SORTED: two tables with the same 20 keys, inserted in opposite orders, are one term)
+    local up, down, want = {}, {}, {}
+    for i = 1, 20 do local k = ('k%02d'):format(i); up[k] = i; want[i] = k end
+    for i = 20, 1, -1 do down[('k%02d'):format(i)] = i end
+    eq(want, A.lua_kv(up).keys, 'the keys sorted, not in pairs order')
+    ok(A.eq(A.kv_term(A.lua_kv(up)), A.kv_term(A.lua_kv(down))), 'insertion order is not part of the term')
+    local ok_bad = pcall(A.lua_kv, { [5] = 'sparse' })
+    ok(not ok_bad, 'a key neither a string nor positional refuses')
+    -- the family: the same plan kind over different items -> the steps fixed, the items a sequence hole
+    local fam = { A.lua_kv(plan({ { root = '/a', floor = 1 }, { root = '/b', floor = 2 }, { root = '/c', floor = 3 } })),
+        A.lua_kv(plan({ { root = '/a', floor = 1 } })) }
+    local g = A.generalize(A.kv_terms(fam, {}))
+    local holes = {}
+    for h in pairs(g.values[1]) do holes[#holes + 1] = h end
+    eq(1, #holes, 'one decision: the items after the first — ' .. A.show(g.template.body))
+    -- a decision -> a plan nobody wrote: the open hole takes a NEW item
+    local new = A.instantiate(g.template, { [holes[1]] = A.seq({ A.kv_term(A.lua_kv({ root = '/z', floor = 9 })) }) })
+    ok(new.ok, vim.inspect(new.rejected))
+    local q = A.kv_lua(A.term_kv(new.term))
+    eq(plan({ { root = '/a', floor = 1 }, { root = '/z', floor = 9 } }), q, 'the generated plan is the plan for those items')
+end)

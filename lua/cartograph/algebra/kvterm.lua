@@ -290,4 +290,38 @@ function M.term_kv(t)
     error('term_kv: not a kv term (' .. tostring(t.k) .. ')')
 end
 
+--- ★ A PLAIN LUA TABLE <-> the kv view (CART-1645): data a Lua caller holds — a PLAN (cartograph.tactic's terms are
+--- tables) — so it generalizes as a term, and a template's instance comes back as the table. A table has no written key
+--- order, so an object's keys are SORTED (pairs order is per table and per process: two plans with the same keys read
+--- through it did not align at all); a positional part rides as a list under the key `[]` (a `then` node: { op =
+--- 'then', step, step }); a pure list is a list. A key neither a string nor positional refuses BY NAME. kv_lua is the
+--- inverse; the round trip is the oracle (tests/kvterm_spec.lua).
+function M.lua_kv(x)
+    if type(x) ~= 'table' then return x end
+    local keys, n = {}, #x
+    for k in pairs(x) do
+        if type(k) == 'string' then keys[#keys + 1] = k
+        elseif not (type(k) == 'number' and k >= 1 and k <= n and k % 1 == 0) then
+            error(('lua_kv: key %s is neither a string nor positional'):format(tostring(k)), 2)
+        end
+    end
+    table.sort(keys)
+    local function list() local l = {} for i = 1, n do l[i] = M.lua_kv(x[i]) end return { a = l } end
+    if n > 0 and #keys == 0 then return list() end
+    local o = {}
+    for _, k in ipairs(keys) do o[k] = M.lua_kv(x[k]) end
+    if n > 0 then o['[]'] = list(); keys[#keys + 1] = '[]' end
+    return { o = o, keys = keys }
+end
+function M.kv_lua(x)
+    if type(x) ~= 'table' then return x end
+    if x.a then local l = {} for i, v in ipairs(x.a) do l[i] = M.kv_lua(v) end return l end
+    if x.null then return nil end
+    local t = {}
+    for _, k in ipairs(x.keys or {}) do
+        if k == '[]' then for i, v in ipairs(M.kv_lua(x.o[k])) do t[i] = v end else t[k] = M.kv_lua(x.o[k]) end
+    end
+    return t
+end
+
 end

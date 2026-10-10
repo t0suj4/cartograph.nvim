@@ -313,6 +313,27 @@ test('tactic: `each` runs one body per item; a failing item leaves the completed
     eq('failed', f.status); eq('root.3', f.where); eq(2, #f.completed)
 end)
 
+test('tactic: `each` with a DATA body — holes bound from each item — runs as the function body did, and stays data', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = mkroot(ORIG)
+    local items = { { f = 'a.lua', tag = 'one' }, { f = 'b.lua', tag = 'two' } }
+    local term = T.each(items, T.step('write', { file = T.hole('f'), line = T.hole('tag', '-- data %s') }))
+    -- (no function anywhere in it: it survives a JSON round trip, and runs the same)
+    local back = vim.json.decode(vim.json.encode(term))
+    local r = run(back)
+    eq('done', r.status, tostring(r.why)); eq(2, r.applied)
+    ok(read(root, 'a.lua'):find('-- data one', 1, true) and read(root, 'b.lua'):find('-- data two', 1, true))
+    mkroot(ORIG)
+    local f = run(T.each({ { f = 'a.lua' }, { g = 'b.lua' } }, T.step('write', { file = T.hole('f') })))
+    eq('failed', f.status); eq('ill-posed', f.class); eq('root.2', f.where)
+    ok(tostring(f.why):find('no `f`', 1, true), tostring(f.why))
+    -- (a hole with a DEFAULT: an optional field the item may lack)
+    root = mkroot(ORIG)
+    local d = run(T.each({ { f = 'a.lua' } }, T.step('write', { file = T.hole('f'), line = T.hole('note', '-- %s', 'default') })))
+    eq('done', d.status, tostring(d.why))
+    ok(read(root, 'a.lua'):find('-- default', 1, true), read(root, 'a.lua'))
+end)
+
 -- ── the REAL chain: move an exported function, then replace its body — two real verbs, a real decision each ──────
 local R_LUA = 'local M = {}\nfunction M.dbl(x) return x * 2 end\nfunction M.keep(x) return x + 1 end\nreturn M\n'
 local function fn_ref(name, file)

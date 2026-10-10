@@ -252,6 +252,39 @@ function M.T.first(...) return { op = 'first', ... } end
 function M.T.try(t) return { op = 'try', t } end
 function M.T.rep(t, limit) return { op = 'repeat', t, limit = limit } end
 function M.T.each(items, body) return { op = 'each', items = items, body = body } end
+--- ★ A BODY AS DATA (CART-1645): `each`'s body may be a TERM in place of a function — instantiated per item, every
+--- `T.hole(path[, fmt])` in it replaced by the item's value at `path` (`.` the item itself, `#` its index, `a.b` a
+--- field; `fmt` formats it into a string, `%s`). The term stays plain data, so a PLAN is data: serializable, and two
+--- plans generalize as terms (their holes are the decisions). A path the item does not have refuses BY NAME — unless
+--- the hole carries a `default` (an optional field: `args` only some corpora pass).
+function M.T.hole(path, fmt, default) return { op = 'hole', path = path, fmt = fmt, default = default } end
+local function hole_value(item, i, path)
+    if path == '.' then return item end
+    if path == '#' then return i end
+    local v = item
+    for seg in tostring(path):gmatch('[^.]+') do
+        if type(v) ~= 'table' then return nil end
+        v = v[tonumber(seg) or seg]
+    end
+    return v
+end
+--- one `each` body for one item -> term (raises when a hole names what the item lacks)
+function M.each_body(t, item, i)
+    if type(t.body) == 'function' then return t.body(item, i) end
+    local function inst(x)
+        if type(x) ~= 'table' then return x end
+        if x.op == 'hole' then
+            local v = hole_value(item, i, x.path)
+            if v == nil then v = x.default end
+            if v == nil then error(('each: the item has no `%s` for a hole'):format(tostring(x.path)), 0) end
+            return x.fmt and x.fmt:format(tostring(v)) or v
+        end
+        local o = {}
+        for k, v in pairs(x) do o[k] = inst(v) end
+        return o
+    end
+    return inst(t.body)
+end
 --- a NAMED toolbelt entry as a step (cartograph.toolbelt): a write entry runs its own term, a discovery is a PREMISE
 --- gate — it passes when its claim holds and fails ill-posed, by name, when it does not. `name` may be a QUERY
 --- { tag, at?, kind? }: the one tactic so tagged that APPLIES at the subject (CART-1448; several = a decision)
@@ -570,7 +603,11 @@ function eval(store, t, opts, where)
         local kids = t
         if op == 'each' then
             kids = {}
-            for i, item in ipairs(t.items or {}) do kids[i] = t.body(item, i) end
+            for i, item in ipairs(t.items or {}) do
+                local okb, k = pcall(M.each_body, t, item, i)
+                if not okb then return adopt(out, { class = 'ill-posed', where = where .. '.' .. i, why = tostring(k) }) end
+                kids[i] = k
+            end
         end
         local outer = opts.tail_can_stop
         for i, k in ipairs(kids) do
@@ -765,7 +802,7 @@ function M._irreversible_in(t, verbs)
     end
     if op == 'each' then
         for i, item in ipairs(t.items or {}) do
-            local ok, k = pcall(t.body, item, i)
+            local ok, k = pcall(M.each_body, t, item, i)
             local v = ok and M._irreversible_in(k, verbs)
             if v then return v end
         end
@@ -795,7 +832,7 @@ function M.no_return_check(term, verbs, has_oracle)
             for i, k in ipairs(t) do walk(k, where .. '.' .. i, safe) end
         elseif op == 'each' then
             for i, item in ipairs(t.items or {}) do
-                local ok, k = pcall(t.body, item, i)
+                local ok, k = pcall(M.each_body, t, item, i)
                 if ok then walk(k, where .. '.' .. i, safe) end
             end
         elseif op == 'try' then
