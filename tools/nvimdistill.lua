@@ -54,11 +54,22 @@ for _, path in ipairs(files) do
         if lines[j]:match('%S') then mtbl = lines[j]:match('^return%s+([%a_][%w_]*)%s*$'); break end
     end
     mtbl = mtbl or ts.module_table(path, lines)
-    local classes = {}
+    local classes, alias = {}, {}
+    -- (a class's methods often hang off a LOCAL named for it: `---@class vim.treesitter.LanguageTree` … `local
+    -- LanguageTree = {}` … `function LanguageTree:parse()` — the methods are the declared class's, so the local is an
+    -- ALIAS of it when only annotation lines stand between the two; without this every LanguageTree method was lost,
+    -- and a value from `get_string_parser(…):parse()` had no type)
+    local pending
     for _, l in ipairs(lines) do
         local body = l:match('^%-%-%-%s*@class%s+(.*)$')
         local c = body and body:gsub('^%(%w+%)%s*', ''):match('^([%w_%.]+)')
-        if c then classes[c] = true end
+        if c then classes[c] = true; pending = c
+        elseif l:match('^%-%-%-') or not l:match('%S') then -- (still the annotation block)
+        else
+            local x = l:match('^local%s+([%a_][%w_]*)%s*=')
+            if pending and x and x ~= pending then alias[x] = pending end
+            pending = nil
+        end
     end
     local function owner_of(o)
         -- a `vim`-rooted owner is PUBLIC AS WRITTEN, even where the file returns that table (shared.lua ends
@@ -66,6 +77,7 @@ for _, path in ipairs(files) do
         if o == 'vim' or o:match('^vim%.') then return o end
         if mtbl and o == mtbl then return modname end
         if classes[o] then return o end
+        if alias[o] then return alias[o] end
         return nil -- a file-local helper table: not an API
     end
     R:each_function(lines, { owner_of = owner_of }, function (f)
@@ -73,6 +85,13 @@ for _, path in ipairs(files) do
         local s = f.sig
         s.file, s.line = rel, f.line
         if f.sep == ':' then s.method = true end
+        -- (a file that RETURNS a class alias — languagetree.lua returns LanguageTree — names its functions by the path,
+        -- `vim.treesitter.languagetree#parse`; a value TYPED by the class, `vim.treesitter.LanguageTree`, looks its
+        -- methods up under the class: both names)
+        if mtbl and alias[mtbl] and f.owner == modname then
+            local cls_key = alias[mtbl] .. '#' .. f.key:sub(#modname + 2)
+            if not sigs[cls_key] then sigs[cls_key] = s end
+        end
         if sigs[f.key] then
             n_dup = n_dup + 1
             sigs[f.key].overloads = (sigs[f.key].overloads or 1) + 1

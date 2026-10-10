@@ -116,6 +116,8 @@ local function build(store, opts)
     local pts, cnt, top, delta = {}, {}, {}, {}
     local succ, loads, stores, calls, mflows, protos_at = {}, {}, {}, {}, {}, {}
     local ofield, protos, fnports, obinfo = {}, {}, {}, {}
+    local TYPEOBJ, TNAME = {}, {} -- (type objects: below, with typeobj)
+    local typeobj
     -- ★ A FIELD'S READERS ARE IMPLICIT (CART-1643, to make the solver SMALLER): a load of x.f READS field f of every
     -- object at x, and materializing that as an edge per (object, load) was 96% of all edges — 10.96 M of 11.38 M on
     -- lua/cartograph, 339 MB. Instead each object keeps the loads that read it, rd[o] = { [f] = { [dst] = strict } }
@@ -343,10 +345,26 @@ local function build(store, opts)
     end
     -- (STRICT: a language whose records have no dynamic keys — Go — reads exactly the field: a named load never reads
     -- `[]`, a `[]` load never reads every field. Lua's `t[k] = v` may write any field, so there both widen)
+    -- ★ A CONTAINER TYPE'S ELEMENTS (CART-1643): the environment profile types what comes from OUTSIDE the tree —
+    -- `vim.split` -> string[], `TSNode:field()` -> TSNode[], `LanguageTree:parse()` -> table<integer, TSTree> — and a
+    -- value read out of one (`lines[i]`, `node:field('name')[1]`) is its element type. On lua/cartograph most
+    -- ambiguous calls with nothing at the receiver held values from outside: tree-sitter nodes and strings.
+    local function elemtype(tn)
+        local e = tn:match('^(.-)%[%]$')
+        if e then return e end
+        local v = tn:match('^table<[^,]+,%s*(.-)>$')
+        return v
+    end
     local function load_obj(o, f, dst, seen, strict)
         seen = seen or {}
         if seen[o] then return end
         seen[o] = true
+        local tn = TNAME[o]
+        if tn then
+            local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
+            if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
+            return
+        end
         local r = rd[o]
         if not r then r = {}; rd[o] = r end
         local l = r[f]
@@ -443,8 +461,7 @@ local function build(store, opts)
         for o in each(callee) do bindcall(o, args, res) end
     end
     -- type objects and the profiles' declared returns
-    local TYPEOBJ, TNAME = {}, {}
-    local function typeobj(t)
+    typeobj = function (t)
         local o = TYPEOBJ[t]
         if not o then o = newobj('type:' .. t); TYPEOBJ[t] = o; TNAME[o] = t end
         return o
@@ -937,8 +954,21 @@ local function build(store, opts)
     local function taint(p) if p and not tainted[p] then tainted[p] = true; twork[#twork + 1] = p end end
     local gf_of = {}
     for _, gf in ipairs(gfilters) do local l = gf_of[gf[1]] or {}; gf_of[gf[1]] = l; l[#l + 1] = gf[2] end
+    -- (an escaped object's fields and prototypes escaped WITH it: the solve no longer follows it, so a load through a
+    -- tainted base misses what its fields hold — a method of its metatable — and a call through that load binds none of
+    -- them. Closed transitively)
     local esc = {}
     for o in pairs(escaped) do esc[#esc + 1] = o end
+    do
+        local i = 1
+        while i <= #esc do
+            local o = esc[i]; i = i + 1
+            for _, fp in pairs(ofield[o] or {}) do
+                for x in each(fp) do if not escaped[x] then escaped[x] = true; esc[#esc + 1] = x end end
+            end
+            for c in pairs(protos[o] or {}) do if not escaped[c] then escaped[c] = true; esc[#esc + 1] = c end end
+        end
+    end
     local field_hit, params_hit = {}, false
     for p in pairs(top) do taint(p) end
     while #twork > 0 do

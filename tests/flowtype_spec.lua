@@ -559,6 +559,44 @@ test('flowtype: a load of a field the cap may have left incomplete is partial', 
     eq(true, v and v.partial, 'box.handler may hold what put wrote unseen: ' .. vim.inspect(v))
 end)
 
+-- ★ WHAT AN ESCAPED OBJECT HOLDS ESCAPES WITH IT (CART-1643): a call through a tainted callee taints the parameters of
+-- every escaped function — but the function is often not what escaped: here a P instance reaches `keep`'s saturated
+-- parameter, and `r.go(q)` would read P's method `go` through it, binding q to its o. The instance escaped, its metatable
+-- and the metatable's methods did not, so `o:hit()` read exact P:hit (uncapped: P:hit and Q:hit) — and under another
+-- schedule it was not (lua/cartograph's ir.lua P:skip_group: exact under desc, saturated under asc)
+test('flowtype: a method reached only through an escaped object has partial parameters', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['main.lua'] = table.concat({
+            'local P = {}; P.__index = P',
+            'function P:hit() return 1 end',
+            'function P.go(o) return o:hit() end',
+            'local Q = {}; Q.__index = Q',
+            'function Q:hit() return 2 end',
+            'function Q.go(o) return 0 end',
+            'local function keep(x) return x end',
+            'keep(setmetatable({}, P)); keep({}); keep({})',
+            'local q = setmetatable({}, Q)',
+            'local r = keep(setmetatable({}, P))',
+            'r.go(q)',
+            'P.go(setmetatable({}, P))',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local R = flowtype.solve(store, { open = false })
+    flowtype.CAP = cap
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'main.lua' and c.refused and c.at and atr.sl(c.at) == 2 then v = R.verdict(c) end
+    end
+    vim.fn.delete(root, 'rf')
+    ok(v ~= nil, 'o:hit() is answered')
+    eq(true, v and v.partial, 'go may get q, unseen: ' .. vim.inspect(v))
+end)
+
 -- ★ DENSE SETS ARE THE SAME SETS (CART-1643): past M.BIG objects a set and its delta become bitsets, moved word by word
 -- — the complete solve of arktype went 707 s -> ~186 s with every answer unchanged. Under the default cap no set gets
 -- that big, so this solves uncapped with BIG forced down (dense almost everywhere) and up (never), and every answer —
@@ -598,4 +636,29 @@ test('flowtype: dense (bitset) sets give exactly the answers hash sets give', fu
     vim.fn.delete(root, 'rf')
     ok(#hashed > 10, 'the fixture answers: ' .. #hashed)
     eq(hashed, dense, 'the same answers, dense or not')
+end)
+
+-- ★ VALUES FROM OUTSIDE THE TREE (CART-1643): on lua/cartograph most ambiguous calls with nothing at the receiver held
+-- values from nvim's API — tree-sitter nodes, strings. The environment profile types them (`vim.split` -> string[]),
+-- and a value read out of a container type is its ELEMENT type: `parts[1]` is a string, so `parts[1]:upper()` is the
+-- string method, neither in-tree `upper`
+test('flowtype: an element read out of a profile-typed container has the element type', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        -- (laid out as an nvim plugin: that SHAPE is what composes the nvim profile in)
+        ['lua/fx/a.lua'] = 'local A = {}\nfunction A.upper(s) return s end\nreturn A\n',
+        ['lua/fx/b.lua'] = 'local B = {}\nfunction B.upper(s) return s end\nreturn B\n',
+        ['lua/fx/main.lua'] = 'local parts = vim.split("a,b", ",")\nlocal p = parts[1]\nreturn p:upper()\n',
+        ['plugin/fx.lua'] = 'require("fx.main")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v, refused
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/main.lua' and c.at and atr.sl(c.at) == 2 then v = R.verdict(c); refused = c.refused end
+    end
+    vim.fn.delete(root, 'rf')
+    if not refused then skip('the extractor already decides p:upper() (profile ' .. tostring(store.data.profile) .. ')') end
+    eq('string', v and v.kind, 'parts[1] is a string: ' .. vim.inspect(v) .. ' profile ' .. tostring(store.data.profile))
 end)
