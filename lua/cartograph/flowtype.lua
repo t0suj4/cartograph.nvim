@@ -35,7 +35,14 @@ M.CAP = 64
 local function sorted(t)
     local ks = {}
     for k in pairs(t) do ks[#ks + 1] = k end
-    table.sort(ks, function (a, b) return tostring(a) < tostring(b) end)
+    -- (string keys compare as themselves — the same order tostring gave, without a tostring per comparison: it was
+    -- 9% of a near-complete solve)
+    if #ks > 1 then
+        table.sort(ks, function (a, b)
+            if type(a) == 'string' and type(b) == 'string' then return a < b end
+            return tostring(a) < tostring(b)
+        end)
+    end
     local i = 0
     return function ()
         i = i + 1
@@ -59,6 +66,17 @@ local function build(store, opts)
     -- lua/cartograph, 339 MB. Instead each object keeps the loads that read it, rd[o] = { [f] = { [dst] = strict } }
     -- (a non-strict named load also under NS: it reads `[]` too), and a field port's new objects go to its readers.
     local rd, fowner, fname = {}, {}, {}
+    -- (an object's field names in ONE order, cached until it gains a field: a dynamic load walks them per object)
+    local okeys_cache = {}
+    local function okeys(o)
+        local l = okeys_cache[o]
+        if l then return l end
+        l = {}
+        for f in pairs(ofield[o] or {}) do l[#l + 1] = f end
+        table.sort(l)
+        okeys_cache[o] = l
+        return l
+    end
     local NS = '\0ns'
     local wl, inwl, head, tail = {}, {}, 1, 0
     local walking, NW, NOW = true, 0, 0
@@ -189,6 +207,7 @@ local function build(store, opts)
         local p = m[f]
         if not p then
             p = new(); m[f] = p
+            okeys_cache[o] = nil
             fowner[p], fname[p] = o, f
             if not walking then pinfo[p] = { okey(o), f } end
         end
@@ -226,7 +245,7 @@ local function build(store, opts)
                 for x in each(q) do addobj(dst, x) end
             end
             if strict then pull(ofp(o, f))
-            elseif f == '[]' then for fk, fp in sorted(ofield[o] or {}) do if fk ~= '{k}' then pull(fp) end end
+            elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' then pull(m[fk]) end end
             else pull(ofp(o, f)); pull(ofp(o, '[]')) end
         end
         for c in pairs(protos[o] or {}) do load_obj(c, f, dst, seen, strict) end
