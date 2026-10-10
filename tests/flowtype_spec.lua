@@ -356,3 +356,30 @@ test('flowtype (ts): namespaces, re-exports, tsconfig paths and template substit
     one('format', '^src/lib/fmt%.ts::.*format', 'P.Fmt.format: paths → the barrel → export * → the namespace')
     one('encode', '^src/lib/enc%.ts::.*encode', 'P.E.encode: an aliased re-export through `@lib/*`, inside `${…}`')
 end)
+
+-- ★ OCCLUDING THE TYPES is an instrument: flowtype on a tree with every type blanked (positions kept) must answer as
+-- on the typed tree — it reads no type. Its first run found two places where TYPES STILL CHANGED THE ANSWER:
+-- tree-sitter-typescript parses `await c.m<T>(…)` as `(await c.m)<T>(…)`, so the typed call had no probe at all
+-- (typescript-language-server: withProgress, getWorkspaceConfiguration); and a 17th parameter indexed past the fixed
+-- 16 parameter ports and crashed the walk (arktype's tests)
+test('flowtype (ts): a generic call under await is a probe, and a function may take more than 16 parameters', function ()
+    if not parser_available('typescript') then skip 'no typescript parser' end
+    local ps = {}
+    for k = 1, 18 do ps[#ps + 1] = 'p' .. k end
+    local root = tree({
+        ['src/m.ts'] = table.concat({
+            'class C { async w<T>(x: T): Promise<T> { return x; } }',
+            'const c = new C();',
+            'async function f() { return await c.w<number>(1); }',
+            'function many(' .. table.concat(ps, ', ') .. ') { return p18; }',
+            'const r = many(' .. table.concat(ps, ', '):gsub('p%d+', '0') .. ');',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local p
+    for _, x in ipairs(R.probes) do if x.member == 'w' then p = x end end
+    eq('exact', p and p.kind, 'the awaited generic call is a probe: ' .. vim.inspect(p))
+    ok(p and p.targets[1]:match('C%.w'), vim.inspect(p and p.targets))
+end)

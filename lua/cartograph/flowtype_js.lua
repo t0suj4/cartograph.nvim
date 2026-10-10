@@ -181,6 +181,7 @@ function M.walker(S, files)
                 for _, x in kids(ps) do
                     if x:named() and x:type() ~= 'comment' then
                         i = i + 1
+                        fp.params[i] = fp.params[i] or port('a:' .. id .. ':' .. i) -- (past 16: arktype's tests)
                         bind(x, fp.params[i], true)
                         -- (a constructor PARAMETER PROPERTY `private svc: Svc` is `this.svc = svc`)
                         if ctor_props and (x:type() == 'required_parameter' or x:type() == 'optional_parameter') then
@@ -276,6 +277,9 @@ function M.walker(S, files)
         local function callv(n)
             local f = n:field('function')[1]
             local res = new()
+            -- (tree-sitter-typescript parses `await c.m<T>(…)` as `(await c.m)<T>(…)`: the await is the call's, not
+            -- the callee's — found by OCCLUDING the types, which made the call parse right and appear)
+            while f and f:type() == 'await_expression' and n:field('type_arguments')[1] do f = f:named_child(0) end
             if not f then return res end
             local ft = f:type()
             if ft == 'import' then return port('mod:?') end
