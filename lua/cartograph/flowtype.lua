@@ -53,7 +53,13 @@ local function build(store, opts)
     local N, NO = 0, 0
     local pts, cnt, top, delta = {}, {}, {}, {}
     local succ, loads, stores, calls, mflows, protos_at = {}, {}, {}, {}, {}, {}
-    local ofield, olodes, anyload, protos, fnports, obinfo = {}, {}, {}, {}, {}, {}
+    local ofield, protos, fnports, obinfo = {}, {}, {}, {}
+    -- ★ A FIELD'S READERS ARE IMPLICIT (CART-1643, to make the solver SMALLER): a load of x.f READS field f of every
+    -- object at x, and materializing that as an edge per (object, load) was 96% of all edges — 10.96 M of 11.38 M on
+    -- lua/cartograph, 339 MB. Instead each object keeps the loads that read it, rd[o] = { [f] = { [dst] = strict } }
+    -- (a non-strict named load also under NS: it reads `[]` too), and a field port's new objects go to its readers.
+    local rd, fowner, fname = {}, {}, {}
+    local NS = '\0ns'
     local wl, inwl, head, tail = {}, {}, 1, 0
     local walking, NW, NOW = true, 0, 0
     local function new() N = N + 1; return N end
@@ -183,10 +189,23 @@ local function build(store, opts)
         local p = m[f]
         if not p then
             p = new(); m[f] = p
+            fowner[p], fname[p] = o, f
             if not walking then pinfo[p] = { okey(o), f } end
-            if f ~= '{k}' then for _, dst in ipairs(anyload[o] or {}) do edge(p, dst) end end
         end
         return p
+    end
+    -- every load reading field g of o: the loads of g; a non-strict `[]` load reads every field but `{k}`; `[]` is read
+    -- by every non-strict named load as well (a Lua `t[k] = v` may write any name)
+    local function readers(o, g, fn)
+        local r = rd[o]
+        if not r then return end
+        local l = r[g]
+        if l then for dst in pairs(l) do fn(dst) end end
+        if g ~= '{k}' and g ~= '[]' then
+            local dyn = r['[]']
+            if dyn then for dst, strict in pairs(dyn) do if not strict then fn(dst) end end end
+        end
+        if g == '[]' then local ns = r[NS]; if ns then for dst in pairs(ns) do fn(dst) end end end
     end
     -- (STRICT: a language whose records have no dynamic keys — Go — reads exactly the field: a named load never reads
     -- `[]`, a `[]` load never reads every field. Lua's `t[k] = v` may write any field, so there both widen)
@@ -194,22 +213,31 @@ local function build(store, opts)
         seen = seen or {}
         if seen[o] then return end
         seen[o] = true
-        if strict then
-            edge(ofp(o, f), dst)
-        elseif f == '[]' then
-            local al = anyload[o]
-            if not al then al = {}; anyload[o] = al end
-            al[#al + 1] = dst
-            for fk, fp in sorted(ofield[o] or {}) do if fk ~= '{k}' then edge(fp, dst) end end
-        else
-            edge(ofp(o, f), dst)
-            edge(ofp(o, '[]'), dst)
+        local r = rd[o]
+        if not r then r = {}; rd[o] = r end
+        local l = r[f]
+        if not l then l = {}; r[f] = l end
+        if l[dst] == nil then
+            l[dst] = strict and true or false
+            if not strict and f ~= '[]' then local ns = r[NS]; if not ns then ns = {}; r[NS] = ns end; ns[dst] = true end
+            -- (what the fields hold already; what they gain later reaches dst as their readers)
+            local function pull(q)
+                if top[q] then if spread then settop(dst) end return end
+                for x in each(q) do addobj(dst, x) end
+            end
+            if strict then pull(ofp(o, f))
+            elseif f == '[]' then for fk, fp in sorted(ofield[o] or {}) do if fk ~= '{k}' then pull(fp) end end
+            else pull(ofp(o, f)); pull(ofp(o, '[]')) end
         end
-        local l = olodes[o]
-        if not l then l = {}; olodes[o] = l end
-        local key = f .. '\0' .. dst
-        if not l[key] then l[key] = true; l[#l + 1] = { f, dst, strict } end
         for c in pairs(protos[o] or {}) do load_obj(c, f, dst, seen, strict) end
+    end
+    -- the loads recorded on o, replayed on c (a prototype o gained) — field names in ONE order
+    local function replay_loads(o, c)
+        local r = rd[o]
+        if not r then return end
+        for f, l in sorted(r) do
+            if f ~= NS then for dst, strict in pairs(l) do load_obj(c, f, dst, nil, strict) end end
+        end
     end
     local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
@@ -234,7 +262,7 @@ local function build(store, opts)
         if not pr then pr = {}; protos[o] = pr end
         if pr[c] then return end
         pr[c] = true
-        for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2], nil, ld[3]) end
+        replay_loads(o, c)
     end
     local function proto(t, idx)
         local l = protos_at[t]
@@ -249,7 +277,7 @@ local function build(store, opts)
         if not pr then pr = {}; protos[o] = pr end
         if pr[c] then return end
         pr[c] = true
-        for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2], nil, ld[3]) end
+        replay_loads(o, c)
     end
     -- (a GUARDED flow: dst holds the objects of src whose prototype chain reaches an object of gp — `x instanceof
     -- C` narrows x to C's instances; prototypes are whole only after a solve, so it is re-run to a fixpoint below)
@@ -334,6 +362,7 @@ local function build(store, opts)
             inwl[p] = nil
             if top[p] then
                 for q in pairs(succ[p] or {}) do settop(q) end
+                if spread and fowner[p] then readers(fowner[p], fname[p], settop) end
                 for _, ld in ipairs(loads[p] or {}) do settop(ld[2]) end
                 for _, cl in ipairs(calls[p] or {}) do if type(cl[2]) ~= 'table' then settop(cl[2]) end end
             else
@@ -341,6 +370,7 @@ local function build(store, opts)
                 delta[p] = nil
                 if d then
                     for q in pairs(succ[p] or {}) do for _, o in ipairs(d) do addobj(q, o) end end
+                    if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in ipairs(d) do addobj(q, o) end end) end
                     for _, ld in ipairs(loads[p] or {}) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
                     for _, st in ipairs(stores[p] or {}) do for _, o in ipairs(d) do edge(st[2], ofp(o, st[1])) end end
                     for _, cl in ipairs(calls[p] or {}) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2]) end end
@@ -770,6 +800,7 @@ local function build(store, opts)
     while #twork > 0 do
         local p = twork[#twork]; twork[#twork] = nil
         for q in pairs(succ[p] or {}) do taint(q) end
+        if fowner[p] then readers(fowner[p], fname[p], taint) end
         for _, ld in ipairs(loads[p] or {}) do taint(ld[2]) end
         for _, st in ipairs(stores[p] or {}) do
             local f = st[1]
@@ -789,7 +820,7 @@ local function build(store, opts)
         for _, d in ipairs(gf_of[p] or {}) do taint(d) end
         for _, mf in ipairs(mflows[p] or {}) do taint(mf[2]) end
         for _, t in ipairs(protos_rev[p] or {}) do
-            for o in each(t) do for _, ld in ipairs(olodes[o] or {}) do taint(ld[2]) end end
+            for o in each(t) do for f, l in pairs(rd[o] or {}) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end end
         end
     end
     local partial_hit -- (set by targets: a field port it read was tainted)

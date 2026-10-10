@@ -526,3 +526,35 @@ test('flowtype: a list built into a table does not reach its named fields; an un
     ok(v[5] and tostring(v[5].targets[1]):match('A%.run'), vim.inspect(v[5] and v[5].targets))
     ok(not (v[9] and v[9].kind == 'exact'), 'dyn[k] = B may write `handler`: no exact claim — ' .. vim.inspect(v[9]))
 end)
+
+-- ★ A LOAD THROUGH A TAINTED FIELD IS PARTIAL (CART-1643): field reads are implicit — an object keeps the loads that
+-- read it (96% of all edges were object x load, 339 MB on lua/cartograph) — so taint reaches a load through the same
+-- readers. Here `put` saturates (CAP 2), box escapes into it, and box.handler may have been written there unseen
+test('flowtype: a load of a field the cap may have left incomplete is partial', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.run(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.run(self) return 2 end\nreturn B\n',
+        ['main.lua'] = table.concat({
+            'local A, B = require "a", require "b"',
+            'local box = { handler = A }',
+            'local function put(t, v) t.handler = v end',
+            'put(box, A); put({ n = 1 }, B); put({ n = 2 }, B)',
+            'local x = box.handler',
+            'return x:run()',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local R = flowtype.solve(store, { open = false })
+    flowtype.CAP = cap
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'main.lua' and c.refused and c.at and atr.sl(c.at) == 5 then v = R.verdict(c) end
+    end
+    vim.fn.delete(root, 'rf')
+    ok(v ~= nil, 'x:run() is answered')
+    eq(true, v and v.partial, 'box.handler may hold what put wrote unseen: ' .. vim.inspect(v))
+end)
