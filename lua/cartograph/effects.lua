@@ -305,6 +305,8 @@ local HCAP = 4    -- hedges kept per summary
 -- the param predicate of the CALL SITE being taken (CART-1567): what a call under `if not validator` brings in fires
 -- only when that holds, so its keys carry the site's gp — set around one site's processing, nil otherwise
 local SITE_GP
+-- the flow analysis for this summaries() run (config.effects_flow), nil when off
+local FLOW
 -- `gp` (±param): the write fires only under that predicate. A key added UNGUARDED, or under another predicate, is
 -- unguarded: it may fire either way (the order of the adds does not decide it)
 local function s_add(sum, key, tier, gp)
@@ -694,6 +696,8 @@ end
 --- Compute (and cache per graph generation) every fn's write summary.
 function M.summaries(store)
     if store._fx and store._fxgen == store.generation then return store._fx end
+    -- (config.effects_flow: the flow analysis's verdicts for ambiguous calls, CART-1621 — M.FLOW forces it for a test)
+    FLOW = (M.FLOW or require('cartograph.config').effects_flow) and require('cartograph.flowtype').of(store) or nil
     local scc = require 'cartograph.scc'
     local ids = {}
     for _, n in ipairs(store.data.nodes) do
@@ -893,7 +897,10 @@ function M.summaries(store)
             -- orders it first) keeps the hedge; a candidate in this component adds nothing it does not already share
             local function join(c, caller, r)
                 if not (M.JOIN[r.rule] and r.cands and r.n and #r.cands == r.n) then return false end
-                local cands = M.structural_cands(store, c, caller, r.cands)
+                -- (BY FLOW, when asked: the function(s) that reach the receiver — possibly one the name join never
+                -- listed, at.lua's C.sl is bytecol's returned reader — instead of every same-named candidate)
+                local fv = FLOW and FLOW.verdict(c)
+                local cands = (fv and fv.targets) or M.structural_cands(store, c, caller, r.cands)
                 if #cands == 0 then return false end -- (no candidate's owner declares what is called on the receiver)
                 local whole = true
                 for _, id in ipairs(cands) do
@@ -943,6 +950,13 @@ function M.summaries(store)
                         if not declname and type(cext) == 'table' and cext.type
                             and (cext.why == 'typed-receiver' or cext.why == 'typed-binding') and callrec.callee(c) then
                             bname = cext.type .. '.' .. callrec.callee(c)
+                        end
+                        -- (a receiver only a TYPE reaches by flow — a string — is that type's: the join is skipped,
+                        -- under the flow premise ~)
+                        local fvt = not declname and FLOW and c.refused and FLOW.verdict(c)
+                        if fvt and fvt.type and callrec.callee(c) then
+                            bname = fvt.type .. '.' .. callrec.callee(c)
+                            sum.jp = true
                         end
                         local sig, grade
                         if lang and bname then

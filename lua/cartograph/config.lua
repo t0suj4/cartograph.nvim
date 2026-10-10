@@ -169,6 +169,12 @@ M.merge_worker_fold = vim.env.CARTOGRAPH_WORKERFOLD == '1'
 -- peak DROP needs detail streamed off residency (step 3c); this proves resolution is faithful.
 M.federated_resolve = vim.env.CARTOGRAPH_FEDERATED == '1'
 
+-- EFFECTS BY FLOW (CART-1621): effects ask cartograph.flowtype — an inclusion points-to analysis — what reaches an
+-- AMBIGUOUS call's receiver, before joining every same-named candidate: the one function (or the few) that flows
+-- there, or the type (`string`). The answer is a premise, hedged (~) like the join. Env CARTOGRAPH_EFFECTS_FLOW=1.
+-- Default off: the analysis is ~23 s and ~650 MB over an extraction on lua/cartograph (measured 2026-10-10)
+M.effects_flow = vim.env.CARTOGRAPH_EFFECTS_FLOW == '1'
+
 -- INCREMENTAL REFRESH (CART-1439, EARLY CUTOFF): a save whose files keep their INTERFACE re-resolves only the calls
 -- that edit can change (ts.relink opts.only). ACCEPTED by the refresh-parity oracle on 122 real edits of our tree: the
 -- graph equals the full refresh's after every step; the 88 cutoff saves 1.28 -> 0.99 s. ON BY DEFAULT since the oracle
