@@ -383,3 +383,70 @@ test('flowtype (ts): a generic call under await is a probe, and a function may t
     eq('exact', p and p.kind, 'the awaited generic call is a probe: ' .. vim.inspect(p))
     ok(p and p.targets[1]:match('C%.w'), vim.inspect(p and p.targets))
 end)
+
+-- ★ `setmetatable(t, { __index = idx })` links t's objects to idx's whichever side arrives LAST (CART-1621): the link
+-- was made only when t gained an object, so an __index table whose value flowed in later was never a prototype — a
+-- missed flow, and an ORDER-dependent one (here: lost under the ascending and FIFO schedules, kept under the others).
+-- And `require` reaches its module at all: the import edge's range is an index once ingest FOLDS it, and a table-only
+-- guard had left every require unresolved since flowtype shipped
+test('flowtype: an __index table that receives its value after the object becomes its prototype, in every order', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.hello(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.hello(self) return 2 end\nreturn B\n',
+        ['main.lua'] = table.concat({
+            'local holder = { k = 1 }',
+            'local t = setmetatable({ n = 0 }, { __index = holder.base })',
+            'holder.base = require "a"',
+            'return t:hello()',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local got = {}
+    for _, order in ipairs({ 'desc', 'asc', 'lifo', 'fifo' }) do
+        local R = flowtype.solve(store, { open = false, order = order })
+        for _, c in ipairs(store.data.calls) do if callrec.file(c) == 'main.lua' and c.refused then got[order] = R.verdict(c) end end
+    end
+    vim.fn.delete(root, 'rf')
+    for _, order in ipairs({ 'desc', 'asc', 'lifo', 'fifo' }) do
+        local v = got[order]
+        eq('exact', v and v.kind, order .. ': t:hello() through the late __index: ' .. vim.inspect(v))
+        ok(v and tostring(v.targets[1]):match('A%.hello'), order .. ': ' .. vim.inspect(v and v.targets))
+    end
+end)
+
+-- ★ AN UNRELATED FILE MOVES NO ANSWER (CART-1621). A port that saturates mid-solve has handed downstream whatever it
+-- held when it was processed, so the schedule decides the answer. A stack's order followed port numbers (through
+-- `pairs` over integer-keyed sets), and adding ANY file shifts every number — arktype: 127 of 7917 answers in untouched
+-- files moved when one 3-line file was added, and the per-process string hash moved them run to run (456 / 413 / 422
+-- exact). The worklist is now a heap over a stable order. Fixture: tests/fixtures/flowsched, delta-debugged from
+-- arktype to the 151 lines where a comment-only file still moved an answer under the stack
+test('flowtype: adding an unrelated file moves no answer — and under the old stack order it did', function ()
+    if not parser_available('typescript') then skip 'no typescript parser' end
+    local FIX = vim.fn.getcwd() .. '/tests/fixtures/flowsched/ark/schema/shared/'
+    local files = {}
+    for _, f in ipairs({ 'errors.ts', 'traversal.ts' }) do
+        files['ark/schema/shared/' .. f] = assert(io.open(FIX .. f)):read('a')
+    end
+    local function answers(extra, order)
+        local fs = vim.deepcopy(files)
+        if extra then fs['aaa_unrelated.ts'] = '// nothing\n' end
+        local root = tree(fs)
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, order = order })
+        vim.fn.delete(root, 'rf')
+        local out, n = {}, 0
+        for _, p in ipairs(R.probes) do
+            if p.file:match('^ark/') then
+                out[p.file .. ':' .. p.line .. ':' .. p.col] = p.kind .. ' ' .. table.concat(p.targets, ','); n = n + 1
+            end
+        end
+        return out, n
+    end
+    local function moved(a, b) local m = 0 for k, v in pairs(a) do if b[k] ~= v then m = m + 1 end end return m end
+    local a, n = answers(false)
+    ok(n >= 5, 'the fixture has answers: ' .. n)
+    eq(0, moved(a, (answers(true))), 'the default schedule: nothing moves')
+    ok(moved((answers(false, 'lifo')), (answers(true, 'lifo'))) > 0, 'the old stack order still moves an answer — the fixture is live')
+end)

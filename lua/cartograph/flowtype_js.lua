@@ -68,7 +68,7 @@ function M.walker(S, files)
         if not spec:match('^%.') then
             local c = tsconfig_of(dir)
             if not c then return nil end
-            for pat, outs in pairs(c.paths) do
+            for pat, outs in require('cartograph.flowtype').sorted(c.paths) do
                 local pre, post = pat:match('^(.-)%*(.*)$')
                 local star
                 if pre then
@@ -632,7 +632,7 @@ function M.walker(S, files)
             for i, st in ipairs(stars) do
                 local m, src = st[1], st[2]
                 for _, o in ipairs({ src, m }) do
-                    for f in pairs(S.fields(o) or {}) do
+                    for f in require('cartograph.flowtype').sorted(S.fields(o) or {}) do
                         local k = i .. '\0' .. f
                         if f ~= 'default' and not done[k] then
                             done[k] = true; grew = true

@@ -29,6 +29,22 @@ local EMPTY_NODE = { child = function () return nil end } -- (an absent child li
 local M = {}
 M.CAP = 64
 
+-- (a STRING-keyed table walked in ONE order: LuaJIT seeds its string hash per process, so `pairs` over field names
+-- walks differently in every run — and while a saturated port drops out, the walk order decides which objects reached
+-- downstream before it saturated: arktype read 456 / 413 / 422 exact answers in three runs of one input)
+local function sorted(t)
+    local ks = {}
+    for k in pairs(t) do ks[#ks + 1] = k end
+    table.sort(ks, function (a, b) return tostring(a) < tostring(b) end)
+    local i = 0
+    return function ()
+        i = i + 1
+        local k = ks[i]
+        if k ~= nil then return k, t[k] end
+    end
+end
+M.sorted = sorted
+
 local function build(store, opts)
     opts = opts or {}
     local open = opts.open ~= false
@@ -38,10 +54,71 @@ local function build(store, opts)
     local pts, cnt, top, delta = {}, {}, {}, {}
     local succ, loads, stores, calls, mflows, protos_at = {}, {}, {}, {}, {}, {}
     local ofield, olodes, anyload, protos, fnports, obinfo = {}, {}, {}, {}, {}, {}
-    local wl, inwl = {}, {}
+    local wl, inwl, head, tail = {}, {}, 1, 0
+    local walking, NW, NOW = true, 0, 0
     local function new() N = N + 1; return N end
     local function newobj(info) NO = NO + 1; obinfo[NO] = info; return NO end
-    local function push(p) if not inwl[p] then inwl[p] = true; wl[#wl + 1] = p end end
+    -- (an object named stably: one the walk made by its number, one the solve made — a type object — by its info)
+    local function okey(o) return o <= NOW and o or tostring(obinfo[o]) end
+    -- ★ THE SCHEDULE IS A STABLE ORDER, not a stack: a port saturating mid-solve has handed downstream whatever it
+    -- held when it was processed, so the answer depends on the order ports are processed in. The worklist is a heap
+    -- over an order an unrelated edit does not change: ports the walk made by number (files are walked sorted, so
+    -- adding a file shifts numbers but keeps every other port's relative order), then the solve's field ports by their
+    -- object (a walk object by number, a solve object by its info) and field name. Two ports no flow connects are
+    -- processed in the same relative order whatever else the tree holds. (`opts.order` = 'asc' / 'lifo' / 'fifo':
+    -- other orders, an INSTRUMENT — how much an answer depends on the schedule)
+    local order = opts.order
+    local pinfo = {}
+    local LATE = { math.huge, '' } -- (a port made after the walk other than a field port: last, by number)
+    local less
+    less = function (a, b)
+        local wa, wb = walking or a <= NW, walking or b <= NW
+        if wa and wb then return a < b end
+        if wa then return true end
+        if wb then return false end
+        local x, y = pinfo[a] or LATE, pinfo[b] or LATE
+        if x[1] ~= y[1] then
+            if type(x[1]) == type(y[1]) then return x[1] < y[1] end
+            return type(x[1]) == 'number'
+        end
+        if x[2] ~= y[2] then return x[2] < y[2] end
+        return a < b
+    end
+    -- (DESCENDING: the latest port first — what a stack did, depth-first, so a value travels before a helper fills;
+    -- ascending saturated more receivers: lroot string verdicts 673 vs 567, arktype class exact-right 330 vs 326)
+    if order ~= 'asc' then
+        local asc = less
+        less = function (a, b) return asc(b, a) end
+    end
+    if order == 'asc' or order == 'desc' then order = nil end
+    local function push(p)
+        if inwl[p] then return end
+        inwl[p] = true
+        tail = tail + 1; wl[tail] = p
+        if order then return end
+        local i = tail
+        while i > 1 do
+            local j = math.floor(i / 2)
+            if not less(wl[i], wl[j]) then break end
+            wl[i], wl[j] = wl[j], wl[i]; i = j
+        end
+    end
+    local function pop()
+        local p
+        if order == 'fifo' then p = wl[head]; wl[head] = nil; head = head + 1; return p end
+        if order == 'lifo' then p = wl[tail]; wl[tail] = nil; tail = tail - 1; return p end
+        p = wl[1]
+        wl[1] = wl[tail]; wl[tail] = nil; tail = tail - 1
+        local i = 1
+        while true do
+            local l, r, m = 2 * i, 2 * i + 1, i
+            if l <= tail and less(wl[l], wl[m]) then m = l end
+            if r <= tail and less(wl[r], wl[m]) then m = r end
+            if m == i then break end
+            wl[i], wl[m] = wl[m], wl[i]; i = m
+        end
+        return p
+    end
     -- (SPREAD: a saturated port makes everything it flows into unknown — sound, and measured to blank 1252 of 3674
     -- receivers on lua/cartograph: a registration helper `cmd(name, fn)` takes every handler at one parameter, and
     -- context-insensitive flow carries that set everywhere the helper's value goes. Off by default: a saturated port
@@ -101,6 +178,7 @@ local function build(store, opts)
         local p = m[f]
         if not p then
             p = new(); m[f] = p
+            if not walking then pinfo[p] = { okey(o), f } end
             if f ~= '{k}' then for _, dst in ipairs(anyload[o] or {}) do edge(p, dst) end end
         end
         return p
@@ -117,7 +195,7 @@ local function build(store, opts)
             local al = anyload[o]
             if not al then al = {}; anyload[o] = al end
             al[#al + 1] = dst
-            for fk, fp in pairs(ofield[o] or {}) do if fk ~= '{k}' then edge(fp, dst) end end
+            for fk, fp in sorted(ofield[o] or {}) do if fk ~= '{k}' then edge(fp, dst) end end
         else
             edge(ofp(o, f), dst)
             edge(ofp(o, '[]'), dst)
@@ -143,10 +221,23 @@ local function build(store, opts)
         l[#l + 1] = { f, v }
         for o in each(x) do edge(v, ofp(o, f)) end
     end
+    -- (`setmetatable(t, { __index = idx })`: every object at t has every object at idx as a prototype — linked when
+    -- EITHER side gains one; linking only on t's arrivals lost an idx object that came later, an ORDER-dependent miss)
+    local protos_rev = {}
+    local function protolink(o, c)
+        local pr = protos[o]
+        if not pr then pr = {}; protos[o] = pr end
+        if pr[c] then return end
+        pr[c] = true
+        for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2], nil, ld[3]) end
+    end
     local function proto(t, idx)
         local l = protos_at[t]
         if not l then l = {}; protos_at[t] = l end
         l[#l + 1] = idx
+        local r = protos_rev[idx]
+        if not r then r = {}; protos_rev[idx] = r end
+        r[#r + 1] = t
     end
     local function objproto(o, c) -- o's loads also read c's fields (an EMBEDDED type's methods: Go promotion)
         local pr = protos[o]
@@ -231,8 +322,10 @@ local function build(store, opts)
         end
     end
     local function solve()
-        while #wl > 0 do
-            local p = table.remove(wl)
+        if walking then walking = false; NW, NOW = N, NO end
+        while head <= tail do
+            local p = pop()
+            if order == 'fifo' and head > tail then head, tail = 1, 0 end
             inwl[p] = nil
             if top[p] then
                 for q in pairs(succ[p] or {}) do settop(q) end
@@ -257,16 +350,10 @@ local function build(store, opts)
                         end
                     end
                     for _, idx in ipairs(protos_at[p] or {}) do
-                        for _, o in ipairs(d) do
-                            for c in each(idx) do
-                                local pr = protos[o]
-                                if not pr then pr = {}; protos[o] = pr end
-                                if not pr[c] then
-                                    pr[c] = true
-                                    for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2], nil, ld[3]) end
-                                end
-                            end
-                        end
+                        for _, o in ipairs(d) do for c in each(idx) do protolink(o, c) end end
+                    end
+                    for _, t in ipairs(protos_rev[p] or {}) do
+                        for o in each(t) do for _, c in ipairs(d) do protolink(o, c) end end
                     end
                 end
             end
@@ -295,8 +382,12 @@ local function build(store, opts)
     local req_at = {}
     for _, e in ipairs(store.data.edges or {}) do
         if e.kind == 'import' and e.at then
-            local a = e.at[1] or e.at
-            if type(a) == 'table' and a.start then req_at[e.from .. ':' .. atr.sl(a) .. ':' .. atr.sc(a)] = e.to end
+            -- (a range is a table only until ingest FOLDS it into an index — after any ingest every one is a number:
+            -- a table-only guard here left this map empty, and no `require` ever reached its module)
+            local a = type(e.at) == 'table' and (e.at[1] or e.at) or e.at
+            if type(a) == 'number' or (type(a) == 'table' and a.start) then
+                req_at[e.from .. ':' .. atr.sl(a) .. ':' .. atr.sc(a)] = e.to
+            end
         end
     end
     local probes = {}
@@ -611,7 +702,7 @@ local function build(store, opts)
     if open then
         for _, mp in ipairs(modports) do
             for o in each(mp) do
-                for _, fp in pairs(ofield[o] or {}) do
+                for _, fp in sorted(ofield[o] or {}) do
                     for fo in each(fp) do
                         local fpp = fnports[fo]
                         if fpp then for _, pp in ipairs(fpp.params) do addobj(pp, EXT) end end
@@ -733,5 +824,8 @@ function M.of(store, opts)
     c[key] = build(store, opts)
     return c[key]
 end
+
+-- (one solve, uncached — for an instrument that varies opts.order)
+function M.solve(store, opts) return build(store, opts) end
 
 return M
