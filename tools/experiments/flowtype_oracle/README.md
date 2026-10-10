@@ -17,6 +17,10 @@ cd <module> && /tmp/gooracle <module> /tmp/x.exports $(go list -f '{{.Dir}}' ./.
 nvim --headless -u NONE --cmd 'set rtp^=.' -l tools/experiments/flowtype_oracle/score.lua <module> /tmp/x.oracle
 ```
 
-MEASURED 2026-10-10 on helm (52k lines, 3484 method calls), tests excluded: concrete in-tree 1254 — EXACT-RIGHT 709,
-a set containing the truth 24, no claim 518, WRONG 0; interface in-tree 244 — every flow target an implementer's
-(17 exact, 69 narrowed, 99 all, 59 none); external calls: 0 wrong. With tests: EXACT-RIGHT 898 (71.6%), 0 wrong.
+MEASURED 2026-10-10 on helm (52k lines, 3484 method calls), tests excluded: concrete in-tree 1254 — EXACT-RIGHT 1098
+(87.6%), a set containing the truth 27, no claim 126, WRONG 0; interface in-tree 244 — every flow target an implementer's
+(18 exact, 88 narrowed, 99 all, 39 none); external calls: 0 wrong. With tests: EXACT-RIGHT 1140 (90.9%), 0 wrong.
+The progression (each step scored, none allowed a wrong answer): 709 (walker v1) -> 749 (a pre-pass of the tree's
+types; zero values `var x T`, typed consts, conversions T(x) allocate a T) -> 921 (a multi-value truncation bug
+`local a, b = x and f()` had disabled the zero-value rule — cartograph's own truncation lint flags it) -> 1063 (a
+method's receiver IS a T) -> 1098 (type assertions and one-type `case *T:` filter: a runtime type check).

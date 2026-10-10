@@ -158,3 +158,90 @@ test('flowtype (go): a method reached through a constructor, an embedded type, a
     one('Base@24', 'S%.Base', 'a *T from the map, Base promoted from the embedded S — not U.Base')
     one('Run@27', 'R1%.Run', 'the field holds an R1: R1.Run, not R2.Run (the declared type is only the interface)')
 end)
+
+-- ★ THE ALLOCATIONS A GO PROGRAM MAKES WITHOUT A LITERAL (scored on helm: exact-right 709 -> 1063, still 0 wrong): a
+-- zero value `var x T`, a typed const (and its iota successors), a conversion `T(x)`, and a method's RECEIVER (a T,
+-- always: Go has no struct subtyping). Two types each declare every method named below
+test('flowtype (go): zero values, typed consts, conversions and the receiver are allocations of their type', function ()
+    if not parser_available('go') then skip 'no go parser' end
+    local root = tree({
+        ['go.mod'] = 'module example.com/m\n\ngo 1.22\n',
+        ['p/p.go'] = table.concat({
+            'package p',
+            'type labels map[string]string',
+            'func (l *labels) init() { *l = labels{} }',
+            'type other map[string]int',
+            'func (o *other) init() {}',
+            'type Status string',
+            'func (s Status) String() string { return string(s) }',
+            'type Kind string',
+            'func (k Kind) String() string { return string(k) }',
+            'const (',
+            '\tDeployed Status = "deployed"',
+            '\tFailed',
+            ')',
+            'type T struct{}',
+            'func (t *T) Get() int { return 1 }',
+            'func (t *T) Twice() int { return t.Get() }',
+            'type U struct{}',
+            'func (u *U) Get() int { return 2 }',
+            'func use() {',
+            '\tvar lb labels',
+            '\tlb.init()',
+            '\t_ = Failed.String()',
+            '\t_ = Status("x").String()',
+            '}',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local by = {}
+    for _, p in ipairs(R.probes) do by[p.member .. '@' .. p.line] = p end
+    local function one(key, pat, why)
+        local p = by[key]
+        eq('exact', p and p.kind, why .. ': ' .. vim.inspect(p))
+        ok(p and p.targets[1] and p.targets[1]:match(pat), why .. ': ' .. vim.inspect(p and p.targets))
+    end
+    one('init@20', 'labels%.init', 'var lb labels: a zero labels value')
+    one('String@21', 'Status%.String', 'Failed repeats the iota block\'s type: a Status')
+    one('String@22', 'Status%.String', 'a conversion Status("x") is a Status')
+    one('Get@15', 'T%.Get', 'inside T\'s method the receiver is a T')
+end)
+
+-- ★ A TYPE ASSERTION IS A RUNTIME TYPE CHECK, so it FILTERS: through an `any` both T and U arrive, and `x.(*T)` /
+-- `case *T:` pass only the T (on helm, tests included: the one wrong exact — v2's Validate for a v3 call — gone)
+test('flowtype (go): x.(*T) and a one-type `case *T:` keep only the T that flows through an `any`', function ()
+    if not parser_available('go') then skip 'no go parser' end
+    local root = tree({
+        ['go.mod'] = 'module example.com/m\n\ngo 1.22\n',
+        ['p/p.go'] = table.concat({
+            'package p',
+            'type T struct{}',
+            'func (t *T) Get() int { return 1 }',
+            'type U struct{}',
+            'func (u *U) Get() int { return 2 }',
+            'func pass(x any) any { return x }',
+            'func use() {',
+            '\ta := pass(&T{})',
+            '\t_ = pass(&U{})',
+            '\tt := a.(*T)',
+            '\t_ = t.Get()',
+            '\tswitch v := a.(type) {',
+            '\tcase *U:',
+            '\t\t_ = v.Get()',
+            '\t}',
+            '}',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local by = {}
+    for _, p in ipairs(R.probes) do by[p.member .. '@' .. p.line] = p end
+    local t, u = by['Get@10'], by['Get@13']
+    eq('exact', t and t.kind, 'the assertion passes only the T: ' .. vim.inspect(t))
+    ok(t and t.targets[1]:match('T%.Get'), vim.inspect(t and t.targets))
+    eq('exact', u and u.kind, 'the case clause passes only the U: ' .. vim.inspect(u))
+    ok(u and u.targets[1]:match('U%.Get'), vim.inspect(u and u.targets))
+end)

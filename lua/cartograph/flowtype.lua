@@ -155,6 +155,14 @@ local function build(store, opts)
         pr[c] = true
         for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2], nil, ld[3]) end
     end
+    -- (a FILTERED flow: only the objects `pred` admits — a type assertion `x.(*T)` is a runtime type check)
+    local filters = {}
+    local function filter(a, b, pred)
+        local l = filters[a]
+        if not l then l = {}; filters[a] = l end
+        l[#l + 1] = { b, pred }
+        for o in each(a) do if pred(o) then addobj(b, o) end end
+    end
     local function bindcall(o, args, res)
         local fp = fnports[o]
         if not fp then return end
@@ -234,6 +242,9 @@ local function build(store, opts)
                     for _, ld in ipairs(loads[p] or {}) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
                     for _, st in ipairs(stores[p] or {}) do for _, o in ipairs(d) do edge(st[2], ofp(o, st[1])) end end
                     for _, cl in ipairs(calls[p] or {}) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2]) end end
+                    for _, fl in ipairs(filters[p] or {}) do
+                        for _, o in ipairs(d) do if fl[2](o) then addobj(fl[1], o) end end
+                    end
                     for _, mf in ipairs(mflows[p] or {}) do
                         for _, o in ipairs(d) do
                             local tn = TNAME[o]
@@ -550,6 +561,7 @@ local function build(store, opts)
     -- (the solver's operations, for a language's own walker: flowtype_go)
     local S = { new = new, newobj = newobj, addobj = addobj, edge = edge, ofp = ofp, field = field, storec = storec,
         callc = callc, mflow = mflow, port = port, objproto = objproto, fnports = fnports, typeobj = typeobj, STR = STR,
+        filter = filter,
         EXT = EXT, fn_at = fn_at, call_at = call_at, req_at = req_at, root = root, probes = {}, modports = modports,
         nodes = store.data.nodes }
     local gowalk

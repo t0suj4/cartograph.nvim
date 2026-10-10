@@ -43,7 +43,8 @@ function M.walker(S, files)
         if not o then o = newobj('mt:' .. k); mt[k] = o end
         return o
     end
-    local typenames = {} -- dir -> { [type name] = true }: a call `T(x)` is a CONVERSION, its value is x
+    local typenames = {} -- dir -> { [type name] = 'iface' | 'type' }: the tree's named types (a pre-pass)
+    local objtype = {} -- object -> 'dir:T': the type an allocation named (type assertions filter on it)
     -- the names a package DECLARES at top level (the graph's nodes): only those resolve to the package's port — an
     -- identifier the walker cannot bind is a fresh port, never a name shared across the package's functions (a
     -- `bytes.Buffer` named `buf` in one function had joined pflag values named `buf` in another)
@@ -59,16 +60,15 @@ function M.walker(S, files)
             end
         end
     end
-    return function (file, src)
+    -- ── one file's parse + imports (the pre-pass and the walk share it) ──
+    local ctxs = {}
+    local function ctx_of(file, src)
+        local c = ctxs[file]
+        if c then return c end
         local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'go')
-        if not okp then return end
+        if not okp then return nil end
         local tree = parser:parse()[1]:root()
-        local dir = file:match('^(.*)/[^/]+$') or '.'
-        local fnmap = S.fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
-        local tn = typenames[dir]
-        if not tn then tn = {}; typenames[dir] = tn end
-        -- imports: alias -> directory
         local imports = {}
         for _, d in kids(tree) do
             if d:type() == 'import_declaration' then
@@ -85,20 +85,75 @@ function M.walker(S, files)
                 end
             end
         end
-        -- the TYPE NAME an allocation names: `T`, `pkg.T`, `*T`, `T[U]` -> dir, name | nil
-        local function tname_of(t)
-            if not t then return nil end
-            local ty = t:type()
-            if ty == 'type_identifier' then return dir, txt(t) end
-            if ty == 'pointer_type' then return tname_of(t:named_child(0)) end
-            if ty == 'generic_type' then return tname_of(t:field('type')[1]) end
-            if ty == 'qualified_type' then
-                local pk, nm = t:field('package')[1], t:field('name')[1]
-                local dd = pk and imports[txt(pk)]
-                if dd and nm then return dd, txt(nm) end
-            end
-            return nil
+        c = { tree = tree, src = src, txt = txt, imports = imports }
+        ctxs[file] = c
+        return c
+    end
+    local function tname_in(cx, dir, t)
+        if not t then return nil end
+        local ty = t:type()
+        if ty == 'type_identifier' then return dir, cx.txt(t) end
+        if ty == 'pointer_type' then return tname_in(cx, dir, t:named_child(0)) end
+        if ty == 'generic_type' then return tname_in(cx, dir, t:field('type')[1]) end
+        if ty == 'qualified_type' then
+            local pk, nm = t:field('package')[1], t:field('name')[1]
+            local dd = pk and cx.imports[cx.txt(pk)]
+            if dd and nm then return dd, cx.txt(nm) end
         end
+        return nil
+    end
+    -- ── the PRE-PASS: every named type of the tree (interface or not) and the embeddings (Go promotion) ──
+    for _, f in ipairs(files) do
+        if f:match('%.go$') then
+            local fd = type(S.root) == 'string' and io.open(S.root .. '/' .. f, 'rb')
+            local src = fd and fd:read('a')
+            if fd then fd:close() end
+            local cx = src and ctx_of(f, src)
+            if cx then
+                local dir = f:match('^(.*)/[^/]+$') or '.'
+                local tn = typenames[dir]
+                if not tn then tn = {}; typenames[dir] = tn end
+                for _, d in kids(cx.tree) do
+                    if d:type() == 'type_declaration' then
+                        for _, sp in kids(d) do
+                            if sp:type() == 'type_spec' then
+                                local nm, ty = sp:field('name')[1], sp:field('type')[1]
+                                if nm then
+                                    tn[cx.txt(nm)] = (ty and ty:type() == 'interface_type') and 'iface' or 'type'
+                                    if ty and ty:type() == 'struct_type' then
+                                        for _, fl in kids(ty) do
+                                            if fl:type() == 'field_declaration_list' then
+                                                for _, fdd in kids(fl) do
+                                                    if fdd:type() == 'field_declaration' and not fdd:field('name')[1] then
+                                                        local ed, en = tname_in(cx, dir, fdd:field('type')[1])
+                                                        if ed and en then objproto(mtobj(dir, cx.txt(nm)), mtobj(ed, en)) end
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    -- (a named type the tree declares that is no interface: its values may be ALLOCATED — `var x T`, `T(x)`, a typed
+    -- const — and they carry T's methods; an interface's zero value is nil and holds nothing)
+    local function concrete_type(d, nm) return d and nm and typenames[d] and typenames[d][nm] == 'type' end
+    return function (file, src)
+        local cx = ctx_of(file, src)
+        if not cx then return end
+        local tree = cx.tree
+        local dir = file:match('^(.*)/[^/]+$') or '.'
+        local fnmap = S.fn_at[file] or {}
+        local txt = cx.txt
+        local tn = typenames[dir] or {}
+        local imports = cx.imports
+        -- the TYPE NAME an allocation names: `T`, `pkg.T`, `*T`, `T[U]` -> dir, name | nil
+        local function tname_of(t) return tname_in(cx, dir, t) end
         local scopes = { {} }
         local pn = pkgnames[dir] or {}
         local function lookup(name)
@@ -108,6 +163,7 @@ function M.walker(S, files)
         end
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
         local fnstack = {}
+        local tswitch = {}
         local expr, stmt, block
         local function list_of(n) -- an expression_list's members
             local out = {}
@@ -177,8 +233,18 @@ function M.walker(S, files)
             local p = new()
             local o = newobj(tag)
             addobj(p, o)
-            if d and nm then objproto(o, mtobj(d, nm)) end
+            if d and nm then objproto(o, mtobj(d, nm)); objtype[o] = d .. ':' .. nm end
             return p, o
+        end
+        -- (`x.(*T)` / a `case *T:` clause: only the objects allocated as T pass — a runtime type check, so sound; an
+        -- interface or an external type keeps them all)
+        local function asserted(xp, tyn)
+            local d, nm = tname_of(tyn)
+            if not concrete_type(d, nm) then return xp end
+            local key = d .. ':' .. nm
+            local r = new()
+            S.filter(xp, r, function (o) return objtype[o] == key end)
+            return r
         end
         local function callv(n) -- -> the result ports (a list: multi-value)
             local f = n:field('function')[1]
@@ -197,9 +263,14 @@ function M.walker(S, files)
                     edge(s, res[1])
                     return res
                 end
+                if concrete_type(dir, nm) and #args == 1 and not scopes[#scopes][nm] then
+                    expr(args[1])
+                    res[1] = alloc(dir, nm, 'conv') -- (a conversion `T(x)` is a T: T's methods — Status(s).String())
+                    return res
+                end
                 if (tn[nm] or nm:match('^u?int%d*$') or nm == 'string' or nm == 'byte' or nm == 'float64' or nm == 'any')
                     and #args == 1 and not scopes[#scopes][nm] then
-                    edge(expr(args[1]), res[1]) -- (a conversion `T(x)`: the value is x's)
+                    edge(expr(args[1]), res[1]) -- (a conversion to a builtin / an interface: the value is x's)
                     return res
                 end
             end
@@ -208,6 +279,11 @@ function M.walker(S, files)
                 local op, fl = f:field('operand')[1], f:field('field')[1]
                 local pk = op and op:type() == 'identifier' and imports[txt(op)]
                 if pk and not (function () for i = #scopes, 1, -1 do if scopes[i][txt(op)] then return true end end end)() then
+                    if concrete_type(pk, txt(fl)) and #args == 1 then
+                        expr(args[1])
+                        res[1] = alloc(pk, txt(fl), 'conv') -- (`pkg.T(x)`: a T)
+                        return res
+                    end
                     callee = port('pkg:' .. pk .. ':' .. txt(fl))
                 else
                     recvp = expr(op)
@@ -269,7 +345,11 @@ function M.walker(S, files)
                 for _, c in kids(n) do if c:named() and c ~= x then expr(c) end end
                 return x and field(expr(x), '[]') or new()
             end
-            if t == 'type_assertion_expression' or t == 'slice_expression' then
+            if t == 'type_assertion_expression' then
+                local x, ty = n:field('operand')[1], n:field('type')[1]
+                return x and asserted(expr(x), ty) or new()
+            end
+            if t == 'slice_expression' then
                 local x = n:field('operand')[1] or n:named_child(0)
                 return x and expr(x) or new()
             end
@@ -329,14 +409,27 @@ function M.walker(S, files)
                 if o == '=' then assign_list(list_of(n:field('left')[1]), list_of(n:field('right')[1]), false)
                 else expr(n:field('right')[1] or n) end
             elseif t == 'var_declaration' or t == 'const_declaration' then
+                local isconst = t == 'const_declaration'
+                local last_ty -- (a const spec with no type of its own repeats the previous one's: iota blocks)
                 local function spec(sp)
                     local names, vals = {}, {}
                     for _, c in kids(sp) do
                         if c:type() == 'identifier' then names[#names + 1] = c end
                     end
+                    local ty = sp:field('type')[1]
                     local v = sp:field('value')[1]
                     vals = list_of(v)
-                    if #vals > 0 then assign_list(names, vals, true)
+                    if isconst then
+                        if ty then last_ty = ty elseif #vals == 0 then ty = last_ty end
+                    end
+                    -- (THE DECLARATION IS THE ALLOCATION when nothing else gives the value: `var lbs labels`, or a typed
+                    -- const — `StatusDeployed Status = "deployed"`: a value of a named type, with that type's methods)
+                    local td, tnm
+                    if ty and ty:type() ~= 'pointer_type' then td, tnm = tname_of(ty) end
+                    if td and concrete_type(td, tnm) and (#vals == 0 or isconst) then
+                        for _, v2 in ipairs(vals) do expr(v2) end
+                        for _, nm in ipairs(names) do edge((alloc(td, tnm, 'zero')), declare(txt(nm))) end
+                    elseif #vals > 0 then assign_list(names, vals, true)
                     else for _, nm in ipairs(names) do declare(txt(nm)) end end
                 end
                 for _, c in kids(n) do
@@ -387,7 +480,12 @@ function M.walker(S, files)
                     local al, val = n:field('alias')[1], n:field('value')[1]
                     if al and val then
                         local vp = expr(val)
-                        for _, a in ipairs(list_of(al)) do if a:type() == 'identifier' then edge(vp, declare(txt(a))) end end
+                        for _, a in ipairs(list_of(al)) do
+                            if a:type() == 'identifier' then
+                                edge(vp, declare(txt(a)))
+                                tswitch[#tswitch + 1] = { txt(a), vp, n } -- (a one-type case narrows it: below)
+                            end
+                        end
                     end
                 end
                 for _, c in kids(n) do
@@ -402,6 +500,11 @@ function M.walker(S, files)
                 scopes[#scopes] = nil
             elseif t == 'expression_case' or t == 'default_case' or t == 'type_case' or t == 'communication_case' then
                 scopes[#scopes + 1] = {}
+                local ts0 = tswitch[#tswitch]
+                if t == 'type_case' and ts0 and n:parent() and n:parent():id() == ts0[3]:id() then
+                    local tys = n:field('type')
+                    if #tys == 1 then declare(ts0[1], asserted(ts0[2], tys[1])) end
+                end
                 for _, c in kids(n) do
                     if c:named() then
                         local ct = c:type()
@@ -426,31 +529,6 @@ function M.walker(S, files)
             end
             scopes[#scopes] = nil
         end
-        -- (top level: types first — the embedding prototypes —, then the declarations)
-        for _, d in kids(tree) do
-            if d:type() == 'type_declaration' then
-                for _, sp in kids(d) do
-                    if sp:type() == 'type_spec' then
-                        local nm, ty = sp:field('name')[1], sp:field('type')[1]
-                        if nm then
-                            tn[txt(nm)] = true
-                            if ty and ty:type() == 'struct_type' then
-                                for _, fl in kids(ty) do
-                                    if fl:type() == 'field_declaration_list' then
-                                        for _, fd in kids(fl) do
-                                            if fd:type() == 'field_declaration' and not fd:field('name')[1] then
-                                                local ed, en = tname_of(fd:field('type')[1])
-                                                if ed and en then objproto(mtobj(dir, txt(nm)), mtobj(ed, en)) end
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
         for _, d in kids(tree) do
             local t = d:type()
             if t == 'function_declaration' then
@@ -464,7 +542,18 @@ function M.walker(S, files)
                 for _, pd in kids(rl) do if pd:type() == 'parameter_declaration' then rty = pd:field('type')[1] end end
                 local rd, rn = tname_of(rty)
                 local p, o = func(d, fnid(d), true)
-                if nm and rd and rn then edge(p, ofp(mtobj(rd, rn), txt(nm))) end
+                if nm and rd and rn then
+                    edge(p, ofp(mtobj(rd, rn), txt(nm)))
+                    -- (THE RECEIVER IS A T: Go has no subtyping of structs, so inside T's method the receiver's
+                    -- dynamic type is T — the same declaration that put the method in T's table. `ch.Name()` inside a
+                    -- Chart method is Chart.Name; its FIELDS still come only from the values that flow in)
+                    local fp = fnports[o]
+                    if fp and fp.params[1] then
+                        local so = newobj('self:' .. rd .. ':' .. rn)
+                        objproto(so, mtobj(rd, rn))
+                        addobj(fp.params[1], so)
+                    end
+                end
             elseif t == 'var_declaration' or t == 'const_declaration' then
                 stmt(d)
                 -- (a package-level var is the package's: re-key the declared names to the package port)
