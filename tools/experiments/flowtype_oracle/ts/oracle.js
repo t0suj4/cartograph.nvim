@@ -25,7 +25,9 @@ for (const sf of program.getSourceFiles()) {
       const pa = n.expression;
       let sym = checker.getSymbolAtLocation(pa.name);
       if (sym && (sym.flags & ts.SymbolFlags.Alias)) sym = checker.getAliasedSymbol(sym);
-      const decl = sym && sym.declarations && sym.declarations[0];
+      // (OVERLOADS: the signatures come first, the implementation — the declaration with a BODY — is the callee)
+      const decls = (sym && sym.declarations) || [];
+      const decl = decls.find((d) => d.body) || decls[0];
       if (decl) {
         const p = decl.parent;
         // (the checker's answer is a DECLARATION: a method with a body IS the callee; an abstract method, or a field /

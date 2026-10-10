@@ -61,7 +61,21 @@ function M.walker(S, files)
         end
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
         local fnstack = {} -- { fp, this port }
+        local guard_of -- (cond) -> name, prototype port | nil: an `x instanceof C` condition
+        local guards = {} -- { name, the guarding class's `prototype` port }: active `instanceof` narrowings
         local expr, stmt
+        guard_of = function (cond)
+            local inner = cond
+            while inner and inner:type() == 'parenthesized_expression' do inner = inner:named_child(0) end
+            if inner and inner:type() == 'binary_expression' then
+                local op = inner:field('operator')[1]
+                local l, r = inner:field('left')[1], inner:field('right')[1]
+                if op and txt(op) == 'instanceof' and l and l:type() == 'identifier' and r then
+                    return txt(l), field(expr(r), 'prototype')
+                end
+            end
+            return nil
+        end
         local function fnid(n)
             local l, c = n:start()
             return fnmap[l .. ':' .. c] or ('ts:' .. file .. ':' .. l .. ':' .. c)
@@ -221,7 +235,13 @@ function M.walker(S, files)
                 local m = prop and txt(prop) or '[]'
                 local callee = field(recv, m)
                 local l, c = obj:start()
-                S.probes[#S.probes + 1] = { file = file, line = l, col = c, member = m, recv = recv }
+                -- (inside `if (x instanceof C)` the receiver x is a C: the guard filters the verdict)
+                local guard
+                if obj:type() == 'identifier' then
+                    local nm = txt(obj)
+                    for gi = #guards, 1, -1 do if guards[gi][1] == nm then guard = guards[gi][2]; break end end
+                end
+                S.probes[#S.probes + 1] = { file = file, line = l, col = c, member = m, recv = recv, guard = guard }
                 aps = args_of(n)
                 table.insert(aps, 1, recv)
                 callc(callee, aps, res)
@@ -335,7 +355,17 @@ function M.walker(S, files)
                 local c, a, b = n:field('condition')[1], n:field('consequence')[1], n:field('alternative')[1]
                 if c then expr(c) end
                 local r = new()
+                -- (`x instanceof C ? x.m() : …`: the consequence sees x as a C)
+                local gname, gproto = guard_of(c)
+                if gname then
+                    local narrowed = new()
+                    S.gfilter(lookup(gname), narrowed, gproto)
+                    scopes[#scopes + 1] = {}
+                    declare(gname, narrowed)
+                    guards[#guards + 1] = { gname, gproto }
+                end
                 if a then edge(expr(a), r) end
+                if gname then guards[#guards] = nil; scopes[#scopes] = nil end
                 if b then edge(expr(b), r) end
                 return r
             end
@@ -436,6 +466,25 @@ function M.walker(S, files)
                 scopes[#scopes + 1] = {}
                 for _, c in kids(n) do if c:named() then stmt(c) end end
                 scopes[#scopes] = nil
+            elseif t == 'if_statement' then
+                -- (`if (x instanceof C) { … }`: a RUNTIME type check — inside, x is a C)
+                local cond = n:field('condition')[1]
+                local gname, gproto = guard_of(cond)
+                if cond then expr(cond) end
+                local cons, alt = n:field('consequence')[1], n:field('alternative')[1]
+                if cons then
+                    if gname then
+                        -- (the branch sees x NARROWED: a port of the C instances among x's — the flow, not only the verdict)
+                        local narrowed = new()
+                        S.gfilter(lookup(gname), narrowed, gproto)
+                        scopes[#scopes + 1] = {}
+                        declare(gname, narrowed)
+                        guards[#guards + 1] = { gname, gproto }
+                    end
+                    stmt(cons)
+                    if gname then guards[#guards] = nil; scopes[#scopes] = nil end
+                end
+                if alt then stmt(alt) end
             elseif t == 'expression_statement' then
                 for _, c in kids(n) do if c:named() then expr(c) end end
             elseif t == 'catch_clause' then

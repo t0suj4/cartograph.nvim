@@ -286,3 +286,37 @@ test('flowtype (ts): new, this, statics, imports and object literals decide a me
     one('src/b.ts:get@2', 'A%.get', 'a = A.make() = new A(): A.get, not B.get')
     one('src/b.ts:get@4', 'b%.ts::', 'the object literal\'s own arrow function')
 end)
+
+-- ★ `x instanceof C` NARROWS THE FLOW, not only the verdict (arktype, scored: `if (out instanceof ArkErrors)
+-- out.transform(e => e.transform(...))` had handed the callback to BaseNode.transform too, so `e` held BaseNodes and
+-- `e.transform` read wrong). Inside the branch x is a port of C's instances among x's — solved to a fixpoint
+test('flowtype (ts): inside `if (x instanceof B)` and `x instanceof B ? …` x holds only the B instances', function ()
+    if not parser_available('typescript') then skip 'no typescript parser' end
+    local root = tree({
+        ['src/m.ts'] = table.concat({
+            'class Leaf { visit(f: (x: Leaf) => void): void { f(this); } name(): string { return "leaf"; } }',
+            'class Node2 { visit(f: (x: Node2) => void): void { f(this); } name(): string { return "node"; } }',
+            'function pick(k: number) { return k > 0 ? new Leaf() : new Node2(); }',
+            'const v = pick(1);',
+            'if (v instanceof Leaf) {',
+            '  v.visit(x => x.name());',
+            '}',
+            'const w = v instanceof Node2 ? v.name() : "";',
+            'const u = v instanceof Node2 ? v.visit(y => y.name()) : 0;',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local by = {}
+    for _, p in ipairs(R.probes) do by[p.member .. '@' .. p.line .. ':' .. p.col] = p end
+    local function one(key, pat, why)
+        local p = by[key]
+        eq('exact', p and p.kind, why .. ': ' .. vim.inspect(p))
+        ok(p and p.targets[1] and p.targets[1]:match(pat), why .. ': ' .. vim.inspect(p and p.targets))
+    end
+    one('visit@5:2', 'Leaf%.visit', 'the branch sees only the Leaf')
+    one('name@5:15', 'Leaf%.name', 'and so does the callback it hands Leaf.visit: x is a Leaf, never a Node2')
+    one('name@7:31', 'Node2%.name', 'the ternary consequence sees only the Node2')
+    one('name@8:44', 'Node2%.name', 'and the callback it hands Node2.visit holds only Node2s')
+end)

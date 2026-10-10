@@ -155,6 +155,10 @@ local function build(store, opts)
         pr[c] = true
         for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2], nil, ld[3]) end
     end
+    -- (a GUARDED flow: dst holds the objects of src whose prototype chain reaches an object of gp — `x instanceof
+    -- C` narrows x to C's instances; prototypes are whole only after a solve, so it is re-run to a fixpoint below)
+    local gfilters = {}
+    local function gfilter(src, dst, gp) gfilters[#gfilters + 1] = { src, dst, gp, {} } end
     -- (a FILTERED flow: only the objects `pred` admits — a type assertion `x.(*T)` is a runtime type check)
     local filters = {}
     local function filter(a, b, pred)
@@ -561,7 +565,7 @@ local function build(store, opts)
     -- (the solver's operations, for a language's own walker: flowtype_go)
     local S = { new = new, newobj = newobj, addobj = addobj, edge = edge, ofp = ofp, field = field, storec = storec,
         callc = callc, mflow = mflow, port = port, objproto = objproto, fnports = fnports, typeobj = typeobj, STR = STR,
-        filter = filter, proto = proto,
+        filter = filter, proto = proto, gfilter = gfilter,
         EXT = EXT, fn_at = fn_at, call_at = call_at, req_at = req_at, root = root, probes = {}, modports = modports,
         nodes = store.data.nodes }
     local gowalk, jswalk
@@ -580,6 +584,28 @@ local function build(store, opts)
         end
     end
     solve()
+    -- (the instanceof GUARDS to a fixpoint: admit what the solved prototypes allow, solve again — sets only grow)
+    for _ = 1, 20 do
+        local grew = false
+        for _, gf in ipairs(gfilters) do
+            local gp = {}
+            for g in each(gf[3]) do gp[g] = true end
+            if next(gp) then
+                local function chain(o, seen)
+                    if gp[o] then return true end
+                    if seen[o] then return false end
+                    seen[o] = true
+                    for c in pairs(protos[o] or {}) do if chain(c, seen) then return true end end
+                    return false
+                end
+                for o in each(gf[1]) do
+                    if not gf[4][o] and chain(o, {}) then gf[4][o] = true; addobj(gf[2], o); grew = true end
+                end
+            end
+        end
+        if not grew then break end
+        solve()
+    end
     -- (OPEN: an exported function's callers are not all in the tree — its parameters may hold anything)
     if open then
         for _, mp in ipairs(modports) do
@@ -657,15 +683,37 @@ local function build(store, opts)
         local kind, fns, unknown = nil, {}, top[pr.recv] or has(pr.recv, EXT)
         if not unknown then
             local out = {}
-            for o in each(pr.recv) do if targets(o, pr.member, out, {}) then unknown = true end end
+            -- (a GUARD — `x instanceof C` around the call — keeps only the objects whose prototype chain holds one of
+            -- C's prototypes: a runtime type check, decided after the solve, when the sets are whole)
+            local keep
+            if pr.guard then
+                keep = {}
+                local gp = {}
+                for g in each(pr.guard) do gp[g] = true end
+                local function chain(o, seen)
+                    if gp[o] then return true end
+                    if seen[o] then return false end
+                    seen[o] = true
+                    for c in pairs(protos[o] or {}) do if chain(c, seen) then return true end end
+                    return false
+                end
+                for o in each(pr.recv) do if chain(o, {}) then keep[o] = true end end
+            end
+            for o in each(pr.recv) do
+                if not keep or keep[o] then if targets(o, pr.member, out, {}) then unknown = true end end
+            end
             for x in pairs(out) do
                 if x == EXT then unknown = true
-                elseif fnports[x] then fns[#fns + 1] = obinfo[x] end
+                elseif fnports[x] then
+                    -- (a function the graph has no node for is no answer it can give: unknown, as for Lua's verdicts)
+                    if tostring(obinfo[x]):find('^ts:') then unknown = true else fns[#fns + 1] = obinfo[x] end
+                end
             end
             table.sort(fns)
         end
         if unknown then kind = 'unknown' elseif #fns == 0 then kind = 'none' elseif #fns == 1 then kind = 'exact' else kind = 'set' end
-        probe_out[#probe_out + 1] = { file = pr.file, line = pr.line, col = pr.col, member = pr.member, kind = kind, targets = fns }
+        probe_out[#probe_out + 1] = { file = pr.file, line = pr.line, col = pr.col, member = pr.member, kind = kind, targets = fns,
+            guarded = pr.guard ~= nil }
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     return { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }

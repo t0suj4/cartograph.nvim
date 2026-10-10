@@ -37,3 +37,11 @@ MEASURED 2026-10-10 (types ignored by the walker): typescript-language-server �
 (87.1%), 2 sets containing the truth, 95 no claim, 0 WRONG; interface members 122 of 166 answered. turborepo (an
 untouched second corpus) — class 213 exact-right, 92 no claim, 0 WRONG (59 unprobed: calls in test files). The walker
 rules each step added: `this` inside C's method is a C, a static is the class's own (methods and fields).
+
+TYPE-SYSTEM-HEAVY corpora (user 2026-10-10): effect (`packages/effect`, 694 src files) — functions 2621 exact-right,
+class methods 675, object members 9, 0 WRONG (its `Effect.map`-style `export const map = dual(2, …)` calls name a
+VARIABLE: coverage only); arktype — class 331, object 41 exact-right, 0 WRONG. The oracle picks an overloaded
+function's IMPLEMENTATION (the declaration with a body). Two walker rules came from these: an anonymous function the
+graph has no node for is unknown, never an answer; `x instanceof C` (an `if` or a ternary) NARROWS x in the branch —
+a real flow port solved to a fixpoint, not only a verdict filter (otherwise a callback handed on inside the branch
+still reaches every class's method).
