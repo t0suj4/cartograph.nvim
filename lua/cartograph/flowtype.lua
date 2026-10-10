@@ -552,7 +552,7 @@ local function build(store, opts)
         local seen = {}
         for _, n in ipairs(store.data.nodes) do
             local f = n.file
-            if type(f) == 'string' and (f:match('%.lua$') or f:match('%.go$')) and not seen[f]
+            if type(f) == 'string' and (f:match('%.lua$') or f:match('%.go$') or f:match('%.[jt]sx?$')) and not f:match('%.d%.ts$') and not seen[f]
                 and not (opts.exclude and f:match(opts.exclude)) then seen[f] = true; files[#files + 1] = f end
         end
         table.sort(files)
@@ -561,10 +561,10 @@ local function build(store, opts)
     -- (the solver's operations, for a language's own walker: flowtype_go)
     local S = { new = new, newobj = newobj, addobj = addobj, edge = edge, ofp = ofp, field = field, storec = storec,
         callc = callc, mflow = mflow, port = port, objproto = objproto, fnports = fnports, typeobj = typeobj, STR = STR,
-        filter = filter,
+        filter = filter, proto = proto,
         EXT = EXT, fn_at = fn_at, call_at = call_at, req_at = req_at, root = root, probes = {}, modports = modports,
         nodes = store.data.nodes }
-    local gowalk
+    local gowalk, jswalk
     for _, f in ipairs(files) do
         local fd = type(root) == 'string' and io.open(root .. '/' .. f, 'rb')
         local src = fd and fd:read('a')
@@ -573,6 +573,9 @@ local function build(store, opts)
             if f:match('%.go$') then
                 gowalk = gowalk or require('cartograph.flowtype_go').walker(S, files)
                 gowalk(f, src)
+            elseif f:match('%.[jt]sx?$') then
+                jswalk = jswalk or require('cartograph.flowtype_js').walker(S, files)
+                jswalk(f, src)
             else walk_file(f, src) end
         end
     end

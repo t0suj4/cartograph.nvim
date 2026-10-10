@@ -24,3 +24,16 @@ The progression (each step scored, none allowed a wrong answer): 709 (walker v1)
 types; zero values `var x T`, typed consts, conversions T(x) allocate a T) -> 921 (a multi-value truncation bug
 `local a, b = x and f()` had disabled the zero-value rule — cartograph's own truncation lint flags it) -> 1063 (a
 method's receiver IS a T) -> 1098 (type assertions and one-type `case *T:` filter: a runtime type check).
+
+## TypeScript (`ts/`)
+
+`ts/oracle.js` asks the TypeScript checker (any `typescript` package: `node ts/oracle.js <typescript pkg> <project>`)
+for every `x.m(…)`: the resolved declaration and what holds it — `class` / `object` (a method or function-valued
+member WITH a body: the callee itself, scored exact), `function`, and the SLOTS scored for coverage only: `abstract`,
+`field` (a property holding a function value), `interface`. `ts/score.lua` joins row by row (test files excluded on
+the flow side unless `tests`).
+
+MEASURED 2026-10-10 (types ignored by the walker): typescript-language-server — class methods 661 of 759 exact-right
+(87.1%), 2 sets containing the truth, 95 no claim, 0 WRONG; interface members 122 of 166 answered. turborepo (an
+untouched second corpus) — class 213 exact-right, 92 no claim, 0 WRONG (59 unprobed: calls in test files). The walker
+rules each step added: `this` inside C's method is a C, a static is the class's own (methods and fields).

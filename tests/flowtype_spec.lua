@@ -245,3 +245,44 @@ test('flowtype (go): x.(*T) and a one-type `case *T:` keep only the T that flows
     eq('exact', u and u.kind, 'the case clause passes only the U: ' .. vim.inspect(u))
     ok(u and u.targets[1]:match('U%.Get'), vim.inspect(u and u.targets))
 end)
+
+-- ★ THE JS / TS WALKER (scored by the TypeScript checker, tools/experiments/flowtype_oracle/ts: on
+-- typescript-language-server 661 of 759 class-method calls exact-right, 0 wrong; turborepo 213, 0 wrong). Types are
+-- ignored: `new C()` takes C's prototype, `this` inside C's method is a C, a static is the class's own, an imported
+-- name is the module's export. Two classes declare `get`: every call below is decided by flow
+test('flowtype (ts): new, this, statics, imports and object literals decide a member call', function ()
+    if not parser_available('typescript') then skip 'no typescript parser' end
+    local root = tree({
+        ['src/a.ts'] = table.concat({
+            'export class A {',
+            '  get(): number { return 1; }',
+            '  run(): number { return this.get(); }',
+            '  static make(): A { return new A(); }',
+            '}',
+            'export class B {',
+            '  get(): number { return 2; }',
+            '}',
+        }, '\n'),
+        ['src/b.ts'] = table.concat({
+            "import { A } from './a';",
+            'const a = A.make();',
+            'a.get();',
+            'const o = { get: () => 3 };',
+            'o.get();',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local by = {}
+    for _, p in ipairs(R.probes) do by[p.file .. ':' .. p.member .. '@' .. p.line] = p end
+    local function one(key, pat, why)
+        local p = by[key]
+        eq('exact', p and p.kind, why .. ': ' .. vim.inspect(p))
+        ok(p and p.targets[1] and p.targets[1]:match(pat), why .. ': ' .. vim.inspect(p and p.targets))
+    end
+    one('src/a.ts:get@2', 'A%.get', 'this inside A.run is an A')
+    one('src/b.ts:make@1', 'make', 'A.make: the imported class\'s static')
+    one('src/b.ts:get@2', 'A%.get', 'a = A.make() = new A(): A.get, not B.get')
+    one('src/b.ts:get@4', 'b%.ts::', 'the object literal\'s own arrow function')
+end)
