@@ -28,6 +28,61 @@ local EMPTY_NODE = { child = function () return nil end } -- (an absent child li
 
 local M = {}
 M.CAP = 64
+-- ★ DENSE SETS (CART-1643): a set past M.BIG objects becomes a BITSET (LuaJIT FFI uint32 words), and so does a delta,
+-- so a big delta moves along an edge as a word loop (new = delta & ~target) instead of one hash probe per object —
+-- the complete solve of arktype offered objects 14.7 BILLION times to add 52 M. M.BIG > M.CAP: under the default cap
+-- no set ever becomes dense, and a solve that saturates nothing has one answer whatever its representation.
+M.BIG = 128
+local ffi = require 'ffi'
+local bit = require 'bit'
+local band, bor, bnot, lshift, rshift = bit.band, bit.bor, bit.bnot, bit.lshift, bit.rshift
+local U32 = ffi.typeof('uint32_t[?]')
+local POP8 = {}
+for i = 0, 255 do local c, x = 0, i; while x > 0 do c = c + band(x, 1); x = rshift(x, 1) end; POP8[i] = c end
+local function pop32(x)
+    return POP8[band(x, 255)] + POP8[band(rshift(x, 8), 255)] + POP8[band(rshift(x, 16), 255)] + POP8[band(rshift(x, 24), 255)]
+end
+-- (lo / hi: the words that may be non-zero — a delta is usually a few words of a wide set)
+local function bs_new(nw) return { bs = U32(nw), nw = nw, lo = nw, hi = -1 } end
+local function bs_grow(b, need)
+    if need <= b.nw then return end
+    local nw = math.max(need, b.nw * 2)
+    local nb = U32(nw)
+    ffi.copy(nb, b.bs, b.nw * 4)
+    b.bs, b.nw = nb, nw
+end
+local function bs_test(b, o)
+    local w = rshift(o, 5)
+    if w >= b.nw then return false end
+    return band(b.bs[w], lshift(1, band(o, 31))) ~= 0
+end
+local function bs_set(b, o) -- -> true when o was not there
+    local w = rshift(o, 5)
+    if w >= b.nw then bs_grow(b, w + 1) end
+    local m = lshift(1, band(o, 31))
+    local v = b.bs[w]
+    if band(v, m) ~= 0 then return false end
+    b.bs[w] = bor(v, m)
+    if w < b.lo then b.lo = w end
+    if w > b.hi then b.hi = w end
+    return true
+end
+local function bs_iter(b) -- the objects, ascending
+    local w, word, base = b.lo - 1, 0, 0
+    local hi = b.hi
+    return function ()
+        while word == 0 do
+            w = w + 1
+            if w > hi then return nil end
+            word = b.bs[w]; base = w * 32
+        end
+        local low = band(word, -word)
+        local i, t = 0, low
+        while band(t, 1) == 0 do t = rshift(t, 1); i = i + 1 end
+        word = band(word, bnot(low))
+        return base + i
+    end
+end
 
 -- (a STRING-keyed table walked in ONE order: LuaJIT seeds its string hash per process, so `pairs` over field names
 -- walks differently in every run — and while a saturated port drops out, the walk order decides which objects reached
@@ -155,7 +210,9 @@ local function build(store, opts)
     local function settop(p)
         if top[p] then return end
         local s = pts[p]
-        if type(s) == 'number' then escaped[s] = true elseif s then for o in pairs(s) do escaped[o] = true end end
+        if type(s) == 'number' then escaped[s] = true
+        elseif s and s.bs then for o in bs_iter(s) do escaped[o] = true end
+        elseif s then for o in pairs(s) do escaped[o] = true end end
         top[p] = true; pts[p] = nil; delta[p] = nil
         if spread then push(p) end
     end
@@ -167,12 +224,31 @@ local function build(store, opts)
         local s = pts[p]
         if s == nil then return next, EMPTY, nil end
         if type(s) == 'number' then return one, s, nil end
+        if s.bs then return bs_iter(s) end
         return next, s, nil
     end
     local function has(p, o)
         local s = pts[p]
         if type(s) == 'number' then return s == o end
+        if s and s.bs then return bs_test(s, o) end
         return s ~= nil and s[o] == true
+    end
+    local BIG = M.BIG
+    local function tobits(p) -- p's set as a bitset
+        local s = pts[p]
+        if type(s) == 'table' and s.bs then return s end
+        local b = bs_new(rshift(NO, 5) + 2)
+        if type(s) == 'number' then bs_set(b, s) elseif s then for o in pairs(s) do bs_set(b, o) end end
+        pts[p] = b
+        return b
+    end
+    local function dbits(p) -- p's pending delta as a bitset
+        local d = delta[p]
+        if type(d) == 'table' and d.bs then return d end
+        local b = bs_new(rshift(NO, 5) + 2)
+        if d then for _, o in ipairs(d) do bs_set(b, o) end end
+        delta[p] = b
+        return b
     end
     local function addobj(p, o)
         if top[p] then escaped[o] = true; return end
@@ -181,16 +257,54 @@ local function build(store, opts)
         elseif type(s) == 'number' then
             if s == o then return end
             pts[p] = { [s] = true, [o] = true }; cnt[p] = 2
+        elseif s.bs then
+            if not bs_set(s, o) then return end
+            cnt[p] = cnt[p] + 1
         else
             if s[o] then return end
             s[o] = true
             cnt[p] = cnt[p] + 1
+            if cnt[p] > BIG then tobits(p) end
         end
         if cnt[p] > M.CAP then return settop(p) end
         local d = delta[p]
-        if not d then d = {}; delta[p] = d end
-        d[#d + 1] = o
+        if type(d) == 'table' and d.bs then bs_set(d, o)
+        else
+            if not d then d = {}; delta[p] = d end
+            d[#d + 1] = o
+            if #d > BIG then dbits(p) end
+        end
         push(p)
+    end
+    -- the bitset d into q: word by word, what was new becomes q's delta
+    local function addbits(q, d)
+        if top[q] then for o in bs_iter(d) do escaped[o] = true end return end
+        local t = tobits(q)
+        if t.nw < d.nw then bs_grow(t, d.nw) end
+        local tb, db = t.bs, d.bs
+        local dd, added = nil, 0
+        for w = d.lo, d.hi do
+            local x = db[w]
+            if x ~= 0 then
+                local tv = tb[w]
+                local nw = band(x, bnot(tv))
+                if nw ~= 0 then
+                    tb[w] = bor(tv, nw)
+                    if w < t.lo then t.lo = w end
+                    if w > t.hi then t.hi = w end
+                    if not dd then dd = dbits(q); if dd.nw < d.nw then bs_grow(dd, d.nw) end end
+                    dd.bs[w] = bor(dd.bs[w], nw)
+                    if w < dd.lo then dd.lo = w end
+                    if w > dd.hi then dd.hi = w end
+                    added = added + pop32(nw)
+                end
+            end
+        end
+        if added > 0 then
+            cnt[q] = (cnt[q] or 0) + added
+            if cnt[q] > M.CAP then return settop(q) end
+            push(q)
+        end
     end
     local function edge(a, b) -- pts(b) ⊇ pts(a)
         if a == b then return end
@@ -199,7 +313,8 @@ local function build(store, opts)
         if s[b] then return end
         s[b] = true
         if top[a] then if spread then settop(b) end; return end
-        for o in each(a) do addobj(b, o) end
+        local sa = pts[a]
+        if type(sa) == 'table' and sa.bs then addbits(b, sa) else for o in each(a) do addobj(b, o) end end
     end
     local function ofp(o, f)
         local m = ofield[o]
@@ -242,7 +357,8 @@ local function build(store, opts)
             -- (what the fields hold already; what they gain later reaches dst as their readers)
             local function pull(q)
                 if top[q] then if spread then settop(dst) end return end
-                for x in each(q) do addobj(dst, x) end
+                local sq = pts[q]
+                if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
             end
             if strict then pull(ofp(o, f))
             elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' then pull(m[fk]) end end
@@ -387,9 +503,18 @@ local function build(store, opts)
             else
                 local d = delta[p]
                 delta[p] = nil
-                if d then
+                if d and d.bs then
+                    -- (a DENSE delta: the copy edges and the field's readers in bulk; the rest per object)
+                    local db = d
+                    for q in pairs(succ[p] or {}) do addbits(q, db) end
+                    if fowner[p] then readers(fowner[p], fname[p], function (q) addbits(q, db) end) end
+                    d = {}
+                    for o in bs_iter(db) do d[#d + 1] = o end
+                elseif d then
                     for q in pairs(succ[p] or {}) do for _, o in ipairs(d) do addobj(q, o) end end
                     if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in ipairs(d) do addobj(q, o) end end) end
+                end
+                if d then
                     for _, ld in ipairs(loads[p] or {}) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
                     for _, st in ipairs(stores[p] or {}) do for _, o in ipairs(d) do edge(st[2], ofp(o, st[1])) end end
                     for _, cl in ipairs(calls[p] or {}) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2]) end end

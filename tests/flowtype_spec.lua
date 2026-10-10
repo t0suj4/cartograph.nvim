@@ -558,3 +558,44 @@ test('flowtype: a load of a field the cap may have left incomplete is partial', 
     ok(v ~= nil, 'x:run() is answered')
     eq(true, v and v.partial, 'box.handler may hold what put wrote unseen: ' .. vim.inspect(v))
 end)
+
+-- ★ DENSE SETS ARE THE SAME SETS (CART-1643): past M.BIG objects a set and its delta become bitsets, moved word by word
+-- — the complete solve of arktype went 707 s -> ~186 s with every answer unchanged. Under the default cap no set gets
+-- that big, so this solves uncapped with BIG forced down (dense almost everywhere) and up (never), and every answer —
+-- probes and Lua verdicts — must be the same
+test('flowtype: dense (bitset) sets give exactly the answers hash sets give', function ()
+    if not parser_available('typescript') or not parser_available('lua') then skip 'no parsers' end
+    local FIX = vim.fn.getcwd() .. '/tests/fixtures/flowsched/ark/schema/shared/'
+    local files = {}
+    for _, f in ipairs({ 'errors.ts', 'traversal.ts' }) do files['ark/schema/shared/' .. f] = assert(io.open(FIX .. f)):read('a') end
+    -- (and a Lua part with fan-in: many tables through one helper)
+    local L = { 'local M = {}', 'local function keep(x) return x end', 'local out = {}' }
+    for i = 1, 40 do L[#L + 1] = ('out[%d] = keep({ id = %d, run = function () return %d end })'):format(i, i, i) end
+    L[#L + 1] = 'for _, x in ipairs(out) do local r = x.run() end'
+    L[#L + 1] = 'return M'
+    files['lib/many.lua'] = table.concat(L, '\n')
+    local root = tree(files)
+    store.ingest(ts.extract(root))
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local function rows()
+        local R = flowtype.solve(store, { open = false })
+        local out = {}
+        for _, p in ipairs(R.probes) do out[#out + 1] = p.file .. ':' .. p.line .. ':' .. p.col .. ' ' .. p.kind .. ' ' .. table.concat(p.targets, ',') end
+        for _, c in ipairs(store.data.calls) do
+            local v = R.verdict(c)
+            if v and c.at then out[#out + 1] = callrec.file(c) .. ':' .. atr.sl(c.at) .. ' ' .. v.kind .. ' ' .. table.concat(v.targets or {}, ',') end
+        end
+        table.sort(out)
+        return out, R.stats.ports
+    end
+    local cap, big = flowtype.CAP, flowtype.BIG
+    flowtype.CAP = 1e9
+    flowtype.BIG = 1e9
+    local hashed = rows()
+    flowtype.BIG = 2
+    local dense = rows()
+    flowtype.CAP, flowtype.BIG = cap, big
+    vim.fn.delete(root, 'rf')
+    ok(#hashed > 10, 'the fixture answers: ' .. #hashed)
+    eq(hashed, dense, 'the same answers, dense or not')
+end)
