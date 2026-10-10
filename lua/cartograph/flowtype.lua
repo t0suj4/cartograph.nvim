@@ -565,10 +565,10 @@ local function build(store, opts)
     -- (the solver's operations, for a language's own walker: flowtype_go)
     local S = { new = new, newobj = newobj, addobj = addobj, edge = edge, ofp = ofp, field = field, storec = storec,
         callc = callc, mflow = mflow, port = port, objproto = objproto, fnports = fnports, typeobj = typeobj, STR = STR,
-        filter = filter, proto = proto, gfilter = gfilter,
+        filter = filter, proto = proto, gfilter = gfilter, each = each, fields = function (o) return ofield[o] end,
         EXT = EXT, fn_at = fn_at, call_at = call_at, req_at = req_at, root = root, probes = {}, modports = modports,
         nodes = store.data.nodes }
-    local gowalk, jswalk
+    local gowalk, jswalk, jsfinish
     for _, f in ipairs(files) do
         local fd = type(root) == 'string' and io.open(root .. '/' .. f, 'rb')
         local src = fd and fd:read('a')
@@ -578,11 +578,12 @@ local function build(store, opts)
                 gowalk = gowalk or require('cartograph.flowtype_go').walker(S, files)
                 gowalk(f, src)
             elseif f:match('%.[jt]sx?$') then
-                jswalk = jswalk or require('cartograph.flowtype_js').walker(S, files)
+                if not jswalk then jswalk, jsfinish = require('cartograph.flowtype_js').walker(S, files) end
                 jswalk(f, src)
             else walk_file(f, src) end
         end
     end
+    if jsfinish then jsfinish() end
     solve()
     -- (the instanceof GUARDS to a fixpoint: admit what the solved prototypes allow, solve again — sets only grow)
     for _ = 1, 20 do

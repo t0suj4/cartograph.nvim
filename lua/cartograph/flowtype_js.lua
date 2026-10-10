@@ -28,10 +28,7 @@ function M.walker(S, files)
         end
         return table.concat(out, '/')
     end
-    local function resolve(from, spec)
-        if not spec:match('^%.') then return nil end
-        local dir = from:match('^(.*)/[^/]+$') or ''
-        local base = norm((dir ~= '' and (dir .. '/') or '') .. spec)
+    local function try(base)
         for _, e in ipairs(EXTS) do
             local cand = base:gsub('%.js$', '') .. e
             if inset[cand] then return cand end
@@ -39,13 +36,65 @@ function M.walker(S, files)
         end
         return nil
     end
+    -- (a bare specifier through the nearest tsconfig.json's `paths`: `"@sinclair/typebox-codegen": ["src/index.ts"]`,
+    -- `"@/*": ["src/*"]`, relative to `baseUrl` or else the tsconfig's own directory; `extends` is not followed)
+    local tsconf = {}
+    local function tsconfig_of(dir)
+        local c = tsconf[dir]
+        if c == nil then
+            c = false
+            local fd = type(S.root) == 'string' and io.open(S.root .. '/' .. (dir ~= '' and dir .. '/' or '') .. 'tsconfig.json', 'rb')
+            if fd then
+                local raw = fd:read('a'); fd:close()
+                local ok, j = pcall(vim.json.decode, raw)
+                if not ok then -- (JSONC: comments, trailing commas — stripped only when plain JSON fails: `"@/*"` is a key)
+                    raw = raw:gsub('/%*.-%*/', ''):gsub('\n%s*//[^\n]*', '\n'):gsub(',(%s*[}%]])', '%1')
+                    ok, j = pcall(vim.json.decode, raw)
+                end
+                local co = ok and type(j) == 'table' and type(j.compilerOptions) == 'table' and j.compilerOptions
+                if co and type(co.paths) == 'table' then
+                    local bu = type(co.baseUrl) == 'string' and co.baseUrl or '.'
+                    c = { base = norm((dir ~= '' and dir .. '/' or '') .. bu), paths = co.paths }
+                end
+            elseif dir ~= '' then
+                c = tsconfig_of(dir:match('^(.*)/[^/]+$') or '')
+            end
+            tsconf[dir] = c
+        end
+        return c
+    end
+    local function resolve(from, spec)
+        local dir = from:match('^(.*)/[^/]+$') or ''
+        if not spec:match('^%.') then
+            local c = tsconfig_of(dir)
+            if not c then return nil end
+            for pat, outs in pairs(c.paths) do
+                local pre, post = pat:match('^(.-)%*(.*)$')
+                local star
+                if pre then
+                    if #spec >= #pre + #post and spec:sub(1, #pre) == pre and spec:sub(#spec - #post + 1) == post then
+                        star = spec:sub(#pre + 1, #spec - #post)
+                    end
+                elseif pat == spec then star = '' end
+                if star and type(outs) == 'table' then
+                    for _, o in ipairs(outs) do
+                        local hit = type(o) == 'string' and try(norm(c.base .. '/' .. o:gsub('%*', (star:gsub('%%', '%%%%')), 1)))
+                        if hit then return hit end
+                    end
+                end
+            end
+            return nil
+        end
+        return try(norm((dir ~= '' and (dir .. '/') or '') .. spec))
+    end
     local modobj = {}
+    local stars = {} -- { module object, source module object }: `export * from './x'`, linked once every file is walked
     local function module_of(file)
         local o = modobj[file]
         if not o then o = newobj('module:' .. file); modobj[file] = o; addobj(port('mod:' .. file), o) end
         return o
     end
-    return function (file, src)
+    local function walk(file, src)
         local lang = file:match('%.tsx$') and 'tsx' or (file:match('%.tsx?$') and 'typescript' or 'javascript')
         local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
         if not okp then return end
@@ -53,7 +102,9 @@ function M.walker(S, files)
         local fnmap = S.fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
         local mod = module_of(file)
-        local function export(name, v) edge(v, ofp(mod, name)) end
+        -- (where `export` writes: the module object, or a NAMESPACE's while its body is walked)
+        local exportto = { mod }
+        local function export(name, v) edge(v, ofp(exportto[#exportto], name)) end
         local scopes = { {} }
         local function lookup(name)
             for i = #scopes, 1, -1 do local p = scopes[i][name]; if p then return p end end
@@ -63,7 +114,7 @@ function M.walker(S, files)
         local fnstack = {} -- { fp, this port }
         local guard_of -- (cond) -> name, prototype port | nil: an `x instanceof C` condition
         local guards = {} -- { name, the guarding class's `prototype` port }: active `instanceof` narrowings
-        local expr, stmt
+        local expr, stmt, namespace
         guard_of = function (cond)
             local inner = cond
             while inner and inner:type() == 'parenthesized_expression' do inner = inner:named_child(0) end
@@ -296,7 +347,16 @@ function M.walker(S, files)
             if t == 'arrow_function' then return (func(n, false)) end
             if t == 'function_expression' or t == 'function' or t == 'generator_function' then return (func(n, true)) end
             if t == 'class' then return class(n) end
-            if t == 'string' or t == 'template_string' then local p = new(); addobj(p, S.STR); return p end
+            if t == 'internal_module' then return (namespace(n)) end
+            if t == 'string' then local p = new(); addobj(p, S.STR); return p end
+            if t == 'template_string' then -- (its `${…}` substitutions are expressions: calls, probes)
+                for _, c in kids(n) do
+                    if c:type() == 'template_substitution' then
+                        for _, x in kids(c) do if x:named() then expr(x) end end
+                    end
+                end
+                local p = new(); addobj(p, S.STR); return p
+            end
             if t == 'object' then
                 local p = new()
                 local o = newobj('obj:' .. file .. ':' .. (n:start()))
@@ -386,8 +446,34 @@ function M.walker(S, files)
                 end
             end
         end
+        -- a TS NAMESPACE `namespace X { export function f() … }`: an object whose exports are its fields (merged with
+        -- an earlier X in scope — declaration merging); typebox-codegen's `Character.IsNumeric(…)`
+        namespace = function (d)
+            local nm = d:field('name')[1]
+            local name = nm and nm:type() == 'identifier' and txt(nm)
+            local p = name and scopes[#scopes][name]
+            if not p then
+                p = new()
+                addobj(p, newobj('ns:' .. file .. ':' .. (d:start())))
+                if name then declare(name, p) end
+            end
+            local o
+            for x in S.each(p) do o = x end
+            local body = d:field('body')[1]
+            if body and o then
+                exportto[#exportto + 1] = o
+                stmt(body)
+                exportto[#exportto] = nil
+            end
+            return p, name
+        end
         local function declaration(d, exported)
             local t = d:type()
+            if t == 'internal_module' or t == 'module' then
+                local p, name = namespace(d)
+                if exported and name then export(name, p) end
+                return true
+            end
             if t == 'function_declaration' or t == 'generator_function_declaration' then
                 local nm = d:field('name')[1]
                 local target = nm and declare(txt(nm))
@@ -434,7 +520,32 @@ function M.walker(S, files)
             elseif t == 'export_statement' then
                 local d = n:field('declaration')[1]
                 local v = n:field('value')[1]
-                if d then declaration(d, true)
+                local srcn = n:field('source')[1]
+                local fr = srcn and srcn:named_child(0)
+                local target = fr and resolve(file, txt(fr))
+                if srcn then
+                    -- (a RE-EXPORT: `export * from`, `export * as ns from`, `export { a as b } from`)
+                    if not target then return end
+                    local smod = module_of(target)
+                    local any = false
+                    for _, c in kids(n) do
+                        local ct = c:type()
+                        if ct == 'namespace_export' then
+                            any = true
+                            local id = c:named_child(0)
+                            if id then export(txt(id), port('mod:' .. target)) end
+                        elseif ct == 'export_clause' then
+                            any = true
+                            for _, sp in kids(c) do
+                                if sp:type() == 'export_specifier' then
+                                    local nm, al = sp:field('name')[1], sp:field('alias')[1]
+                                    if nm then export(txt(al or nm), ofp(smod, txt(nm))) end
+                                end
+                            end
+                        end
+                    end
+                    if not any then stars[#stars + 1] = { mod, smod } end
+                elseif d then declaration(d, true)
                 elseif v then export('default', expr(v))
                 else
                     for _, c in kids(n) do
@@ -508,6 +619,28 @@ function M.walker(S, files)
         end
         for _, s in kids(tree) do if s:named() then stmt(s) end end
     end
+    -- (`export * from`: every field either side knows — the source's exports, the names importers read — flows
+    -- source → re-exporter; a chain of barrels to a fixpoint. `default` is not re-exported)
+    local function finish()
+        local done = {}
+        for _ = 1, 20 do
+            local grew = false
+            for i, st in ipairs(stars) do
+                local m, src = st[1], st[2]
+                for _, o in ipairs({ src, m }) do
+                    for f in pairs(S.fields(o) or {}) do
+                        local k = i .. '\0' .. f
+                        if f ~= 'default' and not done[k] then
+                            done[k] = true; grew = true
+                            edge(ofp(src, f), ofp(m, f))
+                        end
+                    end
+                end
+            end
+            if not grew then break end
+        end
+    end
+    return walk, finish
 end
 
 return M

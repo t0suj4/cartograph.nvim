@@ -29,7 +29,7 @@ for ln in io.lines(otsv) do
             for _, id in ipairs(p.targets) do local f2, l2 = declpos(id); if f2 == df and l2 == tonumber(dl) then hit = true end end
             if p.kind == 'exact' then v = hit and 'EXACT-RIGHT' or 'EXACT-WRONG' else v = hit and 'set-contains' or 'SET-MISSES' end
         end
-        bump(scope .. ' ' .. v, (v == 'EXACT-WRONG' or v == 'SET-MISSES' or v == 'no-probe') and
+        bump(scope .. ' ' .. v, (v == 'EXACT-WRONG' or v == 'SET-MISSES' or v == 'no-probe' or v == 'none') and
             (file .. ':' .. (line + 1) .. ' ' .. m .. ' truth ' .. df .. ':' .. (dl + 1) .. ' flow ' .. (p and table.concat(p.targets, ',') or '-')) or nil)
     end
 end

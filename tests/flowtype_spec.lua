@@ -320,3 +320,39 @@ test('flowtype (ts): inside `if (x instanceof B)` and `x instanceof B ? …` x h
     one('name@7:31', 'Node2%.name', 'the ternary consequence sees only the Node2')
     one('name@8:44', 'Node2%.name', 'and the callback it hands Node2.visit holds only Node2s')
 end)
+
+-- ★ a TS NAMESPACE is an object of its exports, a barrel's `export * from` / `export { a as b } from` re-exports,
+-- and a bare specifier resolves through tsconfig `paths` (typebox-codegen, scored: `Formatter.Format(…)` from
+-- `export namespace Formatter`, reached via `export * from './formatter'` and `@sinclair/typebox-codegen` → src/index.ts:
+-- 12 → 183 of 183 exact-right). A call inside a template string's `${…}` is a probe too
+test('flowtype (ts): namespaces, re-exports, tsconfig paths and template substitutions reach the function', function ()
+    if not parser_available('typescript') then skip 'no typescript parser' end
+    local root = tree({
+        ['tsconfig.json'] = table.concat({
+            '{ "compilerOptions": {',
+            '  // JSONC: a comment and a trailing comma',
+            '  "paths": { "@pkg": ["src/index.ts"], "@lib/*": ["src/lib/*"], },',
+            '} }',
+        }, '\n'),
+        ['src/lib/fmt.ts'] = 'export namespace Fmt { export function format(s: string) { return s; } }',
+        ['src/lib/enc.ts'] = 'export namespace Enc { export function encode(s: string) { return s; } }',
+        ['src/index.ts'] = "export * from './lib/fmt'\nexport { Enc as E } from '@lib/enc'",
+        ['example/use.ts'] = table.concat({
+            "import * as P from '@pkg'",
+            'const a = P.Fmt.format("x")',
+            'const b = `<${P.E.encode("y")}>`',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local by = {}
+    for _, p in ipairs(R.probes) do if p.file == 'example/use.ts' then by[p.member] = p end end
+    local function one(m, pat, why)
+        local p = by[m]
+        eq('exact', p and p.kind, why .. ': ' .. vim.inspect(p))
+        ok(p and p.targets[1] and p.targets[1]:match(pat), why .. ': ' .. vim.inspect(p and p.targets))
+    end
+    one('format', '^src/lib/fmt%.ts::.*format', 'P.Fmt.format: paths → the barrel → export * → the namespace')
+    one('encode', '^src/lib/enc%.ts::.*encode', 'P.E.encode: an aliased re-export through `@lib/*`, inside `${…}`')
+end)
