@@ -105,11 +105,15 @@ local function build(store, opts)
         end
         return p
     end
-    local function load_obj(o, f, dst, seen)
+    -- (STRICT: a language whose records have no dynamic keys — Go — reads exactly the field: a named load never reads
+    -- `[]`, a `[]` load never reads every field. Lua's `t[k] = v` may write any field, so there both widen)
+    local function load_obj(o, f, dst, seen, strict)
         seen = seen or {}
         if seen[o] then return end
         seen[o] = true
-        if f == '[]' then
+        if strict then
+            edge(ofp(o, f), dst)
+        elseif f == '[]' then
             local al = anyload[o]
             if not al then al = {}; anyload[o] = al end
             al[#al + 1] = dst
@@ -121,16 +125,16 @@ local function build(store, opts)
         local l = olodes[o]
         if not l then l = {}; olodes[o] = l end
         local key = f .. '\0' .. dst
-        if not l[key] then l[key] = true; l[#l + 1] = { f, dst } end
-        for c in pairs(protos[o] or {}) do load_obj(c, f, dst, seen) end
+        if not l[key] then l[key] = true; l[#l + 1] = { f, dst, strict } end
+        for c in pairs(protos[o] or {}) do load_obj(c, f, dst, seen, strict) end
     end
-    local function field(x, f) -- a LOAD x.f -> its result port
+    local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
         local l = loads[x]
         if not l then l = {}; loads[x] = l end
-        l[#l + 1] = { f, dst }
+        l[#l + 1] = { f, dst, strict }
         if top[x] and spread then settop(dst) end
-        for o in each(x) do load_obj(o, f, dst) end
+        for o in each(x) do load_obj(o, f, dst, nil, strict) end
         return dst
     end
     local function storec(x, f, v)
@@ -144,17 +148,27 @@ local function build(store, opts)
         if not l then l = {}; protos_at[t] = l end
         l[#l + 1] = idx
     end
+    local function objproto(o, c) -- o's loads also read c's fields (an EMBEDDED type's methods: Go promotion)
+        local pr = protos[o]
+        if not pr then pr = {}; protos[o] = pr end
+        if pr[c] then return end
+        pr[c] = true
+        for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2], nil, ld[3]) end
+    end
     local function bindcall(o, args, res)
         local fp = fnports[o]
         if not fp then return end
         for i, a in ipairs(args) do if fp.params[i] then edge(a, fp.params[i]) end end
-        edge(fp.ret, res)
+        -- (a MULTI-value result — Go's `v, err := f()` — is a list of ports: the i-th return to the i-th)
+        if type(res) == 'table' then
+            for i, r in ipairs(res) do local fr = fp.rets and fp.rets[i] or (i == 1 and fp.ret); if fr then edge(fr, r) end end
+        else edge(fp.ret, res) end
     end
     local function callc(callee, args, res)
         local l = calls[callee]
         if not l then l = {}; calls[callee] = l end
         l[#l + 1] = { args, res }
-        if top[callee] and spread then settop(res) end
+        if top[callee] and spread and type(res) ~= 'table' then settop(res) end
         for o in each(callee) do bindcall(o, args, res) end
     end
     -- type objects and the profiles' declared returns
@@ -211,13 +225,13 @@ local function build(store, opts)
             if top[p] then
                 for q in pairs(succ[p] or {}) do settop(q) end
                 for _, ld in ipairs(loads[p] or {}) do settop(ld[2]) end
-                for _, cl in ipairs(calls[p] or {}) do settop(cl[2]) end
+                for _, cl in ipairs(calls[p] or {}) do if type(cl[2]) ~= 'table' then settop(cl[2]) end end
             else
                 local d = delta[p]
                 delta[p] = nil
                 if d then
                     for q in pairs(succ[p] or {}) do for _, o in ipairs(d) do addobj(q, o) end end
-                    for _, ld in ipairs(loads[p] or {}) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2]) end end
+                    for _, ld in ipairs(loads[p] or {}) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
                     for _, st in ipairs(stores[p] or {}) do for _, o in ipairs(d) do edge(st[2], ofp(o, st[1])) end end
                     for _, cl in ipairs(calls[p] or {}) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2]) end end
                     for _, mf in ipairs(mflows[p] or {}) do
@@ -234,7 +248,7 @@ local function build(store, opts)
                                 if not pr then pr = {}; protos[o] = pr end
                                 if not pr[c] then
                                     pr[c] = true
-                                    for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2]) end
+                                    for _, ld in ipairs(olodes[o] or {}) do load_obj(c, ld[1], ld[2], nil, ld[3]) end
                                 end
                             end
                         end
@@ -527,16 +541,28 @@ local function build(store, opts)
         local seen = {}
         for _, n in ipairs(store.data.nodes) do
             local f = n.file
-            if type(f) == 'string' and f:match('%.lua$') and not seen[f] then seen[f] = true; files[#files + 1] = f end
+            if type(f) == 'string' and (f:match('%.lua$') or f:match('%.go$')) and not seen[f]
+                and not (opts.exclude and f:match(opts.exclude)) then seen[f] = true; files[#files + 1] = f end
         end
         table.sort(files)
     end
     local root = store.data.root
+    -- (the solver's operations, for a language's own walker: flowtype_go)
+    local S = { new = new, newobj = newobj, addobj = addobj, edge = edge, ofp = ofp, field = field, storec = storec,
+        callc = callc, mflow = mflow, port = port, objproto = objproto, fnports = fnports, typeobj = typeobj, STR = STR,
+        EXT = EXT, fn_at = fn_at, call_at = call_at, req_at = req_at, root = root, probes = {}, modports = modports,
+        nodes = store.data.nodes }
+    local gowalk
     for _, f in ipairs(files) do
         local fd = type(root) == 'string' and io.open(root .. '/' .. f, 'rb')
         local src = fd and fd:read('a')
         if fd then fd:close() end
-        if src then walk_file(f, src) end
+        if src then
+            if f:match('%.go$') then
+                gowalk = gowalk or require('cartograph.flowtype_go').walker(S, files)
+                gowalk(f, src)
+            else walk_file(f, src) end
+        end
     end
     solve()
     -- (OPEN: an exported function's callers are not all in the tree — its parameters may hold anything)
@@ -610,13 +636,30 @@ local function build(store, opts)
         stats[kind] = (stats[kind] or 0) + 1
         if v then verdicts[pr.c] = v end
     end
+    -- (PROBES a language walker records itself — every Go method call: { file, line, col, member, recv } -> targets)
+    local probe_out = {}
+    for _, pr in ipairs(S.probes) do
+        local kind, fns, unknown = nil, {}, top[pr.recv] or has(pr.recv, EXT)
+        if not unknown then
+            local out = {}
+            for o in each(pr.recv) do if targets(o, pr.member, out, {}) then unknown = true end end
+            for x in pairs(out) do
+                if x == EXT then unknown = true
+                elseif fnports[x] then fns[#fns + 1] = obinfo[x] end
+            end
+            table.sort(fns)
+        end
+        if unknown then kind = 'unknown' elseif #fns == 0 then kind = 'none' elseif #fns == 1 then kind = 'exact' else kind = 'set' end
+        probe_out[#probe_out + 1] = { file = pr.file, line = pr.line, col = pr.col, member = pr.member, kind = kind, targets = fns }
+    end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
-    return { verdict = function (c) return verdicts[c] end, stats = stats }
+    return { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
 end
 
 --- the analysis over `store`'s graph, cached per graph generation (and per `open`)
 function M.of(store, opts)
     local key = ((opts and opts.open == false) and 'closed' or 'open') .. ((opts and opts.spread) and '+spread' or '')
+        .. ((opts and opts.exclude) and ('-' .. opts.exclude) or '')
     local c = store._flowtype
     -- (the generation AND the graph itself: a fresh ingest may restart the generation count)
     if c and c.gen == store.generation and c.data == store.data and c[key] then return c[key] end

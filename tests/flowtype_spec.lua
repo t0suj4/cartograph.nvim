@@ -104,3 +104,57 @@ test('effects by flow: a joined call flow decides takes ITS target — not every
     eq('writes~', by_name, 'the name join takes A.get and B.get: their writes')
     eq('pure~', by_flow, 'by flow, r.get is the record\'s closure: no write (a premise: ~)')
 end)
+
+-- ★ THE GO WALKER, the language the type checker can SCORE (tools/experiments/flowtype_oracle: on helm, 709 exact,
+-- 0 wrong): declared types are ignored — an allocation names its type (`&T{…}` carries T's methods), embedding
+-- promotes, the rest flows. Two types both declare `Get` / `Base` / `Run`: every call below is decided by what reaches it
+test('flowtype (go): a method reached through a constructor, an embedded type, a map range, a struct field', function ()
+    if not parser_available('go') then skip 'no go parser' end
+    local root = tree({
+        ['go.mod'] = 'module example.com/m\n\ngo 1.22\n',
+        ['p/p.go'] = table.concat({
+            'package p',
+            'type S struct{ n int }',
+            'func (s S) Base() int { return s.n }',
+            'type T struct {',
+            '\tS',
+            '\tname string',
+            '}',
+            'func (t *T) Get(i int) (int, error) { return i, nil }',
+            'type U struct{ S }',
+            'func (u *U) Get(i int) (int, error) { return -i, nil }',
+            'func (u *U) Base() int { return 0 }',
+            'type Runner interface{ Run() }',
+            'type R1 struct{}',
+            'func (R1) Run() {}',
+            'type R2 struct{}',
+            'func (R2) Run() {}',
+            'type Holder struct{ r Runner }',
+            'func New(name string) *T { return &T{name: name} }',
+            'func use() {',
+            '\tt := New("x")',
+            '\tv, err := t.Get(1)',
+            '\t_, _ = v, err',
+            '\tm := map[string]*T{"a": t}',
+            '\tfor _, x := range m {',
+            '\t\tx.Base()',
+            '\t}',
+            '\th := Holder{r: R1{}}',
+            '\th.r.Run()',
+            '}',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local by = {}
+    for _, p in ipairs(R.probes) do by[p.member .. '@' .. p.line] = p end
+    local function one(key, pat, why)
+        local p = by[key]
+        eq('exact', p and p.kind, why .. ': ' .. vim.inspect(p))
+        ok(p and p.targets[1] and p.targets[1]:match(pat), why .. ': ' .. vim.inspect(p and p.targets))
+    end
+    one('Get@20', 'T%.Get', 't := New(...): *T\'s Get, not U\'s')
+    one('Base@24', 'S%.Base', 'a *T from the map, Base promoted from the embedded S — not U.Base')
+    one('Run@27', 'R1%.Run', 'the field holds an R1: R1.Run, not R2.Run (the declared type is only the interface)')
+end)
