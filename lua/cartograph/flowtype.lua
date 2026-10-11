@@ -687,6 +687,7 @@ local function build(store, opts)
     -- in (so a closure keeps its upvalues), keyed to the file's real positions so each instance probes the calls in it.
     -- A call's answer is then the union over its instances: each instance's receiver stays under the cap where the
     -- merged one did not
+    local mcalls = {} -- every `x:m(…)` the Lua walker saw: { receiver port, method, result ports }
     local CTXFNS = opts.ctxfns
     local CTX, CTXTREES, ctx_direct = {}, {}, {}
     local function walk_file(file, src, clone)
@@ -893,7 +894,10 @@ local function build(store, opts)
             local res = new()
             local resl = { res }
             for k = 2, want or 1 do resl[k] = new() end
-            if recvp then for k, r in ipairs(resl) do mflow(recvp, txt(f:field('method')[1]), r, k) end end
+            if recvp then
+                for k, r in ipairs(resl) do mflow(recvp, txt(f:field('method')[1]), r, k) end
+                mcalls[#mcalls + 1] = { recvp, txt(f:field('method')[1]), resl }
+            end
             if to and CTXFNS and CTXFNS[to] and not clone then
                 ctx_direct[#ctx_direct + 1] = { to, aps, resl }
                 return want and resl or res
@@ -1207,6 +1211,26 @@ local function build(store, opts)
         if not grew then break end
         solve()
     end
+    -- ★ A STRING METHOD ON AN EMPTY RECEIVER (CART-1643): `name:lower()`, `raw:sub(i)` — the receiver reached no value
+    -- the solve holds, but a program that got past the call had a string there (a table would need the member; none
+    -- arrived), so the result is what the string library returns. Only where the receiver ended EMPTY — a user table
+    -- with its own `find` keeps its own answer — and HEDGED (tainted below): it is the call's evidence, not a flow.
+    -- Rounds, because a typed result can feed the next call's receiver
+    local sinf = {}
+    for _ = 1, 4 do
+        local grew = false
+        for _, mc in ipairs(mcalls) do
+            local recvp, m, resl = mc[1], mc[2], mc[3]
+            if pts[recvp] == nil and not top[recvp] and PSIGS['string#' .. m] then
+                for k, r in ipairs(resl) do
+                    local rt = retk('string#' .. m, k)
+                    if rt and not sinf[r] then sinf[r] = true; addobj(r, typeobj(rt)); grew = true end
+                end
+            end
+        end
+        if not grew then break end
+        solve()
+    end
     -- (OPEN: an exported function's callers are not all in the tree — its parameters may hold anything)
     if open then
         for _, mp in ipairs(modports) do
@@ -1252,6 +1276,7 @@ local function build(store, opts)
     end
     local field_hit, params_hit = {}, false
     for p in pairs(top) do taint(p) end
+    for r in pairs(sinf) do taint(r) end
     -- ★ OPEN REACHES PAST THE EXPORTS (CART-1652): a caller outside the tree gets more than the module's functions —
     -- what they RETURN, and those objects' fields and methods — and calls those methods with objects it got the same
     -- way: `M.b():go()` runs A:go with a B instance the tree never builds, where the tree only calls `M.a():go()`.

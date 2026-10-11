@@ -559,6 +559,25 @@ test('flowtype: a load of a field the cap may have left incomplete is partial', 
     eq(true, v and v.partial, 'box.handler may hold what put wrote unseen: ' .. vim.inspect(v))
 end)
 
+-- ★ A STRING METHOD ON AN EMPTY RECEIVER (CART-1643): nothing reaches `name`, but a program past `name:lower()` had a
+-- string there — the result is a string, hedged (partial). A receiver the solve DID fill keeps its own answer
+test('flowtype: a string method on an empty receiver returns the string library\'s type, partial', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.find(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.find(self) return 2 end\nreturn B\n',
+        ['main.lua'] = 'local function f(name)\n  local l = name:lower()\n  return l:find("x")\nend\nreturn f\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local v
+    for _, c in ipairs(store.data.calls) do if callrec.file(c) == 'main.lua' and tostring(callrec.full(c)) == 'l:find' then v = R.verdict(c) end end
+    eq('string', v and v.kind, 'what :lower() returns: ' .. vim.inspect(v))
+    eq(true, v and v.partial, 'the evidence is the call, not a flow: hedged')
+end)
+
 -- ★ A GENERIC RETURN IS ITS ARGUMENT (CART-1653): `assert(v: T, …): T` returns v. Read as an object of a type named T
 -- the algebra table never reached `A().node(…)` — 48 empty receivers on lua/cartograph
 test('flowtype: a profile function returning its generic parameter (assert) returns the argument, not a type named T', function ()
