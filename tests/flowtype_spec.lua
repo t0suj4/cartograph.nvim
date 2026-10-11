@@ -896,3 +896,53 @@ test('flowtype: a profile function passed as a value returns its declared type; 
     if not refused[12] then skip 'the extractor already decides parser:parse()' end
     ok(not (v[12] and v[12].kind == 'typed'), 'the local vim is not the profile: ' .. vim.inspect(v[12]))
 end)
+
+-- ★ PER-LOOP INSTANCES OF A SMALL CLOSED ITERATOR (CART-1643): a generic for binds its iterator to an instance of its
+-- own when the function is small and CLOSED (every name it reads is its own or a global, nothing nested) — so one loop's
+-- values do not pour into another's. tsutil.inext took every loop's node and saturated; with instances, lua/cartograph's
+-- executed WHOLE typed answers went 47 -> 126 right (runtime oracle). An iterator that reads an UPVALUE is shared
+test('flowtype: a closed iterator is instantiated per loop; one reading an upvalue is shared', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/a.lua'] = table.concat({
+            'local A = {}; A.__index = A',
+            'function A:run() return 1 end',
+            'local B = {}; B.__index = B',
+            'function B:run() return 2 end',
+            'local function inext(t, i) i = i + 1; local v = t[i]; if v then return i, v end end',
+            'local shift = 1',
+            'local function onext(t, i) i = i + shift; local v = t[i]; if v then return i, v end end',
+            'local function vals(s) s.i = s.i + 1; return s.list[s.i] end',
+            'local function nnext(t, i) local function step(j) return j + 1 end; i = step(i); local v = t[i]; if v then return i, v end end',
+            'local M = {}',
+            'function M.more()',
+            '    for a in vals, { list = { setmetatable({}, A) }, i = 0 } do a:run() end',
+            '    for b in vals, { list = { setmetatable({}, B) }, i = 0 } do b:run() end',
+            '    for _, c in nnext, { setmetatable({}, A) }, 0 do c:run() end',
+            '    for _, d in nnext, { setmetatable({}, B) }, 0 do d:run() end',
+            'end',
+            'function M.go()',
+            '    for _, x in inext, { setmetatable({}, A) }, 0 do x:run() end',
+            '    for _, y in inext, { setmetatable({}, B) }, 0 do y:run() end',
+            '    for _, z in onext, { setmetatable({}, A) }, 0 do z:run() end',
+            '    for _, w in onext, { setmetatable({}, B) }, 0 do w:run() end',
+            'end',
+            'return M',
+        }, '\n'),
+        ['plugin/fx.lua'] = 'require("fx.a")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v = {}
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/a.lua' and c.refused and c.at then v[atr.sl(c.at) + 1] = R.verdict(c) or false end
+    end
+    vim.fn.delete(root, 'rf')
+    ok(v[18] and v[18].kind == 'exact' and tostring(v[18].targets[1]):match('A:run'), 'inext loop 1: A only — ' .. vim.inspect(v[18]))
+    ok(v[19] and v[19].kind == 'exact' and tostring(v[19].targets[1]):match('B:run'), 'inext loop 2: B only — ' .. vim.inspect(v[19]))
+    ok(not (v[20] and v[20].kind == 'exact'), 'onext reads `shift`: shared, both loops hold A and B — ' .. vim.inspect(v[20]))
+    ok(v[12] and v[12].kind == 'exact' and tostring(v[12].targets[1]):match('A:run'), 'vals, its FIRST value: A only — ' .. vim.inspect(v[12]))
+    ok(v[13] and v[13].kind == 'exact' and tostring(v[13].targets[1]):match('B:run'), 'vals loop 2: B only — ' .. vim.inspect(v[13]))
+    ok(not (v[14] and v[14].kind == 'exact'), 'nnext holds a function of its own: shared — ' .. vim.inspect(v[14]))
+end)

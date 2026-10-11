@@ -446,7 +446,12 @@ local function build(store, opts)
         for o in each(a) do if pred(o) then addobj(b, o) end end
     end
     local funrets
-    local function bindcall(o, args, res)
+    local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
+    local function bindcall(o, args, res, site)
+        if site and clone_at then
+            local inst = clone_at(site, o)
+            if inst then o = inst end
+        end
         local fp = fnports[o]
         if not fp then
             -- (a TYPED function — the profile's `fun(): TSNode, string`, what TSNode:iter_children returns — returns its
@@ -465,12 +470,12 @@ local function build(store, opts)
             for i, r in ipairs(res) do local fr = fp.rets and fp.rets[i] or (i == 1 and fp.ret); if fr then edge(fr, r) end end
         else edge(fp.ret, res) end
     end
-    local function callc(callee, args, res)
+    local function callc(callee, args, res, site)
         local l = calls[callee]
         if not l then l = {}; calls[callee] = l end
-        l[#l + 1] = { args, res }
+        l[#l + 1] = { args, res, site }
         if top[callee] and spread and type(res) ~= 'table' then settop(res) end
-        for o in each(callee) do bindcall(o, args, res) end
+        for o in each(callee) do bindcall(o, args, res, site) end
     end
     -- type objects and the profiles' declared returns
     typeobj = function (t)
@@ -577,7 +582,7 @@ local function build(store, opts)
                 if d then
                     for _, ld in ipairs(loads[p] or {}) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
                     for _, st in ipairs(stores[p] or {}) do for _, o in ipairs(d) do edge(st[2], ofp(o, st[1])) end end
-                    for _, cl in ipairs(calls[p] or {}) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2]) end end
+                    for _, cl in ipairs(calls[p] or {}) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2], cl[3]) end end
                     for _, fl in ipairs(filters[p] or {}) do
                         for _, o in ipairs(d) do if fl[2](o) then addobj(fl[1], o) end end
                     end
@@ -644,16 +649,32 @@ local function build(store, opts)
     -- that one call is where cartograph.algebra's whole API comes from. Filled before the walk)
     local modfile = {}
     -- ── one file: a scoped walk emitting the constraints ─────────────────────────────────────────────────
-    local function walk_file(file, src)
+    -- ★ PER-SITE INSTANCES (CART-1643): a small CLOSED function — every name it reads its own or a global, no function
+    -- inside it — is instantiable: walked again from its own text with ports of its own. A generic for binds its
+    -- iterator to an instance per loop, so one loop's values no longer pour into every other's: tsutil.inext's node
+    -- parameter took a node from every loop in the tree and saturated, and every inext loop variable was partial
+    local CLONE, CLONE_MAX = {}, 600 -- fn object -> { file, text, id }
+    local function walk_file(file, src, clone)
         local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
         if not okp then return end
         local tree = parser:parse()[1]:root()
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
-        local function key_of(n) local l, c = n:start(); return file .. ':' .. l .. ':' .. c end
+        -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record)
+        local kfile = clone and ('clone:' .. file) or file
+        local function key_of(n) local l, c = n:start(); return kfile .. ':' .. l .. ':' .. c end
         local scopes = { {} }
+        -- (a function is CLOSED when every name it reads is its own or a global: fnbase holds each open function's
+        -- first scope, fnmeta whether it read past it or holds a function of its own)
+        local fnbase, fnmeta = {}, {}
         local function lookup(name)
-            for i = #scopes, 1, -1 do local p = scopes[i][name]; if p then return p end end
+            for i = #scopes, 1, -1 do
+                local p = scopes[i][name]
+                if p then
+                    for k = #fnbase, 1, -1 do if i < fnbase[k] then fnmeta[k].upv = true else break end end
+                    return p
+                end
+            end
             return port('g:' .. name)
         end
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
@@ -711,29 +732,42 @@ local function build(store, opts)
         end
         local function func(n)
             local l, c = n:start()
-            local id = fnmap[l .. ':' .. c] or ('ts:' .. file .. ':' .. l .. ':' .. c)
+            -- (an INSTANCE keeps the original's id — it is that function — and gets ports of its own)
+            local inst = clone and #fnstack == 0
+            -- (a function INSIDE an instance is at the snippet's position, which the file's map does not describe)
+            local id = inst and clone.id or (not clone and fnmap[l .. ':' .. c]) or ('ts:' .. kfile .. ':' .. l .. ':' .. c)
             local p = new()
             local o = newobj(id)
             addobj(p, o)
-            local fp = { params = {}, ret = port('r:' .. id), id = id }
+            local fp = { params = {}, ret = inst and new() or port('r:' .. id), id = id, inst = inst or nil }
             fp.rets = { fp.ret }
             fnports[o] = fp
+            for k = 1, #fnmeta do fnmeta[k].nested = true end
             scopes[#scopes + 1] = {}
+            fnbase[#fnbase + 1] = #scopes
+            local meta = {}
+            fnmeta[#fnmeta + 1] = meta
             local i = 0
             local nm = n:field('name')[1]
-            if nm and txt(nm):find(':', 1, true) then i = 1; fp.params[1] = declare('self', port('a:' .. id .. ':1')) end
+            local method = nm and txt(nm):find(':', 1, true)
+            if method then i = 1; fp.params[1] = declare('self', inst and new() or port('a:' .. id .. ':1')) end
             local ps = n:field('parameters')[1]
             for _, x in tsutil.inext, ps or EMPTY_NODE, -1 do
                 if x:named() and x:type() == 'identifier' then
                     i = i + 1
-                    fp.params[i] = declare(txt(x), port('a:' .. id .. ':' .. i))
+                    fp.params[i] = declare(txt(x), inst and new() or port('a:' .. id .. ':' .. i))
                 end
             end
             fnstack[#fnstack + 1] = fp
             local body = n:field('body')[1]
             if body then for _, s in tsutil.inext, body, -1 do if s:named() then stmt(s) end end end
             fnstack[#fnstack] = nil
+            fnbase[#fnbase] = nil
+            fnmeta[#fnmeta] = nil
             scopes[#scopes] = nil
+            if not clone and not meta.upv and not meta.nested and body and #txt(n) <= CLONE_MAX then
+                CLONE[o] = { file = file, id = id, text = 'return function ' .. (method and ('(self' .. (txt(ps):match('^%(%s*%)$') and ')' or (', ' .. txt(ps):sub(2)))) or txt(ps)) .. '\n' .. txt(body) .. '\nend\n' }
+            end
             return p
         end
         local function callv(n, want)
@@ -931,10 +965,11 @@ local function build(store, opts)
                 for i, v in ipairs(vals) do
                     if fp then
                         local r = fp.rets[i]
-                        if not r then r = port('r:' .. fp.id .. ':' .. i); fp.rets[i] = r end
+                        if not r then r = fp.inst and new() or port('r:' .. fp.id .. ':' .. i); fp.rets[i] = r end
                         edge(v, r)
-                    elseif i == 1 then
+                    elseif i == 1 and not clone then
                         edge(v, port('mod:' .. file)); modports[#modports + 1] = v
+                    elseif i == 1 then clone.port = v
                     end
                 end
             elseif t == 'for_statement' then
@@ -974,7 +1009,8 @@ local function build(store, opts)
                         local ctl = new()
                         if trip[3] then edge(trip[3], ctl) end
                         if V[1] then edge(V[1], ctl) end
-                        callc(trip[1], { trip[2] or new(), ctl }, V)
+                        -- (the site: each loop binds a small closed iterator to an instance of its own — CLONE)
+                        callc(trip[1], { trip[2] or new(), ctl }, V, ctl)
                     end
                 elseif cl then
                     for _, x in tsutil.inext, cl, -1 do
@@ -1003,6 +1039,22 @@ local function build(store, opts)
             end
         end
         for _, s in tsutil.inext, tree, -1 do if s:named() then stmt(s) end end
+    end
+    local instances = {}
+    clone_at = function (site, o)
+        local cl = CLONE[o]
+        if not cl then return nil end
+        local per = instances[site]
+        if not per then per = {}; instances[site] = per end
+        local x = per[o]
+        if x == nil then
+            local info = { id = cl.id }
+            walk_file(cl.file, cl.text, info)
+            x = false
+            if info.port then for y in each(info.port) do x = y end end
+            per[o] = x
+        end
+        return x or nil
     end
     local files = {}
     do
