@@ -28,6 +28,10 @@ local EMPTY_NODE = { child = function () return nil end } -- (an absent child li
 
 local M = {}
 M.CAP = 64
+-- ★ ONE EMPTY TABLE FOR EVERY ABSENT LIST (CART-1656's allocation census): `ipairs(loads[p] or {})` in the solve loop
+-- built a fresh empty table per port per visit — 16 M of the 27 M tables one solve of lua/cartograph allocated were
+-- such fallbacks. Iterated only: NEVER written
+local NOTHING = setmetatable({}, { __newindex = function () error('flowtype: NOTHING is read-only') end })
 -- ★ DENSE SETS (CART-1643): a set past M.BIG objects becomes a BITSET (LuaJIT FFI uint32 words), and so does a delta,
 -- so a big delta moves along an edge as a word loop (new = delta & ~target) instead of one hash probe per object —
 -- the complete solve of arktype offered objects 14.7 BILLION times to add 52 M. M.BIG > M.CAP: under the default cap
@@ -129,7 +133,7 @@ local function build(store, opts)
         local l = okeys_cache[o]
         if l then return l end
         l = {}
-        for f in pairs(ofield[o] or {}) do l[#l + 1] = f end
+        for f in pairs(ofield[o] or NOTHING) do l[#l + 1] = f end
         table.sort(l)
         okeys_cache[o] = l
         return l
@@ -389,7 +393,7 @@ local function build(store, opts)
             elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' then pull(m[fk]) end end
             else pull(ofp(o, f)); pull(ofp(o, '[]')) end
         end
-        for c in pairs(protos[o] or {}) do load_obj(c, f, dst, seen, strict) end
+        for c in pairs(protos[o] or NOTHING) do load_obj(c, f, dst, seen, strict) end
     end
     -- the loads recorded on o, replayed on c (a prototype o gained) — field names in ONE order
     local function replay_loads(o, c)
@@ -496,7 +500,7 @@ local function build(store, opts)
         local P = require 'cartograph.spec.profile'
         for _, nm in ipairs { P.base_for('lua'), store.data.profile } do
             local pr = nm and P.load(nm)
-            for k, v in pairs(pr and pr.sigs or {}) do if PSIGS[k] == nil then PSIGS[k] = v end end
+            for k, v in pairs(pr and pr.sigs or NOTHING) do if PSIGS[k] == nil then PSIGS[k] = v end end
         end
     end
     -- (a declared type that is ONE type: `X?` / `X|nil` is X, a real union is none)
@@ -538,7 +542,7 @@ local function build(store, opts)
         local rk = type(sg) == 'table' and sg.returns and sg.returns[k]
         local rt = rk and type(rk.type) == 'string' and rk.type:gsub('%?$', '')
         if rt and rt:match('^[A-Z]%d?$') then
-            for i, pm in ipairs(sg.params or {}) do
+            for i, pm in ipairs(sg.params or NOTHING) do
                 if pm.name ~= '...' and type(pm.type) == 'string' and pm.type:gsub('%?$', '') == rt then g = i; break end
             end
         end
@@ -588,42 +592,42 @@ local function build(store, opts)
             if order == 'fifo' and head > tail then head, tail = 1, 0 end
             inwl[p] = nil
             if top[p] then
-                for q in pairs(succ[p] or {}) do settop(q) end
+                for q in pairs(succ[p] or NOTHING) do settop(q) end
                 if spread and fowner[p] then readers(fowner[p], fname[p], settop) end
-                for _, ld in ipairs(loads[p] or {}) do settop(ld[2]) end
-                for _, cl in ipairs(calls[p] or {}) do if type(cl[2]) ~= 'table' then settop(cl[2]) end end
+                for _, ld in ipairs(loads[p] or NOTHING) do settop(ld[2]) end
+                for _, cl in ipairs(calls[p] or NOTHING) do if type(cl[2]) ~= 'table' then settop(cl[2]) end end
             else
                 local d = delta[p]
                 delta[p] = nil
                 if d and d.bs then
                     -- (a DENSE delta: the copy edges and the field's readers in bulk; the rest per object)
                     local db = d
-                    for q in pairs(succ[p] or {}) do addbits(q, db) end
+                    for q in pairs(succ[p] or NOTHING) do addbits(q, db) end
                     if fowner[p] then readers(fowner[p], fname[p], function (q) addbits(q, db) end) end
                     d = {}
                     for o in bs_iter(db) do d[#d + 1] = o end
                 elseif d then
-                    for q in pairs(succ[p] or {}) do for _, o in ipairs(d) do addobj(q, o) end end
+                    for q in pairs(succ[p] or NOTHING) do for _, o in ipairs(d) do addobj(q, o) end end
                     if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in ipairs(d) do addobj(q, o) end end) end
                 end
                 if d then
-                    for _, ld in ipairs(loads[p] or {}) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
-                    for _, st in ipairs(stores[p] or {}) do for _, o in ipairs(d) do edge(st[2], ofp(o, st[1])) end end
-                    for _, cl in ipairs(calls[p] or {}) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2], cl[3]) end end
-                    for _, fl in ipairs(filters[p] or {}) do
+                    for _, ld in ipairs(loads[p] or NOTHING) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
+                    for _, st in ipairs(stores[p] or NOTHING) do for _, o in ipairs(d) do edge(st[2], ofp(o, st[1])) end end
+                    for _, cl in ipairs(calls[p] or NOTHING) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2], cl[3]) end end
+                    for _, fl in ipairs(filters[p] or NOTHING) do
                         for _, o in ipairs(d) do if fl[2](o) then addobj(fl[1], o) end end
                     end
-                    for _, mf in ipairs(mflows[p] or {}) do
+                    for _, mf in ipairs(mflows[p] or NOTHING) do
                         for _, o in ipairs(d) do
                             local tn = TNAME[o]
                             local rt = tn and retk(tn .. '#' .. mf[1], mf[3] or 1)
                             if rt then addobj(mf[2], typeobj(rt)) end
                         end
                     end
-                    for _, idx in ipairs(protos_at[p] or {}) do
+                    for _, idx in ipairs(protos_at[p] or NOTHING) do
                         for _, o in ipairs(d) do for c in each(idx) do protolink(o, c) end end
                     end
-                    for _, t in ipairs(protos_rev[p] or {}) do
+                    for _, t in ipairs(protos_rev[p] or NOTHING) do
                         for o in each(t) do for _, c in ipairs(d) do protolink(o, c) end end
                     end
                 end
@@ -649,7 +653,7 @@ local function build(store, opts)
     -- `load()`, `parser:parse()[1]:root()` and `parser:parse()` — and by position alone the inner record overwrote
     -- the outer, so the outer, ambiguous call was never probed)
     local call_at = {}
-    for _, c in ipairs(store.data.calls or {}) do
+    for _, c in ipairs(store.data.calls or NOTHING) do
         local at = c.at
         if at then
             local k = callrec.file(c) .. ':' .. atr.sl(at) .. ':' .. atr.sc(at)
@@ -659,7 +663,7 @@ local function build(store, opts)
         end
     end
     local req_at = {}
-    for _, e in ipairs(store.data.edges or {}) do
+    for _, e in ipairs(store.data.edges or NOTHING) do
         if e.kind == 'import' and e.at then
             -- (a range is a table only until ingest FOLDS it into an index — after any ingest every one is a number:
             -- a table-only guard here left this map empty, and no `require` ever reached its module)
@@ -1269,7 +1273,7 @@ local function build(store, opts)
                     if gp[o] then return true end
                     if seen[o] then return false end
                     seen[o] = true
-                    for c in pairs(protos[o] or {}) do if chain(c, seen) then return true end end
+                    for c in pairs(protos[o] or NOTHING) do if chain(c, seen) then return true end end
                     return false
                 end
                 for o in each(gf[1]) do
@@ -1337,10 +1341,10 @@ local function build(store, opts)
         local i = 1
         while i <= #esc do
             local o = esc[i]; i = i + 1
-            for _, fp in pairs(ofield[o] or {}) do
+            for _, fp in pairs(ofield[o] or NOTHING) do
                 for x in each(fp) do if not escaped[x] then escaped[x] = true; esc[#esc + 1] = x end end
             end
-            for c in pairs(protos[o] or {}) do if not escaped[c] then escaped[c] = true; esc[#esc + 1] = c end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] then escaped[c] = true; esc[#esc + 1] = c end end
         end
     end
     local field_hit, params_hit = {}, false
@@ -1357,8 +1361,8 @@ local function build(store, opts)
         local i = 1
         while i <= #q do
             local o = q[i]; i = i + 1
-            for _, fp in pairs(ofield[o] or {}) do for x in each(fp) do reach(x) end end
-            for c in pairs(protos[o] or {}) do reach(c) end
+            for _, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do reach(x) end end
+            for c in pairs(protos[o] or NOTHING) do reach(c) end
             local fpp = fnports[o]
             if fpp then
                 for _, pp in ipairs(fpp.params) do taint(pp) end
@@ -1368,10 +1372,10 @@ local function build(store, opts)
     end
     while #twork > 0 do
         local p = twork[#twork]; twork[#twork] = nil
-        for q in pairs(succ[p] or {}) do taint(q) end
+        for q in pairs(succ[p] or NOTHING) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
-        for _, ld in ipairs(loads[p] or {}) do taint(ld[2]) end
-        for _, st in ipairs(stores[p] or {}) do
+        for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end
+        for _, st in ipairs(stores[p] or NOTHING) do
             local f = st[1]
             if not field_hit[f] then
                 field_hit[f] = true
@@ -1382,14 +1386,14 @@ local function build(store, opts)
             params_hit = true
             for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end
         end
-        for _, cl in ipairs(calls[p] or {}) do
+        for _, cl in ipairs(calls[p] or NOTHING) do
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
         end
-        for _, fl in ipairs(filters[p] or {}) do taint(fl[1]) end
-        for _, d in ipairs(gf_of[p] or {}) do taint(d) end
-        for _, mf in ipairs(mflows[p] or {}) do taint(mf[2]) end
-        for _, t in ipairs(protos_rev[p] or {}) do
-            for o in each(t) do for f, l in pairs(rd[o] or {}) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end end
+        for _, fl in ipairs(filters[p] or NOTHING) do taint(fl[1]) end
+        for _, d in ipairs(gf_of[p] or NOTHING) do taint(d) end
+        for _, mf in ipairs(mflows[p] or NOTHING) do taint(mf[2]) end
+        for _, t in ipairs(protos_rev[p] or NOTHING) do
+            for o in each(t) do for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end end
         end
     end
     local partial_hit -- (set by targets: a field port it read was tainted)
@@ -1405,7 +1409,7 @@ local function build(store, opts)
         if p and top[p] then return true end
         if p then for x in each(p) do out[x] = true end end
         local t = false
-        for c in pairs(protos[o] or {}) do t = targets(c, m, out, seen) or t end
+        for c in pairs(protos[o] or NOTHING) do t = targets(c, m, out, seen) or t end
         return t
     end
     -- (does o — or its prototype chain — hold functions under a key the walk could not name, `t[k] = f`?)
@@ -1414,7 +1418,7 @@ local function build(store, opts)
         seen[o] = true
         local p = ofield[o] and ofield[o]['[]']
         if p then for x in each(p) do if fnports[x] or x == EXT then return true end end end
-        for c in pairs(protos[o] or {}) do if dynfn(c, seen) then return true end end
+        for c in pairs(protos[o] or NOTHING) do if dynfn(c, seen) then return true end end
         return false
     end
     stats.partial = 0
@@ -1512,7 +1516,7 @@ local function build(store, opts)
                     if gp[o] then return true end
                     if seen[o] then return false end
                     seen[o] = true
-                    for c in pairs(protos[o] or {}) do if chain(c, seen) then return true end end
+                    for c in pairs(protos[o] or NOTHING) do if chain(c, seen) then return true end end
                     return false
                 end
                 for o in each(pr.recv) do if chain(o, {}) then keep[o] = true end end
@@ -1577,7 +1581,7 @@ local function build(store, opts)
         R.proto_fields = function (site, f)
             local out, computed, seen = {}, false, {}
             local function go(o, depth)
-                for c in pairs(protos[o] or {}) do
+                for c in pairs(protos[o] or NOTHING) do
                     if not seen[c] and depth < 8 then
                         seen[c] = true
                         if fnports[c] then computed = true
@@ -1589,7 +1593,7 @@ local function build(store, opts)
                     end
                 end
             end
-            for _, o in ipairs(of_site[site] or {}) do go(o, 0) end
+            for _, o in ipairs(of_site[site] or NOTHING) do go(o, 0) end
             local l = {} for k in pairs(out) do l[#l + 1] = k end; table.sort(l)
             return l, computed
         end
@@ -1618,7 +1622,7 @@ local function build(store, opts)
                         elseif f == '[]' then for fk, fp in pairs(m) do if fk ~= '{k}' then addp(dst, fp) end end
                         else if m[f] then addp(dst, m[f]) end; if m['[]'] then addp(dst, m['[]']) end end
                     end
-                    for c in pairs(protos[o] or {}) do via(c, depth + 1) end
+                    for c in pairs(protos[o] or NOTHING) do via(c, depth + 1) end
                 end
                 for _, o in ipairs(os) do via(o, 0) end
             end
@@ -1634,13 +1638,13 @@ local function build(store, opts)
                     seen[o] = true
                     local m = ofield[o]
                     if m and m[pr.member] then seed(m[pr.member]) end
-                    for c in pairs(protos[o] or {}) do mem(c, seen) end
+                    for c in pairs(protos[o] or NOTHING) do mem(c, seen) end
                 end
                 for _, o in ipairs(objs(pr.recv)) do mem(o, {}) end
             end
         end
         local h = 1
-        while h <= #q do local p = q[h]; h = h + 1; for _, r in ipairs(pred[p] or {}) do seed(r) end end
+        while h <= #q do local p = q[h]; h = h + 1; for _, r in ipairs(pred[p] or NOTHING) do seed(r) end end
         local sel, n = {}, 0
         for o, fp in pairs(fnports) do
             if not fp.inst and fp.id and tostring(fp.id):find('%.lua::') then -- (instances are the Lua walker's)
