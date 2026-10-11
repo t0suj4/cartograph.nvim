@@ -27,9 +27,9 @@ return {
     name = 'hoist-empty',
     kind = 'write',
     tags = { 'code', 'optimize' },
-    summary = 'the optimizer\'s empty-fallback pass: every `t or {}` built only to be READ (a builtin that reads it — effects.reads —, pairs / ipairs as a for iterator, `#`) reads one read-only empty table per file; files = the files (default every Lua file); a file that would not compile with the constant is skipped by name',
-    params = { files = 'list?' },
-    build = function (p) return T.step('hoist-empty', { files = p.files }) end,
+    summary = 'the optimizer\'s empty-fallback pass: every `t or {}` built only to be READ (a builtin that reads it — effects.reads —, pairs / ipairs as a for iterator, `#`) reads one read-only empty table per file; files = the files (default every Lua file); nodes = a SCOPE (ids or file::name — e.g. the functions alloc-census found hot): only the sites inside them; a file that would not compile with the constant is skipped by name',
+    params = { files = 'list?', nodes = 'list?' },
+    build = function (p) return T.step('hoist-empty', { files = p.files, nodes = p.nodes }) end,
     examples = {
         {
             name = 'the iterator, the length and table.concat read the constant; a named, selected, compared or locally rebound one stays',
@@ -43,6 +43,16 @@ return {
                     and s:find('rawequal(t or {}, t)', 1, true) and s:find('for _ in ipairs(t or {})', 1, true)
                     and s:find('tostring(t or {})', 1, true)
                 return ok and true or false, s
+            end },
+        },
+        {
+            name = 'a SCOPE narrows the hoist: nodes = { m.lua::M.f } — M.f\'s fallback moves, M.h\'s in the same file stays',
+            files = { ['m.lua'] = "local M, SEP = {}, ','\nfunction M.f(t) return table.concat(t or {}, SEP) end\nfunction M.h(t) return table.concat(t or {}, SEP) end\nreturn M\n" },
+            params = { nodes = { 'm.lua::M.f' } },
+            expect = { status = 'done', applied = 1, check = function (root)
+                local s = io.open(root .. '/m.lua'):read('a')
+                return s:find('function M.f(t) return table.concat(t or EMPTY_RO, SEP) end', 1, true) ~= nil
+                    and s:find('function M.h(t) return table.concat(t or {}, SEP) end', 1, true) ~= nil, s
             end },
         },
         {

@@ -626,27 +626,58 @@ end
 -- file instead of building a fresh one per call. One constant per file, never per site: a file-level local is an upvalue
 -- of every function that reads it, and a function at the 60-upvalue limit (treesitter's M.extract) must still compile —
 -- every rewritten file is compile-checked, and one that does not compile is skipped BY NAME (a frontier), the rest go.
---   plan_empty(store, { files = { rel… }? })   (default: every Lua file of the world)
+--   plan_empty(store, { files = { rel… }?, scope = a cartograph.cut?, nodes = { id | 'file::name' … }? })
+--   (default: every Lua file of the world). A SCOPE narrows the rewrite to the sites inside it — a cut (cut.of_frame:
+--   the browser's current view; cut.of_nodes: the functions alloc-census found hot), or `nodes`, whose own extents
+--   make one. Narrowing a rewrite is always legal: a cut only removes sites, it never invents one.
 function M.plan_empty(store, args)
     args = args or {}
     local txn, hazard = require 'cartograph.txn', require 'cartograph.hazard'
+    local cut = require 'cartograph.cut'
     local root = store.data and store.data.root
     if not root then return nil, 'no world is loaded', 'ill-posed' end
+    local sc = args.scope
+    if not sc and args.nodes then
+        local ids = {}
+        for _, r in ipairs(args.nodes) do
+            local id = store.node(r) and r
+            if not id then
+                for _, n in ipairs(store.data.nodes or {}) do
+                    if type(n.id) == 'string' and n.id:sub(1, #r + 1) == r .. '@' then id = n.id; break end
+                end
+            end
+            if not id then return nil, ('no node `%s` in this world (an id, or file::name)'):format(tostring(r)), 'ill-posed' end
+            ids[#ids + 1] = id
+        end
+        sc = cut.of_nodes(store, ids, 'hoist-empty scope')
+        if not sc then return nil, 'the nodes named have no extent to scope by', 'ill-posed' end
+    end
     local files = args.files
+    if not files and sc then
+        -- (a scope's files are the only ones it can hold a site in)
+        local seen = {}
+        files = {}
+        for _, s in ipairs(sc.spans or {}) do if not seen[s.file] then seen[s.file] = true; files[#files + 1] = s.file end end
+        table.sort(files)
+    end
     if not files then
         files = {}
         -- (a test FIXTURE is data, its text asserted: never rewritten)
         for _, f in ipairs(store.files or {}) do if f:match('%.lua$') and not f:match('/fixtures/') then files[#files + 1] = f end end
         table.sort(files)
     end
-    local edits, touched, stamps, skipped, nsite, nclosed = {}, {}, {}, {}, 0, 0
+    local edits, touched, stamps, skipped, nsite, nclosed, noutside = {}, {}, {}, {}, 0, 0, 0
     for _, rel in ipairs(files) do
         local text = txn.read_file(root, rel)
         local all = text and require('cartograph.emptyfallback').empty_fallbacks(text, 'lua') or {}
         -- (a site in a CLOSED function is left: the constant would give that function its first outer reference, and a
         -- closed function is one cartograph may lift as code — a qlower kernel, a closure mix assembles from source)
         local sites = {}
-        for _, s in ipairs(all) do if s.closed then nclosed = nclosed + 1 else sites[#sites + 1] = s end end
+        for _, s in ipairs(all) do
+            if s.closed then nclosed = nclosed + 1
+            elseif sc and not cut.contains(store, sc, rel, s.range[1] + 1) then noutside = noutside + 1
+            else sites[#sites + 1] = s end
+        end
         if #sites > 0 then
             -- (a name the file does not use)
             local name, k = 'EMPTY_RO', 0
@@ -689,7 +720,8 @@ function M.plan_empty(store, args)
         touched = touched, stamps = stamps, refspecs = {}, edits = edits, hazards = hazards,
         preserves = 'unreviewed',
         preserves_why = 'each hoisted `{}` is the right operand of `or` in a position nothing can name, write or compare (a builtin that only READS it, effects.reads; pairs / ipairs as a for iterator; `#`), and nothing else names the shared table',
-        desc = ('hoist-empty: %d empty fallback(s) in %d file(s) read one read-only constant'):format(nsite, #touched),
+        desc = ('hoist-empty: %d empty fallback(s) in %d file(s) read one read-only constant%s'):format(nsite, #touched,
+            sc and (' (scope %s: %d outside it left)'):format(tostring(sc.label), noutside) or ''),
     }
     return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
 end
