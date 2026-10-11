@@ -5,11 +5,6 @@
 -- id pass is a pure reduce in the PARENT (global lookups live there —
 -- slice-local uniqueness is not global uniqueness).
 
--- LuaJIT's default trace budgets (maxtrace=1000, maxmcode=512K) are too
--- small for the extractor: traces flush and recompile in a churn loop that
--- profiled at 15-17% of wall. Raising them measured -14% on server /
--- -19% on libs (J: 16.5%->2.2%). This is OUR process — tune freely.
-pcall(function () require('jit.opt').start('maxtrace=4000', 'maxmcode=8192') end)
 
 local T0 = vim.uv.hrtime() -- whole-process work time (spawn cost is the
 -- parent's dt minus this; the split says pipe-vs-process economics)
@@ -21,6 +16,10 @@ local job = vim.json.decode(fd:read('a'))
 fd:close()
 
 for _, p in ipairs(job.rtp or {}) do vim.opt.rtp:append(p) end
+-- LuaJIT's default trace budgets are too small for the extractor (the
+-- measurements are in jittune; it is reachable only now, from job.rtp).
+-- This is OUR process — tune freely.
+require('cartograph.jittune').batch()
 local ts = require 'cartograph.providers.treesitter'
 local codec = require 'cartograph.cache' -- binary encode/decode
 

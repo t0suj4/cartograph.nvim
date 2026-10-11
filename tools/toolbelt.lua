@@ -15,6 +15,7 @@
 local REPO = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 package.path = REPO .. '/lua/?.lua;' .. REPO .. '/lua/?/init.lua;' .. package.path
 vim.opt.rtp:append(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
+require('cartograph.jittune').batch() -- (a batch process: LuaJIT's trace budgets, measured in jittune)
 local tb = require 'cartograph.toolbelt'
 local cmd = arg[1] or 'list'
 if cmd == 'list' then

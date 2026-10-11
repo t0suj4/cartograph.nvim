@@ -19,6 +19,11 @@ if not st:match('cartograph%-test%-state') then
         :format(st))
 end
 
+-- (the suite is a batch process of ours: LuaJIT's trace budgets, see jittune. OPTIONAL: a runner started from a
+-- fixture — prun_spec's — has no cartograph on its path, and an error here would leave `-c luafile` hanging open)
+local okj, jt = pcall(require, 'cartograph.jittune')
+if okj then jt.batch() end
+
 local reg = {}
 
 -- the spec file each test came from (TIMES groups by it)
