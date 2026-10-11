@@ -9178,9 +9178,11 @@ local MATCH_OPTS = { match_limit = 65536 }
             -- only as long as their tree (and its owning parser) does
             local function parse_into()
                 local _pp = pstart()
-                rawtree = raw_parse(lang, M.parse_view(lang, src))
+                local view = M.parse_view(lang, src)
+                rawtree = raw_parse(lang, view)
                 if rawtree then
                     tsroot = rawtree:root()
+                    require('cartograph.parsecache').put(view, lang, rawtree, tsroot) -- (flowtype and lint reuse it)
                 else
                     local okp, parser =
                         pcall(vim.treesitter.get_string_parser, M.parse_view(lang, src), lang)

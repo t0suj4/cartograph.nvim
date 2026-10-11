@@ -669,8 +669,8 @@ local function tagcover_findings(store)
             local fd = io.open(store.abs(file), 'r')
             if fd then
                 local src = fd:read('*a'); fd:close()
-                local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, 'lua'), 'lua')
-                local tree = okp and parser and parser:parse()[1]
+                local troot = require('cartograph.parsecache').root(require('cartograph.parseview').view(src, 'lua'), 'lua')
+                local tree = troot and { root = function () return troot end } -- (the shared tree: one parse per text)
                 if tree then
                     -- field -> set of literal values CONSTRUCTED for it in this module
                     -- field -> fn -> set of literal values TESTED against it
@@ -763,8 +763,8 @@ local function truncation_findings(store)
             if fd then
                 local src = fd:read('*a')
                 fd:close()
-                local okp, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, 'lua'), 'lua')
-                local tree = okp and parser and parser:parse()[1]
+                local troot = require('cartograph.parsecache').root(require('cartograph.parseview').view(src, 'lua'), 'lua')
+                local tree = troot and { root = function () return troot end } -- (the shared tree: one parse per text)
                 if tree then
                     local function has_call(n) -- a call anywhere in the and/or chain
                         local t = n:type()

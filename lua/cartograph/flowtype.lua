@@ -707,17 +707,13 @@ local function build(store, opts)
     local ARRAYFN = { ['table.concat'] = true, ['table.sort'] = true, ['table.remove'] = true, ['table.unpack'] = true,
         unpack = true, ['vim.list_extend'] = true, ['vim.tbl_islist'] = true, ['vim.islist'] = true }
     local CTXFNS = opts.ctxfns
-    local CTX, CTXTREES, ctx_direct = {}, {}, {}
+    local CTX, ctx_direct = {}, {}
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
-        local tree
-        if isctx and CTXTREES[file] then tree = CTXTREES[file][2]
-        else
-            local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
-            if not okp then return end
-            tree = parser:parse()[1]:root()
-            if isctx then CTXTREES[file] = { parser, tree } end
-        end
+        -- (one parse per text per process, shared with the extractor and the lint rules — a snippet instance's text is
+        -- its own entry)
+        local tree = require('cartograph.parsecache').root(src, 'lua')
+        if not tree then return end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
         -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record — a
