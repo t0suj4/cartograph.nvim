@@ -135,6 +135,14 @@ function M.inext(n, i)
     local c = n:child(i)
     if c then return i, c end
 end
+-- the NAMED children only (`for _, c in tsutil.inamed, n, -1 do`): a walk that skips anonymous tokens never
+-- materializes them — 40% of lua/cartograph's nodes are punctuation and keywords, and every child the walk touches
+-- is a fresh userdata (a named-only walk of flowtype.lua is 1.8x faster than inext + `if c:named()`)
+function M.inamed(n, i)
+    i = i + 1
+    local c = n:named_child(i)
+    if c then return i, c end
+end
 
 -- a REFUSAL is a place: when resolution declines to pick, the call keeps the
 -- rule that refused and (capped, sorted — worker == inline) the candidate ids

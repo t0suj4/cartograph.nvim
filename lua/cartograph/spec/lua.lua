@@ -542,7 +542,7 @@ local function lua_derived_locals(fn, src, pmap)
         return r and known[node_text(r, src)]
     end
     local function walk(n)
-        for _, c in inext, n, -1 do
+        for _, c in tsutil.inamed, n, -1 do -- (named children only: a token matches no case below and has no children)
             local t = c:type()
             if t == 'function_definition' or t == 'function_declaration' then -- (a nested function: its own params)
             else

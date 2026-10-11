@@ -127,7 +127,7 @@ function M.collect(lang, tsroot, src)
                 if f then out[#out + 1] = { class = cls, field = node_text(f, src), fn = fn, node = n, parent = p } end
             end
         end
-        for _, c in tsutil.inext, n, -1 do walk(c, n, p) end
+        for _, c in tsutil.inamed, n, -1 do walk(c, n, p) end -- (named children only: every mention is a named node)
     end
     walk(tsroot, tsroot:parent(), nil)
     return out

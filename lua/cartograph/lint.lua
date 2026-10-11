@@ -704,9 +704,7 @@ local function tagcover_findings(store)
                                 tested[field][fnk][unq(rhs)] = true
                             end
                         end
-                        for _, c in tsutil.inext, n, -1 do
-                            if c:named() then walk(c, fnk) end
-                        end
+                        for _, c in tsutil.inamed, n, -1 do walk(c, fnk) end -- (named children only: no userdata for tokens)
                     end
                     walk(tree:root(), nil)
                     for TAG, values in pairs(built) do
