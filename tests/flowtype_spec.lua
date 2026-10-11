@@ -744,3 +744,76 @@ test('flowtype: pcall(require, "m") reaches module m', function ()
     eq('exact', v and v.kind, vim.inspect(v))
     ok(v and tostring(v.targets[1]):match('core%.lua::M%.run'), vim.inspect(v and v.targets))
 end)
+
+-- ★ AN OBJECT WITHOUT THE MEMBER IS NOT THE RECEIVER (CART-1643): `x:upper()` on a table that has no `upper` raises,
+-- so a program past the call held the string there. The exact answer always read a call that way; a string beside
+-- such a table read `none` (275 of lua/cartograph's non-empty `none` receivers). A table that holds functions under a
+-- key the walk could not name (`t[k] = f`) may have the member: no claim
+test('flowtype: a receiver object lacking the member is excluded; one with unnamed function keys is not', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/a.lua'] = 'local A = {}\nfunction A.upper(s) return s end\nreturn A\n',
+        ['lua/fx/b.lua'] = 'local B = {}\nfunction B.upper(s) return s end\nreturn B\n',
+        ['lua/fx/main.lua'] = table.concat({
+            'local M = {}',
+            'function M.pick(c) if c then return "text" end return { n = 1 } end',
+            'local x = M.pick(true)',
+            'local r1 = x:upper()',
+            'local dyn = { n = 2 }',
+            'function M.put(k) dyn[k] = function () return 1 end end',
+            'function M.pick2(c) if c then return "text" end return dyn end',
+            'local y = M.pick2(true)',
+            'local r2 = y:upper()',
+            'return M',
+        }, '\n'),
+        ['plugin/fx.lua'] = 'require("fx.main"); require("fx.a"); require("fx.b")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v, refused = {}, {}
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/main.lua' and c.at and callrec.callee(c) == 'upper' then
+            v[atr.sl(c.at) + 1] = R.verdict(c) or false; refused[atr.sl(c.at) + 1] = c.refused
+        end
+    end
+    vim.fn.delete(root, 'rf')
+    if not refused[4] or not refused[9] then skip 'the extractor already decides the upper() calls' end
+    eq('string', v[4] and v[4].kind, 'the table has no upper: ' .. vim.inspect(v[4]))
+    eq(false, v[9], 'dyn may hold upper under a key the walk cannot name: ' .. vim.inspect(v[9]))
+end)
+
+-- (…and an ESCAPED object without the member may have gained it where the solve no longer follows it: the answer
+-- that excludes it is partial)
+test('flowtype: excluding an escaped receiver object that lacks the member makes the answer partial', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/a.lua'] = 'local A = {}\nfunction A.upper(s) return s end\nreturn A\n',
+        ['lua/fx/b.lua'] = 'local B = {}\nfunction B.upper(s) return s end\nreturn B\n',
+        ['lua/fx/main.lua'] = table.concat({
+            'local M = {}',
+            'local t = { n = 1 }',
+            'local function keep(v) return v end',
+            'keep(t); keep({ n = 2 }); keep({ n = 3 })',
+            'function M.pick(c) if c then return "text" end return t end',
+            'local x = M.pick(true)',
+            'local r1 = x:upper()',
+            'return M',
+        }, '\n'),
+        ['plugin/fx.lua'] = 'require("fx.main"); require("fx.a"); require("fx.b")\n',
+    })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local R = flowtype.solve(store, { open = false })
+    flowtype.CAP = cap
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v, refused
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/main.lua' and c.at and atr.sl(c.at) == 6 then v = R.verdict(c); refused = c.refused end
+    end
+    vim.fn.delete(root, 'rf')
+    if not refused then skip 'the extractor already decides x:upper()' end
+    eq('string', v and v.kind, vim.inspect(v))
+    eq(true, v and v.partial, 't escaped into keep: it may have gained upper unseen — ' .. vim.inspect(v))
+end)

@@ -1136,6 +1136,15 @@ local function build(store, opts)
         for c in pairs(protos[o] or {}) do t = targets(c, m, out, seen) or t end
         return t
     end
+    -- (does o — or its prototype chain — hold functions under a key the walk could not name, `t[k] = f`?)
+    local function dynfn(o, seen)
+        if seen[o] then return false end
+        seen[o] = true
+        local p = ofield[o] and ofield[o]['[]']
+        if p then for x in each(p) do if fnports[x] or x == EXT then return true end end end
+        for c in pairs(protos[o] or {}) do if dynfn(c, seen) then return true end end
+        return false
+    end
     stats.partial = 0
     for _, pr in ipairs(probes) do
         local kind, v
@@ -1149,8 +1158,22 @@ local function build(store, opts)
                 if tn then
                     if tn == 'string' or PSIGS[tn .. '#' .. pr.member] then tyname = tn end
                 else
-                    other = true
-                    if targets(o, pr.member, out, {}) then sat = true end
+                    local mine = {}
+                    if targets(o, pr.member, mine, {}) then sat = true end
+                    if next(mine) then
+                        other = true
+                        for x in pairs(mine) do out[x] = true end
+                    elseif dynfn(o, {}) then
+                        -- (it may hold the member under a key the walk could not name: no claim)
+                        sat = true
+                    elseif escaped[o] then
+                        -- (it may have gained the member where the solve no longer follows it)
+                        partial_hit = true
+                    end
+                    -- ★ AN OBJECT WITHOUT THE MEMBER IS NOT THIS CALL'S RECEIVER (CART-1643): `x:find()` on it would
+                    -- raise, so a program that gets past the call did not hold it there. The exact answer always
+                    -- read the call that way (only the objects that HAVE the member give targets); a string beside
+                    -- such tables read `none`, and 275 of lua/cartograph's 566 non-empty `none` receivers were that
                 end
             end
             local fns, unknown = {}, sat
