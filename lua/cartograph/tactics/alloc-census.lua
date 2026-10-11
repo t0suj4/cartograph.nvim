@@ -8,6 +8,10 @@
 -- `ipairs(t or {})` fallbacks in flowtype's solve loop: removed in 935e310, ~8% faster (ab-equivalence).
 -- params: workload = Lua source (`@file` reads one) run by `nvim -l` with the copy first on the runtimepath (arg[1] =
 -- the copy's root), top = rows (default 25), roster = 1, repo (default this cartograph), keep = 1, timeout = seconds.
+-- ⚠ COUNTS ARE ALLOCATIONS WITHOUT SINKING: the counting call lets every table escape, so a site LuaJIT would SINK in
+-- a compiled trace (`ipairs(t or {})` in a compiled loop allocates nothing) counts here as if it allocated. Hot counts
+-- in INTERPRETED code (pairs/next loops, trace aborts — jit.p's VM state says which) are real; confirm a rewrite with
+-- ab-equivalence, never with the census alone.
 -- CLAIM: the workload ran and something was counted.
 local MC = require 'cartograph.tactics.mutation-check'
 local tsutil = require 'cartograph.spec.tsutil'

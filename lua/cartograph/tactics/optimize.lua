@@ -20,9 +20,9 @@ local T = require('cartograph.tactic').T
 
 local function git_clean(root)
     local r = vim.system({ 'git', '-C', root, 'status', '--porcelain', '--untracked-files=no' }, { text = true }):wait()
-    if r.code ~= 0 then return nil, ('%s is not a git checkout: side A of the A/B is its HEAD'):format(root) end
+    if r.code ~= 0 then return nil, ('%s is not a git checkout: side A of the A/B is its HEAD'):format(root), 'ill-posed' end
     if vim.trim(r.stdout or '') ~= '' then
-        return nil, ('%s has uncommitted changes: side A (HEAD) would not be the state before this rewrite — commit or set them aside first'):format(root)
+        return nil, ('%s has uncommitted changes: side A (HEAD) would not be the state before this rewrite — commit or set them aside first'):format(root), 'ill-posed'
     end
     return true
 end
@@ -76,7 +76,48 @@ local function build(p, store)
                 end, { ungated = true }))
         end)
     end
-    if rewrite ~= 'memo' then return nil, ('rewrite = memo | order, not %q'):format(rewrite), 'ill-posed' end
+    if rewrite == 'hoist' then
+        -- ★ HOIST (CART-1657): alloc-census on the workload -> its hot constructor sites that are PROVABLE empty fallbacks
+        -- (cartograph.emptyfallback, not inside a closed function) -> their enclosing functions as the SCOPE ->
+        -- hoist-empty there -> the A/B, equal AND faster, or ROLL BACK. The census runs a script: the workload's
+        -- function is wrapped to be called
+        local wrapped = ('local w = assert(load(%q))()\nif type(w) == \'table\' then if w.setup then w.setup() end; w = w.run end\nlocal okS, S = pcall(require, \'cartograph.store\')\nw(okS and S or nil)\n'):format(p.workload)
+        return T.bind('alloc-census', { workload = wrapped, repo = root, top = '400', timeout = p.timeout }, function (cv)
+            local txn, atr = require 'cartograph.txn', require 'cartograph.at'
+            local hot = {}
+            for _, r in ipairs(cv.rows or {}) do
+                local f, l, c = tostring(r.key):match('^tbl:(.-):(%d+):(%d+)$')
+                if f and inside(f) then hot[f] = hot[f] or {}; hot[f][l .. ':' .. c] = r.count end
+            end
+            local function fn_at(file, line0) -- the innermost function of the graph holding the line
+                local best, span
+                for _, n in ipairs(store.data.nodes or {}) do
+                    if n.file == file and (n.kind == 'function' or n.kind == 'method') and n.range then
+                        local sl, el = atr.sl(n.range), atr.el(n.range)
+                        if sl <= line0 and line0 <= el and (not span or el - sl < span) then best, span = n.id, el - sl end
+                    end
+                end
+                return best
+            end
+            local EF = require 'cartograph.emptyfallback'
+            local nodes, seen, saved = {}, {}, 0
+            for file, set in pairs(hot) do
+                local text = txn.read_file(root, file)
+                for _, s in ipairs(text and EF.empty_fallbacks(text, 'lua') or {}) do
+                    local n = set[s.range[1] .. ':' .. s.range[2]]
+                    local id = n and not s.closed and fn_at(file, s.range[1])
+                    if id then saved = saved + n; if not seen[id] then seen[id] = true; nodes[#nodes + 1] = id end end
+                end
+            end
+            table.sort(nodes)
+            local share = tonumber(p.min or 0.01)
+            if #nodes == 0 or saved < share * (cv.total or 0) then
+                return nil, ('no hot allocation site of the workload is a provable empty fallback worth %.0f%% of its %d tables (found %d)'):format(share * 100, cv.total or 0, saved), 'empty'
+            end
+            return T.seq(T.use('hoist-empty', { nodes = nodes }), T.use('ab-equivalence', vim.tbl_extend('force', ab, { faster = '1' })))
+        end)
+    end
+    if rewrite ~= 'memo' then return nil, ('rewrite = memo | order | hoist, not %q'):format(rewrite), 'ill-posed' end
     -- (candidates by INCLUSIVE time: a memo saves what the field and everything below it costs)
     return T.bind('hot-spots', { workload = p.workload, code = root, timeout = p.timeout, by = 'inclusive', top = '200' }, function (hs)
         local targets, where = {}, {}
@@ -149,6 +190,14 @@ local SHARED = table.concat({
     'function M.box(t) local s = 0 for i = 1, 1500000 do s = s + (#t * i) % 7 end return { n = s } end',
     'function M.work(xs) local s = 0 for _, x in ipairs(xs) do local b = M.box(x); b.n = b.n + 1; s = s + b.n end return s end',
     'return M', '' }, '\n')
+-- a hot loop over an ABSENT map: `pairs(t or {})` builds an empty table per iteration — and pairs is not compiled by
+-- LuaJIT 2.1, so the loop runs INTERPRETED and the table is really allocated (a compiled `ipairs(t or {})` is SUNK: the
+-- JIT allocates nothing there, and the A/B had nothing to measure); `cold` is outside the scope
+local HOISTM = table.concat({
+    'local M, ONE = {}, 1',
+    'function M.work(n) local s, t = 0, nil for i = 1, n do for _, x in pairs(t or {}) do s = s + x end s = s + ONE end return s end',
+    'function M.cold(t) return #(t or {}) end',
+    'return M', '' }, '\n')
 local function work(mod) return ('return function () local m = require(%q); local t = { 1, 2, 3 }; local xs = {}; for i = 1, 60 do xs[i] = t end; return m.work(xs) end'):format(mod) end
 local function measure_of(mod) return ('return { measure = function () package.loaded[%q] = nil; local w = assert(load(%q))(); return tostring(w()) end }'):format(mod, work(mod)) end
 
@@ -157,7 +206,7 @@ return {
     kind = 'write',
     tags = { 'code', 'optimize' },
     on_stop = 'rollback',
-    summary = 'THE OPTIMIZATION LOOP on this world: rewrite = memo (hot-spots -> memo-advisor -> memoize, residence from the key kind) | order (sort-ties -> total-order) — then ab-equivalence of `measure` on `corpus` at HEAD vs the rewritten tree (memo: equal AND faster), rolled back when it fails. workload = what the discoveries run (Lua returning function (store) or { setup, run }; @file). Apply only, on a clean git checkout; stops only on decisions (mixed key kind, several separators)',
+    summary = 'THE OPTIMIZATION LOOP on this world: rewrite = memo (hot-spots -> memo-advisor -> memoize, residence from the key kind) | order (sort-ties -> total-order) | hoist (alloc-census -> the hot provable empty fallbacks -> hoist-empty scoped to their functions; min = their share of the tables, default 0.01) — then ab-equivalence of `measure` on `corpus` at HEAD vs the rewritten tree (memo: equal AND faster), rolled back when it fails. workload = what the discoveries run (Lua returning function (store) or { setup, run }; @file). Apply only, on a clean git checkout; stops only on decisions (mixed key kind, several separators)',
     params = { workload = 'string', measure = 'string', corpus = 'list', sorted = 'string?', rewrite = 'string?', top = 'string?',
         min = 'string?', timeout = 'string?', by = 'list?', residence = 'string?', generation = 'string?', max_kb = 'string?' },
     build = build,
@@ -208,6 +257,19 @@ return {
             expect = { status = 'done', applied = 1, check = function (root)
                 local s = io.open(root .. '/lua/ordm.lua'):read('a')
                 return s:find('return a.id < b.id', 1, true) ~= nil, s
+            end },
+        },
+        {
+            name = 'rewrite = hoist: the census finds the hot `pairs(t or {})`, hoist-empty rewrites only its function, and the A/B accepts it — equal and faster',
+            files = { ['lua/hoistm.lua'] = HOISTM }, requires = in_git,
+            params = function (store)
+                commit(store)
+                return { rewrite = 'hoist', workload = 'return function () require("hoistm").work(2000000) end', corpus = { store.data.root },
+                    measure = 'return { measure = function () package.loaded.hoistm = nil; return tostring(require("hoistm").work(2000000)) end }' }
+            end,
+            expect = { status = 'done', applied = 1, check = function (root)
+                local s = io.open(root .. '/lua/hoistm.lua'):read('a')
+                return s:find('pairs(t or EMPTY_RO)', 1, true) ~= nil and s:find('function M.cold(t) return #(t or {}) end', 1, true) ~= nil, s
             end },
         },
         {
