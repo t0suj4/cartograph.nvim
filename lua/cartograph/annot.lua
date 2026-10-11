@@ -73,7 +73,19 @@ function M.scan_type(s)
         local tok, rest = s:match('^(%S+)%s*(.*)$')
         return tok, rest or ''
     end
-    return s:sub(1, i - 1), (s:sub(i + 1):gsub('^%s+', ''))
+    local tok, rest = s:sub(1, i - 1), (s:sub(i + 1):gsub('^%s+', ''))
+    -- A FUNCTION TYPE'S RETURN LIST is part of it: `fun(): TSNode, string` (nvim's TSNode:iter_children) was cut at the
+    -- space to `fun():` — and the list goes on while a type ends with a comma. Wrapped, `(fun(): A, B):` ends with the
+    -- tag's name colon, which is no part of the type
+    if tok:match('^fun%b()%s*:$') then
+        repeat
+            local t
+            t, rest = M.scan_type(rest)
+            if not t then break end
+            tok = tok .. ' ' .. t
+        until not t:match(',$')
+    elseif tok:match('^%b():$') then tok = tok:sub(1, -2) end
+    return tok, rest
 end
 
 --- Split `s` on TOP-LEVEL occurrences of `sep` (brackets protect their contents).
@@ -129,6 +141,8 @@ end
 --- inventing positions the row shape has no slot for.
 local function first_of_list(t)
     if not t or not t:find(',', 1, true) then return t, nil end
+    -- (a function type's own return list is no list of values: `fun(): TSNode, string` is ONE)
+    if t:match('^fun%b()%s*:') then return t, nil end
     -- only a TOP-LEVEL comma splits: `table<integer, dap.bp>` is one type
     local parts = split_top(t, ',')
     if #parts < 2 then return t, nil end

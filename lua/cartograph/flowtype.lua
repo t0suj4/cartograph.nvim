@@ -350,6 +350,7 @@ local function build(store, opts)
     -- value read out of one (`lines[i]`, `node:field('name')[1]`) is its element type. On lua/cartograph most
     -- ambiguous calls with nothing at the receiver held values from outside: tree-sitter nodes and strings.
     local function elemtype(tn)
+        if tn:match('^%(?fun%(') then return nil end -- (`fun(): T[]` returns a list; it is none)
         local e = tn:match('^(.-)%[%]$')
         if e then return e end
         local v = tn:match('^table<[^,]+,%s*(.-)>$')
@@ -444,9 +445,20 @@ local function build(store, opts)
         l[#l + 1] = { b, pred }
         for o in each(a) do if pred(o) then addobj(b, o) end end
     end
+    local funrets
     local function bindcall(o, args, res)
         local fp = fnports[o]
-        if not fp then return end
+        if not fp then
+            -- (a TYPED function — the profile's `fun(): TSNode, string`, what TSNode:iter_children returns — returns its
+            -- declared types)
+            local rl = TNAME[o] and funrets(TNAME[o])
+            if rl then
+                if type(res) == 'table' then
+                    for i, r in ipairs(res) do if rl[i] then addobj(r, typeobj(rl[i])) end end
+                elseif rl[1] then addobj(res, typeobj(rl[1])) end
+            end
+            return
+        end
         for i, a in ipairs(args) do if fp.params[i] then edge(a, fp.params[i]) end end
         -- (a MULTI-value result — Go's `v, err := f()` — is a list of ports: the i-th return to the i-th)
         if type(res) == 'table' then
@@ -476,33 +488,64 @@ local function build(store, opts)
             for k, v in pairs(pr and pr.sigs or {}) do if PSIGS[k] == nil then PSIGS[k] = v end end
         end
     end
-    local RET = {}
-    local function ret1(key)
-        local r = RET[key]
-        if r ~= nil then return r or nil end
-        local sg = PSIGS[key]
-        local r1 = type(sg) == 'table' and sg.returns and sg.returns[1]
-        local ty = r1 and r1.type
+    -- (a declared type that is ONE type: `X?` / `X|nil` is X, a real union is none)
+    local function onetype(ty)
+        if type(ty) ~= 'string' then return nil end
+        if ty:match('^%(?fun%(') then return (ty:gsub('^%s+', ''):gsub('%s+$', '')) end
         local one
-        if type(ty) == 'string' then
-            for part in (ty:gsub('%s', '') .. '|'):gmatch('([^|]*)|') do
-                part = part:gsub('%?$', ''):gsub('%*$', '')
-                if part ~= '' and part ~= 'nil' then
-                    if one and one ~= part then one = nil; break end
-                    one = part
-                end
+        for part in (ty:gsub('%s', '') .. '|'):gmatch('([^|]*)|') do
+            part = part:gsub('%?$', ''):gsub('%*$', '')
+            if part ~= '' and part ~= 'nil' then
+                if one and one ~= part then return nil end
+                one = part
             end
         end
-        RET[key] = one or false
         return one
     end
-    local function mflow(recv, m, res) -- a method on a TYPED object returns its signature's type
+    local RET = {}
+    local function retk(key, k) -- the k-th declared return of a profile signature
+        local ck = k == 1 and key or (key .. '\0' .. k)
+        local r = RET[ck]
+        if r ~= nil then return r or nil end
+        local sg = PSIGS[key]
+        local rk = type(sg) == 'table' and sg.returns and sg.returns[k]
+        local one = onetype(rk and rk.type)
+        RET[ck] = one or false
+        return one
+    end
+    -- (a function TYPE's returns: `fun(a: integer): TSNode, string` -> { 'TSNode', 'string' }; wrapped in parentheses
+    -- too. Anything else is no function type: nil)
+    local FUNRETS = {}
+    funrets = function (tn)
+        local r = FUNRETS[tn]
+        if r ~= nil then return r or nil end
+        local s = tn:match('^%((.*)%)$') or tn
+        local params = s:match('^fun(%b())')
+        if not params then FUNRETS[tn] = false; return nil end
+        local list = s:sub(4 + #params):match('^%s*:%s*(.-)%s*$')
+        r = {}
+        if list and list ~= '' then
+            local depth, from = 0, 1
+            local function put(part) r[#r + 1] = onetype((part:gsub('^%s*[%a_][%w_]*%s*:%s+', ''))) or false end
+            for i = 1, #list do
+                local ch = list:sub(i, i)
+                if ch:match('[%(<{%[]') then depth = depth + 1
+                elseif ch:match('[%)>}%]]') then depth = depth - 1
+                elseif ch == ',' and depth == 0 then put(list:sub(from, i - 1)); from = i + 1 end
+            end
+            put(list:sub(from))
+        end
+        FUNRETS[tn] = r
+        return r
+    end
+    local function mflow(recv, m, res, k) -- a method on a TYPED object returns its signature's type (its k-th)
+        k = k or 1
         local l = mflows[recv]
         if not l then l = {}; mflows[recv] = l end
-        l[#l + 1] = { m, res }
+        l[#l + 1] = { m, res, k }
         for o in each(recv) do
             local tn = TNAME[o]
-            local rt = tn and ret1(tn .. '#' .. m)
+            local rt = tn and retk(tn .. '#' .. m, k)
             if rt then addobj(res, typeobj(rt)) end
         end
     end
@@ -541,7 +584,7 @@ local function build(store, opts)
                     for _, mf in ipairs(mflows[p] or {}) do
                         for _, o in ipairs(d) do
                             local tn = TNAME[o]
-                            local rt = tn and ret1(tn .. '#' .. mf[1])
+                            local rt = tn and retk(tn .. '#' .. mf[1], mf[3] or 1)
                             if rt then addobj(mf[2], typeobj(rt)) end
                         end
                     end
@@ -603,6 +646,7 @@ local function build(store, opts)
         end
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
         local fnstack = {}
+        local MULTI = 4 -- (the values a `return f()` forwards)
         local expr, stmt
         -- ★ THE ARRAY PART `#` (CART-1643): a key that is a NUMBER — a literal, `-x` / `#x`, arithmetic, a numeric-for or
         -- ipairs index — is no field NAME, so what is stored there (a list built by `t[#t + 1] = x`, table.insert, a
@@ -647,7 +691,8 @@ local function build(store, opts)
             local p = new()
             local o = newobj(id)
             addobj(p, o)
-            local fp = { params = {}, ret = port('r:' .. id) }
+            local fp = { params = {}, ret = port('r:' .. id), id = id }
+            fp.rets = { fp.ret }
             fnports[o] = fp
             scopes[#scopes + 1] = {}
             local i = 0
@@ -660,14 +705,15 @@ local function build(store, opts)
                     fp.params[i] = declare(txt(x), port('a:' .. id .. ':' .. i))
                 end
             end
-            fnstack[#fnstack + 1] = fp.ret
+            fnstack[#fnstack + 1] = fp
             local body = n:field('body')[1]
             if body then for _, s in tsutil.inext, body, -1 do if s:named() then stmt(s) end end end
             fnstack[#fnstack] = nil
             scopes[#scopes] = nil
             return p
         end
-        local function callv(n)
+        local function callv(n, want)
+            if want and want < 2 then want = nil end
             local f = n:field('name')[1]
             local args = n:field('arguments')[1]
             local argn = {}
@@ -687,6 +733,13 @@ local function build(store, opts)
             if (fname == 'pcall' or fname == 'xpcall') and argn[1] then
                 local aps = {}
                 for j = (fname == 'xpcall' and 3 or 2), #argn do aps[#aps + 1] = expr(argn[j]) end
+                -- (`local ok, v = pcall(f, …)`: v is f's FIRST value — the status comes before them)
+                if want then
+                    local fl, out = {}, { new() }
+                    for k = 1, want - 1 do fl[k] = new(); out[k + 1] = fl[k] end
+                    callc(expr(argn[1]), aps, fl)
+                    return out
+                end
                 local res = new()
                 callc(expr(argn[1]), aps, res)
                 return res
@@ -711,21 +764,41 @@ local function build(store, opts)
                 if base and member then probes[#probes + 1] = { c = c, recv = base, member = txt(member) } end
             end
             local to = c and callrec.to(c)
+            -- (MULTIPLE VALUES: `want` > 1 asks for that many results — `local a, b = f()`, `return f()`, a generic
+            -- for's iterator triple — the k-th result port gets the callee's k-th return)
             local res = new()
-            if recvp then mflow(recvp, txt(f:field('method')[1]), res) end
+            local resl = { res }
+            for k = 2, want or 1 do resl[k] = new() end
+            if recvp then for k, r in ipairs(resl) do mflow(recvp, txt(f:field('method')[1]), r, k) end end
             if to then
                 for j, ap in ipairs(aps) do edge(ap, port('a:' .. to .. ':' .. j)) end
-                edge(port('r:' .. to), res)
-                return res
+                for k, r in ipairs(resl) do edge(port('r:' .. to .. (k > 1 and (':' .. k) or '')), r) end
+                return want and resl or res
             end
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
-                local rt = ret1(owner and (owner .. '#' .. mm) or fname)
-                if rt then addobj(res, typeobj(rt)) end
+                for k, r in ipairs(resl) do
+                    local rt = retk(owner and (owner .. '#' .. mm) or fname, k)
+                    if rt then addobj(r, typeobj(rt)) end
+                end
             end
             if not callee and f then callee = expr(f) end
-            if callee then callc(callee, aps, res) end
-            return res
+            if callee then callc(callee, aps, want and resl or res) end
+            return want and resl or res
+        end
+        -- an expression LIST's values: a call LAST in it supplies all the values still wanted (Lua truncates a call
+        -- anywhere else to one)
+        local function exprs(el, want)
+            local xs = {}
+            for _, x in tsutil.inext, el or EMPTY_NODE, -1 do if x:named() then xs[#xs + 1] = x end end
+            local vals = {}
+            for i, x in ipairs(xs) do
+                if i == #xs and want > #xs and x:type() == 'function_call' then
+                    local l = callv(x, want - #xs + 1)
+                    if type(l) == 'table' then for _, r in ipairs(l) do vals[#vals + 1] = r end else vals[#vals + 1] = l end
+                else vals[#vals + 1] = expr(x) end
+            end
+            return vals
         end
         expr = function (n)
             local t = n:type()
@@ -769,8 +842,7 @@ local function build(store, opts)
                 local a = n:named_child(0)
                 if a and a:type() == 'assignment_statement' then
                     local vl, el = a:named_child(0), a:named_child(1)
-                    local vals = {}
-                    for _, x in tsutil.inext, el, -1 do if x:named() then vals[#vals + 1] = expr(x) end end
+                    local vals = exprs(el, vl:named_child_count())
                     local i = 0
                     for _, v in tsutil.inext, vl, -1 do
                         if v:named() then i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end end
@@ -781,8 +853,7 @@ local function build(store, opts)
                 end
             elseif t == 'assignment_statement' then
                 local vl, el = n:named_child(0), n:named_child(1)
-                local vals = {}
-                for _, x in tsutil.inext, el, -1 do if x:named() then vals[#vals + 1] = expr(x) end end
+                local vals = exprs(el, vl:named_child_count())
                 local i = 0
                 for _, v in tsutil.inext, vl, -1 do if v:named() then i = i + 1; if vals[i] then assign(v, vals[i]) end end end
             elseif t == 'function_declaration' then
@@ -802,15 +873,17 @@ local function build(store, opts)
                 end
             elseif t == 'return_statement' then
                 local el = n:named_child(0)
-                local first = true
-                for _, x in tsutil.inext, el or EMPTY_NODE, -1 do
-                    if x:named() then
-                        local v = expr(x)
-                        if first then
-                            edge(v, fnstack[#fnstack] or port('mod:' .. file))
-                            if not fnstack[#fnstack] then modports[#modports + 1] = v end
-                            first = false
-                        end
+                local fp = fnstack[#fnstack]
+                -- (each value to its position: `return i, c` — tsutil.inext's — the second is the node. A call last
+                -- forwards its values: up to MULTI of them)
+                local vals = exprs(el, fp and MULTI or 1)
+                for i, v in ipairs(vals) do
+                    if fp then
+                        local r = fp.rets[i]
+                        if not r then r = port('r:' .. fp.id .. ':' .. i); fp.rets[i] = r end
+                        edge(v, r)
+                    elseif i == 1 then
+                        edge(v, port('mod:' .. file)); modports[#modports + 1] = v
                     end
                 end
             elseif t == 'for_statement' then
@@ -818,29 +891,39 @@ local function build(store, opts)
                 local cl = n:named_child(0)
                 if cl and cl:type() == 'for_generic_clause' then
                     local vl, el = cl:named_child(0), cl:named_child(1)
-                    local it = el and el:named_child(0)
-                    local vp, kp
+                    local it = el and el:named_child_count() == 1 and el:named_child(0)
+                    local vp, kp, trip
                     local fname_ipairs = false
-                    if it and it:type() == 'function_call' then
-                        local fname = it:field('name')[1] and txt(it:field('name')[1])
+                    local fname = it and it:type() == 'function_call' and it:field('name')[1] and txt(it:field('name')[1])
+                    local a1 = fname and it:field('arguments')[1] and it:field('arguments')[1]:named_child(0)
+                    if (fname == 'ipairs' or fname == 'pairs') and a1 then
                         fname_ipairs = fname == 'ipairs'
-                        local a1 = it:field('arguments')[1] and it:field('arguments')[1]:named_child(0)
-                        if (fname == 'ipairs' or fname == 'pairs') and a1 then
-                            local tp = expr(a1)
-                            -- (ipairs walks the array part: `#` — a load of it also reads `[]`, the untyped keys)
-                            vp = field(tp, fname == 'ipairs' and '#' or '[]')
-                            if fname == 'pairs' then kp = field(tp, '{k}') end
-                        else expr(it) end
+                        local tp = expr(a1)
+                        -- (ipairs walks the array part: `#` — a load of it also reads `[]`, the untyped keys)
+                        vp = field(tp, fname == 'ipairs' and '#' or '[]')
+                        if fname == 'pairs' then kp = field(tp, '{k}') end
+                    else
+                        -- ★ ANY OTHER ITERATOR IS A CALL (CART-1643): `for a, b in f, s, c` calls f(s, c) — then f(s, a) —
+                        -- and a, b are its values; `for x in n:iter_children()` / `s:gmatch(p)` first evaluate the
+                        -- triple. tsutil.inext, a TSNode iterator, was 106 of lua/cartograph's empty receivers
+                        trip = exprs(el, 3)
                     end
-                    local i = 0
+                    local i, V = 0, {}
                     for _, v in tsutil.inext, vl, -1 do
                         if v:named() then
                             i = i + 1
                             local p = declare(txt(v))
+                            V[i] = p
                             if i == 1 and fname_ipairs then numeric[p] = true end
                             if i == 2 and vp then edge(vp, p) end
                             if i == 1 and kp then edge(kp, p) end
                         end
+                    end
+                    if trip and trip[1] then
+                        local ctl = new()
+                        if trip[3] then edge(trip[3], ctl) end
+                        if V[1] then edge(V[1], ctl) end
+                        callc(trip[1], { trip[2] or new(), ctl }, V)
                     end
                 elseif cl then
                     for _, x in tsutil.inext, cl, -1 do

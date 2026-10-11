@@ -662,3 +662,56 @@ test('flowtype: an element read out of a profile-typed container has the element
     if not refused then skip('the extractor already decides p:upper() (profile ' .. tostring(store.data.profile) .. ')') end
     eq('string', v and v.kind, 'parts[1] is a string: ' .. vim.inspect(v) .. ' profile ' .. tostring(store.data.profile))
 end)
+
+-- ★ MULTIPLE VALUES (CART-1643): Lua's walker gave every call ONE value and bound a generic for's variables to nothing
+-- unless it was pairs / ipairs — so `local ok, parser = pcall(get_string_parser, …)` left parser empty, `return i, c`
+-- lost c, and `for _, c in tsutil.inext, node, -1` / `for c in node:iter_children()` (the profile's `fun(): TSNode,
+-- string`) left c empty. On lua/cartograph the generic for alone took the empty receivers 1441 -> 975 and the typed
+-- verdicts 14 -> 381
+test('flowtype: multiple values — pcall, a second return, an iterator in the tree and a typed one', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/a.lua'] = table.concat({
+            'local A = {}; A.__index = A',
+            'function A:run() return 1 end',
+            'function A:type() return 1 end',
+            'local B = {}; B.__index = B',
+            'function B:run() return 2 end',
+            'function B:type() return 2 end',
+            'local function two() return 1, setmetatable({}, A) end',
+            'local function inext(t, i) i = i + 1; local v = t[i]; if v then return i, v end end',
+            'local function scan(src)',
+            '    local ok, x = pcall(function () return setmetatable({}, A) end)',
+            '    local r1 = x:run()',
+            '    local _, y = two()',
+            '    local r2 = y:run()',
+            '    for _, z in inext, { setmetatable({}, B) }, 0 do local r3 = z:run() end',
+            '    local p = vim.treesitter.get_string_parser(src, "lua")',
+            '    local t = p:parse()',
+            '    local root = t[1]:root()',
+            '    for c in root:iter_children() do local k = c:type() end',
+            '    return r1, r2',
+            'end',
+            'return scan',
+        }, '\n'),
+        ['plugin/fx.lua'] = 'require("fx.a")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v = {}
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/a.lua' and c.refused and c.at then v[atr.sl(c.at) + 1] = R.verdict(c) or false end
+    end
+    vim.fn.delete(root, 'rf')
+    local function one(line, want, what)
+        local x = v[line]
+        ok(x, what .. ': answered — ' .. vim.inspect(x))
+        if want == 'TSNode' then eq('typed', x and x.kind, what); eq('TSNode', x and x.type, what)
+        else eq('exact', x and x.kind, what); ok(x and tostring(x.targets[1]):match(want), what .. ': ' .. vim.inspect(x)) end
+    end
+    one(11, 'A:run', "pcall's second value is the function's first")
+    one(13, 'A:run', 'the second return')
+    one(14, 'B:run', "an iterator in the tree: inext's second value")
+    one(18, 'TSNode', "a typed iterator: iter_children's first value")
+end)

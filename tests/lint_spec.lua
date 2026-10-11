@@ -322,6 +322,12 @@ test('annot: the type is ONE token, and the comment after it is not part of it',
     eq('function', m.type)
     eq(true, m.multi)
     eq(true, m.opt, 'the ? belongs to `function`, not to the comma')
+    -- a FUNCTION type keeps its return list — nvim's iterators are typed by it
+    eq('fun(): TSNode, string', parse('---@return fun(): TSNode, string').type)
+    eq('fun(): string', parse('---@return fun(): string the next line').type, 'the comment after the list is not in it')
+    local w = parse('---@return (fun(n: integer|nil): integer, TSNode): pattern id, match')
+    eq('(fun(n: integer|nil): integer, TSNode)', w.type, 'wrapped: the colon after it names the value')
+    eq(nil, w.multi)
     -- the visibility word precedes a field name
     eq('items', parse('---@field private items table').name)
     -- an unknown tag is ignored BY NAME: nvim's gen_vimdoc emits @brief/@toc/@text
