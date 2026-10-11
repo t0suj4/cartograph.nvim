@@ -102,19 +102,27 @@ function M.family(store, args)
     local R = require('cartograph.flowtype').solve(store, o)
     local fam, want = {}, {}
     for _, spec in ipairs(args.family) do
-        local f, l = tostring(spec):match('^(.-):(%d+)$')
-        if not f then return nil, ('family entry `%s` is not file:LINE'):format(tostring(spec)), 'ill-posed' end
-        want[#want + 1] = { file = f, line = tonumber(l), spec = spec }
+        -- (file:LINE names the OUTERMOST constructor starting on that line — `{ a = {…}, b = {…} }` is one record, its
+        -- nested tables are not; file:LINE:COL, 1-based, picks one exactly)
+        local f, l, c = tostring(spec):match('^(.-):(%d+):(%d+)$')
+        if not f then f, l = tostring(spec):match('^(.-):(%d+)$') end
+        if not f then return nil, ('family entry `%s` is not file:LINE or file:LINE:COL'):format(tostring(spec)), 'ill-posed' end
+        want[#want + 1] = { file = f, line = tonumber(l), col = c and tonumber(c), spec = spec }
     end
     local allsites = {}
     for _, a in ipairs(R.accesses or {}) do for site in pairs(a.sites) do allsites[site] = true end end
     for _, w in ipairs(want) do
-        local hit = false
+        local best, bestc
         for site in pairs(allsites) do
-            local f, l = site:match('^tbl:(.-):(%d+):%d+$')
-            if f == w.file and tonumber(l) + 1 == w.line then fam[site] = true; hit = true end
+            local f, l, c = site:match('^tbl:(.-):(%d+):(%d+)$')
+            if f == w.file and tonumber(l) + 1 == w.line then
+                c = tonumber(c)
+                if w.col then if c + 1 == w.col then best, bestc = site, c end
+                elseif not bestc or c < bestc then best, bestc = site, c end
+            end
         end
-        if not hit then return nil, ('no table constructor the analysis follows at %s'):format(w.spec), 'ill-posed' end
+        if not best then return nil, ('no table constructor the analysis follows at %s'):format(w.spec), 'ill-posed' end
+        fam[best] = true
     end
     local function where(a) return ('%s:%d'):format(a.file, a.range[1] + 1) end
     -- (a family table that ESCAPED reached a saturated port: what is done with it beyond is not followed, so no roster

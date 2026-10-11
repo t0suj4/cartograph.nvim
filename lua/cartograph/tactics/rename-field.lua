@@ -41,6 +41,16 @@ return {
             end },
         },
         {
+            name = 'by provenance: file:LINE names the OUTERMOST constructor — a nested table on the same line keeps its own same-named field',
+            files = { ['a.lua'] = 'local M = {}\nfunction M.mk(n) return { name = n, meta = { name = "inner" } } end\nfunction M.label(r) return r.name, r.meta.name end\nreturn M\n',
+                ['b.lua'] = "local A = require 'a'\nreturn A.label(A.mk('x'))\n" },
+            params = { family = { 'a.lua:2' }, field = 'name', to = 'title' },
+            expect = { status = 'done', applied = 1, check = function (root)
+                local a = io.open(root .. '/a.lua'):read('a')
+                return a:find('{ title = n, meta = { name = "inner" } }', 1, true) ~= nil and a:find('return r.title, r.meta.name end', 1, true) ~= nil, a
+            end },
+        },
+        {
             name = 'by provenance: a module\'s FUNCTION field — its declaration `function M.label` and the call `A.label(rec)` in another file',
             files = { ['a.lua'] = FAM_A, ['b.lua'] = FAM_B },
             params = { family = { 'a.lua:1' }, field = 'label', to = 'tag' },
