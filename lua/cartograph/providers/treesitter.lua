@@ -1191,6 +1191,7 @@ function M._bound_value(an, a)
     local chain, k = jvt_sm.resolve(an, a)
     if k == 0 then return nil end
     local b = chain[1]
+    if b.byname then return nil end -- (no value of its own: the name decides, CART-1651)
     -- (a use INSIDE its binder's own declaration — `x := x()`, `let p = wrap(p)`, lua's `local x = x or {}` —
     -- reads the OUTER binding: the new one's scope starts after it, CART-1602)
     if b.ab and b.abe then -- (BYTES, not rows: `x := mk(); x()` on one line is a use AFTER the declaration)
@@ -4194,9 +4195,18 @@ end
 -- [x,setX]=useState()` has none → a shadow, so a cross-file global name-match
 -- would be the bug → skip the match (resolve_local_callable refuses fn-value).
 -- Only 'localdecl' (not params: an AMD `define([…],function(dep){})` dep is a
--- param whose global name-match is correct; not lua df-locals: unchanged).
-local function localdecl_shadow(callee, file, fn, parent_fn, exact)
-    if callee_binding(callee, fn, parent_fn) ~= 'localdecl' then return false end
+-- param whose global name-match is correct) — UNLESS the language's spec says
+-- `bound_names_shadow` (Lua, CART-1651): there a PARAMETER shadows (a local VALUE
+-- is the binder veto's: the call's `cb`, M._bound_value) — when the SCOPE MODEL
+-- agrees the nearest binder is one (cb == -1): this chain walk is position-blind, and
+-- mixalg's `local function root` inside M.program(root, …) is nearer than the param.
+local function localdecl_shadow(callee, file, fn, parent_fn, exact, cb)
+    local b = callee_binding(callee, fn, parent_fn)
+    if b == 'higher-order' then
+        local _, spec = elang_for(file)
+        return spec and spec.bound_names_shadow and cb == -1 or false
+    end
+    if b ~= 'localdecl' then return false end
     for _, d in ipairs(exact[callee] or {}) do
         if d.file == file and (d.kind == 'function' or d.kind == 'method') then
             return false -- a same-file def exists → the main loop resolves it plain
@@ -8887,9 +8897,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- (a BARE callee BOUND at its site — a local / param the scope model sees there — is a call through
                     -- that binding: no function of its name but the def the binder declares. Only where a bare call CAN
                     -- go through a local — the languages declaring fn_locals; ruby / java / php call a method or a
-                    -- function by name, lua's forward declaration IS the later def — CART-1602)
+                    -- function by name; and lua, whose forward declaration IS the later def — CART-1602 — once its
+                    -- binders said which are no value of their own, `byname`: CART-1651)
                     local cb, cbe
-                    if spec.fn_locals and not method and (full == nil or full == callee) and namen then
+                    if (spec.fn_locals or spec.bound_names_shadow) and not method and (full == nil or full == callee) and namen then
                         cb, cbe = M._bound_value(callee, namen)
                     end
                     local c = { callee = callee, args = args, argv = argv, cb = cb, cbe = cbe,
@@ -9912,7 +9923,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             -- false global, and the two are indistinguishable here (banked).
             local from = not p.call.full and fn_at(p.file, p.at.start.line)
             local shadowed = from and node_index[from]
-                and localdecl_shadow(p.call.callee, p.file, node_index[from], parent_fn, exact)
+                and localdecl_shadow(p.call.callee, p.file, node_index[from], parent_fn, exact, p.call.cb)
             -- ★ A FIELD-DEFERRED CALL SKIPS THE NAME JOIN HERE (CART-1077): its receiver's type is settled by the
             -- return-type rounds once every file is in; the join runs afterwards ONLY if they cannot (field_fallback).
             -- (and a TYPE-VARIABLE head with a return flow, rt.tv, the same way)
@@ -10763,7 +10774,7 @@ function M.relink(data, touched, opts)
                 target = resolve(cget(i, 'indirect'), cfile)
                 inferred = false
             elseif not cfull and cfn and node_index[cfn]
-                and localdecl_shadow(ccallee, cfile, node_index[cfn], parent_fn, exact) then
+                and localdecl_shadow(ccallee, cfile, node_index[cfn], parent_fn, exact, cget(i, 'cb')) then
                 -- local-shadow gate (see extract): a JS/TS const/let/var-bound bare
                 -- callee with no same-file def is not a global — leave it for
                 -- resolve_local_callable (refuse fn-value) below

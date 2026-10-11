@@ -38,17 +38,31 @@ local function lua_locals(node, src, out) -- chunk/block statement locals
         if t == 'variable_declaration' then
             -- `local a, b = 1, 2` wraps an assignment_statement; a bare
             -- `local a` holds the variable_list directly
+            -- (a binder carries its statement's BYTES, ab/abe: a use inside `local x = x or {}` reads the OUTER x; and
+            -- `byname` when it is no value of its own — a bare `local f` is the forward declaration of a later
+            -- `function f`, a same-name field alias `local cmd = H.cmd` is the member of that name: the call resolves
+            -- by name, CART-1651)
             local row = select(1, stmt:range())
+            local ab, abe = select(3, stmt:start()), select(3, stmt:end_())
             for _, a in inext, stmt, -1 do
                 local vl = a:type() == 'variable_list' and a or nil
+                local vals = {}
                 if not vl and a:type() == 'assignment_statement' then
                     for _, c in inext, a, -1 do
-                        if c:type() == 'variable_list' then vl = c break end
+                        if c:type() == 'variable_list' then vl = c
+                        elseif c:type() == 'expression_list' then
+                            for _, e in inext, c, -1 do if e:named() then vals[#vals + 1] = e end end
+                        end
                     end
                 end
+                local i = 0
                 for _, v in (vl and inext or NOOP), vl, -1 do
                     if v:type() == 'identifier' then
-                        out[node_text(v, src)] = { row = row }
+                        i = i + 1
+                        local name, e = node_text(v, src), vals[i]
+                        local byname = a:type() == 'variable_list' or (e and e:type() == 'dot_index_expression'
+                            and e:named_child(1) and node_text(e:named_child(1), src) == name) or nil
+                        out[name] = { row = row, ab = ab, abe = abe, byname = byname }
                     end
                 end
             end
@@ -1547,6 +1561,11 @@ return {
     -- a BARE call reaches a bare name only: Lua has no implicit receiver, so `tonumber(x)` is never some file's
     -- `T.tonumber` (the resolver's tail join otherwise links it there, CART-1487)
     bare_calls_bind_bare = true,
+    -- a BARE name its site binds — a parameter, a local value — is THAT binding, never another file's definition of the
+    -- name (CART-1651: transport's `local kind = M.kinds[k]; kind(e)` had been linked to oraclejoin's `local function
+    -- kind`). The scope model names the binder; one marked `byname` (a forward declaration, a same-name field alias)
+    -- still resolves by name
+    bound_names_shadow = true,
     -- a statement directly in a `return function (…) … end` wrapper: an INSTALLER part's body, which is its module scope
     -- (CART-1497 — its `local key = SHARED.key` aliases are recorded like a file's own)
     installer_scope = function (defn)

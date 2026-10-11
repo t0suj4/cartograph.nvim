@@ -108,6 +108,71 @@ test('shadowing: a PARAMETER passed as an argument is the value handed in — ne
     eq(2, seen)
 end)
 
+-- a bare name its SITE binds is that binding (CART-1651): transport's `local kind = M.kinds[k]; kind(e)` had been linked
+-- by name to oraclejoin's `local function kind`. The scope model names the binder: a local VALUE refuses `fn-value`, a
+-- parameter `higher-order` — while a forward declaration and a same-name field alias still resolve by name.
+test('shadowing: a bare call through a local VALUE or a parameter is that binding — never another file\'s function of the name; a forward declaration, a same-name alias `local cmd = H.cmd` and a local function nearer than a param still resolve — at extract and after a refresh (CART-1651)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local store = require 'cartograph.store'
+    local files = {
+        ['other.lua'] = table.concat({
+            'local function kind(x) return "k" end',
+            'local function label(x) return x end',
+            'local function emit(x) return x end',
+            'local function cmd(x) return x end',
+            'local function root(x) return x end',
+            'return { kind = kind, label = label, emit = emit, cmd = cmd, root = root }', '' }, '\n'),
+        ['user.lua'] = table.concat({
+            'local M = {}',
+            'local build',
+            'function M.run(spec, emit, H)',
+            '  for _, e in ipairs(spec) do',
+            '    local kind = M.kinds[e.kind]',
+            '    kind(e)',
+            '  end',
+            '  local label = H.node_label',
+            '  label(spec)',
+            '  emit(spec)',
+            '  local cmd = H.cmd',
+            '  cmd(spec)',
+            '  return build(spec)',
+            'end',
+            'function M.walk(root)',
+            '  local function root(n) return n end',
+            '  return root(1)',
+            'end',
+            'function build(s) return s end',
+            'M.kinds = {}',
+            'return M', '' }, '\n'),
+    }
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for rel, src in pairs(files) do local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(src); fd:close() end
+    local function check(how)
+        local cv = require('cartograph.callview').of(store.data)
+        local by = {}
+        for i = 1, cv.n do
+            if cv.get(i, 'file') == 'user.lua' and not cv.get(i, 'full') then
+                local r = cv.get(i, 'refused')
+                by[cv.get(i, 'callee')] = { to = cv.get(i, 'to'), refused = type(r) == 'table' and r.rule or r }
+            end
+        end
+        eq(nil, by.kind.to, how .. ': a local VALUE is not other.lua\'s kind')
+        eq('fn-value', by.kind.refused, how)
+        eq(nil, by.label.to, how .. ': `local label = H.node_label` — a field of ANOTHER name is a value too')
+        eq(nil, by.emit.to, how .. ': a parameter is the value handed in')
+        eq('higher-order', by.emit.refused, how)
+        ok(tostring(by.cmd.to):match('^other%.lua::cmd@'), how .. ': a same-name field alias resolves by name: ' .. tostring(by.cmd.to))
+        ok(tostring(by.build.to):match('^user%.lua::build@'), how .. ': a forward declaration is the later def: ' .. tostring(by.build.to))
+        ok(tostring(by.root.to):match('^user%.lua::root@'), how .. ': the local function is nearer than the param `root`: ' .. tostring(by.root.to))
+    end
+    store.ingest(ts.extract(root))
+    check('extract')
+    local fd = assert(io.open(root .. '/user.lua', 'w')); fd:write((files['user.lua']:gsub('M.kinds = {}', '-- edited\nM.kinds = {}'))); fd:close()
+    assert(require('cartograph.refresh').files({ 'user.lua' }, { incremental = true }))
+    vim.fn.delete(root, 'rf')
+    check('refresh')
+end)
+
 -- ⚠ THE TREE MAY BE THE STDLIB ITSELF (CART-1614): inside $VIMRUNTIME every vim.* call was refused `prefix` (964 calls
 -- naming a def the runtime holds — vim.validate 187, vim.notify 58), because the override rule above binds a prefixed
 -- def only in its own file. A def at a file the active PROFILE names as its own source is the runtime's definition

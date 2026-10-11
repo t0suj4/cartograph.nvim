@@ -112,6 +112,7 @@ M.SLOTS = {
     dot_calls_are_methods = 'SCOPE&KEY',
     bare_calls_bind_bare = 'SCOPE&KEY', -- no implicit receiver: a bare call never tail-matches `T.f` (CART-1487)
     colon_calls_pass_self = 'SCOPE&KEY', -- `x:f()` reaches a method only, never a plain `M.f` (CART-1491)
+    bound_names_shadow = 'SCOPE&KEY', -- a bare call through a PARAMETER is that binding, never a def by name (CART-1651)
     installer_scope = 'SCOPE&KEY', -- a `return function (…)` wrapper's body is the part's module scope (CART-1497)
     hash_qualified = 'SCOPE&KEY',
     qualified_scope_local = 'SCOPE&KEY',
