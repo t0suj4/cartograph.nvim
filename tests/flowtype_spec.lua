@@ -559,6 +559,52 @@ test('flowtype: a load of a field the cap may have left incomplete is partial', 
     eq(true, v and v.partial, 'box.handler may hold what put wrote unseen: ' .. vim.inspect(v))
 end)
 
+-- ★ SELECTIVE CONTEXT SENSITIVITY (CART-1653): a function whose parameter SATURATES upstream of an unknown answer gets
+-- an instance per resolved call site, walked inside the scopes it was defined in (a closure: `use` reads `count`), and
+-- a call in it is answered over its instances. At CAP 2 the merged `x` holds A and two plain tables: saturated, no
+-- claim; each instance holds one, and of the three only A has `run`
+test('flowtype: a closure whose parameter saturates gets an instance per call site — its call is answered over them (CART-1653)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.run(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.run(self) return 2 end\nreturn B\n',
+        ['main.lua'] = table.concat({
+            'local A = require "a"',
+            'local count = 0',
+            'local function use(x)',
+            '  count = count + 1',
+            '  x:run()',
+            '  return A',
+            'end',
+            'use(A); use({ n = 1 })',
+            'local r = use({ n = 2 })',
+            'return r:run()',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local merged = flowtype.solve(store, { open = false, ctx = false })
+    local split = flowtype.solve(store, { open = false })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local c, rc
+    for _, x in ipairs(store.data.calls) do
+        if callrec.file(x) == 'main.lua' and tostring(callrec.full(x)) == 'x:run' then c = x end
+        if callrec.file(x) == 'main.lua' and tostring(callrec.full(x)) == 'r:run' then rc = x end
+    end
+    ok(c ~= nil, 'the call x:run() is in the graph')
+    eq(nil, merged.verdict(c), 'one walk: x saturates, no claim')
+    local v = split.verdict(c)
+    eq('exact', v and v.kind, 'instances: ' .. vim.inspect(v))
+    ok(v and v.targets[1] == 'a.lua::A.run@1', 'A.run, the only receiver with run: ' .. vim.inspect(v))
+    ok((split.stats.ctxfns or 0) >= 1, 'use was selected: ' .. tostring(split.stats.ctxfns))
+    -- (the instance sees the scopes `use` was defined in: its upvalue A is the module, not a global)
+    local rv = split.verdict(rc)
+    eq('exact', rv and rv.kind, 'what an instance returns from its upvalue: ' .. vim.inspect(rv))
+end)
+
 -- ★ WHAT AN ESCAPED OBJECT HOLDS ESCAPES WITH IT (CART-1643): a call through a tainted callee taints the parameters of
 -- every escaped function — but the function is often not what escaped: here a P instance reaches `keep`'s saturated
 -- parameter, and `r.go(q)` would read P's method `go` through it, binding q to its o. The instance escaped, its metatable

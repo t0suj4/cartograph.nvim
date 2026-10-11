@@ -209,12 +209,18 @@ local function build(store, opts)
     -- (ESCAPED: an object that reached a saturated port — from there it may go anywhere the solve no longer follows:
     -- written through, called through. See PARTIAL below)
     local escaped = {}
+    local SATSNAP = {}
     local function settop(p)
         if top[p] then return end
         local s = pts[p]
         if type(s) == 'number' then escaped[s] = true
         elseif s and s.bs then for o in bs_iter(s) do escaped[o] = true end
         elseif s then for o in pairs(s) do escaped[o] = true end end
+        if opts.keepsat then
+            local snap = {}
+            if type(s) == 'number' then snap[1] = s elseif s and s.bs then for o in bs_iter(s) do snap[#snap + 1] = o end elseif s then for o in pairs(s) do snap[#snap + 1] = o end end
+            SATSNAP[p] = snap
+        end
         top[p] = true; pts[p] = nil; delta[p] = nil
         if spread then push(p) end
     end
@@ -654,14 +660,29 @@ local function build(store, opts)
     -- iterator to an instance per loop, so one loop's values no longer pour into every other's: tsutil.inext's node
     -- parameter took a node from every loop in the tree and saturated, and every inext loop variable was partial
     local CLONE, CLONE_MAX = {}, 600 -- fn object -> { file, text, id }
+    -- ★ SELECTIVE CONTEXT SENSITIVITY (CART-1653; client-driven refinement, Guyer & Lin SAS'03, Zipper OOPSLA'18): the
+    -- functions a first solve found with a SATURATED parameter upstream of an unknown answer (opts.ctxfns) get an
+    -- instance per resolved call site — re-walked from their own node inside a snapshot of the scopes they were defined
+    -- in (so a closure keeps its upvalues), keyed to the file's real positions so each instance probes the calls in it.
+    -- A call's answer is then the union over its instances: each instance's receiver stays under the cap where the
+    -- merged one did not
+    local CTXFNS = opts.ctxfns
+    local CTX, CTXTREES, ctx_direct = {}, {}, {}
     local function walk_file(file, src, clone)
-        local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
-        if not okp then return end
-        local tree = parser:parse()[1]:root()
+        local isctx = clone and clone.ctx
+        local tree
+        if isctx and CTXTREES[file] then tree = CTXTREES[file][2]
+        else
+            local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
+            if not okp then return end
+            tree = parser:parse()[1]:root()
+            if isctx then CTXTREES[file] = { parser, tree } end
+        end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
-        -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record)
-        local kfile = clone and ('clone:' .. file) or file
+        -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record — a
+        -- CONTEXT instance walks the original node, at the file's own positions)
+        local kfile = (clone and not isctx) and ('clone:' .. file) or file
         local function key_of(n) local l, c = n:start(); return kfile .. ':' .. l .. ':' .. c end
         local scopes = { {} }
         -- (a function is CLOSED when every name it reads is its own or a global: fnbase holds each open function's
@@ -735,13 +756,19 @@ local function build(store, opts)
             -- (an INSTANCE keeps the original's id — it is that function — and gets ports of its own)
             local inst = clone and #fnstack == 0
             -- (a function INSIDE an instance is at the snippet's position, which the file's map does not describe)
-            local id = inst and clone.id or (not clone and fnmap[l .. ':' .. c]) or ('ts:' .. kfile .. ':' .. l .. ':' .. c)
+            local id = inst and clone.id or ((not clone or isctx) and fnmap[l .. ':' .. c]) or ('ts:' .. kfile .. ':' .. l .. ':' .. c)
             local p = new()
             local o = newobj(id)
             addobj(p, o)
             local fp = { params = {}, ret = inst and new() or port('r:' .. id), id = id, inst = inst or nil }
             fp.rets = { fp.ret }
             fnports[o] = fp
+            if CTXFNS and not clone and CTXFNS[id] then
+                -- (the scopes it sees: each copied, so a local declared after it is not visible to its instances)
+                local snap = {}
+                for i = 1, #scopes do local t = {}; for k, v in pairs(scopes[i]) do t[k] = v end; snap[i] = t end
+                CTX[o] = { ctx = true, id = id, file = file, src = src, l = l, c = c, scopes = snap }
+            end
             for k = 1, #fnmeta do fnmeta[k].nested = true end
             scopes[#scopes + 1] = {}
             fnbase[#fnbase + 1] = #scopes
@@ -846,6 +873,10 @@ local function build(store, opts)
             local resl = { res }
             for k = 2, want or 1 do resl[k] = new() end
             if recvp then for k, r in ipairs(resl) do mflow(recvp, txt(f:field('method')[1]), r, k) end end
+            if to and CTXFNS and CTXFNS[to] and not clone then
+                ctx_direct[#ctx_direct + 1] = { to, aps, resl }
+                return want and resl or res
+            end
             if to then
                 for j, ap in ipairs(aps) do edge(ap, port('a:' .. to .. ':' .. j)) end
                 for k, r in ipairs(resl) do edge(port('r:' .. to .. (k > 1 and (':' .. k) or '')), r) end
@@ -1038,6 +1069,17 @@ local function build(store, opts)
                 end
             end
         end
+        if isctx then
+            -- (the instance: the function node at its own position, walked inside its definition's scopes)
+            local nd = tree:named_descendant_for_range(clone.l, clone.c, clone.l, clone.c)
+            while nd and not ((nd:type() == 'function_declaration' or nd:type() == 'function_definition') and select(1, nd:start()) == clone.l and select(2, nd:start()) == clone.c) do nd = nd:parent() end
+            if not nd then return end
+            scopes = {}
+            for i, t in ipairs(clone.scopes) do scopes[i] = t end
+            local p = func(nd)
+            for y in each(p) do clone.obj = y end
+            return
+        end
         for _, s in tsutil.inext, tree, -1 do if s:named() then stmt(s) end end
     end
     local instances = {}
@@ -1099,6 +1141,23 @@ local function build(store, opts)
         end
     end
     if jsfinish then jsfinish() end
+    -- (the context instances: one per resolved call site of a selected function; a site it cannot instance — the
+    -- function was never walked — binds the shared ports as before)
+    if CTXFNS then
+        local byid = {}
+        for o, fp in pairs(fnports) do if not fp.inst and fp.id and CTX[o] then byid[fp.id] = o end end
+        for _, d in ipairs(ctx_direct) do
+            local to, aps, resl = d[1], d[2], d[3]
+            local o = byid[to]
+            local info = o and setmetatable({ obj = false }, { __index = CTX[o] })
+            if info then walk_file(info.file, info.src, info) end
+            if info and info.obj then bindcall(info.obj, aps, #resl > 1 and resl or resl[1])
+            else
+                for j, ap in ipairs(aps) do edge(ap, port('a:' .. to .. ':' .. j)) end
+                for k, r in ipairs(resl) do edge(port('r:' .. to .. (k > 1 and (':' .. k) or '')), r) end
+            end
+        end
+    end
     solve()
     -- (the instanceof GUARDS to a fixpoint: admit what the solved prototypes allow, solve again — sets only grow)
     for _ = 1, 20 do
@@ -1239,14 +1298,31 @@ local function build(store, opts)
         return false
     end
     stats.partial = 0
+    -- (one answer per CALL: a call walked in several context instances has a receiver in each — its answer is over all)
+    local groups, gorder = {}, {}
     for _, pr in ipairs(probes) do
+        local g = groups[pr.c]
+        if not g then g = { pr = pr, recvs = {} }; groups[pr.c] = g; gorder[#gorder + 1] = g end
+        g.recvs[#g.recvs + 1] = pr.recv
+    end
+    stats.probes = #gorder
+    for _, g in ipairs(gorder) do
+        local pr = g.pr
         local kind, v
-        partial_hit = tainted[pr.recv] or false
-        if top[pr.recv] or has(pr.recv, EXT) then kind = 'unknown'
-        elseif pts[pr.recv] == nil then kind = 'none'
+        partial_hit = false
+        local anyunk, anyobj = false, false
+        for _, r in ipairs(g.recvs) do
+            if tainted[r] then partial_hit = true end
+            if top[r] or has(r, EXT) then anyunk = true end
+            if pts[r] ~= nil then anyobj = true end
+        end
+        if anyunk then kind = 'unknown'
+        elseif not anyobj then kind = 'none'
         else
             local out, sat, tyname, other = {}, false, nil, false
-            for o in each(pr.recv) do
+            local recvobjs = {}
+            for _, r in ipairs(g.recvs) do for o in each(r) do recvobjs[#recvobjs + 1] = o end end
+            for _, o in ipairs(recvobjs) do
                 local tn = TNAME[o]
                 if tn then
                     if tn == 'string' or PSIGS[tn .. '#' .. pr.member] then tyname = tn end
@@ -1338,13 +1414,80 @@ local function build(store, opts)
             guarded = pr.guard ~= nil, partial = partial_hit or nil }
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
-    return { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
+    local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
+    if opts.keepsat then
+        -- (the SELECTION: saturated ports upstream of an unknown answer — copies, field -> load, through prototypes —
+        -- and the functions whose PARAMETERS are among them)
+        local function objs(p) if top[p] then return SATSNAP[p] or {} end local t = {}; for o in each(p) do t[#t + 1] = o end; return t end
+        local pred = {}
+        local function addp(q, p) local l = pred[q]; if not l then l = {}; pred[q] = l end; l[#l + 1] = p end
+        for p, sq in pairs(succ) do for q in pairs(sq) do addp(q, p) end end
+        for x, l in pairs(loads) do
+            local os = objs(x)
+            for _, ld in ipairs(l) do
+                local f, dst, strict = ld[1], ld[2], ld[3]
+                local seen = {}
+                local function via(o, depth)
+                    if seen[o] or depth > 4 or TNAME[o] then return end
+                    seen[o] = true
+                    local m = ofield[o]
+                    if m then
+                        if strict then if m[f] then addp(dst, m[f]) end
+                        elseif f == '[]' then for fk, fp in pairs(m) do if fk ~= '{k}' then addp(dst, fp) end end
+                        else if m[f] then addp(dst, m[f]) end; if m['[]'] then addp(dst, m['[]']) end end
+                    end
+                    for c in pairs(protos[o] or {}) do via(c, depth + 1) end
+                end
+                for _, o in ipairs(os) do via(o, 0) end
+            end
+        end
+        local S, q = {}, {}
+        local function seed(p) if top[p] and not S[p] then S[p] = true; q[#q + 1] = p end end
+        for _, pr in ipairs(probes) do
+            local v = verdicts[pr.c]
+            if not v then
+                seed(pr.recv)
+                local function mem(o, seen)
+                    if seen[o] or TNAME[o] then return end
+                    seen[o] = true
+                    local m = ofield[o]
+                    if m and m[pr.member] then seed(m[pr.member]) end
+                    for c in pairs(protos[o] or {}) do mem(c, seen) end
+                end
+                for _, o in ipairs(objs(pr.recv)) do mem(o, {}) end
+            end
+        end
+        local h = 1
+        while h <= #q do local p = q[h]; h = h + 1; for _, r in ipairs(pred[p] or {}) do seed(r) end end
+        local sel, n = {}, 0
+        for o, fp in pairs(fnports) do
+            if not fp.inst and fp.id and tostring(fp.id):find('%.lua::') then -- (instances are the Lua walker's)
+                for _, pp in ipairs(fp.params) do if S[pp] and not sel[fp.id] then sel[fp.id] = true; n = n + 1 end end
+            end
+        end
+        R.ctxfns, R.nctx = sel, n
+    end
+    return R
+end
+-- (TWO SOLVES, the selective context sensitivity: the first picks the functions, the second gives them instances.
+-- `opts.ctx = false`: one solve. Measured on lua/cartograph: 92 functions; runtime oracle RIGHT open 556 -> 566, closed
+-- 691 -> 762, unknown 693 -> 638; the schedule moves 204/174/171 -> 112/200/140; 2.3x the time. A second round of
+-- selection (103 functions) answered no more: unknown 645)
+local build1 = build
+build = function (store, opts)
+    opts = opts or {}
+    if opts.ctx == false or opts.ctxfns then return build1(store, opts) end
+    local R1 = build1(store, setmetatable({ keepsat = true }, { __index = opts }))
+    if (R1.nctx or 0) == 0 then return R1 end
+    local R = build1(store, setmetatable({ ctxfns = R1.ctxfns }, { __index = opts }))
+    R.stats.ms, R.stats.ctxfns = R.stats.ms + R1.stats.ms, R1.nctx
+    return R
 end
 
 --- the analysis over `store`'s graph, cached per graph generation (and per `open`)
 function M.of(store, opts)
     local key = ((opts and opts.open == false) and 'closed' or 'open') .. ((opts and opts.spread) and '+spread' or '')
-        .. ((opts and opts.exclude) and ('-' .. opts.exclude) or '')
+        .. ((opts and opts.exclude) and ('-' .. opts.exclude) or '') .. ((opts and opts.ctx == false) and '-noctx' or '')
     local c = store._flowtype
     -- (the generation AND the graph itself: a fresh ingest may restart the generation count)
     if c and c.gen == store.generation and c.data == store.data and c[key] then return c[key] end
