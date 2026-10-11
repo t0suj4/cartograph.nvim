@@ -2449,9 +2449,17 @@ local function parse_root(src, lang, lines)
         return pc.root
     end
     pc.miss = pc.miss + 1
+    -- a tree the process already holds (the extractor's, shared through parsecache) costs nothing to reuse; this
+    -- cache's own bounded parse is only for a text nobody parsed — peek never parses, so the bound still holds
+    local view = require('cartograph.parseview').view(src, lang)
+    local shared = require('cartograph.parsecache').peek(view, lang)
     -- release BEFORE parsing: two trees alive at once is the peak we are cutting
     M.parse_release()
-    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
+    if shared then -- (held here as the current entry; parsecache owns the tree, so there is no parser to keep)
+        pc.lines, pc.src, pc.lang, pc.root, pc.parser = lines, src, lang, shared, false
+        return shared
+    end
+    local ok, parser = pcall(vim.treesitter.get_string_parser, view, lang)
     if not ok then return nil end
     local tree = parser:parse()[1]
     local root = tree and tree:root() or nil

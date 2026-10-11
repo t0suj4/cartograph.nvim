@@ -1030,3 +1030,16 @@ test('flowtype: a closed iterator is instantiated per loop; one reading an upval
     ok(v[13] and v[13].kind == 'exact' and tostring(v[13].targets[1]):match('B:run'), 'vals loop 2: B only — ' .. vim.inspect(v[13]))
     ok(not (v[14] and v[14].kind == 'exact'), 'nnext holds a function of its own: shared — ' .. vim.inspect(v[14]))
 end)
+
+-- the walker looks its tree up by the PARSE VIEW, the key the extractor stored it under: keyed by the raw text, a file
+-- that mentions `global` (the view renames it, TSGAP-0012) missed the shared tree and was parsed a second time
+test('flowtype: a file that mentions `global` reuses the extractor\'s tree — no second parse', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['g.lua'] = 'local global = { a = 1 }\nlocal function get() return global.a end\nreturn get\n' })
+    store.ingest(ts.extract(root))
+    local pcache = require 'cartograph.parsecache'
+    local m0 = pcache.stats.misses
+    flowtype.solve(store, {})
+    vim.fn.delete(root, 'rf')
+    eq(0, pcache.stats.misses - m0, 'the walker parsed nothing of its own')
+end)

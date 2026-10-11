@@ -361,6 +361,33 @@ test('expr: released, and re-parsed — the cache holds exactly one file', funct
 end)
 
 
+-- a tree the process already holds (the extractor's, through parsecache) is REUSED without a parse; a text nobody
+-- parsed takes expr's own bounded parse and does NOT grow the process-wide cache (peek never parses)
+test('expr: a tree held by parsecache is reused, a cold text is parsed here and not cached there', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest { 'local function only(a) return a end' }
+    local id = fn_id('only')
+    local pcache = require 'cartograph.parsecache'
+    local real, parses = vim.treesitter.get_string_parser, 0
+    vim.treesitter.get_string_parser = function (...) parses = parses + 1; return real(...) end
+    local okk, err = pcall(function ()
+        pcache.clear(); expr.parse_release()
+        ok(expr.of(store, id), 'cold: resolved')
+        eq(1, parses, 'cold: expr parsed the text itself')
+        -- (ingest writes no trailing newline, so the file's bytes are exactly the text expr parses)
+        local fd = assert(io.open(store.abs(store.node(id).file))); local src = fd:read('*a'); fd:close()
+        local view = require('cartograph.parseview').view(src, 'lua')
+        eq(nil, pcache.peek(view, 'lua'), 'cold: parsecache was not filled')
+        expr.parse_release(); parses = 0
+        ok(pcache.root(view, 'lua'), 'parsecache holds the tree')
+        parses = 0
+        ok(expr.of(store, id), 'warm: resolved')
+        eq(0, parses, 'warm: the shared tree was reused, no parse')
+    end)
+    vim.treesitter.get_string_parser = real
+    ok(okk, tostring(err))
+end)
+
 -- ── scoped extraction (CART-0429) ────────────────────────────────────────────
 -- ★★ WHAT `--file` CLAIMS, AND WHAT THIS ACTUALLY TESTS. Scoping the census filters
 -- EXTRACTION (the provider's `opts.files`) — the only place the loop really collapses, 135s

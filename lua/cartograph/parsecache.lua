@@ -5,6 +5,7 @@
 -- Trees are immutable; each entry keeps its owner (the LanguageTree, or the raw parse's TSTree) alive with its root.
 --   root(text, lang)        -> the root node (parsed on a miss) | nil
 --   put(text, lang, owner, root)   a tree parsed elsewhere (the extractor's reused raw parser)
+--   peek(text, lang)        -> the cached root | nil, never parsing (a caller with its own bounded cache)
 --   clear()                 drop every tree (a caller that knows it is done with a world)
 local M = {}
 
@@ -24,6 +25,12 @@ function M.root(text, lang)
     local root = tree:root()
     per[text] = { parser, root }
     return root
+end
+
+function M.peek(text, lang)
+    local per = CACHE[lang]
+    local e = per and per[text]
+    if e then M.stats.hits = M.stats.hits + 1; return e[2] end
 end
 
 function M.put(text, lang, owner, root)

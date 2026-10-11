@@ -711,8 +711,9 @@ local function build(store, opts)
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
         -- (one parse per text per process, shared with the extractor and the lint rules — a snippet instance's text is
-        -- its own entry)
-        local tree = require('cartograph.parsecache').root(src, 'lua')
+        -- its own entry. Keyed by the PARSE VIEW, as every parse site is: the raw text of a file that mentions `global`
+        -- is a different key, so it missed the extractor's tree, parsed again, and the grammar misread that copy.)
+        local tree = require('cartograph.parsecache').root(require('cartograph.parseview').view(src, 'lua'), 'lua')
         if not tree then return end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
