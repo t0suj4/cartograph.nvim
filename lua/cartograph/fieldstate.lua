@@ -109,8 +109,9 @@ function M.collect(lang, tsroot, src)
     local L = LANGS[lang]
     if not L then return {} end
     local out = {}
-    local function walk(n)
-        local p = n:parent()
+    -- (the PARENT and GRANDPARENT ride down the walk: tree-sitter's node:parent() re-descends from the root, and asking
+    -- it at every node of every file was 9% of an extract + solve of lua/cartograph — the profiler's top C-code line)
+    local function walk(n, p, gp)
         if p and L.ivar and L.ivar[n:type()] then -- (`@x`: the mention is the field)
             local fn, cls = receiver(L, n, src)
             if fn and cls then out[#out + 1] = { class = cls, field = (node_text(n, src):gsub('^@', '')), fn = fn, node = n, parent = p } end
@@ -118,7 +119,7 @@ function M.collect(lang, tsroot, src)
             local fld_field = L.member[p:type()]
             -- (`this.build()` / `self.helper(x)` CALLS a method: the member is a callee, not a field — it had minted a
             -- `Panel.build` field shadowing the method)
-            local gp = fld_field and p:parent()
+            gp = fld_field and gp
             local callee = gp and L.calls[gp:type()] and gp:field(L.calls[gp:type()])[1] == p
             if fld_field and not callee and p:named_child(0) == n then
                 local fn, cls = receiver(L, n, src)
@@ -126,9 +127,9 @@ function M.collect(lang, tsroot, src)
                 if f then out[#out + 1] = { class = cls, field = node_text(f, src), fn = fn, node = n, parent = p } end
             end
         end
-        for _, c in tsutil.inext, n, -1 do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c, n, p) end
     end
-    walk(tsroot)
+    walk(tsroot, tsroot:parent(), nil)
     return out
 end
 
