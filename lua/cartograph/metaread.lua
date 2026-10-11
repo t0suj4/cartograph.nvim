@@ -89,6 +89,17 @@ function M.new()
                 -- a `do … end` block — 8 of 70 vim.* definitions were missing from the profile, CART-1616)
                 local owner, sep, member, params = l:match('^%s*function%s+([%w_%.]+)([%.:])([%w_]+)%s*%(([^)]*)%)')
                 local bare = (not owner) and l:match('^%s*function%s+([%w_]+)%s*%(')
+                -- (opts.assigned: an ANNOTATED assignment is a definition too — `M.parse = memoize('concat-2',
+                -- function (lang, query) … end)` under a `---@return vim.treesitter.Query` block; only where the block
+                -- declares a @param or @return, so a documented constant is not read as a function)
+                if not owner and not bare and opts.assigned and #blk > 0 then
+                    local o2, m2 = l:match('^%s*([%w_%.]+)%.([%w_]+)%s*=[^=]')
+                    if o2 then
+                        local typed = false
+                        for _, bl in ipairs(blk) do if bl:match('@return') or bl:match('@param') then typed = true end end
+                        if typed then owner, sep, member, params = o2, '.', m2, nil end
+                    end
+                end
                 if owner and opts.owner_of then owner = opts.owner_of(owner) end
                 if (owner or bare) and live then
                     local rows = annot.read_block(blk, blk_first or 0, TAG)

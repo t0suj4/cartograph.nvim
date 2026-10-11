@@ -145,3 +145,25 @@ test('metaread.each_function: an INDENTED definition (inside a do-block) is read
     eq('string', got['vim#validate'] and got['vim#validate'].sig.params[1].type, 'with the annotation block above it')
     ok(got['vim#top'], 'a column-0 def still is')
 end)
+
+-- ★ AN ANNOTATED ASSIGNMENT IS A DEFINITION, ON REQUEST (CART-1643): nvim defines `M.parse = memoize('concat-2',
+-- function (lang, query) … end)` under a `---@return vim.treesitter.Query` block, so vim.treesitter.query.parse was absent
+-- from nvim.mpack, and every query the tree parses had no type. opts.assigned reads such an assignment when its block
+-- declares a @param or @return; a documented constant is not a function
+test('metaread.each_function: opts.assigned reads an annotated assignment, not a documented constant', function ()
+    local R = require('cartograph.metaread').new()
+    local lines = {
+        '---@param lang string',
+        '---@return vim.treesitter.Query : Parsed query',
+        "M.parse = memoize('concat-2', function(lang, query) end)",
+        '--- the default timeout',
+        'M.TIMEOUT = 5',
+    }
+    local got, plain = {}, {}
+    R:each_function(lines, { assigned = true }, function (f) got[f.key] = f end)
+    R:each_function(lines, {}, function (f) plain[f.key] = f end)
+    ok(got['M#parse'], 'the annotated assignment is read')
+    eq('vim.treesitter.Query', got['M#parse'] and got['M#parse'].sig.returns[1].type)
+    eq(nil, got['M#TIMEOUT'], 'a documented constant is no function')
+    eq(nil, plain['M#parse'], 'only on request')
+end)

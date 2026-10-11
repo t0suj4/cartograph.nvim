@@ -659,6 +659,18 @@ local function build(store, opts)
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
         local fnstack = {}
         local MULTI = 4 -- (the values a `return f()` forwards)
+        local function funtype(path, n)
+            local owner, mm = path:match('^([%a_][%w_%.]*)%.([%a_][%w_]*)$')
+            if not owner then return nil end
+            local key = owner .. '#' .. mm
+            local sg = PSIGS[key]
+            if type(sg) ~= 'table' or not sg.returns or #sg.returns == 0 then return nil end
+            local root = owner:match('^[%a_][%w_]*')
+            for i = #scopes, 1, -1 do if scopes[i][root] then return nil end end -- (a local of that name: not the profile's)
+            local tys = {}
+            for k, r in ipairs(sg.returns) do tys[k] = (type(r.type) == 'string' and r.type ~= '') and r.type or 'any' end
+            return typeobj('fun(): ' .. table.concat(tys, ', '))
+        end
         local expr, stmt
         -- ★ THE ARRAY PART `#` (CART-1643): a key that is a NUMBER — a literal, `-x` / `#x`, arithmetic, a numeric-for or
         -- ipairs index — is no field NAME, so what is stored there (a list built by `t[#t + 1] = x`, table.insert, a
@@ -833,7 +845,16 @@ local function build(store, opts)
         expr = function (n)
             local t = n:type()
             if t == 'identifier' then return lookup(txt(n)) end
-            if t == 'dot_index_expression' then return field(expr(n:field('table')[1]), txt(n:field('field')[1])) end
+            if t == 'dot_index_expression' then
+                local p = field(expr(n:field('table')[1]), txt(n:field('field')[1]))
+                -- ★ A PROFILE FUNCTION AS A VALUE (CART-1643): `pcall(vim.treesitter.get_string_parser, src, lang)` —
+                -- 65 of lua/cartograph's tree-sitter entry points — passes the function, and a load off the global
+                -- `vim` holds nothing: no parser, no tree, no node anywhere downstream. A dotted reference rooted at a
+                -- GLOBAL that names a profile signature holds its function TYPE, `fun(): R1, R2`
+                local ft = funtype(txt(n), n)
+                if ft then addobj(p, ft) end
+                return p
+            end
             if t == 'bracket_index_expression' then return field(expr(n:field('table')[1]), keyname(n:field('field')[1])) end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
             if t == 'string' then local p = new(); addobj(p, STR); return p end

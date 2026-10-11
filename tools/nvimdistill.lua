@@ -80,7 +80,7 @@ for _, path in ipairs(files) do
         if alias[o] then return alias[o] end
         return nil -- a file-local helper table: not an API
     end
-    R:each_function(lines, { owner_of = owner_of }, function (f)
+    R:each_function(lines, { owner_of = owner_of, assigned = true }, function (f)
         if not f.owner then return end -- a bare global in the runtime: not declared as an API here
         local s = f.sig
         s.file, s.line = rel, f.line

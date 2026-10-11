@@ -853,3 +853,46 @@ test('flowtype: open — a method reached through an exported return has partial
     eq(nil, vc and vc.partial, 'closed: whole')
     eq(true, vo and vo.partial, 'open: an outside caller may run go with a B — ' .. vim.inspect(vo))
 end)
+
+-- ★ A PROFILE FUNCTION AS A VALUE (CART-1643): `pcall(vim.treesitter.get_string_parser, src, lang)` — 65 of
+-- lua/cartograph's tree-sitter entry points — passes the function, and a load off the global `vim` held nothing, so no
+-- parser, tree or node existed downstream. A dotted reference rooted at a GLOBAL that names a profile signature holds its
+-- function type; a local of the root's name is not the profile's
+test('flowtype: a profile function passed as a value returns its declared type; a shadowing local does not', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/a.lua'] = 'local A = {}\nfunction A:root() return self end\nfunction A:parse() return self end\nreturn A\n',
+        ['lua/fx/b.lua'] = 'local B = {}\nfunction B:root() return self end\nfunction B:parse() return self end\nreturn B\n',
+        ['lua/fx/main.lua'] = table.concat({
+            'local M = {}',
+            'function M.scan(src)',
+            '    local ok, parser = pcall(vim.treesitter.get_string_parser, src, "lua")',
+            '    local t = M.first(parser:parse())',
+            '    local tree = M.first(t[1])',
+            '    return tree:root()',
+            'end',
+            'function M.first(x) return x end',
+            'function M.shadow(src)',
+            '    local vim = { treesitter = { get_string_parser = function () return nil end } }',
+            '    local ok, parser = pcall(vim.treesitter.get_string_parser, src, "lua")',
+            '    return parser:parse()',
+            'end',
+            'return M',
+        }, '\n'),
+        ['plugin/fx.lua'] = 'require("fx.main"); require("fx.a"); require("fx.b")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v, refused = {}, {}
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/main.lua' and c.at and (callrec.callee(c) == 'root' or atr.sl(c.at) + 1 == 12) then
+            v[atr.sl(c.at) + 1] = R.verdict(c) or false; refused[atr.sl(c.at) + 1] = c.refused
+        end
+    end
+    vim.fn.delete(root, 'rf')
+    if not refused[6] then skip 'the extractor already decides tree:root()' end
+    eq('typed', v[6] and v[6].kind, 'tree holds what parse() returned: ' .. vim.inspect(v[6]))
+    if not refused[12] then skip 'the extractor already decides parser:parse()' end
+    ok(not (v[12] and v[12].kind == 'typed'), 'the local vim is not the profile: ' .. vim.inspect(v[12]))
+end)
