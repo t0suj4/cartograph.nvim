@@ -68,7 +68,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 
 | Question | Instrument |
 |---|---|
-| Which functions are dead / possibly dead, and why is this one alive? | lint `dead-confined`, `dead-function` (MCP `lint_run`, `:CartographLint`); the alibi verb (`lint.alibi(store)`, MCP `why`) — inheritance contract both ways since CART-0714; erlang `-behaviour` callbacks (the tree's `-callback` + the otp-api profile's `behaviours`, alibi kind `behaviour-callback`) since CART-1117 |
+| Which functions are dead / possibly dead, and why is this one alive? | lint `dead-confined`, `dead-function` (MCP `lint_run`, `:CartographLint`); the alibi verb (`lint.alibi(store)`, MCP `why`) — inheritance contract both ways since CART-0714; erlang `-behaviour` callbacks (the tree's `-callback` + the otp-api profile's `behaviours`, alibi kind `behaviour-callback`) since CART-1117; `dead-function` skips a function whose VALUE is read (`escapes`: returned, passed, stored) since CART-1655 |
 | Which records does an erlang tree declare and never use; which fields are never named? | `tools/erlrecordcensus.lua --unused` |
 
 ## Across the wire: the XMPP triple (ejabberd × payload spec × converse.js)

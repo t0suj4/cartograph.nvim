@@ -25,6 +25,15 @@ test('lint: a local function with no callers is flagged dead', function ()
     ok(not names:match("M%.run"), 'exported entry point not flagged')
 end)
 
+test('lint: a function whose VALUE is read (returned, passed, stored — escapes) is NOT flagged: its calls run through the value (CART-1655)', function ()
+    local cb = fn('m.lua', 'cb'); cb.escapes = true
+    local orphan = fn('m.lua', 'orphan'); orphan.escapes = false
+    graph({ mod('m.lua'), cb, orphan }, {})
+    local names = table.concat(messages(lint.run(store, only('dead-function'))), '\n')
+    ok(names:match("'orphan'"), 'a local never read as a value still is: ' .. names)
+    ok(not names:match("'cb'"), 'the escaped value is not')
+end)
+
 test('lint: an exported no-caller function is NOT flagged (public surface)', function ()
     graph({ mod('m.lua'), fn('m.lua', 'M.api'), fn('m.lua', 'mt:method', 'method') }, {})
     local f = lint.run(store, only('dead-function'))

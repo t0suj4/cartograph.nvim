@@ -2220,7 +2220,11 @@ M.rules = {
                     and not contract(n)
                     and band:n_callers(n.id) == 0
                     -- a registration is an alibi: a dispatch table keeps it alive
-                    and band:n_registrants(n.id) == 0 then
+                    and band:n_registrants(n.id) == 0
+                    -- and so is a VALUE read (`escapes`, CART-0230): returned, passed, stored — its calls run through
+                    -- the value and no call edge names it. 42 of 54 findings on lua/cartograph were such values, every
+                    -- one sampled alive: a sort comparator, `return bind_of, reaches`, `M.elem = elem` (CART-1655)
+                    and n.escapes ~= true then
                     out[#out + 1] = { file = store.abspath(n), line = atr.sl(n.range) + 1,
                         message = ("local function '%s' has no callers (possibly dead)"):format(n.name) }
                 end
