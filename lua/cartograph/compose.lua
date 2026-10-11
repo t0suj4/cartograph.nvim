@@ -179,6 +179,13 @@ M.VERBS['rename-field'] = {
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
+-- ★ RESHAPE A RECORD FAMILY (CART-1656): positional -> named at exactly the accesses flowtype says the family reaches
+-- (cartograph.reshape; the family and its roster from renamefield.family)
+M.VERBS.reshape = {
+    plan = function (store, args) return require('cartograph.reshape').plan(store, args) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
+    effect = 'journaled', rerun = 'empty',
+}
 M.VERBS['learn-tactic'] = {
     plan = function (store, args) return require('cartograph.toolbelt').plan_learn(store, args) end,
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,

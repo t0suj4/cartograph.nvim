@@ -693,6 +693,8 @@ local function build(store, opts)
     -- the ALLOCATION SITES that reach it. A representation change (renamefield's family mode) rewrites exactly the
     -- accesses one family of tables reaches
     local ACC = opts.accesses and {} or nil
+    local ARRAYFN = { ['table.concat'] = true, ['table.sort'] = true, ['table.remove'] = true, ['table.unpack'] = true,
+        unpack = true, ['vim.list_extend'] = true, ['vim.tbl_islist'] = true, ['vim.islist'] = true }
     local CTXFNS = opts.ctxfns
     local CTX, CTXTREES, ctx_direct = {}, {}, {}
     local function walk_file(file, src, clone)
@@ -712,9 +714,10 @@ local function build(store, opts)
         local kfile = (clone and not isctx) and ('clone:' .. file) or file
         local function key_of(n) local l, c = n:start(); return kfile .. ':' .. l .. ':' .. c end
         -- (an access, at the FILE's positions: a snippet instance's positions are its own, so it records none)
-        local function acc(kind, node, f, base, obj)
+        local function acc(kind, node, f, base, obj, range)
             if not ACC or (clone and not isctx) or not node then return end
             local sr, sc, er, ec = node:range()
+            if range then sr, sc, er, ec = range[1], range[2], range[3], range[4] end
             ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj }
         end
         local scopes = { {} }
@@ -776,9 +779,18 @@ local function build(store, opts)
         end
         -- (a bracket key's access: a string literal names its field — the range is its content — a computed key may
         -- name any field: a `dynamic` access)
-        local function acc_key(kind, kn, base)
+        -- (a NUMBER literal key is a position: `t[2]` — an `index` access whose range runs from the end of the table
+        -- expression to the closing bracket, the text a positional -> named reshape replaces with `.name`; another
+        -- numeric key is the array as a whole)
+        local function acc_key(kind, kn, base, whole)
             if not ACC or not kn then return end
             if kn:type() == 'string' then local c = kn:field('content')[1]; if c then acc(kind, c, txt(c), base) end
+            elseif kn:type() == 'number' and whole and tonumber(txt(kn)) then
+                local tb = whole:field('table')[1]
+                local _, _, er, ec = whole:range()
+                local tr, tc = tb:end_()
+                acc('index', kn, tostring(tonumber(txt(kn))), base, nil, { tr, tc, er, ec })
+            elseif keyname(kn) == '#' then acc('array', kn, nil, base)
             elseif keyname(kn) == '[]' then acc('dynamic', kn, nil, base) end
         end
         local function assign(target, v)
@@ -790,7 +802,7 @@ local function build(store, opts)
                 storec(base, txt(target:field('field')[1]), v)
             elseif t == 'bracket_index_expression' then
                 local base, kn = expr(target:field('table')[1]), target:field('field')[1]
-                acc_key('write', kn, base)
+                acc_key('write', kn, base, target)
                 storec(base, keyname(kn), v)
                 if kn then storec(base, '{k}', expr(kn)) end
             end
@@ -893,6 +905,7 @@ local function build(store, opts)
             end
             if fname == 'table.insert' and argn[1] then
                 local tp = expr(argn[1])
+                acc('array', argn[1], nil, tp)
                 for j = 2, #argn do local v = expr(argn[j]); if j == #argn then storec(tp, '#', v) end end
                 return new()
             end
@@ -907,6 +920,8 @@ local function build(store, opts)
             local aps = {}
             if recvp then aps[1] = recvp end
             for _, a in ipairs(argn) do aps[#aps + 1] = expr(a) end
+            -- (the array as a whole: a library function that reads or writes every position)
+            if ACC and ARRAYFN[fname] and argn[1] then acc('array', argn[1], nil, aps[recvp and 2 or 1]) end
             local r = c and c.refused
             if type(r) == 'table' and r.rule == 'ambiguous' and r.cands then
                 local member = f:type() == 'method_index_expression' and f:field('method')[1] or f:field('field')[1]
@@ -979,7 +994,7 @@ local function build(store, opts)
             end
             if t == 'bracket_index_expression' then
                 local base = expr(n:field('table')[1])
-                acc_key('read', n:field('field')[1], base)
+                acc_key('read', n:field('field')[1], base, n)
                 return field(base, keyname(n:field('field')[1]))
             end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
@@ -990,9 +1005,11 @@ local function build(store, opts)
                 local p = new()
                 local o = newobj('tbl:' .. key_of(n))
                 addobj(p, o)
+                local npos = 0
                 for _, fl in tsutil.inext, n, -1 do
                     if fl:type() == 'field' then
                         local k, v = fl:field('name')[1], fl:field('value')[1]
+                        if v and not k then npos = npos + 1; acc('pos', v, tostring(npos), nil, o) end
                         if v then
                             local key = (k and k:type() == 'identifier') and txt(k) or keyname(k)
                             if k and k:type() == 'identifier' then acc('key', k, key, nil, o) elseif k then acc_key('key', k, nil); if ACC and ACC[#ACC] and ACC[#ACC].sr == select(1, k:range()) then ACC[#ACC].obj = o end end
@@ -1002,6 +1019,13 @@ local function build(store, opts)
                     end
                 end
                 return p
+            end
+            if t == 'unary_expression' and ACC then
+                local op = txt(n):match('^%s*([#%-]?)')
+                local x = n:named_child(0)
+                local xp = x and expr(x)
+                if op == '#' and x then acc('array', x, nil, xp) end
+                return new()
             end
             if t == 'binary_expression' then
                 local op
@@ -1082,6 +1106,7 @@ local function build(store, opts)
                     if (fname == 'ipairs' or fname == 'pairs') and a1 then
                         fname_ipairs = fname == 'ipairs'
                         local tp = expr(a1)
+                        acc(fname == 'ipairs' and 'array' or 'iterate', a1, nil, tp)
                         -- (ipairs walks the array part: `#` — a load of it also reads `[]`, the untyped keys)
                         vp = field(tp, fname == 'ipairs' and '#' or '[]')
                         if fname == 'pairs' then kp = field(tp, '{k}') end

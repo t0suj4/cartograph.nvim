@@ -93,9 +93,10 @@ end
 --   the family)                                         -> a frontier: refused, with the sites
 --   the new name already a field of the family          -> a decision (name-occupied)
 -- world = 'closed' (default: the tree is the whole program, as a refactoring assumes) | 'open'
-local function plan_family(store, args)
-    local txn = require 'cartograph.txn'
-    local root = store.data and store.data.root
+-- the FAMILY: its allocation sites resolved against flowtype's access roster, refused when a table of it ESCAPED.
+-- -> { R = the solve, fam = { [site] = true }, n = #entries, where = fn(access) -> 'file:line' } | nil, why, class.
+-- Shared by every provenance reshape (rename here, positional -> named in cartograph.reshape)
+function M.family(store, args)
     local o = { accesses = true }
     if args.world ~= 'open' then o.open = false end
     local R = require('cartograph.flowtype').solve(store, o)
@@ -124,6 +125,16 @@ local function plan_family(store, args)
         table.sort(esc)
         return nil, ('the family ESCAPES: %s reach a saturated port, so accesses through it are not followed — no roster of its accesses is complete'):format(table.concat(esc, ', ')), 'frontier'
     end
+    return { R = R, fam = fam, n = #want, where = where }
+end
+M.splice = splice
+
+local function plan_family(store, args)
+    local txn = require 'cartograph.txn'
+    local root = store.data and store.data.root
+    local F, why, class = M.family(store, args)
+    if not F then return nil, why, class or 'ill-posed' end
+    local R, fam, where, want = F.R, F.fam, F.where, { n = F.n }
     local rewrite, frontier, others, occupied = {}, {}, {}, {}
     local nkeys, nsites = 0, 0
     for _, a in ipairs(R.accesses or {}) do
@@ -156,11 +167,12 @@ local function plan_family(store, args)
         return nil, ('the family is not closed: %d access(es) are shared with other tables — add them to the family: %s')
             :format(#others, table.concat(others, '; ', 1, math.min(#others, 12))), 'decision'
     end
-    if #occupied > 0 then
-        return nil, ('`%s` is already a field of the family: %s'):format(args.to, table.concat(occupied, '; ')), 'decision'
-    end
+    -- (nothing left to rename is DONE — a re-run finds the new name it wrote, and that is no collision)
     if #rewrite == 0 then
         return nil, ('no access of `%s` reaches the family: nothing to rename'):format(args.field), 'empty'
+    end
+    if #occupied > 0 then
+        return nil, ('`%s` is already a field of the family: %s'):format(args.to, table.concat(occupied, '; ')), 'decision'
     end
     local by = {}
     for _, a in ipairs(rewrite) do local l = by[a.file] or {}; by[a.file] = l; l[#l + 1] = a.range end
@@ -176,7 +188,7 @@ local function plan_family(store, args)
         touched = touched, stamps = stamps, refspecs = {}, edits = edits, hazards = {},
         preserves = 'unreviewed',
         preserves_why = 'by PROVENANCE: every access flowtype resolves to the family is rewritten and every rewritten access is reached ONLY by the family; saturated, partial and computed-key accesses refused the plan. Not covered: field names observed by pairs/next or a metatable',
-        desc = ('rename-field (family of %d) %s -> %s: %d access(es), %d key(s) in %d file(s)'):format(#want, args.field, args.to, nsites, nkeys, #touched),
+        desc = ('rename-field (family of %d) %s -> %s: %d access(es), %d key(s) in %d file(s)'):format(want.n, args.field, args.to, nsites, nkeys, #touched),
     }
     return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
 end
