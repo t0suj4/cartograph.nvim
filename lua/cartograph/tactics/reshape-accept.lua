@@ -4,7 +4,7 @@
 -- access IT sees; the tests are the independent oracle for the ones it cannot (code built by load(), a C caller).
 -- Measured by hand first (2026-10-11): `txn.disk_stamp` (50 rewrites in 33 files) and the tactic result's `applied`
 -- (33 in 14 files, the examples' own `want.applied` untouched) — the whole suite green both times.
--- params: verb = rename-field | reshape, with = its k=v arguments (family / positional / define take a comma list),
+-- params: verb = rename-field | reshape | hoist-empty, with = its k=v arguments (family / positional / define take a comma list),
 -- spec = the spec filter (empty: the whole suite), repo (default this cartograph), keep = 1, timeout = seconds per run.
 -- CLAIM: the baseline is green, the reshape is planned (a refusal or a decision is no acceptance), and the spec is green
 -- after it.
@@ -21,7 +21,7 @@ end
 local function measure(_, p)
     local repo = p.repo or repo_of_toolbelt()
     local v = { verb = p.verb, spec = p.spec or '' }
-    if p.verb ~= 'rename-field' and p.verb ~= 'reshape' then v.error = 'verb is rename-field or reshape'; return v end
+    if p.verb ~= 'rename-field' and p.verb ~= 'reshape' and p.verb ~= 'hoist-empty' then v.error = 'verb is rename-field, reshape or hoist-empty'; return v end
     local args, last = {}, nil
     for _, kv in ipairs(p.with or {}) do
         local k, val = tostring(kv):match('^([%w_]+)=(.*)$')
@@ -77,8 +77,8 @@ return {
     name = 'reshape-accept',
     kind = 'discovery',
     tags = { 'gate', 'test', 'code' },
-    summary = 'does a provenance reshape keep the tests green? verb = rename-field | reshape, with = its k=v arguments (family / positional / define: comma lists), spec = the spec filter (empty: the whole suite); planned and written in a SCRATCH COPY of repo (default this cartograph), the spec run before and after — the independent oracle for accesses the analysis cannot see',
-    params = { verb = 'string', with = 'list', spec = 'string?', repo = 'string?', keep = 'string?', timeout = 'string?' },
+    summary = 'does a provenance reshape keep the tests green? verb = rename-field | reshape | hoist-empty, with = its k=v arguments (family / positional / define: comma lists), spec = the spec filter (empty: the whole suite); planned and written in a SCRATCH COPY of repo (default this cartograph), the spec run before and after — the independent oracle for accesses the analysis cannot see',
+    params = { verb = 'string', with = 'list?', spec = 'string?', repo = 'string?', keep = 'string?', timeout = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end

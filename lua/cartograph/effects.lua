@@ -61,9 +61,13 @@ M.SIGS = {
     lua = {
         exact = {
             -- language core
-            pairs = P, ipairs = P, next = P, type = P, tostring = P,
-            tonumber = P, select = P, rawget = P, rawequal = P, rawlen = P,
-            unpack = P, getmetatable = P,
+            -- (pairs / ipairs hand their table BACK — the iteration state: `yields_arg`, read by emptyfallback.empty_fallbacks)
+            -- (`reads = { i }`: looks only at the CONTENTS of argument i — never its identity, never returns it; read by
+            -- emptyfallback.empty_fallbacks, the optimizer's empty-fallback hoisting)
+            pairs = { pure = true, reads = { 1 }, yields_arg = { 1 } }, ipairs = { pure = true, reads = { 1 }, yields_arg = { 1 } },
+            next = { pure = true, reads = { 1 } }, type = P, tostring = P,
+            tonumber = P, select = P, rawget = P, rawequal = P, rawlen = { pure = true, reads = { 1 } },
+            unpack = { pure = true, reads = { 1 } }, getmetatable = P,
             -- (no write, but a RAISE: a consumer that runs calls early — mix's evaluator — must not, CART-1553)
             error = { pure = true, raises = true }, assert = { pure = true, raises = true },
             rawset = { w = { 1 } }, setmetatable = { w = { 1 }, returns_arg = 1 },
@@ -75,8 +79,8 @@ M.SIGS = {
             ['table.insert'] = { w = { 1 } }, ['table.remove'] = { w = { 1 } },
             ['table.sort'] = { w = { 1 }, calls = { 2 } },
             -- (table.move(a1, f, e, t [, a2]) writes a2, or a1 when a2 is absent: both, the sound over-approximation, CART-1551)
-            ['table.move'] = { w = { 1, 5 } }, ['table.concat'] = P,
-            ['table.unpack'] = P,
+            ['table.move'] = { w = { 1, 5 } }, ['table.concat'] = { pure = true, reads = { 1 } },
+            ['table.unpack'] = { pure = true, reads = { 1 } },
             ['string.gsub'] = { calls = { 3 } }, -- repl may be a fn; strings/tables pure
             ['coroutine.wrap'] = { calls = { 1 } },
             ['coroutine.create'] = { calls = { 1 } },

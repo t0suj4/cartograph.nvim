@@ -621,6 +621,79 @@ end
 --- `opts.line` to target a single finding (commonly = the location line).
 --- @return table? plan
 --- @return string? why  (set when plan is nil)
+-- ★ HOIST-EMPTY (the general optimizer's first tree-wide pass, CART-1657): every EMPTY FALLBACK emptyfallback.empty_fallbacks
+-- proves unnameable (cartograph.emptyfallback) (`ipairs(t or {})`, `#(t or {})`, `table.concat(t or {}, …)`) reads ONE read-only empty table per
+-- file instead of building a fresh one per call. One constant per file, never per site: a file-level local is an upvalue
+-- of every function that reads it, and a function at the 60-upvalue limit (treesitter's M.extract) must still compile —
+-- every rewritten file is compile-checked, and one that does not compile is skipped BY NAME (a frontier), the rest go.
+--   plan_empty(store, { files = { rel… }? })   (default: every Lua file of the world)
+function M.plan_empty(store, args)
+    args = args or {}
+    local txn, hazard = require 'cartograph.txn', require 'cartograph.hazard'
+    local root = store.data and store.data.root
+    if not root then return nil, 'no world is loaded', 'ill-posed' end
+    local files = args.files
+    if not files then
+        files = {}
+        -- (a test FIXTURE is data, its text asserted: never rewritten)
+        for _, f in ipairs(store.files or {}) do if f:match('%.lua$') and not f:match('/fixtures/') then files[#files + 1] = f end end
+        table.sort(files)
+    end
+    local edits, touched, stamps, skipped, nsite, nclosed = {}, {}, {}, {}, 0, 0
+    for _, rel in ipairs(files) do
+        local text = txn.read_file(root, rel)
+        local all = text and require('cartograph.emptyfallback').empty_fallbacks(text, 'lua') or {}
+        -- (a site in a CLOSED function is left: the constant would give that function its first outer reference, and a
+        -- closed function is one cartograph may lift as code — a qlower kernel, a closure mix assembles from source)
+        local sites = {}
+        for _, s in ipairs(all) do if s.closed then nclosed = nclosed + 1 else sites[#sites + 1] = s end end
+        if #sites > 0 then
+            -- (a name the file does not use)
+            local name, k = 'EMPTY_RO', 0
+            while text:find('%f[%w_]' .. name .. '%f[^%w_]') do k = k + 1; name = 'EMPTY_RO_' .. k end
+            local lines = vim.split(text, '\n', { plain = true })
+            local function offset(row, col) local o = 0; for i = 1, row do o = o + #lines[i] + 1 end; return o + col end
+            local abs = {}
+            for _, s in ipairs(sites) do abs[#abs + 1] = { offset(s.range[1], s.range[2]), offset(s.range[3], s.range[4]) } end
+            table.sort(abs, function (a, b) return a[1] > b[1] end)
+            local out = text
+            for _, r in ipairs(abs) do out = out:sub(1, r[1]) .. name .. out:sub(r[2] + 1) end
+            -- (the declaration PREFIXES the first line of code — past a shebang, the header comments and blank lines — so no
+            -- line moves: positions are asserted (source maps, loop-cost reports). A PLAIN table, read-only by
+            -- construction (every site only reads it): a metatable would put the code outside the subset mix lowers)
+            local olines = vim.split(out, '\n', { plain = true })
+            local at = 1
+            while olines[at] and (olines[at]:match('^#!') or olines[at]:match('^%s*%-%-') or olines[at]:match('^%s*$')) do at = at + 1 end
+            if not olines[at] then olines[at] = '' end
+            olines[at] = ('local %s = {}; '):format(name) .. olines[at]
+            out = table.concat(olines, '\n')
+            if loadstring((out:gsub('^#![^\n]*', ''))) then
+                edits[rel] = out; touched[#touched + 1] = rel; stamps[rel] = txn.disk_stamp(root, rel); nsite = nsite + #sites
+            else skipped[#skipped + 1] = rel end
+        end
+    end
+    local hazards = {}
+    if nclosed > 0 then
+        hazards[#hazards + 1] = hazard.new('closed-kept', ('%d empty fallback(s) in CLOSED functions left as they are: a hoisted constant would open them (they may be lifted as code)'):format(nclosed),
+            nil, { sites = nclosed }, 'informational')
+    end
+    if #skipped > 0 then
+        hazards[#hazards + 1] = hazard.new('uncompilable', ('%d file(s) would not compile with the constant (an upvalue or local limit): left as they are: %s')
+            :format(#skipped, table.concat(skipped, ', ', 1, math.min(#skipped, 12))), nil, { files = skipped }, 'frontier')
+    end
+    if #touched == 0 then
+        return nil, #skipped > 0 and ('every file with an empty fallback would not compile: %s'):format(table.concat(skipped, ', ')) or 'no empty fallback to hoist', 'empty'
+    end
+    local plan = {
+        verb = 'hoist-empty', guards = { 'parses' }, generation = store.generation,
+        touched = touched, stamps = stamps, refspecs = {}, edits = edits, hazards = hazards,
+        preserves = 'unreviewed',
+        preserves_why = 'each hoisted `{}` is the right operand of `or` in a position nothing can name, write or compare (a builtin that only READS it, effects.reads; pairs / ipairs as a for iterator; `#`), and nothing else names the shared table',
+        desc = ('hoist-empty: %d empty fallback(s) in %d file(s) read one read-only constant'):format(nsite, #touched),
+    }
+    return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
+end
+
 function M.plan_at(store, file, line, opts)
     local fid = M.at(store, file, line)
     if not fid then return nil, ('no function at %s:%d'):format(file, line), 'no-function' end

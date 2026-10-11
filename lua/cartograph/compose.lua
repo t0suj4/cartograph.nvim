@@ -186,6 +186,13 @@ M.VERBS.reshape = {
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
+-- ★ HOIST-EMPTY (CART-1657): the general optimizer's first tree-wide pass — every provably unnameable `t or {}` reads one
+-- read-only empty table per file (cartograph.optapply.plan_empty over emptyfallback.empty_fallbacks)
+M.VERBS['hoist-empty'] = {
+    plan = function (store, args) return require('cartograph.optapply').plan_empty(store, args) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
+    effect = 'journaled', rerun = 'empty',
+}
 M.VERBS['learn-tactic'] = {
     plan = function (store, args) return require('cartograph.toolbelt').plan_learn(store, args) end,
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,

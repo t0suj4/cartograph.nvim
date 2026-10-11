@@ -435,6 +435,8 @@ local IDEM = {
         end, { 'target-write' }, function (a) return a.target end },
     ['rename-field'] = { { ['s.lua'] = 'return { scopes = 1 }\n', ['r.lua'] = 'local M = {}\nfunction M.f(spec) return spec.scopes end\nreturn M\n' },
         function () return { base = 'spec', field = 'scopes', to = 'lexical', define = { 's.lua' } } end },
+    ['hoist-empty'] = { { ['m.lua'] = "local SEP = ','\nlocal function f(t) for _, x in ipairs(t or {}) do end; return SEP end\nreturn f\n" },
+        function () return {} end },
     reshape = { { ['pt.lua'] = 'local M = {}\nfunction M.pt(a, b) return { a, b } end\nfunction M.len(p) return p[1] + p[2] end\nreturn M\n',
             ['use.lua'] = "local P = require 'pt'\nreturn P.len(P.pt(1, 2))\n" },
         function () return { family = { 'pt.lua:2' }, positional = { '1=x', '2=y' } } end },
