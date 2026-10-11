@@ -1,7 +1,7 @@
 -- nvimdistill — distil the NEOVIM RUNTIME's Lua API into an L2 environment profile (`nvim`), from the runtime's OWN
 -- LuaLS annotations ([[cartograph-stdlib-profile]], CART-1150).
 --
---   nvim --headless -u NONE -l tools/nvimdistill.lua [--show] [--runtime <dir>]
+--   nvim --headless -u NONE -l tools/nvimdistill.lua [--show] [--runtime <dir>] [--out <file>]
 --
 -- ★★ THE SOURCE IS THE RUNTIME THAT RUNS THE CODE, NOT A LIST. Neovim ships its API annotated for lua-language-server:
 -- `_meta/vimfn.gen.lua` (every `vim.fn.*`), `_meta/api.gen.lua` (every `vim.api.nvim_*`), and the Lua modules
@@ -28,6 +28,7 @@ local i = 1
 while arg[i] do
     if arg[i] == '--show' then SHOW = true
     elseif arg[i] == '--runtime' and arg[i + 1] then RUNTIME = vim.fn.expand(arg[i + 1]); i = i + 1
+    elseif arg[i] == '--out' and arg[i + 1] then OUT = vim.fn.expand(arg[i + 1]); i = i + 1
     else io.stderr:write('nvimdistill: unknown argument ' .. arg[i] .. '\n'); os.exit(2) end
     i = i + 1
 end
@@ -40,7 +41,13 @@ local version = tostring(vim.version())
 local ts = require 'cartograph.providers.treesitter'
 local R = require('cartograph.metaread').new()
 local files = vim.fn.globpath(RUNTIME .. '/lua/vim', '**/*.lua', false, true)
+-- (and luv's annotations: `uv/_meta.lua` declares `---@class uv` and its handle classes; the runtime's own
+-- `---@type uv` over `vim.uv = ...` says where Neovim exposes it — read below, not listed)
+for _, f in ipairs(vim.fn.globpath(RUNTIME .. '/lua/uv', '**/*.lua', false, true)) do files[#files + 1] = f end
 table.sort(files)
+-- a TYPED vim field (`---@type uv` / `vim.uv = ...`) and a vim ALIAS (`vim.loop = vim.uv`): the field's calls are the
+-- class's methods called with a dot, so its signatures are the class's under the field's name
+local typed_field, field_alias = {}, {}
 
 local sigs, n_sig, n_dup, n_str, per_root = {}, 0, 0, 0, {}
 for _, path in ipairs(files) do
@@ -80,6 +87,14 @@ for _, path in ipairs(files) do
         if alias[o] then return alias[o] end
         return nil -- a file-local helper table: not an API
     end
+    for j, l in ipairs(lines) do
+        local ty = l:match('^%-%-%-%s*@type%s+([%w_%.]+)%s*$')
+        local nxt = ty and lines[j + 1]
+        local fld = nxt and nxt:match('^(vim%.[%w_%.]+)%s*=')
+        if fld then typed_field[fld] = ty end
+        local a, b = l:match('^(vim%.[%w_%.]+)%s*=%s*(vim%.[%w_%.]+)%s*$')
+        if a then field_alias[a] = b end
+    end
     R:each_function(lines, { owner_of = owner_of, assigned = true }, function (f)
         if not f.owner then return end -- a bare global in the runtime: not declared as an API here
         local s = f.sig
@@ -106,6 +121,18 @@ for _, path in ipairs(files) do
     end)
 end
 
+-- the typed fields, then their aliases: `vim.uv#fs_stat` is `uv#fs_stat`, `vim.loop#fs_stat` is `vim.uv#fs_stat`
+local n_field = 0
+local function copy_class(cls, as)
+    local pre = cls .. '#'
+    local add = {}
+    for k, v in pairs(sigs) do
+        if k:sub(1, #pre) == pre and not v.method then add[as .. '#' .. k:sub(#pre + 1)] = v end
+    end
+    for k, v in pairs(add) do if not sigs[k] then sigs[k] = v; n_field = n_field + 1 end end
+end
+for fld, cls in pairs(typed_field) do copy_class(cls, fld) end
+for a, b in pairs(field_alias) do copy_class(b, a) end
 local prof = {
     schema = 1, runtime = 'nvim', lang = 'lua', version = version,
     stamp = ('distilled from the LuaLS annotations of %s (nvim %s)'):format(RUNTIME, version),
@@ -118,6 +145,7 @@ local prof = {
 print(('nvimdistill  %s  nvim %s'):format(RUNTIME, version))
 print(('  %d files, %d signatures (%d overloads folded, %d multi-line types UNKNOWN), %d return a string first')
     :format(#files, n_sig, n_dup, R.multiline, n_str))
+print(('  %d more through typed vim fields and their aliases'):format(n_field))
 local roots = {}
 for k, v in pairs(per_root) do roots[#roots + 1] = { k, v } end
 table.sort(roots, function (a, b) return a[2] > b[2] end)

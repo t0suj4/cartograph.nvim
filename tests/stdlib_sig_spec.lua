@@ -167,3 +167,26 @@ test('metaread.each_function: opts.assigned reads an annotated assignment, not a
     eq(nil, got['M#TIMEOUT'], 'a documented constant is no function')
     eq(nil, plain['M#parse'], 'only on request')
 end)
+
+-- ★ A TYPED VIM FIELD CARRIES ITS CLASS'S SIGNATURES (CART-1643): the runtime declares `---@type uv` over
+-- `vim.uv = ...` and `vim.loop = vim.uv`; luv's `uv/_meta.lua` declares `---@class uv`. nvimdistill reads all three, so
+-- `vim.uv.fs_scandir_next(fs)` has a signature (it had none: 14 empty receivers on lua/cartograph)
+test('nvimdistill: a typed vim field and its alias carry the class\'s signatures (vim.uv, vim.loop)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local rt = vim.fn.tempname()
+    for _, d in ipairs { '/lua/vim', '/lua/uv' } do vim.fn.mkdir(rt .. d, 'p') end
+    local function w(rel, s) local fd = assert(io.open(rt .. rel, 'w')); fd:write(s); fd:close() end
+    w('/lua/vim/_meta.lua', '---@type uv\nvim.uv = ...\n')
+    w('/lua/vim/editor.lua', 'vim.loop = vim.uv\n')
+    w('/lua/uv/_meta.lua', '--- @class uv\nlocal uv = {}\n--- @param fs uv.uv_fs_t\n--- @return string? name\nfunction uv.fs_scandir_next(fs) end\n') -- (as luv's file: no `return`, the table is its @class)
+    local out = vim.fn.tempname() .. '.mpack'
+    local repo = vim.fn.getcwd()
+    local r = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', repo .. '/tools/nvimdistill.lua', '--runtime', rt, '--out', out }, { text = true }):wait()
+    vim.fn.delete(rt, 'rf')
+    eq(0, r.code, (r.stdout or '') .. (r.stderr or ''))
+    local fd = assert(io.open(out, 'rb')); local prof = vim.mpack.decode(fd:read('a')); fd:close()
+    os.remove(out)
+    ok(prof.sigs['uv#fs_scandir_next'], 'luv\'s own class')
+    ok(prof.sigs['vim.uv#fs_scandir_next'], 'the typed field `vim.uv`')
+    ok(prof.sigs['vim.loop#fs_scandir_next'], 'its alias `vim.loop`')
+end)
