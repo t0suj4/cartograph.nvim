@@ -817,3 +817,39 @@ test('flowtype: excluding an escaped receiver object that lacks the member makes
     eq('string', v and v.kind, vim.inspect(v))
     eq(true, v and v.partial, 't escaped into keep: it may have gained upper unseen — ' .. vim.inspect(v))
 end)
+
+-- ★ OPEN REACHES PAST THE EXPORTS (CART-1652): an outside caller can call a method on what an exported function
+-- RETURNS — `M.b():go()` runs A:go with a B instance, though the tree itself only ever calls `M.a():go()`. Open, the
+-- answer inside A:go is partial; closed (only the tree's own callers), it stays whole
+test('flowtype: open — a method reached through an exported return has partial parameters', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/a.lua'] = table.concat({
+            'local M = {}',
+            'local A = {}; A.__index = A',
+            'function A:hit() return 1 end',
+            'function A:go() return self:hit() end',
+            'local B = setmetatable({}, { __index = A }); B.__index = B',
+            'function B:hit() return 2 end',
+            'function M.a() return setmetatable({}, A) end',
+            'function M.b() return setmetatable({}, B) end',
+            'M.a():go()',
+            'return M',
+        }, '\n'),
+        ['plugin/fx.lua'] = 'require("fx.a")\n',
+    })
+    store.ingest(ts.extract(root))
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local function at3(R)
+        for _, c in ipairs(store.data.calls) do
+            if callrec.file(c) == 'lua/fx/a.lua' and c.at and atr.sl(c.at) == 3 and c.refused then return R.verdict(c), true end
+        end
+    end
+    local vo, ro = at3(flowtype.solve(store, {}))
+    local vc = at3(flowtype.solve(store, { open = false }))
+    vim.fn.delete(root, 'rf')
+    if not ro then skip 'the extractor already decides self:hit()' end
+    eq('exact', vc and vc.kind, 'closed: ' .. vim.inspect(vc))
+    eq(nil, vc and vc.partial, 'closed: whole')
+    eq(true, vo and vo.partial, 'open: an outside caller may run go with a B — ' .. vim.inspect(vo))
+end)

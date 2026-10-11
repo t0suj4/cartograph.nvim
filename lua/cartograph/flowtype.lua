@@ -1094,6 +1094,26 @@ local function build(store, opts)
     end
     local field_hit, params_hit = {}, false
     for p in pairs(top) do taint(p) end
+    -- ★ OPEN REACHES PAST THE EXPORTS (CART-1652): a caller outside the tree gets more than the module's functions —
+    -- what they RETURN, and those objects' fields and methods — and calls those methods with objects it got the same
+    -- way: `M.b():go()` runs A:go with a B instance the tree never builds, where the tree only calls `M.a():go()`.
+    -- Every function reachable from the exports that way has parameters an outside caller may fill: tainted
+    if open then
+        local seen, q = {}, {}
+        local function reach(o) if not seen[o] then seen[o] = true; q[#q + 1] = o end end
+        for _, mp in ipairs(modports) do for o in each(mp) do reach(o) end end
+        local i = 1
+        while i <= #q do
+            local o = q[i]; i = i + 1
+            for _, fp in pairs(ofield[o] or {}) do for x in each(fp) do reach(x) end end
+            for c in pairs(protos[o] or {}) do reach(c) end
+            local fpp = fnports[o]
+            if fpp then
+                for _, pp in ipairs(fpp.params) do taint(pp) end
+                for _, r in pairs(fpp.rets or { fpp.ret }) do for x in each(r) do reach(x) end end
+            end
+        end
+    end
     while #twork > 0 do
         local p = twork[#twork]; twork[#twork] = nil
         for q in pairs(succ[p] or {}) do taint(q) end
