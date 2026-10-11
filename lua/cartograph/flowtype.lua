@@ -367,9 +367,12 @@ local function build(store, opts)
         return v
     end
     local function load_obj(o, f, dst, seen, strict)
-        seen = seen or {}
-        if seen[o] then return end
-        seen[o] = true
+        -- (the cycle guard only matters along PROTOTYPES: allocated at the first one — 2.2 M sets per solve were built
+        -- for loads that never followed a prototype, the allocation census's top site)
+        if seen then
+            if seen[o] then return end
+            seen[o] = true
+        end
         local tn = TNAME[o]
         if tn then
             local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
@@ -393,7 +396,11 @@ local function build(store, opts)
             elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' then pull(m[fk]) end end
             else pull(ofp(o, f)); pull(ofp(o, '[]')) end
         end
-        for c in pairs(protos[o] or NOTHING) do load_obj(c, f, dst, seen, strict) end
+        local pr = protos[o]
+        if pr then
+            seen = seen or { [o] = true }
+            for c in pairs(pr) do load_obj(c, f, dst, seen, strict) end
+        end
     end
     -- the loads recorded on o, replayed on c (a prototype o gained) — field names in ONE order
     local function replay_loads(o, c)
