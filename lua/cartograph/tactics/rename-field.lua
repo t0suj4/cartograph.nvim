@@ -25,7 +25,8 @@ return {
     summary = 'rename a record field: base = the base spelling (spec), field -> to, define = the files whose constructors define the record (a,b), accept = name-occupied to move an occupant to a placeholder; OR family = the constructors (file:LINE,…) — by provenance: every access flowtype says those tables reach, under any spelling (world = closed|open)',
     params = { base = 'string?', field = 'string', to = 'string', define = 'list?', accept = 'string?', family = 'list?', world = 'string?' },
     build = function (p)
-        if p.family then return T.step('rename-field', { family = p.family, field = p.field, to = p.to, world = p.world }) end
+        if p.family then return T.step('rename-field', { family = p.family, field = p.field, to = p.to, world = p.world },
+            p.accept == 'keys-observed' and { 'keys-observed' } or nil) end
         return T.step('rename-field', { base = p.base, field = p.field, to = p.to, define = p.define },
             p.accept == 'name-occupied' and { 'name-occupied' } or nil)
     end,
@@ -58,6 +59,41 @@ return {
                 local a, b = io.open(root .. '/a.lua'):read('a'), io.open(root .. '/b.lua'):read('a')
                 return a:find('function M.tag(r)', 1, true) ~= nil and b:find('A.tag(rec)', 1, true) ~= nil, a .. b
             end },
+        },
+        {
+            name = 'by provenance: a pairs loop over the family SEES its field names — the rename stops on keys-observed',
+            files = { ['a.lua'] = FAM_A:gsub('return M\n$', 'function M.keys(r) local n = 0; for k in pairs(r) do n = n + 1 end; return n end\nreturn M\n'),
+                ['b.lua'] = FAM_B:gsub('A.big%(rec%)', 'A.big(rec), A.keys(rec)') },
+            params = { family = { 'a.lua:2' }, field = 'name', to = 'title' },
+            expect = { status = 'stopped', applied = 0 },
+        },
+        {
+            name = 'by provenance: keys-observed ACCEPTED — the rename goes ahead',
+            files = { ['a.lua'] = FAM_A:gsub('return M\n$', 'function M.keys(r) local n = 0; for k in pairs(r) do n = n + 1 end; return n end\nreturn M\n'),
+                ['b.lua'] = FAM_B:gsub('A.big%(rec%)', 'A.big(rec), A.keys(rec)') },
+            params = { family = { 'a.lua:2' }, field = 'name', to = 'title', accept = 'keys-observed' },
+            expect = { status = 'done', applied = 1 },
+        },
+        {
+            name = 'by provenance: a field the instances find in their PROTOTYPE (the class table) stops — the class must join the family',
+            files = { ['c.lua'] = table.concat({
+                'local C = {}',
+                'C.__index = C',
+                'function C.describe(self) return self.n end',
+                'local function new(n) return setmetatable({ n = n }, C) end',
+                'local x = new(1)',
+                'return x:describe()', '' }, '\n') },
+            params = { family = { 'c.lua:4' }, field = 'describe', to = 'show' },
+            expect = { status = 'stopped', applied = 0 },
+        },
+        {
+            name = 'by provenance: an __index FUNCTION computes fields no roster sees — refused',
+            files = { ['d.lua'] = table.concat({
+                'local function new(n) return setmetatable({ n = n }, { __index = function (t, k) return k end }) end',
+                'local x = new(1)',
+                'return x.n, x.other', '' }, '\n') },
+            params = { family = { 'd.lua:1' }, field = 'n', to = 'size' },
+            expect = { status = 'failed', applied = 0, check = function (_, res) return res.class == 'frontier', tostring(res.why) end },
         },
         {
             name = 'by provenance: an access the family SHARES with another table stops — widen the family; nothing is written',

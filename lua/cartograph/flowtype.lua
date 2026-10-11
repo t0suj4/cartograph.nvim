@@ -1568,6 +1568,31 @@ local function build(store, opts)
             end
         end
         R.accesses = rows
+        -- (what a family's PROTOTYPES hold: proto_fields(site, f) -> { proto sites holding f }, computed — a prototype
+        -- that is a function (an `__index` function computes fields). Every object of the site, instances included)
+        local of_site = {}
+        for o, info in pairs(obinfo) do
+            if not TNAME[o] then local k = tostring(info); local l = of_site[k]; if not l then l = {}; of_site[k] = l end; l[#l + 1] = o end
+        end
+        R.proto_fields = function (site, f)
+            local out, computed, seen = {}, false, {}
+            local function go(o, depth)
+                for c in pairs(protos[o] or {}) do
+                    if not seen[c] and depth < 8 then
+                        seen[c] = true
+                        if fnports[c] then computed = true
+                        else
+                            local m = ofield[c]
+                            if m and m[f] then out[tostring(obinfo[c])] = true end
+                            go(c, depth + 1)
+                        end
+                    end
+                end
+            end
+            for _, o in ipairs(of_site[site] or {}) do go(o, 0) end
+            local l = {} for k in pairs(out) do l[#l + 1] = k end; table.sort(l)
+            return l, computed
+        end
         -- (the allocation sites whose tables ESCAPED — reached a saturated port, where the solve no longer follows them)
         R.escaped_sites = {}
         for o in pairs(escaped) do if not TNAME[o] and obinfo[o] ~= 'external' then R.escaped_sites[tostring(obinfo[o])] = true end end

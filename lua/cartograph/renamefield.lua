@@ -143,7 +143,14 @@ local function plan_family(store, args)
     local F, why, class = M.family(store, args)
     if not F then return nil, why, class or 'ill-posed' end
     local R, fam, where, want = F.R, F.fam, F.where, { n = F.n }
-    local rewrite, frontier, others, occupied = {}, {}, {}, {}
+    local rewrite, frontier, others, occupied, observed = {}, {}, {}, {}, {}
+    -- (the field may live in a PROTOTYPE — a metatable's __index table — which the family's constructors do not define:
+    -- the prototype must join the family; an __index FUNCTION computes fields, which no roster can see)
+    for site in pairs(fam) do
+        local ps, computed = R.proto_fields(site, args.field)
+        if computed then frontier[#frontier + 1] = site .. ' has an __index function (fields are computed)' end
+        for _, ps1 in ipairs(ps) do if not fam[ps1] then others[#others + 1] = site .. ' finds it in prototype ' .. ps1 end end
+    end
     local nkeys, nsites = 0, 0
     for _, a in ipairs(R.accesses or {}) do
         local mine, foreign = false, {}
@@ -167,6 +174,8 @@ local function plan_family(store, args)
         elseif a.field == args.to and mine then
             occupied[#occupied + 1] = where(a) .. ' ' .. a.kind
         end
+        -- (a `pairs` over the family OBSERVES its field names: the rename changes what it sees — a decision)
+        if a.kind == 'iterate' and mine then observed[#observed + 1] = where(a) end
     end
     if #frontier > 0 then
         table.sort(frontier)
@@ -193,11 +202,17 @@ local function plan_family(store, args)
         edits[rel] = splice(text, ranges, args.to); touched[#touched + 1] = rel; stamps[rel] = txn.disk_stamp(root, rel)
     end
     table.sort(touched)
+    local hazards = {}
+    if #observed > 0 then
+        table.sort(observed)
+        hazards[#hazards + 1] = require('cartograph.hazard').new('keys-observed', ('%d pairs/next loop(s) over the family see its field NAMES, so they will see `%s` for `%s`: %s')
+            :format(#observed, args.to, args.field, table.concat(observed, ', ', 1, math.min(#observed, 12))), nil, { sites = observed }, 'decision')
+    end
     local plan = {
         verb = 'rename-field', guards = { 'parses' }, generation = store.generation,
-        touched = touched, stamps = stamps, refspecs = {}, edits = edits, hazards = {},
+        touched = touched, stamps = stamps, refspecs = {}, edits = edits, hazards = hazards,
         preserves = 'unreviewed',
-        preserves_why = 'by PROVENANCE: every access flowtype resolves to the family is rewritten and every rewritten access is reached ONLY by the family; saturated, partial and computed-key accesses refused the plan. Not covered: field names observed by pairs/next or a metatable',
+        preserves_why = 'by PROVENANCE: every access flowtype resolves to the family is rewritten and every rewritten access is reached ONLY by the family; saturated, partial and computed-key accesses refused the plan. A pairs/next over the family is a keys-observed decision; a prototype holding the field must join the family; an __index function refuses',
         desc = ('rename-field (family of %d) %s -> %s: %d access(es), %d key(s) in %d file(s)'):format(want.n, args.field, args.to, nsites, nkeys, #touched),
     }
     return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)

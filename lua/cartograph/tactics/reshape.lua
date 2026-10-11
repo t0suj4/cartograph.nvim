@@ -48,6 +48,12 @@ return {
             expect = { status = 'stopped', applied = 0 },
         },
         {
+            name = 'an __index FUNCTION on the family computes what an index reads — refused',
+            files = { ['e.lua'] = 'local function pt(a, b) return setmetatable({ a, b }, { __index = function () return 0 end }) end\nlocal p = pt(1, 2)\nreturn p[1] + p[3]\n' },
+            params = { family = { 'e.lua:1' }, positional = { '1=x', '2=y' } },
+            expect = { status = 'failed', applied = 0, check = function (_, res) return res.class == 'frontier', tostring(res.why) end },
+        },
+        {
             name = 'a position the mapping does not name stops on the decision',
             files = { ['pt.lua'] = PT, ['use.lua'] = USE },
             params = { family = { 'pt.lua:2' }, positional = { '1=x' } },

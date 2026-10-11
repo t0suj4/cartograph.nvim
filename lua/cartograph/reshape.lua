@@ -10,7 +10,7 @@
 -- (pairs), or a computed key, cannot keep its meaning once the positions are names: a FRONTIER, refused with the
 -- sites. So are saturated / partial accesses the family reaches and a family that escaped (renamefield.family). An
 -- access shared with other tables stops on the widen-the-family decision; a target name already a field of the family
--- on the name-occupied one.
+-- on the name-occupied one. A family whose metatable has an __index FUNCTION refuses (computed fields).
 local M = {}
 
 -- replace each { sr, sc, er, ec, text } range, bottom-up (an insertion is an empty range)
@@ -43,6 +43,11 @@ function M.plan(store, args)
     local fam, where = F.fam, F.where
     local edits, frontier, others, unmapped, occupied = {}, {}, {}, {}, {}
     local npos, nidx = 0, 0
+    -- (an __index FUNCTION on the family computes what an index reads: no roster sees it)
+    for site in pairs(fam) do
+        local _, computed = F.R.proto_fields(site, '#')
+        if computed then frontier[#frontier + 1] = site .. ' has an __index function (fields are computed)' end
+    end
     for _, a in ipairs(F.R.accesses or {}) do
         local mine, foreign = false, {}
         for site in pairs(a.sites) do if fam[site] then mine = true else foreign[#foreign + 1] = site end end
