@@ -142,7 +142,9 @@ local function plan_family(store, args)
         for site in pairs(a.sites) do if fam[site] then mine = true else foreign[#foreign + 1] = site end end
         if a.field == args.field or a.kind == 'dynamic' then
             if mine then
-                if a.kind == 'dynamic' then frontier[#frontier + 1] = where(a) .. ' a computed key'
+                if a.kind == 'dynamic' then
+                    -- (a computed key that cannot be a STRING — `rec[node]`, a table or a function — never names the field)
+                    if a.keystr then frontier[#frontier + 1] = where(a) .. ' a computed key' end
                 elseif a.top or a.partial then frontier[#frontier + 1] = where(a) .. (a.top and ' saturated' or ' partial')
                 elseif #foreign > 0 then
                     table.sort(foreign)

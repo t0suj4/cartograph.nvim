@@ -714,11 +714,11 @@ local function build(store, opts)
         local kfile = (clone and not isctx) and ('clone:' .. file) or file
         local function key_of(n) local l, c = n:start(); return kfile .. ':' .. l .. ':' .. c end
         -- (an access, at the FILE's positions: a snippet instance's positions are its own, so it records none)
-        local function acc(kind, node, f, base, obj, range)
+        local function acc(kind, node, f, base, obj, range, key)
             if not ACC or (clone and not isctx) or not node then return end
             local sr, sc, er, ec = node:range()
             if range then sr, sc, er, ec = range[1], range[2], range[3], range[4] end
-            ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj }
+            ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj, key = key }
         end
         local scopes = { {} }
         -- (a function is CLOSED when every name it reads is its own or a global: fnbase holds each open function's
@@ -791,7 +791,15 @@ local function build(store, opts)
                 local tr, tc = tb:end_()
                 acc('index', kn, tostring(tonumber(txt(kn))), base, nil, { tr, tc, er, ec })
             elseif keyname(kn) == '#' then acc('array', kn, nil, base)
-            elseif keyname(kn) == '[]' then acc('dynamic', kn, nil, base) end
+            elseif keyname(kn) == '[]' then
+                -- (and what the key holds — read only where reading it adds nothing to the solve: a name, or a dotted read
+                -- off one; any other key, a call among them, is taken as possibly a string)
+                local kt, ok = kn:type(), false
+                local x = kn
+                while x and x:type() == 'dot_index_expression' do x = x:field('table')[1] end
+                ok = x and x:type() == 'identifier'
+                acc('dynamic', kn, nil, base, nil, nil, ok and expr(kn) or false)
+            end
         end
         local function assign(target, v)
             local t = target:type()
@@ -1542,6 +1550,15 @@ local function build(store, opts)
                 elseif obinfo[o] == 'external' then r.partial = true
                 else r.sites[tostring(obinfo[o])] = true end
                 if escaped[o] then r.partial = true end
+            end
+            -- (a computed key: may it be a STRING — a field name? `seen[node]` keyed by tables or functions never is)
+            if a.key == false then r.keystr = true
+            elseif a.key then
+                if top[a.key] or tainted[a.key] or pts[a.key] == nil then r.keystr = true end
+                for o in each(a.key) do
+                    local tn = TNAME[o]
+                    if obinfo[o] == 'external' or (tn and tn ~= 'integer' and tn ~= 'number' and tn ~= 'boolean') then r.keystr = true end
+                end
             end
             if a.obj then r.sites[tostring(obinfo[a.obj])] = true -- (a constructor's own key: definitional, never partial)
             else

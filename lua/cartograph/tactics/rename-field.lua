@@ -56,6 +56,12 @@ return {
             expect = { status = 'stopped', applied = 0 },
         },
         {
+            name = 'by provenance: a computed key that cannot be a string (`rec[A]`, a table) names no field — the rename proceeds',
+            files = { ['a.lua'] = FAM_A, ['b.lua'] = FAM_B:gsub('rec.size = 3;', 'rec.size = 3; rec[A] = true;') },
+            params = { family = { 'a.lua:2' }, field = 'name', to = 'title' },
+            expect = { status = 'done', applied = 1 },
+        },
+        {
             name = 'by provenance: a computed key the family reaches cannot be proven — refused, nothing is written',
             files = { ['a.lua'] = FAM_A:gsub('return M\n$', 'function M.get(r, k) return r[k] end\nreturn M\n'),
                 ['b.lua'] = FAM_B:gsub('A.big%(rec%)', 'A.big(rec), A.get(rec, "name")') },
