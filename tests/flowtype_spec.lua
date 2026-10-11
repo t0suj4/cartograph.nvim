@@ -559,6 +559,25 @@ test('flowtype: a load of a field the cap may have left incomplete is partial', 
     eq(true, v and v.partial, 'box.handler may hold what put wrote unseen: ' .. vim.inspect(v))
 end)
 
+-- ★ A GENERIC RETURN IS ITS ARGUMENT (CART-1653): `assert(v: T, …): T` returns v. Read as an object of a type named T
+-- the algebra table never reached `A().node(…)` — 48 empty receivers on lua/cartograph
+test('flowtype: a profile function returning its generic parameter (assert) returns the argument, not a type named T', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.run(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.run(self) return 2 end\nreturn B\n',
+        ['main.lua'] = 'local A = require "a"\nlocal x = assert(A, "no a")\nreturn x:run()\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local v
+    for _, c in ipairs(store.data.calls) do if callrec.file(c) == 'main.lua' and tostring(callrec.full(c)) == 'x:run' then v = R.verdict(c) end end
+    eq('exact', v and v.kind, 'assert hands A through: ' .. vim.inspect(v))
+    ok(v and v.targets[1] == 'a.lua::A.run@1', vim.inspect(v))
+end)
+
 -- ★ SELECTIVE CONTEXT SENSITIVITY (CART-1653): a function whose parameter SATURATES upstream of an unknown answer gets
 -- an instance per resolved call site, walked inside the scopes it was defined in (a closure: `use` reads `count`), and
 -- a call in it is answered over its instances. At CAP 2 the merged `x` holds A and two plain tables: saturated, no

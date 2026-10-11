@@ -524,6 +524,27 @@ local function build(store, opts)
         RET[ck] = one or false
         return one
     end
+    -- ★ A GENERIC RETURN IS ITS ARGUMENT (CART-1653): `assert(v: T, …): T` returns v — not an object of a type named
+    -- `T`. 48 of lua/cartograph's empty receivers were `A().node(…)` with A = `assert(require(…).load())`: the algebra
+    -- table never arrived, a bare `T` did. A return whose type is a generic-shaped name (T, K, V, T1) that also types a
+    -- parameter takes that parameter's argument -> its index, or nil
+    local GEN = {}
+    local function genarg(key, k)
+        local ck = key .. '\0' .. k
+        local g = GEN[ck]
+        if g ~= nil then return g or nil end
+        g = false
+        local sg = PSIGS[key]
+        local rk = type(sg) == 'table' and sg.returns and sg.returns[k]
+        local rt = rk and type(rk.type) == 'string' and rk.type:gsub('%?$', '')
+        if rt and rt:match('^[A-Z]%d?$') then
+            for i, pm in ipairs(sg.params or {}) do
+                if pm.name ~= '...' and type(pm.type) == 'string' and pm.type:gsub('%?$', '') == rt then g = i; break end
+            end
+        end
+        GEN[ck] = g
+        return g or nil
+    end
     -- (a function TYPE's returns: `fun(a: integer): TSNode, string` -> { 'TSNode', 'string' }; wrapped in parentheses
     -- too. Anything else is no function type: nil)
     local FUNRETS = {}
@@ -885,8 +906,13 @@ local function build(store, opts)
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
                 for k, r in ipairs(resl) do
-                    local rt = retk(owner and (owner .. '#' .. mm) or fname, k)
-                    if rt then addobj(r, typeobj(rt)) end
+                    local key = owner and (owner .. '#' .. mm) or fname
+                    local gi = genarg(key, k)
+                    if gi then if aps[gi] then edge(aps[gi], r) end
+                    else
+                        local rt = retk(key, k)
+                        if rt then addobj(r, typeobj(rt)) end
+                    end
                 end
             end
             if not callee and f then callee = expr(f) end
