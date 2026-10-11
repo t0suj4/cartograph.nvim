@@ -613,10 +613,18 @@ local function build(store, opts)
             m[atr.sl(n.range) .. ':' .. atr.sc(n.range)] = n.id
         end
     end
+    -- (keyed by position AND callee name: a chained call starts where its inner call does — `load().run()` and
+    -- `load()`, `parser:parse()[1]:root()` and `parser:parse()` — and by position alone the inner record overwrote
+    -- the outer, so the outer, ambiguous call was never probed)
     local call_at = {}
     for _, c in ipairs(store.data.calls or {}) do
         local at = c.at
-        if at then call_at[callrec.file(c) .. ':' .. atr.sl(at) .. ':' .. atr.sc(at)] = c end
+        if at then
+            local k = callrec.file(c) .. ':' .. atr.sl(at) .. ':' .. atr.sc(at)
+            call_at[k .. '#' .. tostring(callrec.callee(c))] = c
+            -- (by position alone only where ONE call starts there)
+            if call_at[k] == nil then call_at[k] = c elseif call_at[k] ~= c then call_at[k] = false end
+        end
     end
     local req_at = {}
     for _, e in ipairs(store.data.edges or {}) do
@@ -631,6 +639,10 @@ local function build(store, opts)
     end
     local probes = {}
     local modports = {}
+    -- (a module NAME -> its file by Lua's path convention, lua/a/b.lua or lua/a/b/init.lua: the fallback for a require
+    -- the graph has no import edge for — `pcall(require, 'cartograph.algebra.core')` passes require as a VALUE, and
+    -- that one call is where cartograph.algebra's whole API comes from. Filled before the walk)
+    local modfile = {}
     -- ── one file: a scoped walk emitting the constraints ─────────────────────────────────────────────────
     local function walk_file(file, src)
         local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
@@ -718,12 +730,30 @@ local function build(store, opts)
             local args = n:field('arguments')[1]
             local argn = {}
             for _, a in tsutil.inext, args or EMPTY_NODE, -1 do if a:named() then argn[#argn + 1] = a end end
-            local c = f and call_at[key_of(f)]
+            local cname = f and ((f:type() == 'method_index_expression' and f:field('method')[1])
+                or (f:type() == 'dot_index_expression' and f:field('field')[1]) or (f:type() == 'identifier' and f))
+            local c = f and (call_at[key_of(f) .. '#' .. (cname and txt(cname) or '')] or call_at[key_of(f)] or nil)
             local fname = f and txt(f) or ''
+            local function modport(a)
+                local s = a and a:type() == 'string' and a:field('content')[1]
+                local mf = s and modfile[txt(s)]
+                return mf and port('mod:' .. mf)
+            end
             if fname == 'require' and argn[1] then
                 local l, cc = argn[1]:start()
                 local m = req_at[file .. ':' .. l .. ':' .. cc]
                 if m then return port('mod:' .. m) end
+                local mp = modport(argn[1])
+                if mp then return mp end
+            end
+            if fname == 'pcall' and argn[1] and argn[1]:type() == 'identifier' and txt(argn[1]) == 'require' then
+                local mp = modport(argn[2])
+                if mp then
+                    if not want then return mp end
+                    local out = { new(), mp }
+                    for k = 3, want do out[k] = new() end
+                    return out
+                end
             end
             if fname == 'setmetatable' and argn[1] then
                 local tp = expr(argn[1])
@@ -962,6 +992,16 @@ local function build(store, opts)
                 and not (opts.exclude and f:match(opts.exclude)) then seen[f] = true; files[#files + 1] = f end
         end
         table.sort(files)
+        local dup = {}
+        for _, f in ipairs(files) do
+            local rel = f:match('^lua/(.+)%.lua$') or f:match('/lua/(.+)%.lua$')
+            if rel then
+                local name = rel:gsub('/init$', ''):gsub('/', '.')
+                if modfile[name] and modfile[name] ~= f then dup[name] = true end
+                modfile[name] = f
+            end
+        end
+        for name in pairs(dup) do modfile[name] = nil end
     end
     local root = store.data.root
     -- (the solver's operations, for a language's own walker: flowtype_go)

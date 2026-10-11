@@ -715,3 +715,32 @@ test('flowtype: multiple values — pcall, a second return, an iterator in the t
     one(14, 'B:run', "an iterator in the tree: inext's second value")
     one(18, 'TSNode', "a typed iterator: iter_children's first value")
 end)
+
+-- ★ A REQUIRE THE GRAPH HAS NO IMPORT EDGE FOR (CART-1643): `pcall(require, 'cartograph.algebra.core')` passes require
+-- as a VALUE, and cartograph.algebra's whole API comes out of that one call (M.load()). A literal module name now
+-- resolves by Lua's path convention (lua/a/b.lua, lua/a/b/init.lua) to a file in the tree: on lua/cartograph exact
+-- verdicts 279 -> 387, and the runtime oracle saw 57 more executed exact answers right, 0 wrong
+test('flowtype: pcall(require, "m") reaches module m', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/core.lua'] = 'local M = {}\nfunction M.run() return 1 end\nreturn M\n',
+        ['lua/fx/other.lua'] = 'local O = {}\nfunction O.run() return 2 end\nreturn O\n',
+        ['lua/fx/main.lua'] = table.concat({
+            'local ok, A = pcall(require, "fx.core")',
+            'local function load() return A end',
+            'return load().run()',
+        }, '\n'),
+        ['plugin/fx.lua'] = 'require("fx.main"); require("fx.other")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v, refused
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/main.lua' and c.at and atr.sl(c.at) == 2 and (callrec.callee(c) == 'run') then v = R.verdict(c); refused = c.refused end
+    end
+    vim.fn.delete(root, 'rf')
+    if not refused then skip 'the extractor already decides load().run()' end
+    eq('exact', v and v.kind, vim.inspect(v))
+    ok(v and tostring(v.targets[1]):match('core%.lua::M%.run'), vim.inspect(v and v.targets))
+end)
