@@ -688,6 +688,11 @@ local function build(store, opts)
     -- A call's answer is then the union over its instances: each instance's receiver stays under the cap where the
     -- merged one did not
     local mcalls = {} -- every `x:m(…)` the Lua walker saw: { receiver port, method, result ports }
+    -- ★ THE ACCESS ROSTER (opts.accesses, CART-1175): every field access the Lua walker sees — a read, a write, a method
+    -- call, a constructor key, a computed key — with its source range and its base port, resolved after the solve to
+    -- the ALLOCATION SITES that reach it. A representation change (renamefield's family mode) rewrites exactly the
+    -- accesses one family of tables reaches
+    local ACC = opts.accesses and {} or nil
     local CTXFNS = opts.ctxfns
     local CTX, CTXTREES, ctx_direct = {}, {}, {}
     local function walk_file(file, src, clone)
@@ -706,6 +711,12 @@ local function build(store, opts)
         -- CONTEXT instance walks the original node, at the file's own positions)
         local kfile = (clone and not isctx) and ('clone:' .. file) or file
         local function key_of(n) local l, c = n:start(); return kfile .. ':' .. l .. ':' .. c end
+        -- (an access, at the FILE's positions: a snippet instance's positions are its own, so it records none)
+        local function acc(kind, node, f, base, obj)
+            if not ACC or (clone and not isctx) or not node then return end
+            local sr, sc, er, ec = node:range()
+            ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj }
+        end
         local scopes = { {} }
         -- (a function is CLOSED when every name it reads is its own or a global: fnbase holds each open function's
         -- first scope, fnmeta whether it read past it or holds a function of its own)
@@ -763,12 +774,23 @@ local function build(store, opts)
             if isnum(k) then return '#' end
             return '[]'
         end
+        -- (a bracket key's access: a string literal names its field — the range is its content — a computed key may
+        -- name any field: a `dynamic` access)
+        local function acc_key(kind, kn, base)
+            if not ACC or not kn then return end
+            if kn:type() == 'string' then local c = kn:field('content')[1]; if c then acc(kind, c, txt(c), base) end
+            elseif keyname(kn) == '[]' then acc('dynamic', kn, nil, base) end
+        end
         local function assign(target, v)
             local t = target:type()
             if t == 'identifier' then edge(v, lookup(txt(target)))
-            elseif t == 'dot_index_expression' then storec(expr(target:field('table')[1]), txt(target:field('field')[1]), v)
+            elseif t == 'dot_index_expression' then
+                local base = expr(target:field('table')[1])
+                acc('write', target:field('field')[1], txt(target:field('field')[1]), base)
+                storec(base, txt(target:field('field')[1]), v)
             elseif t == 'bracket_index_expression' then
                 local base, kn = expr(target:field('table')[1]), target:field('field')[1]
+                acc_key('write', kn, base)
                 storec(base, keyname(kn), v)
                 if kn then storec(base, '{k}', expr(kn)) end
             end
@@ -875,9 +897,12 @@ local function build(store, opts)
                 return new()
             end
             local recvp, callee
+            -- (the roster: a dotted callee `M.show(a)` READS the field show — a resolved call never evaluates it)
+            if ACC and f and f:type() == 'dot_index_expression' then acc('read', f:field('field')[1], txt(f:field('field')[1]), expr(f:field('table')[1])) end
             if f and f:type() == 'method_index_expression' then
                 recvp = expr(f:field('table')[1])
                 callee = field(recvp, txt(f:field('method')[1]))
+                acc('method', f:field('method')[1], txt(f:field('method')[1]), recvp)
             end
             local aps = {}
             if recvp then aps[1] = recvp end
@@ -941,7 +966,9 @@ local function build(store, opts)
             local t = n:type()
             if t == 'identifier' then return lookup(txt(n)) end
             if t == 'dot_index_expression' then
-                local p = field(expr(n:field('table')[1]), txt(n:field('field')[1]))
+                local base = expr(n:field('table')[1])
+                local p = field(base, txt(n:field('field')[1]))
+                acc('read', n:field('field')[1], txt(n:field('field')[1]), base)
                 -- ★ A PROFILE FUNCTION AS A VALUE (CART-1643): `pcall(vim.treesitter.get_string_parser, src, lang)` —
                 -- 65 of lua/cartograph's tree-sitter entry points — passes the function, and a load off the global
                 -- `vim` holds nothing: no parser, no tree, no node anywhere downstream. A dotted reference rooted at a
@@ -950,7 +977,11 @@ local function build(store, opts)
                 if ft then addobj(p, ft) end
                 return p
             end
-            if t == 'bracket_index_expression' then return field(expr(n:field('table')[1]), keyname(n:field('field')[1])) end
+            if t == 'bracket_index_expression' then
+                local base = expr(n:field('table')[1])
+                acc_key('read', n:field('field')[1], base)
+                return field(base, keyname(n:field('field')[1]))
+            end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
             if t == 'string' then local p = new(); addobj(p, STR); return p end
             if t == 'function_call' then return callv(n) end
@@ -964,6 +995,7 @@ local function build(store, opts)
                         local k, v = fl:field('name')[1], fl:field('value')[1]
                         if v then
                             local key = (k and k:type() == 'identifier') and txt(k) or keyname(k)
+                            if k and k:type() == 'identifier' then acc('key', k, key, nil, o) elseif k then acc_key('key', k, nil); if ACC and ACC[#ACC] and ACC[#ACC].sr == select(1, k:range()) then ACC[#ACC].obj = o end end
                             edge(expr(v), ofp(o, key))
                             if k then local sp = new(); addobj(sp, STR); edge(sp, ofp(o, '{k}')) end
                         end
@@ -1013,7 +1045,11 @@ local function build(store, opts)
                         if nm:type() == 'identifier' then edge(fp, lookup(txt(nm)))
                         else
                             local o, last = nm:named_child(0), nm:named_child(nm:named_child_count() - 1)
-                            if o and last then storec(expr(o), txt(last), fp) end
+                            if o and last then
+                                local base = expr(o)
+                                acc('write', last, txt(last), base)
+                                storec(base, txt(last), fp)
+                            end
                         end
                     end
                 end
@@ -1466,6 +1502,34 @@ local function build(store, opts)
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
+    if ACC then
+        -- (one row per source range and kind: the shared walk and each context instance unioned)
+        local rows, idx = {}, {}
+        for _, a in ipairs(ACC) do
+            local k = a.file .. ':' .. a.sr .. ':' .. a.sc .. ':' .. a.kind
+            local r = idx[k]
+            if not r then
+                r = { file = a.file, range = { a.sr, a.sc, a.er, a.ec }, field = a.f, kind = a.kind, sites = {}, types = {}, top = false, partial = false }
+                idx[k] = r; rows[#rows + 1] = r
+            end
+            local function add(o)
+                if TNAME[o] then r.types[TNAME[o]] = true
+                elseif obinfo[o] == 'external' then r.partial = true
+                else r.sites[tostring(obinfo[o])] = true end
+                if escaped[o] then r.partial = true end
+            end
+            if a.obj then r.sites[tostring(obinfo[a.obj])] = true -- (a constructor's own key: definitional, never partial)
+            else
+                if top[a.base] then r.top = true end
+                if tainted[a.base] then r.partial = true end
+                for o in each(a.base) do add(o) end
+            end
+        end
+        R.accesses = rows
+        -- (the allocation sites whose tables ESCAPED — reached a saturated port, where the solve no longer follows them)
+        R.escaped_sites = {}
+        for o in pairs(escaped) do if not TNAME[o] and obinfo[o] ~= 'external' then R.escaped_sites[tostring(obinfo[o])] = true end end
+    end
     if opts.keepsat then
         -- (the SELECTION: saturated ports upstream of an unknown answer — copies, field -> load, through prototypes —
         -- and the functions whose PARAMETERS are among them)

@@ -85,8 +85,114 @@ local function splice(text, ranges, to)
     return text
 end
 
+-- ★ FAMILY MODE — PROVENANCE, NOT SPELLING (CART-1175): `family = { 'file.lua:LINE', … }` names the table constructors
+-- whose records are renamed; flowtype's access roster (opts.accesses) says which reads, writes, method calls and keys
+-- those tables REACH, under any spelling. A rename is safe only on a CLOSED family:
+--   an access reached by the family and by OTHER tables  -> a decision: widen the family (the other sites are named)
+--   a saturated / partial / computed-key access the family reaches, or a saturated access of the old name (it may hide
+--   the family)                                         -> a frontier: refused, with the sites
+--   the new name already a field of the family          -> a decision (name-occupied)
+-- world = 'closed' (default: the tree is the whole program, as a refactoring assumes) | 'open'
+local function plan_family(store, args)
+    local txn = require 'cartograph.txn'
+    local root = store.data and store.data.root
+    local o = { accesses = true }
+    if args.world ~= 'open' then o.open = false end
+    local R = require('cartograph.flowtype').solve(store, o)
+    local fam, want = {}, {}
+    for _, spec in ipairs(args.family) do
+        local f, l = tostring(spec):match('^(.-):(%d+)$')
+        if not f then return nil, ('family entry `%s` is not file:LINE'):format(tostring(spec)), 'ill-posed' end
+        want[#want + 1] = { file = f, line = tonumber(l), spec = spec }
+    end
+    local allsites = {}
+    for _, a in ipairs(R.accesses or {}) do for site in pairs(a.sites) do allsites[site] = true end end
+    for _, w in ipairs(want) do
+        local hit = false
+        for site in pairs(allsites) do
+            local f, l = site:match('^tbl:(.-):(%d+):%d+$')
+            if f == w.file and tonumber(l) + 1 == w.line then fam[site] = true; hit = true end
+        end
+        if not hit then return nil, ('no table constructor the analysis follows at %s'):format(w.spec), 'ill-posed' end
+    end
+    local function where(a) return ('%s:%d'):format(a.file, a.range[1] + 1) end
+    -- (a family table that ESCAPED reached a saturated port: what is done with it beyond is not followed, so no roster
+    -- of its accesses is complete — the frontier is the family itself)
+    local esc = {}
+    for site in pairs(fam) do if R.escaped_sites and R.escaped_sites[site] then esc[#esc + 1] = site end end
+    if #esc > 0 then
+        table.sort(esc)
+        return nil, ('the family ESCAPES: %s reach a saturated port, so accesses through it are not followed — no roster of its accesses is complete'):format(table.concat(esc, ', ')), 'frontier'
+    end
+    local rewrite, frontier, others, occupied = {}, {}, {}, {}
+    local nkeys, nsites = 0, 0
+    for _, a in ipairs(R.accesses or {}) do
+        local mine, foreign = false, {}
+        for site in pairs(a.sites) do if fam[site] then mine = true else foreign[#foreign + 1] = site end end
+        if a.field == args.field or a.kind == 'dynamic' then
+            if mine then
+                if a.kind == 'dynamic' then frontier[#frontier + 1] = where(a) .. ' a computed key'
+                elseif a.top or a.partial then frontier[#frontier + 1] = where(a) .. (a.top and ' saturated' or ' partial')
+                elseif #foreign > 0 then
+                    table.sort(foreign)
+                    others[#others + 1] = where(a) .. ' also ' .. table.concat(foreign, ', ')
+                else
+                    rewrite[#rewrite + 1] = a
+                    if a.kind == 'key' then nkeys = nkeys + 1 else nsites = nsites + 1 end
+                end
+            elseif a.top and a.field == args.field then
+                frontier[#frontier + 1] = where(a) .. ' saturated (it may hold the family)'
+            end
+        elseif a.field == args.to and mine then
+            occupied[#occupied + 1] = where(a) .. ' ' .. a.kind
+        end
+    end
+    if #frontier > 0 then
+        table.sort(frontier)
+        return nil, ('%d access(es) the analysis cannot prove: %s'):format(#frontier, table.concat(frontier, '; ', 1, math.min(#frontier, 12))), 'frontier'
+    end
+    if #others > 0 then
+        table.sort(others)
+        return nil, ('the family is not closed: %d access(es) are shared with other tables — add them to the family: %s')
+            :format(#others, table.concat(others, '; ', 1, math.min(#others, 12))), 'decision'
+    end
+    if #occupied > 0 then
+        return nil, ('`%s` is already a field of the family: %s'):format(args.to, table.concat(occupied, '; ')), 'decision'
+    end
+    if #rewrite == 0 then
+        return nil, ('no access of `%s` reaches the family: nothing to rename'):format(args.field), 'empty'
+    end
+    local by = {}
+    for _, a in ipairs(rewrite) do local l = by[a.file] or {}; by[a.file] = l; l[#l + 1] = a.range end
+    local edits, touched, stamps = {}, {}, {}
+    for rel, ranges in pairs(by) do
+        local text = txn.read_file(root, rel)
+        if not text then return nil, 'cannot read ' .. rel, 'ill-posed' end
+        edits[rel] = splice(text, ranges, args.to); touched[#touched + 1] = rel; stamps[rel] = txn.disk_stamp(root, rel)
+    end
+    table.sort(touched)
+    local plan = {
+        verb = 'rename-field', guards = { 'parses' }, generation = store.generation,
+        touched = touched, stamps = stamps, refspecs = {}, edits = edits, hazards = {},
+        preserves = 'unreviewed',
+        preserves_why = 'by PROVENANCE: every access flowtype resolves to the family is rewritten and every rewritten access is reached ONLY by the family; saturated, partial and computed-key accesses refused the plan. Not covered: field names observed by pairs/next or a metatable',
+        desc = ('rename-field (family of %d) %s -> %s: %d access(es), %d key(s) in %d file(s)'):format(#want, args.field, args.to, nsites, nkeys, #touched),
+    }
+    return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
+end
+
 function M.plan(store, args)
     args = args or {}
+    if args.family then
+        for _, k in ipairs { 'field', 'to' } do
+            if type(args[k]) ~= 'string' or not args[k]:match('^[%a_][%w_]*$') then
+                return nil, ('`%s` must be a Lua identifier'):format(k), 'ill-posed'
+            end
+        end
+        if args.field == args.to then return nil, 'the field already has that name', 'ill-posed' end
+        if not (store.data and store.data.root) then return nil, 'no world is loaded', 'ill-posed' end
+        return plan_family(store, args)
+    end
     local txn, hazard = require 'cartograph.txn', require 'cartograph.hazard'
     local root = store.data and store.data.root
     if not root then return nil, 'no world is loaded', 'ill-posed' end
