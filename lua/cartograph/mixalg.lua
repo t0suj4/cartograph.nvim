@@ -636,13 +636,17 @@ local prog_cache, prog_term
 -- residual `pcall` (key computations keep the original's) would otherwise swallow it and answer from a wrong branch
 M.DEOPT = setmetatable({}, { __tostring = function () return 'mixalg: an assumption of the compiled matcher failed (deoptimize)' end })
 -- the residual chunk's environment and the function it serves: the matcher, checked for a swallowed deopt
-local function served(text, pool)
+local match_knowns -- (M.program('M.match')'s knowns, once per process: load_match serves a cached text with them)
+local function served(text, pool, knowns)
     local A = require('cartograph.algebra').load()
     local flag = { up = false }
     local Menv = { grammars = A.grammars }
     for path in pairs(M.ALWAYS_OPAQUE) do Menv[path:match('^M%.(.*)$')] = A[path:match('^M%.(.*)$')] end
     local env = setmetatable({ MIXK = pool, M = Menv,
         MIXDEOPT = function () flag.up = true; error(M.DEOPT, 0) end }, { __index = _G })
+    -- (the closure's KNOWN file-level tables, by their mangled names: the residual reads them as globals — M.program's
+    -- contract, "to the residual's environment")
+    for k, v in pairs(knowns or {}) do if k:match('^[%a_][%w_]*$') then env[k] = v end end
     local m = assert(load(text, 'mixalg.match', 't', env))()
     return function (I)
         flag.up = false
@@ -657,27 +661,41 @@ end
 --- opts.assume: SPECULATE — e.g. { align = { value = nil } }, a
 --- subject's nodes are never keyed (algebraread's are not): the keyed code folds away, a guard raises M.DEOPT when a
 --- node is keyed after all
+--- the GLOBALS mix specializes M.match under: the algebra's grammars and the closure's KNOWN file-level tables — M.program's
+--- contract says the caller passes them (the match closure had captured none until the optimizer's hoist-empty gave
+--- core.lua one, and compile_match — and every copy of its call — dropped them)
+function M.match_globals()
+    local A = require('cartograph.algebra').load()
+    local globals = { ['M.grammars'] = A.grammars or {} }
+    for k, v in pairs(select(4, M.program('M.match')) or {}) do if globals[k] == nil then globals[k] = v end end
+    return globals
+end
+
 function M.compile_match(T, opts)
     opts = opts or {}
     local MX = require 'cartograph.mix'
     local A = require('cartograph.algebra').load()
     if not term_cache then term_cache = assert(require('cartograph.algebraread').read((M.program('M.match')), 'lua')) end
-    local _, _, lines, _, mreport, prims = M.program('M.match')
+    local _, _, lines, knowns, mreport, prims = M.program('M.match')
+    match_knowns = knowns
     if prog_term ~= term_cache then prog_cache, prog_term = MX.lower(term_cache, { lines = lines }), term_cache end
+    local globals = M.match_globals()
     local res, stats = MX.specialize(prog_cache, 'M_match', { 'S', 'D', 'S' }, { T, nil, opts.env },
-        { budget = opts.budget or 5e6, depth = opts.depth, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, assume = opts.assume,
+        { budget = opts.budget or 5e6, depth = opts.depth, globals = globals, lines = lines, assume = opts.assume,
           prims = prims, single_prims = mreport and mreport.single_prims })
     local text, map = MX.print(res, prog_cache.where)
     stats.decisions = res.decisions -- (as MX.mix reports them, CART-1501)
     local pool = res.pool
     -- (map: residual line -> the algebra's src:line — MX.translate turns an error of this code into the source's terms)
-    return served(text, pool), text, stats, pool, map
+    return served(text, pool, knowns), text, stats, pool, map
 end
 
 --- a compiled matcher from its residual TEXT and constant POOL (as compile_match returned them, e.g. read back from a
 --- cache) -> the matcher function
 function M.load_match(text, pool)
-    return served(text, pool)
+    -- (the knowns of the closure the text was compiled from: the same loaded code gives the same values)
+    if not match_knowns then match_knowns = select(4, M.program('M.match')) end
+    return served(text, pool, match_knowns)
 end
 
 return M

@@ -638,7 +638,7 @@ test('mixalg: compile_match lowers the match closure ONCE, and a compile leaves 
     end
     local before = snap(prog)
     for _, r in ipairs(some) do
-        MX.specialize(prog, 'M_match', { 'S', 'D', 'S' }, { r.lhs, nil, nil }, { budget = 5e6, globals = { ['M.grammars'] = A.grammars or {} }, lines = lines, prims = prims })
+        MX.specialize(prog, 'M_match', { 'S', 'D', 'S' }, { r.lhs, nil, nil }, { budget = 5e6, globals = MA.match_globals(), lines = lines, prims = prims })
     end
     eq(before, snap(prog), 'specialize leaves the program it was given as it was')
 end)

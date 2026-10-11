@@ -22,7 +22,7 @@ test('mixterm: the ROUND TRIP on real IR — every function of the algebra\'s ma
     end
     for name, f in pairs(prog.funcs) do check('source ' .. name, f.body) end
     local rule = require('cartograph.luajs.rules').all()[5]
-    local res = MX.specialize(prog, 'M_match', { 'S', 'D', 'S' }, { rule.lhs }, { budget = 5e6, globals = { ['M.grammars'] = A.grammars or {} } })
+    local res = MX.specialize(prog, 'M_match', { 'S', 'D', 'S' }, { rule.lhs }, { budget = 5e6, globals = MA.match_globals() })
     for name, f in pairs(res.funcs) do check('residual ' .. name, f.body) end
     ok(nf >= 50 and nodes >= 5000, ('%d functions, %d term nodes'):format(nf, nodes))
 end)
