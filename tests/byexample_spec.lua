@@ -32,12 +32,14 @@ test('byexample: the rule rewrites every match with the TARGET\'s own operands, 
     if not ready() then skip 'no lua parser or algebra' end
     local rules = assert(BX.learn('if x == nil then return 0 end', 'if not x then return 0 end'))
     local out, n = BX.rewrite(rules, SRC)
-    eq(2, n, 'y == nil and t[k] == nil')
+    eq(3, n, 'y == nil, t[k] == nil and the unspaced y==nil')
     ok(out:find('if not y then return 1 end', 1, true) and out:find('if not t[k] then return false end', 1, true), out)
-    ok(out:find('if y==nil then return 2 end', 1, true), 'FIRST CUT: matching is trivia-sensitive — the unspaced form is left')
+    -- (CART-1664: the unspaced form is matched on STRUCTURE — an expression rule's output is parsed back IN ITS FILE;
+    -- read alone, `not y` was no statement and every expression-level site was refused)
+    ok(out:find('if not y then return 2 end', 1, true), 'spacing-independent: ' .. out)
     ok(out:find('return y ~= nil and 1 or 0', 1, true), 'a different operator is a different pattern')
-    -- byte-identical outside the two rewritten spans
-    eq(SRC:gsub('if y == nil then', 'if not y then'):gsub('if t%[k%] == nil', 'if not t[k]'), out)
+    -- byte-identical outside the three rewritten spans
+    eq(SRC:gsub('if y == nil then', 'if not y then'):gsub('if t%[k%] == nil', 'if not t[k]'):gsub('if y==nil then', 'if not y then'), out)
 end)
 
 test('byexample: an example with no edit, and a rule that would match its own output, are refused by name', function ()
@@ -62,7 +64,7 @@ test('byexample: WHERE a rule applies is a decision — it stops listing the mat
     project { ['a.lua'] = SRC, ['b.lua'] = 'local B = {}\nfunction B.h(q)\n  if q == nil then return 3 end\n  return q\nend\nreturn B\n' }
     local ex = { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end' }
     local p, why, class = BX.plan(store, ex)
-    eq(nil, p); eq('decision', class); ok(why:find('3 site(s) in 2 file(s)', 1, true), why)
+    eq(nil, p); eq('decision', class); ok(why:find('4 site(s) in 2 file(s)', 1, true), why)
     local r = tactic.run(store, tactic.T.step('rewrite-by-example', { before = ex.before, after = ex.after, scope = 'b.lua' }), { apply = true })
     eq('done', r.status, tostring(r.why))
     ok(read('b.lua'):find('if not q then return 3 end', 1, true)); eq(SRC, read('a.lua'), 'a.lua was outside the scope')
@@ -388,6 +390,63 @@ test('byexample: PYTHON — a moved body holding a TRIPLE-QUOTED string: the cod
     local a, b = run(src), run(out)
     ok(a:find('head', 1, true), 'the original runs: ' .. a)
     eq(a, b, 'before and after answer the same')
+end)
+
+-- PHP: braces, heredocs and nowdocs (CART-1664). The rule: unwrap an `if` inside a loop, learned with php's `name`
+-- kind (read as `name_`) as the holes it is
+local PHP_RULE = { '<?php\nforeach (every($xs) as $c) {\n    if ($c->ok) {\n        use_it($c);\n    }\n}\n', '<?php\nforeach (oks($xs) as $c) {\n    use_it($c);\n}\n' }
+local PHP_PRE = '<?php\nclass I { public $n; public $ok; function __construct($n, $ok) { $this->n = $n; $this->ok = $ok; } }\nfunction every($xs) { return $xs; }\nfunction oks($xs) { return array_values(array_filter($xs, fn($x) => $x->ok)); }\n'
+local function php_run(code)
+    local f = vim.fn.tempname() .. '.php'
+    vim.fn.writefile(vim.split(code .. 'echo json_encode(total([new I(1, true), new I(2, false), new I(3, true)])), "\\n";\n', '\n'), f)
+    local r = vim.system({ 'php', f }, { text = true }):wait()
+    vim.fn.delete(f)
+    return r.stdout
+end
+
+test('byexample: PHP — the holes are php\'s names, and the loop keeps ITS brace: the body moves up a level, the inner `}` goes (CART-1664)', function ()
+    if not ready() or not parser_available('php') then skip 'no php parser' end
+    local rules = assert(BX.learn(PHP_RULE[1], PHP_RULE[2], 'php'))
+    eq(2, rules[1].holes, 'php reads `name` as `name_`; with the escape mapped back its names are holes (there were 0)')
+    -- the target laid out EXACTLY as the example: instantiating moved the body at its old depth and kept the inner `}`
+    local out, n = BX.rewrite(rules, '<?php\nforeach (every($items) as $it) {\n    if ($it->ok) {\n        $x = 1;\n        f($x);\n    }\n}\n', 'php')
+    eq(1, n)
+    eq('<?php\nforeach (oks($items) as $it) {\n    $x = 1;\n    f($x);\n}\n', out)
+end)
+
+test('byexample: PHP — a moved body holding a HEREDOC and a NOWDOC: parsed back IN ITS FILE (a fragment is inline HTML), the program answers the same (CART-1664)', function ()
+    if not ready() or not parser_available('php') then skip 'no php parser' end
+    if vim.fn.executable('php') == 0 then skip 'no php' end
+    local rules = assert(BX.learn(PHP_RULE[1], PHP_RULE[2], 'php'))
+    local body = 'function total($items) {\n    $acc = [];\n    foreach (every($items) as $it) {\n        if ($it->ok) {\n            $a = <<<EOT\n        old {$it->n}\n          deeper\nEOT;\n            $c = <<<\'NOW\'\n            now $it->n\n          NOW;\n            $acc[] = $a . "|" . $c;\n        }\n    }\n    return $acc;\n}\n'
+    local out, n = BX.rewrite(rules, PHP_PRE .. body, 'php')
+    eq(1, n)
+    ok(out:find('foreach (oks($items) as $it) {', 1, true), out)
+    ok(out:find('            $a = <<<EOT\n        old {$it->n}\n          deeper\nEOT;\n', 1, true), 'the heredoc keeps every byte (its marker at column 0 holds the body at its depth): ' .. out)
+    local a, b = php_run(PHP_PRE .. body), php_run(out)
+    ok(a:find('deeper', 1, true), 'the original runs: ' .. a)
+    eq(a, b, 'before and after answer the same')
+end)
+
+test('byexample: PHP — a re-indent that would change a FLEXIBLE heredoc\'s text is not taken: every carried value must read back the same (CART-1664)', function ()
+    if not ready() or not parser_available('php') then skip 'no php parser' end
+    local rules = assert(BX.learn(PHP_RULE[1], PHP_RULE[2], 'php'))
+    -- (php's heredoc lines are separated by whitespace GAPS: no token spans the line, so only comparing the carried
+    -- values sees the re-indent reach into the string — the right side's holes match anything)
+    local heredoc = '            $b = <<<EOT\n              flexible {$it->n}\n              EOT;\n'
+    local src = PHP_PRE .. 'function total($items) {\n    $acc = [];\n    foreach (every($items) as $it) {\n        if ($it->ok) {\n' .. heredoc .. '            $acc[] = $b;\n        }\n    }\n    return $acc;\n}\n'
+    local out, n = BX.rewrite(rules, src, 'php')
+    eq(1, n)
+    ok(out:find('foreach (oks($items) as $it) {\n' .. heredoc, 1, true), 'the body keeps its depth, the heredoc its bytes: ' .. out)
+    if vim.fn.executable('php') == 1 then eq(php_run(src), php_run(out), 'before and after answer the same') end
+end)
+
+test('byexample: RUBY — a carried call keeps its own `(` `)`: a token is keyed by its parent, not its whole ancestry (CART-1664)', function ()
+    if not ready() or not parser_available('ruby') then skip 'no ruby parser' end
+    local rules = assert(BX.learn('every(xs).each do |c|\n  if c.ok\n    use(c)\n  end\nend\n', 'oks(xs).each do |c|\n  use(c)\nend\n', 'ruby'))
+    local out, n = BX.rewrite(rules, 'def t(items)\n  every(items).each do |it|\n    if it.ok\n      f(it)\n    end\n  end\nend\n', 'ruby')
+    eq(1, n)
+    eq('def t(items)\n  oks(items).each do |it|\n    f(it)\n  end\nend\n', out)
 end)
 
 test('byexample: a moved body holding a LONG STRING is re-indented around it — the string\'s continuation lines are its value, like a heredoc\'s (CART-1664)', function ()

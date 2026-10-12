@@ -23,9 +23,23 @@ local function A() return require('cartograph.algebra').load() end
 
 local function get(t, path) for _, i in ipairs(path) do t = t.kids[i] end return t end
 
-local function has_name(t)
-    if t.k == 'identifier' then return true end
-    for _, c in ipairs(t.kids or {}) do if has_name(c) then return true end end
+-- (a NAME by the grammars' convention, the tokens their `word` rule lexes: `identifier` and its kinds — lua, python, js's
+-- `property_identifier`, go's `field_identifier` — or `name`, php's: a rule learned in php held NO hole until this
+-- read past `identifier`, so `$c` matched only `$c`). The reader ESCAPES a kind the algebra reserves (php's `name` is
+-- read as `name_`), so the term's kind is mapped back through its grammar's escapes first.
+local function name_kinds(lang)
+    local back = {}
+    for k, esc in pairs(require('cartograph.algebraread').escapes(lang)) do back[esc] = k end
+    return setmetatable({}, { __index = function (t, k)
+        local orig = back[k] or k
+        local v = orig == 'name' or orig:sub(-10) == 'identifier'
+        rawset(t, k, v); return v
+    end })
+end
+
+local function has_name(t, nk)
+    if nk[t.k] then return true end
+    for _, c in ipairs(t.kids or {}) do if has_name(c, nk) then return true end end
     return false
 end
 
@@ -69,6 +83,7 @@ function M.learn(before, after, lang)
     local a = A()
     if not a then return nil, 'algebra unavailable', 'environment' end
     local R = require 'cartograph.algebraread'
+    local nk = name_kinds(lang)
     local Tb, bwhy = R.read(before, lang)
     if not Tb then return nil, 'the BEFORE text does not read: ' .. tostring(bwhy), 'ill-posed' end
     local Ta, awhy = R.read(after, lang)
@@ -96,7 +111,7 @@ function M.learn(before, after, lang)
         local bsubs, found = subtrees(get(Tb, pi), {}), false
         local function look(t)
             if found then return end
-            if t.k ~= 'lit' and has_name(t) then
+            if t.k ~= 'lit' and has_name(t, nk) then
                 for _, s in ipairs(bsubs) do if a.eq(s, t) then found = true; return end end
             end
             for _, c in ipairs(t.kids or {}) do look(c) end
@@ -218,7 +233,7 @@ function M.learn(before, after, lang)
         find_seq(La)
         local function pick(t)
             if seq_kid[t] then return end
-            if t.k ~= 'lit' and has_name(t) and not holds_repeat(t) then
+            if t.k ~= 'lit' and has_name(t, nk) and not holds_repeat(t) then
                 for _, s in ipairs(bsubs) do
                     if a.eq(s, t) then
                         for _, p in ipairs(picks) do if a.eq(p, t) then return end end
@@ -329,8 +344,9 @@ function M.learn(before, after, lang)
 end
 
 -- one SPACING-INDEPENDENT site: the target node `o` (original), its stripped view `s` (orig maps stripped -> original),
--- the match's values -> the new text of the node, its re-read term | nil, why, class
-local function ws_edit(a, rule, o, s, values, orig, lang)
+-- the match's values, `reread(text)` (the file with the node's text replaced, read again -> the node's term at its
+-- place | nil, why) -> the new text of the node, its re-read term | nil, why, class
+local function ws_edit(a, rule, o, s, values, orig, reread)
     -- 1. the left side's UNITS over the target, in order: a fixed token (its original lit), or a hole (its nodes)
     local lu = {}
     local function walk(tt, st)
@@ -344,7 +360,9 @@ local function ws_edit(a, rule, o, s, values, orig, lang)
                 lu[#lu + 1] = { key = 'H:' .. tk.h, nodes = nodes }
                 j = j + n
             elseif tk.k == 'lit' then
-                -- (a token's key includes its PARENT's kind: the `if`'s `end` is not the `for`'s)
+                -- (a token's key includes its PARENT's kind: the `if`'s `end` is not the `for`'s. Not the whole ancestry:
+                -- a carried call's `(` `)` keep their parent when the `if` around them goes — keyed by the path, ruby's
+                -- `f(it)` lost its `)` to a delete + insert)
                 lu[#lu + 1] = { key = 'L:' .. tostring(tk.v) .. '@' .. tostring(tt.k), lit = st.kids[j] }
                 j = j + 1
             else
@@ -364,12 +382,12 @@ local function ws_edit(a, rule, o, s, values, orig, lang)
         end
     end
     rwalk(rule.rhs_ws.body or rule.rhs_ws)
-    local before_ws, last = {}, ''
+    local before_ws, before_hole, last = {}, {}, ''
     local function wwalk(t)
         for _, c in ipairs(t.kids or {}) do
             if c.k == 'lit' then
                 if ws_lit(c) then last = last .. tostring(c.v) else before_ws[c] = last; last = '' end
-            elseif c.k == 'hole' then last = ''
+            elseif c.k == 'hole' then if before_hole[c.h] == nil then before_hole[c.h] = last end; last = ''
             else wwalk(c) end
         end
     end
@@ -386,7 +404,7 @@ local function ws_edit(a, rule, o, s, values, orig, lang)
     local keep, ins_before = {}, {} -- keep[lhs unit] = true; ins_before[lhs unit index | n1+1] = { rhs units }
     local i, j = 1, 1
     while i <= n1 and j <= n2 do
-        if lu[i].key == ru[j].key then keep[i] = true; i = i + 1; j = j + 1
+        if lu[i].key == ru[j].key then keep[i] = j; i = i + 1; j = j + 1
         elseif L[i][j - 1] >= L[i - 1][j] then i = i + 1
         else ins_before[i] = ins_before[i] or {}; table.insert(ins_before[i], ru[j]); j = j + 1 end
     end
@@ -416,11 +434,28 @@ local function ws_edit(a, rule, o, s, values, orig, lang)
     local function text() return table.concat(buf) end
     local refused
     local just_deleted = false
-    local owed, owed_mark -- (a deleted line-start's line break, owed to the next kept code)
+    local owed, owed_mark -- (a deleted line-start's line break, owed to the next kept code; the text offset it is owed at)
     local marks = {} -- hedge unit -> { start offset, end offset } in the output
     local first_deleted_line_indent
     local function emit_ins(k)
-        for _, u in ipairs(ins_before[k] or {}) do put((before_ws[u.lit] or '') .. tostring(u.lit.v)) end
+        if not ins_before[k] then return end
+        -- (inserted tokens go BEFORE the spacing that leads to the kept token, on its line: `a == null` -> `a === null`,
+        -- not `a  ===null`. A leading LINE BREAK stays first: what is inserted starts that line.)
+        -- (the first starts where the target's spacing did when it opens the right side; between the last and the kept
+        -- token after it, the EXAMPLE's spacing: `x in` -> `_, x in`, `(y)` -> `not (y)`)
+        local s0 = text()
+        local body = s0:gsub('[ \t]*$', '')
+        local trail = s0:sub(#body + 1)
+        local moved = trail ~= '' and not body:find('\n$')
+        if moved then buf = { body } end
+        for x, u in ipairs(ins_before[k]) do
+            local ws = before_ws[u.lit] or ''
+            if x == 1 and moved and (ws == '' and u == ru[1]) then ws = trail end
+            put(ws .. tostring(u.lit.v))
+        end
+        local nx = keep[k] and ru[keep[k]]
+        if nx then put((nx.lit and before_ws[nx.lit]) or (nx.h and before_hole[nx.h]) or '')
+        elseif moved then put(trail) end
     end
     local frozen = {} -- (a token that spans lines — a long string, a block comment — keeps its CONTINUATION lines as they
     -- are: they are the token's VALUE, like a heredoc's, so re-indenting skips them; { first, last offset } in the output)
@@ -432,25 +467,27 @@ local function ws_edit(a, rule, o, s, values, orig, lang)
             if k then emit_ins(k) end
             if deleted[t] then
                 -- the deleted token takes its preceding whitespace; the indentation of a line it STARTED is noted, and
-                -- that line break is owed to the next kept code if it would otherwise land on the line before
+                -- that line break is owed to the next kept code if it would otherwise land on the line before — only the
+                -- break right after KEPT code: one between two deleted tokens was the deleted code's own layout (php's
+                -- `) {` + `\n if (…) {` keeps the inner `{` on the loop's line, as written)
                 local s0 = text()
                 local stripped = s0:gsub('[ \t]*\n?[ \t]*$', '')
                 local ws0 = s0:sub(#stripped + 1)
                 if ws0:find('\n') then
                     if not first_deleted_line_indent then first_deleted_line_indent = #(s0:match('\n([ \t]*)$') or '') end
-                    if not owed then owed = ws0:match('\n[ \t]*$') end
+                    if not owed and not just_deleted then owed = ws0:match('\n[ \t]*$') end
                 end
                 buf = { stripped }
-                owed_mark = #buf
+                owed_mark = #stripped
                 just_deleted = true
             else
                 if not ws_lit(t) then
                     just_deleted = false
                     -- (kept code after a deleted line-start: on its own line, as the deleted token was)
                     if owed then
-                        local since = table.concat(buf, '', owed_mark + 1)
+                        local since = text():sub(owed_mark + 1)
                         if not since:find('\n') then
-                            for x = #buf, owed_mark + 1, -1 do buf[x] = nil end
+                            buf = { text():sub(1, owed_mark) }
                             put(owed)
                         end
                         owed = nil
@@ -469,6 +506,7 @@ local function ws_edit(a, rule, o, s, values, orig, lang)
     emit_ins(n1 + 1)
     if refused then return nil, refused, 'decision' end
     local out = text()
+    local undented = out
     -- 6. a moved body follows its new parent: its LINES dedented by the level the removed wrapper line had (the body's
     -- indent minus the anchor's — the kept line before it — minus that level), when every body line can give it; the
     -- continuation lines of a token spanning lines stay as they are (a long string's lines, like a heredoc's, are its value)
@@ -485,9 +523,14 @@ local function ws_edit(a, rule, o, s, values, orig, lang)
         for _, m in pairs(marks) do
             if m[1] and m[2] then
                 local l1, l2 = line_at(m[1] + 1), line_at(math.max(m[2], m[1] + 1))
+                -- (a body that STARTS mid-line — php's kept `{ … }` block after the loop's `)` — is re-indented from
+                -- its next line: its first line is the line it joined)
+                local ls = (out:sub(1, m[1]):match('.*\n()') or 1)
+                if out:sub(ls, m[1]):match('%S') then l1 = l1 + 1 end
+                while l1 <= l2 and (keep[l1] or not lines[l1]:match('%S')) do l1 = l1 + 1 end
                 local anchor_line
                 for x = l1 - 1, 1, -1 do if lines[x]:match('%S') then anchor_line = x; break end end
-                if anchor_line then
+                if anchor_line and l1 <= l2 then
                     local anchor = #lines[anchor_line]:match('^[ \t]*')
                     local cur = #lines[l1]:match('^[ \t]*')
                     local delta = cur - first_deleted_line_indent
@@ -499,12 +542,25 @@ local function ws_edit(a, rule, o, s, values, orig, lang)
         end
         out = table.concat(lines, '\n')
     end
-    -- 7. PARSED BACK: the new text must read as the rule's right side
-    local R = require 'cartograph.algebraread'
-    local t2 = R.read(out, lang)
-    local stmt
-    for _, c in ipairs(t2 and t2.kids or {}) do if not ws_lit(c) then if stmt then stmt = nil; break end; stmt = c end end
-    if not stmt or not a.match(rule.rhs_ws, strip(a, stmt)).ok then return nil, 'the rewritten text does not read as the rule\'s right side', 'frontier' end
+    -- 7. PARSED BACK, IN ITS FILE: the new text must read as the rule's right side where it stands — a fragment read
+    -- alone is not the language (php's is inline HTML without its `<?php`; python's indentation means something only
+    -- inside its block), and the rest of the file must read as it did. And every CARRIED value must read as it did
+    -- but for layout: the right side's holes match anything, so a re-indent that changed a string's content — php's
+    -- heredoc lines are separated by whitespace GAPS the reader takes for layout — passed until this compared them.
+    -- A re-indent that fails is retried without it (the body keeps its old depth: valid, only less tidy).
+    local function check(text)
+        local stmt, rwhy = reread(text)
+        if not stmt then return nil, rwhy, 'frontier' end
+        local m2 = a.match(rule.rhs_ws, strip(a, stmt))
+        if not m2.ok then return nil, 'the rewritten text does not read as the rule\'s right side', 'frontier' end
+        for h, v in pairs(m2.values or {}) do
+            if values[h] ~= nil and not a.eq(values[h], v, true) then return nil, ('the carried `%s` reads differently after the edit'):format(h), 'frontier' end
+        end
+        return stmt
+    end
+    local stmt, cwhy = check(out)
+    if not stmt and undented ~= out then out = undented; stmt, cwhy = check(out) end
+    if not stmt then return nil, cwhy, 'frontier' end
     return out, stmt
 end
 
@@ -534,28 +590,50 @@ local function rewrite_once(rules, src, lang)
         -- (and only at the positions that CAN be a match root: an anchor token's ancestor at its fixed depth —
         -- cartograph.prefilter, sound; no anchor, or CARTOGRAPH_PREFILTER=0, every position)
         local poss = os.getenv('CARTOGRAPH_PREFILTER') ~= '0' and require('cartograph.prefilter').candidates(t, rule.lhs, src) or a.positions(t)
+        -- (SPACING-INDEPENDENT, CART-1664: a position is matched on STRUCTURE — the token script edits the target's
+        -- own text, parsed back before it is taken -> its re-read term | nil, why)
+        local function ws_try(pos)
+            local orig = {}
+            local sn = strip(a, pos.node, orig)
+            local m = a.match(rule.lhs_ws, sn)
+            if not m.ok then return nil end
+            local function reread(text)
+                local mark = a.lit(text)
+                local t2 = require('cartograph.algebraread').read(a.cst_print(a.put(t, pos.path, mark)), lang or 'lua') -- @langs-ok as learn
+                if not t2 then return nil, 'the rewritten file does not read', 'frontier' end
+                local ok_, n2 = pcall(get, t2, pos.path)
+                if not ok_ or not n2 then return nil, 'the rewritten file has no node where the site was', 'frontier' end
+                if a.cst_print(n2) ~= text then return nil, 'the rewritten text does not read as one node where the site was', 'frontier' end
+                if not a.eq(a.put(t2, pos.path, mark), a.put(t, pos.path, mark)) then return nil, 'the rest of the file reads differently around the rewritten text', 'frontier' end
+                return n2
+            end
+            local newtext, stmt_or_why = ws_edit(a, rule, pos.node, sn, m.values, orig, reread)
+            if newtext then return stmt_or_why end
+            return nil, stmt_or_why, 'frontier'
+        end
+        local ws_hits = {}
         for _, pos in ipairs(poss) do
             if not inside(pos.path) then
                 local m = compiled and compiled(pos.node) or a.match(rule.lhs, pos.node)
-                if m.ok then hits[#hits + 1] = { path = pos.path, values = m.values }; covered[#covered + 1] = pos.path end
+                if m.ok then
+                    -- (an EXACT match takes the token script too when it can: instantiating moves a carried body
+                    -- with the indentation and the trailing whitespace of its OLD depth — php's `}` landed indented
+                    -- under the loop it closed. Refused there, the instantiation stands: the example spelled it.)
+                    local stmt = rule.lhs_ws and ws_try(pos)
+                    if stmt then ws_hits[#ws_hits + 1] = { path = pos.path, term = stmt }
+                    else hits[#hits + 1] = { path = pos.path, values = m.values } end
+                    covered[#covered + 1] = pos.path
+                end
             end
         end
-        -- (SPACING-INDEPENDENT, CART-1664: a position the exact match missed is matched on structure — the token script
-        -- edits the target's own text, parsed back before it is taken)
-        local ws_hits = {}
+        -- (a position the exact match missed)
         if rule.lhs_ws then
             local rootk = (rule.lhs_ws.body or rule.lhs_ws).k
             for _, pos in ipairs(a.positions(t)) do
                 if pos.node.k == rootk and not inside(pos.path) then
-                    local orig = {}
-                    local sn = strip(a, pos.node, orig)
-                    local m = a.match(rule.lhs_ws, sn)
-                    if m.ok then
-                        local newtext, stmt_or_why = ws_edit(a, rule, pos.node, sn, m.values, orig, lang or 'lua')
-                        local stmt, why2 = newtext and stmt_or_why, not newtext and stmt_or_why
-                        if newtext then ws_hits[#ws_hits + 1] = { path = pos.path, term = stmt }; covered[#covered + 1] = pos.path
-                        else refused[#refused + 1] = { why = why2, text = (a.cst_print(pos.node):match('^[^\n]*')) } end
-                    end
+                    local stmt, why2 = ws_try(pos)
+                    if stmt then ws_hits[#ws_hits + 1] = { path = pos.path, term = stmt }; covered[#covered + 1] = pos.path
+                    elseif why2 then refused[#refused + 1] = { why = why2, text = (a.cst_print(pos.node):match('^[^\n]*')) } end
                 end
             end
         end
