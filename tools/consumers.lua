@@ -128,83 +128,25 @@ for _, e in ipairs(r.frontier) do
 end
 
 -- ── the seam rewriter ─────────────────────────────────────────────────────
+-- (the PLAN is cartograph.encapsulate's — one source with the `encapsulate` tactic: safe rewrites applied, risky ones
+-- listed as rows with their keys; the tactic answers them with decide = <key>=rewrite|skip)
 if rwmap and rwmod and rwbind then
-    local edits, skipped = {}, {} -- edits[file] = { {ext, to} }
-    for _, s in ipairs(r.sites) do
-        -- prefer a 2-segment suffix (sub-path accessor, stem2); fall back to a
-        -- 1-segment suffix (record-field accessor, stem1) — e.g. `c.file`
-        local suf2 = s.path:match('([%w_]+%.[%w_]+)$')
-        local suf1 = s.path:match('([%w_]+)$')
-        local acc, stem
-        if suf2 and rwmap[suf2] then acc, stem = rwmap[suf2], s.stem2
-        elseif suf1 and rwmap[suf1] then acc, stem = rwmap[suf1], s.stem1 end
-        if acc then
-            local skip
-            for _, pat in ipairs(RWSKIP) do
-                if s.file:find(pat) then skip = 'owner file' break end
-            end
-            if not skip and s.pre then skip = 'prefix taint (partial chain)' end
-            if not skip and not (s.ext and stem) then skip = 'no extent' end
-            if not skip and s.ext[1] ~= s.ext[3] then skip = 'multi-line chain' end
-            if skip then
-                skipped[#skipped + 1] = { s = s, why = skip }
-            else
-                edits[s.file] = edits[s.file] or {}
-                table.insert(edits[s.file], { ext = s.ext,
-                    to = ('%s.%s(%s)'):format(rwbind, acc, stem) })
-            end
-        end
-    end
-    local files2, ne = {}, 0
-    for f in pairs(edits) do files2[#files2 + 1] = f end
-    table.sort(files2)
+    local E = require 'cartograph.encapsulate'
+    local p = E.plan(root, { calls = spec.calls, fields = spec.fields, rooted = spec.rooted, bless = spec.bless,
+        rw = rwmap, mod = rwmod, bind = rwbind, files = files, owners = RWSKIP })
     emit('\nREWRITES%s:', apply and ' (applied)' or ' (plan — add --apply to write)')
-    for _, f in ipairs(files2) do
-        -- bottom-up so earlier splices don't shift later extents
-        table.sort(edits[f], function (a, b)
-            return a.ext[1] > b.ext[1] or (a.ext[1] == b.ext[1] and a.ext[2] > b.ext[2])
-        end)
-        local lines = vim.fn.readfile(root .. '/' .. f)
-        for _, ed in ipairs(edits[f]) do
-            local ln = lines[ed.ext[1] + 1]
-            local before = ln:sub(1, ed.ext[2])
-            local after = ln:sub(ed.ext[4] + 1)
-            emit('  %s:%d  %s  ->  %s', f, ed.ext[1] + 1,
-                ln:sub(ed.ext[2] + 1, ed.ext[4]), ed.to)
-            lines[ed.ext[1] + 1] = before .. ed.to .. after
-            ne = ne + 1
+    local nf = 0
+    for _ in pairs(p.edits) do nf = nf + 1 end
+    for _, w in ipairs(p.rewrites) do emit('  %s:%d  %s  ->  %s', w.file, w.line, w.from, w.to) end
+    if apply then
+        for f, text in pairs(p.edits) do
+            local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(text); fd:close()
         end
-        -- ensure the accessor module is required ABOVE its first use. Insert
-        -- before the first non-comment/blank line (top level) — which dominates
-        -- EVERY use, including a function DEFINED above the module's require
-        -- block that reads the field (xlang.verb_matches). BUGFIX 2026-07-21:
-        -- previously inserted after the LAST require, but a use in an earlier-
-        -- defined function preceded it → `nil global 'callrec'` at runtime
-        -- (16 spec failures). Top placement is always safe: a require never
-        -- depends on a preceding local.
-        -- (the BINDING must exist at the top level under rwbind — a file that requires the module under another name,
-        -- or inside a function, does not bind it: three files read `atr` as an undeclared global, 2026-10-12)
-        local has, first_code = false, nil
-        local bindpat = '^local%s+' .. rwbind .. '%s*=%s*require%s*%(?%s*[\'"]' .. rwmod:gsub('%W', '%%%0') .. '[\'"]'
-        for j, ln in ipairs(lines) do
-            if ln:find(bindpat) then has = true break end
-            if not first_code and not ln:match('^%s*%-%-') and not ln:match('^%s*$') then
-                first_code = j
-            end
-        end
-        if not has then
-            table.insert(lines, first_code or 1,
-                ("local %s = require '%s'"):format(rwbind, rwmod))
-            emit('  %s:+  local %s = require \'%s\'', f, rwbind, rwmod)
-        end
-        if apply then vim.fn.writefile(lines, root .. '/' .. f) end
     end
-    emit('%d rewrites in %d files', ne, #files2)
-    if #skipped > 0 then
-        emit('SKIPPED (manual):')
-        for _, k in ipairs(skipped) do
-            emit('  %s:%d  %-14s %s', k.s.file, k.s.line, k.s.path, k.why)
-        end
+    emit('%d rewrites in %d files', #p.rewrites, nf)
+    if #p.rows > 0 then
+        emit('SKIPPED (risky — the encapsulate tactic decides them, decide = <key>=rewrite|skip):')
+        emit('%s', E.render(p.rows, #p.rows))
     end
 end
 io.write(table.concat(out, '\n'), '\n')

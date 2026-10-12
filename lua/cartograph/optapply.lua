@@ -786,6 +786,73 @@ function M.plan_buffer(store, args)
     return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
 end
 
+--   plan_encapsulate(store, { calls, fields, rooted (producer seeds: name=kind), bless, rw = { suffix=acc }, mod, bind,
+--   decide = { key=answer } })
+-- ENCAPSULATE FIELD (CART-1664): every SAFE deref of the shape is rerouted through the accessor (identity on the raw
+-- record); a RISKY one is a decision row (cartograph.encapsulate) — the plan stops on `decision` until each is answered
+local function kv(list, sep)
+    local out = {}
+    for _, x in ipairs(list or {}) do
+        local k, v = tostring(x):match('^(.-)' .. (sep or '=') .. '(.*)$')
+        if k then out[k] = v ~= '' and v or true else out[tostring(x)] = true end
+    end
+    return out
+end
+M.encapsulate_args = function (args)
+    local function seeds(list, default)
+        local out = {}
+        for k, v in pairs(kv(list)) do out[k] = v == true and default or v end
+        return out
+    end
+    local mod, bind = tostring(args.mod or 'cartograph.at:atr'):match('^([%w_.%-]+):([%w_]+)$')
+    local fields, rooted = {}, {}
+    for k, v in pairs(seeds(args.fields, 'any')) do if k:find('.', 1, true) then rooted[k] = v == 'any' and 'list' or v else fields[k] = v end end
+    local bless = {}
+    for k in pairs(kv(args.bless)) do bless[k] = true end
+    local decide = {}
+    for _, x in ipairs(args.decide or {}) do
+        local k, v = tostring(x):match('^(.*)=(%a+)$')
+        if k then decide[k] = v end
+    end
+    return { calls = seeds(args.calls, 'list'), fields = fields, rooted = rooted, bless = bless, rw = kv(args.rw),
+        mod = mod, bind = bind, decide = decide, owners = args.owners }
+end
+function M.plan_encapsulate(store, args)
+    args = args or {}
+    local txn, hazard = require 'cartograph.txn', require 'cartograph.hazard'
+    local root = store.data and store.data.root
+    if not root then return nil, 'no world is loaded', 'ill-posed' end
+    local a = M.encapsulate_args(args)
+    if not (a.mod and next(a.rw)) then return nil, 'rw = suffix=accessor,… and mod = module:binding are required', 'ill-posed' end
+    if not (next(a.calls) or next(a.fields) or next(a.rooted)) then return nil, 'no producer seed: calls = name, fields = name | base.field', 'ill-posed' end
+    a.files = {}
+    for _, f in ipairs(store.files or {}) do if f:match('%.lua$') then a.files[#a.files + 1] = f end end
+    table.sort(a.files)
+    local E = require 'cartograph.encapsulate'
+    local p = E.plan(root, a)
+    if #p.rows > 0 then
+        return nil, ('%d rewrite(s) need an answer (decide = <key>=rewrite|skip, …):\n%s'):format(#p.rows, E.render(p.rows)), 'decision'
+    end
+    local touched, stamps = {}, {}
+    for f in pairs(p.edits) do touched[#touched + 1] = f; stamps[f] = txn.disk_stamp(root, f) end
+    table.sort(touched)
+    if #touched == 0 then return nil, ('no deref of the shape left to reroute (%d escape row(s) remain — encapsulate-closure lists them)'):format(#p.escapes), 'empty' end
+    local hazards = {}
+    if #p.escapes > 0 then
+        hazards[#hazards + 1] = hazard.new('escapes-open', ('%d escape(s) of the shape stay open: the record leaves through an argument, a store, a return or a raw index — the field is not closed until each is answered'):format(#p.escapes),
+            nil, { escapes = #p.escapes }, 'informational')
+    end
+    local plan = {
+        verb = 'encapsulate', guards = { 'parses' }, generation = store.generation,
+        touched = touched, stamps = stamps, refspecs = {}, edits = p.edits, hazards = hazards,
+        preserves = 'unreviewed',
+        preserves_why = ('each rewritten deref reads the same value: %s\'s accessors are identity on the raw record'):format(a.mod),
+        desc = ('encapsulate: %d deref(s) in %d file(s) read through %s'):format(#p.rewrites, #touched, a.mod),
+        rewrites = p.rewrites,
+    }
+    return txn.protocol(plan, function (pl) return function (rel, before) return pl.edits[rel] or before end end)
+end
+
 function M.plan_at(store, file, line, opts)
     local fid = M.at(store, file, line)
     if not fid then return nil, ('no function at %s:%d'):format(file, line), 'no-function' end

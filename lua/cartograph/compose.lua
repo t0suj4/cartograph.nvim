@@ -193,6 +193,12 @@ M.VERBS['hoist-empty'] = {
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
+-- ENCAPSULATE FIELD (CART-1664): a shape's field reads through an accessor module; a risky rewrite stops on a decision
+M.VERBS['encapsulate'] = {
+    plan = function (store, args) return require('cartograph.optapply').plan_encapsulate(store, args) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
+    effect = 'journaled', rerun = 'empty',
+}
 -- the optimizer's lazy-buffer pass (CART-1663): an append-only buffer allocates its table on the second piece
 -- (cartograph.optapply.plan_buffer over lazybuffer.sites)
 M.VERBS['lazy-buffer'] = {
