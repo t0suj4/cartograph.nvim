@@ -10,7 +10,7 @@ local tsutil = require 'cartograph.spec.tsutil'
 
 local M = {}
 
-local EMPTY_NODE = { child = function () return nil end }
+local EMPTY_NODE = { child = function () return nil end, named_child = function () return nil end }
 local function kids(n) return tsutil.inext, n or EMPTY_NODE, -1 end
 
 --- a walker over the solver S for the tree's Go files -> walk(file, src)

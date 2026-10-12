@@ -54,7 +54,7 @@ end
 local function vars_of(n, src, out)
     out = out or {}
     if n:type() == 'var' then out[#out + 1] = n end
-    for _, c in tsutil.inext, n, -1 do if c:named() then vars_of(c, src, out) end end
+    for _, c in tsutil.inamed, n, -1 do vars_of(c, src, out) end
     return out
 end
 
@@ -104,7 +104,7 @@ function M.find(src, file)
                 found[#found + 1] = it
             end
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then visit(c) end end
+        for _, c in tsutil.inamed, n, -1 do visit(c) end
     end
     visit(root)
     for _, it in ipairs(found) do it.src = src end
@@ -144,7 +144,7 @@ function M.context_chain(it, files)
                     end
                 end
             end
-            for _, c in tsutil.inext, n, -1 do if c:named() then visit(c) end end
+            for _, c in tsutil.inamed, n, -1 do visit(c) end
         end
         if root then visit(root) end
     end

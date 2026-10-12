@@ -497,7 +497,7 @@ local function rb_names(n, src, out, row)
         if not b or (b.row and row and row < b.row) then out[nm] = { row = row } end -- (the FIRST assignment)
     elseif t == 'left_assignment_list' or t == 'destructured_parameter' or t == 'destructured_left_assignment'
         or t == 'rest_assignment' or t == 'exception_variable' then
-        for _, c in tsutil.inext, n, -1 do if c:named() then rb_names(c, src, out, row) end end
+        for _, c in tsutil.inamed, n, -1 do rb_names(c, src, out, row) end
     end
 end
 local function rb_params(node, src, out)

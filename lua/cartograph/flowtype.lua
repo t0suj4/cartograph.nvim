@@ -24,7 +24,7 @@
 local callrec = require 'cartograph.callrec'
 local atr = require 'cartograph.at'
 local tsutil = require 'cartograph.spec.tsutil'
-local EMPTY_NODE = { child = function () return nil end } -- (an absent child list: tsutil.inext over nothing)
+local EMPTY_NODE = { child = function () return nil end, named_child = function () return nil end } -- (an absent child list: tsutil.inext over nothing)
 
 local M = {}
 M.CAP = 64
@@ -876,7 +876,7 @@ local function build(store, opts)
             end
             fnstack[#fnstack + 1] = fp
             local body = n:field('body')[1]
-            if body then for _, s in tsutil.inext, body, -1 do if s:named() then stmt(s) end end end
+            if body then for _, s in tsutil.inamed, body, -1 do stmt(s) end end
             fnstack[#fnstack] = nil
             fnbase[#fnbase] = nil
             fnmeta[#fnmeta] = nil
@@ -891,7 +891,7 @@ local function build(store, opts)
             local f = n:field('name')[1]
             local args = n:field('arguments')[1]
             local argn = {}
-            for _, a in tsutil.inext, args or EMPTY_NODE, -1 do if a:named() then argn[#argn + 1] = a end end
+            for _, a in tsutil.inamed, args or EMPTY_NODE, -1 do argn[#argn + 1] = a end
             local cname = f and ((f:type() == 'method_index_expression' and f:field('method')[1])
                 or (f:type() == 'dot_index_expression' and f:field('field')[1]) or (f:type() == 'identifier' and f))
             local c = f and (call_at[key_of(f) .. '#' .. (cname and txt(cname) or '')] or call_at[key_of(f)] or nil)
@@ -1000,7 +1000,7 @@ local function build(store, opts)
         -- anywhere else to one)
         local function exprs(el, want)
             local xs = {}
-            for _, x in tsutil.inext, el or EMPTY_NODE, -1 do if x:named() then xs[#xs + 1] = x end end
+            for _, x in tsutil.inamed, el or EMPTY_NODE, -1 do xs[#xs + 1] = x end
             local vals = {}
             for i, x in ipairs(xs) do
                 if i == #xs and want > #xs and x:type() == 'function_call' then
@@ -1073,7 +1073,7 @@ local function build(store, opts)
                 if op == '..' then local r = new(); addobj(r, STR); return r end
                 return new()
             end
-            for _, x in tsutil.inext, n, -1 do if x:named() then expr(x) end end
+            for _, x in tsutil.inamed, n, -1 do expr(x) end
             return new()
         end
         stmt = function (n)
@@ -1095,7 +1095,7 @@ local function build(store, opts)
                 local vl, el = n:named_child(0), n:named_child(1)
                 local vals = exprs(el, vl:named_child_count())
                 local i = 0
-                for _, v in tsutil.inext, vl, -1 do if v:named() then i = i + 1; if vals[i] then assign(v, vals[i]) end end end
+                for _, v in tsutil.inamed, vl, -1 do i = i + 1; if vals[i] then assign(v, vals[i]) end end
             elseif t == 'function_declaration' then
                 local nm = n:field('name')[1]
                 if nm and txt(n):match('^local%s') then
@@ -1186,7 +1186,7 @@ local function build(store, opts)
                 scopes[#scopes] = nil
             elseif t == 'block' or t == 'do_statement' then
                 scopes[#scopes + 1] = {}
-                for _, x in tsutil.inext, n, -1 do if x:named() then stmt(x) end end
+                for _, x in tsutil.inamed, n, -1 do stmt(x) end
                 scopes[#scopes] = nil
             elseif t == 'function_call' then callv(n)
             else
@@ -1209,7 +1209,7 @@ local function build(store, opts)
             for y in each(p) do clone.obj = y end
             return
         end
-        for _, s in tsutil.inext, tree, -1 do if s:named() then stmt(s) end end
+        for _, s in tsutil.inamed, tree, -1 do stmt(s) end
     end
     local instances = {}
     clone_at = function (site, o)

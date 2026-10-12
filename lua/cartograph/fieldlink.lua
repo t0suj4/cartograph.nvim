@@ -83,8 +83,8 @@ local function collect_reads(fn, src, out)
                 if c:type() == 'variable_list' then vl = c
                 elseif c:type() == 'expression_list' then el = c end
             end
-            if vl then for _, t in tsutil.inext, vl, -1 do if t:named() then walk(t, true) end end end
-            if el then for _, e in tsutil.inext, el, -1 do if e:named() then walk(e, false) end end end
+            if vl then for _, t in tsutil.inamed, vl, -1 do walk(t, true) end end
+            if el then for _, e in tsutil.inamed, el, -1 do walk(e, false) end end
             return
         end
         if n:type() == 'dot_index_expression' and not inwrite then

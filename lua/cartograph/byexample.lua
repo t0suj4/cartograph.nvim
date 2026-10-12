@@ -106,14 +106,98 @@ function M.learn(before, after, lang)
             end
         end
     end
+    -- ★ ONE STATEMENT, ONE EDIT (CART-1664). Two regions inside the SAME top-level statement of the example are one
+    -- demonstrated edit even when neither carries the other's subterms: `for _, c in tsutil.inext, n, -1 do if
+    -- c:named() then walk(c) end end` -> `for _, c in tsutil.inamed, n, -1 do walk(c) end` was learned as `inext ->
+    -- inamed` (every inext loop, check or not) plus `if c:named() then walk(c) end -> walk(c)` (every named check,
+    -- loop or not) — each wrong alone. Merged at their lowest common ancestor. Edits in DIFFERENT top-level statements
+    -- stay separate rules (an example of two independent edits is two statements); two independent edits nested in
+    -- one statement become one, more specific, rule — show them as two statements instead.
+    local merged2 = true
+    while merged2 and #regions > 1 do
+        merged2 = false
+        for i = 1, #regions do
+            for j = i + 1, #regions do
+                local ri, rj = regions[i], regions[j]
+                if not merged2 and #ri > 0 and #rj > 0 and ri[1] == rj[1] then
+                    local l = {}
+                    for k = 1, math.min(#ri, #rj) do
+                        if ri[k] ~= rj[k] then break end
+                        l[k] = ri[k]
+                    end
+                    local keep = { l }
+                    for _, r in ipairs(regions) do if not under(l, r) then keep[#keep + 1] = r end end
+                    regions, merged2 = keep, true
+                end
+            end
+        end
+    end
     -- a region's RULE SIDES: its before and after subterms with the carried-over subterms made holes -> lhs term, rhs
     -- term, Lb, La, the number of holes
     local function sides(path)
         local Lb, La = get(Tb, path), get(Ta, path)
         -- the carried-over subterms: MAXIMAL subtrees of the after-region equal to one in the before-region
         local bsubs, picks = subtrees(Lb, {}), {}
+        -- ★ A NAME USED TWICE IS ONE HOLE (CART-1664): `for _, c in … do if c:named() …` — the maximal pick `_, c` held
+        -- the loop variable, so `c:named()` kept a literal `c` and a loop over `x` never matched. A subterm holding a
+        -- name the before-region uses MORE THAN ONCE is not picked whole; the pick descends, and the name is a hole of
+        -- its own wherever it occurs
+        local count = {}
+        local function count_names(t)
+            if t.k ~= 'lit' and not (t.kids and #t.kids > 1) then
+                local s = a.cst_print(t):match('^%s*([%a_][%w_]*)%s*$')
+                if s then count[s] = (count[s] or 0) + 1 end
+            end
+            for _, c in ipairs(t.kids or {}) do count_names(c) end
+        end
+        count_names(Lb)
+        local function holds_repeat(t)
+            for _, c in ipairs(t.kids or {}) do
+                local s = c.k ~= 'lit' and a.cst_print(c):match('^%s*([%a_][%w_]*)%s*$')
+                if (s and (count[s] or 0) > 1) or holds_repeat(c) then return true end
+            end
+            return false
+        end
+        -- ★ A SOLE STATEMENT IS ITS SEQUENCE (CART-1664): a node of the after-region that is the ONLY non-token child of
+        -- its parent, and is carried over intact from a before-node that is the only non-token child of ITS parent (a
+        -- loop body's one statement in the example), stands for any sequence there — both parents' children become one
+        -- HEDGE hole, so the rule matches a body of any length and prints the target's own, formatting included.
+        -- Decided BEFORE the picks: a repeated name inside it (`walk(c)`) must not split it
+        local function sole(parent, child)
+            if not parent then return false end
+            local n = 0
+            for _, c in ipairs(parent.kids or {}) do
+                if c.k ~= 'lit' then n = n + 1; if c ~= child then return false end end
+            end
+            return n == 1
+        end
+        local function parents(root, out)
+            for _, c in ipairs(root.kids or {}) do out[c] = root; parents(c, out) end
+            return out
+        end
+        local pa_of, pb_of = parents(La, {}), parents(Lb, {})
+        local seqs, seq_kid = {}, {} -- seqs: parent node (either side, by identity) -> hole name; seq_kid: the after kid
+        local nseq = 0
+        local function find_seq(t)
+            local pa = pa_of[t]
+            if t.k ~= 'lit' and pa and pa ~= La and sole(pa, t) then
+                for b, pb in pairs(pb_of) do
+                    -- (both parents the SAME kind — a body is a body — and the carried node more than one name: an
+                    -- identifier is a hole of its own, and `a` of `local a` must not pair with the `a` of `return a`)
+                    if b.k ~= 'lit' and pb ~= Lb and a.eq(b, t) and sole(pb, b) and not seqs[pb]
+                        and pa.k == pb.k and not a.cst_print(t):match('^%s*[%a_][%w_]*%s*$') then
+                        nseq = nseq + 1
+                        seqs[pa], seqs[pb], seq_kid[t] = 's' .. nseq, 's' .. nseq, true
+                        return
+                    end
+                end
+            end
+            for _, c in ipairs(t.kids or {}) do find_seq(c) end
+        end
+        find_seq(La)
         local function pick(t)
-            if t.k ~= 'lit' and has_name(t) then
+            if seq_kid[t] then return end
+            if t.k ~= 'lit' and has_name(t) and not holds_repeat(t) then
                 for _, s in ipairs(bsubs) do
                     if a.eq(s, t) then
                         for _, p in ipairs(picks) do if a.eq(p, t) then return end end
@@ -126,6 +210,7 @@ function M.learn(before, after, lang)
         end
         pick(La)
         local function holed(t)
+            if seqs[t] then return a.rebuild(t, { a.hole(seqs[t], true) }) end
             for k, p in ipairs(picks) do if a.eq(p, t) then return a.hole('h' .. k) end end
             if t.k == 'lit' or not t.kids then return t end
             local kids = {}

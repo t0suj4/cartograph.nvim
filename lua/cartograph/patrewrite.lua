@@ -184,7 +184,7 @@ local function call_shape(node, src)
     local args = node:field('arguments')[1]
     if not (name and args) then return nil end
     local list = {}
-    for _, c in tsutil.inext, args, -1 do if c:named() then list[#list + 1] = c end end
+    for _, c in tsutil.inamed, args, -1 do list[#list + 1] = c end
     local nt = name:type()
     if nt == 'method_index_expression' then
         local m = name:field('method')[1]
@@ -260,7 +260,7 @@ function M.sites(src)
                 end
             end
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then visit(c) end end
+        for _, c in tsutil.inamed, n, -1 do visit(c) end
     end
     visit(root)
     table.sort(found, function(a, b) return a.line < b.line end)

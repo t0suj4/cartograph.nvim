@@ -35,7 +35,7 @@ local function build_flow(store, node)
     local sl, target = atr.sl(node.range), nil
     local function rec(n)
         if FN[n:type()] and select(1, n:range()) == sl and not target then target = n end
-        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
+        for _, c in tsutil.inamed, n, -1 do rec(c) end
     end
     rec(parser:parse()[1]:root())
     if not target then return nil, 'could not locate the function AST' end

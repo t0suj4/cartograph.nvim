@@ -49,7 +49,7 @@ end
 
 local function named_count(n)
     local k = 0
-    for _, c in tsutil.inext, n, -1 do if c:named() then k = k + 1 end end
+    for _, c in tsutil.inamed, n, -1 do k = k + 1 end
     return k
 end
 

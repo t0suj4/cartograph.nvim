@@ -148,7 +148,7 @@ local function rhs_node(root, src, line, defname)
                 end
             end
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
+        for _, c in tsutil.inamed, n, -1 do rec(c) end
     end
     rec(root)
     return found
@@ -271,7 +271,7 @@ local function loop_node(root, line, loops)
     local function rec(n)
         if found then return end
         if n:start() + 1 == line and loops[n:type()] then found = n; return end
-        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
+        for _, c in tsutil.inamed, n, -1 do rec(c) end
     end
     rec(root)
     return found
@@ -305,7 +305,7 @@ local function callee_occurrences(loopn, src, full)
                 if sr == er then out[#out + 1] = { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } } end
             end
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
+        for _, c in tsutil.inamed, n, -1 do rec(c) end
     end
     rec(loopn)
     return out

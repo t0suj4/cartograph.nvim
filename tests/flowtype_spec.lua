@@ -1043,3 +1043,15 @@ test('flowtype: a file that mentions `global` reuses the extractor\'s tree — n
     vim.fn.delete(root, 'rf')
     eq(0, pcache.stats.misses - m0, 'the walker parsed nothing of its own')
 end)
+
+-- an ABSENT child list — a bare `return`, `local x` with no value — is walked through EMPTY_NODE, the stand-in for
+-- "no node": it must answer every iterator the walker uses (inamed asks named_child; its absence crashed the solve
+-- on the 428-file corpus while the suite passed)
+test('flowtype: a bare return and a valueless local walk an absent child list without crashing', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['e.lua'] = 'local function f() local x; return end\nlocal function g() return f() end\nreturn g\n' })
+    store.ingest(ts.extract(root))
+    local ok_, err = pcall(flowtype.solve, store, {})
+    vim.fn.delete(root, 'rf')
+    ok(ok_, tostring(err))
+end)

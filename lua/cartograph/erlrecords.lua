@@ -122,7 +122,7 @@ function M.parse_source(src, path)
     -- an include guard: the file's first directive is -ifndef(X) and the next form is -define(X, …)
     do
         local forms = {}
-        for _, ch in tsutil.inext, root, -1 do if ch:named() then forms[#forms + 1] = ch end end
+        for _, ch in tsutil.inamed, root, -1 do forms[#forms + 1] = ch end
         local a, b = forms[1], forms[2]
         if a and b and a:type() == 'pp_ifndef' and b:type() == 'pp_define' then
             local nm = f1(a, 'name')
@@ -193,7 +193,7 @@ function M.parse_source(src, path)
                 end
             end
         end
-        for _, ch in tsutil.inext, n, -1 do if ch:named() then walk(ch, ctx) end end
+        for _, ch in tsutil.inamed, n, -1 do walk(ch, ctx) end
     end
 
     for _, form in tsutil.inext, root, -1 do

@@ -10,7 +10,7 @@ local tsutil = require 'cartograph.spec.tsutil'
 
 local M = {}
 
-local EMPTY_NODE = { child = function () return nil end }
+local EMPTY_NODE = { child = function () return nil end, named_child = function () return nil end }
 local function kids(n) return tsutil.inext, n or EMPTY_NODE, -1 end
 local WRAP = { as_expression = true, satisfies_expression = true, non_null_expression = true, type_assertion = true,
     parenthesized_expression = true, await_expression = true }

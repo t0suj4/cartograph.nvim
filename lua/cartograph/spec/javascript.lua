@@ -233,13 +233,13 @@ local function js_pattern_names(p, src, out)
     elseif t == 'pair_pattern' then js_pattern_names(p:field('value')[1], src, out)
     elseif t == 'required_parameter' or t == 'optional_parameter' then js_pattern_names(p:field('pattern')[1], src, out)
     elseif t == 'rest_pattern' or t == 'object_pattern' or t == 'array_pattern' then
-        for _, c in tsutil.inext, p, -1 do if c:named() then js_pattern_names(c, src, out) end end
+        for _, c in tsutil.inamed, p, -1 do js_pattern_names(c, src, out) end
     end
 end
 local function js_params(node, src, out)
     local ps = node:field('parameters')[1]
     if ps then
-        for _, c in tsutil.inext, ps, -1 do if c:named() then js_pattern_names(c, src, out) end end
+        for _, c in tsutil.inamed, ps, -1 do js_pattern_names(c, src, out) end
     end
     js_pattern_names(node:field('parameter')[1], src, out) -- `v => v` (an arrow's lone param), `catch (e)`
 end

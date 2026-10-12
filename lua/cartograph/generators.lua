@@ -325,7 +325,7 @@ function M.read(gen, troot, src, file)
                 end
             end
         end
-        for _, c in tsutil.inext, node, -1 do if c:named() then visit(c) end end
+        for _, c in tsutil.inamed, node, -1 do visit(c) end
     end
     visit(troot)
     return facts, refusals, selected, nonsites

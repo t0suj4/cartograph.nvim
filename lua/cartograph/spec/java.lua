@@ -499,7 +499,7 @@ local function java_ret_flow(defn, src, tvars)
             local nm = n:field('name')[1]
             if nm then bound[node_text(nm, src)] = true end
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then bind(c) end end
+        for _, c in tsutil.inamed, n, -1 do bind(c) end
     end
     bind(defn)
     -- a type NAME the project may define: a plain identifier, not a type variable, not the JDK's
@@ -568,7 +568,7 @@ local function java_ret_flow(defn, src, tvars)
             if not ts_ then ok = false; return end
             for _, x in ipairs(ts_) do if not seen[x] then seen[x] = true; all[#all + 1] = x end end
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end
+        for _, c in tsutil.inamed, n, -1 do walk(c) end
     end
     local b = defn:field('body')[1]
     if b then walk(b) end

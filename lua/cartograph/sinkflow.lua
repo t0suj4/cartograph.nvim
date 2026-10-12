@@ -77,7 +77,7 @@ local function collect(node, types)
     for _, t in ipairs(types) do want[t] = true end
     local function rec(n)
         if want[n:type()] then acc[#acc + 1] = n end
-        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c) end end
+        for _, c in tsutil.inamed, n, -1 do rec(c) end
     end
     rec(node)
     return acc
@@ -369,7 +369,7 @@ local function collect_scoped(node, types)
     local function rec(n, top)
         if not top and BODY_STOP[n:type()] then return end
         if want[n:type()] then acc[#acc + 1] = n end
-        for _, c in tsutil.inext, n, -1 do if c:named() then rec(c, false) end end
+        for _, c in tsutil.inamed, n, -1 do rec(c, false) end
     end
     rec(node, true)
     return acc

@@ -85,7 +85,7 @@ M.IF_HEAD = {
 function M.unparen(node)
     while node and M.PARENS[node:type()] do
         local inner
-        for _, c in M.inext, node, -1 do if c:named() then inner = c break end end
+        for _, c in M.inamed, node, -1 do inner = c break end
         if not inner then break end
         node = inner
     end

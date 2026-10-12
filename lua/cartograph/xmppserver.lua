@@ -251,7 +251,7 @@ function M.sends(dir, opts)
                                 local fnm = cl and cl:field('name')[1]
                                 local arity = 0
                                 local ca = cl and cl:field('args')[1]
-                                if ca then for _, a in tsutil.inext, ca, -1 do if a:named() then arity = arity + 1 end end end
+                                if ca then for _, a in tsutil.inamed, ca, -1 do arity = arity + 1 end end
                                 local rec = term.k and term.k:match('^rec:(.+)$')
                                 rows[#rows + 1] = { file = f:sub(#dir + 2), line = c:start() + 1,
                                     fn = fnm and (vim.treesitter.get_node_text(fnm, src) .. '/' .. arity) or '?',

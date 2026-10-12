@@ -97,7 +97,7 @@ function M.frame(ctx)
     local function find_pfield(n, src, p)
         local f = pfield(n, src, p)
         if f then return f end
-        for _, c in tsutil.inext, n, -1 do if c:named() then f = find_pfield(c, src, p); if f then return f end end end
+        for _, c in tsutil.inamed, n, -1 do f = find_pfield(c, src, p); if f then return f end end
         return nil
     end
     local mq = vim.treesitter.query.parse('c', '(binary_expression operator: "-") @b')
@@ -138,7 +138,7 @@ function M.frame(ctx)
                                 if f and f ~= fr.top and f ~= fr.base then found[f] = d.name end
                             end
                         end
-                        for _, c in tsutil.inext, n, -1 do if c:named() then idents(c) end end
+                        for _, c in tsutil.inamed, n, -1 do idents(c) end
                     end
                     idents(node)
                 end

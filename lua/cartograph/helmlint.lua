@@ -89,14 +89,14 @@ function M.reads(src)
                 while #stack > 0 do
                     local x = table.remove(stack)
                     if x:type() == 'selector_expression' then local p = values_path(x, src); if p then g2[#g2 + 1] = p end end
-                    for _, c in tsutil.inext, x, -1 do if c:named() then stack[#stack + 1] = c end end
+                    for _, c in tsutil.inamed, x, -1 do stack[#stack + 1] = c end
                 end
             end
             local inner_scoped = scoped or t == 'with_action' or t == 'range_action'
             for i = 1, n:named_child_count() - 1 do walk(n:named_child(i), (t ~= 'range_action') and g2 or guards, inner_scoped) end
             return
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then walk(c, guards, scoped) end end
+        for _, c in tsutil.inamed, n, -1 do walk(c, guards, scoped) end
     end
     walk(root, {}, false)
     return out, whole
@@ -128,7 +128,7 @@ function M.chomped(src)
                 end
             end
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then stack[#stack + 1] = c end end
+        for _, c in tsutil.inamed, n, -1 do stack[#stack + 1] = c end
     end
     table.sort(out)
     return out

@@ -174,7 +174,7 @@ local comprehension             -- list comprehensions (defined beside M.eval)
 
 local function named(x)
     local out = {}
-    if x then for _, c in tsutil.inext, x, -1 do if c:named() then out[#out + 1] = c end end end
+    if x then for _, c in tsutil.inamed, x, -1 do out[#out + 1] = c end end
     return out
 end
 local function last_expr(clause)
@@ -987,7 +987,7 @@ function M.carried(m, key, clauses)
                     return
                 end
                 if T.match[t] then scan(n:field('lhs')[1], depth); scan(n:field('rhs')[1], depth); return end
-                for _, c in tsutil.inext, n, -1 do if c:named() then scan(c, depth + 1) end end
+                for _, c in tsutil.inamed, n, -1 do scan(c, depth + 1) end
             end
             scan(p, 0)
         end

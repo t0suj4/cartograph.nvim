@@ -76,7 +76,7 @@ function M.model(root, opts)
                 for k, cl in ipairs(clauses) do
                     stats.clauses = stats.clauses + 1
                     local heads = {}
-                    for _, c in tsutil.inext, (cl:field('args')[1] or cl), -1 do if c:named() then heads[#heads + 1] = c end end
+                    for _, c in tsutil.inamed, (cl:field('args')[1] or cl), -1 do heads[#heads + 1] = c end
                     local ai = arity
                     for i, h in ipairs(heads) do
                         if vim.treesitter.get_node_text(h, m.src):find('#iq', 1, true) then ai = i; break end

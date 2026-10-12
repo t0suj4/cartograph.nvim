@@ -27,7 +27,7 @@ local function arity_of(n)
     local args = n and n:field('args')[1]
     if not args then return 0 end
     local k = 0
-    for _, c in tsutil.inext, args, -1 do if c:named() then k = k + 1 end end
+    for _, c in tsutil.inamed, args, -1 do k = k + 1 end
     return k
 end
 
@@ -50,7 +50,7 @@ local function exports_of(root, src)
             local o = form:field('options')[1]
             local function scan(n)
                 if n:type() == 'atom' and vim.treesitter.get_node_text(n, src) == 'export_all' then all = true end
-                for _, c in tsutil.inext, n, -1 do if c:named() then scan(c) end end
+                for _, c in tsutil.inamed, n, -1 do scan(c) end
             end
             if o then scan(o) end
         end
@@ -390,7 +390,7 @@ return {
             local a = n:field(f)[1]
             if not a then return -1 end
             local k = 0
-            for _, c in tsutil.inext, a, -1 do if c:named() then k = k + 1 end end
+            for _, c in tsutil.inamed, a, -1 do k = k + 1 end
             return k
         end
         -- the local calls and macro uses in each -define body
@@ -411,7 +411,7 @@ return {
                             local mn = n:field('name')[1]
                             if mn then m.uses[#m.uses + 1] = { T(mn), argc(n, 'args') } end
                         end
-                        for _, c in tsutil.inext, n, -1 do if c:named() then scan(c) end end
+                        for _, c in tsutil.inamed, n, -1 do scan(c) end
                     end
                     scan(body)
                     macros[T(nm) .. '/' .. argc(lhs, 'args')] = m
@@ -455,7 +455,7 @@ return {
                     end
                 end
             end
-            for _, c in tsutil.inext, n, -1 do if c:named() then walk(c, in_define) end end
+            for _, c in tsutil.inamed, n, -1 do walk(c, in_define) end
         end
         walk(tsroot, false)
         return out
@@ -561,7 +561,7 @@ return {
                     end
                 end
             end
-            for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end
+            for _, c in tsutil.inamed, n, -1 do walk(c) end
         end
         walk(tsroot)
         local out = {}

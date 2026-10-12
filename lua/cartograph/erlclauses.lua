@@ -20,7 +20,7 @@ local M = {}
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
 local function named(x)
     local out = {}
-    if x then for _, c in tsutil.inext, x, -1 do if c:named() then out[#out + 1] = c end end end
+    if x then for _, c in tsutil.inamed, x, -1 do out[#out + 1] = c end end
     return out
 end
 

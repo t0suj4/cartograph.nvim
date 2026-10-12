@@ -162,7 +162,7 @@ function M.sites(src)
                 declined[#declined + 1] = { line = n:range() + 1, reason = why, class = why_class }
             end
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then visit(c) end end
+        for _, c in tsutil.inamed, n, -1 do visit(c) end
     end
     visit(root)
     if src:find('%f[%w_]cg_bucket%f[^%w_]') and #sites > 0 then

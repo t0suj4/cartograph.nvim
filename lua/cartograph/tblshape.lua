@@ -145,9 +145,9 @@ function M.of(src, file, tree)
         local nameid
         if stmt and stmt:type() == 'assignment_statement' and stmt:parent() and stmt:parent():type() == 'variable_declaration' then
             local idx, i = nil, 0
-            for _, c in tsutil.inext, el, -1 do if c:named() then i = i + 1; if c:equal(tc) then idx = i end end end
+            for _, c in tsutil.inamed, el, -1 do i = i + 1; if c:equal(tc) then idx = i end end
             local names = {}
-            for _, c in tsutil.inext, stmt, -1 do if c:type() == 'variable_list' then for _, v in tsutil.inext, c, -1 do if v:named() then names[#names + 1] = v end end end end
+            for _, c in tsutil.inext, stmt, -1 do if c:type() == 'variable_list' then for _, v in tsutil.inamed, c, -1 do names[#names + 1] = v end end end
             nameid = idx and names[idx]
             if nameid and nameid:type() ~= 'identifier' then nameid = nil end
         end

@@ -359,7 +359,7 @@ local function measure(_, p)
                             local l = first_stmt(n); if l then arms[#arms + 1] = l end
                         end
                     end
-                    for _, c in tsutil.inext, n, -1 do if c:named() then walk(c, STMT[ty] or false) end end
+                    for _, c in tsutil.inamed, n, -1 do walk(c, STMT[ty] or false) end
                 end
                 walk(root, false)
                 local nl, hl, na, ha = 0, 0, #arms, 0

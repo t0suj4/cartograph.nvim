@@ -255,7 +255,7 @@ function M.read(src)
             return scalar(node)
         end
         -- a scalar's inner node (string_scalar, integer_scalar, …): its parent decides
-        for _, c in tsutil.inext, node, -1 do if c:named() then return value(c) end end
+        for _, c in tsutil.inamed, node, -1 do return value(c) end
         return node_text(node, src)
     end
     local docs = {}

@@ -150,7 +150,7 @@ function M.container_of(text, lang, range)
         if range and (er < atr.sl(range) or sr > atr.el(range)) then return end
         local ok, ir = pcall(expr.build, nd, text, lang)
         if ok and ir and ir.k == 'table' then found = ir; return end
-        for _, c in tsutil.inext, nd, -1 do if c:named() then walk(c) end end
+        for _, c in tsutil.inamed, nd, -1 do walk(c) end
     end
     walk(root)
     if not found then return nil, 'no container literal found in that range', 'ill-posed' end

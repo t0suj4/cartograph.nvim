@@ -287,7 +287,7 @@ local function terminates(body, src)
     -- (else early-exit guards without braces are silently missed, [[cartograph-nil-flow]]).
     if TERM[body:type()] then return true end
     local last
-    for _, c in tsutil.inext, body, -1 do if c:named() then last = c end end
+    for _, c in tsutil.inamed, body, -1 do last = c end
     if not last then return false end
     if TERM[last:type()] then return true end
     local s = txt(last, src)

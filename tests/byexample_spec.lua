@@ -189,11 +189,13 @@ test('byexample: a STRUCTURAL MOVE is ONE rule — regions that exchange a carri
     local out, n = BX.rewrite(move, 'local r = w:Show(z)\nlocal obj = 1\n', 'lua')
     eq('local r = show(w, z)\nlocal obj = 1\n', out); eq(1, n)
     -- a swap's two argument regions report bare LITERALS; lifted to their identifiers they carry each other's name and
-    -- merge — into `(a, b) -> (b, a)`, which matches its own output: refused by name, never three token rules
-    -- (`a -> b`, `b -> a`, `f -> g`) that would rewrite every `a` and `b`. (The callee `f -> g` carries nothing, so it
-    -- is not merged in: a sibling edit with no shared subterm is a further case, noted on CART-1435)
-    local swap, why = BX.learn('f(a, b)', 'g(b, a)', 'lua')
-    eq(nil, swap); ok(tostring(why):find('matches its own output', 1, true), tostring(why))
+    -- merge — and the callee `f -> g`, a sibling edit in the SAME statement that carries nothing, merges with them
+    -- (CART-1664: one statement, one edit): the rule is the whole demonstrated edit, `f(?1, ?2) -> g(?2, ?1)` — never
+    -- three token rules (`a -> b`, `b -> a`, `f -> g`) that would rewrite every `a` and `b`
+    local swap = assert(BX.learn('f(a, b)', 'g(b, a)', 'lua'))
+    eq(1, #swap, 'one rule')
+    local sout, sn = BX.rewrite(swap, 'local r = f(x, y)\nlocal a, b = 1, 2\n', 'lua')
+    eq('local r = g(y, x)\nlocal a, b = 1, 2\n', sout); eq(1, sn)
 end)
 
 test('byexample: a region with NO CONSTANT is no evidence — lifted until it holds one, so a binder-list edit stays with its loop (CART-1452)', function ()
@@ -251,4 +253,40 @@ test('learn-from-example: an example that shows its own rule is TOO GENERAL fail
         before = 'local a = x == nil\nif x == nil then return 0 end', after = 'local a = x == nil\nif not x then return 0 end' }, { apply = true })
     eq('failed', r.status); ok(r.why:find('fails its own examples', 1, true), r.why)
     eq(0, vim.fn.filereadable(root .. '/.cartograph/tactics/too-general.lua'), 'not written')
+end)
+
+test('byexample: ONE STATEMENT, ONE EDIT and a moved SOLE STATEMENT is a sequence — the named-children loop refactor (CART-1664)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    -- two regions (inext -> inamed, the check removed) in ONE statement: one rule, not two that are each wrong alone;
+    -- the loop variable used twice is one hole; the body, moved out of the `if`, binds a sequence of any length
+    local rules = assert(BX.learn('for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end',
+        'for _, c in tsutil.inamed, n, -1 do walk(c) end', 'lua'))
+    eq(1, #rules, 'one rule')
+    local src = table.concat({
+        'for _, x in tsutil.inext, m, -1 do if x:named() then local t = x:type(); seen[t] = true end end',
+        'for _, x in tsutil.inext, m, -1 do if x:named() then f(x) else g(x) end end',
+        'for _, x in tsutil.inext, m, -1 do f(x) end',
+        'if x:named() then f(x) end', '' }, '\n')
+    local out, n = BX.rewrite(rules, src, 'lua')
+    eq(1, n, 'only the loop whose whole body is the check')
+    eq(table.concat({
+        'for _, x in tsutil.inamed, m, -1 do local t = x:type(); seen[t] = true end',
+        'for _, x in tsutil.inext, m, -1 do if x:named() then f(x) else g(x) end end',
+        'for _, x in tsutil.inext, m, -1 do f(x) end',
+        'if x:named() then f(x) end', '' }, '\n'), out)
+end)
+
+test('byexample: a body CARRIED UNCHANGED stands for any body — `if a then f(x) end -> if b then f(x) end` rewrites the condition whatever the body (CART-1664)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local rules = assert(BX.learn('if a then f(x) end', 'if b then f(x) end', 'lua'))
+    local out, n = BX.rewrite(rules, 'if a then g(); h(1) end\nif c then f(x) end\n', 'lua')
+    eq(1, n); eq('if b then g(); h(1) end\nif c then f(x) end\n', out)
+end)
+
+test('byexample: a sole child pairs as a sequence only with a parent of the SAME kind — an argument list is no body (CART-1664)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    -- (paired across kinds, the sequence would carry the argument list's parentheses into the block: `do (h(y)) end`)
+    local rules = assert(BX.learn('g(f(x))', 'do f(x) end', 'lua'))
+    local out, n = BX.rewrite(rules, 'g(h(y))\n', 'lua')
+    eq(1, n); eq('do h(y) end\n', out)
 end)

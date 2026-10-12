@@ -212,7 +212,7 @@ local function qname(namen, src)
     -- nested case without this made the v8 residual go 15 -> 17, because three names that had
     -- been fully glued became half-glued and my detector counts both the same.
     local last
-    for _, c in tsutil.inext, namen, -1 do if c:named() then last = c end end
+    for _, c in tsutil.inamed, namen, -1 do last = c end
     -- @langs-ok `qualified_identifier` is a CPP-ONLY node type; the comparison
     -- being false in every other grammar is exactly what confines this unglue to
     -- C++ misparses, and they fall through to the plain squeezed text (the

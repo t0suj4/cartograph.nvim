@@ -241,7 +241,7 @@ function M.attach(data)
         elseif ty == 'atom' and servers[unq(vim.treesitter.get_node_text(n, t.src))] then
             acc[unq(vim.treesitter.get_node_text(n, t.src))] = true
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then names_in(c, t, own, acc) end end
+        for _, c in tsutil.inamed, n, -1 do names_in(c, t, own, acc) end
         return acc
     end
     local function helper_body(t, name)
@@ -276,7 +276,7 @@ function M.attach(data)
                     local l, r = n:field('lhs')[1], n:field('rhs')[1]
                     if l and r and l:type() == 'var' and vim.treesitter.get_node_text(l, t.src) == name then from_expr(r) end
                 end
-                for _, c in tsutil.inext, n, -1 do if c:named() then scan(c) end end
+                for _, c in tsutil.inamed, n, -1 do scan(c) end
             end
             if cl then scan(cl) end
         end

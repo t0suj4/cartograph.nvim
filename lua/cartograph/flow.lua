@@ -872,7 +872,7 @@ function M.head_binders(node, src, cls)
             if n:type() == 'identifier' then names[#names + 1] = txt(n, src) end
             return
         end
-        for _, c in tsutil.inext, n, -1 do if c:named() then leaves(c) end end
+        for _, c in tsutil.inamed, n, -1 do leaves(c) end
     end
     for _, b in ipairs(nodes) do skip[b:id()] = true; leaves(b) end
     return names, skip, {}

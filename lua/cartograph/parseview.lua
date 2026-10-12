@@ -103,7 +103,7 @@ local function cpp_misreads(root, src)
             return
         end
         if CPP_NO_DESCEND[t] then return end
-        for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end
+        for _, c in tsutil.inamed, n, -1 do walk(c) end
     end
     walk(root)
     return spans
