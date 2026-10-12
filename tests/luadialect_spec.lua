@@ -7,6 +7,7 @@ local ld = require 'cartograph.luadialect'
 local function root_with(files)
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     for name, body in pairs(files) do
+        vim.fn.mkdir(vim.fn.fnamemodify(root .. '/' .. name, ':h'), 'p')
         local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(body); fd:close()
     end
     return root
@@ -21,6 +22,8 @@ test('luadialect: resolves from .luarc.json, .luarc.jsonc, .luacheckrc, and says
         { { ['.luacheckrc'] = 'std = "lua54+busted"\n' }, '5.4', '.luacheckrc' },
         { { ['.luacheckrc'] = "std = 'luajit'\n" }, 'jit', '.luacheckrc' },
         { {}, nil, 'default (before 5.5)' },
+        -- (a Neovim plugin's layout: the nvim profile, and Neovim's Lua is LuaJIT)
+        { { ['plugin/p.lua'] = 'return 1\n', ['lua/p/init.lua'] = 'return {}\n' }, 'jit', 'profile:nvim' },
     }
     for _, c in ipairs(cases) do
         local root = root_with(c[1])

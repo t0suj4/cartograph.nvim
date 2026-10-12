@@ -68,6 +68,9 @@ function M.resolve(root)
         if type(prof) == 'string' then
             if prof:find('factorio', 1, true) then return '5.2', 'profile:' .. prof end
             if prof:find('luajit', 1, true) then return 'jit', 'profile:' .. prof end
+            -- (Neovim runs its Lua on LuaJIT: a plugin or a config root is a LuaJIT root — the target a
+            -- target-dependent spelling reads, CART-1663)
+            if prof == 'nvim' then return 'jit', 'profile:nvim' end
         end
     end
     return nil, 'default (before 5.5)'
