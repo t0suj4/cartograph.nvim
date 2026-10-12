@@ -26,6 +26,7 @@
 -- reaches — a hedge, not a verdict (a message can come from outside the tree or from a variable).
 -- NOT HERE YET: gen_statem (its callback mode decides the receiving function), `Pid ! Msg` (handle_info, whose
 -- target is a pid). ⚠ SESSION-LIVE, a post-pass (cartograph.postpass).
+local atr = require 'cartograph.at'
 local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
@@ -306,7 +307,7 @@ function M.attach(data)
         if kind and verb ~= 'call' and verb ~= 'cast' then kind = nil end
         local t = kind and trees[c.file]
         if t and c.at and c.fn then
-            local node = t.root:named_descendant_for_range(c.at.start.line, c.at.start.char, c.at['end'].line, c.at['end'].char)
+            local node = t.root:named_descendant_for_range(atr.sl(c.at), atr.sc(c.at), atr.el(c.at), atr.ec(c.at))
             while node and node:type() ~= 'call' do node = node:parent() end
             local args = node and named(node:field('args')[1])
             local s, msg = args and args[1], args and args[2]

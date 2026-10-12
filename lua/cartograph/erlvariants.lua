@@ -17,6 +17,7 @@
 -- and its rule becomes `variants` (the set is known; which member runs is the build's). Which branch compiles BY
 -- DEFAULT is erlfeatures' question, deliberately not asked here: both members are live code in some build.
 -- ⚠ SESSION-LIVE, a post-pass (cartograph.postpass), like erldispatch.
+local atr = require 'cartograph.at'
 local M = {}
 
 local F = require 'cartograph.erlfeatures'
@@ -60,7 +61,7 @@ function M.attach(data)
             local paths, ok_all, macro = {}, true, nil
             for i, id in ipairs(r.cands) do
                 local n = byid[id]
-                local sl = n and n.range and (type(n.range) == 'table' and n.range.start and n.range.start.line or at.sl(n.range))
+                local sl = n and n.range and (type(n.range) == 'table' and n.range.start and atr.sl(n.range) or at.sl(n.range))
                 if not sl then ok_all = false; break end
                 paths[i] = path_at(regions[c.file], sl + 1)
             end

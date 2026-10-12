@@ -27,6 +27,7 @@
 -- CLIENT ATTRIBUTION (CART-0958): a template's OWNER is the innermost function of the client graph whose range holds
 -- it; a FRAGMENT built by one function and spliced into another's template (`${this.itemsEl()}`) is followed through
 -- the client graph's resolved call at that hole (CART-0800's cross-function attribution, for this one shape).
+local atr = require 'cartograph.at'
 local M = {}
 
 local stx = require 'cartograph.stx'
@@ -386,12 +387,12 @@ local function owner_index(cdata)
         line = line - 1
         local l = {}
         for _, n in ipairs(by_file[file] or {}) do
-            if n.range.start.line <= line and line <= n.range['end'].line then l[#l + 1] = n end
+            if atr.sl(n.range) <= line and line <= atr.el(n.range) then l[#l + 1] = n end
         end
         table.sort(l, function (x, y)
-            local sx, sy = x.range.start.line, y.range.start.line
+            local sx, sy = atr.sl(x.range), atr.sl(y.range)
             if sx ~= sy then return sx > sy end
-            return x.range['end'].line < y.range['end'].line
+            return atr.el(x.range) < atr.el(y.range)
         end)
         return l
     end

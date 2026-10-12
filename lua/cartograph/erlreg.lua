@@ -47,6 +47,7 @@
 -- that compute the same thing SEPARATELY will disagree, and the disagreement
 -- will be discovered by a reader who trusts the wrong one".
 
+local atr = require 'cartograph.at'
 local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local M = {}
 
@@ -271,7 +272,7 @@ function M.attach(data)
                                     e.at = e.at or {}
                                     local dup = false
                                     for _, x in ipairs(e.at) do
-                                        if x.start and x.start.line == a1 and x.start.char == a2 then dup = true end
+                                        if x.start and atr.sl(x) == a1 and atr.sc(x) == a2 then dup = true end
                                     end
                                     if not dup then e.at[#e.at + 1] = site end
                                 end

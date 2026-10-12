@@ -30,6 +30,7 @@
 -- the exact defect this file's refusal counter exists to prevent. A document
 -- with no `kind:` is refused and COUNTED.
 
+local atr = require 'cartograph.at'
 local M = {}
 
 -- ★ THE IMAGE -> SOURCE MAPPING IS AN ORACLE, NOT A NAME MATCH. skaffold.yaml
@@ -379,13 +380,13 @@ function M.traces(data, id)
                     if wd then
                         selected = true
                         hops[#hops + 1] = { text = 'selects ' .. wd.d.kind .. '/' .. tostring(wd.d.name), file = sd.rel,
-                            line = e.at and e.at[1] and (e.at[1].start.line + 1) or (sd.d.line0 or 0) + 1 }
+                            line = e.at and e.at[1] and (atr.sl(e.at[1]) + 1) or (sd.d.line0 or 0) + 1 }
                         hops[#hops + 1] = { text = wd.d.kind .. '/' .. tostring(wd.d.name) .. ' listens', file = wd.rel, line = line_of(wd.d, 'containerPort') }
                         -- (probe edges are probes x vendored copies of the Health contract: count each apart)
                         local sites, copies, pline = {}, {}, nil
                         for _, pe in ipairs(data.edges or {}) do
                             if pe.k8 == 'probes' and pe.from == e.to then
-                                local l = pe.at and pe.at[1] and (pe.at[1].start.line + 1)
+                                local l = pe.at and pe.at[1] and (atr.sl(pe.at[1]) + 1)
                                 if l then sites[l] = true end
                                 copies[pe.to] = true
                                 pline = (l and (not pline or l < pline)) and l or pline

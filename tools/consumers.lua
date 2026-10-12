@@ -182,9 +182,12 @@ if rwmap and rwmod and rwbind then
         -- defined function preceded it → `nil global 'callrec'` at runtime
         -- (16 spec failures). Top placement is always safe: a require never
         -- depends on a preceding local.
+        -- (the BINDING must exist at the top level under rwbind — a file that requires the module under another name,
+        -- or inside a function, does not bind it: three files read `atr` as an undeclared global, 2026-10-12)
         local has, first_code = false, nil
+        local bindpat = '^local%s+' .. rwbind .. '%s*=%s*require%s*%(?%s*[\'"]' .. rwmod:gsub('%W', '%%%0') .. '[\'"]'
         for j, ln in ipairs(lines) do
-            if ln:find(rwmod:gsub('%W', '%%%0'), 1, false) then has = true break end
+            if ln:find(bindpat) then has = true break end
             if not first_code and not ln:match('^%s*%-%-') and not ln:match('^%s*$') then
                 first_code = j
             end

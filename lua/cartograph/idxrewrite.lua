@@ -28,6 +28,7 @@
 -- certified call findings on cartograph, 15 are filter-shaped — 4 equality filters (this verb), 11
 -- range containments (`x >= r.from and x <= r.to`, fn_at's kind: an interval index, not this one).
 
+local atr = require 'cartograph.at'
 local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.inext: indexed child iteration, CART-1453)
 local txn = require 'cartograph.txn'
 
@@ -213,13 +214,13 @@ function M.instrument(src)
     end
     local lines = vim.split(src, '\n', { plain = true })
     table.sort(edits, function(a, b)
-        if a.at.start.line ~= b.at.start.line then return a.at.start.line > b.at.start.line end
-        return a.at.start.char > b.at.start.char
+        if atr.sl(a.at) ~= atr.sl(b.at) then return atr.sl(a.at) > atr.sl(b.at) end
+        return atr.sc(a.at) > atr.sc(b.at)
     end)
     for _, e in ipairs(edits) do
-        local l = lines[e.at.start.line + 1]
-        lines[e.at.start.line + 1] = l:sub(1, e.at.start.char) .. e.to .. lines[e.at['end'].line + 1]:sub(e.at['end'].char + 1)
-        for k = e.at['end'].line, e.at.start.line + 1, -1 do table.remove(lines, k + 1) end
+        local l = lines[atr.sl(e.at) + 1]
+        lines[atr.sl(e.at) + 1] = l:sub(1, atr.sc(e.at)) .. e.to .. lines[e.at['end'].line + 1]:sub(atr.ec(e.at) + 1)
+        for k = atr.el(e.at), atr.sl(e.at) + 1, -1 do table.remove(lines, k + 1) end
     end
     return M.PROBE .. table.concat(lines, '\n'), sites
 end
