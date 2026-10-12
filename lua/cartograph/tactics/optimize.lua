@@ -41,7 +41,20 @@ local function node_at(store, file, line)
     return n and store.ref_of(n.id) or nil
 end
 
+local build_rewrite
+-- jit = 1: jit-budget FIRST (CART-1662) — what LuaJIT's trace budgets cost the workload, carried as a premise of the
+-- run whatever the rewrite then finds: on luacheck the code rewrites rightly found nothing while the default trace
+-- cache cost 3.4x. A knob, not a rewrite (jit.opt is process-wide: the batch entry point owns it), so it is reported,
+-- never written
 local function build(p, store)
+    if p.jit ~= '1' then return build_rewrite(p, store) end
+    local okg, gwhy = git_clean(store.data.root)
+    if not okg then return nil, gwhy, 'ill-posed' end
+    return T.bind('jit-budget', { workload = p.workload, code = store.data.root, reps = '1', timeout = p.timeout }, function ()
+        return build_rewrite(p, store)
+    end, { ungated = true })
+end
+build_rewrite = function (p, store)
     local root = store.data.root
     local okg, gwhy = git_clean(root)
     if not okg then return nil, gwhy, 'ill-posed' end
@@ -232,9 +245,10 @@ return {
     kind = 'write',
     tags = { 'code', 'optimize' },
     on_stop = 'rollback',
-    summary = 'THE OPTIMIZATION LOOP on this world: rewrite = memo (hot-spots -> memo-advisor -> memoize, residence from the key kind) | order (sort-ties -> total-order) | hoist (alloc-census -> the hot provable empty fallbacks -> hoist-empty scoped to their functions; min = their share of the tables, default 0.01) — then ab-equivalence of `measure` on `corpus` at HEAD vs the rewritten tree (memo: equal AND faster), rolled back when it fails. workload = what the discoveries run (Lua returning function (store) or { setup, run }; @file). Apply only, on a clean git checkout; stops only on decisions (mixed key kind, several separators)',
+    summary = 'THE OPTIMIZATION LOOP on this world: rewrite = memo (hot-spots -> memo-advisor -> memoize, residence from the key kind) | order (sort-ties -> total-order) | hoist (alloc-census -> the hot provable empty fallbacks -> hoist-empty scoped to their functions; min = their share of the tables, default 0.01) — then ab-equivalence of `measure` on `corpus` at HEAD vs the rewritten tree (memo: equal AND faster), rolled back when it fails. workload = what the discoveries run (Lua returning function (store) or { setup, run }; @file). Apply only, on a clean git checkout; stops only on decisions (mixed key kind, several separators). jit = 1 runs jit-budget first and carries what the trace budgets cost as a premise (reported, never written)',
     params = { workload = 'string', measure = 'string', corpus = 'list', sorted = 'string?', rewrite = 'string?', top = 'string?',
-        min = 'string?', timeout = 'string?', by = 'list?', residence = 'string?', generation = 'string?', max_kb = 'string?' },
+        min = 'string?', timeout = 'string?', by = 'list?', residence = 'string?', generation = 'string?', max_kb = 'string?',
+        jit = 'string?' },
     build = build,
     examples = {
         {
@@ -296,6 +310,21 @@ return {
             expect = { status = 'done', applied = 1, check = function (root)
                 local s = io.open(root .. '/lua/hoistm.lua'):read('a')
                 return s:find('pairs(t or EMPTY_RO)', 1, true) ~= nil and s:find('function M.cold(t) return #(t or {}) end', 1, true) ~= nil, s
+            end },
+        },
+        {
+            name = 'jit = 1: jit-budget runs first and its finding rides along as a premise; the rewrite still happens (CART-1662)',
+            files = { ['lua/hoistm.lua'] = HOISTM }, requires = in_git,
+            params = function (store)
+                commit(store)
+                return { rewrite = 'hoist', jit = '1', workload = 'return function () require("hoistm").work(2000000) end', corpus = { store.data.root },
+                    measure = 'return { measure = function () package.loaded.hoistm = nil; return tostring(require("hoistm").work(2000000)) end }' }
+            end,
+            expect = { status = 'done', applied = 1, check = function (_, r)
+                for _, x in ipairs(r and r.residue or {}) do
+                    if tostring(x.text):find('premise `jit-budget` holds: fastest:', 1, true) then return true end
+                end
+                return false, vim.inspect(r and r.residue)
             end },
         },
         {
