@@ -72,15 +72,18 @@ local function first_param_name(L, fn, src)
     return nil
 end
 
--- is `n` a receiver mention? -> the method's tree node and the class name | nil
-local function receiver(L, n, src)
+-- is `n` (anc[d], the walk's ancestor stack: anc[d - 1] its parent) a receiver mention? -> the method's tree node and
+-- the class name | nil. The method and its class are ANCESTORS, read off the stack: node:parent() re-descends from the
+-- root (~1.1 us a call), and this climbed it at every candidate mention
+local function receiver(L, n, src, anc, d)
     local t = n:type()
     if L.recv == 'ivar' then if not L.ivar[t] then return nil end
     elseif L.recv == 'node' then if not L.recv_type[t] then return nil end
     elseif not L.ident[t] then return nil
     elseif L.recv == 'name' and node_text(n, src) ~= L.recv_name then return nil end
-    local fn = n:parent()
-    while fn and not L.stop[fn:type()] do fn = fn:parent() end
+    local j = d - 1
+    while j >= 1 and not L.stop[anc[j]:type()] do j = j - 1 end
+    local fn = anc[j]
     if not (fn and L.method[fn:type()]) then return nil end
     if L.class == 'fn_name' then -- lua: `T:m` binds self; `T.m(self, …)` names it
         local name = fn:field('name')[1]
@@ -94,10 +97,11 @@ local function receiver(L, n, src)
         return fn, cls
     end
     if L.recv == 'first_param' and first_param_name(L, fn, src) ~= node_text(n, src) then return nil end
-    local p = fn:parent()
-    while p and L.through[p:type()] do p = p:parent() end
+    local k = j - 1
+    while k >= 1 and L.through[anc[k]:type()] do k = k - 1 end
+    local p = anc[k]
     if not (p and L.body[p:type()]) then return nil end
-    local cls = p:parent()
+    local cls = anc[k - 1]
     if not cls or (L.class_types and not L.class_types[cls:type()]) then return nil end
     local nm = cls:field('name')[1]
     return fn, nm and node_text(nm, src)
@@ -109,27 +113,28 @@ function M.collect(lang, tsroot, src)
     local L = LANGS[lang]
     if not L then return {} end
     local out = {}
-    -- (the PARENT and GRANDPARENT ride down the walk: tree-sitter's node:parent() re-descends from the root, and asking
-    -- it at every node of every file was 9% of an extract + solve of lua/cartograph — the profiler's top C-code line)
-    local function walk(n, p, gp)
-        if p and L.ivar and L.ivar[n:type()] then -- (`@x`: the mention is the field)
-            local fn, cls = receiver(L, n, src)
+    -- (ONE treewalk visitor: the PARENT and GRANDPARENT are the ancestor stack's — tree-sitter's node:parent()
+    -- re-descends from the root, and asking it at every node of every file was 9% of an extract + solve of
+    -- lua/cartograph; every mention is a named node, so the walk is named-only)
+    require('cartograph.treewalk').solo(tsroot, { any = function (n, nt, anc, d, ty)
+        local p, gp = anc[d - 1], anc[d - 2]
+        if p and L.ivar and L.ivar[nt] then -- (`@x`: the mention is the field)
+            local fn, cls = receiver(L, n, src, anc, d)
             if fn and cls then out[#out + 1] = { class = cls, field = (node_text(n, src):gsub('^@', '')), fn = fn, node = n, parent = p } end
         elseif p then
-            local fld_field = L.member[p:type()]
+            local fld_field = L.member[ty[d - 1]]
             -- (`this.build()` / `self.helper(x)` CALLS a method: the member is a callee, not a field — it had minted a
             -- `Panel.build` field shadowing the method)
             gp = fld_field and gp
-            local callee = gp and L.calls[gp:type()] and gp:field(L.calls[gp:type()])[1] == p
+            local cf = gp and L.calls[ty[d - 2]]
+            local callee = cf and gp:field(cf)[1] == p
             if fld_field and not callee and p:named_child(0) == n then
-                local fn, cls = receiver(L, n, src)
+                local fn, cls = receiver(L, n, src, anc, d)
                 local f = fn and cls and p:field(fld_field)[1]
                 if f then out[#out + 1] = { class = cls, field = node_text(f, src), fn = fn, node = n, parent = p } end
             end
         end
-        for _, c in tsutil.inamed, n, -1 do walk(c, n, p) end -- (named children only: every mention is a named node)
-    end
-    walk(tsroot, tsroot:parent(), nil)
+    end })
     return out
 end
 

@@ -9,13 +9,14 @@
 --   tw.solo(root, v)                 the same, one visitor (a walker's own entry point stays a one-liner)
 --
 -- A visitor is a table:
---   enter = { [node type] = function (n, anc, d) … end }   a node of that type, BEFORE its children. `anc` is the
+--   enter = { [node type] = function (n, anc, d, ty) … end }   a node of that type, BEFORE its children. `anc` is the
 --           ANCESTOR STACK: anc[d] == n, anc[d - 1] its parent, anc[1] the root — an array read, where node:parent()
---           re-descends from the root (~1.1 us a call, vs 0.24 us for a child). Return `false` to PRUNE: this visitor
---           sees nothing below n (others still do).
---   leave = { [node type] = function (n, anc, d) … end }   the same node AFTER its children (not called for a node the
---           visitor pruned at, nor for anything below it)
---   any   = function (n, t, anc, d) … end                  every node (t its type), before the typed handler; `false`
+--           re-descends from the root (~1.1 us a call, vs 0.24 us for a child). `ty` is the same stack of TYPES
+--           (ty[d - 1] the parent's: node:type() builds a Lua string per call, and the driver already asked it).
+--           Return `false` to PRUNE: this visitor sees nothing below n (others still do).
+--   leave = { [node type] = function (n, anc, d, ty) … end }   the same node AFTER its children (not called for a node
+--           the visitor pruned at, nor for anything below it)
+--   any   = function (n, t, anc, d, ty) … end              every node (t its type), before the typed handler; `false`
 --           prunes as above
 --   tokens = true                                           visit anonymous children too (default: named only — 40%
 --           of a Lua tree is punctuation and keywords, and no named-only walker needs them)
@@ -53,29 +54,29 @@ function M.walk(root, visitors)
     local count = tokens and root.child_count or root.named_child_count
     local child = tokens and root.child or root.named_child
 
+    local types = {} -- depth -> the type of anc[d] (asked once, at enter)
     -- enter n at depth d: the any-handlers, then the typed ones; a handler returning false prunes its visitor
     local function enter(n, d)
         local t = n:type()
+        types[d] = t
         for k = 1, #anys, 2 do
             local i = anys[k]
-            if not off[i] and anys[k + 1](n, t, anc, d) == false then off[i] = d; active = active - 1 end
+            if not off[i] and anys[k + 1](n, t, anc, d, types) == false then off[i] = d; active = active - 1 end
         end
         local l = by_enter[t]
         if l then
             for k = 1, #l, 2 do
                 local i = l[k]
-                if not off[i] and l[k + 1](n, anc, d) == false then off[i] = d; active = active - 1 end
+                if not off[i] and l[k + 1](n, anc, d, types) == false then off[i] = d; active = active - 1 end
             end
         end
-        return t
     end
-    local types = {} -- depth -> the type of anc[d] (asked once, at enter)
     local function leave(n, d)
         local l = by_leave[types[d]]
         if l then
             for k = 1, #l, 2 do
                 local i = l[k]
-                if not off[i] then l[k + 1](n, anc, d) end
+                if not off[i] then l[k + 1](n, anc, d, types) end
             end
         end
         -- (a visitor that pruned HERE is active again for n's siblings)
@@ -84,7 +85,7 @@ function M.walk(root, visitors)
 
     local d = 1
     anc[1], idx[1] = root, 0
-    types[1] = enter(root, 1)
+    enter(root, 1)
     cnt[1] = active > 0 and count(root) or 0
     while d > 0 do
         local i = idx[d]
@@ -93,7 +94,7 @@ function M.walk(root, visitors)
             local c = child(anc[d], i)
             d = d + 1
             anc[d], idx[d] = c, 0
-            types[d] = enter(c, d)
+            enter(c, d)
             cnt[d] = active > 0 and count(c) or 0 -- (every visitor pruned: nothing below is visited)
         else
             leave(anc[d], d)
@@ -103,6 +104,36 @@ function M.walk(root, visitors)
     end
 end
 
-function M.solo(root, visitor) return M.walk(root, { visitor }) end
+-- (ONE visitor with only `any`: the same walk without the dispatch tables and the per-node leave scan — the general
+-- driver cost a plain recursive walk +6% on a 428-file Lua corpus where the visitor does little per node)
+local function walk_any(root, any, tokens)
+    local count = tokens and root.child_count or root.named_child_count
+    local child = tokens and root.child or root.named_child
+    local anc, idx, cnt, types = {}, {}, {}, {}
+    local t = root:type()
+    anc[1], idx[1], types[1] = root, 0, t
+    local pruned = any(root, t, anc, 1, types) == false
+    cnt[1] = pruned and 0 or count(root)
+    local d = 1
+    while d > 0 do
+        local i = idx[d]
+        if i < cnt[d] then
+            idx[d] = i + 1
+            local c = child(anc[d], i)
+            d = d + 1
+            t = c:type()
+            anc[d], idx[d], types[d] = c, 0, t
+            cnt[d] = any(c, t, anc, d, types) == false and 0 or count(c)
+        else
+            anc[d] = nil
+            d = d - 1
+        end
+    end
+end
+
+function M.solo(root, visitor)
+    if root and visitor.any and not visitor.enter and not visitor.leave then return walk_any(root, visitor.any, visitor.tokens) end
+    return M.walk(root, { visitor })
+end
 
 return M

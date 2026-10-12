@@ -76,6 +76,13 @@ test('treewalk: a prune is the visitor\'s own — the others still see the subtr
     local none = 0
     tw.solo(root, { any = function (n) if not n:named() then none = none + 1 end end })
     eq(0, none, 'and not by default')
+    -- the single-`any` fast path prunes the same way: nothing below a function declaration
+    local seen_ids = 0
+    tw.solo(root, { any = function (n, t)
+        if t == 'identifier' then seen_ids = seen_ids + 1 end
+        if t == 'function_declaration' then return false end
+    end })
+    eq(4, seen_ids, 'solo any: the pruned function hides its identifiers, the rest of the file is seen')
 end)
 
 test('treewalk: a 5000-deep tree is walked without overflowing (iterative, CART-1082)', function ()
