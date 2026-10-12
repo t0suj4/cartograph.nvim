@@ -537,6 +537,27 @@ test('flow: reaching_cfg scope-regime — php variables survive blocks (function
     ok(next(rc_at(flow.reaching_cfg(f2), f2, 'z', 6)), 'php $z reaches after the block (function scope)')
 end)
 
+test('flow: php DESTRUCTURING defines its names — list($p, $q) = … and [$x, $y] = …; an element write stays a use (CART-1667)', function ()
+    if not ready('php') then skip 'no php parser' end
+    local fn, src = parse_fn(table.concat({
+        'function d($arr) {',
+        '  list($p, $q) = [1, 2];',
+        '  [$x, $y] = $arr;',
+        '  list($a[0], $b) = $arr;',
+        '  return $p + $x + $b;',
+        '}',
+    }, '\n'))
+    local f2 = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.php.regime })
+    local rows = {}
+    for _, s in ipairs(f2.stmts) do rows[#rows + 1] = ('def={%s} use={%s}'):format(table.concat(s.def or {}, ','), table.concat(s.use or {}, ',')) end
+    local all = table.concat(rows, ' | ')
+    ok(all:find('def={p,q} use={}', 1, true), all)
+    ok(all:find('def={x,y} use={arr}', 1, true), all)
+    ok(all:find('def={b} use={a,arr}', 1, true), 'the $a of $a[0] is written INTO, not defined: ' .. all)
+    -- (and the names now REACH their use: before, nothing defined $p)
+    ok(next(rc_at(flow.reaching_cfg(f2), f2, 'p', 6)), 'list() $p reaches the return')
+end)
+
 test('flow: reaching_cfg scope-regime — rust let is block-scoped', function ()
     if not ready('rust') then skip 'no rust parser' end
     local fn, src = parse_fn(table.concat({

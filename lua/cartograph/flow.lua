@@ -357,7 +357,8 @@ end
 -- the sticky def-position of a PATTERN subtree (du, CART-0957): truthy, and distinct from `true`
 local PAT = 'pat'
 local WRAP = { variable_list = true, variable_name = true,
-    reference_declarator = true, exception_variable = true } -- ruby `rescue … => e`
+    reference_declarator = true, exception_variable = true, -- ruby `rescue … => e`
+    list_literal = true } -- php `list($p, $q) = …` / `[$p, $q] = …`: each name a DEF (they read as uses: CART-1667)
 -- C/C++ declarator wrappers WITH a `declarator` field (a `*`/`[]` around the
 -- declared name): def-position continues down that field, NOT to siblings like
 -- an array `size` or pointer `type_qualifier` (which are uses/non-names). So
