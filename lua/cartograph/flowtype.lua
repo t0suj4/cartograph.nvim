@@ -998,8 +998,10 @@ local function build(store, opts)
             if t == 'identifier' then return lookup(txt(n)) end
             if t == 'dot_index_expression' then
                 local base = expr(n:field('table')[1])
-                local p = field(base, txt(n:field('field')[1]))
-                acc('read', n:field('field')[1], txt(n:field('field')[1]), base)
+                local fnode = n:field('field')[1] -- (each n:field() call allocates a table and a node: asked once)
+                local fname_ = txt(fnode)
+                local p = field(base, fname_)
+                acc('read', fnode, fname_, base)
                 -- ★ A PROFILE FUNCTION AS A VALUE (CART-1643): `pcall(vim.treesitter.get_string_parser, src, lang)` —
                 -- 65 of lua/cartograph's tree-sitter entry points — passes the function, and a load off the global
                 -- `vim` holds nothing: no parser, no tree, no node anywhere downstream. A dotted reference rooted at a
@@ -1010,8 +1012,9 @@ local function build(store, opts)
             end
             if t == 'bracket_index_expression' then
                 local base = expr(n:field('table')[1])
-                acc_key('read', n:field('field')[1], base, n)
-                return field(base, keyname(n:field('field')[1]))
+                local knode = n:field('field')[1]
+                acc_key('read', knode, base, n)
+                return field(base, keyname(knode))
             end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
             if t == 'string' then local p = new(); addobj(p, STR); return p end
@@ -1044,9 +1047,11 @@ local function build(store, opts)
                 return new()
             end
             if t == 'binary_expression' then
-                local op
-                for _, x in tsutil.inext, n, -1 do if not x:named() then op = txt(x) end end
-                local a, b = expr(n:named_child(0)), expr(n:named_child(1))
+                local op, l, r -- (one pass over the children: the operator token and both operands)
+                for _, x in tsutil.inext, n, -1 do
+                    if not x:named() then op = txt(x) elseif not l then l = x elseif not r then r = x end
+                end
+                local a, b = expr(l), expr(r)
                 if op == 'or' or op == 'and' then local r = new(); edge(a, r); edge(b, r); return r end
                 if op == '..' then local r = new(); addobj(r, STR); return r end
                 return new()

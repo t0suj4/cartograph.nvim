@@ -798,8 +798,9 @@ local function truncation_findings(store)
                                 end
                             end
                         end
-                        for _, c in tsutil.inext, n, -1 do
-                            if c:named() and c:child(0) then walk(c) end
+                        -- (named children with children of their own: a count, not a materialized first child)
+                        for _, c in tsutil.inamed, n, -1 do
+                            if c:child_count() > 0 then walk(c) end
                         end
                     end
                     walk(tree:root())

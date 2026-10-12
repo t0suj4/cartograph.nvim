@@ -53,23 +53,58 @@ function M.model(src, spec)
     --- (a block's start row is not the query row). Returns (chain, count);
     --- the chain array is REUSED across calls — consume it before the next
     --- resolve on this model.
+    -- scope node id -> { node, entry, up = the next scope out (the same record shape) | false }: the scopes above a
+    -- scope are the same for every resolution under it, so the climb to the root (node:parent() re-descends from the
+    -- root in tree-sitter, ~1.1 us a step) is paid once per SCOPE, not once per resolved name (_bound_value resolves
+    -- every argument identifier: 143 K parent steps on an 80-file corpus)
+    local outer = {}
+    local pending = {} -- (iterative, not recursive: a deep tree overflowed a recursive walk's Lua stack, CART-1082)
+    local function scope_rec(s, entry)
+        local r = outer[s:id()]
+        if r then return r end
+        local np, top = 0, false
+        while s do -- climb until a cached scope (or the root), queueing the uncached ones
+            local id = s:id()
+            local c = outer[id]
+            if c then top = c break end
+            np = np + 1
+            pending[np] = { node = s, entry = entry, id = id }
+            local p = s:parent()
+            while p and not spec[p:type()] do p = p:parent() end
+            s = p
+            entry = p and spec[p:type()]
+        end
+        for i = np, 1, -1 do -- link outermost first
+            local q = pending[i]
+            pending[i] = nil
+            local rec = { node = q.node, entry = q.entry, up = top }
+            outer[q.id] = rec
+            top = rec
+        end
+        return top
+    end
     function sm.resolve(ident, from, only, atrow)
         local fromrow = atrow or select(1, from:range())
         local k, n = 0, from
-        while n do
-            local entry = spec[n:type()]
-            if entry and (only == nil or entry.kind == only) then
-                local b = symtab(n, entry)[ident]
+        while n and not spec[n:type()] do n = n:parent() end -- (to the nearest scope, `from` itself included)
+        local r = n and scope_rec(n, spec[n:type()])
+        while r do
+            local entry = r.entry
+            if only == nil or entry.kind == only then
+                local b = symtab(r.node, entry)[ident]
                 if b and (b.row == nil or b.row <= fromrow) then
                     k = k + 1
                     chain[k] = b
                 end
             end
-            n = n:parent()
+            r = r.up
         end
         return chain, k
     end
 
+    -- one scope's binders, harvested once per model: the extractor's mention walk reads every scope through this
+    -- instead of harvesting it a second time (lua_locals ran 1.9x per block)
+    sm.symtab = symtab
     return sm
 end
 

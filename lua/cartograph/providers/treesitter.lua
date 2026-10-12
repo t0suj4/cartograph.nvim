@@ -461,7 +461,7 @@ local function conj_abs(G, n, src, chain, aliases)
 end
 
 -- param-name map of a fn node: name -> 1-based index (nil when no params)
-local function param_map(fnnode, src, pfield)
+local function param_map_of(fnnode, src, pfield)
     local ps = fnnode:field(pfield)[1]
     if not ps then return nil end
     local map, i = nil, 0
@@ -482,6 +482,17 @@ local function param_map(fnnode, src, pfield)
         end
     end
     return map
+end
+-- (memoized per function of the current text: guard_class asks once per WRITE, _call_gp once per guarded CALL and
+-- _derived_of once per def — 9.5 maps per function before. The map is shared, so a caller copies before adding to it,
+-- as _with_derived does)
+local PM_SRC, PM_MEMO = nil, {}
+local function param_map(fnnode, src, pfield)
+    if PM_SRC ~= src then PM_SRC, PM_MEMO = src, {} end
+    local k = fnnode:id() .. '\0' .. tostring(pfield)
+    local m = PM_MEMO[k]
+    if m == nil then m = param_map_of(fnnode, src, pfield) or false; PM_MEMO[k] = m end
+    return m or nil
 end
 
 -- the immediate FIELD of a base-position mention (`state.x` at the state
@@ -1227,13 +1238,21 @@ function M._visible_from(id, ranges, line, col)
 end
 --- a function's params plus the locals DERIVED from them (G.derived_locals, CART-1566), memoized per (file text,
 --- function node) — guard_class asks it once per WRITE
-local DERIVED_SRC, DERIVED_MEMO = nil, {}
+local DERIVED_SRC, DERIVED_MEMO, DERIVED_RAW = nil, {}, {}
+-- the derived locals alone, memoized the same way (both entry points share it: _derived_of had walked every def's body
+-- again, 2.4 walks per function)
+local function derived_raw(fnnode, src, params, G)
+    if DERIVED_SRC ~= src then DERIVED_SRC, DERIVED_MEMO, DERIVED_RAW = src, {}, {} end
+    local k = fnnode:id()
+    local d = DERIVED_RAW[k]
+    if d == nil then d = G.derived_locals(fnnode, src, params) or false; DERIVED_RAW[k] = d end
+    return d or nil
+end
 function M._with_derived(fnnode, src, params, G)
-    if DERIVED_SRC ~= src then DERIVED_SRC, DERIVED_MEMO = src, {} end
+    local d = derived_raw(fnnode, src, params, G) -- (also resets both memos on a new text)
     local k = fnnode:id()
     local m = DERIVED_MEMO[k]
     if m == nil then
-        local d = G.derived_locals(fnnode, src, params)
         if d then
             m = {}
             for nm, i in pairs(params) do m[nm] = i end
@@ -1297,7 +1316,7 @@ end
 function M._derived_of(defn, src, G)
     if not (G and G.derived_locals) then return nil end
     local pm = param_map(defn, src, G.pfield)
-    return pm and G.derived_locals(defn, src, pm) or nil
+    return pm and derived_raw(defn, src, pm, G) or nil
 end
 --- a def NESTED in another function is visible only inside it (CART-1562): `pcall(require, m)` in one function had
 --- upgraded to ANOTHER function's `local require = function () end`. -> true when t2's enclosing fn does not enclose
@@ -5679,14 +5698,17 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- traces are unchanged. An explicit stack would mean rewriting this hot walk's
     -- pre/post hooks (scope push/pop, the df body finalize) for one pathological shape.
     local WALK_SEG, wdepth = 1000, 0
+    -- (the tree's scope model, shared with extract_defs / extract_calls: a scope resolution already harvested is not
+    -- harvested again here, and one harvested here is cached for them)
+    local sm = lexscopes and tree_model(tsroot, src, spec)
 
     local function walk(n, defpos, dfon)
         local nt = n:type()
         local pushed
         local entry = lexscopes and lexscopes[nt]
         if entry then
-            local t = {}
-            entry.harvest(n, src, t)
+            local t
+            if sm then t = sm.symtab(n, entry) else t = {}; entry.harvest(n, src, t) end
             pushed = {}
             for name, b in pairs(t) do
                 local a = active[name]
@@ -7398,6 +7420,9 @@ function M.extract(root, opts)
 local MATCH_OPTS = { match_limit = 65536 }
 
     local function extract_defs(file, lang, spec, src, tsroot, dfreg, escpend)
+        -- (one enclosing-function memo per tree, as extract_calls keeps: each def asked in_function up to five times,
+        -- each a climb of node:parent() steps that re-descend from the root)
+        local difmemo = {}
         -- df-strangler step 6: production DERIVES df from flow.coarse (no
         -- second AST walk). The legacy dfreg df-build survives ONLY as the
         -- parity ORACLE, gated on opts.legacy_df (bench.extract) so dfparity
@@ -7491,7 +7516,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         local function handle_fn(defn, namen, aname)
             if defn and (namen or aname)
                 and not (not aname and spec.toplevel_only
-                    and in_function(defn, spec))
+                    and in_function(defn, spec, difmemo))
                 and not (not aname and spec.skip_def
                     and spec.skip_def(defn, namen, src))
                 and not (not aname and spec.toplevel_parent and defn:parent()
@@ -7808,7 +7833,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- the language's own `fn_types` — reused rather than re-walked, because a
         -- copied walker is a copied bug (CART-0746).
         local function handle_ret_fn(defn)
-            local encl = in_function(defn, spec)
+            local encl = in_function(defn, spec, difmemo)
             if not encl then return end -- TOP-LEVEL: the region keeps it. Decided.
             local nm = 'fn'
             local f = encl:field('name')[1]
@@ -7855,7 +7880,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         --- is assigned in a constructor, so the missing 42.5% is ENRICHED in exactly
         --- the set-once cases the write axis has most to say about.
         local function handle_var(defn, namen, valn, declonly)
-            if defn and namen and not in_function(defn, spec)
+            if defn and namen and not in_function(defn, spec, difmemo)
                 and not (spec.toplevel_parent and defn:parent()
                     and defn:parent():type() ~= spec.toplevel_parent) then
                 local name = node_text(namen, src)
@@ -8354,7 +8379,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 if kind and edges[idx].once == nil then
                                     edges[idx].once = kind.once
                                     edges[idx].soft = kind.soft
-                                    edges[idx].site = in_function(pathn, spec)
+                                    edges[idx].site = in_function(pathn, spec, difmemo)
                                         and 'fn' or 'file'
                                 end
                             else
@@ -8368,7 +8393,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 -- claim half a fact
                                 if kind then
                                     e.once, e.soft = kind.once, kind.soft
-                                    e.site = in_function(pathn, spec)
+                                    e.site = in_function(pathn, spec, difmemo)
                                         and 'fn' or 'file'
                                 end
                                 edges[#edges + 1] = e
