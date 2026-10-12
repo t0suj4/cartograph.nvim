@@ -84,11 +84,18 @@ function M.global_is_name(v)
 end
 
 --- The bytes to PARSE for `src` in `lang`. Identity for any language but lua, and for a 5.5 root.
+-- (the last text's view: flowtype walks one file's text once per context instance, and the view scanned — and for a
+-- file mentioning `global`, rewrote — the whole text every time, 2% of a solve. Strings are interned, so the compare
+-- is a pointer compare. Past the dialect gate the view is a function of the text alone, so the text is the key)
+local last_src, last_out
 function M.view(src, lang, v)
     if lang ~= 'lua' or type(src) ~= 'string' or not M.global_is_name(v) then return src end
-    if not src:find('global', 1, true) then return src end
+    if src == last_src then return last_out end
+    local out = src
     -- whole word only: `global_x`, `myglobal`, `globals` are left alone
-    return (src:gsub('%f[%w_]global%f[^%w_]', '_lobal'))
+    if src:find('global', 1, true) then out = (src:gsub('%f[%w_]global%f[^%w_]', '_lobal')) end
+    last_src, last_out = src, out
+    return out
 end
 
 --- A string parser over the parse view. Callers keep reading node text from `src`, never from parser:source().

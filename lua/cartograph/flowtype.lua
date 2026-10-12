@@ -1357,6 +1357,9 @@ local function build(store, opts)
         end
     end
     local field_hit, params_hit = {}, false
+    -- (field name -> the ports of that field over every escaped object, built on the first store that needs it: each
+    -- new field had scanned the whole escaped list — fields x escaped objects, half of build1)
+    local escf
     for p in pairs(top) do taint(p) end
     for r in pairs(sinf) do taint(r) end
     -- ★ OPEN REACHES PAST THE EXPORTS (CART-1652): a caller outside the tree gets more than the module's functions —
@@ -1388,7 +1391,17 @@ local function build(store, opts)
             local f = st[1]
             if not field_hit[f] then
                 field_hit[f] = true
-                for _, o in ipairs(esc) do local m = ofield[o]; if m and m[f] then taint(m[f]) end end
+                if not escf then
+                    escf = {}
+                    for _, o in ipairs(esc) do
+                        for fk, fp in pairs(ofield[o] or NOTHING) do
+                            local l = escf[fk]
+                            if not l then l = {}; escf[fk] = l end
+                            l[#l + 1] = fp
+                        end
+                    end
+                end
+                for _, fp in ipairs(escf[f] or NOTHING) do taint(fp) end
             end
         end
         if calls[p] and not params_hit then
@@ -1614,13 +1627,18 @@ local function build(store, opts)
         -- (the SELECTION: saturated ports upstream of an unknown answer — copies, field -> load, through prototypes —
         -- and the functions whose PARAMETERS are among them)
         local function objs(p) if top[p] then return SATSNAP[p] or {} end local t = {}; for o in each(p) do t[#t + 1] = o end; return t end
+        -- (predecessors are only ever READ for a saturated port — the search below seeds and expands top ports alone — so
+        -- only a top target's are built: the whole map, every load's fields through its objects' prototypes, was a third
+        -- of build1)
         local pred = {}
         local function addp(q, p) local l = pred[q]; if not l then l = {}; pred[q] = l end; l[#l + 1] = p end
-        for p, sq in pairs(succ) do for q in pairs(sq) do addp(q, p) end end
+        for p, sq in pairs(succ) do for q in pairs(sq) do if top[q] then addp(q, p) end end end
         for x, l in pairs(loads) do
-            local os = objs(x)
+            local os
             for _, ld in ipairs(l) do
                 local f, dst, strict = ld[1], ld[2], ld[3]
+                if not top[dst] then goto next_load end
+                os = os or objs(x)
                 local seen = {}
                 local function via(o, depth)
                     if seen[o] or depth > 4 or TNAME[o] then return end
@@ -1634,6 +1652,7 @@ local function build(store, opts)
                     for c in pairs(protos[o] or NOTHING) do via(c, depth + 1) end
                 end
                 for _, o in ipairs(os) do via(o, 0) end
+                ::next_load::
             end
         end
         local S, q = {}, {}
