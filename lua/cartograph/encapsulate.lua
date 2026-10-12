@@ -30,7 +30,8 @@ end
 --- decide = { [key] = answer } -> { edits = { [file] = new text }, rewrites = { … }, rows = { undecided risky … },
 --- escapes = { … }, roster = the roster }
 function M.plan(root, args)
-    local spec = { calls = args.calls or {}, fields = args.fields or {}, rooted = args.rooted or {}, bless = args.bless or {} }
+    local spec = { calls = args.calls or {}, fields = args.fields or {}, rooted = args.rooted or {}, bless = args.bless or {},
+        params = args.params }
     local owners = args.owners or consumers.OWNERS
     local decide = args.decide or {}
     local r = consumers.roster(root, args.files, spec)
@@ -68,7 +69,7 @@ function M.plan(root, args)
     local escapes = {}
     for _, e in ipairs(r.frontier) do
         local k = key_of(e)
-        if decide[k] ~= 'ok' and decide[e.file] ~= 'other' and e.file ~= self_file then escapes[#escapes + 1] = { key = k, file = e.file, line = e.line, kind = e.kind, detail = e.detail, via = e.via } end
+        if decide[k] ~= 'ok' and decide[e.file] ~= 'other' and e.file ~= self_file then escapes[#escapes + 1] = { key = k, file = e.file, line = e.line, kind = e.kind, detail = e.detail, via = e.via, idx = e.idx, taint = e.taint } end
     end
     local files = vim.tbl_keys(byfile)
     table.sort(files)
@@ -112,6 +113,7 @@ end
 --              mapped suffix, no call into the accessor module) holds ANOTHER shape under that name — cartograph's
 --              algebra keeps tree POSITIONS in `.at` — answered decide = <file>=other (a heuristic: recorded, and the
 --              acceptance after a producer switch is the suite + the row joins, never this rule)
+--   derived    a scalar COMPUTED from the shape (`local l = atr.sl(r)` handed on) -> ok: no representation in it
 --   escapes    an argument to a builtin that is PURE, reads none of its contents and hands it back nowhere (effects'
 --              SIGS: type, rawequal, tostring) -> ok; a store into a SEEDED field, or into the list a seeded field
 --              holds (`e.at[#e.at + 1] = r`) -> ok (its readers are in the roster)
@@ -133,19 +135,65 @@ local function neutral(name)
     local sg = require('cartograph.effects').SIGS.lua.exact[name]
     return sg and sg.pure and not sg.reads and not sg.returns_arg and not sg.yields_arg and not sg.w and not sg.calls
 end
+-- name -> { files defining a function of that LAST name segment } (`function M.f(`, `function C:f(`, `local function
+-- f(`, `f = function(`), over the files the roster scans — an over-approximation of the callee, the safe direction)
+local function defs_index(root, files)
+    local idx = {}
+    local function add(name, f)
+        local l = idx[name]
+        if not l then l = {}; idx[name] = l end
+        if l[#l] ~= f then l[#l + 1] = f end
+    end
+    for _, f in ipairs(files) do
+        local fd = io.open(root .. '/' .. f)
+        local src = fd and fd:read('a'); if fd then fd:close() end
+        if src then
+            for name in src:gmatch('function%s+[%w_.:]-([%w_]+)%s*%(') do add(name, f) end
+            for name in src:gmatch('([%w_]+)%s*=%s*function%s*%(') do add(name, f) end
+        end
+    end
+    return idx
+end
+
 function M.plan_auto(root, args)
     args = vim.deepcopy(args)
     args.bless = args.bless or {}
     for name in pairs(exports_of(root, args.mod)) do args.bless[name] = true end
     args.fields = args.fields or {}
     local seeded = function (f) return args.fields[f] or args.rooted and args.rooted[f] end
-    local p = M.plan(root, args)
+    -- FOLLOW an argument into its callee: the record passed as argument k of `X(…)` seeds parameter k of every
+    -- function named X the tree defines (consumers' parameter seeds, CART-1345), the roster runs again — to a fixpoint
+    -- (at most `rounds`). A callee the tree does not define (a builtin, an external) is not followed.
+    local defs = defs_index(root, args.files)
+    args.params = args.params or {}
+    local followed, nfollow = {}, 0
+    local p
+    for _ = 1, tonumber(args.rounds or 6) do
+        p = M.plan(root, args)
+        local grew = false
+        for _, e in ipairs(p.escapes) do
+            local callee = e.kind == 'arg' and e.idx and tostring(e.detail or ''):match('([%w_]+)%(%)$')
+            local files = callee and not neutral(callee) and defs[callee]
+            if files and not followed[e.key] then
+                followed[e.key] = callee
+                for _, f in ipairs(files) do
+                    local l = args.params[f]
+                    if not l then l = {}; args.params[f] = l end
+                    local dup
+                    for _, x in ipairs(l) do if x.name == callee and x.idx == e.idx then dup = true end end
+                    if not dup then l[#l + 1] = { name = callee, idx = e.idx, kind = e.taint or 'elem' }; grew = true; nfollow = nfollow + 1 end
+                end
+            end
+        end
+        if not grew then break end
+    end
     local decide, decisions = vim.deepcopy(args.decide or {}), {}
     local function answer(key, a, rule)
         if decide[key] then return end -- (an explicit answer wins)
         decide[key] = a
         decisions[#decisions + 1] = { key = key, answer = a, rule = rule }
     end
+    for key, callee in pairs(followed) do answer(key, 'ok', 'followed:' .. callee) end
     -- (files that read the shape: a deref ending in a mapped suffix, or a seamed call)
     local reads = {}
     for _, s in ipairs(p.roster.sites) do
@@ -162,7 +210,9 @@ function M.plan_auto(root, args)
     end
     for _, e in ipairs(p.escapes) do
         local callee = e.kind == 'arg' and tostring(e.detail or ''):match('^([%w_.]+)%(%)$')
-        if callee and neutral(callee) then answer(e.key, 'ok', 'neutral-builtin:' .. callee)
+        if e.kind == 'derived' then answer(e.key, 'ok', 'derived-scalar') -- (a value COMPUTED from the shape — a line number —
+        -- leaves; it does not depend on the record's representation)
+        elseif callee and neutral(callee) then answer(e.key, 'ok', 'neutral-builtin:' .. callee)
         elseif e.kind == 'store' and e.detail then
             local d = tostring(e.detail)
             local f = d:match('^[%w_]+$') or d:match('%.([%w_]+)$') or d:match('([%w_]+)%[#') -- (`x.at[#x.at + 1]`: the list a field holds)

@@ -68,6 +68,21 @@ return {
             end },
         },
         {
+            name = 'policy = auto FOLLOWS an argument into its callee in another file: the escape is answered followed, and the callee\'s raw read joins the roster (a deref to reroute — open until rerouted)',
+            files = {
+                ['lua/rng.lua'] = "local M = {}\nfunction M.mk(a) return { start = { line = a } } end\nreturn M\n",
+                ['lua/acc.lua'] = "local M = {}\nfunction M.sl(r) return r.start.line end\nreturn M\n",
+                ['lua/show.lua'] = "local M = {}\nfunction M.line_of(x) return x.start.line end\nreturn M\n",
+                ['lua/use.lua'] = "local R = require 'rng'\nlocal S = require 'show'\nlocal M = {}\nfunction M.f(a) local r = R.mk(a); return S.line_of(r) end\nreturn M\n",
+            },
+            params = function (store) return { root = store.data.root, calls = { 'mk' }, rw = { 'start.line=sl' }, mod = 'acc:acc', policy = 'auto' } end,
+            expect = { status = 'failed', check = function (v)
+                local followed
+                for _, d in ipairs(v.decisions or {}) do if d.rule == 'followed:line_of' then followed = true end end
+                return followed == true and v.reroute == 1 and #v.escapes == 0, vim.inspect(v)
+            end },
+        },
+        {
             name = 'every escape answered ok: closed',
             files = FILES,
             params = function (store)
