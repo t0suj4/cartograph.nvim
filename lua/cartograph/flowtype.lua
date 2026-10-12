@@ -232,6 +232,9 @@ local function build(store, opts)
     -- the memory: 1.3 GB on lua/cartograph)
     local EMPTY = {}
     local function one(st, ctl) if ctl == nil then return st end end
+    -- (a delta's objects, a number or a list, without a table for the one-object case)
+    local function one_i(n, i) if i == 0 then return 1, n end end
+    local function dit(d) if type(d) == 'number' then return one_i, d, 0 end return ipairs(d) end
     local function each(p)
         local s = pts[p]
         if s == nil then return next, EMPTY, nil end
@@ -258,7 +261,7 @@ local function build(store, opts)
         local d = delta[p]
         if type(d) == 'table' and d.bs then return d end
         local b = bs_new(rshift(NO, 5) + 2)
-        if d then for _, o in ipairs(d) do bs_set(b, o) end end
+        if type(d) == 'number' then bs_set(b, d) elseif d then for _, o in ipairs(d) do bs_set(b, o) end end
         delta[p] = b
         return b
     end
@@ -279,10 +282,13 @@ local function build(store, opts)
             if cnt[p] > BIG then tobits(p) end
         end
         if cnt[p] > M.CAP then return settop(p) end
+        -- (a port's pending delta as its objects are: ONE object is the number itself, more a list, many a bitset — most
+        -- deltas hold one object, and a list per port per round was the allocation census's top site, 1.3 M per run)
         local d = delta[p]
-        if type(d) == 'table' and d.bs then bs_set(d, o)
+        if d == nil then delta[p] = o
+        elseif type(d) == 'number' then delta[p] = { d, o }
+        elseif d.bs then bs_set(d, o)
         else
-            if not d then d = {}; delta[p] = d end
             d[#d + 1] = o
             if #d > BIG then dbits(p) end
         end
@@ -606,7 +612,7 @@ local function build(store, opts)
             else
                 local d = delta[p]
                 delta[p] = nil
-                if d and d.bs then
+                if type(d) == 'table' and d.bs then
                     -- (a DENSE delta: the copy edges and the field's readers in bulk; the rest per object)
                     local db = d
                     for q in pairs(succ[p] or NOTHING) do addbits(q, db) end
@@ -614,28 +620,28 @@ local function build(store, opts)
                     d = {}
                     for o in bs_iter(db) do d[#d + 1] = o end
                 elseif d then
-                    for q in pairs(succ[p] or NOTHING) do for _, o in ipairs(d) do addobj(q, o) end end
-                    if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in ipairs(d) do addobj(q, o) end end) end
+                    for q in pairs(succ[p] or NOTHING) do for _, o in dit(d) do addobj(q, o) end end
+                    if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in dit(d) do addobj(q, o) end end) end
                 end
                 if d then
-                    for _, ld in ipairs(loads[p] or NOTHING) do for _, o in ipairs(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
-                    for _, st in ipairs(stores[p] or NOTHING) do for _, o in ipairs(d) do edge(st[2], ofp(o, st[1])) end end
-                    for _, cl in ipairs(calls[p] or NOTHING) do for _, o in ipairs(d) do bindcall(o, cl[1], cl[2], cl[3]) end end
+                    for _, ld in ipairs(loads[p] or NOTHING) do for _, o in dit(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
+                    for _, st in ipairs(stores[p] or NOTHING) do for _, o in dit(d) do edge(st[2], ofp(o, st[1])) end end
+                    for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3]) end end
                     for _, fl in ipairs(filters[p] or NOTHING) do
-                        for _, o in ipairs(d) do if fl[2](o) then addobj(fl[1], o) end end
+                        for _, o in dit(d) do if fl[2](o) then addobj(fl[1], o) end end
                     end
                     for _, mf in ipairs(mflows[p] or NOTHING) do
-                        for _, o in ipairs(d) do
+                        for _, o in dit(d) do
                             local tn = TNAME[o]
                             local rt = tn and retk(tn .. '#' .. mf[1], mf[3] or 1)
                             if rt then addobj(mf[2], typeobj(rt)) end
                         end
                     end
                     for _, idx in ipairs(protos_at[p] or NOTHING) do
-                        for _, o in ipairs(d) do for c in each(idx) do protolink(o, c) end end
+                        for _, o in dit(d) do for c in each(idx) do protolink(o, c) end end
                     end
                     for _, t in ipairs(protos_rev[p] or NOTHING) do
-                        for o in each(t) do for _, c in ipairs(d) do protolink(o, c) end end
+                        for o in each(t) do for _, c in dit(d) do protolink(o, c) end end
                     end
                 end
             end
