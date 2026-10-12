@@ -39,7 +39,7 @@ function M.plan(root, args)
     -- (the accessor module's own file IS the accessors: its raw reads are their implementation, no row)
     local self_file = 'lua/' .. args.mod:gsub('%.', '/') .. '.lua'
     for _, s in ipairs(r.sites) do
-        if s.file == self_file then goto next_site end
+        if s.file == self_file or decide[s.file] == 'other' then goto next_site end
         local suf2 = s.path:match('([%w_]+%.[%w_]+)$')
         local suf1 = s.path:match('([%w_]+)$')
         local acc, stem
@@ -68,7 +68,7 @@ function M.plan(root, args)
     local escapes = {}
     for _, e in ipairs(r.frontier) do
         local k = key_of(e)
-        if decide[k] ~= 'ok' then escapes[#escapes + 1] = { key = k, file = e.file, line = e.line, kind = e.kind, detail = e.detail, via = e.via } end
+        if decide[k] ~= 'ok' and decide[e.file] ~= 'other' and e.file ~= self_file then escapes[#escapes + 1] = { key = k, file = e.file, line = e.line, kind = e.kind, detail = e.detail, via = e.via } end
     end
     local files = vim.tbl_keys(byfile)
     table.sort(files)
@@ -108,6 +108,10 @@ end
 --   seeds and 10,675 escapes opened. A store is followed only into a field ALREADY seeded, below.)
 --   rows       an OWNER file's deref -> rewrite (identity on the raw record); an unspliceable one (no extent, a partial
 --              or multi-line chain) -> skip
+--   other      a FILE with escapes of the seeded name that never reads the shape's own fields (no deref ending in a
+--              mapped suffix, no call into the accessor module) holds ANOTHER shape under that name — cartograph's
+--              algebra keeps tree POSITIONS in `.at` — answered decide = <file>=other (a heuristic: recorded, and the
+--              acceptance after a producer switch is the suite + the row joins, never this rule)
 --   escapes    an argument to a builtin that is PURE, reads none of its contents and hands it back nowhere (effects'
 --              SIGS: type, rawequal, tostring) -> ok; a store into a SEEDED field, or into the list a seeded field
 --              holds (`e.at[#e.at + 1] = r`) -> ok (its readers are in the roster)
@@ -141,6 +145,16 @@ function M.plan_auto(root, args)
         if decide[key] then return end -- (an explicit answer wins)
         decide[key] = a
         decisions[#decisions + 1] = { key = key, answer = a, rule = rule }
+    end
+    -- (files that read the shape: a deref ending in a mapped suffix, or a seamed call)
+    local reads = {}
+    for _, s in ipairs(p.roster.sites) do
+        local suf2, suf1 = s.path:match('([%w_]+%.[%w_]+)$'), s.path:match('([%w_]+)$')
+        if (suf2 and args.rw[suf2]) or (suf1 and args.rw[suf1]) then reads[s.file] = true end
+    end
+    for _, s in ipairs(p.roster.seamed or {}) do reads[s.file] = true end
+    for _, e in ipairs(p.escapes) do
+        if not reads[e.file] and not decide[e.file] then answer(e.file, 'other', 'no-shape-deref-in-file') end
     end
     for _, r in ipairs(p.rows) do
         if r.why:find('^owner file') then answer(r.key, 'rewrite', 'owner-identity')

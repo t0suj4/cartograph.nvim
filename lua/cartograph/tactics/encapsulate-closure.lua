@@ -6,11 +6,18 @@ local E = require 'cartograph.encapsulate'
 local OA = require 'cartograph.optapply'
 
 local function measure(store, p)
-    local root = store.data and store.data.root
+    -- (root = <dir> with no graph — the world `-` — lists the files itself: the roster needs no graph, and building one
+    -- was 43 of the 62 s a closure check took on cartograph)
+    local root = p.root and vim.fn.fnamemodify(p.root, ':p'):gsub('/+$', '') or (store and store.data and store.data.root)
+    if not root then return { error = 'no world: pass root = <dir> (or a graph root)' } end
     local a = OA.encapsulate_args(p)
     if not (a.mod and next(a.rw)) then return { error = 'rw = suffix=accessor,… and mod = module:binding are required' } end
     a.files = {}
-    for _, f in ipairs(store.files or {}) do if f:match('%.lua$') then a.files[#a.files + 1] = f end end
+    if p.root then
+        for _, f in ipairs(vim.fn.glob(root .. '/lua/**/*.lua', false, true)) do a.files[#a.files + 1] = f:sub(#root + 2) end
+    else
+        for _, f in ipairs(store.files or {}) do if f:match('%.lua$') then a.files[#a.files + 1] = f end end
+    end
     table.sort(a.files)
     -- (an `ok` answer closes an escape; encapsulate's answers count too)
     local pl = (p.policy == 'auto') and E.plan_auto(root, a) or E.plan(root, a)
@@ -29,8 +36,8 @@ return {
     name = 'encapsulate-closure',
     kind = 'discovery',
     tags = { 'code', 'refactor' },
-    summary = 'is a record shape CLOSED behind its accessor (the precondition for changing its representation)? no deref left to reroute, no risky row unanswered, and every ESCAPE — argument, store, return, raw index — answered decide = <key>=ok; same seeds as encapsulate (calls / fields, rw, mod, owners, decide)',
-    params = { calls = 'list?', fields = 'list?', bless = 'list?', rw = 'list', mod = 'string', owners = 'list?', decide = 'list?', policy = 'string?' },
+    summary = 'is a record shape CLOSED behind its accessor (root = <dir> with the world `-`: no graph is built, the roster lists the files itself) (the precondition for changing its representation)? no deref left to reroute, no risky row unanswered, and every ESCAPE — argument, store, return, raw index — answered decide = <key>=ok; same seeds as encapsulate (calls / fields, rw, mod, owners, decide)',
+    params = { calls = 'list?', fields = 'list?', bless = 'list?', rw = 'list', mod = 'string', owners = 'list?', decide = 'list?', policy = 'string?', root = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
@@ -44,6 +51,20 @@ return {
             params = BASE,
             expect = { status = 'failed', check = function (v)
                 return v.closed == false and #v.escapes >= 1 and v.text:find('lua/use.lua:', 1, true) ~= nil, vim.inspect(v.escapes)
+            end },
+        },
+        {
+            name = 'policy = auto: a file whose `.at` is ANOTHER shape (a tree position, never read as a range) is answered other, and root = <dir> needs no graph',
+            files = {
+                ['lua/rng.lua'] = "local M = {}\nfunction M.mk(a, b) return { start = { line = a, char = b } } end\nreturn M\n",
+                ['lua/acc.lua'] = "local M = {}\nfunction M.sl(r) return r.start.line end\nreturn M\n",
+                ['lua/pos.lua'] = "local M = {}\nfunction M.walk(t, keep) local p = t.at; keep[#keep + 1] = p; return #p end\nreturn M\n",
+            },
+            params = function (store) return { root = store.data.root, fields = { 'at' }, rw = { 'start.line=sl' }, mod = 'acc:acc', policy = 'auto' } end,
+            expect = { status = 'done', check = function (v)
+                local other
+                for _, d in ipairs(v.decisions or {}) do if d.key == 'lua/pos.lua' and d.answer == 'other' then other = true end end
+                return v.closed == true and other == true, vim.inspect(v)
             end },
         },
         {
