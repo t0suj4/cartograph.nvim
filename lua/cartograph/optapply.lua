@@ -630,12 +630,10 @@ end
 --   (default: every Lua file of the world). A SCOPE narrows the rewrite to the sites inside it — a cut (cut.of_frame:
 --   the browser's current view; cut.of_nodes: the functions alloc-census found hot), or `nodes`, whose own extents
 --   make one. Narrowing a rewrite is always legal: a cut only removes sites, it never invents one.
-function M.plan_empty(store, args)
-    args = args or {}
-    local txn, hazard = require 'cartograph.txn', require 'cartograph.hazard'
+-- a tree-wide pass's SCOPE and FILES (hoist-empty, lazy-buffer): args.scope (a cut) | args.nodes (ids or file::name) |
+-- args.files -> scope | nil, files | nil, why, class. A test FIXTURE is data, its text asserted: never rewritten
+local function pass_files(store, args, label)
     local cut = require 'cartograph.cut'
-    local root = store.data and store.data.root
-    if not root then return nil, 'no world is loaded', 'ill-posed' end
     local sc = args.scope
     if not sc and args.nodes then
         local ids = {}
@@ -646,11 +644,11 @@ function M.plan_empty(store, args)
                     if type(n.id) == 'string' and n.id:sub(1, #r + 1) == r .. '@' then id = n.id; break end
                 end
             end
-            if not id then return nil, ('no node `%s` in this world (an id, or file::name)'):format(tostring(r)), 'ill-posed' end
+            if not id then return nil, nil, ('no node `%s` in this world (an id, or file::name)'):format(tostring(r)), 'ill-posed' end
             ids[#ids + 1] = id
         end
-        sc = cut.of_nodes(store, ids, 'hoist-empty scope')
-        if not sc then return nil, 'the nodes named have no extent to scope by', 'ill-posed' end
+        sc = cut.of_nodes(store, ids, label .. ' scope')
+        if not sc then return nil, nil, 'the nodes named have no extent to scope by', 'ill-posed' end
     end
     local files = args.files
     if not files and sc then
@@ -662,10 +660,20 @@ function M.plan_empty(store, args)
     end
     if not files then
         files = {}
-        -- (a test FIXTURE is data, its text asserted: never rewritten)
         for _, f in ipairs(store.files or {}) do if f:match('%.lua$') and not f:match('/fixtures/') then files[#files + 1] = f end end
         table.sort(files)
     end
+    return sc, files
+end
+
+function M.plan_empty(store, args)
+    args = args or {}
+    local txn, hazard = require 'cartograph.txn', require 'cartograph.hazard'
+    local cut = require 'cartograph.cut'
+    local root = store.data and store.data.root
+    if not root then return nil, 'no world is loaded', 'ill-posed' end
+    local sc, files, fwhy, fclass = pass_files(store, args, 'hoist-empty')
+    if not files then return nil, fwhy, fclass or 'ill-posed' end
     local edits, touched, stamps, skipped, nsite, nclosed, noutside = {}, {}, {}, {}, 0, 0, 0
     for _, rel in ipairs(files) do
         local text = txn.read_file(root, rel)
@@ -721,6 +729,58 @@ function M.plan_empty(store, args)
         preserves = 'unreviewed',
         preserves_why = 'each hoisted `{}` is the right operand of `or` in a position nothing can name, write or compare (a builtin that only READS it, effects.reads; pairs / ipairs as a for iterator; `#`), and nothing else names the shared table',
         desc = ('hoist-empty: %d empty fallback(s) in %d file(s) read one read-only constant%s'):format(nsite, #touched,
+            sc and (' (scope %s: %d outside it left)'):format(tostring(sc.label), noutside) or ''),
+    }
+    return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
+end
+
+--   plan_buffer(store, { files = { rel… }?, scope = a cartograph.cut?, nodes = { id | 'file::name' … }? })
+-- THE LAZY-BUFFER PASS (CART-1663): every append-only buffer cartograph.lazybuffer proves (a function-local `local b =
+-- {}` / `local b, n = {}, 0` read only by b[1] and a final table.concat) allocates its table on the second piece; the
+-- first lives in a local. A file that would not compile after it is skipped by name; refused buffers are counted.
+function M.plan_buffer(store, args)
+    args = args or {}
+    local txn, hazard = require 'cartograph.txn', require 'cartograph.hazard'
+    local cut, LB = require 'cartograph.cut', require 'cartograph.lazybuffer'
+    local root = store.data and store.data.root
+    if not root then return nil, 'no world is loaded', 'ill-posed' end
+    local sc, files, fwhy, fclass = pass_files(store, args, 'lazy-buffer')
+    if not files then return nil, fwhy, fclass or 'ill-posed' end
+    local edits, touched, stamps, skipped, nsite, nrefused, noutside = {}, {}, {}, {}, 0, 0, 0
+    for _, rel in ipairs(files) do
+        local text = txn.read_file(root, rel)
+        local all, refusals = {}, {}
+        if text then all, refusals = LB.sites(text, 'lua') end
+        nrefused = nrefused + #refusals
+        local sites = {}
+        for _, s in ipairs(all) do
+            if sc and not cut.contains(store, sc, rel, s.decl[1] + 1) then noutside = noutside + 1 else sites[#sites + 1] = s end
+        end
+        if #sites > 0 then
+            local out = LB.apply(text, sites)
+            if loadstring((out:gsub('^#![^\n]*', ''))) then
+                edits[rel] = out; touched[#touched + 1] = rel; stamps[rel] = txn.disk_stamp(root, rel); nsite = nsite + #sites
+            else skipped[#skipped + 1] = rel end
+        end
+    end
+    local hazards = {}
+    if nrefused > 0 then
+        hazards[#hazards + 1] = hazard.new('buffers-refused', ('%d buffer-shaped table(s) left as they are: a use the pass cannot prove (escapes, #b, another key, shadowed, captured)'):format(nrefused),
+            nil, { refused = nrefused }, 'informational')
+    end
+    if #skipped > 0 then
+        hazards[#hazards + 1] = hazard.new('uncompilable', ('%d file(s) would not compile after the rewrite (a local or upvalue limit): left as they are: %s')
+            :format(#skipped, table.concat(skipped, ', ', 1, math.min(#skipped, 12))), nil, { files = skipped }, 'frontier')
+    end
+    if #touched == 0 then
+        return nil, #skipped > 0 and ('every file with a lazy buffer would not compile: %s'):format(table.concat(skipped, ', ')) or 'no append-only buffer to make lazy', 'empty'
+    end
+    local plan = {
+        verb = 'lazy-buffer', guards = { 'parses' }, generation = store.generation,
+        touched = touched, stamps = stamps, refspecs = {}, edits = edits, hazards = hazards,
+        preserves = 'unreviewed',
+        preserves_why = 'each rewritten buffer is function-local, only appended to and read through b[1] and a final table.concat; the first piece lives in a local equal to b[1] in every state, the table exists exactly when two or more pieces were appended (a nil append a no-op in both), and concat of one piece is that piece converted as table.concat converts it',
+        desc = ('lazy-buffer: %d buffer(s) in %d file(s) allocate their table on the second piece%s'):format(nsite, #touched,
             sc and (' (scope %s: %d outside it left)'):format(tostring(sc.label), noutside) or ''),
     }
     return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)

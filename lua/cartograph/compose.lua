@@ -193,6 +193,13 @@ M.VERBS['hoist-empty'] = {
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
     effect = 'journaled', rerun = 'empty',
 }
+-- the optimizer's lazy-buffer pass (CART-1663): an append-only buffer allocates its table on the second piece
+-- (cartograph.optapply.plan_buffer over lazybuffer.sites)
+M.VERBS['lazy-buffer'] = {
+    plan = function (store, args) return require('cartograph.optapply').plan_buffer(store, args) end,
+    apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,
+    effect = 'journaled', rerun = 'empty',
+}
 M.VERBS['learn-tactic'] = {
     plan = function (store, args) return require('cartograph.toolbelt').plan_learn(store, args) end,
     apply = function (store, plan, o) return require('cartograph.txn').apply(store, plan, o) end,

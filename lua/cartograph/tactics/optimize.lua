@@ -94,11 +94,11 @@ build_rewrite = function (p, store)
                 end, { ungated = true }))
         end)
     end
-    if rewrite == 'hoist' then
-        -- ★ HOIST (CART-1657): alloc-census on the workload -> its hot constructor sites that are PROVABLE empty fallbacks
-        -- (cartograph.emptyfallback, not inside a closed function) -> their enclosing functions as the SCOPE ->
-        -- hoist-empty there -> the A/B, equal AND faster, or ROLL BACK. The census runs a script: the workload's
-        -- function is wrapped to be called
+    -- ★ A CENSUS-DRIVEN PASS (hoist, CART-1657; buffer, CART-1663): alloc-census on the workload -> its hot constructor
+    -- sites that the pass's FINDER proves -> their enclosing functions as the SCOPE -> the pass there -> the A/B, equal
+    -- AND faster, or ROLL BACK. The census runs a script: the workload's function is wrapped to be called.
+    --   sites_of(text) -> { { key = { row0, col0 } of the `{}`, eligible } }; verb = the compose verb; what = its noun
+    local function census_pass(sites_of, verb, what)
         local wrapped = ('local w = assert(load(%q))()\nif type(w) == \'table\' then if w.setup then w.setup() end; w = w.run end\nlocal okS, S = pcall(require, \'cartograph.store\')\nw(okS and S or nil)\n'):format(p.workload)
         return T.bind('alloc-census', { workload = wrapped, repo = root, top = '400', timeout = p.timeout }, function (cv)
             local txn, atr = require 'cartograph.txn', require 'cartograph.at'
@@ -117,25 +117,41 @@ build_rewrite = function (p, store)
                 end
                 return best
             end
-            local EF = require 'cartograph.emptyfallback'
             local nodes, seen, saved = {}, {}, 0
             for file, set in pairs(hot) do
                 local text = txn.read_file(root, file)
-                for _, s in ipairs(text and EF.empty_fallbacks(text, 'lua') or {}) do
-                    local n = set[s.range[1] .. ':' .. s.range[2]]
-                    local id = n and not s.closed and fn_at(file, s.range[1])
+                for _, s in ipairs(text and sites_of(text) or {}) do
+                    local n = set[s.key[1] .. ':' .. s.key[2]]
+                    local id = n and s.eligible and fn_at(file, s.key[1])
                     if id then saved = saved + n; if not seen[id] then seen[id] = true; nodes[#nodes + 1] = id end end
                 end
             end
             table.sort(nodes)
             local share = tonumber(p.min or 0.01)
             if #nodes == 0 or saved < share * (cv.total or 0) then
-                return nil, ('no hot allocation site of the workload is a provable empty fallback worth %.0f%% of its %d tables (found %d)'):format(share * 100, cv.total or 0, saved), 'empty'
+                return nil, ('no hot allocation site of the workload is a provable %s worth %.0f%% of its %d tables (found %d)'):format(what, share * 100, cv.total or 0, saved), 'empty'
             end
-            return T.seq(T.use('hoist-empty', { nodes = nodes }), T.use('ab-equivalence', vim.tbl_extend('force', ab, { faster = '1' })))
+            return T.seq(T.use(verb, { nodes = nodes }), T.use('ab-equivalence', vim.tbl_extend('force', ab, { faster = '1' })))
         end)
     end
-    if rewrite ~= 'memo' then return nil, ('rewrite = memo | order | hoist, not %q'):format(rewrite), 'ill-posed' end
+    if rewrite == 'hoist' then
+        -- (an empty fallback in a CLOSED function is left: the hoisted constant would open it)
+        return census_pass(function (text)
+            local out = {}
+            for _, s in ipairs(require('cartograph.emptyfallback').empty_fallbacks(text, 'lua')) do
+                out[#out + 1] = { key = { s.range[1], s.range[2] }, eligible = not s.closed }
+            end
+            return out
+        end, 'hoist-empty', 'empty fallback')
+    end
+    if rewrite == 'buffer' then
+        return census_pass(function (text)
+            local out = {}
+            for _, s in ipairs((require('cartograph.lazybuffer').sites(text, 'lua'))) do out[#out + 1] = { key = s.ctor, eligible = true } end
+            return out
+        end, 'lazy-buffer', 'append-only buffer')
+    end
+    if rewrite ~= 'memo' then return nil, ('rewrite = memo | order | hoist | buffer, not %q'):format(rewrite), 'ill-posed' end
     -- (candidates by INCLUSIVE time: a memo saves what the field and everything below it costs)
     return T.bind('hot-spots', { workload = p.workload, code = root, timeout = p.timeout, by = 'inclusive', top = '200' }, function (hs)
         local targets, where = {}, {}
@@ -222,6 +238,12 @@ local SHARED = table.concat({
     'function M.box(t) local s = 0 for i = 1, 1500000 do s = s + (#t * i) % 7 end return { n = s } end',
     'function M.work(xs) local s = 0 for _, x in ipairs(xs) do local b = M.box(x); b.n = b.n + 1; s = s + b.n end return s end',
     'return M', '' }, '\n')
+-- a hot one-piece BUFFER (CART-1663): a table per call to concat one string (dkjson's scanstring, simplified)
+local BUFM = table.concat({
+    'local M, concat = {}, table.concat',
+    'function M.quote(s) local b = {}; b[#b + 1] = s; return concat(b) end',
+    'function M.work(n) local k = 0 for i = 1, n do k = k + #M.quote("x" .. (i % 10)) end return k end',
+    'return M', '' }, '\n')
 -- a STATEFUL hot function (CART-1661): next(st) ADVANCES st — called 400 times on ONE state object, the advisor sees
 -- the best memo there is; memoized, it returns the first value forever (luacheck's lexer.next_token looped its parser)
 local STATEM = table.concat({
@@ -245,7 +267,7 @@ return {
     kind = 'write',
     tags = { 'code', 'optimize' },
     on_stop = 'rollback',
-    summary = 'THE OPTIMIZATION LOOP on this world: rewrite = memo (hot-spots -> memo-advisor -> memoize, residence from the key kind) | order (sort-ties -> total-order) | hoist (alloc-census -> the hot provable empty fallbacks -> hoist-empty scoped to their functions; min = their share of the tables, default 0.01) — then ab-equivalence of `measure` on `corpus` at HEAD vs the rewritten tree (memo: equal AND faster), rolled back when it fails. workload = what the discoveries run (Lua returning function (store) or { setup, run }; @file). Apply only, on a clean git checkout; stops only on decisions (mixed key kind, several separators). jit = 1 runs jit-budget first and carries what the trace budgets cost as a premise (reported, never written)',
+    summary = 'THE OPTIMIZATION LOOP on this world: rewrite = memo (hot-spots -> memo-advisor -> memoize, residence from the key kind) | order (sort-ties -> total-order) | hoist (alloc-census -> the hot provable empty fallbacks -> hoist-empty scoped to their functions; min = their share of the tables, default 0.01) | buffer (alloc-census -> the hot provable append-only buffers -> lazy-buffer scoped to their functions; the same min) — then ab-equivalence of `measure` on `corpus` at HEAD vs the rewritten tree (memo: equal AND faster), rolled back when it fails. workload = what the discoveries run (Lua returning function (store) or { setup, run }; @file). Apply only, on a clean git checkout; stops only on decisions (mixed key kind, several separators). jit = 1 runs jit-budget first and carries what the trace budgets cost as a premise (reported, never written)',
     params = { workload = 'string', measure = 'string', corpus = 'list', sorted = 'string?', rewrite = 'string?', top = 'string?',
         min = 'string?', timeout = 'string?', by = 'list?', residence = 'string?', generation = 'string?', max_kb = 'string?',
         jit = 'string?' },
@@ -310,6 +332,19 @@ return {
             expect = { status = 'done', applied = 1, check = function (root)
                 local s = io.open(root .. '/lua/hoistm.lua'):read('a')
                 return s:find('pairs(t or EMPTY_RO)', 1, true) ~= nil and s:find('function M.cold(t) return #(t or {}) end', 1, true) ~= nil, s
+            end },
+        },
+        {
+            name = 'rewrite = buffer: the census finds the hot one-piece buffer, lazy-buffer rewrites its function, and the A/B accepts it — equal and faster (CART-1663)',
+            files = { ['lua/bufm.lua'] = BUFM }, requires = in_git,
+            params = function (store)
+                commit(store)
+                return { rewrite = 'buffer', workload = 'return function () require("bufm").work(3000000) end', corpus = { store.data.root },
+                    measure = 'return { measure = function () package.loaded.bufm = nil; return tostring(require("bufm").work(3000000)) end }' }
+            end,
+            expect = { status = 'done', applied = 1, check = function (root)
+                local s = io.open(root .. '/lua/bufm.lua'):read('a')
+                return s:find('local b, b_first', 1, true) ~= nil, s
             end },
         },
         {

@@ -437,6 +437,8 @@ local IDEM = {
         function () return { base = 'spec', field = 'scopes', to = 'lexical', define = { 's.lua' } } end },
     ['hoist-empty'] = { { ['m.lua'] = "local SEP = ','\nlocal function f(t) for _, x in ipairs(t or {}) do end; return SEP end\nreturn f\n" },
         function () return {} end },
+    ['lazy-buffer'] = { { ['m.lua'] = "local function f(xs) local b = {}; for i = 1, #xs do b[#b + 1] = xs[i] end; return table.concat(b) end\nreturn f\n" },
+        function () return {} end },
     reshape = { { ['pt.lua'] = 'local M = {}\nfunction M.pt(a, b) return { a, b } end\nfunction M.len(p) return p[1] + p[2] end\nreturn M\n',
             ['use.lua'] = "local P = require 'pt'\nreturn P.len(P.pt(1, 2))\n" },
         function () return { family = { 'pt.lua:2' }, positional = { '1=x', '2=y' } } end },
