@@ -141,15 +141,16 @@ end
 -- the CHILD as well and a hit must compare equal to it: an id is only unique among LIVE trees, and TSNode equality
 -- includes the tree, so a stale entry from a freed tree is never returned. An entry holds its nodes, and a node holds its
 -- TREE alive: the extractor resets the memo per file (parent_reset), and it is cleared past PMAX entries regardless.
-local PMEMO, PN, PMAX = {}, 0, 50000
-function M.parent_reset() PMEMO, PN = {}, 0 end
+-- (two parallel maps, not an entry table per node: the { n, p } entries were 540 K tables per corpus run — the
+-- allocation census's third site)
+local PCHILD, PPARENT, PN, PMAX = {}, {}, 0, 50000
+function M.parent_reset() PCHILD, PPARENT, PN = {}, {}, 0 end
 function M.parent(n)
     local id = n:id()
-    local e = PMEMO[id]
-    if e and e[1] == n then return e[2] or nil end
+    if PCHILD[id] == n then return PPARENT[id] or nil end
     local p = n:parent()
-    if PN >= PMAX then PMEMO, PN = {}, 0 end
-    PMEMO[id] = { n, p or false }
+    if PN >= PMAX then PCHILD, PPARENT, PN = {}, {}, 0 end
+    PCHILD[id], PPARENT[id] = n, p or false
     PN = PN + 1
     return p
 end
