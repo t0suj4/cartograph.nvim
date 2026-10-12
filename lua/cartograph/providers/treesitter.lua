@@ -5785,7 +5785,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                     or nt == 'variable_name' or nt == 'reference_declarator')
             end
         end
-        local i, c = 0, n:child(0)
+        local i, c = 0, n:named_child(0) -- (named children only: every per-child action below needs a named one — a mention, a statement, a df use — and the 40% that are tokens were 7.9 M node handles per corpus run, CART-1664)
         while c do
             local ct = c:type()
             -- A BINDING MODIFIER (lua 5.4 `<const>`/`<close>`) decorates a declaration and
@@ -5797,7 +5797,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             -- and flow's du had the identical fabrication.
             if modskip and modskip[ct] then
                 i = i + 1
-                c = n:child(i)
+                c = n:named_child(i)
                 goto continue_child
             end
             -- LAZY per-child facts: named() is an FFI call and most java
@@ -6006,7 +6006,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 end
             end
             i = i + 1
-            c = n:child(i)
+            c = n:named_child(i)
             ::continue_child::
         end
         if bodyctx then
