@@ -5640,6 +5640,18 @@ end
 -- the same question `callee` already answers for one shape; the rest of the rule
 -- is grammar and lives in spec.escape_nonvalue. Its own walk was +14% of the
 -- whole extract, and it asked a tree this one is already holding.
+-- dfreg[DFREG_TYPES] = the set of node TYPES a registered body has: the mention walk asks dfreg[n:id()] only for a node
+-- of such a type (node:id() builds a string, and the walk asked it of EVERY node of every file — the walk's hottest
+-- line, CART-1659). A table key, so it cannot collide with an id string.
+local DFREG_TYPES = {}
+-- register body `b` in dfreg (a function on M: M.extract is at LuaJIT's 60-upvalue limit, and a new local captured by
+-- extract_defs broke it)
+function M._dfreg_put(dfreg, b, rec)
+    dfreg[b:id()] = rec
+    local ty = dfreg[DFREG_TYPES]
+    if not ty then ty = {}; dfreg[DFREG_TYPES] = ty end
+    ty[b:type()] = true
+end
 local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local lexscopes = spec.lexical_scopes
     local wrapctx -- statement wrapper node id -> the body context its children belong to (see stmtctx)
@@ -5698,6 +5710,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- traces are unchanged. An explicit stack would mean rewriting this hot walk's
     -- pre/post hooks (scope push/pop, the df body finalize) for one pathological shape.
     local WALK_SEG, wdepth = 1000, 0
+    local dftypes = dfreg and dfreg[DFREG_TYPES]
     -- (the tree's scope model, shared with extract_defs / extract_calls: a scope resolution already harvested is not
     -- harvested again here, and one harvested here is cached for them)
     local sm = lexscopes and tree_model(tsroot, src, spec)
@@ -5717,7 +5730,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 pushed[#pushed + 1] = name
             end
         end
-        local bodyctx = dfreg and dfreg[n:id()]
+        local bodyctx = dftypes and dftypes[nt] and dfreg[n:id()] or nil
         -- the statements' owner: the body itself, or a body's STATEMENT WRAPPER (go's statement_list) whose
         -- children are the body's statements
         local stmtctx = bodyctx or (wrapctx and wrapctx[n:id()])
@@ -5978,7 +5991,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                     vput(parts, ec)
                 end
             end
-            if c:child(0) then
+            if c:child_count() > 0 then -- (a count: child(0) materialized a node to test for a leaf)
                 if wdepth < WALK_SEG then
                     wdepth = wdepth + 1; walk(c, cdefpos, cdfon); wdepth = wdepth - 1
                 else
@@ -7747,7 +7760,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 if not spec.dataflow and spec.body_field then
                     local b = defn:field(spec.body_field)[1]
                     if b then
-                        dfreg[b:id()] = { params = params, node = nodes[#nodes] }
+                        M._dfreg_put(dfreg, b, { params = params, node = nodes[#nodes] })
                     end
                 end
                 fnDefLines[sp.start.line] = true
