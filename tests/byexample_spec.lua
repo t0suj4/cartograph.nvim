@@ -77,6 +77,25 @@ test('byexample: WHERE a rule applies is a decision — it stops listing the mat
     eq(3, B.h(nil)); eq(3, B.h(false), 'false was returned before; the example changed that, as it demonstrated')
 end)
 
+test('byexample: PER SITE — a behaviour-changing rule is applied where a guard shows the operand never takes the differing value; the rest are undecided (CART-1668)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['c.lua'] = table.concat({ 'local C = {}', 'function C.f(q)', "  if type(q) == 'table' then", '    if q == nil then return 1 end', '  end',
+        '  if q then', '    if q == nil then return 2 end', '  end', '  if q == nil then return 3 end', '  return 0', 'end', 'return C', '' }, '\n') }
+    local ex = { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end' }
+    local p = assert(BX.plan(store, { before = ex.before, after = ex.after, scope = 'c.lua' }))
+    eq(2, p.sites, 'under `type(q) == table` and under `if q` (truthy: never false); the bare one is undecided')
+    eq(2, p.discharged)
+    local h = require('cartograph.hazard').plain(p.hazards)
+    eq('sites-undecided', h[1] and h[1].kind); ok(h[1].text:find('c.lua:9: `if q == nil then return 3 end`', 1, true), h[1].text)
+    local out = p.edits['c.lua']
+    ok(out:find('if not q then return 1 end', 1, true) and out:find('if not q then return 2 end', 1, true), out)
+    ok(out:find('if q == nil then return 3 end', 1, true), 'the unguarded site is left: ' .. out)
+    -- a NON-NIL guard does not rule out false: `if q ~= nil` leaves the site undecided — and none shown is a decision
+    project { ['d.lua'] = 'local D = {}\nfunction D.f(q)\n  if q ~= nil then\n    if q == nil then return 1 end\n  end\nend\nreturn D\n' }
+    local _, why, class = BX.plan(store, { before = ex.before, after = ex.after, scope = 'd.lua' })
+    eq('decision', class); ok(tostring(why):find('no site is shown to avoid it (1 undecided', 1, true), tostring(why))
+end)
+
 test('learn-from-example: learning is ITSELF a tactic — into the PROJECT, journaled, born with its own test, never overwriting', function ()
     if not ready() then skip 'no lua parser or algebra' end
     project { ['m.lua'] = 'local M = {}\nreturn M\n' }

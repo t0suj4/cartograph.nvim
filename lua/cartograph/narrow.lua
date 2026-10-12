@@ -1082,4 +1082,31 @@ function M.devirt_report(store, fn_id)
     return L
 end
 
+--- The narrowing facts AT A POSITION of `text` (a file of the graph, read as it is NOW): the dominating guards of the
+--- node there, RAW kinds (truthy is not collapsed to non-nil — `false` is excluded by truthy only). A rewrite asks it
+--- whether a site's operand can take a value its rule treats differently (byexample, CART-1668). The innermost
+--- function holding the position must be a node of the graph: its flow record is what kills a reassigned var's facts,
+--- and without it no fact is sound — nil then, never an empty env read as "nothing narrowed".
+--- -> { [path] = kind } | nil, why
+function M.facts_at(store, rel, text, row, col)
+    local lang = EXT_LANG[rel:match('%.(%w+)$') or '']
+    if not lang or not (vocab[lang] and VERB_LANG.narrow[lang]) then return nil, 'no narrowing vocabulary for ' .. rel end
+    local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(text, lang), lang)
+    if not ok or not parser then return nil, 'no parser' end
+    local root = parser:parse()[1]:root()
+    local site = root:named_descendant_for_range(row, col, row, col)
+    local fn = site
+    while fn and not FN_TYPES[fn:type()] do fn = fn:parent() end
+    if not fn then return nil, 'the position is at file scope: no function, no guards' end
+    local fsl = fn:start()
+    local node, twice
+    for _, n in ipairs(store.by_file and store.by_file[rel] or {}) do
+        if n.range and at.sl(n.range) == fsl then twice = node ~= nil; node = node or n end
+    end
+    if not node then return nil, 'the enclosing function is no node of the graph (its reassignments are unknown)' end
+    if twice then return nil, 'two definitions start on the enclosing function\'s line: which one holds the position is not known' end
+    local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
+    return env_of(site, text, classify, mutated_of(node), field_unstable_of(fn, text))
+end
+
 return M

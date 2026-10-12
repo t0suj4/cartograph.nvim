@@ -29,6 +29,22 @@ local function env_at(name, ln)
     return {}
 end
 
+test('narrow.facts_at: the RAW facts at a position — truthy stays truthy (it rules out false), file scope and an unknown function are refused (CART-1668)', function ()
+    if not ready() then return end
+    local lines = { 'local x = 1', 'local function f(a, b)', '  if a then', '    if b ~= nil then', '      return a + b', '    end', '  end', 'end', 'return f' }
+    ingest(lines)
+    local text = table.concat(lines, '\n')
+    -- (row 4 = `return a + b`, 0-based; `a` at col 13)
+    local env = assert(narrow.facts_at(store, 'm.lua', text, 4, 13))
+    eq('truthy', env.a, 'the display env collapses this to non-nil; a rewrite asking about `false` needs it raw')
+    eq('non-nil', env.b)
+    local none, why = narrow.facts_at(store, 'm.lua', text, 0, 6)
+    eq(nil, none); ok(tostring(why):find('file scope', 1, true), tostring(why))
+    -- the same text under a name the graph does not hold: no flow record, so no fact is sound
+    local n2, why2 = narrow.facts_at(store, 'other.lua', text, 4, 13)
+    eq(nil, n2); ok(tostring(why2):find('no node of the graph', 1, true), tostring(why2))
+end)
+
 test('narrow: `if x then` proves x non-nil in the body', function ()
     if not ready('lua') then skip 'no lua parser' end
     ingest {

@@ -108,7 +108,8 @@ local function sample_rule(a, lhs, rhs, names, lang)
     local fl, fr = compile(lhs), compile(rhs)
     if not fl or not fr then return { verdict = 'unchecked', why = 'a side is no Lua expression' } end
     local function norm(err) return (tostring(err):gsub('^%[string [^%]]*%]:%d+: ', '')) end
-    local idx, total, raised = {}, 0, 0
+    local idx, total, raised, first = {}, 0, 0, nil
+    local bad = {} -- (EVERY differing sample: { [hole] = sample index } — a site is cleared only if it avoids them all)
     for i = 1, #hs do idx[i] = 1 end
     while true do
         local args = {}
@@ -126,18 +127,70 @@ local function sample_rule(a, lhs, rhs, names, lang)
         -- (both raising agrees: the messages name the variables differently — `x .. nil` and `nil .. x` both fail)
         if ok1 and ok2 then same = rawequal(r1, r2) elseif not ok1 and not ok2 then same = true; raised = raised + 1 else same = false end
         if not same then
-            local at = {}
-            for i, h in ipairs(hs) do at[names[h] or h] = SAMPLES[idx[i]][1] end
-            local function show(ok_, r) return ok_ and vim.inspect(r) or ('raises: ' .. norm(r)) end
-            return { verdict = 'differs', at = at, left = show(ok1, r1), right = show(ok2, r2), samples = total }
+            local tuple = {}
+            for i, h in ipairs(hs) do tuple[h] = idx[i] end
+            bad[#bad + 1] = tuple
+            if not first then
+                local at = {}
+                for i, h in ipairs(hs) do at[names[h] or h] = SAMPLES[idx[i]][1] end
+                local function show(ok_, r) return ok_ and vim.inspect(r) or ('raises: ' .. norm(r)) end
+                first = { verdict = 'differs', at = at, left = show(ok1, r1), right = show(ok2, r2) }
+            end
         end
         local i = 1
         while i <= #hs and idx[i] == #SAMPLES do idx[i] = 1; i = i + 1 end
         if i > #hs then break end
         idx[i] = idx[i] + 1
     end
+    if first then first.samples, first.bad = total, bad; return first end
     if raised == total then return { verdict = 'unchecked', why = 'both sides raise on every sample' } end
     return { verdict = 'equal', samples = total }
+end
+
+-- ★ PER SITE (CART-1668): a rule that changes behaviour may still keep it at a site whose operand CANNOT take the
+-- values it treats differently — `x == nil -> not x` under `if type(x) == 'table'`. `facts` = the narrowing facts at
+-- the site (narrow.facts_at: dominating guards, raw kinds); a hole bound to a closed constant knows its own type. A
+-- fact rules a sample out by its TYPE or truthiness only — an exact value (`eq:`) rules out only by its type, since
+-- the sample is not the domain (`x > 0 -> x >= 1` differs at 0.7, sampled only at 0.5). Relative to the sample, as
+-- the verdict is. -> true when every differing sample is ruled out by some hole's evidence
+local function kind_pred(kind)
+    if kind == 'truthy' then return function (v) return v ~= nil and v ~= false end end
+    if kind == 'non-nil' then return function (v) return v ~= nil end end
+    local ty = kind:match('^type:(.+)$') or (kind:match('^eq:s:') and 'string') or (kind:match('^eq:n:') and 'number')
+    if ty then return function (v) return type(v) == ty end end
+end
+function M.site_keeps(rule, values, facts)
+    local s = rule.sample
+    if not s or s.verdict ~= 'differs' then return true end
+    if not s.bad then return false end
+    local a = A()
+    local pred = {}
+    for h, v in pairs(values or {}) do
+        if type(v) == 'table' and v.k then
+            local text = a.cst_print(v)
+            local kind = facts and facts[text]
+            if kind then pred[h] = kind_pred(kind) end
+            if not pred[h] then
+                -- (a closed constant: no name read, no error — its own type is its evidence)
+                -- (no call: a literal's method — `("x"):rep(1e10)` — reads no name and still runs)
+                local chunk = not text:find('[(:]') and loadstring('return ' .. text)
+                if chunk then
+                    local read = false
+                    setfenv(chunk, setmetatable({}, { __index = function () read = true end }))
+                    local ok_, c = pcall(chunk)
+                    if ok_ and not read then pred[h] = function (x) return type(x) == type(c) end end
+                end
+            end
+        end
+    end
+    for _, tuple in ipairs(s.bad) do
+        local ruled_out = false
+        for h, i in pairs(tuple) do
+            if pred[h] and not pred[h](SAMPLES[i][2]) then ruled_out = true; break end
+        end
+        if not ruled_out then return false end
+    end
+    return true
 end
 
 --- the sampled verdict as a sentence (the plan's decision, the learned rule's report)
@@ -648,11 +701,31 @@ end
 
 --- Apply rules to a source text. -> new text, sites (the number of rewrites), refused (spacing-independent sites
 --- matched but refused: { { line, why } }) | nil, why
-local function rewrite_once(rules, src, lang)
+-- `admit(site)` (optional, CART-1668): asked before a site is taken — site = { rule, values, where } where `where()`
+-- gives the site's 0-based row, col in `src` while the text is still `src` (the first pass, before any put), else
+-- nil; a site it declines is UNDECIDED: left as written and listed.
+local function rewrite_once(rules, src, lang, admit, pristine)
     local a = A()
     local t, why = require('cartograph.algebraread').read(src, lang or 'lua') -- @langs-ok as learn
     if not t then return nil, why, 'frontier' end
-    local sites, refused = 0, {}
+    local sites, refused, undecided = 0, {}, {}
+    local function admitted(rule, values, pos)
+        if not admit then return true end
+        local site = { rule = rule, values = values, where = function ()
+            if not pristine then return nil end
+            local marked = a.cst_print(a.put(t, pos.path, a.lit('\0')))
+            local off = marked:find('\0', 1, true) - 1
+            local before = src:sub(1, off)
+            local _, row = before:gsub('\n', '')
+            return row, #before:match('[^\n]*$')
+        end }
+        if admit(site) then return true end
+        -- (named by its LINE when the text is still `src`: an expression site alone — `q == nil` — locates nothing)
+        local row = site.where()
+        local line = row and (src:match(('[^\n]*\n'):rep(row) .. '([^\n]*)') or ''):gsub('^%s+', '')
+        undecided[#undecided + 1] = { line = row and row + 1, text = line or (a.cst_print(pos.node):match('^[^\n]*')) }
+        return false
+    end
     for _, rule in ipairs(rules) do
         local hits, covered = {}, {}
         local function inside(path)
@@ -674,11 +747,12 @@ local function rewrite_once(rules, src, lang)
         local poss = os.getenv('CARTOGRAPH_PREFILTER') ~= '0' and require('cartograph.prefilter').candidates(t, rule.lhs, src) or a.positions(t)
         -- (SPACING-INDEPENDENT, CART-1664: a position is matched on STRUCTURE — the token script edits the target's
         -- own text, parsed back before it is taken -> its re-read term | nil, why)
-        local function ws_try(pos)
+        local function ws_try(pos, exact)
             local orig = {}
             local sn = strip(a, pos.node, orig)
             local m = a.match(rule.lhs_ws, sn)
             if not m.ok then return nil end
+            if not exact and not admitted(rule, m.values, pos) then return nil end
             local function reread(text)
                 local mark = a.lit(text)
                 local t2 = require('cartograph.algebraread').read(a.cst_print(a.put(t, pos.path, mark)), lang or 'lua') -- @langs-ok as learn
@@ -697,14 +771,16 @@ local function rewrite_once(rules, src, lang)
         for _, pos in ipairs(poss) do
             if not inside(pos.path) then
                 local m = compiled and compiled(pos.node) or a.match(rule.lhs, pos.node)
-                if m.ok then
+                if m.ok and admitted(rule, m.values, pos) then
                     -- (an EXACT match takes the token script too when it can: instantiating moves a carried body
                     -- with the indentation and the trailing whitespace of its OLD depth — php's `}` landed indented
                     -- under the loop it closed. Refused there, the instantiation stands: the example spelled it.)
-                    local stmt = rule.lhs_ws and ws_try(pos)
+                    local stmt = rule.lhs_ws and ws_try(pos, true)
                     if stmt then ws_hits[#ws_hits + 1] = { path = pos.path, term = stmt }
                     else hits[#hits + 1] = { path = pos.path, values = m.values } end
                     covered[#covered + 1] = pos.path
+                elseif m.ok then
+                    covered[#covered + 1] = pos.path -- (undecided: not matched again on structure below)
                 end
             end
         end
@@ -725,22 +801,28 @@ local function rewrite_once(rules, src, lang)
             if inst.ok then t = a.put(t, hits[k].path, inst.term); sites = sites + 1 end
         end
         for k = #ws_hits, 1, -1 do t = a.put(t, ws_hits[k].path, ws_hits[k].term); sites = sites + 1 end
+        if sites > 0 then pristine = false end
     end
-    return a.cst_print(t), sites, refused
+    return a.cst_print(t), sites, refused, undecided
 end
 
 --- Apply rules to a source text, to a FIXPOINT: a match nested inside a rewritten site (a loop inside a loop) is skipped
 --- by its pass — its path was covered — and taken by the next; the rule never matches its own output (refused at learn),
---- so the passes end. -> new text, sites, refused | nil, why, class
-function M.rewrite(rules, src, lang)
-    local total, last = 0, {}
-    for _ = 1, 8 do
-        local out, n, refused = rewrite_once(rules, src, lang)
+--- so the passes end. `admit` (optional): rewrite_once's — a declined site is UNDECIDED, left as written.
+--- -> new text, sites, refused, undecided | nil, why, class
+function M.rewrite(rules, src, lang, admit)
+    local total, last, und = 0, {}, {}
+    for pass = 1, 8 do
+        local out, n, refused, undecided = rewrite_once(rules, src, lang, admit, pass == 1)
         if not out then return out, n, refused end
         total, src, last = total + n, out, refused or {}
+        -- (the first pass's undecided sites carry their LINE — the text was still the file's; a later pass sees them
+        -- again without it, and adds only a site the rewrites exposed)
+        if pass == 1 then und = undecided or {}
+        else for i = #und + 1, #(undecided or {}) do und[#und + 1] = undecided[i] end end
         if n == 0 then break end
     end
-    return src, total, last -- (the refusals of the LAST pass: the sites still left as written)
+    return src, total, last, und -- (the refusals and undecided sites of the LAST pass: the sites still left as written)
 end
 
 local function files_in(store, scope, lang)
@@ -775,6 +857,27 @@ function M.plan(store, opts)
         if #changing == 0 or opts.changes == 'accept' then return nil end
         return table.concat(changing, '; ') .. ' — applying it is YOUR decision: changes = \'accept\' (or show an example that keeps behaviour)'
     end
+    -- ★ PER SITE (CART-1668): with the change not accepted, a site is still taken when its operands are SHOWN never to
+    -- take a value the rule treats differently — narrow's guard facts at the site, a constant's own type
+    -- (M.site_keeps); every other site is UNDECIDED, left as written and listed. `drow`, `dcol`: where `text`'s
+    -- rewritten slice starts in the file (the `within` path rewrites a function's slice).
+    local discharged = 0
+    local function mk_admit(rel, text, drow, dcol)
+        if #changing == 0 or opts.changes == 'accept' then return nil end
+        local N = require 'cartograph.narrow'
+        return function (site)
+            if not site.rule.sample or site.rule.sample.verdict ~= 'differs' then return true end
+            local row, col = site.where()
+            local facts
+            if row then
+                if row == 0 then col = col + (dcol or 0) end
+                facts = N.facts_at(store, rel, text, row + (drow or 0), col)
+            end
+            local keep = M.site_keeps(site.rule, site.values, facts)
+            if keep then discharged = discharged + 1 end
+            return keep
+        end
+    end
     local preserves_why = 'the rewrite applies what ONE example demonstrated; nothing checks that it preserves behaviour'
     if #behaviour > 0 then preserves_why = 'the rewrite applies what ONE example demonstrated: ' .. table.concat(behaviour, '; ') end
     -- ★ WITHIN ONE FUNCTION (CART-1176, edit-in): `within` = a durable ref (or a node id). The rule rewrites only that
@@ -793,34 +896,38 @@ function M.plan(store, opts)
         local function offset(l, c) local o = 0; for i = 1, l do o = o + #lines[i] + 1 end; return o + c end
         local s0, e0 = offset(sl, sc), offset(el, ec)
         local slice = text:sub(s0 + 1, e0)
-        local new, n_sites = M.rewrite(rules, slice, opts.lang)
+        local new, n_sites, _, und = M.rewrite(rules, slice, opts.lang, mk_admit(n.file, text, sl, sc))
         local wrapped = false
         if not new then
-            new, n_sites = M.rewrite(rules, 'return ' .. slice, opts.lang)
+            new, n_sites, _, und = M.rewrite(rules, 'return ' .. slice, opts.lang, mk_admit(n.file, text, sl, sc - #'return '))
             if new then new, wrapped = new:gsub('^return ', '', 1), true end
         end
+        und = und or {}
         local rule_text = {}
         for _, r in ipairs(rules) do rule_text[#rule_text + 1] = ('`%s` -> `%s`'):format(r.lhs_text, r.rhs_text) end
         if not new then return nil, ('%s does not read losslessly on its own: %s'):format(tostring(n.name), tostring(n_sites)), 'frontier' end
+        if n_sites == 0 and #und > 0 then
+            return nil, ('%s; no site inside %s is shown to avoid it (%d undecided)'):format(changes_stop(), tostring(n.name), #und), 'decision'
+        end
         if n_sites == 0 then
             return nil, ('the rule %s matches nothing inside %s'):format(table.concat(rule_text, ', '), tostring(n.name)), 'empty'
         end
-        local stop = changes_stop()
-        if stop then return nil, stop, 'decision' end
         local plan = {
             verb = 'rewrite-by-example', guards = { 'parses' }, generation = store.generation,
             touched = { n.file }, stamps = { [n.file] = txn.disk_stamp(root, n.file) },
             refspecs = { { id = n.id, name = n.name, ref = store.ref_of(n.id), what = 'symbol' } },
             edits = { [n.file] = text:sub(1, s0) .. new .. text:sub(e0 + 1) }, rules = rule_text, sites = n_sites,
             within = n.name, wrapped = wrapped or nil,
-            preserves = 'none', preserves_why = preserves_why, behaviour = behaviour,
-            hazards = {},
+            preserves = 'none', preserves_why = preserves_why, behaviour = behaviour, discharged = discharged,
+            hazards = #und > 0 and { require('cartograph.hazard').new('sites-undecided', ('%d site(s) left as written: no evidence there rules out the values the rule treats differently — changes = \'accept\' rewrites them too'):format(#und),
+                nil, { undecided = und }, 'informational') } or {},
             desc = ('rewrite by example within %s: %s, %d site(s)'):format(tostring(n.name), table.concat(rule_text, ', '), n_sites),
         }
         return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)
     end
     local scan = files_in(store, opts.scope or 'all', opts.lang)
     local edits, touched, stamps, per, total, unread = {}, {}, {}, {}, 0, {}
+    local undecided, nfiles = {}, 0 -- (sites of a behaviour-changing rule nothing showed safe, by file: CART-1668)
     local refusals = {} -- (spacing-independent sites matched and refused, by file: a comment beside a deleted token, a
     -- result that does not read as the right side)
     -- ★ THE PREFILTER (cartograph.prefilter): a file whose text lacks a fixed token of EVERY rule cannot hold a match —
@@ -839,31 +946,35 @@ function M.plan(store, opts)
         local text = txn.read_file(root, rel)
         if text and not may_match(text) then prefiltered = prefiltered + 1; text = nil end
         if text then
-            local new, n, refused = M.rewrite(rules, text, opts.lang)
+            local new, n, refused, und = M.rewrite(rules, text, opts.lang, mk_admit(rel, text))
             for _, r in ipairs(new and refused or {}) do refusals[#refusals + 1] = ('%s: `%s` — %s'):format(rel, r.text, r.why) end
+            for _, u in ipairs(new and und or {}) do undecided[#undecided + 1] = ('%s%s: `%s`'):format(rel, u.line and (':' .. u.line) or '', u.text) end
             -- a file the lossless reader cannot read was NOT looked at: say so, never count it as "no match"
             if not new then unread[#unread + 1] = rel end
+            local matched = new and n + #(und or {}) or 0
+            if matched > 0 then per[#per + 1] = ('%s (%d)'):format(rel, matched); nfiles = nfiles + 1 end
             if new and n > 0 then
                 edits[rel] = new; touched[#touched + 1] = rel
                 stamps[rel] = txn.disk_stamp(root, rel)
-                per[#per + 1] = ('%s (%d)'):format(rel, n)
                 total = total + n
             end
         end
     end
     local rule_text = {}
     for _, r in ipairs(rules) do rule_text[#rule_text + 1] = ('`%s` -> `%s`'):format(r.lhs_text, r.rhs_text) end
-    if total == 0 then
+    if total + #undecided == 0 then
         return nil, ('the rule %s matches nothing in %d file(s)%s'):format(table.concat(rule_text, ', '), #scan,
             #refusals > 0 and (' (%d site(s) refused: %s)'):format(#refusals, table.concat(refusals, '; ', 1, math.min(#refusals, 4))) or ''), 'empty'
     end
     if not opts.scope then
         return nil, ('the rule %s matches %d site(s) in %d file(s): %s — where it applies is YOUR decision: scope = \'all\', or a comma list of files')
-            :format(table.concat(rule_text, ', '), total, #touched, table.concat(per, ', ', 1, math.min(#per, 8))
+            :format(table.concat(rule_text, ', '), total + #undecided, nfiles, table.concat(per, ', ', 1, math.min(#per, 8))
                 .. (#per > 8 and (', and %d more file(s)'):format(#per - 8) or '')), 'decision'
     end
-    local stop = changes_stop()
-    if stop then return nil, stop, 'decision' end
+    if total == 0 then
+        return nil, ('%s; no site is shown to avoid it (%d undecided: %s)'):format(changes_stop(), #undecided,
+            table.concat(undecided, '; ', 1, math.min(#undecided, 4))), 'decision'
+    end
     local plan = {
         verb = 'rewrite-by-example',
         guards = { 'parses' },
@@ -871,9 +982,11 @@ function M.plan(store, opts)
         touched = touched, stamps = stamps, refspecs = {},
         edits = edits, rules = rule_text, sites = total, prefiltered = prefiltered,
         -- an example is a claim, not a proof: the rule applies what was demonstrated
-        preserves = 'none', preserves_why = preserves_why, behaviour = behaviour,
+        preserves = 'none', preserves_why = preserves_why, behaviour = behaviour, discharged = discharged,
         hazards = (function ()
             local hz = {}
+            if #undecided > 0 then hz[#hz + 1] = require('cartograph.hazard').new('sites-undecided', ('%d site(s) left as written: no evidence there rules out the values the rule treats differently — changes = \'accept\' rewrites them too: %s')
+                :format(#undecided, table.concat(undecided, '; ', 1, math.min(#undecided, 6))), nil, { undecided = undecided }, 'informational') end
             if #unread > 0 then hz[#hz + 1] = require('cartograph.hazard').new('unread', ('%d file(s) in scope were not read by the lossless reader, so they were not looked at: %s')
                 :format(#unread, table.concat(unread, ', ', 1, math.min(#unread, 6))), nil, { files = unread }, 'frontier') end
             if #refusals > 0 then hz[#hz + 1] = require('cartograph.hazard').new('sites-refused', ('%d matched site(s) left as written: %s')
