@@ -235,6 +235,9 @@ local function build(store, opts)
     -- (a delta's objects, a number or a list, without a table for the one-object case)
     local function one_i(n, i) if i == 0 then return 1, n end end
     local function dit(d) if type(d) == 'number' then return one_i, d, 0 end return ipairs(d) end
+    -- (a port's successors, a number or a set, as pairs would give them)
+    local function one_k(n, k) if k == nil then return n end end
+    local function sit(s) if type(s) == 'number' then return one_k, s, nil end return next, s or NOTHING, nil end
     local function each(p)
         local s = pts[p]
         if s == nil then return next, EMPTY, nil end
@@ -326,10 +329,18 @@ local function build(store, opts)
     end
     local function edge(a, b) -- pts(b) ⊇ pts(a)
         if a == b then return end
+        -- (a port's successors as its objects are: ONE is the port number itself, more a set — a set per source port was
+        -- the census's second site, 0.64 M per run. The set is grown key by key, as before: its pairs ORDER is the
+        -- propagation order, and a constructor would lay the hash out differently)
         local s = succ[a]
-        if not s then s = {}; succ[a] = s end
-        if s[b] then return end
-        s[b] = true
+        if s == nil then succ[a] = b
+        elseif type(s) == 'number' then
+            if s == b then return end
+            local t = {}; t[s] = true; t[b] = true; succ[a] = t
+        else
+            if s[b] then return end
+            s[b] = true
+        end
         if top[a] then if spread then settop(b) end; return end
         local sa = pts[a]
         if type(sa) == 'table' and sa.bs then addbits(b, sa) else for o in each(a) do addobj(b, o) end end
@@ -605,7 +616,7 @@ local function build(store, opts)
             if order == 'fifo' and head > tail then head, tail = 1, 0 end
             inwl[p] = nil
             if top[p] then
-                for q in pairs(succ[p] or NOTHING) do settop(q) end
+                for q in sit(succ[p]) do settop(q) end
                 if spread and fowner[p] then readers(fowner[p], fname[p], settop) end
                 for _, ld in ipairs(loads[p] or NOTHING) do settop(ld[2]) end
                 for _, cl in ipairs(calls[p] or NOTHING) do if type(cl[2]) ~= 'table' then settop(cl[2]) end end
@@ -615,12 +626,12 @@ local function build(store, opts)
                 if type(d) == 'table' and d.bs then
                     -- (a DENSE delta: the copy edges and the field's readers in bulk; the rest per object)
                     local db = d
-                    for q in pairs(succ[p] or NOTHING) do addbits(q, db) end
+                    for q in sit(succ[p]) do addbits(q, db) end
                     if fowner[p] then readers(fowner[p], fname[p], function (q) addbits(q, db) end) end
                     d = {}
                     for o in bs_iter(db) do d[#d + 1] = o end
                 elseif d then
-                    for q in pairs(succ[p] or NOTHING) do for _, o in dit(d) do addobj(q, o) end end
+                    for q in sit(succ[p]) do for _, o in dit(d) do addobj(q, o) end end
                     if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in dit(d) do addobj(q, o) end end) end
                 end
                 if d then
@@ -1390,7 +1401,7 @@ local function build(store, opts)
     end
     while #twork > 0 do
         local p = twork[#twork]; twork[#twork] = nil
-        for q in pairs(succ[p] or NOTHING) do taint(q) end
+        for q in sit(succ[p]) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
         for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end
         for _, st in ipairs(stores[p] or NOTHING) do
@@ -1638,7 +1649,7 @@ local function build(store, opts)
         -- of build1)
         local pred = {}
         local function addp(q, p) local l = pred[q]; if not l then l = {}; pred[q] = l end; l[#l + 1] = p end
-        for p, sq in pairs(succ) do for q in pairs(sq) do if top[q] then addp(q, p) end end end
+        for p, sq in pairs(succ) do for q in sit(sq) do if top[q] then addp(q, p) end end end
         for x, l in pairs(loads) do
             local os
             for _, ld in ipairs(l) do
