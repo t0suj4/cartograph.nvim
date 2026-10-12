@@ -196,10 +196,12 @@ local function in_git()
 end
 
 -- the same output on both sides; side A (the unpacked `…-ab/a` tree) or side B is the SLOW one
+-- (the margins are ~1 s: the suite runs 8 workers that each spawn these sides, and a 300 ms margin was lost once to
+-- scheduling under that load — CART-1658. The examples test the BOTH-ORDERS logic, not the timer's resolution)
 local function slow_side(side) return ([[
 return { measure = function ()
     local src = debug.getinfo(require('cartograph.store').ingest, 'S').source
-    if (src:find('-ab/a/', 1, true) ~= nil) == %s then vim.uv.sleep(300) end
+    if (src:find('-ab/a/', 1, true) ~= nil) == %s then vim.uv.sleep(1000) end
     return { 'same' } end }
 ]]):format(side == 'a' and 'true' or 'false') end
 
@@ -218,8 +220,8 @@ E.examples = {
 return { measure = function ()
     local f = io.open(%q); local k = f and tonumber(f:read('a')) or 0; if f then f:close() end
     f = io.open(%q, 'w'); f:write(tostring(k + 1)); f:close()
-    if k == 0 then vim.uv.sleep(300) end
-    if k == 2 then vim.uv.sleep(600) end
+    if k == 0 then vim.uv.sleep(1000) end
+    if k == 2 then vim.uv.sleep(2000) end
     return { 'same' } end }
 ]]):format(n, n) })
             local held2 = E.claim(once)
