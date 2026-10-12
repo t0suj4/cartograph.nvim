@@ -495,6 +495,36 @@ test('byexample: a rule is SAMPLED for behaviour — a relaxed check is named, a
     eq('differs', v.verdict, t); ok(t:find('`1` -> `2` CHANGES BEHAVIOUR: always: the left side gives 1, the right 2', 1, true), t)
 end)
 
+test('byexample: RUBY — a MULTI-STATEMENT body: the if\'s `then` and the block\'s `body_statement` are both statement blocks, so the carried statement is a sequence (CART-1666)', function ()
+    if not ready() or not parser_available('ruby') then skip 'no ruby parser' end
+    local rules = assert(BX.learn('every(xs).each do |c|\n  if c.ok\n    use(c)\n  end\nend\n', 'oks(xs).each do |c|\n  use(c)\nend\n', 'ruby'))
+    local out, n = BX.rewrite(rules, 'def t(items)\n  every(items).each do |it|\n    if it.ok\n      x = 1\n      f(it)\n    end\n  end\nend\n', 'ruby')
+    eq(1, n)
+    eq('def t(items)\n  oks(items).each do |it|\n    x = 1\n    f(it)\n  end\nend\n', out)
+end)
+
+test('byexample: RUBY — heredocs in a moved body (`<<-` keeps its content\'s indentation LITERALLY, `<<~` strips it): the code dedents, the heredocs keep their bytes, ruby answers the same (CART-1665)', function ()
+    if not ready() or not parser_available('ruby') then skip 'no ruby parser' end
+    if vim.fn.executable('ruby') == 0 then skip 'no ruby' end
+    local rules = assert(BX.learn('every(xs).each do |c|\n  if c.ok\n    use(c)\n  end\nend\n', 'oks(xs).each do |c|\n  use(c)\nend\n', 'ruby'))
+    local heredocs = '      a = <<-EOS\n      dash #{it.n}\n        deeper\n      EOS\n      b = <<~EOT\n        squiggly #{it.n}\n          deeper\n      EOT\n'
+    local pre = 'I = Struct.new(:n, :ok)\ndef every(xs) = xs\ndef oks(xs) = xs.select(&:ok)\n'
+    local src = pre .. 'def total(items)\n  acc = []\n  every(items).each do |it|\n    if it.ok\n' .. heredocs .. '      acc << a + b\n    end\n  end\n  acc\nend\n'
+    local out, n = BX.rewrite(rules, src, 'ruby')
+    eq(1, n)
+    ok(out:find('    a = <<-EOS\n      dash #{it.n}\n        deeper\n      EOS\n    b = <<~EOT\n        squiggly #{it.n}\n          deeper\n      EOT\n    acc << a + b\n  end\n', 1, true), out)
+    local function run(code)
+        local f = vim.fn.tempname() .. '.rb'
+        vim.fn.writefile(vim.split(code .. 'p total([I.new(1, true), I.new(2, false), I.new(3, true)])\n', '\n'), f)
+        local r = vim.system({ 'ruby', f }, { text = true }):wait()
+        vim.fn.delete(f)
+        return r.stdout
+    end
+    local a_, b_ = run(src), run(out)
+    ok(a_:find('dash 1', 1, true), 'the original runs: ' .. a_)
+    eq(a_, b_, 'before and after answer the same')
+end)
+
 test('byexample: a moved body holding a LONG STRING is re-indented around it — the string\'s continuation lines are its value, like a heredoc\'s (CART-1664)', function ()
     if not ready() then skip 'no lua parser or algebra' end
     local rules = assert(BX.learn(LOOP_B, LOOP_A, 'lua'))

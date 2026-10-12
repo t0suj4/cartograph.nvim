@@ -344,16 +344,19 @@ function M.learn(before, after, lang)
             return out
         end
         local pa_of, pb_of = parents(La, {}), parents(Lb, {})
+        local SB = require('cartograph.narrow').STMT_BLOCK
         local seqs, seq_kid = {}, {} -- seqs: parent node (either side, by identity) -> hole name; seq_kid: the after kid
         local nseq = 0
         local function find_seq(t)
             local pa = pa_of[t]
             if t.k ~= 'lit' and pa and pa ~= La and sole(pa, t) then
                 for b, pb in pairs(pb_of) do
-                    -- (both parents the SAME kind — a body is a body — and the carried node more than one name: an
-                    -- identifier is a hole of its own, and `a` of `local a` must not pair with the `a` of `return a`)
+                    -- (both parents the SAME kind — a body is a body — or both STATEMENT BLOCKS of the grammar
+                    -- (narrow.STMT_BLOCK: ruby's if `then` and a block's `body_statement`, CART-1666); and the carried
+                    -- node more than one name: an identifier is a hole of its own, and `a` of `local a` must not pair
+                    -- with the `a` of `return a`)
                     if b.k ~= 'lit' and pb ~= Lb and a.eq(b, t) and sole(pb, b) and not seqs[pb]
-                        and pa.k == pb.k and not a.cst_print(t):match('^%s*[%a_][%w_]*%s*$') then
+                        and (pa.k == pb.k or (SB[pa.k] and SB[pb.k])) and not a.cst_print(t):match('^%s*[%a_][%w_]*%s*$') then
                         nseq = nseq + 1
                         seqs[pa], seqs[pb], seq_kid[t] = 's' .. nseq, 's' .. nseq, true
                         return

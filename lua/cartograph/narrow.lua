@@ -443,6 +443,9 @@ local STMT_BLOCK = {
     body_statement = true, ['then'] = true, ['do'] = true,   -- ruby
     block_body = true, ['else'] = true,
 }
+-- (exported: a rewrite learned from an example pairs a body with a body of ANOTHER kind — ruby's if `then` and a
+-- block's `body_statement` — only when both are here, CART-1666)
+M.STMT_BLOCK = STMT_BLOCK
 local function fn_node(node, src, lang)
     local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
     if not ok then return nil end
