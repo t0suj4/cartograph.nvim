@@ -133,7 +133,7 @@ local function measure(_, p)
     end
     local txn = require 'cartograph.txn'
     local ok, applied, awhy = pcall(store.scoped, { root = root, nodes = {}, edges = {}, calls = {} }, function ()
-        local plan, pwhy, pclass = require('cartograph.byexample').plan(store, { before = before, after = after, scope = p.file })
+        local plan, pwhy, pclass = require('cartograph.byexample').plan(store, { before = before, after = after, scope = p.file, changes = 'accept' }) -- (a mutant changes behaviour BY DESIGN)
         if not plan then return nil, ('%s (%s)'):format(tostring(pwhy), tostring(pclass)), pclass or 'ill-posed' end
         local staged, swhy, sclass = txn.stage(store, plan)
         if not staged then return nil, tostring(swhy), sclass or 'unbuilt' end

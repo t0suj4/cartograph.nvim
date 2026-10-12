@@ -378,7 +378,11 @@ function M.learned_source(opts)
     local lvl = 0
     while (opts.before .. opts.after):find(']' .. ('='):rep(lvl) .. ']', 1, true) do lvl = lvl + 1 end
     local function q(s) return '[' .. ('='):rep(lvl) .. '[\n' .. s .. ']' .. ('='):rep(lvl) .. ']' end
-    local summary = opts.summary or ('rewrite by example: %s (scope = all | a,b)'):format(table.concat(rt, ', '))
+    -- (a rule the sample shows CHANGES behaviour says so in the summary: each run stops there unless changes = 'accept')
+    local BXm, changes = require('cartograph.byexample'), {}
+    for _, r in ipairs(rules) do if r.sample and r.sample.verdict == 'differs' then changes[#changes + 1] = BXm.behaviour_text(r) end end
+    local summary = opts.summary or ('rewrite by example: %s (scope = all | a,b)%s'):format(table.concat(rt, ', '),
+        #changes > 0 and (' — %s: runs only with changes = accept'):format(table.concat(changes, '; ')) or '')
     local src = table.concat({
         ('-- %s: a tactic LEARNED FROM AN EXAMPLE (toolbelt.learn, %s). The rule is re-derived from BEFORE -> AFTER'):format(name, os.date('%Y-%m-%d')),
         ('-- each run (cartograph.byexample): %s. The example is a CLAIM, not a proof — the specs are the oracle.'):format(table.concat(rt, ', ')),
@@ -390,13 +394,13 @@ function M.learned_source(opts)
         ('    name = %q,'):format(name),
         "    kind = 'write',",
         ('    summary = %q,'):format(summary),
-        "    params = { scope = 'string?' },",
-        "    build = function (p) return T.step('rewrite-by-example', { before = BEFORE, after = AFTER, scope = p.scope }) end,",
+        "    params = { scope = 'string?', changes = 'string?' },",
+        "    build = function (p) return T.step('rewrite-by-example', { before = BEFORE, after = AFTER, scope = p.scope, changes = p.changes }) end,",
         '    examples = {',
         '        {',
         "            name = 'the demonstration itself: run on BEFORE with scope = all, it produces AFTER',",
         "            files = { ['example.lua'] = BEFORE .. '\\n' },",
-        "            params = { scope = 'all' },",
+        "            params = { scope = 'all', changes = 'accept' },",
         "            expect = { status = 'done', applied = 1, check = function (root)",
         "                return read(root, 'example.lua') == AFTER .. '\\n', 'the demonstration did not reproduce AFTER'",
         '            end },',

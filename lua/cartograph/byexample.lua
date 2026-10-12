@@ -77,6 +77,85 @@ local function strip(a, t, orig)
 end
 M._strip = strip
 
+-- ★ DOES THE RULE KEEP BEHAVIOUR? (CART-1664) An example is a claim; `x == nil -> not x` RELAXES the check — it also
+-- takes `false`. Before any site is touched, a Lua EXPRESSION rule is run on both sides over sampled values for its
+-- holes, and the first disagreement is NAMED: the plan then stops for a decision. A side that reads a name the sample
+-- does not model (`f(a)`: `f` is free) or raises on every sample is UNCHECKED, never "equal" — both sides raising
+-- on every value compared nothing. A statement rule (a loop) is unchecked: the sample has no world to run.
+-- -> { verdict = 'equal' | 'differs' | 'unchecked', why, at = { hole = label }, left, right, samples }
+local SAMPLES = { { 'nil' }, { 'false', false }, { 'true', true }, { '0', 0 }, { '1', 1 }, { '-1', -1 }, { '0.5', 0.5 },
+    { "''", '' }, { "'a'", 'a' }, { "'0'", '0' }, { '{}', {} }, { '{1}', { 1 } } }
+local function sample_rule(a, lhs, rhs, names, lang)
+    if lang ~= 'lua' then return { verdict = 'unchecked', why = 'the sampler runs the sides as LuaJIT code' } end -- @langs-ok the sampler evaluates with LuaJIT itself
+    local hs = {}
+    for h in pairs(lhs.holes or {}) do hs[#hs + 1] = h end
+    table.sort(hs)
+    local function rep_in(t) if t.k == 'hole' and t.rep then return true end for _, c in ipairs(t.kids or {}) do if rep_in(c) then return true end end end
+    if rep_in(lhs.body or lhs) or rep_in(rhs.body or rhs) then return { verdict = 'unchecked', why = 'a sequence hole: a statement rule, no expression to run' } end
+    if #hs > 3 then return { verdict = 'unchecked', why = ('%d holes: too many to sample'):format(#hs) } end
+    local V, params = {}, {}
+    for i, h in ipairs(hs) do V[h] = a.lit('_h' .. i); params[i] = '_h' .. i end
+    local free = {}
+    local env = setmetatable({}, { __index = function (_, k) free[k] = true end, __newindex = function (_, k) free[k] = true end })
+    local function compile(T)
+        local inst = a.instantiate(T, only_holes(T, V))
+        if not inst.ok then return nil end
+        local chunk = loadstring('return function (' .. table.concat(params, ', ') .. ') return ' .. a.cst_print(inst.term) .. '\nend')
+        if not chunk then return nil end
+        setfenv(chunk, env)
+        return chunk()
+    end
+    local fl, fr = compile(lhs), compile(rhs)
+    if not fl or not fr then return { verdict = 'unchecked', why = 'a side is no Lua expression' } end
+    local function norm(err) return (tostring(err):gsub('^%[string [^%]]*%]:%d+: ', '')) end
+    local idx, total, raised = {}, 0, 0
+    for i = 1, #hs do idx[i] = 1 end
+    while true do
+        local args = {}
+        for i = 1, #hs do local v = SAMPLES[idx[i]][2]; args[i] = type(v) == 'table' and vim.deepcopy(v) or v end
+        local ok1, r1 = pcall(fl, unpack(args, 1, #hs))
+        local ok2, r2 = pcall(fr, unpack(args, 1, #hs))
+        total = total + 1
+        if next(free) then
+            local n = {}
+            for k in pairs(free) do n[#n + 1] = '`' .. tostring(k) .. '`' end
+            table.sort(n)
+            return { verdict = 'unchecked', why = ('it reads %s, which the sample does not model'):format(table.concat(n, ', ')) }
+        end
+        local same
+        -- (both raising agrees: the messages name the variables differently — `x .. nil` and `nil .. x` both fail)
+        if ok1 and ok2 then same = rawequal(r1, r2) elseif not ok1 and not ok2 then same = true; raised = raised + 1 else same = false end
+        if not same then
+            local at = {}
+            for i, h in ipairs(hs) do at[names[h] or h] = SAMPLES[idx[i]][1] end
+            local function show(ok_, r) return ok_ and vim.inspect(r) or ('raises: ' .. norm(r)) end
+            return { verdict = 'differs', at = at, left = show(ok1, r1), right = show(ok2, r2), samples = total }
+        end
+        local i = 1
+        while i <= #hs and idx[i] == #SAMPLES do idx[i] = 1; i = i + 1 end
+        if i > #hs then break end
+        idx[i] = idx[i] + 1
+    end
+    if raised == total then return { verdict = 'unchecked', why = 'both sides raise on every sample' } end
+    return { verdict = 'equal', samples = total }
+end
+
+--- the sampled verdict as a sentence (the plan's decision, the learned rule's report)
+function M.behaviour_text(r)
+    local v = r.sample
+    if not v then return nil end
+    if v.verdict == 'differs' then
+        local at = {}
+        for k, x in pairs(v.at) do at[#at + 1] = k .. ' = ' .. x end
+        table.sort(at)
+        return ('`%s` -> `%s` CHANGES BEHAVIOUR: %s the left side gives %s, the right %s'):format(r.lhs_text, r.rhs_text,
+            #at > 0 and ('at ' .. table.concat(at, ', ')) or 'always:', v.left, v.right)
+    elseif v.verdict == 'equal' then
+        return ('`%s` -> `%s`: both sides agree on %d sampled value(s) — a sample, not a proof'):format(r.lhs_text, r.rhs_text, v.samples)
+    end
+    return ('`%s` -> `%s`: behaviour unchecked (%s)'):format(r.lhs_text, r.rhs_text, v.why)
+end
+
 --- Learn the rules an example demonstrates. -> { { lhs, rhs, lhs_text, rhs_text } } | nil, why, class
 function M.learn(before, after, lang)
     lang = lang or 'lua' -- @langs-ok the reader roster decides; algebraread refuses an unregistered language by name
@@ -337,8 +416,11 @@ function M.learn(before, after, lang)
             return nil, ('the learned rule `%s -> %s` matches its own output — applying it again would rewrite forever')
                 :format(a.cst_print(Lb), a.cst_print(La)), 'ill-posed'
         end
+        -- (the holes by the example's own spelling — `x`, not `h1` — for the behaviour verdict)
+        local names, mb = {}, a.match(lhs, Lb)
+        for h, v in pairs(mb.ok and mb.values or {}) do if type(v) == 'table' and v.k then names[h] = a.cst_print(v) end end
         rules[#rules + 1] = { lhs = lhs, rhs = rhs, lhs_text = a.cst_print(Lb), rhs_text = a.cst_print(La), holes = nholes,
-            lhs_ws = lhs_ws, rhs_ws = rhs_ws, rhs_term = hr }
+            lhs_ws = lhs_ws, rhs_ws = rhs_ws, rhs_term = hr, sample = sample_rule(a, lhs, rhs, names, lang) }
     end
     return rules
 end
@@ -683,6 +765,18 @@ function M.plan(store, opts)
     local rules, why, class = M.learn(opts.before or '', opts.after or '', opts.lang)
     if not rules then return nil, why, class or 'ill-posed' end
     local root = store.data.root
+    -- (what the sample says about each rule: a rule that CHANGES behaviour is applied only on `changes = 'accept'`)
+    local behaviour, changing = {}, {}
+    for _, r in ipairs(rules) do
+        behaviour[#behaviour + 1] = M.behaviour_text(r)
+        if r.sample and r.sample.verdict == 'differs' then changing[#changing + 1] = M.behaviour_text(r) end
+    end
+    local function changes_stop()
+        if #changing == 0 or opts.changes == 'accept' then return nil end
+        return table.concat(changing, '; ') .. ' — applying it is YOUR decision: changes = \'accept\' (or show an example that keeps behaviour)'
+    end
+    local preserves_why = 'the rewrite applies what ONE example demonstrated; nothing checks that it preserves behaviour'
+    if #behaviour > 0 then preserves_why = 'the rewrite applies what ONE example demonstrated: ' .. table.concat(behaviour, '; ') end
     -- ★ WITHIN ONE FUNCTION (CART-1176, edit-in): `within` = a durable ref (or a node id). The rule rewrites only that
     -- node's own source slice — read as a chunk, or as `return <expr>` when it is an expression (a function value in a
     -- table) — and the slice is spliced back; nothing outside the function can match. Terms carry no spans, so the
@@ -711,14 +805,15 @@ function M.plan(store, opts)
         if n_sites == 0 then
             return nil, ('the rule %s matches nothing inside %s'):format(table.concat(rule_text, ', '), tostring(n.name)), 'empty'
         end
+        local stop = changes_stop()
+        if stop then return nil, stop, 'decision' end
         local plan = {
             verb = 'rewrite-by-example', guards = { 'parses' }, generation = store.generation,
             touched = { n.file }, stamps = { [n.file] = txn.disk_stamp(root, n.file) },
             refspecs = { { id = n.id, name = n.name, ref = store.ref_of(n.id), what = 'symbol' } },
             edits = { [n.file] = text:sub(1, s0) .. new .. text:sub(e0 + 1) }, rules = rule_text, sites = n_sites,
             within = n.name, wrapped = wrapped or nil,
-            preserves = 'none',
-            preserves_why = 'the rewrite applies what ONE example demonstrated; nothing checks that it preserves behaviour',
+            preserves = 'none', preserves_why = preserves_why, behaviour = behaviour,
             hazards = {},
             desc = ('rewrite by example within %s: %s, %d site(s)'):format(tostring(n.name), table.concat(rule_text, ', '), n_sites),
         }
@@ -767,6 +862,8 @@ function M.plan(store, opts)
             :format(table.concat(rule_text, ', '), total, #touched, table.concat(per, ', ', 1, math.min(#per, 8))
                 .. (#per > 8 and (', and %d more file(s)'):format(#per - 8) or '')), 'decision'
     end
+    local stop = changes_stop()
+    if stop then return nil, stop, 'decision' end
     local plan = {
         verb = 'rewrite-by-example',
         guards = { 'parses' },
@@ -774,8 +871,7 @@ function M.plan(store, opts)
         touched = touched, stamps = stamps, refspecs = {},
         edits = edits, rules = rule_text, sites = total, prefiltered = prefiltered,
         -- an example is a claim, not a proof: the rule applies what was demonstrated
-        preserves = 'none',
-        preserves_why = 'the rewrite applies what ONE example demonstrated; nothing checks that it preserves behaviour',
+        preserves = 'none', preserves_why = preserves_why, behaviour = behaviour,
         hazards = (function ()
             local hz = {}
             if #unread > 0 then hz[#hz + 1] = require('cartograph.hazard').new('unread', ('%d file(s) in scope were not read by the lossless reader, so they were not looked at: %s')

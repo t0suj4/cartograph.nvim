@@ -447,7 +447,7 @@ local IDEM = {
             ['use.lua'] = "local P = require 'pt'\nreturn P.len(P.pt(1, 2))\n" },
         function () return { family = { 'pt.lua:2' }, positional = { '1=x', '2=y' } } end },
     ['rewrite-by-example'] = { { ['q.lua'] = 'local Q = {}\nfunction Q.h(q)\n  if q == nil then return 3 end\n  return q\nend\nreturn Q\n' },
-        function () return { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'all' } end },
+        function () return { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'all', changes = 'accept' } end },
     propagate = { { ['fe.lua'] = (function ()
             local function b(n, mul) return ('function M.g%d(t)\n    local acc = 0\n    local seen = {}\n    for i = 1, #t do acc = acc + t[i] * %d end\n    local s = tostring(acc)\n    local u = string.upper(s)\n    seen[u] = true\n    local pad = string.rep("-", #u)\n    local out = pad .. u\n    return out .. "%d"\nend\n'):format(n, mul, n) end
             return 'local M = {}\n' .. b(1, 1) .. b(2, 2) .. b(3, 3) .. 'return M\n'

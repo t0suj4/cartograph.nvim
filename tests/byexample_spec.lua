@@ -65,7 +65,11 @@ test('byexample: WHERE a rule applies is a decision — it stops listing the mat
     local ex = { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end' }
     local p, why, class = BX.plan(store, ex)
     eq(nil, p); eq('decision', class); ok(why:find('4 site(s) in 2 file(s)', 1, true), why)
-    local r = tactic.run(store, tactic.T.step('rewrite-by-example', { before = ex.before, after = ex.after, scope = 'b.lua' }), { apply = true })
+    -- ★ THE RULE RELAXES THE CHECK (CART-1664): `x == nil -> not x` also takes `false` — sampled at learn, NAMED, and a
+    -- decision before a site is touched
+    local _, cwhy, cclass = BX.plan(store, { before = ex.before, after = ex.after, scope = 'b.lua' })
+    eq('decision', cclass); ok(tostring(cwhy):find('at x = false the left side gives false, the right true', 1, true), tostring(cwhy))
+    local r = tactic.run(store, tactic.T.step('rewrite-by-example', { before = ex.before, after = ex.after, scope = 'b.lua', changes = 'accept' }), { apply = true })
     eq('done', r.status, tostring(r.why))
     ok(read('b.lua'):find('if not q then return 3 end', 1, true)); eq(SRC, read('a.lua'), 'a.lua was outside the scope')
     -- ★ AN EXAMPLE IS A CLAIM, NOT A PROOF: the demonstrated rewrite changes B.h(false) — the plan says so (preserves none)
@@ -81,6 +85,7 @@ test('learn-from-example: learning is ITSELF a tactic — into the PROJECT, jour
     eq('done', r.status, tostring(r.why)); eq(1, r.applied)
     local e = assert(tb.load('nil-check', nil, root))
     eq('project', e.scope); ok(e.summary:find('x == nil -> not x', 1, true), e.summary)
+    ok(e.summary:find('CHANGES BEHAVIOUR: at x = false', 1, true), 'the learned tactic says it relaxes the check: ' .. e.summary)
     eq(2, #e.examples, 'the demonstration, and the scope decision')
     -- the store is the CALLER's after learning: validation ran in a separate process, not over the singleton
     eq(root, store.data.root)
@@ -91,7 +96,9 @@ test('learn-from-example: learning is ITSELF a tactic — into the PROJECT, jour
     -- and it COMPOSES: learn, then use what was learned, in one tactic
     project { ['a.lua'] = 'local A = {}\nfunction A.f(q)\n  if q == nil then return 3 end\nend\nreturn A\n' }
     local T = tactic.T
-    local both = tactic.run(store, T.seq(T.use('learn-from-example', ex), T.use('nil-check', { scope = 'all' })), { apply = true })
+    local stopped = tactic.run(store, T.seq(T.use('learn-from-example', ex), T.use('nil-check', { scope = 'all' })), { apply = true })
+    eq('stopped', stopped.status, 'the rule relaxes the check: a decision, not a default')
+    local both = tactic.run(store, T.seq(T.use('learn-from-example', ex), T.use('nil-check', { scope = 'all', changes = 'accept' })), { apply = true })
     eq('done', both.status, tostring(both.why))
     ok(read('a.lua'):find('if not q then return 3 end', 1, true), read('a.lua'))
 end)
@@ -242,7 +249,7 @@ test('byexample: a file in scope the lossless reader cannot read is NAMED as not
     -- rule can be in its text (the prefilter's sound condition), so it is counted as PREFILTERED, not as unread
     project { ['a.lua'] = 'local A = {}\nfunction A.f(q)\n  if q == nil then return 3 end\nend\nreturn A\n',
         ['broken.lua'] = 'local B = {\nfunction B.g(q) if q == nil then\n', ['notokens.lua'] = 'local C = {\nfunction C.h(\n' }
-    local p = assert(BX.plan(store, { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'a.lua,broken.lua,notokens.lua' }))
+    local p = assert(BX.plan(store, { before = 'if x == nil then return 0 end', after = 'if not x then return 0 end', scope = 'a.lua,broken.lua,notokens.lua', changes = 'accept' }))
     local h = require('cartograph.hazard').plain(p.hazards)
     eq('unread', h[1] and h[1].kind); eq('frontier', h[1].class); ok(h[1].text:find('broken.lua', 1, true), h[1].text)
     ok(not h[1].text:find('notokens.lua', 1, true), h[1].text)
@@ -447,6 +454,26 @@ test('byexample: RUBY — a carried call keeps its own `(` `)`: a token is keyed
     local out, n = BX.rewrite(rules, 'def t(items)\n  every(items).each do |it|\n    if it.ok\n      f(it)\n    end\n  end\nend\n', 'ruby')
     eq(1, n)
     eq('def t(items)\n  oks(items).each do |it|\n    f(it)\n  end\nend\n', out)
+end)
+
+test('byexample: a rule is SAMPLED for behaviour — a relaxed check is named, a kept one agrees, a free name or a statement is unchecked (CART-1664)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local function verdict(b, a_) local r = assert(BX.learn(b, a_, 'lua')); return r[1].sample, BX.behaviour_text(r[1]) end
+    local v, t = verdict('if x == nil then return 0 end', 'if not x then return 0 end')
+    eq('differs', v.verdict, t); eq('false', v.at.x)
+    v, t = verdict('local r = x ~= nil', 'local r = not (x == nil)')
+    eq('equal', v.verdict, t)
+    v, t = verdict('local r = x > 0', 'local r = x >= 1')
+    eq('differs', v.verdict, t); eq('0.5', v.at.x, 'a fraction is between them')
+    v, t = verdict('local r = f(a, b)', 'local r = g(b, a)')
+    eq('unchecked', v.verdict, t); ok(t:find('`f`', 1, true) and t:find('`g`', 1, true), t)
+    v, t = verdict(LOOP_B, LOOP_A)
+    eq('unchecked', v.verdict, t)
+    -- (both sides raising the same error on every sample is no agreement: nothing was compared)
+    v, t = verdict('local r = x .. nil', 'local r = nil .. x')
+    eq('unchecked', v.verdict, t); ok(t:find('raise on every sample', 1, true), t)
+    v, t = verdict('local r = x()[1]', 'local r = x()[2]')
+    eq('differs', v.verdict, t); ok(t:find('`1` -> `2` CHANGES BEHAVIOUR: always: the left side gives 1, the right 2', 1, true), t)
 end)
 
 test('byexample: a moved body holding a LONG STRING is re-indented around it — the string\'s continuation lines are its value, like a heredoc\'s (CART-1664)', function ()
