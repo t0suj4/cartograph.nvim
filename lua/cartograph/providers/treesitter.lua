@@ -669,7 +669,7 @@ local function guard_class(c, n, src, G)
     if G.rhs_setonce(top, src, ch) then return 2 end
     local class = 0
     local conds, nc, negcond, fnnode
-    local node, p = top, top:parent()
+    local node, p = top, tsutil.parent(top)
     while p do
         local pt = p:type()
         if G.fn[pt] then fnnode = p break end
@@ -705,7 +705,7 @@ local function guard_class(c, n, src, G)
             end
         end
         node = p
-        p = p:parent()
+        p = tsutil.parent(p)
     end
     -- pw: this write's BASE is a param of the enclosing fn — the
     -- param-MUTATION fact the purity fixpoint needs, and it is a
@@ -751,7 +751,7 @@ M.guard_class = guard_class
 --- caller passing a validator never reaches it. The innermost such guard (one is enough: the call runs only under it)
 function M._call_gp(calln, src, G, fn)
     local params
-    local node, p = calln, calln:parent()
+    local node, p = calln, tsutil.parent(calln)
     while p and p ~= fn do
         if G.cond[p:type()] then
             local cond = G.cond_of and G.cond_of(p) or p:named_child(0)
@@ -769,7 +769,7 @@ function M._call_gp(calln, src, G, fn)
                 end
             end
         end
-        node, p = p, p:parent()
+        node, p = p, tsutil.parent(p)
     end
 end
 
@@ -1514,11 +1514,11 @@ end
 
 local function in_function(n, spec, memo)
     local types = spec and spec.fn_types or DEFAULT_FN_TYPES
-    local p = n:parent()
+    local p = tsutil.parent(n)
     if not memo then
         while p do
             if types[p:type()] then return p end
-            p = p:parent()
+            p = tsutil.parent(p)
         end
         return nil
     end
@@ -1534,7 +1534,7 @@ local function in_function(n, spec, memo)
         end
         np = np + 1
         IF_PATH[np] = id
-        p = p:parent()
+        p = tsutil.parent(p)
     end
     for i = 1, np do memo[IF_PATH[i]] = false end
     return nil
@@ -5646,6 +5646,7 @@ end
 local DFREG_TYPES = {}
 -- register body `b` in dfreg (a function on M: M.extract is at LuaJIT's 60-upvalue limit, and a new local captured by
 -- extract_defs broke it)
+function M._parent_reset() tsutil.parent_reset() end
 function M._dfreg_put(dfreg, b, rec)
     dfreg[b:id()] = rec
     local ty = dfreg[DFREG_TYPES]
@@ -9272,6 +9273,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 end
             end
             local dfreg = {}
+            M._parent_reset() -- (the memoized parent() holds trees alive: one file's at a time)
             -- CART-0236: hand the confinement question to the mention walk when one
             -- is coming. The list stays empty for a file with no file-local def, and
             -- a non-empty list implies fnRanges[file] (handle_fn fills both), so the

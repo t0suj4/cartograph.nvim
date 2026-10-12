@@ -15,6 +15,7 @@
 -- test). When the resolve-but-mark policy lands (step 2), it changes the
 -- caller, not this file.
 
+local tsutil = require 'cartograph.spec.tsutil' -- (tsutil.parent: the memoized node:parent())
 local M = {}
 
 --- Build a model over one file's source.
@@ -69,8 +70,8 @@ function M.model(src, spec)
             if c then top = c break end
             np = np + 1
             pending[np] = { node = s, entry = entry, id = id }
-            local p = s:parent()
-            while p and not spec[p:type()] do p = p:parent() end
+            local p = tsutil.parent(s)
+            while p and not spec[p:type()] do p = tsutil.parent(p) end
             s = p
             entry = p and spec[p:type()]
         end
@@ -86,7 +87,7 @@ function M.model(src, spec)
     function sm.resolve(ident, from, only, atrow)
         local fromrow = atrow or select(1, from:range())
         local k, n = 0, from
-        while n and not spec[n:type()] do n = n:parent() end -- (to the nearest scope, `from` itself included)
+        while n and not spec[n:type()] do n = tsutil.parent(n) end -- (to the nearest scope, `from` itself included)
         local r = n and scope_rec(n, spec[n:type()])
         while r do
             local entry = r.entry

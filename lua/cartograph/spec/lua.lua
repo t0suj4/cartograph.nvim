@@ -131,13 +131,13 @@ local function lua_is_write(c, n)
             break
         end
         cur = p
-        p = p:parent()
+        p = tsutil.parent(p)
         if not p then return false end
     end
     if p:type() ~= 'variable_list' then return false end
-    local asg = p:parent()
+    local asg = tsutil.parent(p)
     if not asg or asg:type() ~= 'assignment_statement' then return false end
-    local wrap = asg:parent() -- `local x = v` BINDS a name, writes nothing
+    local wrap = tsutil.parent(asg) -- `local x = v` BINDS a name, writes nothing
     return not (wrap and wrap:type() == 'variable_declaration')
 end
 

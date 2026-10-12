@@ -135,6 +135,24 @@ function M.inext(n, i)
     local c = n:child(i)
     if c then return i, c end
 end
+-- node:parent(), MEMOIZED: tree-sitter re-descends from the root for every parent() (~1.2 us; id() is ~64 ns), and the
+-- extractor's climbs — scope resolution, a call's guard, a write's guard, the enclosing function — walk the same
+-- ancestors from every mention under them (370 K parent() calls in an 80-file extraction, CART-1659). An entry keeps
+-- the CHILD as well and a hit must compare equal to it: an id is only unique among LIVE trees, and TSNode equality
+-- includes the tree, so a stale entry from a freed tree is never returned. An entry holds its nodes, and a node holds its
+-- TREE alive: the extractor resets the memo per file (parent_reset), and it is cleared past PMAX entries regardless.
+local PMEMO, PN, PMAX = {}, 0, 50000
+function M.parent_reset() PMEMO, PN = {}, 0 end
+function M.parent(n)
+    local id = n:id()
+    local e = PMEMO[id]
+    if e and e[1] == n then return e[2] or nil end
+    local p = n:parent()
+    if PN >= PMAX then PMEMO, PN = {}, 0 end
+    PMEMO[id] = { n, p or false }
+    PN = PN + 1
+    return p
+end
 -- the NAMED children only (`for _, c in tsutil.inamed, n, -1 do`): a walk that skips anonymous tokens never
 -- materializes them — 40% of lua/cartograph's nodes are punctuation and keywords, and every child the walk touches
 -- is a fresh userdata (a named-only walk of flowtype.lua is 1.8x faster than inext + `if c:named()`)
