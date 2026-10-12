@@ -653,9 +653,9 @@ end
 -- DERIVED rather than named: `kind`, `type`, `tag`, `op` all qualify, so a project that
 -- writes a tagged union differently is covered. What it cannot cover is a project that
 -- dispatches some other way (a method table, a metatable) — that is a different rule.
-local function tagcover_findings(store)
-    local out = {}
-    if not pcall(vim.treesitter.language.add, 'lua') then return out end
+local function unq(x) return (x:gsub('^([\'"])(.*)%1$', '%2')) end
+-- one file's visitor (a treewalk walker, run beside the other walking rules in ONE walk of the file — lint.run)
+local function tagcover_walker(store, file, src, out)
     -- ⚠ THE DISCRIMINANT IS DERIVED, NOT NAMED. The first cut hardcoded `k`, which is
     -- THIS repo's expression-IR spelling — a rule that fires on its author's codebase and
     -- nowhere else is calibrated to an idiom, not to a defect. A discriminant is
@@ -663,83 +663,80 @@ local function tagcover_findings(store)
     -- constructors of one module and compared with `==` against string literals in it.
     -- `kind`, `type`, `tag`, `op` all qualify on that test and none of them is written
     -- down here.
-    local function unq(x) return (x:gsub('^([\'"])(.*)%1$', '%2')) end
-    for _, file in ipairs(store.files) do
-        if file:match('%.lua$') then
-            local fd = io.open(store.abs(file), 'r')
-            if fd then
-                local src = fd:read('*a'); fd:close()
-                local troot = require('cartograph.parsecache').root(require('cartograph.parseview').view(src, 'lua'), 'lua')
-                local tree = troot and { root = function () return troot end } -- (the shared tree: one parse per text)
-                if tree then
-                    -- field -> set of literal values CONSTRUCTED for it in this module
-                    -- field -> fn -> set of literal values TESTED against it
-                    local built, tested, fnline = {}, {}, {}
-                    local function walk(n, fnk)
-                        local t = n:type()
-                        if t == 'function_declaration' or t == 'function_definition' then
-                            local nm = n:field('name')[1]
-                            fnk = nm and vim.treesitter.get_node_text(nm, src)
-                                or ('@' .. tostring(select(1, n:range()) + 1))
-                            fnline[fnk] = select(1, n:range()) + 1
-                        end
-                        if t == 'field' then
-                            local nmn, vl = n:field('name')[1], n:field('value')[1]
-                            if nmn and vl and vl:type() == 'string' then
-                                local key = vim.treesitter.get_node_text(nmn, src)
-                                if key:match('^[%a_][%w_]*$') then
-                                    built[key] = built[key] or {}
-                                    built[key][unq(vim.treesitter.get_node_text(vl, src))] = true
-                                end
-                            end
-                        end
-                        if t == 'binary_expression' and fnk then
-                            local txt = vim.treesitter.get_node_text(n, src)
-                            local lhs, rhs = txt:match(
-                                "^%s*([%w_%.]+)%s*==%s*(['\"][^'\"]*['\"])%s*$")
-                            local field = lhs and (lhs:match('%.([%w_]+)$') or lhs)
-                            if field and rhs then
-                                tested[field] = tested[field] or {}
-                                tested[field][fnk] = tested[field][fnk] or {}
-                                tested[field][fnk][unq(rhs)] = true
-                            end
-                        end
-                        for _, c in tsutil.inamed, n, -1 do walk(c, fnk) end -- (named children only: no userdata for tokens)
+    -- field -> set of literal values CONSTRUCTED for it in this module
+    -- field -> fn -> set of literal values TESTED against it
+    local built, tested, fnline = {}, {}, {}
+    local fnstack = {} -- the enclosing functions' keys, innermost last
+    local function enter_fn(n)
+        local nm = n:field('name')[1]
+        local fnk = nm and vim.treesitter.get_node_text(nm, src)
+            or ('@' .. tostring(select(1, n:range()) + 1))
+        fnline[fnk] = select(1, n:range()) + 1
+        fnstack[#fnstack + 1] = fnk
+    end
+    local function leave_fn() fnstack[#fnstack] = nil end
+    return {
+        enter = {
+            function_declaration = enter_fn, function_definition = enter_fn,
+            field = function (n)
+                local nmn, vl = n:field('name')[1], n:field('value')[1]
+                if nmn and vl and vl:type() == 'string' then
+                    local key = vim.treesitter.get_node_text(nmn, src)
+                    if key:match('^[%a_][%w_]*$') then
+                        built[key] = built[key] or {}
+                        built[key][unq(vim.treesitter.get_node_text(vl, src))] = true
                     end
-                    walk(tree:root(), nil)
-                    for TAG, values in pairs(built) do
-                    local all = {}
-                    for tag in pairs(values) do all[#all + 1] = tag end
-                    table.sort(all)
-                    -- a family worth checking at all: fewer than four tags is not a
-                    -- dispatch, it is a couple of comparisons
-                    if #all >= 4 then
-                        for fnk, set in pairs(tested[TAG] or {}) do
-                            local have, miss = 0, {}
-                            for _, tag in ipairs(all) do
-                                if set[tag] then have = have + 1
-                                else miss[#miss + 1] = tag end
-                            end
-                            -- COVERS MOST AND MISSES FEW is the shape. A walker handling
-                            -- half the family is making a different choice deliberately.
-                            if have >= math.ceil(#all * 0.75) and #miss > 0 and #miss <= 3 then
-                                table.sort(miss)
-                                out[#out + 1] = { file = store.abs(file),
-                                    line = fnline[fnk] or 1,
-                                    message = ('%s dispatches on `%s` for %d of this'
-                                        .. " module's %d tag(s) and has no case for %s —"
-                                        .. ' does the fallback hold for those, or does it'
-                                        .. ' assume something they do not satisfy?')
-                                        :format(fnk, TAG, have, #all,
-                                            table.concat(miss, ', ')) }
-                            end
-                        end
+                end
+            end,
+            binary_expression = function (n)
+                local fnk = fnstack[#fnstack]
+                if not fnk then return end
+                local txt = vim.treesitter.get_node_text(n, src)
+                local lhs, rhs = txt:match(
+                    "^%s*([%w_%.]+)%s*==%s*(['\"][^'\"]*['\"])%s*$")
+                local field = lhs and (lhs:match('%.([%w_]+)$') or lhs)
+                if field and rhs then
+                    tested[field] = tested[field] or {}
+                    tested[field][fnk] = tested[field][fnk] or {}
+                    tested[field][fnk][unq(rhs)] = true
+                end
+            end,
+        },
+        leave = { function_declaration = leave_fn, function_definition = leave_fn },
+        finish = function ()
+            for TAG, values in pairs(built) do
+            local all = {}
+            for tag in pairs(values) do all[#all + 1] = tag end
+            table.sort(all)
+            -- a family worth checking at all: fewer than four tags is not a
+            -- dispatch, it is a couple of comparisons
+            if #all >= 4 then
+                for fnk, set in pairs(tested[TAG] or {}) do
+                    local have, miss = 0, {}
+                    for _, tag in ipairs(all) do
+                        if set[tag] then have = have + 1
+                        else miss[#miss + 1] = tag end
                     end
+                    -- COVERS MOST AND MISSES FEW is the shape. A walker handling
+                    -- half the family is making a different choice deliberately.
+                    if have >= math.ceil(#all * 0.75) and #miss > 0 and #miss <= 3 then
+                        table.sort(miss)
+                        out[#out + 1] = { file = store.abs(file),
+                            line = fnline[fnk] or 1,
+                            message = ('%s dispatches on `%s` for %d of this'
+                                .. " module's %d tag(s) and has no case for %s —"
+                                .. ' does the fallback hold for those, or does it'
+                                .. ' assume something they do not satisfy?')
+                                :format(fnk, TAG, have, #all,
+                                    table.concat(miss, ', ')) }
                     end
                 end
             end
-        end
-    end
+            end
+        end,
+    }
+end
+local function tagcover_sort(out)
     table.sort(out, function (a, b)
         if a.file ~= b.file then return a.file < b.file end
         return (a.line or 0) < (b.line or 0)
@@ -751,64 +748,78 @@ end
 -- returns to ONE value (b = nil silently). Three real bugs in one day
 -- of cartograph's own development. AST-precise: 2+ targets, ONE rhs
 -- expression that is an and/or chain whose operand is a call.
-local function truncation_findings(store)
-    local out = {}
-    local okts = pcall(vim.treesitter.language.add, 'lua')
-    if not okts then return out end
-    for _, file in ipairs(store.files) do
-        if file:match('%.lua$') then
-            local fd = io.open(store.abs(file), 'r')
-            if fd then
-                local src = fd:read('*a')
-                fd:close()
-                local troot = require('cartograph.parsecache').root(require('cartograph.parseview').view(src, 'lua'), 'lua')
-                local tree = troot and { root = function () return troot end } -- (the shared tree: one parse per text)
-                if tree then
-                    local function has_call(n) -- a call anywhere in the and/or chain
-                        local t = n:type()
-                        if t == 'function_call' then return true end
-                        if t == 'binary_expression' or t == 'parenthesized_expression' then
-                            for _, c in tsutil.inext, n, -1 do
-                                if c:named() and has_call(c) then return true end
-                            end
-                        end
-                        return false
+-- one file's visitor (run in lint.run's shared walk, beside tagcover)
+local function truncation_walker(store, file, src, out)
+    local function has_call(n) -- a call anywhere in the and/or chain
+        local t = n:type()
+        if t == 'function_call' then return true end
+        if t == 'binary_expression' or t == 'parenthesized_expression' then
+            for _, c in tsutil.inext, n, -1 do
+                if c:named() and has_call(c) then return true end
+            end
+        end
+        return false
+    end
+    return { enter = { assignment_statement = function (n)
+        local vl, el = n:named_child(0), n:named_child(1)
+        if vl and el and vl:named_child_count() >= 2
+            and el:named_child_count() == 1 then
+            local e = el:named_child(0)
+            if e:type() == 'binary_expression' then
+                local isao = false
+                for i = 0, e:child_count() - 1 do
+                    local ch = e:child(i)
+                    if not ch:named() then
+                        local ct = ch:type()
+                        if ct == 'and' or ct == 'or' then isao = true break end
                     end
-                    local function walk(n)
-                        local t = n:type()
-                        if t == 'assignment_statement' then
-                            local vl, el = n:named_child(0), n:named_child(1)
-                            if vl and el and vl:named_child_count() >= 2
-                                and el:named_child_count() == 1 then
-                                local e = el:named_child(0)
-                                if e:type() == 'binary_expression' then
-                                    local isao = false
-                                    for i = 0, e:child_count() - 1 do
-                                        local ch = e:child(i)
-                                        if not ch:named() then
-                                            local ct = ch:type()
-                                            if ct == 'and' or ct == 'or' then isao = true break end
-                                        end
-                                    end
-                                    if isao and has_call(e) then
-                                        local l = select(1, n:range())
-                                        out[#out + 1] = { file = store.abs(file), line = l + 1,
-                                            message = 'and/or ADJUSTS a call to one value — the extra targets are silently nil (use an explicit if)' }
-                                    end
-                                end
-                            end
-                        end
-                        -- (named children with children of their own: a count, not a materialized first child)
-                        for _, c in tsutil.inamed, n, -1 do
-                            if c:child_count() > 0 then walk(c) end
-                        end
+                end
+                if isao and has_call(e) then
+                    local l = select(1, n:range())
+                    out[#out + 1] = { file = store.abs(file), line = l + 1,
+                        message = 'and/or ADJUSTS a call to one value — the extra targets are silently nil (use an explicit if)' }
+                end
+            end
+        end
+    end } }
+end
+
+-- THE WALKING RULES' SHARED PASS (CART-1659): every selected rule that declares `walk = { lang, files, make, done? }`
+-- sees each file's tree in ONE treewalk walk — make(store, file, src, out) returns the file's visitor (its `finish`,
+-- if any, runs after the walk), done(out) post-processes the rule's whole list. Tagcover and truncation each walked
+-- every Lua tree on their own. rules -> { [rule] = findings }
+local function walk_rules(store, rules)
+    local res, langs = {}, {}
+    for _, r in ipairs(rules) do
+        res[r] = {}
+        local l = r.walk.lang
+        if not langs[l] then langs[l] = {}; langs[#langs + 1] = l end
+        table.insert(langs[l], r)
+    end
+    local tw, pcache, pview = require 'cartograph.treewalk', require 'cartograph.parsecache', require 'cartograph.parseview'
+    for _, lang in ipairs(langs) do
+        if pcall(vim.treesitter.language.add, lang) then
+            for _, file in ipairs(store.files) do
+                local here
+                for _, r in ipairs(langs[lang]) do
+                    if file:match(r.walk.files) then here = here or {}; here[#here + 1] = r end
+                end
+                local fd = here and io.open(store.abs(file), 'r')
+                if fd then
+                    local src = fd:read('*a'); fd:close()
+                    local root = pcache.root(pview.view(src, lang), lang) -- (the shared tree: one parse per text)
+                    if root then
+                        local vs = {}
+                        for i, r in ipairs(here) do vs[i] = r.walk.make(store, file, src, res[r]) end
+                        tw.walk(root, vs)
+                        for _, v in ipairs(vs) do if v.finish then v.finish() end end
                     end
-                    walk(tree:root())
                 end
             end
         end
     end
-    return out
+    for _, r in ipairs(rules) do if r.walk.done then res[r] = r.walk.done(res[r]) end end
+    return res
 end
 
 -- require cycles: SCCs over the import edges. HEDGED: import edges do
@@ -1954,12 +1965,12 @@ M.rules = {
         -- a hole in a tag dispatch is SILENT: the value falls to whatever the fallback
         -- assumes. Suggestive because a subset may be deliberate and a fallback may be
         -- right — the finding is the question, not the verdict (CART-0662)
-        run = tagcover_findings },
+        walk = { lang = 'lua', files = '%.lua$', make = tagcover_walker, done = tagcover_sort } },
     { name = 'truncation', severity = 'info', quantifier = 'witness', disposition = 'authoritative',
         -- AST-precise (2+ targets, one and/or rhs whose operand is a call) and the
         -- semantics are unambiguous: the second target silently becomes nil. Three
         -- real bugs in one day of our own development
-        run = truncation_findings },
+        walk = { lang = 'lua', files = '%.lua$', make = truncation_walker } },
     { name = 'require-cycle', severity = 'info', quantifier = 'witness', disposition = 'suggestive',
         -- HEDGED BY ITS OWN COMMENT: import edges do not record load-time vs lazy, so
         -- a cycle is "fragile IF load-time", not a certain bug
@@ -2310,6 +2321,10 @@ M.rules = {
         end,
     },
 }
+-- a walking rule run on its own (a caller of rule.run, or a run that selects only it): the shared pass with one rule
+for _, r in ipairs(M.rules) do
+    if r.walk and not r.run then r.run = function (store) return walk_rules(store, { r })[r] end end
+end
 
 --- Run all (enabled) rules over the store. Returns a flat findings list.
 ---@param store table
@@ -2326,6 +2341,14 @@ function M.run(store, opts)
     local sc = opts and opts.scope
     local cut = sc and require 'cartograph.cut'
     local findings, refused = {}, {}
+    -- the walking rules this run selects, all in one walk per file (a refused rule is not walked)
+    local walking = {}
+    for _, rule in ipairs(M.rules) do
+        if rule.walk and (not only or only[rule.name]) and not (sc and not M.policies(rule, sc.grain).clip) then
+            walking[#walking + 1] = rule
+        end
+    end
+    local walked = #walking > 0 and walk_rules(store, walking) or {}
     for _, rule in ipairs(M.rules) do
         if not only or only[rule.name] then
             if sc and not M.policies(rule, sc.grain).clip then
@@ -2341,7 +2364,7 @@ function M.run(store, opts)
                     why = ('asserts an absence over %s — this %s cut cannot hold it')
                         :format(rule.closed_over or 'an unstated space', sc.grain) }
             else
-                for _, f in ipairs(rule.run(store)) do
+                for _, f in ipairs(walked[rule] or rule.run(store)) do
                     -- `not sc` FIRST: the unscoped path must not touch `cut` at
                     -- all, and it is the path every existing caller takes
                     if not sc or cut.contains(store, sc, f.file, f.line) then
