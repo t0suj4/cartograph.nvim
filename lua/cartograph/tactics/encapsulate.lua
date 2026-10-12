@@ -27,8 +27,8 @@ return {
     kind = 'write',
     tags = { 'code', 'refactor', 'optimize' },
     summary = 'ENCAPSULATE FIELD by the shape roster: every read of a record shape the roster proves (seeded by its producers: calls = name[=kind], fields = name | base.field) is rerouted through an accessor module (rw = suffix=accessor,…; mod = module:binding; the binding added at the top of each file); the accessors are identity on the raw record, so a safe rewrite cannot change behaviour. A RISKY rewrite (an owner of the representation — owners = patterns, default the store\'s —, a multi-line or partial chain) STOPS on a decision row: decide = <file:line:col>=rewrite|skip',
-    params = { calls = 'list?', fields = 'list?', bless = 'list?', rw = 'list', mod = 'string', owners = 'list?', decide = 'list?' },
-    build = function (p) return T.step('encapsulate', { calls = p.calls, fields = p.fields, bless = p.bless, rw = p.rw, mod = p.mod, owners = p.owners, decide = p.decide }) end,
+    params = { calls = 'list?', fields = 'list?', bless = 'list?', rw = 'list', mod = 'string', owners = 'list?', decide = 'list?', policy = 'string?' },
+    build = function (p) return T.step('encapsulate', { calls = p.calls, fields = p.fields, bless = p.bless, rw = p.rw, mod = p.mod, owners = p.owners, decide = p.decide, policy = p.policy }) end,
     examples = {
         {
             name = 'a safe deref is rerouted (and the accessor bound at the top); an OWNER file\'s deref stops the plan on a decision — nothing is written',
@@ -59,6 +59,15 @@ return {
                 for _, m in ipairs { 'rng', 'acc', 'use', 'own' } do package.loaded[m] = nil end
                 package.path = saved
                 return okc and okt and w == 7 and l == 3 and t == 5, ('width -> %s %s, top -> %s'):format(tostring(w), tostring(l), tostring(t))
+            end },
+        },
+        {
+            name = 'policy = auto: the owner row is answered by rule (rewrite: identity on the raw record), nothing stops, and the plan says how many the policy answered',
+            files = FILES,
+            params = with({ policy = 'auto' }),
+            expect = { status = 'done', applied = 1, check = function (root)
+                local own = io.open(root .. '/lua/own.lua'):read('a')
+                return own:find('return acc.sl(r)', 1, true) ~= nil, own
             end },
         },
         {

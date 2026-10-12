@@ -100,6 +100,67 @@ function M.plan(root, args)
     return { edits = edits, rewrites = rewrites, rows = rows, escapes = escapes, roster = r }
 end
 
+-- ★ THE AUTO POLICY (CART-1664: "make the decisions — it should accelerate the loop, so experiments are cheaper"): the
+-- answers a person would give by rule, each RECORDED with the rule that gave it, an explicit decide = … always wins.
+--   bless      the accessor module's EXPORTS (parsed from it, never listed): a call to one of them, under any local
+--              name (`at.sl(r)` where the file binds `at`), reads through the seam — no escape
+--   (NOT follow: seeding a stored-into field BY NAME and re-running exploded on cartograph — `e`, `name`, `file` became
+--   seeds and 10,675 escapes opened. A store is followed only into a field ALREADY seeded, below.)
+--   rows       an OWNER file's deref -> rewrite (identity on the raw record); an unspliceable one (no extent, a partial
+--              or multi-line chain) -> skip
+--   escapes    an argument to a builtin that is PURE, reads none of its contents and hands it back nowhere (effects'
+--              SIGS: type, rawequal, tostring) -> ok; a store into a SEEDED field, or into the list a seeded field
+--              holds (`e.at[#e.at + 1] = r`) -> ok (its readers are in the roster)
+-- Whatever no rule answers stays a row: the real decision list.
+local function exports_of(root, mod)
+    local rel = 'lua/' .. mod:gsub('%.', '/') .. '.lua'
+    local fd = io.open(root .. '/' .. rel) or (function ()
+        local hit = vim.api.nvim_get_runtime_file(rel, false)[1]
+        return hit and io.open(hit)
+    end)()
+    local out = {}
+    if fd then
+        local src = fd:read('a'); fd:close()
+        for name in src:gmatch('function%s+M%.([%w_]+)%s*%(') do out[name] = true end
+    end
+    return out
+end
+local function neutral(name)
+    local sg = require('cartograph.effects').SIGS.lua.exact[name]
+    return sg and sg.pure and not sg.reads and not sg.returns_arg and not sg.yields_arg and not sg.w and not sg.calls
+end
+function M.plan_auto(root, args)
+    args = vim.deepcopy(args)
+    args.bless = args.bless or {}
+    for name in pairs(exports_of(root, args.mod)) do args.bless[name] = true end
+    args.fields = args.fields or {}
+    local seeded = function (f) return args.fields[f] or args.rooted and args.rooted[f] end
+    local p = M.plan(root, args)
+    local decide, decisions = vim.deepcopy(args.decide or {}), {}
+    local function answer(key, a, rule)
+        if decide[key] then return end -- (an explicit answer wins)
+        decide[key] = a
+        decisions[#decisions + 1] = { key = key, answer = a, rule = rule }
+    end
+    for _, r in ipairs(p.rows) do
+        if r.why:find('^owner file') then answer(r.key, 'rewrite', 'owner-identity')
+        else answer(r.key, 'skip', 'unspliceable') end
+    end
+    for _, e in ipairs(p.escapes) do
+        local callee = e.kind == 'arg' and tostring(e.detail or ''):match('^([%w_.]+)%(%)$')
+        if callee and neutral(callee) then answer(e.key, 'ok', 'neutral-builtin:' .. callee)
+        elseif e.kind == 'store' and e.detail then
+            local d = tostring(e.detail)
+            local f = d:match('^[%w_]+$') or d:match('%.([%w_]+)$') or d:match('([%w_]+)%[#') -- (`x.at[#x.at + 1]`: the list a field holds)
+            if f and seeded(f) then answer(e.key, 'ok', 'stored-into-seeded:' .. f) end
+        end
+    end
+    args.decide = decide
+    local final = M.plan(root, args)
+    final.decisions, final.seeds = decisions, args.fields
+    return final
+end
+
 --- one row per line, for a decision's text: `key  why/kind  detail`
 function M.render(rows, n)
     local out = {}

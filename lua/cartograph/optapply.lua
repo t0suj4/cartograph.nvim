@@ -829,7 +829,7 @@ function M.plan_encapsulate(store, args)
     for _, f in ipairs(store.files or {}) do if f:match('%.lua$') then a.files[#a.files + 1] = f end end
     table.sort(a.files)
     local E = require 'cartograph.encapsulate'
-    local p = E.plan(root, a)
+    local p = (args.policy == 'auto') and E.plan_auto(root, a) or E.plan(root, a)
     if #p.rows > 0 then
         return nil, ('%d rewrite(s) need an answer (decide = <key>=rewrite|skip, …):\n%s'):format(#p.rows, E.render(p.rows)), 'decision'
     end
@@ -847,8 +847,9 @@ function M.plan_encapsulate(store, args)
         touched = touched, stamps = stamps, refspecs = {}, edits = p.edits, hazards = hazards,
         preserves = 'unreviewed',
         preserves_why = ('each rewritten deref reads the same value: %s\'s accessors are identity on the raw record'):format(a.mod),
-        desc = ('encapsulate: %d deref(s) in %d file(s) read through %s'):format(#p.rewrites, #touched, a.mod),
-        rewrites = p.rewrites,
+        desc = ('encapsulate: %d deref(s) in %d file(s) read through %s%s'):format(#p.rewrites, #touched, a.mod,
+            p.decisions and (' (%d answered by policy)'):format(#p.decisions) or ''),
+        rewrites = p.rewrites, decisions = p.decisions,
     }
     return txn.protocol(plan, function (pl) return function (rel, before) return pl.edits[rel] or before end end)
 end

@@ -13,9 +13,9 @@ local function measure(store, p)
     for _, f in ipairs(store.files or {}) do if f:match('%.lua$') then a.files[#a.files + 1] = f end end
     table.sort(a.files)
     -- (an `ok` answer closes an escape; encapsulate's answers count too)
-    local pl = E.plan(root, a)
+    local pl = (p.policy == 'auto') and E.plan_auto(root, a) or E.plan(root, a)
     return { reroute = #pl.rewrites, risky = pl.rows, escapes = pl.escapes,
-        closed = #pl.rewrites == 0 and #pl.rows == 0 and #pl.escapes == 0, text = E.render(pl.escapes) }
+        closed = #pl.rewrites == 0 and #pl.rows == 0 and #pl.escapes == 0, text = E.render(pl.escapes), decisions = pl.decisions }
 end
 
 local FILES = {
@@ -30,7 +30,7 @@ return {
     kind = 'discovery',
     tags = { 'code', 'refactor' },
     summary = 'is a record shape CLOSED behind its accessor (the precondition for changing its representation)? no deref left to reroute, no risky row unanswered, and every ESCAPE — argument, store, return, raw index — answered decide = <key>=ok; same seeds as encapsulate (calls / fields, rw, mod, owners, decide)',
-    params = { calls = 'list?', fields = 'list?', bless = 'list?', rw = 'list', mod = 'string', owners = 'list?', decide = 'list?' },
+    params = { calls = 'list?', fields = 'list?', bless = 'list?', rw = 'list', mod = 'string', owners = 'list?', decide = 'list?', policy = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
