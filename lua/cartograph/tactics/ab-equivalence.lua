@@ -72,7 +72,14 @@ local function measure(_, p)
     local mfile = scratch .. '/measure.lua'
     local fd = assert(io.open(mfile, 'w')); fd:write(p.measure or ''); fd:close()
     local limit = p.timeout and tonumber(p.timeout) * 1000 or 900000
-    local function run(S, corpus, tag)
+    -- (side B's limit, without an explicit timeout: 10x side A's wall, at least 60 s — a rewrite that HANGS (a memo of a
+    -- stateful function looped the parser forever, CART-1661) is a failure in a minute, not after the flat 900 s)
+    local function blimit(a)
+        if p.timeout or not (a and a.wall) then return limit end
+        return math.min(limit, math.max(60000, a.wall * 10000))
+    end
+    local function run(S, corpus, tag, lim)
+        lim = lim or limit
         local out, secs = scratch .. '/' .. tag .. '.out', scratch .. '/' .. tag .. '.secs'
         local wrapper = scratch .. '/' .. tag .. '-wrapper.lua'
         -- ★ A SIDE THAT IS NOT A CARTOGRAPH CHECKOUT (any Lua project — the optimize loop's world): this toolbelt runs
@@ -89,10 +96,10 @@ local function measure(_, p)
         end
         local t0 = vim.uv.hrtime()
         local obj, err = SF.exec({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', tb, 'run', '@' .. wrapper, corpus },
-            { cwd = S.root, env = env, timeout = limit })
+            { cwd = S.root, env = env, timeout = lim })
         local wall = (vim.uv.hrtime() - t0) / 1e9
         if not obj then return nil, err end
-        if obj.timed_out then return nil, ('%s timed out after %g s on %s (its process group killed)'):format(S.label, limit / 1000, corpus) end
+        if obj.timed_out then return nil, ('%s timed out after %g s on %s (its process group killed)'):format(S.label, lim / 1000, corpus) end
         local f = io.open(out)
         if not f then
             return nil, ('%s produced no output on %s: %s'):format(S.label, corpus, ((obj.stderr or '') .. (obj.stdout or '')):sub(-400))
@@ -104,7 +111,7 @@ local function measure(_, p)
     for i, corpus in ipairs(p.corpus or {}) do
         local a, aw = run(A, corpus, 'a' .. i)
         if not a then v.error = aw; break end
-        local b, bw = run(B, corpus, 'b' .. i)
+        local b, bw = run(B, corpus, 'b' .. i, blimit(a))
         if not b then v.error = bw; break end
         local la, lb = a.lines, b.lines
         if p.sorted == '1' then
@@ -120,7 +127,7 @@ local function measure(_, p)
         -- ★ faster = 1 TIMES BOTH ORDERS (A,B then B,A): one sample in one order decides nothing — whichever side runs
         -- second inherits a warmer machine (the standing timing rule). B must win BOTH pairs
         if p.faster == '1' and first == nil then
-            local b2, bw2 = run(B, corpus, 'b' .. i .. 'r')
+            local b2, bw2 = run(B, corpus, 'b' .. i .. 'r', blimit(a))
             if not b2 then v.error = bw2; break end
             local a2, aw2 = run(A, corpus, 'a' .. i .. 'r')
             if not a2 then v.error = aw2; break end

@@ -29,11 +29,16 @@ end
 
 local function inside(file) return type(file) == 'string' and file:sub(1, 1) ~= '/' and file:sub(1, 1) ~= '[' end
 
-local function node_at(store, file, line)
+local function fn_node_at(store, file, line)
     local at = require 'cartograph.at'
     for _, n in ipairs(store.data.nodes or {}) do
-        if n.file == file and (n.kind == 'function' or n.kind == 'method') and at.sl(n.range) == line - 1 then return store.ref_of(n.id) end
+        if n.file == file and (n.kind == 'function' or n.kind == 'method') and at.sl(n.range) == line - 1 then return n end
     end
+end
+-- the function starting at file:line -> its REF (a write verb's handle); its node id is fn_node_at's .id
+local function node_at(store, file, line)
+    local n = fn_node_at(store, file, line)
+    return n and store.ref_of(n.id) or nil
 end
 
 local function build(p, store)
@@ -128,10 +133,24 @@ local function build(p, store)
         end
         if #targets == 0 then return nil, 'no field of this world holds the workload\'s samples', 'empty' end
         return T.bind('memo-advisor', { targets = table.concat(targets, ','), workload = p.workload, code = root, timeout = p.timeout }, function (adv)
-            local best = adv.rows[1]
+            -- ★ A FUNCTION WITH EFFECTS IS NO MEMO CANDIDATE (CART-1661): the advisor counts calls per distinct
+            -- argument, and a function that ADVANCES its argument (a lexer's next_token(state): 443 K calls on 110 state
+            -- objects, luacheck) looks like the best memo there is — memoized, it returns the first token forever and the
+            -- parser never ends (the A/B timed out after 900 s). effects' purity label decides: writes / io, hedged or
+            -- not, are skipped, the next row is taken, and the skipped ones are named
+            local EFX = require 'cartograph.effects'
+            local best, skipped = nil, {}
+            for _, r in ipairs(adv.rows) do
+                local w = where[r.name]
+                local n = w and fn_node_at(store, w.file, w.line)
+                local label = n and EFX.purity(store, n.id) or '?'
+                if label:match('^writes') or label:match('^io') then skipped[#skipped + 1] = r.name .. ' (' .. label .. ')'
+                else best = r; break end
+            end
+            local skip = #skipped > 0 and ('; skipped as impure: ' .. table.concat(skipped, ', ')) or ''
             if not best or best.saved < min * adv.workload_seconds then
-                return nil, ('no memo saves %.0f%% of the workload (best: %s, %.3f s of %.3f s)'):format(min * 100,
-                    best and best.name or '-', best and best.saved or 0, adv.workload_seconds), 'empty'
+                return nil, ('no memo saves %.0f%% of the workload (best: %s, %.3f s of %.3f s)%s'):format(min * 100,
+                    best and best.name or '-', best and best.saved or 0, adv.workload_seconds, skip), 'empty'
             end
             -- ★ THE PRICE IS A DECISION TOO: the A/B checks output and time, never memory. CART-1427's hand process
             -- REJECTED exactly this memo (expr.of, ~91-141 MB) on its price and restructured instead; a loop that only
@@ -189,6 +208,13 @@ local SHARED = table.concat({
     'local M = {}',
     'function M.box(t) local s = 0 for i = 1, 1500000 do s = s + (#t * i) % 7 end return { n = s } end',
     'function M.work(xs) local s = 0 for _, x in ipairs(xs) do local b = M.box(x); b.n = b.n + 1; s = s + b.n end return s end',
+    'return M', '' }, '\n')
+-- a STATEFUL hot function (CART-1661): next(st) ADVANCES st — called 400 times on ONE state object, the advisor sees
+-- the best memo there is; memoized, it returns the first value forever (luacheck's lexer.next_token looped its parser)
+local STATEM = table.concat({
+    'local M = {}',
+    'function M.next(st) st.i = st.i + 1; local s = 0 for k = 1, 40000 do s = s + (st.i * k) % 7 end return s end',
+    'function M.work(n) local st, s = { i = 0 }, 0 for _ = 1, n do s = s + M.next(st) end return s end',
     'return M', '' }, '\n')
 -- a hot loop over an ABSENT map: `pairs(t or {})` builds an empty table per iteration — and pairs is not compiled by
 -- LuaJIT 2.1, so the loop runs INTERPRETED and the table is really allocated (a compiled `ipairs(t or {})` is SUNK: the
@@ -270,6 +296,21 @@ return {
             expect = { status = 'done', applied = 1, check = function (root)
                 local s = io.open(root .. '/lua/hoistm.lua'):read('a')
                 return s:find('pairs(t or EMPTY_RO)', 1, true) ~= nil and s:find('function M.cold(t) return #(t or {}) end', 1, true) ~= nil, s
+            end },
+        },
+        {
+            name = 'a function that ADVANCES its argument is no memo candidate: skipped by its effects (writes), nothing rewritten (CART-1661)',
+            files = { ['lua/statem.lua'] = STATEM }, requires = in_git,
+            params = function (store)
+                commit(store)
+                return { workload = 'return function () require("statem").work(400) end', corpus = { store.data.root },
+                    measure = 'return { measure = function () package.loaded.statem = nil; return tostring(require("statem").work(400)) end }' }
+            end,
+            -- (no candidate left is the `empty` refusal: status failed, nothing written)
+            expect = { status = 'failed', applied = 0, check = function (root, r)
+                local why = tostring(r and (r.why or r.error) or '')
+                return io.open(root .. '/lua/statem.lua'):read('a') == STATEM and why:find('skipped as impure', 1, true) ~= nil
+                    and why:find('statem.next', 1, true) ~= nil, why
             end },
         },
         {
