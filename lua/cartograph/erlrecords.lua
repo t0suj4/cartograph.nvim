@@ -196,60 +196,58 @@ function M.parse_source(src, path)
         for _, ch in tsutil.inamed, n, -1 do walk(ch, ctx) end
     end
 
-    for _, form in tsutil.inext, root, -1 do
-        if form:named() then
-            local t = form:type()
-            if t == 'pp_ifdef' or t == 'pp_ifndef' then
-                local nm = f1(form, 'name')
-                local base = 'defined(' .. (nm and text(nm) or '?') .. ')'
-                if t == 'pp_ifndef' then base = negate(base) end
-                stack[#stack + 1] = { label = base, base = base, guard = form:id() == guard }
-            elseif t == 'pp_if' then
-                local c = f1(form, 'cond')
-                local base = 'if' .. (c and text(c) or '(?)')
-                stack[#stack + 1] = { label = base, base = base }
-            elseif t == 'pp_elif' then
-                local c = f1(form, 'cond')
-                local top = stack[#stack]
-                if top then top.label = 'elif' .. (c and text(c) or '(?)'); top.chain = true end
-            elseif t == 'pp_else' then
-                local top = stack[#stack]
-                if top then
-                    top.label = top.chain and ('else of ' .. top.base) or negate(top.base)
-                end
-            elseif t == 'pp_endif' then
-                stack[#stack] = nil
-            elseif t == 'pp_include' or t == 'pp_include_lib' then
-                local s = f1(form, 'file')
-                local spec = s and text(s):match('^"(.*)"$')
-                facts.includes[#facts.includes + 1] = {
-                    kind = t == 'pp_include' and 'include' or 'include_lib',
-                    spec = spec, line = form:start() + 1, cond = cond(),
-                }
-            elseif t == 'record_decl' then
-                local nm = f1(form, 'name')
-                local d = { name = nm and nm:type() == 'atom' and atom(text(nm)) or nil, file = path,
-                    line = form:start() + 1, cond = cond(), fields = {}, by = {} }
-                for i, rf in ipairs(form:field('fields')) do
-                    local fn = f1(rf, 'name')
-                    local fe, ft = f1(rf, 'expr'), f1(rf, 'ty')
-                    local de, te = fe and f1(fe, 'expr'), ft and f1(ft, 'expr')
-                    local fld = { name = fn and atom(text(fn)), index = i, line = rf:start() + 1,
-                        default = de and text(de) or nil, type = te and text(te) or nil }
-                    d.fields[i] = fld
-                    if fld.name then d.by[fld.name] = fld end
-                end
-                if d.name then facts.records[#facts.records + 1] = d
-                else facts.unnamed = (facts.unnamed or 0) + 1 end
-                -- defaults and field types reference other records: those are uses too
-                walk(form, 'expr')
-            elseif t == 'pp_define' then
-                in_define = true
-                walk(form, 'expr')
-                in_define = false
-            else
-                walk(form, 'expr')
+    for _, form in tsutil.inamed, root, -1 do
+        local t = form:type()
+        if t == 'pp_ifdef' or t == 'pp_ifndef' then
+            local nm = f1(form, 'name')
+            local base = 'defined(' .. (nm and text(nm) or '?') .. ')'
+            if t == 'pp_ifndef' then base = negate(base) end
+            stack[#stack + 1] = { label = base, base = base, guard = form:id() == guard }
+        elseif t == 'pp_if' then
+            local c = f1(form, 'cond')
+            local base = 'if' .. (c and text(c) or '(?)')
+            stack[#stack + 1] = { label = base, base = base }
+        elseif t == 'pp_elif' then
+            local c = f1(form, 'cond')
+            local top = stack[#stack]
+            if top then top.label = 'elif' .. (c and text(c) or '(?)'); top.chain = true end
+        elseif t == 'pp_else' then
+            local top = stack[#stack]
+            if top then
+                top.label = top.chain and ('else of ' .. top.base) or negate(top.base)
             end
+        elseif t == 'pp_endif' then
+            stack[#stack] = nil
+        elseif t == 'pp_include' or t == 'pp_include_lib' then
+            local s = f1(form, 'file')
+            local spec = s and text(s):match('^"(.*)"$')
+            facts.includes[#facts.includes + 1] = {
+                kind = t == 'pp_include' and 'include' or 'include_lib',
+                spec = spec, line = form:start() + 1, cond = cond(),
+            }
+        elseif t == 'record_decl' then
+            local nm = f1(form, 'name')
+            local d = { name = nm and nm:type() == 'atom' and atom(text(nm)) or nil, file = path,
+                line = form:start() + 1, cond = cond(), fields = {}, by = {} }
+            for i, rf in ipairs(form:field('fields')) do
+                local fn = f1(rf, 'name')
+                local fe, ft = f1(rf, 'expr'), f1(rf, 'ty')
+                local de, te = fe and f1(fe, 'expr'), ft and f1(ft, 'expr')
+                local fld = { name = fn and atom(text(fn)), index = i, line = rf:start() + 1,
+                    default = de and text(de) or nil, type = te and text(te) or nil }
+                d.fields[i] = fld
+                if fld.name then d.by[fld.name] = fld end
+            end
+            if d.name then facts.records[#facts.records + 1] = d
+            else facts.unnamed = (facts.unnamed or 0) + 1 end
+            -- defaults and field types reference other records: those are uses too
+            walk(form, 'expr')
+        elseif t == 'pp_define' then
+            in_define = true
+            walk(form, 'expr')
+            in_define = false
+        else
+            walk(form, 'expr')
         end
     end
     return facts

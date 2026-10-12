@@ -155,8 +155,8 @@ end
 local function php_params(node, src, out)
     local ps = node:field('parameters')[1]
     if ps then
-        for _, p in tsutil.inext, ps, -1 do
-            if p:named() then php_var(p:field('name')[1], src, out) end
+        for _, p in tsutil.inamed, ps, -1 do
+            php_var(p:field('name')[1], src, out)
         end
     end
 end

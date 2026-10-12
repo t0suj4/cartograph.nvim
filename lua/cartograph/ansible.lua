@@ -200,8 +200,8 @@ function M.attach(data)
                         local val = n:next_named_sibling() or n:parent()
                         if nm then anchors[vim.treesitter.get_node_text(nm, src)] = val end
                     end
-                    for _, c in tsutil.inext, n, -1 do
-                        if c:named() then find_anchors(c) end
+                    for _, c in tsutil.inamed, n, -1 do
+                        find_anchors(c)
                     end
                 end
                 find_anchors(tree)
@@ -291,8 +291,8 @@ function M.attach(data)
                 local k, v = pair_kv(n, pf.src)
                 if short_key(k) == 'handlers' then add_handler(seq_of(v), rel, pf.src) end
             end
-            for _, c in tsutil.inext, n, -1 do
-                if c:named() then find_handler_blocks(c) end
+            for _, c in tsutil.inamed, n, -1 do
+                find_handler_blocks(c)
             end
         end
         find_handler_blocks(pf.tree)
@@ -430,8 +430,8 @@ function M.attach(data)
                     end
                 end
             end
-            for _, c in tsutil.inext, n, -1 do
-                if c:named() then visit(c) end
+            for _, c in tsutil.inamed, n, -1 do
+                visit(c)
             end
         end
         visit(pf.tree)

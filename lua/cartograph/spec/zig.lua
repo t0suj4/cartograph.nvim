@@ -21,11 +21,9 @@ local function zig_base_type(node, src)
     local t = node:type()
     if t == 'pointer_type' or t == 'optional_type'
         or t == 'slice_type' or t == 'array_type' then
-        for _, c in tsutil.inext, node, -1 do
-            if c:named() then
-                local inner = zig_base_type(c, src)
-                if inner then return inner end
-            end
+        for _, c in tsutil.inamed, node, -1 do
+            local inner = zig_base_type(c, src)
+            if inner then return inner end
         end
         return nil
     end
@@ -56,11 +54,9 @@ local function zig_method_owner(defn, src)
                     -- parameter = (identifier <name>) <type>; the receiver
                     -- type is the second named child.
                     local seen_name, tynode
-                    for _, cc in tsutil.inext, pc, -1 do
-                        if cc:named() then
-                            if not seen_name then seen_name = true
-                            else tynode = cc break end
-                        end
+                    for _, cc in tsutil.inamed, pc, -1 do
+                        if not seen_name then seen_name = true
+                        else tynode = cc break end
                     end
                     if tynode and tynode:type() == 'pointer_type' then
                         return zig_base_type(tynode, src)
@@ -92,11 +88,9 @@ local function zig_value_owner(defn, src)
             for _, pc in tsutil.inext, c, -1 do
                 if pc:type() == 'parameter' then
                     local nm, tynode
-                    for _, cc in tsutil.inext, pc, -1 do
-                        if cc:named() then
-                            if not nm then nm = node_text(cc, src)
-                            else tynode = cc break end
-                        end
+                    for _, cc in tsutil.inamed, pc, -1 do
+                        if not nm then nm = node_text(cc, src)
+                        else tynode = cc break end
                     end
                     if tynode and tynode:type() == 'identifier' then
                         local ty = node_text(tynode, src)
@@ -123,13 +117,11 @@ local function zig_recv_type(calln, recv, src)
                     for _, pc in tsutil.inext, c, -1 do
                         if pc:type() == 'parameter' then
                             local nm, tynode
-                            for _, cc in tsutil.inext, pc, -1 do
-                                if cc:named() then
-                                    if cc:type() == 'identifier' and not nm then
-                                        nm = node_text(cc, src)
-                                    elseif nm and not tynode then
-                                        tynode = cc
-                                    end
+                            for _, cc in tsutil.inamed, pc, -1 do
+                                if cc:type() == 'identifier' and not nm then
+                                    nm = node_text(cc, src)
+                                elseif nm and not tynode then
+                                    tynode = cc
                                 end
                             end
                             if nm == recv then
@@ -172,11 +164,9 @@ local function zig_ident_type(node, name, src)
                     for _, pc in tsutil.inext, c, -1 do
                         if pc:type() == 'parameter' then
                             local pn, tynode
-                            for _, cc in tsutil.inext, pc, -1 do
-                                if cc:named() then
-                                    if not pn then pn = node_text(cc, src)
-                                    else tynode = cc break end
-                                end
+                            for _, cc in tsutil.inamed, pc, -1 do
+                                if not pn then pn = node_text(cc, src)
+                                else tynode = cc break end
                             end
                             if pn == name then return zig_base_type(tynode, src) end
                         end
@@ -205,12 +195,10 @@ local function build_zig_lf_map(tsroot, src)
         if t == 'function_declaration' then curfn = n end
         if t == 'variable_declaration' and curfn then
             local nm, rhs, seen
-            for _, c in tsutil.inext, n, -1 do
-                if c:named() then
-                    if not seen and c:type() == 'identifier' then
-                        nm = node_text(c, src); seen = true
-                    elseif seen and not rhs then rhs = c end
-                end
+            for _, c in tsutil.inamed, n, -1 do
+                if not seen and c:type() == 'identifier' then
+                    nm = node_text(c, src); seen = true
+                elseif seen and not rhs then rhs = c end
             end
             if nm and rhs and rhs:type() == 'field_expression' then
                 local ro = rhs:field('object')[1]
@@ -269,12 +257,10 @@ local function build_zig_ret_map(tsroot, src)
         if t == 'variable_declaration' and curfn
             and node_text(n, src):match('^const%f[%W]') then
             local nm, rhs, seen
-            for _, c in tsutil.inext, n, -1 do
-                if c:named() then
-                    if not seen and c:type() == 'identifier' then
-                        nm = node_text(c, src); seen = true
-                    elseif seen and not rhs then rhs = c end
-                end
+            for _, c in tsutil.inamed, n, -1 do
+                if not seen and c:type() == 'identifier' then
+                    nm = node_text(c, src); seen = true
+                elseif seen and not rhs then rhs = c end
             end
             if nm and rhs and rhs:type() == 'call_expression' then
                 local fe = rhs:field('function')[1]
@@ -776,12 +762,10 @@ return {
                         for _, c in tsutil.inext, n, -1 do
                             if c:type() == 'container_field' then
                                 local fname, tynode
-                                for _, cc in tsutil.inext, c, -1 do
-                                    if cc:named() then
-                                        if not fname and cc:type() == 'identifier' then
-                                            fname = node_text(cc, src)
-                                        elseif fname and not tynode then tynode = cc end
-                                    end
+                                for _, cc in tsutil.inamed, c, -1 do
+                                    if not fname and cc:type() == 'identifier' then
+                                        fname = node_text(cc, src)
+                                    elseif fname and not tynode then tynode = cc end
                                 end
                                 local b = tynode and zig_base_type(tynode, src)
                                 if fname and b then
@@ -825,11 +809,9 @@ return {
                 if t == 'error_union_expression' or t == 'error_union'
                     or t == 'optional_type' or t == 'pointer_type'
                     or t == 'slice_type' or t == 'array_type' then
-                    for _, c in tsutil.inext, node, -1 do
-                        if c:named() then
-                            local r = resolve_rt(c, depth + 1)
-                            if r then return r end
-                        end
+                    for _, c in tsutil.inamed, node, -1 do
+                        local r = resolve_rt(c, depth + 1)
+                        if r then return r end
                     end
                     return nil
                 end

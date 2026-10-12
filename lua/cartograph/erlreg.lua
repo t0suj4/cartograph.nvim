@@ -87,20 +87,20 @@ end
 local function tuples_tagged(root, src, tag, out)
     if root:type() == 'tuple' then
         local first
-        for _, c in tsutil.inext, root, -1 do
-            if c:named() then first = c; break end
+        for _, c in tsutil.inamed, root, -1 do
+            first = c; break
         end
         if first and first:type() == 'atom'
             and vim.treesitter.get_node_text(first, src) == tag then
             local els = {}
-            for _, c in tsutil.inext, root, -1 do
-                if c:named() then els[#els + 1] = c end
+            for _, c in tsutil.inamed, root, -1 do
+                els[#els + 1] = c
             end
             out[#out + 1] = els
         end
     end
-    for _, c in tsutil.inext, root, -1 do
-        if c:named() then tuples_tagged(c, src, tag, out) end
+    for _, c in tsutil.inamed, root, -1 do
+        tuples_tagged(c, src, tag, out)
     end
 end
 

@@ -224,10 +224,13 @@ test('byexample: a CONSTANT the example keeps stays part of the pattern, and ove
     local out, n = BX.rewrite(rules, 'if y == 0 then return end\nif y == 5 then return end\n')
     eq(1, n, 'y == 5 is not the demonstrated comparison with 0')
     ok(out:find('if y <= 0 then', 1, true) and out:find('if y == 5 then', 1, true), out)
-    -- the outer match covers the inner one: one rewrite, with the inner expression as its operand
+    -- the outer match covers the inner one in ONE pass, and the next pass takes the inner one: a rewrite reaches its
+    -- FIXPOINT (CART-1664), so running it again finds nothing — one pass had left `y == nil` for a rerun to rewrite
     local nil_rules = assert(BX.learn('if x == nil then return 0 end', 'if not x then return 0 end'))
     local o2, n2 = BX.rewrite(nil_rules, 'if (y == nil) == nil then return end\n')
-    eq(1, n2); eq('if not (y == nil) then return end\n', o2)
+    eq(2, n2); eq('if not (not y) then return end\n', o2)
+    local _, n3 = BX.rewrite(nil_rules, o2)
+    eq(0, n3, 'a rerun is empty')
 end)
 
 test('byexample: a file in scope the lossless reader cannot read is NAMED as not looked at, never counted as "no match" — unless its TEXT already rules a match out', function ()
@@ -289,4 +292,111 @@ test('byexample: a sole child pairs as a sequence only with a parent of the SAME
     local rules = assert(BX.learn('g(f(x))', 'do f(x) end', 'lua'))
     local out, n = BX.rewrite(rules, 'g(h(y))\n', 'lua')
     eq(1, n); eq('do h(y) end\n', out)
+end)
+
+-- ── SPACING-INDEPENDENT MATCHING (CART-1664) ─────────────────────────────────────────────────────────────────────
+local LOOP_B = 'for _, c in tsutil.inext, n, -1 do if c:named() then walk(c) end end'
+local LOOP_A = 'for _, c in tsutil.inamed, n, -1 do walk(c) end'
+
+test('byexample: a ONE-LINE example rewrites MULTI-LINE targets — kept tokens keep their spacing, the moved body is dedented (CART-1664)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local rules = assert(BX.learn(LOOP_B, LOOP_A, 'lua'))
+    local src = table.concat({
+        'local function a(n)',
+        '    for _, x in tsutil.inext, n, -1 do',
+        '        if x:named() then',
+        '            local t = x:type()',
+        '            seen[t] = true',
+        '        end',
+        '    end',
+        'end',
+        'local function b(vl)',
+        '    for _, v in tsutil.inext, vl, -1 do',
+        '        if v:named() then i = i + 1; g(v) end',
+        '    end',
+        'end', '' }, '\n')
+    local out, n = BX.rewrite(rules, src, 'lua')
+    eq(2, n)
+    eq(table.concat({
+        'local function a(n)',
+        '    for _, x in tsutil.inamed, n, -1 do',
+        '        local t = x:type()',
+        '        seen[t] = true',
+        '    end',
+        'end',
+        'local function b(vl)',
+        '    for _, v in tsutil.inamed, vl, -1 do',
+        '        i = i + 1; g(v)',
+        '    end',
+        'end', '' }, '\n'), out)
+    local _, again = BX.rewrite(rules, out, 'lua')
+    eq(0, again, 'a rerun is empty')
+end)
+
+test('byexample: a COMMENT beside a deleted token refuses the site by name — it may describe the deleted code (CART-1664)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local rules = assert(BX.learn(LOOP_B, LOOP_A, 'lua'))
+    local src = 'for _, x in tsutil.inext, n, -1 do\n    if x:named() then -- the named ones\n        f(x)\n    end\nend\n'
+    local out, n, refused = BX.rewrite(rules, src, 'lua')
+    eq(0, n); eq(src, out)
+    ok(refused[1] and refused[1].why:find('comment beside a deleted token', 1, true), vim.inspect(refused))
+end)
+
+test('byexample: an example that differs ONLY in spacing is refused — a spacing-free rule would match everything (CART-1664)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local r, why = BX.learn('local x = f(a,b)', 'local x = f(a, b)', 'lua')
+    eq(nil, r); ok(tostring(why):find('only in spacing', 1, true), tostring(why))
+end)
+
+test('byexample: PYTHON — the moved body is re-indented and the program answers the same (whitespace-significant, checked by parse-back) (CART-1664)', function ()
+    if not ready() or not parser_available('python') then skip 'no python parser' end
+    if vim.fn.executable('python3') == 0 then skip 'no python3' end
+    local rules = assert(BX.learn('for c in every(xs):\n    if c.ok:\n        use(c)\n', 'for c in oks(xs):\n    use(c)\n', 'python'))
+    local pre = 'def every(xs): return list(xs)\ndef oks(xs): return [x for x in xs if x.ok]\nclass I:\n    def __init__(s, n, ok): s.n, s.ok = n, ok\n'
+    local src = pre .. 'def total(items):\n    acc = []\n    for it in every(items):\n        if it.ok:\n            v = it.n * 2\n            acc.append(v)\n    return acc\n'
+    local out, n = BX.rewrite(rules, src, 'python')
+    eq(1, n)
+    ok(out:find('    for it in oks(items):\n        v = it.n * 2\n        acc.append(v)\n    return acc', 1, true), out)
+    local tail = 'print(total([I(1, True), I(2, False), I(3, True)]))\n'
+    local function run(code)
+        local f = vim.fn.tempname() .. '.py'
+        vim.fn.writefile(vim.split(code .. tail, '\n'), f)
+        local r = vim.system({ 'python3', f }, { text = true }):wait()
+        vim.fn.delete(f)
+        return r.stdout
+    end
+    eq(run(src), run(out), 'before and after answer the same')
+end)
+
+test('byexample: PYTHON — a moved body holding a TRIPLE-QUOTED string: the code dedents, the string keeps its bytes, the program answers the same (CART-1664)', function ()
+    if not ready() or not parser_available('python') then skip 'no python parser' end
+    if vim.fn.executable('python3') == 0 then skip 'no python3' end
+    local rules = assert(BX.learn('for c in every(xs):\n    if c.ok:\n        use(c)\n', 'for c in oks(xs):\n    use(c)\n', 'python'))
+    local pre = 'def every(xs): return list(xs)\ndef oks(xs): return [x for x in xs if x.ok]\nclass I:\n    def __init__(s, n, ok): s.n, s.ok = n, ok\n'
+    local src = pre .. 'def total(items):\n    acc = []\n    for it in every(items):\n        if it.ok:\n            v = """\n        head\n            %d\n"""\n            acc.append(v % it.n)\n    return acc\n'
+    local out, n = BX.rewrite(rules, src, 'python')
+    eq(1, n)
+    ok(out:find('    for it in oks(items):\n        v = """\n        head\n            %d\n"""\n        acc.append(v % it.n)\n', 1, true), out)
+    local tail = 'print(total([I(1, True), I(2, False), I(3, True)]))\n'
+    local function run(code)
+        local f = vim.fn.tempname() .. '.py'
+        vim.fn.writefile(vim.split(code .. tail, '\n'), f)
+        local r = vim.system({ 'python3', f }, { text = true }):wait()
+        vim.fn.delete(f)
+        return r.stdout
+    end
+    local a, b = run(src), run(out)
+    ok(a:find('head', 1, true), 'the original runs: ' .. a)
+    eq(a, b, 'before and after answer the same')
+end)
+
+test('byexample: a moved body holding a LONG STRING is re-indented around it — the string\'s continuation lines are its value, like a heredoc\'s (CART-1664)', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local rules = assert(BX.learn(LOOP_B, LOOP_A, 'lua'))
+    local src = 'for _, x in tsutil.inext, n, -1 do\n    if x:named() then\n        local s = [[\n        keep me\n        ]]\n        f(x, s)\n    end\nend\n'
+    local out, n = BX.rewrite(rules, src, 'lua')
+    eq(1, n)
+    eq('for _, x in tsutil.inamed, n, -1 do\n    local s = [[\n        keep me\n        ]]\n    f(x, s)\nend\n', out, 'the code lines dedented, the string\'s lines kept')
+    local before_s = src:match('%[%[(.-)%]%]')
+    eq(before_s, out:match('%[%[(.-)%]%]'), 'the long string\'s value is unchanged')
 end)

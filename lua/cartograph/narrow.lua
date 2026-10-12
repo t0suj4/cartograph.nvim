@@ -499,8 +499,8 @@ local function field_unstable_of(fn, src)
             end end
         elseif t == 'function_call' then -- A passed as arg, or A:m() receiver
             local args = n:field('arguments')[1]
-            if args then for _, a in tsutil.inext, args, -1 do
-                if a:named() then local p = path_of(a, src); if p then mark(p.path, false) end end
+            if args then for _, a in tsutil.inamed, args, -1 do
+                local p = path_of(a, src); if p then mark(p.path, false) end
             end end
             local callee = n:named_child(0)
             -- @langs-ok lua-only staling walk; ruby has no depth-≥1 facts to stale
@@ -574,33 +574,31 @@ function M.narrow(store, fn_id)
 
     local points, seenguard = {}, {}
     local function visit(n)
-        for _, c in tsutil.inext, n, -1 do
-            if c:named() then
-                if STMT_BLOCK[c:type()] then
-                    for _, stmt in tsutil.inext, c, -1 do
-                        if stmt:named() and not tsutil.is_comment(stmt) then
-                            local env = {}
-                            for _, g in ipairs(cfg.guards_over(stmt, src)) do
-                                for _, f in ipairs(classify(g.cond, src, not g.neg)) do
-                                    if fact_live(f, mutated, funstable) then
-                                        -- keep the STRONGEST kind; eq:/type: shown verbatim,
-                                        -- nil/truthy collapse to the sound floor 'non-nil'
-                                        if kind_rank(f.kind) > kind_rank(env[f.var]) then
-                                            env[f.var] = disp(f.kind)
-                                        end
-                                        seenguard[g.cond:id()] = true
+        for _, c in tsutil.inamed, n, -1 do
+            if STMT_BLOCK[c:type()] then
+                for _, stmt in tsutil.inext, c, -1 do
+                    if stmt:named() and not tsutil.is_comment(stmt) then
+                        local env = {}
+                        for _, g in ipairs(cfg.guards_over(stmt, src)) do
+                            for _, f in ipairs(classify(g.cond, src, not g.neg)) do
+                                if fact_live(f, mutated, funstable) then
+                                    -- keep the STRONGEST kind; eq:/type: shown verbatim,
+                                    -- nil/truthy collapse to the sound floor 'non-nil'
+                                    if kind_rank(f.kind) > kind_rank(env[f.var]) then
+                                        env[f.var] = disp(f.kind)
                                     end
+                                    seenguard[g.cond:id()] = true
                                 end
                             end
-                            if next(env) then
-                                points[#points + 1] = { line = stmt:start() + 1,
-                                    kind = stmt:type(), env = env }
-                            end
+                        end
+                        if next(env) then
+                            points[#points + 1] = { line = stmt:start() + 1,
+                                kind = stmt:type(), env = env }
                         end
                     end
                 end
-                if not FN_TYPES[c:type()] then visit(c) end -- nested fns = their own scope
             end
+            if not FN_TYPES[c:type()] then visit(c) end -- nested fns = their own scope
         end
     end
     visit(fn)

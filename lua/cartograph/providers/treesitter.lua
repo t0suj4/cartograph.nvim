@@ -465,20 +465,18 @@ local function param_map_of(fnnode, src, pfield)
     local ps = fnnode:field(pfield)[1]
     if not ps then return nil end
     local map, i = nil, 0
-    for _, ch in tsutil.inext, ps, -1 do
-        if ch:named() then
-            local nm
-            local t = ch:type()
-            if t == 'identifier' then nm = node_text(ch, src)
-            elseif t == 'simple_parameter' or t == 'variable_name'
-                or t == 'property_promotion_parameter' then
-                nm = node_text(ch, src):match('%$[%w_]+')
-            end
-            i = i + 1
-            if nm then
-                map = map or {}
-                map[nm] = i
-            end
+    for _, ch in tsutil.inamed, ps, -1 do
+        local nm
+        local t = ch:type()
+        if t == 'identifier' then nm = node_text(ch, src)
+        elseif t == 'simple_parameter' or t == 'variable_name'
+            or t == 'property_promotion_parameter' then
+            nm = node_text(ch, src):match('%$[%w_]+')
+        end
+        i = i + 1
+        if nm then
+            map = map or {}
+            map[nm] = i
         end
     end
     return map
@@ -622,15 +620,13 @@ local function block_exits(G, blk, src)
     if ex == nil then
         ex = {}
         local alias = {}
-        for _, st in tsutil.inext, blk, -1 do
-            if st:named() then
-                local v, x = G.alias_decl(st)
-                if v then alias[node_text(v, src)] = ntext(x, src) end
-                local tgt = G.exit_target(st, src)
-                if tgt then
-                    local t = ntext(tgt, src)
-                    ex[#ex + 1] = { e = select(3, st:end_()), t = t, a = alias[t] }
-                end
+        for _, st in tsutil.inamed, blk, -1 do
+            local v, x = G.alias_decl(st)
+            if v then alias[node_text(v, src)] = ntext(x, src) end
+            local tgt = G.exit_target(st, src)
+            if tgt then
+                local t = ntext(tgt, src)
+                ex[#ex + 1] = { e = select(3, st:end_()), t = t, a = alias[t] }
             end
         end
         exit_memo[id] = ex
@@ -5863,8 +5859,8 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 -- (a function-like macro's PARAMETERS are its own names, no var: `#define X(a) (a + g)` reads g only)
                 local ps, pset = n:field('parameters')[1], ''
                 if ps then
-                    for _, pc in tsutil.inext, ps, -1 do
-                        if pc:named() then pset = pset .. ',' .. node_text(pc, src) end
+                    for _, pc in tsutil.inamed, ps, -1 do
+                        pset = pset .. ',' .. node_text(pc, src)
                     end
                     pset = pset .. ','
                 end

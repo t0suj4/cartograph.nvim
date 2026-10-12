@@ -42,6 +42,27 @@ local function only_holes(T, values)
     return out
 end
 
+-- ── SPACING-INDEPENDENT MATCHING (CART-1664) ─────────────────────────────────────────────────────────────────────
+-- The matcher compared whitespace tokens too, so a one-line example matched only one-line targets. A rule now ALSO
+-- carries its sides without whitespace tokens; a target that does not match exactly is matched on structure, and the
+-- edit is applied as a TOKEN SCRIPT on the target's own text (kept tokens keep their spacing, a deleted token takes its
+-- preceding whitespace, an inserted one takes the example's), a moved body re-indented by the removed wrapper's level,
+-- and the result PARSED BACK: it must read as the rule's right side, else the site is refused — that check is what keeps
+-- a whitespace-significant language (python's indentation) honest without listing it. A comment is NOT whitespace: it
+-- stays in the structure, and one beside a deleted token refuses the site (it may describe the deleted code).
+local function ws_lit(t) return t.k == 'lit' and t.trivia and not tostring(t.v):match('%S') end
+-- (the MATCHING view also drops comment nodes — tsutil.COMMENT, every grammar's comment types: printing walks the
+-- ORIGINAL, so a comment inside a body travels with it, and one beside a deleted token refuses the site by name)
+local function strip(a, t, orig)
+    if t.k == 'hole' or not t.kids then return t end
+    local kids = {}
+    for _, c in ipairs(t.kids) do if not ws_lit(c) and not tsutil.COMMENT[c.k] then kids[#kids + 1] = strip(a, c, orig) end end
+    local s = a.rebuild(t, kids)
+    if orig then orig[s] = t end
+    return s
+end
+M._strip = strip
+
 --- Learn the rules an example demonstrates. -> { { lhs, rhs, lhs_text, rhs_text } } | nil, why, class
 function M.learn(before, after, lang)
     lang = lang or 'lua' -- @langs-ok the reader roster decides; algebraread refuses an unregistered language by name
@@ -286,22 +307,214 @@ function M.learn(before, after, lang)
         end
         local hl, hr, Lb, La, nholes = sides(path)
         local lhs, rhs = a.template(hl), a.template(hr)
+        -- (the spacing-free sides; an example that differs ONLY in spacing would match everything, its output included)
+        local sl, sr = strip(a, hl), strip(a, hr)
+        if a.eq(sl, sr) then
+            return nil, ('the example differs only in spacing (`%s`): a spacing-free rule would match everything'):format(a.cst_print(Lb)), 'ill-posed'
+        end
+        local lhs_ws, rhs_ws = a.template(sl), a.template(sr)
+        if a.match(lhs_ws, strip(a, La)).ok then
+            return nil, ('the learned rule `%s -> %s` matches its own output once spacing is ignored — applying it again would rewrite forever')
+                :format(a.cst_print(Lb), a.cst_print(La)), 'ill-posed'
+        end
         -- ★ A RULE THAT MATCHES ITS OWN OUTPUT NEVER RUNS OUT OF WORK (and could not be re-run as `empty`)
         if a.match(lhs, La).ok then
             return nil, ('the learned rule `%s -> %s` matches its own output — applying it again would rewrite forever')
                 :format(a.cst_print(Lb), a.cst_print(La)), 'ill-posed'
         end
-        rules[#rules + 1] = { lhs = lhs, rhs = rhs, lhs_text = a.cst_print(Lb), rhs_text = a.cst_print(La), holes = nholes }
+        rules[#rules + 1] = { lhs = lhs, rhs = rhs, lhs_text = a.cst_print(Lb), rhs_text = a.cst_print(La), holes = nholes,
+            lhs_ws = lhs_ws, rhs_ws = rhs_ws, rhs_term = hr }
     end
     return rules
 end
 
---- Apply rules to a source text. -> new text, sites (the number of rewrites) | nil, why
-function M.rewrite(rules, src, lang)
+-- one SPACING-INDEPENDENT site: the target node `o` (original), its stripped view `s` (orig maps stripped -> original),
+-- the match's values -> the new text of the node, its re-read term | nil, why, class
+local function ws_edit(a, rule, o, s, values, orig, lang)
+    -- 1. the left side's UNITS over the target, in order: a fixed token (its original lit), or a hole (its nodes)
+    local lu = {}
+    local function walk(tt, st)
+        local j = 1
+        for _, tk in ipairs(tt.kids or {}) do
+            if tk.k == 'hole' then
+                local v = values[tk.h]
+                local n = tk.rep and (v and v.kids and #v.kids or 0) or 1
+                local nodes = {}
+                for x = j, j + n - 1 do nodes[#nodes + 1] = orig[st.kids[x]] or st.kids[x] end
+                lu[#lu + 1] = { key = 'H:' .. tk.h, nodes = nodes }
+                j = j + n
+            elseif tk.k == 'lit' then
+                -- (a token's key includes its PARENT's kind: the `if`'s `end` is not the `for`'s)
+                lu[#lu + 1] = { key = 'L:' .. tostring(tk.v) .. '@' .. tostring(tt.k), lit = st.kids[j] }
+                j = j + 1
+            else
+                walk(tk, st.kids[j])
+                j = j + 1
+            end
+        end
+    end
+    walk(rule.lhs_ws.body or rule.lhs_ws, s)
+    -- 2. the right side's units, and the whitespace the example puts before each fixed token
+    local ru = {}
+    local function rwalk(t)
+        for _, c in ipairs(t.kids or {}) do
+            if c.k == 'hole' then ru[#ru + 1] = { key = 'H:' .. c.h, h = c.h }
+            elseif c.k == 'lit' then ru[#ru + 1] = { key = 'L:' .. tostring(c.v) .. '@' .. tostring(t.k), lit = c }
+            else rwalk(c) end
+        end
+    end
+    rwalk(rule.rhs_ws.body or rule.rhs_ws)
+    local before_ws, last = {}, ''
+    local function wwalk(t)
+        for _, c in ipairs(t.kids or {}) do
+            if c.k == 'lit' then
+                if ws_lit(c) then last = last .. tostring(c.v) else before_ws[c] = last; last = '' end
+            elseif c.k == 'hole' then last = ''
+            else wwalk(c) end
+        end
+    end
+    wwalk(rule.rhs_term)
+    -- 3. align them (a longest common subsequence of the unit keys): what is kept, deleted, inserted
+    local n1, n2 = #lu, #ru
+    local L = {}
+    for i = 0, n1 do L[i] = {}; for j = 0, n2 do L[i][j] = 0 end end
+    for i = n1, 1, -1 do for j = n2, 1, -1 do
+        L[i - 1] = L[i - 1] or {}
+        if lu[i].key == ru[j].key then L[i - 1][j - 1] = L[i][j] + 1
+        else L[i - 1][j - 1] = math.max(L[i][j - 1], L[i - 1][j]) end
+    end end
+    local keep, ins_before = {}, {} -- keep[lhs unit] = true; ins_before[lhs unit index | n1+1] = { rhs units }
+    local i, j = 1, 1
+    while i <= n1 and j <= n2 do
+        if lu[i].key == ru[j].key then keep[i] = true; i = i + 1; j = j + 1
+        elseif L[i][j - 1] >= L[i - 1][j] then i = i + 1
+        else ins_before[i] = ins_before[i] or {}; table.insert(ins_before[i], ru[j]); j = j + 1 end
+    end
+    while j <= n2 do ins_before[n1 + 1] = ins_before[n1 + 1] or {}; table.insert(ins_before[n1 + 1], ru[j]); j = j + 1 end
+    -- (a hole INSERTED is a move — the exact path's business; a hole occurrence DROPPED is deleted text, its value
+    -- kept wherever else the right side uses it: the `c` of the deleted `c:named()`)
+    for _, list in pairs(ins_before) do for _, u in ipairs(list) do if u.h then return nil, 'a hole the edit moves', 'frontier' end end end
+    -- 4. roles of the original leaves: the first leaf of each unit (where insertions go), the deleted lits
+    local first_of, deleted = {}, {}
+    local function first_leaf(t) if t.k == 'lit' then return t end for _, c in ipairs(t.kids or {}) do local f = first_leaf(c); if f then return f end end end
+    local function leaves(t, out) if t.k == 'lit' then out[#out + 1] = t end for _, c in ipairs(t.kids or {}) do leaves(c, out) end return out end
+    for k, u in ipairs(lu) do
+        local f = u.lit or (u.nodes[1] and first_leaf(u.nodes[1]))
+        if f then first_of[f] = k end
+        if not keep[k] and u.lit then deleted[u.lit] = true end
+        if not keep[k] and u.nodes then
+            for _, nd in ipairs(u.nodes) do for _, lf in ipairs(leaves(nd, {})) do if not ws_lit(lf) then deleted[lf] = true end end end
+        end
+    end
+    local hedge_first, hedge_last = {}, {}
+    for k, u in ipairs(lu) do
+        if u.nodes and #u.nodes > 0 and keep[k] then hedge_first[u.nodes[1]] = k; hedge_last[u.nodes[#u.nodes]] = k end
+    end
+    -- 5. emit the original's leaves, applying the script
+    local buf, blen = {}, 0
+    local function put(x) buf[#buf + 1] = x end
+    local function text() return table.concat(buf) end
+    local refused
+    local just_deleted = false
+    local owed, owed_mark -- (a deleted line-start's line break, owed to the next kept code)
+    local marks = {} -- hedge unit -> { start offset, end offset } in the output
+    local first_deleted_line_indent
+    local function emit_ins(k)
+        for _, u in ipairs(ins_before[k] or {}) do put((before_ws[u.lit] or '') .. tostring(u.lit.v)) end
+    end
+    local frozen = {} -- (a token that spans lines — a long string, a block comment — keeps its CONTINUATION lines as they
+    -- are: they are the token's VALUE, like a heredoc's, so re-indenting skips them; { first, last offset } in the output)
+    local function walk_out(t)
+        if hedge_first[t] then local k = hedge_first[t]; marks[k] = marks[k] or {}; marks[k][1] = #text() end
+        if tsutil.COMMENT[t.k] and just_deleted then refused = 'a comment beside a deleted token (it may describe the deleted code)' end
+        if t.k == 'lit' then
+            local k = first_of[t]
+            if k then emit_ins(k) end
+            if deleted[t] then
+                -- the deleted token takes its preceding whitespace; the indentation of a line it STARTED is noted, and
+                -- that line break is owed to the next kept code if it would otherwise land on the line before
+                local s0 = text()
+                local stripped = s0:gsub('[ \t]*\n?[ \t]*$', '')
+                local ws0 = s0:sub(#stripped + 1)
+                if ws0:find('\n') then
+                    if not first_deleted_line_indent then first_deleted_line_indent = #(s0:match('\n([ \t]*)$') or '') end
+                    if not owed then owed = ws0:match('\n[ \t]*$') end
+                end
+                buf = { stripped }
+                owed_mark = #buf
+                just_deleted = true
+            else
+                if not ws_lit(t) then
+                    just_deleted = false
+                    -- (kept code after a deleted line-start: on its own line, as the deleted token was)
+                    if owed then
+                        local since = table.concat(buf, '', owed_mark + 1)
+                        if not since:find('\n') then
+                            for x = #buf, owed_mark + 1, -1 do buf[x] = nil end
+                            put(owed)
+                        end
+                        owed = nil
+                    end
+                end
+                local v = tostring(t.v)
+                if not ws_lit(t) and v:find('\n') then frozen[#frozen + 1] = { #text() + 1, #text() + #v } end
+                put(v)
+            end
+        else
+            for _, c in ipairs(t.kids or {}) do walk_out(c) end
+        end
+        if hedge_last[t] then local k = hedge_last[t]; marks[k] = marks[k] or {}; marks[k][2] = #text() end
+    end
+    walk_out(o)
+    emit_ins(n1 + 1)
+    if refused then return nil, refused, 'decision' end
+    local out = text()
+    -- 6. a moved body follows its new parent: its LINES dedented by the level the removed wrapper line had (the body's
+    -- indent minus the anchor's — the kept line before it — minus that level), when every body line can give it; the
+    -- continuation lines of a token spanning lines stay as they are (a long string's lines, like a heredoc's, are its value)
+    if first_deleted_line_indent then
+        local lines = vim.split(out, '\n', { plain = true })
+        local function line_at(off) local _, nl = out:sub(1, off):gsub('\n', ''); return nl + 1 end
+        local keep = {}
+        -- (a line whose line break BEFORE it is a character of a token's value: its indentation, even none — the column a
+        -- python string's closing quotes sit at — is that value's)
+        for _, f in ipairs(frozen) do
+            local p = f[1] - 1
+            while true do p = out:find('\n', p + 1, true); if not p or p > f[2] then break end; keep[line_at(p)] = true end
+        end
+        for _, m in pairs(marks) do
+            if m[1] and m[2] then
+                local l1, l2 = line_at(m[1] + 1), line_at(math.max(m[2], m[1] + 1))
+                local anchor_line
+                for x = l1 - 1, 1, -1 do if lines[x]:match('%S') then anchor_line = x; break end end
+                if anchor_line then
+                    local anchor = #lines[anchor_line]:match('^[ \t]*')
+                    local cur = #lines[l1]:match('^[ \t]*')
+                    local delta = cur - first_deleted_line_indent
+                    local ok_ = delta > 0 and first_deleted_line_indent > anchor
+                    for x = l1, l2 do if not keep[x] and lines[x]:match('%S') and #lines[x]:match('^[ \t]*') < delta then ok_ = false end end
+                    if ok_ then for x = l1, l2 do if not keep[x] and lines[x]:match('%S') then lines[x] = lines[x]:sub(delta + 1) end end end
+                end
+            end
+        end
+        out = table.concat(lines, '\n')
+    end
+    -- 7. PARSED BACK: the new text must read as the rule's right side
+    local R = require 'cartograph.algebraread'
+    local t2 = R.read(out, lang)
+    local stmt
+    for _, c in ipairs(t2 and t2.kids or {}) do if not ws_lit(c) then if stmt then stmt = nil; break end; stmt = c end end
+    if not stmt or not a.match(rule.rhs_ws, strip(a, stmt)).ok then return nil, 'the rewritten text does not read as the rule\'s right side', 'frontier' end
+    return out, stmt
+end
+
+--- Apply rules to a source text. -> new text, sites (the number of rewrites), refused (spacing-independent sites
+--- matched but refused: { { line, why } }) | nil, why
+local function rewrite_once(rules, src, lang)
     local a = A()
     local t, why = require('cartograph.algebraread').read(src, lang or 'lua') -- @langs-ok as learn
     if not t then return nil, why, 'frontier' end
-    local sites = 0
+    local sites, refused = 0, {}
     for _, rule in ipairs(rules) do
         local hits, covered = {}, {}
         local function inside(path)
@@ -327,13 +540,47 @@ function M.rewrite(rules, src, lang)
                 if m.ok then hits[#hits + 1] = { path = pos.path, values = m.values }; covered[#covered + 1] = pos.path end
             end
         end
+        -- (SPACING-INDEPENDENT, CART-1664: a position the exact match missed is matched on structure — the token script
+        -- edits the target's own text, parsed back before it is taken)
+        local ws_hits = {}
+        if rule.lhs_ws then
+            local rootk = (rule.lhs_ws.body or rule.lhs_ws).k
+            for _, pos in ipairs(a.positions(t)) do
+                if pos.node.k == rootk and not inside(pos.path) then
+                    local orig = {}
+                    local sn = strip(a, pos.node, orig)
+                    local m = a.match(rule.lhs_ws, sn)
+                    if m.ok then
+                        local newtext, stmt_or_why = ws_edit(a, rule, pos.node, sn, m.values, orig, lang or 'lua')
+                        local stmt, why2 = newtext and stmt_or_why, not newtext and stmt_or_why
+                        if newtext then ws_hits[#ws_hits + 1] = { path = pos.path, term = stmt }; covered[#covered + 1] = pos.path
+                        else refused[#refused + 1] = { why = why2, text = (a.cst_print(pos.node):match('^[^\n]*')) } end
+                    end
+                end
+            end
+        end
         -- disjoint subtrees: replacing one never moves another's path
         for k = #hits, 1, -1 do
             local inst = a.instantiate(rule.rhs, only_holes(rule.rhs, hits[k].values))
             if inst.ok then t = a.put(t, hits[k].path, inst.term); sites = sites + 1 end
         end
+        for k = #ws_hits, 1, -1 do t = a.put(t, ws_hits[k].path, ws_hits[k].term); sites = sites + 1 end
     end
-    return a.cst_print(t), sites
+    return a.cst_print(t), sites, refused
+end
+
+--- Apply rules to a source text, to a FIXPOINT: a match nested inside a rewritten site (a loop inside a loop) is skipped
+--- by its pass — its path was covered — and taken by the next; the rule never matches its own output (refused at learn),
+--- so the passes end. -> new text, sites, refused | nil, why, class
+function M.rewrite(rules, src, lang)
+    local total, last = 0, {}
+    for _ = 1, 8 do
+        local out, n, refused = rewrite_once(rules, src, lang)
+        if not out then return out, n, refused end
+        total, src, last = total + n, out, refused or {}
+        if n == 0 then break end
+    end
+    return src, total, last -- (the refusals of the LAST pass: the sites still left as written)
 end
 
 local function files_in(store, scope, lang)
@@ -401,6 +648,8 @@ function M.plan(store, opts)
     end
     local scan = files_in(store, opts.scope or 'all', opts.lang)
     local edits, touched, stamps, per, total, unread = {}, {}, {}, {}, 0, {}
+    local refusals = {} -- (spacing-independent sites matched and refused, by file: a comment beside a deleted token, a
+    -- result that does not read as the right side)
     -- ★ THE PREFILTER (cartograph.prefilter): a file whose text lacks a fixed token of EVERY rule cannot hold a match —
     -- a sound necessary condition, so it is skipped before it is parsed (CARTOGRAPH_PREFILTER=0 turns it off)
     local filters = {}
@@ -417,7 +666,8 @@ function M.plan(store, opts)
         local text = txn.read_file(root, rel)
         if text and not may_match(text) then prefiltered = prefiltered + 1; text = nil end
         if text then
-            local new, n = M.rewrite(rules, text, opts.lang)
+            local new, n, refused = M.rewrite(rules, text, opts.lang)
+            for _, r in ipairs(new and refused or {}) do refusals[#refusals + 1] = ('%s: `%s` — %s'):format(rel, r.text, r.why) end
             -- a file the lossless reader cannot read was NOT looked at: say so, never count it as "no match"
             if not new then unread[#unread + 1] = rel end
             if new and n > 0 then
@@ -431,7 +681,8 @@ function M.plan(store, opts)
     local rule_text = {}
     for _, r in ipairs(rules) do rule_text[#rule_text + 1] = ('`%s` -> `%s`'):format(r.lhs_text, r.rhs_text) end
     if total == 0 then
-        return nil, ('the rule %s matches nothing in %d file(s)'):format(table.concat(rule_text, ', '), #scan), 'empty'
+        return nil, ('the rule %s matches nothing in %d file(s)%s'):format(table.concat(rule_text, ', '), #scan,
+            #refusals > 0 and (' (%d site(s) refused: %s)'):format(#refusals, table.concat(refusals, '; ', 1, math.min(#refusals, 4))) or ''), 'empty'
     end
     if not opts.scope then
         return nil, ('the rule %s matches %d site(s) in %d file(s): %s — where it applies is YOUR decision: scope = \'all\', or a comma list of files')
@@ -447,8 +698,14 @@ function M.plan(store, opts)
         -- an example is a claim, not a proof: the rule applies what was demonstrated
         preserves = 'none',
         preserves_why = 'the rewrite applies what ONE example demonstrated; nothing checks that it preserves behaviour',
-        hazards = #unread > 0 and { require('cartograph.hazard').new('unread', ('%d file(s) in scope were not read by the lossless reader, so they were not looked at: %s')
-            :format(#unread, table.concat(unread, ', ', 1, math.min(#unread, 6))), nil, { files = unread }, 'frontier') } or {},
+        hazards = (function ()
+            local hz = {}
+            if #unread > 0 then hz[#hz + 1] = require('cartograph.hazard').new('unread', ('%d file(s) in scope were not read by the lossless reader, so they were not looked at: %s')
+                :format(#unread, table.concat(unread, ', ', 1, math.min(#unread, 6))), nil, { files = unread }, 'frontier') end
+            if #refusals > 0 then hz[#hz + 1] = require('cartograph.hazard').new('sites-refused', ('%d matched site(s) left as written: %s')
+                :format(#refusals, table.concat(refusals, '; ', 1, math.min(#refusals, 6))), nil, { refused = refusals }, 'informational') end
+            return hz
+        end)(),
         desc = ('rewrite by example: %s, %d site(s) in %d file(s)'):format(table.concat(rule_text, ', '), total, #touched),
     }
     return txn.protocol(plan, function (p) return function (rel, before) return p.edits[rel] or before end end)

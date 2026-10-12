@@ -1084,8 +1084,8 @@ local function build(store, opts)
                     local vl, el = a:named_child(0), a:named_child(1)
                     local vals = exprs(el, vl:named_child_count())
                     local i = 0
-                    for _, v in tsutil.inext, vl, -1 do
-                        if v:named() then i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end end
+                    for _, v in tsutil.inamed, vl, -1 do
+                        i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
                     end
                 elseif a then
                     if a:type() == 'identifier' then declare(txt(a)) end
@@ -1155,15 +1155,13 @@ local function build(store, opts)
                         trip = exprs(el, 3)
                     end
                     local i, V = 0, {}
-                    for _, v in tsutil.inext, vl, -1 do
-                        if v:named() then
-                            i = i + 1
-                            local p = declare(txt(v))
-                            V[i] = p
-                            if i == 1 and fname_ipairs then numeric[p] = true end
-                            if i == 2 and vp then edge(vp, p) end
-                            if i == 1 and kp then edge(kp, p) end
-                        end
+                    for _, v in tsutil.inamed, vl, -1 do
+                        i = i + 1
+                        local p = declare(txt(v))
+                        V[i] = p
+                        if i == 1 and fname_ipairs then numeric[p] = true end
+                        if i == 2 and vp then edge(vp, p) end
+                        if i == 1 and kp then edge(kp, p) end
                     end
                     if trip and trip[1] then
                         local ctl = new()
@@ -1173,13 +1171,11 @@ local function build(store, opts)
                         callc(trip[1], { trip[2] or new(), ctl }, V, ctl)
                     end
                 elseif cl then
-                    for _, x in tsutil.inext, cl, -1 do
-                        if x:named() then
-                            if x:type() == 'identifier' then
-                                local p = declare(txt(x))
-                                if cl:type() == 'for_numeric_clause' then numeric[p] = true end
-                            else expr(x) end
-                        end
+                    for _, x in tsutil.inamed, cl, -1 do
+                        if x:type() == 'identifier' then
+                            local p = declare(txt(x))
+                            if cl:type() == 'for_numeric_clause' then numeric[p] = true end
+                        else expr(x) end
                     end
                 end
                 for _, x in tsutil.inext, n, -1 do if x:named() and x ~= cl then stmt(x) end end
@@ -1190,11 +1186,9 @@ local function build(store, opts)
                 scopes[#scopes] = nil
             elseif t == 'function_call' then callv(n)
             else
-                for _, x in tsutil.inext, n, -1 do
-                    if x:named() then
-                        local xt = x:type()
-                        if xt == 'block' or xt:find('statement', 1, true) then stmt(x) else expr(x) end
-                    end
+                for _, x in tsutil.inamed, n, -1 do
+                    local xt = x:type()
+                    if xt == 'block' or xt:find('statement', 1, true) then stmt(x) else expr(x) end
                 end
             end
         end

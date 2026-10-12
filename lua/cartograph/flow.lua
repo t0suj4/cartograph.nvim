@@ -476,8 +476,8 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         elseif bf then
             bindset, bindskip = {}, {}
             if bf == true then
-                for _, c in tsutil.inext, node, -1 do
-                    if c:named() then bindset[c:id()] = true end
+                for _, c in tsutil.inamed, node, -1 do
+                    bindset[c:id()] = true
                 end
             else
                 -- an ORDERED field list: the FIRST field present binds, and the OTHERS
@@ -577,93 +577,91 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         else
             k = defpos and WRAP[t] or false
         end
-        for _, c in tsutil.inext, node, -1 do
-            if c:named() then
-              local ct = c:type() -- cache the per-child type FFI (was called 2-6× below)
-              -- a BINDING MODIFIER decorates the declaration and reads nothing; descending
-              -- it invented a read of `const` from lua's `local x <const>` (CART-0234).
-              -- Language-declared, because the node name means `a.b` in python.
-              if mods and mods[ct] then goto skipchild end
-              -- a LISTED-BUT-NOT-CHOSEN binder field (the foreign name of an
-              -- aliased import): not a binding, and not a local read either.
-              if bindskip and bindskip[c:id()] then goto skipchild end
-              -- a name that is not a variable (a macro name): neither def nor use (CART-1121)
-              if nsn and c:id() == nsn:id() then goto skipchild end
-              -- ★ AN 'always' STOP IS AN ATTACHED BLOCK, AND du IS WHAT FINDS IT (part B).
-              -- A ruby `xs.each do |x| … end` hangs its block off a `call` that can sit
-              -- ANYWHERE inside the statement — `q = xs.map { … }` puts it under an
-              -- assignment's RHS — so the block cannot be found by asking the ROW's node for
-              -- a field. It has to be found by a walk, and this walk already runs, under
-              -- exactly the stop rules block emission needs (nested functions excluded,
-              -- sub-regions excluded when this is a control head). A SECOND walk over the
-              -- same nodes under the same stops is precisely what `sus` was fused in here to
-              -- stop being — measured ~33% of flow.build, itself 43-57% of the profile.
-              -- So the blocks handed back are BY CONSTRUCTION exactly the ones this row's
-              -- def/use excluded: one source of truth, and EVERY du caller (plain row,
-              -- control head, elseif, catch, case label, post-loop cond) gets block emission
-              -- from one line instead of each having to re-derive which stops to mirror.
-              -- `true` (body/clause) still stops only for a control head; 'always' stops
-              -- unconditionally, because an attached block is never part of the statement
-              -- carrying it, control head or not.
-              local st = (stopset or DU_STOP)[ct]
-              if st == 'always' then blks[#blks + 1] = c; goto skipchild end
-              -- ★ AND BY FIELD, not only by type (CART-0414): an UNBRACED body is a bare
-              -- `expression_statement` in the `consequence`/`body` position, which no type
-              -- test names. It is NOT appended to `blks` — the caller's own child loop
-              -- already emits it as a row (verified: the body row survives this stop), so
-              -- re-emitting it here would double it.
-              if stop_body and bodyc and bodyc[c:id()] then goto skipchild end
-              if not FN[ct] and not (stop_body and st) then
-                if SUSPEND[ct] then sus = true end -- fused suspension detection
-                local cdefpos
-                if k == 10 then cdefpos = bindset[c:id()] or false -- pattern/import binder
-                elseif k == 1 then cdefpos = same(c, asgleft)
-                elseif k == 3 then cdefpos = same(c, decld)
-                elseif k == 4 then cdefpos = (ct == 'variable_list'
-                    or ct == 'identifier') and not (flatskip and flatskip[c:id()])
-                elseif k == 5 then cdefpos = (ct == 'variable_name')
-                elseif k == 6 then cdefpos = (ct == 'variable_name')
-                elseif k == 7 then
-                    cdefpos = false
-                    for _, dd in ipairs(declist) do if same(c, dd) then cdefpos = true; break end end
-                elseif k == 8 then cdefpos = not rngskip[c:id()] -- cpp range-for declarator
-                elseif k == 9 then cdefpos = (ct == 'exception_variable') -- ruby rescue binding
-                elseif k == 11 then cdefpos = not (patread and same(c, patread)) and PAT or false
-                elseif k == 12 then cdefpos = (patnode and same(c, patnode)) and PAT or false
-                else cdefpos = k end
-                if ids[ct] then
-                    local nm = txt(c, src)
-                    if cdefpos then
-                        if not dseen[nm] then dseen[nm] = true; def[#def + 1] = nm end
-                    elseif dseen[nm] then
-                        -- use-position but ALREADY a def in this statement = a
-                        -- read-modify-write (`a = a + …`). The df contract drops it
-                        -- from `use` (a def name is not also a use), losing the READ.
-                        -- Record it SEPARATELY so reaching_cfg can see the self-read
-                        -- without perturbing the du/df census or the rw edge kinds
-                        -- ([[flow-precision-gaps]] #1).
-                        if not rmwseen[nm] and not useen[nm] then
-                            rmwseen[nm] = true; rmw[#rmw + 1] = nm
-                        end
-                    elseif not useen[nm] then
-                        useen[nm] = true; use[#use + 1] = nm
-                    end
-                end
-                if depth < DU_SEG then
-                    depth = depth + 1; rec(c, cdefpos); depth = depth - 1
-                else
-                    local saved = depth; depth = 0
-                    local co = coroutine.create(rec)
-                    local ok, err = coroutine.resume(co, c, cdefpos)
-                    depth = saved
-                    if not ok then error(err, 0) end
-                    -- a yield inside the segment (coop.tick) would stop HERE, not at the scheduler, and
-                    -- the walk would end half done and look complete: refuse by name instead
-                    if coroutine.status(co) ~= 'dead' then error('flow du: a deep-tree segment yielded (CART-1082)', 0) end
-                end
+        for _, c in tsutil.inamed, node, -1 do
+            local ct = c:type() -- cache the per-child type FFI (was called 2-6× below)
+            -- a BINDING MODIFIER decorates the declaration and reads nothing; descending
+            -- it invented a read of `const` from lua's `local x <const>` (CART-0234).
+            -- Language-declared, because the node name means `a.b` in python.
+            if mods and mods[ct] then goto skipchild end
+            -- a LISTED-BUT-NOT-CHOSEN binder field (the foreign name of an
+            -- aliased import): not a binding, and not a local read either.
+            if bindskip and bindskip[c:id()] then goto skipchild end
+            -- a name that is not a variable (a macro name): neither def nor use (CART-1121)
+            if nsn and c:id() == nsn:id() then goto skipchild end
+            -- ★ AN 'always' STOP IS AN ATTACHED BLOCK, AND du IS WHAT FINDS IT (part B).
+            -- A ruby `xs.each do |x| … end` hangs its block off a `call` that can sit
+            -- ANYWHERE inside the statement — `q = xs.map { … }` puts it under an
+            -- assignment's RHS — so the block cannot be found by asking the ROW's node for
+            -- a field. It has to be found by a walk, and this walk already runs, under
+            -- exactly the stop rules block emission needs (nested functions excluded,
+            -- sub-regions excluded when this is a control head). A SECOND walk over the
+            -- same nodes under the same stops is precisely what `sus` was fused in here to
+            -- stop being — measured ~33% of flow.build, itself 43-57% of the profile.
+            -- So the blocks handed back are BY CONSTRUCTION exactly the ones this row's
+            -- def/use excluded: one source of truth, and EVERY du caller (plain row,
+            -- control head, elseif, catch, case label, post-loop cond) gets block emission
+            -- from one line instead of each having to re-derive which stops to mirror.
+            -- `true` (body/clause) still stops only for a control head; 'always' stops
+            -- unconditionally, because an attached block is never part of the statement
+            -- carrying it, control head or not.
+            local st = (stopset or DU_STOP)[ct]
+            if st == 'always' then blks[#blks + 1] = c; goto skipchild end
+            -- ★ AND BY FIELD, not only by type (CART-0414): an UNBRACED body is a bare
+            -- `expression_statement` in the `consequence`/`body` position, which no type
+            -- test names. It is NOT appended to `blks` — the caller's own child loop
+            -- already emits it as a row (verified: the body row survives this stop), so
+            -- re-emitting it here would double it.
+            if stop_body and bodyc and bodyc[c:id()] then goto skipchild end
+            if not FN[ct] and not (stop_body and st) then
+              if SUSPEND[ct] then sus = true end -- fused suspension detection
+              local cdefpos
+              if k == 10 then cdefpos = bindset[c:id()] or false -- pattern/import binder
+              elseif k == 1 then cdefpos = same(c, asgleft)
+              elseif k == 3 then cdefpos = same(c, decld)
+              elseif k == 4 then cdefpos = (ct == 'variable_list'
+                  or ct == 'identifier') and not (flatskip and flatskip[c:id()])
+              elseif k == 5 then cdefpos = (ct == 'variable_name')
+              elseif k == 6 then cdefpos = (ct == 'variable_name')
+              elseif k == 7 then
+                  cdefpos = false
+                  for _, dd in ipairs(declist) do if same(c, dd) then cdefpos = true; break end end
+              elseif k == 8 then cdefpos = not rngskip[c:id()] -- cpp range-for declarator
+              elseif k == 9 then cdefpos = (ct == 'exception_variable') -- ruby rescue binding
+              elseif k == 11 then cdefpos = not (patread and same(c, patread)) and PAT or false
+              elseif k == 12 then cdefpos = (patnode and same(c, patnode)) and PAT or false
+              else cdefpos = k end
+              if ids[ct] then
+                  local nm = txt(c, src)
+                  if cdefpos then
+                      if not dseen[nm] then dseen[nm] = true; def[#def + 1] = nm end
+                  elseif dseen[nm] then
+                      -- use-position but ALREADY a def in this statement = a
+                      -- read-modify-write (`a = a + …`). The df contract drops it
+                      -- from `use` (a def name is not also a use), losing the READ.
+                      -- Record it SEPARATELY so reaching_cfg can see the self-read
+                      -- without perturbing the du/df census or the rw edge kinds
+                      -- ([[flow-precision-gaps]] #1).
+                      if not rmwseen[nm] and not useen[nm] then
+                          rmwseen[nm] = true; rmw[#rmw + 1] = nm
+                      end
+                  elseif not useen[nm] then
+                      useen[nm] = true; use[#use + 1] = nm
+                  end
               end
-              ::skipchild::
+              if depth < DU_SEG then
+                  depth = depth + 1; rec(c, cdefpos); depth = depth - 1
+              else
+                  local saved = depth; depth = 0
+                  local co = coroutine.create(rec)
+                  local ok, err = coroutine.resume(co, c, cdefpos)
+                  depth = saved
+                  if not ok then error(err, 0) end
+                  -- a yield inside the segment (coop.tick) would stop HERE, not at the scheduler, and
+                  -- the walk would end half done and look complete: refuse by name instead
+                  if coroutine.status(co) ~= 'dead' then error('flow du: a deep-tree segment yielded (CART-1082)', 0) end
+              end
             end
+            ::skipchild::
         end
     end
     -- a statement that IS a bare name leaf — e.g. a rust/ml tail-expression
@@ -809,8 +807,8 @@ function M.pattern_binders(node, bindf, ids)
         local bf = bindf and bindf[n:type()]
         local bindset, bindskip = {}, {}
         if bf == true then
-            for _, c in tsutil.inext, n, -1 do
-                if c:named() then bindset[c:id()] = true end
+            for _, c in tsutil.inamed, n, -1 do
+                bindset[c:id()] = true
             end
         elseif bf then
             local taken
@@ -1313,13 +1311,11 @@ function M.build(fnnode, src, cfg)
     -- (a C switch body is a compound_statement of `case_statement`s) route to
     -- clause() so their bodies are regioned, not folded.
     function region(block, parent, pol)
-        for _, c in tsutil.inext, block, -1 do
-            if c:named() then
-                local ct = c:type()
-                if not COMMENT[ct] then
-                    if STMT_LIST[ct] then region(c, parent, pol) -- go's wrapper: its children ARE this region's
-                    elseif CLAUSE_[ct] then clause(c, parent) else emit(c, parent, pol) end
-                end
+        for _, c in tsutil.inamed, block, -1 do
+            local ct = c:type()
+            if not COMMENT[ct] then
+                if STMT_LIST[ct] then region(c, parent, pol) -- go's wrapper: its children ARE this region's
+                elseif CLAUSE_[ct] then clause(c, parent) else emit(c, parent, pol) end
             end
         end
     end

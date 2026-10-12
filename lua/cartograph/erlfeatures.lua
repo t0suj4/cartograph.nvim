@@ -83,11 +83,9 @@ function M.rebar(root)
     local troot = parser:parse()[1]:root()
     local terms = {}
     local function collect(n)
-        for _, c in tsutil.inext, n, -1 do
-            if c:named() then
-                local t = c:type()
-                if t == 'tuple' or t == 'list' then terms[#terms + 1] = erllit.term(c, src) else collect(c) end
-            end
+        for _, c in tsutil.inamed, n, -1 do
+            local t = c:type()
+            if t == 'tuple' or t == 'list' then terms[#terms + 1] = erllit.term(c, src) else collect(c) end
         end
     end
     collect(troot)

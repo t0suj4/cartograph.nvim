@@ -1424,12 +1424,10 @@ local function assign_sides(node, src)
     local left = node:field('left')[1]
     local right = node:field('right')[1] or node:field('value')[1]
     if not left or not right then
-        for _, c in tsutil.inext, node, -1 do
-            if c:named() then
-                local ct = c:type()
-                if ct == 'variable_list' and not left then left = c
-                elseif ct == 'expression_list' and not right then right = c end
-            end
+        for _, c in tsutil.inamed, node, -1 do
+            local ct = c:type()
+            if ct == 'variable_list' and not left then left = c
+            elseif ct == 'expression_list' and not right then right = c end
         end
     end
     -- ★ POSITIONAL FALLBACK. Odin's `assignment_statement` carries NO fields and no
@@ -1611,20 +1609,18 @@ function M.harvest_row(node, src, hint, lang)
         -- re-deriving — the same reason head_binders and case_labels are exported. A
         -- mirrored rule is one rule; two rules that agree today are two rules.
         local bodyc = require('cartograph.flow').body_children(node, CT, C)
-        for _, c in tsutil.inext, node, -1 do
-            if c:named() then
-                local ct = c:type()
-                if not tsutil.COMMENT[ct] and not B[ct] and not C[ct]
-                    and not (BLK and BLK[ct] ~= nil) and not (bskip and bskip[c:id()])
-                    and not (bodyc and bodyc[c:id()]) then
-                    if CT[ct] then -- a nested head: its condition, never its body
-                        local sub = M.harvest_row(c, src, 'ctrlhead', lang)
-                        if sub.cond then rhs[#rhs + 1] = sub.cond end
-                        for _, e in ipairs(sub.rhs or {}) do rhs[#rhs + 1] = e end
-                        for _, e in ipairs(sub.lhs or {}) do lhs[#lhs + 1] = e end
-                    else
-                        rhs[#rhs + 1] = build(c, src, lang)
-                    end
+        for _, c in tsutil.inamed, node, -1 do
+            local ct = c:type()
+            if not tsutil.COMMENT[ct] and not B[ct] and not C[ct]
+                and not (BLK and BLK[ct] ~= nil) and not (bskip and bskip[c:id()])
+                and not (bodyc and bodyc[c:id()]) then
+                if CT[ct] then -- a nested head: its condition, never its body
+                    local sub = M.harvest_row(c, src, 'ctrlhead', lang)
+                    if sub.cond then rhs[#rhs + 1] = sub.cond end
+                    for _, e in ipairs(sub.rhs or {}) do rhs[#rhs + 1] = e end
+                    for _, e in ipairs(sub.lhs or {}) do lhs[#lhs + 1] = e end
+                else
+                    rhs[#rhs + 1] = build(c, src, lang)
                 end
             end
         end
@@ -2550,14 +2546,12 @@ local function merged_clauses(node, root, lang)
     local fnt = ts.fn_types(lang)
     local out = {}
     local function walk(n)
-        for _, c in tsutil.inext, n, -1 do
-            if c:named() then
-                local r0, _, r1 = c:range()
-                if r1 >= sl and r0 <= el then
-                    if fnt[c:type()] then
-                        if r0 >= sl then out[#out + 1] = c end
-                    else walk(c) end
-                end
+        for _, c in tsutil.inamed, n, -1 do
+            local r0, _, r1 = c:range()
+            if r1 >= sl and r0 <= el then
+                if fnt[c:type()] then
+                    if r0 >= sl then out[#out + 1] = c end
+                else walk(c) end
             end
         end
     end
@@ -2655,8 +2649,8 @@ function M.of_text(src, lang, opts)
     local fnt = ts.fn_types(lang)
     local function find(n)
         if fnt[n:type()] then return n end
-        for _, c in tsutil.inext, n, -1 do
-            if c:named() then local r = find(c); if r then return r end end
+        for _, c in tsutil.inamed, n, -1 do
+            local r = find(c); if r then return r end
         end
     end
     local fn = find(root)
@@ -2750,8 +2744,8 @@ function M.bound_names(fn, src, binders)
     for _, b in ipairs(binders) do by_node[b.node] = b end
     local function collect_names(n)
         if BINDNAME[n:type()] then out[txt(n, src)] = true end
-        for _, c in tsutil.inext, n, -1 do
-            if c:named() then collect_names(c) end
+        for _, c in tsutil.inamed, n, -1 do
+            collect_names(c)
         end
     end
     local function walk(n)
@@ -2764,8 +2758,8 @@ function M.bound_names(fn, src, binders)
                 end
             end
         end
-        for _, c in tsutil.inext, n, -1 do
-            if c:named() then walk(c) end
+        for _, c in tsutil.inamed, n, -1 do
+            walk(c)
         end
     end
     walk(fn)

@@ -61,13 +61,11 @@ M.LANGS = LANGS
 local function first_param_name(L, fn, src)
     local ps = fn:field('parameters')[1]
     if not ps then return nil end
-    for _, c in tsutil.inext, ps, -1 do
-        if c:named() then
-            if L.ident[c:type()] then return node_text(c, src) end
-            local id = c:field('name')[1] or c:named_child(0) -- (a typed / default parameter wraps the name)
-            if id and L.ident[id:type()] then return node_text(id, src) end
-            return nil
-        end
+    for _, c in tsutil.inamed, ps, -1 do
+        if L.ident[c:type()] then return node_text(c, src) end
+        local id = c:field('name')[1] or c:named_child(0) -- (a typed / default parameter wraps the name)
+        if id and L.ident[id:type()] then return node_text(id, src) end
+        return nil
     end
     return nil
 end

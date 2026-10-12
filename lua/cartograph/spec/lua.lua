@@ -186,16 +186,14 @@ local STRING_CACHE = { src = nil, seen = {} } -- the last file's verdicts, keyed
 local function assigned(vl, el, name, src)
     -- the expression a `name` in variable list `vl` receives from expression list `el` (by position), or false
     local i = 0
-    for _, v in tsutil.inext, vl, -1 do
-        if v:named() then
-            i = i + 1
-            if v:type() == 'identifier' and node_text(v, src) == name then
-                local ei, e = 0, nil
-                for _, x in tsutil.inext, el, -1 do
-                    if x:named() then ei = ei + 1; if ei == i then e = x end end
-                end
-                return e or false
+    for _, v in tsutil.inamed, vl, -1 do
+        i = i + 1
+        if v:type() == 'identifier' and node_text(v, src) == name then
+            local ei, e = 0, nil
+            for _, x in tsutil.inamed, el, -1 do
+                ei = ei + 1; if ei == i then e = x end
             end
+            return e or false
         end
     end
     return nil
@@ -218,11 +216,9 @@ local function scope_assigns(p, src, seen)
         local exprs, k = {}, 0
         for _, x in tsutil.inext, el or vl, -1 do if el and x:named() then k = k + 1; exprs[k] = x end end
         local i = 0
-        for _, v in tsutil.inext, vl, -1 do
-            if v:named() then
-                i = i + 1
-                if v:type() == 'identifier' then put(node_text(v, src), sid, exprs[i]) end
-            end
+        for _, v in tsutil.inamed, vl, -1 do
+            i = i + 1
+            if v:type() == 'identifier' then put(node_text(v, src), sid, exprs[i]) end
         end
     end
     local function walk(x)
@@ -631,21 +627,17 @@ local LUA_GUARDS = {
         local vl = top:parent()
         if not vl or vl:type() ~= 'variable_list' then return false end
         local pos, i = nil, 0
-        for _, ch in tsutil.inext, vl, -1 do
-            if ch:named() then
-                i = i + 1
-                if ch == top then pos = i break end
-            end
+        for _, ch in tsutil.inamed, vl, -1 do
+            i = i + 1
+            if ch == top then pos = i break end
         end
         local asg = vl:parent()
         local exprs = asg and asg:named_child(1)
         if not (pos and exprs) then return false end
         local rhs, j = nil, 0
-        for _, ch in tsutil.inext, exprs, -1 do
-            if ch:named() then
-                j = j + 1
-                if j == pos then rhs = ch break end
-            end
+        for _, ch in tsutil.inamed, exprs, -1 do
+            j = j + 1
+            if j == pos then rhs = ch break end
         end
         if not rhs or rhs:type() ~= 'binary_expression'
             or not optext_is(rhs, src, { ['or'] = true }) then return false end

@@ -275,12 +275,10 @@ function Scan:use(node, taint, via)
         -- (the argument's POSITION: the helper follow uses it, and so does record-flow across files — CART-1345)
         local sl2, sc2 = cur:range()
         local idx = 0
-        for _, ch in tsutil.inext, p, -1 do
-            if ch:named() then
-                idx = idx + 1
-                local cl, cc = ch:range()
-                if cl == sl2 and cc == sc2 then break end
-            end
+        for _, ch in tsutil.inamed, p, -1 do
+            idx = idx + 1
+            local cl, cc = ch:range()
+            if cl == sl2 and cc == sc2 then break end
         end
         -- INTERPROC 1-HOP: the WHOLE record (not a derived sub-value) passed to
         -- a resolvable same-file helper → FOLLOW it (taint that helper's matching
@@ -338,13 +336,13 @@ end
 -- positional (name_i, expr_i) binding for declarations and assignments
 function Scan:bind_pairs(vars, exprs)
     local names = {}
-    for _, ch in tsutil.inext, vars, -1 do
-        if ch:named() then names[#names + 1] = ch end
+    for _, ch in tsutil.inamed, vars, -1 do
+        names[#names + 1] = ch
     end
     local vals = {}
     if exprs then
-        for _, ch in tsutil.inext, exprs, -1 do
-            if ch:named() then vals[#vals + 1] = ch end
+        for _, ch in tsutil.inamed, exprs, -1 do
+            vals[#vals + 1] = ch
         end
     end
     for i, nm in ipairs(names) do
@@ -388,8 +386,8 @@ function Scan:walk(node, pending)
     local t = node:type()
     if t == 'block' or t == 'chunk' then
         self.frames[#self.frames + 1] = pending or {}
-        for _, ch in tsutil.inext, node, -1 do
-            if ch:named() then self:walk(ch) end
+        for _, ch in tsutil.inamed, node, -1 do
+            self:walk(ch)
         end
         self.frames[#self.frames] = nil
         return
@@ -417,12 +415,10 @@ function Scan:walk(node, pending)
     end
     if t == 'for_statement' then
         local clause, body
-        for _, ch in tsutil.inext, node, -1 do
-            if ch:named() then
-                local ct = ch:type()
-                if ct == 'for_generic_clause' or ct == 'for_numeric_clause' then clause = ch
-                elseif ct == 'block' then body = ch end
-            end
+        for _, ch in tsutil.inamed, node, -1 do
+            local ct = ch:type()
+            if ct == 'for_generic_clause' or ct == 'for_numeric_clause' then clause = ch
+            elseif ct == 'block' then body = ch end
         end
         local pend = {}
         if clause and clause:type() == 'for_generic_clause' then
@@ -489,8 +485,8 @@ function Scan:walk(node, pending)
         if args then self:walk(args) end
         return
     end
-    for _, ch in tsutil.inext, node, -1 do
-        if ch:named() then self:walk(ch) end
+    for _, ch in tsutil.inamed, node, -1 do
+        self:walk(ch)
     end
 end
 
@@ -524,8 +520,8 @@ function Scan:collect_helpers(node)
             self.helpers[key] = { params = params, body = body }
         end
     end
-    for _, ch in tsutil.inext, node, -1 do
-        if ch:named() then self:collect_helpers(ch) end
+    for _, ch in tsutil.inamed, node, -1 do
+        self:collect_helpers(ch)
     end
 end
 

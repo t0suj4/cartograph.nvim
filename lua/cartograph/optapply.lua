@@ -286,11 +286,9 @@ end
 -- `procedure_declaration` — so on those languages the conservative guard was not
 -- conservative, it was blind. syngate's localize rung is the fence.
 local function has_nested_fn(n, fnt)
-    for _, c in tsutil.inext, n, -1 do
-        if c:named() then
-            if fnt[c:type()] then return true end
-            if has_nested_fn(c, fnt) then return true end
-        end
+    for _, c in tsutil.inamed, n, -1 do
+        if fnt[c:type()] then return true end
+        if has_nested_fn(c, fnt) then return true end
     end
     return false
 end

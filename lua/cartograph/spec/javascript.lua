@@ -792,26 +792,24 @@ return {
                 end
             end
             local function walk(node)
-                for _, ch in tsutil.inext, node, -1 do
-                    if ch:named() then
-                        local t = ch:type()
-                        if t == 'shorthand_property_identifier_pattern' then
-                            shorthand(ch)
-                        elseif t == 'pair_pattern' then
-                            -- `{ expect: e }` — key is the MEMBER, value the local
-                            local k = ch:field('key')[1]
-                            local v = ch:field('value')[1]
-                            if k and v and v:type() == 'identifier' then pair(k, v) end
-                        elseif t == 'import_specifier' then
-                            -- `{ stub }` or `{ stub as s }` — alias is the local
-                            local nm = ch:field('name')[1]
-                            local al = ch:field('alias')[1]
-                            if nm and al then pair(nm, al)
-                            elseif nm then shorthand(nm) end
-                        elseif t == 'object_pattern' or t == 'named_imports'
-                            or t == 'import_clause' then
-                            walk(ch)
-                        end
+                for _, ch in tsutil.inamed, node, -1 do
+                    local t = ch:type()
+                    if t == 'shorthand_property_identifier_pattern' then
+                        shorthand(ch)
+                    elseif t == 'pair_pattern' then
+                        -- `{ expect: e }` — key is the MEMBER, value the local
+                        local k = ch:field('key')[1]
+                        local v = ch:field('value')[1]
+                        if k and v and v:type() == 'identifier' then pair(k, v) end
+                    elseif t == 'import_specifier' then
+                        -- `{ stub }` or `{ stub as s }` — alias is the local
+                        local nm = ch:field('name')[1]
+                        local al = ch:field('alias')[1]
+                        if nm and al then pair(nm, al)
+                        elseif nm then shorthand(nm) end
+                    elseif t == 'object_pattern' or t == 'named_imports'
+                        or t == 'import_clause' then
+                        walk(ch)
                     end
                 end
             end

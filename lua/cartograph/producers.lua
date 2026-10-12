@@ -45,13 +45,11 @@ local function erl_terms(path)
     local erllit = require 'cartograph.erllit'
     local out = {}
     local function walk(n)
-        for _, c in tsutil.inext, n, -1 do
-            if c:named() then
-                local t = c:type()
-                -- a tuple or list literal: read it as a term and stop (its insides are part of the term)
-                if t == 'tuple' or t == 'list' then out[#out + 1] = erllit.term(c, src)
-                else walk(c) end
-            end
+        for _, c in tsutil.inamed, n, -1 do
+            local t = c:type()
+            -- a tuple or list literal: read it as a term and stop (its insides are part of the term)
+            if t == 'tuple' or t == 'list' then out[#out + 1] = erllit.term(c, src)
+            else walk(c) end
         end
     end
     walk(root)

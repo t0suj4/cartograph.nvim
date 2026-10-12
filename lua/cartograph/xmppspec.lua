@@ -253,16 +253,14 @@ function M.parse_source(src, path)
                 local v = form:field('value')[1]
                 local nm, body, extra = nil, nil, 0
                 if v and v:type() == 'paren_expr' then
-                    for _, ch in tsutil.inext, v, -1 do
-                        if ch:named() then
-                            if ch:type() == 'ERROR' and not nm then
-                                local a = ch:named_child(0)
-                                if a and a:type() == 'atom' and ch:named_child_count() == 1 then
-                                    nm = unquote_atom(vim.treesitter.get_node_text(a, src))
-                                else extra = extra + 1 end
-                            elseif not body and ch:type() ~= 'ERROR' then body = ch
+                    for _, ch in tsutil.inamed, v, -1 do
+                        if ch:type() == 'ERROR' and not nm then
+                            local a = ch:named_child(0)
+                            if a and a:type() == 'atom' and ch:named_child_count() == 1 then
+                                nm = unquote_atom(vim.treesitter.get_node_text(a, src))
                             else extra = extra + 1 end
-                        end
+                        elseif not body and ch:type() ~= 'ERROR' then body = ch
+                        else extra = extra + 1 end
                     end
                 end
                 if not v or v:type() ~= 'paren_expr' then refuse('value is not a parenthesised pair')
