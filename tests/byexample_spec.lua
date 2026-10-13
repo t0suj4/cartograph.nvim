@@ -94,6 +94,10 @@ test('byexample: PER SITE — a behaviour-changing rule is applied where a guard
     project { ['d.lua'] = 'local D = {}\nfunction D.f(q)\n  if q ~= nil then\n    if q == nil then return 1 end\n  end\nend\nreturn D\n' }
     local _, why, class = BX.plan(store, { before = ex.before, after = ex.after, scope = 'd.lua' })
     eq('decision', class); ok(tostring(why):find('no site is shown to avoid it (1 undecided', 1, true), tostring(why))
+    -- a LOCAL'S DEFINITION is evidence too: `local t = {}`, never assigned again, is never false
+    project { ['e.lua'] = 'local E = {}\nfunction E.f()\n  local t = {}\n  if t == nil then return 1 end\n  return t\nend\nreturn E\n' }
+    local pe = assert(BX.plan(store, { before = ex.before, after = ex.after, scope = 'e.lua' }))
+    eq(1, pe.sites); ok(pe.edits['e.lua']:find('if not t then return 1 end', 1, true), pe.edits['e.lua'])
 end)
 
 test('learn-from-example: learning is ITSELF a tactic — into the PROJECT, journaled, born with its own test, never overwriting', function ()

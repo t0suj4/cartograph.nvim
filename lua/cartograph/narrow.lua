@@ -1085,6 +1085,89 @@ function M.devirt_report(store, fn_id)
     return L
 end
 
+--- LUA: what a LOCAL'S OWN DEFINITION proves at `site` (CART-1668) — `local t = {}` and never assigned again is a
+--- table at every later use. Sound by construction: the NEAREST binding of a name, walking out from the site through
+--- its enclosing blocks (earlier sibling statements only — they ran before it); a parameter, a `for` variable or a
+--- `local function` met first BLOCKS the name (no fact); a name that is the target of a plain assignment ANYWHERE in
+--- the function — nested closures included, `function () t = nil end` — has none; and the initializer must evaluate
+--- as a CLOSED CONSTANT (no name read, no call: `{}`, `"x"`, `1`), its type is the fact. -> { [name] = 'type:T' }
+-- (lua's binder kinds, per language: facts_at calls this only for lua — ruby has no declaration statement, a name
+-- is bound by its first assignment, which this reading of `local` does not model)
+local DEF_KINDS = { lua = { decl = 'variable_declaration', asg = 'assignment_statement', fdecl = 'function_declaration' } }
+function M._lua_def_kinds(site, fn, text)
+    local K = DEF_KINDS.lua
+    local seen = {} -- name -> the initializer node | false (a binder that proves nothing)
+    local function bind(name, value) if seen[name] == nil then seen[name] = value or false end end
+    local function names_in(n, out)
+        for _, c in tsutil.inamed, n, -1 do
+            if c:type() == 'identifier' then out[#out + 1] = vim.treesitter.get_node_text(c, text) end
+        end
+        return out
+    end
+    local child, anc = site, site:parent()
+    while anc do
+        local t = anc:type()
+        if t == 'block' or t == 'chunk' then
+            -- (earlier siblings, nearest first)
+            local prev = child:prev_named_sibling()
+            while prev do
+                if prev:type() == K.decl then
+                    local asg = prev:named_child(0)
+                    if asg and asg:type() == K.asg then
+                        local vl, el = asg:named_child(0), asg:named_child(1)
+                        local vals = {}
+                        for _, v in tsutil.inamed, el, -1 do vals[#vals + 1] = v end
+                        local names = names_in(vl, {})
+                        for i = #names, 1, -1 do bind(names[i], #vals == #names and vals[i]) end
+                    else
+                        for _, nm in ipairs(names_in(prev, {})) do bind(nm, false) end -- `local x` (no value)
+                    end
+                elseif prev:type() == K.fdecl then
+                    local nm = prev:field('name')[1]
+                    if nm then bind(vim.treesitter.get_node_text(nm, text), false) end
+                end
+                prev = prev:prev_named_sibling()
+            end
+        elseif t == 'for_statement' then
+            local clause = anc:field('clause')[1] or anc:named_child(0)
+            if clause then for _, nm in ipairs(names_in(clause, {})) do bind(nm, false) end end
+        end
+        if anc:id() == fn:id() then
+            local ps = fn:field('parameters')[1]
+            if ps then for _, nm in ipairs(names_in(ps, {})) do bind(nm, false) end end
+            break
+        end
+        child, anc = anc, anc:parent()
+    end
+    -- (a plain assignment anywhere in the function, closures included, revokes the definition)
+    local assigned = {}
+    local function scan(n)
+        for _, c in tsutil.inamed, n, -1 do
+            if c:type() == K.asg and n:type() ~= K.decl then
+                local vl = c:named_child(0)
+                if vl then for _, nm in ipairs(names_in(vl, {})) do assigned[nm] = true end end
+            end
+            scan(c)
+        end
+    end
+    scan(fn)
+    local out = {}
+    for name, value in pairs(seen) do
+        if value and not assigned[name] then
+            local src = vim.treesitter.get_node_text(value, text)
+            -- (no call: a literal's method — `("x"):rep(1e10)` — reads no name and still runs)
+            local chunk = not src:find('[(:]') and loadstring('return ' .. src)
+            if chunk then
+                local read = false
+                setfenv(chunk, setmetatable({}, { __index = function () read = true end }))
+                local okc, c = pcall(chunk)
+                if okc and not read and c ~= nil then out[name] = 'type:' .. type(c) end
+            end
+        end
+    end
+    return out
+end
+
 --- The narrowing facts AT A POSITION of `text` (a file of the graph, read as it is NOW): the dominating guards of the
 --- node there, RAW kinds (truthy is not collapsed to non-nil — `false` is excluded by truthy only). A rewrite asks it
 --- whether a site's operand can take a value its rule treats differently (byexample, CART-1668). The innermost
@@ -1109,7 +1192,13 @@ function M.facts_at(store, rel, text, row, col)
     if not node then return nil, 'the enclosing function is no node of the graph (its reassignments are unknown)' end
     if twice then return nil, 'two definitions start on the enclosing function\'s line: which one holds the position is not known' end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
-    return env_of(site, text, classify, mutated_of(node), field_unstable_of(fn, text))
+    local env = env_of(site, text, classify, mutated_of(node), field_unstable_of(fn, text))
+    if lang == 'lua' then
+        for name, kind in pairs(M._lua_def_kinds(site, fn, text)) do
+            if kind_rank(kind) > kind_rank(env[name]) then env[name] = kind end
+        end
+    end
+    return env
 end
 
 return M

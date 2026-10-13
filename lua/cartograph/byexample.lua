@@ -720,12 +720,14 @@ local function rewrite_once(rules, src, lang, admit, pristine)
             local off = marked:find('\0', 1, true) - 1
             local before = src:sub(1, off)
             local _, row = before:gsub('\n', '')
-            return row, #before:match('[^\n]*$')
+            local col = #before:match('[^\n]*$')
+            return row, col, src:match('^[^\n]*', off - col + 1) -- (and the site's whole line)
         end }
         if admit(site) then return true end
-        -- (named by its LINE when the text is still `src`: an expression site alone — `q == nil` — locates nothing)
-        local row = site.where()
-        local line = row and (src:match(('[^\n]*\n'):rep(row) .. '([^\n]*)') or ''):gsub('^%s+', '')
+        -- (named by its LINE when the text is still `src`: an expression site alone — `q == nil` — locates nothing.
+        -- Sliced at the site's offset: a pattern repeated per row was "too complex" past a few hundred lines)
+        local row, _, ltext = site.where()
+        local line = row and (ltext or ''):gsub('^%s+', '')
         undecided[#undecided + 1] = { line = row and row + 1, text = line or (a.cst_print(pos.node):match('^[^\n]*')) }
         return false
     end

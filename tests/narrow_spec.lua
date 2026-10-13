@@ -45,7 +45,36 @@ test('narrow.facts_at: the RAW facts at a position — truthy stays truthy (it r
     eq(nil, n2); ok(tostring(why2):find('no node of the graph', 1, true), tostring(why2))
 end)
 
+test('narrow.facts_at: a LOCAL\'S OWN DEFINITION — `local t = {}` never assigned again is a table; a closure that assigns it, a nearer parameter, or a call initializer proves nothing (CART-1668)', function ()
+    if not ready() then return end
+    local lines = {
+        'local function f(p, q)',            -- 0
+        '  local t, s, n = {}, "x", 1',      -- 1
+        '  local u = {}',                    -- 2
+        '  local g = function () u = false end', -- 3
+        '  local c = io.open("x")',          -- 4
+        '  local p, v = {}, q or {}',        -- 5: p shadows the parameter (the NEAREST binding); v READS q
+        '  do',                              -- 6
+        '    local function s() end',        -- 7: a nearer binder of s: no fact
+        '    return t, s, n, u, c, p, v',    -- 8
+        '  end',
+        'end',
+        'return f' }
+    ingest(lines)
+    local text = table.concat(lines, '\n')
+    local env = assert(narrow.facts_at(store, 'm.lua', text, 8, 11))
+    eq('type:table', env.t)
+    eq('type:number', env.n)
+    eq(nil, env.s, 'the nearer `local function s` binds it')
+    eq(nil, env.u, 'a closure assigns u')
+    eq(nil, env.c, 'a call proves no type')
+    eq('type:table', env.p, 'the local that shadows the parameter')
+    eq(nil, env.q, 'a parameter proves nothing')
+    eq(nil, env.v, '`q or {}` reads q: a table only when q is falsy — the sandbox read nil there, the program need not')
+end)
+
 test('narrow: `if x then` proves x non-nil in the body', function ()
+
     if not ready('lua') then skip 'no lua parser' end
     ingest {
         'local function f(x)',
