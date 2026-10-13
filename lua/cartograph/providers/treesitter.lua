@@ -4510,8 +4510,75 @@ local function resolve_installer(cv, edges, exact, addref, node_index, fieldalia
         if not f then f = {}; fams[key] = f; bind(f, x.host, x.arg) end
         bind(f, x.part, x.param) -- (a part installed into two tables binds its name to two families: neither — bind)
     end
-    if not next(fams) then return 0 end
+    -- (an INLINE shared table, CART-1681: `require('part')({ tx = tx, … })` — the argument is a constructor, no local
+    -- names it, but its simple fields say what each member IS: the part's `H.tx` / `local tx = H.tx` is the host's
+    -- function `tx`. ctor_of[part][param] = { host, fields }; installed twice, differently, it is neither's)
+    local ctor_of = {}
+    for i = 1, cv.n do
+        local callee = cget(i, 'callee')
+        if callee and tostring(callee):match('^require%s*%(?%s*[\'"][^\'"]+[\'"]%s*%)?$') then
+            local host = cget(i, 'file')
+            local part = required_module(inl, host, callee, cget(i, 'at'))
+            local ps = part and params_of[part]
+            if ps then
+                local rec = { _av = cget(i, '_av'), _av0 = cget(i, '_av0'), _avn = cget(i, '_avn'), argv = cget(i, 'argv') }
+                for k, p in ipairs(ps) do
+                    local a = argv.at(rec, k)
+                    if a and a.k == 'ctor' and a.prefix then
+                        local fields = {}
+                        for kk, vv in tostring(a.prefix):gmatch('([%w_]+)=([%w_]+)') do fields[kk] = vv end
+                        ctor_of[part] = ctor_of[part] or {}
+                        local prev = ctor_of[part][p]
+                        if prev == nil then ctor_of[part][p] = { host = host, fields = fields }
+                        elseif prev and (prev.host ~= host or vim.inspect(prev.fields) ~= vim.inspect(fields)) then ctor_of[part][p] = false end
+                    end
+                end
+            end
+        end
+    end
     local n = 0
+    if next(ctor_of) then
+        for i = 1, cv.n do
+            local cfull, cfile = cget(i, 'full'), cget(i, 'file')
+            local cc = ctor_of[cfile]
+            if cc then
+                local recv, member
+                if cfull then recv, member = tostring(cfull):match('^([%a_][%w_]*)%.([%w_]+)$')
+                else
+                    local b = fieldalias and fieldalias[cfile] and fieldalias[cfile][tostring(cget(i, 'callee'))]
+                    if b and b.n == 1 then recv, member = b.recv, b.member end
+                end
+                local inst = recv and cc[recv]
+                local vname = inst and inst.fields[member]
+                if vname then
+                    local fit, dup
+                    for _, d in ipairs(exact[vname] or {}) do
+                        if d.file == inst.host and (d.kind == 'function' or d.kind == 'method') then
+                            if fit then dup = true end
+                            fit = fit or d
+                        end
+                    end
+                    -- (or CORRECTED: a name join that landed outside the host — `H.kids` on another file's M.kids —
+                    -- read the member by its name; the table it is a member of says which function it is)
+                    local cto = cget(i, 'to')
+                    local cur = cto and node_index[cto]
+                    if fit and not dup and fit.id ~= cto and (not cto or (cur and cur.file ~= inst.host)) then
+                        cset(i, 'to', fit.id)
+                        cset(i, 'inferred', true)
+                        cset(i, 'refused', nil)
+                        cset(i, 'ext', nil)
+                        local cfn = cget(i, 'fn')
+                        if cfn then
+                            local cline = cget(i, 'line')
+                            addref(cfn, fit.id, cget(i, 'at') or { start = { line = cline, char = 0 }, ['end'] = { line = cline, char = 0 } }, true)
+                        end
+                        n = n + 1
+                    end
+                end
+            end
+        end
+    end
+    if not next(fams) then return n end
     for i = 1, cv.n do
         local cfull, cfile = cget(i, 'full'), cget(i, 'file')
         local recv, member = nil, nil
@@ -8966,7 +9033,18 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 -- `{ … }` — a table this call's argument list MAKES: fresh, so a write into it (setmetatable's) is
                                 -- the call's own business, never module state (CART-1547)
                                 args[#args + 1] = ''
-                                argv[#argv + 1] = { k = 'ctor' }
+                                -- (its simple `key = name` fields, `k=v;k=v` in `prefix` — never `v`, which argv.str reads as the
+                                -- literal; prefix is read only for concat — an INSTALLER's shared table built inline —
+                                -- `require('part')({ tx = tx, … })` — names what each member IS, CART-1681)
+                                local fv = {}
+                                for _, fld in tsutil.inamed, a, -1 do
+                                    local fk, fvv = fld:field('name')[1], fld:field('value')[1]
+                                    if fk and fvv and fk:type() == 'identifier' and fvv:type() == 'identifier' then -- @langs-ok lua table_constructor fields
+                                        fv[#fv + 1] = node_text(fk, src) .. '=' .. node_text(fvv, src)
+                                    end
+                                end
+                                local fs = table.concat(fv, ';')
+                                argv[#argv + 1] = { k = 'ctor', prefix = #fs > 0 and #fs <= 4096 and fs or nil }
                             else
                                 local cname = callable_arg(a, src)
                                 args[#args + 1] = ''

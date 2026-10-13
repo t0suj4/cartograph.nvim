@@ -307,7 +307,7 @@ local function signature(s)
 end
 
 local CAP = 200   -- write-set keys per summary before honest coarsening
-local HCAP = 4    -- hedges kept per summary
+local HCAP = tonumber(os.getenv('CARTOGRAPH_HEDGE_CAP') or '') or 4 -- hedges kept per summary (a census lifts it: CART-1681)
 
 -- the param predicate of the CALL SITE being taken (CART-1567): what a call under `if not validator` brings in fires
 -- only when that holds, so its keys carry the site's gp — set around one site's processing, nil otherwise

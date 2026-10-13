@@ -50,6 +50,38 @@ local function extract()
     return by
 end
 
+test('an INSTALLER part handed an INLINE table: `require(part)({ tx = tx })` makes the part\'s H.tx — and its alias `local tx = H.tx` — the host\'s function tx (CART-1681)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(rel, text) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close() end
+    put('part.lua', table.concat({
+        'return function (H)',
+        '  local tx = H.tx',
+        '  local P = {}',
+        '  function P.run(n) return tx(n), H.kids(n), H.other(n), H.made(n) end',
+        '  return P',
+        'end', '' }, '\n'))
+    put('host.lua', table.concat({
+        'local M = {}',
+        'local function tx(n) return n end',
+        'local function kids(n) return { n } end',
+        'local P = require("part")({ tx = tx, kids = kids, other = some_global, made = kids(1) })',
+        'function M.go(n) return P.run(n) end',
+        'return M', '' }, '\n'))
+    put('elsewhere.lua', 'local M = {}\nfunction M.tx(n) return n end\nfunction M.kids(n) return n end\nreturn M\n')
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local cv = require('cartograph.callview').of(data)
+    local by = {}
+    for i = 1, cv.n do
+        if cv.get(i, 'file') == 'part.lua' then by[cv.get(i, 'full') or cv.get(i, 'callee')] = cv.get(i, 'to') end
+    end
+    ok(tostring(by.tx):find('host.lua::tx', 1, true), 'the alias tx is the host\'s tx: ' .. tostring(by.tx))
+    ok(tostring(by['H.kids']):find('host.lua::kids', 1, true), 'H.kids is the host\'s kids: ' .. tostring(by['H.kids']))
+    ok(not tostring(by['H.other']):find('host.lua', 1, true), 'a field holding a global names no host function: ' .. tostring(by['H.other']))
+    ok(not tostring(by['H.made']):find('host.lua::kids', 1, true), 'a field holding kids(1) holds its RESULT, not kids: ' .. tostring(by['H.made']))
+end)
+
 test('a local bound to a FACTORY\'s one returned closure calls that closure — only on the exact shape `local f = F(…)` with F returning once (CART-1681)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
