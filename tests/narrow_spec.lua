@@ -113,6 +113,46 @@ test('narrow: a call that CANNOT write its argument does not stale a field fact 
     eq(nil, env_at('M.s', 28)['t.x'], 'table.sort writes its first argument: stale')
 end)
 
+test('narrow: a staling call BEFORE the guard cannot invalidate it — unless a loop around the use, or a goto, can bring it back (CART-1677)', function ()
+    if not ready() then return end
+    ingest({
+        'local M = {}',                                         -- 1
+        'local function poke(t) t.x = nil end',                -- 2: writes its param
+        'function M.a(t)',                                      -- 3
+        '  poke(t)',                                            -- 4: before the guard
+        '  if t.x then',                                        -- 5
+        '    return t.x',                                       -- 6
+        '  end',
+        'end',
+        'function M.b(t)',                                      -- 9
+        '  if t.x then',                                        -- 10
+        '    poke(t)',                                          -- 11: after the guard
+        '    return t.x',                                       -- 12
+        '  end',
+        'end',
+        'function M.c(t, xs)',                                  -- 15
+        '  for _ in ipairs(xs) do',                             -- 16
+        '    poke(t)',                                          -- 17: before, but in the loop around the use
+        '    if t.x then',                                      -- 18
+        '      local y = t.x',                                  -- 19
+        '    end',
+        '  end',
+        'end',
+        'function M.d(t)',                                      -- 23
+        '  ::again::',                                          -- 24
+        '  poke(t)',                                            -- 25
+        '  if t.x then',                                        -- 26
+        '    local y = t.x',                                    -- 27
+        '    goto again',                                       -- 28
+        '  end',
+        'end',
+        'return M' })
+    ok(env_at('M.a', 6)['t.x'], 'poke ran before the guard was checked')
+    eq(nil, env_at('M.b', 12)['t.x'], 'poke after the guard: stale')
+    eq(nil, env_at('M.c', 19)['t.x'], 'a loop around the use holds the call: stale (conservative)')
+    eq(nil, env_at('M.d', 27)['t.x'], 'a goto: no position rule in this function')
+end)
+
 test('narrow: `if x then` proves x non-nil in the body', function ()
 
     if not ready('lua') then skip 'no lua parser' end

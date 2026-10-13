@@ -522,8 +522,13 @@ local function field_unstable_of(fn, src, harmless)
     local stale = {} -- list of { prefix = <path str>, inclusive = bool }
     -- (a CALL-derived entry carries its call node and argument position — 0 the method receiver — for the call-staling
     -- census: does the callee's effect summary say it writes there at all? CART-1677)
-    local function mark(prefix, inclusive, call, argi)
-        if prefix then stale[#stale + 1] = { prefix = prefix, inclusive = inclusive, call = call, argi = argi } end
+    -- (`at`: the byte the staling node starts at — an entry BEFORE a guard cannot invalidate what the guard proves,
+    -- see fact_live; `from` the node itself)
+    local function mark(prefix, inclusive, call, argi, from)
+        if prefix then
+            local at = from and select(3, from:start())
+            stale[#stale + 1] = { prefix = prefix, inclusive = inclusive, call = call, argi = argi, at = at }
+        end
     end
     local function walk(n)
         local t = n:type()
@@ -541,26 +546,28 @@ local function field_unstable_of(fn, src, harmless)
             if vlist then for _, tgt in tsutil.inext, vlist, -1 do -- field-write targets
                 -- @langs-ok lua-only, same reason: ruby facts are all depth 0
                 if tgt:type() == 'dot_index_expression' then
-                    local p = path_of(tgt, src); if p then mark(p.path, true) end -- A.f inclusive
+                    local p = path_of(tgt, src); if p then mark(p.path, true, nil, nil, tgt) end -- A.f inclusive
                 -- @langs-ok lua-only, same reason as above
                 elseif tgt:type() == 'bracket_index_expression' then
-                    local b = path_of(tgt:named_child(0), src); if b then mark(b.path, false) end -- A[?] → A.*
+                    local b = path_of(tgt:named_child(0), src); if b then mark(b.path, false, nil, nil, tgt) end -- A[?] → A.*
                 end
             end end
             if elist then for _, v in tsutil.inext, elist, -1 do -- alias RHS (identifier or field path)
-                if v:named() then local p = path_of(v, src); if p then mark(p.path, false) end end -- y = A → A.*
+                if v:named() then local p = path_of(v, src); if p then mark(p.path, false, nil, nil, v) end end -- y = A → A.*
             end end
         elseif t == 'function_call' then -- A passed as arg, or A:m() receiver
             local args = n:field('arguments')[1]
             if args then local ai = 0; for _, a in tsutil.inamed, args, -1 do
                 ai = ai + 1
-                local p = path_of(a, src); if p and not (harmless and harmless(n, ai)) then mark(p.path, false, n, ai) end
+                local p = path_of(a, src); if p and not (harmless and harmless(n, ai)) then mark(p.path, false, n, ai, n) end
             end end
             local callee = n:named_child(0)
             -- @langs-ok lua-only staling walk; ruby has no depth-≥1 facts to stale
             if callee and callee:type() == 'method_index_expression' then
-                local p = path_of(callee:named_child(0), src); if p and not (harmless and harmless(n, 0)) then mark(p.path, false, n, 0) end
+                local p = path_of(callee:named_child(0), src); if p and not (harmless and harmless(n, 0)) then mark(p.path, false, n, 0, n) end
             end
+        elseif t == 'goto_statement' then -- @langs-ok lua-only staling walk
+            stale.has_goto = true -- (a backward jump breaks textual order: no position rule in this function)
         end
         for _, c in tsutil.inext, n, -1 do
             if c:named() and not FN_TYPES[c:type()] then walk(c) end -- nested fns = own scope
@@ -578,14 +585,34 @@ local function prefix_covers(a, inclusive, p)
 end
 -- keep a fact `f` at a point. A field path (depth ≥ 1) needs its root un-reassigned
 -- AND no staling prefix covering its path; a bare var only needs un-reassignment.
-local function fact_live(f, mutated, stale)
+-- ★ POSITION (CART-1677): a staling entry that starts BEFORE the guard's condition ran before the guard was checked, so
+-- it cannot invalidate what the guard proves — unless a LOOP holding the point also holds the entry (a later iteration
+-- runs it after the guard) or the function has a `goto`. `gb` = the guard condition's start byte, `loops` = the byte
+-- ranges of the loops enclosing the point ({ start, end } pairs); both nil = the old, position-blind rule.
+local function before_guard(e, gb, loops, stale)
+    if not (gb and e.at and e.at < gb) or stale.has_goto then return false end
+    for _, l in ipairs(loops or {}) do if e.at >= l[1] and e.at < l[2] then return false end end
+    return true
+end
+local function fact_live(f, mutated, stale, gb, loops)
     if mutated[f.root] then return false end
     if (f.depth or 0) >= 1 then
         for _, e in ipairs(stale) do
-            if prefix_covers(e.prefix, e.inclusive, f.var) then return false end
+            if prefix_covers(e.prefix, e.inclusive, f.var) and not before_guard(e, gb, loops, stale) then return false end
         end
     end
     return true
+end
+-- the byte ranges of the loops enclosing `node` up to `fn` (fact_live's `loops`)
+local LOOPS = { while_statement = true, for_statement = true, repeat_statement = true }
+local function loops_of(node, fn)
+    local out = {}
+    local a = node:parent()
+    while a and (not fn or a:id() ~= fn:id()) do
+        if LOOPS[a:type()] then out[#out + 1] = { select(3, a:start()), select(3, a:end_()) } end
+        a = a:parent()
+    end
+    return out
 end
 
 -- kind precedence: a concrete value (eq:) proves a type, a type proves non-nil +
@@ -633,9 +660,10 @@ function M.narrow(store, fn_id)
                 for _, stmt in tsutil.inext, c, -1 do
                     if stmt:named() and not tsutil.is_comment(stmt) then
                         local env = {}
+                        local sloops = loops_of(stmt, fn)
                         for _, g in ipairs(cfg.guards_over(stmt, src)) do
                             for _, f in ipairs(classify(g.cond, src, not g.neg)) do
-                                if fact_live(f, mutated, funstable) then
+                                if fact_live(f, mutated, funstable, select(3, g.cond:start()), sloops) then
                                     -- keep the STRONGEST kind; eq:/type: shown verbatim,
                                     -- nil/truthy collapse to the sound floor 'non-nil'
                                     if kind_rank(f.kind) > kind_rank(env[f.var]) then
@@ -668,9 +696,10 @@ end
 -- and the eq: value verbatim. Keyed by PATH (a bare var or a field path).
 local function env_of(node, src, classify, mutated, funstable)
     local env = {}
+    local nloops = loops_of(node)
     for _, g in ipairs(cfg.guards_over(node, src)) do
         for _, f in ipairs(classify(g.cond, src, not g.neg)) do
-            if fact_live(f, mutated or {}, funstable or {}) then
+            if fact_live(f, mutated or {}, funstable or {}, select(3, g.cond:start()), nloops) then
                 if kind_rank(f.kind) > kind_rank(env[f.var]) then env[f.var] = f.kind end
             end
         end
