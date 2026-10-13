@@ -427,8 +427,22 @@ local function build(store, opts)
             if f ~= NS then for dst, strict in pairs(l) do load_obj(c, f, dst, nil, strict) end end
         end
     end
+    -- (PARAMETER PATHS, opts.pathsum — CART-1673: a parameter's port is tagged { fn, j, path = '' }, a load through a
+    -- tagged port tags its result with the extended path (depth <= 3), and a tagged port's USES are noted — a method
+    -- receiver, a call argument, a called value, a return. R.param_paths() -> uses, tags. Declared HERE: field() reads
+    -- PTAG, and a later local would leave it a global inside field)
+    local PTAG = opts.pathsum and {} or nil
+    local PUSES = PTAG and {} or nil
+    local function puse(p, kind, extra)
+        local tg = PTAG and PTAG[p]
+        if tg then PUSES[#PUSES + 1] = { fn = tg.fn, j = tg.j, path = tg.path, kind = kind, extra = extra } end
+    end
     local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
+        if PTAG then
+            local tg = PTAG[x]
+            if tg and tg.d < 3 then PTAG[dst] = { fn = tg.fn, j = tg.j, path = tg.path .. '.' .. tostring(f), d = tg.d + 1 } end
+        end
         local l = loads[x]
         if not l then l = {}; loads[x] = l end
         l[#l + 1] = { f, dst, strict }
@@ -729,6 +743,7 @@ local function build(store, opts)
     -- writers census asks it: an opaque local handed to a param-mutating callee may hold a module table)
     local ARGP = opts.argprobes and {} or nil
     local ROOTS = ARGP and {} or nil -- (each walked file's TOP scope: name -> port, filled as the walk declares)
+    -- (parameter paths: PTAG / PUSES / puse, declared before field() — opts.pathsum, CART-1673)
     local CTX, ctx_direct = {}, {}
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
@@ -873,11 +888,13 @@ local function build(store, opts)
             local nm = n:field('name')[1]
             local method = nm and txt(nm):find(':', 1, true)
             if method then i = 1; fp.params[1] = declare('self', inst and new() or port('a:' .. id .. ':1')) end
+            if PTAG and method and not inst then PTAG[fp.params[1]] = { fn = id, j = 1, path = '', d = 0 } end
             local ps = n:field('parameters')[1]
             for _, x in tsutil.inext, ps or EMPTY_NODE, -1 do
                 if x:named() and x:type() == 'identifier' then
                     i = i + 1
                     fp.params[i] = declare(txt(x), inst and new() or port('a:' .. id .. ':' .. i))
+                    if PTAG and not inst then PTAG[fp.params[i]] = { fn = id, j = i, path = '', d = 0 } end
                 end
             end
             fnstack[#fnstack + 1] = fp
@@ -960,6 +977,11 @@ local function build(store, opts)
             if recvp then aps[1] = recvp end
             for _, a in ipairs(argn) do aps[#aps + 1] = expr(a) end
             if ARGP and c and not clone then ARGP[c] = aps end
+            if PTAG and not clone then
+                if recvp then puse(recvp, 'recv', txt(f:field('method')[1])) end
+                local to0 = c and callrec.to(c)
+                for j = recvp and 2 or 1, #aps do puse(aps[j], 'arg', { to = to0, j = j }) end
+            end
             -- (the array as a whole: a library function that reads or writes every position)
             if ACC and ARRAYFN[fname] and argn[1] then acc('array', argn[1], nil, aps[recvp and 2 or 1]) end
             local r = c and c.refused
@@ -1000,6 +1022,7 @@ local function build(store, opts)
                 end
             end
             if not callee and f then callee = expr(f) end
+            if PTAG and not clone and callee and not recvp then puse(callee, 'call') end
             if callee then callc(callee, aps, want and resl or res) end
             return want and resl or res
         end
@@ -1093,6 +1116,9 @@ local function build(store, opts)
                     local i = 0
                     for _, v in tsutil.inamed, vl, -1 do
                         i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
+                        -- (a local DECLARED from a parameter path is that path — an upper bound: a later assignment
+                        -- to it is not checked here, the census marks it)
+                        if PTAG and vals[i] and PTAG[vals[i]] then local tg = PTAG[vals[i]]; PTAG[p] = { fn = tg.fn, j = tg.j, path = tg.path, d = tg.d, via = 'local' } end
                     end
                 elseif a then
                     if a:type() == 'identifier' then declare(txt(a)) end
@@ -1129,6 +1155,7 @@ local function build(store, opts)
                 -- forwards its values: up to MULTI of them)
                 local vals = exprs(el, fp and MULTI or 1)
                 for i, v in ipairs(vals) do
+                    if fp and PTAG and not fp.inst then puse(v, 'ret', i) end
                     if fp then
                         local r = fp.rets[i]
                         if not r then r = fp.inst and new() or port('r:' .. fp.id .. ':' .. i); fp.rets[i] = r end
@@ -1600,6 +1627,7 @@ local function build(store, opts)
         -- (WHERE SATURATION LIVES: every saturated port by its role — a function's parameter (`a:`) or return (`r:`)
         -- port, the call boundary a per-call summary would not merge; a global / module port; a FIELD of an object in
         -- module state or of one outside it; any other (a local, a temporary). -> { [role] = count }, total)
+        R.param_paths = function () return PUSES or {}, PTAG or {} end
         R.top_census = function (only) -- (only: a set of ports — R.top_origins — instead of every saturated one)
             local role, n = {}, 0
             local fieldof = {}
@@ -1796,6 +1824,7 @@ local function build(store, opts)
         end
         local h = 1
         while h <= #q do local p = q[h]; h = h + 1; for _, r in ipairs(pred[p] or NOTHING) do seed(r) end end
+        if ARGP then R.unknown_ancestors = S end -- (the saturated ports upstream of an unknown answer: the ones that COST)
         local sel, n = {}, 0
         for o, fp in pairs(fnports) do
             if not fp.inst and fp.id and tostring(fp.id):find('%.lua::') then -- (instances are the Lua walker's)
