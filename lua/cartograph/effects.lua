@@ -500,7 +500,7 @@ end
 -- substitute argument j of call `c` (made by `caller`) for a pending pair owned by the callee
 local function subst(store, sums, sum, c, caller, j, tname, member)
     if callrec.method(c) then
-        s_hedge(sum, ('calls parameter %d of method %s @%s:%d'):format(j, tname, callrec.file(c) or '?', callrec.line(c) or 0))
+        s_hedge(sum, ('calls parameter %d of method %s @%s:%d'):format(j, tname, callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
         return
     end
     local a = argv.at(c, j)
@@ -518,7 +518,7 @@ local function subst(store, sums, sum, c, caller, j, tname, member)
     local ts = target and sums[target]
     if ts then inherit(sum, ts); return end
     s_hedge(sum, ('calls parameter %d of %s with an unknown function @%s:%d')
-        :format(j, tname, callrec.file(c) or '?', callrec.line(c) or 0))
+        :format(j, tname, callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
 end
 
 -- ── STRUCTURE NARROWS THE JOIN (CART-1572) ─────────────────────────────────────────────────────────────────────────
@@ -922,7 +922,7 @@ function M.summaries(store)
                             sum.pwx[x] = true
                         elseif kind == 'opaque' then
                             s_hedge(sum, ('param-mutation via opaque arg -> %s @%s:%d')
-                                :format(tn and tn.name or to, callrec.file(c) or '?', callrec.line(c) or 0))
+                                :format(tn and tn.name or to, callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
                         end
                     end
                 end
@@ -1032,7 +1032,7 @@ function M.summaries(store)
                                     sum.pwx[x] = true
                                 elseif kind == 'opaque' then
                                     s_hedge(sum, ('%s on opaque arg @%s:%d')
-                                        :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
+                                        :format(bname, callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
                                 end
                             end
                             -- HIGHER-ORDER: the passed fn's summary is this
@@ -1060,7 +1060,7 @@ function M.summaries(store)
                                     end
                                     if ts2.pwx then
                                         s_hedge(sum, ('callback %s mutates its params @%s:%d')
-                                            :format(a.name or '?', callrec.file(c) or '?', callrec.line(c) or 0))
+                                            :format(a.name or '?', callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
                                     end
                                     -- (a callback calling a parameter of an enclosing function: still pending here)
                                     for _, p in pairs(ts2.cpo or {}) do cp_add(sum, p.owner, p.j) end
@@ -1072,7 +1072,7 @@ function M.summaries(store)
                                     -- signature, CART-1563)
                                 elseif a then
                                     s_hedge(sum, ('%s: callback effects unknown @%s:%d')
-                                        :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
+                                        :format(bname, callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
                                 end
                             end
                             -- sig.pure / sig.reads / sig.returns_arg: no hedge,
@@ -1084,13 +1084,13 @@ function M.summaries(store)
                         elseif c.refused then
                             s_hedge(sum, ('refused (%s): %s @%s:%d'):format(
                                 c.refused.rule or '?', bname or '?',
-                                callrec.file(c) or '?', callrec.line(c) or 0))
+                                callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
                         elseif not c.dynamic and bname then
                             s_hedge(sum, ('unresolved: %s @%s:%d'):format(
-                                bname, callrec.file(c) or '?', callrec.line(c) or 0))
+                                bname, callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
                         else
                             s_hedge(sum, ('dynamic call @%s:%d'):format(
-                                callrec.file(c) or '?', callrec.line(c) or 0))
+                                callrec.file(c) or '?', (callrec.line(c) or -1) + 1))
                         end
                     end
                 end

@@ -32,6 +32,26 @@ test('effects: an ABSENT argument is nothing to mutate — unless the call\'s la
     eq('writes', effects.purity(store, by['M.passes']), 'the caller\'s own param is mutated')
 end)
 
+test('effects: a hedge names the call by its 1-based LINE, as an editor shows it (CART-1680)', function ()
+    if not ready('lua') then return end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',                                -- 1
+        'local function put(t, k) t[k] = true end',    -- 2
+        'function M.f(k)',                             -- 3
+        '  local x = get_from_somewhere()',            -- 4: an opaque local
+        '  put(x, k)',                                 -- 5
+        'end',
+        'return M', '' }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local id
+    for _, n in ipairs(store.data.nodes) do if n.name == 'M.f' then id = n.id end end
+    local hs = table.concat((effects.summaries(store)[id] or {}).h or {}, ' | ')
+    ok(hs:find('m.lua:5', 1, true), 'the hedge names line 5: ' .. hs)
+end)
+
 local function edge(data, fn_name, var_name)
     local byid = {}
     for _, n in ipairs(data.nodes) do byid[n.id] = n end
