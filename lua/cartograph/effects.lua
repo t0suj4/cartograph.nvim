@@ -695,9 +695,21 @@ function M._file_bindings(store, file)
                 else bind(name, mod .. '#' .. chain:sub(2)) end
                 hit = true
             end
+            -- (an ACCESSOR: `local function A() return [assert(]require('x')….load()[)] end` returns a value of x's
+            -- package — `x#()fn`; a local assigned its call, `local a = A()`, holds that value: `x#()`)
+            local fname, body = code:match('^%s*local%s+function%s+([%a_][%w_]*)%s*%(%s*%)%s*return%s+(.-)%s+end%s*$')
+            if fname then
+                body = body:match('^assert%s*%((.*)%)$') or body
+                local amod = body:match('^require%s*%(?%s*[\'"]([^\'"]+)[\'"]%s*%)?[%.%w_]*%s*%(%s*%)$')
+                bind(fname, amod and (amod .. '#()fn') or false)
+                hit = true
+            end
             if not hit then
                 local name, rest = code:match('^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$')
-                if name then bind(name, rest:match('^{%s*}$') and true or false) end
+                local acc = name and rest:match('^([%a_][%w_]*)%s*%(%s*%)$')
+                local av = acc and seen[acc]
+                if name and type(av) == 'string' and av:sub(-5) == '#()fn' then bind(name, av:sub(1, -3))
+                elseif name then bind(name, rest:match('^{%s*}$') and true or false) end
             end
         end
         f:close()
@@ -728,7 +740,10 @@ function M.structural_cands(store, c, caller, cands)
     local own
     if not mod then
         local r = full:match('^([%a_][%w_]*)[.:]')
-        local b = r and M._file_bindings(store, callrec.file(c))[r]
+        local acc = not r and full:match('^([%a_][%w_]*)%s*%(%s*%)[.:]') -- (`A().node`: the accessor's value)
+        local b = (r or acc) and M._file_bindings(store, callrec.file(c))[r or acc]
+        if type(b) == 'string' and b:sub(-5) == '#()fn' then b = acc and b:sub(1, -3) or nil -- (the accessor ITSELF is no module)
+        elseif acc then b = nil end
         if b == true then own = callrec.file(c) elseif b then mod = b end
     end
     if own then

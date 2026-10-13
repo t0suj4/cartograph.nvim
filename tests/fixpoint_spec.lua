@@ -471,6 +471,13 @@ test('fixpoint: a PARAMETER receiver is read over its whole binding scope — a 
         'local function d1() return pm.go() end',
         'local pr = require("pkg.mod").make()',            -- a CALLED chain: a value pkg.mod MADE — its package's
         'local function d2() return pr.go() end',
+        -- an ACCESSOR returning a value pkg.mod makes (xmppgrammar.lua's `A()`): its call, and a local holding it
+        'local function PA() return assert(require("pkg.mod").make()) end',
+        'local function d3() return PA().go() end',
+        'local function d4()',
+        '  local pa = PA()',
+        '  return pa.go()',
+        'end',
         -- a COMMENT quoting a binding binds nothing: e1's `fake` is its parameter, and it answers topo
         '-- local fake = require("fake")',
         'local function e1(fake) return fake.node(1), fake.topo() end',
@@ -497,6 +504,10 @@ test('fixpoint: a PARAMETER receiver is read over its whole binding scope — a 
     eq(false, wrote('d1', 'S@1\31x'), 'and M.go (S.x), the same name outside T, is not')
     eq(true, wrote('d2', 'pkg/mod.lua'), 'd2: a value pkg.mod made joins pkg.mod\'s functions')
     eq(false, wrote('d2', 'other.lua'), 'and never another module\'s namesake')
+    for _, d in ipairs { 'd3', 'd4' } do
+        eq(true, wrote(d, 'pkg/mod.lua'), d .. ': the accessor\'s value joins pkg.mod\'s functions')
+        eq(false, wrote(d, 'other.lua'), d .. ': and never other.lua\'s')
+    end
     eq(false, fake('e1'), 'e1: the comment binds nothing, structure keeps only real.node')
     vim.fn.delete(root, 'rf')
 end)
