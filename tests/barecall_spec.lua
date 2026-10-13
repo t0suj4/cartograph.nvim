@@ -50,6 +50,42 @@ local function extract()
     return by
 end
 
+test('a local bound to a FACTORY\'s one returned closure calls that closure — only on the exact shape `local f = F(…)` with F returning once (CART-1681)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/f.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local function make(k)',
+        '  local cache = {}',
+        '  return function (x) cache[x] = k; return x end',
+        'end',
+        'local function noisy(k)',
+        '  if k then return nil end',
+        '  return function (x) return x end',
+        'end',
+        'function M.a()', '  local fa = make(1)', '  return fa(2)', 'end',
+        'function M.b()', '  local fb = make(1) or print', '  return fb(2)', 'end',
+        'function M.c()', '  local fc = noisy(1)', '  return fc(2)', 'end',
+        'local function cond_mk(k) if k then return function (x) return x end else return nil end end',
+        'function M.d()', '  local fd = cond_mk(1)', '  return fd(2)', 'end',
+        'return M', '' }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local cv = require('cartograph.callview').of(data)
+    local by = {}
+    for i = 1, cv.n do
+        local k = cv.get(i, 'callee')
+        local r = cv.get(i, 'refused')
+        by[k] = { to = cv.get(i, 'to'), refused = type(r) == 'table' and r.rule or r }
+    end
+    ok(tostring(by.fa.to):find('make#ret', 1, true), 'fa is make\'s closure: ' .. vim.inspect(by.fa))
+    eq(nil, by.fb.to, '`make(1) or print` may be print'); eq('fn-value', by.fb.refused)
+    eq(nil, by.fc.to, 'noisy may return nil on another path'); eq('fn-value', by.fc.refused)
+    eq(nil, by.fd.to, 'cond_mk returns nil AFTER the closure, on its line'); eq('fn-value', by.fd.refused)
+end)
+
 test('bare call: Lua `tonumber(x)` is the builtin — never a qualified `T.tonumber` of another file: no link, no ambiguity, an EXTERNAL disposition (CART-1487)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local by = extract()

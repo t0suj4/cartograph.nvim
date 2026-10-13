@@ -4185,7 +4185,7 @@ local function callee_binding(callee, fn, parent_fn)
         local pi = hasp(f)
         if pi then return 'higher-order', f, pi end
         if hasdecl(f) then return 'localdecl' end
-        if hasdf(f) then return 'local' end
+        if hasdf(f) then return 'local', f end
         f = parent_fn and parent_fn[f.id]
     end
 end
@@ -4289,9 +4289,98 @@ function M._method_veto(target, name, file)
     return tsutil.refusal('blocked', { target })
 end
 
-local function resolve_local_callable(cv, node_index, exact, addref, parent_fn)
+-- ★ A LOCAL BOUND TO A FACTORY'S CLOSURE IS THAT CLOSURE (CART-1681): `local eff_spec = spec_overlay(packs, profile)`
+-- where spec_overlay's ONE return is `return function (lang, spec) … end` — minted `spec_overlay#ret` — makes every
+-- `eff_spec(…)` a call to that closure. It refused `fn-value`, and the hedge reached 2660 effect summaries of the repo.
+-- Sound only on the exact shape, each checked: the local is defined ONCE in its owner (df), on a line that is exactly
+-- `local NAME = CALLEE(…)` (not `c and F() or g`, not `F()()`), that call resolved to F, F mints ONE `F#ret`, and F has
+-- ONE `return` outside the closure (no other value on another path). -> the #ret node | nil
+local function returned_closure(ccallee, owner, cv, node_index, data, cache)
+    if not (owner and data and data.root) then return nil end
+    -- (the owner's df decoded ONCE, however many calls ask: name -> its defining statements, CART-1440)
+    cache.defs = cache.defs or {}
+    local bydef = cache.defs[owner]
+    if not bydef then
+        bydef = {}
+        for _, st in ipairs(dfmod.stmts(owner)) do
+            for _, d in ipairs(st.def or {}) do local l = bydef[d]; if not l then l = {}; bydef[d] = l end; l[#l + 1] = st end
+        end
+        cache.defs[owner] = bydef
+    end
+    local defs = bydef[ccallee] or {}
+    if #defs ~= 1 or #(defs[1].def or {}) ~= 1 or not defs[1].l then return nil end
+    local function lines_of(file)
+        local l = cache.lines[file]
+        if l == nil then
+            local fd = io.open(data.root .. '/' .. file)
+            l = fd and vim.split(fd:read('a'), '\n', { plain = true }) or false
+            if fd then fd:close() end
+            cache.lines[file] = l
+        end
+        return l or nil
+    end
+    local ls = lines_of(owner.file)
+    local text = ls and ls[defs[1].l]
+    if not text then return nil end
+    text = text:gsub('%-%-.*$', '')
+    local cname = text:match('^%s*local%s+' .. vim.pesc(ccallee) .. '%s*=%s*([%w_%.:]+)%b()%s*$')
+    if not cname then return nil end
+    -- the call on that line, in the owner, resolved
+    if not cache.calls then
+        cache.calls = {}
+        for j = 1, cv.n do
+            local k = tostring(cv.get(j, 'fn')) .. '\31' .. tostring(cv.get(j, 'line'))
+            local l = cache.calls[k]; if not l then l = {}; cache.calls[k] = l end
+            l[#l + 1] = j
+        end
+    end
+    local target
+    for _, j in ipairs(cache.calls[owner.id .. '\31' .. (defs[1].l - 1)] or {}) do
+        if (cv.get(j, 'full') or cv.get(j, 'callee')) == cname then
+            if target then return nil end
+            target = cv.get(j, 'to') and node_index[cv.get(j, 'to')]
+        end
+    end
+    if not (target and target.name and target.range) then return nil end
+    -- F's ONE minted closure
+    if not cache.rets then
+        cache.rets = {}
+        for _, nd in pairs(node_index) do
+            if nd.name and nd.file and tostring(nd.name):sub(-4) == '#ret' then
+                local k = nd.file .. '\31' .. nd.name
+                cache.rets[k] = cache.rets[k] == nil and nd or false
+            end
+        end
+    end
+    local ret = cache.rets[target.file .. '\31' .. target.name .. '#ret']
+    if not (ret and ret.range) then return nil end
+    -- F's ONE return, outside the closure's own body
+    local fls = lines_of(target.file)
+    if not fls then return nil end
+    local atr = require 'cartograph.at'
+    local fs, fe = atr.sl(target.range) + 1, atr.el(target.range) + 1
+    local rs, rc, re, rec = atr.sl(ret.range) + 1, atr.sc(ret.range), atr.el(ret.range) + 1, atr.ec(ret.range)
+    local nret = 0
+    for ln = fs, fe do
+        local s = fls[ln] or ''
+        -- (only F's own text: on the closure's first and last lines, what lies OUTSIDE its columns — a one-line
+        -- `return function (x) …; return x end` holds the closure's own return too)
+        if ln == rs and ln == re then s = s:sub(1, rc) .. ' ' .. s:sub(rec + 1)
+        elseif ln == rs then s = s:sub(1, rc)
+        elseif ln == re then s = s:sub(rec + 1)
+        elseif ln > rs and ln < re then s = '' end
+        s = s:gsub('%-%-.*$', '')
+        local _, k = s:gsub('%f[%w_]return%f[^%w_]', '')
+        nret = nret + k
+    end
+    if nret ~= 1 then return nil end
+    return ret
+end
+
+local function resolve_local_callable(cv, node_index, exact, addref, parent_fn, data)
     local cget, cset = cv.get, cv.set
     local n = 0
+    local rcache = { lines = {} }
     parent_fn = parent_fn or build_parent_fn(node_index)
     for i = 1, cv.n do
         local ccallee, cfn = cget(i, 'callee'), cget(i, 'fn')
@@ -4311,6 +4400,7 @@ local function resolve_local_callable(cv, node_index, exact, addref, parent_fn)
             local fn = node_index[cfn]
             if fn then
                 local regime, owner, pidx = callee_binding(ccallee, fn, parent_fn)
+                local bowner = regime == 'local' and owner or nil
                 if regime == 'higher-order' then
                     -- (whose parameter, which one: a call to the owner says what runs here — CART-1495)
                     cset(i, 'refused', { rule = 'higher-order', owner = owner and owner.id, param = pidx })
@@ -4329,6 +4419,10 @@ local function resolve_local_callable(cv, node_index, exact, addref, parent_fn)
                             if hit then dup = true; break end
                             hit = d
                         end
+                    end
+                    if not (hit and not dup) and bowner then
+                        local ret = returned_closure(ccallee, bowner, cv, node_index, data, rcache)
+                        if ret then hit, dup = ret, nil end
                     end
                     if hit and not dup then
                         cset(i, 'to', hit.id)
@@ -4638,7 +4732,7 @@ local RESOLVE_PASSES = {
     { name = 'interface', run = function (x)
         return resolve_interface(x.cv, x.data.implements, x.data.beans, x.data.extends, x.exact, x.addref, javaspec._service_markers) end },
     { name = 'local_callable', run = function (x)
-        return resolve_local_callable(x.cv, x.node_index, x.exact, x.addref, x.parent_fn) end },
+        return resolve_local_callable(x.cv, x.node_index, x.exact, x.addref, x.parent_fn, x.data) end },
     -- DISPOSITION (not resolution): label std-aliased calls the resolvers left
     -- unresolved. Last, so it only speaks for genuine no-defs / refusals.
     { name = 'std_alias', run = function (x)
