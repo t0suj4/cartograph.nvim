@@ -371,9 +371,25 @@ end
 -- resolve a call argument to what a callee-side param write would hit:
 -- a same-file module var ('var'), the CALLER's own param ('param'), a local
 -- this call made ('fresh': no effect outside it), or nothing nameable ('opaque')
+-- ★ AN ABSENT ARGUMENT IS NOTHING TO MUTATE (CART-1670): `M.ho_term(a, b)` into a callee that mutates its 4th param
+-- hands it nil in lua — no caller table is reached. Absent only when nothing can fill the position: the call passes no
+-- argument at all, or its LAST one cannot expand (a trailing call or `...` returns any number of values — the
+-- extractor records both as `expr`; a splat as `spread`). Lua only: python's mutable default is shared state, php's
+-- default is per-call but unproven here. Measured: 627 of 1495 opaque param-mutation positions on lua/cartograph.
+local NONEXPANDING = { lit = true, ['local'] = true, field = true, ctor = true, func = true, scalar = true,
+    concat = true, class = true, callable = true }
+local function absent(c, i)
+    local n = argv.n(c)
+    if i <= n then return false end
+    if not (callrec.file(c) or ''):match('%.lua$') then return false end
+    if n == 0 then return true end
+    local last = argv.at(c, n)
+    return last ~= nil and NONEXPANDING[last.k] == true
+end
+
 local function arg_target(store, c, i, caller)
     local a = argv.at(c, i)
-    if not a then return 'opaque' end
+    if not a then return absent(c, i) and 'absent' or 'opaque' end
     -- a LOCAL names the table itself; a FIELD path (`w.order`, `S[k].x`, CART-1560) names a table REACHABLE from its
     -- root, so the write lands in the root's first field (`S.list[i] = x` is recorded the same way by the extractor,
     -- with the same blind spot: no alias analysis; a bracket or unknown first field is the root's whole '' key)
@@ -698,6 +714,11 @@ local function builtin_callback(store, c, caller, a, lang, sum)
 end
 
 --- Compute (and cache per graph generation) every fn's write summary.
+-- (what an argument position names, for a consumer composing a callee's param effects at a call: 'var', var id
+-- .. '\31' .. first field | 'param', index | 'fresh' | 'absent' (no argument can be there) | 'opaque' — the writers
+-- census, CART-1670)
+M._arg_target = arg_target
+
 function M.summaries(store)
     if store._fx and store._fxgen == store.generation then return store._fx end
     -- (config.effects_flow: the flow analysis's verdicts for ambiguous calls, CART-1621 — M.FLOW forces it for a test)

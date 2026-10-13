@@ -11,6 +11,27 @@ local function ready(lang)
     return pcall(vim.treesitter.language.add, lang)
 end
 
+test('effects: an ABSENT argument is nothing to mutate — unless the call\'s last argument can expand into it (CART-1670)', function ()
+    if not ready('lua') then return end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local function put(t, k, m) if m then m[k] = true end; return t end', -- mutates its 3rd param
+        'function M.get() return {} end',
+        'function M.absent(x) return put(x, 1) end',          -- #3 not passed: nil, nothing reached
+        'function M.expands(x) return put(x, M.get()) end',   -- #3 not written, but M.get() may return two values
+        'function M.passes(x, m) return put(x, 1, m) end',    -- #3 is the caller's param: it writes ITS param
+        'return M', '' }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do if n.name then by[n.name] = n.id end end
+    eq('pure', effects.purity(store, by['M.absent']), 'an absent 3rd argument: no caller table is mutated')
+    ok(tostring(effects.purity(store, by['M.expands'])):find('~', 1, true), 'a trailing call may fill #3: still hedged')
+    eq('writes', effects.purity(store, by['M.passes']), 'the caller\'s own param is mutated')
+end)
+
 local function edge(data, fn_name, var_name)
     local byid = {}
     for _, n in ipairs(data.nodes) do byid[n.id] = n end
