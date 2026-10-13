@@ -1601,8 +1601,12 @@ local function build(store, opts)
             table.sort(fns)
         end
         if unknown then kind = 'unknown' elseif #fns == 0 then kind = 'none' elseif #fns == 1 then kind = 'exact' else kind = 'set' end
+        -- (how many objects the receiver held: a `none` over an EMPTY receiver and one over objects without the member
+        -- are different gaps — CART-1678)
+        local nobj = 0
+        if not top[pr.recv] then for _ in each(pr.recv) do nobj = nobj + 1 end end
         probe_out[#probe_out + 1] = { file = pr.file, line = pr.line, col = pr.col, member = pr.member, kind = kind, targets = fns,
-            guarded = pr.guard ~= nil, partial = partial_hit or nil }
+            guarded = pr.guard ~= nil, partial = partial_hit or nil, nobj = nobj, c = pr.c }
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
