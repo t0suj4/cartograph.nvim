@@ -291,6 +291,8 @@ end
 -- `ambiguous`: several in-tree definitions fit; `blocked` — the candidates sit across a scope fence — is a different
 -- premise and stays off unless asked for
 M.JOIN = { ambiguous = true }
+-- (a joined receiver that is a PARAMETER is read over its whole binding scope, CART-1683; CARTOGRAPH_SCOPE_MEMBERS=0 off)
+M.SCOPE_MEMBERS = os.getenv('CARTOGRAPH_SCOPE_MEMBERS') ~= '0'
 local JOIN_ROUNDS = 30 -- passes toward the join's fixpoint (cartograph needs 9, CART-1542)
 
 -- what a pass hands the next — everything `take` reads off a summary — as one string, to compare two passes by
@@ -565,20 +567,77 @@ local function structure(store)
     return s
 end
 -- the receiver name of call `c` (`r.m` / `r:m`, r a plain name) and the members `caller` calls on it
+local function calls_on(store, s, fid)
+    local per = s.recv[fid]
+    if not per then
+        per = {}
+        for _, x in ipairs(store.topo():sites(fid)) do
+            local rx, mx = tostring(callrec.full(x) or ''):match('^([%a_][%w_]*)[.:]([%w_]+)$')
+            if rx then per[rx] = per[rx] or {}; per[rx][mx] = true end
+        end
+        s.recv[fid] = per
+    end
+    return per
+end
+-- ★ A PARAMETER NEVER REBOUND HOLDS ONE VALUE IN ITS WHOLE SCOPE (CART-1683): the members called on `store` anywhere in
+-- the function that binds it — its closures too — are all the receiver's. A closure that calls only `store.node(id)`
+-- joined cinterp's C.node beside store.lua's M.node, and that one false candidate carried cinterp's hedges into ~3,900
+-- summaries; the binder's own `store.topo()` rules it out. Only for a real parameter its function never reassigns,
+-- and never through a function inside it that binds the name again (a param or a local of its own) -> { member } | nil
+local function scope_members(store, s, caller, r)
+    local oid = param_of(store, caller, r)
+    local owner = oid and store.node(oid)
+    if not (owner and owner.range and owner.file) then return nil end
+    local isparam = false
+    for _, p in ipairs(owner.params or {}) do if p == r then isparam = true end end
+    if not isparam then return nil end -- (a local derived from a param, CART-1566, is not the param's value)
+    s.scope = s.scope or {}
+    local key = owner.id .. '\0' .. r
+    if s.scope[key] ~= nil then return s.scope[key] or nil end
+    local df, at = require 'cartograph.df', require 'cartograph.at'
+    local function defines(f, own)
+        if not own then for _, p in ipairs(f.params or {}) do if p == r then return true end end end
+        local ok, stmts = pcall(df.stmts, f)
+        if not ok then return true end -- (no statements: no claim it is not rebound)
+        for _, st in ipairs(stmts or {}) do for _, d in ipairs(st.def or {}) do if d == r then return true end end end
+        return false
+    end
+    local out = false
+    if not defines(owner, true) then
+        local os_, oe = at.sl(owner.range), at.el(owner.range)
+        local inner, rebind = {}, {}
+        for _, f in ipairs(store.by_file[owner.file] or {}) do
+            if f ~= owner and (f.kind == 'function' or f.kind == 'method') and f.range then
+                local fs, fe = at.sl(f.range), at.el(f.range)
+                if os_ <= fs and fe <= oe then
+                    inner[#inner + 1] = { f = f, s = fs, e = fe }
+                    if defines(f) then rebind[#rebind + 1] = { s = fs, e = fe } end
+                end
+            end
+        end
+        local function shadowed(x) for _, b in ipairs(rebind) do if b.s <= x.s and x.e <= b.e then return true end end end
+        out = {}
+        for m in pairs(calls_on(store, s, owner.id)[r] or {}) do out[m] = true end
+        for _, x in ipairs(inner) do
+            if not shadowed(x) then for m in pairs(calls_on(store, s, x.f.id)[r] or {}) do out[m] = true end end
+        end
+        -- (the caller itself must see the binder's value: inside a rebinding function it sees another)
+        local cs, ce = caller.range and at.sl(caller.range), caller.range and at.el(caller.range)
+        if caller ~= owner and not (cs and not shadowed({ s = cs, e = ce })) then out = false end
+    end
+    s.scope[key] = out
+    return out or nil
+end
 local function receiver_members(store, c, caller)
     local r = tostring(callrec.full(c) or ''):match('^([%a_][%w_]*)[.:][%w_]+$')
     if not (r and caller) then return nil end
     local s = structure(store)
-    local per = s.recv[caller.id]
-    if not per then
-        per = {}
-        for _, x in ipairs(store.topo():sites(caller.id)) do
-            local rx, mx = tostring(callrec.full(x) or ''):match('^([%a_][%w_]*)[.:]([%w_]+)$')
-            if rx then per[rx] = per[rx] or {}; per[rx][mx] = true end
-        end
-        s.recv[caller.id] = per
+    local mine = calls_on(store, s, caller.id)[r]
+    if mine and M.SCOPE_MEMBERS then
+        local wide = scope_members(store, s, caller, r)
+        if wide then return wide, s end -- (the caller's own calls are among them: it sits in the binder's scope)
     end
-    return per[r], s
+    return mine, s
 end
 -- the METHOD sets of the store's active profile and its language's base profile (luajit's string, file): `T -> {m}`
 local function profile_methods(store, s)

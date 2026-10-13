@@ -430,6 +430,52 @@ test('fixpoint: STRUCTURE narrows the join — the owner must declare every memb
     vim.fn.delete(root, 'rf') -- (only now: effects reads the files' bindings)
 end)
 
+test('fixpoint: a PARAMETER receiver is read over its whole binding scope — a closure calling only store.node is narrowed by the binder\'s store.topo(); a rebinding or a reassignment is no claim (CART-1683)', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/plugin', 'p'); vim.fn.mkdir(root .. '/lua', 'p')
+    local function put(rel, text) local f = assert(io.open(root .. '/' .. rel, 'w')); f:write(text); f:close() end
+    put('plugin/x.lua', '')
+    put('lua/real.lua', 'local M = {}\nfunction M.node() return 1 end\nfunction M.topo() return 2 end\nreturn M')
+    put('lua/fake.lua', 'local M = {}\nlocal F = {}\nfunction M.node() F.n = 1 end\nreturn M') -- (no topo)
+    put('lua/m.lua', table.concat({
+        'local function a(store)',
+        '  local function g1() return store.node(1) end', -- the binder calls store.topo(): fake cannot be it
+        '  local function k(store) return store.zap() end', -- ITS OWN store: zap is no member of a's
+        '  store.topo()',
+        '  return g1, k',
+        'end',
+        'local function b(store)',
+        '  local function h()',
+        '    local store = other()',                      -- another store, for every function inside h
+        '    local function g2() return store.node(1) end',
+        '    return g2',
+        '  end',
+        '  store.topo()',
+        '  return h',
+        'end',
+        'local function c(store)',
+        '  store = pick(store)',                          -- reassigned: no one value
+        '  local function g3() return store.node(1) end',
+        '  store.topo()',
+        '  return g3',
+        'end',
+        'return { a, b, c }' }, '\n'))
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do if n.file == 'lua/m.lua' then by[n.name] = n end end
+    local sums = effects.summaries(store)
+    local function fake(name)
+        for k in pairs(sums[by[name].id].w) do if k:find('fake.lua', 1, true) then return true end end
+        return false
+    end
+    eq(false, fake('g1'), 'g1 joins only real.node')
+    eq(true, sums[by['g1'].id].jp, 'g1 still JOINS (real.node): k\'s own store.zap is not a member of a\'s store')
+    eq(true, fake('g2'), 'g2 reads its own store: the join stands')
+    eq(true, fake('g3'), 'g3 reads a reassigned param: the join stands')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('fixpoint: a join whose candidate is summarized LATER repeats the pass to the fixpoint, and a later pass recomputes only what read a changed summary (CART-1544)', function ()
     if not ready() then skip 'no lua parser' end
     store.ingest(ts.extract(mkroot(table.concat({
