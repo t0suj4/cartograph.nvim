@@ -1597,6 +1597,25 @@ local function build(store, opts)
         -- (MODULE STATE: every object reachable through fields from a module ROOT — a file's top-scope locals, a
         -- global, a module's returned value. An object it reaches outlives the call that made it: a write into it is
         -- a write of state. -> { [object] = true }, computed once)
+        -- (WHERE SATURATION LIVES: every saturated port by its role — a function's parameter (`a:`) or return (`r:`)
+        -- port, the call boundary a per-call summary would not merge; a global / module port; a FIELD of an object in
+        -- module state or of one outside it; any other (a local, a temporary). -> { [role] = count }, total)
+        R.top_census = function (only) -- (only: a set of ports — R.top_origins — instead of every saturated one)
+            local role, n = {}, 0
+            local fieldof = {}
+            for o, m in pairs(ofield) do for _, fp in pairs(m) do fieldof[fp] = o end end
+            local named_of = {}
+            for key, p in pairs(named) do named_of[p] = key end
+            local st = R.state_objs()
+            for p in pairs(only or top) do
+                n = n + 1
+                local key, o = named_of[p], fieldof[p]
+                local r = key and (key:match('^a:') and 'param' or key:match('^r:') and 'return' or (key:match('^g:') or key:match('^mod:')) and 'global / module' or 'named other')
+                    or (o and (st[o] and 'field of module state' or 'field of a non-state object')) or 'local / temporary'
+                role[r] = (role[r] or 0) + 1
+            end
+            return role, n
+        end
         local state
         R.state_objs = function ()
             if state then return state end
@@ -1705,6 +1724,38 @@ local function build(store, opts)
                 end
                 for _, o in ipairs(os) do via(o, 0) end
                 ::next_load::
+            end
+        end
+        -- (ORIGINS, with argument probes on: a saturated port none of whose predecessors is saturated — the union
+        -- overflowed HERE, everything downstream only inherited it)
+        if ARGP then
+            local origin = {}
+            for p in pairs(top) do
+                local inherited = false
+                for _, r in ipairs(pred[p] or NOTHING) do if top[r] then inherited = true; break end end
+                if not inherited then origin[p] = true end
+            end
+            R.top_origins = origin
+            -- (an origin that is a temporary, classified by what MERGED into it: fields (a load through a base of many
+            -- objects — a heap merge), return ports (a call whose callee value holds several functions — a call-boundary
+            -- merge), parameter ports, or plain copies (locals assigned from several places))
+            R.origin_preds = function (p)
+                local k = { field = 0, ret = 0, param = 0, copy = 0 }
+                local fieldof = R._fieldof or {}
+                if not R._fieldof then
+                    for o, m in pairs(ofield) do for _, fp in pairs(m) do fieldof[fp] = o end end
+                    R._fieldof = fieldof
+                    R._named_of = {}
+                    for key, q in pairs(named) do R._named_of[q] = key end
+                end
+                for _, r in ipairs(pred[p] or NOTHING) do
+                    local key = R._named_of[r]
+                    if fieldof[r] then k.field = k.field + 1
+                    elseif key and key:match('^r:') then k.ret = k.ret + 1
+                    elseif key and key:match('^a:') then k.param = k.param + 1
+                    else k.copy = k.copy + 1 end
+                end
+                return k
             end
         end
         local S, q = {}, {}
