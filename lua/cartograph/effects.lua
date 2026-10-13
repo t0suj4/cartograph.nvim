@@ -81,6 +81,9 @@ M.SIGS = {
             -- (table.move(a1, f, e, t [, a2]) writes a2, or a1 when a2 is absent: both, the sound over-approximation, CART-1551)
             ['table.move'] = { w = { 1, 5 } }, ['table.concat'] = { pure = true, reads = { 1 } },
             ['table.unpack'] = { pure = true, reads = { 1 } },
+            -- (nvim's own, named by the hedge census of 2026-10-13: vim.trim hedged 1160 summaries on the repo)
+            ['vim.trim'] = P, ['vim.list_extend'] = { w = { 1 } },
+            ['debug.getinfo'] = ND, ['debug.traceback'] = ND,
             ['string.gsub'] = { calls = { 3 } }, -- repl may be a fn; strings/tables pure
             ['coroutine.wrap'] = { calls = { 1 } },
             ['coroutine.create'] = { calls = { 1 } },
@@ -987,6 +990,25 @@ function M.summaries(store)
                         local lang = file and (file:match('%.lua$') and 'lua'
                             or file:match('%.php$') and 'php')
                         local bname = declname or callrec.full(c) or callrec.callee(c)
+                        -- (a bare name the file binds ONCE to a module member — `local byte = string.byte`, the
+                        -- extractor's field alias (CART-0237) — is that member: its signature answers, not the
+                        -- unresolved hedge. 231 summaries on the repo hedged on bytecol's `byte`)
+                        if lang == 'lua' and bname and not bname:find('[.:]') then
+                            local fa = store.data.fieldalias and store.data.fieldalias[file]
+                            local b = fa and fa[bname]
+                            -- (and never assigned again: the alias var must be CONST in the atlas — a later
+                            -- `byte = function (t) t.x = 1 end` is no `local`, the extractor's rebind counter misses it)
+                            if b and b.n == 1 and b.recv and b.member then
+                                local stable = false
+                                for _, v in ipairs(store.by_file[file] or {}) do
+                                    if v.kind == 'var' and v.name == bname then
+                                        stable = require('cartograph.atlas').classify(store, v.id, { indirect = false }).label == 'const'
+                                        break
+                                    end
+                                end
+                                if stable then bname = b.recv .. '.' .. b.member end
+                            end
+                        end
                         -- (a receiver the resolver TYPED — by member evidence or by its one definition's declared
                         -- return, CART-1570 / CART-1621 — is its type's: `fd:close()` on a file is file.close)
                         local cext = c.ext

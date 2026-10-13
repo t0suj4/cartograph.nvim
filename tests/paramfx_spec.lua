@@ -32,6 +32,30 @@ test('effects: an ABSENT argument is nothing to mutate — unless the call\'s la
     eq('writes', effects.purity(store, by['M.passes']), 'the caller\'s own param is mutated')
 end)
 
+test('effects: a bare call through a file\'s stable ALIAS of a builtin is that builtin — never when the alias is reassigned', function ()
+    if not ready('lua') then return end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local byte, upper = string.byte, string.upper',
+        'local sort = table.sort',
+        'local find = string.find',
+        'function M.b(s) return byte(s, 1), upper(s) end',    -- pure: string.byte / string.upper
+        'function M.s(t) sort(t) end',                        -- writes its param: table.sort writes arg 1
+        'function M.rebind() find = rawget(_G, "mystery") end',   -- reassigned to a value nothing resolves
+        'function M.f(s) return find(s, "x") end',            -- find is reassigned: no alias claim
+        'return M', '' }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do if n.name then by[n.name] = n.id end end
+    eq('pure', effects.purity(store, by['M.b']), 'byte / upper are string.byte / string.upper')
+    eq('writes', effects.purity(store, by['M.s']), 'sort is table.sort: it writes its first argument (the param)')
+    local pf = effects.purity(store, by['M.f'])
+    ok(pf ~= 'pure', 'a reassigned alias is no string.find: whatever it holds now is unknown — ' .. tostring(pf))
+end)
+
 test('effects: a hedge names the call by its 1-based LINE, as an editor shows it (CART-1680)', function ()
     if not ready('lua') then return end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
