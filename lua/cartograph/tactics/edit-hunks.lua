@@ -56,10 +56,10 @@ return {
                 end },
             },
             {
-                -- (an example's world is a LENS that drops a failed run's staged writes, so this holds with or without
-                -- the rollback; on DISK the first hunk WAS left applied until on_stop = 'rollback' — checked
-                -- 2026-10-13 through the CLI: applied 1 -> 0, the file as it was)
-                name = 'the SECOND hunk drifted: the file is left as it was, the first hunk included',
+                -- (the example runs the entry as LOADED FROM THIS FILE, on disk: without on_stop = 'rollback' the
+                -- first hunk stays applied and this fails — mutation-check, 2026-10-13. CART-1669 had claimed the
+                -- example could not see it: that mutation edited an in-memory copy the run never used)
+                name = 'the SECOND hunk drifted: the first, already applied, is ROLLED BACK — the file is as it was',
                 files = { ['m.lua'] = 'local M = {}\nM.a = 1\nreturn M\n' },
                 params = function () return { file = 'm.lua', dir = hunks({ { 'M.a = 1', 'M.a = 10' }, { 'M.zzz = 1', 'M.zzz = 2' } }) } end,
                 expect = { check = function (root)
