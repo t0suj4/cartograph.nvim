@@ -550,6 +550,14 @@ local function field_unstable_of(fn, src, harmless)
                 -- @langs-ok lua-only, same reason as above
                 elseif tgt:type() == 'bracket_index_expression' then
                     local b = path_of(tgt:named_child(0), src); if b then mark(b.path, false, nil, nil, tgt) end -- A[?] → A.*
+                -- (a plain REASSIGNMENT of a name — not a `local` declaration, a new binding: where it starts, for the
+                -- root's position rule in fact_live)
+                -- @langs-ok lua-only, same reason as above
+                elseif tgt:type() == 'identifier' and n:parent() and n:parent():type() ~= 'variable_declaration' then
+                    local nm = vim.treesitter.get_node_text(tgt, src)
+                    stale.assign_at = stale.assign_at or {}
+                    stale.assign_at[nm] = stale.assign_at[nm] or {}
+                    table.insert(stale.assign_at[nm], select(3, tgt:start()))
                 end
             end end
             if elist then for _, v in tsutil.inext, elist, -1 do -- alias RHS (identifier or field path)
@@ -594,8 +602,20 @@ local function before_guard(e, gb, loops, stale)
     for _, l in ipairs(loops or {}) do if e.at >= l[1] and e.at < l[2] then return false end end
     return true
 end
+-- the same rule for the ROOT: a name reassigned (mutated_of: anywhere in the function) keeps a fact only when EVERY
+-- reassignment the walk saw starts before the guard and no loop around the point holds one — and the walk saw at least
+-- one (mutated_of may know a write the walk does not position: then it still kills)
+local function reassigned_before(root, gb, loops, stale)
+    local at = stale and stale.assign_at and stale.assign_at[root]
+    if not (gb and at and #at > 0) or stale.has_goto then return false end
+    for _, b in ipairs(at) do
+        if b >= gb then return false end
+        for _, l in ipairs(loops or {}) do if b >= l[1] and b < l[2] then return false end end
+    end
+    return true
+end
 local function fact_live(f, mutated, stale, gb, loops)
-    if mutated[f.root] then return false end
+    if mutated[f.root] and not reassigned_before(f.root, gb, loops, stale) then return false end
     if (f.depth or 0) >= 1 then
         for _, e in ipairs(stale) do
             if prefix_covers(e.prefix, e.inclusive, f.var) and not before_guard(e, gb, loops, stale) then return false end
@@ -1395,6 +1415,77 @@ function M._call_kill_census(store, fn_id, sums, sites)
                                                 end
                                             end
                                         end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            if not FN_TYPES[c:type()] then visit(c) end
+        end
+    end
+    visit(fn)
+    return out
+end
+
+--- REASSIGNMENT CENSUS (CART-1677, a diagnostic): a guard fact whose ROOT is assigned anywhere in the function dies
+--- (mutated_of is flow-insensitive). For one function: guard facts at statements, how many the root's reassignment kills,
+--- and how many would survive by POSITION — every assignment of the root starts before the guard's condition and no
+--- loop around the point holds it (no goto in the function). -> { facts, killed, before_guard }
+function M._reassign_census(store, fn_id)
+    local out = { facts = 0, killed = 0, before_guard = 0 }
+    local node = store.node and store.node(fn_id)
+    if not node or not node.file then return out end
+    local lang = EXT_LANG[node.file:match('%.(%w+)$') or '']
+    if lang ~= 'lua' then return out end
+    local src = table.concat(store.content(node) or {}, '\n')
+    local fn = fn_node(node, src, lang)
+    if not fn then return out end
+    local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
+    local mutated = mutated_of(node)
+    -- the root's assignment positions (a plain `x = …`, not a `local` declaration), and any goto
+    local at, has_goto = {}, false
+    local function scan(n)
+        for _, c in tsutil.inamed, n, -1 do
+            local t = c:type()
+            if t == 'goto_statement' then has_goto = true end -- @langs-ok lua-only census
+            if t == 'assignment_statement' and n:type() ~= 'variable_declaration' then -- @langs-ok lua-only census
+                local vl = c:named_child(0)
+                for _, v in tsutil.inamed, vl or c, -1 do
+                    if v:type() == 'identifier' then -- @langs-ok lua-only census
+                        local nm = txt(v, src)
+                        at[nm] = at[nm] or {}
+                        table.insert(at[nm], select(3, v:start()))
+                    end
+                end
+            end
+            if not FN_TYPES[t] then scan(c) end
+        end
+    end
+    scan(fn)
+    local seen = {}
+    local function visit(n)
+        for _, c in tsutil.inamed, n, -1 do
+            if STMT_BLOCK[c:type()] then
+                for _, stmt in tsutil.inext, c, -1 do
+                    if stmt:named() and not tsutil.is_comment(stmt) then
+                        local loops = loops_of(stmt, fn)
+                        for _, g in ipairs(cfg.guards_over(stmt, src)) do
+                            local gb = select(3, g.cond:start())
+                            for _, f in ipairs(classify(g.cond, src, not g.neg)) do
+                                local k = stmt:id() .. f.var
+                                if not seen[k] then
+                                    seen[k] = true
+                                    out.facts = out.facts + 1
+                                    if mutated[f.root] then
+                                        out.killed = out.killed + 1
+                                        local ok = not has_goto and at[f.root] ~= nil
+                                        for _, b in ipairs(at[f.root] or {}) do
+                                            if b >= gb then ok = false end
+                                            for _, l in ipairs(loops) do if b >= l[1] and b < l[2] then ok = false end end
+                                        end
+                                        if ok then out.before_guard = out.before_guard + 1 end
                                     end
                                 end
                             end

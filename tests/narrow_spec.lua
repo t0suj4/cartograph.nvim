@@ -153,6 +153,36 @@ test('narrow: a staling call BEFORE the guard cannot invalidate it — unless a 
     eq(nil, env_at('M.d', 27)['t.x'], 'a goto: no position rule in this function')
 end)
 
+test('narrow: a variable REASSIGNED before its guard keeps the guard\'s fact; after it, or in a loop around the use, it does not (CART-1677)', function ()
+    if not ready() then return end
+    ingest({
+        'local M = {}',                                         -- 1
+        'function M.a(t)',                                      -- 2
+        '  t = t or M.default',                                 -- 3: before the guard
+        '  if t then',                                          -- 4
+        '    return t',                                         -- 5
+        '  end',
+        'end',
+        'function M.b(t)',                                      -- 8
+        '  if t then',                                          -- 9
+        '    t = nil',                                          -- 10: after the guard
+        '    return t',                                         -- 11
+        '  end',
+        'end',
+        'function M.c(t, xs)',                                  -- 14
+        '  for _, x in ipairs(xs) do',                          -- 15
+        '    t = x',                                            -- 16: in the loop around the use
+        '    if t then',                                        -- 17
+        '      local y = t',                                    -- 18
+        '    end',
+        '  end',
+        'end',
+        'return M' })
+    ok(env_at('M.a', 5).t, 'the reassignment ran before the guard checked t')
+    eq(nil, env_at('M.b', 11).t, 'reassigned after the guard')
+    eq(nil, env_at('M.c', 18).t, 'a loop around the use holds the reassignment (conservative)')
+end)
+
 test('narrow: `if x then` proves x non-nil in the body', function ()
 
     if not ready('lua') then skip 'no lua parser' end
