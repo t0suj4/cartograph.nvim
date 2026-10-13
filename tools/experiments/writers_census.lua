@@ -5,9 +5,11 @@
 --   nvim --headless -u NONE --cmd 'set rtp^=.' -l tools/experiments/writers_census.lua <abs dir> [open|closed] [opaque|var|param|fresh]
 -- `opaque` (the default) is effects' blind spot — an argument it cannot name hedges its caller; `var` is the CONTROL:
 -- the arguments effects already names as module vars must come out as module state, or the reachability is wrong.
--- MEASURED 2026-10-13 on lua/cartograph (closed / open): of 888 opaque positions, 194 / 172 MODULE STATE only (writers
--- the atlas and the summaries do not see), 386 / 304 never module state (a removable hedge), 199 / 340 unknown;
--- control: 11 of 11 resolved var arguments are module state.
+-- MEASURED 2026-10-13 on lua/cartograph (closed / open): of 888 opaque positions, 129 / 132 MODULE STATE only, 453 / 345
+-- never module state (a removable hedge), 199 / 340 unknown; control: 11 of 11 resolved var arguments are module state.
+-- (A first count, 194 / 172, took STRINGS for state: every string is flowtype's one `type:string` object, so a string
+-- local at file scope `owned` every string argument — type and function objects are excluded now.) Of the 129, ONE is a
+-- module var's own table (R.state_level 0); the rest reach state only through fields, where "which var" has no answer.
 vim.opt.rtp:append(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 local store = require 'cartograph.store'
 store.ingest(require('cartograph.providers.treesitter').extract(arg[1]))

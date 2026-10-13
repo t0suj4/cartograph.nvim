@@ -766,7 +766,7 @@ local function build(store, opts)
             ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj, key = key }
         end
         local scopes = { {} }
-        if ROOTS and not clone then ROOTS[#ROOTS + 1] = scopes[1] end
+        if ROOTS and not clone then ROOTS[#ROOTS + 1] = { file = file, scope = scopes[1] } end
         -- (a function is CLOSED when every name it reads is its own or a global: fnbase holds each open function's
         -- first scope, fnmeta whether it read past it or holds a function of its own)
         local fnbase, fnmeta = {}, {}
@@ -1653,13 +1653,18 @@ local function build(store, opts)
             if state then return state end
             state = {}
             local q = {}
-            local function add_port(p) for o in each(p) do if o ~= EXT and not state[o] then state[o] = true; q[#q + 1] = o end end end
-            for _, sc in ipairs(ROOTS) do for _, p in pairs(sc) do add_port(p) end end
-            for key, p in pairs(named) do if key:match('^g:') or key:match('^mod:') then add_port(p) end end
+            -- (state[o] = the ROOT that reaches it first, breadth-first: 'var:<file>:<name>' for a file's top-scope
+            -- local — the var a write into o writes —, or the global / module port key; a field path is not kept)
+            local level = {}
+            R.state_level = level -- (0: the root's OWN object; deeper: reached through fields — the root is then only the first found)
+            -- (a TYPE object — every string is one `type:string` — and a function are no mutable tables: never state)
+            local function add_port(p, root, lv) for o in each(p) do if o ~= EXT and not TNAME[o] and not fnports[o] and not state[o] then state[o] = root; level[o] = lv or 0; q[#q + 1] = o end end end
+            for _, r in ipairs(ROOTS) do for name, p in pairs(r.scope) do add_port(p, 'var:' .. r.file .. ':' .. name) end end
+            for key, p in pairs(named) do if key:match('^g:') or key:match('^mod:') then add_port(p, key) end end
             local h = 1
             while h <= #q do
                 local o = q[h]; h = h + 1
-                for _, fp in pairs(ofield[o] or NOTHING) do add_port(fp) end
+                for _, fp in pairs(ofield[o] or NOTHING) do add_port(fp, state[o], level[o] + 1) end
             end
             return state
         end
