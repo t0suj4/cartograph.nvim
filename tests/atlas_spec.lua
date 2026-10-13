@@ -79,6 +79,32 @@ test('atlas: end-to-end on a real extract', function ()
     eq('set-once', byname.memo)
 end)
 
+test('atlas: a var handed to a callee that MUTATES that parameter is WRITTEN — never const (CART-1670)', function ()
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local CACHE = {}',                                    -- written only through put's param
+        'local LIMITS = {}',                                   -- handed only to a reader
+        'local function put(t, k) t[k] = true end',
+        'local function size(t) return #t end',
+        'function M.add(k) put(CACHE, k) end',
+        'function M.has(k) return CACHE[k], size(LIMITS) end',
+        'return M', '' }, '\n'))
+    fd:close()
+    store.ingest(require('cartograph.providers.treesitter').extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do if n.kind == 'var' then by[n.name] = n.id end end
+    eq('const', atlas.classify(store, by.CACHE, { indirect = false }).label, 'the write edges alone see no writer')
+    local c = atlas.classify(store, by.CACHE)
+    eq('single-writer', c.label, 'M.add writes it through put')
+    eq(1, c.nwi)
+    ok(tostring(c.writers[1]):find('M.add', 1, true), vim.inspect(c.writers))
+    eq('const', atlas.classify(store, by.LIMITS).label, 'a callee that only READS its param writes nothing')
+end)
+
 test('atlas fields: a multi-writer var decomposes per field', function ()
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()

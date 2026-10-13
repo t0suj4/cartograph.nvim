@@ -311,6 +311,7 @@ local HCAP = 4    -- hedges kept per summary
 local SITE_GP
 -- the flow analysis for this summaries() run (config.effects_flow), nil when off
 local FLOW
+local INDIRECT -- (the current summaries' writers through a parameter, by var: M.indirect_writers)
 -- `gp` (±param): the write fires only under that predicate. A key added UNGUARDED, or under another predicate, is
 -- unguarded: it may fire either way (the order of the adds does not decide it)
 local function s_add(sum, key, tier, gp)
@@ -719,10 +720,20 @@ end
 -- census, CART-1670)
 M._arg_target = arg_target
 
+--- WRITERS THROUGH A PARAMETER (CART-1670): the module vars a function hands to a callee that MUTATES that parameter —
+--- `add(M.cache, x)` into `local function add(t, k) t[k] = true end` writes M.cache, and the write edge is `add`'s on
+--- its own param, never M.cache's. Per CALLER, never per shared summary: a recursive group does not make every member a
+--- writer. -> { [var id] = { [fn id] = callee id } } (the summaries are computed if they were not)
+function M.indirect_writers(store)
+    M.summaries(store)
+    return store._fxpwv or {}
+end
+
 function M.summaries(store)
     if store._fx and store._fxgen == store.generation then return store._fx end
     -- (config.effects_flow: the flow analysis's verdicts for ambiguous calls, CART-1621 — M.FLOW forces it for a test)
     FLOW = (M.FLOW or require('cartograph.config').effects_flow) and require('cartograph.flowtype').of(store) or nil
+    INDIRECT = {}; store._fxpwv = INDIRECT -- (var key -> { [caller fn id] = callee }: see M.indirect_writers)
     local scc = require 'cartograph.scc'
     local ids = {}
     for _, n in ipairs(store.data.nodes) do
@@ -900,6 +911,12 @@ function M.summaries(store)
                         local kind, x = arg_target(store, c, pi, caller)
                         if kind == 'var' then
                             s_add(sum, x, 1)
+                            -- (THIS caller hands module state to a mutated parameter: an indirect WRITER of it)
+                            local vid = x:match('^(.-)\31')
+                            if vid and caller then
+                                local w = INDIRECT[vid]; if not w then w = {}; INDIRECT[vid] = w end
+                                w[caller.id] = to
+                            end
                         elseif kind == 'param' then
                             sum.pwx = sum.pwx or {}
                             sum.pwx[x] = true

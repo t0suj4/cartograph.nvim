@@ -87,6 +87,23 @@ function M.classify(store, id, opts)
             end
         end
     end
+    -- WRITERS THROUGH A PARAMETER (CART-1670): a function handing this var to a callee that mutates that param
+    -- writes it, though no write edge says so — the edge is the callee's, on its own param. Counted as writers
+    -- (`nwi` of them), unguarded: a const / single-writer claim that ignored them was wrong, not conservative.
+    -- opts.indirect = false: the edges alone
+    local nwi = 0
+    if not (opts and opts.indirect == false) then
+        local seenw = {}
+        for _, w in ipairs(writers) do seenw[w] = true end
+        for fid in pairs(require('cartograph.effects').indirect_writers(store)[id] or {}) do
+            if not seenw[fid] then
+                seenw[fid] = true
+                nw = nw + 1; nwi = nwi + 1
+                writers[nw] = fid
+                gwmin = math.min(gwmin or 1, 1)
+            end
+        end
+    end
     -- derived reads are READS: a call with a literal key was SEEN, so each is a
     -- witness, and they enter the ladder on the same footing. They are counted
     -- separately as well (`dnr`) because a reader is owed the difference between a
@@ -112,7 +129,7 @@ function M.classify(store, id, opts)
     -- reads change is const-on-nothing -> const-with-evidence, a STRENGTHENING.
     -- So the honest surface is a count ("const · 7 reads (7 via config_get)") and
     -- per-row marks, not a hedge glyph implying doubt about the label.
-    return { label = label, nr = nr, nw = nw, writers = writers, gw = gwmin,
+    return { label = label, nr = nr, nw = nw, nwi = nwi > 0 and nwi or nil, writers = writers, gw = gwmin,
         dnr = dnr > 0 and dnr or nil }
 end
 
