@@ -73,6 +73,46 @@ test('narrow.facts_at: a LOCAL\'S OWN DEFINITION — `local t = {}` never assign
     eq(nil, env.v, '`q or {}` reads q: a table only when q is falsy — the sandbox read nil there, the program need not')
 end)
 
+test('narrow: a call that CANNOT write its argument does not stale a field fact — by the callee\'s effect summary or a builtin\'s signature (CART-1677)', function ()
+    if not ready() then return end
+    ingest({
+        'local M = {}',                                         -- 1
+        'local log = {}',                                       -- 2
+        'local function peek(t) return t.n end',                -- 3: writes nothing
+        'local function poke(t) t.x = nil end',                -- 4: writes its param
+        'local function tally(t) log.n = t end',                -- 5: writes MODULE state
+        'function M.f(t)',                                      -- 6
+        '  if t.x then',                                        -- 7
+        '    peek(t)',                                          -- 8
+        '    local a = type(t)',                                -- 9
+        '    return t.x',                                       -- 10
+        '  end',
+        'end',
+        'function M.g(t)',                                      -- 13
+        '  if t.x then',                                        -- 14
+        '    poke(t)',                                          -- 15
+        '    return t.x',                                       -- 16
+        '  end',
+        'end',
+        'function M.h(t)',                                      -- 19
+        '  if t.x then',                                        -- 20
+        '    tally(t)',                                         -- 21
+        '    return t.x',                                       -- 22
+        '  end',
+        'end',
+        'function M.s(t)',                                      -- 25
+        '  if t.x then',                                        -- 26
+        '    table.sort(t)',                                    -- 27
+        '    return t.x',                                       -- 28
+        '  end',
+        'end',
+        'return M' })
+    ok(env_at('M.f', 10)['t.x'], 'peek writes nothing and type is a builtin that writes nothing: t.x survives')
+    eq(nil, env_at('M.g', 16)['t.x'], 'poke writes its param: stale')
+    eq(nil, env_at('M.h', 22)['t.x'], 'tally writes module state, which could alias t: stale')
+    eq(nil, env_at('M.s', 28)['t.x'], 'table.sort writes its first argument: stale')
+end)
+
 test('narrow: `if x then` proves x non-nil in the body', function ()
 
     if not ready('lua') then skip 'no lua parser' end

@@ -472,9 +472,59 @@ end
 -- A depth-≥1 fact on path P is dropped if some prefix entry covers P (see fact_live);
 -- bare-var facts are immune (a call can't nil a caller's local) and use mutated_of.
 -- Root reassignment is covered separately by mutated_of.
-local function field_unstable_of(fn, src)
+-- ★ A CALL THAT CANNOT WRITE ITS ARGUMENT DOES NOT STALE IT (CART-1677). Staling a field path on EVERY call that receives
+-- its root — `foo(A)`, `A:m()` — killed 11276 of lua/cartograph's 29431 field-path guard facts on calls alone. A
+-- call is HARMLESS to argument i when its resolved callee's effect summary carries no hedge, does not mutate that
+-- parameter (pwx) and writes no module state at all (a module write could reach A through an alias stored there
+-- before this function ran); or, unresolved, when the builtin signature registry knows it and its `w` does not list
+-- that position (`type`, `ipairs`, `string.format` — `table.sort` writes its first). Measured: 4823 of the 11276
+-- facts survive. CARTOGRAPH_NARROW_EFFECTS=0: every call stales, as before. -> harmless(call_node, argi) | nil
+local function call_harmless(store, node)
+    if os.getenv('CARTOGRAPH_NARROW_EFFECTS') == '0' or not (store and node and store.topo) then return nil end
+    local E = require 'cartograph.effects'
+    local callrec = require 'cartograph.callrec'
+    local atr = require 'cartograph.at'
+    local sums = E.summaries(store)
+    local sites = store.topo():sites(node.id)
+    local memo = {}
+    return function (cn, argi)
+        local r, c0 = cn:start()
+        local key = r .. ':' .. c0 .. ':' .. argi
+        if memo[key] ~= nil then return memo[key] end
+        local c, bd
+        for _, x in ipairs(sites) do
+            if callrec.line(x) == r then -- (0-based, as the node's row)
+                local d = math.abs((x.at and atr.sc(x.at) or 0) - c0)
+                if not bd or d < bd then c, bd = x, d end
+            end
+        end
+        local ok = false
+        if c then
+            local pos = argi == 0 and 1 or (argi + (callrec.method(c) and 1 or 0))
+            local to = callrec.to(c)
+            local s = to and sums[to]
+            if s then
+                ok = not s.h and not (s.pwx and s.pwx[pos]) and next(s.w or {}) == nil
+            elseif not to then
+                local sig = E.sig_of('lua', callrec.full(c) or callrec.callee(c), callrec.method(c))
+                if sig then
+                    ok = true
+                    for _, wi in ipairs(sig.w or {}) do if wi == pos then ok = false end end
+                end
+            end
+        end
+        memo[key] = ok
+        return ok
+    end
+end
+
+local function field_unstable_of(fn, src, harmless)
     local stale = {} -- list of { prefix = <path str>, inclusive = bool }
-    local function mark(prefix, inclusive) if prefix then stale[#stale + 1] = { prefix = prefix, inclusive = inclusive } end end
+    -- (a CALL-derived entry carries its call node and argument position — 0 the method receiver — for the call-staling
+    -- census: does the callee's effect summary say it writes there at all? CART-1677)
+    local function mark(prefix, inclusive, call, argi)
+        if prefix then stale[#stale + 1] = { prefix = prefix, inclusive = inclusive, call = call, argi = argi } end
+    end
     local function walk(n)
         local t = n:type()
         -- `assignment_statement` = (variable_list) = (expression_list); `local x = …` is
@@ -502,13 +552,14 @@ local function field_unstable_of(fn, src)
             end end
         elseif t == 'function_call' then -- A passed as arg, or A:m() receiver
             local args = n:field('arguments')[1]
-            if args then for _, a in tsutil.inamed, args, -1 do
-                local p = path_of(a, src); if p then mark(p.path, false) end
+            if args then local ai = 0; for _, a in tsutil.inamed, args, -1 do
+                ai = ai + 1
+                local p = path_of(a, src); if p and not (harmless and harmless(n, ai)) then mark(p.path, false, n, ai) end
             end end
             local callee = n:named_child(0)
             -- @langs-ok lua-only staling walk; ruby has no depth-≥1 facts to stale
             if callee and callee:type() == 'method_index_expression' then
-                local p = path_of(callee:named_child(0), src); if p then mark(p.path, false) end
+                local p = path_of(callee:named_child(0), src); if p and not (harmless and harmless(n, 0)) then mark(p.path, false, n, 0) end
             end
         end
         for _, c in tsutil.inext, n, -1 do
@@ -573,7 +624,7 @@ function M.narrow(store, fn_id)
     if not fn then return { lang = lang, points = {} } end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
     local mutated = mutated_of(node)
-    local funstable = field_unstable_of(fn, src)
+    local funstable = field_unstable_of(fn, src, call_harmless(store, node))
 
     local points, seenguard = {}, {}
     local function visit(n)
@@ -782,7 +833,7 @@ function M.param_nilability(store, fn_id)
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, params = {} } end
     local classify, mutated = gated_classify(vocab[lang], type_is_shadowed(lang, node)), mutated_of(node)
-    local funstable = field_unstable_of(fn, src)
+    local funstable = field_unstable_of(fn, src, call_harmless(store, node))
     local fl = flowmod.present(node) and flowmod.record(node)
     local plist = (fl and fl.params) or {}
     local params = {}
@@ -876,7 +927,7 @@ function M.redundant(store, fn_id)
     if not fn then return { lang = lang, checks = {} } end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
     local mutated = mutated_of(node)
-    local funstable = field_unstable_of(fn, src)
+    local funstable = field_unstable_of(fn, src, call_harmless(store, node))
     -- determine() handles only SINGLE predicates, so a conjunction `cond and other()`
     -- (where only `cond` is known) is correctly NOT flagged — the other conjunct still
     -- gates the branch.
@@ -929,7 +980,7 @@ function M.devirt(store, fn_id)
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, sites = {}, summary = {} } end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
-    local mutated, funstable = mutated_of(node), field_unstable_of(fn, src)
+    local mutated, funstable = mutated_of(node), field_unstable_of(fn, src, call_harmless(store, node))
 
     local sites = {}
     local summary = { method_calls = 0, typed = 0, certified = 0, candidate = 0 }
@@ -1174,6 +1225,161 @@ end
 --- function holding the position must be a node of the graph: its flow record is what kills a reassigned var's facts,
 --- and without it no fact is sound — nil then, never an empty env read as "nothing narrowed".
 --- -> { [path] = kind } | nil, why
+--- CALL-STALING CENSUS (CART-1677, a diagnostic): a field-path fact (`A.x`, depth >= 1) dies wherever a call anywhere in
+--- the function receives `A` — `foo(A)`, `A:m()` — whatever the callee does. For one function: every guard fact on a
+--- field path at every statement, how many staling kills, how many ONLY calls kill, and of those how many the callees'
+--- EFFECT SUMMARIES clear — every covering call resolved to a callee that does not mutate that argument (no pwx at the
+--- position, an argument counted with a method's receiver as 1, as argv does) and carries no hedge; `pure` = every
+--- covering callee pure. `sums` = effects.summaries(store), `sites` = store.topo():sites(fn_id).
+--- -> { facts, killed, by_calls_only, cleared_index, cleared_pure, unresolved }
+function M._call_kill_census(store, fn_id, sums, sites)
+    local out = { facts = 0, killed = 0, by_calls_only = 0, cleared_index = 0, cleared_pure = 0, unresolved = 0,
+        cleared_position = 0, cleared_position_or_index = 0, killers = {} }
+    local node = store.node and store.node(fn_id)
+    if not node or not node.file then return out end
+    local lang = EXT_LANG[node.file:match('%.(%w+)$') or '']
+    if lang ~= 'lua' then return out end
+    local src = table.concat(store.content(node) or {}, '\n')
+    local fn = fn_node(node, src, lang)
+    if not fn then return out end
+    local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
+    local mutated = mutated_of(node)
+    local stale = field_unstable_of(fn, src)
+    local callrec = require 'cartograph.callrec'
+    local E = require 'cartograph.effects'
+    -- the call record of a call node: same line, nearest column
+    local function record_of(cn)
+        local r, c0 = cn:start()
+        local best, bd
+        for _, c in ipairs(sites or {}) do
+            if callrec.line(c) == r then -- (callrec.line is 0-based, as the node's row)
+                local at = c.at and require('cartograph.at').sc(c.at) or 0
+                local d = math.abs(at - c0)
+                if not bd or d < bd then best, bd = c, d end
+            end
+        end
+        return best
+    end
+    local verdict = {} -- call node id .. ':' .. argi -> 'index' | 'pure' | false
+    local function cleared(e)
+        local key = e.call:id() .. ':' .. e.argi
+        if verdict[key] ~= nil then return verdict[key] end
+        local c = record_of(e.call)
+        local to = c and callrec.to(c)
+        local s = to and sums[to]
+        local v = false
+        local pos = c and (e.argi == 0 and 1 or (e.argi + (callrec.method(c) and 1 or 0)))
+        if s then
+            if not s.h and not (s.pwx and s.pwx[pos]) then
+                -- ('strict': no module-state write either — a callee writing module state could reach A through an
+                -- alias stored there before this function ran)
+                v = E.purity(store, to) == 'pure' and 'pure' or (next(s.w or {}) == nil and 'strict' or 'index')
+            end
+        elseif c and not to then
+            -- (an UNRESOLVED call into a builtin the signature registry knows — type, ipairs, string.format —
+            -- writes only the arguments its signature lists in `w`: table.sort writes its first)
+            local sig = E.sig_of('lua', callrec.full(c) or callrec.callee(c), callrec.method(c))
+            if sig then
+                local writes = false
+                for _, wi in ipairs(sig.w or {}) do if wi == pos then writes = true end end
+                if not writes then v = 'strict' end -- (a builtin reaches no module table through its other arguments)
+            else
+                out.unresolved = out.unresolved + 1
+            end
+        else
+            out.unresolved = out.unresolved + 1
+        end
+        verdict[key] = v
+        return v
+    end
+    local seen = {}
+    local function visit(n)
+        for _, c in tsutil.inamed, n, -1 do
+            if STMT_BLOCK[c:type()] then
+                for _, stmt in tsutil.inext, c, -1 do
+                    if stmt:named() and not tsutil.is_comment(stmt) then
+                        for _, g in ipairs(cfg.guards_over(stmt, src)) do
+                            for _, f in ipairs(classify(g.cond, src, not g.neg)) do
+                                local k = stmt:id() .. f.var
+                                if (f.depth or 0) >= 1 and not mutated[f.root] and not seen[k] then
+                                    seen[k] = true
+                                    out.facts = out.facts + 1
+                                    local any, other, calls = false, false, {}
+                                    for _, e in ipairs(stale) do
+                                        if prefix_covers(e.prefix, e.inclusive, f.var) then
+                                            any = true
+                                            if e.call then calls[#calls + 1] = e else other = true end
+                                        end
+                                    end
+                                    if any then out.killed = out.killed + 1 end
+                                    if any and not other then
+                                        out.by_calls_only = out.by_calls_only + 1
+                                        local all, pure = true, true
+                                        for _, e in ipairs(calls) do
+                                            local v = cleared(e)
+                                            if not v then all = false; pure = false; break end
+                                            if v ~= 'pure' then pure = false end
+                                        end
+                                        if all then out.cleared_index = out.cleared_index + 1 end
+                                        local strict = true
+                                        for _, e in ipairs(calls) do local v = cleared(e); if v ~= 'pure' and v ~= 'strict' then strict = false end end
+                                        if strict then out.cleared_strict = (out.cleared_strict or 0) + 1 end
+                                        if pure then out.cleared_pure = out.cleared_pure + 1 end
+                                        -- (POSITION: a call that starts before the guard cannot invalidate what the
+                                        -- guard proves — unless a LOOP holding both brings control back around)
+                                        local gb = select(3, g.cond:start())
+                                        local loops = {}
+                                        local a = stmt:parent()
+                                        while a and a:id() ~= fn:id() do
+                                            local at = a:type()
+                                            if at == 'while_statement' or at == 'for_statement' or at == 'repeat_statement' then loops[#loops + 1] = a end -- @langs-ok lua-only census
+                                            a = a:parent()
+                                        end
+                                        local function before(e)
+                                            local cb = select(3, e.call:start())
+                                            if cb >= gb then return false end
+                                            for _, l in ipairs(loops) do
+                                                local _, _, lb = l:start(); local _, _, le = l:end_()
+                                                if cb >= lb and cb < le then return false end
+                                            end
+                                            return true
+                                        end
+                                        local allpos, mix = true, true
+                                        for _, e in ipairs(calls) do
+                                            local p = before(e)
+                                            if not p then allpos = false end
+                                            if not p and not cleared(e) then mix = false end
+                                        end
+                                        if allpos then out.cleared_position = out.cleared_position + 1 end
+                                        if mix then out.cleared_position_or_index = out.cleared_position_or_index + 1
+                                        else
+                                            -- (what still kills it: the uncleared calls after the guard, by callee name and
+                                            -- whether a summary exists for it)
+                                            for _, e in ipairs(calls) do
+                                                if not before(e) and not cleared(e) then
+                                                    local c = record_of(e.call)
+                                                    local to = c and callrec.to(c)
+                                                    local nm = (c and (callrec.full(c) or callrec.callee(c)) or ('? L' .. (e.call:start() + 1) .. ' ' .. vim.treesitter.get_node_text(e.call, src):sub(1, 40))):gsub('^[%w_]+[:.]', '.')
+                                                    local why = not to and 'unresolved' or (sums[to] and (sums[to].h and 'hedged' or 'mutates it') or 'no summary')
+                                                    local k = why .. ' ' .. nm
+                                                    out.killers[k] = (out.killers[k] or 0) + 1
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            if not FN_TYPES[c:type()] then visit(c) end
+        end
+    end
+    visit(fn)
+    return out
+end
+
 function M.facts_at(store, rel, text, row, col)
     local lang = EXT_LANG[rel:match('%.(%w+)$') or '']
     if not lang or not (vocab[lang] and VERB_LANG.narrow[lang]) then return nil, 'no narrowing vocabulary for ' .. rel end
@@ -1192,7 +1398,7 @@ function M.facts_at(store, rel, text, row, col)
     if not node then return nil, 'the enclosing function is no node of the graph (its reassignments are unknown)' end
     if twice then return nil, 'two definitions start on the enclosing function\'s line: which one holds the position is not known' end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
-    local env = env_of(site, text, classify, mutated_of(node), field_unstable_of(fn, text))
+    local env = env_of(site, text, classify, mutated_of(node), field_unstable_of(fn, text, call_harmless(store, node)))
     if lang == 'lua' then
         for name, kind in pairs(M._lua_def_kinds(site, fn, text)) do
             if kind_rank(kind) > kind_rank(env[name]) then env[name] = kind end
