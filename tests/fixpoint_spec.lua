@@ -438,6 +438,11 @@ test('fixpoint: a PARAMETER receiver is read over its whole binding scope — a 
     put('plugin/x.lua', '')
     put('lua/real.lua', 'local M = {}\nfunction M.node() return 1 end\nfunction M.topo() return 2 end\nreturn M')
     put('lua/fake.lua', 'local M = {}\nlocal F = {}\nfunction M.node() F.n = 1 end\nreturn M') -- (no topo)
+    vim.fn.mkdir(root .. '/lua/pkg', 'p')
+    -- (the module defines `go` twice — M.go and M.T.go, tactic.lua's M.step / M.T.step: the resolver refuses, the join
+    -- decides, and only the BOUND module's two may stay)
+    put('lua/pkg/mod.lua', 'local M = {}\nlocal S = {}\nM.T = {}\nfunction M.go() S.x = 1 end\nfunction M.T.go() S.y = 1 end\nreturn M')
+    put('lua/other.lua', 'local M = {}\nlocal O = {}\nfunction M.go() O.y = 1 end\nreturn M')
     put('lua/m.lua', table.concat({
         'local function a(store)',
         '  local function g1() return store.node(1) end', -- the binder calls store.topo(): fake cannot be it
@@ -460,7 +465,16 @@ test('fixpoint: a PARAMETER receiver is read over its whole binding scope — a 
         '  store.topo()',
         '  return g3',
         'end',
-        'return { a, b, c }' }, '\n'))
+        -- a receiver bound to a module's FIELD table (tactic.lua's `require(...).T`): the resolver refuses ambiguous, and
+        -- `pkg.mod` names lua/pkg/mod.lua — a suffix of the candidate's path
+        'local pm = require("pkg.mod").T',
+        'local function d1() return pm.go() end',
+        'local pr = require("pkg.mod").make()',            -- a CALLED chain: a value pkg.mod MADE — its package's
+        'local function d2() return pr.go() end',
+        -- a COMMENT quoting a binding binds nothing: e1's `fake` is its parameter, and it answers topo
+        '-- local fake = require("fake")',
+        'local function e1(fake) return fake.node(1), fake.topo() end',
+        'return { a, b, c, d1, e1 }' }, '\n'))
     store.ingest(ts.extract(root))
     local by = {}
     for _, n in ipairs(store.data.nodes) do if n.file == 'lua/m.lua' then by[n.name] = n end end
@@ -473,6 +487,17 @@ test('fixpoint: a PARAMETER receiver is read over its whole binding scope — a 
     eq(true, sums[by['g1'].id].jp, 'g1 still JOINS (real.node): k\'s own store.zap is not a member of a\'s store')
     eq(true, fake('g2'), 'g2 reads its own store: the join stands')
     eq(true, fake('g3'), 'g3 reads a reassigned param: the join stands')
+    local function wrote(name, file)
+        for k in pairs(sums[by[name].id].w) do if k:find(file, 1, true) then return true end end
+        return false
+    end
+    eq(true, wrote('d1', 'pkg/mod.lua'), 'd1 joins lua/pkg/mod.lua\'s go')
+    eq(false, wrote('d1', 'other.lua'), 'and not other.lua\'s')
+    eq(true, wrote('d1', 'S@1\31y'), 'pm is the module\'s T: M.T.go (S.y) is joined')
+    eq(false, wrote('d1', 'S@1\31x'), 'and M.go (S.x), the same name outside T, is not')
+    eq(true, wrote('d2', 'pkg/mod.lua'), 'd2: a value pkg.mod made joins pkg.mod\'s functions')
+    eq(false, wrote('d2', 'other.lua'), 'and never another module\'s namesake')
+    eq(false, fake('e1'), 'e1: the comment binds nothing, structure keeps only real.node')
     vim.fn.delete(root, 'rf')
 end)
 

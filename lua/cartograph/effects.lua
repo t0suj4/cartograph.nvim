@@ -683,9 +683,20 @@ function M._file_bindings(store, file)
             -- (a `require` binding ANYWHERE on a line — a one-line function binds mid-line; any other `local x =` that
             -- starts a line is a binding to something else, which unbinds the name)
             local hit = false
-            for name, mod in line:gmatch('local%s+([%a_][%w_]*)%s*=%s*require%s*%(?%s*[\'"]([^\'"]+)[\'"]%s*%)?') do bind(name, mod); hit = true end
+            -- (never in a COMMENT: a comment quoting `local store = require …` bound `store` for the whole file)
+            local code = line:gsub('%-%-.*$', '')
+            -- (`require('x').T` binds the module's FIELD table: `x#T` — tactic.lua's T.step is M.T.step, never the
+            -- executor M.step beside it; a chain that is then CALLED, `require('x').load()`, binds a value the module
+            -- MADE: `x#()`, a function of x's package — algebra.load() returns algebra/core.lua's M)
+            for name, mod, chain, after in code:gmatch('local%s+([%a_][%w_]*)%s*=%s*require%s*%(?%s*[\'"]([^\'"]+)[\'"]%s*%)?([%.%w_]*)%s*(.?)') do
+                if chain == '' then bind(name, mod)
+                elseif after == '(' or after == '"' or after == "'" or after == '{' then bind(name, mod .. '#()')
+                elseif after == ':' or after == '[' then bind(name, false)
+                else bind(name, mod .. '#' .. chain:sub(2)) end
+                hit = true
+            end
             if not hit then
-                local name, rest = line:match('^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$')
+                local name, rest = code:match('^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$')
                 if name then bind(name, rest:match('^{%s*}$') and true or false) end
             end
         end
@@ -726,12 +737,28 @@ function M.structural_cands(store, c, caller, cands)
         return keep
     end
     if mod then
+        local path
+        mod, path = mod:match('^([^#]*)#?(.*)$')
+        local member = full:match('[.:]([%w_]+)$') or ''
         local tail = mod:gsub('%.', '/')
         local keep = {}
         for _, id in ipairs(cands) do
             local f = tostring(id):match('^(.-)%.lua::') or ''
             local g = f:gsub('/init$', '')
-            if g ~= '' and (tail == g or tail:sub(-#g - 1) == '/' .. g) then keep[#keep + 1] = id end
+            -- (bound to a FIELD of the module: only a function defined under that path — `M.T.step` for T = …).T)
+            if path == '()' then
+                -- (a value the module made: any function of its PACKAGE — x.lua, x/init.lua, x/**)
+                if not (('/' .. g .. '/'):find('/' .. tail .. '/', 1, true) or ('/' .. f .. '/'):find('/' .. tail .. '/', 1, true)) then g = '' end
+                if g ~= '' then keep[#keep + 1] = id end
+                g = ''
+            elseif path ~= '' then
+                local name = tostring(id):match('::(.-)@%d+$') or ''
+                local want = path .. '.' .. member
+                if not (name == want or name:sub(-#want - 1) == '.' .. want) then g = '' end
+            end
+            -- (a suffix EITHER way: `x.real2` names root real2.lua, and `cartograph.store` names lua/cartograph/store.lua —
+            -- the one-way match kept no candidate of a `lua/` tree: all 524 bound receivers of the repo hedged, CART-1683)
+            if g ~= '' and (tail == g or tail:sub(-#g - 1) == '/' .. g or g:sub(-#tail - 1) == '/' .. tail) then keep[#keep + 1] = id end
         end
         return keep
     end
