@@ -1890,7 +1890,10 @@ function M.enclosing(id)
             local el, ec = at.el(n.range), at.ec(n.range)
             local starts_at_or_before = sl < xsl or (sl == xsl and sc <= xsc)
             local ends_at_or_after = el > xel or (el == xel and ec >= xec)
-            if starts_at_or_before and ends_at_or_after then
+            -- (an IDENTICAL range is a PEER, never an encloser: two regions over the same lines enclosed each other,
+            -- and a caller walking upward — e = enclosing(e.id) — cycled forever, CART-1679)
+            local same = sl == xsl and sc == xsc and el == xel and ec == xec
+            if starts_at_or_before and ends_at_or_after and not same then
                 -- INNERMOST = the smallest span, lines first and columns as the
                 -- tie-break: two definitions can share a line range and differ only
                 -- in where they open (an inline callback inside a one-line wrapper).

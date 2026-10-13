@@ -252,6 +252,18 @@ test('store.enclosing: the innermost containing definition, nil at file scope', 
     eq(nil, store.enclosing('a.lua::sibling'), 'and neither does one beside it')
 end)
 
+test('store.enclosing: a node with the IDENTICAL range is a peer, not a parent — an upward walk ends (CART-1679)', function ()
+    graph({ mod('c.lua', false),
+        fnr('c.lua', 'outer', rng(0, 0, 20, 3)),
+        fnr('c.lua', 'twin_a', rng(4, 0, 9, 3)),
+        fnr('c.lua', 'twin_b', rng(4, 0, 9, 3)) })
+    eq('c.lua::outer', store.enclosing('c.lua::twin_a').id, 'not its twin')
+    eq('c.lua::outer', store.enclosing('c.lua::twin_b').id)
+    local e, steps = store.enclosing('c.lua::twin_a'), 0
+    while e and steps < 10 do steps = steps + 1; e = store.enclosing(e.id) end
+    eq(1, steps, 'twin -> outer -> file scope')
+end)
+
 test('store.enclosing: never returns the MODULE, so nil means file scope', function ()
     -- the module spans the whole file; if it were eligible, every node would be
     -- enclosed and "top level" would be unsayable. `by_file` excludes it by
