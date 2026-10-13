@@ -63,6 +63,37 @@ test('flowtype: a returned record\'s closure, a string-only receiver — decided
     eq('string', s and s.kind, 'only a string reaches s: ' .. vim.inspect(s))
 end)
 
+test('flowtype: a store into a SCALAR writes no field — the shared string object never holds `.body`; explain names a saturation (CART-1683)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local L3 = 'local function main() put("s"); put({}) end'
+    local sinks = {}
+    for i = 1, 70 do sinks[i] = 'sink({})' end -- (70 tables through one parameter: past CAP)
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local function f() return 1 end',
+            'local function put(x) x.body = f end', -- x is a string at one call, a table at the other
+            L3,
+            'local function sink(x) return x end',
+            table.concat(sinks, '\n'),
+            'return main' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false, explain = true, keepsat = true })
+    local so = R.object('type:string')
+    ok(so, 'the string type object exists')
+    eq(nil, R.field_port(so, 'body'), 'a string has no field to write: `x.body = f` raises on one')
+    local tb = R.object('tbl:m.lua:2:' .. (L3:find('{', 1, true) - 1)) -- (an object's key: file, 0-based line and column)
+    ok(tb and R.field_port(tb, 'body'), 'the table handed to put does get .body')
+    -- (explain: the first sink table escaped through sink's saturated parameter, and that port saturated past CAP)
+    local path = R.escape_of(R.object('tbl:m.lua:4:5'))
+    ok(path[#path]:find('[saturated]', 1, true), 'escape_of ends at a saturated port: ' .. table.concat(path, ' | '))
+    local late = R.escape_of(R.object('tbl:m.lua:73:5')) -- (the last: it reached the port AFTER it saturated)
+    ok(late[#late]:find('[saturated]', 1, true), 'a late arrival is recorded too: ' .. table.concat(late, ' | '))
+    local why = R.taint_path(R._escport)
+    eq('<- saturated (past CAP)', why[#why], 'taint_path names the seed')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: an EXPORTED function\'s parameter may hold anything (open) — no claim through it', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({

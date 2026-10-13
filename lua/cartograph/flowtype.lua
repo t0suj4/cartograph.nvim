@@ -28,6 +28,12 @@ local EMPTY_NODE = { child = function () return nil end, named_child = function 
 
 local M = {}
 M.CAP = 64
+-- ★ A SCALAR HAS NO FIELD TO WRITE: `s.body = f` on a string, number or boolean raises, so a program that gets past
+-- the store did not hold one there (CART-1643's reading, for stores). The shared `type:string` object had collected
+-- derive.lua's functions as `.body` that way, a call `t.body(…)` on a list walker reached them, and their returns
+-- snowballed the walker's parameter past CAP — the store module escaped through it and every `store.node` answer
+-- read partial (CART-1683)
+local SCALAR = { string = true, number = true, integer = true, boolean = true, ['nil'] = true }
 -- ★ ONE EMPTY TABLE FOR EVERY ABSENT LIST (CART-1656's allocation census): `ipairs(loads[p] or {})` in the solve loop
 -- built a fresh empty table per port per visit — 16 M of the 27 M tables one solve of lua/cartograph allocated were
 -- such fallbacks. Iterated only: NEVER written
@@ -213,10 +219,18 @@ local function build(store, opts)
     -- (ESCAPED: an object that reached a saturated port — from there it may go anywhere the solve no longer follows:
     -- written through, called through. See PARTIAL below)
     local escaped = {}
+    -- (opts.explain: the saturated port each object ESCAPED through first, or { carrier object } for a field or
+    -- prototype that escaped with it: R.escape_of)
+    local ESCAT = opts.explain and {} or nil
     local SATSNAP = {}
     local function settop(p)
         if top[p] then return end
         local s = pts[p]
+        if ESCAT then
+            if type(s) == 'number' then ESCAT[s] = ESCAT[s] or p
+            elseif s and s.bs then for o in bs_iter(s) do ESCAT[o] = ESCAT[o] or p end
+            elseif s then for o in pairs(s) do ESCAT[o] = ESCAT[o] or p end end
+        end
         if type(s) == 'number' then escaped[s] = true
         elseif s and s.bs then for o in bs_iter(s) do escaped[o] = true end
         elseif s then for o in pairs(s) do escaped[o] = true end end
@@ -269,7 +283,7 @@ local function build(store, opts)
         return b
     end
     local function addobj(p, o)
-        if top[p] then escaped[o] = true; return end
+        if top[p] then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end; return end
         local s = pts[p]
         if s == nil then pts[p] = o; cnt[p] = 1
         elseif type(s) == 'number' then
@@ -299,7 +313,7 @@ local function build(store, opts)
     end
     -- the bitset d into q: word by word, what was new becomes q's delta
     local function addbits(q, d)
-        if top[q] then for o in bs_iter(d) do escaped[o] = true end return end
+        if top[q] then for o in bs_iter(d) do escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or q end end return end
         local t = tobits(q)
         if t.nw < d.nw then bs_grow(t, d.nw) end
         local tb, db = t.bs, d.bs
@@ -650,7 +664,9 @@ local function build(store, opts)
                 end
                 if d then
                     for _, ld in ipairs(loads[p] or NOTHING) do for _, o in dit(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
-                    for _, st in ipairs(stores[p] or NOTHING) do for _, o in dit(d) do edge(st[2], ofp(o, st[1])) end end
+                    for _, st in ipairs(stores[p] or NOTHING) do
+                        for _, o in dit(d) do if not SCALAR[TNAME[o]] then edge(st[2], ofp(o, st[1])) end end
+                    end
                     for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3]) end end
                     for _, fl in ipairs(filters[p] or NOTHING) do
                         for _, o in dit(d) do if fl[2](o) then addobj(fl[1], o) end end
@@ -1383,7 +1399,13 @@ local function build(store, opts)
     -- reads), and — for a function — its parameters once a call's callee is tainted (which function it would reach is
     -- what was lost).
     local tainted, twork = {}, {}
-    local function taint(p) if p and not tainted[p] then tainted[p] = true; twork[#twork + 1] = p end end
+    -- (opts.explain: what tainted each port — the port it flowed from, `{ port, why }` for a rule that jumps, or a
+    -- seed's reason — so a partial answer can be walked back to its seed: R.taint_path)
+    local TFROM = opts.explain and {} or nil
+    local TCUR
+    local function taint(p)
+        if p and not tainted[p] then tainted[p] = true; twork[#twork + 1] = p; if TFROM then TFROM[p] = TCUR end end
+    end
     local gf_of = {}
     for _, gf in ipairs(gfilters) do local l = gf_of[gf[1]] or {}; gf_of[gf[1]] = l; l[#l + 1] = gf[2] end
     -- (an escaped object's fields and prototypes escaped WITH it: the solve no longer follows it, so a load through a
@@ -1396,17 +1418,20 @@ local function build(store, opts)
         while i <= #esc do
             local o = esc[i]; i = i + 1
             for _, fp in pairs(ofield[o] or NOTHING) do
-                for x in each(fp) do if not escaped[x] then escaped[x] = true; esc[#esc + 1] = x end end
+                for x in each(fp) do if not escaped[x] then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] then escaped[c] = true; esc[#esc + 1] = c end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] then escaped[c] = true; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
         end
     end
     local field_hit, params_hit = {}, false
     -- (field name -> the ports of that field over every escaped object, built on the first store that needs it: each
     -- new field had scanned the whole escaped list — fields x escaped objects, half of build1)
     local escf
+    TCUR = 'saturated (past CAP)'
     for p in pairs(top) do taint(p) end
+    TCUR = 'sinf'
     for r in pairs(sinf) do taint(r) end
+    TCUR = 'open: reachable from an export, an outside caller may fill it'
     -- ★ OPEN REACHES PAST THE EXPORTS (CART-1652): a caller outside the tree gets more than the module's functions —
     -- what they RETURN, and those objects' fields and methods — and calls those methods with objects it got the same
     -- way: `M.b():go()` runs A:go with a B instance the tree never builds, where the tree only calls `M.a():go()`.
@@ -1429,6 +1454,7 @@ local function build(store, opts)
     end
     while #twork > 0 do
         local p = twork[#twork]; twork[#twork] = nil
+        TCUR = p
         for q in sit(succ[p]) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
         for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end
@@ -1446,12 +1472,16 @@ local function build(store, opts)
                         end
                     end
                 end
+                if TFROM then TCUR = { p, 'a store of .' .. tostring(f) .. ' through it reaches that field of EVERY escaped object' } end
                 for _, fp in ipairs(escf[f] or NOTHING) do taint(fp) end
+                TCUR = p
             end
         end
         if calls[p] and not params_hit then
             params_hit = true
+            if TFROM then TCUR = { p, 'a call through it may reach ANY escaped function: their parameters' } end
             for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end
+            TCUR = p
         end
         for _, cl in ipairs(calls[p] or NOTHING) do
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
@@ -1472,7 +1502,7 @@ local function build(store, opts)
         if seen[o] then return false end
         seen[o] = true
         local p = ofield[o] and ofield[o][m]
-        if p and tainted[p] then partial_hit = true end
+        if p and tainted[p] then partial_hit = partial_hit or p end
         if p and top[p] then return true end
         if p then for x in each(p) do out[x] = true end end
         local t = false
@@ -1503,7 +1533,7 @@ local function build(store, opts)
         partial_hit = false
         local anyunk, anyobj = false, false
         for _, r in ipairs(g.recvs) do
-            if tainted[r] then partial_hit = true end
+            if tainted[r] then partial_hit = partial_hit or r end
             if top[r] or has(r, EXT) then anyunk = true end
             if pts[r] ~= nil then anyobj = true end
         end
@@ -1562,7 +1592,10 @@ local function build(store, opts)
             end
         end
         stats[kind] = (stats[kind] or 0) + 1
-        if v and partial_hit then v.partial = true; stats.partial = stats.partial + 1 end
+        if v and partial_hit then
+            v.partial = true; stats.partial = stats.partial + 1
+            if TFROM and type(partial_hit) == 'number' then v.ptport = partial_hit end -- (the tainted port it read)
+        end
         if v then verdicts[pr.c] = v end
     end
     -- (PROBES a language walker records itself — every Go method call: { file, line, col, member, recv } -> targets)
@@ -1606,10 +1639,69 @@ local function build(store, opts)
         local nobj = 0
         if not top[pr.recv] then for _ in each(pr.recv) do nobj = nobj + 1 end end
         probe_out[#probe_out + 1] = { file = pr.file, line = pr.line, col = pr.col, member = pr.member, kind = kind, targets = fns,
-            guarded = pr.guard ~= nil, partial = partial_hit or nil, nobj = nobj, c = pr.c }
+            guarded = pr.guard ~= nil, partial = partial_hit and true or nil, nobj = nobj, c = pr.c }
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
+    if TFROM then
+        -- (a partial verdict's v.ptport walked back to its SEED: { label… }, the last a reason)
+        local named_of = {}
+        for k, q in pairs(named) do named_of[q] = k end
+        local function label(q)
+            if named_of[q] then return tostring(named_of[q]) end
+            if fowner[q] then return 'field ' .. tostring(obinfo[fowner[q]] or fowner[q]) .. '.' .. tostring(fname[q]) end
+            local fp = nil
+            for o, f in pairs(fnports) do
+                for i, pp in ipairs(f.params or NOTHING) do if pp == q then fp = 'param ' .. i .. ' of ' .. tostring(obinfo[o] or o) end end
+                if fp then break end
+            end
+            return fp or ('port ' .. tostring(q))
+        end
+        -- (how an object escaped: { object label, …, the saturated port's label }, following carriers)
+        R.escape_of = function (o)
+            local out, seen = {}, {}
+            while o and not seen[o] do
+                seen[o] = true
+                out[#out + 1] = tostring(obinfo[o] or o)
+                local w = ESCAT and ESCAT[o]
+                if type(w) == 'table' then out[#out + 1] = '<- a field / prototype of'; o = w[1]
+                else out[#out + 1] = '<- reached ' .. (w and label(w) or '?') .. (w and top[w] and ' [saturated]' or ''); R._escport = w; break end
+            end
+            return out
+        end
+        -- (what a saturated port held when it saturated — with opts.keepsat — by object label)
+        R.sat_objs = function (p)
+            local out = {}
+            for _, o in ipairs(SATSNAP[p] or NOTHING) do out[#out + 1] = tostring(obinfo[o] or o) end
+            table.sort(out)
+            return out
+        end
+        R.label = label
+        R.port = function (key) return named[key] end
+        -- (the field port `f` of the object labelled `key`)
+        R.field_port = function (o, f) return ofield[o] and ofield[o][f] end
+        R.is_top = function (p) return top[p] == true end
+        R.objs_of = function (p)
+            local out = {}
+            if top[p] then for _, o in ipairs(SATSNAP[p] or NOTHING) do out[#out + 1] = tostring(obinfo[o] or o) end
+            else for o in each(p) do out[#out + 1] = tostring(obinfo[o] or o) end end
+            return out
+        end
+        -- (the object whose obinfo key is `key`)
+        R.object = function (key) for o, k in pairs(obinfo) do if k == key then return o end end end
+        R.taint_path = function (p)
+            local out, seen = {}, {}
+            while p and not seen[p] do
+                seen[p] = true
+                out[#out + 1] = label(p) .. (top[p] and ' [saturated]' or '')
+                local w = TFROM[p]
+                if type(w) == 'string' then out[#out + 1] = '<- ' .. w; break
+                elseif type(w) == 'table' then out[#out + 1] = '<- ' .. w[2]; p = w[1]
+                else p = w end
+            end
+            return out
+        end
+    end
     -- (the allocation sites reaching argument i of call c -> { obinfo key… } | nil, why: a saturated or partial port,
     -- an external value, no port — never a short list read as the whole)
     if ARGP then
@@ -1741,6 +1833,7 @@ local function build(store, opts)
         local pred = {}
         local function addp(q, p) local l = pred[q]; if not l then l = {}; pred[q] = l end; l[#l + 1] = p end
         for p, sq in pairs(succ) do for q in sit(sq) do if top[q] then addp(q, p) end end end
+        if TFROM then R.sat_preds = function (p) return pred[p] or {} end end -- (explain: a saturated port's predecessors)
         for x, l in pairs(loads) do
             local os
             for _, ld in ipairs(l) do
