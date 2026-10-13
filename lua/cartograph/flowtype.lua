@@ -1739,6 +1739,26 @@ local function build(store, opts)
             -- (an origin that is a temporary, classified by what MERGED into it: fields (a load through a base of many
             -- objects — a heap merge), return ports (a call whose callee value holds several functions — a call-boundary
             -- merge), parameter ports, or plain copies (locals assigned from several places))
+            -- (the LOAD an origin came from: { base port, field, the base's object count, the objects' keys (first 8) },
+            -- and how many saturated ports it feeds downstream)
+            R.origin_load = function (p)
+                if not R._loadof then
+                    R._loadof = {}
+                    for x, l in pairs(loads) do for _, ld in ipairs(l) do R._loadof[ld[2]] = R._loadof[ld[2]] or { x, ld[1] } end end
+                end
+                local e = R._loadof[p]
+                if not e then return nil end
+                local os = objs(e[1])
+                local keys = {}
+                for i = 1, math.min(8, #os) do keys[i] = tostring(obinfo[os[i]] or os[i]) end
+                local seen, q, n = { [p] = true }, { p }, 0
+                local h = 1
+                while h <= #q do
+                    local x = q[h]; h = h + 1
+                    for y in sit(succ[x]) do if top[y] and not seen[y] then seen[y] = true; n = n + 1; q[#q + 1] = y end end
+                end
+                return { base = e[1], field = e[2], nbase = #os, base_top = top[e[1]] or false, keys = keys, feeds = n }
+            end
             R.origin_preds = function (p)
                 local k = { field = 0, ret = 0, param = 0, copy = 0 }
                 local fieldof = R._fieldof or {}
