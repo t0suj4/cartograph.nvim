@@ -724,6 +724,11 @@ local function build(store, opts)
     local ARRAYFN = { ['table.concat'] = true, ['table.sort'] = true, ['table.remove'] = true, ['table.unpack'] = true,
         unpack = true, ['vim.list_extend'] = true, ['vim.tbl_islist'] = true, ['vim.islist'] = true }
     local CTXFNS = opts.ctxfns
+    -- (ARGUMENT PROBES, opts.argprobes — CART-1670: the ports of every resolved-or-not call's arguments, by call record
+    -- (a method's receiver is position 1, as in argv); R.arg_objs(c, i) answers which allocation sites reach one. The
+    -- writers census asks it: an opaque local handed to a param-mutating callee may hold a module table)
+    local ARGP = opts.argprobes and {} or nil
+    local ROOTS = ARGP and {} or nil -- (each walked file's TOP scope: name -> port, filled as the walk declares)
     local CTX, ctx_direct = {}, {}
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
@@ -746,6 +751,7 @@ local function build(store, opts)
             ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj, key = key }
         end
         local scopes = { {} }
+        if ROOTS and not clone then ROOTS[#ROOTS + 1] = scopes[1] end
         -- (a function is CLOSED when every name it reads is its own or a global: fnbase holds each open function's
         -- first scope, fnmeta whether it read past it or holds a function of its own)
         local fnbase, fnmeta = {}, {}
@@ -953,6 +959,7 @@ local function build(store, opts)
             local aps = {}
             if recvp then aps[1] = recvp end
             for _, a in ipairs(argn) do aps[#aps + 1] = expr(a) end
+            if ARGP and c and not clone then ARGP[c] = aps end
             -- (the array as a whole: a library function that reads or writes every position)
             if ACC and ARRAYFN[fname] and argn[1] then acc('array', argn[1], nil, aps[recvp and 2 or 1]) end
             local r = c and c.refused
@@ -1572,6 +1579,40 @@ local function build(store, opts)
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
+    -- (the allocation sites reaching argument i of call c -> { obinfo key… } | nil, why: a saturated or partial port,
+    -- an external value, no port — never a short list read as the whole)
+    if ARGP then
+        R.arg_objs = function (c, i)
+            local ap = ARGP[c] and ARGP[c][i]
+            if not ap then return nil, 'no port' end
+            if top[ap] then return nil, 'saturated' end
+            if tainted[ap] then return nil, 'partial' end
+            local out, ids = {}, {}
+            for o in each(ap) do
+                if o == EXT then return nil, 'external' end
+                out[#out + 1] = tostring(obinfo[o] or o); ids[#ids + 1] = o
+            end
+            return out, ids
+        end
+        -- (MODULE STATE: every object reachable through fields from a module ROOT — a file's top-scope locals, a
+        -- global, a module's returned value. An object it reaches outlives the call that made it: a write into it is
+        -- a write of state. -> { [object] = true }, computed once)
+        local state
+        R.state_objs = function ()
+            if state then return state end
+            state = {}
+            local q = {}
+            local function add_port(p) for o in each(p) do if o ~= EXT and not state[o] then state[o] = true; q[#q + 1] = o end end end
+            for _, sc in ipairs(ROOTS) do for _, p in pairs(sc) do add_port(p) end end
+            for key, p in pairs(named) do if key:match('^g:') or key:match('^mod:') then add_port(p) end end
+            local h = 1
+            while h <= #q do
+                local o = q[h]; h = h + 1
+                for _, fp in pairs(ofield[o] or NOTHING) do add_port(fp) end
+            end
+            return state
+        end
+    end
     if ACC then
         -- (one row per source range and kind: the shared walk and each context instance unioned)
         local rows, idx = {}, {}
