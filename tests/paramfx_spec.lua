@@ -76,6 +76,36 @@ test('effects: a hedge names the call by its 1-based LINE, as an editor shows it
     ok(hs:find('m.lua:5', 1, true), 'the hedge names line 5: ' .. hs)
 end)
 
+test('effects: a caller inherits EVERY distinct hedge of its callee, and its call slice lists them (CART-1681)', function ()
+    if not ready('lua') then return end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',                                -- 1
+        'local function put(t, k) t[k] = true end',    -- 2
+        'function M.g(k)',                             -- 3
+        '  get_a(k)',                                  -- 4: one hedge (unresolved)
+        '  get_b(k)',                                  -- 5: another
+        'end',
+        'function M.h(k) M.g(k); M.g(k) end',          -- 7: called twice — each hedge kept once
+        'return M', '' }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do if n.name then by[n.name] = n.id end end
+    local sums = effects.summaries(store)
+    local function lines(hs)
+        local got = {}
+        for _, h in ipairs(hs or {}) do got[#got + 1] = h:match('m%.lua:(%d+)$') or h end
+        table.sort(got)
+        return table.concat(got, ' ')
+    end
+    eq('4 5', lines((sums[by['M.g']] or {}).h), 'the callee raises two')
+    eq('4 5', lines((sums[by['M.h']] or {}).h), 'the caller carries both, once each (two calls) — not the first alone')
+    local c = store.topo():sites(by['M.h'])[1]
+    eq('4 5', lines(effects.call_effects(store, c, 'm.lua').hedges), 'the call slice names both')
+end)
+
 local function edge(data, fn_name, var_name)
     local byid = {}
     for _, n in ipairs(data.nodes) do byid[n.id] = n end

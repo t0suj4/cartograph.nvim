@@ -302,8 +302,18 @@ local function keys_of(t)
 end
 local function signature(s)
     return table.concat({ s.nk, tostring(s.over), tostring(s.mh), tostring(s.nd), tostring(s.jp),
-        s.h and s.h[1] or '', keys_of(s.w), keys_of(s.gpk), keys_of(s.pwx), keys_of(s.cpo),
+        s.h and table.concat(s.h, '\1') or '', keys_of(s.w), keys_of(s.gpk), keys_of(s.pwx), keys_of(s.cpo),
         s.gh and (s.gh[1][1] .. '=' .. s.gh[1][2] .. '/' .. #s.gh) or '' }, '\0')
+end
+
+-- a summary's pending pairs (cpo) in KEY order: substituting them in `pairs` order raised their hedges in an order
+-- that changed run to run (LuaJIT seeds its string hash per process), and a hedge list is part of the signature
+local function cpo_sorted(cpo)
+    local ks = {}
+    for k in pairs(cpo or {}) do ks[#ks + 1] = k end
+    table.sort(ks)
+    local i = 0
+    return function () i = i + 1; local k = ks[i]; if k ~= nil then return k, cpo[k] end end
 end
 
 local CAP = 200   -- write-set keys per summary before honest coarsening
@@ -346,6 +356,8 @@ local function s_hedge(sum, why, gp)
     end
     local h = sum.h
     if not h then h = {}; sum.h = h end
+    -- (each distinct hedge kept once: a callee's chain arrives through every call to it; the scan is bounded by HCAP)
+    for i = 1, #h do if h[i] == why then return end end
     if #h < HCAP then h[#h + 1] = why end
     sum.nh = (sum.nh or 0) + 1
 end
@@ -456,7 +468,9 @@ end
 -- `c` / `file`: the call site and the callee's file, when there is one — a guarded hedge is discharged there
 local function tiers(sum, ts, c, file)
     if ts.over then sum.over = true end
-    if ts.h then s_hedge(sum, ts.h[1]) end
+    -- EVERY hedge of the callee, not its first (CART-1681): a caller that inherited only `h[1]` showed one link of a
+    -- chain, so fixing that root revealed the next and a census could not tell which fixes clean a summary
+    for _, why in ipairs(ts.h or {}) do s_hedge(sum, why) end
     for _, x in ipairs(ts.gh or {}) do
         if not c or M.verdict({ rw = 2, gw = 1, gp = x[2] }, c, file) ~= 'skips' then s_hedge(sum, x[1]) end
         if not c then break end
@@ -930,7 +944,7 @@ function M.summaries(store)
                     end
                 end
                 -- the callee calls ITS parameter j: what did WE pass there? (an outer owner's pair travels on)
-                for _, p in pairs(cs.cpo or {}) do
+                for _, p in cpo_sorted(cs.cpo) do
                     if p.owner == to then subst(store, sums, sum, c, caller, p.j, tn and tn.name or to, member)
                     else cp_add(sum, p.owner, p.j) end
                 end
@@ -1123,7 +1137,7 @@ function M.summaries(store)
             for _ = 1, 50 do
                 local todo = {}
                 for _, x in ipairs(intra) do
-                    for key, p in pairs(sum.cpo or {}) do
+                    for key, p in cpo_sorted(sum.cpo) do
                         if p.owner == x.to and not done[x] then done[x] = {} end
                         if p.owner == x.to and not done[x][key] then done[x][key] = true; todo[#todo + 1] = { x = x, p = p } end
                     end
@@ -1179,7 +1193,7 @@ function M.call_effects(store, c, caller_file)
             return out
         end
         if cs.over then hedge('write-set overflow in callee') end
-        if cs.h then hedge(cs.h[1]) end
+        for _, why in ipairs(cs.h or {}) do hedge(why) end
         -- (the summary's PREMISES are hedges of this slice too, CART-1558)
         if cs.mh then hedge('a method matched to a builtin by name') end
         if cs.jp then hedge('an ambiguous call joined over its candidates') end
