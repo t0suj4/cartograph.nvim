@@ -5712,8 +5712,16 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- harvested again here, and one harvested here is cached for them)
     local sm = lexscopes and tree_model(tsroot, src, spec)
 
+    -- (CART-1659: the CALLS query rides this walk — buf.callm is its compiled matcher (cartograph.tsquery), every
+    -- node's matches gathered into buf.callrows with their completion key; extract_calls reads them after. The walk
+    -- recurses into every named child with children, and a call is never a leaf: the oracle and graphrows hold it)
+    local callm, crows, cdepth = buf.callm, buf.callrows, 1
+    local tq_at = callm and require('cartograph.tsquery').at
+    local function gather(_, caps, b, dd) crows[#crows + 1] = { caps = caps, byte = b, depth = dd } end
+    local croots, cwild = callm and callm.roots, callm and #callm.wild > 0
     local function walk(n, defpos, dfon)
         local nt = n:type()
+        if croots and (croots[nt] or cwild) then tq_at(callm, n, gather, cdepth, nt) end
         local pushed
         local entry = lexscopes and lexscopes[nt]
         if entry then
@@ -5990,11 +5998,13 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             end
             if c:child_count() > 0 then -- (a count: child(0) materialized a node to test for a leaf)
                 if wdepth < WALK_SEG then
-                    wdepth = wdepth + 1; walk(c, cdefpos, cdfon); wdepth = wdepth - 1
+                    wdepth = wdepth + 1; cdepth = cdepth + 1; walk(c, cdefpos, cdfon); wdepth = wdepth - 1; cdepth = cdepth - 1
                 else
                     local saved = wdepth; wdepth = 0
                     local co = coroutine.create(walk)
+                    cdepth = cdepth + 1
                     local ok, err = coroutine.resume(co, c, cdefpos, cdfon)
+                    cdepth = cdepth - 1
                     wdepth = saved
                     if not ok then error(err, 0) end
                     -- a yield inside the segment would stop HERE and leave the walk half done: refuse
@@ -8516,19 +8526,16 @@ local MATCH_OPTS = { match_limit = 65536 }
     -- calls: inventory + reference sites (resolved after all files).
     -- Containers also run this over TEMPLATE EXPRESSION trees — an
     -- @click="save(item)" is a real call_expression at absolute rows
-    local function extract_calls(file, lang, spec, src, tsroot)
+    local function extract_calls(file, lang, spec, src, tsroot, pre)
         tree_model(tsroot, src, spec) -- shared with extract_defs (same tree)
         local ifmemo = {} -- per TREE by construction (dies with this call)
         -- calls (inventory + reference sites, resolved after all files)
         local q = parse_query(lang, spec.calls)
         if q then
-            for _, match in q:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
-                local calln, namen
-                for id, ns in pairs(match) do
-                    local cap = q.captures[id]
-                    local n = cap_node(ns)
-                    if cap == 'call' then calln = n elseif cap == 'name' then namen = n end
-                end
+            -- (the calls query COMPILED to a per-node matcher when it can be — cartograph.tsquery, equal to
+            -- iter_matches row for row by tools/experiments/tsquery_oracle.lua; CART-1659)
+            for caps in require('cartograph.tsquery').iter(q, spec.calls, tsroot, src, MATCH_OPTS, pre) do
+                local calln, namen = caps.call, caps.name
                 -- context skip: constructs that merely LOOK like calls
                 -- (C++ constructor member-initializers: count(count))
                 if calln and spec.call_skip_within then
@@ -9282,9 +9289,9 @@ local MATCH_OPTS = { match_limit = 65536 }
             -- calls + mentions/refs are deferred entirely in the index-only / dataflow-only
             -- front-ends (they, and the resolution they feed, are the bulk that defers on-demand)
             if not (defs_only or dataflow_only) then
-            local _pc = pstart()
-            extract_calls(file, lang, spec, src, tsroot)
-            padd('extract_calls', _pc)
+            -- (extract_calls runs AFTER the mention walk, which gathers its matches — CART-1659; neither reads what
+            -- the other writes: calls / edges / pending vs the mention buffer)
+            local callrows
             -- fusion Stage B: mentions ride the SAME tree — the id pass
             -- never parses again. df rides the same walk via dfreg
             -- (registered by extract_defs above).
@@ -9299,9 +9306,12 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local buf = mention_buf(spec)
                 local escset = escpend and escpend[1] and {} or nil
                 local _pm = pstart()
+                buf.callm = spec.calls and require('cartograph.tsquery').compiled(spec.calls) or nil
+                buf.callrows = buf.callm and {} or nil
                 collect_mentions(buf, tsroot, src, spec, dfreg,
                     opts and opts.legacy_df, escset)
                 padd('collect_mentions', _pm)
+                callrows, buf.callm, buf.callrows = buf.callrows, nil, nil
                 buf.m = table.concat(buf.parts)
                 buf.parts, buf.nidx = nil, nil
                 mentions[file] = buf
@@ -9314,6 +9324,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                     end
                 end
             end
+            local _pc = pstart()
+            extract_calls(file, lang, spec, src, tsroot, callrows)
+            padd('extract_calls', _pc)
             end -- if not defs_only (calls + mentions deferred)
         end
         ::next_file::

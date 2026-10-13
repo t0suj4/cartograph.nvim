@@ -76,6 +76,9 @@ function M.passes(src)
                 end
             end
             if line:match("capn?:sub%(1,%s*1%)%s*~=%s*'_'") then cur.catchall = true end
+            -- (and a CAPTURES TABLE read by field: cartograph.tsquery.iter yields { [name] = node }, so the calls
+            -- pass reads `caps.call` / `caps.name` — no comparison to find; CART-1659)
+            for name in line:gmatch('%f[%w_]caps%.([%a_][%w_]*)') do cur.captures[name] = true end
         end
     end
     return passes
