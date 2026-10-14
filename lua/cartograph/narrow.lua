@@ -518,7 +518,178 @@ local function call_harmless(store, node)
     end
 end
 
-local function field_unstable_of(fn, src, harmless)
+-- ★★ THE INTERIM STALING RULE (CART-1684; designed and costed by the flowpath research, ~/work/flowpath
+-- RESEARCH.md §0 / §15.4, as its variant I4). Staling by NAME — a write naming a prefix of A.x, a call RECEIVING A —
+-- kept false facts whenever a write reached the guarded table through another name: a zero-argument mutator of an
+-- upvalue, a param alias, another argument's field (its metamorphic harness, execution as the oracle: 57 violations in
+-- 87 cases). Under this rule EVERY call is a suspect unless provably harmless (a plain-`pure` summary that reaches no
+-- write through a name that is neither its param nor a fresh local, or a builtin whose contract writes, calls and does
+-- nothing), every field write stales the facts naming that field, and a depth-0 fact on a name the function does not
+-- bind is exposed like a field path. Refinements, each sound: the USE bound (an entry entirely after the use point,
+-- outside every loop around it, cannot run between guard and use), array-only builtins (table.insert / remove / a
+-- comparator-less sort write integer slots), provably NUMERIC keys, and writes into a table built fresh after the guard.
+-- Harness: 57 -> 8 violations, all __index / __newindex (counting every off-chain index as a call — `meta`, I4M — closes
+-- them at a cost the research left as a decision). The sound end state is R4 (MOD on the points-to graph).
+-- CARTOGRAPH_NARROW_INTERIM=0 restores name-based staling (an A/B switch only).
+local NI_ON = os.getenv('CARTOGRAPH_NARROW_INTERIM') ~= '0'
+local NI = { on = NI_ON, ub = NI_ON, meta = os.getenv('CARTOGRAPH_NARROW_META') == '1', arr = NI_ON, numkey = NI_ON,
+    fresh = NI_ON }
+M._NI = NI
+local LUASTD = { table = true, string = true, math = true, os = true, io = true, coroutine = true, debug = true,
+    bit = true, utf8 = true }
+local ARRAY_ONLY = { ['table.insert'] = true, ['table.remove'] = true, ['table.sort'] = 1 }
+-- EVERY call is a suspect: harmless only when it can write NO table — resolved with a summary effects.purity reads
+-- plain 'pure' (no module write, no pwx anywhere, no world effect, no hedge, no handed-in callee), or unresolved into a
+-- builtin whose contract is pure with no `w`, no `calls`, no `io` and not the name-matched `~` method tier. The call
+-- record must sit at the node's EXACT column (a nearest-column match could borrow a neighbour's verdict).
+-- -> fn(call node) -> ok, category
+-- ★ effects.purity reads 'pure' for a closure that writes a field of an UPVALUE that is not a module var — `do local
+-- s = state; later = function () s.cur = nil end end`, a factory's `return function () t.cur = nil end` (measured:
+-- both 'pure', narrowcost FINDINGS). So 'pure' alone is not harmless: the callee and everything it reaches must also
+-- write no field through a name that is neither its own parameter (pwx covers those) nor a local it built fresh.
+local UVW = setmetatable({}, { __mode = 'k' })
+local function direct_uvw(store, fid)
+    local n = store.node(fid)
+    if not (n and n.file and n.file:match('%.lua$')) then return true end
+    -- (store.content is the WHOLE file; one parse per file, the callee found by its range as fn_node does)
+    local fc = UVW[store] and UVW[store].__files or {}
+    if UVW[store] then UVW[store].__files = fc end
+    local ent = fc[n.file]
+    if not ent then
+        local src = table.concat(store.content(n) or {}, '\n')
+        local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, 'lua'), 'lua')
+        ent = { src = src, root = ok and parser:parse()[1]:root() or nil }
+        fc[n.file] = ent
+    end
+    if not ent.root then return true end
+    local src = ent.src
+    local d = ent.root:named_descendant_for_range(at.sl(n.range), at.sc(n.range), at.el(n.range), at.ec(n.range))
+    while d and not FN_TYPES[d:type()] do d = d:parent() end
+    local f = d
+    if not f then return true end
+    local params, fresh = {}, {}
+    -- (a root effects already TRACKS — a module var its summary lists — is no blind spot: its write is in s.w)
+    local tracked = {}
+    local sm = require('cartograph.effects').summaries(store)[fid]
+    for key in pairs(sm and sm.w or {}) do local v = key:match('var:([^@]+)@'); if v then tracked[v] = true end end
+    local ps = f:field('parameters')[1]
+    if ps then for _, c in tsutil.inamed, ps, -1 do if c:type() == 'identifier' then params[txt(c, src)] = true end end end
+    local hit = false
+    local function rootname(x)
+        -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+        while x and (x:type() == 'dot_index_expression' or x:type() == 'bracket_index_expression') do x = x:named_child(0) end
+        return x and x:type() == 'identifier' and txt(x, src) or nil
+    end
+    local function walk(x)
+        if hit then return end
+        local t = x:type()
+        if t == 'variable_declaration' then
+            -- `local o = {}` / `local o = setmetatable({}, mt)` is FRESH
+            local a = x:named_child(0)
+            -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+            if a and a:type() == 'assignment_statement' then
+                local vl, el = a:named_child(0), a:named_child(1)
+                if vl and el then
+                    for i = 0, vl:named_child_count() - 1 do
+                        local v, e = vl:named_child(i), el:named_child(i)
+                        if v and e and v:type() == 'identifier' then
+                            local et = txt(e, src)
+                            -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+                            fresh[txt(v, src)] = (e:type() == 'table_constructor' or et:match('^setmetatable%s*%(%s*{')) and true or nil
+                        end
+                    end
+                end
+            end
+        elseif t == 'assignment_statement' then
+            local vl = x:named_child(0)
+            if vl then for _, tgt in tsutil.inamed, vl, -1 do
+                local tt = tgt:type()
+                if tt == 'dot_index_expression' or tt == 'bracket_index_expression' then
+                    local r = rootname(tgt)
+                    if not r or not (params[r] or fresh[r] or tracked[r]) then hit = true end
+                elseif tt == 'identifier' then fresh[txt(tgt, src)] = nil end -- (rebound: no longer known fresh)
+            end end
+        end
+        for _, c in tsutil.inamed, x, -1 do if not FN_TYPES[c:type()] then walk(c) end end
+    end
+    walk(f)
+    return hit
+end
+local function reaches_uvw(store, fid)
+    -- (one memo per graph GENERATION: a re-ingest — the harness re-uses one store — invalidates every parse and verdict)
+    local memo = UVW[store]
+    if not memo or memo.__gen ~= store.generation then memo = { __files = {}, __gen = store.generation }; UVW[store] = memo end
+    if memo[fid] ~= nil then return memo[fid] end
+    local callrec = require 'cartograph.callrec'
+    local seen, work, hit = { [fid] = true }, { fid }, false
+    while #work > 0 and not hit do
+        local f = table.remove(work)
+        if memo[f] == true or direct_uvw(store, f) then hit = true break end
+        for _, c in ipairs(store.topo():sites(f) or {}) do
+            local to = callrec.to(c)
+            if to and not seen[to] then seen[to] = true; work[#work + 1] = to end
+        end
+    end
+    memo[fid] = hit
+    return hit
+end
+M._reaches_uvw = reaches_uvw
+
+local function interim_harmless(store, node)
+    local E = require 'cartograph.effects'
+    local callrec = require 'cartograph.callrec'
+    local atr = require 'cartograph.at'
+    local sums = store and store.topo and E.summaries(store) or {}
+    local sites = store and store.topo and store.topo():sites(node.id) or {}
+    local memo = {}
+    return function (cn)
+        local id = cn:id()
+        if memo[id] then return memo[id][1], memo[id][2] end
+        local r, c0 = cn:start()
+        local c
+        for _, x in ipairs(sites) do
+            if callrec.line(x) == r and (x.at and atr.sc(x.at) or -1) == c0 then c = x; break end
+        end
+        local ok, cat = false, 'unmatched'
+        if c then
+            local to = callrec.to(c)
+            if to then
+                local s = sums[to]
+                if not s then cat = 'nosummary'
+                else
+                    local p = E.purity(store, to)
+                    if p == 'pure' then
+                        if reaches_uvw(store, to) then cat = 'pure-but-upvalue-write' else ok, cat = true, 'pure' end
+                    else cat = p or 'nosummary' end
+                end
+            else
+                local name = callrec.full(c) or callrec.callee(c)
+                local sig, tier = E.sig_of('lua', name, callrec.method(c))
+                local an = ARRAY_ONLY[name]
+                local args = cn:field('arguments')[1]
+                if an == 1 and args and args:named_child(1) ~= nil then an = nil end -- (sort WITH a comparator calls it)
+                if NI.arr and an then
+                    ok, cat = true, 'array-builtin'
+                elseif not sig then cat = 'unresolved'
+                elseif tier == 'method~' then cat = 'builtin-method~'
+                elseif sig.calls then cat = 'builtin-calls'
+                elseif sig.w then cat = 'builtin-writes'
+                elseif sig.io then cat = 'builtin-io'
+                elseif not sig.pure then cat = 'builtin-impure'
+                else ok, cat = true, 'builtin-pure' end
+            end
+        end
+        memo[id] = { ok, cat }
+        return ok, cat
+    end
+end
+M._interim_harmless = interim_harmless
+-- (the interim rule reads LUA trees — its node types are lua's; every other language keeps name-based staling)
+local function interim_for(store, node)
+    return NI.on and node and type(node.file) == 'string' and node.file:match('%.lua$') and interim_harmless(store, node) or nil
+end
+
+local function field_unstable_of(fn, src, harmless, iharm)
     local stale = {} -- list of { prefix = <path str>, inclusive = bool }
     -- (a CALL-derived entry carries its call node and argument position — 0 the method receiver — for the call-staling
     -- census: does the callee's effect summary say it writes there at all? CART-1677)
@@ -527,11 +698,133 @@ local function field_unstable_of(fn, src, harmless)
     local function mark(prefix, inclusive, call, argi, from)
         if prefix then
             local at = from and select(3, from:start())
-            stale[#stale + 1] = { prefix = prefix, inclusive = inclusive, call = call, argi = argi, at = at }
+            stale[#stale + 1] = { prefix = prefix, inclusive = inclusive, call = call, argi = argi, at = at,
+                endb = from and select(3, from:end_()) }
+        end
+    end
+    -- (INTERIM entries: `ifield` a field NAME written, `iall` every fact, `imeta` an index off the guarded chain; `cat`
+    -- why. `at` / `endb` nil = unpositioned: a write inside a nested function runs whenever it is called)
+    local function imark(e, from)
+        if from then e.at = select(3, from:start()); e.endb = select(3, from:end_()) end
+        e.interim = true
+        stale[#stale + 1] = e
+    end
+    local function keyname(b) -- a bracket index's literal string key, else nil
+        local k = b:field('field')[1]
+        if k and k:type() == 'string' then local c = k:field('content')[1]; return c and txt(c, src) or '' end
+        return nil
+    end
+    local function fieldwrite(tgt, nested)
+        local tt = tgt:type()
+        local tbl = tgt:named_child(0)
+        local troot = not nested and tbl and tbl:type() == 'identifier' and txt(tbl, src) or nil
+        local n0 = #stale
+        if tt == 'dot_index_expression' then
+            local f = tgt:field('field')[1]
+            imark({ ifield = f and txt(f, src), cat = nested and 'nested-field-write' or 'field-write' }, not nested and tgt or nil)
+        elseif tt == 'bracket_index_expression' then
+            local k = keyname(tgt)
+            if k then imark({ ifield = k, cat = nested and 'nested-field-write' or 'field-write' }, not nested and tgt or nil)
+            else imark({ iall = true, cat = nested and 'nested-dynkey-write' or 'dynkey-write',
+                keynode = not nested and tgt:field('field')[1] or nil }, not nested and tgt or nil) end
+        end
+        if troot then for i = n0 + 1, #stale do stale[i].troot = troot end end
+    end
+    -- (a nested function's writes: field writes stale by name whenever it may run; a name it ASSIGNS is CAPTURED)
+    local function nested(n)
+        -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+        if n:type() == 'assignment_statement' then
+            for _, c in tsutil.inext, n, -1 do
+                -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+                if c:type() == 'variable_list' then for _, tgt in tsutil.inext, c, -1 do
+                    if tgt:type() == 'identifier' then
+                        stale.captured = stale.captured or {}
+                        stale.captured[txt(tgt, src)] = true
+                    else fieldwrite(tgt, true) end
+                end end
+            end
+        end
+        for _, c in tsutil.inext, n, -1 do if c:named() then nested(c) end end
+    end
+    -- (the names this function BINDS itself: params, locals, local functions, loop variables — a depth-0 fact on any
+    -- other name is an upvalue or a global, which a call can reassign)
+    local bound = {}
+    stale.bound = bound
+    do
+        local ps = fn:field('parameters')[1]
+        if ps then for _, c in tsutil.inamed, ps, -1 do if c:type() == 'identifier' then bound[txt(c, src)] = true end end end
+    end
+    local declcount, numvars, freshdecl = {}, {}, {}
+    local function decl(nm) bound[nm] = true; declcount[nm] = (declcount[nm] or 0) + 1 end
+    local function binds(n)
+        local t = n:type()
+        if t == 'variable_declaration' then
+            local function names(x)
+                for _, c in tsutil.inamed, x, -1 do
+                    if c:type() == 'identifier' then decl(txt(c, src))
+                    -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+                    elseif c:type() == 'variable_list' or c:type() == 'assignment_statement' then names(c) end
+                end
+            end
+            names(n)
+            -- (`local r = {}`: where a FRESH table is bound, for NI.fresh)
+            local a = n:named_child(0)
+            -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+            if a and a:type() == 'assignment_statement' then
+                local vl, el = a:named_child(0), a:named_child(1)
+                if vl and el and vl:named_child_count() == 1 and el:named_child_count() == 1
+                    -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+                    and vl:named_child(0):type() == 'identifier' and el:named_child(0):type() == 'table_constructor' then
+                    freshdecl[txt(vl:named_child(0), src)] = select(3, n:start())
+                end
+            end
+        elseif t == 'function_declaration' then
+            local nm = n:field('name')[1]
+            -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+            if nm and nm:type() == 'identifier' and n:parent() and n:parent():type() ~= 'chunk' then
+                -- (`local function g` and a bare `function g` both name an identifier; only `local` binds — check the text)
+                if txt(n, src):match('^local%s') then decl(txt(nm, src)) end
+            end
+        elseif t == 'for_generic_clause' then
+            -- (`for i, v in ipairs(t)`: i is a NUMBER)
+            local vl, el
+            for _, c in tsutil.inamed, n, -1 do
+                -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+                if c:type() == 'variable_list' then vl = c elseif c:type() == 'expression_list' then el = c end
+            end
+            local it = el and el:named_child(0)
+            -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+            local isip = it and it:type() == 'function_call' and it:named_child(0) and txt(it:named_child(0), src) == 'ipairs'
+            if vl then local k = 0; for _, v in tsutil.inamed, vl, -1 do
+                k = k + 1
+                decl(txt(v, src))
+                if isip and k == 1 then numvars[txt(v, src)] = true end
+            end end
+        elseif t == 'for_numeric_clause' then
+            local nm = n:field('name')[1]; if nm then decl(txt(nm, src)); numvars[txt(nm, src)] = true end
         end
     end
     local function walk(n)
         local t = n:type()
+        if iharm then
+            binds(n)
+            if t == 'function_call' then
+                local ok, cat = iharm(n)
+                if not ok then imark({ iall = true, cat = cat, call = n }, n)
+                -- (even a harmless call may be a nested closure that REBINDS a captured name: its summary need not say)
+                else imark({ icallany = true, cat = 'call-captured', call = n }, n) end
+            elseif NI.meta and (t == 'dot_index_expression' or t == 'bracket_index_expression'
+                    or t == 'method_index_expression') then
+                local p
+                if t == 'method_index_expression' then
+                    local r = path_of(n:named_child(0), src); local m = n:field('method')[1]
+                    p = r and m and (r.path .. '.' .. txt(m, src))
+                else p = path_of(n, src); p = p and p.path end
+                -- (the Lua stdlib tables carry no metatable: `table.insert`, `string.format` read plain fields)
+                local r0 = p and p:match('^([%w_]+)')
+                if not (r0 and LUASTD[r0] and not bound[r0]) then imark({ imeta = true, path = p, cat = 'meta' }, n) end
+            end
+        end
         -- `assignment_statement` = (variable_list) = (expression_list); `local x = …` is
         -- a `variable_declaration` wrapping one, so handling the inner form catches both.
         if t == 'assignment_statement' then
@@ -544,6 +837,7 @@ local function field_unstable_of(fn, src, harmless)
                 elseif c:type() == 'expression_list' then elist = c end
             end
             if vlist then for _, tgt in tsutil.inext, vlist, -1 do -- field-write targets
+                if iharm then fieldwrite(tgt, false) end
                 -- @langs-ok lua-only, same reason: ruby facts are all depth 0
                 if tgt:type() == 'dot_index_expression' then
                     local p = path_of(tgt, src); if p then mark(p.path, true, nil, nil, tgt) end -- A.f inclusive
@@ -579,9 +873,56 @@ local function field_unstable_of(fn, src, harmless)
         end
         for _, c in tsutil.inext, n, -1 do
             if c:named() and not FN_TYPES[c:type()] then walk(c) end -- nested fns = own scope
+            if iharm and c:named() and FN_TYPES[c:type()] then
+                -- (a nested function DECLARED `local function g` binds g here; `function A.f()` WRITES A.f)
+                binds(c)
+                local nm = c:field('name')[1]
+                -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+                if nm and nm:type() == 'dot_index_expression' then fieldwrite(nm, false)
+                -- @langs-ok lua-only: the CART-1684 interim rule (interim_for runs it on lua functions only)
+                elseif nm and nm:type() == 'method_index_expression' then
+                    local m = nm:field('method')[1]
+                    imark({ ifield = m and txt(m, src), cat = 'field-write' }, nm)
+                end
+                nested(c)
+            end
         end
     end
     walk(fn)
+    if iharm and NI.fresh then
+        -- (a write INTO a table this function built AFTER the guard — `local out = {}` bound once, never reassigned nor
+        -- captured, written as `out[k]` / `out.f` — cannot touch an object the guarded path ran through: those existed
+        -- when the guard ran, and putting the new table on the path takes a write the other rules already see)
+        for _, e in ipairs(stale) do
+            local r = e.troot
+            if r and freshdecl[r] and declcount[r] == 1 and not (stale.assign_at and stale.assign_at[r])
+                and not (stale.captured and stale.captured[r]) then e.fresh_at = freshdecl[r] end
+        end
+    end
+    if iharm and NI.numkey then
+        -- (a bracket write whose key is provably a NUMBER cannot reach a field a dot path names: `out[#out + 1] = x`,
+        -- `t[i] = v` for a numeric-for / ipairs index declared once and never reassigned)
+        local function numeric(k)
+            if not k then return false end
+            local t = k:type()
+            if t == 'number' then return true end
+            if t == 'parenthesized_expression' then return numeric(k:named_child(0)) end
+            if t == 'unary_expression' then return txt(k:child(0), src) == '#' end
+            if t == 'binary_expression' then
+                local op = txt(k:child(1), src)
+                return (op == '+' or op == '-' or op == '*' or op == '%') and numeric(k:named_child(0)) and numeric(k:named_child(1))
+            end
+            if t == 'identifier' then
+                local nm = txt(k, src)
+                return numvars[nm] == true and declcount[nm] == 1 and not (stale.assign_at and stale.assign_at[nm])
+                    and not (stale.captured and stale.captured[nm])
+            end
+            return false
+        end
+        for _, e in ipairs(stale) do
+            if e.keynode and numeric(e.keynode) then e.iall = nil; e.cat = 'numkey-write' end
+        end
+    end
     return stale
 end
 
@@ -614,12 +955,51 @@ local function reassigned_before(root, gb, loops, stale)
     end
     return true
 end
-local function fact_live(f, mutated, stale, gb, loops)
+-- (NI.ub: an entry that ends before the use point `ub`, or runs inside a loop around the point, can reach it; one that
+-- starts at or after it, outside every such loop, cannot. A goto disables the rule)
+local function after_use(e, ub, loops, stale)
+    if not (NI.ub and ub and e.at and e.endb) or stale.has_goto then return false end
+    if e.endb <= ub then return false end
+    for _, l in ipairs(loops or {}) do if e.at >= l[1] and e.at < l[2] then return false end end
+    return true
+end
+-- does interim entry e reach fact f?
+local function interim_hits(f, e, captured)
+    local depth = f.depth or 0
+    if e.iall then return true end
+    if e.icallany then return captured ~= nil and captured[f.root] == true end
+    if e.ifield then
+        if depth == 0 then return e.ifield == f.var end -- (`_G.x = …` for a global root)
+        for part in f.var:gmatch('%.([^.]+)') do if part == e.ifield then return true end end
+        return false
+    end
+    if e.imeta then
+        if depth == 0 then return false end
+        if e.path and (f.var == e.path or f.var:sub(1, #e.path + 1) == e.path .. '.') then return false end
+        return true
+    end
+    return false
+end
+-- (the interim kills of the LAST fact_live call, by category: read by the census)
+M._last_kill = nil
+local function fact_live(f, mutated, stale, gb, loops, ub)
+    M._last_kill = nil
     if mutated[f.root] and not reassigned_before(f.root, gb, loops, stale) then return false end
-    if (f.depth or 0) >= 1 then
+    local depth = f.depth or 0
+    -- (INTERIM: a depth-0 fact on a name this function does not bind, or one a nested function assigns, is exposed to
+    -- calls like a field path)
+    local exposed0 = NI.on and depth == 0 and stale.bound and (not stale.bound[f.root] or (stale.captured and stale.captured[f.root]))
+    if depth >= 1 or exposed0 then
+        local cats
         for _, e in ipairs(stale) do
-            if prefix_covers(e.prefix, e.inclusive, f.var) and not before_guard(e, gb, loops, stale) then return false end
+            if not before_guard(e, gb, loops, stale) and not after_use(e, ub, loops, stale) then
+                if e.interim then
+                    local fresh = e.fresh_at and gb and e.fresh_at > gb and not stale.has_goto
+                    if not fresh and interim_hits(f, e, stale.captured) then cats = cats or {}; cats[e.cat] = true end
+                elseif depth >= 1 and prefix_covers(e.prefix, e.inclusive, f.var) then return false end
+            end
         end
+        if cats then M._last_kill = cats; return false end
     end
     return true
 end
@@ -671,7 +1051,7 @@ function M.narrow(store, fn_id)
     if not fn then return { lang = lang, points = {} } end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
     local mutated = mutated_of(node)
-    local funstable = field_unstable_of(fn, src, call_harmless(store, node))
+    local funstable = field_unstable_of(fn, src, call_harmless(store, node), interim_for(store, node))
 
     local points, seenguard = {}, {}
     local function visit(n)
@@ -683,7 +1063,9 @@ function M.narrow(store, fn_id)
                         local sloops = loops_of(stmt, fn)
                         for _, g in ipairs(cfg.guards_over(stmt, src)) do
                             for _, f in ipairs(classify(g.cond, src, not g.neg)) do
-                                if fact_live(f, mutated, funstable, select(3, g.cond:start()), sloops) then
+                                local live = fact_live(f, mutated, funstable, select(3, g.cond:start()), sloops, select(3, stmt:start()))
+                                if M._ni_hook then M._ni_hook(stmt, f, live, M._last_kill) end
+                                if live then
                                     -- keep the STRONGEST kind; eq:/type: shown verbatim,
                                     -- nil/truthy collapse to the sound floor 'non-nil'
                                     if kind_rank(f.kind) > kind_rank(env[f.var]) then
@@ -719,7 +1101,7 @@ local function env_of(node, src, classify, mutated, funstable)
     local nloops = loops_of(node)
     for _, g in ipairs(cfg.guards_over(node, src)) do
         for _, f in ipairs(classify(g.cond, src, not g.neg)) do
-            if fact_live(f, mutated or {}, funstable or {}, select(3, g.cond:start()), nloops) then
+            if fact_live(f, mutated or {}, funstable or {}, select(3, g.cond:start()), nloops, select(3, node:start())) then
                 if kind_rank(f.kind) > kind_rank(env[f.var]) then env[f.var] = f.kind end
             end
         end
@@ -882,7 +1264,7 @@ function M.param_nilability(store, fn_id)
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, params = {} } end
     local classify, mutated = gated_classify(vocab[lang], type_is_shadowed(lang, node)), mutated_of(node)
-    local funstable = field_unstable_of(fn, src, call_harmless(store, node))
+    local funstable = field_unstable_of(fn, src, call_harmless(store, node), interim_for(store, node))
     local fl = flowmod.present(node) and flowmod.record(node)
     local plist = (fl and fl.params) or {}
     local params = {}
@@ -976,7 +1358,7 @@ function M.redundant(store, fn_id)
     if not fn then return { lang = lang, checks = {} } end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
     local mutated = mutated_of(node)
-    local funstable = field_unstable_of(fn, src, call_harmless(store, node))
+    local funstable = field_unstable_of(fn, src, call_harmless(store, node), interim_for(store, node))
     -- determine() handles only SINGLE predicates, so a conjunction `cond and other()`
     -- (where only `cond` is known) is correctly NOT flagged — the other conjunct still
     -- gates the branch.
@@ -1029,7 +1411,7 @@ function M.devirt(store, fn_id)
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, sites = {}, summary = {} } end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
-    local mutated, funstable = mutated_of(node), field_unstable_of(fn, src, call_harmless(store, node))
+    local mutated, funstable = mutated_of(node), field_unstable_of(fn, src, call_harmless(store, node), interim_for(store, node))
 
     local sites = {}
     local summary = { method_calls = 0, typed = 0, certified = 0, candidate = 0 }
@@ -1518,7 +1900,7 @@ function M.facts_at(store, rel, text, row, col)
     if not node then return nil, 'the enclosing function is no node of the graph (its reassignments are unknown)' end
     if twice then return nil, 'two definitions start on the enclosing function\'s line: which one holds the position is not known' end
     local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
-    local env = env_of(site, text, classify, mutated_of(node), field_unstable_of(fn, text, call_harmless(store, node)))
+    local env = env_of(site, text, classify, mutated_of(node), field_unstable_of(fn, text, call_harmless(store, node), interim_for(store, node)))
     if lang == 'lua' then
         for name, kind in pairs(M._lua_def_kinds(site, fn, text)) do
             if kind_rank(kind) > kind_rank(env[name]) then env[name] = kind end

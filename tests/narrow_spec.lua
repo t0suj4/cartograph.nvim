@@ -830,3 +830,47 @@ test('narrow ruby: the OTHER three verbs refuse ruby by name, not by silence', f
     eq(true, narrow.devirt(store, id).unsupported)
     eq(true, narrow.param_nilability(store, id).unsupported)
 end)
+
+test('narrow: a write reaching the guarded table through ANOTHER name stales the fact — the interim rule (CART-1684)', function ()
+    if not ready('lua') then return end
+    local lines = {
+        'local state = {}',
+        'local function clear() state.cur = nil end',
+        'local function wipe(t) t.cur = nil end',
+        'local function pure(x) return x end',
+        'local function use_upvalue()',       -- 4
+        '  if state.cur then',
+        '    clear()',                        -- a zero-argument call that writes the upvalue
+        '    return state.cur.name',          -- 7
+        '  end',
+        'end',
+        'local function use_alias(a, b)',
+        '  if a.cur then',
+        '    b.cur = nil',                    -- use_alias(s, s): the same table
+        '    return a.cur.name',              -- 13
+        '  end',
+        'end',
+        'local function use_field(a, ctx)',
+        '  if a.cur then',
+        '    wipe(ctx.a)',                    -- ctx.a == a
+        '    return a.cur.name',              -- 19
+        '  end',
+        'end',
+        'local function use_pure(a)',
+        '  if a.cur then',
+        '    pure(1)',                        -- a pure call: harmless
+        '    return a.cur.name',              -- 25
+        '  end',
+        'end',
+        'return { use_upvalue, use_alias, use_field, use_pure }' }
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(table.concat(lines, '\n')); fd:close()
+    store.ingest(ts.extract(root))
+    local text = table.concat(lines, '\n')
+    local function fact(row, var) local env = narrow.facts_at(store, 'm.lua', text, row, 11); return env and env[var] end
+    eq(nil, fact(7, 'state.cur'), 'clear() writes state.cur through its upvalue')
+    eq(nil, fact(13, 'a.cur'), 'b.cur = nil may write a.cur')
+    eq(nil, fact(19, 'a.cur'), 'wipe(ctx.a) may write a.cur')
+    ok(fact(25, 'a.cur') ~= nil, 'a pure call keeps the fact')
+    vim.fn.delete(root, 'rf')
+end)
