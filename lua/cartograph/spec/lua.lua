@@ -577,6 +577,113 @@ local function lua_derived_locals(fn, src, pmap)
     return out
 end
 
+-- ★ WHAT A STORE THROUGH A CAPTURED OR ALIASED NAME WRITES (CART-1693): `local q = state; q.cur = nil`,
+-- `do local s = state; f = function () s.cur = nil end end` and a closure writing its FACTORY's parameter all read
+-- `pure` — the write's root resolved to no var, so no edge carried it. The root is resolved LEXICALLY here: the nearest
+-- binding visible at the store (a param of an enclosing function, a `local` before it in an enclosing block), an alias
+-- `local x = y` / `y.f…` followed to y's binding. -> 'var\31<file-level local>\31<first field>' (an alias of a module
+-- var: the write is that var's), or 'cap\31<owner row:col | chunk>\31<name>\31<param index | 0>' (a value captured from
+-- an enclosing function, or a block-level local of the chunk), or nil (a direct module var — its own edge has it —, a
+-- param or local of the writer itself, a global)
+local LUA_FN = { function_definition = true, function_declaration = true }
+local function lua_enclosing_fn(n)
+    local p = tsutil.parent(n)
+    while p and not LUA_FN[p:type()] do p = tsutil.parent(p) end
+    return p
+end
+-- the names a block statement declares, with their values: `local a, b = x, y`, `local a`, `local function f`
+local function lua_decls(st, src)
+    local t = st:type()
+    if t == 'variable_declaration' then
+        local a = st:named_child(0)
+        local vl, el = a, nil
+        if a and a:type() == 'assignment_statement' then vl, el = a:named_child(0), a:named_child(1) end
+        if not (vl and vl:type() == 'variable_list') then return nil end
+        local out = {}
+        for i = 0, vl:named_child_count() - 1 do
+            local nm = vl:named_child(i)
+            if nm:type() == 'identifier' then out[#out + 1] = { node_text(nm, src), el and el:named_child(i) or false } end
+        end
+        return out
+    elseif t == 'function_declaration' and node_text(st, src):match('^local%s') then
+        local nm = st:field('name')[1]
+        return nm and nm:type() == 'identifier' and { { node_text(nm, src), false } } or nil
+    end
+end
+local function lua_binding(x, at, src)
+    local n = at
+    while true do
+        local p = tsutil.parent(n)
+        if not p then return nil end
+        local t = p:type()
+        if LUA_FN[t] then
+            local ps = p:field('parameters')[1]
+            for i = 0, (ps and ps:named_child_count() or 0) - 1 do
+                local q = ps:named_child(i)
+                if q:type() == 'identifier' and node_text(q, src) == x then return { kind = 'param', fn = p, index = i + 1 } end
+            end
+        elseif t == 'block' or t == 'chunk' then
+            local _, _, nb = n:start()
+            local found
+            for _, st in tsutil.inamed, p, -1 do
+                local _, _, sb = st:start()
+                if sb >= nb then break end
+                for _, d in ipairs(lua_decls(st, src) or {}) do
+                    if d[1] == x then found = { kind = 'local', node = st, value = d[2], top = t == 'chunk' } end
+                end
+            end
+            if found then return found end
+        elseif t == 'for_statement' then
+            local cl = p:named_child(0)
+            if cl and node_text(cl, src):find(x, 1, true) then
+                local names = cl:type() == 'for_generic_clause' and cl:named_child(0) or cl
+                for i = 0, (names and names:named_child_count() or 0) - 1 do
+                    local q = names:named_child(i)
+                    if q:type() == 'identifier' and node_text(q, src) == x then return { kind = 'local', node = p, value = false } end
+                end
+            end
+        end
+        n = p
+    end
+end
+local function lua_store_root(c, src)
+    local fnnode = lua_enclosing_fn(c)
+    if not fnnode then return nil end -- (module-level code: the region's own effects)
+    local p = tsutil.parent(c)
+    local fld = p and p:type() == 'dot_index_expression' and p:field('field')[1]
+    local field = fld and node_text(fld, src) or ''
+    local x, at, hops = node_text(c, src), c, 0
+    for _ = 1, 8 do
+        local b = lua_binding(x, at, src)
+        if not b then return nil end -- (a global)
+        local owner = b.kind == 'param' and b.fn or lua_enclosing_fn(b.node)
+        local v = b.kind == 'local' and b.value
+        local y = v and lua_chain_root(v)
+        if y then -- (an alias: the write is y's; a chain's first field is the field written)
+            if v ~= y then -- (`y.a.b…`: the field written below y is `a`; a bracket there is no named field)
+                local e, first = v, nil
+                while e and (e:type() == 'dot_index_expression' or e:type() == 'bracket_index_expression') do
+                    local tb = e:field('table')[1]
+                    if tb == y then first = e break end
+                    e = tb
+                end
+                local ff = first and first:type() == 'dot_index_expression' and first:field('field')[1]
+                field = ff and node_text(ff, src) or ''
+            end
+            x, at, hops = node_text(y, src), b.node, hops + 1
+        else
+            if owner == fnnode then return nil end -- (the writer's own param or local: pw, or a fresh table — settling at the owner would drop it anyway; this keeps every local write from minting a fact)
+            if owner == nil then
+                if b.top then return hops > 0 and ('var\31' .. x .. '\31' .. field) or nil end -- (a module var)
+                return 'cap\31chunk\31' .. x .. '\31' .. 0
+            end
+            local r, col = owner:start()
+            return ('cap\31%d:%d\31%s\31%d'):format(r, col, x, b.kind == 'param' and b.index or 0)
+        end
+    end
+    return nil
+end
+
 local LUA_GUARDS = {
     -- the early-exit memo guard (CART-1433): the BLOCK kinds whose earlier statements are scanned, an alias reader, the
     -- guard test (providers/treesitter.lua guard_class)
@@ -588,6 +695,7 @@ local LUA_GUARDS = {
     negop = 'unary_expression', negtok = 'not', pfield = 'parameters',
     pw_refsem = true, -- tables are reference-typed: param writes escape
     derived_locals = lua_derived_locals, -- (a write through a local derived from a param is the param's, CART-1566)
+    store_root = lua_store_root, -- (a store through a captured or aliased name: what it writes, CART-1693)
     -- `not X` / `X == nil` / `nil == X`, X the written chain
     -- (`aliases`: the `local v = X` names before the `if` — `local v = c[k]; if not v then … c[k] = v end`, CART-1433)
     abs_test = function (n, src, chain, aliases)

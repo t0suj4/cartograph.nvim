@@ -449,6 +449,47 @@ local VERDICT_TIER = { ['writes-once'] = 3, ['writes-guarded'] = 2,
 -- world effects ride a pseudo-var key: every conflict/tier machinery
 -- (commute, min-merge) treats world-order like state-order for free
 local IOKEY = '\1io\31'
+-- the module var named `name` in `file` (a file-level local the extractor minted) -> its id | nil
+local fv_memo = setmetatable({}, { __mode = 'k' })
+local function file_var(store, file, name)
+    local per = fv_memo[store]
+    if not per or per.gen ~= store.generation then per = { gen = store.generation }; fv_memo[store] = per end
+    local m = per[file]
+    if not m then
+        m = {}
+        for _, n in ipairs(store.by_file[file] or {}) do if n.kind == 'var' and n.name and m[n.name] == nil then m[n.name] = n.id end end
+        per[file] = m
+    end
+    return m[name]
+end
+-- ★ A CAPTURED WRITE SETTLES AT ITS OWNER (CART-1693): `\1cap:<file>:<row:col>:<name>:<i>` is a store into a value a
+-- closure captured from the function at row:col. Every function it reaches by inheritance writes state it does not
+-- own — except the OWNER: there a captured LOCAL is its own (a closure filling `acc` is the owner's business, not an
+-- effect of calling it) and a captured PARAMETER is that parameter's mutation (pwx). A `chunk` owner is module state:
+-- never settled
+local function settle_captured(store, sum, members)
+    local own
+    for key in pairs(sum.w) do
+        if key:sub(1, 5) == '\1cap:' then
+            local file, r, c, i = key:match('^\1cap:(.-):(%d+):(%d+):[^:]*:(%d+)\31$')
+            if file then
+                if not own then
+                    own = {}
+                    local at = require 'cartograph.at'
+                    for _, fid in ipairs(members) do
+                        local n = store.node(fid)
+                        if n and n.range then own[(n.file or '') .. ':' .. at.sl(n.range) .. ':' .. at.sc(n.range)] = true end
+                    end
+                end
+                if own[file .. ':' .. r .. ':' .. c] then
+                    sum.w[key] = nil; sum.nk = sum.nk - 1
+                    if sum.gpk then sum.gpk[key] = nil end
+                    if i ~= '0' then sum.pwx = sum.pwx or {}; sum.pwx[tonumber(i)] = true end
+                end
+            end
+        end
+    end
+end
 M.IOKEY = IOKEY
 
 -- ── HIGHER-ORDER THROUGH A PARAMETER (CART-1495) ──────────────────────────
@@ -995,6 +1036,15 @@ function M.summaries(store)
                     sum.pwx = sum.pwx or {}
                     for _, pi in ipairs(fnode.pw) do sum.pwx[pi] = true end
                 end
+                -- (stores through a captured or aliased name, CART-1693: an alias of a module var writes that var; a
+                -- captured value is a pseudo-var named by its OWNER, settled when the owner's own summary is made)
+                for _, x in ipairs(fnode and fnode.sw or {}) do
+                    local kind, a, b, d = x:match('^(%a+)\31([^\31]*)\31([^\31]*)\31?(.*)$')
+                    local vid = kind == 'var' and file_var(store, fnode.file, a)
+                    if vid then s_add(sum, vid .. '\31' .. b, 1)
+                    elseif kind == 'var' then s_add(sum, ('\1cap:%s:chunk:%s:0\31'):format(fnode.file, a), 1)
+                    elseif kind == 'cap' then s_add(sum, ('\1cap:%s:%s:%s:%s\31'):format(fnode.file, a, b, d), 1) end
+                end
             end
             -- CALL inheritance (external callees are already summarized:
             -- Tarjan emission order is callees-first)
@@ -1254,6 +1304,7 @@ function M.summaries(store)
             -- order they arrived in (`pairs` over a callee's set), and a summary that differed run to run made the
             -- join's fixpoint nondeterministic — 109 of cartograph's, CART-1545. purity reads `over` as writes,
             -- calls_commute as unknown
+            settle_captured(store, sum, members)
             if sum.over then sum.w, sum.nk, sum.gpk = {}, 0, nil end
             if was and signature(sum) == signature(was) then sum = was else changed = changed + 1 end
             for _, fid in ipairs(members) do real[fid] = sum end

@@ -106,6 +106,45 @@ test('effects: a caller inherits EVERY distinct hedge of its callee, and its cal
     eq('4 5', lines(effects.call_effects(store, c, 'm.lua').hedges), 'the call slice names both')
 end)
 
+test('effects: a store through an ALIAS or a CAPTURED name writes — settled at the owner: its local is its own, its param is pwx (CART-1693)', function ()
+    if not ready('lua') then return end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local state = { cur = 1 }',
+        'local f',
+        'do local s = state; f = function () s.cur = nil end end',              -- a block local aliasing module state
+        'function M.alias() local q = state; q.cur = nil end',                   -- a local alias
+        'local function factory(p) return function () p.cur = nil end end',     -- writes the factory's parameter
+        'local function each(xs, fn) for _, x in ipairs(xs) do fn(x) end end',
+        'function M.collect(xs) local acc = {}; each(xs, function (x) acc[#acc + 1] = x end); return acc end',
+        'function M.fill(t) local function put(x) t[x] = true end; put(1) end',  -- its inner function writes its param
+        'function M.own() local t = {}; t.x = 1; return t end',                  -- a fresh table of its own
+        'function M.direct() state.cur = nil end',
+        'M.f, M.factory = f, factory',
+        'return M', '' }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do if n.name then by[n.name] = by[n.name] or n.id end end
+    local function lab(name) return effects.purity(store, by[name]) end
+    eq('writes', lab('f'), 'a closure writing a block local that aliases module state')
+    eq('writes', lab('M.alias'), 'a write through a local alias of module state')
+    local s = effects.summaries(store)
+    local function wkeys(name) local ks = {}; for k in pairs(s[by[name]].w) do ks[#ks + 1] = (k:gsub('^.-::', ''):gsub('\31', '.')) end; table.sort(ks); return table.concat(ks, ' ') end
+    eq('var:state@1.cur', wkeys('M.alias'), 'the aliased var and its field')
+    eq('var:state@1.cur', wkeys('f'), 'through the block local too')
+    eq('pure', lab('factory'), 'the factory writes nothing when called')
+    eq('writes', lab('factory#ret'), 'its closure writes the captured parameter')
+    eq('pure', lab('M.collect'), 'a closure filling the OWNER\'s fresh local: the owner stays pure')
+    eq('writes', lab('each#cb'), 'though the closure itself writes captured state')
+    eq('writes', lab('M.fill'), 'an inner function writing the owner\'s param: the owner mutates its param')
+    ok(s[by['M.fill']].pwx and s[by['M.fill']].pwx[1], 'as pwx[1]')
+    eq('pure', lab('M.own'), 'a table the function made itself')
+    eq('writes', lab('M.direct'), 'a direct module write, as before')
+end)
+
 local function edge(data, fn_name, var_name)
     local byid = {}
     for _, n in ipairs(data.nodes) do byid[n.id] = n end

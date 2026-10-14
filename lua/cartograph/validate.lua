@@ -49,6 +49,8 @@ M.NODE_FIELDS = {
                     -- is refused (CART-0230)
     pw = true, -- param-write fact: sorted indexes of OWN params this fn
                -- writes through (lua/js reference semantics; ~ to own params)
+    sw = true, -- (lua) stores through a CAPTURED or ALIASED name: sorted 'var\31name\31field' /
+               -- 'cap\31owner row:col|chunk\31name\31param index' (CART-1693)
     top = true, -- unconditional module-load def (lua): a load-order sibling for
                 -- the reassignment-override resolver (resolve_reassign, v56)
     stmtrun = true, -- (region only, v107) a run of TOP-LEVEL STATEMENTS, as against

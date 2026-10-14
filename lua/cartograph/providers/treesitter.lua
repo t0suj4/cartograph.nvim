@@ -6218,7 +6218,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- flag byte patched in place (each flag is its own parts slot). The
     -- param predicate (±index) can't ride the FULL flag byte — it ships
     -- as flat (ordinal, gp) pairs on the buffer (JSON-safe for workers).
-    local pwseen
+    local pwseen, swseen
     for i = 1, wqn do
         local b = i * 5
         local g, gp, pw = guard_class(wq[b - 4], wq[b - 3], src, guards)
@@ -6240,6 +6240,28 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             if not set then set = {}; fnode._pwset = set; pwseen = pwseen or {}; pwseen[#pwseen + 1] = fnode end
             set[pw] = true
         end
+        -- (a STORE through a captured or aliased name — what it writes, a node fact like pw: CART-1693)
+        if guards.store_root and wq[b] then
+            local c = wq[b - 4]
+            local top = chain_top(c, wq[b - 3])
+            if top ~= c and leftmost(top) == c then
+                local sw = guards.store_root(c, src)
+                if sw then
+                    local fn2 = wq[b]
+                    local set = fn2._swset
+                    if not set then set = {}; fn2._swset = set; swseen = swseen or {}; swseen[#swseen + 1] = fn2 end
+                    set[sw] = true
+                end
+            end
+        end
+    end
+    for _, fn2 in ipairs(swseen or {}) do
+        local set = fn2._swset
+        for _, x in ipairs(fn2.sw or {}) do set[x] = true end
+        local arr = {}
+        for x in pairs(set) do arr[#arr + 1] = x end
+        table.sort(arr)
+        fn2.sw, fn2._swset = arr, nil
     end
     if pwseen then
         for _, fnode in ipairs(pwseen) do
