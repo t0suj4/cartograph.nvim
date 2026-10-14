@@ -159,6 +159,12 @@ local function build(store, opts)
     end
     local NS = '\0ns'
     local wl, inwl, head, tail = {}, {}, 1, 0
+    -- ★ A FUEL BUDGET (CART-1706): termination BY CONSTRUCTION — after `fuel` worklist steps (opts.fuel, or
+    -- CARTOGRAPH_FLOWTYPE_FUEL; per pass) the solve stops and every port still queued is UNFINISHED: its pending
+    -- objects escape and it seeds the taint, as a saturated port does, so a whole answer read through none of them is
+    -- unaffected by the work left (the flowpath Lean plan's 9.1). stats.fuel_cut counts them
+    local FUEL = tonumber(opts.fuel or os.getenv('CARTOGRAPH_FLOWTYPE_FUEL') or '')
+    local OUT = false
     local walking, NW, NOW = true, 0, 0
     local function new() N = N + 1; return N end
     local function newobj(info) NO = NO + 1; obinfo[NO] = info; return NO end
@@ -709,7 +715,12 @@ local function build(store, opts)
     end
     local function solve()
         if walking then walking = false; NW, NOW = N, NO end
+        if OUT then return end
         while head <= tail do
+            if FUEL then
+                if FUEL <= 0 then OUT = true; break end
+                FUEL = FUEL - 1
+            end
             local p = pop()
             if order == 'fifo' and head > tail then head, tail = 1, 0 end
             inwl[p] = nil
@@ -1556,6 +1567,19 @@ local function build(store, opts)
     -- longer follows it: its field f once a store with a tainted base writes f (or `[]`, which a Lua load also
     -- reads), and — for a function — its parameters once a call's callee is tainted (which function it would reach is
     -- what was lost).
+    -- (out of fuel: the queued ports' pending objects ESCAPE — the solve no longer follows them — before the escape
+    -- closure below; the ports seed the taint with the saturated ones)
+    local UNFIN = {}
+    if OUT then
+        for p in pairs(inwl) do
+            UNFIN[#UNFIN + 1] = p
+            local d = delta[p]
+            local function esc1(o) if not escaped[o] then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end end end
+            if type(d) == 'number' then esc1(d) elseif d and d.bs then for o in bs_iter(d) do esc1(o) end
+            elseif d then for _, o in ipairs(d) do esc1(o) end end
+        end
+        table.sort(UNFIN)
+    end
     local tainted, twork = {}, {}
     -- (opts.explain: what tainted each port — the port it flowed from, `{ port, why }` for a rule that jumps, or a
     -- seed's reason — so a partial answer can be walked back to its seed: R.taint_path)
@@ -1586,6 +1610,10 @@ local function build(store, opts)
     -- (field name -> the ports of that field over every escaped object, built on the first store that needs it: each
     -- new field had scanned the whole escaped list — fields x escaped objects, half of build1)
     local escf
+    TCUR = 'fuel: the solve stopped with this port unfinished'
+    for _, p in ipairs(UNFIN) do taint(p) end
+    -- (a guarded flow's chain test ran over prototypes the cut may have left incomplete)
+    if OUT then for _, gf in ipairs(gfilters) do taint(gf[2]) end end
     TCUR = 'saturated (past CAP)'
     for p in pairs(top) do taint(p) end
     TCUR = 'sinf'
@@ -1721,7 +1749,7 @@ local function build(store, opts)
     local partial_hit -- (set by targets: a field port it read was tainted)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
     local verdicts = {}
-    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN,
+    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil,
         files = #files, ports = N, objects = NO }
     local function targets(o, m, out, seen)
         if seen[o] then return false end

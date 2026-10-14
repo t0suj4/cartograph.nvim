@@ -256,6 +256,59 @@ test('flowtype: a string is the receiver only of a string-library member — ("x
     vim.fn.delete(root, 'rf')
 end)
 
+test('flowtype: a FUEL budget stops the solve and taints what it left queued — no whole answer from the unfinished work; a budget larger than needed changes nothing (CART-1706)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (the methods sit on the objects, so a lookup needs no prototype link; `a` reaches p as the calls are walked,
+    -- `b` only through x, which is empty when use(x) is walked and gains b later — the worklist carries it to p. At
+    -- run time setx runs first: b.m runs. A cut that left x queued must not answer a whole exact a.m)
+    local root = tree({ ['m.lua'] = table.concat({
+        'local a, b = {}, {}',
+        'function a.m(self) return 1 end',
+        'function b.m(self) return 2 end',
+        'local x',
+        'local function main() use(a); return use(x) end',
+        'local function setx() x = b end',
+        'function use(p) return p:m() end',
+        'setx()',
+        'print(main())' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local cut = flowtype.solve(store, { open = false, fuel = 0 })
+    ok((cut.stats.fuel_cut or 0) > 0, 'the budget ran out with ports queued')
+    local v = cut.verdict(call)
+    ok(not (v and v.kind == 'exact' and not v.partial), 'no whole exact A.m from a cut solve: ' .. vim.inspect(v))
+    local full, big = flowtype.solve(store, { open = false }), flowtype.solve(store, { open = false, fuel = 1e12 })
+    eq(nil, big.stats.fuel_cut, 'a budget larger than needed never runs out')
+    eq(vim.inspect(full.verdict(call)), vim.inspect(big.verdict(call)), 'and answers as the unbudgeted solve')
+    vim.fn.delete(root, 'rf')
+    -- (a STORE through a port the cut left queued: holder's table reaches put's t only through y, so `t.m = b.m` may
+    -- never have reached it — the queued objects ESCAPE, and the store through the tainted t reaches their field m.
+    -- Which budget leaves exactly that queued is the schedule's choice: every order, budgets 0..40)
+    root = tree({ ['m.lua'] = table.concat({
+        'local a, b = {}, {}',
+        'function a.m(self) return 1 end',
+        'function b.m(self) return 2 end',
+        'local holder = { m = a.m }',
+        'local y',
+        'local function main() put(y); return holder:m() end',
+        'local function sety() y = holder end',
+        'function put(t) t.m = b.m end',
+        'sety()',
+        'print(main())' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    call = nil
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'holder:m' then call = c end end
+    for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+        for fuel = 0, 40 do
+            local w = flowtype.solve(store, { open = false, fuel = fuel, order = order }).verdict(call)
+            ok(not (w and w.kind == 'exact' and not w.partial), ('%s fuel %d: no whole exact a.m — %s'):format(order, fuel, vim.inspect(w)))
+        end
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: an EXPORTED function\'s parameter may hold anything (open) — no claim through it', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({
