@@ -94,6 +94,26 @@ test('flowtype: a store into a SCALAR writes no field — the shared string obje
     vim.fn.delete(root, 'rf')
 end)
 
+test('flowtype: a load over many objects sharing one deep prototype chain walks the chain ONCE, not once per object (CART-1686)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (50 objects, each its own allocation site, all with __index = P1, the head of a 30-link prototype chain linked
+    -- AFTER the loads: each object's load `o.x` is replayed onto P1 once P1 is its prototype, and P1 already holds
+    -- that load — the old code re-walked the whole chain every time: 1760 load_obj calls here, 290 with the return)
+    local src = { 'local ' .. table.concat(vim.tbl_map(function (k) return 'P' .. k end, vim.fn.range(1, 30)), ', '),
+        'local P31 = { x = 1 }', 'local get' }
+    for k = 0, 49 do src[#src + 1] = ('local o%d = setmetatable({}, { __index = P1 })'):format(k) end
+    src[#src + 1] = 'get = function (o) return o.x end'
+    for k = 0, 49 do src[#src + 1] = ('get(o%d)'):format(k) end
+    for k = 30, 1, -1 do src[#src + 1] = ('P%d = setmetatable({}, { __index = P%d })'):format(k, k + 1) end
+    src[#src + 1] = 'return get'
+    local root = tree({ ['m.lua'] = table.concat(src, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false, ctx = false })
+    ok(R.stats.loadvisits > 0, 'the counter counts')
+    ok(R.stats.loadvisits < 500, 'linear in objects + chain, not their product: ' .. R.stats.loadvisits)
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: an EXPORTED function\'s parameter may hold anything (open) — no claim through it', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({

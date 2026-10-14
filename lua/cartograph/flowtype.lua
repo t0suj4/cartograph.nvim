@@ -397,7 +397,9 @@ local function build(store, opts)
         local v = tn:match('^table<[^,]+,%s*(.-)>$')
         return v
     end
+    local LOADV = 0 -- (load_obj calls: stats.loadvisits, the complexity a spec pins — CART-1686)
     local function load_obj(o, f, dst, seen, strict)
+        LOADV = LOADV + 1
         -- (the cycle guard only matters along PROTOTYPES: allocated at the first one — 2.2 M sets per solve were built
         -- for loads that never followed a prototype, the allocation census's top site)
         if seen then
@@ -414,7 +416,12 @@ local function build(store, opts)
         if not r then r = {}; rd[o] = r end
         local l = r[f]
         if not l then l = {}; r[f] = l end
-        if l[dst] == nil then
+        -- ★ A REGISTERED LOAD RETURNS AT ONCE (CART-1686): registering (o, f, dst) walked every prototype o had then (in
+        -- the same call, below), and a prototype o gains LATER receives o's recorded loads through replay_loads — so a
+        -- repeat could only re-walk the prototype DAG under a fresh `seen`. On WoW's mixin-dense trees that re-walk was
+        -- 91% of the solve (w2, 607k lines: 184.7 s -> 15.6 s, every verdict row identical)
+        if l[dst] ~= nil then return end
+        do
             l[dst] = strict and true or false
             if not strict and f ~= '[]' then local ns = r[NS]; if not ns then ns = {}; r[NS] = ns end; ns[dst] = true end
             -- (what the fields hold already; what they gain later reaches dst as their readers)
@@ -1496,7 +1503,7 @@ local function build(store, opts)
     local partial_hit -- (set by targets: a field port it read was tainted)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
     local verdicts = {}
-    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0,
+    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV,
         files = #files, ports = N, objects = NO }
     local function targets(o, m, out, seen)
         if seen[o] then return false end
