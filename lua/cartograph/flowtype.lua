@@ -1440,6 +1440,7 @@ local function build(store, opts)
         end
     end
     local field_hit, params_hit = {}, false
+    local loadf, fhit = nil, {} -- (a load's result port -> its field name; the field names whose functions are tainted)
     -- (field name -> the ports of that field over every escaped object, built on the first store that needs it: each
     -- new field had scanned the whole escaped list — fields x escaped objects, half of build1)
     local escf
@@ -1490,6 +1491,30 @@ local function build(store, opts)
                 end
                 if TFROM then TCUR = { p, 'a store of .' .. tostring(f) .. ' through it reaches that field of EVERY escaped object' } end
                 for _, fp in ipairs(escf[f] or NOTHING) do taint(fp) end
+                TCUR = p
+            end
+        end
+        -- ★ A CALL THROUGH A TAINTED LOAD OF `.f` MAY REACH ANY FUNCTION STORED AS `.f` (CART-1696): the load's base was
+        -- cut short, so the method it would have read need not be ESCAPED — a class method sitting in its prototype's
+        -- field never reaches a saturated port when the instances that would read it were dropped upstream. arktype:
+        -- CompiledFunction.return's `this` held 3 objects untainted at CAP 64, the answer through it a WHOLE exact that
+        -- CAP 256 widened to a set. Every function held under that field name, anywhere, has its parameters tainted
+        if calls[p] then
+            if not loadf then
+                loadf = {}
+                for _, l in pairs(loads) do for _, ld in ipairs(l) do loadf[ld[2]] = ld[1] end end
+            end
+            local f = loadf[p]
+            if f and not fhit[f] then
+                fhit[f] = true
+                if TFROM then TCUR = { p, 'a call through it may reach any function stored as .' .. tostring(f) .. ': their parameters' } end
+                for o, m in pairs(ofield) do
+                    for fk, fp in pairs(m) do
+                        if (fk == f or f == '[]') and not top[fp] then
+                            for x in each(fp) do local fpp = fnports[x]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end
+                        end
+                    end
+                end
                 TCUR = p
             end
         end

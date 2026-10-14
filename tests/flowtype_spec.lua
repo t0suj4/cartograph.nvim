@@ -114,6 +114,33 @@ test('flowtype: a load over many objects sharing one deep prototype chain walks 
     vim.fn.delete(root, 'rf')
 end)
 
+test('flowtype: a store through a SATURATED base may write any escaped object\'s field — a load through that object\'s own port is partial (CART-1643 rule 1, CART-1696)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (o holds A.run; o and 70 other tables reach g's parameter, which saturates: o ESCAPES. g writes `t.run = B.run`
+    -- through it, which the solve no longer follows into o. A load o.run through o's own, untainted port must not
+    -- answer a whole exact A.run — at run time it may be B.run)
+    local sinks = {}
+    for k = 1, 70 do sinks[k] = 'g({})' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.run(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.run(self) return 2 end\nreturn B\n',
+        ['m.lua'] = table.concat({
+            'local A, B = require("a"), require("b")',
+            'local o = { run = A.run }',
+            'local function g(t) t.run = B.run end',
+            'g(o)',
+            table.concat(sinks, '\n'),
+            'return o:run()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'o:run' then call = c end end
+    ok(call and call.refused, 'the call is ambiguous: ' .. vim.inspect(call and call.refused and call.refused.rule))
+    local v = flowtype.of(store, { open = false }).verdict(call)
+    ok(not (v and v.kind == 'exact' and not v.partial), 'no WHOLE exact through the escaped object: ' .. vim.inspect(v))
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: a loop\'s per-site instance of its iterator is walked AT ITS OWN POSITIONS — the original call\'s answer is the union (CART-1688)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     -- (the loop hands `node` to an instance of `it`; a direct call hands `other` to the original. The call n:kid inside

@@ -6,20 +6,23 @@ local M = {}
 local D = vim.fn.getcwd() .. '/tools/experiments/flowtype_oracle/'
 local function src(f) return io.open(D .. f):read('a') end
 
--- the four taint rules, each removed alone, each with the corpus check that caught it (CART-1643)
+-- the taint rules, each removed alone, each with the corpus check that caught it (CART-1643; CART-1696 added the fifth).
+-- ★ THE TEXTS ARE THE CODE'S: an edit of a rule's line must move its entry here in the same commit — they had drifted
+-- (escf, NOTHING, `partial_hit or p`) and the mutant step failed "did not APPLY" for days unseen
+-- ('escaped fields' — a store through a tainted base reaches that field of every escaped object — and 'field taint read
+-- by targets' have NO corpus witness since 2203ed7: their mutants survive cap and schedule on arktype and the lua tree.
+-- Both are pinned by one synthetic spec instead, tests/flowtype_spec.lua "a store through a SATURATED base…", each
+-- mutant-CAUGHT, CART-1696)
 M.RULES = {
-  { name = 'escaped fields', check = 'cap.lua', tree = 'ts',
-    before = 'for _, o in ipairs(esc) do local m = ofield[o]; if m and m[f] then taint(m[f]) end end',
-    after = 'for _, o in ipairs(esc) do local m = ofield[o]; if false and m and m[f] then taint(m[f]) end end' },
   { name = 'escaped params', check = 'cap.lua', tree = 'ts',
     before = 'for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end',
     after = 'for _, o in ipairs(esc) do local fpp = fnports[o]; if false and fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end' },
-  { name = 'field taint read by targets', check = 'schedule.lua', tree = 'ts',
-    before = '        if p and tainted[p] then partial_hit = true end',
-    after = '        if false and p and tainted[p] then partial_hit = true end' },
   { name = 'load results', check = 'cap.lua', tree = 'lua',
-    before = '        for _, ld in ipairs(loads[p] or {}) do taint(ld[2]) end\n        for _, st in ipairs(stores[p] or {}) do',
-    after = '        for _, ld in ipairs({}) do taint(ld[2]) end\n        for _, st in ipairs(stores[p] or {}) do' },
+    before = '        for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end',
+    after = '        for _, ld in ipairs(NOTHING) do taint(ld[2]) end' },
+  { name = 'functions under a tainted field load', check = 'cap.lua', tree = 'ts',
+    before = '                        if (fk == f or f == \'[]\') and not top[fp] then',
+    after = '                        if false and (fk == f or f == \'[]\') and not top[fp] then' },
 }
 
 --- CART-1643: what moves with the order is flagged, whole answers survive a bigger cap, every taint rule is needed
