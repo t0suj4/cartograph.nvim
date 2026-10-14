@@ -745,7 +745,10 @@ local function build(store, opts)
     -- inside it — is instantiable: walked again from its own text with ports of its own. A generic for binds its
     -- iterator to an instance per loop, so one loop's values no longer pour into every other's: tsutil.inext's node
     -- parameter took a node from every loop in the tree and saturated, and every inext loop variable was partial
-    local CLONE, CLONE_MAX = {}, 600 -- fn object -> { file, text, id }
+    local CLONE, CLONE_MAX = {}, 600 -- fn object -> { file, id, src, l, c }: the function's own position
+    -- (CART-1687: a loop site minted INSIDE an instance walk takes no instance of its own — the shared function answers
+    -- there, which instances only refine. Postal's IterateModules loop instantiated itself 230k times on WoW w3)
+    local NOCLONE, INST, INSTN = {}, 0, 0 -- (INSTN: instances walked — stats.instances)
     -- ★ SELECTIVE CONTEXT SENSITIVITY (CART-1653; client-driven refinement, Guyer & Lin SAS'03, Zipper OOPSLA'18): the
     -- functions a first solve found with a SATURATED parameter upstream of an unknown answer (opts.ctxfns) get an
     -- instance per resolved call site — re-walked from their own node inside a snapshot of the scopes they were defined
@@ -783,7 +786,7 @@ local function build(store, opts)
         local function key_of(n) local l, c = n:start(); return kfile .. ':' .. l .. ':' .. c end
         -- (an access, at the FILE's positions: a snippet instance's positions are its own, so it records none)
         local function acc(kind, node, f, base, obj, range, key)
-            if not ACC or (clone and not isctx) or not node then return end
+            if not ACC or (clone and (not isctx or clone.noacc)) or not node then return end
             local sr, sc, er, ec = node:range()
             if range then sr, sc, er, ec = range[1], range[2], range[3], range[4] end
             ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj, key = key }
@@ -928,7 +931,7 @@ local function build(store, opts)
             fnmeta[#fnmeta] = nil
             scopes[#scopes] = nil
             if not clone and not meta.upv and not meta.nested and body and #txt(n) <= CLONE_MAX then
-                CLONE[o] = { file = file, id = id, text = 'return function ' .. (method and ('(self' .. (txt(ps):match('^%(%s*%)$') and ')' or (', ' .. txt(ps):sub(2)))) or txt(ps)) .. '\n' .. txt(body) .. '\nend\n' }
+                CLONE[o] = { file = file, id = id, src = src, l = l, c = c }
             end
             return p
         end
@@ -1222,6 +1225,7 @@ local function build(store, opts)
                     end
                     if trip and trip[1] then
                         local ctl = new()
+                        if INST > 0 then NOCLONE[ctl] = true end
                         if trip[3] then edge(trip[3], ctl) end
                         if V[1] then edge(V[1], ctl) end
                         -- (the site: each loop binds a small closed iterator to an instance of its own — CLONE)
@@ -1265,15 +1269,20 @@ local function build(store, opts)
     local instances = {}
     clone_at = function (site, o)
         local cl = CLONE[o]
-        if not cl then return nil end
+        if not cl or NOCLONE[site] then return nil end
         local per = instances[site]
         if not per then per = {}; instances[site] = per end
         local x = per[o]
         if x == nil then
-            local info = { id = cl.id }
-            walk_file(cl.file, cl.text, info)
-            x = false
-            if info.port then for y in each(info.port) do x = y end end
+            -- ★ AT THE FUNCTION'S OWN POSITIONS (CART-1688), as a context instance: its calls are the original call
+            -- records, so a call's answer is the union over the original and every instance. A snippet walked under
+            -- `clone:<file>` matched no record — the original's verdict read only the original's ports and answered an
+            -- unsound exact (a loop's state reached only the instance). The function is CLOSED: no scope but its own
+            local info = { ctx = true, id = cl.id, l = cl.l, c = cl.c, scopes = { {} }, noacc = true }
+            INST, INSTN = INST + 1, INSTN + 1
+            walk_file(cl.file, cl.src, info)
+            INST = INST - 1
+            x = info.obj or false
             per[o] = x
         end
         return x or nil
@@ -1503,7 +1512,7 @@ local function build(store, opts)
     local partial_hit -- (set by targets: a field port it read was tainted)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
     local verdicts = {}
-    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV,
+    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN,
         files = #files, ports = N, objects = NO }
     local function targets(o, m, out, seen)
         if seen[o] then return false end

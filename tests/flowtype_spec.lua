@@ -114,6 +114,51 @@ test('flowtype: a load over many objects sharing one deep prototype chain walks 
     vim.fn.delete(root, 'rf')
 end)
 
+test('flowtype: a loop\'s per-site instance of its iterator is walked AT ITS OWN POSITIONS — the original call\'s answer is the union (CART-1688)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (the loop hands `node` to an instance of `it`; a direct call hands `other` to the original. The call n:kid inside
+    -- `it` reaches BOTH — an answer naming other.kid alone was an unsound exact)
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.kid(self, i) return nil end',
+        'function B.kid(self, i) return nil end',
+        'local node = { kid = function (self, i) if i < 2 then return i end end }',
+        'local other = { kid = function (self, i) return nil end }',
+        'local function it(n, i)',
+        '    local c = n:kid(i + 1)',
+        '    if c then return i + 1, c end',
+        'end',
+        'it(other, 0)',
+        'for _, c in it, node, -1 do print(c) end',
+        'return A' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'n:kid' then call = c end end
+    ok(call, 'the ambiguous call is recorded')
+    for _, open in ipairs { false, true } do
+        local v = flowtype.of(store, { open = open }).verdict(call)
+        ok(not (v and v.kind == 'exact'), (open and 'open' or 'closed') .. ': no exact through the loop\'s instance: ' .. vim.inspect(v))
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('flowtype: a loop site minted INSIDE an instance takes no instance of its own — a chain of iterators instantiates once per original site (CART-1687)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (three small closed iterators, each looping over the next; global, so each is closed. Without the bound every
+    -- instance's own loop instantiated the next again — 6 instances here, a cycle of them never stopped on WoW)
+    local root = tree({ ['m.lua'] = table.concat({
+        'function it3(s, i) return nil end',
+        'function it2(s, i) for _ in it3, s, i do end return nil end',
+        'function it1(s, i) for _ in it2, s, i do end return nil end',
+        'for _ in it1, {}, 0 do end',
+        'return it1' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false, ctx = false })
+    eq(3, R.stats.instances, 'one instance per loop site of the original code')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: an EXPORTED function\'s parameter may hold anything (open) — no claim through it', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({
