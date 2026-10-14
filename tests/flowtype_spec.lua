@@ -186,6 +186,76 @@ test('flowtype: a loop site minted INSIDE an instance takes no instance of its o
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ LUA'S HIDDEN VALUE ROUTES (CART-1699): classes A and B with a method m; a function's parameter p receives `a` through
+-- an ordinary call and `b` through a construct the walk did not model. At run time B.m runs (each fixture checked with
+-- luajit, ~/work/flowpath/probes/translation/fx); the answer for p:m() must not be a WHOLE exact A.m
+local CLASSES = table.concat({
+    'local A, B = {}, {}',
+    'function A.m(self) return "A" end',
+    'function B.m(self) return "B" end',
+    'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })' }, '\n') .. '\n'
+local ROUTES = {
+    { 'coroutine', 'CART-1700', 'local function f(p) return p:m() end\nf(a)\nlocal co = coroutine.create(f)\nprint(coroutine.resume(co, b))\n' },
+    { 'callmeta', 'CART-1701', 'local function h(self, p) return p:m() end\nh(nil, a)\nlocal callable = setmetatable({}, { __call = h })\nprint(callable(b))\n' },
+    { 'opmeta', 'CART-1702', 'local function add(x, p) return p:m() end\nadd(nil, a)\nlocal box = setmetatable({}, { __add = add })\nprint(box + b)\n' },
+    { 'indexfn', 'CART-1703', 'local function get(t, k) return b end\nlocal lazy = setmetatable({}, { __index = get })\nlocal function use(p) return p:m() end\nuse(a)\nprint(use(lazy.anything))\n' },
+    -- (the same, but the table reaches the load through a PARAMETER: the load registers after the __index link)
+    { 'indexfn-late', 'CART-1703', 'local function get(t, k) return b end\nlocal lazy = setmetatable({}, { __index = get })\nlocal function rd(t) return t.anything end\nlocal function use(p) return p:m() end\nuse(a)\nprint(use(rd(lazy)))\n' },
+    { 'newindexfn', 'CART-1704', 'local function onset(t, k, p) return p:m() end\nonset(nil, "x", a)\nlocal watched = setmetatable({}, { __newindex = onset })\nwatched.y = b\n' },
+    { 'errorval', 'CART-1705', 'local function use(p) return p:m() end\nuse(a)\nlocal ok, e = pcall(function () error(b) end)\nprint(use(e))\n' },
+}
+for _, r in ipairs(ROUTES) do
+    test(('flowtype: %s — the value that reaches p by that route makes p:m() no WHOLE exact A.m (%s)'):format(r[1], r[2]), function ()
+        if not parser_available('lua') then skip 'no lua parser' end
+        local root = tree({ ['m.lua'] = CLASSES .. r[3] })
+        store.ingest(ts.extract(root))
+        local callrec = require 'cartograph.callrec'
+        local call
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+        ok(call and call.refused, 'p:m() is ambiguous')
+        -- (every worklist ORDER: which of two paths carries a route — a load registered before or after its __index
+        -- link — is the schedule's choice, and a path only one order takes is pinned by that order)
+        for _, open in ipairs { false, true } do
+            for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+                local v = flowtype.solve(store, { open = open, order = order }).verdict(call)
+                ok(not (v and v.kind == 'exact' and not v.partial), ('%s %s %s: %s'):format(r[1], open and 'open' or 'closed', order, vim.inspect(v)))
+            end
+        end
+        vim.fn.delete(root, 'rf')
+    end)
+end
+
+test('flowtype: an error is caught only by a pcall protecting what raises it — another function\'s error() reaches no other pcall (CART-1705)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (the global error set saturated on the repo and made every `local ok, v = pcall(f)` ⊤: v holds what f — and what
+    -- f calls — raises, never what an unrelated function raises)
+    local root = tree({ ['m.lua'] = CLASSES .. table.concat({
+        'local function boom() error(b) end',                     -- raises b, protected elsewhere
+        'local function make() return a end',
+        'local ok, v = pcall(make)',
+        'local function use(p) return p:m() end',
+        'print(use(v), pcall(boom))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local v = flowtype.of(store, { open = false }).verdict(call)
+    eq('exact', v and v.kind, 'v holds make\'s a (and a runtime error\'s string), never boom\'s b: ' .. vim.inspect(v))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('flowtype: a string is the receiver only of a string-library member — ("x"):finish() would raise (CART-1690)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = CLASSES .. 'local function use(p) return p:m() end\nuse(a)\nuse("s")\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local v = flowtype.of(store, { open = false }).verdict(call)
+    eq('exact', v and v.kind, 'the string has no m: a, alone, is the receiver: ' .. vim.inspect(v))
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: an EXPORTED function\'s parameter may hold anything (open) — no claim through it', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({

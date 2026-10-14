@@ -28,6 +28,11 @@ local EMPTY_NODE = { child = function () return nil end, named_child = function 
 
 local M = {}
 M.CAP = 64
+-- (a binary operator's metamethod — run with both operands when either carries it, CART-1702; `a > b` is `b < a`)
+local METAOP = { ['+'] = '__add', ['-'] = '__sub', ['*'] = '__mul', ['/'] = '__div', ['%'] = '__mod', ['^'] = '__pow',
+    ['..'] = '__concat', ['//'] = '__idiv', ['&'] = '__band', ['|'] = '__bor', ['~'] = '__bxor', ['<<'] = '__shl',
+    ['>>'] = '__shr', ['=='] = '__eq', ['~='] = '__eq', ['<'] = '__lt', ['<='] = '__le', ['>'] = '__lt', ['>='] = '__le' }
+local CMPOP = { ['=='] = true, ['~='] = true, ['<'] = true, ['<='] = true, ['>'] = true, ['>='] = true }
 -- ★ A SCALAR HAS NO FIELD TO WRITE: `s.body = f` on a string, number or boolean raises, so a program that gets past
 -- the store did not hold one there (CART-1643's reading, for stores). The shared `type:string` object had collected
 -- derive.lua's functions as `.body` that way, a call `t.body(…)` on a list walker reached them, and their returns
@@ -128,6 +133,14 @@ local function build(store, opts)
     local ofield, protos, fnports, obinfo = {}, {}, {}, {}
     local TYPEOBJ, TNAME = {}, {} -- (type objects: below, with typeobj)
     local typeobj
+    -- ★ LUA'S HIDDEN VALUE ROUTES (CART-1699): a function reached as a Lua `__index` (LUAIDX: an index port a lua
+    -- setmetatable made — JS prototypes are never called) is CALLED by a load that falls through to it (IDXFN: table ->
+    -- its __index functions); OBJPORT / KEYPORT hold the (table, key) arguments it is called with. idxcall is set below
+    local LUAIDX, IDXFN, OBJPORT, KEYPORT = {}, {}, {}, {}
+    -- (METAH: a handler port -> its metamethod name; MTSTORES: every setmetatable's { target, metatable } ports — what
+    -- decides whether a tainted handler port can be missing anything, see the taint loop)
+    local METAH, MTSTORES = {}, {}
+    local idxcall
     -- ★ A FIELD'S READERS ARE IMPLICIT (CART-1643, to make the solver SMALLER): a load of x.f READS field f of every
     -- object at x, and materializing that as an edge per (object, load) was 96% of all edges — 10.96 M of 11.38 M on
     -- lua/cartograph, 339 MB. Instead each object keeps the loads that read it, rd[o] = { [f] = { [dst] = strict } }
@@ -431,8 +444,11 @@ local function build(store, opts)
                 if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
             end
             if strict then pull(ofp(o, f))
-            elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' then pull(m[fk]) end end
+            elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' and fk ~= '\1mt' then pull(m[fk]) end end
             else pull(ofp(o, f)); pull(ofp(o, '[]')) end
+            -- (a load falling through to an __index FUNCTION calls it with (o, key): its result is the load's value)
+            local fm = IDXFN[o]
+            if fm then for g in pairs(fm) do idxcall(g, o, f, dst) end end
         end
         local pr = protos[o]
         if pr then
@@ -480,14 +496,27 @@ local function build(store, opts)
     -- (`setmetatable(t, { __index = idx })`: every object at t has every object at idx as a prototype — linked when
     -- EITHER side gains one; linking only on t's arrivals lost an idx object that came later, an ORDER-dependent miss)
     local protos_rev = {}
-    local function protolink(o, c)
+    local function protolink(o, c, lua)
+        if lua and fnports[c] then -- (a lua __index FUNCTION: each load on o calls it, CART-1703 — and it stays a prototype:
+            -- the field rosters see a function there and refuse, rename-field / reshape)
+            local m = IDXFN[o]
+            if not m then m = {}; IDXFN[o] = m end
+            if not m[c] then
+                m[c] = true
+                local r = rd[o]
+                if r then
+                    for f, l in sorted(r) do if f ~= NS then for dst in pairs(l) do idxcall(c, o, f, dst) end end end
+                end
+            end
+        end
         local pr = protos[o]
         if not pr then pr = {}; protos[o] = pr end
         if pr[c] then return end
         pr[c] = true
         replay_loads(o, c)
     end
-    local function proto(t, idx)
+    local function proto(t, idx, lua)
+        if lua then LUAIDX[idx] = true end
         local l = protos_at[t]
         if not l then l = {}; protos_at[t] = l end
         l[#l + 1] = idx
@@ -516,7 +545,7 @@ local function build(store, opts)
     end
     local funrets
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
-    local function bindcall(o, args, res, site)
+    local function bindcall(o, args, res, site, cerr)
         if site and clone_at then
             local inst = clone_at(site, o)
             if inst then o = inst end
@@ -534,17 +563,51 @@ local function build(store, opts)
             return
         end
         for i, a in ipairs(args) do if fp.params[i] then edge(a, fp.params[i]) end end
+        if cerr and fp.err then edge(fp.err, cerr) end -- (what the callee raises, the caller raises: CART-1705)
         -- (a MULTI-value result — Go's `v, err := f()` — is a list of ports: the i-th return to the i-th)
         if type(res) == 'table' then
             for i, r in ipairs(res) do local fr = fp.rets and fp.rets[i] or (i == 1 and fp.ret); if fr then edge(fr, r) end end
         else edge(fp.ret, res) end
     end
-    local function callc(callee, args, res, site)
+    -- (one yield set and one resume-argument set for the whole program, CART-1700: any yield's values reach any resume,
+    -- any resume's arguments any yield. GERR: what MODULE-LEVEL code raises — a function's own errors go to its port
+    -- `e:<id>`, up the call graph to the pcall that protects it, CART-1705; one global set saturated on the repo and
+    -- turned every pcall's second value into ⊤)
+    local GERR, GYIELD, GRESARG
+    local function gerr() if not GERR then GERR = new(); addobj(GERR, typeobj('string')) end return GERR end
+    local function gyield() if not GYIELD then GYIELD = new() end return GYIELD end
+    local function gresarg() if not GRESARG then GRESARG = new() end return GRESARG end
+    idxcall = function (g, o, f, dst)
+        local op = OBJPORT[o]
+        if not op then op = new(); OBJPORT[o] = op; addobj(op, o) end
+        local kp = KEYPORT[f]
+        if not kp then
+            kp = new(); KEYPORT[f] = kp
+            if f ~= '[]' then addobj(kp, typeobj(f == '#' and 'number' or 'string')) end
+        end
+        bindcall(g, { op, kp }, dst)
+    end
+    local function callc(callee, args, res, site, cerr)
         local l = calls[callee]
         if not l then l = {}; calls[callee] = l end
-        l[#l + 1] = { args, res, site }
+        l[#l + 1] = { args, res, site, cerr }
         if top[callee] and spread and type(res) ~= 'table' then settop(res) end
-        for o in each(callee) do bindcall(o, args, res, site) end
+        for o in each(callee) do bindcall(o, args, res, site, cerr) end
+    end
+    -- (a handler in x's metatable — `__call`, `__add`, `__newindex`… — called with args, its results into res: the
+    -- metatable rides on the object as the hidden field `\1mt`, which `setmetatable` writes)
+    local function metacall(x, mm, args, res, cerr)
+        local h = field(field(x, '\1mt', true), mm) -- (non-strict: a handler written `mt[k] = f` counts)
+        METAH[h] = mm
+        callc(h, args, res, nil, cerr)
+    end
+    -- (a store `x.f = v` / `x[k] = v` also reaches x's `__newindex`: a FUNCTION is called with (x, key, v), a TABLE
+    -- receives the store — CART-1704)
+    local function metastore(base, f, kp, v, cerr)
+        local nh = field(field(base, '\1mt', true), '__newindex')
+        METAH[nh] = '__newindex'
+        callc(nh, { base, kp, v }, new(), nil, cerr)
+        storec(nh, f, v)
     end
     -- type objects and the profiles' declared returns
     typeobj = function (t)
@@ -674,7 +737,7 @@ local function build(store, opts)
                     for _, st in ipairs(stores[p] or NOTHING) do
                         for _, o in dit(d) do if not SCALAR[TNAME[o]] then edge(st[2], ofp(o, st[1])) end end
                     end
-                    for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3]) end end
+                    for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3], cl[4]) end end
                     for _, fl in ipairs(filters[p] or NOTHING) do
                         for _, o in dit(d) do if fl[2](o) then addobj(fl[1], o) end end
                     end
@@ -686,10 +749,12 @@ local function build(store, opts)
                         end
                     end
                     for _, idx in ipairs(protos_at[p] or NOTHING) do
-                        for _, o in dit(d) do for c in each(idx) do protolink(o, c) end end
+                        local lua = LUAIDX[idx]
+                        for _, o in dit(d) do for c in each(idx) do protolink(o, c, lua) end end
                     end
+                    local plua = LUAIDX[p]
                     for _, t in ipairs(protos_rev[p] or NOTHING) do
-                        for o in each(t) do for _, c in dit(d) do protolink(o, c) end end
+                        for o in each(t) do for _, c in dit(d) do protolink(o, c, plua) end end
                     end
                 end
             end
@@ -808,6 +873,8 @@ local function build(store, opts)
         end
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
         local fnstack = {}
+        -- (where an error raised HERE goes: the enclosing function's error port; module-level code's, the chunk set)
+        local function curerr() local f = fnstack[#fnstack]; return f and f.err or gerr() end
         local MULTI = 4 -- (the values a `return f()` forwards)
         local function funtype(path, n)
             local owner, mm = path:match('^([%a_][%w_%.]*)%.([%a_][%w_]*)$')
@@ -880,11 +947,15 @@ local function build(store, opts)
                 local base = expr(target:field('table')[1])
                 acc('write', target:field('field')[1], txt(target:field('field')[1]), base)
                 storec(base, txt(target:field('field')[1]), v)
+                local kp = new(); addobj(kp, STR)
+                metastore(base, txt(target:field('field')[1]), kp, v, curerr())
             elseif t == 'bracket_index_expression' then
                 local base, kn = expr(target:field('table')[1]), target:field('field')[1]
                 acc_key('write', kn, base, target)
                 storec(base, keyname(kn), v)
-                if kn then storec(base, '{k}', expr(kn)) end
+                local kp = kn and expr(kn) or new()
+                if kn then storec(base, '{k}', kp) end
+                metastore(base, keyname(kn), kp, v, curerr())
             end
         end
         local function func(n)
@@ -898,6 +969,7 @@ local function build(store, opts)
             addobj(p, o)
             local fp = { params = {}, ret = inst and new() or port('r:' .. id), id = id, inst = inst or nil }
             fp.rets = { fp.ret }
+            fp.err = inst and new() or port('e:' .. id) -- (what it raises, CART-1705)
             fnports[o] = fp
             if CTXFNS and not clone and CTXFNS[id] then
                 -- (the scopes it sees: each copied, so a local declared after it is not visible to its instances)
@@ -968,21 +1040,69 @@ local function build(store, opts)
             end
             if fname == 'setmetatable' and argn[1] then
                 local tp = expr(argn[1])
-                if argn[2] then proto(tp, field(expr(argn[2]), '__index')) end
+                if argn[2] then
+                    local mtp = expr(argn[2])
+                    proto(tp, field(mtp, '__index'), true)
+                    storec(tp, '\1mt', mtp) -- (its handlers: __call, operators, __newindex — CART-1699)
+                end
                 return tp
+            end
+            -- (COROUTINES, CART-1700: create(f) is a thread holding f; resume(co, …) calls f with its arguments — and
+            -- every yield returns them —, its results after the status are f's returns and every yield's values.
+            -- wrap(f) is f itself: a call calls f — its yields are not modelled there)
+            if fname == 'coroutine.create' or fname == 'coroutine.wrap' then
+                local fp = argn[1] and expr(argn[1]) or new()
+                if fname == 'coroutine.wrap' then return fp end
+                local tp = new()
+                addobj(tp, newobj('thread:' .. key_of(n)))
+                storec(tp, '\1co', fp)
+                return tp
+            end
+            if fname == 'coroutine.resume' and argn[1] then
+                local cp = expr(argn[1])
+                local aps = {}
+                for j = 2, #argn do aps[#aps + 1] = expr(argn[j]); edge(aps[#aps], gresarg()) end
+                local fl, out = {}, { new() }
+                for k = 1, math.max((want or 1) - 1, 1) do fl[k] = new(); out[k + 1] = fl[k]; edge(gyield(), fl[k]) end
+                -- (resume CATCHES what the coroutine raises: `false, err`)
+                local rerr = new()
+                addobj(rerr, STR)
+                edge(rerr, fl[1])
+                callc(field(cp, '\1co', true), aps, fl, nil, rerr)
+                if want then return out end
+                return out[1]
+            end
+            if fname == 'coroutine.yield' then
+                for j = 1, #argn do edge(expr(argn[j]), gyield()) end
+                local out = {}
+                for k = 1, want or 1 do out[k] = new(); edge(gresarg(), out[k]) end
+                if want then return out end
+                return out[1]
             end
             if (fname == 'pcall' or fname == 'xpcall') and argn[1] then
                 local aps = {}
                 for j = (fname == 'xpcall' and 3 or 2), #argn do aps[#aps + 1] = expr(argn[j]) end
                 -- (`local ok, v = pcall(f, …)`: v is f's FIRST value — the status comes before them)
+                -- (a CAUGHT error, CART-1705: what the protected function — and everything it calls — raises, and a
+                -- runtime error's message: a string. A function OUTSIDE the tree is taken to raise strings, the contract
+                -- clause this rests on. xpcall hands it to its handler, whose result is the second value)
+                local perr = new()
+                addobj(perr, STR)
                 if want then
                     local fl, out = {}, { new() }
                     for k = 1, want - 1 do fl[k] = new(); out[k + 1] = fl[k] end
-                    callc(expr(argn[1]), aps, fl)
+                    callc(expr(argn[1]), aps, fl, nil, perr)
+                    if out[2] then
+                        if fname == 'xpcall' and argn[2] then
+                            local hr = new()
+                            callc(expr(argn[2]), { perr }, hr, nil, curerr())
+                            edge(hr, out[2])
+                        else edge(perr, out[2]) end
+                    end
                     return out
                 end
                 local res = new()
-                callc(expr(argn[1]), aps, res)
+                callc(expr(argn[1]), aps, res, nil, perr)
                 return res
             end
             if fname == 'table.insert' and argn[1] then
@@ -1002,6 +1122,9 @@ local function build(store, opts)
             local aps = {}
             if recvp then aps[1] = recvp end
             for _, a in ipairs(argn) do aps[#aps + 1] = expr(a) end
+            -- (what error() / assert's message raises reaches every pcall's second result, CART-1705)
+            if fname == 'error' and aps[1] then edge(aps[1], curerr()) end
+            if fname == 'assert' and aps[2] then edge(aps[2], curerr()) end
             if ARGP and c and not clone then ARGP[c] = aps end
             if PTAG and not clone then
                 if recvp then puse(recvp, 'recv', txt(f:field('method')[1])) end
@@ -1031,6 +1154,7 @@ local function build(store, opts)
                 return want and resl or res
             end
             if to then
+                edge(port('e:' .. to), curerr())
                 for j, ap in ipairs(aps) do edge(ap, port('a:' .. to .. ':' .. j)) end
                 for k, r in ipairs(resl) do edge(port('r:' .. to .. (k > 1 and (':' .. k) or '')), r) end
                 return want and resl or res
@@ -1049,7 +1173,13 @@ local function build(store, opts)
             end
             if not callee and f then callee = expr(f) end
             if PTAG and not clone and callee and not recvp then puse(callee, 'call') end
-            if callee then callc(callee, aps, want and resl or res) end
+            if callee then
+                callc(callee, aps, want and resl or res, nil, curerr())
+                -- (calling a TABLE runs its metatable's __call with the table first, CART-1701)
+                local ma = { callee }
+                for _, ap in ipairs(aps) do ma[#ma + 1] = ap end
+                metacall(callee, '__call', ma, want and resl or res, curerr())
+            end
             return want and resl or res
         end
         -- an expression LIST's values: a call LAST in it supplies all the values still wanted (Lua truncates a call
@@ -1112,12 +1242,15 @@ local function build(store, opts)
                 end
                 return p
             end
-            if t == 'unary_expression' and ACC then
+            if t == 'unary_expression' then
                 local op = txt(n):match('^%s*([#%-]?)')
                 local x = n:named_child(0)
                 local xp = x and expr(x)
-                if op == '#' and x then acc('array', x, nil, xp) end
-                return new()
+                if ACC and op == '#' and x then acc('array', x, nil, xp) end
+                local res = new()
+                -- (`#x` runs __len, `-x` __unm, with the operand twice — CART-1702)
+                if xp and (op == '#' or op == '-') then metacall(xp, op == '#' and '__len' or '__unm', { xp, xp }, res, curerr()) end
+                return res
             end
             if t == 'binary_expression' then
                 local op, l, r -- (one pass over the children: the operator token and both operands)
@@ -1126,8 +1259,17 @@ local function build(store, opts)
                 end
                 local a, b = expr(l), expr(r)
                 if op == 'or' or op == 'and' then local r = new(); edge(a, r); edge(b, r); return r end
-                if op == '..' then local r = new(); addobj(r, STR); return r end
-                return new()
+                local res = new()
+                local mm = METAOP[op]
+                if mm then
+                    local args = (op == '>' or op == '>=') and { b, a } or { a, b }
+                    local hr = new()
+                    metacall(a, mm, args, hr, curerr())
+                    metacall(b, mm, args, hr, curerr())
+                    if not CMPOP[op] then edge(hr, res) end -- (a comparison is a boolean whatever the handler returns)
+                end
+                if op == '..' then addobj(res, STR) end
+                return res
             end
             for _, x in tsutil.inamed, n, -1 do expr(x) end
             return new()
@@ -1229,7 +1371,7 @@ local function build(store, opts)
                         if trip[3] then edge(trip[3], ctl) end
                         if V[1] then edge(V[1], ctl) end
                         -- (the site: each loop binds a small closed iterator to an instance of its own — CLONE)
-                        callc(trip[1], { trip[2] or new(), ctl }, V, ctl)
+                        callc(trip[1], { trip[2] or new(), ctl }, V, ctl, curerr())
                     end
                 elseif cl then
                     for _, x in tsutil.inamed, cl, -1 do
@@ -1469,12 +1611,42 @@ local function build(store, opts)
             end
         end
     end
+    -- ★ A HANDLER PORT IS MISSING NOTHING WHERE NO METATABLE CAN HOLD THE HANDLER (CART-1699): the metamethod routes
+    -- load `x.\1mt.__add` off every operand — a tainted operand taints the load, and the call through it would taint
+    -- its results: every `a .. b` on a hedged string went partial (typed RIGHT 122 -> 16 on the runtime oracle). A
+    -- handler can only sit in a METATABLE (an object setmetatable stored); while no metatable's field under that name
+    -- or a dynamic key holds anything, and no metatable port or field is saturated or tainted, the handler port cannot
+    -- have lost a function: its calls and stores are PARKED. After the loop drains, a name that became possible
+    -- releases its ports and the loop runs again — possibility only grows
+    local ALLOW, METAPEND = {}, {}
+    local function meta_possible(mm)
+        for _, ms in ipairs(MTSTORES) do
+            local vp = ms[2]
+            if top[vp] or tainted[vp] then return true end
+            for x in each(vp) do
+                local m = ofield[x]
+                for _, k in ipairs({ mm, '[]' }) do
+                    local fp = m and m[k]
+                    if fp and (top[fp] or tainted[fp] or pts[fp] ~= nil) then return true end
+                end
+            end
+        end
+        return false
+    end
+    ::drain::
     while #twork > 0 do
         local p = twork[#twork]; twork[#twork] = nil
         TCUR = p
         for q in sit(succ[p]) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
         for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end
+        local mm = METAH[p]
+        if mm and not ALLOW[mm] then
+            local l = METAPEND[mm]
+            if not l then l = {}; METAPEND[mm] = l end
+            l[#l + 1] = p
+            goto parked
+        end
         for _, st in ipairs(stores[p] or NOTHING) do
             local f = st[1]
             if not field_hit[f] then
@@ -1526,6 +1698,7 @@ local function build(store, opts)
         end
         for _, cl in ipairs(calls[p] or NOTHING) do
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
+            if cl[4] then taint(cl[4]) end -- (a callee the solve lost may raise anything)
         end
         for _, fl in ipairs(filters[p] or NOTHING) do taint(fl[1]) end
         for _, d in ipairs(gf_of[p] or NOTHING) do taint(d) end
@@ -1533,6 +1706,17 @@ local function build(store, opts)
         for _, t in ipairs(protos_rev[p] or NOTHING) do
             for o in each(t) do for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end end
         end
+        ::parked::
+    end
+    do -- (release the handler names that became possible, and drain again)
+        local released = false
+        for nm, ports in pairs(METAPEND) do
+            if not ALLOW[nm] and meta_possible(nm) then
+                ALLOW[nm] = true; released = true
+                for _, q in ipairs(ports) do twork[#twork + 1] = q end
+            end
+        end
+        if released then goto drain end
     end
     local partial_hit -- (set by targets: a field port it read was tainted)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
@@ -1587,7 +1771,10 @@ local function build(store, opts)
             for _, o in ipairs(recvobjs) do
                 local tn = TNAME[o]
                 if tn then
-                    if tn == 'string' or PSIGS[tn .. '#' .. pr.member] then tyname = tn end
+                    -- (a STRING is the receiver only for a string-library member: `("x"):finish()` indexes nil and raises — the
+                    -- program that got past the call did not hold a string there, CART-1690. pcall's error values,
+                    -- strings and error tables, reach every `local ok, v = pcall(…)`'s v: this keeps them off v:parse())
+                    if PSIGS[tn .. '#' .. pr.member] then tyname = tn end
                 else
                     local mine = {}
                     if targets(o, pr.member, mine, {}) then sat = true end
