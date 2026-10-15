@@ -27,6 +27,7 @@
 
 local argv = require 'cartograph.argv'
 local callrec = require 'cartograph.callrec'
+local at = require 'cartograph.at'
 
 local M = {}
 
@@ -414,9 +415,18 @@ local function arg_target(store, c, i, caller)
     local name, field = a.name, ''
     if a.k == 'field' and name then name, field = name:match('^([^.]+)%.?([^.]*)') end -- ('root.first.…')
     if (a.k == 'local' or a.k == 'field') and name then
-        for _, n in ipairs(store.by_file[callrec.file(c)] or {}) do
-            if n.kind == 'var' and n.name == name then
-                return 'var', n.id .. '\31' .. field
+        -- ★ THE BINDING, NOT THE NAME (CART-1715): the argument's binder at its site (argv's `bd`, the scope model) —
+        -- a parameter or local named like a module var is not that var (`function M.f(cache) fill(cache) end` wrote the
+        -- module's `cache`). A binder with a declaration row: the var declared on THAT row, if the extractor minted one (a
+        -- file-level `do` block's local is module state too); a parameter: never a var; no binder: a global, which the
+        -- language names; no scope model (bd nil): the name, as before
+        local bd = a.bd
+        local row = bd and (bd >= 0 and bd or bd <= -3 and -bd - 3) or nil
+        if bd ~= -2 then
+            for _, n in ipairs(store.by_file[callrec.file(c)] or {}) do
+                if n.kind == 'var' and n.name == name and (not row or (n.range and at.sl(n.range) == row)) then
+                    return 'var', n.id .. '\31' .. field
+                end
             end
         end
         local ps = caller and caller.params
@@ -570,8 +580,15 @@ local function subst(store, sums, sum, c, caller, j, tname, member)
         local owner, pi = nil, nil
         if caller then owner, pi = param_of(store, caller, a.name) end
         if owner then cp_add(sum, owner, pi); return end -- (handing on a parameter: the pair moves to its owner)
-        for _, fn2 in ipairs(store.by_file[callrec.file(c)] or {}) do
-            if (fn2.kind == 'function' or fn2.kind == 'method') and fn2.name == a.name then target = fn2.id; break end
+        -- (the function its BINDER declares — argv's `bd`, CART-1715: an inner local / the file's outermost one is the
+        -- function defined on its declaration row; a global is named by the language; no scope model: the name)
+        local bd = a.bd
+        local row = bd and (bd >= 0 and bd or bd <= -3 and -bd - 3) or nil
+        if bd == nil or bd == -1 or row then
+            for _, fn2 in ipairs(store.by_file[callrec.file(c)] or {}) do
+                if (fn2.kind == 'function' or fn2.kind == 'method') and fn2.name == a.name
+                    and (not row or (fn2.range and at.sl(fn2.range) == row)) then target = fn2.id; break end
+            end
         end
     end
     if target and member(target) then return end -- (its effects are this component's own)

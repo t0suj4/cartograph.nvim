@@ -103,6 +103,24 @@ function M.model(src, spec)
         return chain, k
     end
 
+    --- the NEAREST binder of `ident` at `from`, and whether its scope is the file's OUTERMOST one -> b, top | nil (no
+    --- binder: a global). A use inside its binder's own declaration — lua's `local x = x or {}` — reads the outer one
+    --- (CART-1602's rule, as _bound_value applies it)
+    function sm.binder(ident, from)
+        local fromrow = select(1, from:range())
+        local ub = select(3, from:start())
+        local n = from
+        while n and not spec[n:type()] do n = tsutil.parent(n) end
+        local r = n and scope_rec(n, spec[n:type()])
+        while r do
+            local b = symtab(r.node, r.entry)[ident]
+            if b and (b.row == nil or b.row <= fromrow) and not (b.ab and b.abe and ub >= b.ab and ub < b.abe) then
+                return b, not r.up
+            end
+            r = r.up
+        end
+    end
+
     -- one scope's binders, harvested once per model: the extractor's mention walk reads every scope through this
     -- instead of harvesting it a second time (lua_locals ran 1.9x per block)
     sm.symtab = symtab

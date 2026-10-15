@@ -51,7 +51,7 @@ function M.at(c, i)
         if i < 1 or i > c._avn then return nil end -- out of range, like raw
         local col, r = c._av, c._av0 + i
         return { k = M.KNAME[col.k[r] or 0], name = col.name[r], v = col.v[r],
-            prefix = col.prefix[r], kw = col.kw[r], to = col.to[r], l = col.l[r] }
+            prefix = col.prefix[r], kw = col.kw[r], to = col.to[r], l = col.l[r], bd = col.bd and col.bd[r] }
     end
     return c.argv and c.argv[i]
 end
@@ -69,7 +69,7 @@ end
 -- outside this shape keeps its CALL raw (the accessor's dual mode serves the
 -- mix); the fold still collapses the tree-sitter majority (the 197MB win).
 local FOLDABLE = { k = true, name = true, v = true, prefix = true,
-    kw = true, to = true, l = true, up = true, bound = true, bate = true } -- up / bound are read pre-fold (resolution), ignored
+    kw = true, to = true, l = true, up = true, bound = true, bate = true, bd = true } -- up / bound are read pre-fold (resolution), ignored; bd = the binder (M._binder)
 local function simple(a)
     if not M.K[a.k] then return false end -- unknown kind (param/call/field/…)
     for f in pairs(a) do if not FOLDABLE[f] then return false end end
@@ -78,7 +78,7 @@ end
 
 function M.fold(data)
     if data._argvcol then return 0 end -- already folded (idempotent)
-    local col = { k = {}, name = {}, v = {}, prefix = {}, kw = {}, to = {}, l = {} }
+    local col = { k = {}, name = {}, v = {}, prefix = {}, kw = {}, to = {}, l = {}, bd = {} }
     local n = 0
     for _, c in ipairs(data.calls or {}) do
         if c.argv and not c._av then
@@ -97,6 +97,7 @@ function M.fold(data)
                     col.kw[n] = a.kw
                     col.to[n] = a.to
                     col.l[n] = a.l
+                    col.bd[n] = a.bd
                 end
                 c._av, c._av0, c._avn = col, base, #c.argv
                 c.argv, c.args = nil, nil -- the fat tables, gone
@@ -111,7 +112,7 @@ end
 function M.bytes(data)
     local col = data._argvcol
     if not col then return 0 end
-    return #col.k * (1 + 8 * 6) -- k byte + 6 ref slots (name/v/prefix/kw/to/l)
+    return #col.k * (1 + 8 * 7) -- k byte + 7 ref slots (name/v/prefix/kw/to/l/bd)
 end
 
 return M

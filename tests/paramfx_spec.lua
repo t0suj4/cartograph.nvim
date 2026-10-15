@@ -328,3 +328,37 @@ test('purity inputs: php param writes are VALUE-semantics — no pw', function (
         end
     end
 end)
+
+-- ★ THE BINDING, NOT THE NAME (CART-1715): an argument names what its BINDER at the call site holds — argv's `bd`, the
+-- scope model's nearest binder — never the first same-file var or function of that spelling
+test('effects: a parameter, an inner local or a later declaration named like a module var is not that var; a callback is the function its binder declares', function ()
+    if not ready('lua') then return end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local cache = {}',
+        'local state = {}',
+        'local function fill(t) t.x = 1 end',
+        'local function run(f) f() end',
+        'local function Bcb() state.n = 1 end',  -- (named to sort before M.*: summaries go in id order, and a callback's must exist)
+        'function M.module() fill(cache) end',                              -- the module's cache
+        'function M.param(cache) fill(cache) end',                          -- its own parameter
+        'function M.inner() local cache = {}; fill(cache); return cache end', -- a fresh local
+        'function M.selfref() local cache = fill(cache) end',               -- inside its own declaration: the OUTER cache
+        'function M.outer() run(Bcb) end',                                  -- Bcb writes state
+        'function M.shadowcb() local function Bcb() end; run(Bcb) end',     -- an inner Bcb, pure
+        'return M', '' }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do if n.name and not by[n.name] then by[n.name] = n.id end end
+    eq('writes', effects.purity(store, by['M.module']), 'fill(cache) writes the module var')
+    eq('writes', effects.purity(store, by['M.param']), 'its own param is mutated…')
+    local S = effects.summaries(store)
+    eq(nil, next(S[by['M.param']].w or {}), '…and no module var: ' .. vim.inspect(S[by['M.param']]))
+    eq('pure', effects.purity(store, by['M.inner']), 'a fresh local of that name is the call\'s own business')
+    eq('writes', effects.purity(store, by['M.selfref']), '`local cache = fill(cache)` hands fill the module\'s cache')
+    eq('writes', effects.purity(store, by['M.outer']), 'run(Bcb) runs the module Bcb: a state write')
+    eq('pure', effects.purity(store, by['M.shadowcb']), 'run(Bcb) runs the inner Bcb: nothing — ' .. vim.inspect(S[by['M.shadowcb']]))
+end)

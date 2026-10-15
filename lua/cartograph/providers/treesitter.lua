@@ -1207,6 +1207,17 @@ function M._bound_value(an, a)
     end
     return b.at or b.row or -1, b.ate -- (the declaration's first and last row: a def starting in it is the binder's)
 end
+--- the BINDER an argument name has at its own site, as one number (argv's `bd`, CART-1715 — so a consumer decides by
+--- the binding, never by the name): row >= 0 = bound at the file's OUTERMOST scope, declared on that row; -1 = no
+--- binder (a global); -2 = a parameter of an inner scope; <= -3 = an inner local declared on row -bd - 3; nil = the
+--- language has no scope model
+function M._binder(an, a)
+    if not jvt_sm then return nil end
+    local b, top = jvt_sm.binder(an, a)
+    if not b then return -1 end
+    if top then return b.row or 0 end
+    return b.row and (-b.row - 3) or -2
+end
 --- the same rule from the fn RANGES alone (the id pass has no parent map): the innermost range strictly enclosing
 --- def `id`'s must contain the mention (line, col); a top-level def is visible everywhere in its file (CART-1562)
 local VIS_ENC = setmetatable({}, { __mode = 'k' }) -- ranges list -> { n = #ranges, [id] = enclosing range | false }
@@ -9024,7 +9035,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 -- (BOUND at its own site — a param / local the scope model sees there: the callback upgrade
                                 -- joins it to no function by name but the def its binder declares, M._bound_value — CART-1598)
                                 local bnd, bate = M._bound_value(an, a)
-                                argv[#argv + 1] = { k = 'local', name = an, l = select(1, a:range()), bound = bnd, bate = bate }
+                                argv[#argv + 1] = { k = 'local', name = an, l = select(1, a:range()), bound = bnd, bate = bate, bd = M._binder(an, a) }
                             elseif t == 'function_definition' or t == 'lambda' then
                                 args[#args + 1] = ''
                                 local ar, ac = a:start()
@@ -9048,9 +9059,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 -- builtin that mutates the argument writes that name's field (CART-1560; the helper
                                 -- lives in tsutil because this function is at LuaJIT's 60-upvalue limit)
                                 -- (`name` = the dotted path from the root, never `v`: argv.str reads v as a LITERAL)
-                                local _, _, path = tsutil.lua_field_root(a, src)
+                                local froot, _, path = tsutil.lua_field_root(a, src)
                                 args[#args + 1] = ''
-                                argv[#argv + 1] = { k = 'field', name = path }
+                                argv[#argv + 1] = { k = 'field', name = path, bd = M._binder(froot, a) }
                             elseif t == 'table_constructor' then
                                 -- `{ … }` — a table this call's argument list MAKES: fresh, so a write into it (setmetatable's) is
                                 -- the call's own business, never module state (CART-1547)
