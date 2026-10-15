@@ -160,6 +160,19 @@ local function build(store, opts)
     -- is handed; it may call every function arriving there with unknown arguments, and write or re-metatable every
     -- object. GOBJ / GPORT — the globals table, whose fields the globals are. Set below, with port)
     local G7 = {} -- (EXTCALL, GOBJ, GPORT, gport, gread: one local — the builder is at Lua's 200-local limit)
+    -- (opts.dump: the program in the core IR, with this solve's solution — flowdump.lua, CART-1710. G7.mu runs a builtin
+    -- translated by hand with its inner primitives MUTED; G7.ins / G7.gap record into the current function)
+    if opts.dump then G7.REC = require('cartograph.flowdump').recorder(); G7.M = 0 end
+    function G7.mu(f)
+        if not G7.REC then return f() end
+        G7.M = G7.M + 1
+        local r = f()
+        G7.M = G7.M - 1
+        return r
+    end
+    function G7.cur() local st = G7.FNS; local fp = st and st[#st]; return fp and fp.id or G7.CK end
+    function G7.ins(ins, tag) if G7.REC and G7.W then G7.REC.ins(G7.cur(), ins, tag) end end
+    function G7.gap(kind, vars) if G7.REC and G7.W then G7.REC.gap(G7.cur(), kind, vars, G7.CK) end end
     local idxcall
     -- ★ A FIELD'S READERS ARE IMPLICIT (CART-1643, to make the solver SMALLER): a load of x.f READS field f of every
     -- object at x, and materializing that as an edge per (object, load) was 96% of all edges — 10.96 M of 11.38 M on
@@ -526,7 +539,9 @@ local function build(store, opts)
         local l = stores[x]
         if not l then l = {}; stores[x] = l end
         l[#l + 1] = { f, v }
-        for o in each(x) do edge(v, ofp(o, f)) end
+        -- (a FUNCTION has no metatable of its own — setmetatable raises on one — so `\1mt` never lands on it: a generic
+        -- setmetatable(x, mt) whose x also held functions made a call of them run mt's __call, CART-1710)
+        for o in each(x) do if not (fnports[o] and f == '\1mt') then edge(v, ofp(o, f)) end end
     end
     -- (`setmetatable(t, { __index = idx })`: every object at t has every object at idx as a prototype — linked when
     -- EITHER side gains one; linking only on t's arrivals lost an idx object that came later, an ORDER-dependent miss)
@@ -642,7 +657,10 @@ local function build(store, opts)
     -- `e:<id>`, up the call graph to the pcall that protects it, CART-1705; one global set saturated on the repo and
     -- turned every pcall's second value into ⊤)
     local GERR, GYIELD, GRESARG
-    local function gerr() if not GERR then GERR = new(); addobj(GERR, typeobj('string')) end return GERR end
+    local function gerr()
+        if not GERR then GERR = new(); if G7.REC then G7.REC.errp[GERR] = true end; addobj(GERR, typeobj('string')) end
+        return GERR
+    end
     local function gyield() if not GYIELD then GYIELD = new() end return GYIELD end
     local function gresarg() if not GRESARG then GRESARG = new() end return GRESARG end
     idxcall = function (g, o, f, dst)
@@ -810,7 +828,9 @@ local function build(store, opts)
                 if d then
                     for _, ld in ipairs(loads[p] or NOTHING) do for _, o in dit(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
                     for _, st in ipairs(stores[p] or NOTHING) do
-                        for _, o in dit(d) do if not SCALAR[TNAME[o]] then edge(st[2], ofp(o, st[1])) end end
+                        for _, o in dit(d) do
+                            if not SCALAR[TNAME[o]] and not (fnports[o] and st[1] == '\1mt') then edge(st[2], ofp(o, st[1])) end
+                        end
                     end
                     for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3], cl[4]) end end
                     for _, ce in ipairs(ARGERR[p] or NOTHING) do
@@ -878,6 +898,7 @@ local function build(store, opts)
     G7.EXTCALL = new()
     do
         local xa = new()
+        G7.XA = xa
         addobj(xa, EXT)
         callc(G7.EXTCALL, { xa, xa, xa, xa, spread = 4 }, new())
     end
@@ -1086,6 +1107,7 @@ local function build(store, opts)
             local fp = { params = {}, ret = inst and new() or port('r:' .. id), id = id, inst = inst or nil }
             fp.rets = { fp.ret }
             fp.err = inst and new() or port('e:' .. id) -- (what it raises, CART-1705)
+            if G7.REC then G7.REC.errp[fp.err] = true end
             fnports[o] = fp
             -- (a nested function inherits its parent's environment — a top-level one its file CHUNK's: G7.fenv)
             local pid = fnstack[#fnstack] and fnstack[#fnstack].id or G7.CHUNK
@@ -1172,21 +1194,23 @@ local function build(store, opts)
                     return out
                 end
             end
-            if fname == 'setmetatable' and argn[1] then
+            if fname == 'setmetatable' and argn[1] then return G7.mu(function ()
                 local tp = expr(argn[1])
                 if argn[2] then
                     local mtp = expr(argn[2])
+                    G7.ins({ 'setmeta', tp, mtp })
                     proto(tp, field(mtp, '__index'), true)
                     storec(tp, '\1mt', mtp) -- (its handlers: __call, operators, __newindex — CART-1699)
                     MTSTORES[#MTSTORES + 1] = { tp, mtp } -- (it was never filled: a parked handler port was never released)
                     G7.GCPEND[#G7.GCPEND + 1] = { tp, gerr() } -- (a finalizer runs with the object, CART-1707: deferred)
                 end
                 return tp
-            end
+            end) end
             -- (UNKNOWN CODE, CART-1707: what load / loadstring / loadfile / dofile return is code the tree does not hold
             -- — EXT, and calling EXT returns EXT and hands its arguments to unknown code. A require the tree cannot map
             -- falls through to the general call, whose callee is EXT below)
             if (fname == 'load' or fname == 'loadstring' or fname == 'loadfile' or fname == 'dofile') and gbl() then
+                G7.gap('unknown-code', {})
                 for _, a in ipairs(argn) do edge(expr(a), G7.EXTCALL) end
                 local out = {}
                 for k = 1, want or 1 do out[k] = new(); addobj(out[k], EXT) end
@@ -1197,8 +1221,9 @@ local function build(store, opts)
             -- after the walk, when every function's reads are known (G7.FENV). setfenv(1, env) is the calling
             -- function (at the top level, the file's chunk); a deeper level is any function: env becomes a prototype of
             -- _G. getfenv returns _G and every environment set. rawget / rawset are a load and a store)
-            if fname == 'getfenv' and gbl() then for _, a in ipairs(argn) do expr(a) end; return G7.FENVP end
+            if fname == 'getfenv' and gbl() then for _, a in ipairs(argn) do expr(a) end; G7.gap('getfenv', {}); return G7.FENVP end
             if fname == 'setfenv' and argn[2] and gbl() then
+                G7.gap('setfenv', {})
                 local fa, env = argn[1], expr(argn[2])
                 edge(env, G7.FENVP)
                 local pf = fnstack[#fnstack]
@@ -1251,27 +1276,32 @@ local function build(store, opts)
             -- every yield returns them —, its results after the status are f's returns and every yield's values.
             -- wrap(f) is a FUNCTION of its own: a call forwards its arguments to f — the first call's are f's, every
             -- later one's every yield's results — and returns f's returns and every yield's values, CART-1707)
-            if fname == 'coroutine.wrap' then
+            if fname == 'coroutine.wrap' then return G7.mu(function ()
                 local fp = argn[1] and expr(argn[1]) or new()
+                G7.gap('coroutine.wrap', { fp })
                 local id = 'ts:wrap:' .. key_of(n) -- (no graph node: a verdict naming it is no claim)
                 local w = newobj(id)
                 local wp = new()
+                G7.ins({ 'new', wp, w })
                 addobj(wp, w)
                 local ps, rs = {}, {}
                 for k = 1, MULTI do ps[k] = new(); edge(ps[k], gresarg()); rs[k] = new(); edge(gyield(), rs[k]) end
                 local wfp = { params = ps, ret = rs[1], rets = rs, id = id, err = new(), vararg = new() }
                 fnports[w] = wfp
+                G7.gap('coroutine.wrap', rs) -- (its function's results: every yield's values, the solver's)
                 callc(fp, ps, rs, nil, wfp.err)
                 return wp
-            end
-            if fname == 'coroutine.create' then
+            end) end
+            if fname == 'coroutine.create' then return G7.mu(function ()
                 local fp = argn[1] and expr(argn[1]) or new()
                 local tp = new()
-                addobj(tp, newobj('thread:' .. key_of(n)))
+                local th = newobj('thread:' .. key_of(n))
+                G7.ins({ 'cocreate', tp, th, fp }, 'divergence:coroutine')
+                addobj(tp, th)
                 storec(tp, '\1co', fp)
                 return tp
-            end
-            if fname == 'coroutine.resume' and argn[1] then
+            end) end
+            if fname == 'coroutine.resume' and argn[1] then return G7.mu(function ()
                 local cp = expr(argn[1])
                 local aps = {}
                 for j = 2, #argn do aps[#aps + 1] = expr(argn[j]); edge(aps[#aps], gresarg()) end
@@ -1279,20 +1309,24 @@ local function build(store, opts)
                 for k = 1, math.max((want or 1) - 1, 1) do fl[k] = new(); out[k + 1] = fl[k]; edge(gyield(), fl[k]) end
                 -- (resume CATCHES what the coroutine raises: `false, err`)
                 local rerr = new()
+                if G7.REC then G7.REC.rerr[#G7.REC.rerr + 1] = rerr end
+                G7.ins({ 'resume', out, cp, aps }, 'divergence:coroutine')
                 addobj(rerr, STR)
                 edge(rerr, fl[1])
                 callc(field(cp, '\1co', true), aps, fl, nil, rerr)
                 if want then return out end
                 return out[1]
-            end
-            if fname == 'coroutine.yield' then
-                for j = 1, #argn do edge(expr(argn[j]), gyield()) end
+            end) end
+            if fname == 'coroutine.yield' then return G7.mu(function ()
+                local ys = {}
+                for j = 1, #argn do ys[j] = expr(argn[j]); edge(ys[j], gyield()) end
                 local out = {}
                 for k = 1, want or 1 do out[k] = new(); edge(gresarg(), out[k]) end
+                G7.ins({ 'yield', out, ys })
                 if want then return out end
                 return out[1]
-            end
-            if (fname == 'pcall' or fname == 'xpcall') and argn[1] then
+            end) end
+            if (fname == 'pcall' or fname == 'xpcall') and argn[1] then return G7.mu(function ()
                 local aps = {}
                 for j = (fname == 'xpcall' and 3 or 2), #argn do
                     aps[#aps + 1] = expr(argn[j])
@@ -1304,10 +1338,13 @@ local function build(store, opts)
                 -- clause this rests on. xpcall hands it to its handler, whose result is the second value)
                 local perr = new()
                 addobj(perr, STR)
+                if fname == 'xpcall' then G7.gap('xpcall-handler', {}) end
                 if want then
                     local fl, out = {}, { new() }
                     for k = 1, want - 1 do fl[k] = new(); out[k + 1] = fl[k] end
-                    callc(expr(argn[1]), aps, fl, nil, perr)
+                    local fv = expr(argn[1])
+                    G7.ins({ 'pcall', out, fv, aps }, fname == 'xpcall' and 'divergence:xpcall' or nil)
+                    callc(fv, aps, fl, nil, perr)
                     if out[2] then
                         if fname == 'xpcall' and argn[2] then
                             local hr = new()
@@ -1318,9 +1355,11 @@ local function build(store, opts)
                     return out
                 end
                 local res = new()
-                callc(expr(argn[1]), aps, res, nil, perr)
+                local fv = expr(argn[1])
+                G7.ins({ 'pcall', { res }, fv, aps }, fname == 'xpcall' and 'divergence:xpcall' or nil)
+                callc(fv, aps, res, nil, perr)
                 return res
-            end
+            end) end
             if fname == 'table.insert' and argn[1] then
                 local tp = expr(argn[1])
                 acc('array', argn[1], nil, tp)
@@ -1377,7 +1416,13 @@ local function build(store, opts)
                 ctx_direct[#ctx_direct + 1] = { to, aps, resl }
                 return want and resl or res
             end
-            if to then
+            if to then return G7.mu(function ()
+                -- (the name join resolved it and the callee is never evaluated: the dump calls the callee's site)
+                local xs = {}
+                for k, r in ipairs(resl) do xs[k] = r end
+                local as = {}
+                for j, ap in ipairs(aps) do as[j] = ap end
+                G7.ins({ 'call', xs, { static = to }, as, file }, 'resolved')
                 edge(port('e:' .. to), curerr())
                 for j, ap in ipairs(aps) do edge(ap, port('a:' .. to .. ':' .. j)) end
                 -- (past the callee's named parameters, into its vararg; a spread last argument into every parameter
@@ -1391,7 +1436,7 @@ local function build(store, opts)
                 end
                 for k, r in ipairs(resl) do edge(port('r:' .. to .. (k > 1 and (':' .. k) or '')), r) end
                 return want and resl or res
-            end
+            end) end
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
                 for k, r in ipairs(resl) do
@@ -1688,11 +1733,19 @@ local function build(store, opts)
         -- a file that names setfenv: a port per top-level global read cost w2 4x the load visits, 33 -> 55 s)
         local saved = G7.CHUNK
         G7.CHUNK = src:find('setfenv', 1, true) and ('chunk:' .. file) or nil
+        if G7.REC then
+            G7.W, G7.FNS, G7.CK = true, fnstack, 'chunk:' .. file
+            local e0, c0 = expr, callv -- (an argument evaluated inside a hand-translated builtin is the program's)
+            expr = function (x) local m = G7.M; G7.M = 0; local a, b = e0(x); G7.M = m; return a, b end
+            callv = function (x, w) local m = G7.M; G7.M = 0; local a, b = c0(x, w); G7.M = m; return a, b end
+        end
         for _, s in tsutil.inamed, tree, -1 do stmt(s) end
+        G7.W = false
         G7.CHUNK = saved
     end
     local instances = {}
     clone_at = function (site, o)
+        if G7.REC then return nil end -- (a dump is of the instance-free solve: an instance's ports are in no body)
         local cl = CLONE[o]
         if not cl or NOCLONE[site] then return nil end
         local per = instances[site]
@@ -1739,6 +1792,78 @@ local function build(store, opts)
         filter = filter, proto = proto, gfilter = gfilter, each = each, fields = function (o) return ofield[o] end,
         EXT = EXT, fn_at = fn_at, call_at = call_at, req_at = req_at, root = root, probes = {}, modports = modports,
         nodes = store.data.nodes }
+    -- (opts.dump: the walker's primitives RECORD — a primitive the walker calls is an instruction, what it does inside,
+    -- and all the solver derives, is not: G7.M counts the depth. Installed in a function of its own: the builder is at
+    -- the local limit)
+    if G7.REC then (function ()
+        local REC, E = G7.REC, G7.REC.errp
+        REC.objvar[G7.GOBJ] = G7.GPORT
+        local r_addobj, r_edge, r_field, r_storec, r_callc, r_metacall, r_metastore, r_proto =
+            addobj, edge, field, storec, callc, metacall, metastore, proto
+        local function on() return G7.W and G7.M == 0 end
+        local function enter() G7.M = G7.M + 1 end
+        local function leave() G7.M = G7.M - 1 end
+        local function list(t) local l = {}; for i, x in ipairs(t) do l[i] = x end; return l end
+        addobj = function (p, o)
+            if on() and not E[p] then
+                G7.ins({ 'new', p, o })
+                if not REC.objvar[o] then REC.objvar[o] = p end
+            end
+            enter(); r_addobj(p, o); leave()
+        end
+        edge = function (a, b)
+            if on() then
+                if E[b] then if not E[a] then G7.ins({ 'error', a }) end -- (a call's port-to-port flow is its own)
+                elseif E[a] then G7.gap('error-value', { a, b })
+                elseif fowner[b] and fname[b] == '{k}' then -- (a key into the key set: no core field)
+                elseif fowner[a] and fname[a] == '{k}' then G7.gap('table-keys', { b, a })
+                elseif fowner[b] then
+                    local hv = REC.objvar[fowner[b]]
+                    if hv then G7.ins({ 'store', hv, fname[b], a }) else G7.gap('store-field-port', { a, b }) end
+                elseif fowner[a] then
+                    local hv = REC.objvar[fowner[a]]
+                    if hv then G7.ins({ 'load', b, hv, fname[a] }) else G7.gap('load-field-port', { a, b }) end
+                else G7.ins({ 'copy', b, a }) end
+            end
+            enter(); r_edge(a, b); leave()
+        end
+        field = function (x, f, strict)
+            enter(); local dst = r_field(x, f, strict); leave()
+            if on() then
+                if f:byte(1) == 1 then G7.gap('hidden-load', { dst, x })
+                elseif f == '{k}' then G7.gap('table-keys', { dst, x }) -- (the key set `pairs` yields: no core field)
+                else
+                    G7.ins({ 'load', dst, x, f }, strict and f ~= '[]'
+                        and (x == G7.GPORT and 'contract:strict-global' or 'contract:strict') or nil)
+                end
+            end
+            return dst
+        end
+        storec = function (x, f, v)
+            if on() and f ~= '{k}' then if f:byte(1) == 1 then G7.gap('hidden-store', { x, v }) else G7.ins({ 'store', x, f, v }) end end
+            enter(); r_storec(x, f, v); leave()
+        end
+        callc = function (callee, args, res, site, cerr)
+            if on() then
+                if args.hook or args.fenv then G7.gap(args.hook and 'hooksecurefunc' or 'setfenv', { callee })
+                else G7.ins({ 'call', type(res) == 'table' and list(res) or { res }, callee, list(args) }) end
+            end
+            enter(); r_callc(callee, args, res, site, cerr); leave()
+        end
+        G7.callc = callc
+        -- (an operator's handler is the core's `op`; `__call`, `__index`, `__newindex` and `__gc` handlers are what a
+        -- call, a load, a store and the collector already run in the core — no instruction of their own)
+        local IMPLIED = { __call = true, __index = true, __newindex = true, __gc = true }
+        metacall = function (x, mm, args, res, cerr)
+            if on() and not IMPLIED[mm] then G7.ins({ 'op', res, list(args), mm }) end
+            enter(); r_metacall(x, mm, args, res, cerr); leave()
+        end
+        metastore = function (base, f, kp, v, cerr) enter(); r_metastore(base, f, kp, v, cerr); leave() end
+        proto = function (t, idx, lua)
+            if on() then G7.gap('proto', { t, idx }) end
+            enter(); r_proto(t, idx, lua); leave()
+        end
+    end)() end
     local gowalk, jswalk, jsfinish
     for _, f in ipairs(files) do
         local fd = type(root) == 'string' and io.open(root .. '/' .. f, 'rb')
@@ -1898,7 +2023,7 @@ local function build(store, opts)
     local PINC = {} -- (object -> the tainted __index source port that leaves its prototypes incomplete, CART-1709)
     -- (opts.explain: what tainted each port — the port it flowed from, `{ port, why }` for a rule that jumps, or a
     -- seed's reason — so a partial answer can be walked back to its seed: R.taint_path)
-    local TFROM = opts.explain and {} or nil
+    local TFROM = (opts.explain or opts.dump) and {} or nil
     local TCUR
     local function taint(p)
         if p and not tainted[p] then tainted[p] = true; twork[#twork + 1] = p; if TFROM then TFROM[p] = TCUR end end
@@ -2537,6 +2662,18 @@ local function build(store, opts)
         end
         R.ctxfns, R.nctx = sel, n
     end
+    if G7.REC then -- (opts.dump: the program in the core IR and this solution, CART-1710)
+        local sha = vim.fn.systemlist({ 'git', '-C', type(root) == 'string' and root or '.', 'rev-parse', 'HEAD' })[1]
+        R.dump = require('cartograph.flowdump').build(G7.REC, {
+            N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
+            ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.GOBJ, GPORT = G7.GPORT, EXT = EXT, GERR = GERR,
+            GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, verdicts = verdicts,
+            calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at',
+            sha = vim.v.shell_error == 0 and sha or nil })
+        if type(opts.dump) == 'string' then
+            local fd = assert(io.open(opts.dump, 'w')); fd:write(R.dump); fd:close()
+        end
+    end
     return R
 end
 -- (TWO SOLVES, the selective context sensitivity: the first picks the functions, the second gives them instances.
@@ -2546,7 +2683,7 @@ end
 local build1 = build
 build = function (store, opts)
     opts = opts or {}
-    if opts.ctx == false or opts.ctxfns then return build1(store, opts) end
+    if opts.ctx == false or opts.ctxfns or opts.dump then return build1(store, opts) end
     local R1 = build1(store, setmetatable({ keepsat = true }, { __index = opts }))
     if (R1.nctx or 0) == 0 then return R1 end
     local R = build1(store, setmetatable({ ctxfns = R1.ctxfns }, { __index = opts }))
