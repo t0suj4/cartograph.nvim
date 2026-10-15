@@ -74,6 +74,9 @@ test('flowdump: the format — the Lua instance\'s field ids, host sites, per-fu
     if not parser_available('lua') then skip 'no lua parser' end
     local D = dump('local ok, e = pcall(function () error(b) end)\nprint(use(e))\nlocal t = { x = a }\nfor k in pairs(t) do print(k) end\n')
     eq(1, D.format)
+    -- (the PRODUCER's commit is cartograph's, wherever the caller stands; a corpus that is no repository has none — CART-1721)
+    eq(vim.fn.systemlist({ 'git', '-C', vim.fn.fnamemodify(debug.getinfo(require('cartograph.flowtype').solve, 'S').source:sub(2), ':h'), 'rev-parse', 'HEAD' })[1], D.cartograph)
+    eq(vim.NIL, D.corpus.sha, 'a temp tree is no repository')
     eq('<meta>', D.names.fields[101], 'the metatable slot is field 100')
     eq('__index', D.names.fields[102], '__index is field 101')
     eq(vim.NIL, D.names.fields[105], '104 (evStoreLook) is no field')

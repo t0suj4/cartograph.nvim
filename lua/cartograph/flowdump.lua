@@ -13,7 +13,9 @@
 -- layer is FLOW C.3. The answers in the dump are that run's.
 --
 -- FORMAT 1 (CORE.md §5, with these decisions — revisable with the reader):
---   { format = 1, lang = 'lua', ver = 51, cartograph = <sha|nil>, mode = 'closed', instances = false,
+--   { format = 1, lang = 'lua', ver = 51, cartograph = <sha|nil>, corpus = { root, sha }, mode = 'closed', instances = false,
+--   (cartograph: the PRODUCER's commit — the repo flowtype.lua is in; corpus.sha: the analysed tree's own commit, null
+--   when its root is not a repository's top level)
 --     names = { fields = [...], functions = [...] },
 --     sites = [ { id, kind, label, fn } ... ],
 --     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ] } ... ],
@@ -81,6 +83,18 @@ function M.recorder()
     end
     function R.gap(key, kind, vars, at) R.gaps[#R.gaps + 1] = { fn = key, kind = kind, vars = vars or {}, at = at } end
     return R
+end
+
+--- the git HEAD of `dir`'s repository, or nil; `own`: only when dir IS that repository's top level (a snapshot without
+--- .git inside another repo is not that repo's commit — CART-1721)
+function M.head(dir, own)
+    if type(dir) ~= 'string' or dir == '' then return nil end
+    if own then
+        local top = vim.fn.systemlist({ 'git', '-C', dir, 'rev-parse', '--show-toplevel' })[1]
+        if vim.v.shell_error ~= 0 or vim.fn.resolve(vim.fn.fnamemodify(top, ':p')) ~= vim.fn.resolve(vim.fn.fnamemodify(dir, ':p')) then return nil end
+    end
+    local sha = vim.fn.systemlist({ 'git', '-C', dir, 'rev-parse', 'HEAD' })[1]
+    return vim.v.shell_error == 0 and sha or nil
 end
 
 -- ── the writer: JSON by hand (the dump of a large tree is tens of MB; vim.json.encode of one table doubles it) ──
@@ -320,7 +334,8 @@ function M.build(rec, X)
     for id = 0, maxf do fields[id + 1] = fnames[id] and jstr(fnames[id]) or 'null' end
     local fns = {}
     for i, n in ipairs(fnlist) do fns[i] = jstr(n) end
-    put(('{"format":1,"lang":"lua","ver":51,"cartograph":%s,"mode":"closed","instances":false,'):format(X.sha and jstr(X.sha) or 'null'))
+    put(('{"format":1,"lang":"lua","ver":51,"cartograph":%s,"corpus":{"root":%s,"sha":%s},"mode":"closed","instances":false,'):format(
+        X.sha and jstr(X.sha) or 'null', type(X.corpus) == 'string' and jstr(X.corpus) or 'null', X.corpus_sha and jstr(X.corpus_sha) or 'null'))
     put('"names":{"fields":[' .. table.concat(fields, ',') .. '],"functions":[' .. table.concat(fns, ',') .. ']},')
     put('"sites":[' .. table.concat(sj, ',') .. '],')
     put('"functions":[' .. table.concat(fjson, ',') .. '],')

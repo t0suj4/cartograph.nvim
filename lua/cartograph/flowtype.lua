@@ -2663,13 +2663,14 @@ local function build(store, opts)
         R.ctxfns, R.nctx = sel, n
     end
     if G7.REC then -- (opts.dump: the program in the core IR and this solution, CART-1710)
-        local sha = vim.fn.systemlist({ 'git', '-C', type(root) == 'string' and root or '.', 'rev-parse', 'HEAD' })[1]
-        R.dump = require('cartograph.flowdump').build(G7.REC, {
+        local FD = require 'cartograph.flowdump'
+        local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
+        R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.GOBJ, GPORT = G7.GPORT, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, verdicts = verdicts,
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at',
-            sha = vim.v.shell_error == 0 and sha or nil })
+            sha = here and FD.head(here), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) })
         if type(opts.dump) == 'string' then
             local fd = assert(io.open(opts.dump, 'w')); fd:write(R.dump); fd:close()
         end
