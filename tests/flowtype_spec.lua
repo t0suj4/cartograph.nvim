@@ -188,7 +188,10 @@ end)
 
 -- ★ LUA'S HIDDEN VALUE ROUTES (CART-1699): classes A and B with a method m; a function's parameter p receives `a` through
 -- an ordinary call and `b` through a construct the walk did not model. At run time B.m runs (each fixture checked with
--- luajit, ~/work/flowpath/probes/translation/fx); the answer for p:m() must not be a WHOLE exact A.m
+-- luajit, ~/work/flowpath/probes/translation/fx); the answer for p:m() must not be a WHOLE exact A.m. CART-1708 adds the
+-- errors of tree code a builtin runs (an __index function, a sort comparator or __lt, __tostring, a gsub replacement);
+-- CART-1707 varargs, code outside the tree (load, dofile, a require the tree cannot map), environments, raw access,
+-- hooksecurefunc, coroutine.wrap, finalizers and getmetatable
 local CLASSES = table.concat({
     'local A, B = {}, {}',
     'function A.m(self) return "A" end',
@@ -203,6 +206,44 @@ local ROUTES = {
     { 'indexfn-late', 'CART-1703', 'local function get(t, k) return b end\nlocal lazy = setmetatable({}, { __index = get })\nlocal function rd(t) return t.anything end\nlocal function use(p) return p:m() end\nuse(a)\nprint(use(rd(lazy)))\n' },
     { 'newindexfn', 'CART-1704', 'local function onset(t, k, p) return p:m() end\nonset(nil, "x", a)\nlocal watched = setmetatable({}, { __newindex = onset })\nwatched.y = b\n' },
     { 'errorval', 'CART-1705', 'local function use(p) return p:m() end\nuse(a)\nlocal ok, e = pcall(function () error(b) end)\nprint(use(e))\n' },
+    { 'idxerr', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal lazy = setmetatable({}, { __index = function (t, k) error(b) end })\nlocal ok, e = pcall(function () return lazy.x end)\nprint(use(e))\n' },
+    { 'sortcb', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal ok, e = pcall(function () table.sort({ 2, 1 }, function (x, y) error(b) end) end)\nprint(use(e))\n' },
+    { 'sortlt', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, { __lt = function () error(b) end })\nlocal ok, e = pcall(function () table.sort({ o, o }) end)\nprint(use(e))\n' },
+    { 'tostringerr', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, { __tostring = function () error(b) end })\nlocal ok, e = pcall(function () return tostring(o) end)\nprint(use(e))\n' },
+    { 'printerr', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, { __tostring = function () error(b) end })\nlocal ok, e = pcall(function () print(o) end)\nprint(use(e))\n' },
+    { 'gsubrepl', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal ok, e = pcall(function () return string.gsub("x", ".", function () error(b) end) end)\nprint(use(e))\n' },
+    { 'spread', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) return use(...) end\nprint(f(b))\n' },
+    { 'local_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) local x = ... ; return use(x) end\nprint(f(b))\n' },
+    { 'select_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) return use(select(1, ...)) end\nprint(f(b))\n' },
+    { 'table_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) local t = { ... }; return use(t[1]) end\nprint(f(b))\n' },
+    { 'unpack_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(t) return use(unpack(t)) end\nprint(f({ b }))\n' },
+    { 'multiret', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function two() return 1, b end\nlocal function g(x, y) return use(y) end\nprint(g(two()))\n' },
+    { 'pcall_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) return pcall(use, ...) end\nprint(f(b))\n' },
+    { 'loadstring', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal f = loadstring("return ...")\nprint(use(f(b)))\n' },
+    { 'load', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal f = load("return ...")\nprint(use(f(b)))\n' },
+    { 'dofile', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nprint(use(dofile("x.lua")))\n' },
+    { 'require_unknown', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nprint(use(require("nowhere.at.all")))\n' },
+    { 'getfenv', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal env = getfenv(1)\nenv.q = b\nprint(use(q))\n' },
+    { 'setfenv', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal env = setmetatable({ q = b }, { __index = _G })\nlocal function g() return use(q) end\nsetfenv(g, env)\nprint(g())\n' },
+    { 'setfenv_nested', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal env = setmetatable({ q = b }, { __index = _G })\nlocal function g() return (function () return use(q) end)() end\nsetfenv(g, env)\nprint(g())\n' },
+    { 'setfenv_chunk', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nsetfenv(1, setmetatable({ q = b }, { __index = _G }))\nprint(use(q))\n' },
+    { '_G', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\n_G.q = b\nprint(use(q))\n' },
+    { '_G_dynamic', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal k = ("q"):lower()\n_G[k] = b\nprint(use(_G[k]))\n' },
+    { '_G_host', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nbb = b\nprint(use(_G[("bb"):lower()]))\n' },
+    { '_G_dyncall', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal k = ("f"):lower()\n_G[k] = use\n_G[k](b)\n' },
+    { '_G_dynparam', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal k = ("f"):lower()\n_G[k] = use\nlocal function get(t, j) return t[j] end\nget(_G, k)(b)\n' },
+    { 'rawget', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal t = { x = b }\nprint(use(rawget(t, "x")))\n' },
+    { 'rawset', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal t = {}\nrawset(t, "x", b)\nprint(use(t.x))\n' },
+    { 'hook', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal T = { f = function (x) return x end }\nhooksecurefunc(T, "f", function (x) return use(x) end)\nT.f(b)\n' },
+    { 'wrapyield', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal w = coroutine.wrap(function () coroutine.yield(b) end)\nprint(use(w()))\n' },
+    { 'gc', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, { __gc = function (self) return use(self.v) end })\no.v = b\n' },
+    { 'gc_dynamic', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal mt = {}\nmt[("_"):rep(2) .. "gc"] = function (self) return use(self.v) end\nlocal o = setmetatable({ v = b }, mt)\n' },
+    { 'newproxy', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal u = newproxy(true)\ngetmetatable(u).__index = function () return b end\nprint(use(u.x))\n' },
+    { 'getmetatable', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, {})\ngetmetatable(o).__index = function () return b end\nprint(use(o.x))\n' },
+    { 'handed', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nbb = b\nlocal t = {}\nlocal f = loadstring("local t = ... t.v = bb")\nf(t)\nprint(use(t.v))\n' },
+    { 'sortval', 'CART-1707', 'local function lt(x, p) return p:m() end\nlt(nil, a)\ntable.sort({ b, b }, lt)\n' },
+    { 'wraparg', 'CART-1707', 'local function f(p) return p:m() end\nf(a)\nlocal w = coroutine.wrap(f)\nw(b)\n' },
+    { 'spread_later', 'CART-1707', 'local function g(x, p) return p:m() end\ng(nil, a)\nlocal function f(...) return g(...) end\nf(nil, b)\n' },
 }
 for _, r in ipairs(ROUTES) do
     test(('flowtype: %s — the value that reaches p by that route makes p:m() no WHOLE exact A.m (%s)'):format(r[1], r[2]), function ()
@@ -220,6 +261,171 @@ for _, r in ipairs(ROUTES) do
                 local v = flowtype.solve(store, { open = open, order = order }).verdict(call)
                 ok(not (v and v.kind == 'exact' and not v.partial), ('%s %s %s: %s'):format(r[1], open and 'open' or 'closed', order, vim.inspect(v)))
             end
+        end
+        vim.fn.delete(root, 'rf')
+    end)
+end
+
+-- (the same fixtures, read the other way: `t[k]` never returns a HIDDEN field — the metatable rides on t as `\1mt`. The
+-- dynamic load registered BEFORE setmetatable's store got the metatable as a value, one registered after did not; mt
+-- has an m of its own, so a load that returned it made p:m() a set, CART-1707)
+for _, late in ipairs { false, true } do
+    test(('flowtype: `t[k]` never reads the metatable — setmetatable %s the load (CART-1707)'):format(late and 'after' or 'before'), function ()
+        if not parser_available('lua') then skip 'no lua parser' end
+        local sm = 'setmetatable(t, mt)\n'
+        local root = tree({ ['m.lua'] = CLASSES .. table.concat({
+            'local function use(p) return p:m() end',
+            'use(a)',
+            'local mt = { __index = {}, m = function (self) return "MT" end }',
+            'local t = {}',
+            late and '' or sm,
+            'local function rd(x, k) return x[k] end',
+            'print(use(rd(t, ("q"):upper())))',
+            late and sm or '' }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local callrec = require 'cartograph.callrec'
+        local call
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+        for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+            local v = flowtype.solve(store, { open = false, order = order }).verdict(call)
+            ok(v and v.kind == 'exact' and not v.partial and tostring(v.targets[1]):match('A%.m'), order .. ': ' .. vim.inspect(v))
+        end
+        vim.fn.delete(root, 'rf')
+    end)
+end
+
+-- (a metamethod is looked up in the object's OWN metatable: an __index prototype's metatable is never consulted — `o + b`
+-- with __add only on o's prototype raises, so add never runs with b. A load of the hidden `\1mt` that walked the
+-- prototype chain answered it did, CART-1707)
+-- (both orders: `o + b` loads o's metatable at the walk, before the prototype link — a replayed load; `plus(o, b)` loads
+-- it when o reaches the parameter, after the link — the chain walk)
+for _, viaparam in ipairs { false, true } do
+test(('flowtype: a metamethod is the object\'s own — a prototype\'s metatable is not consulted%s (CART-1707)'):format(viaparam and ', through a parameter' or ''), function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = CLASSES .. table.concat({
+        'local function add(x, p) return p:m() end',
+        'add(nil, a)',
+        'local base = setmetatable({}, { __add = add })',
+        'local o = setmetatable({}, { __index = base })',
+        viaparam and 'local function plus(x, y) return x + y end\nprint(pcall(plus, o, b))' or 'print(pcall(function () return o + b end))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+        local v = flowtype.solve(store, { open = false, order = order }).verdict(call)
+        ok(v and v.kind == 'exact' and not v.partial and tostring(v.targets[1]):match('A%.m'), order .. ': ' .. vim.inspect(v))
+    end
+    vim.fn.delete(root, 'rf')
+end)
+end
+
+-- (a HANDLER PORT the cap left incomplete is parked until some metatable can hold the handler — and the metatables were
+-- never recorded, so it was never released: `o1 + 1` runs __add, which returns a, where the metatable parameter
+-- saturated; the answer was a WHOLE exact B.m. Found by CART-1707's finalizer deferral, which reads the same list)
+test('flowtype: a handler port the cap cut is RELEASED once a metatable can hold the handler — no whole exact (CART-1707)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = CLASSES .. table.concat({
+        'local function use(p) return p:m() end',
+        'use(b)',
+        'local function mk(mt) return setmetatable({}, mt) end',
+        'local o1 = mk({ __add = function (x, y) return a end })',
+        'local o2 = mk({})',
+        'local o3 = mk({})',
+        'print(use(o1 + 1))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2 -- (the metatable parameter saturates)
+    for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+        local v = flowtype.solve(store, { open = false, order = order }).verdict(call)
+        ok(not (v and v.kind == 'exact' and not v.partial), order .. ': ' .. vim.inspect(v))
+    end
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+end)
+
+-- (the contract's third edge: _G never ESCAPES. `put` receives three tables at CAP 2, _G among them; its parameter
+-- saturates, so the store `t.q = b` is not followed into _G — and _G's fields are not tainted for it. WoW passes _G as
+-- an argument: an escaped _G took every addon's namespace with it, w3 308 whole answers partial. A fix that keeps the
+-- precision flips this spec)
+for _, held in ipairs { false, true } do
+test(('flowtype: a write to _G through a value the cap cut is not followed — _G never escapes%s (CART-1707)'):format(held and ', held in a field' or ''), function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = CLASSES .. table.concat({
+        'local function use(p) return p:m() end',
+        'use(a)',
+        held and 'local function put(t) t.g.q = b end' or 'local function put(t) t.q = b end',
+        held and 'put({ g = {} })' or 'put({})',
+        held and 'put({ g = {} })' or 'put({})',
+        held and 'put({ g = _G })' or 'put(_G)',
+        'print(use(q))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local v = flowtype.solve(store, { open = false }).verdict(call)
+    flowtype.CAP = cap
+    eq('exact', v and v.kind, 'the miss: ' .. vim.inspect(v))
+    ok(not v.partial, 'whole: ' .. vim.inspect(v))
+    vim.fn.delete(root, 'rf')
+end)
+end
+
+-- (`setfenv(1, env)` at a file's top level is that CHUNK's environment — its functions' global reads, nobody else's.
+-- Without the chunk, env became a prototype of _G for every global read in the tree: WoW's `setfenv(1, Prat)`)
+test('flowtype: setfenv(1, env) at the top level is the file chunk\'s environment — another file\'s global read does not see env (CART-1707)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lib.lua'] = 'B2 = setmetatable({}, { __index = { m = function (self) return "B" end } })\nsetfenv(1, { q = B2 })\nprint(q)\n',
+        ['m.lua'] = CLASSES .. 'local function use(p) return p:m() end\nuse(a)\nprint(use(q))\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local v = flowtype.solve(store, { open = false }).verdict(call)
+    ok(v and v.kind == 'exact' and not v.partial and tostring(v.targets[1]):match('A%.m'), vim.inspect(v))
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ★ THE CONTRACT'S EDGE, PINNED (CART-1707): a global read is a STRICT load of _G's field — it sees `_G.q = v`,
+-- `rawset(_G, 'q', v)`, getfenv's table and setfenv's environments, not a DYNAMIC-key `_G[k] = v`. Reading `[]` made
+-- every global read on the repo partial (typed RIGHT 121 -> 0 on the runtime oracle): mix's evaluator holds _G among
+-- its values and writes `o[k] = v`. This miss is the price; a fix that keeps the precision flips this spec
+test('flowtype: a dynamic-key write `_G[k] = v` is not seen by a global read — the contract\'s edge (CART-1707)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = CLASSES .. 'local function use(p) return p:m() end\nuse(a)\nlocal k = ("q"):lower()\n_G[k] = b\nprint(use(q))\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local v = flowtype.solve(store, { open = false }).verdict(call)
+    eq('exact', v and v.kind, 'the miss: ' .. vim.inspect(v))
+    vim.fn.delete(root, 'rf')
+end)
+
+-- (and its mirror: a read by COMPUTED name `_G[k]` sees what a dynamic-key write stored, and EXT — a global the host
+-- defines — not the named globals: pulling every named global's set into each `_G[k]` took WoW w2 from 41 to 632 s.
+-- So `_G[name](b)` does not bind the named global function; a fix that keeps the cost flips this spec)
+for _, viaparam in ipairs { false, true } do
+    test(('flowtype: a read by computed name `_G[k]` does not see the NAMED globals — the contract\'s edge%s (CART-1707)'):format(viaparam and ', through a parameter' or ''), function ()
+        if not parser_available('lua') then skip 'no lua parser' end
+        local root = tree({ ['m.lua'] = CLASSES .. table.concat({
+            'function gf(p) return p:m() end',
+            'gf(a)',
+            'local k = ("g"):rep(1) .. "f"',
+            viaparam and 'local function get(t, j) return t[j] end\nget(_G, k)(b)' or '_G[k](b)' }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local callrec = require 'cartograph.callrec'
+        local call
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+        for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+            local v = flowtype.solve(store, { open = false, order = order }).verdict(call)
+            eq('exact', v and v.kind, order .. ': the miss: ' .. vim.inspect(v))
         end
         vim.fn.delete(root, 'rf')
     end)

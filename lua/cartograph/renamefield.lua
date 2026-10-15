@@ -125,13 +125,14 @@ function M.family(store, args)
         fam[best] = true
     end
     local function where(a) return ('%s:%d'):format(a.file, a.range[1] + 1) end
-    -- (a family table that ESCAPED reached a saturated port: what is done with it beyond is not followed, so no roster
-    -- of its accesses is complete — the frontier is the family itself)
+    -- (a family table that ESCAPED reached a saturated port or code outside the tree — load()'s, a module the tree does
+    -- not hold, CART-1707: what is done with it beyond is not followed, so no roster of its accesses is complete — the
+    -- frontier is the family itself)
     local esc = {}
     for site in pairs(fam) do if R.escaped_sites and R.escaped_sites[site] then esc[#esc + 1] = site end end
     if #esc > 0 then
         table.sort(esc)
-        return nil, ('the family ESCAPES: %s reach a saturated port, so accesses through it are not followed — no roster of its accesses is complete'):format(table.concat(esc, ', ')), 'frontier'
+        return nil, ('the family ESCAPES: %s reach a saturated port or code outside the tree, so accesses through it are not followed — no roster of its accesses is complete'):format(table.concat(esc, ', ')), 'frontier'
     end
     return { R = R, fam = fam, n = #want, where = where }
 end

@@ -21,8 +21,8 @@ M.RULES = {
     before = '        for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end',
     after = '        for _, ld in ipairs(NOTHING) do taint(ld[2]) end' },
   { name = 'functions under a tainted field load', check = 'cap.lua', tree = 'ts',
-    before = '                        if (fk == f or f == \'[]\') and not top[fp] then',
-    after = '                        if false and (fk == f or f == \'[]\') and not top[fp] then' },
+    before = '                local function hit(l) for _, x in ipairs(l) do for _, pp in ipairs(fnports[x].params) do taint(pp) end end end',
+    after = '                local function hit(l) end' },
 }
 
 --- CART-1643: what moves with the order is flagged, whole answers survive a bigger cap, every taint rule is needed

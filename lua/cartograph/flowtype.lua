@@ -14,9 +14,21 @@
 -- reader closure), 772 calls whose receiver is only ever a string.
 --
 -- ★ AN ANSWER IS A CLAIM ONLY WHEN NOTHING UNKNOWN REACHES THE RECEIVER. A port past CAP objects is `top` and that
--- spreads to whatever it flows into; an external call with no declared return yields EXT; with `open` (default), a
--- function a module exports takes EXT at its parameters (its callers are not all in the tree). A receiver holding
+-- spreads to whatever it flows into; code outside the tree — what load / loadstring / dofile and a require the tree
+-- cannot map return — is EXT, and calling it returns EXT and hands it the arguments (CART-1707); with `open` (default),
+-- a function a module exports takes EXT at its parameters (its callers are not all in the tree). A receiver holding
 -- EXT or top gets no verdict. What the tree does not hold is a frontier, never a guess.
+--
+-- ★ THE CONTRACT — what a whole answer assumes of the code it cannot see (each clause pinned by a spec):
+--   - a function outside the tree raises strings (pcall's second value, CART-1705);
+--   - a profile-typed function (vim.*, string.*) writes nothing it is handed, and calls a function it is handed only
+--     where a route models it (table.sort's comparator, __tostring; any such call's ERRORS reach the caller, CART-1708)
+--     — `vim.tbl_map(f, t)` handing t's elements to f is not followed; UNKNOWN code (EXT) may write any field of what
+--     it is handed and calls the functions among it with EXT — but not the globals table, which every code reaches;
+--   - globals are named: a global read sees `_G.q = v`, never a dynamic-key `_G[k] = v`, and a read by computed
+--     name `_G[k]` sees dynamic-key writes and EXT, never the named globals (CART-1707: either widening made every
+--     global read on the repo partial, or WoW w2's solve 15x slower); and _G never ESCAPES — a write through a value
+--     the cap cut that may be _G is not followed (WoW passes _G as an argument: w3, 308 whole answers partial).
 --
 --   M.of(store, opts) -> R, cached per graph generation; R.verdict(c) -> nil | { kind = 'exact' | 'narrowed' |
 --     'string' | 'typed', targets = { fn id … } (exact / narrowed), type = 'string' | <profile type> }
@@ -140,6 +152,14 @@ local function build(store, opts)
     -- (METAH: a handler port -> its metamethod name; MTSTORES: every setmetatable's { target, metatable } ports — what
     -- decides whether a tainted handler port can be missing anything, see the taint loop)
     local METAH, MTSTORES = {}, {}
+    -- (CART-1708: where an error raised by tree code that a LOAD runs — an __index function — goes: the load site's
+    -- function's error port, LOADERR[load result]; WALKERR is the walker's current one. ARGERR: a call's argument
+    -- port -> the error ports a function value arriving there carries into — a builtin may call it)
+    local LOADERR, ARGERR, WALKERR = {}, {}, nil
+    -- (CART-1707: EXTCALL — what UNKNOWN code (a call of EXT: load / loadstring / dofile, a module outside the tree)
+    -- is handed; it may call every function arriving there with unknown arguments, and write or re-metatable every
+    -- object. GOBJ / GPORT — the globals table, whose fields the globals are. Set below, with port)
+    local G7 = {} -- (EXTCALL, GOBJ, GPORT, gport, gread: one local — the builder is at Lua's 200-local limit)
     local idxcall
     -- ★ A FIELD'S READERS ARE IMPLICIT (CART-1643, to make the solver SMALLER): a load of x.f READS field f of every
     -- object at x, and materializing that as an edge per (object, load) was 96% of all edges — 10.96 M of 11.38 M on
@@ -390,14 +410,16 @@ local function build(store, opts)
         end
         return p
     end
-    -- every load reading field g of o: the loads of g; a non-strict `[]` load reads every field but `{k}`; `[]` is read
-    -- by every non-strict named load as well (a Lua `t[k] = v` may write any name)
+    -- every load reading field g of o: the loads of g; a non-strict `[]` load reads every field but `{k}` and the
+    -- HIDDEN ones (`\1mt`, `\1co`: no `t[k]` returns them — a `[]` load registered before setmetatable's store got
+    -- the metatable, one registered after did not, CART-1707); `[]` is read by every non-strict named load as well (a
+    -- Lua `t[k] = v` may write any name)
     local function readers(o, g, fn)
         local r = rd[o]
         if not r then return end
         local l = r[g]
         if l then for dst in pairs(l) do fn(dst) end end
-        if g ~= '{k}' and g ~= '[]' then
+        if g ~= '{k}' and g ~= '[]' and g:byte(1) ~= 1 and o ~= G7.GOBJ then
             local dyn = r['[]']
             if dyn then for dst, strict in pairs(dyn) do if not strict then fn(dst) end end end
         end
@@ -450,14 +472,20 @@ local function build(store, opts)
                 if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
             end
             if strict then pull(ofp(o, f))
-            elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' and fk ~= '\1mt' then pull(m[fk]) end end
+            elseif f == '[]' and o == G7.GOBJ then
+                -- (`_G[k]`, k unknown: what a dynamic-key write stored, and a global the HOST defines — EXT. Not every
+                -- named global: on WoW `_G["Frame" .. i]` pulled every global's value set into each such read, and
+                -- the solve went 41 -> 632 s. The mirror of a STRICT global read, CART-1707)
+                pull(ofp(o, '[]')); if G7.EXT then addobj(dst, G7.EXT) end
+            elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' and fk:byte(1) ~= 1 then pull(m[fk]) end end
             else pull(ofp(o, f)); pull(ofp(o, '[]')) end
             -- (a load falling through to an __index FUNCTION calls it with (o, key): its result is the load's value)
             local fm = IDXFN[o]
             if fm then for g in pairs(fm) do idxcall(g, o, f, dst) end end
         end
         local pr = protos[o]
-        if pr then
+        -- (a HIDDEN field — the metatable `\1mt`, a thread's `\1co` — is the object's own: no __index chain reaches it)
+        if pr and f:byte(1) ~= 1 then
             seen = seen or { [o] = true }
             for c in pairs(pr) do load_obj(c, f, dst, seen, strict) end
         end
@@ -467,7 +495,7 @@ local function build(store, opts)
         local r = rd[o]
         if not r then return end
         for f, l in sorted(r) do
-            if f ~= NS then for dst, strict in pairs(l) do load_obj(c, f, dst, nil, strict) end end
+            if f ~= NS and f:byte(1) ~= 1 then for dst, strict in pairs(l) do load_obj(c, f, dst, nil, strict) end end
         end
     end
     -- (PARAMETER PATHS, opts.pathsum — CART-1673: a parameter's port is tagged { fn, j, path = '' }, a load through a
@@ -482,6 +510,7 @@ local function build(store, opts)
     end
     local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
+        if WALKERR then LOADERR[dst] = WALKERR() end
         if PTAG then
             local tg = PTAG[x]
             if tg and tg.d < 3 then PTAG[dst] = { fn = tg.fn, j = tg.j, path = tg.path .. '.' .. tostring(f), d = tg.d + 1 } end
@@ -556,6 +585,31 @@ local function build(store, opts)
             local inst = clone_at(site, o)
             if inst then o = inst end
         end
+        if args.fenv then
+            -- (setfenv's function: its reads see the environment; unknown code is handed it)
+            if o == G7.EXT then edge(args.fenv, G7.EXTCALL)
+            elseif fnports[o] then G7.fenv(fnports[o].id, args.fenv) end
+            return
+        end
+        if args.hook then
+            -- (a HOOKED function — hooksecurefunc's: each function stored under the name also runs the hook with its
+            -- arguments, CART-1707. A resolved call reaches the original straight, so its PARAMETERS are the hook's
+            -- arguments)
+            local fpp = fnports[o]
+            if fpp then
+                local ha = {}
+                for i, pp in ipairs(fpp.params) do ha[i] = pp end
+                if fpp.vararg then ha[#ha + 1] = fpp.vararg; ha.spread = #ha end
+                G7.callc(args.hook, ha, new())
+            end
+            return
+        end
+        if o == G7.EXT and G7.EXTCALL then
+            -- (calling UNKNOWN code: its results are unknown, what it is handed it may call or write — CART-1707)
+            if type(res) == 'table' then for _, r in ipairs(res) do addobj(r, G7.EXT) end elseif res then addobj(res, G7.EXT) end
+            for _, a in ipairs(args) do edge(a, G7.EXTCALL) end
+            return
+        end
         local fp = fnports[o]
         if not fp then
             -- (a TYPED function — the profile's `fun(): TSNode, string`, what TSNode:iter_children returns — returns its
@@ -570,6 +624,14 @@ local function build(store, opts)
         end
         for i, a in ipairs(args) do if fp.params[i] then edge(a, fp.params[i]) end end
         if cerr and fp.err then edge(fp.err, cerr) end -- (what the callee raises, the caller raises: CART-1705)
+        -- (arguments past the named parameters reach the vararg; a spread last argument every parameter from its
+        -- position, CART-1707)
+        if fp.vararg then for i = #fp.params + 1, #args do edge(args[i], fp.vararg) end end
+        local sp = args.spread
+        if sp then
+            for i = sp + 1, #fp.params do edge(args[sp], fp.params[i]) end
+            if fp.vararg then edge(args[sp], fp.vararg) end
+        end
         -- (a MULTI-value result — Go's `v, err := f()` — is a list of ports: the i-th return to the i-th)
         if type(res) == 'table' then
             for i, r in ipairs(res) do local fr = fp.rets and fp.rets[i] or (i == 1 and fp.ret); if fr then edge(fr, r) end end
@@ -591,7 +653,7 @@ local function build(store, opts)
             kp = new(); KEYPORT[f] = kp
             if f ~= '[]' then addobj(kp, typeobj(f == '#' and 'number' or 'string')) end
         end
-        bindcall(g, { op, kp }, dst)
+        bindcall(g, { op, kp }, dst, nil, LOADERR[dst])
     end
     local function callc(callee, args, res, site, cerr)
         local l = calls[callee]
@@ -600,6 +662,7 @@ local function build(store, opts)
         if top[callee] and spread and type(res) ~= 'table' then settop(res) end
         for o in each(callee) do bindcall(o, args, res, site, cerr) end
     end
+    G7.callc = callc
     -- (a handler in x's metatable — `__call`, `__add`, `__newindex`… — called with args, its results into res: the
     -- metatable rides on the object as the hidden field `\1mt`, which `setmetatable` writes)
     local function metacall(x, mm, args, res, cerr)
@@ -623,6 +686,7 @@ local function build(store, opts)
     end
     local STR = typeobj('string')
     local EXT = newobj('external')
+    G7.EXT = EXT
     local PSIGS = {}
     do
         local P = require 'cartograph.spec.profile'
@@ -749,6 +813,9 @@ local function build(store, opts)
                         for _, o in dit(d) do if not SCALAR[TNAME[o]] then edge(st[2], ofp(o, st[1])) end end
                     end
                     for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3], cl[4]) end end
+                    for _, ce in ipairs(ARGERR[p] or NOTHING) do
+                        for _, o in dit(d) do local fpp = fnports[o]; if fpp and fpp.err then edge(fpp.err, ce) end end
+                    end
                     for _, fl in ipairs(filters[p] or NOTHING) do
                         for _, o in dit(d) do if fl[2](o) then addobj(fl[1], o) end end
                     end
@@ -776,6 +843,43 @@ local function build(store, opts)
         local p = named[key]
         if not p then p = new(); named[key] = p end
         return p
+    end
+    -- ★ THE GLOBALS ARE THE FIELDS OF ONE TABLE, _G (CART-1707): a global's port IS field `name` of GOBJ, so `_G.q = b`,
+    -- `_G[k] = v` and `rawset(_G, …)` write it; a global READ is a load through GPORT, copied into a port of the
+    -- reading FUNCTION (G7.GR: function id -> name -> port), so `setfenv(f, env)` adds env's field to f's reads — and
+    -- to the functions nested in f, which inherit its environment — and nowhere else. getfenv returns G7.FENVP: _G and
+    -- every environment setfenv set
+    G7.GOBJ = newobj('_G')
+    G7.GPORT = new()
+    addobj(G7.GPORT, G7.GOBJ)
+    function G7.gport(name)
+        local key = 'g:' .. name
+        local p = named[key]
+        if not p then p = ofp(G7.GOBJ, name); named[key] = p end
+        return p
+    end
+    addobj(G7.gport('_G'), G7.GOBJ)
+    G7.GR, G7.KIDS, G7.FENV, G7.GCPEND = {}, {}, {}, {}
+    G7.FENVP = new()
+    addobj(G7.FENVP, G7.GOBJ)
+    function G7.fenv(id, env, seen)
+        seen = seen or {}
+        if seen[id] then return end
+        seen[id] = true
+        for name, dst in pairs(G7.GR[id] or NOTHING) do edge(field(env, name), dst) end
+        for _, k in ipairs(G7.KIDS[id] or NOTHING) do G7.fenv(k, env, seen) end
+    end
+    G7.GREAD = {}
+    function G7.gread(name)
+        local p = G7.GREAD[name]
+        if not p then p = field(G7.GPORT, name, true); G7.GREAD[name] = p end
+        return p
+    end
+    G7.EXTCALL = new()
+    do
+        local xa = new()
+        addobj(xa, EXT)
+        callc(G7.EXTCALL, { xa, xa, xa, xa, spread = 4 }, new())
     end
     -- ── the graph's facts ───────────────────────────────────────────────────────────────────────────
     local fn_at = {}
@@ -880,12 +984,13 @@ local function build(store, opts)
                     return p
                 end
             end
-            return port('g:' .. name)
+            return G7.gport(name), true
         end
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
         local fnstack = {}
         -- (where an error raised HERE goes: the enclosing function's error port; module-level code's, the chunk set)
         local function curerr() local f = fnstack[#fnstack]; return f and f.err or gerr() end
+        WALKERR = curerr -- (a load this walk makes knows where the errors of an __index function it runs go)
         local MULTI = 4 -- (the values a `return f()` forwards)
         local function funtype(path, n)
             local owner, mm = path:match('^([%a_][%w_%.]*)%.([%a_][%w_]*)$')
@@ -982,6 +1087,9 @@ local function build(store, opts)
             fp.rets = { fp.ret }
             fp.err = inst and new() or port('e:' .. id) -- (what it raises, CART-1705)
             fnports[o] = fp
+            -- (a nested function inherits its parent's environment — a top-level one its file CHUNK's: G7.fenv)
+            local pid = fnstack[#fnstack] and fnstack[#fnstack].id or G7.CHUNK
+            if pid and not inst and not clone then local kl = G7.KIDS[pid]; if not kl then kl = {}; G7.KIDS[pid] = kl end; kl[#kl + 1] = id end
             if CTXFNS and not clone and CTXFNS[id] then
                 -- (the scopes it sees: each copied, so a local declared after it is not visible to its instances)
                 local snap = {}
@@ -1000,6 +1108,10 @@ local function build(store, opts)
             if PTAG and method and not inst then PTAG[fp.params[1]] = { fn = id, j = 1, path = '', d = 0 } end
             local ps = n:field('parameters')[1]
             for _, x in tsutil.inext, ps or EMPTY_NODE, -1 do
+                if x:named() and x:type() == 'vararg_expression' then
+                    -- (`...`: every argument past the named ones, CART-1707)
+                    fp.vararg = inst and new() or port('v:' .. id)
+                end
                 if x:named() and x:type() == 'identifier' then
                     i = i + 1
                     fp.params[i] = declare(txt(x), inst and new() or port('a:' .. id .. ':' .. i))
@@ -1028,6 +1140,12 @@ local function build(store, opts)
                 or (f:type() == 'dot_index_expression' and f:field('field')[1]) or (f:type() == 'identifier' and f))
             local c = f and (call_at[key_of(f) .. '#' .. (cname and txt(cname) or '')] or call_at[key_of(f)] or nil)
             local fname = f and txt(f) or ''
+            -- (a CART-1707 builtin is the GLOBAL of that name: `local function load()` is the tree's own function)
+            local function gbl()
+                if not f or f:type() ~= 'identifier' then return false end
+                local _, g = lookup(fname)
+                return g
+            end
             local function modport(a)
                 local s = a and a:type() == 'string' and a:field('content')[1]
                 local mf = s and modfile[txt(s)]
@@ -1039,6 +1157,11 @@ local function build(store, opts)
                 if m then return port('mod:' .. m) end
                 local mp = modport(argn[1])
                 if mp then return mp end
+                -- (a module the tree does not hold: what it returns is unknown, CART-1707)
+                for _, a in ipairs(argn) do expr(a) end
+                local xp = new()
+                addobj(xp, EXT)
+                return xp
             end
             if fname == 'pcall' and argn[1] and argn[1]:type() == 'identifier' and txt(argn[1]) == 'require' then
                 local mp = modport(argn[2])
@@ -1055,15 +1178,94 @@ local function build(store, opts)
                     local mtp = expr(argn[2])
                     proto(tp, field(mtp, '__index'), true)
                     storec(tp, '\1mt', mtp) -- (its handlers: __call, operators, __newindex — CART-1699)
+                    MTSTORES[#MTSTORES + 1] = { tp, mtp } -- (it was never filled: a parked handler port was never released)
+                    G7.GCPEND[#G7.GCPEND + 1] = { tp, gerr() } -- (a finalizer runs with the object, CART-1707: deferred)
                 end
                 return tp
             end
+            -- (UNKNOWN CODE, CART-1707: what load / loadstring / loadfile / dofile return is code the tree does not hold
+            -- — EXT, and calling EXT returns EXT and hands its arguments to unknown code. A require the tree cannot map
+            -- falls through to the general call, whose callee is EXT below)
+            if (fname == 'load' or fname == 'loadstring' or fname == 'loadfile' or fname == 'dofile') and gbl() then
+                for _, a in ipairs(argn) do edge(expr(a), G7.EXTCALL) end
+                local out = {}
+                for k = 1, want or 1 do out[k] = new(); addobj(out[k], EXT) end
+                if want then return out end
+                return out[1]
+            end
+            -- (ENVIRONMENTS: setfenv(f, env) — f's global reads, and its nested functions', also read env: applied
+            -- after the walk, when every function's reads are known (G7.FENV). setfenv(1, env) is the calling
+            -- function (at the top level, the file's chunk); a deeper level is any function: env becomes a prototype of
+            -- _G. getfenv returns _G and every environment set. rawget / rawset are a load and a store)
+            if fname == 'getfenv' and gbl() then for _, a in ipairs(argn) do expr(a) end; return G7.FENVP end
+            if fname == 'setfenv' and argn[2] and gbl() then
+                local fa, env = argn[1], expr(argn[2])
+                edge(env, G7.FENVP)
+                local pf = fnstack[#fnstack]
+                if fa:type() ~= 'number' then
+                    local fp = expr(fa)
+                    G7.FENV[#G7.FENV + 1] = { port = fp, env = env }
+                    return fp
+                elseif txt(fa) == '1' and (pf or G7.CHUNK) then G7.FENV[#G7.FENV + 1] = { id = pf and pf.id or G7.CHUNK, env = env }
+                else proto(G7.GPORT, env) end
+                return new()
+            end
+            local function strkey(a)
+                local s = a and a:type() == 'string' and a:field('content')[1]
+                return s and txt(s) or '[]'
+            end
+            if fname == 'rawget' and argn[1] and gbl() then
+                local tp = expr(argn[1]); if argn[2] then expr(argn[2]) end
+                return field(tp, strkey(argn[2]), true)
+            end
+            if fname == 'rawset' and argn[3] and gbl() then
+                local tp = expr(argn[1]); expr(argn[2])
+                storec(tp, strkey(argn[2]), expr(argn[3]))
+                return tp
+            end
+            -- (hooksecurefunc([t,] "name", hook): a call of the hooked function also runs the hook with its arguments)
+            if fname == 'hooksecurefunc' and argn[2] and gbl() then
+                local tp = argn[3] and expr(argn[1]) or G7.GPORT
+                local kn = argn[3] and argn[2] or argn[1]
+                local h = expr(argn[3] or argn[2])
+                callc(field(tp, strkey(kn)), { hook = h }, new())
+                return new()
+            end
+            -- (getmetatable(x) is the metatable setmetatable stored; newproxy(true) a userdata with a fresh one)
+            if fname == 'getmetatable' and argn[1] and gbl() then return field(expr(argn[1]), '\1mt', true) end
+            if fname == 'newproxy' and gbl() then
+                local up = new()
+                local u = newobj('proxy:' .. key_of(n))
+                addobj(up, u)
+                if argn[1] and txt(argn[1]) == 'true' then
+                    local mp = new()
+                    addobj(mp, newobj('proxymt:' .. key_of(n)))
+                    storec(up, '\1mt', mp)
+                    MTSTORES[#MTSTORES + 1] = { up, mp }
+                    proto(up, field(mp, '__index'), true)
+                    G7.GCPEND[#G7.GCPEND + 1] = { up, gerr() }
+                end
+                return up
+            end
             -- (COROUTINES, CART-1700: create(f) is a thread holding f; resume(co, …) calls f with its arguments — and
             -- every yield returns them —, its results after the status are f's returns and every yield's values.
-            -- wrap(f) is f itself: a call calls f — its yields are not modelled there)
-            if fname == 'coroutine.create' or fname == 'coroutine.wrap' then
+            -- wrap(f) is a FUNCTION of its own: a call forwards its arguments to f — the first call's are f's, every
+            -- later one's every yield's results — and returns f's returns and every yield's values, CART-1707)
+            if fname == 'coroutine.wrap' then
                 local fp = argn[1] and expr(argn[1]) or new()
-                if fname == 'coroutine.wrap' then return fp end
+                local id = 'ts:wrap:' .. key_of(n) -- (no graph node: a verdict naming it is no claim)
+                local w = newobj(id)
+                local wp = new()
+                addobj(wp, w)
+                local ps, rs = {}, {}
+                for k = 1, MULTI do ps[k] = new(); edge(ps[k], gresarg()); rs[k] = new(); edge(gyield(), rs[k]) end
+                local wfp = { params = ps, ret = rs[1], rets = rs, id = id, err = new(), vararg = new() }
+                fnports[w] = wfp
+                callc(fp, ps, rs, nil, wfp.err)
+                return wp
+            end
+            if fname == 'coroutine.create' then
+                local fp = argn[1] and expr(argn[1]) or new()
                 local tp = new()
                 addobj(tp, newobj('thread:' .. key_of(n)))
                 storec(tp, '\1co', fp)
@@ -1092,7 +1294,10 @@ local function build(store, opts)
             end
             if (fname == 'pcall' or fname == 'xpcall') and argn[1] then
                 local aps = {}
-                for j = (fname == 'xpcall' and 3 or 2), #argn do aps[#aps + 1] = expr(argn[j]) end
+                for j = (fname == 'xpcall' and 3 or 2), #argn do
+                    aps[#aps + 1] = expr(argn[j])
+                    if j == #argn and argn[j]:type() == 'vararg_expression' then aps.spread = #aps end
+                end
                 -- (`local ok, v = pcall(f, …)`: v is f's FIRST value — the status comes before them)
                 -- (a CAUGHT error, CART-1705: what the protected function — and everything it calls — raises, and a
                 -- runtime error's message: a string. A function OUTSIDE the tree is taken to raise strings, the contract
@@ -1132,7 +1337,15 @@ local function build(store, opts)
             end
             local aps = {}
             if recvp then aps[1] = recvp end
-            for _, a in ipairs(argn) do aps[#aps + 1] = expr(a) end
+            -- (a LAST argument that is `...` SPREADS into every parameter from there and the callee's vararg; a last
+            -- call passes its first MULTI values positionally, CART-1707)
+            for j, a in ipairs(argn) do
+                if j == #argn and a:type() == 'vararg_expression' then aps[#aps + 1] = expr(a); aps.spread = #aps
+                elseif j == #argn and a:type() == 'function_call' then
+                    local l = callv(a, MULTI)
+                    if type(l) == 'table' then for _, r in ipairs(l) do aps[#aps + 1] = r end else aps[#aps + 1] = l end
+                else aps[#aps + 1] = expr(a) end
+            end
             -- (what error() / assert's message raises reaches every pcall's second result, CART-1705)
             if fname == 'error' and aps[1] then edge(aps[1], curerr()) end
             if fname == 'assert' and aps[2] then edge(aps[2], curerr()) end
@@ -1167,6 +1380,15 @@ local function build(store, opts)
             if to then
                 edge(port('e:' .. to), curerr())
                 for j, ap in ipairs(aps) do edge(ap, port('a:' .. to .. ':' .. j)) end
+                -- (past the callee's named parameters, into its vararg; a spread last argument into every parameter
+                -- from its position — the graph's params, self included, say how many there are)
+                local tnode = store.node(to)
+                local np = #(tnode and tnode.params or EMPTY)
+                for j = np + 1, #aps do edge(aps[j], port('v:' .. to)) end
+                if aps.spread then
+                    for j = aps.spread + 1, np do edge(aps[aps.spread], port('a:' .. to .. ':' .. j)) end
+                    edge(aps[aps.spread], port('v:' .. to))
+                end
                 for k, r in ipairs(resl) do edge(port('r:' .. to .. (k > 1 and (':' .. k) or '')), r) end
                 return want and resl or res
             end
@@ -1181,6 +1403,33 @@ local function build(store, opts)
                         if rt then addobj(r, typeobj(rt)) end
                     end
                 end
+            end
+            -- (CART-1708: tree code a BUILTIN runs. A function value handed to a call that is no resolved tree function
+            -- may be called by it — its errors pass through to this caller. tostring runs __tostring and returns its
+            -- result (5.1: any value); print and string.format run it on their arguments; table.sort compares the
+            -- elements — its comparator or their __lt. (string.gsub's replacement function needs no route: its
+            -- errors are the rule above, and it is handed only strings)
+            for _, ap in ipairs(aps) do
+                local l = ARGERR[ap]
+                if not l then l = {}; ARGERR[ap] = l end
+                local ce = curerr()
+                l[#l + 1] = ce
+                for o in each(ap) do local fpp = fnports[o]; if fpp and fpp.err then edge(fpp.err, ce) end end
+            end
+            if fname == 'tostring' and aps[1] then metacall(aps[1], '__tostring', { aps[1] }, res, curerr()) end
+            -- (select(n, …) returns arguments past the first; unpack(t) a table's elements, CART-1707)
+            if fname == 'select' and #aps >= 2 then for _, r in ipairs(resl) do for j = 2, #aps do edge(aps[j], r) end end end
+            if (fname == 'unpack' or fname == 'table.unpack') and aps[1] then
+                local el = field(aps[1], '[]')
+                for _, r in ipairs(resl) do edge(el, r) end
+            end
+            if fname == 'print' or fname == 'string.format' then
+                for _, ap in ipairs(aps) do metacall(ap, '__tostring', { ap }, new(), curerr()) end
+            end
+            if fname == 'table.sort' and aps[1] then
+                local el = field(aps[1], '[]')
+                if aps[2] then callc(aps[2], { el, el }, new(), nil, curerr())
+                else metacall(el, '__lt', { el, el }, new(), curerr()) end
             end
             if not callee and f then callee = expr(f) end
             if PTAG and not clone and callee and not recvp then puse(callee, 'call') end
@@ -1203,13 +1452,30 @@ local function build(store, opts)
                 if i == #xs and want > #xs and x:type() == 'function_call' then
                     local l = callv(x, want - #xs + 1)
                     if type(l) == 'table' then for _, r in ipairs(l) do vals[#vals + 1] = r end else vals[#vals + 1] = l end
+                elseif i == #xs and want > #xs and x:type() == 'vararg_expression' then
+                    local v = expr(x) -- (`local a, b = ...`: every value still wanted is a vararg)
+                    for _ = i, want do vals[#vals + 1] = v end
                 else vals[#vals + 1] = expr(x) end
             end
             return vals
         end
         expr = function (n)
             local t = n:type()
-            if t == 'identifier' then return lookup(txt(n)) end
+            if t == 'identifier' then
+                local nm = txt(n)
+                local p, glob = lookup(nm)
+                if glob then -- (a global READ loads through _G, into the reading function's own port)
+                    local gid = fnstack[#fnstack] and fnstack[#fnstack].id or G7.CHUNK
+                    if not gid then return G7.gread(nm) end
+                    local m = G7.GR[gid]
+                    if not m then m = {}; G7.GR[gid] = m end
+                    local q = m[nm]
+                    if not q then q = new(); edge(G7.gread(nm), q); m[nm] = q end
+                    return q
+                end
+                return p
+            end
+            if t == 'vararg_expression' then local f = fnstack[#fnstack]; return f and f.vararg or new() end
             if t == 'dot_index_expression' then
                 local base = expr(n:field('table')[1])
                 local fnode = n:field('field')[1] -- (each n:field() call allocates a table and a node: asked once)
@@ -1417,7 +1683,13 @@ local function build(store, opts)
             for y in each(p) do clone.obj = y end
             return
         end
+        -- (the file's CHUNK is a function of its own: `setfenv(1, env)` at the top level is its environment — WoW's
+        -- `setfenv(1, Prat)` had made Prat a prototype of _G for every global read in the corpus, CART-1707. Only in
+        -- a file that names setfenv: a port per top-level global read cost w2 4x the load visits, 33 -> 55 s)
+        local saved = G7.CHUNK
+        G7.CHUNK = src:find('setfenv', 1, true) and ('chunk:' .. file) or nil
         for _, s in tsutil.inamed, tree, -1 do stmt(s) end
+        G7.CHUNK = saved
     end
     local instances = {}
     clone_at = function (site, o)
@@ -1483,6 +1755,9 @@ local function build(store, opts)
         end
     end
     if jsfinish then jsfinish() end
+    for _, fe in ipairs(G7.FENV) do
+        if fe.id then G7.fenv(fe.id, fe.env) else callc(fe.port, { fenv = fe.env }, new()) end
+    end
     -- (the context instances: one per resolved call site of a selected function; a site it cannot instance — the
     -- function was never walked — binds the shared ports as before)
     if CTXFNS then
@@ -1522,6 +1797,29 @@ local function build(store, opts)
         end
         if not grew then break end
         solve()
+    end
+    -- ★ FINALIZERS, DEFERRED (CART-1707): each setmetatable's `\1mt.__gc` load was 29 M of w2's 39 M load visits
+    -- (solve 41 -> 76 s) for a handler no WoW addon defines. A finalizer exists only where a metatable — read after the
+    -- solve, when every write has landed — holds `__gc` or a field a dynamic key wrote, or its port saturated; otherwise
+    -- the route stays unbuilt
+    do
+        local function possible()
+            for _, ms in ipairs(MTSTORES) do
+                local vp = ms[2]
+                if top[vp] then return true end
+                for x in each(vp) do
+                    local m = ofield[x]
+                    local d = m and m['[]']
+                    if m and (m.__gc or (d and (top[d] or pts[d] ~= nil))) then return true end
+                end
+            end
+            return false
+        end
+        if #G7.GCPEND > 0 and possible() then
+            for _, g in ipairs(G7.GCPEND) do metacall(g[1], '__gc', { g[1] }, new(), g[2]) end
+            G7.GCPEND = {}
+            solve()
+        end
     end
     -- ★ A STRING METHOD ON AN EMPTY RECEIVER (CART-1643): `name:lower()`, `raw:sub(i)` — the receiver reached no value
     -- the solve holds, but a program that got past the call had a string there (a table would need the member; none
@@ -1580,6 +1878,22 @@ local function build(store, opts)
         end
         table.sort(UNFIN)
     end
+    -- ★ WHAT UNKNOWN CODE IS HANDED ESCAPES (CART-1707): load's chunk, a module outside the tree may write any field of
+    -- it, set its metatable, keep it — closed over its fields and prototypes. Its field reads are tainted below, and
+    -- it is prototype-incomplete; a function among them is called with EXT (G7.EXTCALL's call)
+    local XESC = {}
+    do
+        local q = {}
+        local function skip(x) return x == EXT or x == G7.GOBJ end -- (_G: every code reaches it, the contract)
+        for o in each(G7.EXTCALL) do if not skip(o) and not XESC[o] then XESC[o] = true; q[#q + 1] = o end end
+        local i = 1
+        while i <= #q do
+            local o = q[i]; i = i + 1
+            if not escaped[o] then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or G7.EXTCALL end end
+            for _, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do if not skip(x) and not XESC[x] then XESC[x] = true; q[#q + 1] = x end end end
+            for c in pairs(protos[o] or NOTHING) do if not skip(c) and not XESC[c] then XESC[c] = true; q[#q + 1] = c end end
+        end
+    end
     local tainted, twork = {}, {}
     local PINC = {} -- (object -> the tainted __index source port that leaves its prototypes incomplete, CART-1709)
     -- (opts.explain: what tainted each port — the port it flowed from, `{ port, why }` for a rule that jumps, or a
@@ -1595,15 +1909,19 @@ local function build(store, opts)
     -- tainted base misses what its fields hold — a method of its metatable — and a call through that load binds none of
     -- them. Closed transitively)
     local esc = {}
+    -- (the GLOBALS TABLE never escapes — the contract: a global is written by name, and every code reaches _G anyway.
+    -- WoW passes _G as a value: one saturated parameter made every addon's namespace, its fields, escape, and each
+    -- store of `.f` anywhere tainted every namespace's f — w3: 317 whole exact answers partial, CART-1707)
+    escaped[G7.GOBJ] = nil
     for o in pairs(escaped) do esc[#esc + 1] = o end
     do
         local i = 1
         while i <= #esc do
             local o = esc[i]; i = i + 1
             for _, fp in pairs(ofield[o] or NOTHING) do
-                for x in each(fp) do if not escaped[x] then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                for x in each(fp) do if not escaped[x] and x ~= G7.GOBJ then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] then escaped[c] = true; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and c ~= G7.GOBJ then escaped[c] = true; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
         end
     end
     local field_hit, params_hit = {}, false
@@ -1619,6 +1937,12 @@ local function build(store, opts)
     for p in pairs(top) do taint(p) end
     TCUR = 'sinf'
     for r in pairs(sinf) do taint(r) end
+    TCUR = 'handed to unknown code (load, a module outside the tree): it may write any field'
+    for o in pairs(XESC) do
+        PINC[o] = PINC[o] or G7.EXTCALL
+        for _, fp in pairs(ofield[o] or NOTHING) do taint(fp) end
+        for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end
+    end
     TCUR = 'open: reachable from an export, an outside caller may fill it'
     -- ★ OPEN REACHES PAST THE EXPORTS (CART-1652): a caller outside the tree gets more than the module's functions —
     -- what they RETURN, and those objects' fields and methods — and calls those methods with objects it got the same
@@ -1646,7 +1970,9 @@ local function build(store, opts)
     -- handler can only sit in a METATABLE (an object setmetatable stored); while no metatable's field under that name
     -- or a dynamic key holds anything, and no metatable port or field is saturated or tainted, the handler port cannot
     -- have lost a function: its calls and stores are PARKED. After the loop drains, a name that became possible
-    -- releases its ports and the loop runs again — possibility only grows
+    -- releases its ports and the loop runs again — possibility only grows. (The metatables were never RECORDED until
+    -- CART-1707: no name was ever possible, no parked port was released — a cap-cut metatable answered a whole exact.
+    -- Recording them: 72 whole exact answers partial on the runtime-oracle tree, 0 wrong either way)
     local ALLOW, METAPEND = {}, {}
     local function meta_possible(mm)
         for _, ms in ipairs(MTSTORES) do
@@ -1709,13 +2035,23 @@ local function build(store, opts)
             if f and not fhit[f] then
                 fhit[f] = true
                 if TFROM then TCUR = { p, 'a call through it may reach any function stored as .' .. tostring(f) .. ': their parameters' } end
-                for o, m in pairs(ofield) do
-                    for fk, fp in pairs(m) do
-                        if (fk == f or f == '[]') and not top[fp] then
-                            for x in each(fp) do local fpp = fnports[x]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end
+                -- (field name -> the functions held under it, built once: the solve is done, the sets are final. The
+                -- scan of every object's fields per name hit was the taint phase's top line, ~19 s on WoW w2)
+                if not G7.FNF then
+                    G7.FNF = {}
+                    for _, m in pairs(ofield) do
+                        for fk, fp in pairs(m) do
+                            if not top[fp] then
+                                for x in each(fp) do
+                                    if fnports[x] then local l = G7.FNF[fk]; if not l then l = {}; G7.FNF[fk] = l end; l[#l + 1] = x end
+                                end
+                            end
                         end
                     end
                 end
+                local function hit(l) for _, x in ipairs(l) do for _, pp in ipairs(fnports[x].params) do taint(pp) end end end
+                if f == '[]' then for _, l in pairs(G7.FNF) do hit(l) end
+                elseif G7.FNF[f] then hit(G7.FNF[f]) end
                 TCUR = p
             end
         end
@@ -1726,9 +2062,12 @@ local function build(store, opts)
             TCUR = p
         end
         for _, cl in ipairs(calls[p] or NOTHING) do
+            -- (a hooked name the solve lost: the hook misses those functions' arguments)
+            if cl[1].hook then for o in each(cl[1].hook) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end end
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
             if cl[4] then taint(cl[4]) end -- (a callee the solve lost may raise anything)
         end
+        for _, ce in ipairs(ARGERR[p] or NOTHING) do taint(ce) end -- (a callback the solve lost may raise anything)
         for _, fl in ipairs(filters[p] or NOTHING) do taint(fl[1]) end
         for _, d in ipairs(gf_of[p] or NOTHING) do taint(d) end
         for _, mf in ipairs(mflows[p] or NOTHING) do taint(mf[2]) end

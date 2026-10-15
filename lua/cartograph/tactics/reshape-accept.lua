@@ -1,7 +1,7 @@
 -- RESHAPE-ACCEPT (discovery, CART-1656): does a provenance reshape keep the tests green? The reshape (rename-field by
 -- family, or reshape) is planned and written in a SCRATCH COPY of the repo — never the working tree — and the spec runs
 -- there before and after. The acceptance test the provenance claim needs: the analysis proves the rewrite covers every
--- access IT sees; the tests are the independent oracle for the ones it cannot (code built by load(), a C caller).
+-- access IT sees; the tests are the independent oracle for the ones it cannot (a C caller — code built by load() it now sees, and refuses: CART-1707).
 -- Measured by hand first (2026-10-11): `txn.disk_stamp` (50 rewrites in 33 files) and the tactic result's `applied`
 -- (33 in 14 files, the examples' own `want.applied` untouched) — the whole suite green both times.
 -- params: verb = rename-field | reshape | hoist-empty, with = its k=v arguments (family / positional / define take a comma list),
@@ -69,9 +69,15 @@ local FX = {
     ['tests/run.sh'] = SF.FIXTURE['tests/run.sh'],
     ['tests/mini.lua'] = SF.FIXTURE['tests/mini.lua']:gsub("'lib/%?%.lua;'", "'./?.lua;'"),
     ['tests/rec_spec.lua'] = "local check = ...\nlocal R = require('rec')\ncheck(R.label(R.mk('a')) == 'a')\n",
-    -- (code the analysis cannot see: a function built by load() reads the field by its old name)
-    ['tests/load_spec.lua'] = "local check = ...\nlocal R = require('rec')\nlocal get = load('return function (r) return r.name end')()\ncheck(get(R.mk('a')) == 'a')\n",
 }
+-- (an access the analysis cannot see: a C function — vim.tbl_get, typed by the profile — reads the field by its old name)
+local FXC = vim.tbl_extend('force', FX, {
+    ['tests/c_spec.lua'] = "local check = ...\nlocal R = require('rec')\ncheck(vim.tbl_get(R.mk('a'), 'name') == 'a')\n",
+})
+-- (code built by load() is handed the record: the analysis SEES the hand-off to unknown code, CART-1707)
+local FXL = vim.tbl_extend('force', FX, {
+    ['tests/load_spec.lua'] = "local check = ...\nlocal R = require('rec')\nlocal get = load('return function (r) return r.name end')()\ncheck(get(R.mk('a')) == 'a')\n",
+})
 
 return {
     name = 'reshape-accept',
@@ -96,10 +102,16 @@ return {
             expect = { holds = true, check = function (v) return v.after and v.after.failed == 0 and v.scratch == nil and (v.touched or {})[1] == 'rec.lua', vim.inspect(v.touched) end },
         },
         {
-            name = 'code built by load() reads the field by its old name — invisible to the analysis — and the spec CATCHES it',
-            files = FX,
-            params = function (store) return { verb = 'rename-field', with = { 'family=rec.lua:2', 'field=name', 'to=title' }, spec = 'load_spec', repo = store.data.root } end,
+            name = 'a C function reads the field by its old name — invisible to the analysis — and the spec CATCHES it',
+            files = FXC,
+            params = function (store) return { verb = 'rename-field', with = { 'family=rec.lua:2', 'field=name', 'to=title' }, spec = 'c_spec', repo = store.data.root } end,
             expect = { holds = false, check = function (v) return v.after and v.after.failed > 0, tostring(v.error) end },
+        },
+        {
+            name = 'code built by load() is handed the record — the analysis sees the hand-off: refused as a frontier, never written',
+            files = FXL,
+            params = function (store) return { verb = 'rename-field', with = { 'family=rec.lua:2', 'field=name', 'to=title' }, spec = 'load_spec', repo = store.data.root } end,
+            expect = { holds = false, check = function (v) return v.after == nil and tostring(v.error):find('ESCAPES', 1, true) ~= nil and v.class == 'frontier', tostring(v.error) end },
         },
         {
             name = 'a reshape the planner refuses is no acceptance — refused by name',
