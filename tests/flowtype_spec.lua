@@ -309,6 +309,33 @@ test('flowtype: a FUEL budget stops the solve and taints what it left queued —
     vim.fn.delete(root, 'rf')
 end)
 
+test('flowtype: an object whose __index SOURCE the cut left unfinished is prototype-incomplete — no whole answer through it (CART-1709)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (one allocation site, prototypes {D, C} uncut; C still on its way to mk's parameter when D is linked: the chain
+    -- the verdict walks lacks C, and y:m() runs C.m — fifo, budgets 32..36 had answered a WHOLE exact D.m. The flowpath
+    -- research's fixture, ~/work/flowpath/probes/fuel/roots/protocut2)
+    local root = tree({ ['m.lua'] = table.concat({
+        'local C, D = {}, {}',
+        'function C.m(self) return "C" end',
+        'function D.m(self) return "D" end',
+        'local function id(v) return v end',
+        'local function mk(proto) return setmetatable({}, { __index = proto }) end',
+        'local x = mk(D)',
+        'local y = mk(id(id(id(id(id(id(C)))))))',
+        'print(y:m())' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'y:m' then call = c end end
+    for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+        for fuel = 0, 60 do
+            local v = flowtype.solve(store, { open = false, ctx = false, fuel = fuel, order = order }).verdict(call)
+            ok(not (v and v.kind == 'exact' and not v.partial), ('%s fuel %d: no whole exact D.m — %s'):format(order, fuel, vim.inspect(v)))
+        end
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: an EXPORTED function\'s parameter may hold anything (open) — no claim through it', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({

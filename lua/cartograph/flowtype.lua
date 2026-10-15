@@ -1581,6 +1581,7 @@ local function build(store, opts)
         table.sort(UNFIN)
     end
     local tainted, twork = {}, {}
+    local PINC = {} -- (object -> the tainted __index source port that leaves its prototypes incomplete, CART-1709)
     -- (opts.explain: what tainted each port — the port it flowed from, `{ port, why }` for a rule that jumps, or a
     -- seed's reason — so a partial answer can be walked back to its seed: R.taint_path)
     local TFROM = opts.explain and {} or nil
@@ -1732,7 +1733,12 @@ local function build(store, opts)
         for _, d in ipairs(gf_of[p] or NOTHING) do taint(d) end
         for _, mf in ipairs(mflows[p] or NOTHING) do taint(mf[2]) end
         for _, t in ipairs(protos_rev[p] or NOTHING) do
-            for o in each(t) do for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end end
+            -- (its __index SOURCE is incomplete, so o's prototype chain may be: o is PROTOTYPE-INCOMPLETE — the
+            -- verdict walks protos[o] directly, CART-1709)
+            for o in each(t) do
+                PINC[o] = PINC[o] or p
+                for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end
+            end
         end
         ::parked::
     end
@@ -1756,6 +1762,7 @@ local function build(store, opts)
         seen[o] = true
         local p = ofield[o] and ofield[o][m]
         if p and tainted[p] then partial_hit = partial_hit or p end
+        if PINC[o] then partial_hit = partial_hit or PINC[o] end -- (a prototype it may lack holds m too)
         if p and top[p] then return true end
         if p then for x in each(p) do out[x] = true end end
         local t = false
