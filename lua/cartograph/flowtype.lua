@@ -28,7 +28,10 @@
 --   - globals are named: a global read sees `_G.q = v`, never a dynamic-key `_G[k] = v`, and a read by computed
 --     name `_G[k]` sees dynamic-key writes and EXT, never the named globals (CART-1707: either widening made every
 --     global read on the repo partial, or WoW w2's solve 15x slower); and _G never ESCAPES — a write through a value
---     the cap cut that may be _G is not followed (WoW passes _G as an argument: w3, 308 whole answers partial).
+--     the cap cut that may be _G is not followed (WoW passes _G as an argument: w3, 308 whole answers partial);
+--   - a call on a MEMBER of unknown code's value (a receiver load / an unmappable module returned) runs no tree code
+--     and hands its arguments nowhere — a member of EXT is not EXT (CART-1715: 427 typed / string answers went
+--     unknown when it was); a call the flow cannot resolve runs nothing (the name join is no input, CART-1689).
 --
 --   M.of(store, opts) -> R, cached per graph generation; R.verdict(c) -> nil | { kind = 'exact' | 'narrowed' |
 --     'string' | 'typed', targets = { fn id … } (exact / narrowed), type = 'string' | <profile type> }
@@ -462,6 +465,7 @@ local function build(store, opts)
         end
         local tn = TNAME[o]
         if tn then
+            if tn == 'string' and G7.STRLIB and f ~= '#' and f ~= '[]' then load_obj(G7.STRLIB, f, dst, seen, strict) end
             local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
             return
@@ -880,6 +884,22 @@ local function build(store, opts)
     end
     addobj(G7.gport('_G'), G7.GOBJ)
     G7.GR, G7.KIDS, G7.FENV, G7.GCPEND = {}, {}, {}, {}
+    -- (the modules the environment profile declares: every dotted prefix of a signature's path)
+    function G7.profmod(name)
+        if not G7.PMODS then
+            G7.PMODS = {}
+            for k in pairs(PSIGS) do
+                local path = k:match('^(.-)#') or k:match('^(.*)%.[^.]*$') or k
+                local acc
+                for part in path:gmatch('[^.]+') do acc = acc and (acc .. '.' .. part) or part; G7.PMODS[acc] = true end
+            end
+        end
+        return G7.PMODS[name]
+    end
+    -- ★ THE STRING LIBRARY IS A TABLE (CART-1715; the Lean model's P.strLib): the global `string` holds it, a store
+    -- `string.pick = f` lands on it, and a string value's member is read from it too — `("x"):pick()` calls f. The name
+    -- join had resolved such a call by spelling; without it the library's own fields are the evidence. Made by the LUA
+    -- walk, on its first file: an object minted for every solve renumbers a TypeScript tree's objects, and its schedule
     G7.FENVP = new()
     addobj(G7.FENVP, G7.GOBJ)
     function G7.fenv(id, env, seen)
@@ -900,7 +920,8 @@ local function build(store, opts)
         local xa = new()
         G7.XA = xa
         addobj(xa, EXT)
-        callc(G7.EXTCALL, { xa, xa, xa, xa, spread = 4 }, new())
+        G7.XRES = new()
+        callc(G7.EXTCALL, { xa, xa, xa, xa, spread = 4 }, G7.XRES)
     end
     -- ── the graph's facts ───────────────────────────────────────────────────────────────────────────
     local fn_at = {}
@@ -979,6 +1000,7 @@ local function build(store, opts)
         -- is a different key, so it missed the extractor's tree, parsed again, and the grammar misread that copy.)
         local tree = require('cartograph.parsecache').root(require('cartograph.parseview').view(src, 'lua'), 'lua')
         if not tree then return end
+        if not G7.STRLIB then G7.STRLIB = newobj('stringlib'); addobj(G7.gport('string'), G7.STRLIB) end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
         -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record — a
@@ -1179,10 +1201,13 @@ local function build(store, opts)
                 if m then return port('mod:' .. m) end
                 local mp = modport(argn[1])
                 if mp then return mp end
-                -- (a module the tree does not hold: what it returns is unknown, CART-1707)
+                -- (a module the tree does not hold: what it returns is unknown, CART-1707 — unless the environment PROFILE
+                -- declares it (a signature under its path: vim.treesitter, lpeg): a HOST module, whose members are what
+                -- the profile says; unknown code there wiped every declared type behind it, CART-1715)
                 for _, a in ipairs(argn) do expr(a) end
+                local s0 = argn[1] and argn[1]:type() == 'string' and argn[1]:field('content')[1]
                 local xp = new()
-                addobj(xp, EXT)
+                if not (s0 and G7.profmod(txt(s0))) then addobj(xp, EXT) end
                 return xp
             end
             if fname == 'pcall' and argn[1] and argn[1]:type() == 'identifier' and txt(argn[1]) == 'require' then
@@ -1416,27 +1441,15 @@ local function build(store, opts)
                 ctx_direct[#ctx_direct + 1] = { to, aps, resl }
                 return want and resl or res
             end
-            if to then return G7.mu(function ()
-                -- (the name join resolved it and the callee is never evaluated: the dump calls the callee's site)
-                local xs = {}
-                for k, r in ipairs(resl) do xs[k] = r end
-                local as = {}
-                for j, ap in ipairs(aps) do as[j] = ap end
-                G7.ins({ 'call', xs, { static = to }, as, file }, 'resolved')
-                edge(port('e:' .. to), curerr())
-                for j, ap in ipairs(aps) do edge(ap, port('a:' .. to .. ':' .. j)) end
-                -- (past the callee's named parameters, into its vararg; a spread last argument into every parameter
-                -- from its position — the graph's params, self included, say how many there are)
-                local tnode = store.node(to)
-                local np = #(tnode and tnode.params or EMPTY)
-                for j = np + 1, #aps do edge(aps[j], port('v:' .. to)) end
-                if aps.spread then
-                    for j = aps.spread + 1, np do edge(aps[aps.spread], port('a:' .. to .. ':' .. j)) end
-                    edge(aps[aps.spread], port('v:' .. to))
-                end
-                for k, r in ipairs(resl) do edge(port('r:' .. to .. (k > 1 and (':' .. k) or '')), r) end
-                return want and resl or res
-            end) end
+            -- ★ THE NAME JOIN IS NOT AN INPUT (CART-1689 / 1691 / 1692, the user's direction CART-1714 / 1715): a call the
+            -- join resolved (c.to) took its callee from the join and skipped the callee expression's flow — an inferred
+            -- unique-name edge was wrong in 218 of 2,553 observed pairs, a local defined in both branches of an if and
+            -- a module field another module reassigns reached functions the claim did not name. The callee is the
+            -- expression's flow, as for any call. (Not even as a HEDGE: where the flow reaches nothing, the join's pick
+            -- was mostly spelling — `c:named()` on a tree-sitter node "resolved" to Band:named — and tainting what such
+            -- calls are handed cost 55 of 83 whole RIGHT answers on the runtime oracle. Nor does a member of EXT become
+            -- EXT — semantically right, but EXT reaches every function handed to unknown code, and through its members
+            -- 427 typed / string answers went unknown: a call on unknown code's value runs nothing, THE CONTRACT)
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
                 for k, r in ipairs(resl) do
@@ -2054,6 +2067,25 @@ local function build(store, opts)
     -- (field name -> the ports of that field over every escaped object, built on the first store that needs it: each
     -- new field had scanned the whole escaped list — fields x escaped objects, half of build1)
     local escf
+    -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
+    -- that already fired applied to it: a store of .f through a tainted base, a call reaching any escaped function)
+    function G7.escmore(o0)
+        if escaped[o0] or o0 == EXT or o0 == G7.GOBJ then return end
+        local q, i = { o0 }, 1
+        escaped[o0] = true
+        while i <= #q do
+            local o = q[i]; i = i + 1
+            esc[#esc + 1] = o
+            for fk, fp in pairs(ofield[o] or NOTHING) do
+                if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
+                if field_hit[fk] then taint(fp) end
+                for x in each(fp) do if not escaped[x] and x ~= EXT and x ~= G7.GOBJ then escaped[x] = true; q[#q + 1] = x end end
+            end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and c ~= G7.GOBJ then escaped[c] = true; q[#q + 1] = c end end
+            local fpp = fnports[o]
+            if fpp and params_hit then for _, pp in ipairs(fpp.params) do taint(pp) end end
+        end
+    end
     TCUR = 'fuel: the solve stopped with this port unfinished'
     for _, p in ipairs(UNFIN) do taint(p) end
     -- (a guarded flow's chain test ran over prototypes the cut may have left incomplete)
@@ -2187,6 +2219,12 @@ local function build(store, opts)
             TCUR = p
         end
         for _, cl in ipairs(calls[p] or NOTHING) do
+            -- (a call the solve lost HANDS ITS ARGUMENTS to whatever it may reach — any escaped function, whose stores
+            -- reach escaped objects: the arguments escape too. A call bound during the solve, not at the walk, is cut
+            -- before it binds: `put(y)` through a callee port left queued never wrote y's table, CART-1706 / 1715)
+            if TFROM then TCUR = { p, 'a call through it hands its arguments to whatever it may reach: they escape' } end
+            for _, ap in ipairs(cl[1]) do for o in each(ap) do G7.escmore(o) end end
+            TCUR = p
             -- (a hooked name the solve lost: the hook misses those functions' arguments)
             if cl[1].hook then for o in each(cl[1].hook) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end end
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
@@ -2668,7 +2706,7 @@ local function build(store, opts)
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.GOBJ, GPORT = G7.GPORT, EXT = EXT, GERR = GERR,
-            GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, verdicts = verdicts,
+            GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.STRLIB, verdicts = verdicts,
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at',
             sha = here and FD.head(here), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) })
         if type(opts.dump) == 'string' then

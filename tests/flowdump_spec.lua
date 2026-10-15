@@ -70,7 +70,7 @@ for _, r in ipairs(ROUTES) do
     end)
 end
 
-test('flowdump: the format — the Lua instance\'s field ids, host sites, per-function error ports, the resolved-call tag, contracts', function ()
+test('flowdump: the format — the Lua instance\'s field ids, host sites, per-function error ports, tags, contracts', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local D = dump('local ok, e = pcall(function () error(b) end)\nprint(use(e))\nlocal t = { x = a }\nfor k in pairs(t) do print(k) end\n')
     eq(1, D.format)
@@ -89,7 +89,6 @@ test('flowdump: the format — the Lua instance\'s field ids, host sites, per-fu
     ok(any, 'the callback\'s port holds what it raises: ' .. vim.inspect(D.solution.err))
     local tags = {}
     for _, F in ipairs(D.functions) do for _, t in ipairs(F.tags) do tags[t[2]] = true end end
-    ok(tags.resolved, 'a call the name join resolved is tagged: ' .. vim.inspect(tags))
     ok(tags['contract:strict-global'], 'a global read carries its contract: ' .. vim.inspect(tags))
     ok(D.contracts.clauses['hidden-fields'] and D.contracts.globals_site, vim.inspect(D.contracts))
     -- the key set `pairs` yields is no field: hkeys, and its load a gap

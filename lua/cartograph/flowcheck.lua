@@ -42,7 +42,12 @@ for _, s in ipairs(S.err.cerr) do CERR[s] = true end
 for _, s in ipairs(S.rin) do RIN[s] = true end
 for _, s in ipairs(S.rout) do ROUT[s] = true end
 local FNOF, HOST, GLOBALS = {}, {}, nil
+local STRLIB = D.contracts and D.contracts.strlib_site ~= NULL and D.contracts.strlib_site or nil
+local STRSITE, EXTSITE
+local EXTCH = D.contracts and D.contracts.ext_channel ~= NULL and D.contracts.ext_channel or nil
 for _, st in ipairs(D.sites) do
+    if st.kind == 'ext' then EXTSITE = st.id end
+    if st.label == 'type:string' then STRSITE = st.id end
     if st.fn ~= NULL then FNOF[st.id] = st.fn end
     if st.kind == 'globals' then GLOBALS = st.id end
     if st.kind == 'type' or st.kind == 'ext' then HOST[st.id] = true end -- (contract:host: no fields)
@@ -136,7 +141,9 @@ for _, F in ipairs(D.functions) do
         elseif op == 'copy' then sub(v(ins[3]), ins[2], 'copy')
         elseif op == 'load' or op == 'loadDyn' then
             local x, y, f = ins[2], ins[3], ins[4]
-            for a in pairs(v(y)) do
+            for a0 in pairs(v(y)) do
+                -- (a string indexes through the string library: the Lean model's ABase / aprim, P.strLib)
+                local a = (a0 == STRSITE and STRLIB) or a0
                 if not HOST[a] then for _, c in ipairs(chain(evLoad, a)) do
                     if op == 'load' then
                         sub(h(c, f), x, 'field'); sub(HDYN[c] or EMPTY, x, 'field[]')
@@ -169,6 +176,8 @@ for _, F in ipairs(D.functions) do
             for i, a in ipairs(args) do srcs[i] = v(a) end
             for a in pairs(v(fv)) do
                 if FNOF[a] then entry(F.id, FNOF[a], a, srcs, xs, op == 'pcall') end
+                -- (contract unknown-code: calling an ext site hands the arguments to the unknown-code channel)
+                if a == EXTSITE and EXTCH then for _, s2 in ipairs(srcs) do sub(s2, EXTCH, 'unknown-code') end end
                 for _, t in ipairs(handlers(CALLK, a)) do
                     local s2 = { { [a] = true } }
                     for _, s in ipairs(srcs) do s2[#s2 + 1] = s end
@@ -237,6 +246,7 @@ for _, F in ipairs(D.functions) do
     end
 end
 for _, g in ipairs(D.gaps) do for _, x in ipairs(g.vars) do w(x) end end -- (a gap names what the IR could not write)
+if EXTCH then w(EXTCH) end -- (the unknown-code channel: written by the contract, not an instruction)
 local unwritten = 0
 local uex = {}
 for x, t in pairs(V) do if next(t) and not written[x] then unwritten = unwritten + 1; if #uex < 5 then uex[#uex + 1] = x end end end

@@ -8,7 +8,7 @@
 -- the WALK only: a primitive called by the walker is an instruction (addobj -> new, edge -> copy, field -> load,
 -- storec -> store, callc -> call, metacall -> op); what a primitive does inside itself, and everything the solver
 -- derives, is not. Builtins with a core opcode are translated explicitly (pcall, setmetatable, the coroutine
--- library, error / assert, a call the name join resolved); builtins without one are GAPS. The solve runs without
+-- library, error / assert); builtins without one are GAPS. The solve runs without
 -- per-site instances and without contexts (`ctx = false`): their ports are in no function's body, and the context
 -- layer is FLOW C.3. The answers in the dump are that run's.
 --
@@ -39,8 +39,6 @@
 --   [site, field | null] a field the taint reached (null: `[]`) — closedness is required except at tainted ports.
 --   `hkeys` [site, [sites]]: flowtype's KEY SET of a table (what `pairs` yields as keys) — no core field; a load of it
 --   is a gap (`table-keys`).
--- * A call the NAME JOIN resolved never evaluated its callee: its `fv` is a synthesized variable holding the callee's
---   site (`new` in the `init` function), tagged `resolved` — a failure there is the join's, not the solve's.
 -- * Errors are PER FUNCTION (Core/Errors.lean, FLOW C.E): err.fn [fn, [sites]] is `E.port fn` (err.top: a port past
 --   CAP — any site; err.taint: a port the taint reached); a file chunk's port is
 --   module-level code's (one, shared by every chunk); err.cerr the coroutine channel. `error(y)` is emitted where code
@@ -48,7 +46,8 @@
 -- * TAGS name an instruction's known divergence from the core, so a checker failure there is named, not noise:
 --   `contract:strict-global` (a global read does not see a dynamic-key `_G[k] = v` — flowtype's header, CART-1707),
 --   `divergence:coroutine` (flowtype binds a resume's arguments to that coroutine's function only; the core's `rin` is
---   one channel), `resolved` (above).
+--   one channel). (Since CART-1689 / 1715 a call's callee is the callee expression's flow, never the name join's
+--   claim: no call is synthesized.)
 -- * GAPS: constructs with no core opcode, or modelled outside the IR — rawget / rawset, getfenv / setfenv,
 --   hooksecurefunc, getmetatable, newproxy, coroutine.wrap, xpcall's handler, unknown code (load ... : the `ext`
 --   sites and the EXTCALL call in `init`), weak tables (not modelled: `weak` is empty).
@@ -62,6 +61,8 @@ M.CONTRACTS = {
     ['strict-global'] = 'a named global read does not see a dynamic-key write `_G[k] = v` (tag contract:strict-global)',
     ['computed-global'] = 'a read `_G[k]` with k unknown sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'the globals site never escapes: a write through a cap-cut value that may be _G is not followed',
+    ['unknown-receiver'] = 'a call on a member of an ext value runs no tree code and hands its arguments nowhere; a call whose callee the flow cannot resolve runs nothing',
+    ['unknown-code'] = 'a call whose callee holds an ext site hands its arguments to the unknown-code channel (contracts.ext_channel), which calls the functions among them with ext',
     ['function-no-metatable'] = 'a function has no metatable of its own (setmetatable raises): a setmeta on a closure site writes nothing (the core\'s setmeta writes any reference)',
     ['hidden-fields'] = 'a dynamic key never reads or writes the metatable slot (Lua; the core\'s loadDyn / storeDyn range over it)',
 }
@@ -69,7 +70,7 @@ M.CONTRACTS = {
 local RESERVED = { ['\1mt'] = 100, __index = 101, __newindex = 102, __call = 103, __gc = 105, __mode = 106 }
 
 function M.recorder()
-    local R = { fns = {}, forder = {}, tags = {}, gaps = {}, objvar = {}, errp = {}, resolved = {}, rerr = {} }
+    local R = { fns = {}, forder = {}, tags = {}, gaps = {}, objvar = {}, errp = {}, rerr = {} }
     -- (the current function's instruction list: a function's own id, a file chunk's `chunk:<file>`)
     function R.list(key)
         local l = R.fns[key]
@@ -146,24 +147,12 @@ function M.build(rec, X)
     if X.FENVP then init[#init + 1] = { 'new', V(X.FENVP), X.GOBJ } end
     if X.XA then
         init[#init + 1] = { 'new', V(X.XA), X.EXT }
-        init[#init + 1] = { 'call', { V(newvar()) }, V(X.EXTCALL), { X.XA, X.XA, X.XA, X.XA } }
+        init[#init + 1] = { 'call', { V(X.XRES) }, V(X.EXTCALL), { X.XA, X.XA, X.XA, X.XA } }
     end
     local inittags = { { #init - 1, 'gap:unknown-code' } }
-    local svar = {}
-    local function static(name, key)
-        local v = svar[name]
-        if v then return v end
-        local ss = sitesof[name]
-        if not ss then return nil end
-        v = V(newvar()); svar[name] = v
-        for _, o in ipairs(ss) do init[#init + 1] = { 'new', v, o } end
-        rec._self = rec._self or {}
-        rec._self[v] = ss
-        return v
-    end
     -- instruction operands to JSON, naming every variable they use
     local function vars(l) for _, p in ipairs(l) do V(p) end; return l end
-    local function enc(key, ins)
+    local function enc(ins)
         local op = ins[1]
         if op == 'new' then return { 'new', V(ins[2]), ins[3] }
         elseif op == 'copy' then return { 'copy', V(ins[2]), V(ins[3]) }
@@ -174,12 +163,7 @@ function M.build(rec, X)
             if ins[3] == '[]' then return { 'storeDyn', V(ins[2]), V(ins[4]) } end
             return { 'store', V(ins[2]), F(ins[3]), V(ins[4]) }
         elseif op == 'call' or op == 'pcall' then
-            local fv = ins[3]
-            if type(fv) == 'table' then
-                fv = static(fv.static, key)
-                if not fv then rec.gap(key, 'resolved-callee-not-walked', {}, ins[5]); return nil end
-            end
-            return { op, vars(ins[2]), V(fv), vars(ins[4]) }
+            return { op, vars(ins[2]), V(ins[3]), vars(ins[4]) }
         elseif op == 'error' then return { 'error', V(ins[2]) }
         elseif op == 'op' then return { 'op', V(ins[2]), vars(ins[3]), F(ins[4]) }
         elseif op == 'setmeta' then return { 'setmeta', V(ins[2]), V(ins[3]) }
@@ -202,7 +186,7 @@ function M.build(rec, X)
     for _, name in ipairs(keys) do
         local body, tags, map = {}, {}, {}
         for i, ins in ipairs(rec.fns[name] or {}) do
-            local e = enc(name, ins)
+            local e = enc(ins)
             if e then body[#body + 1] = e; map[i - 1] = #body - 1 end
         end
         for _, t in ipairs(rec.tags[name] or {}) do if map[t[1]] then tags[#tags + 1] = { map[t[1]], t[2] } end end
@@ -221,7 +205,6 @@ function M.build(rec, X)
         rec._self = rec._self or {}
         rec._self[self] = sitesof[name]
     end
-    -- init last: the resolved callees' `new`s were added while encoding
     local iself = newvar()
     rec._self[iself] = {}
     local ij = {}
@@ -345,7 +328,8 @@ function M.build(rec, X)
         .. '},"weak":[],"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']}},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
-    put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"clauses":' .. jstr(M.CONTRACTS) .. '},')
+    put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
+        .. ',"clauses":' .. jstr(M.CONTRACTS) .. '},')
     put('"answers":[' .. table.concat(aj, ',') .. ']}')
     return table.concat(out)
 end

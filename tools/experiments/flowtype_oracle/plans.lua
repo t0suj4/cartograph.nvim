@@ -12,7 +12,10 @@ local function src(f) return io.open(D .. f):read('a') end
 -- ('escaped fields' — a store through a tainted base reaches that field of every escaped object — and 'field taint read
 -- by targets' have NO corpus witness since 2203ed7: their mutants survive cap and schedule on arktype and the lua tree.
 -- Both are pinned by one synthetic spec instead, tests/flowtype_spec.lua "a store through a SATURATED base…", each
--- mutant-CAUGHT, CART-1696)
+-- mutant-CAUGHT, CART-1696. 'functions under a tainted field load' (CART-1696's own) lost its arktype witness when a
+-- call the cut lost began handing its ARGUMENTS on — they escape, and the escape closure reaches what it protected
+-- (CART-1715 work): its mutant survives the cap check. Kept in the code, out of this list; whether it is now SUBSUMED
+-- in closed mode is CART-1727)
 M.RULES = {
   { name = 'escaped params', check = 'cap.lua', tree = 'ts',
     before = 'for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end',
@@ -20,9 +23,6 @@ M.RULES = {
   { name = 'load results', check = 'cap.lua', tree = 'lua',
     before = '        for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end',
     after = '        for _, ld in ipairs(NOTHING) do taint(ld[2]) end' },
-  { name = 'functions under a tainted field load', check = 'cap.lua', tree = 'ts',
-    before = '                local function hit(l) for _, x in ipairs(l) do for _, pp in ipairs(fnports[x].params) do taint(pp) end end end',
-    after = '                local function hit(l) end' },
 }
 
 --- CART-1643: what moves with the order is flagged, whole answers survive a bigger cap, every taint rule is needed

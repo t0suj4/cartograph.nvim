@@ -324,6 +324,30 @@ test('flowtype: setfenv(1, env) at the top level is the file chunk\'s environmen
     vim.fn.delete(root, 'rf')
 end)
 
+-- (and a fourth: a call on a MEMBER of unknown code's value runs nothing — `Obj` came back from a loaded chunk, so
+-- `Obj:Register(t)` does not reach Reg:Register, which writes t.m. At run time B.m runs. A member of EXT made EXT
+-- was measured — 427 typed / string answers went unknown — and the name join, which named Register, is no input
+-- (CART-1715). A fix that keeps the precision flips this spec)
+test('flowtype: a call on a member of unknown code\'s value runs nothing — the contract\'s edge (CART-1715)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = CLASSES .. table.concat({
+        'local function use(p) return p:m() end',
+        'use(a)',
+        'local Reg = {}',
+        'function Reg:Register(x) x.m = B.m end',
+        'local Obj = loadstring("return ...")(Reg)',
+        'local t = { m = A.m }',
+        'Obj:Register(t)',
+        'use(t)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local v = flowtype.solve(store, { open = false }).verdict(call)
+    eq('exact', v and v.kind, 'the miss: ' .. vim.inspect(v))
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ★ THE CONTRACT'S EDGE, PINNED (CART-1707): a global read is a STRICT load of _G's field — it sees `_G.q = v`,
 -- `rawset(_G, 'q', v)`, getfenv's table and setfenv's environments, not a DYNAMIC-key `_G[k] = v`. Reading `[]` made
 -- every global read on the repo partial (typed RIGHT 121 -> 0 on the runtime oracle): mix's evaluator holds _G among
