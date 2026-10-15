@@ -187,84 +187,16 @@ test('flowtype: a loop site minted INSIDE an instance takes no instance of its o
 end)
 
 -- ★ LUA'S HIDDEN VALUE ROUTES (CART-1699): classes A and B with a method m; a function's parameter p receives `a` through
--- an ordinary call and `b` through a construct the walk did not model. At run time B.m runs (each fixture checked with
--- luajit, ~/work/flowpath/probes/translation/fx); the answer for p:m() must not be a WHOLE exact A.m. CART-1708 adds the
--- errors of tree code a builtin runs (an __index function, a sort comparator or __lt, __tostring, a gsub replacement);
--- CART-1707 varargs, code outside the tree (load, dofile, a require the tree cannot map), environments, raw access,
--- hooksecurefunc, coroutine.wrap, finalizers and getmetatable
+-- an ordinary call and `b` through a construct the walk did not model. At run time B.m runs; the answer for p:m() must
+-- not be a WHOLE exact A.m. The routes themselves — CART-1699's, the errors of tree code a builtin runs (CART-1708),
+-- varargs, code outside the tree, environments, raw access, hooks, wrap, finalizers (CART-1707), the Lean model's R1-R20
+-- — are FIXTURES, run on every Lua version and analysed in every order: tests/fixtures/routes/, tests/routes_spec.lua
+-- (CART-1711). The specs below use the same prologue
 local CLASSES = table.concat({
     'local A, B = {}, {}',
     'function A.m(self) return "A" end',
     'function B.m(self) return "B" end',
     'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })' }, '\n') .. '\n'
-local ROUTES = {
-    { 'coroutine', 'CART-1700', 'local function f(p) return p:m() end\nf(a)\nlocal co = coroutine.create(f)\nprint(coroutine.resume(co, b))\n' },
-    { 'callmeta', 'CART-1701', 'local function h(self, p) return p:m() end\nh(nil, a)\nlocal callable = setmetatable({}, { __call = h })\nprint(callable(b))\n' },
-    { 'opmeta', 'CART-1702', 'local function add(x, p) return p:m() end\nadd(nil, a)\nlocal box = setmetatable({}, { __add = add })\nprint(box + b)\n' },
-    { 'indexfn', 'CART-1703', 'local function get(t, k) return b end\nlocal lazy = setmetatable({}, { __index = get })\nlocal function use(p) return p:m() end\nuse(a)\nprint(use(lazy.anything))\n' },
-    -- (the same, but the table reaches the load through a PARAMETER: the load registers after the __index link)
-    { 'indexfn-late', 'CART-1703', 'local function get(t, k) return b end\nlocal lazy = setmetatable({}, { __index = get })\nlocal function rd(t) return t.anything end\nlocal function use(p) return p:m() end\nuse(a)\nprint(use(rd(lazy)))\n' },
-    { 'newindexfn', 'CART-1704', 'local function onset(t, k, p) return p:m() end\nonset(nil, "x", a)\nlocal watched = setmetatable({}, { __newindex = onset })\nwatched.y = b\n' },
-    { 'errorval', 'CART-1705', 'local function use(p) return p:m() end\nuse(a)\nlocal ok, e = pcall(function () error(b) end)\nprint(use(e))\n' },
-    { 'idxerr', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal lazy = setmetatable({}, { __index = function (t, k) error(b) end })\nlocal ok, e = pcall(function () return lazy.x end)\nprint(use(e))\n' },
-    { 'sortcb', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal ok, e = pcall(function () table.sort({ 2, 1 }, function (x, y) error(b) end) end)\nprint(use(e))\n' },
-    { 'sortlt', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, { __lt = function () error(b) end })\nlocal ok, e = pcall(function () table.sort({ o, o }) end)\nprint(use(e))\n' },
-    { 'tostringerr', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, { __tostring = function () error(b) end })\nlocal ok, e = pcall(function () return tostring(o) end)\nprint(use(e))\n' },
-    { 'printerr', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, { __tostring = function () error(b) end })\nlocal ok, e = pcall(function () print(o) end)\nprint(use(e))\n' },
-    { 'gsubrepl', 'CART-1708', 'local function use(p) return p:m() end\nuse(a)\nlocal ok, e = pcall(function () return string.gsub("x", ".", function () error(b) end) end)\nprint(use(e))\n' },
-    { 'spread', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) return use(...) end\nprint(f(b))\n' },
-    { 'local_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) local x = ... ; return use(x) end\nprint(f(b))\n' },
-    { 'select_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) return use(select(1, ...)) end\nprint(f(b))\n' },
-    { 'table_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) local t = { ... }; return use(t[1]) end\nprint(f(b))\n' },
-    { 'unpack_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(t) return use(unpack(t)) end\nprint(f({ b }))\n' },
-    { 'multiret', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function two() return 1, b end\nlocal function g(x, y) return use(y) end\nprint(g(two()))\n' },
-    { 'pcall_va', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal function f(...) return pcall(use, ...) end\nprint(f(b))\n' },
-    { 'loadstring', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal f = loadstring("return ...")\nprint(use(f(b)))\n' },
-    { 'load', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal f = load("return ...")\nprint(use(f(b)))\n' },
-    { 'dofile', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nprint(use(dofile("x.lua")))\n' },
-    { 'require_unknown', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nprint(use(require("nowhere.at.all")))\n' },
-    { 'getfenv', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal env = getfenv(1)\nenv.q = b\nprint(use(q))\n' },
-    { 'setfenv', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal env = setmetatable({ q = b }, { __index = _G })\nlocal function g() return use(q) end\nsetfenv(g, env)\nprint(g())\n' },
-    { 'setfenv_nested', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal env = setmetatable({ q = b }, { __index = _G })\nlocal function g() return (function () return use(q) end)() end\nsetfenv(g, env)\nprint(g())\n' },
-    { 'setfenv_chunk', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nsetfenv(1, setmetatable({ q = b }, { __index = _G }))\nprint(use(q))\n' },
-    { '_G', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\n_G.q = b\nprint(use(q))\n' },
-    { '_G_dynamic', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal k = ("q"):lower()\n_G[k] = b\nprint(use(_G[k]))\n' },
-    { '_G_host', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nbb = b\nprint(use(_G[("bb"):lower()]))\n' },
-    { '_G_dyncall', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal k = ("f"):lower()\n_G[k] = use\n_G[k](b)\n' },
-    { '_G_dynparam', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal k = ("f"):lower()\n_G[k] = use\nlocal function get(t, j) return t[j] end\nget(_G, k)(b)\n' },
-    { 'rawget', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal t = { x = b }\nprint(use(rawget(t, "x")))\n' },
-    { 'rawset', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal t = {}\nrawset(t, "x", b)\nprint(use(t.x))\n' },
-    { 'hook', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal T = { f = function (x) return x end }\nhooksecurefunc(T, "f", function (x) return use(x) end)\nT.f(b)\n' },
-    { 'wrapyield', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal w = coroutine.wrap(function () coroutine.yield(b) end)\nprint(use(w()))\n' },
-    { 'gc', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, { __gc = function (self) return use(self.v) end })\no.v = b\n' },
-    { 'gc_dynamic', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal mt = {}\nmt[("_"):rep(2) .. "gc"] = function (self) return use(self.v) end\nlocal o = setmetatable({ v = b }, mt)\n' },
-    { 'newproxy', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal u = newproxy(true)\ngetmetatable(u).__index = function () return b end\nprint(use(u.x))\n' },
-    { 'getmetatable', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nlocal o = setmetatable({}, {})\ngetmetatable(o).__index = function () return b end\nprint(use(o.x))\n' },
-    { 'handed', 'CART-1707', 'local function use(p) return p:m() end\nuse(a)\nbb = b\nlocal t = {}\nlocal f = loadstring("local t = ... t.v = bb")\nf(t)\nprint(use(t.v))\n' },
-    { 'sortval', 'CART-1707', 'local function lt(x, p) return p:m() end\nlt(nil, a)\ntable.sort({ b, b }, lt)\n' },
-    { 'wraparg', 'CART-1707', 'local function f(p) return p:m() end\nf(a)\nlocal w = coroutine.wrap(f)\nw(b)\n' },
-    { 'spread_later', 'CART-1707', 'local function g(x, p) return p:m() end\ng(nil, a)\nlocal function f(...) return g(...) end\nf(nil, b)\n' },
-}
-for _, r in ipairs(ROUTES) do
-    test(('flowtype: %s — the value that reaches p by that route makes p:m() no WHOLE exact A.m (%s)'):format(r[1], r[2]), function ()
-        if not parser_available('lua') then skip 'no lua parser' end
-        local root = tree({ ['m.lua'] = CLASSES .. r[3] })
-        store.ingest(ts.extract(root))
-        local callrec = require 'cartograph.callrec'
-        local call
-        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
-        ok(call and call.refused, 'p:m() is ambiguous')
-        -- (every worklist ORDER: which of two paths carries a route — a load registered before or after its __index
-        -- link — is the schedule's choice, and a path only one order takes is pinned by that order)
-        for _, open in ipairs { false, true } do
-            for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
-                local v = flowtype.solve(store, { open = open, order = order }).verdict(call)
-                ok(not (v and v.kind == 'exact' and not v.partial), ('%s %s %s: %s'):format(r[1], open and 'open' or 'closed', order, vim.inspect(v)))
-            end
-        end
-        vim.fn.delete(root, 'rf')
-    end)
-end
 
 -- (the same fixtures, read the other way: `t[k]` never returns a HIDDEN field — the metatable rides on t as `\1mt`. The
 -- dynamic load registered BEFORE setmetatable's store got the metatable as a value, one registered after did not; mt

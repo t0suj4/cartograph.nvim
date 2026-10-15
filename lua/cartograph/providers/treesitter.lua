@@ -10631,13 +10631,16 @@ function M.relink(data, touched, opts)
             mark(from)
         end
     end
+    local regok = {} -- (the reg pairs this relink minted or re-confirmed: a stale worker upgrade's pair is retracted)
     local function addreg(from, to, at)
         local k = from .. '\31' .. to
+        regok[k] = true
         if regEdge[k] then return end -- already registered from this module
         local e = { from = from, to = to, kind = 'reg', at = at and { at } or {} }
         regEdge[k] = e
         data.edges[#data.edges + 1] = e
     end
+    local regstale = {}
     local bind_of, binding_reaches = binding_index(data.edges)
     local project_classes -- CART-1077: lazily, the class names the project defines, extends or implements
     M._set_clink(data.nodes, data.edges) -- the C/C++ join bridge's extern "C" evidence + included sources (CART-1079/1081)
@@ -11074,6 +11077,17 @@ function M.relink(data, touched, opts)
             local ak, aname = cv.aget(i, j, 'k'), cv.aget(i, j, 'name')
             if ak == 'local' and aname then
                 local t2 = resolve(aname, cfile)
+                -- ★ A WORKER'S REGISTRATION IS RE-JUDGED HERE (CART-1711's parity witness): a slice resolves BEFORE the
+                -- global cbarg pre-scan, so a module-level callback's same-file function — `table.sort(t, lt)` — bound
+                -- there and the slice minted a reg edge, while the global mark denies it the same-file priority and a
+                -- SHORT name then falls to the noise floor: sequential and parallel extraction disagreed. A short name
+                -- the global resolution refuses keeps no registration of its same-file function (the data-reference
+                -- path never registers a name under three characters, so nothing else minted that pair)
+                if not t2 and not cfn and #aname < 3 then
+                    for _, n in ipairs(exact[aname] or {}) do
+                        if n.file == cfile then regstale[cfile .. '\31' .. n.id] = true end
+                    end
+                end
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
                     and not M._nested_unseen(t2, cfn, parent_fn) -- (another function's local def, CART-1562)
                     and (cv.aget(i, j, 'bound') ~= nil and not M._bound_veto(cv.aget(i, j, 'bound'), cv.aget(i, j, 'bate'), t2, cfile)
@@ -11095,6 +11109,15 @@ function M.relink(data, touched, opts)
                 end
             end
         end
+    end
+    if next(regstale) then -- (compacted IN PLACE: the passes below hold this very list)
+        local E, w = data.edges, 0
+        for r = 1, #E do
+            local e = E[r]
+            local k = e.kind == 'reg' and (e.from .. '\31' .. e.to)
+            if k and regstale[k] and not regok[k] then regEdge[k] = nil else w = w + 1; E[w] = e end
+        end
+        for r = #E, w + 1, -1 do E[r] = nil end
     end
     -- run THE RESOLUTION PIPELINE over the full (merged/spliced) graph — the
     -- SAME ordered list extract runs, no longer a hand-mirrored copy
