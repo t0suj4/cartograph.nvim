@@ -182,6 +182,8 @@ test('flowtype: a keyed copy T[k] = S[k] gives T the source\'s members — what 
     -- once the other's objects were processed, in asc / fifo here)
     for what, body in pairs {
         ['a later member of S'] = 'local o = { run = A.run, stop = A.stop }\nlocal S = {}\nfor _, op in ipairs({ "run" }) do o[op] = S[op] end\nS.run = B.run',
+        -- (a store makes S's metatable PORT, to look for __newindex — no metatable is there)
+        ['a member stored before'] = 'local o = { run = A.run, stop = A.stop }\nlocal S = {}\nS.run = B.run\nfor _, op in ipairs({ "run" }) do o[op] = S[op] end',
         ['a target by parameter'] = 'local S = { run = B.run }\nlocal function g(t) for _, op in ipairs({ "run" }) do t[op] = S[op] end end\nlocal o = { run = A.run, stop = A.stop }\ng(o)',
         ['a source by parameter'] = 'local o = { run = A.run, stop = A.stop }\nlocal function h(s) for _, op in ipairs({ "run" }) do o[op] = s[op] end end\nh({ run = B.run })',
         ['a target stored late'] = 'local S = { run = B.run }\nlocal function g(t) for _, op in ipairs({ "run" }) do t[op] = S[op] end end\nlocal box = {}\nlocal function later() g(box.v) end\nlater()\nbox.v = { run = A.run, stop = A.stop }\nlocal o = box.v',
@@ -195,11 +197,32 @@ test('flowtype: a keyed copy T[k] = S[k] gives T the source\'s members — what 
     end
 end)
 
+test('flowtype: a keyed copy from a source with a METATABLE is a dynamic-key store — its __index answers any key (CART-1726)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    for what, src in pairs {
+        ['a prototype table'] = 'local S = setmetatable({}, { __index = { run = B.run } })',
+        ['an __index function'] = 'local S = setmetatable({}, { __index = function () return B.run end })',
+    } do
+        local v = kcase { body = src .. '\nlocal o = { run = A.run, stop = A.stop }\nfor _, op in ipairs({ "run" }) do o[op] = S[op] end' }
+        ok(not whole(v.run, 'run'), what .. ': o.run may be B.run: ' .. vim.inspect(v.run))
+    end
+    -- (the metatable arrives AFTER the copy is walked; the source reaches the copy only after its metatable was solved)
+    for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+        local v = kcase { order = order, body = 'local S = {}\nlocal o = { run = A.run, stop = A.stop }\nfor _, op in ipairs({ "run" }) do o[op] = S[op] end\nsetmetatable(S, { __index = { run = B.run } })' }
+        ok(not whole(v.run, 'run'), 'a later metatable ' .. order .. ': o.run may be B.run: ' .. vim.inspect(v.run))
+        v = kcase { order = order, body = 'local o = { run = A.run, stop = A.stop }\nlocal function h(s) for _, op in ipairs({ "run" }) do o[op] = s[op] end end\nlocal box = {}\nlocal function later() h(box.v) end\nlater()\nbox.v = setmetatable({}, { __index = { run = B.run } })' }
+        ok(not whole(v.run, 'run'), 'a metatable source stored late ' .. order .. ': o.run may be B.run: ' .. vim.inspect(v.run))
+    end
+end)
+
 test('flowtype: a keyed copy through a port the solve lost — into any escaped object, or from anything (CART-1726)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     -- (the TARGET saturates: o escapes, and the copy may write S's members into it unseen)
     local v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal S = { run = B.run }\nlocal function g(t) for _, op in ipairs({ "run" }) do t[op] = S[op] end end\ng(o)', sink = 'g({})' }
     ok(not whole(v.run, 'run'), 'a lost target: o.run may be B.run: ' .. vim.inspect(v.run))
+    -- (… from a source whose __index answers any key: every escaped object's computed-key port)
+    v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal S = setmetatable({}, { __index = { run = B.run } })\nlocal function g(t) for _, op in ipairs({ "run" }) do t[op] = S[op] end end\ng(o)', sink = 'g({})' }
+    ok(not whole(v.run, 'run'), 'a lost target, a metatable source: o.run may be B.run: ' .. vim.inspect(v.run))
     -- (the SOURCE saturates: what it held under any key may land in o)
     v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal function h(s) for _, op in ipairs({ "run" }) do o[op] = s[op] end end\nh({ run = B.run })', sink = 'h({})' }
     ok(not whole(v.run, 'run'), 'a lost source: o.run may be B.run: ' .. vim.inspect(v.run))

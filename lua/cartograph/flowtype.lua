@@ -693,20 +693,43 @@ local function build(store, opts)
     -- made every function of D a candidate for every member of M (algebra/core.lua's M, 394 answers); as a copy,
     -- M.generalize may be D.generalize and nothing else of D. G7.COPY: port -> its copy records; G7.CPAIR: source
     -- object -> its target objects
+    -- object -> { [target object] = the copy's value port, what `S[k]` read }. A source the walk cannot copy field by
+    -- field — unknown code's value, a typed one, one with a METATABLE (its __index answers keys it lacks) — is copied
+    -- as the plain dynamic-key store of that value
     G7.edge, G7.COPY, G7.CPAIR = edge, {}, {}
-    function G7.copypair(s0, o)
-        if s0 == o or TNAME[s0] or TNAME[o] or s0 == G7.EXT or o == G7.EXT then return end
+    -- (a metatable is an object in the hidden field `\1mt` — the PORT alone is no evidence: a store creates it to look
+    -- for __newindex. G7.mtcopy: a copy source's metatable port gained an object, or saturated)
+    function G7.uncopyable(s0)
+        local mp = ofield[s0] and ofield[s0]['\1mt']
+        return s0 == G7.EXT or TNAME[s0] or (mp and (pts[mp] ~= nil or top[mp]))
+    end
+    function G7.mtcopy(p)
+        local cp = fname[p] == '\1mt' and G7.CPAIR[fowner[p]]
+        if cp then for t, v in pairs(cp) do edge(v, ofp(t, '[]')) end end
+    end
+    -- (the fields a copy from s0 may write: its own, and any key where it is uncopyable)
+    function G7.copykeys(s0)
+        local fs = ofield[s0] or NOTHING
+        if not G7.uncopyable(s0) then return fs end
+        local t = { ['[]'] = true }
+        for f in pairs(fs) do t[f] = true end
+        return t
+    end
+    function G7.copypair(s0, o, v)
+        if s0 == o or TNAME[o] or o == G7.EXT then return end
         local m = G7.CPAIR[s0]
         if not m then m = {}; G7.CPAIR[s0] = m end
         if m[o] then return end
-        m[o] = true
+        m[o] = v
+        if G7.uncopyable(s0) then edge(v, ofp(o, '[]')) end
+        if s0 == G7.EXT or TNAME[s0] then return end
         for f, fp in pairs(ofield[s0] or NOTHING) do if f:byte(1) ~= 1 then edge(fp, ofp(o, f)) end end
     end
-    function G7.copyf(dst, src)
-        local r = { dst, src }
+    function G7.copyf(dst, src, v)
+        local r = { dst, src, v }
         for _, q in ipairs { dst, src } do local l = G7.COPY[q]; if not l then l = {}; G7.COPY[q] = l end; l[#l + 1] = r end
         -- (muted: the core IR has no field-wise copy — the dump names it as the gap `keyed-copy`)
-        G7.mu(function () for s0 in each(src) do for o in each(dst) do G7.copypair(s0, o) end end end)
+        G7.mu(function () for s0 in each(src) do for o in each(dst) do G7.copypair(s0, o, v) end end end)
     end
     -- (a handler in x's metatable — `__call`, `__add`, `__newindex`… — called with args, its results into res: the
     -- metatable rides on the object as the hidden field `\1mt`, which `setmetatable` writes)
@@ -834,6 +857,7 @@ local function build(store, opts)
             if order == 'fifo' and head > tail then head, tail = 1, 0 end
             inwl[p] = nil
             if top[p] then
+                G7.mtcopy(p)
                 for q in sit(succ[p]) do settop(q) end
                 if spread and fowner[p] then readers(fowner[p], fname[p], settop) end
                 for _, ld in ipairs(loads[p] or NOTHING) do settop(ld[2]) end
@@ -859,10 +883,11 @@ local function build(store, opts)
                             if not SCALAR[TNAME[o]] and not (fnports[o] and st[1] == '\1mt') then edge(st[2], ofp(o, st[1])) end
                         end
                     end
+                    G7.mtcopy(p)
                     for _, r in ipairs(G7.COPY[p] or NOTHING) do
                         for _, x in dit(d) do
-                            if p == r[1] then for s0 in each(r[2]) do G7.copypair(s0, x) end end
-                            if p == r[2] then for o in each(r[1]) do G7.copypair(x, o) end end
+                            if p == r[1] then for s0 in each(r[2]) do G7.copypair(s0, x, r[3]) end end
+                            if p == r[2] then for o in each(r[1]) do G7.copypair(x, o, r[3]) end end
                         end
                     end
                     for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3], cl[4]) end end
@@ -1144,7 +1169,7 @@ local function build(store, opts)
                 local rk = rhs and rhs:type() == 'bracket_index_expression' and rhs:field('field')[1]
                 if kn and rk and kn:type() == 'identifier' and rk:type() == 'identifier' and txt(kn) == txt(rk)
                     and not select(2, lookup(txt(kn))) and G7.KBASE and G7.KBASE[rhs:id()] then
-                    G7.copyf(base, G7.KBASE[rhs:id()])
+                    G7.copyf(base, G7.KBASE[rhs:id()], v)
                     G7.gap('keyed-copy', { base })
                 else storec(base, keyname(kn), v) end
                 local kp = kn and expr(kn) or new()
@@ -2275,7 +2300,7 @@ local function build(store, opts)
         for _, r in ipairs(G7.COPY[p] or NOTHING) do
             if p == r[1] then
                 for s0 in each(r[2]) do
-                    for f in pairs(ofield[s0] or NOTHING) do
+                    for f in pairs(G7.copykeys(s0)) do
                         if f:byte(1) ~= 1 and not field_hit[f] then
                             field_hit[f] = true
                             if not escf then
