@@ -107,14 +107,16 @@ local function owner_of(node)
 end
 
 -- the extends parents of C (single-parent map from data.extends), walked to collect
--- ancestors so a field written on a base class resolves from a subclass method.
-local function ancestors(store, C)
+-- ancestors so a field written on a base class resolves from a subclass method. A class is the table its methods are
+-- defined on, and a NAME names it only in the file that binds it (CART-1715: every file's `P` was one class) — so the
+-- chain and the methods are the defining file's; a base another file defines is left unresolved, never guessed.
+local function ancestors(store, C, file)
     local chain, seen, cur = { C }, { [C] = true }, C
     local extends = store.data and store.data.extends
     for _ = 1, 16 do
         local par
         for _, e in ipairs(extends or {}) do
-            if e.child == cur then if par and par ~= e.parent then par = nil; break end par = e.parent end
+            if e.child == cur and e.file == file then if par and par ~= e.parent then par = nil; break end par = e.parent end
         end
         if not par or seen[par] then break end
         seen[par] = true; chain[#chain + 1] = par; cur = par
@@ -138,9 +140,9 @@ function M.fields(store, fn_id)
 
     -- the class's methods (own + ancestors), and the genuine-object gate count
     local classes = {}
-    for _, c in ipairs(ancestors(store, C)) do classes[c] = true end
+    for _, c in ipairs(ancestors(store, C, node.file)) do classes[c] = true end
     local methods, methodcount = {}, 0
-    for _, n in ipairs(store.data.nodes or {}) do
+    for _, n in ipairs(store.by_file and store.by_file[node.file] or {}) do
         local o = owner_of(n)
         if o and classes[o] and (n.kind == 'method' or n.kind == 'function') then
             methods[#methods + 1] = n

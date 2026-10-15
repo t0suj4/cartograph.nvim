@@ -80,3 +80,45 @@ test('fieldlink: a field written on the base class resolves from a subclass meth
     eq(1, res.nresolved)                 -- self.shared resolves through the extends chain
     ok(res.reads[1] and res.reads[1].defs[1].method == 'Base:setup', 'to the base write')
 end)
+
+-- (CART-1715: a class is the table its methods are defined on, not its NAME — two files' `P` are two classes. Every
+-- file's `P` was one class: ir.lua's P and erlterms.lua's P pooled their writes and passed the gate together)
+test('fieldlink: two files\' classes of one name are two classes', function ()
+    if not ready() then return skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local files = {
+        ['a.lua'] = { 'local P = {}', 'function P:init() self.x = 1 end', 'function P:use() return self.x, self.y end', 'return P' },
+        ['b.lua'] = { 'local P = {}', 'function P:init() self.y = 2 end', 'return P' },
+    }
+    for f, lines in pairs(files) do
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(table.concat(lines, '\n')); fd:close()
+    end
+    store.ingest(ts.extract(root))
+    local use
+    for _, n in ipairs(store.data.nodes) do if n.name == 'P:use' then use = n.id end end
+    local res = fieldlink.fields(store, use)
+    local byfield = {}
+    for _, r in ipairs(res.reads) do byfield[r.field] = r.defs end
+    ok(byfield.x and byfield.x[1].line == 2, 'self.x -> a.lua\'s own init: ' .. vim.inspect(res))
+    eq(nil, byfield.y, 'self.y is written only by b.lua\'s P, another table')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('fieldlink: an extends chain is the defining file\'s — another file\'s `Sub` extending another base does not cut it', function ()
+    if not ready() then return skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local files = {
+        ['a.lua'] = { 'local Base = {}', 'function Base:setup() self.shared = 1 end', 'function Base:b2() return 0 end',
+            'local Sub = setmetatable({}, {__index = Base})', 'function Sub:use() return self.shared end', 'function Sub:s2() return 0 end', 'return Sub' },
+        ['b.lua'] = { 'local Other = {}', 'function Other:o1() end', 'local Sub = setmetatable({}, {__index = Other})', 'return Sub' },
+    }
+    for f, lines in pairs(files) do
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(table.concat(lines, '\n')); fd:close()
+    end
+    store.ingest(ts.extract(root))
+    local use
+    for _, n in ipairs(store.data.nodes) do if n.name == 'Sub:use' then use = n.id end end
+    local res = fieldlink.fields(store, use)
+    eq(1, res.nresolved, 'self.shared -> Base:setup through a.lua\'s own chain: ' .. vim.inspect(res))
+    vim.fn.delete(root, 'rf')
+end)
