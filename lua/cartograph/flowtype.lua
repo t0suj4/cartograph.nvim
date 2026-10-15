@@ -1047,6 +1047,11 @@ local function build(store, opts)
     local ROOTS = ARGP and {} or nil -- (each walked file's TOP scope: name -> port, filled as the walk declares)
     -- (parameter paths: PTAG / PUSES / puse, declared before field() — opts.pathsum, CART-1673)
     local CTX, ctx_direct = {}, {}
+    -- (CART-1715: the selecting solve records each call's CALLEE PORT — G7.CALLP — and exports the calls whose callee
+    -- was ONE function, untainted: R.ctxcallee, call record -> fn id. The second solve instances by that map, never by
+    -- the name join's c.to: a wrong claim bound the wrong function and skipped the callee's flow)
+    G7.CALLP = opts.ctxsel and {} or nil
+    G7.CTXC = opts.ctxcallee
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
         -- (one parse per text per process, shared with the extractor and the lint rules — a snippet instance's text is
@@ -1487,7 +1492,7 @@ local function build(store, opts)
                 local base = recvp or (f:type() == 'dot_index_expression' and expr(f:field('table')[1]))
                 if base and member then probes[#probes + 1] = { c = c, recv = base, member = txt(member) } end
             end
-            local to = c and callrec.to(c)
+            local to = c and G7.CTXC and G7.CTXC[c]
             -- (MULTIPLE VALUES: `want` > 1 asks for that many results — `local a, b = f()`, `return f()`, a generic
             -- for's iterator triple — the k-th result port gets the callee's k-th return)
             local res = new()
@@ -1498,6 +1503,7 @@ local function build(store, opts)
                 mcalls[#mcalls + 1] = { recvp, txt(f:field('method')[1]), resl }
             end
             if to and CTXFNS and CTXFNS[to] and not clone then
+                if not callee and f then expr(f) end -- (the callee expression is still walked: a call inside it)
                 ctx_direct[#ctx_direct + 1] = { to, aps, resl }
                 return want and resl or res
             end
@@ -1550,6 +1556,7 @@ local function build(store, opts)
                 else metacall(el, '__lt', { el, el }, new(), curerr()) end
             end
             if not callee and f then callee = expr(f) end
+            if G7.CALLP and c and not clone and callee then G7.CALLP[c] = callee end
             if PTAG and not clone and callee and not recvp then puse(callee, 'call') end
             if callee then
                 callc(callee, aps, want and resl or res, nil, curerr())
@@ -2858,6 +2865,18 @@ local function build(store, opts)
             end
         end
         R.ctxfns, R.nctx = sel, n
+        if G7.CALLP then
+            local cc = {}
+            for c, p in pairs(G7.CALLP) do
+                if not top[p] and not tainted[p] then
+                    local one, k = nil, 0
+                    for o in each(p) do one = o; k = k + 1; if k > 1 then break end end
+                    local fp = k == 1 and fnports[one]
+                    if fp and not fp.inst and fp.id and sel[fp.id] then cc[c] = fp.id end
+                end
+            end
+            R.ctxcallee = cc
+        end
     end
     if G7.REC then -- (opts.dump: the program in the core IR and this solution, CART-1710)
         local FD = require 'cartograph.flowdump'
@@ -2882,9 +2901,9 @@ local build1 = build
 build = function (store, opts)
     opts = opts or {}
     if opts.ctx == false or opts.ctxfns or opts.dump then return build1(store, opts) end
-    local R1 = build1(store, setmetatable({ keepsat = true }, { __index = opts }))
+    local R1 = build1(store, setmetatable({ keepsat = true, ctxsel = true }, { __index = opts }))
     if (R1.nctx or 0) == 0 then return R1 end
-    local R = build1(store, setmetatable({ ctxfns = R1.ctxfns }, { __index = opts }))
+    local R = build1(store, setmetatable({ ctxfns = R1.ctxfns, ctxcallee = R1.ctxcallee }, { __index = opts }))
     R.stats.ms, R.stats.ctxfns = R.stats.ms + R1.stats.ms, R1.nctx
     return R
 end

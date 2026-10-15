@@ -1185,6 +1185,12 @@ test('flowtype: a closure whose parameter saturates gets an instance per call si
     flowtype.CAP = 2
     local merged = flowtype.solve(store, { open = false, ctx = false })
     local split = flowtype.solve(store, { open = false })
+    -- (the instances are keyed on the selecting solve's FLOW, never on the name join's c.to — CART-1715: with every
+    -- claim erased the answers are the same)
+    local saved = {}
+    for i, x in ipairs(store.data.calls) do saved[i] = x.to; x.to = nil end
+    local unjoined = flowtype.solve(store, { open = false })
+    for i, x in ipairs(store.data.calls) do x.to = saved[i] end
     flowtype.CAP = cap
     vim.fn.delete(root, 'rf')
     local callrec = require 'cartograph.callrec'
@@ -1202,6 +1208,8 @@ test('flowtype: a closure whose parameter saturates gets an instance per call si
     -- (the instance sees the scopes `use` was defined in: its upvalue A is the module, not a global)
     local rv = split.verdict(rc)
     eq('exact', rv and rv.kind, 'what an instance returns from its upvalue: ' .. vim.inspect(rv))
+    eq(vim.inspect(v), vim.inspect(unjoined.verdict(c)), 'no c.to: the same instances')
+    eq(vim.inspect(rv), vim.inspect(unjoined.verdict(rc)), 'no c.to: the same return')
 end)
 
 -- ★ WHAT AN ESCAPED OBJECT HOLDS ESCAPES WITH IT (CART-1643): a call through a tainted callee taints the parameters of
