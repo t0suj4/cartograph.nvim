@@ -56,6 +56,9 @@ local M = {}
 -- (the assumptions a whole answer rests on that the core does not state — flowtype's header, THE CONTRACT; a checker
 -- exempts a constraint only by one of these names)
 M.CONTRACTS = {
+    ['C1'] = 'open mode: outside code does not replace FUNCTION members of what it can reach from the exports (it may write their data fields — modelled, O2)',
+    ['C3'] = 'open mode: outside code does not set metatables on what it can reach, nor write their handlers',
+    ['C2'] = 'open mode: outside code does not patch the string library or the host API methods',
     ['outside-raises-strings'] = 'a function outside the tree raises strings (pcall second values)',
     ['host'] = 'a site of a host kind has no fields: a store to it is not followed, a load from it is its declared type',
     ['strict-global'] = 'a named global read does not see a dynamic-key write `_G[k] = v` (tag contract:strict-global)',
@@ -301,8 +304,8 @@ function M.build(rec, X)
         if v then
             local tg = {}
             for _, t in ipairs(v.targets or {}) do tg[#tg + 1] = FN(tostring(t)) end
-            aj[#aj + 1] = ('{"call":[%s,%d,%d],"kind":%s,"targets":%s,"partial":%s}'):format(jstr(tostring(X.callrec.file(c))),
-                X.callrec.line(c) or 0, c.at and X.at.sc(c.at) or 0, jstr(v.kind), jarr(tg), v.partial and 'true' or 'false')
+            aj[#aj + 1] = ('{"call":[%s,%d,%d],"kind":%s,"targets":%s,"partial":%s,"contracts":%s}'):format(jstr(tostring(X.callrec.file(c))),
+                X.callrec.line(c) or 0, c.at and X.at.sc(c.at) or 0, jstr(v.kind), jarr(tg), v.partial and 'true' or 'false', jarr(v.contracts or {}))
         end
     end
     -- gaps

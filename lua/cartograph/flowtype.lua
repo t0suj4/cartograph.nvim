@@ -1992,6 +1992,27 @@ local function build(store, opts)
             end
         end
         solve()
+        -- ★ O2 / C1 (CART-1685, the user's decision 2026-10-15): outside code may WRITE THE DATA FIELDS of what it can
+        -- reach from the exports — a config, a cache, a registry, an object stored on the module — so what is read
+        -- through one is PARTIAL (seeded in the taint phase, propagated through loads like any taint: `M.config.item:m()`
+        -- is exact~); it does NOT replace FUNCTION members (C1, a contract, default on): a field holding a function, or a
+        -- name the prototype chain supplies a method for. Answers read through a reachable receiver carry C1 (the
+        -- verdicts). A metatable's fields are not data (C3). The strict reading — every reachable member writable —
+        -- left 179 of 3,182 whole open answers
+        G7.REACH = {}
+        do
+            local q, R = {}, G7.REACH
+            local function reach(o) if not R[o] and o ~= EXT and o ~= G7.GOBJ and not TNAME[o] then R[o] = true; q[#q + 1] = o end end
+            for _, mp in ipairs(modports) do for o in each(mp) do reach(o) end end
+            local i = 1
+            while i <= #q do
+                local o = q[i]; i = i + 1
+                for _, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do reach(x) end end
+                for c in pairs(protos[o] or NOTHING) do reach(c) end
+                local fpp = fnports[o]
+                if fpp then for _, r in pairs(fpp.rets or { fpp.ret }) do for x in each(r) do reach(x) end end end
+            end
+        end
     end
     -- ★ PARTIAL: a set the cap made INCOMPLETE (CART-1643). A port past CAP drops out: what it held before has gone
     -- downstream (an order-chosen part), what came after is lost — and a call through it never binds the functions it
@@ -2099,6 +2120,39 @@ local function build(store, opts)
         PINC[o] = PINC[o] or G7.EXTCALL
         for _, fp in pairs(ofield[o] or NOTHING) do taint(fp) end
         for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end
+    end
+    TCUR = 'O2: a data field of what outside code reaches from the exports — it may write it (open mode, CART-1685)'
+    if open and G7.REACH then
+        local function protofn(o, f, seen)
+            for c in pairs(protos[o] or NOTHING) do
+                if not seen[c] then
+                    seen[c] = true
+                    local fp = ofield[c] and ofield[c][f]
+                    if fp then for y in each(fp) do if fnports[y] then return true end end end
+                    if protofn(c, f, seen) then return true end
+                end
+            end
+            return false
+        end
+        -- (a METATABLE's fields are structure, not data: outside code does not set metatables or their handlers — C3,
+        -- default on, RESEARCH.md §17.2)
+        local MT = {}
+        for o in pairs(G7.REACH) do
+            local mp = ofield[o] and ofield[o]['\1mt']
+            if mp then for x in each(mp) do MT[x] = true end end
+        end
+        for o in pairs(G7.REACH) do
+            if not fnports[o] and not MT[o] then
+                -- (every name read from it has a field port — a load made it — so a key the tree never wrote is covered too)
+                for f, fp in pairs(ofield[o] or NOTHING) do
+                    if f:byte(1) ~= 1 and f ~= '{k}' and f ~= '[]' then
+                        local fn = false
+                        for x in each(fp) do if fnports[x] then fn = true; break end end
+                        if not (fn or protofn(o, f, {})) then taint(fp) end
+                    end
+                end
+            end
+        end
     end
     TCUR = 'open: reachable from an export, an outside caller may fill it'
     -- ★ OPEN REACHES PAST THE EXPORTS (CART-1652): a caller outside the tree gets more than the module's functions —
@@ -2357,6 +2411,18 @@ local function build(store, opts)
             end
         end
         stats[kind] = (stats[kind] or 0) + 1
+        -- (the contracts an open answer rests on, CART-1685: C1 — read through a receiver outside code can reach, whose
+        -- function members it does not replace; C2 — the string library and the host's methods are not patched)
+        if v and open and G7.REACH then
+            local cs = {}
+            if v.kind == 'string' or v.kind == 'typed' then cs[#cs + 1] = 'C2' end
+            for _, r in ipairs(g.recvs) do
+                local hit = false
+                for o in each(r) do if G7.REACH[o] then hit = true; break end end
+                if hit then cs[#cs + 1] = 'C1'; break end
+            end
+            if #cs > 0 then v.contracts = cs end
+        end
         if v and partial_hit then
             v.partial = true; stats.partial = stats.partial + 1
             if TFROM and type(partial_hit) == 'number' then v.ptport = partial_hit end -- (the tainted port it read)

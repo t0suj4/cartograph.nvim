@@ -348,6 +348,45 @@ test('flowtype: a call on a member of unknown code\'s value runs nothing — the
     vim.fn.delete(root, 'rf')
 end)
 
+-- ★ O2 / C1 (CART-1685, the user's decision): in OPEN mode outside code may write the DATA fields of what it reaches
+-- from the exports — `M.config`, `M.cache.last`, an object stored on the module — so what is read through one is
+-- PARTIAL (`exact~`: the targets stay, the claim is no longer whole); it does not replace FUNCTION members (C1) — an
+-- exported function, a method the prototype supplies — so an object an exported function MAKES keeps a whole answer.
+-- Open answers through a reachable receiver say they rest on C1; closed mode is untouched
+test('flowtype: open mode — outside code writes DATA fields (O2), not function members (C1); answers carry C1 (CART-1685)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['lua/m/init.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.m(self) return "A" end',
+        'function B.m(self) return "B" end',
+        'local M = { config = { item = setmetatable({}, { __index = A }) }, cache = {} }',
+        'M.cache.last = setmetatable({}, { __index = A })',
+        'function M.make() return setmetatable({}, { __index = A }) end',
+        'M.obj = setmetatable({}, { __index = A })',
+        'function M.run2() return M.obj:m() end',
+        'function M.run() return M.config.item:m() end',
+        'function M.peek() return M.cache.last:m() end',
+        'local function id(x) return x end',
+        'function M.fresh() local o = id(M.make()); return o:m() end',
+        'return M' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local function at(full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return c end end end
+    local closed, open = flowtype.solve(store, { open = false }), flowtype.solve(store, { open = true })
+    for _, full in ipairs { 'M.config.item:m', 'M.cache.last:m', 'M.obj:m', 'o:m' } do
+        local v = closed.verdict(at(full))
+        ok(v and v.kind == 'exact' and not v.partial and not v.contracts, 'closed: ' .. full .. ' ' .. vim.inspect(v))
+    end
+    for _, full in ipairs { 'M.config.item:m', 'M.cache.last:m', 'M.obj:m' } do
+        local v = open.verdict(at(full))
+        ok(v and v.kind == 'exact' and v.partial, 'O2: read through a data field outside code may write — partial: ' .. full .. ' ' .. vim.inspect(v))
+    end
+    local v = open.verdict(at('o:m'))
+    ok(v and v.kind == 'exact' and not v.partial, 'C1: an object an exported function makes keeps a whole answer: ' .. vim.inspect(v))
+    eq('C1', (v.contracts or {})[1], 'and names the contract it rests on')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ★ THE CONTRACT'S EDGE, PINNED (CART-1707): a global read is a STRICT load of _G's field — it sees `_G.q = v`,
 -- `rawset(_G, 'q', v)`, getfenv's table and setfenv's environments, not a DYNAMIC-key `_G[k] = v`. Reading `[]` made
 -- every global read on the repo partial (typed RIGHT 121 -> 0 on the runtime oracle): mix's evaluator holds _G among
