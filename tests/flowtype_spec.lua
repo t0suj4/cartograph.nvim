@@ -141,6 +141,70 @@ test('flowtype: a store through a SATURATED base may write any escaped object\'s
     vim.fn.delete(root, 'rf')
 end)
 
+-- (CART-1726: a function stored by a COMPUTED key may be any member — `M[op] = D[op]` overrides M.generalize when op is
+-- 'generalize' — and a named load reads those stores too. A KEYED COPY `T[k] = S[k]` is field-wise: T gets S's members,
+-- and keeps the ones S lacks)
+local function kcase(src)
+    local sinks = {}
+    for k = 1, 70 do sinks[k] = src.sink or '' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.run(self) return 1 end\nfunction A.stop(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.run(self) return 2 end\nfunction B.stop(self) return 2 end\nreturn B\n',
+        ['m.lua'] = 'local A, B = require("a"), require("b")\n' .. src.body .. '\n' .. table.concat(sinks, '\n') .. '\nreturn o:run(), o:stop()\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local R = flowtype.solve(store, { open = false, order = src.order })
+    local v = {}
+    for _, c in ipairs(store.data.calls) do
+        local f = callrec.full(c)
+        if f == 'o:run' or f == 'o:stop' then ok(c.refused, f .. ' is ambiguous'); v[f:sub(3)] = R.verdict(c) end
+    end
+    vim.fn.delete(root, 'rf')
+    return v
+end
+local function whole(v, m) return v and v.kind == 'exact' and not v.partial and #v.targets == 1 and tostring(v.targets[1]):match('%u%.' .. m .. '@') end
+
+test('flowtype: a function stored by a computed key may be the named member — no whole exact of the named one (CART-1726)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal k = ("run"):lower()\no[k] = B.run' }
+    ok(not whole(v.run, 'run'), 'o[k] = B.run may be o.run: ' .. vim.inspect(v.run))
+    ok(not whole(v.stop, 'stop'), '… or o.stop: ' .. vim.inspect(v.stop))
+end)
+
+test('flowtype: a keyed copy T[k] = S[k] gives T the source\'s members — what S lacks stays exact (CART-1726)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal S = { run = B.run }\nfor _, op in ipairs({ "run" }) do o[op] = S[op] end' }
+    ok(not whole(v.run, 'run'), 'o.run may be B.run: ' .. vim.inspect(v.run))
+    ok(whole(v.stop, 'stop') and tostring(v.stop.targets[1]):match('A%.stop'), 'S has no stop: o.stop is A.stop, whole: ' .. vim.inspect(v.stop))
+    -- (a member the source gains AFTER the copy is walked; a target / a source that reaches the copy through a parameter,
+    -- and one stored where the call reads it only AFTER the call is walked — in every worklist ORDER: the solve's hook for
+    -- a target gaining objects and the one for a source gaining them cover for each other unless one side fills only
+    -- once the other's objects were processed, in asc / fifo here)
+    for what, body in pairs {
+        ['a later member of S'] = 'local o = { run = A.run, stop = A.stop }\nlocal S = {}\nfor _, op in ipairs({ "run" }) do o[op] = S[op] end\nS.run = B.run',
+        ['a target by parameter'] = 'local S = { run = B.run }\nlocal function g(t) for _, op in ipairs({ "run" }) do t[op] = S[op] end end\nlocal o = { run = A.run, stop = A.stop }\ng(o)',
+        ['a source by parameter'] = 'local o = { run = A.run, stop = A.stop }\nlocal function h(s) for _, op in ipairs({ "run" }) do o[op] = s[op] end end\nh({ run = B.run })',
+        ['a target stored late'] = 'local S = { run = B.run }\nlocal function g(t) for _, op in ipairs({ "run" }) do t[op] = S[op] end end\nlocal box = {}\nlocal function later() g(box.v) end\nlater()\nbox.v = { run = A.run, stop = A.stop }\nlocal o = box.v',
+        ['a source stored late'] = 'local o = { run = A.run, stop = A.stop }\nlocal function h(s) for _, op in ipairs({ "run" }) do o[op] = s[op] end end\nlocal box = {}\nlocal function later() h(box.v) end\nlater()\nbox.v = { run = B.run }',
+    } do
+        for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+            v = kcase { body = body, order = order }
+            ok(not whole(v.run, 'run'), what .. ' ' .. order .. ': o.run may be B.run: ' .. vim.inspect(v.run))
+            ok(whole(v.stop, 'stop'), what .. ' ' .. order .. ': o.stop is A.stop, whole: ' .. vim.inspect(v.stop))
+        end
+    end
+end)
+
+test('flowtype: a keyed copy through a port the solve lost — into any escaped object, or from anything (CART-1726)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (the TARGET saturates: o escapes, and the copy may write S's members into it unseen)
+    local v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal S = { run = B.run }\nlocal function g(t) for _, op in ipairs({ "run" }) do t[op] = S[op] end end\ng(o)', sink = 'g({})' }
+    ok(not whole(v.run, 'run'), 'a lost target: o.run may be B.run: ' .. vim.inspect(v.run))
+    -- (the SOURCE saturates: what it held under any key may land in o)
+    v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal function h(s) for _, op in ipairs({ "run" }) do o[op] = s[op] end end\nh({ run = B.run })', sink = 'h({})' }
+    ok(not whole(v.run, 'run'), 'a lost source: o.run may be B.run: ' .. vim.inspect(v.run))
+end)
+
 test('flowtype: a loop\'s per-site instance of its iterator is walked AT ITS OWN POSITIONS — the original call\'s answer is the union (CART-1688)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     -- (the loop hands `node` to an instance of `it`; a direct call hands `other` to the original. The call n:kid inside

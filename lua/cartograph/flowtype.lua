@@ -5,7 +5,8 @@
 -- assignments, arguments to the parameters of the resolved callee (or, on the fly, of every function the callee
 -- port holds), returns, `require` (the module's returned value), a `setmetatable(t, mt)` __index link (t's objects
 -- read mt.__index's fields), `pcall` / `xpcall`, `for … in pairs / ipairs` (values: the `[]` field; keys: `{k}`).
--- Fields are per OBJECT; a dynamic-key load reads every field. A profile's declared return types an external call's
+-- Fields are per OBJECT; a dynamic-key load reads every field, and a function a dynamic-key store wrote may be any
+-- member (CART-1726) — but `T[k] = S[k]` is a KEYED COPY, field to field. A profile's declared return types an external call's
 -- result (tostring -> string, io.open -> file) and a method on a typed object (s:sub -> string, n:parent -> TSNode).
 --
 -- ★ WHY INCLUSION AND NOT UNIFICATION. Measured on lua/cartograph (the prototype): unification (Steensgaard) merged
@@ -423,6 +424,8 @@ local function build(store, opts)
             okeys_cache[o] = nil
             fowner[p], fname[p] = o, f
             if not walking then pinfo[p] = { okey(o), f } end
+            local cp = G7.CPAIR and G7.CPAIR[o] -- (a KEYED COPY's source gained a field: its targets gain it too)
+            if cp and f:byte(1) ~= 1 then for t in pairs(cp) do G7.edge(p, ofp(t, f)) end end
         end
         return p
     end
@@ -685,6 +688,26 @@ local function build(store, opts)
         for o in each(callee) do bindcall(o, args, res, site, cerr) end
     end
     G7.callc = callc
+    -- ★ A KEYED COPY (CART-1726): `M[op] = D[op]` — the same key on both sides, read in one statement — copies D's field
+    -- k into M's field k, for whichever k: FIELD-WISE, not "any of D's values under any key". As a dynamic-key store it
+    -- made every function of D a candidate for every member of M (algebra/core.lua's M, 394 answers); as a copy,
+    -- M.generalize may be D.generalize and nothing else of D. G7.COPY: port -> its copy records; G7.CPAIR: source
+    -- object -> its target objects
+    G7.edge, G7.COPY, G7.CPAIR = edge, {}, {}
+    function G7.copypair(s0, o)
+        if s0 == o or TNAME[s0] or TNAME[o] or s0 == G7.EXT or o == G7.EXT then return end
+        local m = G7.CPAIR[s0]
+        if not m then m = {}; G7.CPAIR[s0] = m end
+        if m[o] then return end
+        m[o] = true
+        for f, fp in pairs(ofield[s0] or NOTHING) do if f:byte(1) ~= 1 then edge(fp, ofp(o, f)) end end
+    end
+    function G7.copyf(dst, src)
+        local r = { dst, src }
+        for _, q in ipairs { dst, src } do local l = G7.COPY[q]; if not l then l = {}; G7.COPY[q] = l end; l[#l + 1] = r end
+        -- (muted: the core IR has no field-wise copy — the dump names it as the gap `keyed-copy`)
+        G7.mu(function () for s0 in each(src) do for o in each(dst) do G7.copypair(s0, o) end end end)
+    end
     -- (a handler in x's metatable — `__call`, `__add`, `__newindex`… — called with args, its results into res: the
     -- metatable rides on the object as the hidden field `\1mt`, which `setmetatable` writes)
     local function metacall(x, mm, args, res, cerr)
@@ -834,6 +857,12 @@ local function build(store, opts)
                     for _, st in ipairs(stores[p] or NOTHING) do
                         for _, o in dit(d) do
                             if not SCALAR[TNAME[o]] and not (fnports[o] and st[1] == '\1mt') then edge(st[2], ofp(o, st[1])) end
+                        end
+                    end
+                    for _, r in ipairs(G7.COPY[p] or NOTHING) do
+                        for _, x in dit(d) do
+                            if p == r[1] then for s0 in each(r[2]) do G7.copypair(s0, x) end end
+                            if p == r[2] then for o in each(r[1]) do G7.copypair(x, o) end end
                         end
                     end
                     for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3], cl[4]) end end
@@ -1099,7 +1128,7 @@ local function build(store, opts)
                 acc('dynamic', kn, nil, base, nil, nil, ok and expr(kn) or false)
             end
         end
-        local function assign(target, v)
+        local function assign(target, v, rhs)
             local t = target:type()
             if t == 'identifier' then edge(v, lookup(txt(target)))
             elseif t == 'dot_index_expression' then
@@ -1111,7 +1140,13 @@ local function build(store, opts)
             elseif t == 'bracket_index_expression' then
                 local base, kn = expr(target:field('table')[1]), target:field('field')[1]
                 acc_key('write', kn, base, target)
-                storec(base, keyname(kn), v)
+                -- (`T[k] = S[k]` — one local k read twice in one statement: a KEYED COPY, field k to field k, CART-1726)
+                local rk = rhs and rhs:type() == 'bracket_index_expression' and rhs:field('field')[1]
+                if kn and rk and kn:type() == 'identifier' and rk:type() == 'identifier' and txt(kn) == txt(rk)
+                    and not select(2, lookup(txt(kn))) and G7.KBASE and G7.KBASE[rhs:id()] then
+                    G7.copyf(base, G7.KBASE[rhs:id()])
+                    G7.gap('keyed-copy', { base })
+                else storec(base, keyname(kn), v) end
                 local kp = kn and expr(kn) or new()
                 if kn then storec(base, '{k}', kp) end
                 metastore(base, keyname(kn), kp, v, curerr())
@@ -1551,6 +1586,7 @@ local function build(store, opts)
             if t == 'bracket_index_expression' then
                 local base = expr(n:field('table')[1])
                 local knode = n:field('field')[1]
+                if G7.KBASE then G7.KBASE[n:id()] = base end -- (a keyed copy's source, read again by assign: not walked twice)
                 acc_key('read', knode, base, n)
                 return field(base, keyname(knode))
             end
@@ -1629,9 +1665,11 @@ local function build(store, opts)
                 end
             elseif t == 'assignment_statement' then
                 local vl, el = n:named_child(0), n:named_child(1)
+                G7.KBASE = {}
                 local vals = exprs(el, vl:named_child_count())
                 local i = 0
-                for _, v in tsutil.inamed, vl, -1 do i = i + 1; if vals[i] then assign(v, vals[i]) end end
+                for _, v in tsutil.inamed, vl, -1 do i = i + 1; if vals[i] then assign(v, vals[i], el and el:named_child(i - 1)) end end
+                G7.KBASE = nil
             elseif t == 'function_declaration' then
                 local nm = n:field('name')[1]
                 if nm and txt(n):match('^local%s') then
@@ -2232,6 +2270,31 @@ local function build(store, opts)
                 TCUR = p
             end
         end
+        -- (a KEYED COPY through a port the solve lost objects of: a lost TARGET may have received every field the source
+        -- holds — the store rule, per field; a lost SOURCE may have held anything under any key, CART-1726)
+        for _, r in ipairs(G7.COPY[p] or NOTHING) do
+            if p == r[1] then
+                for s0 in each(r[2]) do
+                    for f in pairs(ofield[s0] or NOTHING) do
+                        if f:byte(1) ~= 1 and not field_hit[f] then
+                            field_hit[f] = true
+                            if not escf then
+                                escf = {}
+                                for _, o in ipairs(esc) do
+                                    for fk, fp in pairs(ofield[o] or NOTHING) do
+                                        local l = escf[fk]
+                                        if not l then l = {}; escf[fk] = l end
+                                        l[#l + 1] = fp
+                                    end
+                                end
+                            end
+                            for _, fp in ipairs(escf[f] or NOTHING) do taint(fp) end
+                        end
+                    end
+                end
+            end
+            if p == r[2] then for o in each(r[1]) do taint(ofp(o, '[]')) end end
+        end
         -- ★ A CALL THROUGH A TAINTED LOAD OF `.f` MAY REACH ANY FUNCTION STORED AS `.f` (CART-1696): the load's base was
         -- cut short, so the method it would have read need not be ESCAPED — a class method sitting in its prototype's
         -- field never reaches a saturated port when the instances that would read it were dropped upstream. arktype:
@@ -2325,11 +2388,13 @@ local function build(store, opts)
         for c in pairs(protos[o] or NOTHING) do t = targets(c, m, out, seen) or t end
         return t
     end
-    -- (does o — or its prototype chain — hold functions under a key the walk could not name, `t[k] = f`?)
+    -- (does o — or its prototype chain — hold functions under a key the walk could not name, `t[k] = f`? A computed-key
+    -- port the solve lost values of may hold one too: the answer is partial)
     local function dynfn(o, seen)
         if seen[o] then return false end
         seen[o] = true
         local p = ofield[o] and ofield[o]['[]']
+        if p and tainted[p] then partial_hit = partial_hit or p end
         if p then for x in each(p) do if fnports[x] or x == EXT then return true end end end
         for c in pairs(protos[o] or NOTHING) do if dynfn(c, seen) then return true end end
         return false
@@ -2369,15 +2434,18 @@ local function build(store, opts)
                 else
                     local mine = {}
                     if targets(o, pr.member, mine, {}) then sat = true end
+                    -- (it may hold the member under a key the walk could not name — a function stored by a COMPUTED key, on it
+                    -- or a prototype: no claim. Also where it has the member BY NAME: `M[op] = D[op]` overrides M.generalize
+                    -- when op is 'generalize', and a named load reads those stores too — 394 exact answers on the repo read
+                    -- only the named field, 101 wrong at runtime, CART-1726)
+                    if dynfn(o, {}) then sat = true
+                    elseif not next(mine) and escaped[o] then
+                        -- (it may have gained the member where the solve no longer follows it)
+                        partial_hit = true
+                    end
                     if next(mine) then
                         other = true
                         for x in pairs(mine) do out[x] = true end
-                    elseif dynfn(o, {}) then
-                        -- (it may hold the member under a key the walk could not name: no claim)
-                        sat = true
-                    elseif escaped[o] then
-                        -- (it may have gained the member where the solve no longer follows it)
-                        partial_hit = true
                     end
                     -- ★ AN OBJECT WITHOUT THE MEMBER IS NOT THIS CALL'S RECEIVER (CART-1643): `x:find()` on it would
                     -- raise, so a program that gets past the call did not hold it there. The exact answer always

@@ -49,6 +49,8 @@ local ROUTES = {
     { 'yield', 'local co = coroutine.create(function () coroutine.yield(b) end)\nlocal ok, v = coroutine.resume(co)\nprint(use(v))\n', { 'yield', 'resume' }, 'divergence:coroutine' },
     { 'varargs', 'local function f(...) return use(...) end\nprint(f(b))\n', { 'call' } },
     { 'globals', '_G.q = b\nprint(use(q))\n', { 'store', 'load' } },
+    -- (a KEYED COPY `t[k] = S[k]` has no core opcode: field-wise, it is a gap, and its pairing writes nothing — CART-1726)
+    { 'keyed-copy', 'local t = {}\nlocal S = { x = b }\nfor _, k in ipairs({ "x" }) do t[k] = S[k] end\nprint(use(t.x))\n', { 'load' } },
     -- (a function has no metatable of its own: a shared setmetatable helper that also receives a function must not give
     -- it one — the core would run __call when the function is called, which Lua never does)
     { 'fn-meta', 'local function h(self, p) return p:m() end\nh(nil, a)\nlocal function sm(x) return setmetatable(x, { __call = h }) end\nsm({})\nlocal function g() end\npcall(sm, g)\ng(b)\n', { 'setmeta', 'call' } },
