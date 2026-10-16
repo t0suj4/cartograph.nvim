@@ -14,8 +14,10 @@ local function src(f) return io.open(D .. f):read('a') end
 -- Both are pinned by one synthetic spec instead, tests/flowtype_spec.lua "a store through a SATURATED base…", each
 -- mutant-CAUGHT, CART-1696. 'functions under a tainted field load' (CART-1696's own) lost its arktype witness when a
 -- call the cut lost began handing its ARGUMENTS on — they escape, and the escape closure reaches what it protected
--- (CART-1715 work): its mutant survives the cap check. Kept in the code, out of this list; whether it is now SUBSUMED
--- in closed mode is CART-1727)
+-- (CART-1715 work): its mutant survives the cap check. Kept in the code, out of this list — and NOT subsumed (CART-1727):
+-- the escape rule covers what a lost port lacked only because what it lacked ESCAPED, and _G never escapes (the
+-- contract), so a lost base that is _G at run time reaches its global functions through this rule alone —
+-- tests/fixtures/routes/lost_global_load.lua, mutant CAUGHT)
 M.RULES = {
   { name = 'escaped params', check = 'cap.lua', tree = 'ts',
     before = 'for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end',
