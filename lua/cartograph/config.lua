@@ -86,6 +86,9 @@ M.pins = nil
 --   exclude              directory NAMES excluded under that scope (read per directory the walk enters)
 --   entrypoints          entry-point patterns for files under that scope (store.classify; a real disagreement
 --                        between two covering scopes classifies the file `ambiguous`, never `orphan`)
+--   program              the PROGRAM the files under that scope belong to — a name (they share one globals table and
+--                        string library with each other, apart from the rest) or 'per-file' (each its own); unset:
+--                        one program for the whole tree (cartograph.programs, CART-1737 — :CartographShapes explains)
 --   tactic_overrides     { ['<tactic>'] = { use = 'sha256:<project file>', over = 'sha256:<built-in>' } }: run the
 --                        project's .cartograph/tactics/<tactic>.lua INSTEAD of the built-in one. Your explicit choice,
 --                        for that exact pair of texts — either side changing voids it (the refusal prints the entry)

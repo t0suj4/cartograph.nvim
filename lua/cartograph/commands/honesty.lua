@@ -264,8 +264,14 @@ function M.register(H)
     cmd('CartographShapes', function ()
         local st = require 'cartograph.store'
         local root = (st.data and st.data.root) or vim.fn.getcwd()
-        scratch(require('cartograph.shapes').explain(root))
-    end, { desc = 'cartograph: explain project-shape detection for this root' })
+        local lines = require('cartograph.shapes').explain(root)
+        -- (and the PROGRAMS — which files share one _G / string library, how that was derived, CART-1737)
+        if st.data and st.data.nodes then
+            lines[#lines + 1] = ''
+            for _, l in ipairs(require('cartograph.programs').explain(st)) do lines[#lines + 1] = l end
+        end
+        scratch(lines)
+    end, { desc = 'cartograph: explain project-shape detection for this root, and which files form one PROGRAM (shared globals)' })
 end
 
 return M

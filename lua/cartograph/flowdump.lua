@@ -150,6 +150,15 @@ function M.build(rec, X)
     -- init: what the solve itself starts with
     local init = { { 'new', V(X.GPORT), X.GOBJ } }
     if X.FENVP then init[#init + 1] = { 'new', V(X.FENVP), X.GOBJ } end
+    -- (every further PROGRAM's globals table, CART-1737: its port and its getfenv port hold it)
+    local ISG = { [X.GOBJ] = true }
+    for i, e in ipairs(X.ENVL or {}) do
+        if i > 1 then
+            ISG[e.GOBJ] = true
+            init[#init + 1] = { 'new', V(e.GPORT), e.GOBJ }
+            if e.FENVP then init[#init + 1] = { 'new', V(e.FENVP), e.GOBJ } end
+        end
+    end
     if X.XA then
         init[#init + 1] = { 'new', V(X.XA), X.EXT }
         init[#init + 1] = { 'call', { V(X.XRES) }, V(X.EXTCALL), { X.XA, X.XA, X.XA, X.XA } }
@@ -226,7 +235,7 @@ function M.build(rec, X)
         elseif info:find('^tbl:') then kind = 'table'
         elseif X.TNAME[o] then kind = 'type'
         elseif o == X.EXT then kind = 'ext'
-        elseif o == X.GOBJ then kind = 'globals'
+        elseif ISG[o] then kind = 'globals'
         elseif info:find('^thread:') then kind = 'thread'
         elseif info:find('^proxy') then kind = 'proxy' end
         sj[#sj + 1] = ('{"id":%d,"kind":"%s","label":%s,"fn":%s}'):format(o, kind, jstr(info), fn)
@@ -338,7 +347,9 @@ function M.build(rec, X)
         .. '},"weak":[],"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']}},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
-    put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
+    local gs = { tostring(X.GOBJ) }
+    for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
+    put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
         .. ',"clauses":' .. jstr(M.CONTRACTS) .. '},')
     put('"answers":[' .. table.concat(aj, ',') .. ']}')
     return table.concat(out)

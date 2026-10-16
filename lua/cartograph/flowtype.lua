@@ -438,7 +438,7 @@ local function build(store, opts)
         if not r then return end
         local l = r[g]
         if l then for dst in pairs(l) do fn(dst) end end
-        if g ~= '{k}' and g ~= '[]' and g:byte(1) ~= 1 and o ~= G7.GOBJ then
+        if g ~= '{k}' and g ~= '[]' and g:byte(1) ~= 1 and not G7.ISG[o] then
             local dyn = r['[]']
             if dyn then for dst, strict in pairs(dyn) do if not strict then fn(dst) end end end
         end
@@ -470,7 +470,8 @@ local function build(store, opts)
         if tn then
             -- (a string's metatable __index is the string library: `s.f` and `s[k]` — a computed key too — read its fields,
             -- `string.pick = …` among them; `s[k]` had read nothing, an unexplained loadDyn in the dump, CART-1730)
-            if tn == 'string' and G7.STRLIB and f ~= '#' then load_obj(G7.STRLIB, f, dst, seen, strict) end
+            local sl = G7.MULTI and G7.LENV[dst] and G7.LENV[dst].STRLIB or G7.STRLIB
+            if tn == 'string' and sl and f ~= '#' then load_obj(sl, f, dst, seen, strict) end
             local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
             return
@@ -494,7 +495,7 @@ local function build(store, opts)
                 if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
             end
             if strict then pull(ofp(o, f))
-            elseif f == '[]' and o == G7.GOBJ then
+            elseif f == '[]' and G7.ISG[o] then
                 -- (`_G[k]`, k unknown: what a dynamic-key write stored, and a global the HOST defines — EXT. Not every
                 -- named global: on WoW `_G["Frame" .. i]` pulled every global's value set into each such read, and
                 -- the solve went 41 -> 632 s. The mirror of a STRICT global read, CART-1707)
@@ -532,6 +533,7 @@ local function build(store, opts)
     end
     local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
+        if G7.MULTI then G7.LENV[dst] = G7.ENV end
         if WALKERR then LOADERR[dst] = WALKERR() end
         if PTAG then
             local tg = PTAG[x]
@@ -929,16 +931,36 @@ local function build(store, opts)
     -- reading FUNCTION (G7.GR: function id -> name -> port), so `setfenv(f, env)` adds env's field to f's reads — and
     -- to the functions nested in f, which inherit its environment — and nowhere else. getfenv returns G7.FENVP: _G and
     -- every environment setfenv set
-    G7.GOBJ = newobj('_G')
-    G7.GPORT = new()
-    addobj(G7.GPORT, G7.GOBJ)
+    -- ★ ONE ENVIRONMENT PER PROGRAM (CART-1737, cartograph.programs): the globals table and the string library are a
+    -- PROGRAM's — the files that run in one process. One environment unless config or derived evidence splits them;
+    -- G7.ENV is the walked file's, G7.ISG / G7.ISGP every environment's _G object / port
+    G7.ENVS, G7.ENVL, G7.ISG, G7.ISGP, G7.LENV = {}, {}, {}, {}, {}
+    function G7.useenv(e)
+        G7.ENV = e
+        G7.GOBJ, G7.GPORT, G7.GREAD, G7.FENVP, G7.STRLIB = e.GOBJ, e.GPORT, e.GREAD, e.FENVP, e.STRLIB
+    end
     function G7.gport(name)
-        local key = 'g:' .. name
+        local key = G7.ENV.name == 'default' and ('g:' .. name) or ('g:' .. G7.ENV.name .. ':' .. name)
         local p = named[key]
         if not p then p = ofp(G7.GOBJ, name); named[key] = p end
         return p
     end
-    addobj(G7.gport('_G'), G7.GOBJ)
+    function G7.mkenv(name)
+        local e = G7.ENVS[name]
+        if e then return e end
+        e = { name = name, GOBJ = newobj(name == 'default' and '_G' or ('_G@' .. name)), GPORT = new(), GREAD = {} }
+        addobj(e.GPORT, e.GOBJ)
+        G7.ISG[e.GOBJ], G7.ISGP[e.GPORT] = true, true
+        G7.ENVS[name] = e
+        G7.ENVL[#G7.ENVL + 1] = e
+        if name ~= 'default' then e.FENVP = new(); addobj(e.FENVP, e.GOBJ); G7.MULTI = true end
+        local saved = G7.ENV
+        G7.useenv(e)
+        addobj(G7.gport('_G'), e.GOBJ)
+        if saved then G7.useenv(saved) end
+        return e
+    end
+    G7.useenv(G7.mkenv('default'))
     G7.GR, G7.KIDS, G7.FENV, G7.GCPEND = {}, {}, {}, {}
     -- (the modules the environment profile declares: every dotted prefix of a signature's path)
     function G7.profmod(name)
@@ -958,6 +980,7 @@ local function build(store, opts)
     -- walk, on its first file: an object minted for every solve renumbers a TypeScript tree's objects, and its schedule
     G7.FENVP = new()
     addobj(G7.FENVP, G7.GOBJ)
+    G7.ENV.FENVP = G7.FENVP
     function G7.fenv(id, env, seen)
         seen = seen or {}
         if seen[id] then return end
@@ -965,7 +988,6 @@ local function build(store, opts)
         for name, dst in pairs(G7.GR[id] or NOTHING) do edge(field(env, name), dst) end
         for _, k in ipairs(G7.KIDS[id] or NOTHING) do G7.fenv(k, env, seen) end
     end
-    G7.GREAD = {}
     function G7.gread(name)
         local p = G7.GREAD[name]
         if not p then p = field(G7.GPORT, name, true); G7.GREAD[name] = p end
@@ -1061,7 +1083,9 @@ local function build(store, opts)
         -- is a different key, so it missed the extractor's tree, parsed again, and the grammar misread that copy.)
         local tree = require('cartograph.parsecache').root(require('cartograph.parseview').view(src, 'lua'), 'lua')
         if not tree then return end
-        if not G7.STRLIB then G7.STRLIB = newobj('stringlib'); addobj(G7.gport('string'), G7.STRLIB) end
+        if G7.PROG == nil then G7.PROG = require('cartograph.programs').of(store) or false end
+        if G7.PROG then G7.useenv(G7.mkenv(G7.PROG.env[file] or 'default')) end
+        if not G7.STRLIB then G7.STRLIB = newobj('stringlib'); G7.ENV.STRLIB = G7.STRLIB; addobj(G7.gport('string'), G7.STRLIB) end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
         -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record — a
@@ -1885,7 +1909,7 @@ local function build(store, opts)
     -- the local limit)
     if G7.REC then (function ()
         local REC, E = G7.REC, G7.REC.errp
-        REC.objvar[G7.GOBJ] = G7.GPORT
+        for _, e in ipairs(G7.ENVL) do REC.objvar[e.GOBJ] = e.GPORT end
         local r_addobj, r_edge, r_field, r_storec, r_callc, r_metacall, r_metastore, r_proto =
             addobj, edge, field, storec, callc, metacall, metastore, proto
         local function on() return G7.W and G7.M == 0 end
@@ -1922,7 +1946,7 @@ local function build(store, opts)
                 elseif f == '{k}' then G7.gap('table-keys', { dst, x }) -- (the key set `pairs` yields: no core field)
                 else
                     G7.ins({ 'load', dst, x, f }, strict and f ~= '[]'
-                        and (x == G7.GPORT and 'contract:strict-global' or 'contract:strict') or nil)
+                        and (G7.ISGP[x] and 'contract:strict-global' or 'contract:strict') or nil)
                 end
             end
             return dst
@@ -1993,6 +2017,9 @@ local function build(store, opts)
             end
         end
     end
+    -- (the walks are done: the solve's own reads of the current environment — a string's library for a load recorded
+    -- before a second program existed — are the DEFAULT program's, never the last walked file's, CART-1737)
+    if G7.ENVL[1] then G7.useenv(G7.ENVL[1]) end
     solve()
     -- (the instanceof GUARDS to a fixpoint: admit what the solved prototypes allow, solve again — sets only grow)
     for _ = 1, 20 do
@@ -2082,7 +2109,7 @@ local function build(store, opts)
         G7.REACH = {}
         do
             local q, R = {}, G7.REACH
-            local function reach(o) if not R[o] and o ~= EXT and o ~= G7.GOBJ and not TNAME[o] then R[o] = true; q[#q + 1] = o end end
+            local function reach(o) if not R[o] and o ~= EXT and not G7.ISG[o] and not TNAME[o] then R[o] = true; q[#q + 1] = o end end
             for _, mp in ipairs(modports) do for o in each(mp) do reach(o) end end
             local i = 1
             while i <= #q do
@@ -2123,7 +2150,7 @@ local function build(store, opts)
     local XESC = {}
     do
         local q = {}
-        local function skip(x) return x == EXT or x == G7.GOBJ end -- (_G: every code reaches it, the contract)
+        local function skip(x) return x == EXT or G7.ISG[x] end -- (_G: every code reaches it, the contract)
         for o in each(G7.EXTCALL) do if not skip(o) and not XESC[o] then XESC[o] = true; q[#q + 1] = o end end
         local i = 1
         while i <= #q do
@@ -2151,16 +2178,16 @@ local function build(store, opts)
     -- (the GLOBALS TABLE never escapes — the contract: a global is written by name, and every code reaches _G anyway.
     -- WoW passes _G as a value: one saturated parameter made every addon's namespace, its fields, escape, and each
     -- store of `.f` anywhere tainted every namespace's f — w3: 317 whole exact answers partial, CART-1707)
-    escaped[G7.GOBJ] = nil
+    for o in pairs(G7.ISG) do escaped[o] = nil end
     for o in pairs(escaped) do esc[#esc + 1] = o end
     do
         local i = 1
         while i <= #esc do
             local o = esc[i]; i = i + 1
             for _, fp in pairs(ofield[o] or NOTHING) do
-                for x in each(fp) do if not escaped[x] and x ~= G7.GOBJ then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                for x in each(fp) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and c ~= G7.GOBJ then escaped[c] = true; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
         end
     end
     local field_hit, params_hit = {}, false
@@ -2197,7 +2224,7 @@ local function build(store, opts)
     -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
     -- that already fired applied to it: a store of .f through a tainted base, a call reaching any escaped function)
     function G7.escmore(o0)
-        if escaped[o0] or o0 == EXT or o0 == G7.GOBJ then return end
+        if escaped[o0] or o0 == EXT or G7.ISG[o0] then return end
         local q, i = { o0 }, 1
         escaped[o0] = true
         while i <= #q do
@@ -2207,9 +2234,9 @@ local function build(store, opts)
             for fk, fp in pairs(ofield[o] or NOTHING) do
                 if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
                 if field_hit[fk] then taint(fp) end
-                for x in each(fp) do if not escaped[x] and x ~= EXT and x ~= G7.GOBJ then escaped[x] = true; q[#q + 1] = x end end
+                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] then escaped[x] = true; q[#q + 1] = x end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and c ~= G7.GOBJ then escaped[c] = true; q[#q + 1] = c end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; q[#q + 1] = c end end
             local fpp = fnports[o]
             if fpp and params_hit then for _, pp in ipairs(fpp.params) do taint(pp) end end
         end
@@ -2901,8 +2928,8 @@ local function build(store, opts)
         local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
-            ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.GOBJ, GPORT = G7.GPORT, EXT = EXT, GERR = GERR,
-            GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.STRLIB, verdicts = verdicts,
+            ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             sha = here and FD.head(here), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) })
         if type(opts.dump) == 'string' then

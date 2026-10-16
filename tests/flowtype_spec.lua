@@ -1669,3 +1669,42 @@ test('flowtype: a bare return and a valueless local walk an absent child list wi
     vim.fn.delete(root, 'rf')
     ok(ok_, tostring(err))
 end)
+
+-- (CART-1737: a PROGRAM is the files that share one globals table and string library — one for the whole tree unless
+-- config says otherwise; the derived require closures are only CANDIDATES the explainer shows)
+test('flowtype: programs — one environment by default; a config split hides one program\'s globals from another', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.run(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.run(self) return 2 end\nreturn B\n',
+        ['w/writer.lua'] = 'local A = require "a"\nshared_obj = setmetatable({}, { __index = A })\nstring.objx = setmetatable({}, { __index = A })\n',
+        ['r/reader.lua'] = 'local B = require "b"\nlocal o = shared_obj\nlocal k = ("OBJ"):lower() .. "x"\nlocal q = ("q")[k]\nreturn o:run(), q:run()\n',
+    })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local c
+    local cq
+    for _, x in ipairs(store.data.calls) do if tostring(callrec.full(x)) == 'o:run' then c = x end; if tostring(callrec.full(x)) == 'q:run' then cq = x end end
+    local programs = require 'cartograph.programs'
+    local cfg = require 'cartograph.config'
+    local saved = cfg.scoped
+    local R1 = flowtype.solve(store, { open = false })
+    local v1, q1 = R1.verdict(c), R1.verdict(cq)
+    local e1 = programs.explain(store)
+    cfg.scoped = { [root .. '/w'] = { program = 'per-file' } }
+    store.generation = store.generation + 1 -- (programs.of is memoized per graph generation)
+    local R2 = flowtype.solve(store, { open = false })
+    local v2, q2 = R2.verdict(c), R2.verdict(cq)
+    local p2 = programs.of(store)
+    cfg.scoped = saved
+    vim.fn.delete(root, 'rf')
+    eq('a.lua::A.run@1', v1 and v1.targets and v1.targets[1], 'one program: the reader sees the writer\'s global — ' .. vim.inspect(v1))
+    ok(table.concat(e1, '\n'):find('CANDIDATES, not applied', 1, true), 'the derived closures are candidates only: ' .. table.concat(e1, ' | '))
+    eq('w/writer.lua', p2.env['w/writer.lua'], 'per-file: the writer is a program of its own')
+    eq('default', p2.env['r/reader.lua'], 'the reader stays in the default program')
+    ok(not (v2 and v2.kind == 'exact'), 'split: shared_obj is the writer program\'s — the reader holds nothing of it: ' .. vim.inspect(v2))
+    -- (and its STRING LIBRARY: `("q")[k]` reads the reader's own — walked before the writer's program existed, so the
+    -- solve must read the default program's, not the last walked file's)
+    eq('a.lua::A.run@1', q1 and q1.targets and q1.targets[1], 'one program: string.objx is the reader\'s too — ' .. vim.inspect(q1))
+    ok(not (q2 and q2.kind == 'exact'), 'split: the writer\'s string.objx is not in the reader\'s library: ' .. vim.inspect(q2))
+end)
