@@ -158,3 +158,35 @@ test('flowdump: a plain global assignment is a store into the globals site, and 
     ok(store_q, '`q = b` is a store of field q')
     ok(fns > 0 and rets == fns, ('every function returns through ret: %d of %d'):format(rets, fns))
 end)
+
+-- (CART-1725, flowpath C.4: each answer names the CALL instruction it is about — `ins = [fn, index]`, the index into that
+-- function's DUMPED body — so the checker reads the answer against that instruction's callee in the solution)
+test('flowdump: an answer names its call instruction — a call in the function that makes it, whose callee holds the answer', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('local function two(q) return q:m(), q:m() end\nprint(two(a))\n')
+    local byid = {}
+    for _, F in ipairs(D.functions) do byid[F.id] = F end
+    local V = {}
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    local seen, n = {}, 0
+    for _, a in ipairs(D.answers) do
+        if a.kind == 'exact' then
+            n = n + 1
+            ok(type(a.ins) == 'table', 'linked: ' .. vim.inspect(a))
+            local F = byid[a.ins[1]]
+            local ins = F and F.body[a.ins[2] + 1]
+            ok(ins and ins[1] == 'call', 'a call instruction: ' .. vim.inspect(ins))
+            ok(D.names.functions[a.ins[1] + 1]:find('use') or D.names.functions[a.ins[1] + 1]:find('two'), 'in the calling function: ' .. D.names.functions[a.ins[1] + 1])
+            -- the callee variable holds the answered function's site
+            local held = {}
+            for _, s in ipairs(V[ins[3]] or {}) do held[s] = true end
+            local site
+            for _, s in ipairs(D.sites) do if s.kind == 'function' and s.fn == a.targets[1] then site = s.id end end
+            ok(site ~= nil and held[site], 'the callee holds the target: ' .. vim.inspect({ callee = ins[3], held = V[ins[3]], site = site }))
+            local key = a.ins[1] .. ':' .. a.ins[2]
+            ok(not seen[key], 'two calls, two instructions: ' .. key)
+            seen[key] = true
+        end
+    end
+    ok(n >= 3, 'use\'s p:m() and two\'s q:m() twice are answered: ' .. n)
+end)

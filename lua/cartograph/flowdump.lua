@@ -21,7 +21,9 @@
 --     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ] } ... ],
 --     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, ctx = nil, live = nil,
 --                  taint = { ports, seeds } },
---     gaps = [ { fn, kind, vars, at } ... ], answers = [ { call = [file, line, col], kind, targets, partial } ... ] }
+--     gaps = [ { fn, kind, vars, at } ... ], answers = [ { call = [file, line, col], kind, targets, partial, contracts,
+--       ins = [fn, index] | null — the CALL instruction the answer is about: index is 0-based in that function's dumped
+--       body; null when the walk emitted none (CART-1725, flowpath C.4) } ... ] }
 -- * FIELD IDS are the Lua instance's where it names them: 100 the metatable slot (flowtype's hidden `\1mt`), 101
 --   `__index`, 102 `__newindex`, 103 `__call`, 105 `__gc`, 106 `__mode`; 104 and 107..109 are never emitted (evStoreLook
 --   and the ghosts). Every other field name is interned at 0..99, then 110 on; names.fields[id + 1] is its name (JSON
@@ -186,8 +188,10 @@ function M.build(rec, X)
     for _, k in ipairs(rec.forder) do keys[#keys + 1] = k end
     for name in pairs(byname) do if not rec.fns[name] then keys[#keys + 1] = name end end
     table.sort(keys)
+    local maps = {} -- (a function's recorder index -> its DUMPED body index: what an answer's `ins` names, CART-1725)
     for _, name in ipairs(keys) do
         local body, tags, map = {}, {}, {}
+        maps[name] = map
         for i, ins in ipairs(rec.fns[name] or {}) do
             local e = enc(ins)
             if e then body[#body + 1] = e; map[i - 1] = #body - 1 end
@@ -304,8 +308,11 @@ function M.build(rec, X)
         if v then
             local tg = {}
             for _, t in ipairs(v.targets or {}) do tg[#tg + 1] = FN(tostring(t)) end
-            aj[#aj + 1] = ('{"call":[%s,%d,%d],"kind":%s,"targets":%s,"partial":%s,"contracts":%s}'):format(jstr(tostring(X.callrec.file(c))),
-                X.callrec.line(c) or 0, c.at and X.at.sc(c.at) or 0, jstr(v.kind), jarr(tg), v.partial and 'true' or 'false', jarr(v.contracts or {}))
+            local ia = X.insat and X.insat[c]
+            local ci = ia and maps[ia[1]] and maps[ia[1]][ia[2]]
+            aj[#aj + 1] = ('{"call":[%s,%d,%d],"kind":%s,"targets":%s,"partial":%s,"contracts":%s,"ins":%s}'):format(jstr(tostring(X.callrec.file(c))),
+                X.callrec.line(c) or 0, c.at and X.at.sc(c.at) or 0, jstr(v.kind), jarr(tg), v.partial and 'true' or 'false', jarr(v.contracts or {}),
+                ci and ('[%d,%d]'):format(FN(ia[1]), ci) or 'null')
         end
     end
     -- gaps

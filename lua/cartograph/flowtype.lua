@@ -166,7 +166,7 @@ local function build(store, opts)
     local G7 = {} -- (EXTCALL, GOBJ, GPORT, gport, gread: one local — the builder is at Lua's 200-local limit)
     -- (opts.dump: the program in the core IR, with this solve's solution — flowdump.lua, CART-1710. G7.mu runs a builtin
     -- translated by hand with its inner primitives MUTED; G7.ins / G7.gap record into the current function)
-    if opts.dump then G7.REC = require('cartograph.flowdump').recorder(); G7.M = 0 end
+    if opts.dump then G7.REC = require('cartograph.flowdump').recorder(); G7.M = 0; G7.INSAT = {} end
     function G7.mu(f)
         if not G7.REC then return f() end
         G7.M = G7.M + 1
@@ -1559,7 +1559,10 @@ local function build(store, opts)
             if G7.CALLP and c and not clone and callee then G7.CALLP[c] = callee end
             if PTAG and not clone and callee and not recvp then puse(callee, 'call') end
             if callee then
+                -- (opts.dump: the call instruction this call record's ANSWER is about, CART-1725 — stamped by the recording callc)
+                if G7.REC and c and not clone then G7.NEXTC = c end
                 callc(callee, aps, want and resl or res, nil, curerr())
+                G7.NEXTC = nil
                 -- (calling a TABLE runs its metatable's __call with the table first, CART-1701)
                 local ma = { callee }
                 for _, ap in ipairs(aps) do ma[#ma + 1] = ap end
@@ -1929,7 +1932,12 @@ local function build(store, opts)
         callc = function (callee, args, res, site, cerr)
             if on() then
                 if args.hook or args.fenv then G7.gap(args.hook and 'hooksecurefunc' or 'setfenv', { callee })
-                else G7.ins({ 'call', type(res) == 'table' and list(res) or { res }, callee, list(args) }) end
+                else
+                    G7.ins({ 'call', type(res) == 'table' and list(res) or { res }, callee, list(args) })
+                    local k = G7.NEXTC and G7.W and G7.cur()
+                    local l = k and G7.REC.fns[k]
+                    if l then G7.INSAT[G7.NEXTC] = { k, #l - 1 } end
+                end
             end
             enter(); r_callc(callee, args, res, site, cerr); leave()
         end
@@ -2885,7 +2893,7 @@ local function build(store, opts)
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.GOBJ, GPORT = G7.GPORT, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.STRLIB, verdicts = verdicts,
-            calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at',
+            calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             sha = here and FD.head(here), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) })
         if type(opts.dump) == 'string' then
             local fd = assert(io.open(opts.dump, 'w')); fd:write(R.dump); fd:close()
