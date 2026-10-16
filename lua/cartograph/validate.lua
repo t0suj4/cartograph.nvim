@@ -28,7 +28,7 @@ M.NODE_FIELDS = {
     vlocal = true,   -- a module VAR visible in its file only (lua `local`): never a cross-file use target, CART-1473
     clink = true,    -- C/C++: declared inside extern "C" (the C/C++ join bridge, CART-1079)
     retflow = true,  -- type-variable return: the return expressions as type terms (java_ret_flow, CART-1077)
-    entry = true, exported = true, effects = true, apertures = true, mtab = true, -- (mtab: a module node's exported table, CART-1715)
+    entry = true, exported = true, effects = true, apertures = true, mtab = true, drk = true, -- (mtab: a module node's exported table; drk: a dotted def's root binder, CART-1715)
     annos = true,   -- (CART-0722) registration-CANDIDATE marks: annotation names
                     -- on this def that no supplied list claims. Carried, not
                     -- decided — the reader that would speak for them is in
@@ -211,6 +211,9 @@ M.CALL_FIELDS = {
                  -- <pass name> / 'stdlib') — the by_prov axis ([[cartograph-
                  -- provenance-surfacing]]); stamped by run_resolve_passes
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
+    cb = true, cbe = true, -- a bare callee's BOUND value: its binder's declaration rows (CART-1602)
+    cba = true, -- a bare callee bound to a same-name FIELD alias: its by-name edge is inferred (CART-1715)
+    crk = true, -- a dotted callee's ROOT binder key: matched against the def's drk (CART-1715)
 }
 
 local SAMPLES = 5 -- violations kept per rule

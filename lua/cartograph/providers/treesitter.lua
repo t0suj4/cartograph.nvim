@@ -378,10 +378,10 @@ end
 -- tsroot userdata flows to both passes), so per-tree lifetime is
 -- structural: node ids cannot alias across trees, and the two-models-per-
 -- file redundancy is gone. nil when the language has no scope spec.
-local jvt_sm, jvt_root = nil, nil
+local jvt_sm, jvt_root, jvt_src = nil, nil, nil
 local function tree_model(tsroot, src, spec)
     if jvt_root ~= tsroot then
-        jvt_root = tsroot
+        jvt_root, jvt_src = tsroot, src
         jvt_sm = spec.lexical_scopes
             and require('cartograph.scope').model(src, spec.lexical_scopes) or nil
     end
@@ -1217,6 +1217,24 @@ function M._binder(an, a)
     if not b then return -1 end
     if top then return b.row or 0 end
     return b.row and (-b.row - 3) or -2
+end
+--- the BINDER an expression's ROOT name has at its site, as a key (CART-1715): `L` in `L.scratch()` / `function
+--- L.scratch()` -> 'local@<scope row>:<binder row>' | 'param@<scope row>:nil' | 'g' (a global) | nil (a bare name, or no
+--- scope model). Two dotted names with the same spelling name the same table only where their roots' keys agree
+function M._root_key(x)
+    if not jvt_sm or not x then return nil end
+    local t = x:type()
+    if t ~= 'dot_index_expression' and t ~= 'method_index_expression' then return nil end
+    -- @langs-ok lua index expressions only: the early return above admits no other grammar's node
+    while x and x:type() ~= 'identifier' do
+        t = x:type()
+        if t ~= 'dot_index_expression' and t ~= 'method_index_expression' and t ~= 'bracket_index_expression' then return nil end
+        x = x:field('table')[1]
+    end
+    if not x then return nil end
+    local b, _, sn = jvt_sm.binder(vim.treesitter.get_node_text(x, jvt_src), x)
+    if not b then return 'g' end
+    return ('%s@%d:%s'):format(tostring(b.kind), sn and select(1, sn:start()) or -1, tostring(b.row))
 end
 --- does an identifier ARGUMENT with binder `bd` (argv's, M._binder) name the function `n`? (CART-1715 / 1733: the cbarg
 --- pre-scans marked the globally-unique function of the argument's NAME — tools/erldistill.lua's own `local release`
@@ -7956,6 +7974,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- name is mentioned in a value position in its own file, so the
                     -- value may have escaped; false = it provably never did.
                     escapes = esc,
+                    -- (a DOTTED def's root binder — `L` in `function L.f()` — CART-1715: a same-spelled call through
+                    -- another binding of L is not this def's call by binding)
+                    drk = (not aname and namen and M._root_key(namen)) or nil,
                     torn = torn,
                     entry = (spec.entry_names or {})[name] or nil,
                     -- declared return type (base name): the per-function
@@ -9175,6 +9196,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         cb, cbe, cba = M._bound_value(callee, namen)
                     end
                     local c = { callee = callee, args = args, argv = argv, cb = cb, cbe = cbe, cba = cba,
+                        crk = (full and full ~= callee and namen) and M._root_key(calln:field('name')[1]) or nil,
                         file = file, line = sp.start.line, method = method,
                         full = full ~= callee and full or nil,
                         chainroot = chroot, chainfield = chfield,
@@ -10223,6 +10245,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- (a call through a same-name FIELD alias `local f = H.f` reaches the def of that NAME — the binder's value is
                 -- H's field, not the def: a guess, INFERRED, CART-1715)
                 if target and p.call.cba then inferred = true end
+                -- (a DOTTED call whose root is another binding than the def's root: the same spelling, not the same
+                -- table — `L.scratch()` on a parameter's lattice reached another function's local L's, CART-1715)
+                if target and p.call.crk and target.drk and p.call.crk ~= target.drk then inferred = true end
             end
         end
         if not target and not p.call.dynamic
@@ -10523,7 +10548,7 @@ local function build_symtab(nodes)
                 dfdef = dfdef or {}; dfdef[d] = true
             end
         end
-        local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line), mtab = n.mtab,
+        local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line), mtab = n.mtab, drk = n.drk,
             ret = n.ret, retclass = n.retclass, retflow = n.retflow, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy
@@ -11082,6 +11107,7 @@ function M.relink(data, touched, opts)
                     or M._callee_veto(target, cget(i, 'cb'), cget(i, 'cbe'), cfull, cfile) -- (CART-1602)
                 if veto then target, inferred, refused = nil, nil, veto end
                 if target and cget(i, 'cba') then inferred = true end -- (a same-name field alias: a guess, CART-1715)
+                if target and cget(i, 'crk') and target.drk and cget(i, 'crk') ~= target.drk then inferred = true end -- (another binding of the root)
             end
             if target then
                 cset(i, 'to', target.id)

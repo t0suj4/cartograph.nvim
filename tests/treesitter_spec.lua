@@ -6620,3 +6620,38 @@ test('lua: an import\'s member is confirmed when it is the module table\'s own; 
     for _, n in ipairs(d.nodes) do if n.kind == 'module' and n.file == 'm.lua' then mod = n end end
     eq('M', mod and mod.mtab, 'the module node names its table')
 end)
+
+-- (CART-1715: `L.go()` names the def `function L.go()` only where both L are ONE binding — the solve.lua case: a
+-- lattice parameter's `L.scratch()` had reached another function's local L's scratch, confirmed)
+test('lua: a dotted call through ANOTHER binding of its root is an inferred edge; through the same one, confirmed', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'local function make()',
+        '  local L = {}',
+        '  function L.go() return 1 end',
+        '  return L',
+        'end',
+        'function M.f() return 2 end',
+        'function M.g() return M.f() end',
+        'function M.use(o)',
+        '  local L = o',
+        '  return L.go()',
+        'end',
+        'return M, make', '' }, '\n'))
+    fd:close()
+    local par = require 'cartograph.parallel'
+    local d = ts.extract(root)
+    local acc = ts.extract(root, { files = { 'm.lua' }, fileset = ts.list_files(root), skip_idpass = true })
+    par.audit(acc); ts.relink(acc)
+    vim.fn.delete(root, 'rf')
+    for what, g in pairs { extract = d, relink = acc } do
+        local got = {}
+        for _, c in ipairs(g.calls) do got[c.full or c.callee] = c end
+        eq('m.lua::M.f@6', got['M.f'] and got['M.f'].to, what .. ': M.f()')
+        eq(nil, got['M.f'] and got['M.f'].inferred, what .. ': M is one binding: confirmed')
+        ok(got['L.go'] and got['L.go'].to and got['L.go'].inferred, what .. ': use\'s L is another binding: inferred — ' .. vim.inspect(got['L.go'] and { to = got['L.go'].to, inferred = got['L.go'].inferred, crk = got['L.go'].crk }))
+    end
+end)

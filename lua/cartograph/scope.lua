@@ -115,7 +115,7 @@ function M.model(src, spec)
         while r do
             local b = symtab(r.node, r.entry)[ident]
             if b and (b.row == nil or b.row <= fromrow) and not (b.ab and b.abe and ub >= b.ab and ub < b.abe) then
-                return b, not r.up
+                return b, not r.up, r.node
             end
             r = r.up
         end
