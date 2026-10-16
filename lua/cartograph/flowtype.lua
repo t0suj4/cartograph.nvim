@@ -2519,16 +2519,11 @@ local function build(store, opts)
             elseif tyname and not other then kind = tyname == 'string' and 'string' or 'typed'; v = { kind = kind, type = tyname }
             elseif tyname or #fns == 0 then kind = 'none'
             else
-                local cands = {}
-                for _, id in ipairs(pr.c.refused.cands) do cands[id] = true end
-                -- (a function the join never listed is still an answer: the join is a NAME guess — at.lua's C.sl)
-                if #fns == 1 then kind = 'exact'
-                else
-                    local all = true
-                    for _, id in ipairs(fns) do if not cands[id] then all = false end end
-                    kind = (all and #fns < #pr.c.refused.cands) and 'narrowed' or 'same'
-                end
-                if kind ~= 'same' then v = { kind = kind, targets = fns } end
+                -- (the answer is the FLOW's set, whatever the name join listed — a function the join never listed is still
+                -- an answer, at.lua's C.sl. The set's kind was decided against the join's candidates: `narrowed` only
+                -- inside them, else `same`, no answer — so {core M.lit, derive-accept's A[op]} said nothing, CART-1734)
+                kind = #fns == 1 and 'exact' or 'narrowed'
+                v = { kind = kind, targets = fns }
             end
         end
         stats[kind] = (stats[kind] or 0) + 1

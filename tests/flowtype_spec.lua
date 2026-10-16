@@ -197,6 +197,18 @@ test('flowtype: a keyed copy T[k] = S[k] gives T the source\'s members — what 
     end
 end)
 
+-- (CART-1734: a set answer is the FLOW's, whatever the name join listed — `helper` is no candidate for `o:run`, and the
+-- kind was decided against the candidates: `same`, no answer)
+test('flowtype: a flow set with a function the join never listed is an answer (narrowed), not dropped', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local v = kcase { body = 'local function helper(self) return 0 end\nlocal o = (#arg > 0) and { run = A.run, stop = A.stop } or { run = helper, stop = A.stop }' }
+    eq('narrowed', v.run and v.run.kind, vim.inspect(v.run))
+    local names = {}
+    for _, t in ipairs(v.run and v.run.targets or {}) do names[#names + 1] = tostring(t):match('::(.-)@') end
+    table.sort(names)
+    eq('A.run,helper', table.concat(names, ','), 'the flow set')
+end)
+
 test('flowtype: a keyed copy from a source with a METATABLE is a dynamic-key store — its __index answers any key (CART-1726)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     for what, src in pairs {
