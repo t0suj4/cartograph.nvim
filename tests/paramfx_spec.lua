@@ -362,3 +362,20 @@ test('effects: a parameter, an inner local or a later declaration named like a m
     eq('writes', effects.purity(store, by['M.outer']), 'run(Bcb) runs the module Bcb: a state write')
     eq('pure', effects.purity(store, by['M.shadowcb']), 'run(Bcb) runs the inner Bcb: nothing — ' .. vim.inspect(S[by['M.shadowcb']]))
 end)
+
+-- (an INFERRED edge — the resolver's name guess, here a bare call to the one global of that name in another file — is a
+-- premise: its callee's effects are taken, hedged, CART-1715)
+test('effects: a call the resolver only INFERRED by name carries the callee\'s effects hedged', function ()
+    if not ready('lua') then return end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, lines) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(table.concat(lines, '\n')); fd:close() end
+    put('a.lua', { 'local st = {}', 'function helper() st.x = 1 end', 'local function own() st.y = 1 end', 'function poke() own() end', '' })
+    put('b.lua', { 'local M = {}', 'function M.f() helper() end', 'return M', '' })
+    store.ingest(ts.extract(root))
+    local by, call = {}, nil
+    for _, n in ipairs(store.data.nodes) do if n.name then by[n.name] = n.id end end
+    for _, c in ipairs(store.data.calls) do if require('cartograph.callrec').fn(c) == by['M.f'] then call = c end end
+    ok(call and call.to == by.helper and call.inferred, 'helper() is an inferred edge: ' .. vim.inspect(call and { to = call.to, inferred = call.inferred }))
+    eq('writes~', effects.purity(store, by['M.f']), 'the inferred callee\'s write, hedged')
+    eq('writes', effects.purity(store, by.poke), 'a same-file local call stays confirmed')
+end)

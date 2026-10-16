@@ -1156,6 +1156,9 @@ function M.summaries(store)
                     -- the DECLARED name, which resolution already canonicalized (`api.x` -> `vim.api.x`), CART-1615)
                     local declname
                     if to then local tn = store.node(to); if tn and tn.decl then declname, to = tn.name, nil end end
+                    -- (an INFERRED edge — the name join's guess, not a binding — is a premise like a joined candidate: what
+                    -- the callee does is taken, hedged `~`, never confirmed. CART-1715: repo, 261 of 17,836 purity verdicts)
+                    if to and c.inferred then sum.jp = true end
                     if to and con.comp[to] == ci then
                         -- intra-SCC: members share this summary already
                         intra[#intra + 1] = { c = c, caller = caller, to = to }
