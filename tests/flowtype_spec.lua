@@ -228,6 +228,39 @@ test('flowtype: a keyed copy through a port the solve lost — into any escaped 
     ok(not whole(v.run, 'run'), 'a lost source: o.run may be B.run: ' .. vim.inspect(v.run))
 end)
 
+-- (CART-1732: an object that escapes DURING the taint — here the value a store through a saturated base wrote — has
+-- its DYNAMIC loads tainted once any field of escaped objects may have been written unseen: `pairs(H)` may yield `use`)
+test('flowtype: an object escaping during the taint — a store\'s value — has its dynamic loads partial once a field is hit (CART-1732)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.m(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.m(self) return 2 end\nreturn B\n',
+        ['main.lua'] = table.concat({
+            'local A, B = require "a", require "b"',
+            'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+            'local function use(p) return p:m() end',
+            'use(a)',
+            'local function sink(t) t.f = use end',
+            'sink({}); sink({}); sink({})',
+            'local H = {}',
+            'local function sink2(t) t.x = H end',
+            'sink2({}); sink2({}); sink2({})',
+            'for _, fn in pairs(H) do fn(b) end',
+        }, '\n'),
+    })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local R = flowtype.solve(store, { open = false, ctx = false })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local c
+    for _, x in ipairs(store.data.calls) do if callrec.file(x) == 'main.lua' and tostring(callrec.full(x)) == 'p:m' then c = x end end
+    local v = R.verdict(c)
+    ok(not (v and v.kind == 'exact' and not v.partial), 'H may hold use: no whole exact A.m — ' .. vim.inspect(v))
+end)
+
 test('flowtype: a loop\'s per-site instance of its iterator is walked AT ITS OWN POSITIONS — the original call\'s answer is the union (CART-1688)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     -- (the loop hands `node` to an instance of `it`; a direct call hands `other` to the original. The call n:kid inside

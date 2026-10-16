@@ -2166,6 +2166,32 @@ local function build(store, opts)
     -- (field name -> the ports of that field over every escaped object, built on the first store that needs it: each
     -- new field had scanned the whole escaped list — fields x escaped objects, half of build1)
     local escf
+    -- ★ A FIELD THE SOLVE MAY HAVE WRITTEN UNSEEN ON EVERY ESCAPED OBJECT (a store of .f through a tainted base, a keyed
+    -- copy into a lost target): its PORTS there — a named load made its port when it registered, and a tainted port
+    -- taints its readers — and, once any field is hit, every DYNAMIC load of an escaped object: one WITHOUT the field
+    -- had no port to taint, so `pairs(H)` over it read nothing, whole (CART-1732). G7.escreaders: o's dynamic loads,
+    -- for an object escaping after that
+    function G7.escreaders(o)
+        if not G7.DYNHIT then return end
+        local l = rd[o] and rd[o]['[]']
+        if l then for dst in pairs(l) do taint(dst) end end
+    end
+    function G7.fieldhit(f)
+        if field_hit[f] then return end
+        field_hit[f] = true
+        if not escf then
+            escf = {}
+            for _, o in ipairs(esc) do
+                for fk, fp in pairs(ofield[o] or NOTHING) do
+                    local l = escf[fk]
+                    if not l then l = {}; escf[fk] = l end
+                    l[#l + 1] = fp
+                end
+            end
+        end
+        for _, fp in ipairs(escf[f] or NOTHING) do taint(fp) end
+        if f:byte(1) ~= 1 and not G7.DYNHIT then G7.DYNHIT = true; for _, o in ipairs(esc) do G7.escreaders(o) end end
+    end
     -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
     -- that already fired applied to it: a store of .f through a tainted base, a call reaching any escaped function)
     function G7.escmore(o0)
@@ -2175,6 +2201,7 @@ local function build(store, opts)
         while i <= #q do
             local o = q[i]; i = i + 1
             esc[#esc + 1] = o
+            G7.escreaders(o)
             for fk, fp in pairs(ofield[o] or NOTHING) do
                 if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
                 if field_hit[fk] then taint(fp) end
@@ -2294,41 +2321,27 @@ local function build(store, opts)
         for _, st in ipairs(stores[p] or NOTHING) do
             local f = st[1]
             if not field_hit[f] then
-                field_hit[f] = true
-                if not escf then
-                    escf = {}
-                    for _, o in ipairs(esc) do
-                        for fk, fp in pairs(ofield[o] or NOTHING) do
-                            local l = escf[fk]
-                            if not l then l = {}; escf[fk] = l end
-                            l[#l + 1] = fp
-                        end
-                    end
-                end
                 if TFROM then TCUR = { p, 'a store of .' .. tostring(f) .. ' through it reaches that field of EVERY escaped object' } end
-                for _, fp in ipairs(escf[f] or NOTHING) do taint(fp) end
+                G7.fieldhit(f)
                 TCUR = p
             end
+            -- (and what it stores ESCAPES: written into an object the solve no longer follows, it may be read — and a
+            -- function called — wherever that object goes. `t.f = g` through a saturated t left g's parameters whole, and a
+            -- call through a tainted H.f that ran g answered a whole exact, CART-1732)
+            for o in each(st[2]) do G7.escmore(o) end
         end
         -- (a KEYED COPY through a port the solve lost objects of: a lost TARGET may have received every field the source
         -- holds — the store rule, per field; a lost SOURCE may have held anything under any key, CART-1726)
         for _, r in ipairs(G7.COPY[p] or NOTHING) do
             if p == r[1] then
                 for s0 in each(r[2]) do
+                    -- (what the copy writes escapes with its target, as a store's value does — CART-1732)
+                    for f, fp in pairs(ofield[s0] or NOTHING) do if f:byte(1) ~= 1 then for o in each(fp) do G7.escmore(o) end end end
                     for f in pairs(G7.copykeys(s0)) do
                         if f:byte(1) ~= 1 and not field_hit[f] then
-                            field_hit[f] = true
-                            if not escf then
-                                escf = {}
-                                for _, o in ipairs(esc) do
-                                    for fk, fp in pairs(ofield[o] or NOTHING) do
-                                        local l = escf[fk]
-                                        if not l then l = {}; escf[fk] = l end
-                                        l[#l + 1] = fp
-                                    end
-                                end
-                            end
-                            for _, fp in ipairs(escf[f] or NOTHING) do taint(fp) end
+                            if TFROM then TCUR = { p, 'a keyed copy of .' .. tostring(f) .. ' into it reaches that field of EVERY escaped object' } end
+                            G7.fieldhit(f)
+                            TCUR = p
                         end
                     end
                 end
