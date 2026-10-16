@@ -6560,3 +6560,41 @@ test('lua: a call through a same-name field alias is an inferred edge; a forward
         ok(got.fwd and got.fwd.to and not got.fwd.inferred, what .. ': fwd(): the forward declaration IS the later def — ' .. vim.inspect(got.fwd and { to = got.fwd.to, inferred = got.fwd.inferred }))
     end
 end)
+
+-- (CART-1733: the inline and the parallel graph agree — the two causes the repo showed. The MONKEY-PATCH FENCE needs every
+-- file, so relink applies it to the merged graph; and the cbarg pre-scans mark a function only when the argument's
+-- BINDER is it — another file's `local helper` passed at module level is not e.lua's `helper`)
+test('parallel parity: an override is no call target after relink; a same-named local argument elsewhere does not demote a function', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local par = require 'cartograph.parallel'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    put('a.lua', 'local M = {}\nfunction M.get() return 1 end\nreturn M\n')
+    put('patch.lua', 'local a = require "a"\na.get = function () return 2 end\n')
+    put('c.lua', 'local function use(a) return a.get() end\nreturn use\n')
+    put('d.lua', 'local helper = 1\nprint(helper)\n')
+    put('e.lua', 'local function helper() return 3 end\nreturn helper()\n')
+    local seq = ts.extract(root)
+    local fileset = ts.list_files(root)
+    local acc = { schema = 1, root = root, provider = 'treesitter', nodes = {}, edges = {}, calls = {}, stamps = {}, extends = {} }
+    for _, f in ipairs(fileset) do
+        local chunk = ts.extract(root, { files = { f }, fileset = fileset, skip_idpass = true })
+        for _, k in ipairs { 'nodes', 'edges', 'calls', 'extends' } do for _, x in ipairs(chunk[k] or {}) do acc[k][#acc[k] + 1] = x end end
+    end
+    par.audit(acc)
+    ts.relink(acc)
+    vim.fn.delete(root, 'rf')
+    local function pick(d)
+        local out = {}
+        for _, c in ipairs(d.calls) do
+            if c.file == 'c.lua' and c.callee == 'get' then out.get = tostring(c.to) .. (c.inferred and '~' or '') end
+            if c.file == 'e.lua' and c.callee == 'helper' then out.helper = tostring(c.to) .. (c.inferred and '~' or '') end
+        end
+        return out
+    end
+    local s, p = pick(seq), pick(acc)
+    ok(not tostring(s.get):find('patch.lua', 1, true), 'inline: the override is no target — ' .. tostring(s.get))
+    eq(s.get, p.get, 'a.get(): inline and relink agree')
+    eq('e.lua::helper@0', s.helper, 'inline: helper() is e.lua\'s own, confirmed')
+    eq(s.helper, p.helper, 'helper(): inline and relink agree')
+end)

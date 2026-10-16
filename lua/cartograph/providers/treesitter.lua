@@ -1218,6 +1218,17 @@ function M._binder(an, a)
     if top then return b.row or 0 end
     return b.row and (-b.row - 3) or -2
 end
+--- does an identifier ARGUMENT with binder `bd` (argv's, M._binder) name the function `n`? (CART-1715 / 1733: the cbarg
+--- pre-scans marked the globally-unique function of the argument's NAME — tools/erldistill.lua's own `local release`
+--- marked transport.lua's `release`, and the mark depended on which pass saw it.) No scope model / no binder (a global):
+--- the language names it. A binder with a row: n must be declared in that file at or after it (a forward declaration's
+--- later `function f`). A parameter: never
+function M._arg_is_fn(bd, file, n)
+    if bd == nil or bd == -1 then return true end
+    local row = bd >= 0 and bd or (bd <= -3 and -bd - 3) or nil
+    local nrow = n.order or (n.range and n.range.start and n.range.start.line)
+    return row ~= nil and n.file == file and nrow ~= nil and nrow >= row
+end
 --- the same rule from the fn RANGES alone (the id pass has no parent map): the innermost range strictly enclosing
 --- def `id`'s must contain the mention (line, col); a top-level def is visible everywhere in its file (CART-1562)
 local VIS_ENC = setmetatable({}, { __mode = 'k' }) -- ranges list -> { n = #ranges, [id] = enclosing range | false }
@@ -7360,6 +7371,7 @@ local function drop_overrides(nodes, edges, exact, tail)
     end
     return n
 end
+M._drop_overrides = drop_overrides -- (relink applies it to the merged graph: via M, the function is at the upvalue limit)
 
 --- ONE REGISTRATION, ONE RECORD (CART-0627, and it is what made CART-0623's
 --- `par` column red on six corpora).
@@ -10050,7 +10062,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if a.k == 'local' and a.name then
                         local cands = exact[a.name]
                         if cands and #cands == 1 and (cands[1].kind == 'function'
-                            or cands[1].kind == 'method') then
+                            or cands[1].kind == 'method') and M._arg_is_fn(a.bd, p.file, cands[1]) then
                             cands[1].cbarg = true
                         end
                     end
@@ -10496,7 +10508,7 @@ local function build_symtab(nodes)
                 dfdef = dfdef or {}; dfdef[d] = true
             end
         end
-        local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name,
+        local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line),
             ret = n.ret, retclass = n.retclass, retflow = n.retflow, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy
@@ -10603,6 +10615,10 @@ function M.relink(data, touched, opts)
     local index = (require('cartograph.config').federated_resolve and build_symtab
         or build_index)(data.nodes)
     local exact, tail, node_index = index.exact, index.tail, index.node_index
+    -- (the MONKEY-PATCH FENCE over the merged graph, as extract applies it: a def that reassigns a member of a module
+    -- another file declares is no call target. A slice cannot see the other file, so its nodes carry no `override` —
+    -- and relink had linked 96 repo calls to a spec's stub `store.is_index_only = function` instead, CART-1733)
+    M._drop_overrides(data.nodes, data.edges, exact, tail)
     local apertures, ns_pfx, global_witness = index.apertures, index.ns_pfx, index.global_witness
     local aperture_refusal = aperture_refuser(ns_pfx, apertures, global_witness)
     local refEdge, regEdge = {}, {}
@@ -11005,7 +11021,7 @@ function M.relink(data, touched, opts)
                 if (ak == 'local' or (ak == 'func' and full_cv.aget(i, j, 'up'))) and aname then
                     local cands = exact[aname]
                     if cands and #cands == 1 and (cands[1].kind == 'function'
-                        or cands[1].kind == 'method') then
+                        or cands[1].kind == 'method') and M._arg_is_fn(full_cv.aget(i, j, 'bd'), full_cv.get(i, 'file'), cands[1]) then
                         cands[1].cbarg = true
                     end
                 end
