@@ -28,7 +28,7 @@ M.NODE_FIELDS = {
     vlocal = true,   -- a module VAR visible in its file only (lua `local`): never a cross-file use target, CART-1473
     clink = true,    -- C/C++: declared inside extern "C" (the C/C++ join bridge, CART-1079)
     retflow = true,  -- type-variable return: the return expressions as type terms (java_ret_flow, CART-1077)
-    entry = true, exported = true, effects = true, apertures = true,
+    entry = true, exported = true, effects = true, apertures = true, mtab = true, -- (mtab: a module node's exported table, CART-1715)
     annos = true,   -- (CART-0722) registration-CANDIDATE marks: annotation names
                     -- on this def that no supplied list claims. Carried, not
                     -- decided — the reader that would speak for them is in

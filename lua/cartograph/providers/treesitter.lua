@@ -2871,16 +2871,28 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
                         -- move, because these are the SAME edges. resolve_field_alias (the
                         -- `local f = m.field` sibling) was already unhedged; the two agree
                         -- now, on the call flag AND the edge flag.
-                        cset(i, 'inferred', nil)
+                        -- ★ …BUT ONLY THE BINDING IS NOT A GUESS (CART-1715). The member lookup is: the def whose
+                        -- name merely ENDS in the member. Where the language names a file's module table (lua:
+                        -- `local M = {}` … `return M`, the extractor's `mtab`), `m.f` is M's own `M.f` / `M:f`;
+                        -- any other fit (a local `f` exported by an alias the pass cannot see, a file whose export
+                        -- has no named table) is the name's guess — inferred. Repo: 9,514 module-table members stay
+                        -- confirmed, 2,217 become ~ (20 purity verdicts gain ~)
+                        local _, msp = elang_for(mod)
+                        local guess = nil
+                        if msp and msp.module_table then
+                            local mn = node_index and node_index[mod]
+                            local T = mn and mn.mtab
+                            if not (T and (fit.name == T .. '.' .. member or fit.name == T .. ':' .. member)) then guess = true end
+                        end
+                        cset(i, 'inferred', guess)
                         cset(i, 'refused', nil)
                         local cfn = cget(i, 'fn')
                         if cfn then
                             local cline = cget(i, 'line')
-                            -- 4th arg nil: the EDGE is unhedged too, matching the call
-                            -- flag above (CART-0244)
+                            -- 4th arg: the EDGE carries the call's flag (CART-0244)
                             addref(cfn, fit.id, cget(i, 'at')
                                 or { start = { line = cline, char = 0 },
-                                    ['end'] = { line = cline, char = 0 } }, nil)
+                                    ['end'] = { line = cline, char = 0 } }, guess)
                         end
                         n = n + 1
                     end
@@ -9477,7 +9489,10 @@ local MATCH_OPTS = { match_limit = 65536 }
             nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
                 range = pos_of(tsroot), order = -1,
                 effects = spec.module_effects
-                    and spec.module_effects(tsroot, src) or nil }
+                    and spec.module_effects(tsroot, src) or nil,
+                -- (the file-local name it exports as its MODULE TABLE, where the language names one: what an
+                -- import's `m.f` binds to, CART-1715)
+                mtab = spec.module_table and spec.module_table(vim.split(src, '\n', { plain = true })) or nil }
             if spec.aperture_query then
                 local aq = parse_query(lang, spec.aperture_query)
                 if aq then
@@ -10508,7 +10523,7 @@ local function build_symtab(nodes)
                 dfdef = dfdef or {}; dfdef[d] = true
             end
         end
-        local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line),
+        local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line), mtab = n.mtab,
             ret = n.ret, retclass = n.retclass, retflow = n.retflow, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy

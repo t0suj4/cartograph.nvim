@@ -6598,3 +6598,25 @@ test('parallel parity: an override is no call target after relink; a same-named 
     eq('e.lua::helper@0', s.helper, 'inline: helper() is e.lua\'s own, confirmed')
     eq(s.helper, p.helper, 'helper(): inline and relink agree')
 end)
+
+-- (CART-1715: an import's `m.f` is bound to the module's FILE by the require — and to the def by the file's MODULE
+-- TABLE: `M.f` confirmed; a def that merely ENDS in the member (a local `g` exported by `M.g = g`) is the name's guess)
+test('lua: an import\'s member is confirmed when it is the module table\'s own; a tail fit in the file is inferred', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    put('m.lua', 'local M = {}\nfunction M.f() return 1 end\nlocal function g() return 2 end\nM.g = g\nreturn M\n')
+    put('o.lua', 'local O = {}\nfunction O.f() return 3 end\nfunction O.g() return 4 end\nreturn O\n')
+    put('c.lua', 'local m = require "m"\nreturn m.f(), m.g()\n')
+    local d = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local got = {}
+    for _, c in ipairs(d.calls) do if c.file == 'c.lua' then got[c.callee] = c end end
+    eq('m.lua::M.f@1', got.f and got.f.to, 'm.f() is M.f')
+    eq(nil, got.f and got.f.inferred, 'the module table\'s own member: confirmed')
+    eq('m.lua::g@2', got.g and got.g.to, 'm.g() lands on the local g')
+    eq(true, got.g and got.g.inferred, 'a tail fit in the file: inferred')
+    local mod
+    for _, n in ipairs(d.nodes) do if n.kind == 'module' and n.file == 'm.lua' then mod = n end end
+    eq('M', mod and mod.mtab, 'the module node names its table')
+end)
