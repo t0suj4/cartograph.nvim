@@ -1198,7 +1198,7 @@ function M._bound_value(an, a)
     local chain, k = jvt_sm.resolve(an, a)
     if k == 0 then return nil end
     local b = chain[1]
-    if b.byname then return nil end -- (no value of its own: the name decides, CART-1651)
+    if b.byname then return nil, nil, b.alias end -- (no value of its own: the name decides, CART-1651; a same-name FIELD alias says so — the third value, CART-1715)
     -- (a use INSIDE its binder's own declaration — `x := x()`, `let p = wrap(p)`, lua's `local x = x or {}` —
     -- reads the OUTER binding: the new one's scope starts after it, CART-1602)
     if b.ab and b.abe then -- (BYTES, not rows: `x := mk(); x()` on one line is a use AFTER the declaration)
@@ -9146,11 +9146,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- go through a local — the languages declaring fn_locals; ruby / java / php call a method or a
                     -- function by name; and lua, whose forward declaration IS the later def — CART-1602 — once its
                     -- binders said which are no value of their own, `byname`: CART-1651)
-                    local cb, cbe
+                    local cb, cbe, cba
                     if (spec.fn_locals or spec.bound_names_shadow) and not method and (full == nil or full == callee) and namen then
-                        cb, cbe = M._bound_value(callee, namen)
+                        cb, cbe, cba = M._bound_value(callee, namen)
                     end
-                    local c = { callee = callee, args = args, argv = argv, cb = cb, cbe = cbe,
+                    local c = { callee = callee, args = args, argv = argv, cb = cb, cbe = cbe, cba = cba,
                         file = file, line = sp.start.line, method = method,
                         full = full ~= callee and full or nil,
                         chainroot = chroot, chainfield = chfield,
@@ -10193,6 +10193,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local veto = M._method_veto(target, p.full or p.call.callee, p.file) -- (CART-1491)
                     or M._callee_veto(target, p.call.cb, p.call.cbe, p.call.full, p.file) -- (CART-1602)
                 if veto then target, inferred, refused = nil, nil, veto end
+                -- (a call through a same-name FIELD alias `local f = H.f` reaches the def of that NAME — the binder's value is
+                -- H's field, not the def: a guess, INFERRED, CART-1715)
+                if target and p.call.cba then inferred = true end
             end
         end
         if not target and not p.call.dynamic
@@ -11047,6 +11050,7 @@ function M.relink(data, touched, opts)
                 local veto = M._method_veto(target, cfull or ccallee, cfile) -- (CART-1491)
                     or M._callee_veto(target, cget(i, 'cb'), cget(i, 'cbe'), cfull, cfile) -- (CART-1602)
                 if veto then target, inferred, refused = nil, nil, veto end
+                if target and cget(i, 'cba') then inferred = true end -- (a same-name field alias: a guess, CART-1715)
             end
             if target then
                 cset(i, 'to', target.id)

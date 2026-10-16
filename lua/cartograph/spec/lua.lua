@@ -60,9 +60,12 @@ local function lua_locals(node, src, out) -- chunk/block statement locals
                     if v:type() == 'identifier' then
                         i = i + 1
                         local name, e = node_text(v, src), vals[i]
-                        local byname = a:type() == 'variable_list' or (e and e:type() == 'dot_index_expression'
+                        -- (`alias`: the same-name FIELD alias — its member is found by the field's NAME, a guess the
+                        -- resolver hedges, CART-1715)
+                        local alias = (e and e:type() == 'dot_index_expression'
                             and e:named_child(1) and node_text(e:named_child(1), src) == name) or nil
-                        out[name] = { row = row, ab = ab, abe = abe, byname = byname }
+                        local byname = a:type() == 'variable_list' or alias
+                        out[name] = { row = row, ab = ab, abe = abe, byname = byname, alias = alias }
                     end
                 end
             end

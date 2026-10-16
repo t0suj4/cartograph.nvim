@@ -6527,3 +6527,36 @@ test('defs: a lua table-FIELD function is cbarg; a local function is not (the fi
     ok(by.plain and not by.plain.cbarg, 'a local function is not')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-1715: a call through a same-name FIELD alias `local f = H.f` reaches the def of that NAME — its binder's value
+-- is H's field, which the name only guesses: the edge is INFERRED, so effects reads it hedged)
+test('lua: a call through a same-name field alias is an inferred edge; a forward-declared local is not', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local H = {}',
+        'local function within(x) return x end',
+        'H.within = within',
+        'local fwd',
+        'local function use()',
+        '  local within = H.within',
+        '  return within(1), fwd()',
+        'end',
+        'function fwd() return 2 end',
+        'return use', '' }, '\n'))
+    fd:close()
+    local d = ts.extract(root)
+    -- (and RELINK's copy of the resolver: the audit nulls an inferred resolution, relink re-derives it)
+    local par = require 'cartograph.parallel'
+    local acc = ts.extract(root, { files = { 'm.lua' }, fileset = ts.list_files(root), skip_idpass = true })
+    par.audit(acc)
+    ts.relink(acc)
+    vim.fn.delete(root, 'rf')
+    for what, g in pairs { extract = d, relink = acc } do
+        local got = {}
+        for _, c in ipairs(g.calls) do if c.callee == 'within' or c.callee == 'fwd' then got[c.callee] = c end end
+        ok(got.within and got.within.to and got.within.inferred, what .. ': within(1) through the alias: inferred — ' .. vim.inspect(got.within and { to = got.within.to, inferred = got.within.inferred, cba = got.within.cba }))
+        ok(got.fwd and got.fwd.to and not got.fwd.inferred, what .. ': fwd(): the forward declaration IS the later def — ' .. vim.inspect(got.fwd and { to = got.fwd.to, inferred = got.fwd.inferred }))
+    end
+end)
