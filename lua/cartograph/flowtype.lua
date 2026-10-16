@@ -468,7 +468,9 @@ local function build(store, opts)
         end
         local tn = TNAME[o]
         if tn then
-            if tn == 'string' and G7.STRLIB and f ~= '#' and f ~= '[]' then load_obj(G7.STRLIB, f, dst, seen, strict) end
+            -- (a string's metatable __index is the string library: `s.f` and `s[k]` — a computed key too — read its fields,
+            -- `string.pick = …` among them; `s[k]` had read nothing, an unexplained loadDyn in the dump, CART-1730)
+            if tn == 'string' and G7.STRLIB and f ~= '#' then load_obj(G7.STRLIB, f, dst, seen, strict) end
             local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
             return
