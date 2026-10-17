@@ -232,6 +232,16 @@ function M.build(rec, X)
             if e then body[#body + 1] = e; map[i - 1] = #body - 1 end
         end
         for _, t in ipairs(rec.tags[name] or {}) do if map[t[1]] then tags[#tags + 1] = { map[t[1]], t[2] } end end
+        -- (a store / setmeta through a SATURATED base: the solve follows it into no object, and the escape rule covers
+        -- every object such a base may hold but _G, which never escapes — the contract, named so the checker can say
+        -- so: AceLibrary's crawlReplace `setmetatable(t, getmetatable(t))` over every reachable table, CART-1736)
+        if X.top then
+            for i, ins in ipairs(rec.fns[name] or {}) do
+                if (ins[1] == 'store' or ins[1] == 'setmeta') and X.top[ins[2]] and map[i - 1] then
+                    tags[#tags + 1] = { map[i - 1], 'contract:globals-never-escape' }
+                end
+            end
+        end
         local fp = byname[name]
         local params = {}
         if fp then

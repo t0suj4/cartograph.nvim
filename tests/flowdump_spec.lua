@@ -200,3 +200,22 @@ test('flowdump: a string that is not UTF-8 is written as Latin-1, so the dump st
     eq('"plain"', jstr('plain'))
     eq('12', jstr(12), 'a non-string value is encoded as before')
 end)
+
+-- (CART-1736: a store / setmeta through a SATURATED base reaches every object the base may hold by the escape rule —
+-- but _G, which never escapes: the dump names that contract on the instruction)
+test('flowdump: a store through a saturated base carries contract:globals-never-escape', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local sinks = {}
+    for k = 1, 70 do sinks[k] = 'sink({})' end
+    local D = dump('local function sink(t) t.f = b; setmetatable(t, {}) end\n' .. table.concat(sinks, '\n') .. '\n')
+    local tagged = {}
+    for _, F in ipairs(D.functions) do
+        local name = D.names.functions[F.id + 1]
+        for _, t in ipairs(F.tags) do
+            if t[2] == 'contract:globals-never-escape' then tagged[#tagged + 1] = F.body[t[1] + 1][1] .. '@' .. name end
+        end
+    end
+    table.sort(tagged)
+    ok(#tagged >= 2, 'the store and the setmeta in sink are tagged: ' .. vim.inspect(tagged))
+    for _, x in ipairs(tagged) do ok(x:find('sink', 1, true), 'only sink\'s instructions: ' .. x) end
+end)
