@@ -104,7 +104,33 @@ function M.head(dir, own)
 end
 
 -- ── the writer: JSON by hand (the dump of a large tree is tens of MB; vim.json.encode of one table doubles it) ──
-local function jstr(s) return vim.json.encode(s) end
+-- (a string is written as JSON text, which must be UTF-8: a byte string that is not — a Latin-1 "N\xfake" in a WoW
+-- addon's table, CART-1735 — is read as LATIN-1, each byte >= 0x80 the code point U+00XX: lossless, and the Lean reader's
+-- own fallback. ASCII and valid UTF-8 pass as they are)
+local function utf8_ok(s)
+    local i, n = 1, #s
+    while i <= n do
+        local c = s:byte(i)
+        local len = c < 0x80 and 1 or (c >= 0xC2 and c <= 0xDF) and 2 or (c >= 0xE0 and c <= 0xEF) and 3 or (c >= 0xF0 and c <= 0xF4) and 4 or nil
+        if not len then return false end
+        for k = i + 1, i + len - 1 do
+            local b = s:byte(k)
+            if not b or b < 0x80 or b > 0xBF then return false end
+        end
+        i = i + len
+    end
+    return true
+end
+local function jstr(s)
+    if type(s) == 'string' and s:find('[\128-\255]') and not utf8_ok(s) then
+        s = s:gsub('[\128-\255]', function (ch)
+            local b = ch:byte()
+            return string.char(0xC0 + math.floor(b / 64), 0x80 + b % 64)
+        end)
+    end
+    return vim.json.encode(s)
+end
+M._jstr = jstr
 local function jarr(t)
     local o = {}
     for i, x in ipairs(t) do o[i] = type(x) == 'number' and tostring(x) or (type(x) == 'string' and jstr(x)) or (type(x) == 'table' and jarr(x)) or 'null' end

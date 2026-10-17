@@ -190,3 +190,13 @@ test('flowdump: an answer names its call instruction — a call in the function 
     end
     ok(n >= 3, 'use\'s p:m() and two\'s q:m() twice are answered: ' .. n)
 end)
+
+-- (CART-1735: the dump is JSON text, so UTF-8 — a byte string that is not, a WoW addon's Latin-1 "N\xfake", is read as
+-- Latin-1: each byte >= 0x80 the code point U+00XX, lossless; valid UTF-8 and ASCII pass unchanged)
+test('flowdump: a string that is not UTF-8 is written as Latin-1, so the dump stays valid JSON', function ()
+    local jstr = require('cartograph.flowdump')._jstr
+    eq('N\195\186ke', vim.json.decode(jstr('N\250ke')), 'Latin-1 ú -> U+00FA')
+    eq('já', vim.json.decode(jstr('já')), 'valid UTF-8 unchanged')
+    eq('"plain"', jstr('plain'))
+    eq('12', jstr(12), 'a non-string value is encoded as before')
+end)
