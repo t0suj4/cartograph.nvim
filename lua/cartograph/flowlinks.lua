@@ -26,7 +26,7 @@ end
 function M.apply(store, opts)
     opts = opts or {}
     local data = store.data
-    local R = require('cartograph.flowtype').solve(store, { open = false, ctx = false, allcallees = true })
+    local R = require('cartograph.flowtype').solve(store, { open = false, ctx = false, allcallees = true, selfseed = true })
     if not R.callee_of then return { skipped = 'no Lua walk' } end
     local edges = {}
     for i, e in ipairs(data.edges or {}) do if e.kind == 'ref' then edges[e.from .. '\31' .. e.to] = i end end
@@ -118,6 +118,7 @@ function M.apply(store, opts)
         for i, e in ipairs(data.edges) do if not drop[i] then kept[#kept + 1] = e end end
         data.edges = kept
     end
+    st.selfseed = R.selfseed
     if opts.ingest ~= false then store.ingest(data) end
     return st
 end

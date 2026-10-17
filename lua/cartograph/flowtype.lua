@@ -1020,6 +1020,8 @@ local function build(store, opts)
     end
     G7.useenv(G7.mkenv('default'))
     G7.GR, G7.KIDS, G7.FENV, G7.GCPEND = {}, {}, {}, {}
+    G7.SSTAT = nil
+    G7.MSELF = opts.selfseed and {} or nil -- (each `function T:m`'s self port and T's port: the self seed, CART-1715)
     -- (the modules the environment profile declares: every dotted prefix of a signature's path)
     function G7.profmod(name)
         if not G7.PMODS then
@@ -1328,6 +1330,7 @@ local function build(store, opts)
             if not clone and not meta.upv and not meta.nested and body and #txt(n) <= CLONE_MAX then
                 CLONE[o] = { file = file, id = id, src = src, l = l, c = c }
             end
+            G7.LASTFP = fp
             return p
         end
         local function callv(n, want)
@@ -1815,6 +1818,9 @@ local function build(store, opts)
                                 local base = expr(o)
                                 acc('write', last, txt(last), base)
                                 storec(base, txt(last), fp)
+                                if G7.MSELF and not clone and nm:type() == 'method_index_expression' then
+                                    G7.MSELF[#G7.MSELF + 1] = { G7.LASTFP.params[1], base, G7.LASTFP.id }
+                                end
                             end
                         end
                     end
@@ -2137,6 +2143,72 @@ local function build(store, opts)
             solve()
         end
     end
+    -- ★ SELF OF A METHOD NO CALLER IN THE TREE REACHES (CART-1715, opts.selfseed — flowlinks): `function T:m` DECLARES
+    -- its first parameter, and the host that calls it (an event, a lifecycle, a UI callback) hands it T or an object
+    -- whose prototype chain reaches T — a WoW addon's methods take the addon object itself. Where self ended EMPTY,
+    -- it holds every object prototyped by one of T's (a subclass, an instance a constructor made — with the fields it
+    -- wrote) and ONE ABSTRACT INSTANCE per T object: a table whose prototype is T, standing for T itself or any object
+    -- the host hands in. Never T's own object: a write through self (`target[name] = fn`, CallbackHandler embedding
+    -- itself into an AceDB db whose methods were COPIED from DBObjectLib, not inherited) landed on T and made T's
+    -- whole method calls sets (WoW w2: 37 confirmed links became sets, 291 calls saturated out of their set); on the
+    -- instance it stays the instance's, and T's methods are read through the prototype. All of T's methods share
+    -- the instance: `self.db =` in one is read in the next. HEDGED (tainted below): it is the declaration's
+    -- evidence, not a flow. And where T's port ended EMPTY too — T came from a call the
+    -- solve does not follow: a library factory (`LibStub:NewLibrary`, `addon:NewModule`), a host API (`CreateFrame`) —
+    -- the declaration is still evidence: storing `m` into T succeeded, so a program that got past it had a TABLE there.
+    -- T's port gets ONE stand-in table (every `function T:x` on that port shares it: the stores land on it, self holds
+    -- it), tainted like self (WoW w2: 2,111 of 3,610 empty selfs had an empty T). One batch, decided on the solved
+    -- state, then one solve: a method whose self the seed reaches through `self:n()` is not seeded again
+    G7.SSEED = {} -- (G7: the builder's 200-local limit)
+    if G7.MSELF then
+        local SS = { methods = #G7.MSELF, empty = 0, seeded = 0, nobase = 0, standin = 0 }
+        local STAND, AI, AIP = {}, {}, {}
+        G7.SSTAT = SS
+        local heirs
+        local function heirsof(c)
+            if not heirs then
+                heirs = {}
+                for o, pr in pairs(protos) do for x in pairs(pr) do local l = heirs[x]; if not l then l = {}; heirs[x] = l end; l[#l + 1] = o end end
+            end
+            local ai = AI[c]
+            if not ai then ai = newobj('self<' .. tostring(okey(c)) .. '>'); AI[c] = ai; AIP[#AIP + 1] = { ai, c } end
+            local out, seen, q = { ai }, { [c] = true }, { c }
+            local i = 1
+            while i <= #q do
+                local x = q[i]; i = i + 1
+                if x ~= c then out[#out + 1] = x end
+                for _, o in ipairs(heirs[x] or NOTHING) do if not seen[o] then seen[o] = true; q[#q + 1] = o end end
+            end
+            return out
+        end
+        local plan = {}
+        for _, ms in ipairs(G7.MSELF) do
+            local sp, bp = ms[1], ms[2]
+            if sp and pts[sp] == nil and not top[sp] then
+                SS.empty = SS.empty + 1
+                local objs = {}
+                if not top[bp] then for c in each(bp) do if not fnports[c] and c ~= EXT then for _, x in ipairs(heirsof(c)) do objs[#objs + 1] = x end end end end
+                if #objs == 0 and not top[bp] and pts[bp] == nil then
+                    local so = STAND[bp]
+                    if not so then
+                        so = newobj('decl<' .. tostring(ms[3]) .. '>')
+                        STAND[bp] = so
+                        SS.standin = SS.standin + 1
+                        plan[#plan + 1] = { bp, { so } }
+                    end
+                    for _, x in ipairs(heirsof(so)) do objs[#objs + 1] = x end
+                end
+                if #objs == 0 then SS.nobase = SS.nobase + 1 else plan[#plan + 1] = { sp, objs } end
+            end
+        end
+        for _, x in ipairs(AIP) do objproto(x[1], x[2]) end
+        for _, pl in ipairs(plan) do
+            G7.SSEED[pl[1]] = true
+            SS.seeded = SS.seeded + 1
+            for _, o in ipairs(pl[2]) do addobj(pl[1], o) end
+        end
+        if #plan > 0 then solve() end
+    end
     -- ★ A STRING METHOD ON AN EMPTY RECEIVER (CART-1643): `name:lower()`, `raw:sub(i)` — the receiver reached no value
     -- the solve holds, but a program that got past the call had a string there (a table would need the member; none
     -- arrived), so the result is what the string library returns. Only where the receiver ended EMPTY — a user table
@@ -2326,6 +2398,8 @@ local function build(store, opts)
     for p in pairs(top) do taint(p) end
     TCUR = 'sinf'
     for r in pairs(sinf) do taint(r) end
+    TCUR = 'self seeded from its method declaration: the host may call it with another object'
+    for r in pairs(G7.SSEED) do taint(r) end
     TCUR = 'handed to unknown code (load, a module outside the tree): it may write any field'
     for o in pairs(XESC) do
         PINC[o] = PINC[o] or G7.EXTCALL
@@ -2695,7 +2769,7 @@ local function build(store, opts)
             guarded = pr.guard ~= nil, partial = partial_hit and true or nil, nobj = nobj, c = pr.c }
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
-    local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out }
+    local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT }
     if TFROM then
         -- (a partial verdict's v.ptport walked back to its SEED: { label… }, the last a reason)
         local named_of = {}

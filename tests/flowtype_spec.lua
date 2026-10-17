@@ -1749,6 +1749,57 @@ test('flowlinks: a wrong name-joined link becomes flow\'s target; a set is refus
     ok(not edges['a.lua::cx.pick@2'], 'and the pick guess\'s')
 end)
 
+-- (CART-1715: the SELF SEED, opts.selfseed — flowlinks. WoW w2's 11,375 name-only `self:m()` sit in methods only the
+-- HOST calls; `function T:m` declares self as T or an object prototyped by T)
+test('flowtype selfseed: a host-called method\'s self is an instance of T — hedged, never T itself, only where self is empty', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = table.concat({
+            'local addon = {}',
+            'function addon:OnEnable() return self:Setup() end', -- 1: no caller in the tree
+            'function addon:Setup() return 1 end',
+            'local Base = {}',
+            'Base.__index = Base',
+            'function Base:run() return self:step() end', -- 5: a subclass overrides step
+            'function Base:step() return 1 end',
+            'local Sub = setmetatable({}, { __index = Base })',
+            'function Sub:step() return 2 end',
+            'local Called = {}',
+            'function Called:go() return self:there() end', -- 10: called below — no seed
+            'function Called:there() return 2 end',
+            'Called:go()',
+            'local Lib = {}',
+            'function Lib:a() return 1 end',
+            'function Lib:embed(k) self[k] = function () end end', -- 15: a write through self
+            'local x = Lib.a()', -- 16: stays Lib:a alone
+            'local lib = Factory:NewLibrary("x")', -- 17: T from a call the solve does not follow
+            'function lib:Open() return self:Close() end',
+            'function lib:Close() return 1 end',
+            'return addon, x',
+        }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local function at(line, name) for _, c in ipairs(store.data.calls) do if c.line == line and (c.full or c.callee) == name then return c end end end
+    local function callee(R, line, name) local fns, how = R.callee_of(at(line, name)); return (fns and table.concat(fns, ',') or '') .. ' ' .. tostring(how) end
+    local R0 = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    local R = flowtype.solve(store, { open = false, ctx = false, allcallees = true, selfseed = true })
+    eq(' whole', callee(R0, 1, 'self:Setup'), 'off: no caller, an empty self')
+    eq('a.lua::addon:Setup@2 partial', callee(R, 1, 'self:Setup'), 'seeded: Setup, hedged')
+    eq('a.lua::Base:step@6,a.lua::Sub:step@8 partial', callee(R, 5, 'self:step'), 'a subclass instance may be self: both steps')
+    eq('a.lua::Called:there@11 whole', callee(R, 10, 'self:there'), 'a method the tree calls is not seeded: still whole')
+    -- (one target: the write landed on the instance, not on Lib — seeding Lib itself made it a set. Hedged: Lib may be
+    -- the self the host hands in, and a store through a hedged base taints what it may write)
+    eq('a.lua::Lib:a@14 partial', callee(R, 16, 'Lib.a'), 'a write through self adds nothing to Lib')
+    eq('a.lua::Lib:a@14 whole', callee(R0, 16, 'Lib.a'), 'off: whole')
+    eq('a.lua::lib:Close@19 partial', callee(R, 18, 'self:Close'), 'an empty T gets a stand-in table: its methods meet')
+    eq(1, R.selfseed.standin, vim.inspect(R.selfseed))
+    local st = require('cartograph.flowlinks').apply(store)
+    vim.fn.delete(root, 'rf')
+    local c = at(1, 'self:Setup')
+    eq('a.lua::addon:Setup@2', c.to, 'flowlinks: the link — ' .. vim.inspect(st))
+    eq(true, c.inferred, '… hedged')
+end)
+
 -- (CART-1742: all saturated ports as ONE top node is an optimisation, never a change — with it and without it the
 -- answers are the same, on a fixture whose ports saturate)
 test('flowtype: one top node for every saturated port moves no answer', function ()
