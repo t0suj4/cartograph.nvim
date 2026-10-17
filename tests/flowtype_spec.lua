@@ -1748,3 +1748,29 @@ test('flowlinks: a wrong name-joined link becomes flow\'s target; a set is refus
     ok(not edges['a.lua::cx.where@1'], 'the name join\'s edge is gone')
     ok(not edges['a.lua::cx.pick@2'], 'and the pick guess\'s')
 end)
+
+-- (CART-1742: all saturated ports as ONE top node is an optimisation, never a change — with it and without it the
+-- answers are the same, on a fixture whose ports saturate)
+test('flowtype: one top node for every saturated port moves no answer', function ()
+    if not parser_available('typescript') then skip 'no typescript parser' end
+    local FIX = vim.fn.getcwd() .. '/tests/fixtures/flowsched/ark/schema/shared/'
+    local files = {}
+    for _, f in ipairs({ 'errors.ts', 'traversal.ts' }) do files['ark/schema/shared/' .. f] = assert(io.open(FIX .. f)):read('a') end
+    local root = tree(files)
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 8
+    local function rows(top1)
+        local R = flowtype.solve(store, { open = false, top1 = top1 })
+        local out = {}
+        for _, p in ipairs(R.probes) do out[#out + 1] = p.file .. ':' .. p.line .. ':' .. p.col .. ' ' .. p.kind .. ' ' .. table.concat(p.targets, ',') .. (p.partial and '~' or '') end
+        table.sort(out)
+        return out, R.stats
+    end
+    local a = rows(false)
+    local b = rows(nil)
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    ok(#a > 5, 'answers: ' .. #a)
+    eq(a, b, 'the same answers')
+end)

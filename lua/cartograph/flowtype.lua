@@ -397,8 +397,48 @@ local function build(store, opts)
             push(q)
         end
     end
+    -- CART-1742: ALL SATURATED PORTS ARE ONE ⊤ NODE. A saturated destination only marks what reaches it escaped,
+    -- so a source feeding any number of them feeds the canonical ⊤ port once (G7.TOPL; G7.TOPS for a strict reader)
+    -- (CART-1742, measured in flowpath probes/solver: 92-99.5% of deliveries hand a port an object it already holds, most
+    -- into SATURATED ports where a delivery only marks escaped; the dump is byte-identical with it. opts.top1 = false /
+    -- env CARTOGRAPH_TOP1=0: one top port per saturated port, as before; off under opts.explain, which names each)
+    if opts.top1 ~= false and os.getenv('CARTOGRAPH_TOP1') ~= '0' and not ESCAT then
+        G7.TOPL, G7.TOPS = -1, -2; top[-1] = true; top[-2] = true -- (no port number: the walk's numbering is unchanged)
+    end
+    function G7.resucc(p) -- p's saturated successors replaced by ⊤
+        local s, T = succ[p], G7.TOPL
+        if type(s) == 'number' then if top[s] and s ~= T then succ[p] = T end; return end
+        if s == nil then return end
+        local dead
+        for q in pairs(s) do if top[q] and q ~= T then dead = dead or {}; dead[#dead + 1] = q end end
+        if dead then for i = 1, #dead do s[dead[i]] = nil end; s[T] = true end
+    end
+    -- a reader list's saturated readers are PARKED (G7.PARK[l]: a load's result port carries its own metadata — the
+    -- error port an __index function's raise reaches, LOADERR — so prototype replays and __index calls still see them)
+    -- and the list feeds ⊤ once instead (the strict ⊤ for a strict reader)
+    G7.PARK, G7.FEDTOP = {}, {}
+    function G7.rereaders(l)
+        local dead
+        for dst, v in pairs(l) do if top[dst] and dst ~= G7.TOPL and dst ~= G7.TOPS then dead = dead or {}; dead[#dead + 1] = dst end end
+        if dead then
+            local pk = G7.PARK[l]
+            if not pk then pk = {}; G7.PARK[l] = pk end
+            for i = 1, #dead do
+                local v = l[dead[i]]; l[dead[i]] = nil; pk[dead[i]] = v
+                if v == true then l[G7.TOPS] = true else l[G7.TOPL] = v end
+            end
+        end
+    end
+    -- every reader of a list, live and parked, without the ⊤ markers: for registrations that need the readers themselves
+    function G7.allreaders(l, fn)
+        local T, S = G7.TOPL, G7.TOPS
+        for dst, v in pairs(l) do if dst ~= T and dst ~= S then fn(dst, v) end end
+        local pk = G7.PARK[l]
+        if pk then for dst, v in pairs(pk) do fn(dst, v) end end
+    end
     local function edge(a, b) -- pts(b) ⊇ pts(a)
         if a == b then return end
+        if G7.TOPL and top[b] then b = G7.TOPL; if a == b then return end end -- CART-1742
         -- (a port's successors as its objects are: ONE is the port number itself, more a set — a set per source port was
         -- the census's second site, 0.64 M per run. The set is grown key by key, as before: its pairs ORDER is the
         -- propagation order, and a constructor would lay the hash out differently)
@@ -437,12 +477,17 @@ local function build(store, opts)
         local r = rd[o]
         if not r then return end
         local l = r[g]
-        if l then for dst in pairs(l) do fn(dst) end end
+        -- (CART-1742, CART-1742: a saturated reader seen here is PARKED and its list feeds the one ⊤ port instead)
+        local T, dl, dd, dn = G7.TOPL, nil, nil, nil
+        if l then for dst in pairs(l) do fn(dst); if T and top[dst] and dst ~= T and dst ~= G7.TOPS then dl = true end end end
         if g ~= '{k}' and g ~= '[]' and g:byte(1) ~= 1 and not G7.ISG[o] then
             local dyn = r['[]']
-            if dyn then for dst, strict in pairs(dyn) do if not strict then fn(dst) end end end
+            if dyn then for dst, strict in pairs(dyn) do if not strict then fn(dst); if T and top[dst] and dst ~= T then dd = dyn end end end end
         end
-        if g == '[]' then local ns = r[NS]; if ns then for dst in pairs(ns) do fn(dst) end end end
+        if g == '[]' then local ns = r[NS]; if ns then for dst in pairs(ns) do fn(dst); if T and top[dst] and dst ~= T and dst ~= G7.TOPS then dn = ns end end end end
+        if dl then G7.rereaders(l) end
+        if dd then G7.rereaders(dd) end
+        if dn then G7.rereaders(dn) end
     end
     -- (STRICT: a language whose records have no dynamic keys — Go — reads exactly the field: a named load never reads
     -- `[]`, a `[]` load never reads every field. Lua's `t[k] = v` may write any field, so there both widen)
@@ -485,12 +530,16 @@ local function build(store, opts)
         -- repeat could only re-walk the prototype DAG under a fresh `seen`. On WoW's mixin-dense trees that re-walk was
         -- 91% of the solve (w2, 607k lines: 184.7 s -> 15.6 s, every verdict row identical)
         if l[dst] ~= nil then return end
+        do local pk = G7.PARK and G7.PARK[l]; if pk and pk[dst] ~= nil then return end end -- CART-1742 (parked: registered)
         do
             l[dst] = strict and true or false
             if not strict and f ~= '[]' then local ns = r[NS]; if not ns then ns = {}; r[NS] = ns end; ns[dst] = true end
             -- (what the fields hold already; what they gain later reaches dst as their readers)
             local function pull(q)
                 if top[q] then if spread then settop(dst) end return end
+                -- CART-1742: into ⊤, a field's objects are marked escaped ONCE: the first saturated reader stays
+                -- registered on it (parked) and the list's ⊤ marker takes what it gains later
+                if G7.TOPL and top[dst] then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
                 local sq = pts[q]
                 if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
             end
@@ -518,7 +567,7 @@ local function build(store, opts)
         local r = rd[o]
         if not r then return end
         for f, l in sorted(r) do
-            if f ~= NS and f:byte(1) ~= 1 then for dst, strict in pairs(l) do load_obj(c, f, dst, nil, strict) end end
+            if f ~= NS and f:byte(1) ~= 1 then G7.allreaders(l, function (dst, strict) load_obj(c, f, dst, nil, strict) end) end -- CART-1742
         end
     end
     -- (PARAMETER PATHS, opts.pathsum — CART-1673: a parameter's port is tagged { fn, j, path = '' }, a load through a
@@ -566,7 +615,7 @@ local function build(store, opts)
                 m[c] = true
                 local r = rd[o]
                 if r then
-                    for f, l in sorted(r) do if f ~= NS then for dst in pairs(l) do idxcall(c, o, f, dst) end end end
+                    for f, l in sorted(r) do if f ~= NS then G7.allreaders(l, function (dst) idxcall(c, o, f, dst) end) end end -- CART-1742
                 end
             end
         end
@@ -877,12 +926,16 @@ local function build(store, opts)
                 if type(d) == 'table' and d.bs then
                     -- (a DENSE delta: the copy edges and the field's readers in bulk; the rest per object)
                     local db = d
-                    for q in sit(succ[p]) do addbits(q, db) end
+                    local anytop = false
+                    for q in sit(succ[p]) do addbits(q, db); if top[q] then anytop = true end end
+                    if anytop and G7.TOPL then G7.resucc(p) end -- CART-1742
                     if fowner[p] then readers(fowner[p], fname[p], function (q) addbits(q, db) end) end
                     d = {}
                     for o in bs_iter(db) do d[#d + 1] = o end
                 elseif d then
-                    for q in sit(succ[p]) do for _, o in dit(d) do addobj(q, o) end end
+                    local anytop = false
+                    for q in sit(succ[p]) do for _, o in dit(d) do addobj(q, o) end; if top[q] then anytop = true end end
+                    if anytop and G7.TOPL then G7.resucc(p) end -- CART-1742
                     if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in dit(d) do addobj(q, o) end end) end
                 end
                 if d then
