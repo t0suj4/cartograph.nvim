@@ -39,6 +39,10 @@ for _, o in ipairs(S.hkeystop or {}) do HKEYSTOP[o] = true end -- (a saturated k
 local DYNKEYS = D.contracts and D.contracts.dyn_keys == true -- (loadDyn x y k, storeDyn x k y; else storeDyn x y)
 for _, e in ipairs(S.htop) do HTOP[e[1] .. ':' .. e[2]] = true end
 for _, e in ipairs(S.htaint or {}) do HTAINT[e[1] .. ':' .. (e[2] == NULL and '*' or e[2])] = true end
+-- (the store rule's reach: every cell (escaped site, hit field) is tainted, ported or not — CART-1744)
+local ESC, FHIT = {}, {}
+for _, o in ipairs(S.taint.escaped or {}) do ESC[o] = true end
+for _, f in ipairs(S.taint.fields_hit or {}) do FHIT[f == NULL and '*' or f] = true end
 local PORT, PTOP, PTAINT = {}, {}, {}
 for _, e in ipairs(S.err.fn) do local t = {}; for _, s in ipairs(e[2]) do t[s] = true end; PORT[e[1]] = t end
 for _, g in ipairs(S.err.top or {}) do PTOP[g] = true end
@@ -100,7 +104,7 @@ local function fail(part, dest, msg)
     if #fails < maxshow then fails[#fails + 1] = ('%s  [%s] %s#%d %s — %s'):format(key, fname(cur.g), cur.ins[1], cur.i, vim.inspect(cur.ins, { newline = '' }):sub(1, 120), msg) end
 end
 local function failh(part, c, f, msg)
-    if HTAINT[c .. ':' .. f] or HTAINT[c .. ':*'] then excused = excused + 1; return end
+    if HTAINT[c .. ':' .. f] or HTAINT[c .. ':*'] or (ESC[c] and (FHIT[f] or FHIT['*'])) then excused = excused + 1; return end
     fail(part, nil, msg)
 end
 local function sub(srcset, x, part) -- v(x) ⊇ srcset

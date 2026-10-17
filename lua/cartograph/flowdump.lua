@@ -39,6 +39,9 @@
 --   of that function. `v` is grouped: [var, [sites...]]; a var in `top` SATURATED (past CAP): any site — the taint
 --   carries what it lost. Only variables the IR names are listed. `htop` [site, field] a field past CAP; `htaint`
 --   [site, field | null] a field the taint reached (null: `[]`) — closedness is required except at tainted ports.
+--   `taint.escaped` [sites] the ESCAPED objects (a saturated port's, a lost store's value, unknown code's), and
+--   `taint.fields_hit` [field | null]: a store of that field through a tainted base reached it on every escaped object —
+--   each cell (escaped site, hit field) is TAINTED, whether or not it has a port (CART-1744).
 --   `hkeys` [site, [sites]]: flowtype's KEY SET of a table (what `pairs` yields as keys) — no core field; a load of it
 --   is a gap (`table-keys`).
 -- * Errors are PER FUNCTION (Core/Errors.lean, FLOW C.E): err.fn [fn, [sites]] is `E.port fn` (err.top: a port past
@@ -392,6 +395,14 @@ function M.build(rec, X)
     for _, g in ipairs(rec.gaps) do
         gj[#gj + 1] = ('{"fn":%d,"kind":%s,"vars":%s,"at":%s}'):format(FN(g.fn), jstr(g.kind), jarr(g.vars), g.at and jstr(g.at) or 'null')
     end
+    -- (the STORE RULE's reach, CART-1744: a store — or keyed copy — of `.f` through a tainted base taints field f of
+    -- EVERY escaped object, the cells no port holds too: a cell nothing reads has no port, and htaint lists ports.
+    -- vimruntime: 2,770 cells of the tables in Version's `[]`, written through `__newindex`, looked untainted)
+    local escl, fhj = {}, {}
+    for o in pairs(X.escaped or {}) do if type(o) == 'number' and not ISG[o] then escl[#escl + 1] = o end end
+    table.sort(escl)
+    for f in pairs(X.fields_hit or {}) do fhj[#fhj + 1] = f == '[]' and 'null' or tostring(F(f)) end
+    table.sort(fhj)
     -- names (last: everything above interned)
     local fields = {}
     local maxf = 0
@@ -408,7 +419,8 @@ function M.build(rec, X)
         .. '],"hdyn":[' .. table.concat(hdj, ',') .. '],"htop":[' .. table.concat(htj, ',') .. '],"htaint":[' .. table.concat(hxj, ',') .. '],"hkeys":[' .. table.concat(hkj, ',') .. '],"hkeystop":' .. jarr(hktop) .. ',"err":{"fn":[' .. table.concat(ej, ',')
         .. '],"top":[' .. table.concat(etop, ',') .. '],"taint":[' .. table.concat(etaint, ',') .. '],"cerr":' .. jarr(cl)
         .. '},"weak":' .. jarr(weak) .. ',"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
-        .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']}},')
+        .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']'
+        .. ',"escaped":' .. jarr(escl) .. ',"fields_hit":[' .. table.concat(fhj, ',') .. ']}},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end

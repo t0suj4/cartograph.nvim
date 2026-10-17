@@ -3203,6 +3203,7 @@ local function build(store, opts)
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
+            escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot
             -- without .git inside another repository reported THAT repository's HEAD, CART-1724)

@@ -256,3 +256,36 @@ test('flowdump: dynamic accesses carry their key; keys reads the key set; the du
     for k, n in pairs(c.counts) do ok(k:find('(model)', 1, true), ('%d × %s: %s'):format(n, k, table.concat(c.fails, ' | '))) end
     eq(0, c.unwritten, 'every variable written: ' .. vim.inspect(c.unwritten_ex))
 end)
+
+-- (CART-1744: a store of `.f` through a tainted base taints field f of EVERY escaped object — the cells no port holds too.
+-- htaint lists ports, and a cell nothing reads has none: vimruntime's 2,770 cells written through a `__newindex` table
+-- looked untainted. The dump states the rule — taint.escaped and taint.fields_hit — and the checker applies it)
+test('flowdump: taint.escaped and taint.fields_hit state the store rule; the checker excuses a portless hit cell', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, '\nlocal a, b, c = {}, {}, {}\nlocal x = (#arg == 1 and a) or (#arg == 2 and b) or c\nx.f = 1\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local fidx
+    for i, nm in ipairs(D.names.fields) do if nm == 'f' then fidx = i - 1 end end
+    local T = D.solution.taint
+    ok(fidx and vim.tbl_contains(T.fields_hit, fidx), 'f is hit: ' .. vim.inspect(T.fields_hit))
+    -- (an escaped table — a, b or c — that a variable holds alone, and whose f no port holds)
+    local esc, held = {}, {}
+    for _, o in ipairs(T.escaped) do esc[o] = true end
+    for _, e in ipairs(D.solution.v) do if #e[2] == 1 and esc[e[2][1]] then held[e[2][1]] = held[e[2][1]] or e[1] end end
+    local ported = {}
+    for _, e in ipairs(D.solution.h) do if e[2] == fidx then ported[e[1]] = true end end
+    local asite, avar
+    for _, s in ipairs(D.sites) do
+        if s.kind == 'table' and s.label:find('m.lua', 1, true) and held[s.id] and not ported[s.id] and not asite then asite, avar = s.id, held[s.id] end
+    end
+    ok(asite, 'an escaped table with no f port: ' .. vim.inspect(T.escaped))
+    local V = { avar }
+    local chunk = D.functions[#D.functions]
+    chunk.body[#chunk.body + 1] = { 'store', V[1], fidx, V[1] } -- (a.f = a: a cell with no port)
+    eq(0, flowcheck.check(D).failed, 'the hit cell of an escaped object is tainted')
+    T.fields_hit = {}
+    ok(flowcheck.check(D).failed > 0, 'without the rule the same store fails')
+end)
