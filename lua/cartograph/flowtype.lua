@@ -862,10 +862,15 @@ local function build(store, opts)
             inwl[p] = nil
             if top[p] then
                 G7.mtcopy(p)
-                for q in sit(succ[p]) do settop(q) end
-                if spread and fowner[p] then readers(fowner[p], fname[p], settop) end
-                for _, ld in ipairs(loads[p] or NOTHING) do settop(ld[2]) end
-                for _, cl in ipairs(calls[p] or NOTHING) do if type(cl[2]) ~= 'table' then settop(cl[2]) end end
+                -- (SPREAD only: without it a saturated port DROPS OUT — the taint phase covers what it lost. A port queued
+                -- before it saturated reached this branch by SCHEDULE and saturated its successors, load and call results:
+                -- saturation counts went non-monotone in CAP — 15,358 / 13,246 / 20,955 at CAP 16 / 32 / 64, CART-1741)
+                if spread then
+                    for q in sit(succ[p]) do settop(q) end
+                    if fowner[p] then readers(fowner[p], fname[p], settop) end
+                    for _, ld in ipairs(loads[p] or NOTHING) do settop(ld[2]) end
+                    for _, cl in ipairs(calls[p] or NOTHING) do if type(cl[2]) ~= 'table' then settop(cl[2]) end end
+                end
             else
                 local d = delta[p]
                 delta[p] = nil

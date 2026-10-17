@@ -1028,7 +1028,7 @@ end)
 -- files moved when one 3-line file was added, and the per-process string hash moved them run to run (456 / 413 / 422
 -- exact). The worklist is now a heap over a stable order. Fixture: tests/fixtures/flowsched, delta-debugged from
 -- arktype to the 151 lines where a comment-only file still moved an answer under the stack
-test('flowtype: adding an unrelated file moves no answer — and under the old stack order it did', function ()
+test('flowtype: adding an unrelated file moves no answer — under any worklist order (CART-1741)', function ()
     if not parser_available('typescript') then skip 'no typescript parser' end
     local FIX = vim.fn.getcwd() .. '/tests/fixtures/flowsched/ark/schema/shared/'
     local files = {}
@@ -1054,7 +1054,12 @@ test('flowtype: adding an unrelated file moves no answer — and under the old s
     local a, n = answers(false)
     ok(n >= 5, 'the fixture has answers: ' .. n)
     eq(0, moved(a, (answers(true))), 'the default schedule: nothing moves')
-    ok(moved((answers(false, 'lifo')), (answers(true, 'lifo'))) > 0, 'the old stack order still moves an answer — the fixture is live')
+    -- (and NO order moves one: the stack order (lifo) had, through a port saturating while queued that then saturated
+    -- its successors when popped — schedule-made saturation, gone with CART-1741. Restoring that spread makes lifo move
+    -- an answer again here, which keeps this fixture live)
+    for _, order in ipairs { 'asc', 'lifo', 'fifo' } do
+        eq(0, moved((answers(false, order)), (answers(true, order))), order .. ': nothing moves')
+    end
 end)
 
 -- ★ PARTIAL (CART-1643): the stable schedule made a saturated port's leak REPRODUCIBLE, not whole — what it held went
