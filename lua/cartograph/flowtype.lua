@@ -45,6 +45,42 @@ local EMPTY_NODE = { child = function () return nil end, named_child = function 
 
 local M = {}
 M.CAP = 64
+-- ★ EXPERIMENTS (USER 2026-10-17: "flowtype could have some experiments"): a variant of the solve is a NAMED switch, not a
+-- patch made and reverted for one measurement — CART-1697's diagnostics were exactly that, three times in a day. Selected
+-- by opts.exp (a set, or a comma list) or the environment, CARTOGRAPH_FLOWTYPE_EXP=name[=value],…, so an experiment
+-- (cartograph.experiment) runs one as a CONDITION. An unknown name is an error, never ignored. The solve records what
+-- ran in R.exp. An option a switch names (spread, order…) is set by it unless the caller set it.
+M.EXPERIMENTS = {
+    ['no-sinf'] = 'the string-method rule on an EMPTY receiver does not fire (CART-1697: an order source?)',
+    spread = 'opts.spread: a saturated port saturates what it feeds, never drops out (CART-1741)',
+    order = 'opts.order = asc | lifo | fifo: another worklist order, an instrument (CART-1697 order test)',
+    selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
+    litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
+    expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
+}
+local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
+--- the active experiments of a solve -> { name = value } (true for a bare name); errors on an unknown name
+function M.experiments(opts)
+    local out = {}
+    local function add(name, v)
+        if not M.EXPERIMENTS[name] then
+            local known = vim.tbl_keys(M.EXPERIMENTS); table.sort(known)
+            error(('flowtype: unknown experiment %q (known: %s)'):format(name, table.concat(known, ', ')), 3)
+        end
+        out[name] = v
+    end
+    local function list(sv)
+        for item in tostring(sv):gmatch('[^,%s]+') do
+            local k, v = item:match('^([^=]+)=(.*)$')
+            add(k or item, v or true)
+        end
+    end
+    local e = os.getenv('CARTOGRAPH_FLOWTYPE_EXP')
+    if e and e ~= '' then list(e) end
+    local x = opts and opts.exp
+    if type(x) == 'string' then list(x) elseif type(x) == 'table' then for k, v in pairs(x) do if type(k) == 'number' then add(v, true) else add(k, v) end end end
+    return out
+end
 -- (a binary operator's metamethod — run with both operands when either carries it, CART-1702; `a > b` is `b < a`)
 local METAOP = { ['+'] = '__add', ['-'] = '__sub', ['*'] = '__mul', ['/'] = '__div', ['%'] = '__mod', ['^'] = '__pow',
     ['..'] = '__concat', ['//'] = '__idiv', ['&'] = '__band', ['|'] = '__bor', ['~'] = '__bxor', ['<<'] = '__shl',
@@ -165,6 +201,16 @@ local function build(store, opts)
     -- is handed; it may call every function arriving there with unknown arguments, and write or re-metatable every
     -- object. GOBJ / GPORT — the globals table, whose fields the globals are. Set below, with port)
     local G7 = {} -- (EXTCALL, GOBJ, GPORT, gport, gread: one local — the builder is at Lua's 200-local limit)
+    -- (the experiments: G7.EXP, and the options they name — on a copy, the caller's table is never written)
+    do
+        local ex = M.experiments(opts)
+        G7.EXP = ex
+        local o2
+        for k in pairs(EXPOPT) do
+            if ex[k] ~= nil and opts[k] == nil then o2 = o2 or setmetatable({}, { __index = opts }); o2[k] = ex[k] end
+        end
+        if o2 then opts = o2 end
+    end
     -- (opts.dump: the program in the core IR, with this solve's solution — flowdump.lua, CART-1710. G7.mu runs a builtin
     -- translated by hand with its inner primitives MUTED; G7.ins / G7.gap record into the current function)
     if opts.dump then G7.REC = require('cartograph.flowdump').recorder(); G7.M = 0; G7.INSAT = {} end
@@ -2326,7 +2372,7 @@ local function build(store, opts)
         local grew = false
         for _, mc in ipairs(mcalls) do
             local recvp, m, resl = mc[1], mc[2], mc[3]
-            if pts[recvp] == nil and not top[recvp] and PSIGS['string#' .. m] then
+            if not G7.EXP['no-sinf'] and pts[recvp] == nil and not top[recvp] and PSIGS['string#' .. m] then
                 for k, r in ipairs(resl) do
                     local rt = retk('string#' .. m, k)
                     if rt and not sinf[r] then sinf[r] = true; addobj(r, typeobj(rt)); grew = true end
@@ -2877,7 +2923,11 @@ local function build(store, opts)
             guarded = pr.guard ~= nil, partial = partial_hit and true or nil, nobj = nobj, c = pr.c }
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
-    local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT }
+    local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT, exp = G7.EXP }
+    if G7.EXP.expose then -- (experiment `expose`: the solver's tables for an instrument — names may change, not an API)
+        R.internals = { top = top, pts = pts, each = each, obinfo = obinfo, tainted = tainted, probes = probes, succ = succ,
+            escaped = escaped, ofield = ofield, fnports = fnports, protos = protos, tfrom = TFROM }
+    end
     if TFROM then
         -- (a partial verdict's v.ptport walked back to its SEED: { label… }, the last a reason)
         local named_of = {}
@@ -3233,6 +3283,12 @@ end
 function M.of(store, opts)
     local key = ((opts and opts.open == false) and 'closed' or 'open') .. ((opts and opts.spread) and '+spread' or '')
         .. ((opts and opts.exclude) and ('-' .. opts.exclude) or '') .. ((opts and opts.ctx == false) and '-noctx' or '')
+    do -- (the experiments, from opts and the environment: a different solve)
+        local ex, ks = M.experiments(opts), {}
+        for k, v in pairs(ex) do ks[#ks + 1] = k .. '=' .. tostring(v) end
+        table.sort(ks)
+        if #ks > 0 then key = key .. '+exp:' .. table.concat(ks, ',') end
+    end
     local c = store._flowtype
     -- (the generation AND the graph itself: a fresh ingest may restart the generation count)
     if c and c.gen == store.generation and c.data == store.data and c[key] then return c[key] end

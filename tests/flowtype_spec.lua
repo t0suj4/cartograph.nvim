@@ -1896,3 +1896,33 @@ test('flowtype: one top node for every saturated port moves no answer', function
     ok(#a > 5, 'answers: ' .. #a)
     eq(a, b, 'the same answers')
 end)
+
+-- (USER 2026-10-17: "flowtype could have some experiments" — a variant of the solve is a NAMED switch, selected by opts.exp
+-- or CARTOGRAPH_FLOWTYPE_EXP, recorded in R.exp; an unknown name is an error)
+test('flowtype experiments: named switches from opts or the environment; an unknown name refuses; no-sinf turns the rule off', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A, B = {}, {}\nfunction A:upper() return 1 end\nfunction B:upper() return 2 end\nlocal s = UNDEFINED_SOURCE\nlocal x = s:lower():upper()\nreturn A, B, x\n',
+    })
+    store.ingest(ts.extract(root))
+    local c
+    -- (the rule types the RESULT of `s:lower()` on an empty s: its answer is the next call's, `:upper` on that result)
+    for _, x in ipairs(store.data.calls) do if tostring(x.full or x.callee):find('upper', 1, true) then c = x end end
+    ok(c, 'the call')
+    local R0 = flowtype.solve(store, { open = false, ctx = false })
+    eq({}, R0.exp, 'none active')
+    local v0 = R0.verdict(c)
+    eq('string', v0 and v0.kind, 'an empty receiver of a string method: the string rule (sinf) — ' .. vim.inspect(v0))
+    local R1 = flowtype.solve(store, { open = false, ctx = false, exp = 'no-sinf,expose' })
+    eq({ ['no-sinf'] = true, expose = true }, R1.exp)
+    ok(R1.internals and R1.internals.pts, 'expose: the solver tables')
+    local v1 = R1.verdict(c)
+    ok(not (v1 and v1.kind == 'string'), 'no-sinf: the rule is off — ' .. vim.inspect(v1))
+    local okk, err = pcall(flowtype.solve, store, { exp = { 'no-such-thing' } })
+    ok(not okk and tostring(err):find('unknown experiment', 1, true), 'an unknown name refuses: ' .. tostring(err))
+    vim.env.CARTOGRAPH_FLOWTYPE_EXP = 'order=asc'
+    local R2 = flowtype.solve(store, { open = false, ctx = false })
+    vim.env.CARTOGRAPH_FLOWTYPE_EXP = nil
+    eq({ order = 'asc' }, R2.exp, 'the environment selects')
+    vim.fn.delete(root, 'rf') -- (after the solves: flowtype reads the sources)
+end)
