@@ -1920,6 +1920,10 @@ test('flowtype experiments: named switches from opts or the environment; an unkn
     ok(not (v1 and v1.kind == 'string'), 'no-sinf: the rule is off — ' .. vim.inspect(v1))
     local okk, err = pcall(flowtype.solve, store, { exp = { 'no-such-thing' } })
     ok(not okk and tostring(err):find('unknown experiment', 1, true), 'an unknown name refuses: ' .. tostring(err))
+    local R3 = flowtype.solve(store, { open = false, ctx = false, exp = 'loc' })
+    local seen = false
+    for _, w in pairs(R3.internals.loc) do if tostring(w):match('a%.lua:%d+$') then seen = true; break end end
+    ok(seen, 'loc: a port names the statement it was made at')
     vim.env.CARTOGRAPH_FLOWTYPE_EXP = 'order=asc'
     local R2 = flowtype.solve(store, { open = false, ctx = false })
     vim.env.CARTOGRAPH_FLOWTYPE_EXP = nil

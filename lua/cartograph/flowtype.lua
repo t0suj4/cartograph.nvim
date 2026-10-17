@@ -57,6 +57,7 @@ M.EXPERIMENTS = {
     selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
     expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
+    loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
 }
 local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
 --- the active experiments of a solve -> { name = value } (true for a bare name); errors on an unknown name
@@ -205,6 +206,7 @@ local function build(store, opts)
     do
         local ex = M.experiments(opts)
         G7.EXP = ex
+        G7.LOCP, G7.CURLOC = ex.loc and {} or nil, nil -- (experiment `loc`: port -> the statement the walk was at)
         local o2
         for k in pairs(EXPOPT) do
             if ex[k] ~= nil and opts[k] == nil then o2 = o2 or setmetatable({}, { __index = opts }); o2[k] = ex[k] end
@@ -250,7 +252,7 @@ local function build(store, opts)
     local FUEL = tonumber(opts.fuel or os.getenv('CARTOGRAPH_FLOWTYPE_FUEL') or '')
     local OUT = false
     local walking, NW, NOW = true, 0, 0
-    local function new() N = N + 1; return N end
+    local function new() N = N + 1; if G7.LOCP then G7.LOCP[N] = G7.CURLOC end; return N end
     local function newobj(info) NO = NO + 1; obinfo[NO] = info; return NO end
     -- (an object named stably: one the walk made by its number, one the solve made — a type object — by its info)
     local function okey(o) return o <= NOW and o or tostring(obinfo[o]) end
@@ -951,7 +953,7 @@ local function build(store, opts)
         end
     end
     local function solve()
-        if walking then walking = false; NW, NOW = N, NO end
+        if walking then walking = false; NW, NOW = N, NO; G7.CURLOC = nil end
         if OUT then return end
         while head <= tail do
             if FUEL then
@@ -1894,6 +1896,7 @@ local function build(store, opts)
             return new()
         end
         stmt = function (n)
+            if G7.LOCP then G7.CURLOC = (clone and 'inst:' or '') .. file .. ':' .. (n:start() + 1) end
             local t = n:type()
             if t == 'variable_declaration' then
                 local a = n:named_child(0)
@@ -2079,7 +2082,7 @@ local function build(store, opts)
                 local info = { ctx = true, id = cl.id, l = cl.l, c = cl.c, scopes = { {} }, noacc = true, consts = consts }
                 INST, INSTN = INST + 1, INSTN + 1
                 G7.VINSTN = G7.VINSTN + 1
-                walk_file(cl.file, cl.src, info)
+                walk_file(cl.file, cl.src, info); G7.CURLOC = nil
                 INST = INST - 1
                 x = info.obj or false
                 per[key] = x
@@ -2098,7 +2101,7 @@ local function build(store, opts)
             -- unsound exact (a loop's state reached only the instance). The function is CLOSED: no scope but its own
             local info = { ctx = true, id = cl.id, l = cl.l, c = cl.c, scopes = { {} }, noacc = true }
             INST, INSTN = INST + 1, INSTN + 1
-            walk_file(cl.file, cl.src, info)
+            walk_file(cl.file, cl.src, info); G7.CURLOC = nil
             INST = INST - 1
             x = info.obj or false
             per[o] = x
@@ -2924,10 +2927,10 @@ local function build(store, opts)
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT, exp = G7.EXP }
-    if G7.EXP.expose then -- (experiment `expose`: the solver's tables for an instrument — names may change, not an API)
+    if G7.EXP.expose or G7.EXP.loc then -- (experiment `expose`: the solver's tables for an instrument — names may change, not an API)
         R.internals = { top = top, pts = pts, each = each, obinfo = obinfo, tainted = tainted, probes = probes, succ = succ,
             escaped = escaped, ofield = ofield, fnports = fnports, protos = protos, tfrom = TFROM,
-            NW = NW, NOW = NOW, pinfo = pinfo } -- (NW / NOW: the ports / objects the WALK made — numbered the same across solves of one tree)
+            NW = NW, NOW = NOW, pinfo = pinfo, loc = G7.LOCP } -- (NW / NOW: the ports / objects the WALK made — numbered the same across solves of one tree)
     end
     if TFROM then
         -- (a partial verdict's v.ptport walked back to its SEED: { label… }, the last a reason)
