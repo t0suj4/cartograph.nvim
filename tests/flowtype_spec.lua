@@ -1708,3 +1708,38 @@ test('flowtype: programs — one environment by default; a config split hides on
     eq('a.lua::A.run@1', q1 and q1.targets and q1.targets[1], 'one program: string.objx is the reader\'s too — ' .. vim.inspect(q1))
     ok(not (q2 and q2.kind == 'exact'), 'split: the writer\'s string.objx is not in the reader\'s library: ' .. vim.inspect(q2))
 end)
+
+-- (CART-1715 step 1, cartograph.flowlinks: a Lua call no BINDING links takes its link from flow. byexample.lua's
+-- `site.where()` was name-joined to mix.lua's cx.where; flow knows the table holds byexample's own `where`)
+test('flowlinks: a wrong name-joined link becomes flow\'s target; a set is refused with flow\'s candidates; the edges follow', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local cx = {}\nfunction cx.where() return 1 end\nfunction cx.pick() return 1 end\nreturn cx\n',
+        ['b.lua'] = table.concat({
+            'local function p1() return 3 end',
+            'local function p2() return 4 end',
+            'local site = { where = function () return 2 end }',
+            'local alt = { pick = (#arg > 0) and p1 or p2 }',
+            'return site.where(), alt.pick()',
+        }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local function call(name) for _, c in ipairs(store.data.calls) do if c.file == 'b.lua' and (c.full or c.callee) == name then return c end end end
+    local w0, p0 = call('site.where'), call('alt.pick')
+    eq('a.lua::cx.where@1', w0.to, 'the name join: the only `where` with that tail')
+    eq(true, w0.inferred, '… inferred')
+    local st = require('cartograph.flowlinks').apply(store)
+    vim.fn.delete(root, 'rf')
+    local w, p = call('site.where'), call('alt.pick')
+    eq('b.lua::where@2', w.to, 'flow: the table holds b.lua\'s own where — ' .. vim.inspect(st))
+    eq(nil, w.inferred, 'one function, whole: confirmed')
+    eq('flow', w.prov)
+    eq(nil, p.to, 'two functions reach alt.pick: no link …')
+    eq('flow-set', p.refused and p.refused.rule)
+    eq({ 'b.lua::p1@0', 'b.lua::p2@1' }, p.refused.cands, '… refused with flow\'s candidates')
+    local edges = {}
+    for _, e in ipairs(store.data.edges) do if e.kind == 'ref' then edges[e.to] = true end end
+    ok(edges['b.lua::where@2'], 'the new edge')
+    ok(not edges['a.lua::cx.where@1'], 'the name join\'s edge is gone')
+    ok(not edges['a.lua::cx.pick@2'], 'and the pick guess\'s')
+end)

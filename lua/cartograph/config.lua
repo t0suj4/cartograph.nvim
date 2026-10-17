@@ -177,6 +177,11 @@ M.federated_resolve = vim.env.CARTOGRAPH_FEDERATED == '1'
 -- there, or the type (`string`). The answer is a premise, hedged (~) like the join. Env CARTOGRAPH_EFFECTS_FLOW=1.
 -- Default off: the analysis is ~23 s and ~650 MB over an extraction on lua/cartograph (measured 2026-10-10)
 M.effects_flow = vim.env.CARTOGRAPH_EFFECTS_FLOW == '1'
+-- FLOW LINKS (CART-1715 step 1, cartograph.flowlinks): a Lua call no BINDING links takes its link from flowtype's callee
+-- set instead of the name join — one whole function: a confirmed edge; partial: ~; a set: refused with flow's
+-- candidates; nothing: refused, the name join's pick kept as a candidate. Off by default while it is measured
+-- (env CARTOGRAPH_FLOW_LINKS=1). Costs one flowtype solve per graph.
+M.flow_links = vim.env.CARTOGRAPH_FLOW_LINKS == '1'
 
 -- INCREMENTAL REFRESH (CART-1439, EARLY CUTOFF): a save whose files keep their INTERFACE re-resolves only the calls
 -- that edit can change (ts.relink opts.only). ACCEPTED by the refresh-parity oracle on 122 real edits of our tree: the

@@ -1074,7 +1074,7 @@ local function build(store, opts)
     -- (CART-1715: the selecting solve records each call's CALLEE PORT — G7.CALLP — and exports the calls whose callee
     -- was ONE function, untainted: R.ctxcallee, call record -> fn id. The second solve instances by that map, never by
     -- the name join's c.to: a wrong claim bound the wrong function and skipped the callee's flow)
-    G7.CALLP = opts.ctxsel and {} or nil
+    G7.CALLP = (opts.ctxsel or opts.allcallees) and {} or nil
     G7.CTXC = opts.ctxcallee
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
@@ -2921,6 +2921,20 @@ local function build(store, opts)
                 end
             end
             R.ctxcallee = cc
+        end
+    end
+    -- (opts.allcallees: every call's CALLEE SET by flow — cartograph.flowlinks takes links from it, CART-1715. A set of
+    -- fn ids and how sure: 'whole' / 'partial' (the port was tainted), '+nonfn' when it also held a non-function — a
+    -- table with __call, a type — whose handler is no fn id here)
+    if opts.allcallees and G7.CALLP then
+        R.callee_of = function (c)
+            local p = G7.CALLP[c]
+            if not p then return nil, 'no port' end
+            if top[p] then return nil, 'top' end
+            local fns, other = {}, false
+            for o in each(p) do local fp = fnports[o]; if fp and fp.id and not fp.inst then fns[#fns + 1] = fp.id else other = true end end
+            table.sort(fns)
+            return fns, (tainted[p] and 'partial' or 'whole') .. (other and '+nonfn' or '')
         end
     end
     if G7.REC then -- (opts.dump: the program in the core IR and this solution, CART-1710)

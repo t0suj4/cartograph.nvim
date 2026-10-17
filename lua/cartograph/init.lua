@@ -333,6 +333,7 @@ function M.open(dump_path, opts)
                         if n then vim.notify('cartograph: ' .. n, vim.log.levels.INFO) end
                         preserve(function () finish(acc) end)
                         require('cartograph.toc').attach(store)
+                        require('cartograph.flowlinks').maybe(store) -- (config.flow_links: Lua links from flow, CART-1715)
                         store.ws_resolve()
                     end,
                 })
@@ -404,6 +405,7 @@ function M.open(dump_path, opts)
                         require('cartograph.cache').save_bg(acc)
                         preserve(function () finish(acc) end)
                         require('cartograph.toc').attach(store)
+                        require('cartograph.flowlinks').maybe(store) -- (config.flow_links: Lua links from flow, CART-1715)
                         store.ws_resolve() -- members arrive with their files
                         vim.notify(('cartograph: extraction complete — %d nodes, %d calls')
                             :format(#acc.nodes, #acc.calls), vim.log.levels.INFO)
@@ -423,6 +425,7 @@ function M.open(dump_path, opts)
     end
     -- manifest projects (WoW .toc): exact load order for the browser + linter
     require('cartograph.toc').attach(store)
+    require('cartograph.flowlinks').maybe(store) -- (config.flow_links: Lua links from flow, CART-1715)
 
     -- the working set: what the user marked as their current work,
     -- persisted per root as refs, resolved against this fresh graph
