@@ -401,7 +401,12 @@ function M.build(rec, X)
     local escl, fhj = {}, {}
     for o in pairs(X.escaped or {}) do if type(o) == 'number' and not ISG[o] then escl[#escl + 1] = o end end
     table.sort(escl)
-    for f in pairs(X.fields_hit or {}) do fhj[#fhj + 1] = f == '[]' and 'null' or tostring(F(f)) end
+    -- (interned in NAME order: F numbers a field by first use, and pairs over these string keys varies by process —
+    -- the dump's field table came out in another order on every run)
+    local fhn = {}
+    for f in pairs(X.fields_hit or {}) do fhn[#fhn + 1] = f end
+    table.sort(fhn)
+    for _, f in ipairs(fhn) do fhj[#fhj + 1] = f == '[]' and 'null' or tostring(F(f)) end
     table.sort(fhj)
     -- names (last: everything above interned)
     local fields = {}
@@ -425,7 +430,12 @@ function M.build(rec, X)
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
     put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
-        .. ',"clauses":' .. jstr(M.CONTRACTS) .. '},')
+        .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
+            local ks, kv = vim.tbl_keys(M.CONTRACTS), {}
+            table.sort(ks)
+            for i, k in ipairs(ks) do kv[i] = jstr(k) .. ':' .. jstr(M.CONTRACTS[k]) end
+            return '{' .. table.concat(kv, ',') .. '}'
+        end)() .. '},')
     put('"answers":[' .. table.concat(aj, ',') .. ']}')
     return table.concat(out)
 end

@@ -289,3 +289,21 @@ test('flowdump: taint.escaped and taint.fields_hit state the store rule; the che
     T.fields_hit = {}
     ok(flowcheck.check(D).failed > 0, 'without the rule the same store fails')
 end)
+
+-- (the dump is compared BYTE for byte across processes; pairs order over string keys varies by process, so what it writes
+-- from a hash — the contract clauses, the hit fields' interning — goes out sorted)
+test('flowdump: the contract clauses are written in name order', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = 'local t = {}\nreturn t\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local cl = R.dump:match('"clauses":(%b{})')
+    ok(cl, 'the clauses')
+    local ks = {}
+    for k in cl:gmatch('"([^"]+)":"') do ks[#ks + 1] = k end
+    local sorted = vim.deepcopy(ks)
+    table.sort(sorted)
+    ok(#ks > 3, 'clauses: ' .. #ks)
+    eq(sorted, ks, 'in name order')
+end)
