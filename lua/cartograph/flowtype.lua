@@ -2205,6 +2205,12 @@ local function build(store, opts)
         local l = rd[o] and rd[o]['[]']
         if l then for dst in pairs(l) do taint(dst) end end
     end
+    -- (a function's parameters AND its vararg port: a lost call's arguments past the named parameters land in `...`,
+    -- CART-1738 — 35 of vimruntime's 2,152 escaped functions kept `...` whole)
+    function G7.tparams(fpp)
+        for _, pp in ipairs(fpp.params) do taint(pp) end
+        if fpp.vararg then taint(fpp.vararg) end
+    end
     function G7.fieldhit(f)
         if field_hit[f] then return end
         field_hit[f] = true
@@ -2238,7 +2244,7 @@ local function build(store, opts)
             end
             for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; q[#q + 1] = c end end
             local fpp = fnports[o]
-            if fpp and params_hit then for _, pp in ipairs(fpp.params) do taint(pp) end end
+            if fpp and params_hit then G7.tparams(fpp) end
         end
     end
     TCUR = 'fuel: the solve stopped with this port unfinished'
@@ -2304,7 +2310,7 @@ local function build(store, opts)
             for c in pairs(protos[o] or NOTHING) do reach(c) end
             local fpp = fnports[o]
             if fpp then
-                for _, pp in ipairs(fpp.params) do taint(pp) end
+                G7.tparams(fpp)
                 for _, r in pairs(fpp.rets or { fpp.ret }) do for x in each(r) do reach(x) end end
             end
         end
@@ -2405,7 +2411,7 @@ local function build(store, opts)
                         end
                     end
                 end
-                local function hit(l) for _, x in ipairs(l) do for _, pp in ipairs(fnports[x].params) do taint(pp) end end end
+                local function hit(l) for _, x in ipairs(l) do G7.tparams(fnports[x]) end end
                 if f == '[]' then for _, l in pairs(G7.FNF) do hit(l) end
                 elseif G7.FNF[f] then hit(G7.FNF[f]) end
                 TCUR = p
@@ -2414,7 +2420,7 @@ local function build(store, opts)
         if calls[p] and not params_hit then
             params_hit = true
             if TFROM then TCUR = { p, 'a call through it may reach ANY escaped function: their parameters' } end
-            for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end
+            for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then G7.tparams(fpp) end end
             TCUR = p
         end
         for _, cl in ipairs(calls[p] or NOTHING) do
@@ -2425,7 +2431,7 @@ local function build(store, opts)
             for _, ap in ipairs(cl[1]) do for o in each(ap) do G7.escmore(o) end end
             TCUR = p
             -- (a hooked name the solve lost: the hook misses those functions' arguments)
-            if cl[1].hook then for o in each(cl[1].hook) do local fpp = fnports[o]; if fpp then for _, pp in ipairs(fpp.params) do taint(pp) end end end end
+            if cl[1].hook then for o in each(cl[1].hook) do local fpp = fnports[o]; if fpp then G7.tparams(fpp) end end end
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
             if cl[4] then taint(cl[4]) end -- (a callee the solve lost may raise anything)
         end
@@ -2945,7 +2951,9 @@ local function build(store, opts)
             ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
-            sha = here and FD.head(here), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) })
+            -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot
+            -- without .git inside another repository reported THAT repository's HEAD, CART-1724)
+            sha = here and FD.head((here:gsub('/lua/cartograph$', '')), true), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) })
         if type(opts.dump) == 'string' then
             local fd = assert(io.open(opts.dump, 'w')); fd:write(R.dump); fd:close()
         end
