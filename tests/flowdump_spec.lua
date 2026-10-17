@@ -95,9 +95,12 @@ test('flowdump: the format — the Lua instance\'s field ids, host sites, per-fu
     ok(D.contracts.clauses['hidden-fields'] and D.contracts.globals_site, vim.inspect(D.contracts))
     -- the key set `pairs` yields is no field: hkeys, and its load a gap
     ok(#D.solution.hkeys > 0, 'the key set is hkeys')
-    local gap = false
+    -- (CART-1739: the key set pairs yields is a `keys` instruction, no longer a gap; dynamic accesses carry their key)
+    local keys, gap = 0, false
+    for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do if i[1] == 'keys' then keys = keys + 1 end end end
     for _, g in ipairs(D.gaps) do if g.kind == 'table-keys' then gap = true end end
-    ok(gap, 'a load of the key set is a gap: ' .. vim.inspect(D.gaps))
+    ok(keys > 0 and not gap, 'pairs reads the key set by a keys instruction: ' .. keys)
+    eq(true, D.contracts.dyn_keys, 'the dynamic accesses carry their key operand')
     for _, e in ipairs(D.solution.h) do ok(D.names.fields[e[2] + 1] ~= '{k}', 'no {k} field in h') end
 end)
 
@@ -233,4 +236,23 @@ test('flowdump: weak names the sites a __mode store may reach — named or by a 
     ok(has('m.lua:6:'), 'the __mode table wm is weak: ' .. vim.inspect(weak))
     ok(has('m.lua:8:'), 'the dynamic-key store target t is weak: ' .. vim.inspect(weak))
     ok(not has('m.lua:11:'), 'plain is not: ' .. vim.inspect(weak))
+end)
+
+-- (CART-1739: `storeDyn x k y` and `loadDyn x y k` carry the key's variable, `keys x y` reads the key set — and the
+-- check holds them: a dynamic store's key is in the target's key set, the key loop variable holds them)
+test('flowdump: dynamic accesses carry their key; keys reads the key set; the dump stays closed', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('local t = {}\nlocal k = ("q"):upper()\nt[k] = b\nprint(use(t[k]))\nfor key in pairs(t) do print(key) end\n')
+    local sd, ld, ks
+    for _, F in ipairs(D.functions) do
+        for _, i in ipairs(F.body) do
+            if i[1] == 'storeDyn' then sd = i elseif i[1] == 'loadDyn' and i[4] ~= vim.NIL then ld = i elseif i[1] == 'keys' then ks = i end
+        end
+    end
+    ok(sd and #sd == 4 and sd[3] ~= vim.NIL, 'storeDyn x k y: ' .. vim.inspect(sd))
+    ok(ld and #ld == 4, 't[k]: loadDyn x y k (a builtin\'s own dynamic load, pairs\' values, has a null key): ' .. vim.inspect(ld))
+    ok(ks and #ks == 3, 'keys x y: ' .. vim.inspect(ks))
+    local c = flowcheck.check(D, 5)
+    for k, n in pairs(c.counts) do ok(k:find('(model)', 1, true), ('%d × %s: %s'):format(n, k, table.concat(c.fails, ' | '))) end
+    eq(0, c.unwritten, 'every variable written: ' .. vim.inspect(c.unwritten_ex))
 end)

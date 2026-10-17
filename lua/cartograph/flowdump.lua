@@ -199,13 +199,14 @@ function M.build(rec, X)
         if op == 'new' then return { 'new', V(ins[2]), ins[3] }
         elseif op == 'copy' then return { 'copy', V(ins[2]), V(ins[3]) }
         elseif op == 'load' then
-            if ins[4] == '[]' then return { 'loadDyn', V(ins[2]), V(ins[3]) } end
+            if ins[4] == '[]' then return { 'loadDyn', V(ins[2]), V(ins[3]), ins[5] and V(ins[5]) or vim.NIL } end
             return { 'load', V(ins[2]), V(ins[3]), F(ins[4]) }
         elseif op == 'store' then
-            if ins[3] == '[]' then return { 'storeDyn', V(ins[2]), V(ins[4]) } end
+            if ins[3] == '[]' then return { 'storeDyn', V(ins[2]), ins[5] and V(ins[5]) or vim.NIL, V(ins[4]) } end
             return { 'store', V(ins[2]), F(ins[3]), V(ins[4]) }
         elseif op == 'call' or op == 'pcall' then
             return { op, vars(ins[2]), V(ins[3]), vars(ins[4]) }
+        elseif op == 'keys' then return { 'keys', V(ins[2]), V(ins[3]) }
         elseif op == 'error' then return { 'error', V(ins[2]) }
         elseif op == 'op' then return { 'op', V(ins[2]), vars(ins[3]), F(ins[4]) }
         elseif op == 'setmeta' then return { 'setmeta', V(ins[2]), V(ins[3]) }
@@ -293,6 +294,7 @@ function M.build(rec, X)
     end
     local hj, hdj, htj, hxj, hkj = {}, {}, {}, {}, {}
     local weak = {} -- (the sites a store that may set __mode reaches, CART-1723)
+    local hktop = {}
     for o = 1, X.NO do
         local m = X.ofield[o]
         if m and not X.TNAME[o] and o ~= X.EXT then
@@ -314,6 +316,7 @@ function M.build(rec, X)
                     for b in X.each(fp) do ks[#ks + 1] = b end
                     table.sort(ks)
                     if #ks > 0 then hkj[#hkj + 1] = ('[%d,%s]'):format(o, jarr(ks)) end
+                    if X.top[fp] then hktop[#hktop + 1] = o end -- (a SATURATED key set: any key, CART-1739)
                     goto nextf
                 end
                 if X.tainted[fp] then hxj[#hxj + 1] = ('[%d,%s]'):format(o, f == '[]' and 'null' or tostring(F(f))) end
@@ -389,14 +392,14 @@ function M.build(rec, X)
     put('"sites":[' .. table.concat(sj, ',') .. '],')
     put('"functions":[' .. table.concat(fjson, ',') .. '],')
     put('"solution":{"v":[' .. table.concat(vj, ',') .. '],"top":[' .. table.concat(topj, ',') .. '],"h":[' .. table.concat(hj, ',')
-        .. '],"hdyn":[' .. table.concat(hdj, ',') .. '],"htop":[' .. table.concat(htj, ',') .. '],"htaint":[' .. table.concat(hxj, ',') .. '],"hkeys":[' .. table.concat(hkj, ',') .. '],"err":{"fn":[' .. table.concat(ej, ',')
+        .. '],"hdyn":[' .. table.concat(hdj, ',') .. '],"htop":[' .. table.concat(htj, ',') .. '],"htaint":[' .. table.concat(hxj, ',') .. '],"hkeys":[' .. table.concat(hkj, ',') .. '],"hkeystop":' .. jarr(hktop) .. ',"err":{"fn":[' .. table.concat(ej, ',')
         .. '],"top":[' .. table.concat(etop, ',') .. '],"taint":[' .. table.concat(etaint, ',') .. '],"cerr":' .. jarr(cl)
         .. '},"weak":' .. jarr(weak) .. ',"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']}},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
-    put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
+    put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
         .. ',"clauses":' .. jstr(M.CONTRACTS) .. '},')
     put('"answers":[' .. table.concat(aj, ',') .. ']}')
     return table.concat(out)

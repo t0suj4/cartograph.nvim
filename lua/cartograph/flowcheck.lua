@@ -31,6 +31,12 @@ for _, e in ipairs(S.h) do
     local t = {}; for _, s in ipairs(e[3]) do t[s] = true end; m[e[2]] = t
 end
 for _, e in ipairs(S.hdyn) do local t = {}; for _, s in ipairs(e[2]) do t[s] = true end; HDYN[e[1]] = t end
+-- (the KEY SET a table holds: what pairs / next yield — read by `keys`, written by a storeDyn's key, CART-1739)
+local HKEYS = {}
+for _, e in ipairs(S.hkeys or {}) do local t = HKEYS[e[1]] or {}; for _, s in ipairs(e[2]) do t[s] = true end; HKEYS[e[1]] = t end
+local HKEYSTOP = {}
+for _, o in ipairs(S.hkeystop or {}) do HKEYSTOP[o] = true end -- (a saturated key set: it holds any key)
+local DYNKEYS = D.contracts and D.contracts.dyn_keys == true -- (loadDyn x y k, storeDyn x k y; else storeDyn x y)
 for _, e in ipairs(S.htop) do HTOP[e[1] .. ':' .. e[2]] = true end
 for _, e in ipairs(S.htaint or {}) do HTAINT[e[1] .. ':' .. (e[2] == NULL and '*' or e[2])] = true end
 local PORT, PTOP, PTAINT = {}, {}, {}
@@ -157,10 +163,22 @@ for _, F in ipairs(D.functions) do
                     for _, t in ipairs(handlers(IDX, c)) do entry(F.id, FNOF[t], t, { { [c] = true } }, { x }, false) end
                 end end
             end
+        elseif op == 'keys' then
+            -- (`keys x y`: x holds every key of every table y may hold)
+            local x, y = ins[2], ins[3]
+            for a in pairs(v(y)) do
+                if not HOST[a] then for _, c in ipairs(chain(evLoad, a)) do
+                    sub(HKEYS[c] or EMPTY, x, 'keys')
+                    if HKEYSTOP[c] and not TOP[x] then fail('keys-top', x, ('the key set of %d is top'):format(c)) end
+                end end
+            end
         elseif op == 'store' or op == 'storeDyn' then
-            local x, f, y = ins[2], op == 'store' and ins[3] or nil, op == 'store' and ins[4] or ins[3]
+            local x, f, y = ins[2], op == 'store' and ins[3] or nil, op == 'store' and ins[4] or (DYNKEYS and ins[4] or ins[3])
+            local k = op == 'storeDyn' and DYNKEYS and ins[3] ~= NULL and ins[3] or nil
             for a in pairs(v(x)) do
                 if not HOST[a] then for _, c in ipairs(chain(evStore, a)) do
+                    -- (a dynamic store's key joins the target's key set)
+                    if k and not HKEYSTOP[c] then for b in pairs(v(k)) do if not (HKEYS[c] and HKEYS[c][b]) then failh('hkeys', c, '*', ('hkeys(%d) lacks %d'):format(c, b)); break end end end
                     for b in pairs(v(y)) do
                         if f and not hash(c, f, b) then failh('h', c, f, ('h(%d,%s) lacks %d'):format(c, tostring(fieldname(f)), b)); break end
                         if not f and not (HDYN[c] and HDYN[c][b]) then failh('hdyn', c, '*', ('hdyn(%d) lacks %d'):format(c, b)); break end
@@ -241,7 +259,7 @@ for _, F in ipairs(D.functions) do
     w(F.self)
     for _, ins in ipairs(F.body) do
         local op = ins[1]
-        if op == 'new' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'op' or op == 'cocreate' then w(ins[2])
+        if op == 'new' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'op' or op == 'cocreate' or op == 'keys' then w(ins[2])
         elseif op == 'call' or op == 'pcall' or op == 'resume' or op == 'yield' then for _, x in ipairs(ins[2]) do w(x) end end
     end
 end

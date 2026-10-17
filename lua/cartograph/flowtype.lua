@@ -1260,8 +1260,15 @@ local function build(store, opts)
                     and not select(2, lookup(txt(kn))) and G7.KBASE and G7.KBASE[rhs:id()] then
                     G7.copyf(base, G7.KBASE[rhs:id()], v)
                     G7.gap('keyed-copy', { base })
-                else storec(base, keyname(kn), v) end
-                local kp = kn and expr(kn) or new()
+                else
+                    -- (the key's port is walked FIRST: the dump's storeDyn carries it, CART-1739)
+                    local kp0 = kn and keyname(kn) == '[]' and expr(kn) or nil
+                    G7.KP0 = kp0
+                    G7.NEXTK = kp0
+                    storec(base, keyname(kn), v)
+                end
+                local kp = G7.KP0 or (kn and expr(kn)) or new()
+                G7.KP0 = nil
                 if kn then storec(base, '{k}', kp) end
                 metastore(base, keyname(kn), kp, v, curerr())
             end
@@ -1707,7 +1714,11 @@ local function build(store, opts)
                 local knode = n:field('field')[1]
                 if G7.KBASE then G7.KBASE[n:id()] = base end -- (a keyed copy's source, read again by assign: not walked twice)
                 acc_key('read', knode, base, n)
-                return field(base, keyname(knode))
+                -- (a COMPUTED key is walked — a call in it, `t[make_key(x)]`, had gone unanalysed — and its port goes to the
+                -- dump's loadDyn, CART-1739)
+                local kname = keyname(knode)
+                if kname == '[]' and knode then G7.NEXTK = expr(knode) end
+                return field(base, kname)
             end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
             if t == 'string' then local p = new(); addobj(p, STR); return p end
@@ -2001,16 +2012,18 @@ local function build(store, opts)
             enter(); local dst = r_field(x, f, strict); leave()
             if on() then
                 if f:byte(1) == 1 then G7.gap('hidden-load', { dst, x })
-                elseif f == '{k}' then G7.gap('table-keys', { dst, x }) -- (the key set `pairs` yields: no core field)
+                elseif f == '{k}' then G7.ins({ 'keys', dst, x }) -- (the key set `pairs` / next yield, CART-1739)
                 else
-                    G7.ins({ 'load', dst, x, f }, strict and f ~= '[]'
+                    G7.ins({ 'load', dst, x, f, f == '[]' and G7.NEXTK or nil }, strict and f ~= '[]'
                         and (G7.ISGP[x] and 'contract:strict-global' or 'contract:strict') or nil)
                 end
             end
+            G7.NEXTK = nil
             return dst
         end
         storec = function (x, f, v)
-            if on() and f ~= '{k}' then if f:byte(1) == 1 then G7.gap('hidden-store', { x, v }) else G7.ins({ 'store', x, f, v }) end end
+            if on() and f ~= '{k}' then if f:byte(1) == 1 then G7.gap('hidden-store', { x, v }) else G7.ins({ 'store', x, f, v, f == '[]' and G7.NEXTK or nil }) end end
+            G7.NEXTK = nil
             enter(); r_storec(x, f, v); leave()
         end
         callc = function (callee, args, res, site, cerr)
