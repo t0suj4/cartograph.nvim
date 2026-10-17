@@ -2926,7 +2926,8 @@ local function build(store, opts)
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT, exp = G7.EXP }
     if G7.EXP.expose then -- (experiment `expose`: the solver's tables for an instrument — names may change, not an API)
         R.internals = { top = top, pts = pts, each = each, obinfo = obinfo, tainted = tainted, probes = probes, succ = succ,
-            escaped = escaped, ofield = ofield, fnports = fnports, protos = protos, tfrom = TFROM }
+            escaped = escaped, ofield = ofield, fnports = fnports, protos = protos, tfrom = TFROM,
+            NW = NW, NOW = NOW, pinfo = pinfo } -- (NW / NOW: the ports / objects the WALK made — numbered the same across solves of one tree)
     end
     if TFROM then
         -- (a partial verdict's v.ptport walked back to its SEED: { label… }, the last a reason)
