@@ -52,7 +52,9 @@
 --   claim: no call is synthesized.)
 -- * GAPS: constructs with no core opcode, or modelled outside the IR — rawget / rawset, getfenv / setfenv,
 --   hooksecurefunc, getmetatable, newproxy, coroutine.wrap, xpcall's handler, unknown code (load ... : the `ext`
---   sites and the EXTCALL call in `init`), weak tables (not modelled: `weak` is empty).
+--   sites and the EXTCALL call in `init`). `weak`: every site a store that MAY set __mode reaches — a named __mode store,
+--   or any dynamic-key store (k may be "__mode"), or a saturated such field (CART-1723); weak semantics (what the
+--   collector may drop) are not modelled beyond naming them.
 local M = {}
 
 -- (the assumptions a whole answer rests on that the core does not state — flowtype's header, THE CONTRACT; a checker
@@ -290,8 +292,17 @@ function M.build(rec, X)
         end
     end
     local hj, hdj, htj, hxj, hkj = {}, {}, {}, {}, {}
+    local weak = {} -- (the sites a store that may set __mode reaches, CART-1723)
     for o = 1, X.NO do
         local m = X.ofield[o]
+        if m and not X.TNAME[o] and o ~= X.EXT then
+            for _, f in ipairs { '__mode', '[]' } do
+                local fp = m[f]
+                local held = fp and X.top[fp]
+                if fp and not held then for _ in X.each(fp) do held = true; break end end
+                if held then weak[#weak + 1] = o; break end
+            end
+        end
         -- (a HOST value — a profile-typed one, EXT — has no fields in the analysed heap: a load from it is its declared
         -- type, what a walk stored on it is never read)
         if m and not X.TNAME[o] and o ~= X.EXT then
@@ -380,7 +391,7 @@ function M.build(rec, X)
     put('"solution":{"v":[' .. table.concat(vj, ',') .. '],"top":[' .. table.concat(topj, ',') .. '],"h":[' .. table.concat(hj, ',')
         .. '],"hdyn":[' .. table.concat(hdj, ',') .. '],"htop":[' .. table.concat(htj, ',') .. '],"htaint":[' .. table.concat(hxj, ',') .. '],"hkeys":[' .. table.concat(hkj, ',') .. '],"err":{"fn":[' .. table.concat(ej, ',')
         .. '],"top":[' .. table.concat(etop, ',') .. '],"taint":[' .. table.concat(etaint, ',') .. '],"cerr":' .. jarr(cl)
-        .. '},"weak":[],"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
+        .. '},"weak":' .. jarr(weak) .. ',"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']}},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
     local gs = { tostring(X.GOBJ) }

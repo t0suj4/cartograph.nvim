@@ -219,3 +219,18 @@ test('flowdump: a store through a saturated base carries contract:globals-never-
     ok(#tagged >= 2, 'the store and the setmeta in sink are tagged: ' .. vim.inspect(tagged))
     for _, x in ipairs(tagged) do ok(x:find('sink', 1, true), 'only sink\'s instructions: ' .. x) end
 end)
+
+-- (CART-1723: `weak` names every site a store that may set __mode reaches — a named __mode store, or a dynamic-key
+-- store, whose key may be "__mode")
+test('flowdump: weak names the sites a __mode store may reach — named or by a dynamic key — and no other', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('local wm = { __mode = "k" }\nlocal w = setmetatable({}, wm)\nlocal t = {}\nlocal k = ("x"):upper()\nt[k] = a\nlocal plain = { n = 1 }\nreturn w, t, plain\n')
+    local label = {}
+    for _, s in ipairs(D.sites) do label[s.id] = s.label end
+    local weak = {}
+    for _, o in ipairs(D.solution.weak) do weak[tostring(label[o])] = true end
+    local function has(pat) for l in pairs(weak) do if l:find(pat) then return true end end return false end
+    ok(has('m.lua:6:'), 'the __mode table wm is weak: ' .. vim.inspect(weak))
+    ok(has('m.lua:8:'), 'the dynamic-key store target t is weak: ' .. vim.inspect(weak))
+    ok(not has('m.lua:11:'), 'plain is not: ' .. vim.inspect(weak))
+end)
