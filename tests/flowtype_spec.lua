@@ -1956,3 +1956,18 @@ test('flowtype experiment callsite: per-call-site instances separate an identity
     eq('m.lua::go@1', callee(R1, 'a.go'), 'callsite: A\'s go')
     eq('m.lua::go@2', callee(R1, 'b.go'), 'callsite: B\'s go')
 end)
+
+-- (experiment `trace`, CART-1697: the solve as a bounded graph — ports folded onto their function, deliveries counted per
+-- (source, destination, kind): `id(A)` / `id(B)` deliver both tables into id, whose parameter holds 2, and id returns them)
+test('flowtype experiment trace: deliveries per (source, destination, kind), the largest set per node', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = 'local function id(x) return x end\nlocal a = id({})\nlocal b = id({})\nreturn a, b\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, exp = 'trace' })
+    local R0 = flowtype.solve(store, { open = false, ctx = false })
+    vim.fn.delete(root, 'rf')
+    eq(nil, R0.trace, 'off: no trace')
+    eq(2, R.trace.maxset['m.lua::id@0'], 'id merges both callers\' tables')
+    eq(2, R.trace.edges['chunk:m.lua\tm.lua::id@0\tedge'], 'two objects bound into id')
+    eq(2, R.trace.edges['m.lua::id@0\tchunk:m.lua\tcopy'], 'and returned')
+end)

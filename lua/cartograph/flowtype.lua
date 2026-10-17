@@ -58,6 +58,7 @@ M.EXPERIMENTS = {
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
     expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
+    trace = 'R.trace: the SOLVE as a bounded graph — ports folded onto their function, deliveries counted per (source, destination, kind), fan-in, saturation order, prototype replays (CART-1697)',
     callsite = 'a call binds a small closed function to an instance of its OWN per call site (as a generic for binds its iterator; CART-1697: the blob)',
 }
 local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
@@ -208,6 +209,9 @@ local function build(store, opts)
         local ex = M.experiments(opts)
         G7.EXP = ex
         G7.LOCP, G7.CURLOC = ex.loc and {} or nil, nil -- (experiment `loc`: port -> the statement the walk was at)
+        -- (experiment `trace`: PFN port -> function, OFN object -> function, E deliveries, IN fan-in, SAT first saturation)
+        G7.TR = ex.trace and { PFN = {}, OFN = {}, E = {}, IN = {}, SAT = {}, NSAT = {}, REPLAY = {}, NODE = {}, seq = 0 } or nil
+        G7.CURFN, G7.TSRC, G7.TKIND = nil, nil, nil
         local o2
         for k in pairs(EXPOPT) do
             if ex[k] ~= nil and opts[k] == nil then o2 = o2 or setmetatable({}, { __index = opts }); o2[k] = ex[k] end
@@ -253,8 +257,8 @@ local function build(store, opts)
     local FUEL = tonumber(opts.fuel or os.getenv('CARTOGRAPH_FLOWTYPE_FUEL') or '')
     local OUT = false
     local walking, NW, NOW = true, 0, 0
-    local function new() N = N + 1; if G7.LOCP then G7.LOCP[N] = G7.CURLOC end; return N end
-    local function newobj(info) NO = NO + 1; obinfo[NO] = info; return NO end
+    local function new() N = N + 1; if G7.LOCP then G7.LOCP[N] = G7.CURLOC end; if G7.TR then G7.TR.PFN[N] = G7.CURFN end; return N end
+    local function newobj(info) NO = NO + 1; obinfo[NO] = info; if G7.TR then G7.TR.OFN[NO] = G7.CURFN end; return NO end
     -- (an object named stably: one the walk made by its number, one the solve made — a type object — by its info)
     local function okey(o) return o <= NOW and o or tostring(obinfo[o]) end
     -- ★ THE SCHEDULE IS A STABLE ORDER, not a stack: a port saturating mid-solve has handed downstream whatever it
@@ -345,6 +349,7 @@ local function build(store, opts)
             if type(s) == 'number' then snap[1] = s elseif s and s.bs then for o in bs_iter(s) do snap[#snap + 1] = o end elseif s then for o in pairs(s) do snap[#snap + 1] = o end end
             SATSNAP[p] = snap
         end
+        if G7.TR then local tr = G7.TR; tr.seq = tr.seq + 1; local nd = G7.trnode(p); tr.SAT[nd] = tr.SAT[nd] or tr.seq; tr.NSAT[nd] = (tr.NSAT[nd] or 0) + 1 end
         top[p] = true; pts[p] = nil; delta[p] = nil
         if spread then push(p) end
     end
@@ -404,6 +409,7 @@ local function build(store, opts)
             cnt[p] = cnt[p] + 1
             if cnt[p] > BIG then tobits(p) end
         end
+        if G7.TR and G7.TSRC then G7.trbump(G7.TSRC, p, G7.TKIND) end
         if cnt[p] > M.CAP then return settop(p) end
         -- (a port's pending delta as its objects are: ONE object is the number itself, more a list, many a bitset — most
         -- deltas hold one object, and a list per port per round was the allocation census's top site, 1.3 M per run)
@@ -503,7 +509,10 @@ local function build(store, opts)
         end
         if top[a] then if spread then settop(b) end; return end
         local sa = pts[a]
+        local ts, tk = G7.TSRC, G7.TKIND
+        if G7.TR then G7.TSRC, G7.TKIND = a, 'edge' end
         if type(sa) == 'table' and sa.bs then addbits(b, sa) else for o in each(a) do addobj(b, o) end end
+        if G7.TR then G7.TSRC, G7.TKIND = ts, tk end
     end
     local function ofp(o, f)
         local m = ofield[o]
@@ -518,6 +527,30 @@ local function build(store, opts)
             if cp and f:byte(1) ~= 1 then for t in pairs(cp) do G7.edge(p, ofp(t, f)) end end
         end
         return p
+    end
+    -- (experiment `trace`: a port's NODE — the function the walk made it in, a field cell as `cell <owner's function>.<field>`,
+    -- else `solver`; a delivery of a NEW object counted per (source node, destination node, kind), and the destination's
+    -- distinct sources: its fan-in)
+    function G7.trnode(p)
+        local tr = G7.TR
+        local nd = tr.NODE[p]
+        if nd then return nd end
+        if fowner[p] then
+            local o = fowner[p]
+            nd = 'cell ' .. tostring(tr.OFN[o] or obinfo[o]) .. '.' .. tostring(fname[p])
+        else nd = tr.PFN[p] or 'solver' end
+        tr.NODE[p] = nd
+        return nd
+    end
+    function G7.trbump(src, dst, kind)
+        local tr = G7.TR
+        local a, b = G7.trnode(src), G7.trnode(dst)
+        if a == b then return end
+        local k = a .. '\t' .. b .. '\t' .. tostring(kind)
+        tr.E[k] = (tr.E[k] or 0) + 1
+        local inl = tr.IN[b]
+        if not inl then inl = {}; tr.IN[b] = inl end
+        inl[a] = true
     end
     -- every load reading field g of o: the loads of g; a non-strict `[]` load reads every field but `{k}` and the
     -- HIDDEN ones (`\1mt`, `\1co`: no `t[k]` returns them — a `[]` load registered before setmetatable's store got
@@ -596,7 +629,10 @@ local function build(store, opts)
                 -- registered on it (parked) and the list's ⊤ marker takes what it gains later
                 if G7.TOPL and top[dst] then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
                 local sq = pts[q]
+                local ts, tk = G7.TSRC, G7.TKIND
+                if G7.TR then G7.TSRC, G7.TKIND = q, 'load' end
                 if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
+                if G7.TR then G7.TSRC, G7.TKIND = ts, tk end
             end
             if strict then pull(ofp(o, f))
             elseif f == '[]' and G7.ISG[o] then
@@ -619,6 +655,7 @@ local function build(store, opts)
     end
     -- the loads recorded on o, replayed on c (a prototype o gained) — field names in ONE order
     local function replay_loads(o, c)
+        if G7.TR then local k = G7.TR.OFN[o] or tostring(obinfo[o]); G7.TR.REPLAY[k] = (G7.TR.REPLAY[k] or 0) + 1 end
         local r = rd[o]
         if not r then return end
         for f, l in sorted(r) do
@@ -954,7 +991,7 @@ local function build(store, opts)
         end
     end
     local function solve()
-        if walking then walking = false; NW, NOW = N, NO; G7.CURLOC = nil end
+        if walking then walking = false; NW, NOW = N, NO; G7.CURLOC = nil; G7.CURFN = nil end
         if OUT then return end
         while head <= tail do
             if FUEL then
@@ -989,9 +1026,12 @@ local function build(store, opts)
                     for o in bs_iter(db) do d[#d + 1] = o end
                 elseif d then
                     local anytop = false
+                    if G7.TR then G7.TSRC, G7.TKIND = p, 'copy' end
                     for q in sit(succ[p]) do for _, o in dit(d) do addobj(q, o) end; if top[q] then anytop = true end end
                     if anytop and G7.TOPL then G7.resucc(p) end -- CART-1742
+                    if G7.TR then G7.TKIND = 'read' end
                     if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in dit(d) do addobj(q, o) end end) end
+                    if G7.TR then G7.TSRC, G7.TKIND = nil, nil end
                 end
                 if d then
                     for _, ld in ipairs(loads[p] or NOTHING) do for _, o in dit(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
@@ -1220,6 +1260,7 @@ local function build(store, opts)
             scan(tree)
         end
         G7.REASG = G7.REASGF[file] or NOTHING
+        if G7.TR then G7.CURFN = 'chunk:' .. file end
         if G7.PROG == nil then G7.PROG = require('cartograph.programs').of(store) or false end
         if G7.PROG then G7.useenv(G7.mkenv(G7.PROG.env[file] or 'default')) end
         if not G7.STRLIB then G7.STRLIB = newobj('stringlib'); G7.ENV.STRLIB = G7.STRLIB; addobj(G7.gport('string'), G7.STRLIB) end
@@ -1369,6 +1410,8 @@ local function build(store, opts)
             fp.err = inst and new() or port('e:' .. id) -- (what it raises, CART-1705)
             if G7.REC then G7.REC.errp[fp.err] = true end
             fnports[o] = fp
+            local trfn0 = G7.CURFN
+            if G7.TR then G7.CURFN = id end
             -- (a nested function inherits its parent's environment — a top-level one its file CHUNK's: G7.fenv)
             local pid = fnstack[#fnstack] and fnstack[#fnstack].id or G7.CHUNK
             if pid and not inst and not clone then local kl = G7.KIDS[pid]; if not kl then kl = {}; G7.KIDS[pid] = kl end; kl[#kl + 1] = id end
@@ -1436,6 +1479,7 @@ local function build(store, opts)
                 end
             end
             G7.LASTFP = fp
+            if G7.TR then G7.CURFN = trfn0 end
             return p
         end
         local function callv(n, want)
@@ -2932,6 +2976,13 @@ local function build(store, opts)
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT, exp = G7.EXP }
+    if G7.TR then -- (experiment `trace`: the solve as a bounded graph)
+        local tr = G7.TR
+        local fanin, maxset = {}, {}
+        for nd, l in pairs(tr.IN) do local n = 0; for _ in pairs(l) do n = n + 1 end; fanin[nd] = n end
+        for p, n in pairs(cnt) do if not top[p] and n > 0 then local nd = G7.trnode(p); if (maxset[nd] or 0) < n then maxset[nd] = n end end end
+        R.trace = { edges = tr.E, fanin = fanin, maxset = maxset, sat = tr.SAT, nsat = tr.NSAT, replay = tr.REPLAY, seq = tr.seq }
+    end
     if G7.EXP.expose or G7.EXP.loc then -- (experiment `expose`: the solver's tables for an instrument — names may change, not an API)
         R.internals = { top = top, pts = pts, each = each, obinfo = obinfo, tainted = tainted, probes = probes, succ = succ,
             escaped = escaped, ofield = ofield, fnports = fnports, protos = protos, tfrom = TFROM,
