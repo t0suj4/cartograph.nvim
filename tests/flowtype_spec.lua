@@ -1816,6 +1816,61 @@ test('flowtype: a named load off _G is strict — a dynamic-key write into _G do
     eq({ 's.lua::Stub.get@1' }, (R.callee_of(at('a.lua', 1, 'G.Stub.get'))), 'G.Stub is the global Stub alone, not the hook\'s table')
 end)
 
+-- (CART-1729, opts.litkeys: a call passing LITERALS at a small closed function's key parameters binds to one instance per
+-- value — LibStub's `self.libs[major]`, flowpath FLOW-01's value-keyed instances — and a constant local is its string)
+test('flowtype litkeys: value-keyed instances separate a registry by its literal keys; anything else binds the original', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['stub.lua'] = table.concat({
+            'local MAJOR = "Stub"',
+            'local Stub = _G[MAJOR] or { libs = {} }',
+            '_G[MAJOR] = Stub',
+            'function Stub:New(major) self.libs[major] = self.libs[major] or {}; return self.libs[major] end',
+            'function Stub:Get(major) return self.libs[major] end',
+            'function Stub:Rec(major, n) if n then return self:Rec(major, nil) end return self.libs[major] end',
+            'setmetatable(Stub, { __call = Stub.Get })',
+            'REG = { A = function () return 3 end }',
+            'function Look(k, n) if n then return Look(k, nil) end return REG[k] end', -- a GLOBAL: bound while walked
+        }, '\n') .. '\n',
+        ['a.lua'] = table.concat({
+            'local A = Stub:New("A"); function A.hello() return 1 end',
+            'local BN = "B"',
+            'local B = Stub:New(BN); function B.hello() return 2 end',
+            'local x = Stub("A").hello()', -- 3
+            'local y = Stub("B").hello()', -- 4
+            'local z = Stub(arg[1]).hello()', -- 5
+            'local w = Stub:Rec("A", 1).hello()', -- 6
+            'local q = Look("A", 1)()', -- 7
+        }, '\n') .. '\n',
+        ['r.lua'] = table.concat({
+            'local T = { t = {} }',
+            'function T:get(k) k = k .. "" return self.t[k] end',
+            'T.t.a = function () return 1 end',
+            'T.t.b = function () return 2 end',
+            'local f = T:get("a")',
+            'local v = f()', -- 5
+        }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local function at(file, line, tail) for _, c in ipairs(store.data.calls) do if c.file == file and c.line == line and tostring(c.full or c.callee):sub(-#tail) == tail then return c end end end
+    local function callee(R, file, line, tail)
+        local c = at(file, line, tail)
+        local fns = c and R.callee_of(c) or {}
+        return table.concat(fns, ',')
+    end
+    local R0 = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    local R = flowtype.solve(store, { open = false, ctx = false, allcallees = true, litkeys = true })
+    vim.fn.delete(root, 'rf')
+    eq('', callee(R0, 'a.lua', 3, 'hello'), 'off: `_G[MAJOR]` is a dynamic write, no global Stub')
+    eq('a.lua::A.hello@0', callee(R, 'a.lua', 3, 'hello'), 'Stub("A") is library A alone')
+    eq('a.lua::B.hello@2', callee(R, 'a.lua', 4, 'hello'), 'Stub("B") — B registered through a constant local')
+    eq('a.lua::A.hello@0,a.lua::B.hello@2', callee(R, 'a.lua', 5, 'hello'), 'a computed name binds the original: every library')
+    ok(callee(R, 'a.lua', 6, 'hello'):find('A.hello', 1, true), 'a recursive call binds the original: no endless instance')
+    ok(R.stats.vinstances < 50, 'a recursive call to a function bound while its instance is walked: no endless instance')
+    eq('r.lua::T.t.a@2,r.lua::T.t.b@3', callee(R, 'r.lua', 5, 'f'), 'k is reassigned in its file: no instance, every entry')
+    ok(R.stats.vinstances >= 4, 'instances: ' .. tostring(R.stats.vinstances))
+end)
+
 -- (CART-1742: all saturated ports as ONE top node is an optimisation, never a change — with it and without it the
 -- answers are the same, on a fixture whose ports saturate)
 test('flowtype: one top node for every saturated port moves no answer', function ()

@@ -792,10 +792,10 @@ local function build(store, opts)
     end
     -- (a handler in x's metatable — `__call`, `__add`, `__newindex`… — called with args, its results into res: the
     -- metatable rides on the object as the hidden field `\1mt`, which `setmetatable` writes)
-    local function metacall(x, mm, args, res, cerr)
+    local function metacall(x, mm, args, res, cerr, site)
         local h = field(field(x, '\1mt', true), mm) -- (non-strict: a handler written `mt[k] = f` counts)
         METAH[h] = mm
-        callc(h, args, res, nil, cerr)
+        callc(h, args, res, site, cerr)
     end
     -- (a store `x.f = v` / `x[k] = v` also reaches x's `__newindex`: a FUNCTION is called with (x, key, v), a TABLE
     -- receives the store — CART-1704)
@@ -1027,6 +1027,9 @@ local function build(store, opts)
     G7.useenv(G7.mkenv('default'))
     G7.GR, G7.KIDS, G7.FENV, G7.GCPEND = {}, {}, {}, {}
     G7.SSTAT = nil
+    -- (opts.litkeys, CART-1729: a constant local's port -> its string, a key through it is that name; the names each
+    -- file assigns; value-keyed instances)
+    G7.LITKEYS, G7.CONSTK, G7.REASGF, G7.VINST, G7.VINSTN = opts.litkeys or nil, {}, {}, {}, 0
     G7.MSELF = opts.selfseed and {} or nil -- (each `function T:m`'s self port and T's port: the self seed, CART-1715)
     -- (the modules the environment profile declares: every dotted prefix of a signature's path)
     function G7.profmod(name)
@@ -1149,6 +1152,25 @@ local function build(store, opts)
         -- is a different key, so it missed the extractor's tree, parsed again, and the grammar misread that copy.)
         local tree = require('cartograph.parsecache').root(require('cartograph.parseview').view(src, 'lua'), 'lua')
         if not tree then return end
+        -- (the names this file ASSIGNS anywhere, `k = …` outside a declaration: a local of that name may change, so it
+        -- is no constant key below. By name over the whole file — any binding — which only refuses more. Once per file:
+        -- an instance walks its file again)
+        if G7.LITKEYS and not G7.REASGF[file] then
+            local ra = {}
+            G7.REASGF[file] = ra
+            local function scan(n)
+                for _, x in tsutil.inamed, n, -1 do
+                    if x:type() == 'assignment_statement' and n:type() ~= 'variable_declaration' then
+                        for _, v in tsutil.inamed, x:named_child(0), -1 do
+                            if v:type() == 'identifier' then local _, _, b, _, _, e = v:range(true); ra[src:sub(b + 1, e)] = true end
+                        end
+                    end
+                    if x:named_child_count() > 0 then scan(x) end
+                end
+            end
+            scan(tree)
+        end
+        G7.REASG = G7.REASGF[file] or NOTHING
         if G7.PROG == nil then G7.PROG = require('cartograph.programs').of(store) or false end
         if G7.PROG then G7.useenv(G7.mkenv(G7.PROG.env[file] or 'default')) end
         if not G7.STRLIB then G7.STRLIB = newobj('stringlib'); G7.ENV.STRLIB = G7.STRLIB; addobj(G7.gport('string'), G7.STRLIB) end
@@ -1223,6 +1245,9 @@ local function build(store, opts)
         local function keyname(k)
             if not k then return '#' end -- (a positional constructor field)
             if k:type() == 'string' then local c = k:field('content')[1]; return c and txt(c) or '[]' end
+            -- (a CONSTANT — a local declared from a string literal and never assigned in its file, or a key parameter of
+            -- a value-keyed instance — is that string: `_G[LIBSTUB_MAJOR]` is the global LibStub, CART-1729)
+            if G7.LITKEYS and k:type() == 'identifier' then local p = lookup(txt(k)); local c = p and G7.CONSTK[p]; if c then return c end end
             if isnum(k) then return '#' end
             return '[]'
         end
@@ -1240,7 +1265,7 @@ local function build(store, opts)
                 local tr, tc = tb:end_()
                 acc('index', kn, tostring(tonumber(txt(kn))), base, nil, { tr, tc, er, ec })
             elseif keyname(kn) == '#' then acc('array', kn, nil, base)
-            elseif keyname(kn) == '[]' then
+            elseif keyname(kn) == '[]' or kn:type() == 'identifier' then -- (a constant key is still a NAME in the text)
                 -- (and what the key holds — read only where reading it adds nothing to the solve: a name, or a dotted read
                 -- off one; any other key, a call among them, is taken as possibly a string)
                 local kt, ok = kn:type(), false
@@ -1326,6 +1351,8 @@ local function build(store, opts)
                     if PTAG and not inst then PTAG[fp.params[i]] = { fn = id, j = i, path = '', d = 0 } end
                 end
             end
+            -- (a VALUE-KEYED instance: its key parameters are the call's literals, constants inside it, CART-1729)
+            if inst and clone.consts then for j, sv in pairs(clone.consts) do if fp.params[j] then G7.CONSTK[fp.params[j]] = sv end end end
             fnstack[#fnstack + 1] = fp
             local body = n:field('body')[1]
             if body then for _, s in tsutil.inamed, body, -1 do stmt(s) end end
@@ -1335,6 +1362,29 @@ local function build(store, opts)
             scopes[#scopes] = nil
             if not clone and not meta.upv and not meta.nested and body and #txt(n) <= CLONE_MAX then
                 CLONE[o] = { file = file, id = id, src = src, l = l, c = c }
+                -- (its KEY PARAMETERS — `t[p]` in its body, p never assigned in the file: a call passing a literal there
+                -- binds to the instance for that value, opts.litkeys, CART-1729)
+                if G7.LITKEYS then
+                    local pos = {}
+                    if method then pos.self = 1 end
+                    local j = method and 1 or 0
+                    for _, x in tsutil.inext, ps or EMPTY_NODE, -1 do
+                        if x:named() and x:type() == 'identifier' then j = j + 1; pos[txt(x)] = j end
+                    end
+                    local kp
+                    local function scan(x)
+                        for _, y in tsutil.inamed, x, -1 do
+                            if y:type() == 'bracket_index_expression' then
+                                local k = y:field('field')[1]
+                                local nm = k and k:type() == 'identifier' and txt(k)
+                                if nm and pos[nm] and not G7.REASG[nm] then kp = kp or {}; kp[pos[nm]] = true end
+                            end
+                            if y:named_child_count() > 0 then scan(y) end
+                        end
+                    end
+                    scan(body)
+                    CLONE[o].kp = kp
+                end
             end
             G7.LASTFP = fp
             return p
@@ -1661,12 +1711,25 @@ local function build(store, opts)
             if callee then
                 -- (opts.dump: the call instruction this call record's ANSWER is about, CART-1725 — stamped by the recording callc)
                 if G7.REC and c and not clone then G7.NEXTC = c end
-                callc(callee, aps, want and resl or res, nil, curerr())
+                -- (the literal arguments, by position: a value-keyed instance's key, opts.litkeys)
+                local vl
+                if G7.LITKEYS then
+                    local off = recvp and 1 or 0
+                    for j, a in ipairs(argn) do
+                        local sv
+                        if a:type() == 'string' then local cc = a:field('content')[1]; sv = cc and txt(cc) or ''
+                        elseif a:type() == 'identifier' then local p = lookup(txt(a)); sv = p and G7.CONSTK[p] end
+                        if sv then vl = vl or {}; vl[j + off] = sv end
+                    end
+                end
+                callc(callee, aps, want and resl or res, vl and { vlits = vl } or nil, curerr())
                 G7.NEXTC = nil
                 -- (calling a TABLE runs its metatable's __call with the table first, CART-1701)
                 local ma = { callee }
                 for _, ap in ipairs(aps) do ma[#ma + 1] = ap end
-                metacall(callee, '__call', ma, want and resl or res, curerr())
+                local vm
+                if vl then vm = {}; for j, sv in pairs(vl) do vm[j + 1] = sv end end
+                metacall(callee, '__call', ma, want and resl or res, curerr(), vm and { vlits = vm } or nil)
             end
             return want and resl or res
         end
@@ -1794,6 +1857,11 @@ local function build(store, opts)
                     local i = 0
                     for _, v in tsutil.inamed, vl, -1 do
                         i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
+                        local ev = G7.LITKEYS and el and el:named_child(i - 1)
+                        if ev and ev:type() == 'string' and v:type() == 'identifier' and not G7.REASG[txt(v)] then
+                            local c = ev:field('content')[1]
+                            G7.CONSTK[p] = c and txt(c) or ''
+                        end
                         -- (a local DECLARED from a parameter path is that path — an upper bound: a later assignment
                         -- to it is not checked here, the census marks it)
                         if PTAG and vals[i] and PTAG[vals[i]] then local tg = PTAG[vals[i]]; PTAG[p] = { fn = tg.fn, j = tg.j, path = tg.path, d = tg.d, via = 'local' } end
@@ -1939,6 +2007,39 @@ local function build(store, opts)
     local instances = {}
     clone_at = function (site, o)
         if G7.REC then return nil end -- (a dump is of the instance-free solve: an instance's ports are in no body)
+        -- ★ VALUE-KEYED INSTANCES (CART-1729, opts.litkeys; flowpath FLOW-01's proposal): a call passing LITERALS at a
+        -- small closed function's key parameters binds to ONE instance per distinct value, not per site — WoW w2's
+        -- 1,047 `LibStub("…")` sites name 46 libraries. Inside it those parameters are constants, so `self.libs[major]`
+        -- is a named access and `self.libs[major] = {}` allocates per library. A call with any key parameter not
+        -- literal binds to the original, as before
+        if type(site) == 'table' then
+            local cl = CLONE[o]
+            local kp = cl and cl.kp
+            if not kp then return nil end
+            local parts, consts = {}, {}
+            for j in pairs(kp) do
+                local sv = site.vlits[j]
+                if not sv then return nil end
+                consts[j] = sv
+                parts[#parts + 1] = j .. '=' .. sv
+            end
+            table.sort(parts)
+            local key = table.concat(parts, '\0')
+            local per = G7.VINST[o]
+            if not per then per = {}; G7.VINST[o] = per end
+            local x = per[key]
+            if x == nil then
+                per[key] = false -- (being walked: a recursive call binds the original)
+                local info = { ctx = true, id = cl.id, l = cl.l, c = cl.c, scopes = { {} }, noacc = true, consts = consts }
+                INST, INSTN = INST + 1, INSTN + 1
+                G7.VINSTN = G7.VINSTN + 1
+                walk_file(cl.file, cl.src, info)
+                INST = INST - 1
+                x = info.obj or false
+                per[key] = x
+            end
+            return x or nil
+        end
         local cl = CLONE[o]
         if not cl or NOCLONE[site] then return nil end
         local per = instances[site]
@@ -2615,6 +2716,7 @@ local function build(store, opts)
     local verdicts = {}
     local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil,
         files = #files, ports = N, objects = NO }
+    stats.vinstances = G7.VINSTN
     local function targets(o, m, out, seen)
         if seen[o] then return false end
         seen[o] = true
