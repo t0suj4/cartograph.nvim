@@ -58,6 +58,7 @@ M.EXPERIMENTS = {
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
     expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
+    callsite = 'a call binds a small closed function to an instance of its OWN per call site (as a generic for binds its iterator; CART-1697: the blob)',
 }
 local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
 --- the active experiments of a solve -> { name = value } (true for a bare name); errors on an unknown name
@@ -1770,14 +1771,18 @@ local function build(store, opts)
                         if sv then vl = vl or {}; vl[j + off] = sv end
                     end
                 end
-                callc(callee, aps, want and resl or res, vl and { vlits = vl } or nil, curerr())
+                -- (experiment `callsite`: the call's own instance of a small closed function, keyed by its result port;
+                -- inside an instance no call instances again — a recursive call binds the original)
+                local site = vl and { vlits = vl } or nil
+                if not site and G7.EXP.callsite and INST == 0 then site = res end
+                callc(callee, aps, want and resl or res, site, curerr())
                 G7.NEXTC = nil
                 -- (calling a TABLE runs its metatable's __call with the table first, CART-1701)
                 local ma = { callee }
                 for _, ap in ipairs(aps) do ma[#ma + 1] = ap end
                 local vm
                 if vl then vm = {}; for j, sv in pairs(vl) do vm[j + 1] = sv end end
-                metacall(callee, '__call', ma, want and resl or res, curerr(), vm and { vlits = vm } or nil)
+                metacall(callee, '__call', ma, want and resl or res, curerr(), vm and { vlits = vm } or (type(site) == 'number' and site or nil))
             end
             return want and resl or res
         end

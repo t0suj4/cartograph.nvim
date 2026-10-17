@@ -1930,3 +1930,29 @@ test('flowtype experiments: named switches from opts or the environment; an unkn
     eq({ order = 'asc' }, R2.exp, 'the environment selects')
     vim.fn.delete(root, 'rf') -- (after the solves: flowtype reads the sources)
 end)
+
+-- (experiment `callsite`, CART-1697: a call binds a small closed function to an instance of its own — `id(A).go()` and
+-- `id(B).go()` are A's and B's go, not both; off by default)
+test('flowtype experiment callsite: per-call-site instances separate an identity helper\'s callers', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local function id(x) return x end',
+        'local A = { go = function () return 1 end }',
+        'local B = { go = function () return 2 end }',
+        'local a = id(A)',
+        'local b = id(B)',
+        'local r1 = a.go()',
+        'local r2 = b.go()',
+        'return r1, r2',
+    }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local function callee(R, name)
+        for _, c in ipairs(store.data.calls) do if (c.full or c.callee) == name then return table.concat(R.callee_of(c) or {}, ',') end end
+    end
+    local R0 = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    local R1 = flowtype.solve(store, { open = false, ctx = false, allcallees = true, exp = 'callsite' })
+    vim.fn.delete(root, 'rf')
+    eq('m.lua::go@1,m.lua::go@2', callee(R0, 'a.go'), 'off: one id merges both callers')
+    eq('m.lua::go@1', callee(R1, 'a.go'), 'callsite: A\'s go')
+    eq('m.lua::go@2', callee(R1, 'b.go'), 'callsite: B\'s go')
+end)
