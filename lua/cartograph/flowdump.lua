@@ -245,6 +245,19 @@ function M.build(rec, X)
                 end
             end
         end
+        -- (a NAMED load whose base may hold a globals table is a global read — strict there, as flowtype reads it:
+        -- `local G = _G; G.q`, `_G[MAJOR]` with a constant key. The identifier read is tagged as it is recorded; this
+        -- one only once the solution says what the base holds)
+        do
+            local tagged = {}
+            for _, t in ipairs(tags) do tagged[t[1]] = true end
+            for i, ins in ipairs(rec.fns[name] or {}) do
+                local j = map[i - 1]
+                if ins[1] == 'load' and ins[4] ~= '[]' and ins[4] ~= '{k}' and j and not tagged[j] and not X.top[ins[3]] then
+                    for o in X.each(ins[3]) do if ISG[o] then tags[#tags + 1] = { j, 'contract:strict-global' }; tagged[j] = true; break end end
+                end
+            end
+        end
         local fp = byname[name]
         local params = {}
         if fp then

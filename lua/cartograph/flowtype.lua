@@ -26,7 +26,8 @@
 --     where a route models it (table.sort's comparator, __tostring; any such call's ERRORS reach the caller, CART-1708)
 --     — `vim.tbl_map(f, t)` handing t's elements to f is not followed; UNKNOWN code (EXT) may write any field of what
 --     it is handed and calls the functions among it with EXT — but not the globals table, which every code reaches;
---   - globals are named: a global read sees `_G.q = v`, never a dynamic-key `_G[k] = v`, and a read by computed
+--   - globals are named: a global read — an identifier, or a NAMED load off the globals table, `local G = _G; G.q`
+--     (CART-1715) — sees `_G.q = v`, never a dynamic-key `_G[k] = v`, and a read by computed
 --     name `_G[k]` sees dynamic-key writes and EXT, never the named globals (CART-1707: either widening made every
 --     global read on the repo partial, or WoW w2's solve 15x slower); and _G never ESCAPES — a write through a value
 --     the cap cut that may be _G is not followed (WoW passes _G as an argument: w3, 308 whole answers partial);
@@ -521,6 +522,11 @@ local function build(store, opts)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
             return
         end
+        -- (a NAMED load off a globals table is a global read, whatever expression reached the table — `_G.q`, `local G
+        -- = _G; G.q`: strict, as the identifier read is (the contract). Non-strict, it read every dynamic-key write —
+        -- AceHook's `_G[method] = uid`: with LibStub's `_G[LIBSTUB_MAJOR]` read by name (a constant key, CART-1729's
+        -- patch) the global LibStub held every value in the program)
+        if not strict and f ~= '[]' and G7.ISG[o] and f:byte(1) ~= 1 then strict = true end
         local r = rd[o]
         if not r then r = {}; rd[o] = r end
         local l = r[f]

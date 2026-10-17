@@ -1800,6 +1800,22 @@ test('flowtype selfseed: a host-called method\'s self is an instance of T — he
     eq(true, c.inferred, '… hedged')
 end)
 
+-- (CART-1715: a named load off the globals TABLE is a global read — strict, as the identifier read is; non-strict it read
+-- every dynamic-key `_G[k] = v` in the tree: AceHook's `_G[method] = uid` reached every `_G.LibStub`-shaped read)
+test('flowtype: a named load off _G is strict — a dynamic-key write into _G does not reach it', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['s.lua'] = 'Stub = {}\nfunction Stub.get() return 1 end\n',
+        ['h.lua'] = 'local G = _G\nlocal function hook(name, v) G[name] = v end\nhook(arg[1], { get = function () return 2 end })\n',
+        ['a.lua'] = 'local G = _G\nlocal x = G.Stub.get()\nreturn x\n',
+    })
+    store.ingest(ts.extract(root))
+    local function at(file, line, name) for _, c in ipairs(store.data.calls) do if c.file == file and c.line == line and (c.full or c.callee) == name then return c end end end
+    local R = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    vim.fn.delete(root, 'rf')
+    eq({ 's.lua::Stub.get@1' }, (R.callee_of(at('a.lua', 1, 'G.Stub.get'))), 'G.Stub is the global Stub alone, not the hook\'s table')
+end)
+
 -- (CART-1742: all saturated ports as ONE top node is an optimisation, never a change — with it and without it the
 -- answers are the same, on a fixture whose ports saturate)
 test('flowtype: one top node for every saturated port moves no answer', function ()
