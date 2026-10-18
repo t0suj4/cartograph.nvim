@@ -2997,7 +2997,7 @@ local function build(store, opts)
     if G7.EXP.expose or G7.EXP.loc then -- (experiment `expose`: the solver's tables for an instrument — names may change, not an API)
         R.internals = { top = top, pts = pts, each = each, obinfo = obinfo, tainted = tainted, probes = probes, succ = succ,
             escaped = escaped, ofield = ofield, fnports = fnports, protos = protos, tfrom = TFROM,
-            NW = NW, NOW = NOW, pinfo = pinfo, loc = G7.LOCP } -- (NW / NOW: the ports / objects the WALK made — numbered the same across solves of one tree)
+            NW = NW, NOW = NOW, pinfo = pinfo, loc = G7.LOCP, rd = rd, NS = NS } -- (rd: object -> field -> the loads reading it) -- (NW / NOW: the ports / objects the WALK made — numbered the same across solves of one tree)
     end
     if TFROM then
         -- (a partial verdict's v.ptport walked back to its SEED: { label… }, the last a reason)
