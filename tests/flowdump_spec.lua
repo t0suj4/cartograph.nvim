@@ -408,3 +408,28 @@ test('flowdump: a host site carries its kind: string prim, io.open\'s file membe
     eq('prim', kinds['type:string'], 'string is prim: ' .. vim.inspect(kinds))
     eq('members', kinds['type:file'], 'file is members')
 end)
+
+-- (CART-1763: a dynamic store may write the target's KEY SET and, its key unknown, its __mode. Through a TAINTED target,
+-- every escaped table may be written: weak when the key may be the string "__mode", hkeystop when it may be an object.
+-- On a LISTED target, an unknown key makes it weak whatever the value — __mode's own value is a string)
+test('flowdump: a dynamic store through a tainted target makes escaped tables weak and key-open; a listed one weak', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, table.concat({ '',
+        'local x, y, z = {}, {}, {}',
+        'local T = (#arg == 1 and x) or (#arg == 2 and y) or z',          -- saturates past CAP 2: x, y, z escape
+        'local NM = { f = tostring(#arg) }',
+        'T[NM.f] = 1',                                                    -- through T, a string key: may be "__mode"
+        'local K = {}', 'T[K] = 2',                                       -- through T, an object key
+        'local L = {}', 'local function put(v) L[NM.f] = v end',          -- a listed target, an unknown key, an EMPTY value
+        'return T, L' }, '\n') .. '\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local S, lab = D.solution, {}
+    for _, s in ipairs(D.sites) do lab[s.id] = s.label end
+    local function count(list, pat) local n = 0; for _, id in ipairs(list) do if tostring(lab[id]):match(pat) then n = n + 1 end end; return n end
+    eq(3, count(S.weak, '^tbl:m%.lua:7:'), 'x, y, z (escaped) are weak')
+    eq(3, count(S.hkeystop, '^tbl:m%.lua:7:'), 'x, y, z are key-open')
+    eq(1, count(S.weak, '^tbl:m%.lua:13:'), 'L (listed, an unknown key, a value that holds nothing) is weak')
+end)

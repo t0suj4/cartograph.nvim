@@ -324,6 +324,58 @@ function M.build(rec, X)
             if #ss > 0 then table.sort(ss); vj[#vj + 1] = '[' .. p .. ',' .. jarr(ss) .. ']' end
         end
     end
+    -- ★ WHAT A DYNAMIC STORE MAY WRITE BESIDES ITS CELL (CART-1763; the key set / __mode analog of CART-1744). `t[k] = v`
+    -- with an unknown k may BE `t.__mode = v`: every table t may hold may become weak, whatever v is (__mode's own value
+    -- is a string, a site-less primitive). Through a TAINTED t, which may be any escaped table, every escaped non-host
+    -- table may become weak; and when k may be an OBJECT (a key with identity; strings and numbers have none, CART-1761)
+    -- each one's key set may hold any escaped key: hkeystop. Derived from the storeDyn instructions themselves
+    local weakx, keystopx = {}, {}
+    do
+        local function prim(o) local tn = X.TNAME[o]; return tn and X.hostkind and X.hostkind(tn) == 'prim' end
+        local function maymode(k) -- (k may be the string "__mode": unknown, or a value no site describes — an operator's
+            -- number holds none, and nothing proves such a key is not a string)
+            if not k or X.top[k] or X.tainted[k] then return true end
+            local any = false
+            for o in X.each(k) do
+                any = true
+                if o == X.EXT or X.TNAME[o] == 'string' or not prim(o) and X.TNAME[o] then return true end
+            end
+            return not any
+        end
+        local function mayobj(k) -- (k may be an object: a key with identity)
+            if not k or X.top[k] or X.tainted[k] then return true end
+            for o in X.each(k) do if not prim(o) then return true end end
+            return false
+        end
+        local esct
+        local function escaped_tables()
+            if esct then return esct end
+            esct = {}
+            for o in pairs(X.escaped or {}) do
+                if type(o) == 'number' and not ISG[o] and o ~= X.EXT and not X.fnports[o] then
+                    local info = tostring(X.obinfo[o])
+                    if info:find('^tbl:') or (X.TNAME[o] and X.hostkind and X.hostkind(X.TNAME[o]) == 'open') then esct[#esct + 1] = o end
+                end
+            end
+            return esct
+        end
+        for _, l in pairs(rec.fns) do
+            for _, ins in ipairs(l) do
+                if ins[1] == 'store' and ins[3] == '[]' then
+                    local x, k = ins[2], ins[5]
+                    local mm = maymode(k)
+                    if mm then for o in X.each(x) do if not X.TNAME[o] or not prim(o) then weakx[o] = true end end end
+                    if X.top[x] or X.tainted[x] then
+                        local mo = mayobj(k)
+                        for _, o in ipairs(escaped_tables()) do
+                            if mm then weakx[o] = true end
+                            if mo then keystopx[o] = true end
+                        end
+                    end
+                end
+            end
+        end
+    end
     local hj, hdj, htj, hxj, hkj = {}, {}, {}, {}, {}
     local weak = {} -- (the sites a store that may set __mode reaches, CART-1723)
     local hktop = {}
@@ -393,6 +445,16 @@ function M.build(rec, X)
     local cl = {}
     for o in pairs(cerr) do cl[#cl + 1] = o end
     table.sort(cl)
+    -- (CART-1763's derived sites join weak and hkeystop, in site order: the dump stays byte-deterministic)
+    do
+        local function merge(list, extra)
+            local seen = {}
+            for _, o in ipairs(list) do seen[o] = true end
+            for o in pairs(extra) do if not seen[o] then list[#list + 1] = o; seen[o] = true end end
+            table.sort(list)
+        end
+        merge(weak, weakx); merge(hktop, keystopx)
+    end
     -- the taint and its seeds
     local tj, sdj = {}, {}
     for _, p in ipairs(vlist) do
