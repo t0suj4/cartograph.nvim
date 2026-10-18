@@ -19,7 +19,8 @@
 --     names = { fields = [...], functions = [...] },
 --     sites = [ { id, kind, label, fn } ... ],
 --     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ] } ... ],
---     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, ctx = nil, live = nil,
+--     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, rin_top?, rout_top?, cerr_top?,
+--                  ctx = nil, live = nil,
 --                  taint = { ports, seeds } },
 --     gaps = [ { fn, kind, vars, at } ... ], answers = [ { call = [file, line, col], kind, targets, partial, contracts,
 --       ins = [fn, index] | null — the CALL instruction the answer is about: index is 0-based in that function's dumped
@@ -56,8 +57,10 @@
 -- * GAPS: constructs with no core opcode, or modelled outside the IR — rawget / rawset, getfenv / setfenv,
 --   hooksecurefunc, getmetatable, newproxy, coroutine.wrap, xpcall's handler, unknown code (load ... : the `ext`
 --   sites and the EXTCALL call in `init`). `weak`: every site a store that MAY set __mode reaches — a named __mode store,
---   or any dynamic-key store (k may be "__mode"), or a saturated such field (CART-1723); weak semantics (what the
---   collector may drop) are not modelled beyond naming them.
+--   or any dynamic-key store (k may be "__mode"), or a saturated or TAINTED such field (CART-1723, CART-1756); weak
+--   semantics (what the collector may drop) are not modelled beyond naming them. `rin_top` / `rout_top` / `cerr_top`
+--   (present as 1, else absent): that coroutine channel is saturated or tainted, so it holds any escaped value
+--   (CART-1757).
 local M = {}
 
 -- (the assumptions a whole answer rests on that the core does not state — flowtype's header, THE CONTRACT; a checker
@@ -316,7 +319,8 @@ function M.build(rec, X)
         if m and not X.TNAME[o] and o ~= X.EXT then
             for _, f in ipairs { '__mode', '[]' } do
                 local fp = m[f]
-                local held = fp and X.top[fp]
+                -- (saturated, or TAINTED — a dynamic store with a lost key may write "__mode": CART-1756)
+                local held = fp and (X.top[fp] or X.tainted[fp])
                 if fp and not held then for _ in X.each(fp) do held = true; break end end
                 if held then weak[#weak + 1] = o; break end
             end
@@ -365,7 +369,11 @@ function M.build(rec, X)
         if p and X.tainted[p] then etaint[#etaint + 1] = tostring(FN(name)) end
     end
     local cerr = {}
-    for _, p in ipairs(rec.rerr) do for o in X.each(p) do cerr[o] = true end end
+    -- (a coroutine CHANNEL that is saturated or TAINTED holds any escaped value: rin_top / rout_top / cerr_top. Dumped
+    -- as site lists alone, every lost value passed to resume or yielded failed the channel checks, CART-1757)
+    local function chtop(p) return p ~= nil and (X.top[p] or X.tainted[p]) and true or false end
+    local cerrtop = false
+    for _, p in ipairs(rec.rerr) do for o in X.each(p) do cerr[o] = true end; if chtop(p) then cerrtop = true end end
     local cl = {}
     for o in pairs(cerr) do cl[#cl + 1] = o end
     table.sort(cl)
@@ -426,6 +434,7 @@ function M.build(rec, X)
         .. '],"hdyn":[' .. table.concat(hdj, ',') .. '],"htop":[' .. table.concat(htj, ',') .. '],"htaint":[' .. table.concat(hxj, ',') .. '],"hkeys":[' .. table.concat(hkj, ',') .. '],"hkeystop":' .. jarr(hktop) .. ',"err":{"fn":[' .. table.concat(ej, ',')
         .. '],"top":[' .. table.concat(etop, ',') .. '],"taint":[' .. table.concat(etaint, ',') .. '],"cerr":' .. jarr(cl)
         .. '},"weak":' .. jarr(weak) .. ',"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
+        .. (chtop(X.GRESARG) and ',"rin_top":1' or '') .. (chtop(X.GYIELD) and ',"rout_top":1' or '') .. (cerrtop and ',"cerr_top":1' or '')
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']'
         .. ',"escaped":' .. jarr(escl) .. ',"fields_hit":[' .. table.concat(fhj, ',') .. ']}},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')

@@ -1658,8 +1658,11 @@ local function build(store, opts)
             -- (rawget(t, 'f') reads every RAW entry — one written under a computed key too: a named load without __index,
             -- non-strict but on _G, as `t.f` is. Strict, it missed `t[k] = v` with k == 'f', CART-1746)
             if fname == 'rawget' and argn[1] and gbl() then
-                local tp = expr(argn[1]); if argn[2] then expr(argn[2]) end
-                return field(tp, strkey(argn[2]))
+                -- (a variable key is the load's key, for the dump's loadDyn, as `t[k]`'s is: CART-1758)
+                local tp, kp = expr(argn[1]), argn[2] and expr(argn[2]) or nil
+                local key = strkey(argn[2])
+                if key == '[]' and kp then G7.NEXTK = kp end
+                return field(tp, key)
             end
             if fname == 'rawset' and argn[3] and gbl() then
                 -- (a computed key is the store's key, for the dump's storeDyn, and it enters the key set, as `t[k] = v`

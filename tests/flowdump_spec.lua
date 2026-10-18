@@ -340,3 +340,31 @@ test('flowdump: a constructor\'s computed key and rawset\'s key are named by the
     eq(2, dyn, 'two dynamic stores: the constructor field and rawset')
     eq(2, named, 'both name their key')
 end)
+
+-- (CART-1756 / 1757 / 1758: what the dump said of a TAINTED cell or channel, and rawget's key. k2 is fed by k, which
+-- saturates past CAP 2: tainted and EMPTY, the case a site list cannot carry)
+test('flowdump: a tainted [] cell is weak, a tainted resume channel is rin_top, rawget names its key', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, table.concat({ '',
+        'local x, y, z = {}, {}, {}',
+        'local k = (#arg == 1 and x) or (#arg == 2 and y) or z',
+        'local k2 = k',
+        'local K = { f = tostring(#arg) }',
+        'local t = {}', 't[K.f] = k2',
+        'local co = coroutine.create(function (v) return v end)', 'coroutine.resume(co, k2)',
+        'local u = {}', 'local w = rawget(u, K.f)',
+        'return t, w' }, '\n') .. '\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local S, lab = D.solution, {}
+    for _, s in ipairs(D.sites) do lab[s.id] = s.label end
+    local tw = false
+    for _, id in ipairs(S.weak) do if tostring(lab[id]):match('^tbl:m%.lua:%d+:10$') then tw = true end end
+    ok(tw, 't (its [] cell tainted, empty) is weak: ' .. vim.inspect(S.weak))
+    eq(1, S.rin_top, 'the resume channel is tainted: rin_top')
+    local named = false
+    for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do if i[1] == 'loadDyn' and i[4] ~= vim.NIL then named = true end end end
+    ok(named, 'rawget(u, K.f) is a loadDyn that names its key')
+end)
