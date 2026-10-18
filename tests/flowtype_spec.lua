@@ -1989,3 +1989,17 @@ test('flowtype: an unconditional raise ends its block — a stub chunk defines n
     eq('', callee('M.go'), 'm.lua stops at its raise: M.go is never defined')
     eq('n.lua::N.go@3', callee('N.go'), 'n.lua\'s error is a local function: the chunk runs on')
 end)
+
+-- (experiment `strict-names`, CART-1697: a named load reads only its field, never `[]` — the strict-global contract for
+-- every table. `t[k] = g` with k computed no longer reaches `t.go`)
+test('flowtype experiment strict-names: a named load skips the computed-key cell', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = 'local t = {}\nfunction t.go() return 1 end\nlocal k = arg[1]\nt[k] = function () return 2 end\nreturn t.go()\n' })
+    store.ingest(ts.extract(root))
+    local function callee(R) for _, c in ipairs(store.data.calls) do if (c.full or c.callee) == 't.go' then return table.concat(R.callee_of(c) or {}, ',') end end end
+    local R0 = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    local R1 = flowtype.solve(store, { open = false, ctx = false, allcallees = true, exp = 'strict-names' })
+    vim.fn.delete(root, 'rf')
+    ok(not callee(R0):find('^m%.lua::t%.go@1$'), 'off: t[k] may be go — ' .. callee(R0))
+    eq('m.lua::t.go@1', callee(R1), 'strict-names: only the named go')
+end)

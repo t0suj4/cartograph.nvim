@@ -59,6 +59,7 @@ M.EXPERIMENTS = {
     expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
     trace = 'R.trace: the SOLVE as a bounded graph — ports folded onto their function, deliveries counted per (source, destination, kind), fan-in, saturation order, prototype replays (CART-1697)',
+    ['strict-names'] = "a NAMED load reads only its field, never `[]` — the strict-global contract (a computed key never equals a named field) for every table, not only _G (CART-1697: the `[]` cells are the blob's back channel); unsound in principle, a contract",
     callsite = 'a call binds a small closed function to an instance of its OWN per call site (as a generic for binds its iterator; CART-1697: the blob)',
 }
 local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
@@ -608,7 +609,7 @@ local function build(store, opts)
         -- = _G; G.q`: strict, as the identifier read is (the contract). Non-strict, it read every dynamic-key write —
         -- AceHook's `_G[method] = uid`: with LibStub's `_G[LIBSTUB_MAJOR]` read by name (a constant key, CART-1729's
         -- patch) the global LibStub held every value in the program)
-        if not strict and f ~= '[]' and G7.ISG[o] and f:byte(1) ~= 1 then strict = true end
+        if not strict and f ~= '[]' and (G7.ISG[o] or G7.EXP['strict-names']) and f:byte(1) ~= 1 then strict = true end
         local r = rd[o]
         if not r then r = {}; rd[o] = r end
         local l = r[f]
