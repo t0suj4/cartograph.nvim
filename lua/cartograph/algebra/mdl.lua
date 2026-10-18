@@ -169,6 +169,17 @@ function M.partition_dl(families, opts)
     return total
 end
 
+-- ★ opts.admissible(family) -> bool: the CALLER's veto over a merged family, on top of `min_fixed` — a learner's
+-- NEGATIVE examples (a template must not cover one: Golem's test on an rlgg). Asked LAZILY, only of the candidate a
+-- step would take, then the next best, so a costly predicate (matching every negative) runs on few families. A
+-- singleton is never asked: its template is the instance itself, and a negative it covers is the features' limit, not
+-- the partition's. Without it every result is the same as before.
+local function vetoed(f, opts)
+    if not opts.admissible or #f.members == 1 then return false end
+    if f.vetoed == nil then f.vetoed = not opts.admissible(f) end
+    return f.vetoed
+end
+
 --- greedy agglomerative partition by description length
 function M.partition(instances, opts)
     opts = opts or {}
@@ -179,7 +190,7 @@ function M.partition(instances, opts)
     for i = 1, #instances do all[i] = i end
     local one = family_of(instances, all, opts)
     while #fams > 1 do
-        local best
+        local cands = {}
         for a = 1, #fams do
             for b = a + 1, #fams do
                 local members = {}
@@ -188,10 +199,17 @@ function M.partition(instances, opts)
                 table.sort(members)
                 local merged = family_of(instances, members, opts)
                 local gain = fams[a].dl + fams[b].dl - merged.dl
-                if merged.admissible and gain > 0 and (not best or gain > best.gain) then
-                    best = { a = a, b = b, merged = merged, gain = gain }
-                end
+                if merged.admissible and gain > 0 then cands[#cands + 1] = { a = a, b = b, merged = merged, gain = gain } end
             end
+        end
+        -- (the best candidate — the FIRST of equal gains, as the scan order gives — unless vetoed, then the next)
+        local best
+        while true do
+            local bi
+            for k, c in ipairs(cands) do if not c.out and (not bi or c.gain > cands[bi].gain) then bi = k end end
+            if not bi then break end
+            if not vetoed(cands[bi].merged, opts) then best = cands[bi]; break end
+            cands[bi].out = true
         end
         if not best then break end
         steps[#steps + 1] = { merged = best.merged.members, gain = best.gain }
@@ -203,7 +221,7 @@ function M.partition(instances, opts)
     -- greedy can stop at a local optimum above the one-family partition (seed 26 of the
     -- spec's law did, before admissibility); the trivial candidate is always compared
     local dl = M.partition_dl(fams, opts)
-    if one.admissible and one.dl < dl then
+    if one.admissible and one.dl < dl and not vetoed(one, opts) then
         steps[#steps + 1] = { merged = all, gain = dl - one.dl, why = 'one family beats the greedy result' }
         fams, dl = { one }, one.dl
     end
@@ -231,7 +249,7 @@ function M.partition_all(instances, opts)
             local blocks = {}
             for j = 1, n do blocks[rgs[j]] = blocks[rgs[j]] or {}; table.insert(blocks[rgs[j]], j) end
             local fams, dl, ok = {}, 0, true
-            for _, b in ipairs(blocks) do local f = block(b); fams[#fams + 1] = f; dl = dl + f.dl; ok = ok and f.admissible end
+            for _, b in ipairs(blocks) do local f = block(b); fams[#fams + 1] = f; dl = dl + f.dl; ok = ok and f.admissible and not vetoed(f, opts) end
             if ok and (not best or dl < best.dl) then best = { families = fams, dl = dl } end
             return
         end

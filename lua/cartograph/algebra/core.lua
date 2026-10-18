@@ -1811,17 +1811,19 @@ end
 local function family_of(instances, members, opts)
     local Is = {}
     for _, i in ipairs(members) do Is[#Is + 1] = instances[i] end
-    local T, values
+    local T, values, env
     if #Is == 1 then T, values = M.template(M.copy(Is[1])), { {} }
     else
         local g = M.generalize(Is, opts.generalize)
-        T, values = g.template, g.values
+        T, values, env = g.template, g.values, g.env
     end
     local Vs = {}
     for k, i in ipairs(members) do Vs[i] = values[k] end
     local dl, parts = M.family_dl(T, Vs, opts)
     local admissible = #Is == 1 or fixed_nodes(T.body) >= (opts.min_fixed or 1)
-    return { members = members, template = T, values = Vs, dl = dl, parts = parts, admissible = admissible }
+    -- (`env`: the generalizer's — a repetition hole's domain may name a nested family, `@h2.elem`, in env.defs: matching
+    -- the template without it refuses its own members)
+    return { members = members, template = T, values = Vs, dl = dl, parts = parts, admissible = admissible, env = env }
 end
 
 

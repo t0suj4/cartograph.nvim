@@ -634,3 +634,46 @@ test('algebra seam: seq refuses terms as arguments; a list is a sequence', funct
     eq(false, A.match(T, A.seq({ a, b })).ok, 'no m: no match')
     ok(A.match(T, A.seq({ a, A.node('m', A.lit(1)) })).values.r ~= nil, 'an m binds r')
 end)
+
+--- ★ NEGATIVE EXAMPLES (contrast-families): `opts.admissible` vetoes a merged family, asked lazily. Pinned both
+--- sides: a vetoed merge is not taken (greedy AND the exhaustive optimum agree), an admitting predicate changes nothing,
+--- and a singleton is never asked.
+test('algebra partition: opts.admissible vetoes a merge that covers a negative; greedy and exhaustive agree', function ()
+    local A = need()
+    local function rec(op, base) return A.lua_kv({ op = op, base = base, key = 'top' }) end
+    local t = A.kv_terms({ rec('storeDyn', 'meta'), rec('storeDyn', 'plain'), rec('loadDyn', 'meta'), rec('loadDyn', 'plain') })
+    local P, neg = { t[1], t[2], t[3] }, t[4]
+    local function no_neg(f) return not A.match(f.template, neg).ok end
+    local plain = A.partition(P, {})
+    eq(1, #plain.families, 'unconstrained: one family {?op, ?base, top}')
+    ok(A.match(plain.families[1].template, neg).ok, 'and it covers the negative')
+    local asked_single = false
+    local vet = A.partition(P, { admissible = function (f) if #f.members == 1 then asked_single = true end; return no_neg(f) end })
+    eq(2, #vet.families, 'vetoed: two families')
+    for _, f in ipairs(vet.families) do ok(not A.match(f.template, neg).ok, 'no family covers the negative') end
+    ok(not asked_single, 'a singleton is never asked')
+    local all = A.partition_all(P, { admissible = no_neg })
+    eq(vet.dl, all.dl, 'the greedy vetoed partition is the exhaustive optimum here')
+    local same = A.partition(P, { admissible = function () return true end })
+    eq(plain.dl, same.dl, 'an admitting predicate changes nothing')
+    eq(#plain.families, #same.families, 'the same families')
+    -- a negative EQUAL to a positive: its singleton covers it, and is still a partition (the features' limit)
+    local opp = A.partition_all({ t[1], t[4] }, { admissible = no_neg })
+    ok(opp and opp.families and #opp.families == 2, 'opposite labels on one record still partition, as singletons')
+end)
+
+--- A partition FAMILY carries its generalizer's env: a repetition hole's domain names a nested family (`@h1.elem`)
+--- in env.defs, and without it the template refuses every one of its own members (found by contrast-families on
+--- FLOW-01's vimruntime sites, 2026-10-18; the veto had matched negatives without it too)
+test('algebra partition: a family keeps its env, so its template matches its own members', function ()
+    local A = need()
+    local recs = { { op = 'store', kinds = { 'empty' } }, { op = 'store', kinds = { 'fn', 'str' } },
+        { op = 'store', kinds = { 'fn', 'num', 'str' } }, { op = 'store', kinds = { 'ext', 'fn', 'num', 'str' } } }
+    local I = {}
+    for i, r in ipairs(recs) do I[i] = A.lua_kv(r) end
+    local t = A.kv_terms(I)
+    local f = A.partition(t, {}).families[1]
+    eq(4, #f.members, 'one family of four')
+    ok(f.env and f.env.defs, 'the family carries env.defs')
+    for _, m in ipairs(f.members) do ok(A.match(f.template, t[m], { defs = f.env.defs }).ok, 'member ' .. m .. ' matches its template') end
+end)
