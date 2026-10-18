@@ -749,7 +749,11 @@ local function build(store, opts)
     end
     local funrets
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
+    -- (G7.HOOKS: a hooked function -> its hooks' ports; G7.XARGS: a function -> the calls bound to it with arguments
+    -- past its parameters, which the hook receives and the parameters drop, CART-1748)
+    G7.HOOKS, G7.XARGS = {}, {}
     local function bindcall(o, args, res, site, cerr)
+        local o0 = o
         if site and clone_at then
             local inst = clone_at(site, o)
             if inst then o = inst end
@@ -770,6 +774,11 @@ local function build(store, opts)
                 for i, pp in ipairs(fpp.params) do ha[i] = pp end
                 if fpp.vararg then ha[#ha + 1] = fpp.vararg; ha.spread = #ha end
                 G7.callc(args.hook, ha, new())
+                -- (but a call passing MORE arguments than the original's parameters hands the hook all of them, CART-1748)
+                local hk = G7.HOOKS[o]
+                if not hk then hk = {}; G7.HOOKS[o] = hk end
+                hk[#hk + 1] = args.hook
+                for _, xa in ipairs(G7.XARGS[o] or NOTHING) do G7.callc(args.hook, xa, new()) end
             end
             return
         end
@@ -790,6 +799,12 @@ local function build(store, opts)
                 elseif rl[1] then addobj(res, typeobj(rl[1])) end
             end
             return
+        end
+        if not fp.vararg and (#args > #fp.params or args.spread) then
+            local xl = G7.XARGS[o0]
+            if not xl then xl = {}; G7.XARGS[o0] = xl end
+            xl[#xl + 1] = args
+            for _, h in ipairs(G7.HOOKS[o0] or NOTHING) do G7.callc(h, args, new()) end
         end
         for i, a in ipairs(args) do if fp.params[i] then edge(a, fp.params[i]) end end
         if cerr and fp.err then edge(fp.err, cerr) end -- (what the callee raises, the caller raises: CART-1705)
@@ -1622,9 +1637,11 @@ local function build(store, opts)
                 local s = a and a:type() == 'string' and a:field('content')[1]
                 return s and txt(s) or '[]'
             end
+            -- (rawget(t, 'f') reads every RAW entry — one written under a computed key too: a named load without __index,
+            -- non-strict but on _G, as `t.f` is. Strict, it missed `t[k] = v` with k == 'f', CART-1746)
             if fname == 'rawget' and argn[1] and gbl() then
                 local tp = expr(argn[1]); if argn[2] then expr(argn[2]) end
-                return field(tp, strkey(argn[2]), true)
+                return field(tp, strkey(argn[2]))
             end
             if fname == 'rawset' and argn[3] and gbl() then
                 local tp = expr(argn[1]); expr(argn[2])
@@ -2630,7 +2647,16 @@ local function build(store, opts)
             end
         end
         for _, fp in ipairs(escf[f] or NOTHING) do taint(fp) end
-        if f:byte(1) ~= 1 and not G7.DYNHIT then G7.DYNHIT = true; for _, o in ipairs(esc) do G7.escreaders(o) end end
+        if f:byte(1) ~= 1 and not G7.DYNHIT then
+            G7.DYNHIT = true
+            for _, o in ipairs(esc) do G7.escreaders(o); G7.cpsrchit(o) end
+        end
+    end
+    -- (an escaped KEYED-COPY SOURCE is copied field by field, its OWN fields only: a hit field it lacks has no port, and
+    -- the copy never wrote it. Its `[]`, tainted, reaches every target's `[]`, which their named loads read — a whole
+    -- exact through `T2[k] = o[k]` after a store into a lost o, CART-1747; flowpath's cpdyn2)
+    function G7.cpsrchit(o)
+        if G7.CPAIR[o] then taint(ofp(o, '[]')) end
     end
     -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
     -- that already fired applied to it: a store of .f through a tainted base, a call reaching any escaped function)
@@ -2642,6 +2668,7 @@ local function build(store, opts)
             local o = q[i]; i = i + 1
             esc[#esc + 1] = o
             G7.escreaders(o)
+            if G7.DYNHIT then G7.cpsrchit(o) end
             for fk, fp in pairs(ofield[o] or NOTHING) do
                 if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
                 if field_hit[fk] then taint(fp) end
