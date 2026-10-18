@@ -433,3 +433,25 @@ test('flowdump: a dynamic store through a tainted target makes escaped tables we
     eq(3, count(S.hkeystop, '^tbl:m%.lua:7:'), 'x, y, z are key-open')
     eq(1, count(S.weak, '^tbl:m%.lua:13:'), 'L (listed, an unknown key, a value that holds nothing) is weak')
 end)
+
+-- (CART-1762: a load through a LOST base may run an escaped __index handler, which may raise: the loading function's
+-- error port is tainted once such a handler is possible)
+test('flowdump: a load through a tainted base taints the loading function\'s error port when __index is possible', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, table.concat({ '',
+        'local x, y, z = {}, {}, {}',
+        'local T = (#arg == 1 and x) or (#arg == 2 and y) or z',
+        'local P = setmetatable({}, { __index = function () error("no") end })',
+        'local function rd() return T.f end',
+        'return rd(), P' }, '\n') .. '\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local rdid
+    for i, nm in ipairs(D.names.functions) do if tostring(nm):match('::rd@') then rdid = i - 1 end end
+    ok(rdid ~= nil, 'rd is named')
+    local has = false
+    for _, id in ipairs(D.solution.err.taint) do if tonumber(id) == rdid then has = true end end
+    ok(has, 'rd\'s error port is tainted: ' .. vim.inspect(D.solution.err.taint))
+end)

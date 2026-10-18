@@ -2872,6 +2872,7 @@ local function build(store, opts)
     -- CART-1707: no name was ever possible, no parked port was released — a cap-cut metatable answered a whole exact.
     -- Recording them: 72 whole exact answers partial on the runtime-oracle tree, 0 wrong either way)
     local ALLOW, METAPEND = {}, {}
+    G7.ERRPEND, G7.ERRSET = {}, {} -- (load error ports waiting for an __index handler to become possible, CART-1762)
     local function meta_possible(mm)
         -- (a metatable slot stored through a lost base, `setmetatable(T, mt)` with T lost, gives ANY escaped table ANY
         -- escaped metatable; a hit of mm (or `[]`) puts any escaped value in that metatable's handler. Recorded
@@ -2896,7 +2897,16 @@ local function build(store, opts)
         TCUR = p
         for q in sit(succ[p]) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
-        for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end
+        for _, ld in ipairs(loads[p] or NOTHING) do
+            taint(ld[2])
+            -- (a load through a lost base may run an ESCAPED __index handler, which may raise: the load's error port.
+            -- Parked until such a handler is possible, as a handler port is, CART-1762)
+            local ep = LOADERR[ld[2]]
+            if ep and ld[1]:byte(1) ~= 1 and not tainted[ep] then
+                if ALLOW['__index'] then taint(ep)
+                elseif not G7.ERRSET[ep] then G7.ERRSET[ep] = true; G7.ERRPEND[#G7.ERRPEND + 1] = ep end
+            end
+        end
         local mm = METAH[p]
         if mm and not ALLOW[mm] then
             local l = METAPEND[mm]
@@ -3009,6 +3019,14 @@ local function build(store, opts)
     end
     do -- (release the handler names that became possible, and drain again)
         local released = false
+        if not ALLOW['__index'] and #G7.ERRPEND > 0 and meta_possible('__index') then
+            ALLOW['__index'] = true; released = true
+            if METAPEND['__index'] then for _, q in ipairs(METAPEND['__index']) do twork[#twork + 1] = q end; METAPEND['__index'] = nil end
+        end
+        if ALLOW['__index'] then
+            for _, ep in ipairs(G7.ERRPEND) do if not tainted[ep] then taint(ep); released = true end end
+            G7.ERRPEND, G7.ERRSET = {}, {}
+        end
         for nm, ports in pairs(METAPEND) do
             if not ALLOW[nm] and meta_possible(nm) then
                 ALLOW[nm] = true; released = true
