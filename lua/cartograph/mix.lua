@@ -1375,7 +1375,22 @@ function M.run(prog, fname, args, budget)
     if not f then refuse('no function ' .. tostring(fname)) end
     local env = {}
     for i, id in ipairs(f.params) do env[id] = args[i] end
-    local _, vs = ev.exec(f.body, env)
+    local ok, _, vs = pcall(ev.exec, f.body, env)
+    if not ok then
+        -- (an error the PROGRAM's own operation raised — `for _ = 1, nil`, nil arithmetic — is raised by the evaluator's
+        -- Lua at THIS file's line: it is the program's, at the statement that ran, as Lua prints it, so the original
+        -- and its residual raise the same message. It read `mix.lua:1325: 'for' limit must be a number`, found by
+        -- peergen over the toolbelt's examples, 2026-10-18)
+        local e = _
+        if type(e) == 'string' and ev.R.at then
+            local here = e:match('^(.-:%d+): ')
+            -- (this FILE's position — by name: mix stays inside its own subset S, so no debug.getinfo)
+            if here and here:match('mix%.lua:%d+$') then
+                e = (prog.where and prog.where(ev.R.at) or ('line ' .. ev.R.at)) .. ': ' .. e:sub(#here + 3)
+            end
+        end
+        error(e, 0)
+    end
     return vs and vs[1], ev.R.steps
 end
 

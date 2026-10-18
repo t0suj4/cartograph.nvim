@@ -44,9 +44,12 @@ local function measure(store, p)
         for j, i in ipairs(dyn) do full[i] = d[j] end
         local okw, want = pcall(MX.run, prog, entry, full, tonumber(p.budget or 2e6))
         local okg, got = pcall(f, unpack(d, 1, #dyn))
-        local same = okw and okg and vim.deep_equal(want, got)
+        local original = okw and want or ('raised: ' .. F.why(want))
+        local residual = okg and got or ('raised: ' .. MX.translate(tostring(got), map))
+        -- (both RAISE the same error: the residual keeps the original's behaviour there too)
+        local same = (okw and okg and vim.deep_equal(want, got)) or (not okw and not okg and original == residual)
         if not same then ok = false end
-        rows[si] = { sample = d, original = okw and want or ('raised: ' .. F.why(want)), residual = okg and got or ('raised: ' .. MX.translate(tostring(got), map)), same = same }
+        rows[si] = { sample = d, original = original, residual = residual, same = same }
     end
     return { text = text, stats = stats, division = division, samples = rows, accepted = ok and #rows > 0, cone = how.cone, members = how.members }
 end
@@ -80,6 +83,15 @@ local SRC = table.concat({
     'return M', '' }, '\n')
 
 E.examples = {
+    {
+        name = 'an error the PROGRAM raises (`for _ = 1, nil`) is the same on both sides, at the program\'s line, not mix\'s (found by peergen over the toolbelt)',
+        files = { ['m.lua'] = SRC },
+        params = { ref = 'm.lua::M.pow', samples = '[[1]]' },
+        expect = { holds = true, check = function (v)
+            local o = v.samples[1].original
+            return v.accepted and o:find('m.lua:%d+: \'for\' limit must be a number') ~= nil and not o:find('mix.lua', 1, true), o
+        end },
+    },
     {
         name = 'pow with n = 3 known: the loop is gone from the residual, and it equals the original on every sample',
         files = { ['m.lua'] = SRC },
