@@ -60,6 +60,7 @@ M.EXPERIMENTS = {
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
     trace = 'R.trace: the SOLVE as a bounded graph — ports folded onto their function, deliveries counted per (source, destination, kind), fan-in, saturation order, prototype replays (CART-1697)',
     ['strict-names'] = "a NAMED load reads only its field, never `[]` — the strict-global contract (a computed key never equals a named field) for every table, not only _G (CART-1697: the `[]` cells are the blob's back channel); unsound in principle, a contract",
+    ['strict-records'] = "a NAMED load on a RECORD skips `[]`; a MAP keeps it. A map site is a table constructor bound to a name its file indexes by computed key (`by_id = {}` with `b.by_id[id] = …`), decided before the solve (CART-1697)",
     callsite = 'a call binds a small closed function to an instance of its OWN per call site (as a generic for binds its iterator; CART-1697: the blob)',
 }
 local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
@@ -609,7 +610,7 @@ local function build(store, opts)
         -- = _G; G.q`: strict, as the identifier read is (the contract). Non-strict, it read every dynamic-key write —
         -- AceHook's `_G[method] = uid`: with LibStub's `_G[LIBSTUB_MAJOR]` read by name (a constant key, CART-1729's
         -- patch) the global LibStub held every value in the program)
-        if not strict and f ~= '[]' and (G7.ISG[o] or G7.EXP['strict-names']) and f:byte(1) ~= 1 then strict = true end
+        if not strict and f ~= '[]' and (G7.ISG[o] or G7.EXP['strict-names'] or (G7.EXP['strict-records'] and not G7.MAPSITE[o] and not TNAME[o])) and f:byte(1) ~= 1 then strict = true end
         local r = rd[o]
         if not r then r = {}; rd[o] = r end
         local l = r[f]
@@ -1120,6 +1121,7 @@ local function build(store, opts)
     -- (opts.litkeys, CART-1729: a constant local's port -> its string, a key through it is that name; the names each
     -- file assigns; value-keyed instances)
     G7.LITKEYS, G7.CONSTK, G7.REASGF, G7.VINST, G7.VINSTN = opts.litkeys or nil, {}, {}, {}, 0
+    G7.MAPNAMEF, G7.MAPSITE = {}, {} -- (experiment `strict-records`: file -> map names; object -> a map site)
     G7.MSELF = opts.selfseed and {} or nil -- (each `function T:m`'s self port and T's port: the self seed, CART-1715)
     -- (the modules the environment profile declares: every dotted prefix of a signature's path)
     function G7.profmod(name)
@@ -1261,6 +1263,34 @@ local function build(store, opts)
             scan(tree)
         end
         G7.REASG = G7.REASGF[file] or NOTHING
+        -- (experiment `strict-records`: the names this file indexes by a COMPUTED key in a store — `b.by_id[id] = …` gives
+        -- by_id — the last name of the store's base; a constructor bound to one is a MAP site)
+        if G7.EXP['strict-records'] and not G7.MAPNAMEF[file] then
+            local mn = {}
+            G7.MAPNAMEF[file] = mn
+            local function lastname(b)
+                local t = b:type()
+                if t == 'identifier' then local _, _, s0, _, _, e0 = b:range(true); return src:sub(s0 + 1, e0) end
+                if t == 'dot_index_expression' then local f = b:field('field')[1]; if f then local _, _, s0, _, _, e0 = f:range(true); return src:sub(s0 + 1, e0) end end
+                return nil
+            end
+            local function scan(n)
+                for _, x in tsutil.inamed, n, -1 do
+                    if x:type() == 'assignment_statement' then
+                        for _, v in tsutil.inamed, x:named_child(0), -1 do
+                            if v:type() == 'bracket_index_expression' then
+                                local k, b = v:field('field')[1], v:field('table')[1]
+                                local kt = k and k:type()
+                                if kt and kt ~= 'string' and kt ~= 'number' and b then local nm = lastname(b); if nm then mn[nm] = true end end
+                            end
+                        end
+                    end
+                    if x:named_child_count() > 0 then scan(x) end
+                end
+            end
+            scan(tree)
+        end
+        G7.MAPNAME = G7.MAPNAMEF and G7.MAPNAMEF[file] or NOTHING
         if G7.TR then G7.CURFN = 'chunk:' .. file end
         if G7.PROG == nil then G7.PROG = require('cartograph.programs').of(store) or false end
         if G7.PROG then G7.useenv(G7.mkenv(G7.PROG.env[file] or 'default')) end
@@ -1298,6 +1328,14 @@ local function build(store, opts)
         -- the rest of its block never runs — and is not walked. vimruntime's LuaLS stubs (lua/vim/_meta/*.lua) open with
         -- `error('Cannot require a meta file')`; walked as code, options.gen.lua's 1,404 option aliases through the
         -- accessor proxies were the solve's top merge (half of the CAP-256 solve). Reachability, not a stub marker
+        -- (experiment `strict-records`: a table constructor bound to a map name is a MAP site)
+        function G7.markmap(v, valnode, vp)
+            if not (G7.EXP['strict-records'] and valnode and vp and valnode:type() == 'table_constructor') then return end
+            local nm
+            if v:type() == 'identifier' then nm = txt(v)
+            elseif v:type() == 'dot_index_expression' then local f = v:field('field')[1]; nm = f and txt(f) end
+            if nm and G7.MAPNAME[nm] then for x in each(vp) do G7.MAPSITE[x] = true end end
+        end
         local function raises(x)
             if x:type() ~= 'function_call' then return false end
             local f = x:field('name')[1]
@@ -1917,7 +1955,9 @@ local function build(store, opts)
                         if v then
                             local key = (k and k:type() == 'identifier') and txt(k) or keyname(k)
                             if k and k:type() == 'identifier' then acc('key', k, key, nil, o) elseif k then acc_key('key', k, nil); if ACC and ACC[#ACC] and ACC[#ACC].sr == select(1, k:range()) then ACC[#ACC].obj = o end end
-                            edge(expr(v), ofp(o, key))
+                            local vp = expr(v)
+                            edge(vp, ofp(o, key))
+                            if G7.EXP['strict-records'] and v:type() == 'table_constructor' and G7.MAPNAME[key] then for x in each(vp) do G7.MAPSITE[x] = true end end
                             if k then local sp = new(); addobj(sp, STR); edge(sp, ofp(o, '{k}')) end
                         end
                     end
@@ -1967,6 +2007,7 @@ local function build(store, opts)
                     local i = 0
                     for _, v in tsutil.inamed, vl, -1 do
                         i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
+                        G7.markmap(v, el and el:named_child(i - 1), vals[i])
                         local ev = G7.LITKEYS and el and el:named_child(i - 1)
                         if ev and ev:type() == 'string' and v:type() == 'identifier' and not G7.REASG[txt(v)] then
                             local c = ev:field('content')[1]
@@ -1985,7 +2026,11 @@ local function build(store, opts)
                 G7.KBASE = {}
                 local vals = exprs(el, vl:named_child_count())
                 local i = 0
-                for _, v in tsutil.inamed, vl, -1 do i = i + 1; if vals[i] then assign(v, vals[i], el and el:named_child(i - 1)) end end
+                for _, v in tsutil.inamed, vl, -1 do
+                    i = i + 1
+                    if vals[i] then assign(v, vals[i], el and el:named_child(i - 1)) end
+                    G7.markmap(v, el and el:named_child(i - 1), vals[i])
+                end
                 G7.KBASE = nil
             elseif t == 'function_declaration' then
                 local nm = n:field('name')[1]

@@ -2003,3 +2003,27 @@ test('flowtype experiment strict-names: a named load skips the computed-key cell
     ok(not callee(R0):find('^m%.lua::t%.go@1$'), 'off: t[k] may be go — ' .. callee(R0))
     eq('m.lua::t.go@1', callee(R1), 'strict-names: only the named go')
 end)
+
+-- (experiment `strict-records`, CART-1697: a constructor bound to a name its file indexes by computed key is a MAP site;
+-- every other table is a RECORD, whose named loads skip `[]`)
+test('flowtype experiment strict-records: a record skips the computed-key cell, a map keeps it', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local rec = { go = function () return 1 end }',
+        'local function put(x, k, v) x[k] = v end',
+        'put(rec, arg[1], function () return 2 end)',
+        'local by_id = {}',
+        'by_id[arg[1]] = function () return 3 end',
+        'local a = rec.go()',
+        'local b = by_id.special()',
+        'return a, b',
+    }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local function callee(R, nm) for _, c in ipairs(store.data.calls) do if (c.full or c.callee) == nm then return table.concat(R.callee_of(c) or {}, ',') end end end
+    local R0 = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    local R1 = flowtype.solve(store, { open = false, ctx = false, allcallees = true, exp = 'strict-records' })
+    vim.fn.delete(root, 'rf')
+    ok(callee(R0, 'rec.go'):find(',', 1, true), 'off: put\'s computed-key write may be rec.go — ' .. callee(R0, 'rec.go'))
+    eq('m.lua::go@0', callee(R1, 'rec.go'), 'strict-records: rec is a record, only its named go')
+    ok(callee(R1, 'by_id.special') ~= '', 'by_id is a map site: its computed-key entries still answer a named load')
+end)
