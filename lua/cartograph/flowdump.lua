@@ -332,7 +332,9 @@ function M.build(rec, X)
                     for b in X.each(fp) do ks[#ks + 1] = b end
                     table.sort(ks)
                     if #ks > 0 then hkj[#hkj + 1] = ('[%d,%s]'):format(o, jarr(ks)) end
-                    if X.top[fp] then hktop[#hktop + 1] = o end -- (a SATURATED key set: any key, CART-1739)
+                    -- (a SATURATED key set: any key, CART-1739 — and a TAINTED one, a dynamic store with a lost key: under the
+                    -- taint reading it may hold any key too; dumped as closed, the checker failed 182 vimruntime stores, CART-1752)
+                    if X.top[fp] or X.tainted[fp] then hktop[#hktop + 1] = o end
                     goto nextf
                 end
                 if X.tainted[fp] then hxj[#hxj + 1] = ('[%d,%s]'):format(o, f == '[]' and 'null' or tostring(F(f))) end

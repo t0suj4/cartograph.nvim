@@ -307,3 +307,20 @@ test('flowdump: the contract clauses are written in name order', function ()
     ok(#ks > 3, 'clauses: ' .. #ks)
     eq(sorted, ks, 'in name order')
 end)
+
+-- (CART-1752: a TAINTED key set — a dynamic store whose key is lost but not saturated — may hold any key under the
+-- taint reading, as a saturated one may: hkeystop lists it. Dumped closed, the checker failed 182 vimruntime stores)
+test('flowdump: hkeystop lists a TAINTED key set, not only a saturated one', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    -- (k saturates past CAP 2; k2 is fed by it, tainted but not saturated; t's key set is written from k2)
+    local ok_, D = pcall(dump, '\nlocal x, y, z = {}, {}, {}\nlocal k = (#arg == 1 and x) or (#arg == 2 and y) or z\nlocal k2 = k\nlocal t = {}\nt[k2] = 1\nreturn t\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local lab = {}
+    for _, s in ipairs(D.sites) do lab[s.id] = s.label end
+    local tl
+    for _, id in ipairs(D.solution.hkeystop) do if tostring(lab[id]):match('^tbl:m%.lua:') then tl = lab[id] end end
+    ok(tl ~= nil, 'a table key set is listed: ' .. vim.inspect(D.solution.hkeystop))
+end)

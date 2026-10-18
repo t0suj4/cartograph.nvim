@@ -2614,6 +2614,16 @@ local function build(store, opts)
                 for x in each(fp) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
             end
             for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
+            -- (ESCRET, the dual of the params rule: what an escaped function RETURNS escapes. A lost call may have
+            -- called it, and its result port, tainted, holds only escaped objects. `local r = h()` through a lost h
+            -- that was mk returned mk's table, whose method r.go then ran unseen; the old `.f` rule had covered it by
+            -- coincidence, fhitg did not: CART-1753, flowpath's rule dialog)
+            local fpp = fnports[o]
+            if fpp then
+                for _, r in pairs(fpp.rets or { fpp.ret }) do
+                    for x in each(r) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                end
+            end
         end
     end
     local field_hit, params_hit = {}, false
@@ -2680,6 +2690,11 @@ local function build(store, opts)
             end
             for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; q[#q + 1] = c end end
             local fpp = fnports[o]
+            if fpp then -- (escret, as above: an escaped function's returns escape with it, CART-1753)
+                for _, r in pairs(fpp.rets or { fpp.ret }) do
+                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] then escaped[x] = true; q[#q + 1] = x end end
+                end
+            end
             if fpp and params_hit then G7.tparams(fpp) end
         end
     end
