@@ -2027,3 +2027,38 @@ test('flowtype experiment strict-records: a record skips the computed-key cell, 
     eq('m.lua::go@0', callee(R1, 'rec.go'), 'strict-records: rec is a record, only its named go')
     ok(callee(R1, 'by_id.special') ~= '', 'by_id is a map site: its computed-key entries still answer a named load')
 end)
+
+-- (CART-1754: a FUNCTION has no metatable of its own — the dump's contract function-no-metatable; calling one never
+-- consults __call. A builtin's call — a generic for's iterator — goes through the __call route like a direct call, and
+-- the function's `\1mt` cell, once the metatable slot and `__call` (or `[]`) were hit through a lost base, made the
+-- loop's values partial: 74 of the runtime oracle's whole answers. Pinned both ways: whole here, partial through a
+-- callable TABLE)
+test('flowtype: a plain function iterator stays whole after `\\1mt` and `__call` are hit; a callable table does not', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local sinks = {}
+    for k = 1, 70 do sinks[k] = 'pick({})' end
+    local function src(iter)
+        return table.concat({
+            'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+            'local a = setmetatable({}, { __index = A })', 'local _ = setmetatable({}, { __index = B }):m()',
+            'local function pick(x) return x end', table.concat(sinks, '\n'),
+            'local T = pick({})', 'setmetatable(T, {})', 'T.__call = 1',
+            iter,
+            'pick(it)',
+            'for v in it, nil do local _ = v:m() end' }, '\n') .. '\n'
+    end
+    local callrec = require 'cartograph.callrec'
+    local function answer(iter)
+        local root = tree({ ['m.lua'] = src(iter) })
+        store.ingest(ts.extract(root))
+        local call
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'v:m' then call = c end end
+        local v = call and flowtype.solve(store, { open = false }).verdict(call)
+        vim.fn.delete(root, 'rf')
+        return v
+    end
+    local v = answer('local function it(s, c) if c == nil then return a end end')
+    ok(v and v.kind == 'exact' and not v.partial, 'a plain function iterator: whole: ' .. vim.inspect(v))
+    v = answer('local it = setmetatable({}, { __call = function (s, c) if c == nil then return a end end })')
+    ok(v and v.partial, 'a callable TABLE iterator: partial (its metatable may be any escaped one): ' .. vim.inspect(v))
+end)

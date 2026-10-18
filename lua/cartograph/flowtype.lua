@@ -611,6 +611,10 @@ local function build(store, opts)
         -- = _G; G.q`: strict, as the identifier read is (the contract). Non-strict, it read every dynamic-key write —
         -- AceHook's `_G[method] = uid`: with LibStub's `_G[LIBSTUB_MAJOR]` read by name (a constant key, CART-1729's
         -- patch) the global LibStub held every value in the program)
+        -- (a FUNCTION has no metatable of its own — the dump's contract `function-no-metatable`: calling one never
+        -- consults __call, and `setmetatable(fn)` raises. Its `\1mt` port, made by every call's __call route, was
+        -- tainted by a field hit of `\1mt` and made each generic for over a plain iterator partial, CART-1754)
+        if f == '\1mt' and fnports[o] then return end
         if not strict and f ~= '[]' and (G7.ISG[o] or G7.EXP['strict-names'] or (G7.EXP['strict-records'] and not G7.MAPSITE[o] and not TNAME[o])) and f:byte(1) ~= 1 then strict = true end
         local r = rd[o]
         if not r then r = {}; rd[o] = r end
@@ -903,6 +907,16 @@ local function build(store, opts)
         local h = field(field(x, '\1mt', true), mm) -- (non-strict: a handler written `mt[k] = f` counts)
         METAH[h] = mm
         callc(h, args, res, site, cerr)
+    end
+    -- (a value a BUILTIN calls — pcall's and xpcall's function, xpcall's handler, a generic for's iterator — is called as
+    -- Lua calls anything: a callable TABLE runs its __call with itself first, as a direct call does (CART-1701).
+    -- `pcall(obj, b)` gave the handler no arguments, a whole exact the run falsifies, CART-1754)
+    function G7.callany(callee, args, res, site, cerr)
+        callc(callee, args, res, site, cerr)
+        local ma = { callee }
+        for _, ap in ipairs(args) do ma[#ma + 1] = ap end
+        if args.spread then ma.spread = args.spread + 1 end
+        metacall(callee, '__call', ma, res, cerr)
     end
     -- (a store `x.f = v` / `x[k] = v` also reaches x's `__newindex`: a FUNCTION is called with (x, key, v), a TABLE
     -- receives the store — CART-1704)
@@ -1748,11 +1762,11 @@ local function build(store, opts)
                     for k = 1, want - 1 do fl[k] = new(); out[k + 1] = fl[k] end
                     local fv = expr(argn[1])
                     G7.ins({ 'pcall', out, fv, aps }, fname == 'xpcall' and 'divergence:xpcall' or nil)
-                    callc(fv, aps, fl, nil, perr)
+                    G7.callany(fv, aps, fl, nil, perr)
                     if out[2] then
                         if fname == 'xpcall' and argn[2] then
                             local hr = new()
-                            callc(expr(argn[2]), { perr }, hr, nil, curerr())
+                            G7.callany(expr(argn[2]), { perr }, hr, nil, curerr())
                             edge(hr, out[2])
                         else edge(perr, out[2]) end
                     end
@@ -1761,7 +1775,7 @@ local function build(store, opts)
                 local res = new()
                 local fv = expr(argn[1])
                 G7.ins({ 'pcall', { res }, fv, aps }, fname == 'xpcall' and 'divergence:xpcall' or nil)
-                callc(fv, aps, res, nil, perr)
+                G7.callany(fv, aps, res, nil, perr)
                 return res
             end) end
             if fname == 'table.insert' and argn[1] then
@@ -2130,7 +2144,7 @@ local function build(store, opts)
                         if trip[3] then edge(trip[3], ctl) end
                         if V[1] then edge(V[1], ctl) end
                         -- (the site: each loop binds a small closed iterator to an instance of its own — CLONE)
-                        callc(trip[1], { trip[2] or new(), ctl }, V, ctl, curerr())
+                        G7.callany(trip[1], { trip[2] or new(), ctl }, V, ctl, curerr())
                     end
                 elseif cl then
                     for _, x in tsutil.inamed, cl, -1 do
