@@ -1662,8 +1662,13 @@ local function build(store, opts)
                 return field(tp, strkey(argn[2]))
             end
             if fname == 'rawset' and argn[3] and gbl() then
-                local tp = expr(argn[1]); expr(argn[2])
-                storec(tp, strkey(argn[2]), expr(argn[3]))
+                -- (a computed key is the store's key, for the dump's storeDyn, and it enters the key set, as `t[k] = v`
+                -- does: the dump had named no key, CART-1739's residue on vimruntime)
+                local tp, kp = expr(argn[1]), expr(argn[2])
+                local vp, key = expr(argn[3]), strkey(argn[2])
+                if key == '[]' then G7.NEXTK = kp end
+                storec(tp, key, vp)
+                storec(tp, '{k}', kp)
                 return tp
             end
             -- (hooksecurefunc([t,] "name", hook): a call of the hooked function also runs the hook with its arguments)
@@ -1990,10 +1995,17 @@ local function build(store, opts)
                         if v then
                             local key = (k and k:type() == 'identifier') and txt(k) or keyname(k)
                             if k and k:type() == 'identifier' then acc('key', k, key, nil, o) elseif k then acc_key('key', k, nil); if ACC and ACC[#ACC] and ACC[#ACC].sr == select(1, k:range()) then ACC[#ACC].obj = o end end
+                            -- (a COMPUTED key `[e] = v` is walked — Lua evaluates it before the value — and it is the field's
+                            -- key: the dump's storeDyn names it, and its VALUES enter the key set. A string stood there for
+                            -- every key, though `[severity.ERROR] = …` keys by a number, CART-1739's residue)
+                            local kp = k and key == '[]' and expr(k) or nil
                             local vp = expr(v)
+                            G7.NEXTK = kp
                             edge(vp, ofp(o, key))
+                            G7.NEXTK = nil
                             if G7.EXP['strict-records'] and v:type() == 'table_constructor' and G7.MAPNAME[key] then for x in each(vp) do G7.MAPSITE[x] = true end end
-                            if k then local sp = new(); addobj(sp, STR); edge(sp, ofp(o, '{k}')) end
+                            if kp then edge(kp, ofp(o, '{k}'))
+                            elseif k then local sp = new(); addobj(sp, STR); edge(sp, ofp(o, '{k}')) end
                         end
                     end
                 end
@@ -2303,7 +2315,7 @@ local function build(store, opts)
                 elseif fowner[a] and fname[a] == '{k}' then G7.gap('table-keys', { b, a })
                 elseif fowner[b] then
                     local hv = REC.objvar[fowner[b]]
-                    if hv then G7.ins({ 'store', hv, fname[b], a }) else G7.gap('store-field-port', { a, b }) end
+                    if hv then G7.ins({ 'store', hv, fname[b], a, fname[b] == '[]' and G7.NEXTK or nil }) else G7.gap('store-field-port', { a, b }) end
                 elseif fowner[a] then
                     local hv = REC.objvar[fowner[a]]
                     if hv then G7.ins({ 'load', b, hv, fname[a] }) else G7.gap('load-field-port', { a, b }) end

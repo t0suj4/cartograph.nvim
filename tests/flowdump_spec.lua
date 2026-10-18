@@ -324,3 +324,19 @@ test('flowdump: hkeystop lists a TAINTED key set, not only a saturated one', fun
     for _, id in ipairs(D.solution.hkeystop) do if tostring(lab[id]):match('^tbl:m%.lua:') then tl = lab[id] end end
     ok(tl ~= nil, 'a table key set is listed: ' .. vim.inspect(D.solution.hkeystop))
 end)
+
+-- (CART-1739's residue, 29 vimruntime failures: a constructor's COMPUTED key `{ [e] = v }` and rawset(t, k, v) were
+-- dumped as storeDyn with no key, and the constructor's key set held a string for every key)
+test('flowdump: a constructor\'s computed key and rawset\'s key are named by their storeDyn', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (keys read from a FIELD, as vimruntime's `[watch.FileChangeType.Created] = …`: neither a constant nor an index)
+    local D = dump('\nlocal K = { x = tostring(#arg) }\nlocal t = { [K.x] = 1 }\nlocal u = {}\nrawset(u, K.x, 2)\nreturn t, u\n')
+    local dyn, named = 0, 0
+    for _, F in ipairs(D.functions) do
+        for _, i in ipairs(F.body) do
+            if i[1] == 'storeDyn' then dyn = dyn + 1; if i[3] ~= vim.NIL then named = named + 1 end end
+        end
+    end
+    eq(2, dyn, 'two dynamic stores: the constructor field and rawset')
+    eq(2, named, 'both name their key')
+end)
