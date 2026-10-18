@@ -682,6 +682,7 @@ local function build(store, opts)
             local tg = PTAG[x]
             if tg and tg.d < 3 then PTAG[dst] = { fn = tg.fn, j = tg.j, path = tg.path .. '.' .. tostring(f), d = tg.d + 1 } end
         end
+        if f == '[]' and G7.NEXTK then G7.LOADK[dst] = G7.NEXTK end -- (the access's key port, for __index: CART-1750)
         local l = loads[x]
         if not l then l = {}; loads[x] = l end
         l[#l + 1] = { f, dst, strict }
@@ -751,7 +752,7 @@ local function build(store, opts)
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
     -- (G7.HOOKS: a hooked function -> its hooks' ports; G7.XARGS: a function -> the calls bound to it with arguments
     -- past its parameters, which the hook receives and the parameters drop, CART-1748)
-    G7.HOOKS, G7.XARGS = {}, {}
+    G7.HOOKS, G7.XARGS, G7.LOADK = {}, {}, {}
     local function bindcall(o, args, res, site, cerr)
         local o0 = o
         if site and clone_at then
@@ -835,7 +836,9 @@ local function build(store, opts)
     idxcall = function (g, o, f, dst)
         local op = OBJPORT[o]
         if not op then op = new(); OBJPORT[o] = op; addobj(op, o) end
-        local kp = KEYPORT[f]
+        -- (a DYNAMIC load passes its own key: `t[b]` runs __index(t, b). The shared KEYPORT['[]'] holds nothing, so an
+        -- object or tainted key never reached the handler, CART-1750)
+        local kp = f == '[]' and G7.LOADK[dst] or KEYPORT[f]
         if not kp then
             kp = new(); KEYPORT[f] = kp
             if f ~= '[]' then addobj(kp, typeobj(f == '#' and 'number' or 'string')) end
@@ -2760,6 +2763,10 @@ local function build(store, opts)
     -- Recording them: 72 whole exact answers partial on the runtime-oracle tree, 0 wrong either way)
     local ALLOW, METAPEND = {}, {}
     local function meta_possible(mm)
+        -- (a metatable slot stored through a lost base, `setmetatable(T, mt)` with T lost, gives ANY escaped table ANY
+        -- escaped metatable; a hit of mm (or `[]`) puts any escaped value in that metatable's handler. Recorded
+        -- metatables alone missed it, and a call through an escaped table kept an untainted result, CART-1751)
+        if field_hit['\1mt'] and (field_hit[mm] or field_hit['[]']) then return true end
         for _, ms in ipairs(MTSTORES) do
             local vp = ms[2]
             if top[vp] or tainted[vp] then return true end
