@@ -806,8 +806,8 @@ local function build(store, opts)
             local rl = TNAME[o] and funrets(TNAME[o])
             if rl then
                 if type(res) == 'table' then
-                    for i, r in ipairs(res) do if rl[i] then addobj(r, typeobj(rl[i])) end end
-                elseif rl[1] then addobj(res, typeobj(rl[1])) end
+                    for i, r in ipairs(res) do if rl[i] then addobj(r, G7.retobj(rl[i], r)) end end
+                elseif rl[1] then addobj(res, G7.retobj(rl[1], res)) end
             end
             return
         end
@@ -947,11 +947,12 @@ local function build(store, opts)
     -- members only, a store raises or is ignored. Declared by the environment profile — `kinds[T]`, or `types[T].kind`
     -- — and opts.host_kinds; else the Lua primitives and function types are 'prim', every other host type 'members'.
     -- The dump carries it per host site for the Lean certificate's supplied premise.
-    -- ⚠ A Lua TABLE type a host function returns (`string[]`, `table<K, V>`) is writable, so 'open' is its true kind;
-    -- it stays 'members' by default because ONE type object stands for every value of the type, and open it merges the
-    -- stores to all of them: measured on vimruntime, solve 17 -> 31 s, 520 -> 792 MB, oracle whole typed 153 -> 76.
-    -- The honest fix is a fresh object per returning call (CART-1761's note)
-    G7.HKINDS = {}
+    -- ⚠ A Lua TABLE type a host function returns (`string[]`, `table<K, V>`) is writable, so 'open' is its true kind; it
+    -- stays 'members' until the user decides (CART-1761). Measured on vimruntime: open with ONE type object for every
+    -- value merged their stores (solve 17 -> 31 s, 520 -> 792 MB, oracle whole typed 153 -> 76); open and CREATED per
+    -- call site (G7.retobj) costs nothing in time (17.2 s) but moves 111 vimruntime rows (46 partial string -> no
+    -- answer, 36 no answer -> partial) and 37 repo rows whole -> partial: fresh objects multiply what ports hold
+    G7.HKINDS, G7.CREATES, G7.FRESH = {}, {}, {}
     do
         local HKINDS = G7.HKINDS
         local P = require 'cartograph.spec.profile'
@@ -960,8 +961,10 @@ local function build(store, opts)
             for k, v in pairs(pr and pr.sigs or NOTHING) do if PSIGS[k] == nil then PSIGS[k] = v end end
             for t, k in pairs(pr and pr.kinds or NOTHING) do if HKINDS[t] == nil then HKINDS[t] = k end end
             for t, v in pairs(pr and pr.types or NOTHING) do if type(v) == 'table' and v.kind and HKINDS[t] == nil then HKINDS[t] = v.kind end end
+            for sk, c in pairs(pr and pr.creates or NOTHING) do if G7.CREATES[sk] == nil then G7.CREATES[sk] = c end end
         end
         for t, k in pairs(opts.host_kinds or NOTHING) do HKINDS[t] = k end
+        for sk, c in pairs(opts.creates or NOTHING) do G7.CREATES[sk] = c end
     end
     function G7.hostkind(tn)
         local HKINDS = G7.HKINDS
@@ -970,6 +973,25 @@ local function build(store, opts)
         if SCALAR[tn] or tn:match('^%(?fun%(') or tn == 'function' then k = 'prim' else k = 'members' end
         HKINDS[tn] = k
         return k
+    end
+    -- ★ CREATION (the user: "we're missing creation semantics"). A profile signature says what TYPE it returns, not how
+    -- the value COMES TO BE: created by the call (`vim.split`, `io.open`, WoW's CreateFrame), one of its arguments (a
+    -- generic `T -> T`: genarg, CART-1653), or an existing host object (`io.stdout`). Declared by the profile's
+    -- `creates[sig] = 'new' | 'shared'` and opts.creates; else an OPEN kind is 'new' — its fields are written, so two
+    -- calls' values must not share them — and every other kind 'shared' (no fields: identity cannot matter). A 'new'
+    -- value is an object of its own per call SITE (its result port), typed as the type object is
+    function G7.creates(key, rt)
+        local c = key and G7.CREATES[key]
+        if c then return c end
+        return G7.hostkind(rt) == 'open' and 'new' or 'shared'
+    end
+    function G7.retobj(rt, r, key)
+        if G7.creates(key, rt) ~= 'new' then return typeobj(rt) end
+        local m = G7.FRESH[r]
+        if not m then m = {}; G7.FRESH[r] = m end
+        local o = m[rt]
+        if not o then o = newobj('new:' .. rt .. '@' .. tostring(r)); TNAME[o] = rt; m[rt] = o end
+        return o
     end
     -- (a declared type that is ONE type: `X?` / `X|nil` is X, a real union is none)
     local function onetype(ty)
@@ -1050,7 +1072,7 @@ local function build(store, opts)
         for o in each(recv) do
             local tn = TNAME[o]
             local rt = tn and retk(tn .. '#' .. m, k)
-            if rt then addobj(res, typeobj(rt)) end
+            if rt then addobj(res, G7.retobj(rt, res, tn .. '#' .. m)) end
         end
     end
     local function solve()
@@ -1124,7 +1146,7 @@ local function build(store, opts)
                         for _, o in dit(d) do
                             local tn = TNAME[o]
                             local rt = tn and retk(tn .. '#' .. mf[1], mf[3] or 1)
-                            if rt then addobj(mf[2], typeobj(rt)) end
+                            if rt then addobj(mf[2], G7.retobj(rt, mf[2], tn .. '#' .. mf[1])) end
                         end
                     end
                     for _, idx in ipairs(protos_at[p] or NOTHING) do
@@ -1896,7 +1918,7 @@ local function build(store, opts)
                     if gi then if aps[gi] then edge(aps[gi], r) end
                     else
                         local rt = retk(key, k)
-                        if rt then addobj(r, typeobj(rt)) end
+                        if rt then addobj(r, G7.retobj(rt, r, key)) end
                     end
                 end
             end

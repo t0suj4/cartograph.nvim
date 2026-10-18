@@ -2082,3 +2082,24 @@ test('flowtype: an OPEN host type reads back a field stored on it; a members one
     ok(open and open.kind == 'exact' and #open.targets == 1 and tostring(open.targets[1]):match('A%.m'), 'open: A.m: ' .. vim.inspect(open))
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-1761, creation: a profile signature says what TYPE it returns, not how the value comes to be. An OPEN host type
+-- is CREATED per call site by default (`creates[sig] = 'new'`): two io.open results are two objects, so a field stored
+-- on one is not read from the other. Declared 'shared', they are one object again)
+test('flowtype: an open host value is created per call: a field stored on one is not read from another', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+        'local a = setmetatable({}, { __index = A })', 'local b = setmetatable({}, { __index = B })',
+        'local f1, f2 = io.open("x"), io.open("y")', 'f1.mine = a', 'f2.mine = b',
+        'local g = f1.mine', 'return g:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'g:m' then call = c end end
+    local new = flowtype.solve(store, { open = false, host_kinds = { file = 'open' } }).verdict(call)
+    ok(new and new.kind == 'exact' and #new.targets == 1 and tostring(new.targets[1]):match('A%.m'), 'new per call: only A.m: ' .. vim.inspect(new))
+    local shared = flowtype.solve(store, { open = false, host_kinds = { file = 'open' }, creates = { ['io#open'] = 'shared' } }).verdict(call)
+    ok(shared and #(shared.targets or {}) == 2, 'shared: one object, both methods: ' .. vim.inspect(shared))
+    vim.fn.delete(root, 'rf')
+end)
