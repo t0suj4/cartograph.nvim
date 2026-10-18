@@ -60,6 +60,7 @@ M.EXPERIMENTS = {
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
     trace = 'R.trace: the SOLVE as a bounded graph — ports folded onto their function, deliveries counted per (source, destination, kind), fan-in, saturation order, prototype replays (CART-1697)',
     ['strict-names'] = "a NAMED load reads only its field, never `[]` — the strict-global contract (a computed key never equals a named field) for every table, not only _G (CART-1697: the `[]` cells are the blob's back channel); unsound in principle, a contract",
+    ['fhit-all'] = "the `.f` rule as it was before CART-1697's rule dialog: a call through a tainted load of `.f` taints the parameters of EVERY function stored as `.f`, not only _G's (for comparison)",
     ['strict-records'] = "a NAMED load on a RECORD skips `[]`; a MAP keeps it. A map site is a table constructor bound to a name its file indexes by computed key (`by_id = {}` with `b.by_id[id] = …`), decided before the solve (CART-1697)",
     callsite = 'a call binds a small closed function to an instance of its OWN per call site (as a generic for binds its iterator; CART-1697: the blob)',
 }
@@ -2828,7 +2829,12 @@ local function build(store, opts)
         -- cut short, so the method it would have read need not be ESCAPED — a class method sitting in its prototype's
         -- field never reaches a saturated port when the instances that would read it were dropped upstream. arktype:
         -- CompiledFunction.return's `this` held 3 objects untainted at CAP 64, the answer through it a WHOLE exact that
-        -- CAP 256 widened to a set. Every function held under that field name, anywhere, has its parameters tainted
+        -- CAP 256 widened to a set. Every function held under that field name BY A GLOBALS TABLE has its parameters
+        -- tainted. Only _G's: a lost load's base holds escaped objects, whose functions the params rule already covers,
+        -- or _G, which never escapes (the contract). Every function anywhere was the rule until flowpath's rule dialog
+        -- (CART-1697): `fhitg`, 0 wrong in routegen's 8,000 candidates, -21% partial answers on vimruntime and -10% on
+        -- the repo. What the full rule had covered beyond _G was coincidence, now covered by the direct rules: the
+        -- handler key (CART-1750) and the parked __call (CART-1751)
         if calls[p] then
             if not loadf then
                 loadf = {}
@@ -2842,11 +2848,13 @@ local function build(store, opts)
                 -- scan of every object's fields per name hit was the taint phase's top line, ~19 s on WoW w2)
                 if not G7.FNF then
                     G7.FNF = {}
-                    for _, m in pairs(ofield) do
-                        for fk, fp in pairs(m) do
-                            if not top[fp] then
-                                for x in each(fp) do
-                                    if fnports[x] then local l = G7.FNF[fk]; if not l then l = {}; G7.FNF[fk] = l end; l[#l + 1] = x end
+                    for o, m in pairs(ofield) do
+                        if G7.ISG[o] or G7.EXP['fhit-all'] then
+                            for fk, fp in pairs(m) do
+                                if not top[fp] then
+                                    for x in each(fp) do
+                                        if fnports[x] then local l = G7.FNF[fk]; if not l then l = {}; G7.FNF[fk] = l end; l[#l + 1] = x end
+                                    end
                                 end
                             end
                         end
