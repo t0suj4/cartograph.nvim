@@ -1969,5 +1969,23 @@ test('flowtype experiment trace: deliveries per (source, destination, kind), the
     eq(nil, R0.trace, 'off: no trace')
     eq(2, R.trace.maxset['m.lua::id@0'], 'id merges both callers\' tables')
     eq(2, R.trace.edges['chunk:m.lua\tm.lua::id@0\tedge'], 'two objects bound into id')
-    eq(2, R.trace.edges['m.lua::id@0\tchunk:m.lua\tcopy'], 'and returned')
+    -- (id's return port is id's own: its 2 merged objects reach BOTH call results — the merge's fan-out, 4 deliveries)
+    eq(4, R.trace.edges['m.lua::id@0\tchunk:m.lua\tcopy'], 'and returned to both callers')
+end)
+
+-- (CART-1745: a statement calling the GLOBAL error never returns — the rest of its block is not walked. vimruntime's LuaLS
+-- stubs open with `error('Cannot require a meta file')`; a local named error is not the global)
+test('flowtype: an unconditional raise ends its block — a stub chunk defines nothing; a local `error` does not count', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = 'local M = {}\nerror("a declaration file")\nfunction M.go() return 1 end\nreturn M\n',
+        ['n.lua'] = 'local function error() end\nlocal N = {}\nerror()\nfunction N.go() return 2 end\nreturn N\n',
+        ['a.lua'] = 'local M = require "m"\nlocal N = require "n"\nlocal x = M.go()\nlocal y = N.go()\nreturn x, y\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    vim.fn.delete(root, 'rf')
+    local function callee(name) for _, c in ipairs(store.data.calls) do if c.file == 'a.lua' and (c.full or c.callee) == name then return table.concat(R.callee_of(c) or {}, ',') end end end
+    eq('', callee('M.go'), 'm.lua stops at its raise: M.go is never defined')
+    eq('n.lua::N.go@3', callee('N.go'), 'n.lua\'s error is a local function: the chunk runs on')
 end)

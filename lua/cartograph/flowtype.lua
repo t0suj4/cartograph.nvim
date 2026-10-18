@@ -1293,6 +1293,17 @@ local function build(store, opts)
             return G7.gport(name), true
         end
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
+        -- ★ AN UNCONDITIONAL RAISE ENDS ITS BLOCK (CART-1745): a statement calling the GLOBAL `error` never returns, so
+        -- the rest of its block never runs — and is not walked. vimruntime's LuaLS stubs (lua/vim/_meta/*.lua) open with
+        -- `error('Cannot require a meta file')`; walked as code, options.gen.lua's 1,404 option aliases through the
+        -- accessor proxies were the solve's top merge (half of the CAP-256 solve). Reachability, not a stub marker
+        local function raises(x)
+            if x:type() ~= 'function_call' then return false end
+            local f = x:field('name')[1]
+            if not (f and f:type() == 'identifier' and txt(f) == 'error') then return false end
+            for i = #scopes, 1, -1 do if scopes[i]['error'] then return false end end
+            return true
+        end
         local fnstack = {}
         -- (where an error raised HERE goes: the enclosing function's error port; module-level code's, the chunk set)
         local function curerr() local f = fnstack[#fnstack]; return f and f.err or gerr() end
@@ -1404,14 +1415,14 @@ local function build(store, opts)
             local id = inst and clone.id or ((not clone or isctx) and fnmap[l .. ':' .. c]) or ('ts:' .. kfile .. ':' .. l .. ':' .. c)
             local p = new()
             local o = newobj(id)
+            local trfn0 = G7.CURFN -- (experiment `trace`: from here the ports are the function's own — params, ret, err)
+            if G7.TR then G7.CURFN = id end
             addobj(p, o)
             local fp = { params = {}, ret = inst and new() or port('r:' .. id), id = id, inst = inst or nil }
             fp.rets = { fp.ret }
             fp.err = inst and new() or port('e:' .. id) -- (what it raises, CART-1705)
             if G7.REC then G7.REC.errp[fp.err] = true end
             fnports[o] = fp
-            local trfn0 = G7.CURFN
-            if G7.TR then G7.CURFN = id end
             -- (a nested function inherits its parent's environment — a top-level one its file CHUNK's: G7.fenv)
             local pid = fnstack[#fnstack] and fnstack[#fnstack].id or G7.CHUNK
             if pid and not inst and not clone then local kl = G7.KIDS[pid]; if not kl then kl = {}; G7.KIDS[pid] = kl end; kl[#kl + 1] = id end
@@ -1447,7 +1458,7 @@ local function build(store, opts)
             if inst and clone.consts then for j, sv in pairs(clone.consts) do if fp.params[j] then G7.CONSTK[fp.params[j]] = sv end end end
             fnstack[#fnstack + 1] = fp
             local body = n:field('body')[1]
-            if body then for _, s in tsutil.inamed, body, -1 do stmt(s) end end
+            if body then for _, s in tsutil.inamed, body, -1 do stmt(s); if raises(s) then break end end end
             fnstack[#fnstack] = nil
             fnbase[#fnbase] = nil
             fnmeta[#fnmeta] = nil
@@ -2062,11 +2073,11 @@ local function build(store, opts)
                         else expr(x) end
                     end
                 end
-                for _, x in tsutil.inext, n, -1 do if x:named() and x ~= cl then stmt(x) end end
+                for _, x in tsutil.inext, n, -1 do if x:named() and x ~= cl then stmt(x); if raises(x) then break end end end
                 scopes[#scopes] = nil
             elseif t == 'block' or t == 'do_statement' then
                 scopes[#scopes + 1] = {}
-                for _, x in tsutil.inamed, n, -1 do stmt(x) end
+                for _, x in tsutil.inamed, n, -1 do stmt(x); if raises(x) then break end end
                 scopes[#scopes] = nil
             elseif t == 'function_call' then callv(n)
             else
@@ -2098,7 +2109,7 @@ local function build(store, opts)
             expr = function (x) local m = G7.M; G7.M = 0; local a, b = e0(x); G7.M = m; return a, b end
             callv = function (x, w) local m = G7.M; G7.M = 0; local a, b = c0(x, w); G7.M = m; return a, b end
         end
-        for _, s in tsutil.inamed, tree, -1 do stmt(s) end
+        for _, s in tsutil.inamed, tree, -1 do stmt(s); if raises(s) then break end end
         G7.W = false
         G7.CHUNK = saved
     end
