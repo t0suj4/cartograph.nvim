@@ -375,6 +375,9 @@ function M.build(rec, X)
         end
         if p and X.tainted[p] then etaint[#etaint + 1] = tostring(FN(name)) end
     end
+    -- (init CALLS UNKNOWN CODE — the EXTCALL call — which may raise anything: its error port is tainted. Nothing
+    -- catches an error leaving init, but unstated, it was the last E-reading failure on vimruntime and WoW, CART-1760)
+    if X.XA then etaint[#etaint + 1] = tostring(FN('init')) end
     local cerr = {}
     -- (a coroutine CHANNEL that is saturated or TAINTED holds any escaped value: rin_top / rout_top / cerr_top. Dumped
     -- as site lists alone, every lost value passed to resume or yielded failed the channel checks, CART-1757)

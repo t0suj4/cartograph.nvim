@@ -386,3 +386,15 @@ test('flowdump: a constructor field is storeRaw; pairs\' value and rawget(t, k) 
     eq(1, lrawk, 'rawget names its key, pairs does not')
     eq(0, flowcheck.check(D).failed, 'the dump is closed under the raw rules')
 end)
+
+-- (CART-1760: init calls UNKNOWN CODE, which may raise anything: its error port is tainted)
+test('flowdump: init\'s error port is tainted when it calls unknown code', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('\nlocal m = require("not_in_the_tree")\nreturn m.f(a)\n')
+    local initid
+    for i, nm in ipairs(D.names.functions) do if nm == 'init' then initid = i - 1 end end
+    ok(initid ~= nil, 'init is named: ' .. vim.inspect(D.names.functions))
+    local has = false
+    for _, id in ipairs(D.solution.err.taint) do if tonumber(id) == initid then has = true end end
+    ok(has, 'init is in err.taint: ' .. vim.inspect(D.solution.err.taint))
+end)
