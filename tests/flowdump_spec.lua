@@ -365,6 +365,24 @@ test('flowdump: a tainted [] cell is weak, a tainted resume channel is rin_top, 
     ok(tw, 't (its [] cell tainted, empty) is weak: ' .. vim.inspect(S.weak))
     eq(1, S.rin_top, 'the resume channel is tainted: rin_top')
     local named = false
-    for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do if i[1] == 'loadDyn' and i[4] ~= vim.NIL then named = true end end end
-    ok(named, 'rawget(u, K.f) is a loadDyn that names its key')
+    for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do if i[1] == 'loadRaw' and i[4] ~= vim.NIL then named = true end end end
+    ok(named, 'rawget(u, K.f) is a loadRaw that names its key (FLOW-0090)')
+end)
+
+-- (FLOW-0090 / CART-1759: raw accesses — a constructor's named field is storeRaw, pairs' value and rawget(t, k) with a
+-- variable key are loadRaw, the latter with its key; and the dump is still closed under flowcheck)
+test('flowdump: a constructor field is storeRaw; pairs\' value and rawget(t, k) are loadRaw', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('\nlocal K = { f = tostring(#arg) }\nlocal t = { x = 1 }\nfor _, v in pairs(t) do print(v) end\nlocal w = rawget(t, K.f)\nreturn w\n')
+    local sraw, lraw, lrawk = 0, 0, 0
+    for _, F in ipairs(D.functions) do
+        for _, i in ipairs(F.body) do
+            if i[1] == 'storeRaw' then sraw = sraw + 1 end
+            if i[1] == 'loadRaw' then lraw = lraw + 1; if i[4] ~= vim.NIL then lrawk = lrawk + 1 end end
+        end
+    end
+    ok(sraw >= 2, 'the constructors\' named fields are storeRaw: ' .. sraw)
+    eq(2, lraw, 'pairs\' value and rawget are loadRaw')
+    eq(1, lrawk, 'rawget names its key, pairs does not')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed under the raw rules')
 end)

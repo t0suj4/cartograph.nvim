@@ -167,6 +167,25 @@ for _, F in ipairs(D.functions) do
                     for _, t in ipairs(handlers(IDX, c)) do entry(F.id, FNOF[t], t, { { [c] = true } }, { x }, false) end
                 end end
             end
+        elseif op == 'loadRaw' then
+            -- (`loadRaw x y k`, FLOW-0090: any field of the object ITSELF — no __index, no prototype: pairs' value, rawget)
+            local x, y = ins[2], ins[3]
+            for a in pairs(v(y)) do
+                if not HOST[a] then
+                    for f2, t in pairs(H[a] or EMPTY) do
+                        if f2 ~= META then sub(t, x, a == GLOBALS and 'raw*contract:computed-global' or 'raw*') end
+                    end
+                    sub(HDYN[a] or EMPTY, x, 'raw[]')
+                end
+            end
+        elseif op == 'storeRaw' then
+            -- (`storeRaw x f y`, FLOW-0090: x.f = y on the object itself — no __newindex: a constructor's named field)
+            local x, f, y = ins[2], ins[3], ins[4]
+            for a in pairs(v(x)) do
+                if not HOST[a] then for b in pairs(v(y)) do
+                    if not hash(a, f, b) then failh('h', a, f, ('h(%d,%s) lacks %d'):format(a, tostring(fieldname(f)), b)); break end
+                end end
+            end
         elseif op == 'keys' then
             -- (`keys x y`: x holds every key of every table y may hold)
             local x, y = ins[2], ins[3]
@@ -263,7 +282,7 @@ for _, F in ipairs(D.functions) do
     w(F.self)
     for _, ins in ipairs(F.body) do
         local op = ins[1]
-        if op == 'new' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'op' or op == 'cocreate' or op == 'keys' then w(ins[2])
+        if op == 'new' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' then w(ins[2])
         elseif op == 'call' or op == 'pcall' or op == 'resume' or op == 'yield' then for _, x in ipairs(ins[2]) do w(x) end end
     end
 end

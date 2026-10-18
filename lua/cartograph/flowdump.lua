@@ -31,6 +31,10 @@
 --   null where unused). An operator's `k` is its metatable key's field id (`__add` ...).
 -- * `[]` (a store under an unknown key) is not a field: `hdyn` [site, [sites]] means A.h site f b for EVERY f (the core's
 --   storeDyn). A named load reads it (Lua: `t[k] = v` may write `t.name`).
+-- * RAW accesses (FLOW-0090, the core's D16): `storeRaw` [x, f, y] is a table constructor's named field (no
+--   __newindex); `loadRaw` [x, y, k | null] reads any field of the object ITSELF, with no __index and no prototype:
+--   pairs' value (k null) and rawget(t, k) with a variable key (CART-1758). A constructor's computed key `[e] = v`
+--   stays a storeDyn: the core has no raw dynamic store.
 -- * SITES are flowtype's objects: `table`, `function` (fn = its function id: P.fnOf), `type` (a value the environment
 --   profile types — a host value; `type:string` is the strings), `ext` (code outside the tree: EXT), `globals` (_G),
 --   A `type` or `ext` site is a HOST value (contract:host): no fields in `h` — a store to it is not followed, a load
@@ -72,7 +76,7 @@ M.CONTRACTS = {
     ['outside-raises-strings'] = 'a function outside the tree raises strings (pcall second values)',
     ['host'] = 'a site of a host kind has no fields: a store to it is not followed, a load from it is its declared type',
     ['strict-global'] = 'a named global read does not see a dynamic-key write `_G[k] = v` (tag contract:strict-global)',
-    ['computed-global'] = 'a read `_G[k]` with k unknown sees dynamic-key writes and EXT, not the named globals',
+    ['computed-global'] = 'a read `_G[k]` with k unknown, or next / pairs over _G, sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'the globals site never escapes: a write through a cap-cut value that may be _G is not followed',
     ['unknown-receiver'] = 'a call on a member of an ext value runs no tree code and hands its arguments nowhere; a call whose callee the flow cannot resolve runs nothing',
     ['unknown-code'] = 'a call whose callee holds an ext site hands its arguments to the unknown-code channel (contracts.ext_channel), which calls the functions among them with ext',
@@ -213,6 +217,9 @@ function M.build(rec, X)
         elseif op == 'call' or op == 'pcall' then
             return { op, vars(ins[2]), V(ins[3]), vars(ins[4]) }
         elseif op == 'keys' then return { 'keys', V(ins[2]), V(ins[3]) }
+        -- (RAW accesses, FLOW-0090: a constructor's field, pairs' / next's value)
+        elseif op == 'storeRaw' then return { 'storeRaw', V(ins[2]), F(ins[3]), V(ins[4]) }
+        elseif op == 'loadRaw' then return { 'loadRaw', V(ins[2]), V(ins[3]), ins[4] and V(ins[4]) or vim.NIL }
         elseif op == 'error' then return { 'error', V(ins[2]) }
         elseif op == 'op' then return { 'op', V(ins[2]), vars(ins[3]), F(ins[4]) }
         elseif op == 'setmeta' then return { 'setmeta', V(ins[2]), V(ins[3]) }

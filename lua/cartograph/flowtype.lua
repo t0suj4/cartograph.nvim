@@ -1662,7 +1662,12 @@ local function build(store, opts)
                 local tp, kp = expr(argn[1]), argn[2] and expr(argn[2]) or nil
                 local key = strkey(argn[2])
                 if key == '[]' and kp then G7.NEXTK = kp end
-                return field(tp, key)
+                -- (and it is RAW — no __index, no prototype: the dump's loadRaw with its key, FLOW-0090, CART-1758. The
+                -- solve still lets it reach __index and prototypes: a superset, sound)
+                G7.RAWLOAD = key == '[]' or nil
+                local dst = field(tp, key)
+                G7.RAWLOAD = nil
+                return dst
             end
             if fname == 'rawset' and argn[3] and gbl() then
                 -- (a computed key is the store's key, for the dump's storeDyn, and it enters the key set, as `t[k] = v`
@@ -2004,7 +2009,10 @@ local function build(store, opts)
                             local kp = k and key == '[]' and expr(k) or nil
                             local vp = expr(v)
                             G7.NEXTK = kp
+                            -- (a constructor's field is set RAW — no __newindex: the dump's storeRaw, FLOW-0090)
+                            G7.RAWSTORE = key ~= '[]' or nil
                             edge(vp, ofp(o, key))
+                            G7.RAWSTORE = nil
                             G7.NEXTK = nil
                             if G7.EXP['strict-records'] and v:type() == 'table_constructor' and G7.MAPNAME[key] then for x in each(vp) do G7.MAPSITE[x] = true end end
                             if kp then edge(kp, ofp(o, '{k}'))
@@ -2136,7 +2144,10 @@ local function build(store, opts)
                         local tp = expr(a1)
                         acc(fname == 'ipairs' and 'array' or 'iterate', a1, nil, tp)
                         -- (ipairs walks the array part: `#` — a load of it also reads `[]`, the untyped keys)
+                        -- (pairs without __pairs is raw next: its value read is the dump's loadRaw, FLOW-0090)
+                        G7.RAWLOAD = fname == 'pairs' or nil
                         vp = field(tp, fname == 'ipairs' and '#' or '[]')
+                        G7.RAWLOAD = nil
                         if fname == 'pairs' then kp = field(tp, '{k}') end
                     else
                         -- ★ ANY OTHER ITERATOR IS A CALL (CART-1643): `for a, b in f, s, c` calls f(s, c) — then f(s, a) —
@@ -2318,7 +2329,7 @@ local function build(store, opts)
                 elseif fowner[a] and fname[a] == '{k}' then G7.gap('table-keys', { b, a })
                 elseif fowner[b] then
                     local hv = REC.objvar[fowner[b]]
-                    if hv then G7.ins({ 'store', hv, fname[b], a, fname[b] == '[]' and G7.NEXTK or nil }) else G7.gap('store-field-port', { a, b }) end
+                    if hv then G7.ins({ G7.RAWSTORE and 'storeRaw' or 'store', hv, fname[b], a, fname[b] == '[]' and G7.NEXTK or nil }) else G7.gap('store-field-port', { a, b }) end
                 elseif fowner[a] then
                     local hv = REC.objvar[fowner[a]]
                     if hv then G7.ins({ 'load', b, hv, fname[a] }) else G7.gap('load-field-port', { a, b }) end
@@ -2331,6 +2342,7 @@ local function build(store, opts)
             if on() then
                 if f:byte(1) == 1 then G7.gap('hidden-load', { dst, x })
                 elseif f == '{k}' then G7.ins({ 'keys', dst, x }) -- (the key set `pairs` / next yield, CART-1739)
+                elseif f == '[]' and G7.RAWLOAD then G7.ins({ 'loadRaw', dst, x, G7.NEXTK }) -- (rawget's key; pairs' value: none)
                 else
                     G7.ins({ 'load', dst, x, f, f == '[]' and G7.NEXTK or nil }, strict and f ~= '[]'
                         and (G7.ISGP[x] and 'contract:strict-global' or 'contract:strict') or nil)
