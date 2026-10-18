@@ -37,8 +37,12 @@
 --   stays a storeDyn: the core has no raw dynamic store.
 -- * SITES are flowtype's objects: `table`, `function` (fn = its function id: P.fnOf), `type` (a value the environment
 --   profile types — a host value; `type:string` is the strings), `ext` (code outside the tree: EXT), `globals` (_G),
---   A `type` or `ext` site is a HOST value (contract:host): no fields in `h` — a store to it is not followed, a load
---   from it is its declared type (the answers' `typed` / `string`), not a heap read.
+--   A `type` or `ext` site is a HOST value. A `type` site carries `host` = its KIND, from the environment profile
+--   (CART-1761): `prim` (a store raises: string, number, a function type), `members` (its declared members only:
+--   userdata such as TSNode; by default every non-primitive host type), `open` (an ordinary object, as the profile
+--   declares: a WoW frame). A prim / members site, and
+--   `ext`, has no fields in `h` (contract:host): a store to it is not followed, a load from it is its declared type
+--   (the answers' `typed` / `string`), not a heap read. An open site's fields are in `h` as a table's are.
 --   `thread`, `proxy`, `other`. label: flowtype's own name for it.
 -- * VARIABLES are flowtype's ports; `self` (the closure object itself) is synthesized per function, holding every site
 --   of that function. `v` is grouped: [var, [sites...]]; a var in `top` SATURATED (past CAP): any site — the taint
@@ -74,7 +78,7 @@ M.CONTRACTS = {
     ['C3'] = 'open mode: outside code does not set metatables on what it can reach, nor write their handlers',
     ['C2'] = 'open mode: outside code does not patch the string library or the host API methods',
     ['outside-raises-strings'] = 'a function outside the tree raises strings (pcall second values)',
-    ['host'] = 'a site of a host kind has no fields: a store to it is not followed, a load from it is its declared type',
+    ['host'] = 'a host site of kind prim or members (sites[i].host, from the environment profile) has no fields: a store to it is not followed, a load from it is its declared type; an open host site is an ordinary object',
     ['strict-global'] = 'a named global read does not see a dynamic-key write `_G[k] = v` (tag contract:strict-global)',
     ['computed-global'] = 'a read `_G[k]` with k unknown, or next / pairs over _G, sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'the globals site never escapes: a write through a cap-cut value that may be _G is not followed',
@@ -303,7 +307,9 @@ function M.build(rec, X)
         elseif ISG[o] then kind = 'globals'
         elseif info:find('^thread:') then kind = 'thread'
         elseif info:find('^proxy') then kind = 'proxy' end
-        sj[#sj + 1] = ('{"id":%d,"kind":"%s","label":%s,"fn":%s}'):format(o, kind, jstr(info), fn)
+        -- (a HOST site carries its kind, the profile's — prim / open / members: the certificate's supplied premise, CART-1761)
+        local hk = kind == 'type' and X.hostkind and X.hostkind(X.TNAME[o]) or nil
+        sj[#sj + 1] = ('{"id":%d,"kind":"%s","label":%s,"fn":%s%s}'):format(o, kind, jstr(info), fn, hk and (',"host":"' .. hk .. '"') or '')
     end
     -- the solution
     local vj, topj = {}, {}
@@ -323,7 +329,7 @@ function M.build(rec, X)
     local hktop = {}
     for o = 1, X.NO do
         local m = X.ofield[o]
-        if m and not X.TNAME[o] and o ~= X.EXT then
+        if m and not (X.TNAME[o] and not (X.hostkind and X.hostkind(X.TNAME[o]) == 'open')) and o ~= X.EXT then
             for _, f in ipairs { '__mode', '[]' } do
                 local fp = m[f]
                 -- (saturated, or TAINTED — a dynamic store with a lost key may write "__mode": CART-1756)
@@ -334,7 +340,7 @@ function M.build(rec, X)
         end
         -- (a HOST value — a profile-typed one, EXT — has no fields in the analysed heap: a load from it is its declared
         -- type, what a walk stored on it is never read)
-        if m and not X.TNAME[o] and o ~= X.EXT then
+        if m and not (X.TNAME[o] and not (X.hostkind and X.hostkind(X.TNAME[o]) == 'open')) and o ~= X.EXT then
             for _, f in ipairs(X.okeys(o)) do
                 local fp = m[f]
                 local ss = {}

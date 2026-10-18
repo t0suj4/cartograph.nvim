@@ -605,7 +605,8 @@ local function build(store, opts)
             if tn == 'string' and sl and f ~= '#' then load_obj(sl, f, dst, seen, strict) end
             local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
-            return
+            -- (an OPEN host type is an ordinary object too: what code stored on it is read back, CART-1761)
+            if G7.hostkind(tn) ~= 'open' then return end
         end
         -- (a NAMED load off a globals table is a global read, whatever expression reached the table — `_G.q`, `local G
         -- = _G; G.q`: strict, as the identifier read is (the contract). Non-strict, it read every dynamic-key write —
@@ -701,7 +702,11 @@ local function build(store, opts)
         l[#l + 1] = { f, v }
         -- (a FUNCTION has no metatable of its own — setmetatable raises on one — so `\1mt` never lands on it: a generic
         -- setmetatable(x, mt) whose x also held functions made a call of them run mt's __call, CART-1710)
-        for o in each(x) do if not (fnports[o] and f == '\1mt') then edge(v, ofp(o, f)) end end
+        -- (and a HOST object takes it only when its kind is open, as in the solve, CART-1761)
+        for o in each(x) do
+            local tn = TNAME[o]
+            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and f == '\1mt') then edge(v, ofp(o, f)) end
+        end
     end
     -- (`setmetatable(t, { __index = idx })`: every object at t has every object at idx as a prototype — linked when
     -- EITHER side gains one; linking only on t's arrivals lost an idx object that came later, an ORDER-dependent miss)
@@ -936,12 +941,35 @@ local function build(store, opts)
     local EXT = newobj('external')
     G7.EXT = EXT
     local PSIGS = {}
+    -- ★ THE HOST KINDS (CART-1761; the user: the host is described in a PROFILE, not by a blanket contract). What a host
+    -- type IS: 'prim' — a store raises, it has no fields (string, number, a function type); 'open' — an ordinary object,
+    -- its fields are written AND read (a WoW frame, a Lua table a host function returns); 'members' — its declared
+    -- members only, a store raises or is ignored. Declared by the environment profile — `kinds[T]`, or `types[T].kind`
+    -- — and opts.host_kinds; else the Lua primitives and function types are 'prim', every other host type 'members'.
+    -- The dump carries it per host site for the Lean certificate's supplied premise.
+    -- ⚠ A Lua TABLE type a host function returns (`string[]`, `table<K, V>`) is writable, so 'open' is its true kind;
+    -- it stays 'members' by default because ONE type object stands for every value of the type, and open it merges the
+    -- stores to all of them: measured on vimruntime, solve 17 -> 31 s, 520 -> 792 MB, oracle whole typed 153 -> 76.
+    -- The honest fix is a fresh object per returning call (CART-1761's note)
+    G7.HKINDS = {}
     do
+        local HKINDS = G7.HKINDS
         local P = require 'cartograph.spec.profile'
         for _, nm in ipairs { P.base_for('lua'), store.data.profile } do
             local pr = nm and P.load(nm)
             for k, v in pairs(pr and pr.sigs or NOTHING) do if PSIGS[k] == nil then PSIGS[k] = v end end
+            for t, k in pairs(pr and pr.kinds or NOTHING) do if HKINDS[t] == nil then HKINDS[t] = k end end
+            for t, v in pairs(pr and pr.types or NOTHING) do if type(v) == 'table' and v.kind and HKINDS[t] == nil then HKINDS[t] = v.kind end end
         end
+        for t, k in pairs(opts.host_kinds or NOTHING) do HKINDS[t] = k end
+    end
+    function G7.hostkind(tn)
+        local HKINDS = G7.HKINDS
+        local k = HKINDS[tn]
+        if k then return k end
+        if SCALAR[tn] or tn:match('^%(?fun%(') or tn == 'function' then k = 'prim' else k = 'members' end
+        HKINDS[tn] = k
+        return k
     end
     -- (a declared type that is ONE type: `X?` / `X|nil` is X, a real union is none)
     local function onetype(ty)
@@ -1072,7 +1100,10 @@ local function build(store, opts)
                     for _, ld in ipairs(loads[p] or NOTHING) do for _, o in dit(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
                     for _, st in ipairs(stores[p] or NOTHING) do
                         for _, o in dit(d) do
-                            if not SCALAR[TNAME[o]] and not (fnports[o] and st[1] == '\1mt') then edge(st[2], ofp(o, st[1])) end
+                            -- (a host object takes a store only when its kind is OPEN: a 'prim' raises, a 'members' one has
+                            -- its declared members only, CART-1761)
+                            local tn = TNAME[o]
+                            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and st[1] == '\1mt') then edge(st[2], ofp(o, st[1])) end
                         end
                     end
                     G7.mtcopy(p)
@@ -3466,7 +3497,7 @@ local function build(store, opts)
         local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
-            ofield = ofield, okeys = okeys, TNAME = TNAME, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

@@ -398,3 +398,13 @@ test('flowdump: init\'s error port is tainted when it calls unknown code', funct
     for _, id in ipairs(D.solution.err.taint) do if tonumber(id) == initid then has = true end end
     ok(has, 'init is in err.taint: ' .. vim.inspect(D.solution.err.taint))
 end)
+
+-- (CART-1761: a host site carries its kind from the profile — the certificate's supplied premise)
+test('flowdump: a host site carries its kind: string prim, io.open\'s file members', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('\nlocal s = tostring(#arg)\nlocal fh = io.open(s)\nreturn fh\n')
+    local kinds = {}
+    for _, s in ipairs(D.sites) do if s.kind == 'type' then kinds[s.label] = s.host end end
+    eq('prim', kinds['type:string'], 'string is prim: ' .. vim.inspect(kinds))
+    eq('members', kinds['type:file'], 'file is members')
+end)

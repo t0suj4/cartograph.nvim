@@ -2062,3 +2062,23 @@ test('flowtype: a plain function iterator stays whole after `\\1mt` and `__call`
     v = answer('local it = setmetatable({}, { __call = function (s, c) if c == nil then return a end end })')
     ok(v and v.partial, 'a callable TABLE iterator: partial (its metatable may be any escaped one): ' .. vim.inspect(v))
 end)
+
+-- (CART-1761: what a HOST type is comes from the environment profile — prim / open / members. An OPEN host object is an
+-- ordinary one: a field stored on it is read back. A MEMBERS one (the default for userdata, io.open's `file`) has its
+-- declared members only)
+test('flowtype: an OPEN host type reads back a field stored on it; a members one does not', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+        'local a = setmetatable({}, { __index = A })', 'local _ = setmetatable({}, { __index = B }):m()',
+        'local fh = io.open("x")', 'fh.mine = a', 'local g = fh.mine', 'return g:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'g:m' then call = c end end
+    local members = flowtype.solve(store, { open = false }).verdict(call)
+    ok(not members, 'members (the default): no field is read back: ' .. vim.inspect(members))
+    local open = flowtype.solve(store, { open = false, host_kinds = { file = 'open' } }).verdict(call)
+    ok(open and open.kind == 'exact' and #open.targets == 1 and tostring(open.targets[1]):match('A%.m'), 'open: A.m: ' .. vim.inspect(open))
+    vim.fn.delete(root, 'rf')
+end)
