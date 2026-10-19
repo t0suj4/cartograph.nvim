@@ -514,3 +514,54 @@ test('flowdump: a load and a store through a listed escaped table taint their er
     ok(ids.rd and tset[ids.rd], 'rd (a load through listed escaped x) has a tainted error port')
     ok(ids.wr and tset[ids.wr], 'wr (a store through listed escaped x) has a tainted error port')
 end)
+
+-- (CART-1772: coroutine.wrap and xpcall's handler are IR over existing instructions, no gap. wrap: `cocreate` of f, and
+-- w's body `resume [ok, r…] co params; error r1`. xpcall: the pcall, `call [hr] h [r1]`, `copy r1 hr`)
+test('flowdump: coroutine.wrap and xpcall\'s handler are IR, not gaps', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump(table.concat({ '',
+        'local w = coroutine.wrap(function (x) return x end)', 'local r = w(a)',
+        'local ok, v = xpcall(function () error(b) end, function (e) return e end)',
+        'return r, v' }, '\n') .. '\n')
+    local gaps = {}
+    for _, g in ipairs(D.gaps) do gaps[g.kind] = true end
+    ok(not gaps['coroutine.wrap'], 'no coroutine.wrap gap')
+    ok(not gaps['xpcall-handler'], 'no xpcall-handler gap')
+    local wbody
+    for _, F in ipairs(D.functions) do if tostring(D.names.functions[F.id + 1]):match('^ts:wrap:') then wbody = F.body end end
+    local ops = {}
+    for _, i in ipairs(wbody or {}) do ops[#ops + 1] = i[1] end
+    eq('resume error ret', table.concat(ops, ' '), 'the wrap function resumes, re-raises, returns')
+    -- (the handler call: `call [hr] h [r1]` followed by `copy r1 hr`)
+    local handled = false
+    for _, F in ipairs(D.functions) do
+        for i, ins in ipairs(F.body) do
+            local nx = F.body[i + 1]
+            if ins[1] == 'call' and nx and nx[1] == 'copy' and nx[3] == ins[2][1] and nx[2] == ins[4][1] then handled = true end
+        end
+    end
+    ok(handled, 'xpcall\'s handler is called with r1, and its result copied back')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)
+
+-- (CART-1772, the core's coroutine CHANNELS: a coroutine's function returns into `rout` and raises into `cerr` even
+-- when nothing resumes it, and every resume's error result takes `cerr`)
+test('flowdump: a coroutine nobody resumes still returns into rout and raises into cerr; a resume sees cerr', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump(table.concat({ '',
+        'local co1 = coroutine.create(function () if #arg > 0 then error(b) end; return a end)', -- never resumed
+        'local co2 = coroutine.create(function () end)',
+        'local ok, e = coroutine.resume(co2)',
+        'return e' }, '\n') .. '\n')
+    local S, V = D.solution, {}
+    for _, xv in ipairs(S.v) do V[xv[1]] = xv[2] end
+    local function has(list, o) for _, x in ipairs(list or {}) do if x == o then return true end end end
+    local siteof = {}
+    for _, st in ipairs(D.sites) do siteof[st.label] = st.id end
+    local asite, bsite = siteof['tbl:m.lua:3:26'], siteof['tbl:m.lua:3:61'] -- (a's and b's tables; labels are 0-based)
+    ok(asite and has(S.rout, asite), 'co1 returns a into rout though never resumed: ' .. vim.inspect(S.rout))
+    ok(bsite and has(S.err.cerr, bsite), 'co1 raises b into cerr: ' .. vim.inspect(S.err.cerr))
+    local e
+    for _, F in ipairs(D.functions) do for _, ins in ipairs(F.body) do if ins[1] == 'resume' then e = ins[2][2] end end end
+    ok(e and has(V[e], bsite), 'the resume of co2 sees b in its error result: ' .. vim.inspect(V[e]))
+end)

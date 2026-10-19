@@ -845,7 +845,21 @@ local function build(store, opts)
         return GERR
     end
     local function gyield() if not GYIELD then GYIELD = new() end return GYIELD end
+    -- (THE CORE'S COROUTINE CHANNELS, CART-1772: a coroutine's function takes its parameters from `rin` — every
+    -- resume's arguments —, returns into `rout`, raises into `cerr`; flowtype's own binding — each resume to its
+    -- coroutine's function — stays, a subset. G7.cochan(co) binds co's function to the channels; G7.cerrch() the
+    -- shared error channel, which every resume's error result also takes)
+    function G7.cerrch()
+        if not G7.CERRCH then G7.CERRCH = new(); if G7.REC then G7.REC.rerr[#G7.REC.rerr + 1] = G7.CERRCH end end
+        return G7.CERRCH
+    end
     local function gresarg() if not GRESARG then GRESARG = new() end return GRESARG end
+    function G7.cochan(co, multi)
+        local args, rets = {}, {}
+        for k = 1, multi do args[k] = gresarg(); rets[k] = gyield() end
+        args.spread = multi
+        G7.callc(field(co, '\1co', true), args, rets, nil, G7.cerrch()) -- (G7.callc: callc is defined below)
+    end
     idxcall = function (g, o, f, dst)
         local op = OBJPORT[o]
         if not op then op = new(); OBJPORT[o] = op; addobj(op, o) end
@@ -1783,20 +1797,39 @@ local function build(store, opts)
             -- every yield returns them —, its results after the status are f's returns and every yield's values.
             -- wrap(f) is a FUNCTION of its own: a call forwards its arguments to f — the first call's are f's, every
             -- later one's every yield's results — and returns f's returns and every yield's values, CART-1707)
+            -- (in the IR over existing instructions, CART-1772: wrap creates a COROUTINE of f — `cocreate co th f` here —
+            -- and w is a function whose body is `resume [ok, r…] co params; error r1` — a failed resume re-raises — returning
+            -- r…. r1 also holds the caught error, where the core's resume puts it: w's error port is a superset)
             if fname == 'coroutine.wrap' then return G7.mu(function ()
                 local fp = argn[1] and expr(argn[1]) or new()
-                G7.gap('coroutine.wrap', { fp })
                 local id = 'ts:wrap:' .. key_of(n) -- (no graph node: a verdict naming it is no claim)
                 local w = newobj(id)
                 local wp = new()
                 G7.ins({ 'new', wp, w })
                 addobj(wp, w)
+                local tco, th = new(), newobj('thread:wrap:' .. key_of(n))
+                G7.ins({ 'cocreate', tco, th, fp }, 'divergence:coroutine')
+                addobj(tco, th)
+                storec(tco, '\1co', fp)
+                G7.cochan(tco, MULTI)
                 local ps, rs = {}, {}
                 for k = 1, MULTI do ps[k] = new(); edge(ps[k], gresarg()); rs[k] = new(); edge(gyield(), rs[k]) end
                 local wfp = { params = ps, ret = rs[1], rets = rs, id = id, err = new(), vararg = new() }
                 fnports[w] = wfp
-                G7.gap('coroutine.wrap', rs) -- (its function's results: every yield's values, the solver's)
-                callc(fp, ps, rs, nil, wfp.err)
+                -- (the resume inside w: it CATCHES what the coroutine raises — into r1 — and w raises r1 again)
+                local okv, rerr = new(), new()
+                if G7.REC then G7.REC.rerr[#G7.REC.rerr + 1] = rerr end
+                addobj(rerr, STR)
+                edge(G7.cerrch(), rerr)
+                edge(rerr, rs[1])
+                callc(field(tco, '\1co', true), ps, rs, nil, rerr)
+                edge(rs[1], wfp.err)
+                if G7.REC and G7.W then
+                    local out = { okv }
+                    for k = 1, #rs do out[k + 1] = rs[k] end
+                    G7.REC.ins(id, { 'resume', out, tco, ps }, 'divergence:coroutine')
+                    G7.REC.ins(id, { 'error', rs[1] })
+                end
                 return wp
             end) end
             if fname == 'coroutine.create' then return G7.mu(function ()
@@ -1806,6 +1839,7 @@ local function build(store, opts)
                 G7.ins({ 'cocreate', tp, th, fp }, 'divergence:coroutine')
                 addobj(tp, th)
                 storec(tp, '\1co', fp)
+                G7.cochan(tp, MULTI)
                 return tp
             end) end
             if fname == 'coroutine.resume' and argn[1] then return G7.mu(function ()
@@ -1819,6 +1853,7 @@ local function build(store, opts)
                 if G7.REC then G7.REC.rerr[#G7.REC.rerr + 1] = rerr end
                 G7.ins({ 'resume', out, cp, aps }, 'divergence:coroutine')
                 addobj(rerr, STR)
+                edge(G7.cerrch(), rerr)
                 edge(rerr, fl[1])
                 callc(field(cp, '\1co', true), aps, fl, nil, rerr)
                 if want then return out end
@@ -1852,26 +1887,33 @@ local function build(store, opts)
                     for i = #scopes, 1, -1 do if scopes[i]['error'] then loc = true; break end end
                     if not loc then edge(aps[1], perr) end
                 end
-                if fname == 'xpcall' then G7.gap('xpcall-handler', {}) end
+                -- (xpcall's HANDLER runs with the error result, and its returns join the results after the status — in the
+                -- IR over existing instructions, CART-1772: the pcall, `call [hr] h [r1]`, `copy r1 hr`. r1 also holds the
+                -- error itself, where the core's pcall puts it: a superset. As a statement, `xpcall(f, h, x)` had called
+                -- no handler at all)
+                local function handler(r1)
+                    if fname ~= 'xpcall' or not argn[2] then return end
+                    local hv, hr = expr(argn[2]), new()
+                    G7.ins({ 'call', { hr }, hv, { r1 } })
+                    G7.callany(hv, { r1 }, hr, nil, curerr())
+                    G7.ins({ 'copy', r1, hr })
+                    edge(hr, r1)
+                end
                 if want then
                     local fl, out = {}, { new() }
                     for k = 1, want - 1 do fl[k] = new(); out[k + 1] = fl[k] end
                     local fv = expr(argn[1])
-                    G7.ins({ 'pcall', out, fv, aps }, fname == 'xpcall' and 'divergence:xpcall' or nil)
+                    G7.ins({ 'pcall', out, fv, aps })
                     G7.callany(fv, aps, fl, nil, perr)
-                    if out[2] then
-                        if fname == 'xpcall' and argn[2] then
-                            local hr = new()
-                            G7.callany(expr(argn[2]), { perr }, hr, nil, curerr())
-                            edge(hr, out[2])
-                        else edge(perr, out[2]) end
-                    end
+                    if out[2] then edge(perr, out[2]); handler(out[2]) end
                     return out
                 end
                 local res = new()
                 local fv = expr(argn[1])
-                G7.ins({ 'pcall', { res }, fv, aps }, fname == 'xpcall' and 'divergence:xpcall' or nil)
+                local r1 = fname == 'xpcall' and argn[2] and new() or nil
+                G7.ins({ 'pcall', r1 and { res, r1 } or { res }, fv, aps })
                 G7.callany(fv, aps, res, nil, perr)
+                if r1 then edge(res, r1); edge(perr, r1); handler(r1) end
                 return res
             end) end
             if fname == 'table.insert' and argn[1] then

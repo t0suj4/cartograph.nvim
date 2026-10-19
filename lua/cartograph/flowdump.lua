@@ -62,9 +62,10 @@
 --   `divergence:coroutine` (flowtype binds a resume's arguments to that coroutine's function only; the core's `rin` is
 --   one channel). (Since CART-1689 / 1715 a call's callee is the callee expression's flow, never the name join's
 --   claim: no call is synthesized.)
--- * GAPS: constructs with no core opcode, or modelled outside the IR — rawget / rawset, getfenv / setfenv,
---   hooksecurefunc, getmetatable, newproxy, coroutine.wrap, xpcall's handler, unknown code (load ... : the `ext`
---   sites and the EXTCALL call in `init`). `weak`: every site a store that MAY set __mode reaches — a named __mode store,
+-- * GAPS: constructs with no core opcode, or modelled outside the IR — getfenv / setfenv, hooksecurefunc,
+--   getmetatable, newproxy, a hidden field's load / store, a keyed copy, unknown code (load ... : the `ext` sites and
+--   the EXTCALL call in `init`). rawget / rawset are raw accesses (FLOW-0090, CART-1771); coroutine.wrap is a
+--   `cocreate` and a synthetic function `resume …; error r1`, and xpcall's handler a call after the pcall (CART-1772). `weak`: every site a store that MAY set __mode reaches — a named __mode store,
 --   or any dynamic-key store (k may be "__mode"), or a saturated or TAINTED such field (CART-1723, CART-1756); weak
 --   semantics (what the collector may drop) are not modelled beyond naming them. `rin_top` / `rout_top` / `cerr_top`
 --   (present as 1, else absent): that coroutine channel is saturated or tainted, so it holds any escaped value
