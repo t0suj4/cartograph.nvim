@@ -763,11 +763,8 @@ local function build(store, opts)
     end
     local funrets
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
-    -- (G7.HOOKS: a hooked function -> its hooks' ports; G7.XARGS: a function -> the calls bound to it with arguments
-    -- past its parameters, which the hook receives and the parameters drop, CART-1748)
-    G7.HOOKS, G7.XARGS, G7.LOADK, G7.DYNL, G7.LDL, G7.STL = {}, {}, {}, {}, {}, {}
+    G7.LOADK, G7.DYNL, G7.LDL, G7.STL = {}, {}, {}, {}
     local function bindcall(o, args, res, site, cerr)
-        local o0 = o
         if site and clone_at then
             local inst = clone_at(site, o)
             if inst then o = inst end
@@ -776,24 +773,6 @@ local function build(store, opts)
             -- (setfenv's function: its reads see the environment; unknown code is handed it)
             if o == G7.EXT then edge(args.fenv, G7.EXTCALL)
             elseif fnports[o] then G7.fenv(fnports[o].id, args.fenv) end
-            return
-        end
-        if args.hook then
-            -- (a HOOKED function — hooksecurefunc's: each function stored under the name also runs the hook with its
-            -- arguments, CART-1707. A resolved call reaches the original straight, so its PARAMETERS are the hook's
-            -- arguments)
-            local fpp = fnports[o]
-            if fpp then
-                local ha = {}
-                for i, pp in ipairs(fpp.params) do ha[i] = pp end
-                if fpp.vararg then ha[#ha + 1] = fpp.vararg; ha.spread = #ha end
-                G7.callc(args.hook, ha, new())
-                -- (but a call passing MORE arguments than the original's parameters hands the hook all of them, CART-1748)
-                local hk = G7.HOOKS[o]
-                if not hk then hk = {}; G7.HOOKS[o] = hk end
-                hk[#hk + 1] = args.hook
-                for _, xa in ipairs(G7.XARGS[o] or NOTHING) do G7.callc(args.hook, xa, new()) end
-            end
             return
         end
         if o == G7.EXT and G7.EXTCALL then
@@ -813,12 +792,6 @@ local function build(store, opts)
                 elseif rl[1] then addobj(res, G7.retobj(rl[1], res)) end
             end
             return
-        end
-        if not fp.vararg and (#args > #fp.params or args.spread) then
-            local xl = G7.XARGS[o0]
-            if not xl then xl = {}; G7.XARGS[o0] = xl end
-            xl[#xl + 1] = args
-            for _, h in ipairs(G7.HOOKS[o0] or NOTHING) do G7.callc(h, args, new()) end
         end
         for i, a in ipairs(args) do if fp.params[i] then edge(a, fp.params[i]) end end
         if cerr and fp.err then edge(fp.err, cerr) end -- (what the callee raises, the caller raises: CART-1705)
@@ -1696,8 +1669,10 @@ local function build(store, opts)
             -- (UNKNOWN CODE, CART-1707: what load / loadstring / loadfile / dofile return is code the tree does not hold
             -- — EXT, and calling EXT returns EXT and hands its arguments to unknown code. A require the tree cannot map
             -- falls through to the general call, whose callee is EXT below)
+            -- (in the IR as it stands, CART-1772: the arguments are COPIED into the unknown-code channel and the results
+            -- are `new` of the ext site — what unknown code then does is init's one tagged call of EXTCALL, under the
+            -- unknown-code contract. The site's own gap entry said nothing more)
             if (fname == 'load' or fname == 'loadstring' or fname == 'loadfile' or fname == 'dofile') and gbl() then
-                G7.gap('unknown-code', {})
                 for _, a in ipairs(argn) do edge(expr(a), G7.EXTCALL) end
                 local out = {}
                 for k = 1, want or 1 do out[k] = new(); addobj(out[k], EXT) end
@@ -1769,13 +1744,43 @@ local function build(store, opts)
                 storec(tp, '{k}', kp)
                 return tp
             end
-            -- (hooksecurefunc([t,] "name", hook): a call of the hooked function also runs the hook with its arguments)
+            -- ★ hooksecurefunc([t,] "name", hook) — WoW's API — REPLACES t[name] by a WRAPPER: a function that calls the
+            -- original with its arguments, then the hook with the same ones, and returns the original's results
+            -- (CART-1772: in the IR, a synthetic function `call [r…] orig args; call [] h args; ret r…`, stored raw).
+            -- A call that reaches the wrapper runs the hook with ITS arguments (CART-1748); a reference to the original
+            -- saved earlier does not, as in WoW. It replaced the hook binding on the original's calls (CART-1707)
             if fname == 'hooksecurefunc' and argn[2] and gbl() then
                 local tp = argn[3] and expr(argn[1]) or G7.GPORT
                 local kn = argn[3] and argn[2] or argn[1]
                 local h = expr(argn[3] or argn[2])
-                callc(field(tp, strkey(kn)), { hook = h }, new())
-                return new()
+                local key = strkey(kn)
+                local orig = field(tp, key)
+                return G7.mu(function ()
+                    local id = 'ts:hook:' .. key_of(n) -- (no graph node: a verdict naming it is no claim)
+                    local w, wp = newobj(id), new()
+                    G7.ins({ 'new', wp, w })
+                    addobj(wp, w)
+                    local ps, rs = {}, {}
+                    for k = 1, MULTI do ps[k] = new(); rs[k] = new() end
+                    local wfp = { params = ps, vararg = new(), ret = rs[1], rets = rs, id = id, err = new() }
+                    fnports[w] = wfp
+                    local args = {}
+                    for k = 1, MULTI do args[k] = ps[k] end
+                    args[#args + 1] = wfp.vararg
+                    args.spread = #args
+                    callc(orig, args, rs, nil, wfp.err)
+                    local hres = new()
+                    callc(h, args, hres, nil, wfp.err)
+                    G7.RAWSTORE = true
+                    G7.ins({ 'storeRaw', tp, key, wp })
+                    G7.RAWSTORE = nil
+                    storec(tp, key, wp)
+                    if G7.REC and G7.W then
+                        G7.REC.ins(id, { 'call', rs, orig, args })
+                        G7.REC.ins(id, { 'call', { hres }, h, args })
+                    end
+                    return new()
+                end)
             end
             -- (getmetatable(x) is the metatable setmetatable stored; newproxy(true) a userdata with a fresh one)
             if fname == 'getmetatable' and argn[1] and gbl() then return field(expr(argn[1]), '\1mt', true) end
@@ -2503,7 +2508,7 @@ local function build(store, opts)
         end
         callc = function (callee, args, res, site, cerr)
             if on() then
-                if args.hook or args.fenv then G7.gap(args.hook and 'hooksecurefunc' or 'setfenv', { callee })
+                if args.fenv then G7.gap('setfenv', { callee })
                 else
                     G7.ins({ 'call', type(res) == 'table' and list(res) or { res }, callee, list(args) })
                     local k = G7.NEXTC and G7.W and G7.cur()
@@ -3088,8 +3093,6 @@ local function build(store, opts)
             if TFROM then TCUR = { p, 'a call through it hands its arguments to whatever it may reach: they escape' } end
             for _, ap in ipairs(cl[1]) do for o in each(ap) do G7.escmore(o) end end
             TCUR = p
-            -- (a hooked name the solve lost: the hook misses those functions' arguments)
-            if cl[1].hook then for o in each(cl[1].hook) do local fpp = fnports[o]; if fpp then G7.tparams(fpp) end end end
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
             if cl[4] then taint(cl[4]) end -- (a callee the solve lost may raise anything)
         end
