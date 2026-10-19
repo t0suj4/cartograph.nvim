@@ -455,3 +455,35 @@ test('flowdump: a load through a tainted base taints the loading function\'s err
     for _, id in ipairs(D.solution.err.taint) do if tonumber(id) == rdid then has = true end end
     ok(has, 'rd\'s error port is tainted: ' .. vim.inspect(D.solution.err.taint))
 end)
+
+-- (CART-1768: an ESCAPED function may be called with anything — its parameters are tainted though no call through a
+-- lost callee is seen. CART-1764: a dynamic load through an escaped base may run an escaped __index handler with its
+-- key — the key's objects escape)
+test('flowdump: an escaped method\'s parameter is tainted; a dynamic load\'s key escapes through an escaped base', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, table.concat({ '',
+        'local function lose(x) return x end',
+        'lose({})', 'lose({})', 'lose({})',
+        'local v = lose(a)',                                                -- a escapes, and A.m with it
+        'local P = setmetatable({}, { __index = function (_, k) return k end })',
+        'local K = {}',
+        'local w = v[K]',                                                   -- v may hold the escaped a: K escapes
+        'return P, w' }, '\n') .. '\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local T = D.solution.taint
+    local tp = {}
+    for _, p in ipairs(T.ports) do tp[p] = true end
+    local mid
+    for i, nm in ipairs(D.names.functions) do if tostring(nm):match('::A%.m@') then mid = i - 1 end end
+    local par
+    for _, F in ipairs(D.functions) do if F.id == mid then par = F.params[1] end end
+    ok(par and tp[par], 'A.m (escaped) has a tainted parameter: ' .. tostring(par))
+    local lab = {}
+    for _, s in ipairs(D.sites) do lab[s.id] = s.label end
+    local kesc = false
+    for _, o in ipairs(T.escaped) do if tostring(lab[o]):match('^tbl:m%.lua:13:') then kesc = true end end
+    ok(kesc, 'K (the key of a load through an escaped base) escaped: ' .. vim.inspect(T.escaped))
+end)

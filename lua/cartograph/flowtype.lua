@@ -688,7 +688,7 @@ local function build(store, opts)
             local tg = PTAG[x]
             if tg and tg.d < 3 then PTAG[dst] = { fn = tg.fn, j = tg.j, path = tg.path .. '.' .. tostring(f), d = tg.d + 1 } end
         end
-        if f == '[]' and G7.NEXTK then G7.LOADK[dst] = G7.NEXTK end -- (the access's key port, for __index: CART-1750)
+        if f == '[]' and G7.NEXTK then G7.LOADK[dst] = G7.NEXTK; G7.DYNL[#G7.DYNL + 1] = { x, G7.NEXTK } end -- (the access's key port, for __index: CART-1750)
         local l = loads[x]
         if not l then l = {}; loads[x] = l end
         l[#l + 1] = { f, dst, strict }
@@ -762,7 +762,7 @@ local function build(store, opts)
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
     -- (G7.HOOKS: a hooked function -> its hooks' ports; G7.XARGS: a function -> the calls bound to it with arguments
     -- past its parameters, which the hook receives and the parameters drop, CART-1748)
-    G7.HOOKS, G7.XARGS, G7.LOADK = {}, {}, {}
+    G7.HOOKS, G7.XARGS, G7.LOADK, G7.DYNL = {}, {}, {}, {}
     local function bindcall(o, args, res, site, cerr)
         local o0 = o
         if site and clone_at then
@@ -1710,6 +1710,22 @@ local function build(store, opts)
             end
             -- (rawget(t, 'f') reads every RAW entry — one written under a computed key too: a named load without __index,
             -- non-strict but on _G, as `t.f` is. Strict, it missed `t[k] = v` with k == 'f', CART-1746)
+            -- (`next(t [, k])` is what `pairs` runs: its key is t's KEY SET, its value a RAW read of any field — the dump's
+            -- keys / loadRaw. As a host call it returned the declared type, not t's contents: a whole exact the run
+            -- falsifies, CART-1766)
+            if fname == 'next' and argn[1] and gbl() then
+                local tp = expr(argn[1]); if argn[2] then expr(argn[2]) end
+                local kp = field(tp, '{k}')
+                G7.RAWLOAD = true
+                local vp = field(tp, '[]')
+                G7.RAWLOAD = nil
+                if want then
+                    local out = { kp, vp }
+                    for k = 3, want do out[k] = new() end
+                    return out
+                end
+                return kp
+            end
             if fname == 'rawget' and argn[1] and gbl() then
                 -- (a variable key is the load's key, for the dump's loadDyn, as `t[k]`'s is: CART-1758)
                 local tp, kp = expr(argn[1]), argn[2] and expr(argn[2]) or nil
@@ -1822,6 +1838,13 @@ local function build(store, opts)
                 -- clause this rests on. xpcall hands it to its handler, whose result is the second value)
                 local perr = new()
                 addobj(perr, STR)
+                -- (`pcall(error, x)` raises x ITSELF: the builtin error has no site, so the protected call ran nothing and
+                -- the error value was only outside-raises-strings' string. A whole exact the run falsifies, CART-1765)
+                if argn[1]:type() == 'identifier' and txt(argn[1]) == 'error' and aps[1] then
+                    local loc = false
+                    for i = #scopes, 1, -1 do if scopes[i]['error'] then loc = true; break end end
+                    if not loc then edge(aps[1], perr) end
+                end
                 if fname == 'xpcall' then G7.gap('xpcall-handler', {}) end
                 if want then
                     local fl, out = {}, { new() }
@@ -2054,8 +2077,12 @@ local function build(store, opts)
                         local k, v = fl:field('name')[1], fl:field('value')[1]
                         if v and not k then npos = npos + 1; acc('pos', v, tostring(npos), nil, o) end
                         if v then
-                            local key = (k and k:type() == 'identifier') and txt(k) or keyname(k)
-                            if k and k:type() == 'identifier' then acc('key', k, key, nil, o) elseif k then acc_key('key', k, nil); if ACC and ACC[#ACC] and ACC[#ACC].sr == select(1, k:range()) then ACC[#ACC].obj = o end end
+                            -- (`[a] = v` gives the same `name` node as `a = v`, an identifier: the bracket in the field's own
+                            -- text tells the COMPUTED key, whose value is the key — `{ [a] = true }` was field "a", and
+                            -- pairs never yielded a: a whole exact the run falsifies, CART-1767)
+                            local named = k and k:type() == 'identifier' and not txt(fl):match('^%s*%[')
+                            local key = named and txt(k) or keyname(k)
+                            if named then acc('key', k, key, nil, o) elseif k then acc_key('key', k, nil); if ACC and ACC[#ACC] and ACC[#ACC].sr == select(1, k:range()) then ACC[#ACC].obj = o end end
                             -- (a COMPUTED key `[e] = v` is walked — Lua evaluates it before the value — and it is the field's
                             -- key: the dump's storeDyn names it, and its VALUES enter the key set. A string stood there for
                             -- every key, though `[severity.ERROR] = …` keys by a number, CART-1739's residue)
@@ -2798,6 +2825,14 @@ local function build(store, opts)
     if OUT then for _, gf in ipairs(gfilters) do taint(gf[2]) end end
     TCUR = 'saturated (past CAP)'
     for p in pairs(top) do taint(p) end
+    -- (an ESCAPED function may be called with anything by whatever reached it — the E-reading's closure: its parameters
+    -- are tainted from the start, not only once a call through a lost callee is seen. Every real corpus has one, so
+    -- params_hit fired anyway; a program without one left an escaped method's parameter whole, CART-1768)
+    if #esc > 0 then
+        TCUR = 'an escaped function may be called with anything: its parameters'
+        params_hit = true
+        for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then G7.tparams(fpp) end end
+    end
     TCUR = 'sinf'
     for r in pairs(sinf) do taint(r) end
     TCUR = 'self seeded from its method declaration: the host may call it with another object'
@@ -3026,6 +3061,18 @@ local function build(store, opts)
         if ALLOW['__index'] then
             for _, ep in ipairs(G7.ERRPEND) do if not tainted[ep] then taint(ep); released = true end end
             G7.ERRPEND, G7.ERRSET = {}, {}
+        end
+        -- (a dynamic load `t[k]` through a base that may hold an ESCAPED table runs that table's escaped __index handler
+        -- with k: k's objects escape, as a lost call's arguments do, CART-1764)
+        if ALLOW['__index'] or meta_possible('__index') then
+            for _, dl in ipairs(G7.DYNL) do
+                local x, kp = dl[1], dl[2]
+                local eb = tainted[x]
+                if not eb then for o in each(x) do if escaped[o] then eb = true; break end end end
+                if eb then
+                    for o in each(kp) do if not escaped[o] and o ~= EXT and not G7.ISG[o] then G7.escmore(o); released = true end end
+                end
+            end
         end
         for nm, ports in pairs(METAPEND) do
             if not ALLOW[nm] and meta_possible(nm) then
