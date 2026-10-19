@@ -41,6 +41,18 @@ local altitudes = require 'cartograph.panes.altitudes'
 
 local M = {}
 
+-- ★★ A CUT IS ITS MEMBERS; EXTENTS ARE ANCHORS (user, 2026-10-20: "cut.lua's extents are too specific and probably
+-- won't survive outside files or buffers"; the rule it applies is 2026-09-26's, [[derive-never-list]]: "a scope is
+-- ANY node set — a path prefix is one anchor kind"). A cut was `spans = { {file, sl, el} }`: a node with no file —
+-- a Java bean keyed by class name — could not be cut at all (of_node returned nil, and a working set holding one
+-- silently lost it), and nothing could ask about a subject that is not a line in a file. Now:
+--   members   the node ids the cut was made from — what it IS;
+--   anchors   where its members live, DERIVED per anchor KIND (M.ANCHORS): `text` = { doc, sl, el }, a document's
+--             line range, the doc a file path or a buffer's name — one kind among those a provider may register
+--             (a resource path, a URI, a JSON pointer);
+--   unlocated the members no kind could anchor: kept and NAMED, never dropped.
+-- Membership is asked of a SUBJECT (M.has): a node — by identity, then through its own anchors — or an anchor.
+
 --- The granularity ladder, coarsest last. A scope CONTAINS another when its own
 --- granularity is at least as coarse and its spans cover it.
 M.GRAINS = { node = 1, fn = 2, region = 2, file = 3, set = 4, corpus = 5 }
@@ -54,41 +66,86 @@ M.GRAINS = { node = 1, fn = 2, region = 2, file = 3, set = 4, corpus = 5 }
 local KIND_GRAIN = { ['function'] = 'fn', method = 'fn', region = 'region',
     tbl = 'region', module = 'file', var = 'node' }
 
+--- A document's identity as cuts compare it: relative to the world's root (rules report absolute and relative paths
+--- alike — normalising here beats asking 33 rules to agree)
+function M.doc(store, d)
+    if type(d) ~= 'string' then return d end
+    local root = store and store.data and store.data.root
+    if root and d:sub(1, #root + 1) == root .. '/' then return d:sub(#root + 2) end
+    return d
+end
+
+--- THE ANCHOR KINDS: `of(store, node)` -> the node's anchors of this kind (a list, maybe empty); `covers(store, a,
+--- subject)` -> does anchor a hold the subject anchor (of the same kind)? A provider registers its own kind here.
+M.ANCHORS = {
+    text = {
+        of = function (store, n)
+            if not (n.file and n.range) then return {} end
+            return { { kind = 'text', doc = M.doc(store, n.file), sl = atr.sl(n.range), el = atr.el(n.range) } }
+        end,
+        covers = function (store, a, s)
+            if M.doc(store, a.doc) ~= M.doc(store, s.doc) then return false end
+            local sl, el = s.sl or s.line, s.el or s.line
+            return sl ~= nil and sl >= a.sl and el <= a.el
+        end,
+    },
+}
+local KINDS = { 'text' } -- (in a fixed order: anchors are listed deterministically)
+
+--- every anchor of a node, over every registered kind
+function M.anchors_of(store, n)
+    local out = {}
+    local kinds = {}
+    for _, k in ipairs(KINDS) do kinds[#kinds + 1] = k end
+    for k in pairs(M.ANCHORS) do if not vim.tbl_contains(KINDS, k) then kinds[#kinds + 1] = k end end
+    for _, k in ipairs(kinds) do for _, a in ipairs(M.ANCHORS[k].of(store, n) or {}) do out[#out + 1] = a end end
+    return out
+end
+
 --- A scope over one node's own extent.
---- @return table { grain, label, spans = { {file, sl, el} } }  (0-based lines)
+--- @return table { grain, label, members = { id }, anchors, unlocated }
 function M.of_node(store, id)
     local n = id and store.node(id)
-    if not n or not n.file then return nil end
-    if n.kind == 'module' then return M.of_file(store, n.file) end
+    if not n then return nil end
+    if n.kind == 'module' and n.file then return M.of_file(store, n.file) end
+    local anchors = M.anchors_of(store, n)
     return {
         grain = KIND_GRAIN[n.kind] or 'fn',
         label = ('%s %s'):format(KIND_GRAIN[n.kind] or 'node', n.name or id),
-        spans = { { file = n.file, sl = atr.sl(n.range), el = atr.el(n.range) } },
+        members = { id }, anchors = anchors, unlocated = #anchors == 0 and { id } or {},
     }
 end
 
 --- A scope over a whole file. `el = math.huge` rather than the module node's own
 --- end line: a module range can stop short of the file (a container region, an
 --- unparsed tail), and a scope that silently excludes the last function would
---- under-report while LOOKING complete.
-function M.of_file(_, file)
+--- under-report while LOOKING complete. Its member is the file's module node when the graph has one.
+function M.of_file(store, file)
     if not file then return nil end
-    return { grain = 'file', label = 'file ' .. file,
-        spans = { { file = file, sl = 0, el = math.huge } } }
+    local members = {}
+    for _, n in ipairs(store and store.by_file and store.by_file[file] or {}) do
+        if n.kind == 'module' then members[#members + 1] = n.id end
+    end
+    return { grain = 'file', label = 'file ' .. file, members = members, unlocated = {},
+        anchors = { { kind = 'text', doc = M.doc(store, file), sl = 0, el = math.huge } } }
 end
 
 --- A scope over an explicit node SET (the working set, a move-set, an axis's
 --- members). Grain is `set`: the members need not nest, so nothing finer can be
 --- claimed about the cut.
 function M.of_nodes(store, ids, label)
-    local spans = {}
+    local members, anchors, unlocated = {}, {}, {}
     for _, id in ipairs(ids or {}) do
         local one = M.of_node(store, id)
-        for _, s in ipairs(one and one.spans or {}) do spans[#spans + 1] = s end
+        if one then
+            for _, m in ipairs(one.members) do members[#members + 1] = m end
+            for _, a in ipairs(one.anchors) do anchors[#anchors + 1] = a end
+            for _, u in ipairs(one.unlocated) do unlocated[#unlocated + 1] = u end
+        end
     end
-    if #spans == 0 then return nil end
-    return { grain = 'set', label = label or ('set of %d'):format(#spans),
-        spans = spans }
+    if #members == 0 then return nil end
+    return { grain = 'set', label = label or ('set of %d'):format(#members),
+        members = members, anchors = anchors, unlocated = unlocated }
 end
 
 --- THE SCOPE OF THE BROWSER'S CURRENT FRAME — the whole point of the exercise.
@@ -125,23 +182,45 @@ function M.of_frame(store, level, key)
     return nil
 end
 
---- Is a finding inside this scope? `line` is 1-BASED (findings are), spans are
---- 0-based (node ranges are), and `file` may be absolute or relative because the
---- rules are not consistent about it — normalising here rather than asking 33
---- rules to agree is the cheap correct move.
+--- Is a SUBJECT inside this cut? A subject is a node id, `{ node = id }`, or an anchor `{ kind, … }`. A node is in when
+--- it is a member, or when one of its anchors lies in one of the cut's anchors of the same kind; an anchor when it lies
+--- in one. No cut holds everything.
+function M.has(store, sc, subj)
+    if not sc then return true end
+    if type(subj) == 'string' then subj = { node = subj } end
+    local cands = {}
+    if subj.node then
+        for _, m in ipairs(sc.members or {}) do if m == subj.node then return true end end
+        local n = store.node(subj.node)
+        cands = n and M.anchors_of(store, n) or {}
+    else cands = { subj } end
+    for _, s in ipairs(cands) do
+        local kind = M.ANCHORS[s.kind]
+        if kind then
+            for _, a in ipairs(sc.anchors or {}) do
+                if a.kind == s.kind and kind.covers(store, a, s) then return true end
+            end
+        end
+    end
+    return false
+end
+
+--- Is a finding at `file`:`line` inside this scope? `line` is 1-BASED (findings are), text anchors 0-based (node
+--- ranges are). The text kind's adapter, kept for the callers that locate by file and line.
 function M.contains(store, sc, file, line)
     if not sc then return true end
     if not file then return false end
-    local rel = file
-    local root = store.data and store.data.root
-    if root and rel:sub(1, #root) == root then
-        rel = rel:sub(#root + 2)
+    return M.has(store, sc, { kind = 'text', doc = file, line = (tonumber(line) or 1) - 1 })
+end
+
+--- The documents a cut can hold a text subject in (a pass that walks files walks only these), sorted.
+function M.docs(sc)
+    local seen, out = {}, {}
+    for _, a in ipairs(sc and sc.anchors or {}) do
+        if a.kind == 'text' and a.doc and not seen[a.doc] then seen[a.doc] = true; out[#out + 1] = a.doc end
     end
-    local l0 = (tonumber(line) or 1) - 1
-    for _, s in ipairs(sc.spans) do
-        if s.file == rel and l0 >= s.sl and l0 <= s.el then return true end
-    end
-    return false
+    table.sort(out)
+    return out
 end
 
 return M

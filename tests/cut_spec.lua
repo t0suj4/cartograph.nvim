@@ -120,11 +120,49 @@ test('scope: contains normalises absolute and relative finding paths', function 
     -- the rules are not consistent about it (dead-state calls store.abs, seam-guard
     -- does not), so normalising in ONE place beats asking 33 rules to agree
     store.ingest({ root = '/tmp/x', nodes = {}, edges = {}, calls = {} })
-    local sc = { grain = 'fn', label = 'fn f',
-        spans = { { file = 'a.lua', sl = 4, el = 8 } } }
+    local sc = { grain = 'fn', label = 'fn f', members = {},
+        anchors = { { kind = 'text', doc = 'a.lua', sl = 4, el = 8 } } }
     ok(cut.contains(store, sc, 'a.lua', 6), 'relative, inside')
     ok(cut.contains(store, sc, '/tmp/x/a.lua', 6), 'absolute, inside')
     ok(not cut.contains(store, sc, 'a.lua', 4), 'above the span (1-based vs 0-based)')
     ok(not cut.contains(store, sc, 'b.lua', 6), 'another file')
     ok(cut.contains(store, nil, 'anything', 1), 'no scope contains everything')
+end)
+
+-- (the user, 2026-10-20: extents "too specific — won't survive outside files or buffers". A cut is its MEMBERS; a text
+-- line range is one ANCHOR kind among those a provider may register, and membership is asked of a SUBJECT)
+test('scope: a node with NO file is a member — kept, named unlocated, found by identity', function ()
+    store.ingest({ root = '/tmp/x', nodes = {
+        { id = 'bean:OrderService', kind = 'class', name = 'OrderService' },                    -- no file: a bean
+        { id = 'a.lua::f@4', kind = 'function', name = 'f', file = 'a.lua', range = { start = { line = 4, char = 0 }, ['end'] = { line = 8, char = 3 } } },
+    }, edges = {}, calls = {} })
+    local sc = cut.of_nodes(store, { 'bean:OrderService', 'a.lua::f@4' })
+    ok(sc, 'a set holding a file-less node is still a cut (it was nil, or the node was silently dropped)')
+    eq(2, #sc.members, 'both members kept')
+    eq('bean:OrderService', sc.unlocated[1], 'the file-less one is NAMED, not lost')
+    ok(cut.has(store, sc, 'bean:OrderService'), 'and found by identity')
+    ok(cut.contains(store, sc, 'a.lua', 6), 'the text member still locates a finding by file and line')
+    eq('a.lua', cut.docs(sc)[1], 'the documents a pass may walk are the text anchors\' only')
+    eq(1, #cut.docs(sc))
+end)
+
+test('scope: a node subject lies in a file cut through its anchor; another kind of anchor can be registered', function ()
+    store.ingest({ root = '/tmp/x', nodes = {
+        { id = 'a.lua::f@4', kind = 'function', name = 'f', file = 'a.lua', range = { start = { line = 4, char = 0 }, ['end'] = { line = 8, char = 3 } } },
+        { id = 'svc:prod/api', kind = 'service', name = 'api', path = 'prod/api' },
+        { id = 'svc:prod/api/db', kind = 'service', name = 'db', path = 'prod/api/db' },
+    }, edges = {}, calls = {} })
+    ok(cut.has(store, cut.of_file(store, 'a.lua'), 'a.lua::f@4'), 'a function inside a file cut: through its text anchor')
+    ok(not cut.has(store, cut.of_file(store, 'b.lua'), 'a.lua::f@4'), 'not inside another file\'s')
+    -- a provider's own anchor kind: a resource path, covered by its prefixes
+    cut.ANCHORS.path = {
+        of = function (_, n) return n.path and { { kind = 'path', path = n.path } } or {} end,
+        covers = function (_, a, s) return s.path == a.path or s.path:sub(1, #a.path + 1) == a.path .. '/' end,
+    }
+    local sc = cut.of_node(store, 'svc:prod/api')
+    eq(0, #sc.unlocated, 'the service is located by its own kind')
+    ok(cut.has(store, sc, 'svc:prod/api/db'), 'a node under it is inside, by the path kind')
+    ok(cut.has(store, sc, { kind = 'path', path = 'prod/api/db/conn' }), 'and so is an anchor subject')
+    ok(not cut.has(store, sc, { kind = 'path', path = 'prod/web' }), 'a sibling path is not')
+    cut.ANCHORS.path = nil
 end)

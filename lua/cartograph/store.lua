@@ -54,7 +54,9 @@ local function idx_node(T, n)
         T.by_name[n.name] = T.by_name[n.name] or {}
         table.insert(T.by_name[n.name], n.id)
     end
-    if n.kind ~= 'module' then
+    -- (a node with NO file — a resource, a service, a bean keyed by class name — is indexed by id and name only: the
+    -- by-file index is one locating kind among others, cut.lua's text anchors; it had raised "table index is nil")
+    if n.kind ~= 'module' and n.file then
         T.by_file[n.file] = T.by_file[n.file] or {}
         table.insert(T.by_file[n.file], n)
     end
@@ -285,7 +287,7 @@ function M.ingest(data, opts)
     local seen = {}
     for _, n in ipairs(M.data.nodes) do
         idx_node(M, n)
-        if not seen[n.file] then seen[n.file] = true; table.insert(M.files, n.file) end
+        if n.file and not seen[n.file] then seen[n.file] = true; table.insert(M.files, n.file) end
     end
     table.sort(M.files)
     M._fileset = seen -- files already in M.files (an incremental step extends it)
@@ -861,8 +863,8 @@ function M.ingest_step(acc)
     for i = ing.n + 1, #acc.nodes do
         local n = acc.nodes[i]
         idx_node(M, n)
-        if n.kind ~= 'module' then dirty[n.file] = true end
-        if not M._fileset[n.file] then -- a file not in the roster yet: add it
+        if n.kind ~= 'module' and n.file then dirty[n.file] = true end
+        if n.file and not M._fileset[n.file] then -- a file not in the roster yet: add it
             M._fileset[n.file] = true
             M.files[#M.files + 1] = n.file
             newfiles = true
@@ -1428,8 +1430,10 @@ function M.add_node(n)
         M.by_name[n.name] = M.by_name[n.name] or {}
         table.insert(M.by_name[n.name], n.id)
     end
-    M.by_file[n.file] = M.by_file[n.file] or {}
-    table.insert(M.by_file[n.file], n)
+    if n.file then
+        M.by_file[n.file] = M.by_file[n.file] or {}
+        table.insert(M.by_file[n.file], n)
+    end
     return n
 end
 

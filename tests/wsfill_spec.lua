@@ -85,7 +85,8 @@ test('wsfill: the working set IS a cut, and cut.of_nodes finally has a caller', 
     local sc = cut.of_frame(store, 'ws', 'ws')
     ok(sc, 'standing at the working set yields a cut, not nil')
     eq('set', sc.grain, 'an arbitrary union of nodes: grain `set`')
-    eq(2, #sc.spans, 'one span per member')
+    eq(2, #sc.members, 'one member per marked symbol')
+    eq(2, #sc.anchors, 'and one text anchor each')
     ok(sc.label:match('working set'), sc.label)
     -- and a promise rule still refuses over it: a union of nodes holds nobody's
     -- whole search space, so `set` is deliberately absent from lint.CLOSURE

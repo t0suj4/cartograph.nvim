@@ -647,14 +647,12 @@ local function pass_files(store, args, label)
         end
         sc = cut.of_nodes(store, ids, label .. ' scope')
         if not sc then return nil, nil, 'the nodes named have no extent to scope by', 'ill-posed' end
+        if #cut.docs(sc) == 0 then return nil, nil, 'the nodes named lie in no document a pass could rewrite', 'ill-posed' end
     end
     local files = args.files
     if not files and sc then
         -- (a scope's files are the only ones it can hold a site in)
-        local seen = {}
-        files = {}
-        for _, s in ipairs(sc.spans or {}) do if not seen[s.file] then seen[s.file] = true; files[#files + 1] = s.file end end
-        table.sort(files)
+        files = cut.docs(sc)
     end
     if not files then
         files = {}
