@@ -81,6 +81,7 @@ M.CONTRACTS = {
     ['outside-raises-strings'] = 'a function outside the tree raises strings (pcall second values)',
     ['host'] = 'a host site of kind prim or members (sites[i].host, from the environment profile) has no fields: a store to it is not followed, a load from it is its declared type; an open host site is an ordinary object',
     ['strict-global'] = 'a named global read does not see a dynamic-key write `_G[k] = v` (tag contract:strict-global)',
+    ['fixed-env'] = 'the tree never calls setfenv (its text never names it), and outside code does not set a tree function\'s environment: every environment is the globals table (stated only when that holds)',
     ['computed-global'] = 'a read `_G[k]` with k unknown, or next / pairs over _G, sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'the globals site never escapes: a write through a cap-cut value that may be _G is not followed',
     ['unknown-receiver'] = 'a call on a member of an ext value runs no tree code and hands its arguments nowhere; a call whose callee the flow cannot resolve runs nothing',
@@ -491,7 +492,11 @@ function M.build(rec, X)
     -- gaps
     local gj = {}
     for _, g in ipairs(rec.gaps) do
+        -- (FIXED environments: a tree that never calls setfenv has every environment _G, and getfenv(…) IS the globals
+        -- port the IR already holds — the clause `fixed-env` states it; with a setfenv the gap stays, CART-1775)
+        if g.kind == 'getfenv' and not X.ANYSETFENV then goto nextgap end
         gj[#gj + 1] = ('{"fn":%d,"kind":%s,"vars":%s,"at":%s}'):format(FN(g.fn), jstr(g.kind), jarr(g.vars), g.at and jstr(g.at) or 'null')
+        ::nextgap::
     end
     -- (the STORE RULE's reach, CART-1744: a store — or keyed copy — of `.f` through a tainted base taints field f of
     -- EVERY escaped object, the cells no port holds too: a cell nothing reads has no port, and htaint lists ports.
@@ -530,7 +535,8 @@ function M.build(rec, X)
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
     put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
         .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
-            local ks, kv = vim.tbl_keys(M.CONTRACTS), {}
+            local ks, kv = {}, {}
+            for k in pairs(M.CONTRACTS) do if not (k == 'fixed-env' and X.ANYSETFENV) then ks[#ks + 1] = k end end
             table.sort(ks)
             for i, k in ipairs(ks) do kv[i] = jstr(k) .. ':' .. jstr(M.CONTRACTS[k]) end
             return '{' .. table.concat(kv, ',') .. '}'

@@ -2376,6 +2376,9 @@ local function build(store, opts)
         -- a file that names setfenv: a port per top-level global read cost w2 4x the load visits, 33 -> 55 s)
         local saved = G7.CHUNK
         G7.CHUNK = src:find('setfenv', 1, true) and ('chunk:' .. file) or nil
+        -- (a tree whose text never names setfenv — debug.setfenv included, a comment too: an over-count, never an under —
+        -- has FIXED environments: every one is _G, and the dump states it as a contract, CART-1775)
+        if G7.CHUNK then G7.ANYSETFENV = true end
         if G7.REC then
             G7.W, G7.FNS, G7.CK = true, fnstack, 'chunk:' .. file
             local e0, c0 = expr, callv -- (an argument evaluated inside a hand-translated builtin is the program's)
@@ -3667,7 +3670,7 @@ local function build(store, opts)
         local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
-            ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

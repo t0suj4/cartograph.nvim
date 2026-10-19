@@ -581,3 +581,16 @@ test('flowdump: getmetatable is getmeta and a keyed copy copyKeyed, not gaps', f
     ok(ops.getmeta and ops.copyKeyed, 'getmeta and copyKeyed are emitted')
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
+
+-- (CART-1775, fixed environments: a tree that never calls setfenv has every environment _G — getfenv leaves no gap and
+-- the dump states `fixed-env`; one that does keeps the gap and claims nothing)
+test('flowdump: getfenv is no gap under fixed environments, and stays one when the tree calls setfenv', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function kinds(D) local g = {}; for _, x in ipairs(D.gaps) do g[x.kind] = true end; return g end
+    local D = dump('\nlocal G = getfenv(0)\nreturn G\n')
+    ok(not kinds(D).getfenv, 'no getfenv gap without setfenv')
+    ok(D.contracts.clauses['fixed-env'] ~= nil, 'the fixed-env clause is stated')
+    D = dump('\nlocal G = getfenv(0)\nsetfenv(1, {})\nreturn G\n')
+    ok(kinds(D).getfenv, 'with a setfenv the getfenv gap stays')
+    ok(D.contracts.clauses['fixed-env'] == nil, 'and the fixed-env clause is not stated')
+end)
