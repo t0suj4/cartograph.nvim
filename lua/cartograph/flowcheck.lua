@@ -178,6 +178,16 @@ for _, F in ipairs(D.functions) do
                     sub(HDYN[a] or EMPTY, x, 'raw[]')
                 end
             end
+        elseif op == 'storeRawDyn' then
+            -- (`storeRawDyn x k y`, CART-1771: storeDyn at the object ITSELF — every dynamic field of each object x may
+            -- hold gets y, its key set gets k; no chain, no __newindex handler)
+            local x, k, y = ins[2], ins[3] ~= NULL and ins[3] or nil, ins[4]
+            for a in pairs(v(x)) do
+                if not HOST[a] then
+                    if k and not HKEYSTOP[a] then for b in pairs(v(k)) do if not (HKEYS[a] and HKEYS[a][b]) then failh('hkeys', a, '*', ('hkeys(%d) lacks %d'):format(a, b)); break end end end
+                    for b in pairs(v(y)) do if not (HDYN[a] and HDYN[a][b]) then failh('hdyn', a, '*', ('hdyn(%d) lacks %d'):format(a, b)); break end end
+                end
+            end
         elseif op == 'storeRaw' then
             -- (`storeRaw x f y`, FLOW-0090: x.f = y on the object itself — no __newindex: a constructor's named field)
             local x, f, y = ins[2], ins[3], ins[4]

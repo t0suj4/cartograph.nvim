@@ -327,17 +327,17 @@ end)
 
 -- (CART-1739's residue, 29 vimruntime failures: a constructor's COMPUTED key `{ [e] = v }` and rawset(t, k, v) were
 -- dumped as storeDyn with no key, and the constructor's key set held a string for every key)
-test('flowdump: a constructor\'s computed key and rawset\'s key are named by their storeDyn', function ()
+test('flowdump: a constructor\'s computed key and rawset\'s key are named by their storeRawDyn (CART-1771)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     -- (keys read from a FIELD, as vimruntime's `[watch.FileChangeType.Created] = …`: neither a constant nor an index)
     local D = dump('\nlocal K = { x = tostring(#arg) }\nlocal t = { [K.x] = 1 }\nlocal u = {}\nrawset(u, K.x, 2)\nreturn t, u\n')
     local dyn, named = 0, 0
     for _, F in ipairs(D.functions) do
         for _, i in ipairs(F.body) do
-            if i[1] == 'storeDyn' then dyn = dyn + 1; if i[3] ~= vim.NIL then named = named + 1 end end
+            if i[1] == 'storeRawDyn' then dyn = dyn + 1; if i[3] ~= vim.NIL then named = named + 1 end end
         end
     end
-    eq(2, dyn, 'two dynamic stores: the constructor field and rawset')
+    eq(2, dyn, 'two RAW dynamic stores: the constructor field and rawset')
     eq(2, named, 'both name their key')
 end)
 

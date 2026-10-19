@@ -1748,7 +1748,10 @@ local function build(store, opts)
                 local tp, kp = expr(argn[1]), expr(argn[2])
                 local vp, key = expr(argn[3]), strkey(argn[2])
                 if key == '[]' then G7.NEXTK = kp end
+                -- (and it is RAW — no __newindex: the dump's storeRaw / storeRawDyn, CART-1771)
+                G7.RAWSTORE = true
                 storec(tp, key, vp)
+                G7.RAWSTORE = nil
                 storec(tp, '{k}', kp)
                 return tp
             end
@@ -2106,7 +2109,7 @@ local function build(store, opts)
                             local vp = expr(v)
                             G7.NEXTK = key == '[]' and kp or nil
                             -- (a constructor's field is set RAW — no __newindex: the dump's storeRaw, FLOW-0090)
-                            G7.RAWSTORE = key ~= '[]' or nil
+                            G7.RAWSTORE = true -- (a computed key too: the dump's storeRawDyn, CART-1771)
                             edge(vp, ofp(o, key))
                             G7.RAWSTORE = nil
                             G7.NEXTK = nil
@@ -2452,7 +2455,7 @@ local function build(store, opts)
             return dst
         end
         storec = function (x, f, v)
-            if on() and f ~= '{k}' then if f:byte(1) == 1 then G7.gap('hidden-store', { x, v }) else G7.ins({ 'store', x, f, v, f == '[]' and G7.NEXTK or nil }) end end
+            if on() and f ~= '{k}' then if f:byte(1) == 1 then G7.gap('hidden-store', { x, v }) else G7.ins({ G7.RAWSTORE and 'storeRaw' or 'store', x, f, v, f == '[]' and G7.NEXTK or nil }) end end
             G7.NEXTK = nil
             enter(); r_storec(x, f, v); leave()
         end

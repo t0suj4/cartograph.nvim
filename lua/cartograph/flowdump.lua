@@ -33,8 +33,8 @@
 --   storeDyn). A named load reads it (Lua: `t[k] = v` may write `t.name`).
 -- * RAW accesses (FLOW-0090, the core's D16): `storeRaw` [x, f, y] is a table constructor's named field (no
 --   __newindex); `loadRaw` [x, y, k | null] reads any field of the object ITSELF, with no __index and no prototype:
---   pairs' value (k null) and rawget(t, k) with a variable key (CART-1758). A constructor's computed key `[e] = v`
---   stays a storeDyn: the core has no raw dynamic store.
+--   pairs' value (k null) and rawget(t, k) with a variable key (CART-1758). `storeRawDyn` [x, k | null, y] is a raw
+--   store under a computed key: rawset(t, k, v) and a constructor's `[e] = v` (CART-1771).
 -- * SITES are flowtype's objects: `table`, `function` (fn = its function id: P.fnOf), `type` (a value the environment
 --   profile types — a host value; `type:string` is the strings), `ext` (code outside the tree: EXT), `globals` (_G),
 --   A `type` or `ext` site is a HOST value. A `type` site carries `host` = its KIND, from the environment profile
@@ -222,7 +222,11 @@ function M.build(rec, X)
             return { op, vars(ins[2]), V(ins[3]), vars(ins[4]) }
         elseif op == 'keys' then return { 'keys', V(ins[2]), V(ins[3]) }
         -- (RAW accesses, FLOW-0090: a constructor's field, pairs' / next's value)
-        elseif op == 'storeRaw' then return { 'storeRaw', V(ins[2]), F(ins[3]), V(ins[4]) }
+        elseif op == 'storeRaw' then
+            -- (a raw store under a computed key — rawset(t, k, v), a constructor's `[e] = v` — is the core's storeRawDyn,
+            -- flowpath 734eafe, CART-1771)
+            if ins[3] == '[]' then return { 'storeRawDyn', V(ins[2]), ins[5] and V(ins[5]) or vim.NIL, V(ins[4]) } end
+            return { 'storeRaw', V(ins[2]), F(ins[3]), V(ins[4]) }
         elseif op == 'loadRaw' then return { 'loadRaw', V(ins[2]), V(ins[3]), ins[4] and V(ins[4]) or vim.NIL }
         elseif op == 'error' then return { 'error', V(ins[2]) }
         elseif op == 'op' then return { 'op', V(ins[2]), vars(ins[3]), F(ins[4]) }
@@ -361,7 +365,7 @@ function M.build(rec, X)
         end
         for _, l in pairs(rec.fns) do
             for _, ins in ipairs(l) do
-                if ins[1] == 'store' and ins[3] == '[]' then
+                if (ins[1] == 'store' or ins[1] == 'storeRaw') and ins[3] == '[]' then
                     local x, k = ins[2], ins[5]
                     local mm = maymode(k)
                     if mm then for o in X.each(x) do if not X.TNAME[o] or not prim(o) then weakx[o] = true end end end
