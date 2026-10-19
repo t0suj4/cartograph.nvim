@@ -1509,7 +1509,11 @@ local function build(store, opts)
                 if kn and rk and kn:type() == 'identifier' and rk:type() == 'identifier' and txt(kn) == txt(rk)
                     and not select(2, lookup(txt(kn))) and G7.KBASE and G7.KBASE[rhs:id()] then
                     G7.copyf(base, G7.KBASE[rhs:id()], v)
-                    G7.gap('keyed-copy', { base })
+                    -- (the core's copyKeyed, flowpath 57df099, CART-1774: one dynamic field from y's chain to the same
+                    -- field of x's, the key into the key set, x's __newindex — the field-to-field correlation kept)
+                    local kpc = expr(kn)
+                    G7.KP0 = kpc
+                    G7.ins({ 'copyKeyed', base, G7.KBASE[rhs:id()], kpc, v })
                 else
                     -- (the key's port is walked FIRST: the dump's storeDyn carries it, CART-1739)
                     local kp0 = kn and keyname(kn) == '[]' and expr(kn) or nil
@@ -1783,7 +1787,19 @@ local function build(store, opts)
                 end)
             end
             -- (getmetatable(x) is the metatable setmetatable stored; newproxy(true) a userdata with a fresh one)
-            if fname == 'getmetatable' and argn[1] and gbl() then return field(expr(argn[1]), '\1mt', true) end
+            -- (getmetatable(e): the metatable slot — or, where the slot's table has a `__metatable` field, that field:
+            -- Lua 5.1's override, which the solve had ignored. The core's getmeta, flowpath 43cbd9d, CART-1773)
+            if fname == 'getmetatable' and argn[1] and gbl() then
+                local y = expr(argn[1])
+                return G7.mu(function ()
+                    local mt = field(y, '\1mt', true)
+                    local x = new()
+                    edge(mt, x)
+                    edge(field(mt, '__metatable'), x)
+                    G7.ins({ 'getmeta', x, y, '__metatable' })
+                    return x
+                end)
+            end
             if fname == 'newproxy' and gbl() then
                 local up = new()
                 local u = newobj('proxy:' .. key_of(n))

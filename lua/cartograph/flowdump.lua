@@ -230,6 +230,9 @@ function M.build(rec, X)
             return { 'storeRaw', V(ins[2]), F(ins[3]), V(ins[4]) }
         elseif op == 'loadRaw' then return { 'loadRaw', V(ins[2]), V(ins[3]), ins[4] and V(ins[4]) or vim.NIL }
         elseif op == 'error' then return { 'error', V(ins[2]) }
+        -- (getmetatable and the keyed copy, the core's getmeta / copyKeyed: CART-1773, CART-1774)
+        elseif op == 'getmeta' then return { 'getmeta', V(ins[2]), V(ins[3]), F(ins[4]) }
+        elseif op == 'copyKeyed' then return { 'copyKeyed', V(ins[2]), V(ins[3]), V(ins[4]), V(ins[5]) }
         elseif op == 'op' then return { 'op', V(ins[2]), vars(ins[3]), F(ins[4]) }
         elseif op == 'setmeta' then return { 'setmeta', V(ins[2]), V(ins[3]) }
         elseif op == 'cocreate' then return { 'cocreate', V(ins[2]), ins[3], V(ins[4]) }
@@ -366,8 +369,10 @@ function M.build(rec, X)
         end
         for _, l in pairs(rec.fns) do
             for _, ins in ipairs(l) do
-                if (ins[1] == 'store' or ins[1] == 'storeRaw') and ins[3] == '[]' then
-                    local x, k = ins[2], ins[5]
+                local dyn = (ins[1] == 'store' or ins[1] == 'storeRaw') and ins[3] == '[]'
+                if dyn or ins[1] == 'copyKeyed' then
+                    -- (a keyed copy writes a dynamic field of its target too: its key may be "__mode", CART-1774)
+                    local x, k = ins[2], dyn and ins[5] or ins[4]
                     local mm = maymode(k)
                     if mm then for o in X.each(x) do if not X.TNAME[o] or not prim(o) then weakx[o] = true end end end
                     if X.top[x] or X.tainted[x] then

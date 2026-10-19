@@ -565,3 +565,19 @@ test('flowdump: a coroutine nobody resumes still returns into rout and raises in
     for _, F in ipairs(D.functions) do for _, ins in ipairs(F.body) do if ins[1] == 'resume' then e = ins[2][2] end end end
     ok(e and has(V[e], bsite), 'the resume of co2 sees b in its error result: ' .. vim.inspect(V[e]))
 end)
+
+-- (CART-1773 / 1774: getmetatable is the core's getmeta (with __metatable's field), a keyed copy its copyKeyed — no
+-- hidden-load or keyed-copy gap is left)
+test('flowdump: getmetatable is getmeta and a keyed copy copyKeyed, not gaps', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump(table.concat({ '',
+        'local t = setmetatable({}, { __metatable = b })', 'local m = getmetatable(t)',
+        'local S, T = { x = a }, {}', 'for k in pairs(S) do T[k] = S[k] end',
+        'return m, T' }, '\n') .. '\n')
+    local gaps, ops = {}, {}
+    for _, g in ipairs(D.gaps) do gaps[g.kind] = true end
+    for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do ops[i[1]] = true end end
+    ok(not gaps['hidden-load'] and not gaps['keyed-copy'], 'no hidden-load / keyed-copy gap: ' .. vim.inspect(D.gaps))
+    ok(ops.getmeta and ops.copyKeyed, 'getmeta and copyKeyed are emitted')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)

@@ -167,6 +167,17 @@ for _, F in ipairs(D.functions) do
                     for _, t in ipairs(handlers(IDX, c)) do entry(F.id, FNOF[t], t, { { [c] = true } }, { x }, false) end
                 end end
             end
+        elseif op == 'getmeta' then
+            -- (`getmeta x y f`, CART-1773: x holds y's metatable slot and, Lua 5.1's override, each such table's field f —
+            -- `__metatable`; a host y has no slot here)
+            local x, y, f = ins[2], ins[3], ins[4]
+            for a in pairs(v(y)) do
+                if not HOST[a] then
+                    local mt = h(a, META)
+                    sub(mt, x, 'getmeta')
+                    for m in pairs(mt) do sub(h(m, f), x, 'getmeta.__metatable') end
+                end
+            end
         elseif op == 'loadRaw' then
             -- (`loadRaw x y k`, FLOW-0090: any field of the object ITSELF — no __index, no prototype: pairs' value, rawget)
             local x, y = ins[2], ins[3]
@@ -292,7 +303,7 @@ for _, F in ipairs(D.functions) do
     w(F.self)
     for _, ins in ipairs(F.body) do
         local op = ins[1]
-        if op == 'new' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' then w(ins[2])
+        if op == 'new' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' or op == 'getmeta' then w(ins[2])
         elseif op == 'call' or op == 'pcall' or op == 'resume' or op == 'yield' then for _, x in ipairs(ins[2]) do w(x) end end
     end
 end
