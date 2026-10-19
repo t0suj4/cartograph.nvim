@@ -2098,9 +2098,13 @@ local function build(store, opts)
                             -- (a COMPUTED key `[e] = v` is walked — Lua evaluates it before the value — and it is the field's
                             -- key: the dump's storeDyn names it, and its VALUES enter the key set. A string stood there for
                             -- every key, though `[severity.ERROR] = …` keys by a number, CART-1739's residue)
-                            local kp = k and key == '[]' and expr(k) or nil
+                            -- (ANY non-literal bracket key is evaluated: `[o + 1]` reads as the array cell `#`, yet its
+                            -- operator runs — o's __add — and its VALUE is the key: the key set gets it. `{ [o + 1] = true }`
+                            -- had run nothing, and pairs never yielded the key, CART-1770)
+                            local bracket = k and not named
+                            local kp = bracket and (key == '[]' or k:type() ~= 'string' and k:type() ~= 'number') and expr(k) or nil
                             local vp = expr(v)
-                            G7.NEXTK = kp
+                            G7.NEXTK = key == '[]' and kp or nil
                             -- (a constructor's field is set RAW — no __newindex: the dump's storeRaw, FLOW-0090)
                             G7.RAWSTORE = key ~= '[]' or nil
                             edge(vp, ofp(o, key))
@@ -2108,7 +2112,7 @@ local function build(store, opts)
                             G7.NEXTK = nil
                             if G7.EXP['strict-records'] and v:type() == 'table_constructor' and G7.MAPNAME[key] then for x in each(vp) do G7.MAPSITE[x] = true end end
                             if kp then edge(kp, ofp(o, '{k}'))
-                            elseif k then local sp = new(); addobj(sp, STR); edge(sp, ofp(o, '{k}')) end
+                            elseif k then local sp = new(); addobj(sp, k:type() == 'number' and typeobj('number') or STR); edge(sp, ofp(o, '{k}')) end
                         end
                     end
                 end
