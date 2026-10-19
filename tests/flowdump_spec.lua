@@ -487,3 +487,30 @@ test('flowdump: an escaped method\'s parameter is tainted; a dynamic load\'s key
     for _, o in ipairs(T.escaped) do if tostring(lab[o]):match('^tbl:m%.lua:13:') then kesc = true end end
     ok(kesc, 'K (the key of a load through an escaped base) escaped: ' .. vim.inspect(T.escaped))
 end)
+
+-- (CART-1769: a base that LISTS an escaped table — not itself tainted — meets the same handlers as a lost one: a load's
+-- and a STORE's error port are tainted once their handler is possible)
+test('flowdump: a load and a store through a listed escaped table taint their error ports', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, table.concat({ '',
+        'local function lose(q) return q end',
+        'local x = {}',
+        'lose(x)', 'lose({})', 'lose({})',                                   -- x escapes through the saturated q
+        'local P = setmetatable({}, { __index = function () error("i") end, __newindex = function () error("n") end })',
+        'local function rd() return x.f end',                                -- x is LISTED here, not tainted
+        'local function wr() x.g = 1 end',
+        'return rd(), wr(), P' }, '\n') .. '\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local ids = {}
+    for i, nm in ipairs(D.names.functions) do
+        local short = tostring(nm):match('::(%w+)@')
+        if short then ids[short] = i - 1 end
+    end
+    local tset = {}
+    for _, id in ipairs(D.solution.err.taint) do tset[tonumber(id)] = true end
+    ok(ids.rd and tset[ids.rd], 'rd (a load through listed escaped x) has a tainted error port')
+    ok(ids.wr and tset[ids.wr], 'wr (a store through listed escaped x) has a tainted error port')
+end)

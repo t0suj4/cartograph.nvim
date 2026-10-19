@@ -683,7 +683,10 @@ local function build(store, opts)
     local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
         if G7.MULTI then G7.LENV[dst] = G7.ENV end
-        if WALKERR then LOADERR[dst] = WALKERR() end
+        if WALKERR then
+            LOADERR[dst] = WALKERR()
+            if f:byte(1) ~= 1 and f ~= '{k}' then G7.LDL[#G7.LDL + 1] = { x, LOADERR[dst] } end -- (CART-1769)
+        end
         if PTAG then
             local tg = PTAG[x]
             if tg and tg.d < 3 then PTAG[dst] = { fn = tg.fn, j = tg.j, path = tg.path .. '.' .. tostring(f), d = tg.d + 1 } end
@@ -762,7 +765,7 @@ local function build(store, opts)
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
     -- (G7.HOOKS: a hooked function -> its hooks' ports; G7.XARGS: a function -> the calls bound to it with arguments
     -- past its parameters, which the hook receives and the parameters drop, CART-1748)
-    G7.HOOKS, G7.XARGS, G7.LOADK, G7.DYNL = {}, {}, {}, {}
+    G7.HOOKS, G7.XARGS, G7.LOADK, G7.DYNL, G7.LDL, G7.STL = {}, {}, {}, {}, {}, {}
     local function bindcall(o, args, res, site, cerr)
         local o0 = o
         if site and clone_at then
@@ -926,6 +929,7 @@ local function build(store, opts)
     -- (a store `x.f = v` / `x[k] = v` also reaches x's `__newindex`: a FUNCTION is called with (x, key, v), a TABLE
     -- receives the store — CART-1704)
     local function metastore(base, f, kp, v, cerr)
+        if cerr and f:byte(1) ~= 1 then G7.STL[#G7.STL + 1] = { base, cerr } end -- (a store's error port, CART-1769)
         local nh = field(field(base, '\1mt', true), '__newindex')
         METAH[nh] = '__newindex'
         callc(nh, { base, kp, v }, new(), nil, cerr)
@@ -1870,7 +1874,15 @@ local function build(store, opts)
             if fname == 'table.insert' and argn[1] then
                 local tp = expr(argn[1])
                 acc('array', argn[1], nil, tp)
-                for j = 2, #argn do local v = expr(argn[j]); if j == #argn then storec(tp, '#', v) end end
+                -- (Lua 5.3+'s table.insert is lua_seti: it runs __newindex; 5.1's is raw — taken as the 5.3 one, CART-1769)
+                for j = 2, #argn do
+                    local v = expr(argn[j])
+                    if j == #argn then
+                        storec(tp, '#', v)
+                        local kp = new(); addobj(kp, typeobj('number'))
+                        metastore(tp, '#', kp, v, curerr())
+                    end
+                end
                 return new()
             end
             local recvp, callee
@@ -2185,6 +2197,10 @@ local function build(store, opts)
                                 local base = expr(o)
                                 acc('write', last, txt(last), base)
                                 storec(base, txt(last), fp)
+                                -- (`function t.f() end` IS `t.f = function … end`: it runs t's __newindex like any store,
+                                -- CART-1769 — the walk had skipped the handler, and its error)
+                                local kp = new(); addobj(kp, STR)
+                                metastore(base, txt(last), kp, fp, curerr())
                                 if G7.MSELF and not clone and nm:type() == 'method_index_expression' then
                                     G7.MSELF[#G7.MSELF + 1] = { G7.LASTFP.params[1], base, G7.LASTFP.id }
                                 end
@@ -2907,7 +2923,6 @@ local function build(store, opts)
     -- CART-1707: no name was ever possible, no parked port was released — a cap-cut metatable answered a whole exact.
     -- Recording them: 72 whole exact answers partial on the runtime-oracle tree, 0 wrong either way)
     local ALLOW, METAPEND = {}, {}
-    G7.ERRPEND, G7.ERRSET = {}, {} -- (load error ports waiting for an __index handler to become possible, CART-1762)
     local function meta_possible(mm)
         -- (a metatable slot stored through a lost base, `setmetatable(T, mt)` with T lost, gives ANY escaped table ANY
         -- escaped metatable; a hit of mm (or `[]`) puts any escaped value in that metatable's handler. Recorded
@@ -2932,16 +2947,7 @@ local function build(store, opts)
         TCUR = p
         for q in sit(succ[p]) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
-        for _, ld in ipairs(loads[p] or NOTHING) do
-            taint(ld[2])
-            -- (a load through a lost base may run an ESCAPED __index handler, which may raise: the load's error port.
-            -- Parked until such a handler is possible, as a handler port is, CART-1762)
-            local ep = LOADERR[ld[2]]
-            if ep and ld[1]:byte(1) ~= 1 and not tainted[ep] then
-                if ALLOW['__index'] then taint(ep)
-                elseif not G7.ERRSET[ep] then G7.ERRSET[ep] = true; G7.ERRPEND[#G7.ERRPEND + 1] = ep end
-            end
-        end
+        for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end
         local mm = METAH[p]
         if mm and not ALLOW[mm] then
             local l = METAPEND[mm]
@@ -3054,13 +3060,22 @@ local function build(store, opts)
     end
     do -- (release the handler names that became possible, and drain again)
         local released = false
-        if not ALLOW['__index'] and #G7.ERRPEND > 0 and meta_possible('__index') then
-            ALLOW['__index'] = true; released = true
-            if METAPEND['__index'] then for _, q in ipairs(METAPEND['__index']) do twork[#twork + 1] = q end; METAPEND['__index'] = nil end
+        -- (a load or store whose base may hold an ESCAPED table — the base tainted, or listing an escaped non-host table —
+        -- meets that table's metatable, any escaped one under the E-reading: once an __index (__newindex) handler is
+        -- possible it may run and raise, so the access's error port is tainted. CART-1762 (a lost base's loads),
+        -- CART-1769 (a listed escaped object, and stores). The accesses in walk order: G7.LDL / G7.STL)
+        local function escbase(x)
+            if tainted[x] then return true end
+            for o in each(x) do if escaped[o] and not TNAME[o] and not fnports[o] and o ~= EXT and not G7.ISG[o] then return true end end
+            return false
         end
-        if ALLOW['__index'] then
-            for _, ep in ipairs(G7.ERRPEND) do if not tainted[ep] then taint(ep); released = true end end
-            G7.ERRPEND, G7.ERRSET = {}, {}
+        for _, ev in ipairs { { '__index', G7.LDL }, { '__newindex', G7.STL } } do
+            if ALLOW[ev[1]] or meta_possible(ev[1]) then
+                for _, a in ipairs(ev[2]) do
+                    local ep = a[2]
+                    if not tainted[ep] and escbase(a[1]) then taint(ep); released = true end
+                end
+            end
         end
         -- (a dynamic load `t[k]` through a base that may hold an ESCAPED table runs that table's escaped __index handler
         -- with k: k's objects escape, as a lost call's arguments do, CART-1764)
