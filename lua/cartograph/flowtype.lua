@@ -943,7 +943,7 @@ local function build(store, opts)
     -- value merged their stores (solve 17 -> 31 s, 520 -> 792 MB, oracle whole typed 153 -> 76); open and CREATED per
     -- call site (G7.retobj) costs nothing in time (17.2 s) but moves 111 vimruntime rows (46 partial string -> no
     -- answer, 36 no answer -> partial) and 37 repo rows whole -> partial: fresh objects multiply what ports hold
-    G7.HKINDS, G7.CREATES, G7.FRESH = {}, {}, {}
+    G7.HKINDS, G7.CREATES, G7.FRESH, G7.EROOTC = {}, {}, {}, {}
     do
         local HKINDS = G7.HKINDS
         local P = require 'cartograph.spec.profile'
@@ -2780,7 +2780,7 @@ local function build(store, opts)
         for p in pairs(inwl) do
             UNFIN[#UNFIN + 1] = p
             local d = delta[p]
-            local function esc1(o) if not escaped[o] then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end end end
+            local function esc1(o) if not escaped[o] then escaped[o] = true; G7.EROOTC[o] = G7.EROOTC[o] or 'fuel'; if ESCAT then ESCAT[o] = ESCAT[o] or p end end end
             if type(d) == 'number' then esc1(d) elseif d and d.bs then for o in bs_iter(d) do esc1(o) end
             elseif d then for _, o in ipairs(d) do esc1(o) end end
         end
@@ -2798,6 +2798,7 @@ local function build(store, opts)
         while i <= #q do
             local o = q[i]; i = i + 1
             if not escaped[o] then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or G7.EXTCALL end end
+            G7.EROOTC[o] = 'unknown-code' -- (outside code holds it: the root that no refinement removes)
             for _, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do if not skip(x) and not XESC[x] then XESC[x] = true; q[#q + 1] = x end end end
             for c in pairs(protos[o] or NOTHING) do if not skip(c) and not XESC[c] then XESC[c] = true; q[#q + 1] = c end end
         end
@@ -2821,15 +2822,18 @@ local function build(store, opts)
     -- WoW passes _G as a value: one saturated parameter made every addon's namespace, its fields, escape, and each
     -- store of `.f` anywhere tainted every namespace's f — w3: 317 whole exact answers partial, CART-1707)
     for o in pairs(G7.ISG) do escaped[o] = nil end
-    for o in pairs(escaped) do esc[#esc + 1] = o end
+    -- (THE ROOT CLASS of each escaped object, CART-1782: what escaped in the solve went through a saturated port; fuel and
+    -- unknown code were classed where they escaped. A field, prototype or return escaping WITH an object takes its
+    -- carrier's class, and one the taint phase releases (G7.escmore) the rule's. The dump's taint.escaped_root)
+    for o in pairs(escaped) do G7.EROOTC[o] = G7.EROOTC[o] or 'saturated'; esc[#esc + 1] = o end
     do
         local i = 1
         while i <= #esc do
             local o = esc[i]; i = i + 1
             for _, fp in pairs(ofield[o] or NOTHING) do
-                for x in each(fp) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                for x in each(fp) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
             -- (ESCRET, the dual of the params rule: what an escaped function RETURNS escapes. A lost call may have
             -- called it, and its result port, tainted, holds only escaped objects. `local r = h()` through a lost h
             -- that was mk returned mk's table, whose method r.go then ran unseen; the old `.f` rule had covered it by
@@ -2837,7 +2841,7 @@ local function build(store, opts)
             local fpp = fnports[o]
             if fpp then
                 for _, r in pairs(fpp.rets or { fpp.ret }) do
-                    for x in each(r) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                    for x in each(r) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
                 end
             end
         end
@@ -2890,10 +2894,11 @@ local function build(store, opts)
     end
     -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
     -- that already fired applied to it: a store of .f through a tainted base, a call reaching any escaped function)
-    function G7.escmore(o0)
+    function G7.escmore(o0, why)
         if escaped[o0] or o0 == EXT or G7.ISG[o0] then return end
         local q, i = { o0 }, 1
         escaped[o0] = true
+        G7.EROOTC[o0] = 'escmore:' .. (why or '?')
         while i <= #q do
             local o = q[i]; i = i + 1
             esc[#esc + 1] = o
@@ -2902,13 +2907,13 @@ local function build(store, opts)
             for fk, fp in pairs(ofield[o] or NOTHING) do
                 if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
                 if field_hit[fk] then taint(fp) end
-                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] then escaped[x] = true; q[#q + 1] = x end end
+                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; q[#q + 1] = x end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; q[#q + 1] = c end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; q[#q + 1] = c end end
             local fpp = fnports[o]
             if fpp then -- (escret, as above: an escaped function's returns escape with it, CART-1753)
                 for _, r in pairs(fpp.rets or { fpp.ret }) do
-                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] then escaped[x] = true; q[#q + 1] = x end end
+                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; q[#q + 1] = x end end
                 end
             end
             if fpp and params_hit then G7.tparams(fpp) end
@@ -3051,7 +3056,7 @@ local function build(store, opts)
             -- (and what it stores ESCAPES: written into an object the solve no longer follows, it may be read — and a
             -- function called — wherever that object goes. `t.f = g` through a saturated t left g's parameters whole, and a
             -- call through a tainted H.f that ran g answered a whole exact, CART-1732)
-            for o in each(st[2]) do G7.escmore(o) end
+            for o in each(st[2]) do G7.escmore(o, 'stored-through-lost-base') end
         end
         -- (a KEYED COPY through a port the solve lost objects of: a lost TARGET may have received every field the source
         -- holds — the store rule, per field; a lost SOURCE may have held anything under any key, CART-1726)
@@ -3059,7 +3064,7 @@ local function build(store, opts)
             if p == r[1] then
                 for s0 in each(r[2]) do
                     -- (what the copy writes escapes with its target, as a store's value does — CART-1732)
-                    for f, fp in pairs(ofield[s0] or NOTHING) do if f:byte(1) ~= 1 then for o in each(fp) do G7.escmore(o) end end end
+                    for f, fp in pairs(ofield[s0] or NOTHING) do if f:byte(1) ~= 1 then for o in each(fp) do G7.escmore(o, 'copied-into-lost-target') end end end
                     for f in pairs(G7.copykeys(s0)) do
                         if f:byte(1) ~= 1 and not field_hit[f] then
                             if TFROM then TCUR = { p, 'a keyed copy of .' .. tostring(f) .. ' into it reaches that field of EVERY escaped object' } end
@@ -3123,7 +3128,7 @@ local function build(store, opts)
             -- reach escaped objects: the arguments escape too. A call bound during the solve, not at the walk, is cut
             -- before it binds: `put(y)` through a callee port left queued never wrote y's table, CART-1706 / 1715)
             if TFROM then TCUR = { p, 'a call through it hands its arguments to whatever it may reach: they escape' } end
-            for _, ap in ipairs(cl[1]) do for o in each(ap) do G7.escmore(o) end end
+            for _, ap in ipairs(cl[1]) do for o in each(ap) do G7.escmore(o, 'lost-call-argument') end end
             TCUR = p
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
             if cl[4] then taint(cl[4]) end -- (a callee the solve lost may raise anything)
@@ -3169,7 +3174,7 @@ local function build(store, opts)
                 local eb = tainted[x]
                 if not eb then for o in each(x) do if escaped[o] then eb = true; break end end end
                 if eb then
-                    for o in each(kp) do if not escaped[o] and o ~= EXT and not G7.ISG[o] then G7.escmore(o); released = true end end
+                    for o in each(kp) do if not escaped[o] and o ~= EXT and not G7.ISG[o] then G7.escmore(o, 'dynamic-load-key'); released = true end end
                 end
             end
         end
@@ -3684,7 +3689,7 @@ local function build(store, opts)
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
-            MODE = open and 'open' or 'closed', GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            MODE = open and 'open' or 'closed', EROOTC = G7.EROOTC, REACH = G7.REACH, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

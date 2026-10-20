@@ -609,3 +609,34 @@ test('flowdump: once anything escapes, `[]` is hit — though no tree store goes
     for _, f in ipairs(D.solution.taint.fields_hit) do if f == vim.NIL then hit = true end end
     ok(hit, '[] is in fields_hit: ' .. vim.inspect(D.solution.taint.fields_hit))
 end)
+
+-- (CART-1782: which escaped objects outside code can REACH and which the solve only LOST past CAP, and which tainted
+-- ports trace back to an outside seed)
+test('flowdump: escaped_root tells outside-reachable from saturated, and outside lists the ports an outside seed taints', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local function root(D)
+        local by = {}
+        for _, e in ipairs(D.solution.taint.escaped_root) do by[e[2]] = (by[e[2]] or 0) + 1 end
+        return by
+    end
+    -- saturation only
+    local ok1, D1 = pcall(dump, '\nlocal function lose(q) return q end\nlose({})\nlose({})\nlose({})\nreturn lose\n')
+    -- handed to unknown code, and a lost call's argument
+    local ok2, D2 = pcall(dump, table.concat({ '',
+        'local t = { x = {} }', 'local f = load("return ...")', 'f(t)',
+        'local function lose(q) return q end', 'lose(function () end)', 'lose(function () end)', 'lose(function () end)',
+        'local g = lose(print)', 'local u = {}', 'g(u)',
+        'local y = t.x',                                                   -- a read of what unknown code may have written
+        'return t, u, y' }, '\n') .. '\n')
+    flowtype.CAP = cap
+    assert(ok1, D1); assert(ok2, D2)
+    local r1 = root(D1)
+    ok(r1.saturated and not r1['unknown-code'] and not r1.export, 'saturation only: ' .. vim.inspect(r1))
+    eq(0, #D1.solution.taint.outside, 'and no tainted port runs back to an outside seed')
+    local r2 = root(D2)
+    ok(r2['unknown-code'], 'what load\'s code was handed is rooted outside: ' .. vim.inspect(r2))
+    ok(r2['escmore:lost-call-argument'], 'a lost call\'s argument names its rule: ' .. vim.inspect(r2))
+    ok(#D2.solution.taint.outside > 0, 'some tainted port runs back to the unknown-code seed')
+end)

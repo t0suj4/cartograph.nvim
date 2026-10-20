@@ -49,6 +49,8 @@
 --   carries what it lost. Only variables the IR names are listed. `htop` [site, field] a field past CAP; `htaint`
 --   [site, field | null] a field the taint reached (null: `[]`) — closedness is required except at tainted ports.
 --   `taint.escaped` [sites] the ESCAPED objects (a saturated port's, a lost store's value, unknown code's), and
+--   `taint.escaped_root` [site, class] and `taint.outside` [port]: which escaped objects outside code can reach and
+--   which the solve only lost past CAP, and which tainted ports trace back to an outside seed (CART-1782).
 --   `taint.fields_hit` [field | null]: a store of that field through a tainted base reached it on every escaped object —
 --   each cell (escaped site, hit field) is TAINTED, whether or not it has a port (CART-1744).
 --   `hkeys` [site, [sites]]: flowtype's KEY SET of a table (what `pairs` yields as keys) — no core field; a load of it
@@ -505,6 +507,56 @@ function M.build(rec, X)
     local escl, fhj = {}, {}
     for o in pairs(X.escaped or {}) do if type(o) == 'number' and not ISG[o] then escl[#escl + 1] = o end end
     table.sort(escl)
+    -- ★ WHAT OUTSIDE CODE CAN REACH vs WHAT THE SOLVE LOST (CART-1782): escaped mixes both — vimruntime 93% and WoW
+    -- 99.6% of it rooted at a saturated port, which a refinement (contexts, CAP) could recover, where an outside root
+    -- only a contract could. `escaped_root` [site, class]: `unknown-code` (handed to it), `export` (open mode: reached
+    -- from the exports — listed even when not escaped), `saturated`, `fuel`, or `escmore:<rule>` (released in the taint
+    -- phase: a lost call's argument, a value stored through a lost base, …). `outside`: the tainted ports whose
+    -- provenance (TFROM) runs back to an OUTSIDE seed; every other tainted port runs back to saturation
+    local erj, anyout = {}, false
+    local OUTCLS = { ['unknown-code'] = true, export = true }
+    for _, o in ipairs(escl) do
+        local c = (X.REACH and X.REACH[o]) and 'export' or (X.EROOTC and X.EROOTC[o]) or 'saturated'
+        if OUTCLS[c] then anyout = true end
+        erj[#erj + 1] = ('[%d,%s]'):format(o, jstr(c))
+    end
+    if X.REACH then
+        local ex = {}
+        for o in pairs(X.REACH) do if type(o) == 'number' and not (X.escaped or {})[o] then ex[#ex + 1] = o end end
+        table.sort(ex)
+        for _, o in ipairs(ex) do erj[#erj + 1] = ('[%d,"export"]'):format(o); anyout = true end
+    end
+    local outj = {}
+    do
+        local OUTSEED = {
+            ['handed to unknown code (load, a module outside the tree): it may write any field'] = true,
+            ['O2: a data field of what outside code reaches from the exports — it may write it (open mode, CART-1685)'] = true,
+            ['open: reachable from an export, an outside caller may fill it'] = true,
+            ['self seeded from its method declaration: the host may call it with another object'] = true,
+        }
+        -- (the rules over EVERY escaped object are outside only where some escaped object has an outside root)
+        local ESCRULE = {
+            ['the outside may write any field of what escaped'] = true,
+            ['an escaped function may be called with anything: its parameters'] = true,
+        }
+        local memo = {}
+        local function cls(p)
+            local stack, seen, cur, res = {}, {}, p, false
+            while true do
+                if memo[cur] ~= nil then res = memo[cur]; break end
+                if seen[cur] then break end
+                seen[cur] = true
+                local w = X.tfrom and X.tfrom[cur]
+                if type(w) == 'string' then res = OUTSEED[w] and true or (ESCRULE[w] and anyout) or false; memo[cur] = res; break
+                elseif type(w) == 'table' and w[1] then stack[#stack + 1] = cur; cur = w[1]
+                elseif type(w) == 'number' then stack[#stack + 1] = cur; cur = w
+                else memo[cur] = false; break end
+            end
+            for _, q in ipairs(stack) do memo[q] = res end
+            return res
+        end
+        for _, p in ipairs(vlist) do if X.tainted[p] and cls(p) then outj[#outj + 1] = tostring(p) end end
+    end
     -- (interned in NAME order: F numbers a field by first use, and pairs over these string keys varies by process —
     -- the dump's field table came out in another order on every run)
     local fhn = {}
@@ -532,7 +584,8 @@ function M.build(rec, X)
         .. '},"weak":' .. jarr(weak) .. ',"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
         .. (chtop(X.GRESARG) and ',"rin_top":1' or '') .. (chtop(X.GYIELD) and ',"rout_top":1' or '') .. (cerrtop and ',"cerr_top":1' or '')
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']'
-        .. ',"escaped":' .. jarr(escl) .. ',"fields_hit":[' .. table.concat(fhj, ',') .. ']}},')
+        .. ',"escaped":' .. jarr(escl) .. ',"escaped_root":[' .. table.concat(erj, ',') .. '],"outside":[' .. table.concat(outj, ',') .. ']'
+        .. ',"fields_hit":[' .. table.concat(fhj, ',') .. ']}},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
