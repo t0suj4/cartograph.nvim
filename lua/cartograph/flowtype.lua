@@ -56,6 +56,7 @@ M.EXPERIMENTS = {
     order = 'opts.order = asc | lifo | fifo: another worklist order, an instrument (CART-1697 order test)',
     selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
+    ['host-inst'] = 'a host model function is instanced per CALL SITE — walked again there (CART-1785: measured, vimruntime unknown 303 -> 390, +25 s; the reference for its summary)',
     expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
     trace = 'R.trace: the SOLVE as a bounded graph — ports folded onto their function, deliveries counted per (source, destination, kind), fan-in, saturation order, prototype replays (CART-1697)',
@@ -78,6 +79,21 @@ function M.hostmodel_src(runtime)
     if not fd then return nil end
     local src = fd:read('a'); fd:close()
     return src
+end
+-- (a runtime's host functions that ARE Lua: its own files, from spec/hostmodel/sources.lua, read under the profile's
+-- `sig_source` — the runtime the profile was distilled from — skipping a file the tree holds itself (`have[rel]`):
+-- { { label, src } … } in order, CART-1785 H2)
+function M.hostmodel_sources(runtime, sig_source, have)
+    local ok, cfg = pcall(dofile, (HOSTDIR or '') .. '/spec/hostmodel/sources.lua')
+    local out = {}
+    if not ok or type(cfg) ~= 'table' or type(sig_source) ~= 'string' then return out end
+    for _, rel in ipairs(cfg[runtime] or {}) do
+        if not (have and have[rel]) then
+            local fd = io.open(sig_source .. '/' .. rel, 'rb')
+            if fd then out[#out + 1] = { 'hostmodel:' .. runtime .. ':' .. rel, fd:read('a') }; fd:close() end
+        end
+    end
+    return out
 end
 function M.experiments(opts)
     local out = {}
@@ -2015,6 +2031,7 @@ local function build(store, opts)
             -- for's iterator triple — the k-th result port gets the callee's k-th return)
             local res = new()
             local resl = { res }
+            local hsite -- (a host model's call-site instance, CART-1785)
             for k = 2, want or 1 do resl[k] = new() end
             if recvp then
                 for k, r in ipairs(resl) do mflow(recvp, txt(f:field('method')[1]), r, k) end
@@ -2039,9 +2056,13 @@ local function build(store, opts)
                 local key = owner and (owner .. '#' .. mm) or fname
                 local hm = G7.hostmodel(key)
                 if hm then
-                    -- (a MODELLED host function runs its model: what it returns, creates, writes, calls — CART-1785)
+                    -- (a MODELLED host function runs its model: what it returns, creates, writes, calls — CART-1785. A
+                    -- library function's body is one allocation site for every caller, so `vim.split`'s result table
+                    -- merges every call's; experiment `host-inst` instances a small closed model function per call
+                    -- site (the callee expression's own call binds the same) — measured costly, see EXPERIMENTS)
                     G7.HOSTUSED[key] = true
-                    callc(hm, aps, want and resl or res, nil, curerr())
+                    hsite = INST == 0 and G7.EXP['host-inst'] and res or nil
+                    callc(hm, aps, want and resl or res, hsite, curerr())
                 else
                     for k, r in ipairs(resl) do
                         local gi = genarg(key, k)
@@ -2101,6 +2122,7 @@ local function build(store, opts)
                 -- inside an instance no call instances again — a recursive call binds the original)
                 local site = vl and { vlits = vl } or nil
                 if not site and G7.EXP.callsite and INST == 0 then site = res end
+                if not site and hsite then site = hsite end
                 callc(callee, aps, want and resl or res, site, curerr())
                 G7.NEXTC = nil
                 -- (calling a TABLE runs its metatable's __call with the table first, CART-1701)
@@ -2607,9 +2629,15 @@ local function build(store, opts)
         local P = require 'cartograph.spec.profile'
         local srcs = {}
         if anylua and opts.hostmodels ~= false then
+            local have = {}
+            for _, f in ipairs(files) do have[f] = true end
             for _, nm in ipairs { P.base_for('lua') or false, store.data.profile or false } do
                 local src = nm and M.hostmodel_src(nm)
                 if src then srcs[#srcs + 1] = { 'hostmodel:' .. nm, src } end
+                -- (a runtime's own Lua as its model, opts.hostsources: measured on the repo, shared.lua walked as code
+                -- costs answers — unknown 2390 -> 2660, the outside-write rules make its fresh tables sinks — CART-1785)
+                local pr = opts.hostsources and nm and P.load(nm)
+                for _, hs in ipairs(pr and M.hostmodel_sources(nm, pr.sig_source, have) or NOTHING) do srcs[#srcs + 1] = hs end
             end
             local names = {}
             for nm in pairs(opts.hostmodels or NOTHING) do names[#names + 1] = nm end
@@ -2623,12 +2651,24 @@ local function build(store, opts)
         end
         if #G7.HOSTMODS > 0 then
             G7.HOSTM = {}
-            for _, mp in ipairs(G7.HOSTMODS) do
-                for o in each(mp) do
-                    for k, fp in pairs(ofield[o] or NOTHING) do
-                        if k:byte(1) ~= 1 and k ~= '[]' and k ~= '{k}' then G7.HOSTM[k] = fp end
+            -- (a chunk returning a table a GLOBAL holds — shared.lua's `return vim` — is that NAMESPACE: its fields bind as
+            -- `vim#split`, a nested table's as `vim.list#unique`; any other returned table is keyed by signature key)
+            local gname = {}
+            for n, gp in pairs(ofield[G7.GOBJ] or NOTHING) do
+                if type(n) == 'string' and n:match('^[%a_][%w_]*$') then for o in each(gp) do if not gname[o] then gname[o] = n end end end
+            end
+            local function bind(o, ns, depth)
+                for k, fp in pairs(ofield[o] or NOTHING) do
+                    if k:byte(1) ~= 1 and k ~= '[]' and k ~= '{k}' then
+                        G7.HOSTM[ns and (ns .. '#' .. k) or k] = fp
+                        if ns and depth < 2 then
+                            for t in each(fp) do if not fnports[t] and not TNAME[t] and t ~= EXT then bind(t, ns .. '.' .. k, depth + 1) end end
+                        end
                     end
                 end
+            end
+            for _, mp in ipairs(G7.HOSTMODS) do
+                for o in each(mp) do bind(o, gname[o], 1) end
             end
         end
     end

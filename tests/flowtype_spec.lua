@@ -2206,9 +2206,10 @@ test('flowtype: a host function\'s table type takes the `table` alias\'s kind; o
     local callrec = require 'cartograph.callrec'
     local call
     for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'g:m' then call = c end end
-    local v = flowtype.solve(store, { open = false, host_kinds = { table = 'open' } }).verdict(call)
+    -- (by the SIGNATURE: no host model — CART-1785's shared.lua is vim.split's real body)
+    local v = flowtype.solve(store, { open = false, hostmodels = false, host_kinds = { table = 'open' } }).verdict(call)
     ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'open, new per call: only A.m: ' .. vim.inspect(v))
-    local m = flowtype.solve(store, { open = false }).verdict(call)
+    local m = flowtype.solve(store, { open = false, hostmodels = false }).verdict(call)
     ok(not m, 'the alias by default (members): no field is read back: ' .. vim.inspect(m))
     vim.fn.delete(root, 'rf')
 end)
@@ -2272,6 +2273,35 @@ test('flowtype: the shipped luajit host model — table.remove returns an elemen
     local keys = {}
     for _, e in ipairs(vim.json.decode(R.dump).contracts.host_models) do keys[#keys + 1] = e[1] end
     eq('debug#getregistry,table#remove', table.concat(keys, ','), 'the dump names the models the calls ran')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- (CART-1785 H2: where the host IS Lua its own source is the model — nvim's vim/_core/shared.lua, read under the nvim
+-- profile's sig_source. `vim.tbl_map(f, t)` runs its real body: f is CALLED with t's elements, and the result is a
+-- NEW table of what f returns. By the signature alone (`table`) neither is known)
+test('flowtype: nvim\'s own Lua is its host model — vim.tbl_map calls the callback and builds the result (CART-1785)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local pr = require('cartograph.spec.profile').load('nvim')
+    if not (pr and pr.sig_source and vim.uv.fs_stat(pr.sig_source .. '/lua/vim/_core/shared.lua')) then skip 'the nvim runtime the profile was distilled from is not here' end
+    local root = tree({ ['lua/p/init.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+        'local a = setmetatable({}, { __index = A })', 'local _ = setmetatable({}, { __index = B }):m()',
+        'local r = vim.tbl_map(function (x) x:m(); return x end, { a })', 'local y = r[1]', 'y:m()',
+        'local b = setmetatable({}, { __index = B })',
+        'local p, q = vim.split("a b", " "), vim.split("c", " ")', 'p.mine = a', 'q.mine = b', 'local g = p.mine', 'g:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    store.data.profile = 'nvim'
+    local callrec = require 'cartograph.callrec'
+    local at = {}
+    for _, c in ipairs(store.data.calls) do local k = callrec.full(c); if k then at[k] = c end end
+    local R = flowtype.solve(store, { open = false, hostsources = true, exp = 'host-inst' })
+    -- (g: vim.split's real body allocates ONE table for every caller — instanced per call site, the two results are two)
+    for _, full in ipairs { 'x:m', 'y:m', 'g:m' } do
+        local v = R.verdict(at[full])
+        ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'shared.lua: ' .. full .. ' is A.m: ' .. vim.inspect(v))
+    end
+    local N = flowtype.solve(store, { open = false, hostmodels = false })
+    for _, full in ipairs { 'x:m', 'y:m' } do ok(not N.verdict(at[full]), 'by the signature: ' .. full .. ' has no answer') end
     vim.fn.delete(root, 'rf')
 end)
 
