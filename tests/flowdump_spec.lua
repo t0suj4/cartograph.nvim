@@ -640,3 +640,114 @@ test('flowdump: escaped_root tells outside-reachable from saturated, and outside
     ok(r2['escmore:lost-call-argument'], 'a lost call\'s argument names its rule: ' .. vim.inspect(r2))
     ok(#D2.solution.taint.outside > 0, 'some tainted port runs back to the unknown-code seed')
 end)
+
+-- (CART-1783: the CART-1776 rule also for what escapes LATE — in the taint phase, past the rule's first check. Closed
+-- mode hits `[]`, and an escaped table's KEY set is ⊤: the outside may key it by any escaped object)
+test('flowdump: closed — a value escaping in the taint phase hits `[]`, and its key set is open (CART-1783)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local t = { cb = function () end }',
+        'local f = load("return ...")',
+        'f(t)',                                     -- (unknown code may replace t.cb)
+        'local h = t.cb',
+        'local u = { z = 1 }',
+        'h(u)',                                     -- (u escapes LATE: a lost call's argument)
+        'local n = 0',
+        'for k in pairs(u) do n = n + 1 end',
+        'return u.z, n' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local T = D.solution.taint
+    local u
+    for _, s in ipairs(D.sites) do if s.label == 'tbl:m.lua:4:10' then u = s.id end end
+    assert(u, 'u has a site')
+    local late = false
+    for _, e in ipairs(T.escaped_root) do if e[1] == u and e[2] == 'escmore:lost-call-argument' then late = true end end
+    ok(late, 'u escapes late: ' .. vim.inspect(T.escaped_root))
+    ok(vim.tbl_contains(T.fields_hit, vim.NIL), '[] is hit: ' .. vim.inspect(T.fields_hit))
+    ok(vim.tbl_contains(D.solution.hkeystop, u), 'u\'s key set is open: ' .. vim.inspect(D.solution.hkeystop))
+    eq(0, #T.outside_written, 'closed mode states no per-object outside writes')
+end)
+
+-- (CART-1783, OPEN mode under C1: what outside code holds — the exports' reach, and what escapes later — is written
+-- per object: its data fields, what a DYNAMIC load reads of it, its key set. Not the `[]` cell a named load of a
+-- function member reads: C1)
+test('flowdump: open — the outside writes the exports\' new keys and key sets, stated per object, `[]` not hit (CART-1783)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['lua/m/init.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.m(self) return "A" end',
+        'function B.m(self) return "B" end',
+        'local M = {}',
+        'function M.mk_a() return setmetatable({}, { __index = A }) end',
+        'function M.mk_b() return setmetatable({}, { __index = B }) end',
+        'M.one = M.mk_a()',
+        'function M.run() return M[("oth"):lower() .. "er"]:m() end', -- (the outside may have set M.other = M.mk_b())
+        'function M.count() local n = 0; for k in pairs(M) do n = n + 1 end; return n end',
+        'return M' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = true, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local T = D.solution.taint
+    local M, str
+    for _, s in ipairs(D.sites) do
+        if s.label == 'tbl:lua/m/init.lua:3:10' then M = s.id end
+        if s.label == 'type:string' then str = s.id end
+    end
+    assert(M, 'M has a site')
+    ok(vim.tbl_contains(T.outside_written, M), 'M is written by the outside: ' .. vim.inspect(T.outside_written))
+    ok(vim.tbl_contains(D.solution.hkeystop, M), 'M\'s key set is open: ' .. vim.inspect(D.solution.hkeystop))
+    ok(not vim.tbl_contains(T.fields_hit, vim.NIL), 'the `[]` cell is not hit (C1): ' .. vim.inspect(T.fields_hit))
+    ok(not str or not vim.tbl_contains(T.outside_written, str), 'a string escaping late has no fields the outside writes (C2)')
+    local callrec = require 'cartograph.callrec'
+    local seen = 0
+    for _, c in ipairs(store.data.calls) do
+        if (callrec.full(c) or ""):find('"er"]:m', 1, true) then
+            seen = seen + 1
+            local v = R.verdict(c)
+            ok(v and v.partial, 'the dynamic read through M is partial: ' .. vim.inspect(v))
+        end
+    end
+    eq(1, seen, 'the dynamic call is found')
+end)
+
+-- (CART-1783, open mode: a table escaping LATE — handed to `M.hook:m`, whose `m` the outside may supply (O2) — is
+-- outside-written too. Its only named field `h` is a function member by its prototype (C1: not written), but under a
+-- NEW key the outside may store anything: the DYNAMIC load `cfg[k]` is tainted in the dump. It had been stated closed)
+test('flowdump: open — a late-escaping table is outside-written; a dynamic load of it is tainted (CART-1783)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['lua/m/init.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.m(self) return "A" end',
+        'function B.m(self) return "B" end',
+        'local P = {}',
+        'function P.h() end',
+        'local cfg = setmetatable({}, { __index = P })',
+        'cfg.h = setmetatable({}, { __index = A })',
+        'local M = { hook = setmetatable({}, { __index = B }) }',
+        'function M.run() M.hook:m(cfg); local k = ("x"):upper(); return cfg[k]:m() end',
+        'return M' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = true, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local T = D.solution.taint
+    local cfg
+    for _, s in ipairs(D.sites) do if s.label == 'tbl:lua/m/init.lua:5:25' then cfg = s.id end end
+    assert(cfg, 'cfg has a site')
+    local late = false
+    for _, e in ipairs(T.escaped_root) do if e[1] == cfg and tostring(e[2]):find('^escmore') then late = true end end
+    ok(late, 'cfg escapes late: ' .. vim.inspect(T.escaped_root))
+    ok(vim.tbl_contains(T.outside_written, cfg), 'cfg is outside-written: ' .. vim.inspect(T.outside_written))
+    local tp, n = {}, 0
+    for _, p in ipairs(T.ports) do tp[p] = true end
+    for _, F in ipairs(D.functions) do
+        for _, ins in ipairs(F.body) do
+            if ins[1] == 'loadDyn' then n = n + 1; ok(tp[ins[2]], 'the dynamic load is tainted: ' .. vim.json.encode(ins)) end
+        end
+    end
+    eq(1, n, 'one dynamic load')
+end)

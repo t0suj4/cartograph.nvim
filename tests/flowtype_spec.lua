@@ -480,6 +480,70 @@ test('flowtype: a call on a member of unknown code\'s value runs nothing — the
     vim.fn.delete(root, 'rf')
 end)
 
+-- (CART-1783: what escapes LATE in open mode is written by the outside too, under C1. `M.hook` is a data field the
+-- outside may replace (O2), so `M.hook:m(cfg)` may run the outside's function, which keeps `cfg` and writes its DATA
+-- field `h`: a call through it is partial. It had stayed whole — the `[]` rule fired only before the taint phase)
+test('flowtype: open mode — a table handed to a call the outside may supply has its data fields written (CART-1783)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['lua/m/init.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.m(self) return "A" end',
+        'function B.m(self) return "B" end',
+        'local cfg = { h = setmetatable({}, { __index = A }) }',
+        'local M = { hook = setmetatable({}, { __index = B }) }',
+        'function M.run() M.hook:m(cfg); return cfg.h:m() end',
+        'return M' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local R = flowtype.solve(store, { open = true, explain = true })
+    local n = 0
+    for _, c in ipairs(store.data.calls) do
+        if callrec.full(c) == 'cfg.h:m' then
+            n = n + 1
+            local v = R.verdict(c)
+            ok(v and v.kind == 'exact' and v.partial, 'cfg escaped to the outside\'s m: cfg.h is outside-written: ' .. vim.inspect(v))
+            local why = table.concat(R.taint_path(v.ptport), ' | ')
+            ok(why:find('DATA field of what escaped', 1, true), 'by the late outside write: ' .. why)
+        end
+    end
+    eq(1, n, 'the call is found')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- (CART-1783: once `[]` is hit the outside may key an escaped table by ANY escaped object — `t[obj] = v` — so a key
+-- `pairs` yields of it is partial: for a table escaping LATE (a lost call's argument) and for one escaped BEFORE the
+-- hit (past CAP). The solve held this already — the tainted `[]` cell reaches the loop's key; the DUMP's key set did
+-- not (flowdump_spec). Pinned here)
+test('flowtype: closed — with `[]` hit, an escaped table\'s keys are partial, late or early (CART-1783)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local CLS = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local w = setmetatable({}, { __index = B }); w:m()' }
+    local function keycall(src, cap)
+        local root = tree({ ['m.lua'] = table.concat(CLS, '\n') .. '\n' .. table.concat(src, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local c0 = flowtype.CAP
+        if cap then flowtype.CAP = cap end
+        local ok_, R = pcall(flowtype.solve, store, { open = false })
+        flowtype.CAP = c0
+        vim.fn.delete(root, 'rf')
+        assert(ok_, R)
+        local callrec = require 'cartograph.callrec'
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'k:m' then return R.verdict(c) end end
+    end
+    -- late: u escapes in the taint phase, handed to t.cb, which unknown code may have replaced
+    local v1 = keycall({
+        'local t = { cb = function () end }', 'local f = load("return ...")', 'f(t)',
+        'local u = { [setmetatable({}, { __index = A })] = 1 }', 't.cb(u)',
+        'for k in pairs(u) do k:m() end' })
+    ok(v1 and v1.kind == 'exact' and v1.partial, 'late: k is partial ' .. vim.inspect(v1))
+    -- early: v1 escapes past CAP before the hit
+    local v2 = keycall({
+        'local function lose(q) return q end',
+        'local v = { [setmetatable({}, { __index = A })] = 1 }', 'lose(v)', 'lose({})', 'lose({})',
+        'for k in pairs(v) do k:m() end' }, 2)
+    ok(v2 and v2.kind == 'exact' and v2.partial, 'early: k is partial ' .. vim.inspect(v2))
+end)
+
 -- ★ O2 / C1 (CART-1685, the user's decision): in OPEN mode outside code may write the DATA fields of what it reaches
 -- from the exports — `M.config`, `M.cache.last`, an object stored on the module — so what is read through one is
 -- PARTIAL (`exact~`: the targets stay, the claim is no longer whole); it does not replace FUNCTION members (C1) — an

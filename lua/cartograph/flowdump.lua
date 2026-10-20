@@ -53,6 +53,11 @@
 --   which the solve only lost past CAP, and which tainted ports trace back to an outside seed (CART-1782).
 --   `taint.fields_hit` [field | null]: a store of that field through a tainted base reached it on every escaped object —
 --   each cell (escaped site, hit field) is TAINTED, whether or not it has a port (CART-1744).
+--   `taint.outside_written` [sites]: OPEN mode, under C1 — what outside code holds (reached from the exports, or
+--   escaped later in the taint) and writes: its DATA fields (a name whose value is no function and that no prototype
+--   supplies a method for) are tainted, what a DYNAMIC load reads of it is open and its key set is ⊤; its `[]` cell is
+--   NOT hit — a named load of a function member reads it (C1: the outside does not replace those). Closed mode hits
+--   `[]` instead (`fields_hit`), CART-1783.
 --   `hkeys` [site, [sites]]: flowtype's KEY SET of a table (what `pairs` yields as keys) — no core field; a load of it
 --   is a gap (`table-keys`).
 -- * Errors are PER FUNCTION (Core/Errors.lean, FLOW C.E): err.fn [fn, [sites]] is `E.port fn` (err.top: a port past
@@ -390,6 +395,16 @@ function M.build(rec, X)
             end
         end
     end
+    -- (once `[]` is hit — the outside writes any field of what escaped — it may also key by any escaped object: every
+    -- escaped table's key set is open, CART-1783; a table no `pairs` reads has no key-set port to taint. In OPEN mode
+    -- the outside writes per object, under C1, and taints that port itself: X.OUTWD)
+    if X.fields_hit and X.fields_hit['[]'] then
+        for o in pairs(X.escaped or {}) do
+            if type(o) == 'number' and not ISG[o] and o ~= X.EXT and not X.fnports[o] and not (X.TNAME[o] and not (X.hostkind and X.hostkind(X.TNAME[o]) == 'open')) then
+                keystopx[o] = true
+            end
+        end
+    end
     local hj, hdj, htj, hxj, hkj = {}, {}, {}, {}, {}
     local weak = {} -- (the sites a store that may set __mode reaches, CART-1723)
     local hktop = {}
@@ -537,6 +552,7 @@ function M.build(rec, X)
         -- (the rules over EVERY escaped object are outside only where some escaped object has an outside root)
         local ESCRULE = {
             ['the outside may write any field of what escaped'] = true,
+            ['the outside may write any DATA field of what escaped (C1, open mode)'] = true,
             ['an escaped function may be called with anything: its parameters'] = true,
         }
         local memo = {}
@@ -564,6 +580,9 @@ function M.build(rec, X)
     table.sort(fhn)
     for _, f in ipairs(fhn) do fhj[#fhj + 1] = f == '[]' and 'null' or tostring(F(f)) end
     table.sort(fhj)
+    local owl = {}
+    for o in pairs(X.OUTWD or {}) do if type(o) == 'number' then owl[#owl + 1] = o end end
+    table.sort(owl)
     -- names (last: everything above interned)
     local fields = {}
     local maxf = 0
@@ -585,7 +604,7 @@ function M.build(rec, X)
         .. (chtop(X.GRESARG) and ',"rin_top":1' or '') .. (chtop(X.GYIELD) and ',"rout_top":1' or '') .. (cerrtop and ',"cerr_top":1' or '')
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']'
         .. ',"escaped":' .. jarr(escl) .. ',"escaped_root":[' .. table.concat(erj, ',') .. '],"outside":[' .. table.concat(outj, ',') .. ']'
-        .. ',"fields_hit":[' .. table.concat(fhj, ',') .. ']}},')
+        .. ',"fields_hit":[' .. table.concat(fhj, ',') .. '],"outside_written":' .. jarr(owl) .. '}},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end

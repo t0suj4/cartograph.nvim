@@ -2892,6 +2892,49 @@ local function build(store, opts)
     function G7.cpsrchit(o)
         if G7.CPAIR[o] then taint(ofp(o, '[]')) end
     end
+    -- ★ O2 / C1 — WHAT THE OUTSIDE WRITES INTO AN OBJECT IT HOLDS (open mode, CART-1685): its DATA fields, not its
+    -- function members (C1: a field holding a function, or a name the prototype chain supplies a method for); a
+    -- METATABLE's fields are structure, not data (C3, RESEARCH.md §17.2). And under a NEW key — `M.other = …`, read back
+    -- as `M[k]` — or with any object as a key: what a DYNAMIC load or a key enumeration reads of it is open. Not its
+    -- `[]` cell, which every named load reads too: `o:m()` on an object an exported function makes keeps its answer.
+    -- For the export reach (O2) and, CART-1783, what escapes later in the taint
+    G7.OUTWD = {}
+    function G7.protofn(o, f, seen)
+        for c in pairs(protos[o] or NOTHING) do
+            if not seen[c] then
+                seen[c] = true
+                local fp = ofield[c] and ofield[c][f]
+                if fp then for y in each(fp) do if fnports[y] then return true end end end
+                if G7.protofn(c, f, seen) then return true end
+            end
+        end
+        return false
+    end
+    function G7.outw(o, o2)
+        if G7.OUTWD[o] or fnports[o] then return end
+        -- (a host value escaping late — a string handed to a lost call — has no data fields the outside writes: its
+        -- methods are the string library / the host API's, C2. Only an `open` host kind is a table)
+        if not o2 and TNAME[o] and G7.hostkind(TNAME[o]) ~= 'open' then return end
+        if not G7.MTS then
+            G7.MTS = {}
+            for _, fs in pairs(ofield) do local mp = fs['\1mt']; if mp then for x in each(mp) do G7.MTS[x] = true end end end
+        end
+        if G7.MTS[o] then return end
+        G7.OUTWD[o] = true
+        TCUR = o2 and 'O2: a data field of what outside code reaches from the exports — it may write it (open mode, CART-1685)'
+            or 'the outside may write any DATA field of what escaped (C1, open mode)'
+        -- (every name read from it has a field port — a load made it — so a key the tree never wrote is covered too)
+        for f, fp in pairs(ofield[o] or NOTHING) do
+            if f:byte(1) ~= 1 and f ~= '{k}' and f ~= '[]' then
+                local fn = false
+                for x in each(fp) do if fnports[x] then fn = true; break end end
+                if not (fn or G7.protofn(o, f, {})) then taint(fp) end
+            end
+        end
+        if TNAME[o] or o == EXT then return end
+        for dst in pairs(rd[o] and rd[o]['[]'] or NOTHING) do taint(dst) end
+        taint(ofp(o, '{k}'))
+    end
     -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
     -- that already fired applied to it: a store of .f through a tainted base, a call reaching any escaped function)
     function G7.escmore(o0, why)
@@ -2899,6 +2942,14 @@ local function build(store, opts)
         local q, i = { o0 }, 1
         escaped[o0] = true
         G7.EROOTC[o0] = 'escmore:' .. (why or '?')
+        -- (what escapes LATE is written by the outside too: the CART-1776 rule, fired here as well, CART-1783 — in OPEN
+        -- mode under C1, per object below: its data fields, not the `[]` cell every named load reads)
+        if not open and not field_hit['[]'] then
+            local tc = TCUR
+            TCUR = 'the outside may write any field of what escaped'
+            G7.fieldhit('[]')
+            TCUR = tc
+        end
         while i <= #q do
             local o = q[i]; i = i + 1
             esc[#esc + 1] = o
@@ -2917,6 +2968,7 @@ local function build(store, opts)
                 end
             end
             if fpp and params_hit then G7.tparams(fpp) end
+            if open then local tc = TCUR; G7.outw(o); TCUR = tc end
         end
     end
     TCUR = 'fuel: the solve stopped with this port unfinished'
@@ -2952,36 +3004,7 @@ local function build(store, opts)
     end
     TCUR = 'O2: a data field of what outside code reaches from the exports — it may write it (open mode, CART-1685)'
     if open and G7.REACH then
-        local function protofn(o, f, seen)
-            for c in pairs(protos[o] or NOTHING) do
-                if not seen[c] then
-                    seen[c] = true
-                    local fp = ofield[c] and ofield[c][f]
-                    if fp then for y in each(fp) do if fnports[y] then return true end end end
-                    if protofn(c, f, seen) then return true end
-                end
-            end
-            return false
-        end
-        -- (a METATABLE's fields are structure, not data: outside code does not set metatables or their handlers — C3,
-        -- default on, RESEARCH.md §17.2)
-        local MT = {}
-        for o in pairs(G7.REACH) do
-            local mp = ofield[o] and ofield[o]['\1mt']
-            if mp then for x in each(mp) do MT[x] = true end end
-        end
-        for o in pairs(G7.REACH) do
-            if not fnports[o] and not MT[o] then
-                -- (every name read from it has a field port — a load made it — so a key the tree never wrote is covered too)
-                for f, fp in pairs(ofield[o] or NOTHING) do
-                    if f:byte(1) ~= 1 and f ~= '{k}' and f ~= '[]' then
-                        local fn = false
-                        for x in each(fp) do if fnports[x] then fn = true; break end end
-                        if not (fn or protofn(o, f, {})) then taint(fp) end
-                    end
-                end
-            end
-        end
+        for o in pairs(G7.REACH) do G7.outw(o, 'O2') end
     end
     TCUR = 'open: reachable from an export, an outside caller may fill it'
     -- ★ OPEN REACHES PAST THE EXPORTS (CART-1652): a caller outside the tree gets more than the module's functions —
@@ -3689,7 +3712,7 @@ local function build(store, opts)
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
-            MODE = open and 'open' or 'closed', EROOTC = G7.EROOTC, REACH = G7.REACH, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            MODE = open and 'open' or 'closed', EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
