@@ -2423,6 +2423,17 @@ local function build(store, opts)
         G7.CHUNK = saved
     end
     local instances = {}
+    -- (an INSTANCE walked in the middle of a file's walk: it walks under its own file's environment and leaves the
+    -- caller's as it was — walk_file sets a file's environment and never restores it, so an instance of a function of
+    -- ANOTHER file — a host model's, `hostmodel:luajit`'s `default` — left the rest of the caller's file reading another
+    -- program's globals. A host model's instance is model code too, CART-1785)
+    function G7.instwalk(file, src, info)
+        local env0, hw = G7.ENV, G7.HOSTWALK
+        G7.HOSTWALK = file:match('^hostmodel:') and file or nil
+        walk_file(file, src, info); G7.CURLOC = nil
+        G7.HOSTWALK = hw
+        G7.useenv(env0)
+    end
     clone_at = function (site, o)
         if G7.REC then return nil end -- (a dump is of the instance-free solve: an instance's ports are in no body)
         -- ★ VALUE-KEYED INSTANCES (CART-1729, opts.litkeys; flowpath FLOW-01's proposal): a call passing LITERALS at a
@@ -2451,7 +2462,7 @@ local function build(store, opts)
                 local info = { ctx = true, id = cl.id, l = cl.l, c = cl.c, scopes = { {} }, noacc = true, consts = consts }
                 INST, INSTN = INST + 1, INSTN + 1
                 G7.VINSTN = G7.VINSTN + 1
-                walk_file(cl.file, cl.src, info); G7.CURLOC = nil
+                G7.instwalk(cl.file, cl.src, info)
                 INST = INST - 1
                 x = info.obj or false
                 per[key] = x
@@ -2470,7 +2481,7 @@ local function build(store, opts)
             -- unsound exact (a loop's state reached only the instance). The function is CLOSED: no scope but its own
             local info = { ctx = true, id = cl.id, l = cl.l, c = cl.c, scopes = { {} }, noacc = true }
             INST, INSTN = INST + 1, INSTN + 1
-            walk_file(cl.file, cl.src, info); G7.CURLOC = nil
+            G7.instwalk(cl.file, cl.src, info)
             INST = INST - 1
             x = info.obj or false
             per[o] = x

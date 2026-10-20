@@ -1741,6 +1741,34 @@ end)
 
 -- (CART-1737: a PROGRAM is the files that share one globals table and string library — one for the whole tree unless
 -- config says otherwise; the derived require closures are only CANDIDATES the explainer shows)
+-- (an INSTANCE walked mid-file leaves the caller's environment as it was: walk_file sets a file's environment and never
+-- restored it, so a call-site instance of a function from ANOTHER program's file left the rest of the caller reading
+-- that program's globals — CART-1785, found through a host model's instance)
+test('flowtype: a call-site instance of another program\'s function leaves the caller in its own environment', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.run(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.run(self) return 2 end\nreturn B\n',
+        ['helper.lua'] = 'local M = {}\nfunction M.id(x) return x end\nreturn M\n',
+        ['w/caller.lua'] = 'local A = require "a"\nlocal H = require "helper"\nwobj = setmetatable({}, { __index = A })\nlocal _ = H.id(1)\nlocal o = wobj\nreturn o:run()\n',
+        ['r/other.lua'] = 'local B = require "b"\nlocal _ = setmetatable({}, { __index = B }):run()\n',
+    })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local c
+    for _, x in ipairs(store.data.calls) do if tostring(callrec.full(x)) == 'o:run' then c = x end end
+    local cfg = require 'cartograph.config'
+    local saved = cfg.scoped
+    cfg.scoped = { [root .. '/w'] = { program = 'per-file' } }
+    store.generation = store.generation + 1
+    local R = flowtype.solve(store, { open = false, exp = 'callsite' })
+    cfg.scoped = saved
+    vim.fn.delete(root, 'rf')
+    local v = R.verdict(c)
+    ok(R.stats.instances and R.stats.instances > 0, 'the helper was instanced at the call: ' .. tostring(R.stats.instances))
+    eq('a.lua::A.run@1', v and v.targets and v.targets[1], 'after the instance the caller reads its OWN program\'s wobj: ' .. vim.inspect(v))
+end)
+
 test('flowtype: programs — one environment by default; a config split hides one program\'s globals from another', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({
