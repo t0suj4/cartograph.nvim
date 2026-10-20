@@ -2030,37 +2030,32 @@ end)
 
 -- (CART-1754: a FUNCTION has no metatable of its own — the dump's contract function-no-metatable; calling one never
 -- consults __call. A builtin's call — a generic for's iterator — goes through the __call route like a direct call, and
--- the function's `\1mt` cell, once the metatable slot and `__call` (or `[]`) were hit through a lost base, made the
--- loop's values partial: 74 of the runtime oracle's whole answers. Pinned both ways: whole here, partial through a
--- callable TABLE)
-test('flowtype: a plain function iterator stays whole after `\\1mt` and `__call` are hit; a callable table does not', function ()
+-- the function's `\1mt` cell, once the metatable slot and `__call` were hit through a lost base, made the loop's
+-- values partial: 74 of the runtime oracle's whole answers. Pinned in the DUMP: the escaped plain iterator has NO
+-- metatable cell (META, field 100) at all. Since CART-1776 its RESULTS are partial anyway — what escapes is written
+-- by the outside — so the loop's answer no longer tells the two cases apart)
+test('flowtype: a plain function iterator has no metatable cell, even escaped and with `\\1mt` / `__call` hit', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local sinks = {}
     for k = 1, 70 do sinks[k] = 'pick({})' end
-    local function src(iter)
-        return table.concat({
-            'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
-            'local a = setmetatable({}, { __index = A })', 'local _ = setmetatable({}, { __index = B }):m()',
-            'local function pick(x) return x end', table.concat(sinks, '\n'),
-            'local T = pick({})', 'setmetatable(T, {})', 'T.__call = 1',
-            iter,
-            'pick(it)',
-            'for v in it, nil do local _ = v:m() end' }, '\n') .. '\n'
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A = {}', 'function A.m(self) return 1 end',
+        'local a = setmetatable({}, { __index = A })',
+        'local function pick(x) return x end', table.concat(sinks, '\n'),
+        'local T = pick({})', 'setmetatable(T, {})', 'T.__call = 1',
+        'local function it(s, c) if c == nil then return a end end',
+        'pick(it)',
+        'for v in it, nil do local _ = v:m() end' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local D = vim.json.decode(flowtype.solve(store, { open = false, dump = true }).dump)
+    vim.fn.delete(root, 'rf')
+    local itsite
+    for _, st in ipairs(D.sites) do if st.kind == 'function' and tostring(st.label):match('::it@') then itsite = st.id end end
+    ok(itsite, 'the iterator is a function site')
+    local S = D.solution
+    for _, l in ipairs({ S.h, S.htaint, S.htop }) do
+        for _, c in ipairs(l or {}) do ok(not (c[1] == itsite and c[2] == 100), 'no metatable cell on the plain function: ' .. vim.inspect(c)) end
     end
-    local callrec = require 'cartograph.callrec'
-    local function answer(iter)
-        local root = tree({ ['m.lua'] = src(iter) })
-        store.ingest(ts.extract(root))
-        local call
-        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'v:m' then call = c end end
-        local v = call and flowtype.solve(store, { open = false }).verdict(call)
-        vim.fn.delete(root, 'rf')
-        return v
-    end
-    local v = answer('local function it(s, c) if c == nil then return a end end')
-    ok(v and v.kind == 'exact' and not v.partial, 'a plain function iterator: whole: ' .. vim.inspect(v))
-    v = answer('local it = setmetatable({}, { __call = function (s, c) if c == nil then return a end end })')
-    ok(v and v.partial, 'a callable TABLE iterator: partial (its metatable may be any escaped one): ' .. vim.inspect(v))
 end)
 
 -- (CART-1761: what a HOST type is comes from the environment profile — prim / open / members. An OPEN host object is an

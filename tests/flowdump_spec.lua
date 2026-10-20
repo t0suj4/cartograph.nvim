@@ -594,3 +594,18 @@ test('flowdump: getfenv is no gap under fixed environments, and stays one when t
     ok(kinds(D).getfenv, 'with a setfenv the getfenv gap stays')
     ok(D.contracts.clauses['fixed-env'] == nil, 'and the fixed-env clause is not stated')
 end)
+
+-- (CART-1776, the world: the OUTSIDE writes into what escaped, data fields included — `[]` is hit once anything escapes,
+-- not only when tree code stores dynamically through a lost base)
+test('flowdump: once anything escapes, `[]` is hit — though no tree store goes through a lost base', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, '\nlocal function lose(q) return q end\nlose({})\nlose({})\nlose({})\nreturn lose\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    ok(#D.solution.taint.escaped > 0, 'something escaped')
+    local hit = false
+    for _, f in ipairs(D.solution.taint.fields_hit) do if f == vim.NIL then hit = true end end
+    ok(hit, '[] is in fields_hit: ' .. vim.inspect(D.solution.taint.fields_hit))
+end)

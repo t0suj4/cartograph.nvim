@@ -2917,6 +2917,13 @@ local function build(store, opts)
     -- (an ESCAPED function may be called with anything by whatever reached it — the E-reading's closure: its parameters
     -- are tainted from the start, not only once a call through a lost callee is seen. Every real corpus has one, so
     -- params_hit fired anyway; a program without one left an escaped method's parameter whole, CART-1768)
+    -- (and the OUTSIDE writes into what escaped — data fields, references to other escaped tables among them; C1 forbids
+    -- replacing function members only: `[]` is hit once anything escapes. Tree code's dynamic store through a lost base
+    -- had been the only trigger; the corpora have one, a small program did not, CART-1776)
+    if #esc > 0 and not field_hit['[]'] then
+        TCUR = 'the outside may write any field of what escaped'
+        G7.fieldhit('[]')
+    end
     if #esc > 0 then
         TCUR = 'an escaped function may be called with anything: its parameters'
         params_hit = true
