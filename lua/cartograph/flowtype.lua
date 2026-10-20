@@ -290,7 +290,7 @@ local function build(store, opts)
     local OUT = false
     local walking, NW, NOW = true, 0, 0
     local function new() N = N + 1; if G7.LOCP then G7.LOCP[N] = G7.CURLOC end; if G7.TR then G7.TR.PFN[N] = G7.CURFN end; return N end
-    local function newobj(info) NO = NO + 1; obinfo[NO] = info; if G7.TR then G7.TR.OFN[NO] = G7.CURFN end; return NO end
+    local function newobj(info) NO = NO + 1; obinfo[NO] = info; if G7.TR then G7.TR.OFN[NO] = G7.CURFN end; if G7.OBJFN then G7.OBJFN[NO] = G7.WALKFN or false end; return NO end
     -- (an object named stably: one the walk made by its number, one the solve made — a type object — by its info)
     local function okey(o) return o <= NOW and o or tostring(obinfo[o]) end
     -- ★ THE SCHEDULE IS A STABLE ORDER, not a stack: a port saturating mid-solve has handed downstream whatever it
@@ -622,7 +622,8 @@ local function build(store, opts)
     -- child placeholder for that PATH (`p2.[]`, `p1.f`; deeper than 3 it is unknown), and calling one records the call
     -- and returns a call-result placeholder. What the solved heap holds of them — the function's results, its stores
     -- into parameter paths, its calls through them — is its summary (R.phsummary), applied at a call as edges
-    G7.PH = opts.phseed and {} or nil
+    G7.PH = (opts.phseed or opts.phmodel) and {} or nil
+    G7.OBJFN = G7.PH and {} or nil -- (an object's allocating function, in a summary solve: fresh per call or shared)
     G7.PHCALLS, G7.PHCK, G7.PHSITES = G7.PH and {} or nil, G7.PH and {} or nil, G7.PH and {} or nil
     function G7.mkph(info) local o = newobj('ph:' .. info.label); G7.PH[o] = info; return o end
     function G7.phchild(o, f)
@@ -1420,6 +1421,13 @@ local function build(store, opts)
             if k == 'param' then local a = argp(x[2]); return a and walkp(a, x[3]) end
             if k == 'call' then local c = calls[x[2]]; local r = c and c[x[3]]; return r and walkp(r, x[4]) end
             if k == 'type' then local p = new(); addobj(p, typeobj(x[2])); return p end
+            if k == 'shared' then -- (one object for every call of every summary: `local REG = {}` above the function)
+                G7.SHAREDOBJ = G7.SHAREDOBJ or {}
+                local o = G7.SHAREDOBJ[x[2]]
+                if not o then o = newobj('sum:' .. x[2]); G7.SHAREDOBJ[x[2]] = o end
+                local p = new(); addobj(p, o)
+                return p
+            end
             if k == 'new' or k == 'ref' then
                 local o = objs[x[2]]
                 if not o then o = newobj('sum:' .. x[2]); objs[x[2]] = o end
@@ -1733,9 +1741,12 @@ local function build(store, opts)
             -- (a VALUE-KEYED instance: its key parameters are the call's literals, constants inside it, CART-1729)
             if inst and clone.consts then for j, sv in pairs(clone.consts) do if fp.params[j] then G7.CONSTK[fp.params[j]] = sv end end end
             fnstack[#fnstack + 1] = fp
+            local walkfn0 = G7.WALKFN
+            G7.WALKFN = id
             local body = n:field('body')[1]
             if body then for _, s in tsutil.inamed, body, -1 do stmt(s); if raises(s) then break end end end
             fnstack[#fnstack] = nil
+            G7.WALKFN = walkfn0
             fnbase[#fnbase] = nil
             fnmeta[#fnmeta] = nil
             scopes[#scopes] = nil
@@ -2753,8 +2764,8 @@ local function build(store, opts)
             enter(); r_proto(t, idx, lua); leave()
         end
     end)() end
-    -- (the HOST MODELS, walked before the tree: the base runtime's, then the store's profile's, then opts.hostmodels —
-    -- a later model's key wins; `hostmodels = false`: none. Only for a tree with Lua in it, CART-1785)
+    -- (the HOST MODELS: the base runtime's, then the store's profile's, then opts.hostmodels' — a later model's key
+    -- wins. Only for a tree with Lua in it, CART-1785)
     function G7.hostmodel(key)
         local m = G7.HOSTM and G7.HOSTM[key]
         return m or nil
@@ -2777,21 +2788,38 @@ local function build(store, opts)
         for _, f in ipairs(files) do if f:match('%.lua$') then anylua = true; break end end
         local P = require 'cartograph.spec.profile'
         local srcs = {}
-        if anylua and opts.hostmodels ~= false then
+        -- (a KEYED model — luajit.lua, a spec's — is SUMMARIZED, not walked: one body walked for every caller merged
+        -- every caller's arguments — table.remove's list param held every list of the file, and vim/fs.lua's
+        -- `{ path, 1 }` element reached its string code and unknown code (an E-certified file cut lost, CART-1783's
+        -- measurement). Summarized once, memoized by its text, applied per call as edges. opts.hostwalk: walked)
+        local keyed = {}
+        if opts.phmodel then
+            srcs[1] = { 'hostmodel:' .. opts.phmodel.name, opts.phmodel.src }
+        elseif anylua and (opts.hostmodels or opts.hostsources) then
+            -- (OPT-IN, opts.hostmodels = true or { name = src }: applied per call they cost open mode on vimruntime —
+            -- unknown 303 -> 390, string 268 -> 206 — real elements reaching where `any` went; walked as one body they
+            -- merged every caller and cost an E-certified file cut. The design is being prototyped in flowpath)
             local have = {}
             for _, f in ipairs(files) do have[f] = true end
             for _, nm in ipairs { P.base_for('lua') or false, store.data.profile or false } do
-                local src = nm and M.hostmodel_src(nm)
-                if src then srcs[#srcs + 1] = { 'hostmodel:' .. nm, src } end
+                local src = opts.hostmodels and nm and M.hostmodel_src(nm)
+                if src then keyed[#keyed + 1] = { nm, src } end
                 -- (a runtime's own Lua as its model, opts.hostsources: measured on the repo, shared.lua walked as code
                 -- costs answers — unknown 2390 -> 2660, the outside-write rules make its fresh tables sinks — CART-1785)
                 local pr = opts.hostsources and nm and P.load(nm)
                 for _, hs in ipairs(pr and M.hostmodel_sources(nm, pr.sig_source, have) or NOTHING) do srcs[#srcs + 1] = hs end
             end
             local names = {}
-            for nm in pairs(opts.hostmodels or NOTHING) do names[#names + 1] = nm end
+            for nm in pairs(type(opts.hostmodels) == 'table' and opts.hostmodels or NOTHING) do names[#names + 1] = nm end
             table.sort(names)
-            for _, nm in ipairs(names) do srcs[#srcs + 1] = { 'hostmodel:' .. nm, opts.hostmodels[nm] } end
+            for _, nm in ipairs(names) do keyed[#keyed + 1] = { nm, opts.hostmodels[nm] } end
+        end
+        if opts.hostwalk or opts.phseed then
+            for _, k in ipairs(keyed) do srcs[#srcs + 1] = { 'hostmodel:' .. k[1], k[2] } end
+        elseif #keyed > 0 then
+            local HS = require 'cartograph.hostsummary'
+            G7.HOSTSUM = G7.HOSTSUM or {}
+            for _, k in ipairs(keyed) do for key, sm in pairs(HS.of_model(k[1], k[2])) do G7.HOSTSUM[key] = sm end end
         end
         for _, hs in ipairs(srcs) do
             G7.HOSTWALK = hs[1]
@@ -2861,6 +2889,9 @@ local function build(store, opts)
     -- (the walks are done: the solve's own reads of the current environment — a string's library for a load recorded
     -- before a second program existed — are the DEFAULT program's, never the last walked file's, CART-1737)
     if G7.ENVL[1] then G7.useenv(G7.ENVL[1]) end
+    if G7.PH and opts.phmodel and opts.phmodel.key and G7.HOSTM and G7.HOSTM[opts.phmodel.key] then
+        for o in each(G7.HOSTM[opts.phmodel.key]) do if fnports[o] then opts = setmetatable({ phseed = fnports[o].id }, { __index = opts }); break end end
+    end
     if G7.PH then -- (the summarized function's parameters: placeholders, CART-1786)
         for o, fp in pairs(fnports) do
             if fp.id == opts.phseed and not fp.inst then
@@ -3675,6 +3706,12 @@ local function build(store, opts)
     -- { 'call', n, k, path } (call n's k-th result), { 'type', T }, { 'fn', id }, { 'new', key, fields = { f = sources } }
     -- (allocated by the call — its fields to depth 2, a repeat `{ 'ref', key }`), { 'unknown', why })
     if G7.PH then
+        R.hostkeys = function () -- (a model's keys, for its summary solves)
+            local ks = {}
+            for k in pairs(G7.HOSTM or NOTHING) do ks[#ks + 1] = k end
+            table.sort(ks)
+            return ks
+        end
         R.phsummary = function ()
             local fp = G7.PHFN and fnports[G7.PHFN]
             if not fp then return nil end
@@ -3699,6 +3736,8 @@ local function build(store, opts)
                 if TNAME[o] then return { 'type', TNAME[o] } end
                 if fnports[o] then return { 'fn', fnports[o].id } end
                 local key = tostring(obinfo[o] or o)
+                local of = G7.OBJFN[o]
+                if not (of and G7.PHREACH[of]) then return { 'shared', key } end
                 if seen[o] or depth >= 2 then return { 'ref', key } end
                 seen[o] = true
                 local fields = {}
@@ -3709,6 +3748,25 @@ local function build(store, opts)
                 seen[o] = nil
                 return { 'new', key, fields = fields }
             end
+            -- (what the function's own run reaches: an object allocated THERE is fresh per call, any other — a module
+            -- table, `local REG = {}` above it — is one object shared by every call: `{ 'shared', key }`)
+            local bysite0, reach0, q0 = {}, { [fp.id] = true }, { fp.id }
+            for _, st in ipairs(G7.PHSITES) do
+                if st.fn then local l = bysite0[st.fn]; if not l then l = {}; bysite0[st.fn] = l end; l[#l + 1] = st end
+            end
+            local h0 = 1
+            while h0 <= #q0 do
+                local id = q0[h0]; h0 = h0 + 1
+                for _, st in ipairs(bysite0[id] or NOTHING) do
+                    if not top[st.callee] then
+                        for o in each(st.callee) do
+                            local f2 = fnports[o]
+                            if f2 and f2.id and not reach0[f2.id] then reach0[f2.id] = true; q0[#q0 + 1] = f2.id end
+                        end
+                    end
+                end
+            end
+            G7.PHREACH = reach0
             local out = { results = {}, stores = {}, calls = {}, nparams = #fp.params }
             for k, r in pairs(fp.rets) do out.results[k] = srcs(r, 0, {}) end
             for o, info in pairs(PH) do

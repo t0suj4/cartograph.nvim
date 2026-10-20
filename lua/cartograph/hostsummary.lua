@@ -72,6 +72,37 @@ function M.of(runtime)
     return out
 end
 
+local MMEMO = {}
+
+--- the summaries of a KEYED host model (spec/hostmodel/<runtime>.lua, a spec's opts.hostmodels): { [sig key] =
+--- summary } — each function of its table solved alone with placeholder parameters, as a runtime's own Lua is. Memoized
+--- by the model's text: flowtype applies these per call as edges instead of walking the model as one shared body
+function M.of_model(name, src)
+    local stamp = name .. ' ' .. sha(src)
+    if MMEMO[stamp] then return MMEMO[stamp] end
+    local ts = require 'cartograph.providers.treesitter'
+    local flowtype = require 'cartograph.flowtype'
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local fd = assert(io.open(dir .. '/x.lua', 'wb')); fd:write('return nil\n'); fd:close()
+    local data = ts.extract(dir)
+    data.root = data.root or dir
+    local byid = {}
+    for _, n in ipairs(data.nodes or {}) do byid[n.id] = n end
+    local S = { data = data, generation = 1, node = function (id) return byid[id] end }
+    local base = { open = false, ctx = false, phmodel = { name = name, src = src } }
+    local R0 = flowtype.solve(S, base)
+    local out = {}
+    for _, key in ipairs(R0.hostkeys and R0.hostkeys() or {}) do
+        local R = flowtype.solve(S, { open = false, ctx = false, phmodel = { name = name, src = src, key = key } })
+        local sm = R.phsummary and R.phsummary()
+        if sm then sm.name = key; out[key] = sm end
+    end
+    vim.fn.delete(dir, 'rf')
+    MMEMO[stamp] = out
+    return out
+end
+
 --- the EFFECTS projection of one summary: { pwx = { [j] = true }, calls = { [j] = true }, ext = { name… } } — the
 --- positions it writes through, the positions it calls, and the functions it reaches that its file does not hold
 function M.effects_sig(sm)

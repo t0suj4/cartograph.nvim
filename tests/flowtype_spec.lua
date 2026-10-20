@@ -2269,7 +2269,7 @@ test('flowtype: the shipped luajit host model — table.remove returns an elemen
     local callrec = require 'cartograph.callrec'
     local at = {}
     for _, c in ipairs(store.data.calls) do local k = callrec.full(c); if k then at[k] = c end end
-    local R = flowtype.solve(store, { open = false, dump = true })
+    local R = flowtype.solve(store, { open = false, dump = true, hostmodels = true })
     for _, full in ipairs { 'x:m', 'g:m' } do
         local v = R.verdict(at[full])
         ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), full .. ' is A.m: ' .. vim.inspect(v))

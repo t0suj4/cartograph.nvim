@@ -102,3 +102,28 @@ test('hostsummary: a summary applied as edges — a method on the argument is ty
     ok(table.concat(R.taint_path(recv), ' | '):find("host summary's unknown source", 1, true), 'by the summary\'s unknown source: ' .. table.concat(R.taint_path(recv), ' | '))
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-1783's file cut, vim/fs.lua: a keyed model WALKED as one body merges every caller — `table.remove`'s list
+-- parameter held every list of the file, and a `{ path, 1 }` element reached string code. Applied as its SUMMARY per
+-- call — result = `p1.[]` — two lists never mix. And table.remove's summary STORES nothing: its shifting is a self-copy)
+test('hostsummary: a keyed model applied as its summary — two table.remove calls do not mix; it stores nothing', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local flowtype = require 'cartograph.flowtype'
+    local src = flowtype.hostmodel_src('luajit')
+    eq(0, #HS.of_model('luajit', src)['table#remove'].stores, 'table.remove stores nothing')
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+        'local xs = { setmetatable({}, { __index = A }) }', 'local ys = { setmetatable({}, { __index = B }) }',
+        'local x = table.remove(xs)', 'local y = table.remove(ys)', 'x:m()', 'y:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local at = {}
+    for _, c in ipairs(store.data.calls) do local k = callrec.full(c); if k then at[k] = c end end
+    local S = flowtype.solve(store, { open = false, hostmodels = true })
+    local W = flowtype.solve(store, { open = false, hostmodels = true, hostwalk = true })
+    vim.fn.delete(root, 'rf')
+    local v = S.verdict(at['x:m'])
+    ok(v and v.kind == 'exact' and tostring(v.targets[1]):match('A%.m'), 'summary: x is xs\'s element only: ' .. vim.inspect(v))
+    local w = W.verdict(at['x:m'])
+    ok(w and #(w.targets or {}) == 2, 'walked as one body: the lists mix: ' .. vim.inspect(w))
+end)

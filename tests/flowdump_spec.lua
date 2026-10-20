@@ -783,15 +783,15 @@ test('flowdump: a host model a call ran is stated — host_models and the host-m
     local hm = D.contracts.host_models
     eq(1, #hm, 'one model ran: ' .. vim.inspect(hm))
     eq('debug#getregistry', hm[1][1])
-    eq(1, #hm[1][2], 'its function')
-    ok(D.names.functions[hm[1][2][1] + 1]:find('hostmodel:test', 1, true), 'the model\'s function: ' .. tostring(D.names.functions[hm[1][2][1] + 1]))
+    -- (a keyed model is APPLIED as its summary — instructions at the call, no body of its own: CART-1783's fs.lua)
+    eq(0, #hm[1][2], 'applied as a summary: no function of its own in the dump')
     ok(D.contracts.clauses['host-model'], 'the clause is stated')
     local lab = {}
     for _, s in ipairs(D.sites) do lab[s.id] = s.label end
     local root_of = {}
     for _, e in ipairs(D.solution.taint.escaped_root) do root_of[lab[e[1]]] = e[2] end
-    eq(nil, root_of['tbl:hostmodel:test:1:7'], 'the model\'s table is no export: ' .. vim.inspect(root_of))
-    eq('export', root_of['tbl:hostmodel:test:0:12'], 'what an export RETURNS from it is: the registry M.get hands out')
+    for l in pairs(root_of) do ok(not l:find('^tbl:hostmodel:'), 'no model table at all: ' .. l) end
+    eq('export', root_of['sum:tbl:hostmodel:test:0:12'], 'the registry M.get hands out is exported — ONE shared object: ' .. vim.inspect(root_of))
     eq(0, #DN.contracts.host_models, 'no model: none listed')
     ok(not DN.contracts.clauses['host-model'], 'and no clause')
 end)
