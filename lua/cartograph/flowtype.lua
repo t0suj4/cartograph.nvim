@@ -2402,9 +2402,10 @@ local function build(store, opts)
         -- `setfenv(1, Prat)` had made Prat a prototype of _G for every global read in the corpus, CART-1707. Only in
         -- a file that names setfenv: a port per top-level global read cost w2 4x the load visits, 33 -> 55 s)
         local saved = G7.CHUNK
-        G7.CHUNK = src:find('setfenv', 1, true) and ('chunk:' .. file) or nil
+        G7.CHUNK = not G7.HOSTWALK and src:find('setfenv', 1, true) and ('chunk:' .. file) or nil
         -- (a tree whose text never names setfenv — debug.setfenv included, a comment too: an over-count, never an under —
-        -- has FIXED environments: every one is _G, and the dump states it as a contract, CART-1775)
+        -- has FIXED environments: every one is _G, and the dump states it as a contract, CART-1775. The TREE's text: a
+        -- host model naming setfenv in a comment had made every tree non-fixed, CART-1785)
         if G7.CHUNK then G7.ANYSETFENV = true end
         if G7.REC then
             G7.W, G7.FNS, G7.CK = true, fnstack, 'chunk:' .. file
@@ -2579,7 +2580,7 @@ local function build(store, opts)
         end
     end)() end
     -- (the HOST MODELS, walked before the tree: the base runtime's, then the store's profile's, then opts.hostmodels —
-    -- a later model's key wins. Only for a tree with Lua in it, CART-1785)
+    -- a later model's key wins; `hostmodels = false`: none. Only for a tree with Lua in it, CART-1785)
     function G7.hostmodel(key)
         local m = G7.HOSTM and G7.HOSTM[key]
         return m or nil
@@ -2589,7 +2590,7 @@ local function build(store, opts)
         for _, f in ipairs(files) do if f:match('%.lua$') then anylua = true; break end end
         local P = require 'cartograph.spec.profile'
         local srcs = {}
-        if anylua then
+        if anylua and opts.hostmodels ~= false then
             for _, nm in ipairs { P.base_for('lua') or false, store.data.profile or false } do
                 local src = nm and M.hostmodel_src(nm)
                 if src then srcs[#srcs + 1] = { 'hostmodel:' .. nm, src } end

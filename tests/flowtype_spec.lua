@@ -2212,7 +2212,7 @@ test('flowtype: a modelled host function runs its Lua model (CART-1785)', functi
         local v = R.verdict(at[full])
         ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'modelled: ' .. full .. ' is A.m: ' .. vim.inspect(v))
     end
-    local N = flowtype.solve(store, { open = false })
+    local N = flowtype.solve(store, { open = false, hostmodels = false })
     for _, full in ipairs { 'g:m', 'h:m' } do ok(not N.verdict(at[full]), 'no model: ' .. full .. ' has no answer') end
     -- (the model is no tree code: it records no ACCESS — an access row is about a file of the tree)
     local W = flowtype.solve(store, { open = false, accesses = true, hostmodels = { test = HOSTMODEL } })
@@ -2220,6 +2220,30 @@ test('flowtype: a modelled host function runs its Lua model (CART-1785)', functi
     for _, r in ipairs(W.accesses or {}) do nacc = nacc + 1; if tostring(r.file):find('hostmodel', 1, true) then inmodel = inmodel + 1 end end
     ok(nacc > 0, 'the tree\'s accesses are recorded')
     eq(0, inmodel, 'none in the model')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- (CART-1785 H1, the luajit host model that SHIPS — spec/hostmodel/luajit.lua: `table.remove` returns an element of
+-- its list; `debug.getregistry()` is one table)
+test('flowtype: the shipped luajit host model — table.remove returns an element, the registry is one table (CART-1785)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+        'local a = setmetatable({}, { __index = A })', 'local _ = setmetatable({}, { __index = B }):m()',
+        'local stack = {}', 'stack[#stack + 1] = a', 'local x = table.remove(stack)', 'x:m()',
+        'debug.getregistry().mine = a', 'local g = debug.getregistry().mine', 'g:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local at = {}
+    for _, c in ipairs(store.data.calls) do local k = callrec.full(c); if k then at[k] = c end end
+    local R = flowtype.solve(store, { open = false, dump = true })
+    for _, full in ipairs { 'x:m', 'g:m' } do
+        local v = R.verdict(at[full])
+        ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), full .. ' is A.m: ' .. vim.inspect(v))
+    end
+    local keys = {}
+    for _, e in ipairs(vim.json.decode(R.dump).contracts.host_models) do keys[#keys + 1] = e[1] end
+    eq('debug#getregistry,table#remove', table.concat(keys, ','), 'the dump names the models the calls ran')
     vim.fn.delete(root, 'rf')
 end)
 

@@ -745,11 +745,14 @@ test('flowdump: open — a late-escaping table is outside-written; a dynamic loa
     local tp, n = {}, 0
     for _, p in ipairs(T.ports) do tp[p] = true end
     for _, F in ipairs(D.functions) do
-        for _, ins in ipairs(F.body) do
-            if ins[1] == 'loadDyn' then n = n + 1; ok(tp[ins[2]], 'the dynamic load is tainted: ' .. vim.json.encode(ins)) end
+        -- (the tree's: a host model's own bodies load dynamically too, CART-1785)
+        if not tostring(D.names.functions[F.id + 1]):find('hostmodel', 1, true) then
+            for _, ins in ipairs(F.body) do
+                if ins[1] == 'loadDyn' then n = n + 1; ok(tp[ins[2]], 'the dynamic load is tainted: ' .. vim.json.encode(ins)) end
+            end
         end
     end
-    eq(1, n, 'one dynamic load')
+    eq(1, n, 'one dynamic load in the tree')
 end)
 
 -- (CART-1785, the host as plain code: a model a call ran is a SUPPLIED premise — `contracts.host_models` names it,
@@ -761,7 +764,7 @@ test('flowdump: a host model a call ran is stated — host_models and the host-m
     local root = tree({ ['lua/m/init.lua'] = 'local M = {}\nfunction M.get() return debug.getregistry() end\nreturn M\n' })
     store.ingest(ts.extract(root))
     local R = flowtype.solve(store, { open = true, dump = true, hostmodels = { test = MODEL } })
-    local N = flowtype.solve(store, { open = true, dump = true })
+    local N = flowtype.solve(store, { open = true, dump = true, hostmodels = false })
     vim.fn.delete(root, 'rf')
     local D, DN = vim.json.decode(R.dump), vim.json.decode(N.dump)
     local hm = D.contracts.host_models
