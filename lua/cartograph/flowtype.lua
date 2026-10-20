@@ -2724,13 +2724,17 @@ local function build(store, opts)
     end
     -- (OPEN: an exported function's callers are not all in the tree — its parameters may hold anything)
     if open then
-        for _, mp in ipairs(modports) do
-            for o in each(mp) do
-                for _, fp in sorted(ofield[o] or {}) do
-                    for fo in each(fp) do
-                        local fpp = fnports[fo]
-                        if fpp then for _, pp in ipairs(fpp.params) do addobj(pp, EXT) end end
-                    end
+        -- (the export ROOTS: each module's value, and the STRING LIBRARY of every program — one string metatable per Lua
+        -- state, so `("x").f` reaches what the tree stored there from ANY code: an export surface no require names,
+        -- CART-1777)
+        local roots = {}
+        for _, mp in ipairs(modports) do for o in each(mp) do roots[#roots + 1] = o end end
+        for _, e in ipairs(G7.ENVL or {}) do if e.STRLIB then roots[#roots + 1] = e.STRLIB end end
+        for _, o in ipairs(roots) do
+            for _, fp in sorted(ofield[o] or {}) do
+                for fo in each(fp) do
+                    local fpp = fnports[fo]
+                    if fpp then for _, pp in ipairs(fpp.params) do addobj(pp, EXT) end end
                 end
             end
         end
@@ -2746,6 +2750,8 @@ local function build(store, opts)
         do
             local q, R = {}, G7.REACH
             local function reach(o) if not R[o] and o ~= EXT and not G7.ISG[o] and not TNAME[o] then R[o] = true; q[#q + 1] = o end end
+            -- (the string library is a root for CALLS only: outside code does not patch it, C2, so what is read through it
+            -- is not data the outside may have written)
             for _, mp in ipairs(modports) do for o in each(mp) do reach(o) end end
             local i = 1
             while i <= #q do
@@ -3677,7 +3683,8 @@ local function build(store, opts)
         local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
-            ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
+            MODE = open and 'open' or 'closed', GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

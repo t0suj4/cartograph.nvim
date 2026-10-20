@@ -2098,3 +2098,29 @@ test('flowtype: an open host value is created per call: a field stored on one is
     ok(shared and #(shared.targets or {}) == 2, 'shared: one object, both methods: ' .. vim.inspect(shared))
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string
+-- metatable per Lua state, `("x").pick(…)` reaches it from any code — so its parameters may hold anything, as an
+-- export's do. Closed, nothing outside exists)
+test('flowtype: open mode — a closure stored into the string library is callable from outside', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(a)',
+        'string.pick_route = function (_, p) return use(p) end', 'local s = "x"', 's:pick_route(b)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then call = c end end
+    local closed = flowtype.solve(store, { open = false }).verdict(call)
+    ok(closed and closed.kind == 'narrowed' and not closed.partial, 'closed: complete {A, B}: ' .. vim.inspect(closed))
+    local open = flowtype.solve(store, { open = true }).verdict(call)
+    ok(not (open and open.kind == 'narrowed' and not open.partial and not open.contracts),
+        'open: not a complete, uncontracted answer — outside code may call pick_route with anything: ' .. vim.inspect(open))
+    -- (and the dump writes the mode the solve ran in)
+    local D = vim.json.decode(flowtype.solve(store, { open = true, dump = true }).dump)
+    eq('open', D.mode, 'the dump says open')
+    ok(D.contracts.clauses['globals-per-program'] == nil, 'one program: no globals-per-program clause')
+    vim.fn.delete(root, 'rf')
+end)

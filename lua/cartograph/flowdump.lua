@@ -81,6 +81,7 @@ M.CONTRACTS = {
     ['outside-raises-strings'] = 'a function outside the tree raises strings (pcall second values)',
     ['host'] = 'a host site of kind prim or members (sites[i].host, from the environment profile) has no fields: a store to it is not followed, a load from it is its declared type; an open host site is an ordinary object',
     ['strict-global'] = 'a named global read does not see a dynamic-key write `_G[k] = v` (tag contract:strict-global)',
+    ['globals-per-program'] = 'each program of the tree has its own globals table: other programs do not read this program\'s globals (stated only when the tree holds several programs; false for WoW addons and Neovim plugins, which share _G)',
     ['fixed-env'] = 'the tree never calls setfenv (its text never names it), and outside code does not set a tree function\'s environment: every environment is the globals table (stated only when that holds)',
     ['computed-global'] = 'a read `_G[k]` with k unknown, or next / pairs over _G, sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'the globals site never escapes: a write through a cap-cut value that may be _G is not followed',
@@ -518,8 +519,10 @@ function M.build(rec, X)
     for id = 0, maxf do fields[id + 1] = fnames[id] and jstr(fnames[id]) or 'null' end
     local fns = {}
     for i, n in ipairs(fnlist) do fns[i] = jstr(n) end
-    put(('{"format":1,"lang":"lua","ver":51,"cartograph":%s,"corpus":{"root":%s,"sha":%s},"mode":"closed","instances":false,'):format(
-        X.sha and jstr(X.sha) or 'null', type(X.corpus) == 'string' and jstr(X.corpus) or 'null', X.corpus_sha and jstr(X.corpus_sha) or 'null'))
+    -- (the solve's real mode — open or closed: it had been written "closed" whatever the solve was, CART-1777)
+    put(('{"format":1,"lang":"lua","ver":51,"cartograph":%s,"corpus":{"root":%s,"sha":%s},"mode":%s,"instances":false,'):format(
+        X.sha and jstr(X.sha) or 'null', type(X.corpus) == 'string' and jstr(X.corpus) or 'null', X.corpus_sha and jstr(X.corpus_sha) or 'null',
+        jstr(X.MODE or 'closed')))
     put('"names":{"fields":[' .. table.concat(fields, ',') .. '],"functions":[' .. table.concat(fns, ',') .. ']},')
     put('"sites":[' .. table.concat(sj, ',') .. '],')
     put('"functions":[' .. table.concat(fjson, ',') .. '],')
@@ -536,7 +539,9 @@ function M.build(rec, X)
     put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
         .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
             local ks, kv = {}, {}
-            for k in pairs(M.CONTRACTS) do if not (k == 'fixed-env' and X.ANYSETFENV) then ks[#ks + 1] = k end end
+            for k in pairs(M.CONTRACTS) do
+                if not (k == 'fixed-env' and X.ANYSETFENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2) then ks[#ks + 1] = k end
+            end
             table.sort(ks)
             for i, k in ipairs(ks) do kv[i] = jstr(k) .. ':' .. jstr(M.CONTRACTS[k]) end
             return '{' .. table.concat(kv, ',') .. '}'
