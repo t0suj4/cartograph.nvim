@@ -695,6 +695,9 @@ local function build(store, opts)
     end
     local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
+        -- (a load of a field NAMED setfenv — `debug.setfenv`, `_G.setfenv`, `_G["setfenv"]` — may be the builtin: an
+        -- over-count, never an under; a computed key is the computed-global contract's, CART-1775)
+        if f == 'setfenv' and not G7.HOSTWALK then G7.ANYSETFENV = true end
         if G7.MULTI then G7.LENV[dst] = G7.ENV end
         if WALKERR then
             LOADERR[dst] = WALKERR()
@@ -1415,6 +1418,9 @@ local function build(store, opts)
                     return p
                 end
             end
+            -- (a reference to the GLOBAL setfenv — a call, an alias `local sf = setfenv`: environments may not be fixed,
+            -- CART-1775 — by the walk's own scope resolution, a model's code not counted)
+            if name == 'setfenv' and not G7.HOSTWALK then G7.ANYSETFENV = true end
             return G7.gport(name), true
         end
         local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
@@ -2402,11 +2408,10 @@ local function build(store, opts)
         -- `setfenv(1, Prat)` had made Prat a prototype of _G for every global read in the corpus, CART-1707. Only in
         -- a file that names setfenv: a port per top-level global read cost w2 4x the load visits, 33 -> 55 s)
         local saved = G7.CHUNK
+        -- (the TEXT gate is a cost choice only: a file's chunk port where its text names setfenv. Whether environments
+        -- are FIXED is the walk's scope resolution — a reference to the global setfenv or a load of a field named so,
+        -- above (CART-1775): the text scan had counted a comment, a model's among them, CART-1785)
         G7.CHUNK = not G7.HOSTWALK and src:find('setfenv', 1, true) and ('chunk:' .. file) or nil
-        -- (a tree whose text never names setfenv — debug.setfenv included, a comment too: an over-count, never an under —
-        -- has FIXED environments: every one is _G, and the dump states it as a contract, CART-1775. The TREE's text: a
-        -- host model naming setfenv in a comment had made every tree non-fixed, CART-1785)
-        if G7.CHUNK then G7.ANYSETFENV = true end
         if G7.REC then
             G7.W, G7.FNS, G7.CK = true, fnstack, 'chunk:' .. file
             local e0, c0 = expr, callv -- (an argument evaluated inside a hand-translated builtin is the program's)

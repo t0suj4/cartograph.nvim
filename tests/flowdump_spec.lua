@@ -593,6 +593,19 @@ test('flowdump: getfenv is no gap under fixed environments, and stays one when t
     D = dump('\nlocal G = getfenv(0)\nsetfenv(1, {})\nreturn G\n')
     ok(kinds(D).getfenv, 'with a setfenv the getfenv gap stays')
     ok(D.contracts.clauses['fixed-env'] == nil, 'and the fixed-env clause is not stated')
+    -- (by the walk's SCOPE resolution, not the text, CART-1785: a comment or a string naming it, or a LOCAL called
+    -- setfenv, is no reference to the builtin; an alias, debug.setfenv, `_G["setfenv"]` are)
+    for _, src in ipairs {
+        '\n-- setfenv is not called here\nlocal s = "setfenv"\nlocal G = getfenv(0)\nreturn G, s\n',
+        '\nlocal setfenv = function () end\nsetfenv(1, {})\nlocal G = getfenv(0)\nreturn G\n' } do
+        ok(dump(src).contracts.clauses['fixed-env'] ~= nil, 'fixed: ' .. src)
+    end
+    for _, src in ipairs {
+        '\nlocal sf = setfenv\nlocal G = getfenv(0)\nreturn G, sf\n',
+        '\nlocal sf = debug.setfenv\nlocal G = getfenv(0)\nreturn G, sf\n',
+        '\nlocal sf = _G["setfenv"]\nlocal G = getfenv(0)\nreturn G, sf\n' } do
+        ok(dump(src).contracts.clauses['fixed-env'] == nil, 'not fixed: ' .. src)
+    end
 end)
 
 -- (CART-1776, the world: the OUTSIDE writes into what escaped, data fields included — `[]` is hit once anything escapes,
