@@ -1011,6 +1011,7 @@ local function build(store, opts)
     -- a table too, but its name does not say so
     G7.HKINDS, G7.CREATES, G7.FRESH, G7.EROOTC = {}, {}, {}, {}
     G7.HOSTMODS, G7.HOSTUSED = {}, {} -- (the host models' module ports; the keys a call bound to a model, CART-1785)
+    G7.FNSIZE, G7.WALKBYTES = {}, 0 -- (a walked function's id -> its byte length; the tree's walked bytes)
     do
         local HKINDS = G7.HKINDS
         local P = require 'cartograph.spec.profile'
@@ -1689,6 +1690,7 @@ local function build(store, opts)
             local id = inst and clone.id or ((not clone or isctx) and fnmap[l .. ':' .. c]) or ('ts:' .. kfile .. ':' .. l .. ':' .. c)
             local p = new()
             local o = newobj(id)
+            if not inst and not clone then local _, _, b0, _, _, e0 = n:range(true); G7.FNSIZE[id] = e0 - b0 end -- (its bytes: the context selection's cost)
             local trfn0 = G7.CURFN -- (experiment `trace`: from here the ports are the function's own — params, ret, err)
             if G7.TR then G7.CURFN = id end
             addobj(p, o)
@@ -2832,6 +2834,7 @@ local function build(store, opts)
                 if not jswalk then jswalk, jsfinish = require('cartograph.flowtype_js').walker(S, files) end
                 jswalk(f, src)
             else walk_file(f, src) end
+            G7.WALKBYTES = G7.WALKBYTES + #src
         end
     end
     if jsfinish then jsfinish() end
@@ -4053,6 +4056,25 @@ local function build(store, opts)
                 for _, pp in ipairs(fp.params) do if S[pp] and not sel[fp.id] then sel[fp.id] = true; n = n + 1 end end
             end
         end
+        -- ★ A BUDGET (CART-1788): the second solve walks a selected function ONCE PER RESOLVED CALL SITE, so one costs its
+        -- bytes x its sites — no function may re-walk more than the tree itself. Unbounded, a change that put the
+        -- extractor's M.extract (183 KB, 839 sites: 154 M bytes) upstream of an unknown answer ran the repo's second
+        -- solve out of memory at 11 GB; the default's largest, flow.lua's M.build, is 3 M. opts.ctxbudget scales it
+        local nsite0 = {}
+        if G7.CALLP then
+            for _, p in pairs(G7.CALLP) do
+                if not top[p] and not tainted[p] then
+                    local one, k = nil, 0
+                    for o in each(p) do one = o; k = k + 1; if k > 1 then break end end
+                    local fp = k == 1 and fnports[one]
+                    if fp and fp.id and sel[fp.id] then nsite0[fp.id] = (nsite0[fp.id] or 0) + 1 end
+                end
+            end
+        end
+        R.ctxcut = {}
+        for id in pairs(sel) do
+            if (G7.FNSIZE[id] or 0) * (nsite0[id] or 0) > G7.WALKBYTES * (opts.ctxbudget or 1) then sel[id] = nil; n = n - 1; R.ctxcut[#R.ctxcut + 1] = id end
+        end
         R.ctxfns, R.nctx = sel, n
         if G7.CALLP then
             local cc = {}
@@ -4065,6 +4087,11 @@ local function build(store, opts)
                 end
             end
             R.ctxcallee = cc
+            -- (instrument: each selected function's cost — bytes x resolved call sites — for the selection budget)
+            local nsite = {}
+            for _, id in pairs(cc) do nsite[id] = (nsite[id] or 0) + 1 end
+            R.ctxcost = {}
+            for id in pairs(sel) do R.ctxcost[id] = { bytes = G7.FNSIZE[id] or 0, sites = nsite[id] or 0 } end
         end
     end
     -- (opts.allcallees: every call's CALLEE SET by flow — cartograph.flowlinks takes links from it, CART-1715. A set of

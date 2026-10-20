@@ -1305,6 +1305,9 @@ test('flowtype: a closure whose parameter saturates gets an instance per call si
     for i, x in ipairs(store.data.calls) do saved[i] = x.to; x.to = nil end
     local unjoined = flowtype.solve(store, { open = false })
     for i, x in ipairs(store.data.calls) do x.to = saved[i] end
+    -- (the BUDGET, CART-1788: a selected function re-walked at every site may not cost more than the tree — scaled to 0
+    -- here, `use` is cut and the answer is the one walk's)
+    local cut = flowtype.solve(store, { open = false, ctxbudget = 0 })
     flowtype.CAP = cap
     vim.fn.delete(root, 'rf')
     local callrec = require 'cartograph.callrec'
@@ -1324,6 +1327,7 @@ test('flowtype: a closure whose parameter saturates gets an instance per call si
     eq('exact', rv and rv.kind, 'what an instance returns from its upvalue: ' .. vim.inspect(rv))
     eq(vim.inspect(v), vim.inspect(unjoined.verdict(c)), 'no c.to: the same instances')
     eq(vim.inspect(rv), vim.inspect(unjoined.verdict(rc)), 'no c.to: the same return')
+    eq(nil, cut.verdict(c), 'over the budget: no instances, the one walk\'s answer')
 end)
 
 -- ★ WHAT AN ESCAPED OBJECT HOLDS ESCAPES WITH IT (CART-1643): a call through a tainted callee taints the parameters of
