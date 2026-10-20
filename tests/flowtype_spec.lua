@@ -2185,6 +2185,44 @@ test('flowtype: a host function\'s table type takes the `table` alias\'s kind; o
     vim.fn.delete(root, 'rf')
 end)
 
+-- (CART-1785, the host as plain code: a host function with a Lua MODEL runs it. `debug.getregistry()` returns ONE
+-- existing table — a field stored through one call is read through another; `table.move(a1, f, e, t, a2)` copies a1's
+-- elements into a2 (or a1) and returns it. Without a model both return a `table` of the signature: no field is read
+-- back. (rawset / rawget are the language's own: a store and a load, no model needed)
+local HOSTMODEL = table.concat({
+    'local REG = {}',
+    'return {',
+    '    ["debug#getregistry"] = function () return REG end,',
+    '    ["table#move"] = function (a1, f, e, t, a2) local d = a2 or a1; for i = f, e do d[t + i - f] = a1[i] end; return d end,',
+    '}' }, '\n') .. '\n'
+test('flowtype: a modelled host function runs its Lua model (CART-1785)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+        'local a = setmetatable({}, { __index = A })', 'local _ = setmetatable({}, { __index = B }):m()',
+        'local r1 = debug.getregistry()', 'r1.x = a',
+        'local r2 = debug.getregistry()', 'local g = r2.x', 'g:m()',
+        'local u = table.move({ a }, 1, 1, 1, {})', 'local h = u[1]', 'h:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local at = {}
+    for _, c in ipairs(store.data.calls) do local k = callrec.full(c); if k then at[k] = c end end
+    local R = flowtype.solve(store, { open = false, hostmodels = { test = HOSTMODEL } })
+    for _, full in ipairs { 'g:m', 'h:m' } do
+        local v = R.verdict(at[full])
+        ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'modelled: ' .. full .. ' is A.m: ' .. vim.inspect(v))
+    end
+    local N = flowtype.solve(store, { open = false })
+    for _, full in ipairs { 'g:m', 'h:m' } do ok(not N.verdict(at[full]), 'no model: ' .. full .. ' has no answer') end
+    -- (the model is no tree code: it records no ACCESS — an access row is about a file of the tree)
+    local W = flowtype.solve(store, { open = false, accesses = true, hostmodels = { test = HOSTMODEL } })
+    local nacc, inmodel = 0, 0
+    for _, r in ipairs(W.accesses or {}) do nacc = nacc + 1; if tostring(r.file):find('hostmodel', 1, true) then inmodel = inmodel + 1 end end
+    ok(nacc > 0, 'the tree\'s accesses are recorded')
+    eq(0, inmodel, 'none in the model')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string
 -- metatable per Lua state, `("x").pick(…)` reaches it from any code — so its parameters may hold anything, as an
 -- export's do. Closed, nothing outside exists)

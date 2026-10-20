@@ -58,6 +58,9 @@
 --   supplies a method for) are tainted, what a DYNAMIC load reads of it is open and its key set is ⊤; its `[]` cell is
 --   NOT hit — a named load of a function member reads it (C1: the outside does not replace those). Closed mode hits
 --   `[]` instead (`fields_hit`), CART-1783.
+-- * `contracts.host_models` [key, [function ids]]: the HOST MODELS a call ran (CART-1785) — a host function described
+--   by a Lua body (spec/hostmodel/<runtime>.lua, opts.hostmodels), walked as code: its functions are in `functions`
+--   like the tree's. A SUPPLIED premise: the clause `host-model` is stated when one ran.
 --   `hkeys` [site, [sites]]: flowtype's KEY SET of a table (what `pairs` yields as keys) — no core field; a load of it
 --   is a gap (`table-keys`).
 -- * Errors are PER FUNCTION (Core/Errors.lean, FLOW C.E): err.fn [fn, [sites]] is `E.port fn` (err.top: a port past
@@ -95,6 +98,7 @@ M.CONTRACTS = {
     ['unknown-receiver'] = 'a call on a member of an ext value runs no tree code and hands its arguments nowhere; a call whose callee the flow cannot resolve runs nothing',
     ['unknown-code'] = 'a call whose callee holds an ext site hands its arguments to the unknown-code channel (contracts.ext_channel), which calls the functions among them with ext',
     ['function-no-metatable'] = 'a function has no metatable of its own (setmetatable raises): a setmeta on a closure site writes nothing (the core\'s setmeta writes any reference)',
+    ['host-model'] = 'a host function with a Lua model (contracts.host_models: [key, [function ids]]) behaves as its model\'s body — a SUPPLIED premise (CART-1785; stated only when a call used one)',
     ['hidden-fields'] = 'a dynamic key never reads or writes the metatable slot (Lua; the core\'s loadDyn / storeDyn range over it)',
 }
 
@@ -580,6 +584,20 @@ function M.build(rec, X)
     table.sort(fhn)
     for _, f in ipairs(fhn) do fhj[#fhj + 1] = f == '[]' and 'null' or tostring(F(f)) end
     table.sort(fhj)
+    -- (the host models a call ran: [key, [function ids]], by key — CART-1785)
+    local hmj = {}
+    do
+        local ks = {}
+        for k in pairs(X.HOSTUSED or {}) do ks[#ks + 1] = k end
+        table.sort(ks)
+        for _, k in ipairs(ks) do
+            local ids = {}
+            local p = X.HOSTM and X.HOSTM[k]
+            if p then for o in X.each(p) do local fp = X.fnports[o]; if fp and fp.id then ids[#ids + 1] = FN(fp.id) end end end
+            table.sort(ids)
+            hmj[#hmj + 1] = '[' .. jstr(k) .. ',' .. jarr(ids) .. ']'
+        end
+    end
     local owl = {}
     for o in pairs(X.OUTWD or {}) do if type(o) == 'number' then owl[#owl + 1] = o end end
     table.sort(owl)
@@ -608,11 +626,12 @@ function M.build(rec, X)
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
-    put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null')
+    put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null') .. ',"host_models":[' .. table.concat(hmj, ',') .. ']'
         .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
             local ks, kv = {}, {}
             for k in pairs(M.CONTRACTS) do
-                if not (k == 'fixed-env' and X.ANYSETFENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2) then ks[#ks + 1] = k end
+                if not (k == 'fixed-env' and X.ANYSETFENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
+                    and not (k == 'host-model' and #hmj == 0) then ks[#ks + 1] = k end
             end
             table.sort(ks)
             for i, k in ipairs(ks) do kv[i] = jstr(k) .. ':' .. jstr(M.CONTRACTS[k]) end

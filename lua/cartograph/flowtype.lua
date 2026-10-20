@@ -66,6 +66,19 @@ M.EXPERIMENTS = {
 }
 local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
 --- the active experiments of a solve -> { name = value } (true for a bare name); errors on an unknown name
+-- ★ THE HOST AS PLAIN CODE (CART-1785, the user: "if a host function returns its parameter we should be able to encode
+-- that or anything else we can know about plain code"). A runtime's HOST MODEL is a Lua file returning a table keyed by
+-- profile signature key (`rawset`, `debug#getregistry`, `vim#split`): each value a function whose body says what the
+-- host function does — returns an argument, builds a table, returns an existing object, calls a callback. The solve
+-- walks it as code before the tree and a host call with a model calls it; a model is a SUPPLIED premise, stated in
+-- the dump (`host-model`). The source of `runtime`'s model, or nil
+local HOSTDIR = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/flowtype%.lua$')
+function M.hostmodel_src(runtime)
+    local fd = runtime and HOSTDIR and io.open(HOSTDIR .. '/spec/hostmodel/' .. runtime .. '.lua', 'rb')
+    if not fd then return nil end
+    local src = fd:read('a'); fd:close()
+    return src
+end
 function M.experiments(opts)
     local out = {}
     local function add(name, v)
@@ -945,6 +958,7 @@ local function build(store, opts)
     -- E-reading writes EXT into them; with a bare `table` as ONE shared object, 134 s. A named class (`lsp.Range`) is
     -- a table too, but its name does not say so
     G7.HKINDS, G7.CREATES, G7.FRESH, G7.EROOTC = {}, {}, {}, {}
+    G7.HOSTMODS, G7.HOSTUSED = {}, {} -- (the host models' module ports; the keys a call bound to a model, CART-1785)
     do
         local HKINDS = G7.HKINDS
         local P = require 'cartograph.spec.profile'
@@ -1383,7 +1397,7 @@ local function build(store, opts)
         local function key_of(n) local l, c = n:start(); return kfile .. ':' .. l .. ':' .. c end
         -- (an access, at the FILE's positions: a snippet instance's positions are its own, so it records none)
         local function acc(kind, node, f, base, obj, range, key)
-            if not ACC or (clone and (not isctx or clone.noacc)) or not node then return end
+            if not ACC or (clone and (not isctx or clone.noacc)) or not node or G7.HOSTWALK then return end
             local sr, sc, er, ec = node:range()
             if range then sr, sc, er, ec = range[1], range[2], range[3], range[4] end
             ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj, key = key }
@@ -2016,13 +2030,20 @@ local function build(store, opts)
             -- 427 typed / string answers went unknown: a call on unknown code's value runs nothing, THE CONTRACT)
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
-                for k, r in ipairs(resl) do
-                    local key = owner and (owner .. '#' .. mm) or fname
-                    local gi = genarg(key, k)
-                    if gi then if aps[gi] then edge(aps[gi], r) end
-                    else
-                        local rt = retk(key, k)
-                        if rt then addobj(r, G7.retobj(rt, r, key)) end
+                local key = owner and (owner .. '#' .. mm) or fname
+                local hm = G7.hostmodel(key)
+                if hm then
+                    -- (a MODELLED host function runs its model: what it returns, creates, writes, calls — CART-1785)
+                    G7.HOSTUSED[key] = true
+                    callc(hm, aps, want and resl or res, nil, curerr())
+                else
+                    for k, r in ipairs(resl) do
+                        local gi = genarg(key, k)
+                        if gi then if aps[gi] then edge(aps[gi], r) end
+                        else
+                            local rt = retk(key, k)
+                            if rt then addobj(r, G7.retobj(rt, r, key)) end
+                        end
                     end
                 end
             end
@@ -2293,6 +2314,9 @@ local function build(store, opts)
                         local r = fp.rets[i]
                         if not r then r = fp.inst and new() or port('r:' .. fp.id .. ':' .. i); fp.rets[i] = r end
                         edge(v, r)
+                    elseif i == 1 and not clone and G7.HOSTWALK then
+                        -- (a host model's table is no export: open mode does not reach it, CART-1785)
+                        edge(v, port('mod:' .. file)); G7.HOSTMODS[#G7.HOSTMODS + 1] = port('mod:' .. file)
                     elseif i == 1 and not clone then
                         edge(v, port('mod:' .. file)); modports[#modports + 1] = v
                     elseif i == 1 then clone.port = v
@@ -2554,6 +2578,43 @@ local function build(store, opts)
             enter(); r_proto(t, idx, lua); leave()
         end
     end)() end
+    -- (the HOST MODELS, walked before the tree: the base runtime's, then the store's profile's, then opts.hostmodels —
+    -- a later model's key wins. Only for a tree with Lua in it, CART-1785)
+    function G7.hostmodel(key)
+        local m = G7.HOSTM and G7.HOSTM[key]
+        return m or nil
+    end
+    do
+        local anylua = false
+        for _, f in ipairs(files) do if f:match('%.lua$') then anylua = true; break end end
+        local P = require 'cartograph.spec.profile'
+        local srcs = {}
+        if anylua then
+            for _, nm in ipairs { P.base_for('lua') or false, store.data.profile or false } do
+                local src = nm and M.hostmodel_src(nm)
+                if src then srcs[#srcs + 1] = { 'hostmodel:' .. nm, src } end
+            end
+            local names = {}
+            for nm in pairs(opts.hostmodels or NOTHING) do names[#names + 1] = nm end
+            table.sort(names)
+            for _, nm in ipairs(names) do srcs[#srcs + 1] = { 'hostmodel:' .. nm, opts.hostmodels[nm] } end
+        end
+        for _, hs in ipairs(srcs) do
+            G7.HOSTWALK = hs[1]
+            walk_file(hs[1], hs[2])
+            G7.HOSTWALK = nil
+        end
+        if #G7.HOSTMODS > 0 then
+            G7.HOSTM = {}
+            for _, mp in ipairs(G7.HOSTMODS) do
+                for o in each(mp) do
+                    for k, fp in pairs(ofield[o] or NOTHING) do
+                        if k:byte(1) ~= 1 and k ~= '[]' and k ~= '{k}' then G7.HOSTM[k] = fp end
+                    end
+                end
+            end
+        end
+    end
     local gowalk, jswalk, jsfinish
     for _, f in ipairs(files) do
         local fd = type(root) == 'string' and io.open(root .. '/' .. f, 'rb')
@@ -3715,7 +3776,7 @@ local function build(store, opts)
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
-            MODE = open and 'open' or 'closed', EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            MODE = open and 'open' or 'closed', EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

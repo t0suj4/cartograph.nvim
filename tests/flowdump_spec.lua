@@ -751,3 +751,31 @@ test('flowdump: open — a late-escaping table is outside-written; a dynamic loa
     end
     eq(1, n, 'one dynamic load')
 end)
+
+-- (CART-1785, the host as plain code: a model a call ran is a SUPPLIED premise — `contracts.host_models` names it,
+-- [key, [function ids]], and the clause `host-model` is stated; the model's table is no export in open mode — outside
+-- code cannot reach the host's own internals through it. No model ran: no clause)
+test('flowdump: a host model a call ran is stated — host_models and the host-model clause; it is no export (CART-1785)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local MODEL = 'local REG = {}\nreturn { ["debug#getregistry"] = function () return REG end }\n'
+    local root = tree({ ['lua/m/init.lua'] = 'local M = {}\nfunction M.get() return debug.getregistry() end\nreturn M\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = true, dump = true, hostmodels = { test = MODEL } })
+    local N = flowtype.solve(store, { open = true, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D, DN = vim.json.decode(R.dump), vim.json.decode(N.dump)
+    local hm = D.contracts.host_models
+    eq(1, #hm, 'one model ran: ' .. vim.inspect(hm))
+    eq('debug#getregistry', hm[1][1])
+    eq(1, #hm[1][2], 'its function')
+    ok(D.names.functions[hm[1][2][1] + 1]:find('hostmodel:test', 1, true), 'the model\'s function: ' .. tostring(D.names.functions[hm[1][2][1] + 1]))
+    ok(D.contracts.clauses['host-model'], 'the clause is stated')
+    local lab = {}
+    for _, s in ipairs(D.sites) do lab[s.id] = s.label end
+    local root_of = {}
+    for _, e in ipairs(D.solution.taint.escaped_root) do root_of[lab[e[1]]] = e[2] end
+    eq(nil, root_of['tbl:hostmodel:test:1:7'], 'the model\'s table is no export: ' .. vim.inspect(root_of))
+    eq('export', root_of['tbl:hostmodel:test:0:12'], 'what an export RETURNS from it is: the registry M.get hands out')
+    eq(0, #DN.contracts.host_models, 'no model: none listed')
+    ok(not DN.contracts.clauses['host-model'], 'and no clause')
+end)
