@@ -2300,6 +2300,12 @@ test('flowtype: nvim\'s own Lua is its host model — vim.tbl_map calls the call
         local v = R.verdict(at[full])
         ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'shared.lua: ' .. full .. ' is A.m: ' .. vim.inspect(v))
     end
+    -- (CART-1786: the SAME answers from shared.lua's SUMMARY applied at the calls as edges — no walk of it, no instance)
+    local SM = flowtype.solve(store, { open = false, hostsummary = true })
+    for _, full in ipairs { 'x:m', 'y:m', 'g:m' } do
+        local v = SM.verdict(at[full])
+        ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'summary: ' .. full .. ' is A.m: ' .. vim.inspect(v))
+    end
     local N = flowtype.solve(store, { open = false, hostmodels = false })
     for _, full in ipairs { 'x:m', 'y:m' } do ok(not N.verdict(at[full]), 'by the signature: ' .. full .. ' has no answer') end
     vim.fn.delete(root, 'rf')

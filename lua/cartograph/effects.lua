@@ -150,11 +150,44 @@ M.SIGS = {
     },
 }
 
--- signature lookup: exact → prefix (longest wins not needed; families are
+-- ★ DERIVED SIGNATURES (CART-1786, the user: "build one shared summary of shared.lua for both"): a host function whose
+-- runtime source is here — nvim's vim/_core/shared.lua — has a SUMMARY computed from that source by flowtype
+-- (cartograph.hostsummary), and its effects signature is that summary's projection: the positions it writes through,
+-- the positions it calls, and the functions it reaches outside the file (`ext`, resolved by name like any call).
+-- Set per summaries() run for the store's profile; ahead of the hand table, which stays the fallback where no
+-- runtime source is here. A tree that holds the source summarizes it as its own code
+M.DERIVED = nil
+function M.derived_for(store)
+    local prof = store.data and store.data.profile
+    local ok, HS = pcall(require, 'cartograph.hostsummary')
+    local hs = ok and prof and HS.of(prof)
+    if not hs then return nil end
+    for _, x in ipairs((HS.sources(prof))) do
+        if store.by_file and store.by_file[x[1]] then return nil end
+    end
+    local out = {}
+    for key, sm in pairs(hs.fns) do
+        local p = HS.effects_sig(sm)
+        local sig = { derived = hs.stamp }
+        local w, calls = vim.tbl_keys(p.pwx), vim.tbl_keys(p.calls)
+        table.sort(w); table.sort(calls)
+        if #w > 0 then sig.w = w end
+        if #calls > 0 then sig.calls = calls end
+        if #w == 0 and #calls == 0 then sig.pure = true end
+        local r1 = sm.results and sm.results[1]
+        if r1 and #r1 == 1 and r1[1][1] == 'param' and r1[1][3] == '' and type(r1[1][2]) == 'number' then sig.returns_arg = r1[1][2] end
+        sig.ext = p.ext
+        out[(key:gsub('#', '.'))] = sig
+    end
+    return out
+end
+
+-- signature lookup: derived (CART-1786) → exact → prefix (longest wins not needed; families are
 -- disjoint) → method tier (~, only for method-style calls)
 function M.sig_of(lang, name, is_method)
     local sl = M.SIGS[lang]
     if not sl or not name then return nil end
+    if lang == 'lua' and M.DERIVED and M.DERIVED[name] and not (is_method and name:find(':', 1, true)) then return M.DERIVED[name] end
     if is_method then
         -- ★ A RECEIVER TYPED BEFORE RESOLUTION: a method call keyed `owner.m` — no colon — was re-keyed by the
         -- language's own typing (`('%s'):format(x)` / a local only ever a string: `string.format`, CART-1062 / 1150).
@@ -909,6 +942,7 @@ function M.summaries(store)
     if store._fx and store._fxgen == store.generation then return store._fx end
     -- (config.effects_flow: the flow analysis's verdicts for ambiguous calls, CART-1621 — M.FLOW forces it for a test)
     FLOW = (M.FLOW or require('cartograph.config').effects_flow) and require('cartograph.flowtype').of(store) or nil
+    M.DERIVED = not M.NODERIVED and M.derived_for(store) or nil -- (M.NODERIVED: the hand table alone — an instrument)
     INDIRECT = {}; store._fxpwv = INDIRECT -- (var key -> { [caller fn id] = callee }: see M.indirect_writers)
     local scc = require 'cartograph.scc'
     local ids = {}
@@ -1230,6 +1264,14 @@ function M.summaries(store)
                             end
                             if sig.io then s_add(sum, IOKEY, 1) end
                             if sig.nondet then sum.nd = true end
+                            -- (a DERIVED signature's reach outside its file: each by name, as any call — the world
+                            -- or a hedge; its writes and calls through the arguments are already w / calls, CART-1786)
+                            for _, nm in ipairs(sig.ext or {}) do
+                                local s2 = not nm:match('^%(') and M.sig_of(lang, nm) or nil
+                                if s2 and s2.io then s_add(sum, IOKEY, 1) end
+                                if s2 and s2.nondet then sum.nd = true end
+                                if not s2 and not nm:match('^%(') then s_hedge(sum, ('unresolved: %s (reached by %s)'):format(nm, bname)) end
+                            end
                             for _, ai in ipairs(sig.w or {}) do
                                 local kind, x = arg_target(store, c, ai, caller)
                                 if kind == 'var' then

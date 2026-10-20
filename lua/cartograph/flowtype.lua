@@ -617,9 +617,29 @@ local function build(store, opts)
         local v = tn:match('^table<[^,]+,%s*(.-)>$')
         return v
     end
+    -- ★ PLACEHOLDER PARAMETERS — A SUMMARY SOLVE (CART-1786): opts.phseed names ONE function; its parameters hold
+    -- placeholders, objects standing for "whatever the caller passes". A load of a placeholder's field materializes a
+    -- child placeholder for that PATH (`p2.[]`, `p1.f`; deeper than 3 it is unknown), and calling one records the call
+    -- and returns a call-result placeholder. What the solved heap holds of them — the function's results, its stores
+    -- into parameter paths, its calls through them — is its summary (R.phsummary), applied at a call as edges
+    G7.PH = opts.phseed and {} or nil
+    G7.PHCALLS, G7.PHCK, G7.PHSITES = G7.PH and {} or nil, G7.PH and {} or nil, G7.PH and {} or nil
+    function G7.mkph(info) local o = newobj('ph:' .. info.label); G7.PH[o] = info; return o end
+    function G7.phchild(o, f)
+        local info = G7.PH[o]
+        if f:byte(1) == 1 then return end
+        info.kids = info.kids or {}
+        if info.kids[f] ~= nil then return end
+        if info.d >= 3 then info.kids[f] = false; addobj(ofp(o, f), G7.EXT); return end
+        local path = info.path .. ((f == '[]' or f == '{k}' or f == '#') and f or ('.' .. f))
+        local c = G7.mkph({ param = info.param, call = info.call, k = info.k, path = path, d = info.d + 1, label = info.label .. path })
+        info.kids[f] = c
+        addobj(ofp(o, f), c)
+    end
     local LOADV = 0 -- (load_obj calls: stats.loadvisits, the complexity a spec pins — CART-1686)
     local function load_obj(o, f, dst, seen, strict)
         LOADV = LOADV + 1
+        if G7.PH and G7.PH[o] then G7.phchild(o, f) end
         -- (the cycle guard only matters along PROTOTYPES: allocated at the first one — 2.2 M sets per solve were built
         -- for loads that never followed a prototype, the allocation census's top site)
         if seen then
@@ -805,6 +825,19 @@ local function build(store, opts)
             -- (setfenv's function: its reads see the environment; unknown code is handed it)
             if o == G7.EXT then edge(args.fenv, G7.EXTCALL)
             elseif fnports[o] then G7.fenv(fnports[o].id, args.fenv) end
+            return
+        end
+        if G7.PH and G7.PH[o] then
+            -- (calling a PLACEHOLDER: the summarized function calls what its caller passed — recorded, its results
+            -- placeholders of their own, CART-1786)
+            local rl = type(res) == 'table' and res or { res }
+            local key = tostring(o) .. ':' .. tostring(rl[1])
+            if not G7.PHCK[key] then
+                local n = #G7.PHCALLS + 1
+                G7.PHCK[key] = n
+                G7.PHCALLS[n] = { callee = o, args = args, res = rl }
+                for k, r in ipairs(rl) do addobj(r, G7.mkph({ call = n, k = k, path = '', d = 0, label = 'call' .. n .. ':' .. k })) end
+            end
             return
         end
         if o == G7.EXT and G7.EXTCALL then
@@ -1350,6 +1383,88 @@ local function build(store, opts)
     -- the name join's c.to: a wrong claim bound the wrong function and skipped the callee's flow)
     G7.CALLP = (opts.ctxsel or opts.allcallees) and {} or nil
     G7.CTXC = opts.ctxcallee
+    -- ★ A HOST SUMMARY APPLIED AT A CALL AS EDGES (CART-1786): the summary's sources over THIS call's argument ports —
+    -- a parameter path is field loads, an allocation a fresh object of this application, a call through a parameter a
+    -- callc (a method call on the argument also its type's method: mflow), a store a storec. No re-walk: the body was
+    -- solved once, alone, with placeholders
+    G7.SUMTAINT = {}
+    function G7.applysum(sm, aps, resl, cerr)
+        local calls, objs, filled = {}, {}, {}
+        local function steps(path)
+            local out, i = {}, 1
+            while i <= #path do
+                if path:sub(i, i + 1) == '[]' then out[#out + 1] = '[]'; i = i + 2
+                elseif path:sub(i, i + 2) == '{k}' then out[#out + 1] = '{k}'; i = i + 3
+                elseif path:sub(i, i) == '#' then out[#out + 1] = '#'; i = i + 1
+                elseif path:sub(i, i) == '.' then
+                    local nm = path:match('^[^%.%[{#]+', i + 1) or ''
+                    out[#out + 1] = nm; i = i + 1 + #nm
+                else break end
+            end
+            return out
+        end
+        local function walkp(p, path) for _, f in ipairs(steps(path)) do p = field(p, f) end; return p end
+        local function argp(j)
+            if j == '...' then local v = new(); for i = (sm.nparams or 0) + 1, #aps do edge(aps[i], v) end; return v end
+            return aps[j]
+        end
+        local src
+        local function srcport(l)
+            local p = new()
+            for _, x in ipairs(l or NOTHING) do local q = src(x); if q then edge(q, p) end end
+            return p
+        end
+        src = function (x)
+            local k = x[1]
+            if k == 'param' then local a = argp(x[2]); return a and walkp(a, x[3]) end
+            if k == 'call' then local c = calls[x[2]]; local r = c and c[x[3]]; return r and walkp(r, x[4]) end
+            if k == 'type' then local p = new(); addobj(p, typeobj(x[2])); return p end
+            if k == 'new' or k == 'ref' then
+                local o = objs[x[2]]
+                if not o then o = newobj('sum:' .. x[2]); objs[x[2]] = o end
+                local p = new(); addobj(p, o)
+                if k == 'new' and not filled[x[2]] then
+                    filled[x[2]] = true
+                    for f, l in pairs(x.fields or NOTHING) do if f ~= 'mt' then storec(p, f, srcport(l)) end end
+                end
+                return p
+            end
+            -- (UNKNOWN — a closure it returns, a path past the summary's depth, a value from outside its file: TAINTED
+            -- in the taint phase, not ext — ext reaches the unknown-code channel, which calls every function it is
+            -- handed: 463 repo rows lost their answer, JavaScript ones among them)
+            local p = new()
+            G7.SUMTAINT[#G7.SUMTAINT + 1] = p
+            return p
+        end
+        for n in ipairs(sm.calls or NOTHING) do calls[n] = { new(), new(), new() } end
+        for n, c in ipairs(sm.calls or NOTHING) do
+            local args = {}
+            for i, l in ipairs(c.args or NOTHING) do args[i] = srcport(l) end
+            local cs = c.callee
+            if c.method and cs[1] == 'param' then
+                local st = steps(cs[3])
+                local m = table.remove(st)
+                local rp = argp(cs[2])
+                if rp and m then
+                    for _, f in ipairs(st) do rp = field(rp, f) end
+                    for k, r in ipairs(calls[n]) do mflow(rp, m, r, k) end
+                end
+            end
+            local cp = src(cs)
+            if cp then callc(cp, args, calls[n], nil, cerr) end
+        end
+        for _, st in ipairs(sm.stores or NOTHING) do
+            local at = st.at
+            local base = at[1] == 'param' and argp(at[2]) or (at[1] == 'call' and calls[at[2]] and calls[at[2]][at[3]])
+            local ss = steps(at[1] == 'param' and at[3] or at[4] or '')
+            local last = table.remove(ss)
+            if base and last then
+                for _, f in ipairs(ss) do base = field(base, f) end
+                storec(base, last, srcport(st.sources))
+            end
+        end
+        for k, l in pairs(sm.results or NOTHING) do if resl[k] then edge(srcport(l), resl[k]) end end
+    end
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
         -- (one parse per text per process, shared with the extractor and the lint rules — a snippet instance's text is
@@ -2055,7 +2170,15 @@ local function build(store, opts)
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
                 local key = owner and (owner .. '#' .. mm) or fname
                 local hm = G7.hostmodel(key)
-                if hm then
+                local hsum = G7.HOSTSUM and G7.HOSTSUM[key]
+                if hsum then
+                    -- (a SUMMARIZED host function: its summary applied here as edges, CART-1786 — WITH the signature's
+                    -- declared types, below: `vim.trim(x)` is `x:match(…)`, a string only where x is known to be one,
+                    -- and the signature says string; without them 472 repo rows lost their answer)
+                    G7.HOSTUSED[key] = true
+                    G7.applysum(hsum, aps, resl, curerr())
+                end
+                if hm and not hsum then
                     -- (a MODELLED host function runs its model: what it returns, creates, writes, calls — CART-1785. A
                     -- library function's body is one allocation site for every caller, so `vim.split`'s result table
                     -- merges every call's; experiment `host-inst` instances a small closed model function per call
@@ -2063,7 +2186,8 @@ local function build(store, opts)
                     G7.HOSTUSED[key] = true
                     hsite = INST == 0 and G7.EXP['host-inst'] and res or nil
                     callc(hm, aps, want and resl or res, hsite, curerr())
-                else
+                end
+                if not hm then
                     for k, r in ipairs(resl) do
                         local gi = genarg(key, k)
                         if gi then if aps[gi] then edge(aps[gi], r) end
@@ -2102,6 +2226,16 @@ local function build(store, opts)
                 else metacall(el, '__lt', { el, el }, new(), curerr()) end
             end
             if not callee and f then callee = expr(f) end
+            -- (a summary solve's call sites, by enclosing function: what the summarized function reaches, CART-1786)
+            if G7.PH and callee and not clone then
+                local top0 = fnstack[#fnstack]
+                -- (a callee rooted in a GLOBAL — `vim.deprecate`, `error` — is a function the file may not hold; one
+                -- rooted in a local holds what the closed solve gives it, and empty is nothing)
+                local root0 = type(fname) == 'string' and fname:match('^[%a_][%w_]*')
+                local isg = false
+                if root0 then local _, g0 = lookup(root0); isg = g0 and true or false end
+                G7.PHSITES[#G7.PHSITES + 1] = { fn = top0 and top0.id, callee = callee, name = isg and fname or nil, res = res, method = recvp ~= nil }
+            end
             if G7.CALLP and c and not clone and callee then G7.CALLP[c] = callee end
             if PTAG and not clone and callee and not recvp then puse(callee, 'call') end
             if callee then
@@ -2623,6 +2757,19 @@ local function build(store, opts)
         local m = G7.HOSTM and G7.HOSTM[key]
         return m or nil
     end
+    -- (opts.hostsummary: the store's profile's runtime Lua SUMMARIZED — cartograph.hostsummary — and applied at its calls
+    -- as edges; not when the tree holds that source itself, CART-1786. A TABLE { [sig key] = summary }: those, a spec's)
+    if type(opts.hostsummary) == 'table' then G7.HOSTSUM = opts.hostsummary
+    elseif opts.hostsummary and store.data.profile then
+        local HS = require 'cartograph.hostsummary'
+        local list = HS.sources(store.data.profile)
+        local holds = false
+        local fset = {}
+        for _, f in ipairs(files) do fset[f] = true end
+        for _, x in ipairs(list or NOTHING) do if fset[x[1]] then holds = true end end
+        local hs = list and not holds and HS.of(store.data.profile)
+        G7.HOSTSUM = hs and hs.fns or nil
+    end
     do
         local anylua = false
         for _, f in ipairs(files) do if f:match('%.lua$') then anylua = true; break end end
@@ -2711,6 +2858,15 @@ local function build(store, opts)
     -- (the walks are done: the solve's own reads of the current environment — a string's library for a load recorded
     -- before a second program existed — are the DEFAULT program's, never the last walked file's, CART-1737)
     if G7.ENVL[1] then G7.useenv(G7.ENVL[1]) end
+    if G7.PH then -- (the summarized function's parameters: placeholders, CART-1786)
+        for o, fp in pairs(fnports) do
+            if fp.id == opts.phseed and not fp.inst then
+                G7.PHFN = o
+                for i, pp in ipairs(fp.params) do addobj(pp, G7.mkph({ param = i, path = '', d = 0, label = 'p' .. i })) end
+                if fp.vararg then addobj(fp.vararg, G7.mkph({ param = '...', path = '', d = 0, label = 'p...' })) end
+            end
+        end
+    end
     solve()
     -- (the instanceof GUARDS to a fixpoint: admit what the solved prototypes allow, solve again — sets only grow)
     for _ = 1, 20 do
@@ -3092,6 +3248,8 @@ local function build(store, opts)
             if open then local tc = TCUR; G7.outw(o); TCUR = tc end
         end
     end
+    TCUR = 'a host summary\'s unknown source: a closure it returns, a path past its depth, a value from outside its file'
+    for _, p in ipairs(G7.SUMTAINT) do taint(p) end
     TCUR = 'fuel: the solve stopped with this port unfinished'
     for _, p in ipairs(UNFIN) do taint(p) end
     -- (a guarded flow's chain test ran over prototypes the cut may have left incomplete)
@@ -3509,6 +3667,101 @@ local function build(store, opts)
             escaped = escaped, ofield = ofield, fnports = fnports, protos = protos, tfrom = TFROM,
             NW = NW, NOW = NOW, pinfo = pinfo, loc = G7.LOCP, rd = rd, NS = NS } -- (rd: object -> field -> the loads reading it) -- (NW / NOW: the ports / objects the WALK made — numbered the same across solves of one tree)
     end
+    -- (THE SUMMARY a placeholder solve reads off its heap, CART-1786: { results = { [k] = sources }, stores = { { at =
+    -- param path, sources } }, calls = { { callee = source, args = { sources… } } } }. A SOURCE: { 'param', j, path },
+    -- { 'call', n, k, path } (call n's k-th result), { 'type', T }, { 'fn', id }, { 'new', key, fields = { f = sources } }
+    -- (allocated by the call — its fields to depth 2, a repeat `{ 'ref', key }`), { 'unknown', why })
+    if G7.PH then
+        R.phsummary = function ()
+            local fp = G7.PHFN and fnports[G7.PHFN]
+            if not fp then return nil end
+            local PH = G7.PH
+            local function phsrc(o)
+                local i = PH[o]
+                if i.call then return { 'call', i.call, i.k, i.path } end
+                return { 'param', i.param, i.path }
+            end
+            local describe
+            local function srcs(p, depth, seen)
+                if not p then return {} end
+                if top[p] then return { { 'unknown', 'saturated' } } end
+                local out = {}
+                for o in each(p) do out[#out + 1] = describe(o, depth, seen) end
+                table.sort(out, function (x, y) return vim.inspect(x) < vim.inspect(y) end)
+                return out
+            end
+            describe = function (o, depth, seen)
+                if PH[o] then return phsrc(o) end
+                if o == G7.EXT then return { 'unknown', 'ext' } end
+                if TNAME[o] then return { 'type', TNAME[o] } end
+                if fnports[o] then return { 'fn', fnports[o].id } end
+                local key = tostring(obinfo[o] or o)
+                if seen[o] or depth >= 2 then return { 'ref', key } end
+                seen[o] = true
+                local fields = {}
+                for f, q in pairs(ofield[o] or NOTHING) do
+                    if f == '\1mt' then fields.mt = srcs(q, depth + 1, seen)
+                    elseif f:byte(1) ~= 1 then fields[f] = srcs(q, depth + 1, seen) end
+                end
+                seen[o] = nil
+                return { 'new', key, fields = fields }
+            end
+            local out = { results = {}, stores = {}, calls = {}, nparams = #fp.params }
+            for k, r in pairs(fp.rets) do out.results[k] = srcs(r, 0, {}) end
+            for o, info in pairs(PH) do
+                for f, q in pairs(ofield[o] or NOTHING) do
+                    if f:byte(1) ~= 1 then
+                        local kid = info.kids and info.kids[f]
+                        local l = {}
+                        -- (not the child it reads, nor the depth cap's unknown fill: a STORE is a value put there)
+                        for x in each(q) do if x ~= kid and not (kid == false and x == G7.EXT) then l[#l + 1] = describe(x, 0, {}) end end
+                        if #l > 0 then
+                            local at = phsrc(o)
+                            at[#at] = at[#at] .. ((f == '[]' or f == '{k}' or f == '#') and f or ('.' .. f))
+                            out.stores[#out.stores + 1] = { at = at, sources = l }
+                        end
+                    end
+                end
+            end
+            -- (what it calls that the file does NOT hold — `vim.deprecate`, `error`: by name, from every function it
+            -- reaches; a call site whose callee holds no function of the file, or unknown code)
+            local bysite, reach, q = {}, { [fp.id] = true }, { fp.id }
+            for _, st in ipairs(G7.PHSITES) do
+                if st.fn then local l = bysite[st.fn]; if not l then l = {}; bysite[st.fn] = l end; l[#l + 1] = st end
+            end
+            local ext = {}
+            local h = 1
+            while h <= #q do
+                local id = q[h]; h = h + 1
+                for _, st in ipairs(bysite[id] or NOTHING) do
+                    local any = false
+                    if not top[st.callee] then
+                        for o in each(st.callee) do
+                            local f2 = fnports[o]
+                            if f2 and f2.id then any = true; if not reach[f2.id] then reach[f2.id] = true; q[#q + 1] = f2.id end end
+                            if PH[o] then any = true end
+                        end
+                    end
+                    if not any and st.name and st.name ~= '' then ext[st.name] = true end
+                end
+            end
+            out.ext = {}
+            for nm in pairs(ext) do out.ext[#out.ext + 1] = nm end
+            table.sort(out.ext)
+            -- (each call through a placeholder: its site's function — `now` when the summarized function's own run
+            -- reaches it, not in a closure it only returns (vim.defaulttable's __index) — and whether it is a METHOD call
+            -- on the argument, `s:find()`)
+            local siteof = {}
+            for _, st in ipairs(G7.PHSITES) do if st.res then siteof[st.res] = st end end
+            for n, c in ipairs(G7.PHCALLS) do
+                local args = {}
+                for i, ap in ipairs(c.args) do args[i] = srcs(ap, 0, {}) end
+                local st = siteof[c.res[1]]
+                out.calls[n] = { callee = phsrc(c.callee), args = args, now = st and st.fn and reach[st.fn] or false, method = st and st.method or false }
+            end
+            return out
+        end
+    end
     if TFROM then
         -- (a partial verdict's v.ptport walked back to its SEED: { label… }, the last a reason)
         local named_of = {}
@@ -3571,6 +3824,7 @@ local function build(store, opts)
     -- (the allocation sites reaching argument i of call c -> { obinfo key… } | nil, why: a saturated or partial port,
     -- an external value, no port — never a short list read as the whole)
     if ARGP then
+        R.arg_port = function (c, i) return ARGP[c] and ARGP[c][i] end -- (the port itself, for R.objs_of: an instrument)
         R.arg_objs = function (c, i)
             local ap = ARGP[c] and ARGP[c][i]
             if not ap then return nil, 'no port' end
