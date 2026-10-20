@@ -2163,6 +2163,28 @@ test('flowtype: an open host value is created per call: a field stored on one is
     vim.fn.delete(root, 'rf')
 end)
 
+-- (CART-1761, the user: Lua TABLE types a host function returns — `string[]`, `table<K, V>`, `table`, a `{ … }` shape —
+-- take the kind of the ALIAS `table`: `members` by default (no field is read back), `open` when set — then a field
+-- stored on one is read back, and it is CREATED per call, so `vim.split`'s two results are two objects)
+test('flowtype: a host function\'s table type takes the `table` alias\'s kind; open, it is created per call (CART-1761)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end',
+        'local a = setmetatable({}, { __index = A })', 'local b = setmetatable({}, { __index = B })',
+        'local p, q = vim.split("a b", " "), vim.split("c", " ")', 'p.mine = a', 'q.mine = b',
+        'local g = p.mine', 'return g:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    store.data.profile = 'nvim'
+    local callrec = require 'cartograph.callrec'
+    local call
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'g:m' then call = c end end
+    local v = flowtype.solve(store, { open = false, host_kinds = { table = 'open' } }).verdict(call)
+    ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'open, new per call: only A.m: ' .. vim.inspect(v))
+    local m = flowtype.solve(store, { open = false }).verdict(call)
+    ok(not m, 'the alias by default (members): no field is read back: ' .. vim.inspect(m))
+    vim.fn.delete(root, 'rf')
+end)
+
 -- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string
 -- metatable per Lua state, `("x").pick(…)` reaches it from any code — so its parameters may hold anything, as an
 -- export's do. Closed, nothing outside exists)

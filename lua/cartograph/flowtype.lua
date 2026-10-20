@@ -938,11 +938,12 @@ local function build(store, opts)
     -- members only, a store raises or is ignored. Declared by the environment profile — `kinds[T]`, or `types[T].kind`
     -- — and opts.host_kinds; else the Lua primitives and function types are 'prim', every other host type 'members'.
     -- The dump carries it per host site for the Lean certificate's supplied premise.
-    -- ⚠ A Lua TABLE type a host function returns (`string[]`, `table<K, V>`) is writable, so 'open' is its true kind; it
-    -- stays 'members' until the user decides (CART-1761). Measured on vimruntime: open with ONE type object for every
-    -- value merged their stores (solve 17 -> 31 s, 520 -> 792 MB, oracle whole typed 153 -> 76); open and CREATED per
-    -- call site (G7.retobj) costs nothing in time (17.2 s) but moves 111 vimruntime rows (46 partial string -> no
-    -- answer, 36 no answer -> partial) and 37 repo rows whole -> partial: fresh objects multiply what ports hold
+    -- ★ A Lua TABLE type a host function returns (`string[]`, `table<K, V>`, `table`, a `{ … }` shape) takes the kind
+    -- of the ALIAS `table` (the user, CART-1761): a profile's `kinds.table` or opts.host_kinds.table; a type named on
+    -- its own wins. Default 'members' until the host is modelled as code (CART-1785): as 'open' (created per call) it
+    -- measured on vimruntime, open mode, unknown probes 303 -> 487 and solve 32 -> 49 s — fresh tables escape and the
+    -- E-reading writes EXT into them; with a bare `table` as ONE shared object, 134 s. A named class (`lsp.Range`) is
+    -- a table too, but its name does not say so
     G7.HKINDS, G7.CREATES, G7.FRESH, G7.EROOTC = {}, {}, {}, {}
     do
         local HKINDS = G7.HKINDS
@@ -961,7 +962,9 @@ local function build(store, opts)
         local HKINDS = G7.HKINDS
         local k = HKINDS[tn]
         if k then return k end
-        if SCALAR[tn] or tn:match('^%(?fun%(') or tn == 'function' then k = 'prim' else k = 'members' end
+        if SCALAR[tn] or tn:match('^%(?fun%(') or tn == 'function' then k = 'prim'
+        elseif tn:match('%[%]$') or tn:match('^table<') or tn == 'table' or tn:match('^{') then k = HKINDS.table or 'members'
+        else k = 'members' end
         HKINDS[tn] = k
         return k
     end
