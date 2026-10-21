@@ -823,14 +823,41 @@ test('flowdump: a native is a fixed host site that never escapes; a library esca
     ok(nat > 0, 'natives are in the dump: ' .. nat)
 end)
 
--- (CART-1791: in a DUMP solve a builtin reached by value stays a LOST call — a model run in the solve records no
--- instruction, so its result would hold what no instruction writes: the result is tainted and the arguments escape)
-test('flowdump: a builtin reached by value is a lost call in the dump — its argument escapes (CART-1791)', function ()
+-- (CART-1794, flowpath's sigInline: in a DUMP solve a builtin reached by value runs its model AND inlines the model's
+-- instructions into the caller — the certificate checks it as code; nothing escapes, the dump is closed. A model with
+-- no template (tostring's runs __tostring) stays a lost call: its argument escapes)
+test('flowdump: a builtin reached by value inlines its model\'s IR in the dump; one with no template is lost (CART-1794)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local D = dump('\nlocal rg = rawget\nlocal t = { x = a }\nreturn rg(t, "x")\n')
+    eq(0, #D.solution.taint.escaped, 'nothing escapes: ' .. vim.inspect(D.solution.taint.escaped))
+    local raw = 0
+    for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do if i[1] == 'loadRaw' then raw = raw + 1 end end end
+    ok(raw >= 1, 'the model\'s loadRaw is in the IR')
+    eq(0, flowcheck.check(D).failed, 'and the dump is closed')
+    -- (tostring HAS a model — it runs __tostring — but no template: in the dump it stays lost, its argument escapes)
+    local L = dump('\nlocal f = tostring\nlocal t = setmetatable({}, { __tostring = function (s) return "s" end })\nreturn f(t)\n')
     local lab = {}
-    for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+    for _, x in ipairs(L.sites) do lab[x.id] = x.label end
     local esc = {}
-    for _, i in ipairs(D.solution.taint.escaped) do esc[tostring(lab[i])] = true end
-    ok(esc['tbl:m.lua:8:10'], 'the table handed to the aliased rawget escapes: ' .. vim.inspect(esc))
+    for _, i in ipairs(L.solution.taint.escaped) do esc[tostring(lab[i])] = true end
+    ok(next(esc) ~= nil, 'no template: a lost call, its argument escapes: ' .. vim.inspect(esc))
+end)
+
+-- (CART-1793: the string library's natives sit in a library object of their own, never in the string METHOD table —
+-- STRLIB is every string value's __index, and natives there reached every `s[k]`: 1,016 prim-base / host-store check
+-- failures on vimruntime. string.format by value still reaches its native)
+test('flowdump: string natives are not in the string method table; string.format by value still has one (CART-1793)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('\nlocal f = string.format\nlocal k = ("a"):upper()\nlocal g = ("x")[k]\nreturn f("%s", a), g\n')
+    local lab, natives = {}, {}
+    for _, x in ipairs(D.sites) do lab[x.id] = x.label; if tostring(x.label):match('^native:') then natives[x.id] = true end end
+    local strlib
+    for id, l in pairs(lab) do if l == 'stringlib' then strlib = id end end
+    assert(strlib, 'the string library site')
+    for _, h in ipairs(D.solution.h) do
+        if h[1] == strlib then for _, v in ipairs(h[3]) do ok(not natives[v], 'no native in stringlib: ' .. tostring(lab[v])) end end
+    end
+    local has = false
+    for id, l in pairs(lab) do if l == 'native:string.format' then has = true end end
+    ok(has, 'string.format has its native')
 end)

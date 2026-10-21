@@ -833,8 +833,25 @@ local function build(store, opts)
             -- own path ran, CART-1791)
             local r1 = type(res) == 'table' and res[1] or res
             if G7.TEXTH[r1] then return end
-            local mdl = not G7.REC and G7.NATMODEL[G7.NATIVE[o]]
-            if mdl then mdl(args, type(res) == 'table' and res or { res }, cerr)
+            -- (in a DUMP solve, a model with an IR TEMPLATE runs and INLINES its instructions into the caller — flowpath's
+            -- sigInline, CART-1794: a per-call instance by construction, checked by the certificate like any code. Once
+            -- per call and builtin. A model without one stays a LOST call there)
+            local key = G7.NATIVE[o]
+            local mdl = G7.NATMODEL[key]
+            if G7.REC then
+                local ir = G7.NATIR[key]
+                if type(ir) == 'function' then ir = ir(args) end
+                if not (ir and G7.RESFN[r1]) then mdl = nil end
+            end
+            if mdl then
+                if G7.REC then
+                    local dk = tostring(r1) .. ':' .. key
+                    if G7.NATDONE[dk] then return end
+                    G7.NATDONE[dk] = true
+                    G7.NATFN = G7.RESFN[r1]
+                end
+                mdl(args, type(res) == 'table' and res or { res }, cerr)
+                G7.NATFN = nil
             else G7.NATLOST[#G7.NATLOST + 1] = { res, args, cerr } end
             return
         end
@@ -1009,26 +1026,90 @@ local function build(store, opts)
     -- semantics as the walk's text intrinsics (an alias is the direct call). Not in a DUMP solve: a model run in the
     -- solve records no instruction, so there the call stays LOST (tainted results, escaped arguments) — the
     -- certificate's route is flowpath's sigFn, the builtin as a function body. A builtin with no model: lost
-    G7.NATMODEL = {}
+    G7.NATMODEL, G7.NATDONE, G7.RESFN = {}, {}, {}
+    -- (the inlined IR: an instruction into the calling function's body, the model's ports as the dump's variables; a
+    -- primitive is a `new` of its type site, as a literal is; a key no instruction names, K())
+    function G7.emit(ins) if G7.REC and G7.NATFN then G7.REC.ins(G7.NATFN, ins) end end
+    G7.NATIR = { assert = true, select = true, unpack = true, ['table#unpack'] = true, ['table#remove'] = true,
+        rawget = true, rawset = true, ['table#insert'] = true, next = true, error = true, pcall = true, type = true,
+        ['table#concat'] = true, tonumber = true, rawlen = true, rawequal = true, setmetatable = true, getmetatable = true,
+        -- (a sort with no comparator runs __lt, and tostring / format / gsub / the iterators have no template: lost there)
+        ['table#sort'] = function (a) return a[2] ~= nil end }
     do
         local M0 = G7.NATMODEL
-        local function prim(T) return function (_, rl) addobj(rl[1], T == 'string' and STR or typeobj(T)) end end
-        M0['assert'] = function (a, rl) for i, r in ipairs(rl) do if a[i] then edge(a[i], r) end end end
-        M0['select'] = function (a, rl) for _, r in ipairs(rl) do for j = 2, #a do edge(a[j], r) end end end
-        local function elems(a, rl) if a[1] then local el = field(a[1], '[]'); for _, r in ipairs(rl) do edge(el, r) end end end
+        local function primv(p, T) local o = T == 'string' and STR or typeobj(T); addobj(p, o); G7.emit({ 'new', p, o }) end
+        local function K() local k = new(); primv(k, 'number'); return k end
+        local function prim(T) return function (_, rl) primv(rl[1], T) end end
+        M0['assert'] = function (a, rl) for i, r in ipairs(rl) do if a[i] then edge(a[i], r); G7.emit({ 'copy', r, a[i] }) end end end
+        M0['select'] = function (a, rl) for _, r in ipairs(rl) do for j = 2, #a do edge(a[j], r); G7.emit({ 'copy', r, a[j] }) end end end
+        local function elems(a, rl)
+            if a[1] then local el = field(a[1], '[]'); local k = K(); for _, r in ipairs(rl) do edge(el, r); G7.emit({ 'loadRaw', r, a[1], k }) end end
+        end
         M0['unpack'], M0['table#unpack'] = elems, elems
-        M0['table#remove'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]) end end
-        M0['rawget'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]) end end
+        M0['table#remove'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]); G7.emit({ 'loadRaw', rl[1], a[1], K() }) end end
+        M0['rawget'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]); G7.emit({ 'loadRaw', rl[1], a[1], a[2] or K() }) end end
         M0['rawset'] = function (a, rl)
-            if a[1] and a[3] then storec(a[1], '[]', a[3]); if a[2] then storec(a[1], '{k}', a[2]) end end
-            if a[1] then edge(a[1], rl[1]) end
+            if a[1] and a[3] then
+                storec(a[1], '[]', a[3]); if a[2] then storec(a[1], '{k}', a[2]) end
+                G7.emit({ 'storeRaw', a[1], '[]', a[3], a[2] or K() })
+            end
+            if a[1] then edge(a[1], rl[1]); G7.emit({ 'copy', rl[1], a[1] }) end
         end
-        M0['table#insert'] = function (a) if a[1] and #a >= 2 then storec(a[1], '#', a[#a]) end end
-        M0['next'] = function (a, rl) if a[1] then edge(field(a[1], '{k}'), rl[1]); if rl[2] then edge(field(a[1], '[]'), rl[2]) end end end
-        M0['error'] = function (a, _, cerr) if a[1] and cerr then edge(a[1], cerr) end end
+        M0['table#insert'] = function (a) if a[1] and #a >= 2 then storec(a[1], '#', a[#a]); G7.emit({ 'storeRaw', a[1], '[]', a[#a], K() }) end end
+        M0['next'] = function (a, rl)
+            if not a[1] then return end
+            edge(field(a[1], '{k}'), rl[1]); G7.emit({ 'keys', rl[1], a[1] })
+            if rl[2] then edge(field(a[1], '[]'), rl[2]); G7.emit({ 'loadRaw', rl[2], a[1], K() }) end
+        end
+        M0['error'] = function (a, _, cerr) if a[1] and cerr then edge(a[1], cerr); G7.emit({ 'error', a[1] }) end end
         M0['table#sort'] = function (a, _, cerr)
-            if a[1] and a[2] then local el = field(a[1], '[]'); G7.callc(a[2], { el, el }, new(), nil, cerr) end
+            if not a[1] then return end
+            local el = field(a[1], '[]')
+            -- (no comparator: the elements' __lt, as by name — CART-1793)
+            if a[2] then
+                G7.emit({ 'loadRaw', el, a[1], K() })
+                local r = new()
+                G7.callc(a[2], { el, el }, r, nil, cerr); G7.emit({ 'call', { r }, a[2], { el, el } })
+            else metacall(el, '__lt', { el, el }, new(), cerr) end
         end
+        -- (tostring runs __tostring — 5.1: its result is __tostring's value; string.format's %s does too; gsub calls a
+        -- function replacement with the captures, strings, CART-1793)
+        M0['tostring'] = function (a, rl, cerr)
+            addobj(rl[1], STR)
+            if a[1] then metacall(a[1], '__tostring', { a[1] }, rl[1], cerr) end
+        end
+        M0['string#format'] = function (a, rl, cerr)
+            addobj(rl[1], STR)
+            for j = 2, #a do metacall(a[j], '__tostring', { a[j] }, new(), cerr) end
+        end
+        M0['string#gsub'] = function (a, rl, cerr)
+            addobj(rl[1], STR)
+            if rl[2] then addobj(rl[2], typeobj('integer')) end
+            if a[3] then local cap = new(); addobj(cap, STR); G7.callc(a[3], { cap }, new(), nil, cerr) end
+        end
+        -- (setmetatable returns its table, which gains the metatable — its __index a prototype, its handlers; getmetatable
+        -- reads the slot, or its __metatable. pairs / ipairs return the iterator — next's native, the table — CART-1793)
+        M0['setmetatable'] = function (a, rl)
+            if a[1] and a[2] then
+                proto(a[1], field(a[2], '__index'), true)
+                storec(a[1], '\1mt', a[2])
+                MTSTORES[#MTSTORES + 1] = { a[1], a[2] }
+                G7.emit({ 'setmeta', a[1], a[2] })
+            end
+            if a[1] then edge(a[1], rl[1]); G7.emit({ 'copy', rl[1], a[1] }) end
+        end
+        M0['getmetatable'] = function (a, rl)
+            if not a[1] then return end
+            local mt = field(a[1], '\1mt', true)
+            edge(mt, rl[1])
+            edge(field(mt, '__metatable'), rl[1])
+            G7.emit({ 'getmeta', rl[1], a[1], '__metatable' })
+        end
+        local function iter(a, rl)
+            if G7.NATOBJ['next'] then addobj(rl[1], G7.NATOBJ['next']) end
+            if a[1] and rl[2] then edge(a[1], rl[2]) end
+        end
+        M0['pairs'], M0['ipairs'] = iter, iter
         local function pc(xp)
             return function (a, rl, cerr)
                 if not a[1] then return end
@@ -1036,6 +1117,7 @@ local function build(store, opts)
                 for j = (xp and 3 or 2), #a do rest[#rest + 1] = a[j] end
                 for k = 2, #rl do out[#out + 1] = rl[k] end
                 local perr = new(); addobj(perr, STR)
+                if not xp then G7.emit({ 'pcall', rl, a[1], rest }) end
                 G7.callc(a[1], rest, #out > 0 and out or new(), nil, perr)
                 if rl[2] then
                     if xp and a[2] then local hr = new(); G7.callc(a[2], { perr }, hr, nil, cerr); edge(hr, rl[2]) end
@@ -1045,7 +1127,7 @@ local function build(store, opts)
             end
         end
         M0['pcall'], M0['xpcall'] = pc(false), pc(true)
-        for _, k in ipairs { 'type', 'tostring', 'table#concat' } do M0[k] = prim('string') end
+        for _, k in ipairs { 'type', 'table#concat' } do M0[k] = prim('string') end
         M0['tonumber'], M0['rawlen'], M0['rawequal'] = prim('number'), prim('integer'), prim('boolean')
     end
     local EXT = newobj('external')
@@ -1338,7 +1420,9 @@ local function build(store, opts)
         local pb = base and P.load(base)
         for k, sg in pairs(pb and pb.sigs or NOTHING) do
             local lib = k:match('^([%a_][%w_]*)#[%a_][%w_]*$')
-            if (lib and lib ~= 'string') or k:match('^[%a_][%w_]*$') then if objectish(sg) then cand[k] = true end end
+            -- (the STRING library only where a member has a model: a method call `s:m()` reaches its native too, and a
+            -- lost one would taint every gmatch loop, CART-1793)
+            if (lib and (lib ~= 'string' or G7.NATMODEL[k])) or k:match('^[%a_][%w_]*$') then if objectish(sg) then cand[k] = true end end
         end
         local ps = store.data.profile and store.data.profile ~= base and P.load(store.data.profile)
         for k, sg in pairs(ps and ps.sigs or NOTHING) do if k:match('^[%a_][%w_]*$') and objectish(sg) then cand[k] = true end end
@@ -1354,6 +1438,9 @@ local function build(store, opts)
         for _, k in ipairs(G7.NATKEYS) do
             local lib, m = k:match('^([%a_][%w_]*)#([%a_][%w_]*)$')
             if lib then
+                -- (the STRING library's natives sit in a library object of their own beside G7.STRLIB: STRLIB is every
+                -- string value's method table too, and natives in it reached every `s[k]` — 1,016 prim-base / host-store
+                -- check failures on vimruntime. A call by name, `string.format(…)`, reads the global — so does an alias)
                 local lo = G7.ENV.LIBS[lib]
                 -- (a LIBRARY is an ordinary object: `table.foo = f` writes it, so it follows the escape closure like any
                 -- other — never-escaping, an escaped table holding it broke the E-reading's cells, flowpath on CART-1791)
@@ -1646,7 +1733,9 @@ local function build(store, opts)
         if G7.TR then G7.CURFN = 'chunk:' .. file end
         if G7.PROG == nil then G7.PROG = require('cartograph.programs').of(store) or false end
         if G7.PROG then G7.useenv(G7.mkenv(G7.PROG.env[file] or 'default')) end
-        if not G7.STRLIB then G7.STRLIB = newobj('stringlib'); G7.ENV.STRLIB = G7.STRLIB; addobj(G7.gport('string'), G7.STRLIB) end
+        if not G7.STRLIB then
+            G7.STRLIB = newobj('stringlib'); G7.ENV.STRLIB = G7.STRLIB; addobj(G7.gport('string'), G7.STRLIB)
+        end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
         -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record — a
@@ -1707,6 +1796,9 @@ local function build(store, opts)
             local owner, mm = path:match('^([%a_][%w_%.]*)%.([%a_][%w_]*)$')
             if not owner then return nil end
             local key = owner .. '#' .. mm
+            -- (a builtin with a NATIVE carries itself by identity, its model the result: not also its signature's typed
+            -- function, whose `any` result was tainted — table.remove by value stayed partial, CART-1793)
+            if G7.NATOBJ and G7.NATOBJ[key] then return nil end
             local sg = PSIGS[key]
             if type(sg) ~= 'table' or not sg.returns or #sg.returns == 0 then return nil end
             local root = owner:match('^[%a_][%w_]*')
@@ -2402,6 +2494,10 @@ local function build(store, opts)
                 local site = vl and { vlits = vl } or nil
                 if not site and G7.EXP.callsite and INST == 0 then site = res end
                 if not site and hsite then site = hsite end
+                if G7.REC and G7.W then -- (the function a call's results belong to: a model's inlined IR goes there, CART-1794)
+                    local rr = want and resl or res
+                    for _, r in ipairs(type(rr) == 'table' and rr or { rr }) do G7.RESFN[r] = G7.cur() end
+                end
                 callc(callee, aps, want and resl or res, site, curerr())
                 G7.NEXTC = nil
                 -- (calling a TABLE runs its metatable's __call with the table first, CART-1701)
@@ -3656,7 +3752,9 @@ local function build(store, opts)
                 local eb = tainted[x]
                 if not eb then for o in each(x) do if escaped[o] then eb = true; break end end end
                 if eb then
-                    for o in each(kp) do if not escaped[o] and o ~= EXT and not G7.ISG[o] then G7.escmore(o, 'dynamic-load-key'); released = true end end
+                    -- (not a NATIVE: it never escapes, so escmore leaves it unmarked and `released` re-ran the drain forever —
+                    -- a string-library native as a key hung vimruntime's solve, CART-1793)
+                    for o in each(kp) do if not escaped[o] and o ~= EXT and not G7.ISG[o] and not G7.NOESC[o] then G7.escmore(o, 'dynamic-load-key'); released = true end end
                 end
             end
         end

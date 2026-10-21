@@ -2343,19 +2343,20 @@ test('flowtype: table.remove returns an element; a declared `any` result of a ca
     -- (CART-1791: the tainted `any` result holds the ESCAPED objects, so the call's arguments must escape — through an
     -- alias, `tr(s)` returns s's element b, which must be in the abstraction: no whole answer, b escaped)
     local tv = verdict_of('local tr = table.remove\nlocal s = { b }\nlocal p = tr(s)\nprint(use(p))', nil, false)
-    ok(tv and tv.partial, 'through an alias: partial, never a whole {A.m}: ' .. vim.inspect(tv))
+    ok(tv and tv.kind == 'narrowed' and #tv.targets == 2 and not tv.partial, 'through an alias: the model, whole {A.m, B.m} (CART-1793): ' .. vim.inspect(tv))
     do
         local root = tree({ ['m.lua'] = table.concat({
             'local B = {}', 'function B.m(self) return "B" end', 'local b = setmetatable({}, { __index = B })',
-            'local tr = table.remove', 'local s = { b }', 'return tr(s)' }, '\n') .. '\n' })
+            'return vim.fn.get({ b }, 1)' }, '\n') .. '\n' })
         store.ingest(ts.extract(root))
+        store.data.profile = 'nvim'
         local D = vim.json.decode(flowtype.solve(store, { open = false, dump = true }).dump)
         vim.fn.delete(root, 'rf')
         local lab = {}
         for _, x in ipairs(D.sites) do lab[x.id] = x.label end
         local esc = {}
         for _, i in ipairs(D.solution.taint.escaped) do esc[lab[i]] = true end
-        ok(esc['tbl:m.lua:2:23'], 'b — the element tr may return — is ESCAPED: ' .. vim.inspect(esc))
+        ok(esc['tbl:m.lua:2:23'], 'b — the element vim.fn.get may return — is ESCAPED: ' .. vim.inspect(esc))
     end
     -- (a generic `T` of a `T[]` argument is its ELEMENT: vim.version.last({ b }) is b, not a fixed value named T)
     local g = verdict_of('local z = vim.version.last({ b })\nuse(z)', 'nvim', false)
@@ -2388,11 +2389,44 @@ test('flowtype: a builtin reached by value is a native object — its call is lo
         ok(v and v.kind == 'narrowed' and #v.targets == 2 and not v.partial, 'the model: whole {A.m, B.m}: ' .. vim.inspect(v) .. '\n' .. src)
     end
     -- (no model yet: a LOST call — partial, never runs nothing)
-    local lv = v_of('local ip = ipairs\nlocal t = { a }\nfor _, x in ip(t) do use(x) end')
-    ok(lv and lv.partial, 'ipairs by value, no model: partial: ' .. vim.inspect(lv))
+    local lv = v_of('local w = coroutine.wrap\nlocal g = w(function () return a end)\nuse(g())')
+    ok(lv and lv.partial, 'coroutine.wrap by value, no model: partial: ' .. vim.inspect(lv))
+    -- (CART-1793: the models run what the call by NAME runs — __lt for a comparator-less sort, __tostring for tostring
+    -- and string.format, setmetatable's table, getmetatable's __metatable, ipairs' elements)
+    for _, src in ipairs {
+        'local f = table.sort\nlocal mt = { __index = A, __lt = function (x, y) use(x); return false end }\nf({ setmetatable({}, mt), setmetatable({}, mt) })',
+        'local f = tostring\nf(setmetatable({}, { __index = A, __tostring = function (s) use(s); return "s" end }))',
+        'local f = string.format\nf("%s", setmetatable({}, { __index = A, __tostring = function (s) use(s); return "s" end }))',
+        'local f = setmetatable\nuse(f({}, { __index = A }))',
+        'local f = getmetatable\nuse(f(setmetatable({}, { __metatable = a })))',
+        'local f = ipairs\nfor _, v in f({ a }) do use(v) end' } do
+        local mv = v_of(src)
+        ok(mv and mv.kind == 'narrowed' and #mv.targets == 2 and not mv.partial, 'by value as by name, whole {A.m, B.m}: ' .. vim.inspect(mv) .. '\n' .. src)
+    end
     -- (by NAME the builtin's own path runs: rawget(t, "x") is a, whole)
     local d = v_of('local t = { x = a }\nprint(use(rawget(t, "x")))')
     ok(d and d.kind == 'narrowed' and not d.partial, 'a direct call stays whole: ' .. vim.inspect(d))
+end)
+
+-- (CART-1793: a NATIVE used as a dynamic key through an escaped base with an __index handler possible — the taint
+-- phase's release step escaped the key's objects, a native never escapes, and the drain ran forever: vimruntime's solve
+-- hung once the string library had natives. It terminates, and the key stays unescaped)
+test('flowtype: a native as a dynamic key through an escaped base does not hang the taint phase (CART-1793)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local function lose(q) return q end',
+        'local t = setmetatable({}, { __index = function () return 1 end })',
+        'lose(t)', 'lose({})', 'lose({})',
+        'local k = string.format', 'local v = t[k]', 'return v' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local t0 = vim.uv.hrtime()
+    local ok_, R = pcall(flowtype.solve, store, { open = false, ctx = false })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(ok_, R)
+    ok((vim.uv.hrtime() - t0) / 1e9 < 20, 'the solve terminates')
 end)
 
 -- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string
