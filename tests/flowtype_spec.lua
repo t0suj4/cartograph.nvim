@@ -2399,7 +2399,9 @@ test('flowtype: a builtin reached by value is a native object — its call is lo
         'local f = string.format\nf("%s", setmetatable({}, { __index = A, __tostring = function (s) use(s); return "s" end }))',
         'local f = setmetatable\nuse(f({}, { __index = A }))',
         'local f = getmetatable\nuse(f(setmetatable({}, { __metatable = a })))',
-        'local f = ipairs\nfor _, v in f({ a }) do use(v) end' } do
+        'local f = ipairs\nfor _, v in f({ a }) do use(v) end',
+        -- (table.insert runs __newindex as by name, 5.3's lua_seti: the handler receives the value, CART-1795)
+        'local f = table.insert\nf(setmetatable({}, { __newindex = function (_, _, v) use(v) end }), a)' } do
         local mv = v_of(src)
         ok(mv and mv.kind == 'narrowed' and #mv.targets == 2 and not mv.partial, 'by value as by name, whole {A.m, B.m}: ' .. vim.inspect(mv) .. '\n' .. src)
     end

@@ -834,6 +834,18 @@ test('flowdump: a builtin reached by value inlines its model\'s IR in the dump; 
     for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do if i[1] == 'loadRaw' then raw = raw + 1 end end end
     ok(raw >= 1, 'the model\'s loadRaw is in the IR')
     eq(0, flowcheck.check(D).failed, 'and the dump is closed')
+    -- (an aliased table.insert inlines the by-name path's own instruction — a `store` into the array part `#` — not a
+    -- raw dynamic store its solution lacks, CART-1795)
+    local I = dump('\nlocal tinsert = table.insert\nlocal s = {}\ntinsert(s, a)\nreturn s\n')
+    local stores = 0
+    for _, F in ipairs(I.functions) do
+        for _, i in ipairs(F.body) do
+            if i[1] == 'store' and I.names.fields[i[3] + 1] == '#' then stores = stores + 1 end
+            ok(i[1] ~= 'storeRawDyn', 'no raw dynamic store: ' .. vim.json.encode(i))
+        end
+    end
+    ok(stores >= 1, 'a store into `#`')
+    eq(0, flowcheck.check(I).failed, 'and the dump is closed')
     -- (tostring HAS a model — it runs __tostring — but no template: in the dump it stays lost, its argument escapes)
     local L = dump('\nlocal f = tostring\nlocal t = setmetatable({}, { __tostring = function (s) return "s" end })\nreturn f(t)\n')
     local lab = {}

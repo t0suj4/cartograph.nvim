@@ -1055,7 +1055,17 @@ local function build(store, opts)
             end
             if a[1] then edge(a[1], rl[1]); G7.emit({ 'copy', rl[1], a[1] }) end
         end
-        M0['table#insert'] = function (a) if a[1] and #a >= 2 then storec(a[1], '#', a[#a]); G7.emit({ 'storeRaw', a[1], '[]', a[#a], K() }) end end
+        -- (table.insert as by name: a store into the array part `#` that runs __newindex — 5.3's lua_seti, CART-1769 —
+        -- and in the IR that same `store`. The template had said a raw dynamic store into `[]`, a flow its solution
+        -- lacked: 64 certificate refusals on WoW, CART-1795)
+        M0['table#insert'] = function (a, _, cerr)
+            if not (a[1] and #a >= 2) then return end
+            local v = a[#a]
+            storec(a[1], '#', v)
+            local kp = new(); addobj(kp, typeobj('number'))
+            metastore(a[1], '#', kp, v, cerr)
+            G7.emit({ 'store', a[1], '#', v })
+        end
         M0['next'] = function (a, rl)
             if not a[1] then return end
             edge(field(a[1], '{k}'), rl[1]); G7.emit({ 'keys', rl[1], a[1] })
