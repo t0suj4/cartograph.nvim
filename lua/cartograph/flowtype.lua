@@ -56,6 +56,7 @@ M.EXPERIMENTS = {
     order = 'opts.order = asc | lifo | fifo: another worklist order, an instrument (CART-1697 order test)',
     selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
+    ['loaded-globals'] = 'code a non-literal load returns reads and writes every global by name: the globals are tainted and their values escape — the sound reading; by default the dump states the contract `loaded-code` instead (CART-1796, the user\'s decision: vimruntime partial 384 -> 468, WoW w2 212 -> 513)',
     ['host-inst'] = 'a host model function is instanced per CALL SITE — walked again there (CART-1785: measured, vimruntime unknown 303 -> 390, +25 s; the reference for its summary)',
     expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
@@ -1757,7 +1758,8 @@ local function build(store, opts)
             if not ACC or (clone and (not isctx or clone.noacc)) or not node or G7.HOSTWALK then return end
             local sr, sc, er, ec = node:range()
             if range then sr, sc, er, ec = range[1], range[2], range[3], range[4] end
-            ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj, key = key }
+            -- (`loaded`: in code loaded from a string LITERAL — a real access, inside a string no rewrite can edit, CART-1796)
+            ACC[#ACC + 1] = { file = file, sr = sr, sc = sc, er = er, ec = ec, f = f, kind = kind, base = base, obj = obj, key = key, loaded = G7.LOADWALK or nil }
         end
         local scopes = { {} }
         if ROOTS and not clone then ROOTS[#ROOTS + 1] = { file = file, scope = scopes[1] } end
@@ -2060,7 +2062,34 @@ local function build(store, opts)
             -- (in the IR as it stands, CART-1772: the arguments are COPIED into the unknown-code channel and the results
             -- are `new` of the ext site — what unknown code then does is init's one tagged call of EXTCALL, under the
             -- unknown-code contract. The site's own gap entry said nothing more)
+            -- ★ CODE LOADED FROM A LITERAL IS TREE CODE (CART-1796): `loadstring("x = y")()` reads and writes the globals BY
+            -- NAME, in the caller's environment — as unknown code it was unmodelled, a certified wrong whole answer. A
+            -- literal source (no escape sequence to decode) is parsed and walked as the body of the function load
+            -- returns, a chunk of its own; the dump holds it, so the certificate checks it
+            if (fname == 'load' or fname == 'loadstring') and gbl() and argn[1] and argn[1]:type() == 'string' then
+                local cn = argn[1]:field('content')[1]
+                local body = cn and txt(cn) or ''
+                if not body:find('\\', 1, true) then
+                    for j = 2, #argn do expr(argn[j]) end
+                    local label = 'load:' .. key_of(n)
+                    local env0, reasg, mapn = G7.ENV, G7.REASG, G7.MAPNAME
+                    if G7.PROG then G7.PROG.env[label] = env0.name end
+                    local lw0 = G7.LOADWALK
+                    G7.LOADWALK = true
+                    walk_file(label, 'return function (...)\n' .. body .. '\nend\n')
+                    G7.LOADWALK = lw0
+                    G7.useenv(env0); G7.REASG, G7.MAPNAME = reasg, mapn
+                    local mp = port('mod:' .. label)
+                    if want then
+                        local out = { mp }
+                        for k = 2, want do out[k] = new() end
+                        return out
+                    end
+                    return mp
+                end
+            end
             if (fname == 'load' or fname == 'loadstring' or fname == 'loadfile' or fname == 'dofile') and gbl() then
+                G7.ANYLOAD = true -- (code from a source the tree does not hold: it may touch every global, CART-1796)
                 for _, a in ipairs(argn) do edge(expr(a), G7.EXTCALL) end
                 local out = {}
                 for k = 1, want or 1 do out[k] = new(); addobj(out[k], EXT) end
@@ -2727,6 +2756,9 @@ local function build(store, opts)
                         local r = fp.rets[i]
                         if not r then r = fp.inst and new() or port('r:' .. fp.id .. ':' .. i); fp.rets[i] = r end
                         edge(v, r)
+                    elseif i == 1 and not clone and G7.LOADWALK then
+                        -- (a loaded chunk's function is what load returns, no export: CART-1796)
+                        edge(v, port('mod:' .. file))
                     elseif i == 1 and not clone and G7.HOSTWALK then
                         -- (a host model's table is no export: open mode does not reach it, CART-1785)
                         edge(v, port('mod:' .. file)); G7.HOSTMODS[#G7.HOSTMODS + 1] = port('mod:' .. file)
@@ -3521,6 +3553,17 @@ local function build(store, opts)
             if open then local tc = TCUR; G7.outw(o); TCUR = tc end
         end
     end
+    if G7.ANYLOAD and G7.EXP['loaded-globals'] then
+        TCUR = 'code loaded at run time reads and writes every global by name (CART-1796)'
+        for _, e in ipairs(G7.ENVL) do
+            for nm, gp in pairs(ofield[e.GOBJ] or NOTHING) do
+                if type(nm) == 'string' and nm:byte(1) ~= 1 and nm ~= '[]' and nm ~= '{k}' then
+                    taint(gp)
+                    for o in each(gp) do G7.escmore(o, 'loaded-code-global') end
+                end
+            end
+        end
+    end
     TCUR = 'a builtin reached by value with no model: a lost call (CART-1791)'
     for _, e in ipairs(G7.NATLOST) do
         for _, r in ipairs(type(e[1]) == 'table' and e[1] or { e[1] }) do taint(r) end
@@ -4203,7 +4246,7 @@ local function build(store, opts)
             local k = a.file .. ':' .. a.sr .. ':' .. a.sc .. ':' .. a.kind
             local r = idx[k]
             if not r then
-                r = { file = a.file, range = { a.sr, a.sc, a.er, a.ec }, field = a.f, kind = a.kind, sites = {}, types = {}, top = false, partial = false }
+                r = { file = a.file, range = { a.sr, a.sc, a.er, a.ec }, field = a.f, kind = a.kind, sites = {}, types = {}, top = false, partial = false, loaded = a.loaded }
                 idx[k] = r; rows[#rows + 1] = r
             end
             local function add(o)
@@ -4426,7 +4469,7 @@ local function build(store, opts)
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
-            MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, LOADCONTRACT = G7.ANYLOAD and not G7.EXP['loaded-globals'] or nil, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

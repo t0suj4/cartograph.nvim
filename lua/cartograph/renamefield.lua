@@ -157,7 +157,11 @@ local function plan_family(store, args)
         local mine, foreign = false, {}
         for site in pairs(a.sites) do if fam[site] then mine = true else foreign[#foreign + 1] = site end end
         if a.field == args.field or a.kind == 'dynamic' then
-            if mine then
+            if mine and a.loaded then
+                -- (in code loaded from a string LITERAL: the analysis follows the record there, no rewrite can edit a
+                -- string — CART-1796)
+                frontier[#frontier + 1] = where(a) .. ' in code loaded from a string literal (not rewritable)'
+            elseif mine then
                 if a.kind == 'dynamic' then
                     -- (a computed key that cannot be a STRING — `rec[node]`, a table or a function — never names the field)
                     if a.keystr then frontier[#frontier + 1] = where(a) .. ' a computed key' end

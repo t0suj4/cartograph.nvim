@@ -74,7 +74,8 @@ local FX = {
 local FXC = vim.tbl_extend('force', FX, {
     ['tests/c_spec.lua'] = "local check = ...\nlocal R = require('rec')\ncheck(vim.tbl_get(R.mk('a'), 'name') == 'a')\n",
 })
--- (code built by load() is handed the record: the analysis SEES the hand-off to unknown code, CART-1707)
+-- (code built by load() from a LITERAL is handed the record: the analysis follows it INTO the loaded code — tree code
+-- since CART-1796 — and an access there, inside a string, is no rewrite's to make: a frontier)
 local FXL = vim.tbl_extend('force', FX, {
     ['tests/load_spec.lua'] = "local check = ...\nlocal R = require('rec')\nlocal get = load('return function (r) return r.name end')()\ncheck(get(R.mk('a')) == 'a')\n",
 })
@@ -108,10 +109,10 @@ return {
             expect = { holds = false, check = function (v) return v.after and v.after.failed > 0, tostring(v.error) end },
         },
         {
-            name = 'code built by load() is handed the record — the analysis sees the hand-off: refused as a frontier, never written',
+            name = 'code loaded from a literal reads the record — the analysis follows it there: refused as a frontier, never written',
             files = FXL,
             params = function (store) return { verb = 'rename-field', with = { 'family=rec.lua:2', 'field=name', 'to=title' }, spec = 'load_spec', repo = store.data.root } end,
-            expect = { holds = false, check = function (v) return v.after == nil and tostring(v.error):find('ESCAPES', 1, true) ~= nil and v.class == 'frontier', tostring(v.error) end },
+            expect = { holds = false, check = function (v) return v.after == nil and tostring(v.error):find('loaded from a string literal', 1, true) ~= nil and v.class == 'frontier', tostring(v.error) end },
         },
         {
             name = 'a reshape the planner refuses is no acceptance — refused by name',

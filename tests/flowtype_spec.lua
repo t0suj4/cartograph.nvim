@@ -467,7 +467,7 @@ test('flowtype: a call on a member of unknown code\'s value runs nothing — the
         'use(a)',
         'local Reg = {}',
         'function Reg:Register(x) x.m = B.m end',
-        'local Obj = loadstring("return ...")(Reg)',
+        'local Obj = loadstring(("return ..."):lower())(Reg)',
         'local t = { m = A.m }',
         'Obj:Register(t)',
         'use(t)' }, '\n') .. '\n' })
@@ -532,7 +532,7 @@ test('flowtype: closed — with `[]` hit, an escaped table\'s keys are partial, 
     end
     -- late: u escapes in the taint phase, handed to t.cb, which unknown code may have replaced
     local v1 = keycall({
-        'local t = { cb = function () end }', 'local f = load("return ...")', 'f(t)',
+        'local t = { cb = function () end }', 'local f = load(("return ..."):lower())', 'f(t)',
         'local u = { [setmetatable({}, { __index = A })] = 1 }', 't.cb(u)',
         'for k in pairs(u) do k:m() end' })
     ok(v1 and v1.kind == 'exact' and v1.partial, 'late: k is partial ' .. vim.inspect(v1))
@@ -2429,6 +2429,27 @@ test('flowtype: a native as a dynamic key through an escaped base does not hang 
     vim.fn.delete(root, 'rf')
     assert(ok_, R)
     ok((vim.uv.hrtime() - t0) / 1e9 < 20, 'the solve terminates')
+end)
+
+-- (CART-1796, flowpath's witness: `loadstring("x = y")()` writes the global x from y BY NAME in the caller's
+-- environment — as unknown code it was unmodelled, and `use(x)` answered a WRONG whole {B.m} where Lua prints A. A
+-- literal source is walked as the body of the function load returns: {A.m, B.m}, whole, and the dump is closed)
+test('flowtype: code loaded from a literal is tree code — loadstring("x = y") writes x (CART-1796)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(b)',
+        'y = a', 'loadstring("x = y")()', 'print(use(x))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local R = flowtype.solve(store, { open = false })
+    local D = vim.json.decode(flowtype.solve(store, { open = false, dump = true }).dump)
+    vim.fn.delete(root, 'rf')
+    local v
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
+    ok(v and v.kind == 'narrowed' and #v.targets == 2 and not v.partial, 'the loaded chunk writes x = y: {A.m, B.m}: ' .. vim.inspect(v))
+    eq(0, require('cartograph.flowcheck').check(D).failed, 'the dump holds the chunk and is closed')
 end)
 
 -- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string

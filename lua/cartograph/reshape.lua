@@ -52,7 +52,10 @@ function M.plan(store, args)
         local mine, foreign = false, {}
         for site in pairs(a.sites) do if fam[site] then mine = true else foreign[#foreign + 1] = site end end
         local positional = a.kind == 'pos' or a.kind == 'index'
-        if mine then
+        if mine and a.loaded then
+            -- (in code loaded from a string LITERAL: followed, but no rewrite can edit a string — CART-1796)
+            frontier[#frontier + 1] = where(a) .. ' in code loaded from a string literal (not rewritable)'
+        elseif mine then
             if a.kind == 'array' then frontier[#frontier + 1] = where(a) .. ' uses it as an array'
             elseif a.kind == 'iterate' then frontier[#frontier + 1] = where(a) .. ' iterates its keys'
             elseif a.kind == 'dynamic' then frontier[#frontier + 1] = where(a) .. ' a computed key'

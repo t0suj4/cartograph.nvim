@@ -638,7 +638,7 @@ test('flowdump: escaped_root tells outside-reachable from saturated, and outside
     local ok1, D1 = pcall(dump, '\nlocal function lose(q) return q end\nlose({})\nlose({})\nlose({})\nreturn lose\n')
     -- handed to unknown code, and a lost call's argument
     local ok2, D2 = pcall(dump, table.concat({ '',
-        'local t = { x = {} }', 'local f = load("return ...")', 'f(t)',
+        'local t = { x = {} }', 'local f = load(("return ..."):lower())', 'f(t)',
         'local function lose(q) return q end', 'lose(function () end)', 'lose(function () end)', 'lose(function () end)',
         'local g = lose(print)', 'local u = {}', 'g(u)',
         'local y = t.x',                                                   -- a read of what unknown code may have written
@@ -660,7 +660,7 @@ test('flowdump: closed — a value escaping in the taint phase hits `[]`, and it
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({ ['m.lua'] = table.concat({
         'local t = { cb = function () end }',
-        'local f = load("return ...")',
+        'local f = load(("return ..."):lower())',
         'f(t)',                                     -- (unknown code may replace t.cb)
         'local h = t.cb',
         'local u = { z = 1 }',
@@ -804,7 +804,7 @@ test('flowdump: a native is a fixed host site that never escapes; a library esca
     if not parser_available('lua') then skip 'no lua parser' end
     local cap = flowtype.CAP
     flowtype.CAP = 2
-    local ok_, D = pcall(dump, '\nlocal function lose(q) return q end\nlose(table)\nlose({})\nlose({})\nlocal f = load("return ...")\nf(table)\nlocal s = {}\ntable.insert(s, a)\nreturn s\n')
+    local ok_, D = pcall(dump, '\nlocal function lose(q) return q end\nlose(table)\nlose({})\nlose({})\nlocal f = load(("return ..."):lower())\nf(table)\nlocal s = {}\ntable.insert(s, a)\nreturn s\n')
     flowtype.CAP = cap
     assert(ok_, D)
     local lab = {}
@@ -872,4 +872,14 @@ test('flowdump: string natives are not in the string method table; string.format
     local has = false
     for id, l in pairs(lab) do if l == 'native:string.format' then has = true end end
     ok(has, 'string.format has its native')
+end)
+
+-- (CART-1796, the user's decision: code loaded from a NON-literal source is a stated CONTRACT — `loaded-code`, only when
+-- the tree has such a call — not the sound reading (experiment loaded-globals: it may touch every global by name))
+test('flowdump: a non-literal load states the loaded-code contract; a literal one does not need it (CART-1796)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local N = dump('\nlocal f = loadstring(("x = 1"):lower())\nf()\nreturn x\n')
+    ok(N.contracts.clauses['loaded-code'], 'a non-literal load: the clause is stated')
+    local L = dump('\nlocal f = loadstring("x = 1")\nf()\nreturn x\n')
+    ok(not L.contracts.clauses['loaded-code'], 'a literal load is tree code: no clause')
 end)

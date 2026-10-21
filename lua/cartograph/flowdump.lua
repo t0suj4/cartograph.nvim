@@ -99,6 +99,7 @@ M.CONTRACTS = {
     ['unknown-code'] = 'a call whose callee holds an ext site hands its arguments to the unknown-code channel (contracts.ext_channel), which calls the functions among them with ext',
     ['function-no-metatable'] = 'a function has no metatable of its own (setmetatable raises): a setmeta on a closure site writes nothing (the core\'s setmeta writes any reference)',
     ['host-model'] = 'a host function with a Lua model (contracts.host_models: [key, [function ids]]) behaves as its model\'s body — a SUPPLIED premise (CART-1785; stated only when a call used one)',
+    ['loaded-code'] = 'code loaded at run time from a source the tree does not hold — load / loadstring with a non-literal source, loadfile, dofile — does not read or write the tree\'s globals by name (stated only when the tree has such a call; a literal source is walked as tree code; the sound reading is experiment loaded-globals — CART-1796, the user\'s decision 2026-10-22)',
     ['hidden-fields'] = 'a dynamic key never reads or writes the metatable slot (Lua; the core\'s loadDyn / storeDyn range over it)',
 }
 
@@ -632,7 +633,7 @@ function M.build(rec, X)
             local ks, kv = {}, {}
             for k in pairs(M.CONTRACTS) do
                 if not (k == 'fixed-env' and X.ANYSETFENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
-                    and not (k == 'host-model' and #hmj == 0) then ks[#ks + 1] = k end
+                    and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT) then ks[#ks + 1] = k end
             end
             table.sort(ks)
             for i, k in ipairs(ks) do kv[i] = jstr(k) .. ':' .. jstr(M.CONTRACTS[k]) end
