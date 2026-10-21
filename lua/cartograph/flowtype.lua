@@ -2674,6 +2674,13 @@ local function build(store, opts)
                     local hr = new()
                     metacall(a, mm, args, hr, curerr())
                     metacall(b, mm, args, hr, curerr())
+                    -- (`a <= b` with no __le runs `not __lt(b, a)` — 5.1, LuaJIT, nvim, 5.4 with LUA_COMPAT_LT_LE — so the
+                    -- swapped __lt runs too: `a >= b`, `not __lt(a, b)`. In the IR the same `op __lt` — CART-1798)
+                    if op == '<=' or op == '>=' then
+                        local sw = op == '<=' and { b, a } or { a, b }
+                        metacall(a, '__lt', sw, hr, curerr())
+                        metacall(b, '__lt', sw, hr, curerr())
+                    end
                     if not CMPOP[op] then edge(hr, res) end -- (a comparison is a boolean whatever the handler returns)
                 end
                 if op == '..' then addobj(res, STR) end

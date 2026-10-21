@@ -2452,6 +2452,29 @@ test('flowtype: code loaded from a literal is tree code — loadstring("x = y") 
     eq(0, require('cartograph.flowcheck').check(D).failed, 'the dump holds the chunk and is closed')
 end)
 
+-- (CART-1798, flowpath's c01: `l1 <= l2` with only __lt in the metatable runs __lt(l2, l1) — 5.1, LuaJIT, nvim, 5.4
+-- compat — and the handler stores y.v: `use(got)` runs A. The comparison had run __le only: a WRONG whole {B.m}. And
+-- `>=` falls back to __lt with the operands as written)
+test('flowtype: <= / >= fall back to __lt on swapped operands when there is no __le (CART-1798)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    for _, cmp in ipairs { 'l1 <= l2', 'l2 >= l1' } do
+        local root = tree({ ['m.lua'] = table.concat({
+            'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+            'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+            'local function use(p) return p:m() end', 'use(b)', 'local got = b',
+            'local mt = { __lt = function (x, y) got = y.v; return false end }',
+            'local l1, l2 = setmetatable({ v = a }, mt), setmetatable({ v = a }, mt)',
+            'local _ = ' .. cmp, 'print(use(got))' }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local callrec = require 'cartograph.callrec'
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        local v
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
+        ok(v and v.kind == 'narrowed' and #v.targets == 2 and not v.partial, cmp .. ': the __lt fallback runs: {A.m, B.m}: ' .. vim.inspect(v))
+    end
+end)
+
 -- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string
 -- metatable per Lua state, `("x").pick(…)` reaches it from any code — so its parameters may hold anything, as an
 -- export's do. Closed, nothing outside exists)
