@@ -2315,6 +2315,36 @@ test('flowtype: nvim\'s own Lua is its host model — vim.tbl_map calls the call
     vim.fn.delete(root, 'rf')
 end)
 
+-- (CART-1790, flowpath's witness: table.remove(stack) returns the removed ELEMENT — its result had been the fixed host
+-- value `any` of the signature, the element lost, and `use(p)` answered a WHOLE exact {A.m} where Lua prints B, under
+-- a certified dump. And the class: a builtin declared to return `any` from arguments may return what it was handed —
+-- vim.fn.get({ b }, 1) is b — so its result is TAINTED, never a fixed value)
+test('flowtype: table.remove returns an element; a declared `any` result of a call with arguments is tainted (CART-1790)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function verdict_of(src, profile, mode)
+        local root = tree({ ['m.lua'] = table.concat({
+            'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+            'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+            'local function use(p) return p:m() end', 'use(a)', src }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        store.data.profile = profile
+        local callrec = require 'cartograph.callrec'
+        local R = flowtype.solve(store, { open = mode })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    for _, mode in ipairs { false, true } do
+        local v = verdict_of('local stack = { b }\nlocal p = table.remove(stack)\nprint(use(p))', nil, mode)
+        ok(v and v.kind == 'narrowed' and #v.targets == 2 and not v.partial, (mode and 'open' or 'closed') .. ': table.remove gives b, {A.m, B.m}, whole: ' .. vim.inspect(v))
+    end
+    local w = verdict_of('local y = vim.fn.get({ b }, 1)\nuse(y)', 'nvim', false)
+    ok(not (w and w.kind == 'exact' and not w.partial), 'vim.fn.get\'s `any` is no fixed value: no whole exact {A.m}: ' .. vim.inspect(w))
+    ok(w and w.partial, 'it is partial: ' .. vim.inspect(w))
+    -- (a generic `T` of a `T[]` argument is its ELEMENT: vim.version.last({ b }) is b, not a fixed value named T)
+    local g = verdict_of('local z = vim.version.last({ b })\nuse(z)', 'nvim', false)
+    ok(g and g.kind == 'narrowed' and #g.targets == 2, 'vim.version.last gives b: {A.m, B.m}: ' .. vim.inspect(g))
+end)
+
 -- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string
 -- metatable per Lua state, `("x").pick(…)` reaches it from any code — so its parameters may hold anything, as an
 -- export's do. Closed, nothing outside exists)

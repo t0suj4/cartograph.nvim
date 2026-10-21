@@ -89,7 +89,7 @@ M.CONTRACTS = {
     ['C3'] = 'open mode: outside code does not set metatables on what it can reach, nor write their handlers',
     ['C2'] = 'open mode: outside code does not patch the string library or the host API methods',
     ['outside-raises-strings'] = 'a function outside the tree raises strings (pcall second values)',
-    ['host'] = 'a host site of kind prim or members (sites[i].host, from the environment profile) has no fields: a store to it is not followed, a load from it is its declared type; an open host site is an ordinary object',
+    ['host'] = 'a host site of kind prim or members (sites[i].host, from the environment profile) has no fields: a store to it is not followed, a load from it is its declared type; an open host site is an ordinary object. A builtin\'s declared result is such a site only when it cannot be what the call was handed: a declared `any` / `unknown` result of a call passing arguments is TAINTED instead, a generic `T` of a `T[]` / `table<K, T>` argument is that argument\'s elements, and select / unpack / table.remove are modelled (CART-1790)',
     ['strict-global'] = 'a named global read does not see a dynamic-key write `_G[k] = v` (tag contract:strict-global)',
     ['globals-per-program'] = 'each program of the tree has its own globals table: other programs do not read this program\'s globals (stated only when the tree holds several programs; false for WoW addons and Neovim plugins, which share _G)',
     ['fixed-env'] = 'the tree never calls setfenv (its text never names it), and outside code does not set a tree function\'s environment: every environment is the globals table (stated only when that holds)',

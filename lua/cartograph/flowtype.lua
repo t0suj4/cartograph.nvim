@@ -852,10 +852,10 @@ local function build(store, opts)
             -- (a TYPED function — the profile's `fun(): TSNode, string`, what TSNode:iter_children returns — returns its
             -- declared types)
             local rl = TNAME[o] and funrets(TNAME[o])
-            if rl then
+            if rl and not G7.IRES[type(res) == 'table' and res[1] or res] then
                 if type(res) == 'table' then
-                    for i, r in ipairs(res) do if rl[i] then addobj(r, G7.retobj(rl[i], r)) end end
-                elseif rl[1] then addobj(res, G7.retobj(rl[1], res)) end
+                    for i, r in ipairs(res) do local ro = rl[i] and G7.retobj(rl[i], r, nil, #args); if ro then addobj(r, ro) end end
+                elseif rl[1] then local ro = G7.retobj(rl[1], res, nil, #args); if ro then addobj(res, ro) end end
             end
             return
         end
@@ -1047,7 +1047,11 @@ local function build(store, opts)
         if c then return c end
         return G7.hostkind(rt) == 'open' and 'new' or 'shared'
     end
-    function G7.retobj(rt, r, key)
+    -- (a declared `any` / `unknown` result of a call PASSING ARGUMENTS is no fixed host value: the builtin may return
+    -- what it was handed — table.remove did — so the port is TAINTED in the taint phase, nil here, CART-1790)
+    G7.ANYT, G7.IRES = {}, {} -- (IRES: the result ports of a call whose result the solve models itself)
+    function G7.retobj(rt, r, key, nargs)
+        if (rt == 'any' or rt == 'unknown') and (nargs or 0) > 0 then G7.ANYT[#G7.ANYT + 1] = r; return nil end
         if G7.creates(key, rt) ~= 'new' then return typeobj(rt) end
         local m = G7.FRESH[r]
         if not m then m = {}; G7.FRESH[r] = m end
@@ -1088,18 +1092,25 @@ local function build(store, opts)
     local function genarg(key, k)
         local ck = key .. '\0' .. k
         local g = GEN[ck]
-        if g ~= nil then return g or nil end
+        if g ~= nil then if g then return g[1], g[2] end; return nil end
         g = false
         local sg = PSIGS[key]
         local rk = type(sg) == 'table' and sg.returns and sg.returns[k]
         local rt = rk and type(rk.type) == 'string' and rk.type:gsub('%?$', '')
+        local gf
         if rt and rt:match('^[A-Z]%d?$') then
             for i, pm in ipairs(sg.params or NOTHING) do
-                if pm.name ~= '...' and type(pm.type) == 'string' and pm.type:gsub('%?$', '') == rt then g = i; break end
+                local pt = pm.name ~= '...' and type(pm.type) == 'string' and pm.type:gsub('%?$', ''):gsub('%s', '')
+                if pt == rt then g = i; break end
+                -- (an ELEMENT of an argument: `T` returned where a parameter is `T[]` or `table<K, T>` — its `[]`; `K`
+                -- of a `table<K, …>` — its keys. A generic name left unbound had been a fixed host value, CART-1790)
+                if pt == rt .. '[]' or (pt and pt:match('^table<[^,]+,(.+)>$') == rt) then g, gf = i, '[]'; break end
+                if pt and pt:match('^table<([^,]+),') == rt then g, gf = i, '{k}'; break end
             end
         end
-        GEN[ck] = g
-        return g or nil
+        GEN[ck] = g and { g, gf } or false
+        if g then return g, gf end
+        return nil
     end
     -- (a function TYPE's returns: `fun(a: integer): TSNode, string` -> { 'TSNode', 'string' }; wrapped in parentheses
     -- too. Anything else is no function type: nil)
@@ -2179,6 +2190,11 @@ local function build(store, opts)
             -- calls are handed cost 55 of 83 whole RIGHT answers on the runtime oracle. Nor does a member of EXT become
             -- EXT — semantically right, but EXT reaches every function handed to unknown code, and through its members
             -- 427 typed / string answers went unknown: a call on unknown code's value runs nothing, THE CONTRACT)
+            -- (a builtin whose RESULT the solve models itself — select's arguments, unpack's and table.remove's elements:
+            -- the signature's declared type is no part of it. table.remove's `any` had been a FIXED host value: the
+            -- removed element was lost, a wrong exact under a certified dump, CART-1790)
+            local ires = (fname == 'select' and #aps >= 2) or ((fname == 'unpack' or fname == 'table.unpack' or fname == 'table.remove') and aps[1] and true)
+            if ires then for _, r in ipairs(resl) do G7.IRES[r] = true end end -- (and not the callee's declared type: bindcall)
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
                 local key = owner and (owner .. '#' .. mm) or fname
@@ -2200,13 +2216,14 @@ local function build(store, opts)
                     hsite = INST == 0 and G7.EXP['host-inst'] and res or nil
                     callc(hm, aps, want and resl or res, hsite, curerr())
                 end
-                if not hm then
+                if not hm and not ires then
                     for k, r in ipairs(resl) do
-                        local gi = genarg(key, k)
-                        if gi then if aps[gi] then edge(aps[gi], r) end
+                        local gi, gf = genarg(key, k)
+                        if gi then if aps[gi] then edge(gf and field(aps[gi], gf) or aps[gi], r) end
                         else
                             local rt = retk(key, k)
-                            if rt then addobj(r, G7.retobj(rt, r, key)) end
+                            local ro = rt and G7.retobj(rt, r, key, #aps)
+                            if ro then addobj(r, ro) end
                         end
                     end
                 end
@@ -2230,6 +2247,9 @@ local function build(store, opts)
                 local el = field(aps[1], '[]')
                 for _, r in ipairs(resl) do edge(el, r) end
             end
+            -- (table.remove(t [, pos]) returns an element of t — its array cells; its shifts move t's own values within
+            -- t and the last store is nil: no set changes. 5.1 / LuaJIT are raw, CART-1790)
+            if fname == 'table.remove' and aps[1] then edge(field(aps[1], '[]'), resl[1]) end
             if fname == 'print' or fname == 'string.format' then
                 for _, ap in ipairs(aps) do metacall(ap, '__tostring', { ap }, new(), curerr()) end
             end
@@ -3282,6 +3302,8 @@ local function build(store, opts)
             if open then local tc = TCUR; G7.outw(o); TCUR = tc end
         end
     end
+    TCUR = 'a host function\'s declared `any` result: it may return what it was handed (CART-1790)'
+    for _, p in ipairs(G7.ANYT) do taint(p) end
     TCUR = 'a host summary\'s unknown source: a closure it returns, a path past its depth, a value from outside its file'
     for _, p in ipairs(G7.SUMTAINT) do taint(p) end
     TCUR = 'fuel: the solve stopped with this port unfinished'
