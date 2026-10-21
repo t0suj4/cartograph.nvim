@@ -2340,6 +2340,23 @@ test('flowtype: table.remove returns an element; a declared `any` result of a ca
     local w = verdict_of('local y = vim.fn.get({ b }, 1)\nuse(y)', 'nvim', false)
     ok(not (w and w.kind == 'exact' and not w.partial), 'vim.fn.get\'s `any` is no fixed value: no whole exact {A.m}: ' .. vim.inspect(w))
     ok(w and w.partial, 'it is partial: ' .. vim.inspect(w))
+    -- (CART-1791: the tainted `any` result holds the ESCAPED objects, so the call's arguments must escape — through an
+    -- alias, `tr(s)` returns s's element b, which must be in the abstraction: no whole answer, b escaped)
+    local tv = verdict_of('local tr = table.remove\nlocal s = { b }\nlocal p = tr(s)\nprint(use(p))', nil, false)
+    ok(tv and tv.partial, 'through an alias: partial, never a whole {A.m}: ' .. vim.inspect(tv))
+    do
+        local root = tree({ ['m.lua'] = table.concat({
+            'local B = {}', 'function B.m(self) return "B" end', 'local b = setmetatable({}, { __index = B })',
+            'local tr = table.remove', 'local s = { b }', 'return tr(s)' }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local D = vim.json.decode(flowtype.solve(store, { open = false, dump = true }).dump)
+        vim.fn.delete(root, 'rf')
+        local lab = {}
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+        local esc = {}
+        for _, i in ipairs(D.solution.taint.escaped) do esc[lab[i]] = true end
+        ok(esc['tbl:m.lua:2:23'], 'b — the element tr may return — is ESCAPED: ' .. vim.inspect(esc))
+    end
     -- (a generic `T` of a `T[]` argument is its ELEMENT: vim.version.last({ b }) is b, not a fixed value named T)
     local g = verdict_of('local z = vim.version.last({ b })\nuse(z)', 'nvim', false)
     ok(g and g.kind == 'narrowed' and #g.targets == 2, 'vim.version.last gives b: {A.m, B.m}: ' .. vim.inspect(g))

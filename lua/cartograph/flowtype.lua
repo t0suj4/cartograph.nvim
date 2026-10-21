@@ -854,8 +854,8 @@ local function build(store, opts)
             local rl = TNAME[o] and funrets(TNAME[o])
             if rl and not G7.IRES[type(res) == 'table' and res[1] or res] then
                 if type(res) == 'table' then
-                    for i, r in ipairs(res) do local ro = rl[i] and G7.retobj(rl[i], r, nil, #args); if ro then addobj(r, ro) end end
-                elseif rl[1] then local ro = G7.retobj(rl[1], res, nil, #args); if ro then addobj(res, ro) end end
+                    for i, r in ipairs(res) do local ro = rl[i] and G7.retobj(rl[i], r, nil, args); if ro then addobj(r, ro) end end
+                elseif rl[1] then local ro = G7.retobj(rl[1], res, nil, args); if ro then addobj(res, ro) end end
             end
             return
         end
@@ -1050,8 +1050,10 @@ local function build(store, opts)
     -- (a declared `any` / `unknown` result of a call PASSING ARGUMENTS is no fixed host value: the builtin may return
     -- what it was handed — table.remove did — so the port is TAINTED in the taint phase, nil here, CART-1790)
     G7.ANYT, G7.IRES = {}, {} -- (IRES: the result ports of a call whose result the solve models itself)
-    function G7.retobj(rt, r, key, nargs)
-        if (rt == 'any' or rt == 'unknown') and (nargs or 0) > 0 then G7.ANYT[#G7.ANYT + 1] = r; return nil end
+    function G7.retobj(rt, r, key, args)
+        -- (and the ARGUMENTS ESCAPE: a tainted port holds the escaped objects, so what the builtin returns of its
+        -- arguments must be among them — `local tr = table.remove; tr(s)` came back holding nothing, CART-1791)
+        if (rt == 'any' or rt == 'unknown') and args and #args > 0 then G7.ANYT[#G7.ANYT + 1] = { r, args }; return nil end
         if G7.creates(key, rt) ~= 'new' then return typeobj(rt) end
         local m = G7.FRESH[r]
         if not m then m = {}; G7.FRESH[r] = m end
@@ -2222,7 +2224,7 @@ local function build(store, opts)
                         if gi then if aps[gi] then edge(gf and field(aps[gi], gf) or aps[gi], r) end
                         else
                             local rt = retk(key, k)
-                            local ro = rt and G7.retobj(rt, r, key, #aps)
+                            local ro = rt and G7.retobj(rt, r, key, aps)
                             if ro then addobj(r, ro) end
                         end
                     end
@@ -3303,7 +3305,10 @@ local function build(store, opts)
         end
     end
     TCUR = 'a host function\'s declared `any` result: it may return what it was handed (CART-1790)'
-    for _, p in ipairs(G7.ANYT) do taint(p) end
+    for _, e in ipairs(G7.ANYT) do
+        taint(e[1])
+        for _, ap in ipairs(e[2]) do for o in each(ap) do G7.escmore(o, 'any-result-argument') end end
+    end
     TCUR = 'a host summary\'s unknown source: a closure it returns, a path past its depth, a value from outside its file'
     for _, p in ipairs(G7.SUMTAINT) do taint(p) end
     TCUR = 'fuel: the solve stopped with this port unfinished'
