@@ -795,3 +795,42 @@ test('flowdump: a host model a call ran is stated — host_models and the host-m
     eq(0, #DN.contracts.host_models, 'no model: none listed')
     ok(not DN.contracts.clauses['host-model'], 'and no clause')
 end)
+
+-- (CART-1791: a builtin's NATIVE object is a function value with no fields — it never escapes, unknown code never
+-- writes it, and the dump states it a FIXED host site (kind type, host prim), which the E-tables drop. A LIBRARY object
+-- (`table`) is ordinary: `table.foo = f` writes it, so it follows the escape closure — never-escaping, an escaped table
+-- holding a native broke the E-reading's cells: vimruntime 29 -> 33,962 refusals, flowpath on CART-1791)
+test('flowdump: a native is a fixed host site that never escapes; a library escapes like any object (CART-1791)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, '\nlocal function lose(q) return q end\nlose(table)\nlose({})\nlose({})\nlocal f = load("return ...")\nf(table)\nlocal s = {}\ntable.insert(s, a)\nreturn s\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local lab = {}
+    for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+    ok(#D.solution.taint.escaped > 0, 'something escaped')
+    local libesc = false
+    for _, i in ipairs(D.solution.taint.escaped) do
+        ok(not tostring(lab[i]):match('^native:'), 'a native never escapes: ' .. tostring(lab[i]))
+        if tostring(lab[i]):match('^lib:table') then libesc = true end
+    end
+    ok(libesc, 'the table library, lost past CAP, escapes like any object')
+    local nat = 0
+    for _, x in ipairs(D.sites) do
+        if tostring(x.label):match('^native:') then nat = nat + 1; ok(x.kind == 'type' and x.host == 'prim', 'a native is a fixed host site: ' .. vim.inspect(x)) end
+    end
+    ok(nat > 0, 'natives are in the dump: ' .. nat)
+end)
+
+-- (CART-1791: in a DUMP solve a builtin reached by value stays a LOST call — a model run in the solve records no
+-- instruction, so its result would hold what no instruction writes: the result is tainted and the arguments escape)
+test('flowdump: a builtin reached by value is a lost call in the dump — its argument escapes (CART-1791)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('\nlocal rg = rawget\nlocal t = { x = a }\nreturn rg(t, "x")\n')
+    local lab = {}
+    for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+    local esc = {}
+    for _, i in ipairs(D.solution.taint.escaped) do esc[tostring(lab[i])] = true end
+    ok(esc['tbl:m.lua:8:10'], 'the table handed to the aliased rawget escapes: ' .. vim.inspect(esc))
+end)

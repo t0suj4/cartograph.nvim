@@ -2362,6 +2362,39 @@ test('flowtype: table.remove returns an element; a declared `any` result of a ca
     ok(g and g.kind == 'narrowed' and #g.targets == 2, 'vim.version.last gives b: {A.m, B.m}: ' .. vim.inspect(g))
 end)
 
+-- (CART-1791, flowpath's alias witnesses: a builtin reached by VALUE — renamed, same-name, `tinsert or table.insert`
+-- — had no object, its call ran nothing, and `use(p)` answered a WRONG whole {B.m} where Lua prints A. A native object
+-- now: it runs the builtin's MODEL, what the call by name runs — whole {A.m, B.m}; one with no model (ipairs) is a LOST
+-- call, partial, its arguments escaped; a direct call by name keeps its own path)
+test('flowtype: a builtin reached by value is a native object — its call is lost, never runs nothing (CART-1791)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function v_of(src)
+        local root = tree({ ['m.lua'] = table.concat({
+            'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+            'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+            'local function use(p) return p:m() end', 'use(b)', src }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local callrec = require 'cartograph.callrec'
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    for _, src in ipairs {
+        'local f, t = rawget, { x = a }\nprint(use(f(t, "x")))',
+        'local rawset = rawset\nlocal t = {}\nrawset(t, "x", a)\nprint(use(t.x))',
+        'local tinsert = tinsert or table.insert\nlocal s = {}\ntinsert(s, a)\nprint(use(s[1]))' } do
+        local v = v_of(src)
+        ok(not (v and v.kind == 'exact' and not v.partial and not tostring(v.targets[1]):match('A%.m')), 'no wrong whole {B.m}: ' .. vim.inspect(v) .. '\n' .. src)
+        ok(v and v.kind == 'narrowed' and #v.targets == 2 and not v.partial, 'the model: whole {A.m, B.m}: ' .. vim.inspect(v) .. '\n' .. src)
+    end
+    -- (no model yet: a LOST call — partial, never runs nothing)
+    local lv = v_of('local ip = ipairs\nlocal t = { a }\nfor _, x in ip(t) do use(x) end')
+    ok(lv and lv.partial, 'ipairs by value, no model: partial: ' .. vim.inspect(lv))
+    -- (by NAME the builtin's own path runs: rawget(t, "x") is a, whole)
+    local d = v_of('local t = { x = a }\nprint(use(rawget(t, "x")))')
+    ok(d and d.kind == 'narrowed' and not d.partial, 'a direct call stays whole: ' .. vim.inspect(d))
+end)
+
 -- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string
 -- metatable per Lua state, `("x").pick(…)` reaches it from any code — so its parameters may hold anything, as an
 -- export's do. Closed, nothing outside exists)

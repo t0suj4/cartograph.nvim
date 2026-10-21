@@ -828,6 +828,16 @@ local function build(store, opts)
             elseif fnports[o] then G7.fenv(fnports[o].id, args.fenv) end
             return
         end
+        if G7.NATIVE[o] then
+            -- (a BUILTIN reached by value: a lost call until it has a model — not when the call's text named it, whose
+            -- own path ran, CART-1791)
+            local r1 = type(res) == 'table' and res[1] or res
+            if G7.TEXTH[r1] then return end
+            local mdl = not G7.REC and G7.NATMODEL[G7.NATIVE[o]]
+            if mdl then mdl(args, type(res) == 'table' and res or { res }, cerr)
+            else G7.NATLOST[#G7.NATLOST + 1] = { res, args, cerr } end
+            return
+        end
         if G7.PH and G7.PH[o] then
             -- (calling a PLACEHOLDER: the summarized function calls what its caller passed — recorded, its results
             -- placeholders of their own, CART-1786)
@@ -995,6 +1005,49 @@ local function build(store, opts)
         return o
     end
     local STR = typeobj('string')
+    -- ★ A BUILTIN'S MODEL OVER PORTS (CART-1791): reached by VALUE, a builtin runs what its call by NAME runs — the same
+    -- semantics as the walk's text intrinsics (an alias is the direct call). Not in a DUMP solve: a model run in the
+    -- solve records no instruction, so there the call stays LOST (tainted results, escaped arguments) — the
+    -- certificate's route is flowpath's sigFn, the builtin as a function body. A builtin with no model: lost
+    G7.NATMODEL = {}
+    do
+        local M0 = G7.NATMODEL
+        local function prim(T) return function (_, rl) addobj(rl[1], T == 'string' and STR or typeobj(T)) end end
+        M0['assert'] = function (a, rl) for i, r in ipairs(rl) do if a[i] then edge(a[i], r) end end end
+        M0['select'] = function (a, rl) for _, r in ipairs(rl) do for j = 2, #a do edge(a[j], r) end end end
+        local function elems(a, rl) if a[1] then local el = field(a[1], '[]'); for _, r in ipairs(rl) do edge(el, r) end end end
+        M0['unpack'], M0['table#unpack'] = elems, elems
+        M0['table#remove'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]) end end
+        M0['rawget'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]) end end
+        M0['rawset'] = function (a, rl)
+            if a[1] and a[3] then storec(a[1], '[]', a[3]); if a[2] then storec(a[1], '{k}', a[2]) end end
+            if a[1] then edge(a[1], rl[1]) end
+        end
+        M0['table#insert'] = function (a) if a[1] and #a >= 2 then storec(a[1], '#', a[#a]) end end
+        M0['next'] = function (a, rl) if a[1] then edge(field(a[1], '{k}'), rl[1]); if rl[2] then edge(field(a[1], '[]'), rl[2]) end end end
+        M0['error'] = function (a, _, cerr) if a[1] and cerr then edge(a[1], cerr) end end
+        M0['table#sort'] = function (a, _, cerr)
+            if a[1] and a[2] then local el = field(a[1], '[]'); G7.callc(a[2], { el, el }, new(), nil, cerr) end
+        end
+        local function pc(xp)
+            return function (a, rl, cerr)
+                if not a[1] then return end
+                local rest, out = {}, {}
+                for j = (xp and 3 or 2), #a do rest[#rest + 1] = a[j] end
+                for k = 2, #rl do out[#out + 1] = rl[k] end
+                local perr = new(); addobj(perr, STR)
+                G7.callc(a[1], rest, #out > 0 and out or new(), nil, perr)
+                if rl[2] then
+                    if xp and a[2] then local hr = new(); G7.callc(a[2], { perr }, hr, nil, cerr); edge(hr, rl[2]) end
+                    edge(perr, rl[2])
+                end
+                addobj(rl[1], typeobj('boolean'))
+            end
+        end
+        M0['pcall'], M0['xpcall'] = pc(false), pc(true)
+        for _, k in ipairs { 'type', 'tostring', 'table#concat' } do M0[k] = prim('string') end
+        M0['tonumber'], M0['rawlen'], M0['rawequal'] = prim('number'), prim('integer'), prim('boolean')
+    end
     local EXT = newobj('external')
     G7.EXT = EXT
     local PSIGS = {}
@@ -1261,6 +1314,54 @@ local function build(store, opts)
         if not p then p = ofp(G7.GOBJ, name); named[key] = p end
         return p
     end
+    -- ★ BUILTINS AS OBJECTS (CART-1791; flowpath FLOW-0058 / FLOW-0083): a builtin reached by VALUE — `local tinsert =
+    -- table.insert`, `local rg = rawget`, `tinsert or table.insert` — had no object, its call's callee was empty and
+    -- under `unknown-receiver` ran NOTHING: wrong whole answers on certified dumps (WoW: 138 renamed, 427 same-name).
+    -- Each builtin that can carry an object — a parameter or result not all primitive, by the base runtime's
+    -- signatures (and the profile's plain globals: WoW's tinsert) — is a NATIVE object its global or library field
+    -- holds. A call through one whose text did not name it is a LOST call until the builtin has a model: results
+    -- tainted, arguments escaped (bindcall). A native is a function VALUE with no fields: it never escapes, and the dump
+    -- states it a FIXED host site (host prim), which the E-tables drop. (The string library, the
+    -- method path, and nested namespaces such as vim.fn wait for the models)
+    G7.NOESC, G7.NATIVE, G7.NATOBJ, G7.NATKEYS, G7.TEXTH, G7.NATLOST = {}, {}, {}, {}, {}, {}
+    do
+        local P = require 'cartograph.spec.profile'
+        local function prim(t) if type(t) ~= 'string' then return true end; return SCALAR[(t:gsub('%?$', ''))] or false end
+        local function objectish(sg)
+            if type(sg) ~= 'table' then return false end
+            for _, pm in ipairs(sg.params or NOTHING) do if not prim(pm.type) then return true end end
+            for _, r in ipairs(sg.returns or NOTHING) do if not prim(r.type) then return true end end
+            return false
+        end
+        local cand = {}
+        local base = P.base_for('lua')
+        local pb = base and P.load(base)
+        for k, sg in pairs(pb and pb.sigs or NOTHING) do
+            local lib = k:match('^([%a_][%w_]*)#[%a_][%w_]*$')
+            if (lib and lib ~= 'string') or k:match('^[%a_][%w_]*$') then if objectish(sg) then cand[k] = true end end
+        end
+        local ps = store.data.profile and store.data.profile ~= base and P.load(store.data.profile)
+        for k, sg in pairs(ps and ps.sigs or NOTHING) do if k:match('^[%a_][%w_]*$') and objectish(sg) then cand[k] = true end end
+        for k in pairs(cand) do G7.NATKEYS[#G7.NATKEYS + 1] = k end
+        table.sort(G7.NATKEYS)
+        for _, k in ipairs(G7.NATKEYS) do
+            local o = newobj('native:' .. k:gsub('#', '.'))
+            G7.NATIVE[o], G7.NATOBJ[k], G7.NOESC[o] = k, o, true
+        end
+    end
+    function G7.natives_into() -- (the current environment's globals hold the natives; a library its own object)
+        G7.ENV.LIBS = G7.ENV.LIBS or {}
+        for _, k in ipairs(G7.NATKEYS) do
+            local lib, m = k:match('^([%a_][%w_]*)#([%a_][%w_]*)$')
+            if lib then
+                local lo = G7.ENV.LIBS[lib]
+                -- (a LIBRARY is an ordinary object: `table.foo = f` writes it, so it follows the escape closure like any
+                -- other — never-escaping, an escaped table holding it broke the E-reading's cells, flowpath on CART-1791)
+                if not lo then lo = newobj('lib:' .. lib); G7.ENV.LIBS[lib] = lo; addobj(G7.gport(lib), lo) end
+                addobj(ofp(lo, m), G7.NATOBJ[k])
+            else addobj(G7.gport(k), G7.NATOBJ[k]) end
+        end
+    end
     function G7.mkenv(name)
         local e = G7.ENVS[name]
         if e then return e end
@@ -1273,6 +1374,7 @@ local function build(store, opts)
         local saved = G7.ENV
         G7.useenv(e)
         addobj(G7.gport('_G'), e.GOBJ)
+        G7.natives_into()
         if saved then G7.useenv(saved) end
         return e
     end
@@ -2195,6 +2297,14 @@ local function build(store, opts)
             -- (a builtin whose RESULT the solve models itself — select's arguments, unpack's and table.remove's elements:
             -- the signature's declared type is no part of it. table.remove's `any` had been a FIXED host value: the
             -- removed element was lost, a wrong exact under a certified dump, CART-1790)
+            do -- (the call's TEXT names a builtin and its root is the global: its own path runs — the native skips it)
+                local own, mm0 = fname:match('^(.+)%.([%w_]+)$')
+                local k0 = own and (own .. '#' .. mm0) or fname
+                if G7.NATOBJ[k0] then
+                    local _, g0 = lookup(fname:match('^[%a_][%w_]*') or fname)
+                    if g0 then for _, r in ipairs(resl) do G7.TEXTH[r] = true end end
+                end
+            end
             local ires = (fname == 'select' and #aps >= 2) or ((fname == 'unpack' or fname == 'table.unpack' or fname == 'table.remove') and aps[1] and true)
             if ires then for _, r in ipairs(resl) do G7.IRES[r] = true end end -- (and not the callee's declared type: bindcall)
             if f and f:type() ~= 'method_index_expression' then
@@ -3155,6 +3265,7 @@ local function build(store, opts)
     -- WoW passes _G as a value: one saturated parameter made every addon's namespace, its fields, escape, and each
     -- store of `.f` anywhere tainted every namespace's f — w3: 317 whole exact answers partial, CART-1707)
     for o in pairs(G7.ISG) do escaped[o] = nil end
+    for o in pairs(G7.NOESC) do escaped[o] = nil end -- (a builtin's native object, a library object: CART-1791)
     -- (THE ROOT CLASS of each escaped object, CART-1782: what escaped in the solve went through a saturated port; fuel and
     -- unknown code were classed where they escaped. A field, prototype or return escaping WITH an object takes its
     -- carrier's class, and one the taint phase releases (G7.escmore) the rule's. The dump's taint.escaped_root)
@@ -3164,9 +3275,9 @@ local function build(store, opts)
         while i <= #esc do
             local o = esc[i]; i = i + 1
             for _, fp in pairs(ofield[o] or NOTHING) do
-                for x in each(fp) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                for x in each(fp) do if not escaped[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
             -- (ESCRET, the dual of the params rule: what an escaped function RETURNS escapes. A lost call may have
             -- called it, and its result port, tainted, holds only escaped objects. `local r = h()` through a lost h
             -- that was mk returned mk's table, whose method r.go then ran unseen; the old `.f` rule had covered it by
@@ -3174,7 +3285,7 @@ local function build(store, opts)
             local fpp = fnports[o]
             if fpp then
                 for _, r in pairs(fpp.rets or { fpp.ret }) do
-                    for x in each(r) do if not escaped[x] and not G7.ISG[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                    for x in each(r) do if not escaped[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
                 end
             end
         end
@@ -3271,7 +3382,7 @@ local function build(store, opts)
     -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
     -- that already fired applied to it: a store of .f through a tainted base, a call reaching any escaped function)
     function G7.escmore(o0, why)
-        if escaped[o0] or o0 == EXT or G7.ISG[o0] then return end
+        if escaped[o0] or o0 == EXT or G7.ISG[o0] or G7.NOESC[o0] then return end
         local q, i = { o0 }, 1
         escaped[o0] = true
         G7.EROOTC[o0] = 'escmore:' .. (why or '?')
@@ -3291,18 +3402,24 @@ local function build(store, opts)
             for fk, fp in pairs(ofield[o] or NOTHING) do
                 if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
                 if field_hit[fk] then taint(fp) end
-                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; q[#q + 1] = x end end
+                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; q[#q + 1] = x end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; q[#q + 1] = c end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; q[#q + 1] = c end end
             local fpp = fnports[o]
             if fpp then -- (escret, as above: an escaped function's returns escape with it, CART-1753)
                 for _, r in pairs(fpp.rets or { fpp.ret }) do
-                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; q[#q + 1] = x end end
+                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; q[#q + 1] = x end end
                 end
             end
             if fpp and params_hit then G7.tparams(fpp) end
             if open then local tc = TCUR; G7.outw(o); TCUR = tc end
         end
+    end
+    TCUR = 'a builtin reached by value with no model: a lost call (CART-1791)'
+    for _, e in ipairs(G7.NATLOST) do
+        for _, r in ipairs(type(e[1]) == 'table' and e[1] or { e[1] }) do taint(r) end
+        for _, ap in ipairs(e[2]) do for o in each(ap) do G7.escmore(o, 'builtin-alias-argument') end end
+        if e[3] then taint(e[3]) end
     end
     TCUR = 'a host function\'s declared `any` result: it may return what it was handed (CART-1790)'
     for _, e in ipairs(G7.ANYT) do
@@ -3338,9 +3455,11 @@ local function build(store, opts)
     for r in pairs(G7.SSEED) do taint(r) end
     TCUR = 'handed to unknown code (load, a module outside the tree): it may write any field'
     for o in pairs(XESC) do
+        if G7.NOESC[o] then goto nextx end -- (a builtin, a library: unknown code does not patch them — C2, CART-1791)
         PINC[o] = PINC[o] or G7.EXTCALL
         for _, fp in pairs(ofield[o] or NOTHING) do taint(fp) end
         for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end
+        ::nextx::
     end
     TCUR = 'O2: a data field of what outside code reaches from the exports — it may write it (open mode, CART-1685)'
     if open and G7.REACH then
@@ -4199,7 +4318,7 @@ local function build(store, opts)
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
-            MODE = open and 'open' or 'closed', EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

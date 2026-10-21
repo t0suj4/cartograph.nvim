@@ -324,12 +324,13 @@ function M.build(rec, X)
         if X.fnports[o] then kind = 'function'; fn = X.fnports[o].id and tostring(FN(X.fnports[o].id)) or 'null'
         elseif info:find('^tbl:') then kind = 'table'
         elseif X.TNAME[o] then kind = 'type'
+        elseif X.NATIVE and X.NATIVE[o] then kind = 'type' -- (a builtin's function value: a FIXED host site, CART-1791)
         elseif o == X.EXT then kind = 'ext'
         elseif ISG[o] then kind = 'globals'
         elseif info:find('^thread:') then kind = 'thread'
         elseif info:find('^proxy') then kind = 'proxy' end
         -- (a HOST site carries its kind, the profile's — prim / open / members: the certificate's supplied premise, CART-1761)
-        local hk = kind == 'type' and X.hostkind and X.hostkind(X.TNAME[o]) or nil
+        local hk = kind == 'type' and (X.NATIVE and X.NATIVE[o] and 'prim' or X.hostkind and X.TNAME[o] and X.hostkind(X.TNAME[o])) or nil
         sj[#sj + 1] = ('{"id":%d,"kind":"%s","label":%s,"fn":%s%s}'):format(o, kind, jstr(info), fn, hk and (',"host":"' .. hk .. '"') or '')
     end
     -- the solution
