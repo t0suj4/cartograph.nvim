@@ -1008,3 +1008,20 @@ test('flowlabels: an answer reaching the escaped region carries the region; an u
     local L2 = FL.compute(D(true))
     ok(vim.tbl_contains(L2.names(L2.global), 'unknown-receiver'), 'an unresolved callee: global unknown-receiver')
 end)
+
+-- (CART-1808: a literal load's chunk is walked nested — the walk left the recorder off, and every instruction after
+-- `loadstring("…")` in the caller went missing from the dump: the checker checked a smaller program than the one that
+-- runs. The caller's chunk keeps its calls after the load)
+test('flowdump: instructions after a literal load stay in the caller\'s body (CART-1808)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function calls(D)
+        local n = 0
+        for _, F in ipairs(D.functions) do
+            if D.names.functions[F.id + 1] == 'chunk:m.lua' then for _, ins in ipairs(F.body) do if ins[1] == 'call' then n = n + 1 end end end
+        end
+        return n
+    end
+    local base = calls(dump('local c = 1\n'))
+    local n = calls(dump('local c = loadstring("return ...")(1)\nprint(use(a))\n'))
+    ok(n >= base + 3, 'the loaded chunk\'s call, print and use(a) are recorded: ' .. base .. ' -> ' .. n)
+end)

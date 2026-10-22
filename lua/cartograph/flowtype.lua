@@ -2953,6 +2953,10 @@ local function build(store, opts)
         -- are FIXED is the walk's scope resolution — a reference to the global setfenv or a load of a field named so,
         -- above (CART-1775): the text scan had counted a comment, a model's among them, CART-1785)
         G7.CHUNK = not G7.HOSTWALK and src:find('setfenv', 1, true) and ('chunk:' .. file) or nil
+        -- (the RECORDER's state is the enclosing walk's when this one is NESTED — a literal load's chunk, CART-1796: it was
+        -- left off, and every instruction after `loadstring("…")` in the caller went missing from the dump — the checker
+        -- certified a smaller program than the one that runs, CART-1808)
+        local rw0, rf0, rk0, re0, rc0 = G7.W, G7.FNS, G7.CK, expr, callv
         if G7.REC then
             G7.W, G7.FNS, G7.CK = true, fnstack, 'chunk:' .. file
             local e0, c0 = expr, callv -- (an argument evaluated inside a hand-translated builtin is the program's)
@@ -2961,6 +2965,7 @@ local function build(store, opts)
         end
         for _, s in tsutil.inamed, tree, -1 do stmt(s); if raises(s) then break end end
         G7.W = false
+        if G7.REC and rk0 then G7.W, G7.FNS, G7.CK, expr, callv = rw0, rf0, rk0, re0, rc0 end
         G7.CHUNK = saved
     end
     local instances = {}
