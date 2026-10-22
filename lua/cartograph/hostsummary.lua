@@ -30,13 +30,34 @@ function M.sources(runtime)
 end
 
 local MEMO = {}
+M.stats = { memo = 0, disk = 0, computed = 0 } -- (how a summary was served: the tests read it)
+
+-- ★ PERSISTED BY STAMP (CART-1789): every fresh process recomputed shared.lua's 37 records (~2 s; effects.summaries
+-- paid it on every run). A summary depends on the runtime's SOURCES (the stamp: version + file hashes) and on the code
+-- that derives it — flowtype, the extractor, the specs: the whole lua/cartograph tree this process LOADED (pinned,
+-- CART-1431: never filed under an edit it has not run; ~110 ms). Stored in the stamp cache's blob store, which refuses a
+-- value that would not round-trip; CARTOGRAPH_STAMPCACHE=0 turns it off
+local function disk_key(stamp)
+    local SC = require 'cartograph.stampcache'
+    local here = vim.fn.fnamemodify((debug.getinfo(1, 'S').source:gsub('^@', '')), ':p:h')
+    return SC.key({ 'hostsummary', stamp, tostring(SC.loaded_tree(here)) })
+end
 
 --- the summaries of `runtime`'s own Lua: { stamp, version, fns = { [sig key] = summary } } — nil when the runtime has
 --- no Lua sources here. A summary: R.phsummary's record plus `name` and `fn` (the function's id in the private tree)
 function M.of(runtime)
     local list, pr, stamp = M.sources(runtime)
     if not list then return nil end
-    if MEMO[stamp] then return MEMO[stamp] end
+    if MEMO[stamp] then M.stats.memo = M.stats.memo + 1; return MEMO[stamp] end
+    local blob = require('cartograph.stampcache').blob('hostsummary')
+    local key = disk_key(stamp)
+    local got, found = blob.get(key)
+    if found and type(got) == 'table' and got.stamp == stamp then
+        M.stats.disk = M.stats.disk + 1
+        MEMO[stamp] = got
+        return got
+    end
+    M.stats.computed = M.stats.computed + 1
     local ts = require 'cartograph.providers.treesitter'
     local flowtype = require 'cartograph.flowtype'
     local dir = vim.fn.tempname()
@@ -69,8 +90,12 @@ function M.of(runtime)
     end
     vim.fn.delete(dir, 'rf')
     MEMO[stamp] = out
+    local _, why = blob.put(key, out)
+    M.last_put = why -- (a refusal named, never silent: nil when stored)
     return out
 end
+
+function M._forget() MEMO = {} end -- (the process memo only: the next M.of reads the disk)
 
 local MMEMO = {}
 

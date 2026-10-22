@@ -127,3 +127,20 @@ test('hostsummary: a keyed model applied as its summary — two table.remove cal
     local w = W.verdict(at['x:m'])
     ok(w and #(w.targets or {}) == 2, 'walked as one body: the lists mix: ' .. vim.inspect(w))
 end)
+
+-- (CART-1789: the runtime's summary is PERSISTED by its stamp and the loaded code — a fresh process reads it from the
+-- stamp cache instead of re-solving shared.lua's 37 functions; the record that comes back is the one computed)
+test('hostsummary: a runtime\'s summary is served from the stamp cache in a fresh process (CART-1789)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HS = require 'cartograph.hostsummary'
+    local SC = require 'cartograph.stampcache'
+    HS._forget()
+    local first = HS.of('nvim')
+    if not first then skip 'no nvim runtime sources here' end
+    eq(nil, HS.last_put, 'the summary is stored (or was already): ' .. tostring(HS.last_put))
+    HS._forget()
+    local d0 = HS.stats.disk
+    local again = HS.of('nvim')
+    eq(d0 + 1, HS.stats.disk, 'served from the disk')
+    eq(SC.value(first), SC.value(again), 'the same record')
+end)
