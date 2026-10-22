@@ -2638,3 +2638,28 @@ test('flowtype: the left operand of `and` reaches the result only as false, neve
     for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
     ok(v and #v.targets == 2 and not vim.tbl_contains(v.targets, 'm.lua::C.m@4'), 'x itself never flows: {A.m, B.m}: ' .. vim.inspect(v))
 end)
+
+-- (CART-1802, Lua 5.1 / LuaJIT: a comparison runs a handler only when every operand has one — `x == nil` and `x < 0`
+-- never run x's __eq / __lt; `x == y` with both objects does)
+test('flowtype: a comparison with a literal operand runs no handler (CART-1802)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function v_of(cmp)
+        local root = tree({ ['m.lua'] = table.concat({
+            'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+            'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+            'local function use(p) return p:m() end', 'use(b)',
+            'local mt = { __index = A, __eq = function (x, y) return use(y) == 1 end, __lt = function (x, y) return use(y) == 1 end }',
+            'local x, y = setmetatable({}, mt), setmetatable({}, mt)', 'local _ = ' .. cmp }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        local callrec = require 'cartograph.callrec'
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    for _, cmp in ipairs({ 'x == nil', 'x < 0', 'x == "s"', 'false == x' }) do
+        local v = v_of(cmp)
+        ok(v and v.kind == 'exact', cmp .. ': no handler runs, use sees only b: ' .. vim.inspect(v))
+    end
+    local v = v_of('x == y')
+    ok(v and vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1'), 'x == y: both have the handler, it runs with y: ' .. vim.inspect(v))
+end)

@@ -2811,6 +2811,14 @@ local function build(store, opts)
                 if op == 'or' then local r = new(); edge(a, r); edge(b, r); return r end
                 local res = new()
                 local mm = METAOP[op]
+                -- (Lua 5.1 / LuaJIT — the dump's `ver 51`: a comparison runs a handler only when EVERY operand has one, and
+                -- a literal nil / boolean / number has none — nor does a string for == / ~=, which consults __eq only for
+                -- two tables or two userdata. `x == nil`, `n < 0` had run x's handler with the literal, CART-1802)
+                if CMPOP[op] then
+                    local function lit(x) local ty = x and x:type(); return ty == 'nil' or ty == 'true' or ty == 'false' or ty == 'number'
+                        or ((op == '==' or op == '~=') and ty == 'string') end
+                    if lit(l) or lit(r) then mm = nil end
+                end
                 if mm then
                     local args = (op == '>' or op == '>=') and { b, a } or { a, b }
                     local hr = new()
