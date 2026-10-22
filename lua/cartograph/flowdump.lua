@@ -88,9 +88,12 @@
 --   IR and solution (flowpath's probes/slice read forwards; seeds: its contracts_of table, plus globals-never-escape on a
 --   named _G cell and libraries-never-escape on a library load). `clauses` names the bits; `v` [var, mask], `h` [site,
 --   field, mask], `d` / `k` / `w` [site, mask] (a site's dynamic, key and every-field cells), `err` / `ret` [fn, mask],
---   `rin` / `rout`, and `region`: what the ESCAPED region rests on — an escaped site's cells read as C1 / C3 only, not
---   expanded. A destination's mask ⊇ its sources' ∪ its instruction's seeds. `answers[].contracts`: flowtype's own (open
---   mode's C1-C3) ∪ the answer's call: its callee variable's labels and the call's seeds. CARTOGRAPH_FLOWLABELS=0 skips it.
+--   `rin` / `rout`, `region`: what the ESCAPED region rests on — an escaped site's cells read as C1 / C3 only, not
+--   expanded — and `global`: the stated clauses whose violations no instruction carries (globals-never-escape's world
+--   side, an unresolved callee's unknown-receiver, hidden-fields, function-no-metatable, loaded-code, fixed-env). A
+--   destination's mask ⊇ its sources' ∪ its instruction's seeds. `answers[].contracts`: flowtype's own (open mode's
+--   C1-C3) ∪ the answer's call: its callee variable's labels and the call's seeds, ∪ `region` when that reaches C1 / C3,
+--   ∪ `global` (CART-1805). CARTOGRAPH_FLOWLABELS=0 skips it.
 -- * `contracts.library_sites` [site]: the library tables the clause `libraries-never-escape` keeps out of the escape
 --   closure, as the globals sites are — each library, the string library, package, package.loaded (CART-1797).
 local M = {}
@@ -704,7 +707,7 @@ function M.build(rec, X)
         put('"labels":{"clauses":' .. jarr(require('cartograph.flowlabels').CLAUSES)
             .. ',"v":' .. pairsj(L.v) .. ',"h":[' .. table.concat(hl, ',') .. '],"d":' .. pairsj(L.d) .. ',"k":' .. pairsj(L.k)
             .. ',"w":' .. pairsj(L.w) .. ',"err":' .. pairsj(L.err) .. ',"ret":' .. pairsj(L.ret)
-            .. ',"rin":' .. L.chan.rin .. ',"rout":' .. L.chan.rout .. ',"region":' .. L.region .. '},')
+            .. ',"rin":' .. L.chan.rin .. ',"rout":' .. L.chan.rout .. ',"region":' .. L.region .. ',"global":' .. L.global .. '},')
     end
     local aout = {}
     for i, a in ipairs(aj) do

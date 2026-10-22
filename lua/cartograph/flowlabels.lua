@@ -21,7 +21,8 @@ local bit = require 'bit'
 local bor, band = bit.bor, bit.band
 
 M.CLAUSES = { 'GN', 'strict-global', 'computed-global', 'host', 'unknown-receiver', 'unknown-code',
-    'outside-raises-strings', 'C1', 'C3', 'globals-never-escape', 'libraries-never-escape', 'host-model' }
+    'outside-raises-strings', 'C1', 'C3', 'globals-never-escape', 'libraries-never-escape', 'host-model',
+    'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env' }
 local B = {}
 for i, c in ipairs(M.CLAUSES) do B[c] = bit.lshift(1, i - 1) end
 local ESC = bor(B.C1, B.C3)
@@ -390,7 +391,26 @@ function M.compute(D)
         for _, m in pairs(Lh[a] or {}) do region = bor(region, m) end
         region = bor(region, Ld[a] or 0, Lk[a] or 0, Lw[a] or 0)
     end
-    local L = { v = Lv, h = Lh, d = Ld, k = Lk, w = Lw, err = Lerr, ret = Lret, chan = Lchan, passes = passes, region = region }
+    -- ★ WHOLE-PROGRAM CLAUSES (CART-1805, flowpath's run-time witnesses): a violation no tree instruction carries — outside
+    -- code holding _G runs its __newindex into a tree table (GE's world side), an UNRESOLVED callee (one whose variable
+    -- lists nothing) runs a handler, code loaded at run time, an environment set from outside, a dynamic key hitting
+    -- the metatable slot, a metatable on a function — labels no instruction, so EVERY answer carries the stated ones
+    local global = 0
+    local stated = D.contracts.clauses or {}
+    for _, c in ipairs({ 'globals-never-escape', 'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env' }) do
+        if stated[c] then global = bor(global, B[c]) end
+    end
+    for _, f in ipairs(D.functions) do
+        for _, ins in ipairs(f.body) do
+            if (ins[1] == 'call' or ins[1] == 'pcall') and num(ins[3]) and not tops[ins[3]] and #(V[ins[3]] or {}) == 0 then
+                global = bor(global, B['unknown-receiver'])
+                break
+            end
+        end
+        if band(global, B['unknown-receiver']) ~= 0 then break end
+    end
+    local L = { v = Lv, h = Lh, d = Ld, k = Lk, w = Lw, err = Lerr, ret = Lret, chan = Lchan, passes = passes, region = region,
+        global = global }
     function L.names(m)
         local out = {}
         for i, c in ipairs(M.CLAUSES) do if band(m, bit.lshift(1, i - 1)) ~= 0 then out[#out + 1] = c end end
@@ -406,7 +426,10 @@ function M.compute(D)
             if ext[a] then m = bor(m, B['unknown-receiver'], B['unknown-code']) end
             if ins[1] == 'pcall' and (esc[a] or tops[ins[3]]) then m = bor(m, B['outside-raises-strings']) end
         end
-        return m
+        -- (one that reaches the ESCAPED region rests on what the region rests on — a value a violation produced may be
+        -- stored through a cut base into an escaped cell it reads, CART-1805; and every answer on the global clauses)
+        if band(m, ESC) ~= 0 then m = bor(m, region) end
+        return bor(m, global)
     end
     return L
 end

@@ -964,7 +964,11 @@ test('flowdump: an answer lists the contracts its derivation rests on; a plain o
     local D0 = dump('')
     local a0 = ans(D0, 29)
     ok(a0, 'use\'s p:m() has an answer')
-    eq(0, #a0.contracts, 'locals and setmetatable rest on nothing: ' .. vim.inspect(a0.contracts))
+    local G = {}
+    for i, c in ipairs(D0.labels.clauses) do if bit.band(D0.labels.global, bit.lshift(1, i - 1)) ~= 0 then G[#G + 1] = c end end
+    ok(vim.tbl_contains(G, 'globals-never-escape'), 'the global set holds GE\'s world side: ' .. vim.inspect(G))
+    table.sort(G); local got = vim.deepcopy(a0.contracts); table.sort(got)
+    eq(G, got, 'locals and setmetatable rest on nothing but the whole-program clauses')
     local D1 = dump('x = b\nprint(use(x))\n')
     local a1 = ans(D1, 29)
     ok(a1 and vim.tbl_contains(a1.contracts, 'GN'), 'a value read from a named global rests on GN: ' .. vim.inspect(a1 and a1.contracts))
@@ -973,4 +977,33 @@ test('flowdump: an answer lists the contracts its derivation rests on; a plain o
     local hs = false
     for _, a in ipairs(D2.answers) do if a.kind == 'string' and vim.tbl_contains(a.contracts, 'host') then hs = true end end
     ok(hs, 'a call on a host value rests on host: ' .. vim.inspect(D2.answers))
+end)
+
+-- (CART-1805: an answer that reaches the ESCAPED region rests on what the region rests on — a value unknown code produced,
+-- stored into an escaped cell the answer reads, is how flowpath's run-time witnesses went wrong; and an unresolved
+-- callee makes unknown-receiver a whole-program clause)
+test('flowlabels: an answer reaching the escaped region carries the region; an unresolved call is global (CART-1805)', function ()
+    local FL = require 'cartograph.flowlabels'
+    local function D(unresolved)
+        return {
+            names = { fields = { 'a', 'b', 'c', 'd', 'e', 'f' } },
+            sites = { { id = 1, kind = 'table', label = 'tbl:x' }, { id = 2, kind = 'ext', label = 'external' },
+                { id = 3, kind = 'function', label = 'fn', fn = 1 } },
+            functions = {
+                { id = 0, params = {}, self = 20, body = {
+                    { 'new', 10, 2 }, { 'call', { 11 }, 10, {} }, { 'store', 12, 5, 11 }, { 'load', 13, 12, 5 },
+                    { 'call', { 14 }, 13, {} }, unresolved and { 'call', { 16 }, 15, {} } or { 'copy', 16, 14 } } },
+                { id = 1, params = {}, self = 21, body = { { 'ret', {} } } } },
+            solution = { v = { { 10, { 2 } }, { 12, { 1 } }, { 13, { 3 } } }, h = { { 1, 5, { 3 } } }, top = {},
+                taint = { ports = {}, escaped = { 1 } } },
+            contracts = { clauses = {}, library_sites = {}, host_models = {} },
+        }
+    end
+    local L = FL.compute(D(false))
+    local names = L.names(L.mask(0, 4))
+    ok(vim.tbl_contains(names, 'C1'), 'the load read an escaped cell: ' .. vim.inspect(names))
+    ok(vim.tbl_contains(names, 'unknown-code'), 'and so rests on the region, which unknown code wrote: ' .. vim.inspect(names))
+    eq(0, L.global, 'nothing unresolved, nothing stated: no global clause')
+    local L2 = FL.compute(D(true))
+    ok(vim.tbl_contains(L2.names(L2.global), 'unknown-receiver'), 'an unresolved callee: global unknown-receiver')
 end)
