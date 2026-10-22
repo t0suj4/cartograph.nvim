@@ -967,6 +967,7 @@ test('flowdump: an answer lists the contracts its derivation rests on; a plain o
     local G = {}
     for i, c in ipairs(D0.labels.clauses) do if bit.band(D0.labels.global, bit.lshift(1, i - 1)) ~= 0 then G[#G + 1] = c end end
     ok(vim.tbl_contains(G, 'globals-never-escape'), 'the global set holds GE\'s world side: ' .. vim.inspect(G))
+    ok(not vim.tbl_contains(G, 'unknown-receiver'), 'init\'s ext-channel call is no unresolved call (CART-1807): ' .. vim.inspect(G))
     table.sort(G); local got = vim.deepcopy(a0.contracts); table.sort(got)
     eq(G, got, 'locals and setmetatable rest on nothing but the whole-program clauses')
     local D1 = dump('x = b\nprint(use(x))\n')

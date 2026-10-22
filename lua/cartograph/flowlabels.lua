@@ -402,7 +402,9 @@ function M.compute(D)
     end
     for _, f in ipairs(D.functions) do
         for _, ins in ipairs(f.body) do
-            if (ins[1] == 'call' or ins[1] == 'pcall') and num(ins[3]) and not tops[ins[3]] and #(V[ins[3]] or {}) == 0 then
+            -- (init's own call of the ext channel lists nothing by construction: no unresolved call, CART-1807)
+            if (ins[1] == 'call' or ins[1] == 'pcall') and num(ins[3]) and ins[3] ~= D.contracts.ext_channel
+                and not tops[ins[3]] and #(V[ins[3]] or {}) == 0 then
                 global = bor(global, B['unknown-receiver'])
                 break
             end
