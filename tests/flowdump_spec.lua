@@ -952,3 +952,25 @@ test('flowdump: debug upvalue calls are gaps; debug.getmetatable is a raw getmet
     ok(raw, 'debug.getmetatable: a getmeta naming no written field')
     ok(setm >= 3, 'debug.setmetatable: a setmeta beside the two setmetatable calls: ' .. setm)
 end)
+
+-- (CART-1801: each answer lists the contract clauses its callee's derivation rests on — labels propagated over the
+-- dumped IR with its solution, flowpath's slice read forwards. Pinned both ways: through a named global read GN;
+-- through a host load host; a derivation of locals, setmetatable and parameters nothing)
+test('flowdump: an answer lists the contracts its derivation rests on; a plain one lists none (CART-1801)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function ans(D, col)
+        for _, a in ipairs(D.answers) do if a.call[3] == col then return a end end
+    end
+    local D0 = dump('')
+    local a0 = ans(D0, 29)
+    ok(a0, 'use\'s p:m() has an answer')
+    eq(0, #a0.contracts, 'locals and setmetatable rest on nothing: ' .. vim.inspect(a0.contracts))
+    local D1 = dump('x = b\nprint(use(x))\n')
+    local a1 = ans(D1, 29)
+    ok(a1 and vim.tbl_contains(a1.contracts, 'GN'), 'a value read from a named global rests on GN: ' .. vim.inspect(a1 and a1.contracts))
+    ok(D1.labels and D1.labels.clauses[1] == 'GN', 'the dump carries its labels: ' .. vim.inspect(D1.labels and D1.labels.clauses))
+    local D2 = dump('local X, Y = {}, {}\nfunction X:upper() return 1 end\nfunction Y:upper() return 2 end\nlocal s = UNDEFINED_SOURCE\nlocal x = s:lower():upper()\nreturn X, Y, x\n')
+    local hs = false
+    for _, a in ipairs(D2.answers) do if a.kind == 'string' and vim.tbl_contains(a.contracts, 'host') then hs = true end end
+    ok(hs, 'a call on a host value rests on host: ' .. vim.inspect(D2.answers))
+end)

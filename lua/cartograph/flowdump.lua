@@ -84,9 +84,17 @@
 --   a computed key, pairs over it — reads what the solve does not model there (CART-1797).
 --   `debug-upvalue`: a debug.setupvalue / getupvalue / upvaluejoin call by name — the solve flows the value into (out of)
 --   every upvalue of the functions it is handed; the IR has no upvalue op (CART-1803).
+-- * `labels` (CART-1801): which contract clauses each value's derivation rests on — flowlabels.lua, a fixpoint over this
+--   IR and solution (flowpath's probes/slice read forwards; seeds: its contracts_of table, plus globals-never-escape on a
+--   named _G cell and libraries-never-escape on a library load). `clauses` names the bits; `v` [var, mask], `h` [site,
+--   field, mask], `d` / `k` / `w` [site, mask] (a site's dynamic, key and every-field cells), `err` / `ret` [fn, mask],
+--   `rin` / `rout`, and `region`: what the ESCAPED region rests on — an escaped site's cells read as C1 / C3 only, not
+--   expanded. A destination's mask ⊇ its sources' ∪ its instruction's seeds. `answers[].contracts`: flowtype's own (open
+--   mode's C1-C3) ∪ the answer's call: its callee variable's labels and the call's seeds. CARTOGRAPH_FLOWLABELS=0 skips it.
 -- * `contracts.library_sites` [site]: the library tables the clause `libraries-never-escape` keeps out of the escape
 --   closure, as the globals sites are — each library, the string library, package, package.loaded (CART-1797).
 local M = {}
+M.labels = os.getenv('CARTOGRAPH_FLOWLABELS') ~= '0' -- (CART-1801: contract labels in the dump; CARTOGRAPH_FLOWLABELS=0 skips the pass)
 
 -- (the assumptions a whole answer rests on that the core does not state — flowtype's header, THE CONTRACT; a checker
 -- exempts a constraint only by one of these names)
@@ -532,9 +540,12 @@ function M.build(rec, X)
             for _, t in ipairs(v.targets or {}) do tg[#tg + 1] = FN(tostring(t)) end
             local ia = X.insat and X.insat[c]
             local ci = ia and maps[ia[1]] and maps[ia[1]][ia[2]]
-            aj[#aj + 1] = ('{"call":[%s,%d,%d],"kind":%s,"targets":%s,"partial":%s,"contracts":%s,"ins":%s}'):format(jstr(tostring(X.callrec.file(c))),
-                X.callrec.line(c) or 0, c.at and X.at.sc(c.at) or 0, jstr(v.kind), jarr(tg), v.partial and 'true' or 'false', jarr(v.contracts or {}),
-                ci and ('[%d,%d]'):format(FN(ia[1]), ci) or 'null')
+            -- (its contracts: flowtype's own (open mode's C1-C3) and, once the dump exists, the LABELS its callee's
+            -- derivation carries — CART-1801, filled in below)
+            aj[#aj + 1] = { ('{"call":[%s,%d,%d],"kind":%s,"targets":%s,"partial":%s,"contracts":'):format(jstr(tostring(X.callrec.file(c))),
+                X.callrec.line(c) or 0, c.at and X.at.sc(c.at) or 0, jstr(v.kind), jarr(tg), v.partial and 'true' or 'false'),
+                v.contracts or {}, ci and FN(ia[1]), ci,
+                (',"ins":%s}'):format(ci and ('[%d,%d]'):format(FN(ia[1]), ci) or 'null') }
         end
     end
     -- gaps
@@ -665,7 +676,47 @@ function M.build(rec, X)
             for i, k in ipairs(ks) do kv[i] = jstr(k) .. ':' .. jstr(M.CONTRACTS[k]) end
             return '{' .. table.concat(kv, ',') .. '}'
         end)() .. '},')
-    put('"answers":[' .. table.concat(aj, ',') .. ']}')
+    -- ★ CONTRACT LABELS (CART-1801): the dump so far is the program the checker verifies — its labels are a fixpoint over
+    -- exactly that IR and solution (flowlabels: flowpath's slice read forwards). `labels`: the clause names, then
+    -- [var, mask] / [site, field, mask] / [site, mask] for the dynamic (`d`), key (`k`) and every-field (`w`) cells,
+    -- [fn, mask] for errors and returns, rin / rout, and `region`: what the escaped region rests on (an answer labelled
+    -- C1 / C3 reaches it; its cells are not expanded per answer, as flowpath's slice does not) — bit i is clauses[i + 1]
+    local L = M.labels and require('cartograph.flowlabels').compute(vim.json.decode(table.concat(out) .. '"answers":[]}')) or nil
+    local function pairsj(t)
+        local ks = {}
+        for k in pairs(t) do ks[#ks + 1] = k end
+        table.sort(ks)
+        local o = {}
+        for _, k in ipairs(ks) do if t[k] ~= 0 then o[#o + 1] = ('[%d,%d]'):format(k, t[k]) end end
+        return '[' .. table.concat(o, ',') .. ']'
+    end
+    if L then
+        local hl = {}
+        local as = {}
+        for a in pairs(L.h) do as[#as + 1] = a end
+        table.sort(as)
+        for _, a in ipairs(as) do
+            local fs = {}
+            for f in pairs(L.h[a]) do fs[#fs + 1] = f end
+            table.sort(fs)
+            for _, f in ipairs(fs) do if L.h[a][f] ~= 0 then hl[#hl + 1] = ('[%d,%d,%d]'):format(a, f, L.h[a][f]) end end
+        end
+        put('"labels":{"clauses":' .. jarr(require('cartograph.flowlabels').CLAUSES)
+            .. ',"v":' .. pairsj(L.v) .. ',"h":[' .. table.concat(hl, ',') .. '],"d":' .. pairsj(L.d) .. ',"k":' .. pairsj(L.k)
+            .. ',"w":' .. pairsj(L.w) .. ',"err":' .. pairsj(L.err) .. ',"ret":' .. pairsj(L.ret)
+            .. ',"rin":' .. L.chan.rin .. ',"rout":' .. L.chan.rout .. ',"region":' .. L.region .. '},')
+    end
+    local aout = {}
+    for i, a in ipairs(aj) do
+        local cs, seen = {}, {}
+        for _, c in ipairs(a[2]) do if not seen[c] then seen[c] = true; cs[#cs + 1] = c end end
+        local m = L and a[3] and L.mask(a[3], a[4])
+        if m then for _, c in ipairs(L.names(m)) do if not seen[c] then seen[c] = true; cs[#cs + 1] = c end end end
+        local q = {}
+        for j, c in ipairs(cs) do q[j] = jstr(c) end
+        aout[i] = a[1] .. '[' .. table.concat(q, ',') .. ']' .. a[5]
+    end
+    put('"answers":[' .. table.concat(aout, ',') .. ']}')
     return table.concat(out)
 end
 
