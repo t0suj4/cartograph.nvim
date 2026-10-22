@@ -89,8 +89,10 @@
 --   named _G cell and libraries-never-escape on a library load). `clauses` names the bits; `v` [var, mask], `h` [site,
 --   field, mask], `d` / `k` / `w` [site, mask] (a site's dynamic, key and every-field cells), `err` / `ret` [fn, mask],
 --   `rin` / `rout`, `region`: what the ESCAPED region rests on — an escaped site's cells read as C1 / C3 only, not
---   expanded — and `global`: the stated clauses whose violations no instruction carries (globals-never-escape's world
---   side, an unresolved callee's unknown-receiver, hidden-fields, function-no-metatable, loaded-code, fixed-env). A
+--   expanded — and `global`: the stated clauses whose violations no instruction carries and no reach bounds
+--   (hidden-fields, function-no-metatable, loaded-code, fixed-env). globals-never-escape's world side and an unresolved
+--   callee's unknown-receiver are seeded on what they reach instead (CART-1807: the heap reachable from _G's metatable
+--   handlers / from the call's arguments — every cell written, every function's parameters; the call's results). A
 --   destination's mask ⊇ its sources' ∪ its instruction's seeds. `answers[].contracts`: flowtype's own (open mode's
 --   C1-C3) ∪ the answer's call: its callee variable's labels and the call's seeds, ∪ `region` when that reaches C1 / C3,
 --   ∪ `global` (CART-1805). CARTOGRAPH_FLOWLABELS=0 skips it.
