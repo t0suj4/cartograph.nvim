@@ -2475,6 +2475,32 @@ test('flowtype: <= / >= fall back to __lt on swapped operands when there is no _
     end
 end)
 
+-- (CART-1797, flowpath's g07: `package.loaded._G.x = a` writes the GLOBAL x — package.loaded listed nothing, the store
+-- went nowhere, and `use(x)` answered a WRONG whole {B.m}. package.loaded holds _G, the libraries and the tree's
+-- modules: `package.loaded.mymod` is what `require "mymod"` returns)
+test('flowtype: package.loaded holds _G; the tree\'s modules under pkg-modules (CART-1797)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HDR = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(b)' }
+    local function v_of(src, extra, exp)
+        local files = { ['m.lua'] = table.concat(HDR, '\n') .. '\n' .. src .. '\n' }
+        for k, v in pairs(extra or {}) do files[k] = v end
+        local root = tree(files)
+        store.ingest(ts.extract(root))
+        local callrec = require 'cartograph.callrec'
+        local R = flowtype.solve(store, { open = false, exp = exp })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    local g = v_of('package.loaded._G.x = a\nprint(use(x))')
+    ok(g and g.kind == 'narrowed' and #g.targets == 2 and not g.partial, 'package.loaded._G is the globals: {A.m, B.m}: ' .. vim.inspect(g))
+    -- (the MODULE entries are the experiment pkg-modules: by default `package.loaded.mymod` is still lost — a computed-key
+    -- read over every module saturates and escapes them all, a contract decision, CART-1797)
+    local m = v_of('package.loaded.mymod.obj = a\nprint(use(require("mymod").obj))', { ['lua/mymod.lua'] = 'local M = {}\nreturn M\n' }, 'pkg-modules')
+    ok(m and m.kind == 'narrowed' and #m.targets == 2 and not m.partial, 'package.loaded.mymod is the module: {A.m, B.m}: ' .. vim.inspect(m))
+end)
+
 -- (CART-1777, open mode: a closure the tree stores into the STRING LIBRARY is callable by every other program — one string
 -- metatable per Lua state, `("x").pick(…)` reaches it from any code — so its parameters may hold anything, as an
 -- export's do. Closed, nothing outside exists)

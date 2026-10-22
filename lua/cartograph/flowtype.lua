@@ -57,6 +57,9 @@ M.EXPERIMENTS = {
     selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
     ['loaded-globals'] = 'code a non-literal load returns reads and writes every global by name: the globals are tainted and their values escape — the sound reading; by default the dump states the contract `loaded-code` instead (CART-1796, the user\'s decision: vimruntime partial 384 -> 468, WoW w2 212 -> 513)',
+    ['pkg-modules'] = 'package.loaded also lists the tree\'s modules by name (sound: without it `package.loaded.m.x = a` is lost) — measured: a computed-key read of package.loaded (hot-spots, mixalg, packmap, self_oracle) merges every module into one port, it saturates, and saturation escapes every module (repo 938 rows partial, oracle exact RIGHT 32 -> 2), CART-1797',
+    ['pkg-libs'] = 'package.loaded also lists the libraries (string: the string library, every string value\'s method table) — measured on the runtime oracle with ctx: string RIGHT 92 -> 52, typed 124 -> 43. lib:package already escapes through saturated walker parameters, and its field loaded carries the escape to the string library, CART-1797',
+    ['lib-noesc'] = 'MEASUREMENT: the libraries, the string library and package.loaded never escape (as _G does not) — with pkg-libs the oracle is unchanged (32 / 92 / 124): what a libraries-never-escape contract would buy, CART-1797',
     ['host-inst'] = 'a host model function is instanced per CALL SITE — walked again there (CART-1785: measured, vimruntime unknown 303 -> 390, +25 s; the reference for its summary)',
     expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
@@ -1460,6 +1463,28 @@ local function build(store, opts)
             else addobj(G7.gport(k), G7.NATOBJ[k]) end
         end
     end
+    -- ★ package.loaded (CART-1797): it listed nothing, so `package.loaded._G.x = a` stored into nothing — a certified wrong
+    -- whole answer. Per environment, `package.loaded` is a table whose `_G` is that environment's globals. Its library
+    -- names (string: the string library) are the experiment pkg-libs and its module names — what `require` returns,
+    -- G7.pkgmodules once the module map exists — pkg-modules: both are sound and both cost answers through the escape
+    -- closure (measured in their EXP lines), and what buys the precision back is a contract decision. Until then a
+    -- store through `package.loaded.string` / `.<module>` is lost as before
+    function G7.pkgloaded()
+        local e = G7.ENV
+        e.LIBS = e.LIBS or {}
+        local lp = e.LIBS.package
+        if not lp then lp = newobj('lib:package'); e.LIBS.package = lp; addobj(G7.gport('package'), lp) end
+        local pl = newobj('lib:package.loaded')
+        e.PKGLOADED = pl
+        addobj(ofp(lp, 'loaded'), pl)
+        addobj(ofp(pl, '_G'), e.GOBJ)
+        if G7.EXP['pkg-libs'] then
+            for lib, lo in pairs(e.LIBS) do if lib ~= 'package' then addobj(ofp(pl, lib), lo) end end
+            addobj(ofp(pl, 'package'), lp)
+            if e.STRLIB then addobj(ofp(pl, 'string'), e.STRLIB) end
+        end
+        if G7.EXP['lib-noesc'] then for _, lo in pairs(e.LIBS) do G7.NOESC[lo] = true end; G7.NOESC[pl] = true; G7.NOESC[lp] = true end
+    end
     function G7.mkenv(name)
         local e = G7.ENVS[name]
         if e then return e end
@@ -1473,6 +1498,8 @@ local function build(store, opts)
         G7.useenv(e)
         addobj(G7.gport('_G'), e.GOBJ)
         G7.natives_into()
+        G7.pkgloaded()
+        if G7.MODFILE and G7.pkgmodules and G7.EXP['pkg-modules'] then G7.pkgmodules(e) end
         if saved then G7.useenv(saved) end
         return e
     end
@@ -1746,6 +1773,8 @@ local function build(store, opts)
         if G7.PROG then G7.useenv(G7.mkenv(G7.PROG.env[file] or 'default')) end
         if not G7.STRLIB then
             G7.STRLIB = newobj('stringlib'); G7.ENV.STRLIB = G7.STRLIB; addobj(G7.gport('string'), G7.STRLIB)
+            if G7.ENV.PKGLOADED and G7.EXP['pkg-libs'] then addobj(ofp(G7.ENV.PKGLOADED, 'string'), G7.STRLIB) end
+            if G7.EXP['lib-noesc'] then G7.NOESC[G7.STRLIB] = true end
         end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
@@ -2953,6 +2982,7 @@ local function build(store, opts)
             end
         end
         for name in pairs(dup) do modfile[name] = nil end
+        G7.MODFILE = modfile
     end
     local root = store.data.root
     -- (the solver's operations, for a language's own walker: flowtype_go)
@@ -3047,6 +3077,11 @@ local function build(store, opts)
         local m = G7.HOSTM and G7.HOSTM[key]
         return m or nil
     end
+    -- (the tree's modules in every environment's package.loaded, by module name: what require returns, CART-1797)
+    function G7.pkgmodules(e)
+        for nm, f in pairs(G7.MODFILE or NOTHING) do if e.PKGLOADED then edge(port('mod:' .. f), ofp(e.PKGLOADED, nm)) end end
+    end
+    if G7.EXP['pkg-modules'] then for _, e in ipairs(G7.ENVL) do G7.pkgmodules(e) end end
     -- (opts.hostsummary: the store's profile's runtime Lua SUMMARIZED — cartograph.hostsummary — and applied at its calls
     -- as edges; not when the tree holds that source itself, CART-1786. A TABLE { [sig key] = summary }: those, a spec's)
     if type(opts.hostsummary) == 'table' then G7.HOSTSUM = opts.hostsummary
