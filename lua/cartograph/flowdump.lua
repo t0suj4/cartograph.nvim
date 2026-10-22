@@ -68,7 +68,8 @@
 --   module-level code's (one, shared by every chunk); err.cerr the coroutine channel. `error(y)` is emitted where code
 --   raises; a call's port-to-port flow is the call's own constraint (EEntry), never a copy.
 -- * TAGS name an instruction's known divergence from the core, so a checker failure there is named, not noise:
---   `contract:strict-global` (a global read does not see a dynamic-key `_G[k] = v` — flowtype's header, CART-1707),
+--   `contract:strict-global` (a NAMED global read does not see a dynamic-key `_G[k] = v` — flowtype's header, CART-1707;
+--   with computed-global one hypothesis GN, and a numeric key `#` is no name, CART-1799),
 --   `divergence:coroutine` (flowtype binds a resume's arguments to that coroutine's function only; the core's `rin` is
 --   one channel). (Since CART-1689 / 1715 a call's callee is the callee expression's flow, never the name join's
 --   claim: no call is synthesized.)
@@ -93,10 +94,10 @@ M.CONTRACTS = {
     ['C2'] = 'open mode: outside code does not patch the string library or the host API methods',
     ['outside-raises-strings'] = 'a function outside the tree raises strings (pcall second values)',
     ['host'] = 'a host site of kind prim or members (sites[i].host, from the environment profile) has no fields: a store to it is not followed, a load from it is its declared type; an open host site is an ordinary object. A builtin\'s declared result is such a site only when it cannot be what the call was handed: a declared `any` / `unknown` result of a call passing arguments is TAINTED instead, a generic `T` of a `T[]` / `table<K, T>` argument is that argument\'s elements, and select / unpack / table.remove are modelled (CART-1790)',
-    ['strict-global'] = 'a named global read does not see a dynamic-key write `_G[k] = v` (tag contract:strict-global)',
+    ['strict-global'] = 'GN, one run hypothesis with computed-global: a DYNAMIC step on _G — a key computed at run time: `_G[k]`, `rawget(_G, k)`, `rawset(_G, k, v)`, next / pairs over _G — never reaches a NAMED global: a string key the tree uses on _G as a constant (`x`, `_G.x`, `_G["x"]`, `rawget(_G, "x")`, lowered to static fields) or a global the environment defines by name. A numeric key is no name. So a named global read does not see a dynamic-key write (tag contract:strict-global; a `#` load is untagged, CART-1799)',
     ['globals-per-program'] = 'each program of the tree has its own globals table: other programs do not read this program\'s globals (stated only when the tree holds several programs; false for WoW addons and Neovim plugins, which share _G)',
     ['fixed-env'] = 'the tree never calls setfenv (its text never names it), and outside code does not set a tree function\'s environment: every environment is the globals table (stated only when that holds)',
-    ['computed-global'] = 'a read `_G[k]` with k unknown, or next / pairs over _G, sees dynamic-key writes and EXT, not the named globals',
+    ['computed-global'] = 'GN (stated under strict-global): a dynamic read on _G — `_G[k]` with k unknown, rawget(_G, k), next / pairs over _G — sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'the globals site never escapes: a write through a cap-cut value that may be _G is not followed',
     ['libraries-never-escape'] = 'the library tables (contracts.library_sites: each library, the string library, package, package.loaded) never escape, as the globals site does not: a write through a cap-cut value that may be one is not followed (tag contract:libraries-never-escape, CART-1797)',
     ['unknown-receiver'] = 'a call on a member of an ext value runs no tree code and hands its arguments nowhere; a call whose callee the flow cannot resolve runs nothing',
@@ -297,7 +298,7 @@ function M.build(rec, X)
             for _, t in ipairs(tags) do tagged[t[1]] = true end
             for i, ins in ipairs(rec.fns[name] or {}) do
                 local j = map[i - 1]
-                if ins[1] == 'load' and ins[4] ~= '[]' and ins[4] ~= '{k}' and j and not tagged[j] and not X.top[ins[3]] then
+                if ins[1] == 'load' and ins[4] ~= '[]' and ins[4] ~= '{k}' and ins[4] ~= '#' and j and not tagged[j] and not X.top[ins[3]] then
                     for o in X.each(ins[3]) do if ISG[o] then tags[#tags + 1] = { j, 'contract:strict-global' }; tagged[j] = true; break end end
                 end
             end

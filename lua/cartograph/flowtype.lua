@@ -669,7 +669,8 @@ local function build(store, opts)
         -- consults __call, and `setmetatable(fn)` raises. Its `\1mt` port, made by every call's __call route, was
         -- tainted by a field hit of `\1mt` and made each generic for over a plain iterator partial, CART-1754)
         if f == '\1mt' and fnports[o] then return end
-        if not strict and f ~= '[]' and (G7.ISG[o] or G7.EXP['strict-names'] or (G7.EXP['strict-records'] and not G7.MAPSITE[o] and not TNAME[o])) and f:byte(1) ~= 1 then strict = true end
+        -- (`#` — `_G[1]`, ipairs(_G) — is no NAME: a numeric key is what a dynamic store may write, so it reads them, CART-1799)
+        if not strict and f ~= '[]' and f ~= '#' and (G7.ISG[o] or G7.EXP['strict-names'] or (G7.EXP['strict-records'] and not G7.MAPSITE[o] and not TNAME[o])) and f:byte(1) ~= 1 then strict = true end
         local r = rd[o]
         if not r then r = {}; rd[o] = r end
         local l = r[f]

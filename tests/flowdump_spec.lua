@@ -906,3 +906,28 @@ test('flowdump: a load of package.loaded beyond its listed entries is a gap (CAR
     ok(gaps(dump('for _, m in pairs(package.loaded) do print(m) end\n')) >= 1, 'pairs over it: a gap')
     eq(0, gaps(dump('local k = ...\nlocal m = package.loaded[k]\n', 'pkg-modules')), 'pkg-modules lists the modules: no gap')
 end)
+
+-- (CART-1799, flowpath's GN review: a NUMERIC key is no name. `_G[1]` / ipairs(_G) load `#`, which a dynamic-key store
+-- may write — put(_G, 1, b) — so the load reads it, and no contract:strict-global is tagged on it; a named global read
+-- keeps its tag)
+test('flowdump: a numeric-key load of _G sees a dynamic store and is not tagged strict-global (CART-1799)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D, R = dump('local function put(t, i, v) t[i] = v end\nput(_G, 1, b)\nprint(use(_G[1]))\n')
+    local v
+    for _, a in ipairs(D.answers) do if a.call[3] == 29 then v = a end end -- (use's p:m())
+    ok(v and #v.targets == 2 and not v.partial, "_G[1] holds what put stored: {A.m, B.m}: " .. vim.inspect(v or D.answers))
+    local tagged, hashload = false, false
+    for _, F in ipairs(D.functions) do
+        local at = {}
+        for _, t in ipairs(F.tags) do if t[2] == 'contract:strict-global' then at[t[1]] = true end end
+        for i, ins in ipairs(F.body) do
+            if ins[1] == 'load' and D.names.fields[ins[4] + 1] == '#' then hashload = true; if at[i - 1] then tagged = true end end
+        end
+    end
+    ok(hashload, 'the dump holds the `#` load')
+    ok(not tagged, 'a `#` load is not tagged strict-global')
+    local D2 = dump('x = b\nprint(use(_G.x))\n')
+    local named = false
+    for _, F in ipairs(D2.functions) do for _, t in ipairs(F.tags) do if t[2] == 'contract:strict-global' then named = true end end end
+    ok(named, 'a named global read keeps its tag')
+end)
