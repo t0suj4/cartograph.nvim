@@ -58,8 +58,7 @@ M.EXPERIMENTS = {
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
     ['loaded-globals'] = 'code a non-literal load returns reads and writes every global by name: the globals are tainted and their values escape — the sound reading; by default the dump states the contract `loaded-code` instead (CART-1796, the user\'s decision: vimruntime partial 384 -> 468, WoW w2 212 -> 513)',
     ['pkg-modules'] = 'package.loaded also lists the tree\'s modules by name (sound: without it `package.loaded.m.x = a` is lost) — measured: a computed-key read of package.loaded (hot-spots, mixalg, packmap, self_oracle) merges every module into one port, it saturates, and saturation escapes every module (repo 938 rows partial, oracle exact RIGHT 32 -> 2), CART-1797',
-    ['pkg-libs'] = 'package.loaded also lists the libraries (string: the string library, every string value\'s method table) — measured on the runtime oracle with ctx: string RIGHT 92 -> 52, typed 124 -> 43. lib:package already escapes through saturated walker parameters, and its field loaded carries the escape to the string library, CART-1797',
-    ['lib-noesc'] = 'MEASUREMENT: the libraries, the string library and package.loaded never escape (as _G does not) — with pkg-libs the oracle is unchanged (32 / 92 / 124): what a libraries-never-escape contract would buy, CART-1797',
+    ['libs-escape'] = 'the library tables (each library, the string library, package, package.loaded) follow the escape closure as ordinary objects — the reading without the clause libraries-never-escape: runtime oracle with ctx, string RIGHT 92 -> 52, typed 124 -> 43 (CART-1797)',
     ['host-inst'] = 'a host model function is instanced per CALL SITE — walked again there (CART-1785: measured, vimruntime unknown 303 -> 390, +25 s; the reference for its summary)',
     expose = 'R.internals: the solver tables (top, pts, each, obinfo, tainted, probes, succ) for an instrument — not an API',
     loc = 'R.internals.loc: the statement (file:line) each port was made at, implies expose (CART-1697: where the blob forms)',
@@ -1420,6 +1419,7 @@ local function build(store, opts)
     -- states it a FIXED host site (host prim), which the E-tables drop. (The string library, the
     -- method path, and nested namespaces such as vim.fn wait for the models)
     G7.NOESC, G7.NATIVE, G7.NATOBJ, G7.NATKEYS, G7.TEXTH, G7.NATLOST = {}, {}, {}, {}, {}, {}
+    G7.LIBSITES, G7.PKGL = {}, {} -- (the library tables, the clause libraries-never-escape; each package.loaded, CART-1797)
     do
         local P = require 'cartograph.spec.profile'
         local function prim(t) if type(t) ~= 'string' then return true end; return SCALAR[(t:gsub('%?$', ''))] or false end
@@ -1432,6 +1432,7 @@ local function build(store, opts)
         local cand = {}
         local base = P.base_for('lua')
         local pb = base and P.load(base)
+        G7.NSSET = pb and pb.nsset or {} -- (the profile's library NAMESPACES — `io`, not `file`, a handle's methods: CART-1797)
         for k, sg in pairs(pb and pb.sigs or NOTHING) do
             local lib = k:match('^([%a_][%w_]*)#[%a_][%w_]*$')
             -- (the STRING library only where a member has a model: a method call `s:m()` reaches its native too, and a
@@ -1456,19 +1457,22 @@ local function build(store, opts)
                 -- string value's method table too, and natives in it reached every `s[k]` — 1,016 prim-base / host-store
                 -- check failures on vimruntime. A call by name, `string.format(…)`, reads the global — so does an alias)
                 local lo = G7.ENV.LIBS[lib]
-                -- (a LIBRARY is an ordinary object: `table.foo = f` writes it, so it follows the escape closure like any
-                -- other — never-escaping, an escaped table holding it broke the E-reading's cells, flowpath on CART-1791)
+                -- (a LIBRARY is an ordinary object: `table.foo = f` writes it. Never-escaping WITHOUT a clause broke the
+                -- E-reading's cells, flowpath on CART-1791; it never escapes under the stated clause libraries-never-escape,
+                -- G7.libsite, CART-1797)
                 if not lo then lo = newobj('lib:' .. lib); G7.ENV.LIBS[lib] = lo; addobj(G7.gport(lib), lo) end
                 addobj(ofp(lo, m), G7.NATOBJ[k])
             else addobj(G7.gport(k), G7.NATOBJ[k]) end
         end
     end
     -- ★ package.loaded (CART-1797): it listed nothing, so `package.loaded._G.x = a` stored into nothing — a certified wrong
-    -- whole answer. Per environment, `package.loaded` is a table whose `_G` is that environment's globals. Its library
-    -- names (string: the string library) are the experiment pkg-libs and its module names — what `require` returns,
-    -- G7.pkgmodules once the module map exists — pkg-modules: both are sound and both cost answers through the escape
-    -- closure (measured in their EXP lines), and what buys the precision back is a contract decision. Until then a
-    -- store through `package.loaded.string` / `.<module>` is lost as before
+    -- whole answer. Per environment, `package.loaded` is a table whose `_G` is that environment's globals and whose
+    -- library names hold the library objects (string: the string library). ★ THE LIBRARIES NEVER ESCAPE — the clause
+    -- `libraries-never-escape`, as _G's: lib:package already reached saturated walker parameters, and its field
+    -- `loaded` carried the escape to the string library, every string value's method table — runtime oracle with ctx,
+    -- string RIGHT 92 -> 52, typed 124 -> 43; under the clause 0 (experiment libs-escape: the reading without it).
+    -- The tree's MODULES are the experiment pkg-modules (a computed-key read over package.loaded merges and escapes
+    -- every one); without it a load of an entry not listed here is a dump GAP (`package-loaded`), CART-1797
     function G7.pkgloaded()
         local e = G7.ENV
         e.LIBS = e.LIBS or {}
@@ -1477,13 +1481,16 @@ local function build(store, opts)
         local pl = newobj('lib:package.loaded')
         e.PKGLOADED = pl
         addobj(ofp(lp, 'loaded'), pl)
+        G7.PKGL[pl] = true
         addobj(ofp(pl, '_G'), e.GOBJ)
-        if G7.EXP['pkg-libs'] then
-            for lib, lo in pairs(e.LIBS) do if lib ~= 'package' then addobj(ofp(pl, lib), lo) end end
-            addobj(ofp(pl, 'package'), lp)
-            if e.STRLIB then addobj(ofp(pl, 'string'), e.STRLIB) end
-        end
-        if G7.EXP['lib-noesc'] then for _, lo in pairs(e.LIBS) do G7.NOESC[lo] = true end; G7.NOESC[pl] = true; G7.NOESC[lp] = true end
+        for lib, lo in pairs(e.LIBS) do if lib ~= 'package' and G7.NSSET[lib] then addobj(ofp(pl, lib), lo); G7.libsite(lo) end end
+        addobj(ofp(pl, 'package'), lp)
+        if e.STRLIB then addobj(ofp(pl, 'string'), e.STRLIB) end
+        G7.libsite(lp); G7.libsite(pl)
+    end
+    function G7.libsite(o) -- (a library table: it never escapes, the clause libraries-never-escape)
+        if G7.EXP['libs-escape'] then return end
+        G7.NOESC[o], G7.LIBSITES[o] = true, true
     end
     function G7.mkenv(name)
         local e = G7.ENVS[name]
@@ -1773,8 +1780,8 @@ local function build(store, opts)
         if G7.PROG then G7.useenv(G7.mkenv(G7.PROG.env[file] or 'default')) end
         if not G7.STRLIB then
             G7.STRLIB = newobj('stringlib'); G7.ENV.STRLIB = G7.STRLIB; addobj(G7.gport('string'), G7.STRLIB)
-            if G7.ENV.PKGLOADED and G7.EXP['pkg-libs'] then addobj(ofp(G7.ENV.PKGLOADED, 'string'), G7.STRLIB) end
-            if G7.EXP['lib-noesc'] then G7.NOESC[G7.STRLIB] = true end
+            if G7.ENV.PKGLOADED then addobj(ofp(G7.ENV.PKGLOADED, 'string'), G7.STRLIB) end
+            G7.libsite(G7.STRLIB)
         end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
@@ -4513,6 +4520,7 @@ local function build(store, opts)
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
             MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, LOADCONTRACT = G7.ANYLOAD and not G7.EXP['loaded-globals'] or nil, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
+            LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, PKGMODS = G7.EXP['pkg-modules'] or nil,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot

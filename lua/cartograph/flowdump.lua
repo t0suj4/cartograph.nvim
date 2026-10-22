@@ -79,7 +79,10 @@
 --   or any dynamic-key store (k may be "__mode"), or a saturated or TAINTED such field (CART-1723, CART-1756); weak
 --   semantics (what the collector may drop) are not modelled beyond naming them. `rin_top` / `rout_top` / `cerr_top`
 --   (present as 1, else absent): that coroutine channel is saturated or tainted, so it holds any escaped value
---   (CART-1757).
+--   (CART-1757). `package-loaded`: a load of package.loaded beyond its listed entries (_G, the libraries) — a module,
+--   a computed key, pairs over it — reads what the solve does not model there (CART-1797).
+-- * `contracts.library_sites` [site]: the library tables the clause `libraries-never-escape` keeps out of the escape
+--   closure, as the globals sites are — each library, the string library, package, package.loaded (CART-1797).
 local M = {}
 
 -- (the assumptions a whole answer rests on that the core does not state — flowtype's header, THE CONTRACT; a checker
@@ -95,6 +98,7 @@ M.CONTRACTS = {
     ['fixed-env'] = 'the tree never calls setfenv (its text never names it), and outside code does not set a tree function\'s environment: every environment is the globals table (stated only when that holds)',
     ['computed-global'] = 'a read `_G[k]` with k unknown, or next / pairs over _G, sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'the globals site never escapes: a write through a cap-cut value that may be _G is not followed',
+    ['libraries-never-escape'] = 'the library tables (contracts.library_sites: each library, the string library, package, package.loaded) never escape, as the globals site does not: a write through a cap-cut value that may be one is not followed (tag contract:libraries-never-escape, CART-1797)',
     ['unknown-receiver'] = 'a call on a member of an ext value runs no tree code and hands its arguments nowhere; a call whose callee the flow cannot resolve runs nothing',
     ['unknown-code'] = 'a call whose callee holds an ext site hands its arguments to the unknown-code channel (contracts.ext_channel), which calls the functions among them with ext',
     ['function-no-metatable'] = 'a function has no metatable of its own (setmetatable raises): a setmeta on a closure site writes nothing (the core\'s setmeta writes any reference)',
@@ -281,6 +285,7 @@ function M.build(rec, X)
             for i, ins in ipairs(rec.fns[name] or {}) do
                 if (ins[1] == 'store' or ins[1] == 'setmeta') and X.top[ins[2]] and map[i - 1] then
                     tags[#tags + 1] = { map[i - 1], 'contract:globals-never-escape' }
+                    if next(X.LIBSITES or {}) then tags[#tags + 1] = { map[i - 1], 'contract:libraries-never-escape' } end
                 end
             end
         end
@@ -294,6 +299,22 @@ function M.build(rec, X)
                 local j = map[i - 1]
                 if ins[1] == 'load' and ins[4] ~= '[]' and ins[4] ~= '{k}' and j and not tagged[j] and not X.top[ins[3]] then
                     for o in X.each(ins[3]) do if ISG[o] then tags[#tags + 1] = { j, 'contract:strict-global' }; tagged[j] = true; break end end
+                end
+            end
+        end
+        -- (a load of package.loaded beyond its listed entries — a module, `package.loaded[k]` — reads what the solve does
+        -- not model there (the tree's modules: experiment pkg-modules): a GAP, never a vacuous load, CART-1797)
+        if next(X.PKGL or {}) then
+            for _, ins in ipairs(rec.fns[name] or {}) do
+                local raw = ins[1] == 'loadRaw' -- (pairs / next over it)
+                if (raw or ins[1] == 'load') and not X.top[ins[3]] then
+                    for o in X.each(ins[3]) do
+                        local fpn = not (raw or ins[4] == '[]') and X.ofield[o] and X.ofield[o][ins[4]]
+                        if X.PKGL[o] and (((raw or ins[4] == '[]') and not X.PKGMODS) or (not (raw or ins[4] == '[]') and not (fpn and (function () for _ in X.each(fpn) do return true end end)()))) then
+                            rec.gaps[#rec.gaps + 1] = { fn = name, kind = 'package-loaded', vars = { ins[2], ins[3] } }
+                            break
+                        end
+                    end
                 end
             end
         end
@@ -629,11 +650,13 @@ function M.build(rec, X)
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
     put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null') .. ',"host_models":[' .. table.concat(hmj, ',') .. ']'
+        .. ',"library_sites":' .. jarr((function () local l = {}; for o in pairs(X.LIBSITES or {}) do l[#l + 1] = o end; table.sort(l); return l end)())
         .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
             local ks, kv = {}, {}
             for k in pairs(M.CONTRACTS) do
                 if not (k == 'fixed-env' and X.ANYSETFENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
-                    and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT) then ks[#ks + 1] = k end
+                    and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT)
+                    and not (k == 'libraries-never-escape' and not next(X.LIBSITES or {})) then ks[#ks + 1] = k end
             end
             table.sort(ks)
             for i, k in ipairs(ks) do kv[i] = jstr(k) .. ':' .. jstr(M.CONTRACTS[k]) end

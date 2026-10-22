@@ -25,10 +25,10 @@ local CLASSES = table.concat({
     'local function use(p) return p:m() end',
     'use(a)' }, '\n') .. '\n'
 
-local function dump(src)
+local function dump(src, exp)
     local root = tree({ ['m.lua'] = CLASSES .. src })
     store.ingest(ts.extract(root))
-    local R = flowtype.solve(store, { open = false, dump = true })
+    local R = flowtype.solve(store, { open = false, dump = true, exp = exp })
     vim.fn.delete(root, 'rf')
     return vim.json.decode(R.dump), R
 end
@@ -798,24 +798,34 @@ end)
 
 -- (CART-1791: a builtin's NATIVE object is a function value with no fields — it never escapes, unknown code never
 -- writes it, and the dump states it a FIXED host site (kind type, host prim), which the E-tables drop. A LIBRARY object
--- (`table`) is ordinary: `table.foo = f` writes it, so it follows the escape closure — never-escaping, an escaped table
--- holding a native broke the E-reading's cells: vimruntime 29 -> 33,962 refusals, flowpath on CART-1791)
-test('flowdump: a native is a fixed host site that never escapes; a library escapes like any object (CART-1791)', function ()
+-- (`table`) is ordinary data — `table.foo = f` writes it — and never-escaping WITHOUT a clause broke the E-reading's
+-- cells: vimruntime 29 -> 33,962 refusals, flowpath on CART-1791. CART-1797: it never escapes under the stated clause
+-- libraries-never-escape, its site listed in contracts.library_sites; experiment libs-escape is the reading without it)
+test('flowdump: a native is a fixed host site that never escapes; a library never escapes under its clause (CART-1791, CART-1797)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = '\nlocal function lose(q) return q end\nlose(table)\nlose({})\nlose({})\nlocal f = load(("return ..."):lower())\nf(table)\nlocal s = {}\ntable.insert(s, a)\nreturn s\n'
     local cap = flowtype.CAP
     flowtype.CAP = 2
-    local ok_, D = pcall(dump, '\nlocal function lose(q) return q end\nlose(table)\nlose({})\nlose({})\nlocal f = load(("return ..."):lower())\nf(table)\nlocal s = {}\ntable.insert(s, a)\nreturn s\n')
+    local ok_, D = pcall(dump, SRC)
+    local ok2, D2 = pcall(dump, SRC, 'libs-escape')
     flowtype.CAP = cap
-    assert(ok_, D)
+    assert(ok_, D); assert(ok2, D2)
+    local function libsite(X)
+        for _, x in ipairs(X.sites) do if x.label == 'lib:table' then return x.id end end
+    end
+    local function escaped(X, id) for _, i in ipairs(X.solution.taint.escaped) do if i == id then return true end end end
     local lab = {}
     for _, x in ipairs(D.sites) do lab[x.id] = x.label end
     ok(#D.solution.taint.escaped > 0, 'something escaped')
-    local libesc = false
     for _, i in ipairs(D.solution.taint.escaped) do
         ok(not tostring(lab[i]):match('^native:'), 'a native never escapes: ' .. tostring(lab[i]))
-        if tostring(lab[i]):match('^lib:table') then libesc = true end
     end
-    ok(libesc, 'the table library, lost past CAP, escapes like any object')
+    local lt = libsite(D)
+    ok(lt and not escaped(D, lt), 'the table library, lost past CAP, does not escape under the clause')
+    ok(vim.tbl_contains(D.contracts.library_sites, lt), 'its site is listed: ' .. vim.inspect(D.contracts.library_sites))
+    ok(D.contracts.clauses['libraries-never-escape'], 'the clause is stated')
+    ok(escaped(D2, libsite(D2)), 'libs-escape: it escapes like any object')
+    eq(nil, D2.contracts.clauses['libraries-never-escape'], 'libs-escape: no clause')
     local nat = 0
     for _, x in ipairs(D.sites) do
         if tostring(x.label):match('^native:') then nat = nat + 1; ok(x.kind == 'type' and x.host == 'prim', 'a native is a fixed host site: ' .. vim.inspect(x)) end
@@ -882,4 +892,17 @@ test('flowdump: a non-literal load states the loaded-code contract; a literal on
     ok(N.contracts.clauses['loaded-code'], 'a non-literal load: the clause is stated')
     local L = dump('\nlocal f = loadstring("x = 1")\nf()\nreturn x\n')
     ok(not L.contracts.clauses['loaded-code'], 'a literal load is tree code: no clause')
+end)
+
+-- (CART-1797: package.loaded lists _G and the libraries; a load of any other entry — a module, `package.loaded[k]`,
+-- pairs over it — reads what the solve does not model there (the modules are the experiment pkg-modules): a GAP, so
+-- the certificate refuses instead of certifying a vacuous load)
+test('flowdump: a load of package.loaded beyond its listed entries is a gap (CART-1797)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function gaps(D) local n = 0; for _, g in ipairs(D.gaps) do if g.kind == 'package-loaded' then n = n + 1 end end; return n end
+    eq(0, gaps(dump('package.loaded._G.x = a\nprint(use(x))\npackage.loaded.string.lower("A")\n')), '_G and a library are listed: no gap')
+    eq(1, gaps(dump('package.loaded.mymod.x = a\n')), 'a module is not listed: a gap')
+    eq(1, gaps(dump('local k = ...\nlocal m = package.loaded[k]\n')), 'a computed key: a gap')
+    ok(gaps(dump('for _, m in pairs(package.loaded) do print(m) end\n')) >= 1, 'pairs over it: a gap')
+    eq(0, gaps(dump('local k = ...\nlocal m = package.loaded[k]\n', 'pkg-modules')), 'pkg-modules lists the modules: no gap')
 end)
