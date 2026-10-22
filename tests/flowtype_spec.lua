@@ -2618,3 +2618,23 @@ test('flowtype: a host type\'s method table is no global; a library namespace is
     eq({}, R.objs_of(R.port('g:file')), 'g:file holds nothing')
     ok(vim.tbl_contains(R.objs_of(R.port('g:io')), 'lib:io'), 'g:io holds the io library: ' .. vim.inspect(R.objs_of(R.port('g:io'))))
 end)
+
+-- (CART-1792: `a and b` yields a only where a is falsy — a table never is. `x and x.inner or b` is x.inner or b, never x:
+-- the walk had merged both operands, and `spec and spec.fn_types` handed every language's spec module to a dynamic read)
+test('flowtype: the left operand of `and` reaches the result only as false, never as a table (CART-1792)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B, C = {}, {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'function C.m(self) return "C" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local x = setmetatable({ inner = a }, { __index = C })',
+        'local function use(p) return p:m() end', 'use(b)',
+        'print(use(x and x.inner or b))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local v
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
+    ok(v and #v.targets == 2 and not vim.tbl_contains(v.targets, 'm.lua::C.m@4'), 'x itself never flows: {A.m, B.m}: ' .. vim.inspect(v))
+end)

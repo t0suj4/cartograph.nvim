@@ -2802,7 +2802,13 @@ local function build(store, opts)
                     if not x:named() then op = txt(x) elseif not l then l = x elseif not r then r = x end
                 end
                 local a, b = expr(l), expr(r)
-                if op == 'or' or op == 'and' then local r = new(); edge(a, r); edge(b, r); return r end
+                -- (`a and b` is a only where a is FALSY — nil or false: a table, a function, a string never is. Its left
+                -- operand's objects never reach the result, but a boolean (false) may: `spec and spec.fn_types or D` had
+                -- handed the spec MODULE itself to `types[p:type()]`, which read every field of every language's spec — a
+                -- hub over CAP whose escape made 426 TSNode answers partial, CART-1792. `or` keeps both)
+                -- (an OUTSIDE value — EXT — may be false or nil: it passes, CART-1792)
+                if op == 'and' then local r = new(); filter(a, r, function (o) return TNAME[o] == 'boolean' or o == G7.EXT end); edge(b, r); return r end
+                if op == 'or' then local r = new(); edge(a, r); edge(b, r); return r end
                 local res = new()
                 local mm = METAOP[op]
                 if mm then
