@@ -1037,6 +1037,8 @@ local function build(store, opts)
     G7.NATIR = { assert = true, select = true, unpack = true, ['table#unpack'] = true, ['table#remove'] = true,
         rawget = true, rawset = true, ['table#insert'] = true, next = true, error = true, pcall = true, type = true,
         ['table#concat'] = true, tonumber = true, rawlen = true, rawequal = true, setmetatable = true, getmetatable = true,
+        ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true, ['debug#getupvalue'] = true,
+        ['debug#upvaluejoin'] = true,
         -- (a sort with no comparator runs __lt, and tostring / format / gsub / the iterators have no template: lost there)
         ['table#sort'] = function (a) return a[2] ~= nil end }
     do
@@ -1118,6 +1120,40 @@ local function build(store, opts)
             edge(mt, rl[1])
             edge(field(mt, '__metatable'), rl[1])
             G7.emit({ 'getmeta', rl[1], a[1], '__metatable' })
+        end
+        -- ★ THE DEBUG LIBRARY REWRITES TREE STATE (CART-1803, flowpath's GE review: three certified wrong whole answers).
+        -- debug.setmetatable is setmetatable on any value; debug.getmetatable the raw slot — no `__metatable` override
+        -- (its getmeta names a field no code writes); debug.setupvalue / getupvalue / upvaluejoin write, read and share
+        -- a closure's UPVALUES — every outer local the function captures (fp.ups, from the walk's scope lookup), whatever
+        -- the index: sound, not per slot. Their flows are the solve's; the IR has no upvalue op, so a call by name is a
+        -- dump gap `debug-upvalue`
+        M0['debug#setmetatable'] = M0['setmetatable']
+        M0['debug#getmetatable'] = function (a, rl)
+            if not a[1] then return end
+            edge(field(a[1], '\1mt', true), rl[1])
+            G7.emit({ 'getmeta', rl[1], a[1], '\1raw' })
+        end
+        local function upvs(fnp, each_up) -- (each upvalue port of each function reaching fnp, now and later)
+            filter(fnp, new(), function (o)
+                local fp = fnports[o]
+                for up in pairs(fp and fp.ups or NOTHING) do each_up(up) end
+                return false
+            end)
+        end
+        M0['debug#setupvalue'] = function (a, rl)
+            if a[1] and a[3] then upvs(a[1], function (up) edge(a[3], up) end) end
+            addobj(rl[1], STR)
+        end
+        M0['debug#getupvalue'] = function (a, rl)
+            if a[1] and rl[2] then upvs(a[1], function (up) edge(up, rl[2]) end) end
+            addobj(rl[1], STR)
+        end
+        M0['debug#upvaluejoin'] = function (a)
+            if not (a[1] and a[3]) then return end
+            -- (f1's upvalue becomes f2's cell: values flow both ways between their upvalues from now on)
+            local u1, u3 = {}, {}
+            upvs(a[1], function (up) if not u1[up] then u1[up] = true; for q in pairs(u3) do edge(up, q); edge(q, up) end end end)
+            upvs(a[3], function (up) if not u3[up] then u3[up] = true; for q in pairs(u1) do edge(up, q); edge(q, up) end end end)
         end
         local function iter(a, rl)
             if G7.NATOBJ['next'] then addobj(rl[1], G7.NATOBJ['next']) end
@@ -1420,6 +1456,9 @@ local function build(store, opts)
     -- states it a FIXED host site (host prim), which the E-tables drop. (The string library, the
     -- method path, and nested namespaces such as vim.fn wait for the models)
     G7.NOESC, G7.NATIVE, G7.NATOBJ, G7.NATKEYS, G7.TEXTH, G7.NATLOST = {}, {}, {}, {}, {}, {}
+    G7.NAMEDRUN = { ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true,
+        ['debug#getupvalue'] = true, ['debug#upvaluejoin'] = true }
+    G7.UPVGAP = { ['debug#setupvalue'] = true, ['debug#getupvalue'] = true, ['debug#upvaluejoin'] = true }
     G7.LIBSITES, G7.PKGL = {}, {} -- (the library tables, the clause libraries-never-escape; each package.loaded, CART-1797)
     do
         local P = require 'cartograph.spec.profile'
@@ -1807,7 +1846,15 @@ local function build(store, opts)
             for i = #scopes, 1, -1 do
                 local p = scopes[i][name]
                 if p then
-                    for k = #fnbase, 1, -1 do if i < fnbase[k] then fnmeta[k].upv = true else break end end
+                    -- (and WHICH outer locals it captures: its upvalues, what debug.setupvalue writes, CART-1803)
+                    for k = #fnbase, 1, -1 do
+                        if i < fnbase[k] then
+                            local m = fnmeta[k]
+                            m.upv = true
+                            local u = m.ups; if not u then u = {}; m.ups = u end
+                            u[p] = true
+                        else break end
+                    end
                     return p
                 end
             end
@@ -2003,6 +2050,7 @@ local function build(store, opts)
             if body then for _, s in tsutil.inamed, body, -1 do stmt(s); if raises(s) then break end end end
             fnstack[#fnstack] = nil
             G7.WALKFN = walkfn0
+            fp.ups = meta.ups
             fnbase[#fnbase] = nil
             fnmeta[#fnmeta] = nil
             scopes[#scopes] = nil
@@ -2470,7 +2518,9 @@ local function build(store, opts)
                 local k0 = own and (own .. '#' .. mm0) or fname
                 if G7.NATOBJ[k0] then
                     local _, g0 = lookup(fname:match('^[%a_][%w_]*') or fname)
-                    if g0 then for _, r in ipairs(resl) do G7.TEXTH[r] = true end end
+                    -- (the DEBUG mutators have no path of their own: by name their model runs too, CART-1803)
+                    if g0 and not G7.NAMEDRUN[k0] then for _, r in ipairs(resl) do G7.TEXTH[r] = true end end
+                    if g0 and G7.UPVGAP[k0] then G7.gap('debug-upvalue', aps) end
                 end
             end
             local ires = (fname == 'select' and #aps >= 2) or ((fname == 'unpack' or fname == 'table.unpack' or fname == 'table.remove') and aps[1] and true)

@@ -82,6 +82,8 @@
 --   (present as 1, else absent): that coroutine channel is saturated or tainted, so it holds any escaped value
 --   (CART-1757). `package-loaded`: a load of package.loaded beyond its listed entries (_G, the libraries) — a module,
 --   a computed key, pairs over it — reads what the solve does not model there (CART-1797).
+--   `debug-upvalue`: a debug.setupvalue / getupvalue / upvaluejoin call by name — the solve flows the value into (out of)
+--   every upvalue of the functions it is handed; the IR has no upvalue op (CART-1803).
 -- * `contracts.library_sites` [site]: the library tables the clause `libraries-never-escape` keeps out of the escape
 --   closure, as the globals sites are — each library, the string library, package, package.loaded (CART-1797).
 local M = {}

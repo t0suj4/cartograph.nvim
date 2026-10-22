@@ -931,3 +931,24 @@ test('flowdump: a numeric-key load of _G sees a dynamic store and is not tagged 
     for _, F in ipairs(D2.functions) do for _, t in ipairs(F.tags) do if t[2] == 'contract:strict-global' then named = true end end end
     ok(named, 'a named global read keeps its tag')
 end)
+
+-- (CART-1803: the IR has no upvalue op — a debug.setupvalue / getupvalue / upvaluejoin call by name is a gap; the
+-- solve carries its flows. debug.getmetatable is the RAW slot: its getmeta names a field no code writes, so no
+-- `__metatable` override applies; debug.setmetatable is setmetatable's `setmeta`)
+test('flowdump: debug upvalue calls are gaps; debug.getmetatable is a raw getmeta (CART-1803)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('local o = b\nlocal function get() return o end\ndebug.setupvalue(get, 1, a)\nprint(use(get()))\n')
+    local g = 0
+    for _, x in ipairs(D.gaps) do if x.kind == 'debug-upvalue' then g = g + 1 end end
+    eq(1, g, 'setupvalue by name: one gap')
+    local D2 = dump('local t = setmetatable({}, { __index = b })\ndebug.getmetatable(t).__index = a\nlocal u = {}\ndebug.setmetatable(u, {})\n')
+    local raw, setm = false, 0
+    for _, F in ipairs(D2.functions) do
+        for _, ins in ipairs(F.body) do
+            if ins[1] == 'getmeta' and D2.names.fields[ins[4] + 1] == '\1raw' then raw = true end
+            if ins[1] == 'setmeta' then setm = setm + 1 end
+        end
+    end
+    ok(raw, 'debug.getmetatable: a getmeta naming no written field')
+    ok(setm >= 3, 'debug.setmetatable: a setmeta beside the two setmetatable calls: ' .. setm)
+end)

@@ -2526,3 +2526,33 @@ test('flowtype: open mode — a closure stored into the string library is callab
     ok(D.contracts.clauses['globals-per-program'] == nil, 'one program: no globals-per-program clause')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-1803, flowpath's GE review: the debug library rewrites tree state — each printed A at run time while the answer
+-- was a certified whole {B.m}. debug.setmetatable is setmetatable; debug.getmetatable the raw slot; setupvalue /
+-- getupvalue / upvaluejoin write, read and share a closure's upvalues — any captured local, whatever the index)
+test('flowtype: debug.setmetatable / getmetatable / setupvalue / getupvalue reach tree state (CART-1803)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HDR = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(b)' }
+    local callrec = require 'cartograph.callrec'
+    local function v_of(src)
+        local root = tree({ ['m.lua'] = table.concat(HDR, '\n') .. '\n' .. src .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    local function both(v) return v and v.kind == 'narrowed' and #v.targets == 2 end
+    local h14b = v_of('local t = {}\ndebug.setmetatable(t, { __index = A })\nprint(use(t))')
+    ok(both(h14b), 'h14b: debug.setmetatable is setmetatable: ' .. vim.inspect(h14b))
+    local d01 = v_of('local t = setmetatable({}, { __index = B })\ndebug.getmetatable(t).__index = A\nprint(use(t))')
+    ok(both(d01), 'd01: debug.getmetatable is the metatable slot: ' .. vim.inspect(d01))
+    local d02 = v_of('local o = b\nlocal function get() return o end\ndebug.setupvalue(get, 1, a)\nprint(use(get()))')
+    ok(both(d02) or (d02 and d02.partial), 'd02: setupvalue writes the captured local: ' .. vim.inspect(d02))
+    ok(d02 and vim.tbl_contains(d02.targets or {}, 'm.lua::A.m@1'), 'd02 includes A.m: ' .. vim.inspect(d02))
+    local gu = v_of('local o = a\nlocal function get() return o end\nlocal _, x = debug.getupvalue(get, 1)\nprint(use(x))')
+    ok(both(gu), 'getupvalue reads the captured local: ' .. vim.inspect(gu))
+    local bv = v_of('local o = b\nlocal function get() return o end\nlocal su = debug.setupvalue\nsu(get, 1, a)\nprint(use(get()))')
+    ok(bv and vim.tbl_contains(bv.targets or {}, 'm.lua::A.m@1'), 'by value too: ' .. vim.inspect(bv))
+end)
