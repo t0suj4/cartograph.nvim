@@ -2556,3 +2556,29 @@ test('flowtype: debug.setmetatable / getmetatable / setupvalue / getupvalue reac
     local bv = v_of('local o = b\nlocal function get() return o end\nlocal su = debug.setupvalue\nsu(get, 1, a)\nprint(use(get()))')
     ok(bv and vim.tbl_contains(bv.targets or {}, 'm.lua::A.m@1'), 'by value too: ' .. vim.inspect(bv))
 end)
+
+-- (CART-1806, flowpath's h16 witnesses: a store to a bare global name is `_G.zz = v` — it runs _G's __newindex. A table
+-- handler receives the store, a function handler is called with it, a handler set after setmetatable(_G, mt) too)
+test('flowtype: a bare global store runs _G\'s __newindex as _G.zz = v does (CART-1806)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HDR = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'local P = { zz = b }' }
+    local callrec = require 'cartograph.callrec'
+    local function v_of(src)
+        local root = tree({ ['m.lua'] = table.concat(HDR, '\n') .. '\n' .. src .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    local function both(v) return v and v.kind == 'narrowed' and #v.targets == 2 end
+    local h16c = v_of('setmetatable(_G, { __newindex = P })\nzz = a\nprint(use(P.zz))')
+    ok(both(h16c), 'h16c: a table __newindex receives the bare store: ' .. vim.inspect(h16c))
+    local h16e = v_of('setmetatable(_G, { __newindex = function (t, k, v) P.zz = v end })\nzz = a\nprint(use(P.zz))')
+    ok(both(h16e), 'h16e: a function __newindex is called with it: ' .. vim.inspect(h16e))
+    local h16h = v_of('local mt = {}\nsetmetatable(_G, mt)\nmt.__newindex = P\nzz = a\nprint(use(P.zz))')
+    ok(both(h16h), 'h16h: a handler set after setmetatable: ' .. vim.inspect(h16h))
+    local h16g = v_of('setmetatable(_G, { __newindex = P })\n_G.zz = a\nprint(use(P.zz))')
+    ok(both(h16g), 'h16g: _G.zz, as before: ' .. vim.inspect(h16g))
+end)

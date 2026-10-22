@@ -1958,9 +1958,17 @@ local function build(store, opts)
                 acc('dynamic', kn, nil, base, nil, nil, ok and expr(kn) or false)
             end
         end
+        -- (a store to a bare GLOBAL name IS `_G.x = v`: it runs the environment's __newindex where the raw field may be
+        -- absent — the walk had kept the value in _G.x while setmetatable(_G, { __newindex = P }) sent it to P, a wrong
+        -- whole answer, CART-1806. The read side loads through _G already: G7.gread)
+        local function gstore(name, v)
+            local p, glob = lookup(name)
+            edge(v, p)
+            if glob then local kp = new(); addobj(kp, STR); metastore(G7.GPORT, name, kp, v, curerr()) end
+        end
         local function assign(target, v, rhs)
             local t = target:type()
-            if t == 'identifier' then edge(v, lookup(txt(target)))
+            if t == 'identifier' then gstore(txt(target), v)
             elseif t == 'dot_index_expression' then
                 local base = expr(target:field('table')[1])
                 acc('write', target:field('field')[1], txt(target:field('field')[1]), base)
@@ -2820,7 +2828,7 @@ local function build(store, opts)
                 else
                     local fp = func(n)
                     if nm then
-                        if nm:type() == 'identifier' then edge(fp, lookup(txt(nm)))
+                        if nm:type() == 'identifier' then gstore(txt(nm), fp)
                         else
                             local o, last = nm:named_child(0), nm:named_child(nm:named_child_count() - 1)
                             if o and last then
