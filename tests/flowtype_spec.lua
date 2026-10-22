@@ -2606,3 +2606,15 @@ test('flowtype: debug.setlocal / getlocal reach the locals of the frame (CART-18
     local v = v_of('local function h() local z = b; return z end\nlocal function f() local o = b; debug.setlocal(1, 1, a); return o end\nf()\nprint(use2(h()))', 'q:m')
     ok(v and not hasA(v), 'level 1 does not reach another function\'s locals: ' .. vim.inspect(v))
 end)
+
+-- (CART-1800: only the profile's library NAMESPACES are globals — `io` holds its library, `file` (an io handle's
+-- methods, `file#close` in the signatures) is no global: reading it reads nothing the profile put there)
+test('flowtype: a host type\'s method table is no global; a library namespace is (CART-1800)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = 'local f = file\nlocal i = io\nreturn f, i\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, explain = true })
+    vim.fn.delete(root, 'rf')
+    eq({}, R.objs_of(R.port('g:file')), 'g:file holds nothing')
+    ok(vim.tbl_contains(R.objs_of(R.port('g:io')), 'lib:io'), 'g:io holds the io library: ' .. vim.inspect(R.objs_of(R.port('g:io'))))
+end)

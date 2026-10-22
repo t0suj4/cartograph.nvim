@@ -1525,7 +1525,9 @@ local function build(store, opts)
                 -- (a LIBRARY is an ordinary object: `table.foo = f` writes it. Never-escaping WITHOUT a clause broke the
                 -- E-reading's cells, flowpath on CART-1791; it never escapes under the stated clause libraries-never-escape,
                 -- G7.libsite, CART-1797)
-                if not lo then lo = newobj('lib:' .. lib); G7.ENV.LIBS[lib] = lo; addobj(G7.gport(lib), lo) end
+                -- (only a library NAMESPACE is a global: `file#close`, `buf#put` are a host type's methods — an io handle's,
+                -- string.buffer's — and no Lua program has a global `file` or `buf`, CART-1800)
+                if not lo then lo = newobj('lib:' .. lib); G7.ENV.LIBS[lib] = lo; if G7.NSSET[lib] then addobj(G7.gport(lib), lo) end end
                 addobj(ofp(lo, m), G7.NATOBJ[k])
             else addobj(G7.gport(k), G7.NATOBJ[k]) end
         end
