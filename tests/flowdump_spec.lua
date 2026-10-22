@@ -966,7 +966,8 @@ test('flowdump: an answer lists the contracts its derivation rests on; a plain o
     ok(a0, 'use\'s p:m() has an answer')
     local G = {}
     for i, c in ipairs(D0.labels.clauses) do if bit.band(D0.labels.global, bit.lshift(1, i - 1)) ~= 0 then G[#G + 1] = c end end
-    ok(vim.tbl_contains(G, 'globals-never-escape'), 'the global set holds GE\'s world side: ' .. vim.inspect(G))
+    -- (GE's world side and unknown-receiver are seeded where they reach, CART-1807: not in the global set)
+    ok(not vim.tbl_contains(G, 'globals-never-escape'), 'GE is not global: ' .. vim.inspect(G))
     ok(not vim.tbl_contains(G, 'unknown-receiver'), 'init\'s ext-channel call is no unresolved call (CART-1807): ' .. vim.inspect(G))
     table.sort(G); local got = vim.deepcopy(a0.contracts); table.sort(got)
     eq(G, got, 'locals and setmetatable rest on nothing but the whole-program clauses')
@@ -978,24 +979,36 @@ test('flowdump: an answer lists the contracts its derivation rests on; a plain o
     local hs = false
     for _, a in ipairs(D2.answers) do if a.kind == 'string' and vim.tbl_contains(a.contracts, 'host') then hs = true end end
     ok(hs, 'a call on a host value rests on host: ' .. vim.inspect(D2.answers))
+    -- (GE's world side, CART-1807: outside code holding _G may store through its __newindex table — an answer reading
+    -- that table rests on GE; the plain one above does not)
+    local D3 = dump('local P = { zz = b }\nsetmetatable(_G, { __newindex = P })\nprint(use(P.zz))\n')
+    local a3 = ans(D3, 29)
+    ok(a3 and vim.tbl_contains(a3.contracts, 'globals-never-escape'), 'reading _G\'s __newindex table rests on GE: ' .. vim.inspect(a3 and a3.contracts))
+    ok(not vim.tbl_contains(a0.contracts, 'globals-never-escape'), 'the plain answer does not: ' .. vim.inspect(a0.contracts))
+    -- (and through an __index table — outside code reads through it and may write into what it gets: flowpath's h18)
+    local D4 = dump('local P = { cfg = { p = b } }\nsetmetatable(_G, { __index = P })\nprint(use(P.cfg.p))\n')
+    local a4 = ans(D4, 29)
+    ok(a4 and vim.tbl_contains(a4.contracts, 'globals-never-escape'), 'a table reached from _G\'s __index table rests on GE: ' .. vim.inspect(a4 and a4.contracts))
 end)
 
 -- (CART-1805: an answer that reaches the ESCAPED region rests on what the region rests on — a value unknown code produced,
 -- stored into an escaped cell the answer reads, is how flowpath's run-time witnesses went wrong; and an unresolved
 -- callee makes unknown-receiver a whole-program clause)
-test('flowlabels: an answer reaching the escaped region carries the region; an unresolved call is global (CART-1805)', function ()
+test('flowlabels: an answer reaching the escaped region carries the region; an unresolved call seeds what it reaches (CART-1805, CART-1807)', function ()
     local FL = require 'cartograph.flowlabels'
     local function D(unresolved)
         return {
             names = { fields = { 'a', 'b', 'c', 'd', 'e', 'f' } },
             sites = { { id = 1, kind = 'table', label = 'tbl:x' }, { id = 2, kind = 'ext', label = 'external' },
-                { id = 3, kind = 'function', label = 'fn', fn = 1 } },
+                { id = 3, kind = 'function', label = 'fn', fn = 1 }, { id = 4, kind = 'table', label = 'tbl:y' },
+                { id = 5, kind = 'function', label = 'fn2', fn = 2 } },
             functions = {
                 { id = 0, params = {}, self = 20, body = {
                     { 'new', 10, 2 }, { 'call', { 11 }, 10, {} }, { 'store', 12, 5, 11 }, { 'load', 13, 12, 5 },
-                    { 'call', { 14 }, 13, {} }, unresolved and { 'call', { 16 }, 15, {} } or { 'copy', 16, 14 } } },
-                { id = 1, params = {}, self = 21, body = { { 'ret', {} } } } },
-            solution = { v = { { 10, { 2 } }, { 12, { 1 } }, { 13, { 3 } } }, h = { { 1, 5, { 3 } } }, top = {},
+                    { 'call', { 14 }, 13, {} }, unresolved and { 'call', { 16 }, 15, { 17 } } or { 'copy', 16, 14 } } },
+                { id = 1, params = {}, self = 21, body = { { 'ret', {} } } },
+                { id = 2, params = { 30 }, self = 22, body = { { 'ret', { 30 } } } } },
+            solution = { v = { { 10, { 2 } }, { 12, { 1 } }, { 13, { 3 } }, { 17, { 4 } } }, h = { { 1, 5, { 3 } }, { 4, 6, { 5 } } }, top = {},
                 taint = { ports = {}, escaped = { 1 } } },
             contracts = { clauses = {}, library_sites = {}, host_models = {} },
         }
@@ -1005,8 +1018,15 @@ test('flowlabels: an answer reaching the escaped region carries the region; an u
     ok(vim.tbl_contains(names, 'C1'), 'the load read an escaped cell: ' .. vim.inspect(names))
     ok(vim.tbl_contains(names, 'unknown-code'), 'and so rests on the region, which unknown code wrote: ' .. vim.inspect(names))
     eq(0, L.global, 'nothing unresolved, nothing stated: no global clause')
+    eq(nil, L.v[30], 'nothing unresolved: the function in tbl:y is not seeded')
+    -- (CART-1807: an unresolved callee's unknown-receiver reaches what its arguments reach — tbl:y's cells, the function
+    -- it holds (its parameters), the call's own result — not every answer)
     local L2 = FL.compute(D(true))
-    ok(vim.tbl_contains(L2.names(L2.global), 'unknown-receiver'), 'an unresolved callee: global unknown-receiver')
+    local UR = 'unknown-receiver'
+    ok(not vim.tbl_contains(L2.names(L2.global), UR), 'not global')
+    ok(vim.tbl_contains(L2.names(L2.w[4] or 0), UR), 'the argument\'s table may be written')
+    ok(vim.tbl_contains(L2.names(L2.v[30] or 0), UR), 'the function it holds may be called with anything')
+    ok(vim.tbl_contains(L2.names(L2.v[16] or 0), UR), 'its result is its own')
 end)
 
 -- (CART-1808: a literal load's chunk is walked nested — the walk left the recorder off, and every instruction after

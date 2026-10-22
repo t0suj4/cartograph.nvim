@@ -371,6 +371,49 @@ function M.compute(D)
             if not rule then error('flowlabels: no rule for op ' .. tostring(ins[1]) .. ' — a missing label would claim nothing', 0) end
         end
     end
+    -- ★ TARGETED WHOLE-PROGRAM SEEDS (CART-1807): a violation no instruction carries, seeded on what it can REACH rather
+    -- than on every answer. Each is a REACH from what the violation is handed: every site reached through the heap may be
+    -- written (every cell), every function reached called with anything (its parameters). GE's world side — outside
+    -- code holding _G triggers its metamethods: it is handed the handlers of _G's metatable (an __index table it reads
+    -- through and may write into, flowpath's h18; a __newindex table it stores into; a function it calls). An
+    -- UNRESOLVED callee (its variable lists nothing) is handed its arguments, and its results are its own
+    do
+        local GE, UR = B['globals-never-escape'], B['unknown-receiver']
+        local function seedparams(g, m) local f = F[g]; if f then for _, p in ipairs(f.params) do setv(p, m) end end end
+        local hd = {}
+        for _, e in ipairs(s.hdyn or {}) do hd[e[1]] = e[2] end
+        local function closure_of(roots, m) -- (BFS over the heap from roots: every reached cell and function seeded m)
+            local q, seen = {}, {}
+            for _, a in ipairs(roots) do if not seen[a] then seen[a] = true; q[#q + 1] = a end end
+            local i = 1
+            while i <= #q do
+                local a = q[i]; i = i + 1
+                orinto(Lw, a, m)
+                if closure[a] then seedparams(closure[a], m) end
+                for _, bs in pairs(H[a] or {}) do for _, b in ipairs(bs) do if not seen[b] then seen[b] = true; q[#q + 1] = b end end end
+                for _, b in ipairs(hd[a] or {}) do if not seen[b] then seen[b] = true; q[#q + 1] = b end end
+            end
+            return #q
+        end
+        local groots = {}
+        for gs in pairs(globals) do
+            for _, mt in ipairs(H[gs] and H[gs][META] or {}) do
+                for ev, ts in pairs(H[mt] or {}) do if ev ~= META then for _, t in ipairs(ts) do groots[#groots + 1] = t end end end
+            end
+        end
+        M.LAST_GE_REACH = closure_of(groots, GE)
+        local uroots = {}
+        for _, f in ipairs(D.functions) do
+            for _, ins in ipairs(f.body) do
+                if (ins[1] == 'call' or ins[1] == 'pcall') and num(ins[3]) and ins[3] ~= D.contracts.ext_channel
+                    and not tops[ins[3]] and #(V[ins[3]] or {}) == 0 then
+                    for _, r in ipairs(ins[2]) do setv(r, UR) end
+                    for _, y in ipairs(ins[4]) do for _, a in ipairs(V[y] or {}) do uroots[#uroots + 1] = a end end
+                end
+            end
+        end
+        M.LAST_REACH = closure_of(uroots, UR)
+    end
     local passes = 0
     repeat
         changed = false
@@ -397,19 +440,10 @@ function M.compute(D)
     -- the metatable slot, a metatable on a function — labels no instruction, so EVERY answer carries the stated ones
     local global = 0
     local stated = D.contracts.clauses or {}
-    for _, c in ipairs({ 'globals-never-escape', 'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env' }) do
+    -- (globals-never-escape's world side and an unresolved callee's unknown-receiver are seeded where they reach, above;
+    -- init's own call of the ext channel lists nothing by construction and is no unresolved call)
+    for _, c in ipairs({ 'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env' }) do
         if stated[c] then global = bor(global, B[c]) end
-    end
-    for _, f in ipairs(D.functions) do
-        for _, ins in ipairs(f.body) do
-            -- (init's own call of the ext channel lists nothing by construction: no unresolved call, CART-1807)
-            if (ins[1] == 'call' or ins[1] == 'pcall') and num(ins[3]) and ins[3] ~= D.contracts.ext_channel
-                and not tops[ins[3]] and #(V[ins[3]] or {}) == 0 then
-                global = bor(global, B['unknown-receiver'])
-                break
-            end
-        end
-        if band(global, B['unknown-receiver']) ~= 0 then break end
     end
     local L = { v = Lv, h = Lh, d = Ld, k = Lk, w = Lw, err = Lerr, ret = Lret, chan = Lchan, passes = passes, region = region,
         global = global }
