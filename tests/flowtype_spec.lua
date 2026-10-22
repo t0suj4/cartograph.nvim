@@ -2582,3 +2582,27 @@ test('flowtype: a bare global store runs _G\'s __newindex as _G.zz = v does (CAR
     local h16g = v_of('setmetatable(_G, { __newindex = P })\n_G.zz = a\nprint(use(P.zz))')
     ok(both(h16g), 'h16g: _G.zz, as before: ' .. vim.inspect(h16g))
 end)
+
+-- (CART-1804: debug.setlocal / getlocal write and read the locals of the frame their level names — a literal 1 is the
+-- calling function; another level, a thread, a call by value: any function's, sound and coarse)
+test('flowtype: debug.setlocal / getlocal reach the locals of the frame (CART-1804)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HDR = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'local function use2(q) return q:m() end', 'use(b)' }
+    local callrec = require 'cartograph.callrec'
+    local function v_of(src, full)
+        local root = tree({ ['m.lua'] = table.concat(HDR, '\n') .. '\n' .. src .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == (full or 'p:m') then return R.verdict(c) end end
+    end
+    local function hasA(v) return v and vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1') end
+    ok(hasA(v_of('local function f() local o = b; debug.setlocal(1, 1, a); return o end\nprint(use(f()))')), 'setlocal(1): the calling function\'s local')
+    ok(hasA(v_of('local function g() local o = a; local _, x = debug.getlocal(1, 1); return x end\nprint(use(g()))')), 'getlocal(1) reads it')
+    ok(hasA(v_of('local function set() debug.setlocal(2, 1, a) end\nlocal function f() local o = b; set(); return o end\nprint(use(f()))')), 'level 2: the caller\'s (coarse: any function\'s)')
+    ok(hasA(v_of('local sl = debug.setlocal\nlocal function f() local o = b; sl(1, 1, a); return o end\nprint(use(f()))')), 'by value: any function\'s')
+    local v = v_of('local function h() local z = b; return z end\nlocal function f() local o = b; debug.setlocal(1, 1, a); return o end\nf()\nprint(use2(h()))', 'q:m')
+    ok(v and not hasA(v), 'level 1 does not reach another function\'s locals: ' .. vim.inspect(v))
+end)

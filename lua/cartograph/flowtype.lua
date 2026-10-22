@@ -1038,7 +1038,7 @@ local function build(store, opts)
         rawget = true, rawset = true, ['table#insert'] = true, next = true, error = true, pcall = true, type = true,
         ['table#concat'] = true, tonumber = true, rawlen = true, rawequal = true, setmetatable = true, getmetatable = true,
         ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true, ['debug#getupvalue'] = true,
-        ['debug#upvaluejoin'] = true,
+        ['debug#upvaluejoin'] = true, ['debug#setlocal'] = true, ['debug#getlocal'] = true,
         -- (a sort with no comparator runs __lt, and tostring / format / gsub / the iterators have no template: lost there)
         ['table#sort'] = function (a) return a[2] ~= nil end }
     do
@@ -1147,6 +1147,28 @@ local function build(store, opts)
         M0['debug#getupvalue'] = function (a, rl)
             if a[1] and rl[2] then upvs(a[1], function (up) edge(up, rl[2]) end) end
             addobj(rl[1], STR)
+        end
+        -- (debug.setlocal([thread,] level, i, v) writes local i of the function active at that level; getlocal reads it.
+        -- By name with a literal level 1 and no thread: the CALLING function's locals; otherwise — another level, a thread,
+        -- by value — any function's: sound, coarse (no corpus calls them), CART-1804)
+        local function frame_locals(rl, nplain) -- (nplain: the call's argument count without a thread)
+            local ctx = G7.DBGCTX[rl[1]]
+            local out = {}
+            if ctx and ctx.lvl == 1 and ctx.nargs == nplain then
+                for _, q in ipairs(G7.LOCALS[ctx.fn] or NOTHING) do out[#out + 1] = q end
+            else
+                for _, l in pairs(G7.LOCALS) do for _, q in ipairs(l) do out[#out + 1] = q end end
+            end
+            return out
+        end
+        M0['debug#setlocal'] = function (a, rl)
+            local vs = { a[3], a[4] } -- (the value: 3rd without a thread, 4th with one)
+            for _, q in ipairs(frame_locals(rl, 3)) do for _, v in pairs(vs) do edge(v, q) end end
+            addobj(rl[1], STR)
+        end
+        M0['debug#getlocal'] = function (a, rl)
+            addobj(rl[1], STR)
+            if rl[2] then for _, q in ipairs(frame_locals(rl, 2)) do edge(q, rl[2]) end end
         end
         M0['debug#upvaluejoin'] = function (a)
             if not (a[1] and a[3]) then return end
@@ -1458,7 +1480,10 @@ local function build(store, opts)
     G7.NOESC, G7.NATIVE, G7.NATOBJ, G7.NATKEYS, G7.TEXTH, G7.NATLOST = {}, {}, {}, {}, {}, {}
     G7.NAMEDRUN = { ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true,
         ['debug#getupvalue'] = true, ['debug#upvaluejoin'] = true }
-    G7.UPVGAP = { ['debug#setupvalue'] = true, ['debug#getupvalue'] = true, ['debug#upvaluejoin'] = true }
+    G7.UPVGAP = { ['debug#setupvalue'] = 'debug-upvalue', ['debug#getupvalue'] = 'debug-upvalue', ['debug#upvaluejoin'] = 'debug-upvalue',
+        ['debug#setlocal'] = 'debug-local', ['debug#getlocal'] = 'debug-local' }
+    G7.NAMEDRUN['debug#setlocal'], G7.NAMEDRUN['debug#getlocal'] = true, true
+    G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
     G7.LIBSITES, G7.PKGL = {}, {} -- (the library tables, the clause libraries-never-escape; each package.loaded, CART-1797)
     do
         local P = require 'cartograph.spec.profile'
@@ -1863,7 +1888,16 @@ local function build(store, opts)
             if name == 'setfenv' and not G7.HOSTWALK then G7.ANYSETFENV = true end
             return G7.gport(name), true
         end
-        local function declare(name, p) local q = p or new(); scopes[#scopes][name] = q; return q end
+        local fnstack = {} -- (the functions being walked, innermost last)
+        local function declare(name, p)
+            local q = p or new()
+            scopes[#scopes][name] = q
+            -- (the function's LOCALS, parameters among them: what debug.setlocal / getlocal reach, CART-1804)
+            local fk = fnstack[#fnstack] and fnstack[#fnstack].id or ('chunk:' .. file)
+            local l = G7.LOCALS[fk]; if not l then l = {}; G7.LOCALS[fk] = l end
+            l[#l + 1] = q
+            return q
+        end
         -- ★ AN UNCONDITIONAL RAISE ENDS ITS BLOCK (CART-1745): a statement calling the GLOBAL `error` never returns, so
         -- the rest of its block never runs — and is not walked. vimruntime's LuaLS stubs (lua/vim/_meta/*.lua) open with
         -- `error('Cannot require a meta file')`; walked as code, options.gen.lua's 1,404 option aliases through the
@@ -1883,7 +1917,6 @@ local function build(store, opts)
             for i = #scopes, 1, -1 do if scopes[i]['error'] then return false end end
             return true
         end
-        local fnstack = {}
         -- (where an error raised HERE goes: the enclosing function's error port; module-level code's, the chunk set)
         local function curerr() local f = fnstack[#fnstack]; return f and f.err or gerr() end
         WALKERR = curerr -- (a load this walk makes knows where the errors of an __index function it runs go)
@@ -2528,7 +2561,13 @@ local function build(store, opts)
                     local _, g0 = lookup(fname:match('^[%a_][%w_]*') or fname)
                     -- (the DEBUG mutators have no path of their own: by name their model runs too, CART-1803)
                     if g0 and not G7.NAMEDRUN[k0] then for _, r in ipairs(resl) do G7.TEXTH[r] = true end end
-                    if g0 and G7.UPVGAP[k0] then G7.gap('debug-upvalue', aps) end
+                    if g0 and G7.UPVGAP[k0] then G7.gap(G7.UPVGAP[k0], aps) end
+                    -- (setlocal / getlocal by name: the frame its level names — a literal 1 is the calling function)
+                    if g0 and G7.UPVGAP[k0] == 'debug-local' then
+                        local a1 = argn[1]
+                        G7.DBGCTX[resl[1]] = { fn = fnstack[#fnstack] and fnstack[#fnstack].id or ('chunk:' .. file),
+                            lvl = a1 and a1:type() == 'number' and tonumber(txt(a1)) or nil, nargs = #argn }
+                    end
                 end
             end
             local ires = (fname == 'select' and #aps >= 2) or ((fname == 'unpack' or fname == 'table.unpack' or fname == 'table.remove') and aps[1] and true)

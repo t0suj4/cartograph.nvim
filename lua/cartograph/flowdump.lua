@@ -84,6 +84,8 @@
 --   a computed key, pairs over it — reads what the solve does not model there (CART-1797).
 --   `debug-upvalue`: a debug.setupvalue / getupvalue / upvaluejoin call by name — the solve flows the value into (out of)
 --   every upvalue of the functions it is handed; the IR has no upvalue op (CART-1803).
+--   `debug-local`: a debug.setlocal / getlocal call by name — the solve flows the value into (out of) the locals of the
+--   frame its level names (a literal 1: the calling function; else any function's); the IR has no frame op (CART-1804).
 -- * `labels` (CART-1801): which contract clauses each value's derivation rests on — flowlabels.lua, a fixpoint over this
 --   IR and solution (flowpath's probes/slice read forwards; seeds: its contracts_of table, plus globals-never-escape on a
 --   named _G cell and libraries-never-escape on a library load). `clauses` names the bits; `v` [var, mask], `h` [site,
