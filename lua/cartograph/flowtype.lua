@@ -4023,6 +4023,20 @@ local function build(store, opts)
         for c in pairs(protos[o] or NOTHING) do if dynfn(c, seen) then return true end end
         return false
     end
+    -- (the string library's members the TREE stored, every environment's — what a string receiver's method may be,
+    -- CART-1812: into out; G7.SSAT when the library may hold it under a computed key or past CAP)
+    function G7.strmembers(member, out)
+        G7.SSAT = false
+        local any = false
+        for _, e in ipairs(G7.ENVL or NOTHING) do
+            if e.STRLIB then
+                local mine = {}
+                if targets(e.STRLIB, member, mine, {}) or dynfn(e.STRLIB, {}) then G7.SSAT = true end
+                for x in pairs(mine) do out[x] = true; any = true end
+            end
+        end
+        return any
+    end
     stats.partial = 0
     -- (one answer per CALL: a call walked in several context instances has a receiver in each — its answer is over all)
     local groups, gorder = {}, {}
@@ -4055,6 +4069,10 @@ local function build(store, opts)
                     -- program that got past the call did not hold a string there, CART-1690. pcall's error values,
                     -- strings and error tables, reach every `local ok, v = pcall(…)`'s v: this keeps them off v:parse())
                     if PSIGS[tn .. '#' .. pr.member] then tyname = tn end
+                    -- (a string's method is ALSO what the tree stored in the string library — `string.m = f; ("x"):m()`
+                    -- runs f, and the solve's callee holds it: the answer had dropped it, a wrong whole {B.m}, CART-1812)
+                    if tn == 'string' and G7.strmembers(pr.member, out) then other = true end
+                    if tn == 'string' and G7.SSAT then sat = true end
                 else
                     local mine = {}
                     if targets(o, pr.member, mine, {}) then sat = true end

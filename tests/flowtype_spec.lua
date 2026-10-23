@@ -2670,3 +2670,21 @@ test('flowtype: a comparison with a literal operand runs no handler (CART-1802)'
     local e52 = v_of('x == nil', 'lua-factorio')
     ok(e52 and e52.kind == 'exact', '5.2: x == nil still runs nothing: ' .. vim.inspect(e52))
 end)
+
+-- (CART-1812, flowpath's l18: a string's method is also what the tree stored in the string library — `string.m = f;
+-- use("x")` runs f; the answer had kept only {B.m}, dropping a target its own solution held)
+test('flowtype: a method call on a string includes what the tree stored in the string library (CART-1812)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(b)',
+        'string.m = function () return "S" end', 'print(use("x"))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local v
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
+    ok(v and #(v.targets or {}) == 2 and vim.tbl_contains(v.targets, 'm.lua::string.m@6'), 'the string library\'s m and B.m: ' .. vim.inspect(v))
+end)
