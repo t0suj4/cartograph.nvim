@@ -1043,6 +1043,7 @@ local function build(store, opts)
         ['table#concat'] = true, tonumber = true, rawlen = true, rawequal = true, setmetatable = true, getmetatable = true,
         ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true, ['debug#getupvalue'] = true,
         ['debug#upvaluejoin'] = true, ['debug#setlocal'] = true, ['debug#getlocal'] = true, ['debug#getregistry'] = true,
+        ['table#move'] = true,
         -- (a sort with no comparator runs __lt, and tostring / format / gsub / the iterators have no template: lost there)
         ['table#sort'] = function (a) return a[2] ~= nil end }
     do
@@ -1075,6 +1076,20 @@ local function build(store, opts)
             local kp = new(); addobj(kp, typeobj('number'))
             metastore(a[1], '#', kp, v, cerr)
             G7.emit({ 'store', a[1], '#', v })
+        end
+        -- (table.move(a1, f, e, t [, a2]) copies a1's elements into a2's — a1's own when a2 is absent — and returns that
+        -- table: lua_geti / lua_seti, so __index / __newindex run, as table.insert's (CART-1769). It had no model: a
+        -- certified dump said the target held nothing, flowpath's p60 / p69, CART-1814)
+        M0['table#move'] = function (a, rl, cerr)
+            if not a[1] then return end
+            local dst = a[5] or a[1]
+            local v = new()
+            edge(field(a[1], '#'), v); G7.emit({ 'load', v, a[1], '#' })
+            storec(dst, '#', v)
+            local kp = new(); addobj(kp, typeobj('number'))
+            metastore(dst, '#', kp, v, cerr)
+            G7.emit({ 'store', dst, '#', v })
+            edge(dst, rl[1]); G7.emit({ 'copy', rl[1], dst })
         end
         M0['next'] = function (a, rl)
             if not a[1] then return end
@@ -1534,6 +1549,7 @@ local function build(store, opts)
         ['debug#setlocal'] = 'debug-local', ['debug#getlocal'] = 'debug-local' }
     G7.NAMEDRUN['debug#setlocal'], G7.NAMEDRUN['debug#getlocal'] = true, true
     G7.NAMEDRUN['debug#getregistry'] = true
+    G7.NAMEDRUN['table#move'] = true -- (by name it ran nothing: the model runs, CART-1814)
     G7.SETFENVS = {} -- (every setfenv / debug.setfenv call: { fn, port | level } — the dump's fixed-env decision, CART-1813)
     G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)

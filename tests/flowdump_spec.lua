@@ -1089,3 +1089,18 @@ test('flowdump: the string metatable keeps lib:string\'s natives off string meth
     for _, e in ipairs(D.solution.v) do for _, o in ipairs(e[2]) do if o == nat then held = held + 1 end end end
     eq(0, held, 'no variable holds string.format\'s native: ' .. tostring(nat))
 end)
+
+-- (CART-1814: table.move by name inlines a load of its source's elements and a store into its target — the dump denotes
+-- the move, and stays closed)
+test('flowdump: table.move is a load and a store in the IR (CART-1814)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('local t = { b }\ntable.move({ a }, 1, 1, 1, t)\nprint(use(t[1]))\n')
+    local stores = 0
+    for _, F in ipairs(D.functions) do
+        if D.names.functions[F.id + 1] == 'chunk:m.lua' then
+            for _, ins in ipairs(F.body) do if ins[1] == 'store' and D.names.fields[ins[3] + 1] == '#' then stores = stores + 1 end end
+        end
+    end
+    ok(stores >= 1, 'a store into the target\'s array part: ' .. stores)
+    eq(0, flowcheck.check(D).failed, 'closed')
+end)

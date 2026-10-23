@@ -2246,7 +2246,9 @@ test('flowtype: a modelled host function runs its Lua model (CART-1785)', functi
         ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'modelled: ' .. full .. ' is A.m: ' .. vim.inspect(v))
     end
     local N = flowtype.solve(store, { open = false, hostmodels = false })
-    ok(not N.verdict(at['h:m']), 'no model: h:m has no answer')
+    -- (table.move needs no model either since CART-1814: built in, it copies the elements)
+    local vh = N.verdict(at['h:m'])
+    ok(vh and vh.kind == 'exact' and tostring(vh.targets[1]):match('A%.m'), 'no model, the built-in table.move: h:m is A.m: ' .. vim.inspect(vh))
     -- (the registry needs no model since CART-1811: debug.getregistry() is one table per environment, built in)
     local vg = N.verdict(at['g:m'])
     ok(vg and vg.kind == 'exact' and tostring(vg.targets[1]):match('A%.m'), 'no model, the built-in registry: g:m is A.m: ' .. vim.inspect(vg))
@@ -2732,4 +2734,26 @@ test('flowtype: libraries reached by require, the registry, the string metatable
     local pure = v_of(table.concat({ 'local C = {}', 'function C.m(self) return "C" end',
         'getmetatable("s").__index = C', 'print(use("x"))' }, '\n'))
     ok(pure and vim.tbl_contains(pure.targets or {}, 'm.lua::C.m@7'), 'getmetatable("").__index = C: strings get C.m: ' .. vim.inspect(pure))
+end)
+
+-- (CART-1814, flowpath's p60 / p69: table.move copies a1's elements into a2 — it had no model, and the target held
+-- nothing: `table.move({ a }, 1, 1, 1, t); use(t[1])` answered without a)
+test('flowtype: table.move copies the elements into its target, by name and by value (CART-1814)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HDR = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(b)' }
+    local callrec = require 'cartograph.callrec'
+    local function v_of(src)
+        local root = tree({ ['m.lua'] = table.concat(HDR, '\n') .. '\n' .. src .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    local function hasA(v) return v and vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1') end
+    ok(hasA(v_of('local function put(p) table.move({ a }, 1, 1, 1, p) end\nlocal t = { b }\nput(t)\nprint(use(t[1]))')), 'p60: by name')
+    ok(hasA(v_of('local mv = table.move\nlocal t = { b }\nmv({ a }, 1, 1, 1, t)\nprint(use(t[1]))')), 'by value')
+    ok(hasA(v_of('local s = { b, a }\ntable.move(s, 2, 2, 1)\nprint(use(s[1]))')), 'within one table (no a2)')
+    ok(hasA(v_of('local t = { b }\nlocal r = table.move({ a }, 1, 1, 1, t)\nprint(use(r[1]))')), 'it returns the target')
 end)
