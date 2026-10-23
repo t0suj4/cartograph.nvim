@@ -1104,3 +1104,19 @@ test('flowdump: table.move is a load and a store in the IR (CART-1814)', functio
     ok(stores >= 1, 'a store into the target\'s array part: ' .. stores)
     eq(0, flowcheck.check(D).failed, 'closed')
 end)
+
+-- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
+test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function gaps_of(src)
+        local root = tree({ ['m.lua'] = CLASSES .. src, ['lua/my/mod.lua'] = 'local M = {}\nreturn M\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, dump = true })
+        vim.fn.delete(root, 'rf')
+        local n = 0
+        for _, g in ipairs(vim.json.decode(R.dump).gaps) do if g.kind == 'package-loaded' then n = n + 1 end end
+        return n
+    end
+    eq(0, gaps_of('local s = package.loaded["my.mod"]\n'), 'literal: no gap')
+    eq(1, gaps_of('local k = ...\nlocal s = package.loaded[k]\n'), 'computed: a gap')
+end)

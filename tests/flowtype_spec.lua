@@ -2757,3 +2757,21 @@ test('flowtype: table.move copies the elements into its target, by name and by v
     ok(hasA(v_of('local s = { b, a }\ntable.move(s, 2, 2, 1)\nprint(use(s[1]))')), 'within one table (no a2)')
     ok(hasA(v_of('local t = { b }\nlocal r = table.move({ a }, 1, 1, 1, t)\nprint(use(r[1]))')), 'it returns the target')
 end)
+
+-- (CART-1813, flowpath: `package.loaded["<module>"]` with a LITERAL name the tree holds is that module's export table —
+-- or nil; a computed lookup stays the package-loaded gap, the user's decision)
+test('flowtype: package.loaded with a literal module name is that module (CART-1813)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HDR = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(b)' }
+    local root = tree({ ['m.lua'] = table.concat(HDR, '\n') .. '\nlocal s = package.loaded["my.mod"]\nif s then s.obj = a end\nprint(use(require("my.mod").obj))\n',
+        ['lua/my/mod.lua'] = 'local M = {}\nreturn M\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local v
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
+    ok(v and vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1'), 'the write through package.loaded["my.mod"] is the module\'s: ' .. vim.inspect(v))
+end)

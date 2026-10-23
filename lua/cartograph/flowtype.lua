@@ -702,7 +702,10 @@ local function build(store, opts)
                 -- named global: on WoW `_G["Frame" .. i]` pulled every global's value set into each such read, and
                 -- the solve went 41 -> 632 s. The mirror of a STRICT global read, CART-1707)
                 pull(ofp(o, '[]')); if G7.EXT then addobj(dst, G7.EXT) end
-            elseif f == '[]' then local m = ofield[o]; for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' and fk:byte(1) ~= 1 then pull(m[fk]) end end
+            elseif f == '[]' then
+                local m = ofield[o]
+                local named = G7.PKGL and G7.PKGL[o] and G7.PKGNAMED
+                for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' and fk:byte(1) ~= 1 and not (named and named[fk]) then pull(m[fk]) end end
             else pull(ofp(o, f)); pull(ofp(o, '[]')) end
             -- (a load falling through to an __index FUNCTION calls it with (o, key): its result is the load's value)
             local fm = IDXFN[o]
@@ -1636,6 +1639,33 @@ local function build(store, opts)
         addobj(ofp(pl, 'package'), lp)
         if e.STRLIB then addobj(ofp(pl, 'string'), e.STRLIB) end
         G7.libsite(lp); G7.libsite(pl)
+    end
+    -- (`package.loaded["<module>"]` with a LITERAL name the tree holds: that one module's export table — or nil, not yet
+    -- loaded — is a named entry; a COMPUTED lookup stays the package-loaded gap (the user's decision on CART-1813).
+    -- config / txn / cache / store's "is it loaded?" checks, flowpath on CART-1813)
+    -- (recorded in the walk, LISTED after it — G7.pkgnamed_apply: an edge into a field port during the walk was recorded as
+    -- an instruction the dump could not place, a store-field-port gap. And a COMPUTED read or pairs over package.loaded
+    -- does not pull these entries: it is a gap anyway, and pulling them merged the named modules into every reflective
+    -- lookup — the repo's oracle exact RIGHT 37 -> 31, narrowed 48 -> 22)
+    function G7.pkgmodule(nm)
+        local f = G7.MODFILE and G7.MODFILE[nm]
+        if not f then return end
+        G7.PKGNAMED = G7.PKGNAMED or {}
+        G7.PKGNAMED[nm] = f
+    end
+    function G7.pkgnamed_apply()
+        for nm, f in pairs(G7.PKGNAMED or NOTHING) do
+            for _, e in ipairs(G7.ENVL or NOTHING) do if e.PKGLOADED then edge(port('mod:' .. f), ofp(e.PKGLOADED, nm)) end end
+        end
+    end
+    -- (is n the expression `package.loaded`, package the global?)
+    function G7.ispkgloaded(n, lookup, txt)
+        if not (n and n:type() == 'dot_index_expression') then return false end
+        local t, f = n:field('table')[1], n:field('field')[1]
+        if not (t and f and t:type() == 'identifier') then return false end
+        if txt(t) ~= 'package' or txt(f) ~= 'loaded' then return false end
+        local _, g = lookup('package')
+        return g and true or false
     end
     function G7.libsite(o) -- (a library table: it never escapes, the clause libraries-never-escape)
         if G7.EXP['libs-escape'] then return end
@@ -2844,6 +2874,7 @@ local function build(store, opts)
                 -- dump's loadDyn, CART-1739)
                 local kname = keyname(knode)
                 if kname == '[]' and knode then G7.NEXTK = expr(knode) end
+                if kname ~= '[]' and kname ~= '#' and G7.MODFILE and G7.MODFILE[kname] and G7.ispkgloaded(n:field('table')[1], lookup, txt) then G7.pkgmodule(kname) end
                 return field(base, kname)
             end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
@@ -3409,6 +3440,7 @@ local function build(store, opts)
         end
     end
     if jsfinish then jsfinish() end
+    G7.pkgnamed_apply() -- (package.loaded["<module>"] read by a literal name: that module — after the walk, CART-1813)
     for _, fe in ipairs(G7.FENV) do
         if fe.id then G7.fenv(fe.id, fe.env) else callc(fe.port, { fenv = fe.env }, new()) end
     end
