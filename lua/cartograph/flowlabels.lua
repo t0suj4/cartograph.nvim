@@ -298,15 +298,17 @@ function M.compute(D)
                 if op == 'pcall' then m = bor(m, Lerr[g] or 0) end
                 params_in(g, pin, args)
             else
-                -- (a callable object: its __call handler runs with (object, args…))
                 m = bor(m, cell(a, META))
-                for _, g2 in ipairs(handlers(a, CALL)) do
-                    m = bor(m, ret(g2))
-                    local hargs = { fv }
-                    for _, y in ipairs(args) do hargs[#hargs + 1] = y end
-                    params_in(g2, pin, hargs)
-                end
             end
+        end
+        -- (a callable object: its __call handler runs with (object, args…) — the distinct handlers over the callee's
+        -- sites, static per variable: per site, a hub callee rebuilt the argument list and re-entered one handler for
+        -- each of its tables)
+        local hs = vhandlers(fv, CALL)
+        if #hs > 0 then
+            local hargs = { fv }
+            for _, y in ipairs(args) do hargs[#hargs + 1] = y end
+            for _, g2 in ipairs(hs) do m = bor(m, ret(g2)); params_in(g2, pin, hargs) end
         end
         for _, r in ipairs(rets) do setv(r, m) end
     end
