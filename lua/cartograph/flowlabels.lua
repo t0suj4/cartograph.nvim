@@ -22,7 +22,7 @@ local bor, band = bit.bor, bit.band
 
 M.CLAUSES = { 'GN', 'strict-global', 'computed-global', 'host', 'unknown-receiver', 'unknown-code',
     'outside-raises-strings', 'C1', 'C3', 'globals-never-escape', 'libraries-never-escape', 'host-model',
-    'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env' }
+    'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env', 'reflection:package.loaded' }
 local B = {}
 for i, c in ipairs(M.CLAUSES) do B[c] = bit.lshift(1, i - 1) end
 local ESC = bor(B.C1, B.C3)
@@ -67,6 +67,14 @@ function M.compute(D)
         if si.label == 'external' then ext[si.id] = true end
     end
     for _, a in ipairs(D.contracts.library_sites or {}) do libs[a] = true end
+    -- (REFLECTION, CART-1816: a computed-key, pairs or keys read whose base may hold package.loaded is a reflective read
+    -- over the loaded modules — its result carries the label wherever it flows, a saturated port included)
+    local pls = {}
+    for _, a in ipairs(D.contracts.package_loaded_sites or {}) do pls[a] = true end
+    local REFL = B['reflection:package.loaded']
+    local CUR -- (the instruction being evaluated: { fn, index } — the first cause of a label on a variable)
+    local first = {}
+    local seeds = {}
     local hmodel = {}
     for _, e in ipairs(D.contracts.host_models or {}) do for _, g in ipairs(e[2] or {}) do hmodel[g] = true end end
     local F = {}
@@ -90,11 +98,36 @@ function M.compute(D)
         if tops[x] then m = bor(m, ESC) end
         return m
     end
+    -- (REFLECTION rides on what a reflected object YIELDS — copies, cell values, arguments into parameters, returns into
+    -- results, and what is read THROUGH it (its contents). A callee, a store's base, a key or an operand contributes the
+    -- other clauses but not it: by dependence, reflective code calling and writing what it found reached 93,137 variables
+    -- in 5,131 functions of cartograph's own tree, CART-1816)
+    local NOREFL = bit.bnot(REFL)
+    local function lvb(x) return band(lv(x), NOREFL) end
+    -- (a read THROUGH a reflected base yields reflected content only where the base holds something beyond the globals
+    -- table, the libraries and package.loaded — those are reachable by name, and reading through them is an ordinary
+    -- global read: in the default reading a reflective read returns exactly them, and labelling their contents labelled
+    -- every global, 37,312 variables)
+    local bmemo = {}
+    local function lvthru(y)
+        if not num(y) then return 0 end
+        local b = bmemo[y]
+        if b == nil then
+            b = false
+            for _, a in ipairs(V[y] or {}) do if not (globals[a] or libs[a] or pls[a]) then b = true; break end end
+            if tops[y] then b = true end
+            bmemo[y] = b
+        end
+        return b and lv(y) or lvb(y)
+    end
     local function setv(x, m)
         if not num(x) or m == 0 then return end
         local o = Lv[x] or 0
         local n = bor(o, m)
-        if n ~= o then Lv[x] = n; changed = true end
+        if n ~= o then
+            Lv[x] = n; changed = true
+            if band(o, REFL) == 0 and band(n, REFL) ~= 0 and CUR and not first[x] then first[x] = CUR end
+        end
     end
     local function orinto(t, k, m)
         if m == 0 then return end
@@ -211,6 +244,7 @@ function M.compute(D)
                 if fixed[a] then sd = bor(sd, B.host) end
                 if libs[a] then sd = bor(sd, B['libraries-never-escape']) end
                 if dyn and globals[a] then sd = bor(sd, B['computed-global']) end
+            if dyn and pls[a] then sd = bor(sd, REFL) end
             end
             smemo[key] = sd
         end
@@ -225,35 +259,35 @@ function M.compute(D)
     -- every instruction it reaches, a handler's entry among them)
     RULE.load = function (_, ins)
         local x, y, f = ins[2], ins[3], ins[4]
-        local m = seedload(y, lv(y), false)
-        local pin = m
+        local m = seedload(y, lvthru(y), false)
+        local pin = bor(m, lv(y))
         for _, c in ipairs(vchain(y)) do m = bor(m, cell(c, META), cell(c, f), dcell(c)) end
         for _, g in ipairs(vhandlers(y, IDX)) do m = bor(m, ret(g)); params_in(g, pin) end
         setv(x, m)
     end
     RULE.loadDyn = function (_, ins)
         local x, y, k = ins[2], ins[3], ins[4]
-        local m = seedload(y, bor(lv(y), lv(k)), true)
-        local pin = m
+        local m = seedload(y, bor(lvthru(y), lvb(k)), true)
+        local pin = bor(m, lv(y), lv(k))
         for _, c in ipairs(vchain(y)) do m = bor(m, cell(c, META), allcells(c)) end
         for _, g in ipairs(vhandlers(y, IDX)) do m = bor(m, ret(g)); params_in(g, pin) end
         setv(x, m)
     end
     RULE.loadRaw = function (_, ins)
         local x, y, k = ins[2], ins[3], ins[4]
-        local m = seedload(y, bor(lv(y), lv(k)), true)
+        local m = seedload(y, bor(lvthru(y), lvb(k)), true)
         for _, a in ipairs(V[y] or {}) do m = bor(m, cell(a, META), allcells(a)) end
         setv(x, m)
     end
     RULE.keys = function (_, ins)
         local x, y = ins[2], ins[3]
-        local m = seedload(y, lv(y), true)
+        local m = seedload(y, lvthru(y), true)
         for _, a in ipairs(V[y] or {}) do m = bor(m, cell(a, META), kcell(a)) end
         setv(x, m)
     end
     RULE.getmeta = function (_, ins)
         local x, y, f = ins[2], ins[3], ins[4]
-        local m = lv(y)
+        local m = lvb(y)
         for _, a in ipairs(V[y] or {}) do
             m = bor(m, cell(a, META))
             for _, mt in ipairs(H[a] and H[a][META] or {}) do m = bor(m, cell(mt, f)) end
@@ -263,8 +297,9 @@ function M.compute(D)
     RULE.op = function (_, ins)
         local x, ys, k = ins[2], ins[3], ins[4]
         local m = 0
-        for _, y in ipairs(ys) do m = bor(m, lv(y)) end
-        local inm = m
+        for _, y in ipairs(ys) do m = bor(m, lvb(y)) end
+        local inm = 0
+        for _, y in ipairs(ys) do inm = bor(inm, lv(y)) end
         for _, y in ipairs(ys) do
             for _, a in ipairs(V[y] or {}) do
                 m = bor(m, cell(a, META))
@@ -289,7 +324,7 @@ function M.compute(D)
             if closure[a] and hmodel[closure[a]] then seed = bor(seed, B['host-model']) end
         end
         if op == 'pcall' and anyesc then seed = bor(seed, B['outside-raises-strings']) end
-        local pin = bor(lv(fv), seed)
+        local pin = bor(lvb(fv), seed)
         local m = pin
         for _, a in ipairs(cs) do
             local g = closure[a]
@@ -315,7 +350,7 @@ function M.compute(D)
     RULE.call = function (_, ins) callrule('call', ins) end
     RULE.pcall = function (_, ins) callrule('pcall', ins) end
     local function storerule(x, f, vals, dyn)
-        local m = lv(x)
+        local m = lvb(x)
         for _, y in ipairs(vals) do m = bor(m, lv(y)) end
         for _, a in ipairs(V[x] or {}) do
             local ma = m
@@ -348,7 +383,7 @@ function M.compute(D)
         local m = 0
         for _, y in ipairs(ins[4]) do m = bor(m, lv(y)) end
         local o = Lchan.rin; Lchan.rin = bor(o, m); if Lchan.rin ~= o then changed = true end
-        for _, r in ipairs(ins[2]) do setv(r, bor(Lchan.rout, lv(ins[3]))) end
+        for _, r in ipairs(ins[2]) do setv(r, bor(Lchan.rout, lvb(ins[3]))) end
     end
     RULE.yield = function (_, ins)
         local m = 0
@@ -425,7 +460,8 @@ function M.compute(D)
             -- (escaped function: anything escaped reaches its parameters; a coroutine function's, what resume passes in)
             if escfn[g] then for _, p in ipairs(f.params) do setv(p, ESC) end end
             if cofns[g] then for _, p in ipairs(f.params) do setv(p, Lchan.rin) end end
-            for _, ins in ipairs(f.body) do RULE[ins[1]](g, ins) end
+            for k, ins in ipairs(f.body) do CUR = { g, k - 1 }; RULE[ins[1]](g, ins) end
+            CUR = nil
             for _, c in ipairs(callees[g]) do orinto(Lerr, g, Lerr[c] or 0) end
         end
     until not changed
@@ -447,8 +483,34 @@ function M.compute(D)
     for _, c in ipairs({ 'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env' }) do
         if stated[c] then global = bor(global, B[c]) end
     end
+    -- (the reflective reads, the functions holding them, and the BOUNDARY: every labelled variable of another function,
+    -- with the instruction that first carried the label into it — where reflection's results leave the reflecting code)
+    local refl = { seeds = {}, functions = {}, boundary = {} }
+    if next(pls) then
+        local owner = {}
+        for _, f in ipairs(D.functions) do
+            for _, p in ipairs(f.params) do owner[p] = owner[p] or f.id end
+            for k, ins in ipairs(f.body) do
+                local op = ins[1]
+                if num(ins[2]) then owner[ins[2]] = owner[ins[2]] or f.id end
+                if (op == 'loadDyn' or op == 'loadRaw' or op == 'keys') then
+                    for _, a in ipairs(V[ins[3]] or {}) do
+                        if pls[a] then refl.seeds[#refl.seeds + 1] = { f.id, k - 1 }; refl.functions[f.id] = true; break end
+                    end
+                end
+            end
+        end
+        for x, m in pairs(Lv) do
+            local o = owner[x]
+            if band(m, REFL) ~= 0 and o and not refl.functions[o] then
+                local fc = first[x]
+                refl.boundary[#refl.boundary + 1] = { x, o, fc and fc[1] or -1, fc and fc[2] or -1 }
+            end
+        end
+        table.sort(refl.boundary, function (p, q) return p[1] < q[1] end)
+    end
     local L = { v = Lv, h = Lh, d = Ld, k = Lk, w = Lw, err = Lerr, ret = Lret, chan = Lchan, passes = passes, region = region,
-        global = global }
+        global = global, reflection = refl }
     function L.names(m)
         local out = {}
         for i, c in ipairs(M.CLAUSES) do if band(m, bit.lshift(1, i - 1)) ~= 0 then out[#out + 1] = c end end

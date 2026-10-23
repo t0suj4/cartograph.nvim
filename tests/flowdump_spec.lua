@@ -1139,3 +1139,42 @@ test('flowdump: pkg-modules waives the computed package.loaded gap only where mo
     eq(0, gaps_of({ ['m.lua'] = SRC, ['lua/my/mod.lua'] = 'return {}\n' }), 'a module linked: the computed read lists it, no gap')
     eq(1, gaps_of({ ['m.lua'] = SRC, ['my/mod.lua'] = 'return {}\n' }), 'no module linked (no lua/ dir): still a gap')
 end)
+
+-- (CART-1816: reflection over package.loaded is a LABEL at its reads — computed key, pairs, keys — carried wherever
+-- the result flows; the dump reports the reads, the reflecting functions, and the BOUNDARY: labelled variables of other
+-- functions, each with the instruction that first carried the label into it)
+test('flowdump: a reflective read over package.loaded labels what flows from it, and the dump reports its boundary (CART-1816)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (with the tree's modules listed — pkg-modules — a reflective read reaches a MODULE: what is read through it is
+    -- reflected content; through _G or a library, reachable by name, it is an ordinary global read)
+    local root = tree({ ['m.lua'] = CLASSES .. table.concat({
+        'require("my.mod").obj = a',
+        'local function find() for _, m in pairs(package.loaded) do if type(m) == "table" and m.obj then return m.obj end end end',
+        'local function outside() local o = find(); return o end',
+        'print(use(outside() or b))',
+        'for _, m in pairs(package.loaded) do if type(m) == "table" and m.run then m.run(1) end end' }, '\n') .. '\n',
+        ['lua/my/mod.lua'] = 'local M = {}\nfunction M.run(q) return q end\nreturn M\n' })
+    store.ingest(ts.extract(root))
+    local RR = flowtype.solve(store, { open = false, dump = true, exp = 'pkg-modules' })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(RR.dump)
+    local R = D.labels.reflection
+    ok(R and #R.seeds >= 1, 'the reflective read is a seed: ' .. vim.inspect(R and R.seeds))
+    ok(#R.functions == 2, 'two reflecting functions (find, the chunk): ' .. vim.inspect(R.functions))
+    local fname = D.names.functions
+    local outside = false
+    for _, b in ipairs(R.boundary) do
+        if tostring(fname[b[2] + 1]):find('outside', 1, true) then outside = true; ok(b[3] >= 0, 'with a first cause: ' .. vim.inspect(b)) end
+    end
+    ok(outside, 'outside\'s variable is on the boundary: ' .. vim.inspect(R.boundary))
+    -- (a function reflection CALLS is not reflected content: its parameter holds what the call passed — the callee's label
+    -- does not ride into it, or every module function's parameters were labelled)
+    for _, b in ipairs(R.boundary) do ok(not tostring(fname[b[2] + 1]):find('M.run', 1, true), 'M.run\'s parameter is not labelled: ' .. vim.inspect(b)) end
+    local a
+    for _, x in ipairs(D.answers) do if x.call[3] == 29 then a = x end end
+    ok(a and vim.tbl_contains(a.contracts, 'reflection:package.loaded'), 'use\'s answer carries it: ' .. vim.inspect(a and a.contracts))
+    local D0 = dump('')
+    local a0
+    for _, x in ipairs(D0.answers) do if x.call[3] == 29 then a0 = x end end
+    ok(a0 and not vim.tbl_contains(a0.contracts, 'reflection:package.loaded'), 'a plain answer does not')
+end)

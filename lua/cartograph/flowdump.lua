@@ -98,7 +98,10 @@
 --   handlers / from the call's arguments — every cell written, every function's parameters; the call's results). A
 --   destination's mask ⊇ its sources' ∪ its instruction's seeds. `answers[].contracts`: flowtype's own (open mode's
 --   C1-C3) ∪ the answer's call: its callee variable's labels and the call's seeds, ∪ `region` when that reaches C1 / C3,
---   ∪ `global` (CART-1805). CARTOGRAPH_FLOWLABELS=0 skips it.
+--   ∪ `global` (CART-1805). `reflection` (CART-1816): the label `reflection:package.loaded` is seeded at every computed-
+--   key / pairs / keys read whose base may hold package.loaded (contracts.package_loaded_sites); `seeds` [[fn, index]],
+--   `functions` [fn] (the reflecting ones), `boundary` [[var, its fn, first fn, first index]]: each labelled variable of
+--   another function and the instruction that first carried the label into it. CARTOGRAPH_FLOWLABELS=0 skips it.
 -- * `contracts.library_sites` [site]: the library tables the clause `libraries-never-escape` keeps out of the escape
 --   closure, as the globals sites are — each library, the string library, package, package.loaded (CART-1797).
 local M = {}
@@ -718,6 +721,7 @@ function M.build(rec, X)
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
     put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null') .. ',"host_models":[' .. table.concat(hmj, ',') .. ']'
         .. ',"library_sites":' .. jarr((function () local l = {}; for o in pairs(X.LIBSITES or {}) do l[#l + 1] = o end; table.sort(l); return l end)())
+        .. ',"package_loaded_sites":' .. jarr((function () local l = {}; for o in pairs(X.PKGL or {}) do l[#l + 1] = o end; table.sort(l); return l end)())
         .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
             local ks, kv = {}, {}
             for k in pairs(M.CONTRACTS) do
@@ -757,7 +761,9 @@ function M.build(rec, X)
         put('"labels":{"clauses":' .. jarr(require('cartograph.flowlabels').CLAUSES)
             .. ',"v":' .. pairsj(L.v) .. ',"h":[' .. table.concat(hl, ',') .. '],"d":' .. pairsj(L.d) .. ',"k":' .. pairsj(L.k)
             .. ',"w":' .. pairsj(L.w) .. ',"err":' .. pairsj(L.err) .. ',"ret":' .. pairsj(L.ret)
-            .. ',"rin":' .. L.chan.rin .. ',"rout":' .. L.chan.rout .. ',"region":' .. L.region .. ',"global":' .. L.global .. '},')
+            .. ',"rin":' .. L.chan.rin .. ',"rout":' .. L.chan.rout .. ',"region":' .. L.region .. ',"global":' .. L.global
+            .. ',"reflection":{"seeds":' .. jarr(L.reflection.seeds) .. ',"functions":' .. jarr((function () local l = {}; for g in pairs(L.reflection.functions) do l[#l + 1] = g end; table.sort(l); return l end)())
+            .. ',"boundary":' .. jarr(L.reflection.boundary) .. '}},')
     end
     local aout = {}
     for i, a in ipairs(aj) do
