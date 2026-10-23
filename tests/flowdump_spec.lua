@@ -1045,3 +1045,16 @@ test('flowdump: instructions after a literal load stay in the caller\'s body (CA
     local n = calls(dump('local c = loadstring("return ...")(1)\nprint(use(a))\n'))
     ok(n >= base + 3, 'the loaded chunk\'s call, print and use(a) are recorded: ' .. base .. ' -> ' .. n)
 end)
+
+-- (CART-1811: the string metatable's __index is the string library, and what code WRITES there is a prototype of the
+-- string library — the library tables themselves are not: lib:string's natives on every string method were CART-1793's
+-- check failures, and the link cost WoW w2 a 41 s re-solve)
+test('flowdump: the string metatable keeps lib:string\'s natives off string methods (CART-1811)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('getmetatable("").__index.zz = a\nlocal u = ("x"):format()\n')
+    local nat
+    for _, x in ipairs(D.sites) do if x.label == 'native:string.format' then nat = x.id end end
+    local held = 0
+    for _, e in ipairs(D.solution.v) do for _, o in ipairs(e[2]) do if o == nat then held = held + 1 end end end
+    eq(0, held, 'no variable holds string.format\'s native: ' .. tostring(nat))
+end)

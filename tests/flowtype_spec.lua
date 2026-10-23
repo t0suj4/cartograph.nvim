@@ -2246,7 +2246,10 @@ test('flowtype: a modelled host function runs its Lua model (CART-1785)', functi
         ok(v and v.kind == 'exact' and #v.targets == 1 and tostring(v.targets[1]):match('A%.m'), 'modelled: ' .. full .. ' is A.m: ' .. vim.inspect(v))
     end
     local N = flowtype.solve(store, { open = false, hostmodels = false })
-    for _, full in ipairs { 'g:m', 'h:m' } do ok(not N.verdict(at[full]), 'no model: ' .. full .. ' has no answer') end
+    ok(not N.verdict(at['h:m']), 'no model: h:m has no answer')
+    -- (the registry needs no model since CART-1811: debug.getregistry() is one table per environment, built in)
+    local vg = N.verdict(at['g:m'])
+    ok(vg and vg.kind == 'exact' and tostring(vg.targets[1]):match('A%.m'), 'no model, the built-in registry: g:m is A.m: ' .. vim.inspect(vg))
     -- (the model is no tree code: it records no ACCESS — an access row is about a file of the tree)
     local W = flowtype.solve(store, { open = false, accesses = true, hostmodels = { test = HOSTMODEL } })
     local nacc, inmodel = 0, 0
@@ -2687,4 +2690,46 @@ test('flowtype: a method call on a string includes what the tree stored in the s
     local v
     for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
     ok(v and #(v.targets or {}) == 2 and vim.tbl_contains(v.targets, 'm.lua::string.m@6'), 'the string library\'s m and B.m: ' .. vim.inspect(v))
+end)
+
+-- (CART-1811, flowpath's progs-lib: a library reached WITHOUT reading its global was an empty value — a write through
+-- it vanished and a certified, entailed answer was wrong. Each writes `a` into a library that way and reads it back)
+test('flowtype: libraries reached by require, the registry, the string metatable and bit hold what is written (CART-1811)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HDR = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(b)' }
+    local callrec = require 'cartograph.callrec'
+    local function v_of(src)
+        local root = tree({ ['m.lua'] = table.concat(HDR, '\n') .. '\n' .. src .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    local function hasA(v) return v and vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1') end
+    for name, src in pairs({
+        l02 = 'require("io").zz = a\nprint(use(io.zz or b))',
+        l03 = 'local ok, m = pcall(require, "io")\nm.zz = a\nprint(use(io.zz or b))',
+        l36 = 'require("string").zz = a\nprint(use(string.zz or b))',
+        l42 = 'require("package").loaded.io.zz = a\nprint(use(io.zz or b))',
+        l22 = 'bit.zz = a\nprint(use(bit.zz or b))',
+        l06 = 'debug.getregistry()._LOADED.io.zz = a\nprint(use(io.zz or b))',
+        l07 = 'getmetatable("").__index.zz = a\nprint(use(string.zz or b))',
+        l35 = 'getmetatable("").__index.m = A.m\nprint(use("x"))',
+        l34 = 'debug.setmetatable("", { __index = { m = A.m } })\nprint(use("x"))',
+    }) do
+        local v = v_of(src)
+        ok(hasA(v), name .. ': the write is read back — ' .. vim.inspect(v))
+    end
+    -- (and only for a receiver holding STRINGS ONLY: a crawl over a merged port — a string or a table — keeps the tables'
+    -- metatables; AceLibrary's crawl had rewritten every string's methods, WoW w1 GE certified -> 143,157 refused)
+    local mixed = v_of(table.concat({ 'local C = {}', 'function C.m(self) return "C" end',
+        'local function crawl(t) local mt = getmetatable(t); if mt then mt.__index = C end end',
+        'crawl("s")', 'crawl(setmetatable({}, {}))', 'print(use("x"))' }, '\n'))
+    ok(not (mixed and vim.tbl_contains(mixed.targets or {}, 'm.lua::C.m@7')), 'a merged receiver leaves the strings alone: ' .. vim.inspect(mixed))
+    -- (a strings-only receiver: replacing the string metatable's __index reaches every string)
+    local pure = v_of(table.concat({ 'local C = {}', 'function C.m(self) return "C" end',
+        'getmetatable("s").__index = C', 'print(use("x"))' }, '\n'))
+    ok(pure and vim.tbl_contains(pure.targets or {}, 'm.lua::C.m@7'), 'getmetatable("").__index = C: strings get C.m: ' .. vim.inspect(pure))
 end)

@@ -1038,7 +1038,7 @@ local function build(store, opts)
         rawget = true, rawset = true, ['table#insert'] = true, next = true, error = true, pcall = true, type = true,
         ['table#concat'] = true, tonumber = true, rawlen = true, rawequal = true, setmetatable = true, getmetatable = true,
         ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true, ['debug#getupvalue'] = true,
-        ['debug#upvaluejoin'] = true, ['debug#setlocal'] = true, ['debug#getlocal'] = true,
+        ['debug#upvaluejoin'] = true, ['debug#setlocal'] = true, ['debug#getlocal'] = true, ['debug#getregistry'] = true,
         -- (a sort with no comparator runs __lt, and tostring / format / gsub / the iterators have no template: lost there)
         ['table#sort'] = function (a) return a[2] ~= nil end }
     do
@@ -1120,6 +1120,47 @@ local function build(store, opts)
             edge(mt, rl[1])
             edge(field(mt, '__metatable'), rl[1])
             G7.emit({ 'getmeta', rl[1], a[1], '__metatable' })
+            G7.strmt_into(a[1], rl[1])
+        end
+        -- ★ THE STRING METATABLE (CART-1811, flowpath's l07 / l35): every string shares one, whose __index is the string
+        -- library — getmetatable("").__index.zz = a writes it. Per environment, a never-escaping library site
+        function G7.strmt(e)
+            if e.STRMTO then return e.STRMTO end
+            local o = newobj('stringmt')
+            e.STRMTO = o
+            if e.STRLIB then addobj(ofp(o, '__index'), e.STRLIB) end
+            if e.LIBS and e.LIBS.string then addobj(ofp(o, '__index'), e.LIBS.string) end
+            -- (a string's method is read from the string library; what `getmetatable("").__index = T` puts there is a
+            -- prototype of it — replacing the __index reaches every string, CART-1811)
+            -- (only what code WRITES there: the library tables themselves are no prototype — lib:string's natives on every
+            -- string method had been CART-1793's 1,016 check failures, and the link cost WoW w2 a 41 s re-solve)
+            if e.STRLIB then
+                local sp, written = new(), new()
+                addobj(sp, e.STRLIB)
+                local lstr = e.LIBS and e.LIBS.string
+                filter(ofp(o, '__index'), written, function (x) return x ~= e.STRLIB and x ~= lstr end)
+                proto(sp, written, true)
+            end
+            G7.libsite(o)
+            return o
+        end
+        -- (getmetatable(y): the string metatable where y holds STRINGS ONLY — decided after the solve (G7.STRPEND), when y's
+        -- contents are final. A merged port that may also hold tables keeps the tables' metatables alone: answering the
+        -- string metatable there let AceLibrary's crawl `setmetatable(t, getmetatable(t))` over every reachable value
+        -- rewrite every string's methods — WoW w1, GE certified -> 143,157 refused)
+        function G7.strmt_into(y, x) G7.STRPEND[#G7.STRPEND + 1] = { 'getmeta', y, x } end
+        -- (a library NAME: a namespace of the profile, or _G — what `require` of it returns)
+        function G7.libname(nm) return nm == '_G' or (G7.NSSET and G7.NSSET[nm]) or false end
+        -- (debug.getregistry(): the registry, whose _LOADED is package.loaded — l06, CART-1811. Per environment)
+        M0['debug#getregistry'] = function (_, rl)
+            for _, e in ipairs(G7.ENVL or NOTHING) do
+                if not e.REGO then
+                    e.REGO = newobj('lib:registry')
+                    if e.PKGLOADED then addobj(ofp(e.REGO, '_LOADED'), e.PKGLOADED) end
+                    G7.libsite(e.REGO)
+                end
+                addobj(rl[1], e.REGO)
+            end
         end
         -- ★ THE DEBUG LIBRARY REWRITES TREE STATE (CART-1803, flowpath's GE review: three certified wrong whole answers).
         -- debug.setmetatable is setmetatable on any value; debug.getmetatable the raw slot — no `__metatable` override
@@ -1127,7 +1168,12 @@ local function build(store, opts)
         -- a closure's UPVALUES — every outer local the function captures (fp.ups, from the walk's scope lookup), whatever
         -- the index: sound, not per slot. Their flows are the solve's; the IR has no upvalue op, so a call by name is a
         -- dump gap `debug-upvalue`
-        M0['debug#setmetatable'] = M0['setmetatable']
+        -- (on a STRING it replaces every string's metatable: the string library gains the new __index as a prototype —
+        -- l34, CART-1811; the old one is kept, a sound over-approximation)
+        M0['debug#setmetatable'] = function (a, rl)
+            M0['setmetatable'](a, rl)
+            if a[1] and a[2] then G7.STRPEND[#G7.STRPEND + 1] = { 'setmeta', a[1], field(a[2], '__index') } end
+        end
         M0['debug#getmetatable'] = function (a, rl)
             if not a[1] then return end
             edge(field(a[1], '\1mt', true), rl[1])
@@ -1483,6 +1529,8 @@ local function build(store, opts)
     G7.UPVGAP = { ['debug#setupvalue'] = 'debug-upvalue', ['debug#getupvalue'] = 'debug-upvalue', ['debug#upvaluejoin'] = 'debug-upvalue',
         ['debug#setlocal'] = 'debug-local', ['debug#getlocal'] = 'debug-local' }
     G7.NAMEDRUN['debug#setlocal'], G7.NAMEDRUN['debug#getlocal'] = true, true
+    G7.NAMEDRUN['debug#getregistry'] = true
+    G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
     G7.LIBSITES, G7.PKGL = {}, {}
     do -- (the analysed code's Lua version, from its profile: 5.2+ changes comparison semantics, CART-1802)
@@ -1535,6 +1583,13 @@ local function build(store, opts)
                 if not lo then lo = newobj('lib:' .. lib); G7.ENV.LIBS[lib] = lo; if G7.NSSET[lib] then addobj(G7.gport(lib), lo) end end
                 addobj(ofp(lo, m), G7.NATOBJ[k])
             else addobj(G7.gport(k), G7.NATOBJ[k]) end
+        end
+        -- (EVERY library namespace is an object — `bit`'s functions take numbers only, so no native made one, and
+        -- `bit.zz = a` stored into nothing: a certified wrong whole answer, flowpath's l22, CART-1811)
+        for ns in pairs(G7.NSSET or NOTHING) do
+            if ns:match('^[%a_][%w_]*$') and not G7.ENV.LIBS[ns] then
+                local lo = newobj('lib:' .. ns); G7.ENV.LIBS[ns] = lo; addobj(G7.gport(ns), lo)
+            end
         end
     end
     -- ★ package.loaded (CART-1797): it listed nothing, so `package.loaded._G.x = a` stored into nothing — a certified wrong
@@ -2164,12 +2219,19 @@ local function build(store, opts)
                 -- the profile says; unknown code there wiped every declared type behind it, CART-1715)
                 for _, a in ipairs(argn) do expr(a) end
                 local s0 = argn[1] and argn[1]:type() == 'string' and argn[1]:field('content')[1]
+                -- (`require "io"` IS the io library — package.loaded holds it, CART-1797: the result had been an empty
+                -- port, and `require("io").zz = a` stored into nothing, flowpath's l02 / l36-l39 / l42, CART-1811)
+                if s0 and G7.libname(txt(s0)) then return G7.gport(txt(s0)) end
                 local xp = new()
                 if not (s0 and G7.profmod(txt(s0))) then addobj(xp, EXT) end
                 return xp
             end
             if fname == 'pcall' and argn[1] and argn[1]:type() == 'identifier' and txt(argn[1]) == 'require' then
                 local mp = modport(argn[2])
+                do -- (pcall(require, "io"): the library too, CART-1811 — l03)
+                    local s2 = not mp and argn[2] and argn[2]:type() == 'string' and argn[2]:field('content')[1]
+                    if s2 and G7.libname(txt(s2)) then mp = G7.gport(txt(s2)) end
+                end
                 if mp then
                     if not want then return mp end
                     local out = { new(), mp }
@@ -2343,6 +2405,7 @@ local function build(store, opts)
                     edge(mt, x)
                     edge(field(mt, '__metatable'), x)
                     G7.ins({ 'getmeta', x, y, '__metatable' })
+                    G7.strmt_into(y, x)
                     return x
                 end)
             end
@@ -3368,6 +3431,27 @@ local function build(store, opts)
         end
         if not grew then break end
         solve()
+    end
+    -- (THE STRING METATABLE, DEFERRED (CART-1811): getmetatable(y) / debug.setmetatable(y, mt) touch every string's
+    -- metatable where y holds strings only — G7.strmt_into)
+    if #G7.STRPEND > 0 then
+        local grew = false
+        for _, q in ipairs(G7.STRPEND) do
+            local y = q[2]
+            if not top[y] then
+                local str, other = false, false
+                for o in each(y) do if TNAME[o] == 'string' then str = true else other = true end end
+                if str and not other then
+                    grew = true
+                    for _, e in ipairs(G7.ENVL or NOTHING) do
+                        if q[1] == 'getmeta' then addobj(q[3], G7.strmt(e))
+                        elseif e.STRLIB then local sp = new(); addobj(sp, e.STRLIB); proto(sp, q[3], true) end
+                    end
+                end
+            end
+        end
+        G7.STRPEND = {}
+        if grew then solve() end
     end
     -- ★ FINALIZERS, DEFERRED (CART-1707): each setmetatable's `\1mt.__gc` load was 29 M of w2's 39 M load visits
     -- (solve 41 -> 76 s) for a handler no WoW addon defines. A finalizer exists only where a metatable — read after the
