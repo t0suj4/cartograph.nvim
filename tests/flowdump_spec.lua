@@ -935,12 +935,32 @@ end)
 -- (CART-1803: the IR has no upvalue op — a debug.setupvalue / getupvalue / upvaluejoin call by name is a gap; the
 -- solve carries its flows. debug.getmetatable is the RAW slot: its getmeta names a field no code writes, so no
 -- `__metatable` override applies; debug.setmetatable is setmetatable's `setmeta`)
-test('flowdump: debug upvalue calls are gaps; debug.getmetatable is a raw getmeta (CART-1803)', function ()
+test('flowdump: debug upvalue calls are copies, not gaps; debug.getmetatable is a raw getmeta (CART-1803, CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
+    -- (since CART-1813 no gap: the dump translates the call into copies between its value and every upvalue of the
+    -- functions the solution lists — closed, and the captured local holds what was written)
     local D = dump('local o = b\nlocal function get() return o end\ndebug.setupvalue(get, 1, a)\nprint(use(get()))\n')
     local g = 0
     for _, x in ipairs(D.gaps) do if x.kind == 'debug-upvalue' then g = g + 1 end end
-    eq(1, g, 'setupvalue by name: one gap')
+    eq(0, g, 'setupvalue by name: no gap')
+    eq(0, flowcheck.check(D).failed, 'the dump with the copies is closed')
+    -- (the COPY itself: get's upvalue — the variable its `return o` reads — is written twice in the chunk, by `local o = b`
+    -- and by the setupvalue translation)
+    local U, writes = nil, 0
+    for _, F in ipairs(D.functions) do
+        if tostring(D.names.functions[F.id + 1]):find('get', 1, true) then
+            for _, ins in ipairs(F.body) do if ins[1] == 'copy' and not U then U = ins[3] end end
+        end
+    end
+    for _, F in ipairs(D.functions) do
+        if D.names.functions[F.id + 1] == 'chunk:m.lua' then
+            for _, ins in ipairs(F.body) do if ins[1] == 'copy' and ins[2] == U then writes = writes + 1 end end
+        end
+    end
+    ok(U and writes >= 2, 'the upvalue is written by the translation too: ' .. tostring(U) .. ' x' .. writes)
+    local v
+    for _, x in ipairs(D.answers) do if x.call[3] == 29 then v = x end end
+    ok(v and #v.targets == 2, 'use(get()) holds A and B: ' .. vim.inspect(v))
     local D2 = dump('local t = setmetatable({}, { __index = b })\ndebug.getmetatable(t).__index = a\nlocal u = {}\ndebug.setmetatable(u, {})\n')
     local raw, setm = false, 0
     for _, F in ipairs(D2.functions) do

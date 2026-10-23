@@ -1530,6 +1530,7 @@ local function build(store, opts)
         ['debug#setlocal'] = 'debug-local', ['debug#getlocal'] = 'debug-local' }
     G7.NAMEDRUN['debug#setlocal'], G7.NAMEDRUN['debug#getlocal'] = true, true
     G7.NAMEDRUN['debug#getregistry'] = true
+    G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
     G7.LIBSITES, G7.PKGL = {}, {}
@@ -2631,7 +2632,11 @@ local function build(store, opts)
                     local _, g0 = lookup(fname:match('^[%a_][%w_]*') or fname)
                     -- (the DEBUG mutators have no path of their own: by name their model runs too, CART-1803)
                     if g0 and not G7.NAMEDRUN[k0] then for _, r in ipairs(resl) do G7.TEXTH[r] = true end end
-                    if g0 and G7.UPVGAP[k0] then G7.gap(G7.UPVGAP[k0], aps) end
+                    -- (an UPVALUE call by name is translated by the dump into copies over the functions the solution
+                    -- lists — G7.UPVCALLS, CART-1813; a frame (setlocal / getlocal) stays a gap)
+                    if g0 and G7.UPVGAP[k0] == 'debug-upvalue' then
+                        if G7.REC then G7.UPVCALLS[#G7.UPVCALLS + 1] = { fn = G7.cur(), op = k0, args = aps, res = resl } end
+                    elseif g0 and G7.UPVGAP[k0] then G7.gap(G7.UPVGAP[k0], aps) end
                     -- (setlocal / getlocal by name: the frame its level names — a literal 1 is the calling function)
                     if g0 and G7.UPVGAP[k0] == 'debug-local' then
                         local a1 = argn[1]
@@ -4748,7 +4753,7 @@ local function build(store, opts)
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
             MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, LOADCONTRACT = G7.ANYLOAD and not G7.EXP['loaded-globals'] or nil, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
-            LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, PKGMODS = G7.EXP['pkg-modules'] or nil,
+            LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, PKGMODS = G7.EXP['pkg-modules'] or nil,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot

@@ -82,8 +82,9 @@
 --   (present as 1, else absent): that coroutine channel is saturated or tainted, so it holds any escaped value
 --   (CART-1757). `package-loaded`: a load of package.loaded beyond its listed entries (_G, the libraries) — a module,
 --   a computed key, pairs over it — reads what the solve does not model there (CART-1797).
---   `debug-upvalue`: a debug.setupvalue / getupvalue / upvaluejoin call by name — the solve flows the value into (out of)
---   every upvalue of the functions it is handed; the IR has no upvalue op (CART-1803).
+--   `debug-upvalue`: a debug.setupvalue / getupvalue / upvaluejoin call by name whose function argument is past CAP —
+--   otherwise the dump translates it into copies between its value and every upvalue of the functions the solution
+--   lists (CART-1803, CART-1813).
 --   `debug-local`: a debug.setlocal / getlocal call by name — the solve flows the value into (out of) the locals of the
 --   frame its level names (a literal 1: the calling function; else any function's); the IR has no frame op (CART-1804).
 -- * `labels` (CART-1801): which contract clauses each value's derivation rests on — flowlabels.lua, a fixpoint over this
@@ -193,6 +194,31 @@ end
 --- X: the solve's internals (flowtype passes them): N, each, top, tainted, tfrom, obinfo, fnports, ofield, okeys, TNAME,
 --- GOBJ, GPORT, EXT, GERR, GYIELD, GRESARG, FENVP, EXTCALL, XA, verdicts, calls, callrec, sha
 function M.build(rec, X)
+    -- ★ UPVALUE CALLS AS COPIES (CART-1813): the IR has no upvalue op, so a debug.setupvalue / getupvalue / upvaluejoin
+    -- call by name was a gap — and a gap blocks the certificate. Once solved, the functions its first argument holds
+    -- are known, and each one's upvalues are its captured outer locals (fp.ups): setupvalue is a copy of its value into
+    -- every one of them, getupvalue a copy of every one into its second result, upvaluejoin copies both ways — the
+    -- model's own edges, an over-approximation (any upvalue, not the indexed one). A first argument past CAP keeps the gap
+    for _, u in ipairs(X.UPVCALLS or {}) do
+        local function ups_of(p)
+            if not p or (X.top and X.top[p]) then return nil end
+            local l = {}
+            for o in X.each(p) do local fp = X.fnports[o]; for up in pairs(fp and fp.ups or {}) do l[#l + 1] = up end end
+            return l
+        end
+        local a, r = u.args, u.res
+        local u1 = ups_of(a[1])
+        if not u1 then rec.gap(u.fn, 'debug-upvalue', a)
+        elseif u.op == 'debug#setupvalue' then
+            if a[3] then for _, up in ipairs(u1) do rec.ins(u.fn, { 'copy', up, a[3] }) end end
+        elseif u.op == 'debug#getupvalue' then
+            if r[2] then for _, up in ipairs(u1) do rec.ins(u.fn, { 'copy', r[2], up }) end end
+        elseif u.op == 'debug#upvaluejoin' then
+            local u2 = ups_of(a[3])
+            if not u2 then rec.gap(u.fn, 'debug-upvalue', a)
+            else for _, x in ipairs(u1) do for _, y in ipairs(u2) do rec.ins(u.fn, { 'copy', x, y }); rec.ins(u.fn, { 'copy', y, x }) end end end
+        end
+    end
     local out = {}
     local function put(s) out[#out + 1] = s end
     -- field ids
