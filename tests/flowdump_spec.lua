@@ -584,7 +584,7 @@ end)
 
 -- (CART-1775, fixed environments: a tree that never calls setfenv has every environment _G — getfenv leaves no gap and
 -- the dump states `fixed-env`; one that does keeps the gap and claims nothing)
-test('flowdump: getfenv is no gap under fixed environments, and stays one when the tree calls setfenv', function ()
+test('flowdump: getfenv is no gap under fixed environments, and stays one when a setfenv may target a tree function (CART-1775, CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local function kinds(D) local g = {}; for _, x in ipairs(D.gaps) do g[x.kind] = true end; return g end
     local D = dump('\nlocal G = getfenv(0)\nreturn G\n')
@@ -600,11 +600,22 @@ test('flowdump: getfenv is no gap under fixed environments, and stays one when t
         '\nlocal setfenv = function () end\nsetfenv(1, {})\nlocal G = getfenv(0)\nreturn G\n' } do
         ok(dump(src).contracts.clauses['fixed-env'] ~= nil, 'fixed: ' .. src)
     end
+    -- (CART-1813: from the SOLUTION, not from a reference — a call that may set a TREE function's environment, by name or
+    -- by value, withholds the claim; an alias never called, or a call on loaded code, does not)
+    for _, src in ipairs {
+        '\nlocal function f() return x end\nsetfenv(f, {})\nlocal G = getfenv(0)\nreturn G\n',
+        '\nlocal sf = setfenv\nlocal function f() return x end\nsf(f, {})\nlocal G = getfenv(0)\nreturn G\n',
+        '\nlocal function f() return x end\ndebug.setfenv(f, {})\nlocal G = getfenv(0)\nreturn G\n',
+        '\nlocal sf = debug.setfenv\nlocal function f() return x end\nsf(f, {})\nlocal G = getfenv(0)\nreturn G\n' } do
+        local D2 = dump(src)
+        -- (by value the call has no walk position: the claim is withheld and the getfenv gap stays)
+        ok(D2.contracts.clauses['fixed-env'] == nil and (kinds(D2).setfenv or kinds(D2).getfenv), 'not fixed, a gap: ' .. src)
+    end
     for _, src in ipairs {
         '\nlocal sf = setfenv\nlocal G = getfenv(0)\nreturn G, sf\n',
-        '\nlocal sf = debug.setfenv\nlocal G = getfenv(0)\nreturn G, sf\n',
-        '\nlocal sf = _G["setfenv"]\nlocal G = getfenv(0)\nreturn G, sf\n' } do
-        ok(dump(src).contracts.clauses['fixed-env'] == nil, 'not fixed: ' .. src)
+        '\nlocal g = loadstring(tostring(1))\nsetfenv(g, {})\nlocal G = getfenv(0)\nreturn G\n' } do
+        local D2 = dump(src)
+        ok(D2.contracts.clauses['fixed-env'] ~= nil and not kinds(D2).setfenv and not kinds(D2).getfenv, 'fixed, no gap: ' .. src)
     end
 end)
 

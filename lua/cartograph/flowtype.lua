@@ -856,7 +856,11 @@ local function build(store, opts)
                 end
                 mdl(args, type(res) == 'table' and res or { res }, cerr)
                 G7.NATFN = nil
-            else G7.NATLOST[#G7.NATLOST + 1] = { res, args, cerr } end
+            else
+                G7.NATLOST[#G7.NATLOST + 1] = { res, args, cerr }
+                -- (setfenv by VALUE — an alias: its function argument, for the fixed-env decision, CART-1813)
+                if (key == 'setfenv' or key == 'debug#setfenv') and args[1] then G7.SETFENVS[#G7.SETFENVS + 1] = { port = args[1] } end
+            end
             return
         end
         if G7.PH and G7.PH[o] then
@@ -1530,6 +1534,7 @@ local function build(store, opts)
         ['debug#setlocal'] = 'debug-local', ['debug#getlocal'] = 'debug-local' }
     G7.NAMEDRUN['debug#setlocal'], G7.NAMEDRUN['debug#getlocal'] = true, true
     G7.NAMEDRUN['debug#getregistry'] = true
+    G7.SETFENVS = {} -- (every setfenv / debug.setfenv call: { fn, port | level } — the dump's fixed-env decision, CART-1813)
     G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
@@ -2298,16 +2303,19 @@ local function build(store, opts)
             -- _G. getfenv returns _G and every environment set. rawget / rawset are a load and a store)
             if fname == 'getfenv' and gbl() then for _, a in ipairs(argn) do expr(a) end; G7.gap('getfenv', {}); return G7.FENVP end
             if fname == 'setfenv' and argn[2] and gbl() then
-                G7.gap('setfenv', {})
+                -- (no gap here: the DUMP decides from the solution whether this call can set a TREE function's
+                -- environment — a function argument holding only loaded code does not, CART-1813)
                 local fa, env = argn[1], expr(argn[2])
                 edge(env, G7.FENVP)
                 local pf = fnstack[#fnstack]
                 if fa:type() ~= 'number' then
                     local fp = expr(fa)
                     G7.FENV[#G7.FENV + 1] = { port = fp, env = env }
+                    G7.SETFENVS[#G7.SETFENVS + 1] = { fn = G7.cur(), port = fp }
                     return fp
                 elseif txt(fa) == '1' and (pf or G7.CHUNK) then G7.FENV[#G7.FENV + 1] = { id = pf and pf.id or G7.CHUNK, env = env }
                 else proto(G7.GPORT, env) end
+                G7.SETFENVS[#G7.SETFENVS + 1] = { fn = G7.cur(), level = txt(fa) }
                 return new()
             end
             local function strkey(a)
@@ -2638,6 +2646,12 @@ local function build(store, opts)
                         if G7.REC then G7.UPVCALLS[#G7.UPVCALLS + 1] = { fn = G7.cur(), op = k0, args = aps, res = resl } end
                     elseif g0 and G7.UPVGAP[k0] then G7.gap(G7.UPVGAP[k0], aps) end
                     -- (setlocal / getlocal by name: the frame its level names — a literal 1 is the calling function)
+                    -- (debug.setfenv by NAME ran nothing: it sets f's environment as setfenv does, CART-1813)
+                    if g0 and k0 == 'debug#setfenv' and aps[1] and aps[2] then
+                        edge(aps[2], G7.FENVP)
+                        G7.FENV[#G7.FENV + 1] = { port = aps[1], env = aps[2] }
+                        G7.SETFENVS[#G7.SETFENVS + 1] = { fn = G7.cur(), port = aps[1] }
+                    end
                     if g0 and G7.UPVGAP[k0] == 'debug-local' then
                         local a1 = argn[1]
                         G7.DBGCTX[resl[1]] = { fn = fnstack[#fnstack] and fnstack[#fnstack].id or ('chunk:' .. file),
@@ -4753,7 +4767,7 @@ local function build(store, opts)
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
             MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, LOADCONTRACT = G7.ANYLOAD and not G7.EXP['loaded-globals'] or nil, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
-            LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, PKGMODS = G7.EXP['pkg-modules'] or nil,
+            LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = G7.EXP['pkg-modules'] or nil,
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot

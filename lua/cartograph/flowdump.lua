@@ -114,7 +114,7 @@ M.CONTRACTS = {
     ['host'] = 'a host site of kind prim or members (sites[i].host, from the environment profile) has no fields: a store to it is not followed, a load from it is its declared type; an open host site is an ordinary object. A builtin\'s declared result is such a site only when it cannot be what the call was handed: a declared `any` / `unknown` result of a call passing arguments is TAINTED instead, a generic `T` of a `T[]` / `table<K, T>` argument is that argument\'s elements, and select / unpack / table.remove are modelled (CART-1790)',
     ['strict-global'] = 'GN, one run hypothesis with computed-global: a DYNAMIC step on _G — a key computed at run time: `_G[k]`, `rawget(_G, k)`, `rawset(_G, k, v)`, next / pairs over _G — never reaches a NAMED global: a string key the tree uses on _G as a constant (`x`, `_G.x`, `_G["x"]`, `rawget(_G, "x")`, lowered to static fields) or a global the environment defines by name. A numeric key is no name. So a named global read does not see a dynamic-key write (tag contract:strict-global; a `#` load is untagged, CART-1799)',
     ['globals-per-program'] = 'each program of the tree has its own globals table: other programs do not read this program\'s globals (stated only when the tree holds several programs; false for WoW addons and Neovim plugins, which share _G)',
-    ['fixed-env'] = 'the tree never calls setfenv (its text never names it), and outside code does not set a tree function\'s environment: every environment is the globals table (stated only when that holds)',
+    ['fixed-env'] = 'no setfenv / debug.setfenv in the tree targets a tree function (by the solution: each one\'s function argument holds only loaded code or nothing — CART-1813), and outside code does not set a tree function\'s environment: every tree function\'s environment is the globals table (stated only when that holds)',
     ['computed-global'] = 'GN (stated under strict-global): a dynamic read on _G — `_G[k]` with k unknown, rawget(_G, k), next / pairs over _G — sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'GE, a run hypothesis (flowpath FLOW-0057): _G may escape, but its named globals and its metatable slot are touched only by an ENVIRONMENT access — a static access whose base points to exactly {_G} — never through another value, an __index chain or outside code (outside code may consult its metamethods implicitly; the metatable and its handlers then escape). So the globals site is kept out of the escape closure and a write through a cap-cut value that may be _G is not followed. Known violations: require("_G").x (an external site, the host contract), debug.setmetatable(_G, …); package.loaded._G.x is an environment access since CART-1797',
     ['libraries-never-escape'] = 'the library tables (contracts.library_sites: each library, the string library, package, package.loaded) never escape, as the globals site does not: a write through a cap-cut value that may be one is not followed (tag contract:libraries-never-escape, CART-1797)',
@@ -194,6 +194,26 @@ end
 --- X: the solve's internals (flowtype passes them): N, each, top, tainted, tfrom, obinfo, fnports, ofield, okeys, TNAME,
 --- GOBJ, GPORT, EXT, GERR, GYIELD, GRESARG, FENVP, EXTCALL, XA, verdicts, calls, callrec, sha
 function M.build(rec, X)
+    -- ★ FIXED ENVIRONMENTS, FROM THE SOLUTION (CART-1813): a setfenv whose function argument holds no TREE closure — only
+    -- loaded code (a non-literal load's chunk: EXT) or nothing — sets no tree function's environment; it hands the
+    -- environment to unknown code, which the solve models. Every such call keeps the claim fixed-env; a call that may
+    -- target a tree closure, a saturated argument or a numeric level is a gap and withholds the claim. (It was the TEXT:
+    -- cartograph's own nine setfenv(loadstring(...), env) sandboxes made the whole tree non-fixed)
+    do
+        local harmful = 0
+        for _, sf in ipairs(X.SETFENVS or {}) do
+            local bad = sf.level ~= nil
+            if not bad and sf.port then
+                if X.top and X.top[sf.port] then bad = true
+                else for o in X.each(sf.port) do if X.fnports[o] then bad = true; break end end end
+            end
+            if bad then
+                harmful = harmful + 1
+                if sf.fn then rec.gap(sf.fn, 'setfenv', sf.port and { sf.port } or {}) end
+            end
+        end
+        X.FIXEDENV = harmful == 0
+    end
     -- ★ UPVALUE CALLS AS COPIES (CART-1813): the IR has no upvalue op, so a debug.setupvalue / getupvalue / upvaluejoin
     -- call by name was a gap — and a gap blocks the certificate. Once solved, the functions its first argument holds
     -- are known, and each one's upvalues are its captured outer locals (fp.ups): setupvalue is a copy of its value into
@@ -586,7 +606,7 @@ function M.build(rec, X)
     for _, g in ipairs(rec.gaps) do
         -- (FIXED environments: a tree that never calls setfenv has every environment _G, and getfenv(…) IS the globals
         -- port the IR already holds — the clause `fixed-env` states it; with a setfenv the gap stays, CART-1775)
-        if g.kind == 'getfenv' and not X.ANYSETFENV then goto nextgap end
+        if g.kind == 'getfenv' and X.FIXEDENV then goto nextgap end
         gj[#gj + 1] = ('{"fn":%d,"kind":%s,"vars":%s,"at":%s}'):format(FN(g.fn), jstr(g.kind), jarr(g.vars), g.at and jstr(g.at) or 'null')
         ::nextgap::
     end
@@ -701,7 +721,7 @@ function M.build(rec, X)
         .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
             local ks, kv = {}, {}
             for k in pairs(M.CONTRACTS) do
-                if not (k == 'fixed-env' and X.ANYSETFENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
+                if not (k == 'fixed-env' and not X.FIXEDENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
                     and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT)
                     and not (k == 'libraries-never-escape' and not next(X.LIBSITES or {})) then ks[#ks + 1] = k end
             end
