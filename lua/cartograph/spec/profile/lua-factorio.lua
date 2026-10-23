@@ -202,6 +202,9 @@ end
 
 return {
     schema = 1, runtime = 'lua-factorio', lang = 'lua',
+    -- (the LANGUAGE version Factorio embeds — its semantics differ from 5.1 / LuaJIT's: an ordering comparison runs either
+    -- operand's __lt / __le, CART-1802)
+    lua_version = '5.2',
     version = api_version or '2.0', stamp = 'hand-authored',
     types = TYPES, free = free, namespaces = namespaces, nsset = nsset,
     vocab = vocab,

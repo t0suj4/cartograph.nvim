@@ -2643,14 +2643,15 @@ end)
 -- never run x's __eq / __lt; `x == y` with both objects does)
 test('flowtype: a comparison with a literal operand runs no handler (CART-1802)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
-    local function v_of(cmp)
+    local function v_of(cmp, profile)
         local root = tree({ ['m.lua'] = table.concat({
             'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
             'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
             'local function use(p) return p:m() end', 'use(b)',
-            'local mt = { __index = A, __eq = function (x, y) return use(y) == 1 end, __lt = function (x, y) return use(y) == 1 end }',
+            'local mt = { __index = A, __eq = function (x, y) return use(x) == 1 end, __lt = function (x, y) return use(x) == 1 end }',
             'local x, y = setmetatable({}, mt), setmetatable({}, mt)', 'local _ = ' .. cmp }, '\n') .. '\n' })
         store.ingest(ts.extract(root))
+        if profile then store.data.profile = profile end
         local R = flowtype.solve(store, { open = false })
         vim.fn.delete(root, 'rf')
         local callrec = require 'cartograph.callrec'
@@ -2662,4 +2663,10 @@ test('flowtype: a comparison with a literal operand runs no handler (CART-1802)'
     end
     local v = v_of('x == y')
     ok(v and vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1'), 'x == y: both have the handler, it runs with y: ' .. vim.inspect(v))
+    -- (Lua 5.2+ — Factorio's profile, lua_version 5.2: an ordering runs either operand's __lt, the literal's partner too;
+    -- == still never runs it with a literal)
+    local v52 = v_of('x < 0', 'lua-factorio')
+    ok(v52 and vim.tbl_contains(v52.targets or {}, 'm.lua::A.m@1'), '5.2: x < 0 runs x\'s __lt: ' .. vim.inspect(v52))
+    local e52 = v_of('x == nil', 'lua-factorio')
+    ok(e52 and e52.kind == 'exact', '5.2: x == nil still runs nothing: ' .. vim.inspect(e52))
 end)

@@ -1484,7 +1484,12 @@ local function build(store, opts)
         ['debug#setlocal'] = 'debug-local', ['debug#getlocal'] = 'debug-local' }
     G7.NAMEDRUN['debug#setlocal'], G7.NAMEDRUN['debug#getlocal'] = true, true
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
-    G7.LIBSITES, G7.PKGL = {}, {} -- (the library tables, the clause libraries-never-escape; each package.loaded, CART-1797)
+    G7.LIBSITES, G7.PKGL = {}, {}
+    do -- (the analysed code's Lua version, from its profile: 5.2+ changes comparison semantics, CART-1802)
+        local okp, prf = pcall(function () return store.data.profile and require('cartograph.spec.profile').load(store.data.profile) end)
+        local lv = okp and prf and tonumber(prf.lua_version)
+        G7.LUA52 = lv ~= nil and lv >= 5.2
+    end -- (the library tables, the clause libraries-never-escape; each package.loaded, CART-1797)
     do
         local P = require 'cartograph.spec.profile'
         local function prim(t) if type(t) ~= 'string' then return true end; return SCALAR[(t:gsub('%?$', ''))] or false end
@@ -2814,7 +2819,9 @@ local function build(store, opts)
                 -- (Lua 5.1 / LuaJIT — the dump's `ver 51`: a comparison runs a handler only when EVERY operand has one, and
                 -- a literal nil / boolean / number has none — nor does a string for == / ~=, which consults __eq only for
                 -- two tables or two userdata. `x == nil`, `n < 0` had run x's handler with the literal, CART-1802)
-                if CMPOP[op] then
+                -- (`==` / `~=` in every version; an ORDERING only under 5.1 / LuaJIT — 5.2+ runs either operand's __lt / __le,
+                -- `t < 5` included: a profile declaring lua_version 5.2+ keeps those handlers, FLOW-01 on CART-1802)
+                if CMPOP[op] and (op == '==' or op == '~=' or not G7.LUA52) then
                     local function lit(x) local ty = x and x:type(); return ty == 'nil' or ty == 'true' or ty == 'false' or ty == 'number'
                         or ((op == '==' or op == '~=') and ty == 'string') end
                     if lit(l) or lit(r) then mm = nil end
