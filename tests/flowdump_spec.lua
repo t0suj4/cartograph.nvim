@@ -915,7 +915,8 @@ test('flowdump: a load of package.loaded beyond its listed entries is a gap (CAR
     eq(1, gaps(dump('package.loaded.mymod.x = a\n')), 'a module is not listed: a gap')
     eq(1, gaps(dump('local k = ...\nlocal m = package.loaded[k]\n')), 'a computed key: a gap')
     ok(gaps(dump('for _, m in pairs(package.loaded) do print(m) end\n')) >= 1, 'pairs over it: a gap')
-    eq(0, gaps(dump('local k = ...\nlocal m = package.loaded[k]\n', 'pkg-modules')), 'pkg-modules lists the modules: no gap')
+    -- (CART-1815: pkg-modules waives the gap only where it LINKED a module — this tree has none under lua/)
+    eq(1, gaps(dump('local k = ...\nlocal m = package.loaded[k]\n', 'pkg-modules')), 'pkg-modules with no module linked: still a gap')
 end)
 
 -- (CART-1799, flowpath's GN review: a NUMERIC key is no name. `_G[1]` / ipairs(_G) load `#`, which a dynamic-key store
@@ -1119,4 +1120,22 @@ test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is
     end
     eq(0, gaps_of('local s = package.loaded["my.mod"]\n'), 'literal: no gap')
     eq(1, gaps_of('local k = ...\nlocal s = package.loaded[k]\n'), 'computed: a gap')
+end)
+
+-- (CART-1815, flowpath: under pkg-modules a computed package.loaded read is no gap ONLY where a module was linked — a root
+-- whose files are not under lua/ links none, and the reads must stay gaps)
+test('flowdump: pkg-modules waives the computed package.loaded gap only where modules were linked (CART-1815)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function gaps_of(files)
+        local root = tree(files)
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, dump = true, exp = 'pkg-modules' })
+        vim.fn.delete(root, 'rf')
+        local n = 0
+        for _, g in ipairs(vim.json.decode(R.dump).gaps) do if g.kind == 'package-loaded' then n = n + 1 end end
+        return n
+    end
+    local SRC = CLASSES .. 'local k = ...\nlocal s = package.loaded[k]\n'
+    eq(0, gaps_of({ ['m.lua'] = SRC, ['lua/my/mod.lua'] = 'return {}\n' }), 'a module linked: the computed read lists it, no gap')
+    eq(1, gaps_of({ ['m.lua'] = SRC, ['my/mod.lua'] = 'return {}\n' }), 'no module linked (no lua/ dir): still a gap')
 end)
