@@ -57,6 +57,7 @@ M.EXPERIMENTS = {
     selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
     ['loaded-globals'] = 'code a non-literal load returns reads and writes every global by name: the globals are tainted and their values escape — the sound reading; by default the dump states the contract `loaded-code` instead (CART-1796, the user\'s decision: vimruntime partial 384 -> 468, WoW w2 212 -> 513)',
+    ['refl-nocap'] = 'MEASUREMENT: the reflection region\'s ports — every port the walk made in a file that uses package.loaded reflectively (a computed key, pairs, handed on as a value) — are exempt from CAP, so saturation inside the region does not escape every module (flowpath on CART-1816). Measured 2026-10-24 on cartograph\'s own tree with pkg-modules, CAP 64: 81 s / 2.5 GB -> 267 s / 10.9 GB and no dump — the file-wide region uncaps mixalg\'s algebra walkers too; scoped saturation is flowpath\'s FLOW-0093',
     ['pkg-modules'] = 'package.loaded also lists the tree\'s modules by name (sound: without it `package.loaded.m.x = a` is lost) — measured: a computed-key read of package.loaded (hot-spots, mixalg, packmap, self_oracle) merges every module into one port, it saturates, and saturation escapes every module (repo 938 rows partial, oracle exact RIGHT 32 -> 2), CART-1797',
     ['libs-escape'] = 'the library tables (each library, the string library, package, package.loaded) follow the escape closure as ordinary objects — the reading without the clause libraries-never-escape: runtime oracle with ctx, string RIGHT 92 -> 52, typed 124 -> 43 (CART-1797)',
     ['host-inst'] = 'a host model function is instanced per CALL SITE — walked again there (CART-1785: measured, vimruntime unknown 303 -> 390, +25 s; the reference for its summary)',
@@ -292,7 +293,9 @@ local function build(store, opts)
     local FUEL = tonumber(opts.fuel or os.getenv('CARTOGRAPH_FLOWTYPE_FUEL') or '')
     local OUT = false
     local walking, NW, NOW = true, 0, 0
-    local function new() N = N + 1; if G7.LOCP then G7.LOCP[N] = G7.CURLOC end; if G7.TR then G7.TR.PFN[N] = G7.CURFN end; return N end
+    local function new() N = N + 1; if G7.LOCP then G7.LOCP[N] = G7.CURLOC end; if G7.TR then G7.TR.PFN[N] = G7.CURFN end; if G7.PORTFILE then G7.PORTFILE[N] = G7.WALKFILE end; return N end
+    -- (experiment refl-nocap: a port of a reflecting file is exempt from CAP)
+    function G7.capped(p) return not (G7.PORTFILE and G7.REFLFILE[G7.PORTFILE[p] or false]) end
     local function newobj(info) NO = NO + 1; obinfo[NO] = info; if G7.TR then G7.TR.OFN[NO] = G7.CURFN end; if G7.OBJFN then G7.OBJFN[NO] = G7.WALKFN or false end; return NO end
     -- (an object named stably: one the walk made by its number, one the solve made — a type object — by its info)
     local function okey(o) return o <= NOW and o or tostring(obinfo[o]) end
@@ -445,7 +448,7 @@ local function build(store, opts)
             if cnt[p] > BIG then tobits(p) end
         end
         if G7.TR and G7.TSRC then G7.trbump(G7.TSRC, p, G7.TKIND) end
-        if cnt[p] > M.CAP then return settop(p) end
+        if cnt[p] > M.CAP and G7.capped(p) then return settop(p) end
         -- (a port's pending delta as its objects are: ONE object is the number itself, more a list, many a bitset — most
         -- deltas hold one object, and a list per port per round was the allocation census's top site, 1.3 M per run)
         local d = delta[p]
@@ -484,7 +487,7 @@ local function build(store, opts)
         end
         if added > 0 then
             cnt[q] = (cnt[q] or 0) + added
-            if cnt[q] > M.CAP then return settop(q) end
+            if cnt[q] > M.CAP and G7.capped(q) then return settop(q) end
             push(q)
         end
     end
@@ -1555,6 +1558,7 @@ local function build(store, opts)
     G7.NAMEDRUN['table#move'] = true -- (by name it ran nothing: the model runs, CART-1814)
     G7.SETFENVS = {} -- (every setfenv / debug.setfenv call: { fn, port | level } — the dump's fixed-env decision, CART-1813)
     G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
+    if G7.EXP['refl-nocap'] then G7.PORTFILE, G7.REFLFILE = {}, {} else G7.PORTFILE, G7.REFLFILE = nil, nil end
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
     G7.LIBSITES, G7.PKGL = {}, {}
@@ -1902,6 +1906,8 @@ local function build(store, opts)
     end
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
+        local wf0 = G7.WALKFILE
+        G7.WALKFILE = file
         -- (one parse per text per process, shared with the extractor and the lint rules — a snippet instance's text is
         -- its own entry. Keyed by the PARSE VIEW, as every parse site is: the raw text of a file that mentions `global`
         -- is a different key, so it missed the extractor's tree, parsed again, and the grammar misread that copy.)
@@ -2862,6 +2868,19 @@ local function build(store, opts)
             end
             if t == 'vararg_expression' then local f = fnstack[#fnstack]; return f and f.vararg or new() end
             if t == 'dot_index_expression' then
+                -- (refl-nocap: `package.loaded` used as a VALUE — not under a literal key or a field name — makes this file a
+                -- reflecting one)
+                if G7.PORTFILE and G7.ispkgloaded(n, lookup, txt) then
+                    local par = n:parent()
+                    local pt = par and par:type()
+                    local lit = false
+                    if pt == 'dot_index_expression' and par:field('table')[1] == n then lit = true
+                    elseif pt == 'bracket_index_expression' and par:field('table')[1] == n then
+                        local kf = par:field('field')[1]
+                        lit = kf and kf:type() == 'string' or false
+                    end
+                    if not lit then G7.REFLFILE[file] = true end
+                end
                 local base = expr(n:field('table')[1])
                 local fnode = n:field('field')[1] -- (each n:field() call allocates a table and a node: asked once)
                 local fname_ = txt(fnode)
@@ -3167,6 +3186,7 @@ local function build(store, opts)
         for _, s in tsutil.inamed, tree, -1 do stmt(s); if raises(s) then break end end
         G7.W = false
         if G7.REC and rk0 then G7.W, G7.FNS, G7.CK, expr, callv = rw0, rf0, rk0, re0, rc0 end
+        G7.WALKFILE = wf0
         G7.CHUNK = saved
     end
     local instances = {}
