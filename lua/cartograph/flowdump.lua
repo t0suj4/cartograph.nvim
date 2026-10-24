@@ -770,7 +770,12 @@ function M.build(rec, X)
     -- (gn_exclude, CART-1820: the names the tree's own literal-keyed dynamic _G steps reach — out of GN's named set,
     -- their reads saturated in the solve; interned here, before the field names are written)
     local gnx = {}
-    for nm in pairs(X.GNEXCL or {}) do gnx[#gnx + 1] = F(nm) end
+    do -- (interned in ONE order — pairs over strings differs per run, and so had the field ids)
+        local nms = {}
+        for nm in pairs(X.GNEXCL or {}) do nms[#nms + 1] = nm end
+        table.sort(nms)
+        for _, nm in ipairs(nms) do gnx[#gnx + 1] = F(nm) end
+    end
     table.sort(gnx)
     local maxf = 0
     for id in pairs(fnames) do if id > maxf then maxf = id end end

@@ -773,7 +773,11 @@ local function build(store, opts)
             local tg = PTAG[x]
             if tg and tg.d < 3 then PTAG[dst] = { fn = tg.fn, j = tg.j, path = tg.path .. '.' .. tostring(f), d = tg.d + 1 } end
         end
-        if f == '[]' and G7.NEXTK then G7.LOADK[dst] = G7.NEXTK; G7.DYNL[#G7.DYNL + 1] = { x, G7.NEXTK } end -- (the access's key port, for __index: CART-1750)
+        -- (the access's key port, for __index: CART-1750 — taken ONCE: left set, a later keyless `[]` access took it
+        -- outside the dump, whose recorder alone cleared it, CART-1821)
+        local nk = G7.NEXTK
+        G7.NEXTK = nil
+        if f == '[]' and nk then G7.LOADK[dst] = nk; G7.DYNL[#G7.DYNL + 1] = { x, nk } end
         local l = loads[x]
         if not l then l = {}; loads[x] = l end
         l[#l + 1] = { f, dst, strict }
@@ -782,7 +786,9 @@ local function build(store, opts)
         return dst
     end
     local function storec(x, f, v)
-        if f == '[]' and G7.NEXTK then G7.DYNS[#G7.DYNS + 1] = { x, G7.NEXTK } end -- (a dynamic store's key port: CART-1820)
+        local nk = G7.NEXTK -- (a dynamic store's key port, CART-1820 — taken once, CART-1821)
+        G7.NEXTK = nil
+        if f == '[]' and nk then G7.DYNS[#G7.DYNS + 1] = { x, nk } end
         local l = stores[x]
         if not l then l = {}; stores[x] = l end
         l[#l + 1] = { f, v }
@@ -3357,13 +3363,14 @@ local function build(store, opts)
             enter(); r_edge(a, b); leave()
         end
         field = function (x, f, strict)
+            local nk = G7.NEXTK -- (r_field takes the key: read it first, CART-1821)
             enter(); local dst = r_field(x, f, strict); leave()
             if on() then
                 if f:byte(1) == 1 then G7.gap('hidden-load', { dst, x })
                 elseif f == '{k}' then G7.ins({ 'keys', dst, x }) -- (the key set `pairs` / next yield, CART-1739)
-                elseif f == '[]' and G7.RAWLOAD then G7.ins({ 'loadRaw', dst, x, G7.NEXTK }) -- (rawget's key; pairs' value: none)
+                elseif f == '[]' and G7.RAWLOAD then G7.ins({ 'loadRaw', dst, x, nk }) -- (rawget's key; pairs' value: none)
                 else
-                    G7.ins({ 'load', dst, x, f, f == '[]' and G7.NEXTK or nil }, strict and f ~= '[]'
+                    G7.ins({ 'load', dst, x, f, f == '[]' and nk or nil }, strict and f ~= '[]'
                         and (G7.ISGP[x] and 'contract:strict-global' or 'contract:strict') or nil)
                 end
             end
@@ -3823,7 +3830,7 @@ local function build(store, opts)
             end
         end
         G7.GNEXCL = names
-        for name in pairs(names) do
+        for name in sorted(names) do
             for o in pairs(G7.ISG) do
                 for dst in pairs((rd[o] or NOTHING)[name] or NOTHING) do settop(dst) end
                 for dst in pairs((G7.PARK[(rd[o] or NOTHING)[name] or false] or NOTHING)) do settop(dst) end
