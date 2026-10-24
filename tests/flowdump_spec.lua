@@ -1201,3 +1201,36 @@ test('flowdump: table.insert by name keeps a call to the native beside its model
     ok(stores >= 1, 'beside the model\'s store')
     eq(0, flowcheck.check(D).failed, 'closed')
 end)
+
+-- (CART-1817 stage 3, flowpath FLOW-0093: under refl-scope the REGION — a region top whose holdings did not escape, a
+-- port only the region's taint reached — is the dump's rtop / rcells, and rroots names what the region reads: the
+-- checker lists there the closure of the roots and the escaped universe. An inspecting region escapes no module;
+-- without the experiment the saturated region escapes them and nothing of this is written)
+test('flowdump: refl-scope states the region as rtop / rcells / rroots, and its modules stay unescaped (CART-1817)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = CLASSES .. 'for _, mod in pairs(package.loaded) do print(type(mod)) end\n'
+    local function dump_of(exp)
+        local root = tree({ ['m.lua'] = SRC, ['lua/ma.lua'] = 'local M = {}\nfunction M.f(p) return p:m() end\nreturn M\n',
+            ['lua/mb.lua'] = 'return { x = 1 }\n', ['lua/mc.lua'] = 'return { y = 2 }\n' })
+        store.ingest(ts.extract(root))
+        local cap = flowtype.CAP
+        flowtype.CAP = 2
+        local ok_, R = pcall(flowtype.solve, store, { open = false, dump = true, exp = exp })
+        flowtype.CAP = cap
+        vim.fn.delete(root, 'rf')
+        assert(ok_, R)
+        return vim.json.decode(R.dump)
+    end
+    local function site_of(D, prefix) for _, st in ipairs(D.sites) do if st.label:sub(1, #prefix) == prefix then return st.id end end end
+    local D0 = dump_of('pkg-modules')
+    local ma0 = site_of(D0, 'tbl:lua/ma.lua')
+    ok(ma0 and vim.tbl_contains(D0.solution.taint.escaped, ma0), 'without the scope the module escapes')
+    eq(nil, D0.solution.rtop, 'and no region is written')
+    local D1 = dump_of('pkg-modules,refl-scope')
+    local ma1 = site_of(D1, 'tbl:lua/ma.lua')
+    local S = D1.solution
+    ok(ma1 and not vim.tbl_contains(S.taint.escaped, ma1), 'with it the module does not escape: ' .. vim.inspect(S.taint.escaped))
+    ok(S.rtop and #S.rtop > 0, 'the region top is stated: ' .. vim.inspect(S.rtop))
+    ok(vim.tbl_contains(S.rroots, ma1), 'the module is a region root: ' .. vim.inspect(S.rroots))
+    for _, x in ipairs(S.rtop) do ok(not vim.tbl_contains(S.top, x), 'a region top is not ⊤: ' .. x) end
+end)

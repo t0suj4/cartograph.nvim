@@ -503,14 +503,15 @@ local function build(store, opts)
     end
     -- (refl-scope, CART-1817: a REGION TOP stays its own port — collapsed into ⊤ it escaped what it held, and the scope
     -- held only under opts.explain, which turns the collapse off: stage 1's 459 -> 72 escaped modules were measured so,
-    -- the oracle without it. What each region top holds is recorded, G7.RHB[top], for the capability gate to escape —
-    -- its TABLES and FUNCTIONS: a top that held only values of a type, the module NAMES a walk over package.loaded's
-    -- keys collects, reflects nothing a store, a call or a hand-out could reach)
+    -- the oracle without it. What each region top holds is recorded, G7.RHB[top] — for the capability gate to escape,
+    -- and for the dump's region roots — and whether it held a TABLE or a FUNCTION, G7.RHT[top]: a top that held only
+    -- values of a type, the module NAMES a walk over package.loaded's keys collects, reflects nothing a store, a call or
+    -- a hand-out could reach)
     function G7.isrtop(q) return G7.RTOP ~= nil and G7.RTOP[q] == true end
-    G7.RHB = {}
+    G7.RHB, G7.RHT = {}, {}
     function G7.rheld(s, p)
         local h = G7.RHB[p]
-        local function one(o) if not TNAME[o] then if not h then h = {}; G7.RHB[p] = h end; h[o] = true end end
+        local function one(o) if not h then h = {}; G7.RHB[p] = h end; h[o] = true; if not TNAME[o] then G7.RHT[p] = true end end
         if type(s) == 'number' then one(s)
         elseif s and s.bs then for o in bs_iter(s) do one(o) end
         elseif s then for o in pairs(s) do one(o) end end
@@ -3998,7 +3999,7 @@ local function build(store, opts)
         -- (the region BIT only from a top that held a table or a function: past a top of names alone, a store, a call
         -- or a hand-out meets no reflected object, and the ordinary rules cover what the port is — its taint stays 'r')
         G7.TMODE = 'r'
-        for p in sorted(G7.RTOP) do G7.TREG = G7.RHB[p] and { [p] = true } or nil; taint(p) end
+        for p in sorted(G7.RTOP) do G7.TREG = G7.RHT[p] and { [p] = true } or nil; taint(p) end
         G7.TMODE, G7.TREG = true, nil
     end
     -- (an ESCAPED function may be called with anything by whatever reached it — the E-reading's closure: its parameters
@@ -4280,7 +4281,7 @@ local function build(store, opts)
     stats.rcap = G7.RCAP
     if G7.RCAP then -- (and the region tops: all, those that held a table or a function, those whose holdings escaped)
         local n, h, e = 0, 0, 0
-        for p in pairs(G7.RTOP) do n = n + 1; if G7.RHB[p] then h = h + 1 end; if G7.RESCT[p] then e = e + 1 end end
+        for p in pairs(G7.RTOP) do n = n + 1; if G7.RHT[p] then h = h + 1 end; if G7.RESCT[p] then e = e + 1 end end
         G7.RCAP.tops, G7.RCAP.tops_held, G7.RCAP.tops_escaped = n, h, e
     end
     local function targets(o, m, out, seen)
@@ -4947,6 +4948,8 @@ local function build(store, opts)
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
             MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, LOADCONTRACT = G7.ANYLOAD and not G7.EXP['loaded-globals'] or nil, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
+            -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
+            RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT,
             LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

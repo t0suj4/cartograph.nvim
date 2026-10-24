@@ -423,12 +423,19 @@ function M.build(rec, X)
         sj[#sj + 1] = ('{"id":%d,"kind":"%s","label":%s,"fn":%s%s}'):format(o, kind, jstr(info), fn, hk and (',"host":"' .. hk .. '"') or '')
     end
     -- the solution
-    local vj, topj = {}, {}
+    -- (refl-scope, CART-1817 stage 3: the REGION — a region top whose holdings did not escape, and a port the region's
+    -- taint alone reached ('r') — is stated as rtop / rcells, not ⊤: flowpath's checker (Check/Region.lean, FLOW-0093)
+    -- lists there the region universe, the closure of rroots and the escaped universe over the solution's cells. The
+    -- roots: package.loaded's entries, and everything a live top held — its values of a type too, which the closure over
+    -- cells would not reach)
+    local function rlive(p) return X.RTOP ~= nil and p ~= nil and ((X.RTOP[p] and not X.RESCT[p]) or X.tainted[p] == 'r') or false end
+    local vj, topj, rtopj, rcj = {}, {}, {}, {}
     local vlist = {}
     for p in pairs(used) do vlist[#vlist + 1] = p end
     table.sort(vlist)
     for _, p in ipairs(vlist) do
-        if X.top[p] then topj[#topj + 1] = tostring(p)
+        if rlive(p) then rtopj[#rtopj + 1] = p end
+        if X.top[p] then if not rlive(p) then topj[#topj + 1] = tostring(p) end
         else
             local ss = rec._self[p]
             if not ss then ss = {}; for o in X.each(p) do ss[#ss + 1] = o end end
@@ -530,8 +537,9 @@ function M.build(rec, X)
                     goto nextf
                 end
                 if X.tainted[fp] then hxj[#hxj + 1] = ('[%d,%s]'):format(o, f == '[]' and 'null' or tostring(F(f))) end
+                if rlive(fp) then rcj[#rcj + 1] = ('[%d,%s]'):format(o, f == '[]' and 'null' or tostring(F(f))) end
                 if X.top[fp] then
-                    if f ~= '[]' then htj[#htj + 1] = ('[%d,%d]'):format(o, F(f)) end
+                    if f ~= '[]' and not rlive(fp) then htj[#htj + 1] = ('[%d,%d]'):format(o, F(f)) end
                 else
                     for b in X.each(fp) do ss[#ss + 1] = b end
                     if #ss > 0 then
@@ -715,7 +723,15 @@ function M.build(rec, X)
         .. (chtop(X.GRESARG) and ',"rin_top":1' or '') .. (chtop(X.GYIELD) and ',"rout_top":1' or '') .. (cerrtop and ',"cerr_top":1' or '')
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']'
         .. ',"escaped":' .. jarr(escl) .. ',"escaped_root":[' .. table.concat(erj, ',') .. '],"outside":[' .. table.concat(outj, ',') .. ']'
-        .. ',"fields_hit":[' .. table.concat(fhj, ',') .. '],"outside_written":' .. jarr(owl) .. '}},')
+        .. ',"fields_hit":[' .. table.concat(fhj, ',') .. '],"outside_written":' .. jarr(owl) .. '}'
+        .. ((#rtopj > 0 or #rcj > 0) and (',"rtop":' .. jarr(rtopj) .. ',"rcells":[' .. table.concat(rcj, ',') .. '],"rroots":' .. jarr((function ()
+            local set, l = {}, {}
+            for p, h in pairs(X.RHB or {}) do if not X.RESCT[p] then for o in pairs(h) do set[o] = true end end end
+            for pl in pairs(X.PKGL or {}) do for _, fp in pairs(X.ofield[pl] or {}) do for o in X.each(fp) do set[o] = true end end end
+            for o in pairs(set) do l[#l + 1] = o end
+            table.sort(l)
+            return l
+        end)())) or '') .. '},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
